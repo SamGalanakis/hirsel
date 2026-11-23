@@ -233,7 +233,7 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
 }
 
 fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
-    let options = match backing { Disk(_, options) => options, _ => store.defaults() }
+    let options: store.Options = match backing { Disk(_, options) => clone(options), _ => store.defaults() }
     let mut total = int.saturating_add(options.resident_limit, int.saturating_add(n_place, n_publisher))
     let on_disk = match backing { Memory => false, _ => true }
     if on_disk {
@@ -574,7 +574,7 @@ fn operate_prepare[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H,
         Some(TriggerConfig(entries: take listed, ..)) => take listed,
         None => triggers.empty_entries(),
     }
-    let setup = PrepareConfig(scratch: scratch, options: options, attempt: prepare_bytes(10u64, 16u64)?, image_digest: prepare_bytes(11u64, 32u64)?,
+    let setup = PrepareConfig(scratch: scratch, options: clone(options), attempt: prepare_bytes(10u64, 16u64)?, image_digest: prepare_bytes(11u64, 32u64)?,
         clock: clock, tasks: tasks, n_place: launch_word(0u64, 0u64), place: place, migrate: migrate, handles: handles, triggers: take entries)
     match prepare_deploy(setup) {
         Ok(()) => Ok(Unstarted),
@@ -4804,7 +4804,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
     let exported_store = result.unwrap(store.export_copy(take copying))
     let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
-    let setup = PrepareConfig(scratch: exported_store.dir, options: options, attempt: clone(attempt), image_digest: clone(new_digest),
+    let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(new_digest),
         clock: c, tasks: tasks, n_place: new_n_place, place: new_place,
         migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: clone(new_entries))
     result.unwrap(prepare_export(setup, source, new_digest))
@@ -4914,7 +4914,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let copying = result.unwrap(store.begin_export_copy(mut db, d, clone(attempt), 1u64))
     let exported_store = result.unwrap(store.export_copy(take copying))
     let source = result.unwrap(store.open_export(exported_store.dir, c, attempt, options))
-    let setup = PrepareConfig(scratch: exported_store.dir, options: options, attempt: clone(attempt), image_digest: clone(digest),
+    let setup = PrepareConfig(scratch: exported_store.dir, options: clone(options), attempt: clone(attempt), image_digest: clone(digest),
         clock: c, tasks: tasks, n_place: n_place, place: code.describe(trigger_scan_law_empty),
         migrate: code.describe(trigger_scan_law_keep_schema), handles: code.describe(trigger_law_handles), triggers: triggers.empty_entries())
     result.unwrap(prepare_export(setup, source, digest))
@@ -4934,7 +4934,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let initial_window: Option[DrainWindow] = None
     let drain = latest.new(arc.new(initial_window))
     let triggering = if explicit_empty { Some(trigger_law_config(triggers.empty_entries())) } else { None }
-    let job = ManagedHead(backing: Disk(dir, options), selection: selection, tasks: tasks, clock: c, random: r,
+    let job = ManagedHead(backing: Disk(dir, clone(options)), selection: selection, tasks: tasks, clock: c, random: r,
         place: code.describe(trigger_scan_law_empty), migrate: code.describe(trigger_scan_law_keep_schema),
         handles: code.describe(trigger_law_handles), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
         finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to),

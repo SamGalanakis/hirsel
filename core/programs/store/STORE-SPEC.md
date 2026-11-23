@@ -648,7 +648,7 @@ pub type Options {
     checkpoint_task_bytes: u64, // default 262,400,276: the checkpoint task's root limit, max(pack_bytes, 64 MiB + 88) + 2⌈resident_limit / 11⌉ + 64 KiB (Q1a)
     authority: Authority,
 }
-pub type Authority = Directory()   // one variant today; row 12 adds a variant (§2.9). defaults() gives Directory(). RUN programs-v21/authority: ACCEPTED; `: plain` is refused (OWN-4: computed, never declared)
+pub type Authority: send = Directory() | Bucket(std.object.Bucket)   // defaults() gives Directory(). Bucket holds the bucket's config, never a live client (row 12, §2.9); until its writer is built, `open` and `open_export` refuse it with `Unsupported(1)`. A `memory` store has no authority and ignores the field. Options is `send` because Bucket holds Strings, and is cloned where it was copied
 pub type StoreId { hi: u64, lo: u64 }
 pub fn defaults() -> Options
 
@@ -1344,7 +1344,7 @@ Reason: these bytes passed a 64-bit check bound to their place, so they are the 
 | Row | Reserved now | Waits for |
 |---|---|---|
 | 11 claims and epoch fencing | HEADER `epoch` (0); kind CLAIM (epoch u64, holder 16 bytes, lease_ms u64, MUST); `Error` gains `Fenced(u64)` when built | A second writer that can take over while the first is alive but cut off. Locally `try_lock` on LOCK is released when the process dies, so there is nothing to fence. It needs a remote authority (Net, M5a) or object storage with conditional writes, and a lease clock. Neither exists in host.hirsel (BY READING). |
-| 12 object authorities and durability levels | HEADER `authority` (0); kind AUTHORITY (authority u8, level u8, locator bytes); `Options.authority` with the single variant `Directory` | Core object-storage operations: put-if-absent, get and list. A durability level above a local sync, such as replicated, needs a second authority. The output gate is already covered locally: replies are released after `durable` (§1.8). |
+| 12 object authorities and durability levels | HEADER `authority` (0); kind AUTHORITY (authority u8, level u8, locator bytes); `Options.authority` with `Directory` and `Bucket(std.object.Bucket)`; `open` refuses `Bucket` with `Unsupported(1)` until its writer is built | Core object-storage operations: put-if-absent, get and list. A durability level above a local sync, such as replicated, needs a second authority. The output gate is already covered locally: replies are released after `durable` (§1.8). |
 
 ---
 

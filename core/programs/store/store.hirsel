@@ -4,7 +4,7 @@ pub type StoreId {
     lo: u64
 }
 
-pub type Authority = Directory()
+pub type Authority: send = Directory() | Bucket(std.object.Bucket)
 
 pub type Caller: codec + send {
     issuer: u8,
@@ -15,7 +15,7 @@ pub const FRAME_LIMIT: u64 = 16777296
 
 pub const VALUE_LIMIT: u64 = 16711680
 
-pub type Options {
+pub type Options: send {
     create: bool,
     lock_wait_ms: u64,
     group_commits: u32,
@@ -10116,6 +10116,9 @@ fn replay_export(d: Dir, id: StoreId, first: u64, terminal: u64, limit: u64, tak
 }
 
 pub fn open_export(d: Dir, c: Clock, attempt: Bytes, options: Options) -> Result[Preparation, DeployError] waits {
+    if let Bucket(_) = options.authority {
+        return Error(Store(Unsupported(1)))
+    }
     let stamp = read_export_stamp(d)?
     if stamp.attempt != attempt {
         return Error(ExportMismatch)
@@ -11591,6 +11594,10 @@ fn journal_channels(group_count: u64) -> JournalChannels {
 
 // S3 makes the disk opener public with its journal and final durability path.
 pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
+    // Row 12: the bucket writer is not built yet, so a Bucket authority refuses.
+    if let Bucket(_) = options.authority {
+        return Error(Unsupported(1))
+    }
     if options.group_commits == 0 {
         return Error(Missing("group_commits"))
     }
@@ -11616,7 +11623,7 @@ pub fn open(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options) -> Resu
     db.uncovered = uncovered
     db.checkpointed = generation
     capacity(list.try_reserve(mut db.disk, 1))?
-    list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: options, lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages))
+    list.push(mut db.disk, DiskConnection(lock: take lock, d: d, open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages))
     let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
         Ok(journal_channels(int.widen(options.group_commits)))
     })?

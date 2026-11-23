@@ -132,7 +132,7 @@ fn run_operate[G: send, H: send, S: send, B: send](take request: Operated[G, H, 
 fn volatile(backing: runner.Backing) -> bool { match backing { Disk(_, _) => false, _ => true } }
 
 fn copy_backing(backing: runner.Backing) -> runner.Backing {
-    match backing { Memory => Memory, Disk(dir, options) => Disk(dir, options), Temp(dir) => Temp(dir) }
+    match backing { Memory => Memory, Disk(dir, options) => Disk(dir, clone(options)), Temp(dir) => Temp(dir) }
 }
 
 pub fn directory(take places: List[Listed], take config: DirectoryConfig) -> Result[Directory, DirectoryError] {

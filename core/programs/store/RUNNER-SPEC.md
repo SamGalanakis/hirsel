@@ -30,7 +30,8 @@ The harness gateway creates and deletes one session place per conversation. The 
 |---|---|---|---|---|
 | 1 | Names at run time | **NEW: `add`, `remove`, `max_names`** | §13.1. `add` lists one more name (a listed name is `Duplicate`, `max_names` listed names are `Full`). `remove` unlists a name with no instance (a loaded one is `Loaded`, so it is closed first). A removed name leaves its slot unlisted, so the slot numbers live place tasks report under never shift. The directory reserves its own bytes for `max_names` names up front. | the gateway's create and delete |
 | 2 | Who unloads | **NEW: `idle_ms: None`** | §13.2 Idle. With `None` the directory never unloads by its sweep; a place unloads only by its own §14.4 idle stop, which waits for no sessions, no busy work, no active trigger and no trigger due within its idle time. | an active run is not a lease |
-| 3 | The platform host | **UNCHANGED: §14.8 row 9** | The gateway runs its sessions in a directory because the platform host cannot yet run in-process places. When P6 retires the directory, the gateway moves to the platform host with it. | orchestrator, 2026-11-23 |
+| 3 | Shared services | **NEW: the seed `T`, `seeded_factory`** | §13.1. The directory owns one `seed: T`; a `seeded_factory`'s `make` sees it at each start. `Factory`, `Listed`, `Directory` and `Opener` take `T`. | the gateway's session services |
+| 4 | The platform host | **UNCHANGED: §14.8 row 9** | The gateway runs its sessions in a directory because the platform host cannot yet run in-process places. When P6 retires the directory, the gateway moves to the platform host with it. | orchestrator, 2026-11-23 |
 
 Reversible: both are additive. A directory built with every name and `Some(idle_ms)` behaves as in v2.29.
 
@@ -1585,8 +1586,8 @@ A directory runs several places in one process and finds them by name. It is the
 
 ```hirsel
 pub type Supplied: send { tasks: Tasks, clock: Clock, random: Random, net: Net }
-pub opaque type Factory: send
-pub type Listed: send { name: String, factory: Factory, backing: runner.Backing, selection: runner.Selection }
+pub opaque type Factory[T: send]: send                                   // v2.30: T is the seed
+pub type Listed[T: send]: send { name: String, factory: Factory[T], backing: runner.Backing, selection: runner.Selection }
 pub type DirectoryConfig: send {
     idle_ms: Option[u64], max_places: u64, max_names: u64, place_bytes: u64,   // v2.30
     tasks: Tasks, clock: Clock, random: Random, net: Net,
@@ -1600,23 +1601,24 @@ pub type CloseRefused: send = Unknown | NotLoaded | Leased | Stopping
 pub type DirectoryError: send = Missing(String) | Duplicate(String) | Full(Capacity)
 pub type AddRefused: send = Duplicate | Full(u64) | Stopping              // v2.30
 pub type RemoveRefused: send = Unknown | Loaded | Stopping                // v2.30
-pub opaque type Directory          // holds task handles, so it is not send
-pub opaque type Opener: send
+pub opaque type Directory[T: send]  // holds task handles, so it is not send
+pub opaque type Opener[T: send]: send
 pub opaque type Lease: send
 
-pub fn place_factory[G: send, H: send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Factory, Capacity]
-pub fn directory(take places: List[Listed], take config: DirectoryConfig) -> Result[Directory, DirectoryError]
-pub fn opener(d: Directory) -> Opener
-pub fn open(o: Opener, name: String) -> Result[Lease, Refused] waits
+pub fn place_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Factory[T], Capacity]
+pub fn seeded_factory[T: send, G: send, H: send, S: send, B: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S, B], Capacity]) -> Result[Factory[T], Capacity]   // v2.30
+pub fn directory[T: send](take places: List[Listed[T]], take config: DirectoryConfig, take seed: T) -> Result[Directory[T], DirectoryError]
+pub fn opener[T: send](d: Directory[T]) -> Opener[T]
+pub fn open[T: send](o: Opener[T], name: String) -> Result[Lease, Refused] waits
 pub fn status(l: Lease) -> Latest[runner.Status]
-pub fn close(o: Opener, name: String) -> Result[Unloaded, CloseRefused] waits
-pub fn add(o: Opener, take l: Listed) -> Result[(), AddRefused] waits          // v2.30
-pub fn remove(o: Opener, name: String) -> Result[(), RemoveRefused] waits     // v2.30
-pub fn stop(take d: Directory) -> List[Unloaded] waits
+pub fn close[T: send](o: Opener[T], name: String) -> Result[Unloaded, CloseRefused] waits
+pub fn add[T: send](o: Opener[T], take l: Listed[T]) -> Result[(), AddRefused] waits          // v2.30
+pub fn remove[T: send](o: Opener[T], name: String) -> Result[(), RemoveRefused] waits     // v2.30
+pub fn stop[T: send](take d: Directory[T]) -> List[Unloaded] waits
 ```
 
-- **The allowlist.** `directory` takes the names it starts with, and `add` lists more at run time, up to `max_names` in all (v2.30). A name not listed is `Unknown`. `remove` unlists a name whose state is `Absent`; a loaded name is refused `Loaded`, so its owner closes it first, and the store it names is the owner's to delete. A `Factory` is made only by `place_factory`, from a plain fn that captures nothing, so only code linked into the program can be listed. Loading a place's code by digest is out of scope (harness-prereq-1437 §6). Two listings with one name are refused `Duplicate(name)`.
-- **The factory.** At each start, `make` gets the directory's capabilities and a share of its ingress policy and returns a `PlaceConfig`. The directory then replaces the config's `backing` and `selection` with the listed ones, so `make` cannot point a reopen at another store. The factory erases the place's type parameters, so places with different `G`, `H` and `S` share one directory.
+- **The allowlist.** `directory` takes the names it starts with, and `add` lists more at run time, up to `max_names` in all (v2.30). A name not listed is `Unknown`. `remove` unlists a name whose state is `Absent`; a loaded name is refused `Loaded`, so its owner closes it first, and the store it names is the owner's to delete. A `Factory` is made only by `place_factory` or `seeded_factory`, from a plain fn that captures nothing, so only code linked into the program can be listed. Loading a place's code by digest is out of scope (harness-prereq-1437 §6). Two listings with one name are refused `Duplicate(name)`.
+- **The factory.** At each start, `make` gets the directory's capabilities and a share of its ingress policy and returns a `PlaceConfig`. The directory then replaces the config's `backing` and `selection` with the listed ones, so `make` cannot point a reopen at another store. The factory erases the place's type parameters, so places with different `G`, `H`, `S` and `B` share one directory. **The seed (v2.30).** The directory owns one `seed: T`, given to `directory`. A `seeded_factory`'s `make` also gets a view of it at each start, so the places' grants can be built from services the directory's owner holds (senders, which a plain fn cannot capture); `place_factory` ignores it, and a directory with no services uses `T = ()`.
 - **Leases.** `open` returns a `Lease` on an instance whose phase was `Ready` when the lease was made. `status(l)` returns a handle on that instance's `Status`, which holds its address. A lease is the only in-flight accounting: while any lease on an instance lives, the directory does not unload it. A connection made without a lease is not counted; when its place unloads it is drained like any other (§12.1: answered, or refused `Overloaded`).
 - **Zero bounds.** `Some(0)` for `idle_ms`, or 0 for `max_places`, `max_names` or `place_bytes`, is refused `Missing(field)`, as in STORE-SPEC W1: a zero bound is a bound that was not given.
 - **Watch.** When `watch` is given, the directory `try_send`s `Up(name)` when an instance becomes Ready, before it answers any waiting open, and `Down(unloaded)` when its `operate` has returned, before it starts the name again. So a holder of a lease has always been preceded by its `Up` on the watch. A full watch drops the change.

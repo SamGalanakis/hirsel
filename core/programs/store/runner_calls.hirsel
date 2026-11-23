@@ -2676,18 +2676,18 @@ fn lagged_place(take supplied: places.Supplied) -> Result[runner.PlaceConfig[(),
     Ok(directory_config(supplied, code.describe(place), code.describe(migrate), runner.Stop(lag_ms: 400u64, grace_ms: 2000u64)))
 }
 
-type DirectoryRun { directory: places.Directory, opener: places.Opener, dir_name: String, changes: Receiver[places.Change] }
+type DirectoryRun { directory: places.Directory[()], opener: places.Opener[()], dir_name: String, changes: Receiver[places.Change] }
 
 fn start_directory(parent: Dir, make: fn(take places.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> DirectoryRun waits {
     let mut dir_name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
     let (watch, changes): (Sender[places.Change], Receiver[places.Change]) = channel.new(16u64)
-    let mut listed: List[places.Listed] = list.new()
+    let mut listed: List[places.Listed[()]] = list.new()
     list.push(mut listed, places.Listed(name: string.from("a"), factory: result.unwrap(places.place_factory(make)),
         backing: Disk(dir, disk_options()), selection: Current(0u64)))
     let config = places.DirectoryConfig(idle_ms: Some(idle_ms), max_places: 1u64, max_names: 1u64, place_bytes: DIRECTORY_BUDGET, tasks: tasks, clock: clock, random: random, net: net,
         watch: Some(take watch))
-    let directory = match places.directory(take listed, take config) { Ok(take made) => take made, Error(_) => fail("directory: refused a valid configuration") }
+    let directory = match places.directory(take listed, take config, ()) { Ok(take made) => take made, Error(_) => fail("directory: refused a valid configuration") }
     let opener = places.opener(directory)
     DirectoryRun(directory: take directory, opener: take opener, dir_name: take dir_name, changes: take changes)
 }
@@ -2723,7 +2723,7 @@ fn next_change(changes: Receiver[places.Change]) -> places.Change waits {
 
 // Sends the port of the instance this open leased, or 0 if it was refused, and holds the
 // lease until `release` closes, so both opens hold theirs at once.
-type Opening: send { opener: places.Opener, port: Sender[u16], release: Receiver[()] }
+type Opening: send { opener: places.Opener[()], port: Sender[u16], release: Receiver[()] }
 
 fn open_port(take job: Opening) -> () waits {
     match places.open(job.opener, "a") {
@@ -2769,7 +2769,7 @@ fn test_dir_one_head(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ne
     if law_dir_one_head(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
 }
 
-fn close_a(take opener: places.Opener) -> bool waits {
+fn close_a(take opener: places.Opener[()]) -> bool waits {
     match places.close(opener, "a") { Ok(unloaded) => match unloaded.ended { Ok(Stopped(_)) => true, _ => false }, Error(_) => false }
 }
 

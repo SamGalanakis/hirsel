@@ -368,3 +368,50 @@ fn test_l65_tiered_edges() -> Result[(), ()] {
     }
     l65_check_page(owner)
 }
+
+fn l84_page(offset: u64, direction: TieredDirection) -> TieredDemand {
+    TieredDemand(target: TieredPage(std.page.PagePtr(pack: 7, offset: offset, len: 72, checksum: 1, stamp: 2)), direction: direction)
+}
+
+fn l84_fetch_window(tasks: Tasks, model: BucketSim, item: HistoryRef, window: TieredRange) -> Result[(), Error] waits {
+    let mut source = bucket_law_client_lanes(model, tasks, "s3.test", 9, true, 1)?
+    let mut data: Bytes = list.with_capacity(500000)
+    list.fill(mut data, 500000, 0u8)
+    data[7290u64] = 17
+    data[261071u64] = 29
+    let until = std.object.deadline_after_ms(source, BUCKET_LAW_OP_MS)
+    let (take stored, _) = std.object.store(mut source, history_key("p-", item), take data, until)
+    let _ = stored ?=> |problem| Remote(problem)
+    let raw = read_tiered_bucket_window(mut source, item, window, until)?
+    if list.len(raw) != 253782 || raw[0u64] != 17 || raw[253781u64] != 29 {
+        fail("L84: provider did not return the expected merged byte range")
+    }
+    Ok(())
+}
+
+@test
+fn test_l84_bucket_window(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let item = HistoryRef(seq: 7, epoch: 1, len: 500000, digest: 23)
+    let mut asked: List[TieredDemand] = list.new()
+    list.push(mut asked, l84_page(130000, TieredForward))
+    list.push(mut asked, l84_page(7290, TieredPoint))
+    let windows = tiered_bucket_windows("p-7", item, asked)?
+    if list.len(windows) != 1 || windows[0u64].range != TieredRange(lo: 7290, hi: 261072) || list.len(windows[0u64].demands) != 2 || windows[0u64].demands[0u64] != 1 || windows[0u64].demands[1u64] != 0 {
+        fail("L84: neighbouring GETs did not coalesce below the cap")
+    }
+    let low = tiered_bucket_range("p-7", l84_page(72, TieredBackward).target, 500000, TieredBackward)?
+    let high = tiered_bucket_range("p-7", l84_page(490000, TieredForward).target, 500000, TieredForward)?
+    let whole = tiered_bucket_range("p-7", l84_page(72, TieredPoint).target, 50000, TieredPoint)?
+    let large_blob = TieredBlob(std.page.BlobRef(stamp: 1, len: 300000, checksum: 1, pack: 7, offset: 720, body: 0))
+    let large = tiered_bucket_range("p-7", large_blob, 500000, TieredForward)?
+    if low != TieredRange(lo: 0, hi: 131072) || high != TieredRange(lo: 368928, hi: 500000) || whole != TieredRange(lo: 0, hi: 50000) || large != TieredRange(lo: 720, hi: 300744) {
+        fail("L84: boundary, small pack or large frame range")
+    }
+    let model = bucket_law_sim(tasks, c, 8420, None, list.new())
+    let got = l84_fetch_window(tasks, model, item, windows[0u64].range)
+    let report = bucket_law_finish(take model)
+    if report.writes != 1 {
+        fail("L84: expected one fixture object")
+    }
+    got
+}

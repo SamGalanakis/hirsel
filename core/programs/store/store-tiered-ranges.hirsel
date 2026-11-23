@@ -1,0 +1,96 @@
+const TIERED_GET_MIN: u64 = 131072
+
+const TIERED_GET_MAX: u64 = 262144
+
+type TieredDirection: key = TieredPoint | TieredForward | TieredBackward
+
+type TieredRange: key {
+    lo: u64,
+    hi: u64
+}
+
+type TieredDemand: send {
+    target: TieredTarget,
+    direction: TieredDirection
+}
+
+type TieredBucketWindow: send {
+    range: TieredRange,
+    demands: List[u64]
+}
+
+fn tiered_bucket_range(path: String, target: TieredTarget, bytes_total: u64, direction: TieredDirection) -> Result[TieredRange, Error] {
+    let expected = tiered_frame_id(target)
+    let lo = expected.offset
+    let Some(width) = int.checked_add(expected.len, 16) else {
+        return Error(disk_fault(path, lo, Malformed))
+    }
+    if lo < 72 || lo > bytes_total || width > bytes_total - lo {
+        return Error(disk_fault(path, lo, Dangling(expected.stamp)))
+    }
+    let hi = lo + width
+    if width >= TIERED_GET_MIN {
+        return Ok(TieredRange(lo: lo, hi: hi))
+    }
+    if bytes_total <= TIERED_GET_MIN {
+        return Ok(TieredRange(lo: 0, hi: bytes_total))
+    }
+    match direction {
+        TieredBackward => {
+            let end = order.max(hi, TIERED_GET_MIN)
+            Ok(TieredRange(lo: end - TIERED_GET_MIN, hi: end))
+        },
+        _ => {
+            let begin = order.min(lo, bytes_total - TIERED_GET_MIN)
+            Ok(TieredRange(lo: begin, hi: begin + TIERED_GET_MIN))
+        },
+    }
+}
+
+// One pass over one immutable pack's ranges. Output windows retain the
+// caller's demand indices even when delivery order differs from byte order.
+fn tiered_bucket_windows(path: String, pack_ref: HistoryRef, demands: List[TieredDemand]) -> Result[List[TieredBucketWindow], Error] {
+    let demand_count = list.len(demands)
+    let mut expanded: List[(TieredRange, u64)] = list.new()
+    capacity(list.try_reserve(mut expanded, demand_count))?
+    for slot in 0u64 .. demand_count {
+        let demand = demands[slot]
+        let expected = tiered_frame_id(demand.target)
+        if expected.pack != pack_ref.seq {
+            return Error(disk_fault(path, expected.offset, Dangling(expected.stamp)))
+        }
+        let window = tiered_bucket_range(path, demand.target, pack_ref.len, demand.direction)?
+        list.push(mut expanded, (window, slot))
+    }
+    list.sort(mut expanded, fn(a: (TieredRange, u64), b: (TieredRange, u64)) -> Order {
+        order.compare((a.0 .lo, a.0 .hi, a.1), (b.0 .lo, b.0 .hi, b.1))
+    })
+    let mut windows: List[TieredBucketWindow] = list.new()
+    for (window, slot) in expanded {
+        let n = list.len(windows)
+        if n != 0 {
+            let previous = windows[n - 1].range
+            let end = order.max(previous.hi, window.hi)
+            if end - previous.lo <= TIERED_GET_MAX {
+                capacity(list.try_reserve(mut windows[n - 1].demands, 1))?
+                windows[n - 1].range.hi = end
+                list.push(mut windows[n - 1].demands, slot)
+                continue
+            }
+        }
+        let mut members: List[u64] = list.new()
+        capacity(list.try_reserve(mut members, 1))?
+        capacity(list.try_reserve(mut windows, 1))?
+        list.push(mut members, slot)
+        list.push(mut windows, TieredBucketWindow(range: window, demands: take members))
+    }
+    Ok(take windows)
+}
+
+fn read_tiered_bucket_window(mut client: std.object.Client, pack_ref: HistoryRef, window: TieredRange, deadline: u64) -> Result[Bytes, Error] waits {
+    let path = history_key("p-", pack_ref)
+    let mut raw: Bytes = list.new()
+    capacity(list.try_reserve(mut raw, window.hi - window.lo))?
+    history_range(mut client, path, pack_ref, window.lo, window.hi, mut raw, deadline)?
+    Ok(take raw)
+}

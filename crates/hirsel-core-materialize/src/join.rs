@@ -147,7 +147,7 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
                 &mut out.types,
                 &mut types,
                 module.closure(TypeId(i as u32)).hash,
-                shape.clone(),
+                Row::clone(shape),
             );
             map.types.push(TypeId(row.0));
             if fresh {
@@ -247,12 +247,15 @@ pub fn join(units: &[Unit<'_>], entry: &Identity) -> Result<(Module, FuncId), St
     }
     for (unit, map) in units.iter().zip(remaps) {
         for &i in &map.fresh_types {
-            let mut shape = unit.module.types[i].clone();
+            if !unit.module.types[i].numbered() {
+                continue;
+            }
+            let mut shape = Shape::clone(&unit.module.types[i]);
             shape.map_refs(&mut |r| TypeRef(map.types[r.index()].0));
             for hook in [&mut shape.finalizer, &mut shape.clone, &mut shape.codec] {
                 *hook = hook.map(|f| FuncRef(map.functions[f.0 as usize].0));
             }
-            out.types[map.types[i].index()] = shape;
+            out.types[map.types[i].index()] = Row::new(shape);
         }
         for (i, function) in unit.module.functions.iter().enumerate() {
             let Some(body) = &function.body else { continue };

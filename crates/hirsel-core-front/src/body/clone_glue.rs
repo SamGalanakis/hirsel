@@ -21,7 +21,7 @@ impl Derive<'_> {
     // core clone hook must own that walk, including inside a containing value.
     fn structural_clone_allowed(&self, ty: TypeId, allow_hooks: bool) -> Result<(), &'static str> {
         fn row(
-            types: &[hirsel_core_layout::Shape],
+            types: &[hirsel_core_layout::Row],
             id: u32,
             seen: &mut Vec<u32>,
             allow_hooks: bool,
@@ -55,7 +55,7 @@ impl Derive<'_> {
             }
         }
         fn field(
-            types: &[hirsel_core_layout::Shape],
+            types: &[hirsel_core_layout::Row],
             ty: &FieldTy,
             seen: &mut Vec<u32>,
             allow_hooks: bool,
@@ -733,17 +733,19 @@ mod kernel_clone_tests {
             name: name.into(),
             ty,
         };
-        let row = |name: &str, fields, finalizer| Shape {
-            name: name.into(),
-            repr: Repr::Own,
-            carried: Carried::Address,
-            body: ShapeBody::Record(fields),
-            finalizer,
-            clone: None,
-            codec: None,
-            grant: 0,
-            send: false,
-            held: None,
+        let row = |name: &str, fields, finalizer| {
+            hirsel_core_layout::Row::new(Shape {
+                name: name.into(),
+                repr: Repr::Own,
+                carried: Carried::Address,
+                body: ShapeBody::Record(fields),
+                finalizer,
+                clone: None,
+                codec: None,
+                grant: 0,
+                send: false,
+                held: None,
+            })
         };
         let mut base = Module::default();
         base.types = vec![

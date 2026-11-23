@@ -10,7 +10,7 @@
 
 use crate::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeResult};
 use hirsel_core_ids::{ContentHash, DefPath};
-pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty, Vector};
+pub use hirsel_core_layout::{Carried, Row, Scalar, Shape, Ty, Vector};
 use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, Recipe, TypeRef, cleanup_class};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -828,7 +828,7 @@ impl AllocKind {
     }
     /// The cleanup class of the block (crate docs, "Cleanup classes"); `None` for
     /// region storage, which no edge cleans.
-    pub fn cleanup(&self, shapes: &[Shape], recipes: &[Recipe]) -> Option<Cleanup> {
+    pub fn cleanup(&self, shapes: &[Row], recipes: &[Recipe]) -> Option<Cleanup> {
         match self {
             AllocKind::Own { edge } => cleanup_class(shapes, recipes, edge),
             AllocKind::Environment { .. } => Some(Cleanup::Fixed),
@@ -838,7 +838,7 @@ impl AllocKind {
     }
     /// Whether the block is terminal: the 8-byte payer prefix, freed with nothing
     /// to drop (crate docs, "Cleanup classes").
-    pub fn terminal(&self, shapes: &[Shape], recipes: &[Recipe]) -> bool {
+    pub fn terminal(&self, shapes: &[Row], recipes: &[Recipe]) -> bool {
         self.cleanup(shapes, recipes) == Some(Cleanup::Terminal)
     }
 }
@@ -846,7 +846,7 @@ impl AllocKind {
 /// The owning `seq E` edge of a sequence carrier place, which `grow` replaces the
 /// storage of (crate docs, "Growth"): a row whose only field is that edge, as
 /// `List[T]` (`items`) and `String` (`bytes`) are. None for any other place.
-pub fn sequence_edge(shapes: &[Shape], place: PlaceTy) -> Option<&FieldTy> {
+pub fn sequence_edge(shapes: &[Row], place: PlaceTy) -> Option<&FieldTy> {
     let PlaceTy::Declared(t) = place else {
         return None;
     };
@@ -2532,7 +2532,7 @@ pub struct Module {
     pub items: Vec<DefPath>,
     /// Each declared type's shape (its `name` is its canonical text). `Shape`'s
     /// `TypeRef` and `FuncRef` index this table and `functions`.
-    pub types: Vec<Shape>,
+    pub types: Vec<Row>,
     pub statics: Vec<Static>,
     pub signatures: Vec<Signature>,
     pub instances: Vec<InstanceKey>,
@@ -2747,7 +2747,7 @@ impl Module {
             if let Some(budget) = budget.as_deref_mut() {
                 crate::normal::charge_shape(original, budget)?;
             }
-            let mut shape = original.clone();
+            let mut shape = Shape::clone(original);
             let mut error = None;
             shape.map_refs(&mut |r| match visit(
                 r.0,

@@ -36,10 +36,10 @@ pub use target::Target;
 
 /// Reserve a shape before filling its references, using the caller's type identity.
 pub fn intern_shape<K: Eq + std::hash::Hash, S: std::hash::BuildHasher>(
-    shapes: &mut Vec<Shape>,
+    shapes: &mut Vec<Row>,
     rows: &mut std::collections::HashMap<K, TypeRef, S>,
     key: K,
-    shape: Shape,
+    shape: Row,
 ) -> (TypeRef, bool) {
     match rows.entry(key) {
         std::collections::hash_map::Entry::Occupied(entry) => (*entry.get(), false),
@@ -60,8 +60,8 @@ pub use recipe::{
     tag_width, terminal, word,
 };
 pub use shape::{
-    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Vector,
-    Width,
+    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, Repr, Row, Scalar, Shape, Ty, TypeRef,
+    Vector, Width,
 };
 
 #[cfg(test)]

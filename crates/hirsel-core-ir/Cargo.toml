@@ -15,7 +15,7 @@ map-observation = ["eval"]
 
 [dependencies]
 hirsel-core-net = { path = "../hirsel-core-net", optional = true }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 

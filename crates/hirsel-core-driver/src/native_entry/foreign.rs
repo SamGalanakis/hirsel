@@ -356,7 +356,8 @@ fn option(f: &mut Code<'_, '_>, dest: Value, bits: Value) -> Result<()> {
         send: true,
         held: None,
     };
-    let recipes = hirsel_core_layout::compute(&[shape]).map_err(|e| format!("{e:?}"))?;
+    let recipes = hirsel_core_layout::compute(&[hirsel_core_layout::Row::new(shape)])
+        .map_err(|e| format!("{e:?}"))?;
     let Layout::Fixed(layout) = &recipes[0].layout else {
         unreachable!()
     };

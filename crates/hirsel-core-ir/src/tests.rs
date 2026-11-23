@@ -302,7 +302,7 @@ fn closed_type_identity_has_one_row_and_keeps_its_package() {
             .unwrap_err()
             .contains("duplicate closed type rows")
     );
-    m.types[1].name = "b@1/m/Value".into();
+    std::sync::Arc::make_mut(&mut m.types[1]).name = "b@1/m/Value".into();
     wf::module(&m).unwrap();
 }
 

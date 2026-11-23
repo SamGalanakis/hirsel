@@ -25,7 +25,7 @@ use super::scalar_abi::SignatureAbi;
 use crate::Program;
 use crate::types::*;
 use hirsel_core_ir::{FuncId, InstanceKey, Param, PlaceTy, SigId, Signature, TypeId};
-use hirsel_core_layout::{FuncRef, Shape, TypeRef};
+use hirsel_core_layout::{FuncRef, Row, Shape, TypeRef};
 use std::sync::Arc;
 
 /// The program's closed row closures, by row name: the name the module interns the
@@ -70,7 +70,7 @@ struct Mark {
 /// `i` is instance `i`, and every function and signature is interned by its key.
 struct Closure {
     row: TypeRef,
-    types: Vec<Shape>,
+    types: Vec<Row>,
     signatures: Vec<Signature>,
     /// Each signature's interner convention, by signature.
     conventions: Vec<SignatureAbi>,
@@ -240,12 +240,16 @@ impl Emitter {
             if s.finalizer.is_some() || unbound(&s.clone) || unbound(&s.codec) {
                 return None;
             }
-            let mut s = s.clone();
+            if !s.numbered() {
+                types.push(Row::clone(s));
+                continue;
+            }
+            let mut s = Shape::clone(s);
             s.map_refs(&mut |r| TypeRef(below(r.0, rows)));
             for f in [&mut s.clone, &mut s.codec].into_iter().flatten() {
                 f.0 = below(f.0, functions);
             }
-            types.push(s);
+            types.push(Row::new(s));
         }
         let signatures_added: Vec<Signature> = self.module.signatures[m.signatures..]
             .iter()
@@ -431,14 +435,17 @@ impl Emitter {
             })
             .collect();
         let shape = |i: usize| {
-            let mut s = c.types[i].clone();
+            if !c.types[i].numbered() {
+                return Row::clone(&c.types[i]);
+            }
+            let mut s = Shape::clone(&c.types[i]);
             s.map_refs(&mut |r| at[r.index()]);
             for hook in [&mut s.finalizer, &mut s.clone, &mut s.codec] {
                 if let Some(f) = hook {
                     *f = FuncRef(func_at[f.0 as usize].0);
                 }
             }
-            s
+            Row::new(s)
         };
         // A held row is the closure's by its name: in a module that took no row back
         // (`refused`), the rows it names are held under the closure's names. Its hooks
@@ -539,7 +546,10 @@ impl Emitter {
             dictionaries: k.dictionaries.clone(),
         };
         let shape_at = |i: usize| {
-            let mut s = c.types[i].clone();
+            if !c.types[i].numbered() {
+                return Row::clone(&c.types[i]);
+            }
+            let mut s = Shape::clone(&c.types[i]);
             s.map_refs(&mut |r| TypeRef(r.0 + rows));
             for f in [&mut s.finalizer, &mut s.clone, &mut s.codec]
                 .into_iter()
@@ -547,7 +557,7 @@ impl Emitter {
             {
                 f.0 += functions;
             }
-            s
+            Row::new(s)
         };
         self.module
             .signatures

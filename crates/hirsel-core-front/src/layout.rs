@@ -8,7 +8,7 @@ use crate::Program;
 use crate::decls::{DeclBody, Repr, Role};
 use crate::types::*;
 use hirsel_core_layout::{
-    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Recipe, Repr as LRepr,
+    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Recipe, Repr as LRepr, Row,
     Scalar, Shape, Ty, TypeRef, compute,
 };
 use rustc_hash::FxHashMap as HashMap;
@@ -31,7 +31,7 @@ struct RecipeLayout {
 impl RecipeLayouts {
     pub(crate) fn resolve(
         &mut self,
-        shapes: &[Shape],
+        shapes: &[Row],
         names: &ShapeNames,
         row: TypeRef,
         make: &dyn Fn() -> Result<Recipe, LayoutError>,
@@ -60,11 +60,11 @@ impl RecipeLayouts {
 }
 
 pub(crate) fn intern_shape(
-    shapes: &mut Vec<Shape>,
+    shapes: &mut Vec<Row>,
     names: &mut ShapeNames,
     shape: Shape,
 ) -> (TypeRef, bool) {
-    hirsel_core_layout::intern_shape(shapes, names, shape.name.clone(), shape)
+    hirsel_core_layout::intern_shape(shapes, names, shape.name.clone(), Row::new(shape))
 }
 
 /// A shape table being extended: rows are keyed by canonical text, which is also the
@@ -72,7 +72,7 @@ pub(crate) fn intern_shape(
 pub(crate) struct Shapes<'p, T: TyRead> {
     pub decls: &'p crate::Rows<crate::decls::TypeDecl>,
     pub types: &'p mut T,
-    pub shapes: &'p mut Vec<Shape>,
+    pub shapes: &'p mut Vec<Row>,
     pub of: &'p mut ShapeNames,
     /// A body module's table: a finalizer or clone body names a function row this
     /// table cannot name yet, so it is left to [`Self::hooks`].
@@ -168,7 +168,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 held: None,
             },
         );
-        self.shapes[r.index()].send = self.declares_send(ty);
+        Row::make_mut(&mut self.shapes[r.index()]).send = self.declares_send(ty);
         let (repr, body, finalizer, held) = match self.types.kind(ty).clone() {
             TyKind::Scalar(s) => (
                 LRepr::Own,
@@ -249,7 +249,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 let decl = &decls[d.index()];
                 // Core storage hooks also apply to built-in carriers, whose body
                 // below is supplied by the form rather than source fields.
-                self.shapes[r.index()].clone = match decl.clone_body {
+                Row::make_mut(&mut self.shapes[r.index()]).clone = match decl.clone_body {
                     Some(f) if self.module => {
                         self.hooks.push((r, Hook::Clone, f, args.clone()));
                         Some(FuncRef(u32::MAX))
@@ -280,7 +280,8 @@ impl<T: TyRead> Shapes<'_, T> {
                         let items = FieldTy::Seq(Box::new(self.field(args[0])?));
                         let held = Some(items.clone());
                         let body = record(vec![("items", items)]);
-                        self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
+                        Row::make_mut(&mut self.shapes[r.index()]).codec =
+                            self.structural_codec(r, d, ty, &args);
                         return self.fill(r, ty, LRepr::Own, body, None, held);
                     }
                     Some(Role::ForeignHandle) => {
@@ -289,7 +290,8 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     Some(Role::Map) => {
                         let entries = self.map_field(&args)?;
-                        self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
+                        Row::make_mut(&mut self.shapes[r.index()]).codec =
+                            self.structural_codec(r, d, ty, &args);
                         return self.fill(
                             r,
                             ty,
@@ -451,11 +453,12 @@ impl<T: TyRead> Shapes<'_, T> {
                 };
                 let finalizer = hook(Hook::Finalizer, decl.finalizer);
                 let codec = hook(Hook::Codec, decl.codec().and_then(|c| c.maker));
-                self.shapes[r.index()].codec = codec;
+                Row::make_mut(&mut self.shapes[r.index()]).codec = codec;
                 if codec.is_none() {
-                    self.shapes[r.index()].codec = self.structural_codec(r, d, ty, &args);
+                    Row::make_mut(&mut self.shapes[r.index()]).codec =
+                        self.structural_codec(r, d, ty, &args);
                 }
-                self.shapes[r.index()].grant = decl.grant;
+                Row::make_mut(&mut self.shapes[r.index()]).grant = decl.grant;
                 (repr, body, finalizer, None)
             }
             _ => return None,
@@ -500,9 +503,9 @@ impl<T: TyRead> Shapes<'_, T> {
                 held: None,
             },
         );
-        self.shapes[r.index()].send = self.declares_send(ty);
+        Row::make_mut(&mut self.shapes[r.index()]).send = self.declares_send(ty);
         let body = self.body(decl, &args, true)?;
-        self.shapes[r.index()].body = body;
+        Row::make_mut(&mut self.shapes[r.index()]).body = body;
         Some(r)
     }
     /// The row a compact context names for `ty`: a compact type's compact row.
@@ -564,7 +567,7 @@ impl<T: TyRead> Shapes<'_, T> {
         finalizer: Option<FuncRef>,
         held: Option<FieldTy>,
     ) -> Option<TypeRef> {
-        let shape = &mut self.shapes[r.index()];
+        let shape = Row::make_mut(&mut self.shapes[r.index()]);
         shape.repr = repr;
         shape.body = body;
         shape.finalizer = finalizer;
@@ -581,7 +584,7 @@ impl<T: TyRead> Shapes<'_, T> {
         }
         #[cfg(not(debug_assertions))]
         let _ = ty;
-        self.shapes[r.index()].held = held;
+        Row::make_mut(&mut self.shapes[r.index()]).held = held;
         Some(r)
     }
     /// Forget the rows from `mark` on: a type whose parts do not all map leaves no
@@ -764,11 +767,12 @@ impl<T: TyRead> Shapes<'_, T> {
 /// A variant row whose bytes are one scalar word is carried as that word (FORM #78);
 /// layout's `word` decides. Every other row keeps the type rule's [`carried`]. A
 /// substituted generic row is decided again once its payload is known.
-pub(crate) fn word_carriage(shapes: &mut [Shape], row: usize) {
+pub(crate) fn word_carriage(shapes: &mut [Row], row: usize) {
     crate::cost_scope!("phase", "layout/word carriage");
     if matches!(shapes[row].body, Body::Variant(_)) {
-        shapes[row].carried = hirsel_core_layout::word(shapes, &shapes[row])
+        let carried = hirsel_core_layout::word(shapes, &shapes[row])
             .map_or(Carried::Address, |s| Carried::Value(Ty::Scalar(s)));
+        Row::make_mut(&mut shapes[row]).carried = carried;
     }
 }
 

@@ -438,7 +438,7 @@ impl<'m> ModuleOrder<'m> {
             }) {
                 break;
             }
-            let mut shape = original.clone();
+            let mut shape = Shape::clone(original);
             shape.map_refs(&mut |ty| {
                 if reserve(meter, &mut pending, 1) {
                     pending.push(ty.index());
@@ -1840,11 +1840,13 @@ fn f0 = n0 g0 {
         b.types.swap(0, 1);
         b.functions.swap(1, 2);
         for shape in &mut b.types {
-            if let Some(finalizer) = &mut shape.finalizer {
+            if let Some(finalizer) = &mut std::sync::Arc::make_mut(shape).finalizer {
                 finalizer.0 = 3 - finalizer.0;
             }
         }
-        let hirsel_core_layout::Body::Record(fields) = &mut b.types[2].body else {
+        let hirsel_core_layout::Body::Record(fields) =
+            &mut std::sync::Arc::make_mut(&mut b.types[2]).body
+        else {
             unreachable!()
         };
         fields[0].ty = FieldTy::Inline(TypeRef(1));

@@ -20,7 +20,7 @@
 //! frame lives in its native state. The fixed block of a `Box`, `Rc` or `Arc`
 //! of a resource holds that one pointer, so its frames are a single last point.
 
-use crate::{FieldTy, Layout, Recipe, Shape, Tag, TypeRef, cleanup_class, field_size};
+use crate::{FieldTy, Layout, Recipe, Row, Tag, TypeRef, cleanup_class, field_size};
 
 /// One place where cleanup of a fixed value yields a descendant, in visit order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,7 +91,7 @@ impl Node {
     }
 }
 
-fn plan_type(shapes: &[Shape], recipes: &[Recipe], t: TypeRef, at: u64) -> Node {
+fn plan_type(shapes: &[Row], recipes: &[Recipe], t: TypeRef, at: u64) -> Node {
     let r = &recipes[t.index()];
     let (Some(d), Layout::Fixed(f)) = (&r.drop, &r.layout) else {
         return Node::Empty;
@@ -133,7 +133,7 @@ fn plan_type(shapes: &[Shape], recipes: &[Recipe], t: TypeRef, at: u64) -> Node 
     }
 }
 
-fn plan_field(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy, at: u64) -> Node {
+fn plan_field(shapes: &[Row], recipes: &[Recipe], ty: &FieldTy, at: u64) -> Node {
     let fixed =
         |edge: &FieldTy| cleanup_class(shapes, recipes, edge) != Some(crate::Cleanup::Terminal);
     // Cleaned whole by its ordinary glue in one step that never yields: the
@@ -378,7 +378,7 @@ fn tags(node: &Node, shift: u64, bytes: &mut [bool]) {
 
 /// The suspension points of fixed type `t` and its spare words. Empty for a
 /// type whose cleanup never yields.
-pub fn frames(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Frames {
+pub fn frames(shapes: &[Row], recipes: &[Recipe], t: TypeRef) -> Frames {
     let Layout::Fixed(fixed) = &recipes[t.index()].layout else {
         return Frames::default();
     };
@@ -440,7 +440,7 @@ pub fn frames(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Frames {
 /// block holding a resource pointer, [`Cleanup::Resource`](crate::Cleanup)). A counted
 /// node's value starts at 8, so for both owners the block's native bytes are
 /// round8(bytes) + 8 * spares when spares is nonzero.
-pub fn spare_words(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> u64 {
+pub fn spare_words(shapes: &[Row], recipes: &[Recipe], edge: &FieldTy) -> u64 {
     match edge {
         FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t)
             if matches!(

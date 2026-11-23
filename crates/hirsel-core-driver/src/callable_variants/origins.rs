@@ -7,7 +7,7 @@
 //! unknown offset, moved, grown, its pointer stored, passed on an edge or
 //! returned) is never bound.
 use hirsel_core_ir::*;
-use hirsel_core_layout::{FieldTy, Layout, Recipe, Shape, TypeRef};
+use hirsel_core_layout::{FieldTy, Layout, Recipe, Row, TypeRef};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,8 +50,8 @@ enum Def {
 
 /// Byte offsets of the code words of a value of declared type `t`: each
 /// plain `fn`, `own fn` and borrowed field, through inline records.
-pub(super) fn code_words(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Vec<u64> {
-    fn walk(shapes: &[Shape], recipes: &[Recipe], t: TypeRef, base: u64, out: &mut Vec<u64>) {
+pub(super) fn code_words(shapes: &[Row], recipes: &[Recipe], t: TypeRef) -> Vec<u64> {
+    fn walk(shapes: &[Row], recipes: &[Recipe], t: TypeRef, base: u64, out: &mut Vec<u64>) {
         let (Some(fields), Some(Layout::Fixed(layout))) = (
             shapes.get(t.index()).and_then(|s| s.fields(None)),
             recipes.get(t.index()).map(|r| &r.layout),
@@ -75,8 +75,8 @@ pub(super) fn code_words(shapes: &[Shape], recipes: &[Recipe], t: TypeRef) -> Ve
 }
 
 /// Whether a value of declared type `t` holds a code word.
-pub(super) fn holds_code(shapes: &[Shape], t: TypeRef) -> bool {
-    fn walk(shapes: &[Shape], t: TypeRef, depth: usize) -> bool {
+pub(super) fn holds_code(shapes: &[Row], t: TypeRef) -> bool {
+    fn walk(shapes: &[Row], t: TypeRef, depth: usize) -> bool {
         depth < 64
             && shapes
                 .get(t.index())
@@ -125,7 +125,7 @@ pub(super) fn frozen_parameters(
 
 pub(super) struct Origins<'a> {
     body: &'a Body,
-    shapes: &'a [Shape],
+    shapes: &'a [Row],
     recipes: &'a [Recipe],
     defs: Vec<Def>,
     /// Immutable callable entry values: plain code, or a carrier's pointer.

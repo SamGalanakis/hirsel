@@ -311,13 +311,13 @@ fn clear_rigid(module: &mut Module) {
     };
     for t in 0..module.types.len() {
         if rigid(module, module.types[t].finalizer) {
-            module.types[t].finalizer = None;
+            std::sync::Arc::make_mut(&mut module.types[t]).finalizer = None;
         }
         if rigid(module, module.types[t].clone) {
-            module.types[t].clone = None;
+            std::sync::Arc::make_mut(&mut module.types[t]).clone = None;
         }
         if rigid(module, module.types[t].codec) {
-            module.types[t].codec = None;
+            std::sync::Arc::make_mut(&mut module.types[t]).codec = None;
         }
     }
 }
@@ -363,7 +363,7 @@ fn import(module: &mut Module, names: &mut Names, closure: &Closure) -> Result<T
         shape.codec = codec
             .as_ref()
             .map(|hook| FuncRef(import_hook(module, &rows, hook).0));
-        module.types[id.index()] = shape;
+        module.types[id.index()] = hirsel_core_layout::Row::new(shape);
     }
     let root = rows[0];
     if module.closure(root).hash != closure.hash {
@@ -538,7 +538,7 @@ impl Substitution<'_> {
         let Some(name) = self.type_names.get(&old) else {
             return old;
         };
-        let mut shape = self.module.types[old.index()].clone();
+        let mut shape = hirsel_core_layout::Shape::clone(&self.module.types[old.index()]);
         shape.name = name.render(&self.names);
         let (row, added) =
             crate::layout::intern_shape(&mut self.module.types, self.rows, shape.clone());
@@ -548,7 +548,7 @@ impl Substitution<'_> {
             return row;
         }
         shape.held = shape.held.map(|held| self.field(&held, false));
-        self.module.types[row.index()].held = shape.held.clone();
+        std::sync::Arc::make_mut(&mut self.module.types[row.index()]).held = shape.held.clone();
         let compact = matches!(shape.repr, hirsel_core_layout::Repr::Compact(_));
         let fields = |fields: &mut Vec<hirsel_core_layout::Field>, s: &mut Self| {
             for x in fields {
@@ -571,7 +571,7 @@ impl Substitution<'_> {
         {
             shape.codec = self.codec(recipe).map(|f| FuncRef(f.0));
         }
-        self.module.types[row.index()] = shape;
+        self.module.types[row.index()] = hirsel_core_layout::Row::new(shape);
         crate::layout::word_carriage(&mut self.module.types, row.index());
         row
     }
@@ -1252,7 +1252,7 @@ mod tests {
         let root = owner.instances[instance].arguments[0];
         // The owner's rows sit one function later than its own numbering would put them.
         owner.functions.insert(0, owner.functions[0].clone());
-        for shape in &mut owner.types {
+        for shape in owner.types.iter_mut().map(std::sync::Arc::make_mut) {
             if let Some(f) = &mut shape.finalizer {
                 f.0 += 1;
             }
@@ -1333,7 +1333,7 @@ mod tests {
         for (logical, expected) in [(true, 9), (false, 16)] {
             template.copies = vec![CopySize { value, ty, logical }];
             let owner = Module {
-                types: vec![shape.clone()],
+                types: vec![hirsel_core_layout::Row::new(shape.clone())],
                 ..Module::default()
             };
             let closure = owner.closure(TypeId(0));
@@ -1369,7 +1369,7 @@ mod tests {
             logical: true,
         }];
         let owner = Module {
-            types: vec![empty],
+            types: vec![hirsel_core_layout::Row::new(empty)],
             ..Module::default()
         };
         let closure = owner.closure(TypeId(0));

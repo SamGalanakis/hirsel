@@ -50,7 +50,7 @@ impl KeyOp {
             Self::NeedsDrop => "core.$needs_drop",
         })
     }
-    fn signature(self, types: &[hirsel_core_layout::Shape], ty: TypeId) -> Signature {
+    fn signature(self, types: &[hirsel_core_layout::Row], ty: TypeId) -> Signature {
         // The value read is lent as a view; a clone's target is written, through
         // the place a `mut` parameter of its row lends.
         let view = |ty| Param::Address {
@@ -1321,24 +1321,26 @@ impl Derive<'_> {
             return Ok(TypeId(i as u32));
         }
         let state = TypeId(self.module.types.len() as u32);
-        self.module.types.push(hirsel_core_layout::Shape {
-            name: NAME.into(),
-            repr: LRepr::Scoped,
-            carried: Carried::Address,
-            body: ShapeBody::Record(vec![hirsel_core_layout::Field {
-                name: "words".into(),
-                ty: FieldTy::Array(
-                    Box::new(FieldTy::Scalar(Scalar::U64)),
-                    hirsel_core_layout::map_hash::STATE_WORDS as u64,
-                ),
-            }]),
-            finalizer: None,
-            clone: None,
-            codec: None,
-            grant: 0,
-            send: false,
-            held: None,
-        });
+        self.module
+            .types
+            .push(hirsel_core_layout::Row::new(hirsel_core_layout::Shape {
+                name: NAME.into(),
+                repr: LRepr::Scoped,
+                carried: Carried::Address,
+                body: ShapeBody::Record(vec![hirsel_core_layout::Field {
+                    name: "words".into(),
+                    ty: FieldTy::Array(
+                        Box::new(FieldTy::Scalar(Scalar::U64)),
+                        hirsel_core_layout::map_hash::STATE_WORDS as u64,
+                    ),
+                }]),
+                finalizer: None,
+                clone: None,
+                codec: None,
+                grant: 0,
+                send: false,
+                held: None,
+            }));
         hirsel_core_layout::extend(&self.module.types, &mut self.recipes)
             .map_err(|_| "map hash scratch layout is not built")?;
         Ok(state)

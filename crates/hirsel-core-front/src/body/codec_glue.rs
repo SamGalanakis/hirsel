@@ -782,7 +782,8 @@ impl Emitter {
                 op.sealed(m, rows.tuple, rows.codec, rows.decoded, &rows)
             })
         };
-        self.module.types[row.index()].codec = Some(hirsel_core_layout::FuncRef(f.0));
+        std::sync::Arc::make_mut(&mut self.module.types[row.index()]).codec =
+            Some(hirsel_core_layout::FuncRef(f.0));
     }
     pub(super) fn tuple_codec_rows(
         &mut self,

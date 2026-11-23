@@ -1,6 +1,6 @@
 use crate::{Inst, LayoutQuery, Loan, Module, Param, PlaceTy, Signature, TypeId};
 use hirsel_core_layout::{
-    Body, FieldTy, Handle, Layout, Recipe, Repr, Scalar, Shape, Tag, Ty, TypeRef, field_size,
+    Body, FieldTy, Handle, Layout, Recipe, Repr, Row, Scalar, Tag, Ty, TypeRef, field_size,
 };
 use std::borrow::Cow;
 
@@ -12,7 +12,7 @@ impl LayoutQuery {
         }
     }
 
-    pub fn native(&self, shapes: &[Shape], recipes: &[Recipe]) -> u64 {
+    pub fn native(&self, shapes: &[Row], recipes: &[Recipe]) -> u64 {
         match self {
             Self::FieldSize(field) => field_size(shapes, recipes, field).0,
             Self::HeldSize(ty) if shapes[ty.index()].repr == hirsel_core_layout::Repr::Region => {
@@ -113,7 +113,7 @@ pub struct CallLayouts {
 /// The scalar leaves of fields at `(offset, field)`, at most two, or `None` when
 /// one of them is not a scalar.
 fn scalar_leaves<'a>(
-    shapes: &'a [Shape],
+    shapes: &'a [Row],
     recipes: &[Recipe],
     size: u64,
     fields: impl DoubleEndedIterator<Item = (u64, &'a FieldTy)>,
@@ -179,7 +179,7 @@ fn scalar_leaves<'a>(
 }
 
 impl CallLayouts {
-    pub fn new(shapes: &[Shape], recipes: &[Recipe]) -> Self {
+    pub fn new(shapes: &[Row], recipes: &[Recipe]) -> Self {
         let mut records = vec![None; shapes.len()];
         let mut ok_results = vec![None; shapes.len()];
         for (i, shape) in shapes.iter().enumerate() {

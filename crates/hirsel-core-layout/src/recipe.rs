@@ -9,7 +9,7 @@
 use std::cmp::Reverse;
 
 use crate::shape::{
-    Body, Carried, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Width,
+    Body, Carried, Field, FieldTy, FuncRef, Handle, Repr, Row, Scalar, Shape, Ty, TypeRef, Width,
 };
 
 /// Native size and alignment of a field slot of this type in a fixed layout.
@@ -355,7 +355,7 @@ fn align_up(n: u64, a: u64) -> u64 {
 }
 
 /// Recipes for every shape of a module, indexed like `shapes`.
-pub fn compute(shapes: &[Shape]) -> Result<Vec<Recipe>, LayoutError> {
+pub fn compute(shapes: &[Row]) -> Result<Vec<Recipe>, LayoutError> {
     let mut recipes = vec![];
     extend(shapes, &mut recipes)?;
     Ok(recipes)
@@ -364,7 +364,7 @@ pub fn compute(shapes: &[Shape]) -> Result<Vec<Recipe>, LayoutError> {
 /// Compute only the appended shapes. `recipes` describes an unchanged prefix of
 /// `shapes`; neither that prefix nor its references may change between extensions.
 /// A refused suffix leaves the existing recipes intact.
-pub fn extend(shapes: &[Shape], recipes: &mut Vec<Recipe>) -> Result<(), LayoutError> {
+pub fn extend(shapes: &[Row], recipes: &mut Vec<Recipe>) -> Result<(), LayoutError> {
     RecipeScratch::default().extend(shapes, recipes)
 }
 
@@ -382,11 +382,7 @@ pub struct RecipeScratch {
 impl RecipeScratch {
     /// Compute the new suffix, retaining the prior recipes on refusal. Visit state
     /// is indexed relative to that suffix; references into the prefix are done.
-    pub fn extend(
-        &mut self,
-        shapes: &[Shape],
-        recipes: &mut Vec<Recipe>,
-    ) -> Result<(), LayoutError> {
+    pub fn extend(&mut self, shapes: &[Row], recipes: &mut Vec<Recipe>) -> Result<(), LayoutError> {
         self.extend_with(shapes, recipes, |_, make| make())
     }
 
@@ -394,7 +390,7 @@ impl RecipeScratch {
     /// order and rollback as a direct extension.
     pub fn extend_with(
         &mut self,
-        shapes: &[Shape],
+        shapes: &[Row],
         recipes: &mut Vec<Recipe>,
         mut resolve: impl FnMut(
             TypeRef,
@@ -491,7 +487,7 @@ impl Effects {
     /// task's limit, so its refund is an event (MEM-20). Any other cleanup only
     /// frees blocks and refunds them to the cleaning task's own limits, which
     /// nothing runs between, so those steps commute.
-    fn effectful(&mut self, shapes: &[Shape], root: TypeRef) -> bool {
+    fn effectful(&mut self, shapes: &[Row], root: TypeRef) -> bool {
         let Effects {
             rows,
             pending,
@@ -576,7 +572,7 @@ struct Sendable {
 }
 
 impl Sendable {
-    fn row(&mut self, shapes: &[Shape], t: TypeRef) -> bool {
+    fn row(&mut self, shapes: &[Row], t: TypeRef) -> bool {
         if self.rows.len() < shapes.len() {
             self.rows.resize(shapes.len(), 0);
         }
@@ -591,7 +587,7 @@ impl Sendable {
         self.rows[t.index()] = if send { 1 } else { 2 };
         send
     }
-    fn ty(&mut self, shapes: &[Shape], ty: &FieldTy) -> bool {
+    fn ty(&mut self, shapes: &[Row], ty: &FieldTy) -> bool {
         match ty {
             FieldTy::Inline(t) | FieldTy::Box(t) => self.row(shapes, *t),
             FieldTy::Seq(e) | FieldTy::Array(e, _) => self.ty(shapes, e),
@@ -617,12 +613,7 @@ impl Sendable {
 /// cleaning it can observe order by itself (see [`Effects::effectful`]): a
 /// block of a `send` type may have arrived from another task and refund there.
 /// An allow-list: a field type not named here is effectful.
-fn owned_rows(
-    shapes: &[Shape],
-    send: &mut Sendable,
-    ty: &FieldTy,
-    rows: &mut Vec<TypeRef>,
-) -> bool {
+fn owned_rows(shapes: &[Row], send: &mut Sendable, ty: &FieldTy, rows: &mut Vec<TypeRef>) -> bool {
     match ty {
         FieldTy::Box(t) if send.row(shapes, *t) => false,
         FieldTy::Seq(e) if send.ty(shapes, e) => false,
@@ -673,7 +664,7 @@ enum State {
 /// Depth is bounded by the number of declared types (each is visited once); an
 /// explicit stack keeps it off the native stack.
 fn visit(
-    shapes: &[Shape],
+    shapes: &[Row],
     root: TypeRef,
     prefix: usize,
     state: &mut [State],
@@ -742,7 +733,7 @@ fn done<'a>(out: &'a Computed<'_>, t: TypeRef) -> &'a Recipe {
     out.get(t).expect("inline dependency computed first")
 }
 
-fn recipe(shapes: &[Shape], this: TypeRef, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
+fn recipe(shapes: &[Row], this: TypeRef, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
     let shape = &shapes[this.index()];
     let refused = || LayoutError::Carried {
         ty: shape.name.clone(),
@@ -772,7 +763,7 @@ fn recipe(shapes: &[Shape], this: TypeRef, out: &Computed<'_>) -> Result<Recipe,
 /// field holding that value (a capability designation is a `u64`, and a `ptr`
 /// is a plain `fn` or a borrow), a row carried as nothing has no fields, a value
 /// variant is the word [`word`] gives, and an address row may be anything.
-fn carries(shapes: &[Shape], shape: &Shape) -> bool {
+fn carries(shapes: &[Row], shape: &Shape) -> bool {
     let fields = match &shape.body {
         Body::Record(fields) => fields.as_slice(),
         Body::Variant(_) => {
@@ -805,12 +796,12 @@ fn carries(shapes: &[Shape], shape: &Shape) -> bool {
 ///   the tag in that word (`Option[char]`'s `None` is 0x110000).
 ///
 /// Everything else is None, including a plain `fn` payload (no niche) and a record.
-pub fn word(shapes: &[Shape], shape: &Shape) -> Option<Scalar> {
+pub fn word(shapes: &[Row], shape: &Shape) -> Option<Scalar> {
     spare_word(shapes, shape).map(|(s, _)| s)
 }
 
 /// [`word`] and the spare values its word still has.
-fn spare_word(shapes: &[Shape], shape: &Shape) -> Option<(Scalar, u64)> {
+fn spare_word(shapes: &[Row], shape: &Shape) -> Option<(Scalar, u64)> {
     use Scalar::{U8, U16, U32};
     if !matches!(shape.repr, Repr::Own | Repr::Region) {
         return None;
@@ -844,7 +835,7 @@ fn spare_word(shapes: &[Shape], shape: &Shape) -> Option<(Scalar, u64)> {
 /// The word a variant's one payload field gives, and its spare values: a `bool` or a
 /// `char`, a one-field record of one (the scalar row `char` is `{ 0: char }`), or a
 /// word variant.
-fn field_word(shapes: &[Shape], ty: &FieldTy) -> Option<(Scalar, u64)> {
+fn field_word(shapes: &[Row], ty: &FieldTy) -> Option<(Scalar, u64)> {
     use Scalar::{Bool, Char, U8, U32};
     match ty {
         FieldTy::Scalar(Bool) => Some((U8, 254)),
@@ -930,7 +921,7 @@ fn place_row(
 /// The niche with the most spare values among `fields` at `offsets` (ties to the
 /// lowest offset).
 fn best_niche<'r>(
-    shapes: &[Shape],
+    shapes: &[Row],
     fields: &[Field],
     offsets: &[u64],
     get: &dyn Fn(TypeRef) -> &'r Recipe,
@@ -969,7 +960,7 @@ fn best_niche<'r>(
 /// Nothing else has one: integers and floats use every pattern, and a handle, a
 /// code pointer or a resource pointer is not promised to be non-null here.
 pub fn field_niche<'r>(
-    shapes: &[Shape],
+    shapes: &[Row],
     ty: &FieldTy,
     get: &dyn Fn(TypeRef) -> &'r Recipe,
 ) -> Option<Niche> {
@@ -1008,7 +999,7 @@ pub fn field_niche<'r>(
 /// the other cases.
 #[allow(clippy::type_complexity)]
 fn niche_layout(
-    shapes: &[Shape],
+    shapes: &[Row],
     rows: &[&[Field]],
     measured: &[Vec<(u64, u64, u64)>],
     shape: &Shape,
@@ -1076,7 +1067,7 @@ fn niche_layout(
 /// the first candidate on a tie. A niche must beat the direct tag on size.
 #[allow(clippy::type_complexity)]
 fn several_dataful(
-    shapes: &[Shape],
+    shapes: &[Row],
     rows: &[&[Field]],
     measured: &[Vec<(u64, u64, u64)>],
     shape: &Shape,
@@ -1206,7 +1197,7 @@ fn several_dataful(
 }
 
 fn fixed(
-    shapes: &[Shape],
+    shapes: &[Row],
     shape: &Shape,
     this: TypeRef,
     out: &Computed<'_>,
@@ -1304,7 +1295,7 @@ fn fixed(
 }
 
 /// Whether `target` is compact data a [`FieldTy::Locator`] may name.
-fn locates(shapes: &[Shape], target: &FieldTy) -> bool {
+fn locates(shapes: &[Row], target: &FieldTy) -> bool {
     match target {
         FieldTy::Text | FieldTy::FixedSpan(_) | FieldTy::SeqSpan(_) | FieldTy::IndexedSpan(_) => {
             true
@@ -1318,7 +1309,7 @@ fn locates(shapes: &[Shape], target: &FieldTy) -> bool {
 /// in a fixed layout whose holder has representation `holder`, or why the holder
 /// refuses it.
 fn measure<'r>(
-    shapes: &[Shape],
+    shapes: &[Row],
     holder: Repr,
     ty: &FieldTy,
     get: &dyn Fn(TypeRef) -> &'r Recipe,
@@ -1406,7 +1397,7 @@ fn measure<'r>(
 }
 
 /// SEM-9: an inline array's element is plain or own, never a resource or scoped.
-fn array_element(shapes: &[Shape], ty: &FieldTy) -> bool {
+fn array_element(shapes: &[Row], ty: &FieldTy) -> bool {
     match ty {
         FieldTy::Inline(t) => matches!(shapes[t.index()].repr, Repr::Own | Repr::Region),
         FieldTy::Array(e, _) => array_element(shapes, e),
@@ -1445,7 +1436,7 @@ pub struct MapEntry {
     pub value: u64,
 }
 
-pub fn map_entry(shapes: &[Shape], recipes: &[Recipe], k: &FieldTy, v: &FieldTy) -> MapEntry {
+pub fn map_entry(shapes: &[Row], recipes: &[Recipe], k: &FieldTy, v: &FieldTy) -> MapEntry {
     let word = (8, 8, 8);
     let measured = [
         word,
@@ -1466,13 +1457,13 @@ pub fn map_entry(shapes: &[Shape], recipes: &[Recipe], k: &FieldTy, v: &FieldTy)
 
 /// Native size, native alignment and logical size of an own-held field of type `ty`
 /// whose shape is already accepted: what drop glue needs for an array's stride.
-pub fn field_size(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy) -> (u64, u64, u64) {
+pub fn field_size(shapes: &[Row], recipes: &[Recipe], ty: &FieldTy) -> (u64, u64, u64) {
     held_size(shapes, recipes, Repr::Own, ty)
 }
 
 /// [`field_size`] of a field held by a value whose representation is `holder`.
 pub fn held_size(
-    shapes: &[Shape],
+    shapes: &[Row],
     recipes: &[Recipe],
     holder: Repr,
     ty: &FieldTy,
@@ -1482,7 +1473,7 @@ pub fn held_size(
 
 /// SEM-4: a `List` of a zero-sized element has no element storage (its capacity is
 /// 2^64 - 1 from creation and nothing is admitted), so it has nothing to clean.
-pub fn storage_free(shapes: &[Shape], ty: &FieldTy) -> bool {
+pub fn storage_free(shapes: &[Row], ty: &FieldTy) -> bool {
     matches!(ty, FieldTy::Seq(e) if zero_sized(shapes, e, &mut vec![]))
 }
 
@@ -1490,7 +1481,7 @@ pub fn storage_free(shapes: &[Shape], ty: &FieldTy) -> bool {
 /// element need not be computed before its holder): a record whose fields all have
 /// size 0, or an array of none or of such. A variant has a tag; anything else holds
 /// a scalar, a pointer or a carrier.
-fn zero_sized(shapes: &[Shape], ty: &FieldTy, seen: &mut Vec<TypeRef>) -> bool {
+fn zero_sized(shapes: &[Row], ty: &FieldTy, seen: &mut Vec<TypeRef>) -> bool {
     match ty {
         FieldTy::Inline(t) => {
             let shape = &shapes[t.index()];
@@ -1510,7 +1501,7 @@ fn zero_sized(shapes: &[Shape], ty: &FieldTy, seen: &mut Vec<TypeRef>) -> bool {
     }
 }
 
-fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &Computed<'_>) -> bool {
+fn needs_drop(shapes: &[Row], ty: &FieldTy, out: &Computed<'_>) -> bool {
     drops(shapes, ty, &|t| done(out, t).drop.is_some())
 }
 
@@ -1534,7 +1525,7 @@ pub enum Cleanup {
 
 /// Whether cleaning the block `edge` owns is a free with nothing to drop
 /// ([`cleanup_class`] is [`Cleanup::Terminal`]).
-pub fn terminal(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> bool {
+pub fn terminal(shapes: &[Row], recipes: &[Recipe], edge: &FieldTy) -> bool {
     cleanup_class(shapes, recipes, edge) == Some(Cleanup::Terminal)
 }
 
@@ -1543,7 +1534,7 @@ pub fn terminal(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> bool {
 /// counted payload whose type has no drop recipe, `Seq` storage of elements that need no
 /// drop (`String` and `Bytes` buffers, a `List` of plain elements), or `Map` storage whose
 /// keys and values need none. Derived, never stored.
-pub fn cleanup_class(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> Option<Cleanup> {
+pub fn cleanup_class(shapes: &[Row], recipes: &[Recipe], edge: &FieldTy) -> Option<Cleanup> {
     let drop = |t: TypeRef| recipes[t.index()].drop.is_some();
     Some(match edge {
         FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
@@ -1567,7 +1558,7 @@ pub fn cleanup_class(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> Op
 }
 
 /// Whether a value of `ty` has anything to drop, given which rows have a recipe.
-fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
+fn drops(shapes: &[Row], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
     match ty {
         FieldTy::Seq(e) => !zero_sized(shapes, e, &mut vec![]),
         FieldTy::FrozenBytes => true,
@@ -1596,7 +1587,7 @@ fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool
 }
 
 fn drop_recipe(
-    shapes: &[Shape],
+    shapes: &[Row],
     shape: &Shape,
     rows: &[&[Field]],
     offsets: &[Vec<u64>],
@@ -1641,7 +1632,7 @@ fn drop_recipe(
 }
 
 fn compact(
-    shapes: &[Shape],
+    shapes: &[Row],
     shape: &Shape,
     declared: Width,
     out: &Computed<'_>,
@@ -1754,7 +1745,7 @@ fn compact(
 }
 
 fn compact_size(
-    shapes: &[Shape],
+    shapes: &[Row],
     shape: &Shape,
     f: &Field,
     ty: &FieldTy,
@@ -1849,7 +1840,7 @@ fn compact_size(
 
 /// MEM-12: the packed encoding of a plain record or tuple with at least one field,
 /// each a scalar or such a record, as its fields back to back (MEM-9); its size.
-fn packed_plain(shapes: &[Shape], t: TypeRef) -> Result<Option<u64>, ()> {
+fn packed_plain(shapes: &[Row], t: TypeRef) -> Result<Option<u64>, ()> {
     let shape = &shapes[t.index()];
     let Body::Record(fields) = &shape.body else {
         return Ok(None);

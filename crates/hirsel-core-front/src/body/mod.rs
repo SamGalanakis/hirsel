@@ -434,7 +434,8 @@ impl Emitter {
             return;
         };
         if let Ok((func, _)) = self.instance(p, t, maker as usize, &args) {
-            self.module.types[row.index()].codec = Some(hirsel_core_layout::FuncRef(func.0));
+            std::sync::Arc::make_mut(&mut self.module.types[row.index()]).codec =
+                Some(hirsel_core_layout::FuncRef(func.0));
         }
     }
 
@@ -586,7 +587,8 @@ impl Emitter {
                     match self.row(p, t, f as usize) {
                         Ok((func, _)) => func,
                         Err(_) => {
-                            self.module.types[row.index()].codec = None;
+                            std::sync::Arc::make_mut(&mut self.module.types[row.index()]).codec =
+                                None;
                             continue;
                         }
                     }
@@ -599,14 +601,14 @@ impl Emitter {
                     // A maker is reached only by a call of `of`, which requires the
                     // bound; a row whose maker is not built has none.
                     Err(_) if hook == crate::layout::Hook::Codec => {
-                        self.module.types[row.index()].codec = None;
+                        std::sync::Arc::make_mut(&mut self.module.types[row.index()]).codec = None;
                         continue;
                     }
                     Err(_) => return None,
                 }
             };
             let func = Some(hirsel_core_layout::FuncRef(func.0));
-            let shape = &mut self.module.types[row.index()];
+            let shape = std::sync::Arc::make_mut(&mut self.module.types[row.index()]);
             match hook {
                 crate::layout::Hook::Finalizer => shape.finalizer = func,
                 crate::layout::Hook::Clone => shape.clone = func,

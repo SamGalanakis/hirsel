@@ -58,7 +58,7 @@ fn imported(identity: &Identity, closure: &hirsel_core_ir::Closure) -> hirsel_co
     for i in 0..5 {
         let mut pad = module_pad();
         pad.name = format!("pad.{i}");
-        module.types.push(pad);
+        module.types.push(hirsel_core_layout::Row::new(pad));
     }
     let instance = hirsel_core_front::import_instance(&mut module, identity, &[closure])
         .unwrap_or_else(|e| panic!("{e}"));
@@ -128,16 +128,16 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
     let edits: Vec<(&str, Edit)> = vec![
         (
             "grant (root)",
-            Box::new(move |m| m.types[root.index()].grant += 64),
+            Box::new(move |m| std::sync::Arc::make_mut(&mut m.types[root.index()]).grant += 64),
         ),
         (
             "grant (nested)",
-            Box::new(move |m| m.types[probe.index()].grant += 64),
+            Box::new(move |m| std::sync::Arc::make_mut(&mut m.types[probe.index()]).grant += 64),
         ),
         (
             "repr",
             Box::new(move |m| {
-                let r = &mut m.types[probe.index()].repr;
+                let r = &mut std::sync::Arc::make_mut(&mut m.types[probe.index()]).repr;
                 *r = if *r == Repr::Own {
                     Repr::Region
                 } else {
@@ -148,7 +148,7 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
         (
             "carried",
             Box::new(move |m| {
-                let c = &mut m.types[probe.index()].carried;
+                let c = &mut std::sync::Arc::make_mut(&mut m.types[probe.index()]).carried;
                 *c = if *c == Carried::Address {
                     Carried::Nothing
                 } else {
@@ -159,7 +159,7 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
         (
             "held",
             Box::new(move |m| {
-                let h = &mut m.types[probe.index()].held;
+                let h = &mut std::sync::Arc::make_mut(&mut m.types[probe.index()]).held;
                 *h = match h {
                     None => Some(FieldTy::Box(TypeRef(probe.0))),
                     Some(_) => None,
@@ -217,12 +217,13 @@ fn closure_rows_differ_in_every_layout_field_and_import_unchanged() {
 }
 /// The first field of row `ty` that `edit` rewrites, rewritten.
 fn edit_field(module: &mut Module, ty: TypeId, edit: impl Fn(&FieldTy) -> Option<FieldTy>) {
-    let fields: Vec<&mut hirsel_core_layout::Field> = match &mut module.types[ty.index()].body {
-        hirsel_core_layout::Body::Record(fields) => fields.iter_mut().collect(),
-        hirsel_core_layout::Body::Variant(cases) => {
-            cases.iter_mut().flat_map(|c| &mut c.fields).collect()
-        }
-    };
+    let fields: Vec<&mut hirsel_core_layout::Field> =
+        match &mut std::sync::Arc::make_mut(&mut module.types[ty.index()]).body {
+            hirsel_core_layout::Body::Record(fields) => fields.iter_mut().collect(),
+            hirsel_core_layout::Body::Variant(cases) => {
+                cases.iter_mut().flat_map(|c| &mut c.fields).collect()
+            }
+        };
     for field in fields {
         if let Some(ty) = edit(&field.ty) {
             field.ty = ty;

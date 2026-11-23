@@ -326,6 +326,19 @@ impl<T: Wire> Wire for Vec<T> {
     }
 }
 
+/// A shared row is written as the row it shares, and read as its own allocation.
+impl<T: Wire> Wire for std::sync::Arc<T> {
+    fn write(&self, out: &mut Write<'_, '_, '_>) {
+        (**self).write(out);
+    }
+
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let item = T::read(input)?;
+        input.budget.allocation::<T>(1)?;
+        Ok(std::sync::Arc::new(item))
+    }
+}
+
 impl<T: Wire> Wire for Box<T> {
     fn write(&self, out: &mut Write<'_, '_, '_>) {
         (**self).write(out);

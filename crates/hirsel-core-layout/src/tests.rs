@@ -9,8 +9,8 @@ fn field(name: &str, ty: FieldTy) -> Field {
         ty,
     }
 }
-fn record(name: &str, repr: Repr, fields: Vec<Field>) -> Shape {
-    Shape {
+fn record(name: &str, repr: Repr, fields: Vec<Field>) -> Row {
+    Row::new(Shape {
         name: name.into(),
         repr,
         carried: Carried::Address,
@@ -21,10 +21,10 @@ fn record(name: &str, repr: Repr, fields: Vec<Field>) -> Shape {
         grant: 0,
         send: false,
         held: None,
-    }
+    })
 }
-fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Shape {
-    Shape {
+fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Row {
+    Row::new(Shape {
         name: name.into(),
         repr,
         carried: Carried::Address,
@@ -43,7 +43,7 @@ fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Shape {
         grant: 0,
         send: false,
         held: None,
-    }
+    })
 }
 fn fixed(r: &Recipe) -> &Fixed {
     match &r.layout {
@@ -228,7 +228,7 @@ fn cleanup_visits_owned_fields_in_reverse_declaration_order() {
             field("b", FieldTy::Seq(Box::new(u(Scalar::U8)))),
         ],
     );
-    s.finalizer = Some(FuncRef(7));
+    Row::make_mut(&mut s).finalizer = Some(FuncRef(7));
     let r = compute(&[s]).unwrap();
     let d = r[0].drop.as_ref().unwrap();
     assert_eq!(d.finalizer, Some(FuncRef(7)));
@@ -241,7 +241,7 @@ fn cleanup_visits_owned_fields_in_reverse_declaration_order() {
     );
     assert!(!r[0].plain);
     let string = || FieldTy::Seq(Box::new(u(Scalar::U8)));
-    let order = |shapes: &[Shape], t: usize| -> Vec<(u32, u64)> {
+    let order = |shapes: &[Row], t: usize| -> Vec<(u32, u64)> {
         let r = compute(shapes).unwrap();
         r[t].drop.as_ref().unwrap().fields[0]
             .iter()
@@ -397,7 +397,7 @@ fn plain_elements_are_packed_and_only_packed_types_are_elements() {
         compact_starts(&r, c, &c.fields[0], 0, &rw, &rt),
         vec![0, 10]
     );
-    let refused = |elem: FieldTy, extra: Shape| {
+    let refused = |elem: FieldTy, extra: Row| {
         let s = record("S", Repr::Compact(Width::U32), vec![field("xs", elem)]);
         assert!(matches!(
             compute(&[extra, s]),
@@ -870,7 +870,7 @@ fn appended_layout_visit_state_is_linear_and_retry_resets_the_suffix() {
         ],
     ));
     let mut invalid = record("Invalid", Repr::Own, vec![field("n", u(Scalar::U64))]);
-    invalid.carried = Carried::Nothing;
+    Row::make_mut(&mut invalid).carried = Carried::Nothing;
     shapes.push(invalid);
     assert_eq!(
         scratch.extend(&shapes, &mut recipes),
@@ -973,8 +973,8 @@ fn a_list_of_a_zero_sized_element_has_nothing_to_clean() {
 /// the one-field rows that are the value, and any address row, are laid out.
 #[test]
 fn a_row_carried_unlike_its_body_is_refused() {
-    let carried = |c: Carried, mut s: Shape| {
-        s.carried = c;
+    let carried = |c: Carried, mut s: Row| {
+        Row::make_mut(&mut s).carried = c;
         compute(&[s])
     };
     let u64v = Carried::Value(Ty::Scalar(Scalar::U64));
@@ -1044,7 +1044,7 @@ fn a_row_carried_unlike_its_body_is_refused() {
     }
 }
 
-fn option(name: &str, payload: FieldTy) -> Shape {
+fn option(name: &str, payload: FieldTy) -> Row {
     variant(
         name,
         Repr::Own,

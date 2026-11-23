@@ -63,7 +63,7 @@ fn job_cleanup() -> Vec<u32> {
         row("A", words(2)),
         row("B", words(4)),
     ];
-    let recipes = hirsel_core_layout::compute(&shapes).unwrap();
+    let recipes = hirsel_core_layout::compute(&shapes.map(hirsel_core_layout::Row::new)).unwrap();
     recipes[0].drop.as_ref().unwrap().fields[0]
         .iter()
         .map(|f| f.field)

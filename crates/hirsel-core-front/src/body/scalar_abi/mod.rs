@@ -12,7 +12,7 @@ pub struct SignatureAbi {
 
 /// The place a `mut` parameter at row `id` lends (#88): a value place of the
 /// scalar a scalar-carried row is carried as, else the row.
-pub(super) fn mut_place(types: &[hirsel_core_layout::Shape], id: TypeId) -> PlaceTy {
+pub(super) fn mut_place(types: &[hirsel_core_layout::Row], id: TypeId) -> PlaceTy {
     match types[id.index()].carried {
         Carried::Value(t) => PlaceTy::Value(t),
         Carried::Nothing | Carried::Address => PlaceTy::Declared(id),

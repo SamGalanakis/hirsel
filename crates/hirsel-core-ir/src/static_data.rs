@@ -1,5 +1,5 @@
 use crate::{Static, StaticValue};
-use hirsel_core_layout::{FieldTy, Layout, Recipe, Shape, TypeRef, case_word, field_size};
+use hirsel_core_layout::{FieldTy, Layout, Recipe, Row, TypeRef, case_word, field_size};
 use std::borrow::Cow;
 
 impl Static {
@@ -12,7 +12,7 @@ impl Static {
     }
 
     /// Materialize a read-only object using the same recipes as field projection.
-    pub fn native<'a>(&'a self, shapes: &[Shape], recipes: &[Recipe]) -> (u32, Cow<'a, [u8]>) {
+    pub fn native<'a>(&'a self, shapes: &[Row], recipes: &[Recipe]) -> (u32, Cow<'a, [u8]>) {
         match self {
             Self::Bytes { align, bytes } => (*align, Cow::Borrowed(bytes)),
             Self::Aggregate { ty, value } => {
@@ -33,13 +33,7 @@ impl Static {
     }
 }
 
-fn write(
-    value: &StaticValue,
-    ty: &FieldTy,
-    bytes: &mut [u8],
-    shapes: &[Shape],
-    recipes: &[Recipe],
-) {
+fn write(value: &StaticValue, ty: &FieldTy, bytes: &mut [u8], shapes: &[Row], recipes: &[Recipe]) {
     match (value, ty) {
         (StaticValue::Bits(bits), _) => {
             let size = field_size(shapes, recipes, ty).0 as usize;

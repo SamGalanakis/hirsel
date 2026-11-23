@@ -335,6 +335,32 @@ pub enum FieldTy {
 }
 
 impl FieldTy {
+    /// Whether this field names a row.
+    pub fn names_row(&self) -> bool {
+        match self {
+            FieldTy::Inline(_)
+            | FieldTy::Box(_)
+            | FieldTy::Rc(_)
+            | FieldTy::Arc(_)
+            | FieldTy::RegionRef(_)
+            | FieldTy::Link(_) => true,
+            FieldTy::Seq(ty)
+            | FieldTy::Array(ty, _)
+            | FieldTy::View(ty)
+            | FieldTy::Locator(ty)
+            | FieldTy::FixedSpan(ty)
+            | FieldTy::SeqSpan(ty)
+            | FieldTy::IndexedSpan(ty) => ty.names_row(),
+            FieldTy::Map(k, v) => k.names_row() || v.names_row(),
+            FieldTy::Scalar(_)
+            | FieldTy::Fn
+            | FieldTy::OwnFn
+            | FieldTy::Borrow
+            | FieldTy::Handle(_)
+            | FieldTy::Text
+            | FieldTy::FrozenBytes => false,
+        }
+    }
     /// Rewrite every row this field names, in field order.
     pub fn map_refs(&mut self, f: &mut impl FnMut(TypeRef) -> TypeRef) {
         match self {
@@ -419,7 +445,27 @@ pub struct Shape {
     pub held: Option<FieldTy>,
 }
 
+/// A row of a type table. Tables share rows: a row closure copied into a body's
+/// module (and every later copy of it) holds the closure's own rows wherever
+/// renumbering leaves them as they are, and a write copies a shared row first
+/// (`Arc::make_mut`), so it never reaches another table.
+pub type Row = std::sync::Arc<Shape>;
+
 impl Shape {
+    /// Whether the row names another row or a function: renumbering a table leaves a
+    /// row that names neither as it is.
+    pub fn numbered(&self) -> bool {
+        self.finalizer.is_some()
+            || self.clone.is_some()
+            || self.codec.is_some()
+            || self.held.as_ref().is_some_and(FieldTy::names_row)
+            || match &self.body {
+                Body::Record(fields) => fields.iter().any(|x| x.ty.names_row()),
+                Body::Variant(cases) => cases
+                    .iter()
+                    .any(|c| c.fields.iter().any(|x| x.ty.names_row())),
+            }
+    }
     /// Rewrite every row the body names, in field order, then the rows `held` names.
     pub fn map_refs(&mut self, f: &mut impl FnMut(TypeRef) -> TypeRef) {
         match &mut self.body {

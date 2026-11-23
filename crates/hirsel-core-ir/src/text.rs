@@ -2147,7 +2147,7 @@ impl Parser {
                     expect_index(&mut l, 't', n)?;
                     let s = l.shape()?;
                     l.end()?;
-                    self.module.types.push(s);
+                    self.module.types.push(Row::new(s));
                 }
                 "static" => {
                     let n = index(self.module.statics.len());

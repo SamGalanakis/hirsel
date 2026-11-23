@@ -29,6 +29,7 @@
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
@@ -354,7 +355,8 @@ void list_compile_units(Module &p) {
 // Lends `use` the part of `f`: `f` alone, with what it references, in a
 // module of its own. The part's definition borrows `f`'s body for the call: its blocks move in,
 // its operands and metadata that name a global name the part's declaration
-// instead, and all of it is put back after, so `m` is as it was. The move
+// instead, and all of it is put back after, so `m` is as it was, unless
+// `use` takes the part: `f` is then left without a body. The move
 // keeps every use-list order the code generator follows. A body the move
 // cannot put back exactly (a block whose address is taken or debug records)
 // is cloned instead, as is a codegen part with a subprogram. The clone's
@@ -364,7 +366,7 @@ void list_compile_units(Module &p) {
 // and the part defines every variable it names with its initializer (a tail
 // folds a load from a constant): the part is then a release tail's input.
 void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::string *linkage,
-               SmallVectorImpl<MDNode *> *debug, function_ref<void(Module &)> use) {
+               SmallVectorImpl<MDNode *> *debug, function_ref<void(std::unique_ptr<Module> &)> use) {
     LLVMContext &context = m.getContext();
     auto p = std::make_unique<Module>("hirsel-part", context);
     p->setSourceFileName("hirsel-part");
@@ -452,7 +454,7 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
         CloneFunctionInto(own, &f, map, CloneFunctionChangeType::DifferentModule, returns);
         order_uses_like(f, map);
         list_compile_units(*p);
-        use(*p);
+        use(p);
         return;
     }
     if (debug && !debug->empty()) {
@@ -497,7 +499,8 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
                 }
         }
     list_compile_units(*p);
-    use(*p);
+    use(p);
+    if (!p) return;
     for (auto &[i, kind, node] : retagged) i->setMetadata(kind, node);
     for (auto it = moved.rbegin(); it != moved.rend(); ++it) it->first->set(it->second);
     for (auto [from, to] = std::pair(f.arg_begin(), own->arg_begin()); from != f.arg_end(); ++from, ++to)
@@ -509,7 +512,7 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
 void part_bitcode(Module &m, Function &f, const StringMap<std::string> &sets,
                   SmallVectorImpl<char> &out, std::string *linkage = nullptr,
                   SmallVectorImpl<MDNode *> *debug = nullptr) {
-    with_part(m, f, sets, linkage, debug, [&](Module &p) { bitcode(p, out); });
+    with_part(m, f, sets, linkage, debug, [&](auto &p) { bitcode(*p, out); });
 }
 
 // What code generation is a function of besides the IR: the machine and the
@@ -580,9 +583,11 @@ std::string unsplittable_content(const Module &m) {
     return "";
 }
 
-// One missed part: its bitcode in, its object or an LLVM message out.
+// One missed part: its bitcode, or with one job its module in the composing
+// context, in; its object or an LLVM message out.
 struct Miss {
     SmallVector<char, 0> code;
+    std::unique_ptr<Module> part;
     SmallVector<char, 0> object;
     std::string error;
 };
@@ -608,6 +613,18 @@ class ObjectEmitter {
     std::optional<legacy::PassManager> passes;
 
 public:
+    // A part held in the composing context is generated as is: its bitcode
+    // read back is the same module, use-list orders included.
+    void generate_held(TargetMachine &tm, Miss &miss) {
+        LLVMContext &context = miss.part->getContext();
+        auto previous = context.getDiagnosticHandler();
+        context.setDiagnosticHandler(std::make_unique<DiagnosticHandler>());
+        context.setDiagnosticHandlerCallBack(diagnose, &miss);
+        auto restore = make_scope_exit([&] { context.setDiagnosticHandler(std::move(previous)); });
+        run(tm, *miss.part, miss);
+        miss.part.reset();
+    }
+
     void generate(TargetMachine &tm, Miss &miss) {
         LLVMContext context;
         context.setDiscardValueNames(true);
@@ -618,7 +635,11 @@ public:
             else consumeError(parsed.takeError());
             return;
         }
-        Module &part = **parsed;
+        run(tm, **parsed, miss);
+    }
+
+private:
+    void run(TargetMachine &tm, Module &part, Miss &miss) {
         part.setDataLayout(tm.createDataLayout());
         hirsel_llvm::PassCost cost("object-emission", part);
         if (!passes) {
@@ -687,6 +708,19 @@ void part_options(TargetMachine &tm) {
     tm.Options.UniqueSectionNames = true;
     tm.Options.EnableIPRA = false;
     tm.Options.EnableMachineOutliner = false;
+}
+
+// Generate every miss held in the composing context, on this thread, as
+// `generate_all` would on one.
+void generate_here(const TargetMachine &tm, std::vector<Miss> &misses) {
+    std::unique_ptr<TargetMachine> machine(tm.getTarget().createTargetMachine(
+        tm.getTargetTriple(), tm.getTargetCPU(), tm.getTargetFeatureString(), tm.Options,
+        tm.getRelocationModel(), tm.getCodeModel(), tm.getOptLevel()));
+    ObjectEmitter emitter;
+    for (Miss &miss : misses) {
+        if (machine) emitter.generate_held(*machine, miss);
+        else miss.error = "LLVM could not create the target machine";
+    }
 }
 
 // Generate every miss on up to `jobs` threads.
@@ -816,7 +850,8 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         StringMap<std::string> sets = asm_lines(m);
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
-            with_part(m, f, sets, nullptr, nullptr, [&](Module &p) {
+            with_part(m, f, sets, nullptr, nullptr, [&](auto &part) {
+                Module &p = *part;
                 bytes.clear();
                 bitcode(p, bytes);
                 bool strong = !p.getFunction(f.getName())->isWeakForLinker();
@@ -844,18 +879,22 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
         std::vector<Function *> held;
         for (Function &f : m) {
             if (f.isDeclaration()) continue;
-            with_part(m, f, sets, nullptr, nullptr, [&](Module &p) {
-                if (ask(f.getName(), hirsel_key::module_key(p))) {
+            with_part(m, f, sets, nullptr, nullptr, [&](auto &p) {
+                if (ask(f.getName(), hirsel_key::module_key(*p))) {
                     held.push_back(&f);
                     return;
                 }
                 Miss &miss = misses.emplace_back();
-                if (jobs) bitcode(p, miss.code);
+                // One job generates on this thread, after every part is
+                // keyed: the part itself, with no bitcode between.
+                if (jobs == 1) miss.part = std::move(p);
+                else if (jobs) bitcode(*p, miss.code);
             });
         }
         if (jobs) {
             if (misses.empty()) return 0;
-            generate_all(tm, misses, jobs);
+            if (jobs == 1) generate_here(tm, misses);
+            else generate_all(tm, misses, jobs);
             for (Miss &miss : misses)
                 if (!miss.error.empty()) {
                     *error = strdup(miss.error.c_str());
@@ -1335,7 +1374,8 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
         int found = 0;
         const uint8_t *held = nullptr;
         size_t held_len = 0;
-        with_part(m, *t.f, sets, &t.key, debug_info ? &t.debug : nullptr, [&](Module &p) {
+        with_part(m, *t.f, sets, &t.key, debug_info ? &t.debug : nullptr, [&](auto &part) {
+            Module &p = *part;
             t.ir = hirsel_key::module_key(p);
             found = find(context, t.key.data(), t.key.size(), t.ir.data(), t.ir.size(), &held, &held_len);
             if (found == 2 || (found != 1 && parallel)) bitcode(p, t.input);

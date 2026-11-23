@@ -518,6 +518,12 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     let dir = tempfile::tempdir().unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let (name, source) = UNIT_PROGRAMS[2];
+    let source = format!(
+        "fn find_right(s: String) -> Option[u64] {{ string.find(s, 0, \"right\") }}\n{}",
+        source.replace("string.find(s, 0, \"right\")", "find_right(s)")
+    );
+    let find = hirsel_core_ir::Identity::plain(DefPath::from_full("std@1/string/find").unwrap());
+    let split = hirsel_core_ir::Identity::plain(DefPath::from_full("std@1/string/split_once").unwrap());
     let mut options = native_options(Backend::Llvm, &dir.path().join(name));
     options.optimize = true;
     options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
@@ -527,12 +533,14 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     // first build lowers their side into the shared parts cache, and the
     // second takes it from there.
     for cache in ["cache", "cache-b"] {
-        let product = std_checked(dir.path(), name, source, cache);
+        let product = std_checked(dir.path(), name, &source, cache);
         let code = crate::code_store::CodeStore::new(dir.path().join(name).join(format!("code-{cache}")));
         let reached = product.reachable(&entry, options.instance_limit).unwrap();
         let publication =
             product.publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024).unwrap();
         let std = std_of(&options, &publication).expect("an optimised build's std");
+        assert!(std.roots.contains(&split), "the entry's call uses the side");
+        assert!(!std.roots.contains(&find), "the helper's call stays in the program");
         if cache == "cache" {
             assert!(std.lowered > 0, "a build that lowers the std counts what it lowered");
         } else {

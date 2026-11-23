@@ -1,17 +1,17 @@
 //! The release std: the plain library instances a program reaches, and every
 //! instance they reach, lowered as one unit apart from the program. Its roots
-//! are the plain library instances the program's closure holds, so what the
-//! unit holds and how it is optimised is a function of those instances and
-//! the generator: two programs that reach the same std roots take the same
-//! side, from the shared parts cache. Every root is an export; a program calls
-//! it by its symbol and holds none of its bodies. Every optimised LLVM build
+//! are selected from the program's reached plain library instances. Two
+//! programs that select the same roots and reach the same library bodies
+//! from them take the same side from the shared parts cache. Every root is
+//! an export; a program calls it by its symbol and holds none of its bodies.
+//! Every optimised LLVM build
 //! takes one: a program lowers every other library instance it reaches
 //! itself, so its optimiser sees the closure and dictionary arguments it
 //! passes them, and the held roots with what they reach: those
 //! [`ALWAYS_IMPORT`] names, those that take code a caller can bind
-//! ([`callable_variants::takes_code`]), whose calls through it a program's
-//! private bodies make direct, and those that make an owned network wait,
-//! whose returnable variants a program builds.
+//! ([`callable_variants::takes_code`]), those that make an owned network wait,
+//! whose returnable variants a program builds, and the plain roots its own
+//! helper bodies call directly, so their call chains can optimise together.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -34,7 +34,7 @@ use super::recipe_build::Unit;
 use super::*;
 use crate::native::{NativeOptions, NativeStop, ObjectProduct};
 use hirsel_core_ir::step_contexts::Summary;
-use hirsel_core_ir::{FuncId, Identity};
+use hirsel_core_ir::{Callee, FuncId, Identity};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -137,8 +137,7 @@ struct SideUnits {
     units: BTreeMap<Identity, Unit>,
 }
 
-/// The plain library roots a program's `units` hold besides its `entry`, and
-/// the units they reach.
+/// The plain library roots assigned to the side and the units they reach.
 fn program_side(
     units: &BTreeMap<Identity, Unit>,
     entry: &Identity,
@@ -171,13 +170,33 @@ fn program_side(
             && identity.closures.is_empty()
             && identity.dictionaries.is_empty()
     };
-    let held = reach(
-        units
-            .iter()
-            .filter(|(i, unit)| plain(i) && held_root(&i.definition, &unit.module, FuncId(0)))
-            .map(|(i, _)| i.clone())
-            .collect(),
-    );
+    let mut local_roots: Vec<_> = units
+        .iter()
+        .filter(|(i, unit)| plain(i) && held_root(&i.definition, &unit.module, FuncId(0)))
+        .map(|(i, _)| i.clone())
+        .collect();
+    for (identity, unit) in units {
+        if identity != entry && library(&identity.definition) {
+            continue;
+        }
+        // The entry can call the side directly. Keep library calls from its
+        // helpers and closures in the program, along with what they call.
+        let first_helper = usize::from(identity == entry);
+        for function in &unit.module.functions[first_helper..] {
+            let Some(body) = &function.body else { continue };
+            for call in &body.calls {
+                if let Callee::Direct(callee) = call.callee {
+                    let callee = unit
+                        .module
+                        .identity(unit.module.functions[callee.index()].instance);
+                    if plain(&callee) {
+                        local_roots.push(callee);
+                    }
+                }
+            }
+        }
+    }
+    let held = reach(local_roots);
     let roots: Vec<Identity> = units
         .keys()
         .filter(|i| plain(i) && !held.contains(*i))
@@ -192,10 +211,9 @@ const STD_NAMESPACE: &str = hirsel_llvm_lazy::LENT_NAMESPACE;
 
 /// The release std a program's publication assembles against under
 /// `options`' generator, linking the runtime whose identity is `runtime`: the
-/// plain library roots its `units` reach besides `entry`, with every unit
-/// they reach, lowered once into the shared parts cache, where every later
-/// build that reaches the same roots finds it. A program that holds no plain
-/// library unit takes the empty side, which defines nothing.
+/// selected plain library roots with every unit they reach, lowered once
+/// into the shared parts cache. A program that selects no roots takes the
+/// empty side.
 pub(crate) fn std_side(
     units: &BTreeMap<Identity, Unit>,
     entry: &Identity,

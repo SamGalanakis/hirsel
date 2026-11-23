@@ -1659,6 +1659,8 @@ fn serve_until_ready(tasks: Tasks, take settings: runner.PlaceConfig[(), Hd, (),
 // RUNNER-SPEC §6 "Restart and rebuild": a launch without --hirsel-activation (Reopen)
 // runs genesis on an empty store, reopens the same registry's store at its current
 // activation without writing, and refuses another registry's Describe before handles.
+// That registry's documented upgrade, one --hirsel-install start, keeps the rows and is
+// then what a plain restart reopens.
 pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
@@ -1692,7 +1694,21 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let survived = result.unwrap(store.get(snap, store.shape(read.t), 7u64)) == Some(70u64)
     let unwritten = store.version(snap) == 2u64
     result.unwrap(store.close(take check))
+    let mut upgrade = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    upgrade.selection = Install
+    upgrade.place = code.describe(fixture_place)
+    let upgraded = serve_until_ready(tasks, take upgrade)
+    let mut after = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
+    after.selection = Reopen
+    after.place = code.describe(fixture_place)
+    let resumed = serve_until_ready(tasks, take after)
+    let last = result.unwrap(store.open(tasks, dir, clock, random, disk_options()))
+    let rows = result.unwrap(store.with_schema(last, code.describe(handles)))
+    let carried = result.unwrap(store.get(store.snapshot(last), store.shape(rows.t), 7u64)) == Some(70u64)
+    result.unwrap(store.close(take last))
     result.unwrap(std.dir.remove_all(parent, name))
+    want(upgraded == 3u64 && resumed == upgraded, "restart: --hirsel-install did not activate the other registry after the row, or a restart did not reopen it")
+    want(carried, "restart: installing the other registry lost the row written before it")
     want(installed == 1u64 && reopened == installed, "restart: reopen did not select the installed activation")
     want(survived, "restart: the row written before the restart is gone")
     want(unwritten, "restart: a plain reopen or a refused registry wrote to the store")

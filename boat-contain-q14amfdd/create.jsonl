@@ -1,0 +1,4 @@
+{"event":"created","hostedPorts":null,"id":"bx_ucwvnv9p","org":null,"team":null,"ttlSeconds":3600}
+{"event":"state","id":"bx_ucwvnv9p","state":"starting"}
+{"event":"state","id":"bx_ucwvnv9p","state":"ready"}
+{"archiveAfter":"2026-11-23T01:06:44.250Z","commands":{"forward":"boat forward bx_ucwvnv9p --remote 3000 --local 3000","ssh":"boat ssh bx_ucwvnv9p"},"desktopUrl":null,"event":"ready","id":"bx_ucwvnv9p","ip":"2001:41d0:8:8176:100::21","state":"ready","url":"https://box-node-e1d4abeb0ec48016.on.boat.dev"}

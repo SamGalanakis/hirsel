@@ -591,6 +591,10 @@ impl<'a> Resolver<'a, '_> {
                 true,
                 LookupResult::Missing,
             );
+            // After a lost statement the name may be one it bound (PROG-8).
+            if self.lost {
+                return Target::Missing;
+            }
             self.missing(n)
         }
     }
@@ -736,13 +740,8 @@ impl<'a> Resolver<'a, '_> {
                 .unwrap_or_else(|| self.variant_or_missing(n, name));
         }
         if !type_context {
-            if let Some(t) = self.head_lookup(n, name) {
-                return t;
-            }
-            if self.lost && !self.has_variant(name) {
-                return Target::Missing;
-            }
-            self.variant_or_missing(n, name)
+            self.head_lookup(n, name)
+                .unwrap_or_else(|| self.variant_or_missing(n, name))
         } else {
             self.missing(n)
         }

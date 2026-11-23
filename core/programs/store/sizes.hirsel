@@ -99,5 +99,5 @@ pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Short
     Ok(Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: int.truncate(group),
         checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack,
         resident_limit: resident, authority: Directory(), expect: None, activation: None,
-        binding: None, claim_ms: 30000))
+        binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2))
 }

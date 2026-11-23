@@ -1,16 +1,17 @@
-type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier | IdleCheck
+type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart])
 
 type WriteNotice: send = Written | WriteFailed(IoError)
 
 type JournalIdleTimer: send {
     clock: Clock,
     requests: Receiver[()],
-    journal: Sender[JournalMsg]
+    journal: Sender[JournalMsg],
+    interval_ns: u64
 }
 
 fn journal_idle_timer(take timer: JournalIdleTimer) waits {
     while let Ok(()) = channel.receive(timer.requests) {
-        std.clock.sleep_ns(timer.clock, 100000000)
+        std.clock.sleep_ns(timer.clock, timer.interval_ns)
         if let Error(_) = channel.send(timer.journal, IdleCheck) {
             return
         }
@@ -199,6 +200,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                     answering = true;
                     break
                 },
+                Some(ObjectPause(..)) => fail("log journal received an object cut"),
                 Some(IdleCheck) => {
                     if frames == 0 && idle_at == Some(written) {
                         buffer = list.new()

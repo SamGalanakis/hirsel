@@ -4,6 +4,9 @@ pub opaque type Level: send {
 }
 
 fn store_level_name(db: Db) -> String {
+    if let Some(connection) = db.disk {
+        if let Some(object_writer) = connection.object { return string.from(object_writer.level_name) }
+    }
     if is_disk(db) {
         "host"
     } else {

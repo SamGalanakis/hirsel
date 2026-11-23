@@ -1,4 +1,4 @@
-type HistoryLocator {
+type HistoryLocator: send {
     rows: Map[u64, HistoryRef],
     chunks: List[HistoryRef],
     last_pack: u64
@@ -55,7 +55,12 @@ fn history_locator(mut client: std.object.Client, head: HistoryHead, mark: Histo
 type ObjectPackRead {
     client: std.object.Client,
     locator: HistoryLocator,
-    deadline: u64
+    deadline: u64,
+    admitted_base: Option[HistoryOpenBase]
+}
+
+fn history_reader(take client: std.object.Client, deadline: u64) -> ObjectPackRead {
+    ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline, admitted_base: None)
 }
 
 fn history_list_page(mut source: ObjectPackRead, id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
@@ -368,6 +373,11 @@ fn history_validate_manifest(mut source: ObjectPackRead, id: StoreId, file: Stri
 }
 
 fn history_paged_capture(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {
+    let (take replay, _) = history_paged_load(mut source, head, ceiling)?
+    Ok(take replay)
+}
+
+fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[(JournalReplay, LoadedPageStore), Error] waits {
     let chain = history_suffix(mut source.client, head, head.checkpoint, source.deadline)?
     let (take mark, take checkpoint_data) = history_checkpoint(mut source.client, head, source.deadline)?
     let manifest = history_read_manifest(mut source.client, head.store, mark, head.checkpoint.seq, source.deadline)?
@@ -381,5 +391,5 @@ fn history_paged_capture(mut source: ObjectPackRead, head: HistoryHead, ceiling:
     let mut replay = journal_replay(take initial, loaded.manifest.next_stamp - 1)?
     over_ceiling(journal_account(replay)?, ceiling)?
     history_apply_suffix(mut source.client, head, head.checkpoint.seq, chain, mut replay, ceiling, source.deadline)?
-    Ok(take replay)
+    Ok((take replay, take loaded))
 }

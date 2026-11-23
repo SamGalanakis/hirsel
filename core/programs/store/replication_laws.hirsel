@@ -13,7 +13,7 @@ type ReplicationWriter {
 fn replication_writer(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, expected: Option[StoreId]) -> Result[ReplicationWriter, Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, "spare.test", seed, true, 1)?
     let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(client), level: "bucket"))?
-    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut source = history_reader(take client, 0)
     let mut buffers = history_buffers(1024)?
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
     options.create = match expected {

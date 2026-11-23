@@ -152,7 +152,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
 fn object_follow_job(take job: ObjectFollowJob) waits {
     let ObjectFollowJob(requests: take requests, previous: take previous, expect, ceiling, deadline, response: take response) = take job
     let client = std.object.attach(take requests)
-    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline)
+    let mut source = history_reader(take client, deadline)
     let outcome = object_follow_capture(mut source, previous, expect, ceiling)
     let ObjectPackRead(client: take remote, ..) = take source
     let (take returned, _) = std.object.split(take remote)

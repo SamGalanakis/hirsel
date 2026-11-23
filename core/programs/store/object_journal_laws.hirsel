@@ -1,0 +1,109 @@
+fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
+    let first_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut source = history_reader(take first_client, 0)
+    let mut workspace = history_buffers(1024)?
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket"))?
+    let (take held, _) = history_open_register(mut source, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let initial_head = held.head
+    let (init, ready): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (send_to, receive): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(4)
+    let (acks, delivered): (Sender[Ack], Receiver[Ack]) = channel.new(4)
+    let (notices, _observed): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(1)
+    let (synced, _woken): (Sender[()], Receiver[()]) = channel.new(1)
+    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None)
+    let actor = task.spawn(tasks, bytes 1048576, take actor_input, object_journal_worker)
+    let mut expected_bytes = 0u64
+    for n in 1u64 .. 3 {
+        bucket_m2_law_commit_packet(mut workspace.packet, initial_head, n)?
+        let frame = copied(list.slice(workspace.packet, 112, list.len(workspace.packet)))?
+        expected_bytes += list.len(frame)
+        result.unwrap(channel.send(send_to, Frame(take frame, n)))
+    }
+    let ObjectPackRead(client: take client, ..) = take source
+    let (take requests, take lifetime) = std.object.split(take client)
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS)
+    result.unwrap(channel.send(init, take opened))
+    let ObjectJournaled(2, observed_bytes, 2) = result.unwrap(channel.receive(delivered)) else {
+        fail("the worker did not acknowledge both frames as one group")
+    }
+    if observed_bytes != expected_bytes {
+        fail("the worker did not release exactly the group's frame bytes")
+    }
+    let next_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let mut successor = history_reader(take next_client, 0)
+    let mut next_buffers = history_buffers(1024)?
+    let (take next_claim, take state) = history_open_register(mut successor, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut next_buffers, BUCKET_LAW_OP_MS)?
+    if state.state.tips[0].head != 2 || next_claim.head.entry.seq != 4 {
+        fail("cold claim did not recover both frames in exactly one entry")
+    }
+    result.unwrap(channel.send(send_to, IdleCheck))
+    let ObjectBroken(Fenced(1)) = result.unwrap(channel.receive(delivered)) else {
+        fail("the journal worker's idle probe did not fence the old holder")
+    }
+    let stopped = result.unwrap(task.join(take actor))
+    let _ = take lifetime
+    if let Error(Fenced(1)) = stopped { Ok(()) } else { fail("fenced worker did not exit") }
+}
+
+@test
+fn bucket_test_m2_object_journal(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 123, None, list.new())
+    let grouped = object_group_law(tasks, r, sim)
+    let _ = bucket_law_finish(take sim)
+    grouped
+}
+
+fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let first = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut incumbent = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let _ = create_table(mut incumbent, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut incumbent, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let value = bucket_m2_pack_value()
+    let outcome = run(mut incumbent, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 7, value)
+    })?
+    let Committed(first_write) = outcome else { fail("the first writer could not commit") }
+    durable(mut incumbent, first_write.ticket)?
+    let saved = position(mut incumbent, first_write.ticket)?
+    let _ = checkpoint(mut incumbent)?
+    let next_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    options.create = false
+    options.expect = Some(saved.store)
+    let successor = open_authority(tasks, object_authority(take next_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let mut surviving = take successor
+    let current = snapshot(surviving)
+    if get(current, shape(rows), 7)? != Some(clone(value)) || current.head != saved.version || claim_of(surviving)?.epoch != 2 {
+        fail("a new holder did not recover the durable checkpoint")
+    }
+    let late = run(mut incumbent, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 8, value)
+    })?
+    let Committed(losing) = late else { fail("the losing write could not be staged") }
+    if let Error(Fenced(1)) = durable(mut incumbent, losing.ticket) {} else {
+        fail("a stale holder acknowledged a fenced group")
+    }
+    durable(mut incumbent, first_write.ticket)?
+    if let Error(Fenced(1)) = close(take incumbent) {} else {
+        fail("the old holder lost its sticky fence")
+    }
+    let _ = checkpoint(mut surviving)?
+    let reader = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
+    let mut process = followers()
+    let follower_view = follower(mut process, tasks, object_authority(take reader, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    let visible = snapshot_follower(follower_view, Branch(store: saved.store, id: 0))?
+    if get(visible, shape(rows), 7)? != Some(clone(value)) || get(visible, shape(rows), 8)? != None {
+        fail("the surviving history lost a durable row or exposed a fenced row")
+    }
+    close(take surviving)
+}
+
+@test
+fn bucket_test_m2_object_writer(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 422, None, list.new())
+    let outcome = object_writer_law(c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}

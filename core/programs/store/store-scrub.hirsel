@@ -71,7 +71,7 @@ pub fn begin_scrub(mut db: Db) -> Result[Scrub, Error] {
         list.push(mut state.scrubs, arc.share(lease))
         Ok(())
     })?
-    Ok(Scrub(d: disk_state(db).d, store: db.store, generation: db.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: share_page_locations(disk_state(db).pages.locations), lease: take lease))
+    Ok(Scrub(d: log_directory(db)?, store: db.store, generation: db.checkpointed, next_stamp: next_stamp, packs: take packs, position: 0, at: 0, open: None, checked: 0, known: share_page_locations(disk_state(db).pages.locations), lease: take lease))
 }
 
 // Reads at least one frame, then stops once budget bytes are read this step.

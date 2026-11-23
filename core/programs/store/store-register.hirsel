@@ -31,15 +31,15 @@ fn history_write_head(mut client: std.object.Client, precondition: std.object.Pr
     }
 }
 
-type HistoryRegister {
+type HistoryRegister: send {
     head: HistoryHead,
     tag: std.object.ETag,
     terminal: Option[HistoryTerminal]
 }
 
-type HistoryTerminal = HistoryFault(Error) | HistoryUnknown
+type HistoryTerminal: send = HistoryFault(Error) | HistoryUnknown
 
-type HistoryBuffers {
+type HistoryBuffers: send {
     body: Bytes,
     witness: Bytes,
     packet: Bytes,

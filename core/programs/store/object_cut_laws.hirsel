@@ -1,6 +1,6 @@
 fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
-    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut source = history_reader(take client, 0)
     let mut workspace = history_buffers(1057000)?
     let (take opened, _) = history_open_register(mut source, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let mut held = take opened
@@ -79,7 +79,7 @@ fn bucket_test_m2_checkpoint_advance(c: Clock, r: Random, tasks: Tasks) -> Resul
 
 fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
-    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut source = history_reader(take client, 0)
     let mut workspace = history_buffers(65536)?
     let (take opened, _) = history_open_register(mut source, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let mut held = take opened

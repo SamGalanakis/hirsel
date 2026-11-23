@@ -28,7 +28,10 @@ pub type Options: send {
     expect: Option[StoreId],
     activation: Option[u64],
     binding: Option[Bytes],
-    claim_ms: u64
+    claim_ms: u64,
+    head_poll_ms: u64,
+    checkpoint_entries: u64,
+    retain: u8
 }
 
 pub type Limit = Key | Value | Transaction | Name | Ids | Manifest | Triggers
@@ -55,7 +58,7 @@ fn share_roots(r: Roots) -> Roots {
     PageRoots(collections: share_page_tree(r.collections), streams: share_page_tree(r.streams), catalog: share_page_tree(r.catalog))
 }
 
-type Ack: send = Journaled(u64, u64) | Broken(IoError)
+type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u64, u64) | ObjectBroken(Error)
 
 pub opaque type Db {
     store: StoreId,
@@ -1259,7 +1262,7 @@ fn handoff(mut db: Db) -> Result[(), Error] waits {
 }
 
 fn maybe_checkpoint(mut db: Db) -> Result[(), Error] waits {
-    if is_disk(db) && disk_state(db).since_cut > disk_state(db).options.checkpoint_bytes {
+    if is_disk(db) && (disk_state(db).since_cut > disk_state(db).options.checkpoint_bytes || object_cut_due(db)) {
         match cut_install(mut db, NoHolderChange) {
             Error(Full(_)) => (),
             Error(take problem) => return Error(take problem),
@@ -1887,6 +1890,7 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
     if !same(db.store, t.store) || t.open != open_number(db) {
         return Error(Foreign)
     }
+    if object_writer_open(db) && covered(db, t.mark) { return Ok(true) }
     if let Some(e) = journal_poison(db) {
         return Error(Poisoned(e))
     }
@@ -1896,7 +1900,9 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
             return Ok(true)
         }
     }
-    let _ = journal_poll_groups(mut db)?
+    let drained = journal_poll_groups(mut db)
+    if object_writer_open(db) && covered(db, t.mark) { return Ok(true) }
+    let _ = drained?
     if covered(db, t.mark) {
         return Ok(true)
     }
@@ -1917,6 +1923,7 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
     if !same(db.store, t.store) || t.open != open_number(db) {
         return Error(Foreign)
     }
+    if object_writer_open(db) && covered(db, t.mark) { return Ok(0) }
     if let Some(e) = journal_poison(db) {
         return Error(Poisoned(e))
     }
@@ -1926,7 +1933,11 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
             return Ok(0)
         }
     }
-    let mut groups = journal_poll_groups(mut db)?
+    let drained = journal_poll_groups(mut db)
+    if object_writer_open(db) && covered(db, t.mark) {
+        return Ok(match drained { Ok(groups) => groups, Error(_) => 0u64 })
+    }
+    let mut groups = drained?
     if is_disk(db) {
         while !covered(db, t.mark) {
             let ack = journal_receive(db)
@@ -1960,7 +1971,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
         }
     }
     let connection = replace(mut owned.disk, None)
-    let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_idle_task: take timer, lock: take lock, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
+    let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_idle_task: take timer, lock: take lock, object: take object_writer, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
     let _ = take timer
     let _ = take frames
     let mut poison = fault
@@ -1993,9 +2004,10 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     }
     let _ = take notices
     let _ = take notice_to
-    if let Error(e) = host.close(take lock) {
-        if let None = poison {
-            poison = Some(e)
+    let _ = take object_writer
+    if let Some(take held_lock) = take lock {
+        if let Error(e) = host.close(take held_lock) {
+            if let None = poison { poison = Some(e) }
         }
     }
     match poison {
@@ -5351,7 +5363,7 @@ pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activati
     }
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, last))?
-    let from = disk_state(db).d
+    let from = deploy_result(log_directory(db))?
     let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
     let lease_attempt = deploy_result(copied(attempt))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: activation, terminal: db.file_seq, end: db.file_end)
@@ -6538,8 +6550,8 @@ fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[Dis
 }
 
 type DiskState {
-    lock: HostFile,
-    d: Dir,
+    lock: Option[HostFile],
+    d: Option[Dir],
     open: u64,
     options: Options,
     lease: Option[Arc[ExportLease]],
@@ -6551,6 +6563,7 @@ type DiskState {
     recorded_after: u64,
     pages: PageDisk,
     bucket: Option[BucketWriter],
+    object: Option[ObjectWriterState],
     acks: Receiver[Ack],
     journaled: u64,
     inflight: u64,
@@ -6589,7 +6602,10 @@ pub fn retained_main_after(db: Db) -> u64 {
 fn healthy(db: Db) -> Result[(), Error] {
     match journal_poison(db) {
         Some(e) => Error(Poisoned(e)),
-        None => bucket_failed(db)
+        None => {
+            object_writer_healthy(db)?
+            bucket_failed(db)
+        }
     }
 }
 
@@ -6769,7 +6785,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive) = take channels
     let written_worker = channel.sender(written_send)
     let reserve: u64 = int.widen(options.group_bytes)
-    let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames))
+    let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: 100000000)
     let timer = match task.try_spawn(tasks, bytes 4096, take timer_input, journal_idle_timer) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
@@ -6780,7 +6796,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: take lock, d: d, open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, bucket: take remote_writer, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, bucket: take remote_writer, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer))
     Ok(take db)
 }
 
@@ -6793,7 +6809,7 @@ fn disk_wait_cut(db: Db, generation: u64) -> Result[(), Error] {
 }
 
 fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), Error] waits {
-    let d = disk_state(db).d
+    let d = log_directory(db)?
     let (take segment, take end_file) = disk_new_segment(d, id, seq, previous)?
     let closed = match channel.send(disk_state(db).journal, Rotate(take segment, take end_file)) {
         Ok(()) => false,
@@ -7022,6 +7038,9 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
 
 fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     healthy(db)?
+    if object_writer_open(db) {
+        return object_cut_state(mut db, take delta, seal, target, pack_bytes, limit)
+    }
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.since_cut = 0
     })
@@ -7054,7 +7073,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut 
     let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, roots)?
     over_ceiling(base.account, db.ceiling)?
     let manifest_bytes = cut_manifest_size(db, delta)
-    let d = disk_state(db).d
+    let d = log_directory(db)?
     let mut next_stamp = stamp_after(db.next_node)?
     let prev_first = match disk_state(db).pages.deferred {
         Some(low) => low,
@@ -7745,49 +7764,6 @@ fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
         capacity(state_account(replay.state))
     })
-}
-
-// A writer that ended without its ack (cancelled before it could send
-// Broken) is a terminal failure: the place stops, unacked sequences unanswered.
-fn journal_receive(db: Db) -> Ack waits {
-    match channel.receive(disk_state(db).acks) {
-        Ok(ack) => ack,
-        Error(_) => Broken(Closed),
-    }
-}
-
-fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
-        match ack {
-            Journaled(n, bytes_out) => {
-                state.journaled = n
-                state.inflight -= bytes_out - state.acked_bytes
-                state.acked_bytes = bytes_out
-                Ok(())
-            },
-            Broken(e) => {
-                if let None = state.poison {
-                    state.poison = Some(e)
-                }
-                Error(Poisoned(option.unwrap(state.poison)))
-            },
-        }
-    })
-}
-
-fn journal_poll(mut db: Db) -> Result[(), Error] {
-    let _ = journal_poll_groups(mut db)?
-    Ok(())
-}
-
-fn journal_poll_groups(mut db: Db) -> Result[u64, Error] {
-    let mut groups = 0u64
-    while let Some(take ack) = close_ack(db) {
-        journal_ack(mut db, take ack)?
-        groups += 1
-    }
-    healthy(db)?
-    Ok(groups)
 }
 
 fn journal_following(d: Dir, id: StoreId, seq: u64, flush: bool) -> Result[Option[DiskHeader], Error] waits {

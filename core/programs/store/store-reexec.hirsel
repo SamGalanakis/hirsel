@@ -45,7 +45,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
             }
         }
     }
-    let d = disk_state(db).d
+    let d = log_directory(db)?
     let mut seq = disk_state(db).record_cut
     loop {
         let path = capacity(disk_path("j-", seq, ""))?
@@ -100,7 +100,7 @@ type BaseReplay {
 // open path, so the pages are the ones every load path builds (MEM-30). None
 // when the MANIFEST is already past `base`.
 fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] waits {
-    let d = disk_state(db).d
+    let d = log_directory(db)?
     let (_, id, take manifest) = read_only_manifest(d)?
     if let Some(_) = manifest.claim {
         return Error(Unsupported(1))

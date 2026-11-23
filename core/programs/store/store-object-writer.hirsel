@@ -1,0 +1,254 @@
+type ObjectWriterState {
+    workers: Option[std.object.Workers],
+    locator: HistoryLocator,
+    level_name: String,
+    pair: HistoryPair,
+    entries: u64,
+    failed: Option[Error]
+}
+
+fn log_directory(db: Db) -> Result[Dir, Error] {
+    let Some(d) = disk_state(db).d else { return Error(Unsupported(1)) }
+    Ok(d)
+}
+
+fn object_writer_healthy(db: Db) -> Result[(), Error] {
+    if let Some(connection) = db.disk {
+        if let Some(object_writer) = connection.object {
+            if let Some(problem) = object_writer.failed {
+                return Error(clone(problem))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn object_writer_open(db: Db) -> bool {
+    if let Some(connection) = db.disk {
+        if let Some(_) = connection.object { return true }
+    }
+    false
+}
+
+fn object_state(db: Db) -> View[ObjectWriterState] in db {
+    match disk_state(db).object {
+        Some(w) => view w,
+        None => fail("object writer state required"),
+    }
+}
+
+fn object_cut_due(db: Db) -> bool {
+    if let Some(object_writer) = disk_state(db).object {
+        return object_writer.entries >= disk_state(db).options.checkpoint_entries
+    }
+    false
+}
+
+pub fn open_authority(tasks: Tasks, take authority: Authority, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
+    match take authority {
+        LogAuthority(d) => open(tasks, d, c, r, options),
+        ObjectAuthority(take config) => open_object_writer(tasks, take config, c, r, options),
+    }
+}
+
+fn object_open_checks(options: Options) -> Result[(), Error] {
+    open_checks(options)?
+    if options.head_poll_ms == 0 { return Error(Missing("head_poll_ms")) }
+    if options.checkpoint_entries == 0 { return Error(Missing("checkpoint_entries")) }
+    if options.retain == 0 { return Error(Missing("retain")) }
+    Ok(())
+}
+
+fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
+    object_open_checks(options)?
+    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms) = take config
+    let mut reader = history_reader(take client, 0)
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(reader.client), level: string.from(level_name)))?
+    let group_room: u64 = int.widen(options.group_bytes)
+    let mut workspace = history_buffers(group_room + 112 + BINDING_BYTES)?
+    let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
+        Ok(journal_channels(int.widen(options.group_commits)))
+    })?
+    let (start, starting): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive, ..) = take channels
+    let idle_ns = int.saturating_mul(options.head_poll_ms, 1000000)
+    let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: idle_ns)
+    let timer = match task.try_spawn(tasks, bytes 4096, take timer_input, journal_idle_timer) {
+        Ok(take running) => take running,
+        Error((problem, _)) => return Error(Full(Allocation(problem))),
+    }
+    let actor = ObjectJournalTask(ready: take starting, receive: take queued, acks: take journal_acks, notices: channel.sender(written_send), synced: take synced_send, group_bytes: group_room, group_commits: int.widen(options.group_commits), idle: Some(take idle_send))
+    let worker_room = 4 * group_room + 524288
+    let work = match task.try_spawn(tasks, bytes worker_room, take actor, object_journal_worker) {
+        Ok(take running) => take running,
+        Error((problem, _)) => return Error(Full(Allocation(problem))),
+    }
+    let blank = disk_allocation(fn() -> Result[HistoryOpenBase, Error] {
+        let pages = PageDisk(next_pack: 1, locations: new_page_locations(), lists: empty_paged_lists(), owners: map.new(), carried: list.new(), deferred: None)
+        Ok(HistoryOpenBase(generation: 1, fence: 0, recorded_after: 0, pages: take pages))
+    })?
+    let held_options = disk_allocation(scoped fn() -> Result[Options, Error] { Ok(clone(options)) })?
+    let (take register, _, take started) = history_open_with(mut reader, c, r, options, level_name, mut workspace, op_ms, scoped fn(id: StoreId, replay: JournalReplay) -> Result[Db, Error] {
+        let state = copy_follow_state(replay.state)?
+        let mut prepared = disk_allocation(scoped fn() -> Result[Db, Error] { Ok(empty_db(c, id, options)) })?
+        open_heads(mut prepared, take state)?
+        prepared.next_node = replay.next_node
+        prepared.next_table = replay.state.next_table
+        prepared.resident = journal_account(replay)?
+        Ok(take prepared)
+    })?
+    let mut db = take started
+    let head = register.head
+    let ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take reader
+    let (take requests, take workers) = std.object.split(take owned_client)
+    let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms)
+    if let Error(_) = channel.send(start, take startup) {
+        return Error(Io(Closed))
+    }
+    let HistoryOpenBase(generation, fence, recorded_after, pages: take pages) = match take base {
+        Some(take admitted) => take admitted,
+        None => take blank,
+    }
+    db.checkpointed = generation
+    db.fence = fence
+    db.file_seq = head.entry.seq
+    db.page_resident = resident_location_charge(pages.locations)
+    let object = ObjectWriterState(workers: take workers, locator: take locator, level_name: take level_name, pair: head.pair, entries: head.entry.seq - head.checkpoint.seq, failed: None)
+    db.disk = Some(DiskState(lock: None, d: None, open: head.pair.epoch, options: take held_options, lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: head.checkpoint.seq, recorded_after: recorded_after,
+        pages: take pages, bucket: None, object: Some(take object),
+        acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0,
+        written: take written_receive, written_send: take written_send, synced: Some(take synced_receive),
+        poison: None, journal: take frames, pending: None, journal_task: take work, journal_idle_task: take timer))
+    maybe_checkpoint(mut db)?
+    Ok(take db)
+}
+
+pub fn claim_of(db: Db) -> Result[Claim, Error] {
+    if let Some(connection) = db.disk {
+        if let Some(object_writer) = connection.object {
+            let mut owner: Bytes = list.with_capacity(16)
+            list.put_word_le(mut owner, object_writer.pair.holder.hi)
+            list.put_word_le(mut owner, object_writer.pair.holder.lo)
+            return Ok(Claim(epoch: object_writer.pair.epoch, holder: take owner))
+        }
+    }
+    Error(Missing("head"))
+}
+
+fn object_cut_state(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+    if let Some(_) = target { return Error(Unsupported(1)) }
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, last)?
+    prepare_holder_slot(mut db, delta)?
+    let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let closed = match channel.send(disk_state(db).journal, ObjectPause(take handover, take resuming)) {
+        Ok(()) => false,
+        Error(_) => true,
+    }
+    if closed {
+        journal_poll(mut db)?
+        return Error(Io(Closed))
+    }
+    let owned = match channel.receive(paused) {
+        Ok(take object_io) => take object_io,
+        Error(_) => {
+            journal_poll(mut db)?
+            return Error(Io(Closed))
+        },
+    }
+    let mut lane = object_journal_begin(take owned)
+    let outcome = object_cut_work(mut db, mut lane, take delta, seal, pack_bytes, limit)
+    let return_io = object_journal_pause(take lane)
+    if let Error(_) = channel.send(resume, take return_io) {
+        return Error(Io(Closed))
+    }
+    if let Error(problem) = outcome {
+        let dead = match problem {
+            Fenced(_) => true,
+            Undecided => true,
+            Remote(_) => true,
+            _ => false,
+        }
+        if dead {
+            let saved: Error = clone(problem)
+            write_disk(mut db.disk, take saved, scoped fn(mut state: DiskState, take terminal: Error) {
+                if let Some(mut object_writer) = state.object {
+                    object_writer.failed = Some(take terminal)
+                }
+            })
+        }
+    }
+    take outcome
+}
+
+fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+    let old = lane.register.head
+    let seq = history_next_id(old.entry.seq)?
+    let generation = history_next_id(db.checkpointed)?
+    let now = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    let (take previous, _) = history_checkpoint(mut lane.client, old, now)?
+    let retained = history_retain(previous, old.checkpoint, seq, disk_state(db).options.retain)?
+    let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] { cut_participants(db, delta) })?
+    let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, participants.holders, participants.roots)?
+    over_ceiling(base.account, db.ceiling)?
+    let manifest_bytes = cut_manifest_size(db, delta)
+    let mut next_stamp = stamp_after(db.next_node)?
+    let mut workspace = history_buffers(65536)?
+    let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator), Error] waits {
+        let planned = {
+            let installed = disk_state(db).pages
+            plan_page_cut(base, participants.holders, installed.lists, None, installed.next_pack, pack_bytes, marks, relocated, mut stamp)?
+        }
+        let mut buffers = cut_output_buffers(planned, manifest_bytes, limit)?
+        let (take layout, take refs) = history_write_page_cut(mut lane.client, old, take planned, object_state(db).locator, mut buffers, mut workspace, now)?
+        fill_cut_manifest(mut buffers.out, db, delta, generation, seq, seq, layout, stamp, base.account, seal)?
+        let (take pages, _) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
+            cut_retirement(layout, participants.holders, None, list.new(), seq, seq)
+        })?
+        let (_, take manifest) = disk_read_page_manifest("MANIFEST", buffers.out)?
+        let candidate_locator = disk_allocation(scoped fn() -> Result[HistoryLocator, Error] {
+            let mut rows: Map[u64, HistoryRef] = map.new()
+            capacity(map.try_reserve(mut rows, list.len(refs)))?
+            for item in refs {
+                map.insert(mut rows, item.seq, item)
+            }
+            let last_pack = if list.len(refs) == 0 { 0u64 } else { refs[list.len(refs) - 1].seq }
+            Ok(HistoryLocator(rows: take rows, chunks: list.new(), last_pack))
+        })?
+        let locate_root = history_make_locator(mut lane.client, old.store, seq, old.pair.epoch, take refs, mut workspace, now)?
+        let installed = history_create_manifest(mut lane.client, old.store, old.pair.epoch, manifest, mut workspace, now)?
+        let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, None, mut workspace, now)?
+        match advanced {
+            HistoryApplied(_) => Ok((take pages, take candidate_locator)),
+            _ => Error(Undecided),
+        }
+    })
+    db.next_node = next_stamp - 1
+    let (take pages, take locator) = plan?
+    let resident_pages = resident_location_charge(pages.locations)
+    let recorded_after = match delta {
+        ReplaceMain(main, _) => main.head,
+        _ => db.heads[0].head,
+    }
+    write_disk(mut db.disk, (take pages, take locator), scoped fn(mut state: DiskState, take installation: (PageDisk, HistoryLocator)) {
+        let (take installed, take installed_locator) = take installation
+        state.pages = take installed
+        state.record_cut = seq
+        state.recorded_after = recorded_after
+        state.uncovered = 0
+        state.since_cut = 0
+        if let Some(mut object_writer) = state.object {
+            object_writer.entries = 0
+            object_writer.locator = take installed_locator
+        }
+    })
+    db.file_seq = seq
+    db.file_end = 72
+    db.checkpointed = generation
+    db.resident = base.account
+    db.page_resident = resident_pages
+    db.settled = db.changes
+    install_holder_delta(mut db, take delta)
+    Ok(Ticket(store: old.store, open: old.pair.epoch, mark: Cut(generation)))
+}

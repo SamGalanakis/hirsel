@@ -569,7 +569,7 @@ fn bucket_m2_law_recover(tasks: Tasks, sim: BucketSim) -> Result[(), Error] wait
     let _ = history_fetch(mut client, "head", mut head_buf, due)?
     let captured = history_decode_head(head_buf)?
     let history_head = captured.head
-    let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: due)
+    let mut source = history_reader(take client, due)
     let replay = history_paged_capture(mut source, history_head, 1048576)?
     if replay.state.tips[0].head != 1 {
         fail("recovery did not apply exactly the published suffix")
@@ -733,7 +733,7 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
     let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
     history_create(mut client, history_key("e-", entry_ref), mut raw_entry, mut compare, due)?
     let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
-    let source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: due)
+    let source = history_reader(take client, due)
     Ok((take source, head))
 }
 
@@ -906,7 +906,7 @@ fn bucket_test_m2_admitted_claim(d: Dir, c: Clock, r: Random, tasks: Tasks, seed
 fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let initial_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let reader = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
-    let mut writer = ObjectPackRead(client: take initial_client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
+    let mut writer = history_reader(take initial_client, 0)
     let mut workspace = history_buffers(1024)?
     let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(writer.client), level: "bucket"))?
     let (take opened, _) = history_open_register(mut writer, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?

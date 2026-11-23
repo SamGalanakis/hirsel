@@ -264,7 +264,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
 
 fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
     let disk = disk_state(db)
-    let oracle = law_parse_locations(disk.d)?
+    let oracle = law_parse_locations(log_directory(db)?)?
     let known = view disk.pages.locations
     if disk_index_len(known.frames) != map.len(oracle.frames) || disk_index_len(known.packs) != map.len(oracle.packs) {
         fail("location law: inventory size")

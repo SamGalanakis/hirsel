@@ -454,10 +454,10 @@ fn bucket_send_pack(mut w: BucketWriter, d: Dir, seq: u64, mode: std.object.Mode
 // Uploads the cut's new packs, then publishes its generation. Only a created
 // MANIFEST lets the cut advance; any failure stops the writer.
 fn bucket_publish(mut db: Db, first_pack: u64, end_pack: u64, generation: u64, manifest: Bytes) -> Result[(), Error] waits {
-    let d = disk_state(db).d
     let Some(take writer) = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[BucketWriter] { replace(mut state.bucket, None) }) else {
         return Ok(())
     }
+    let d = log_directory(db)?
     let mut w = take writer
     let mut outcome: Result[(), Error] = Ok(())
     for seq in first_pack .. end_pack {

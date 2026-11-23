@@ -1,0 +1,58 @@
+// A writer that ended without its ack (cancelled before it could send
+// Broken) is a terminal failure: the place stops, unacked sequences unanswered.
+fn journal_receive(db: Db) -> Ack waits {
+    match channel.receive(disk_state(db).acks) {
+        Ok(ack) => ack,
+        Error(_) => Broken(Closed),
+    }
+}
+
+fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
+    write_disk(mut db.disk, take ack, scoped fn(mut state: DiskState, take incoming: Ack) -> Result[(), Error] {
+        match take incoming {
+            Journaled(n, bytes_out) => {
+                state.journaled = n
+                state.inflight -= bytes_out - state.acked_bytes
+                state.acked_bytes = bytes_out
+                Ok(())
+            },
+            ObjectJournaled(n, bytes_out, entries) => {
+                state.journaled = n
+                state.inflight -= bytes_out - state.acked_bytes
+                state.acked_bytes = bytes_out
+                if let Some(mut object_writer) = state.object {
+                    object_writer.entries = entries
+                }
+                Ok(())
+            },
+            ObjectBroken(take problem) => {
+                let terminal: Error = clone(problem)
+                if let Some(mut object_writer) = state.object {
+                    object_writer.failed = Some(take terminal)
+                }
+                Error(take problem)
+            },
+            Broken(e) => {
+                if let None = state.poison {
+                    state.poison = Some(e)
+                }
+                Error(Poisoned(option.unwrap(state.poison)))
+            },
+        }
+    })
+}
+
+fn journal_poll(mut db: Db) -> Result[(), Error] {
+    let _ = journal_poll_groups(mut db)?
+    Ok(())
+}
+
+fn journal_poll_groups(mut db: Db) -> Result[u64, Error] {
+    let mut groups = 0u64
+    while let Some(take ack) = close_ack(db) {
+        journal_ack(mut db, take ack)?
+        groups += 1
+    }
+    healthy(db)?
+    Ok(groups)
+}

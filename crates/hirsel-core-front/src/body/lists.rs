@@ -22,7 +22,7 @@ enum ListStorage {
 
 enum ListGrowth {
     Raise,
-    ReturnCapacity(AddressId, TypeId),
+    ReturnCapacity(AddressId, TypeId, Option<ValueId>),
     Call { grow: usize, single: bool },
 }
 
@@ -780,6 +780,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: TyId,
         header: ValueId,
         additional: ValueId,
+        hint: Option<ValueId>,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
@@ -800,7 +801,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             header,
             additional,
             Ask::Reserve,
-            ListGrowth::ReturnCapacity(to, cap_id),
+            ListGrowth::ReturnCapacity(to, cap_id, hint),
             n,
         )?;
         let value = self.pointer(to, n);
@@ -893,12 +894,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         if !matches!(storage, ListStorage::Empty) {
+            let hint = match mode {
+                ListGrowth::ReturnCapacity(_, _, hint) => hint,
+                _ => None,
+            };
             self.list_grow(
                 item,
                 header,
                 carrier,
                 [len, old_cap, needed],
                 len_over,
+                hint,
                 [success, refused],
                 n,
             )?;
@@ -907,7 +913,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let [requested, available] = self.block_params(refused)[..] else {
             unreachable!("the refusal block takes the charge and the room")
         };
-        let ListGrowth::ReturnCapacity(to, cap_id) = mode else {
+        let ListGrowth::ReturnCapacity(to, cap_id, _) = mode else {
             self.raise_capacity(requested, available, n);
             self.start(success);
             return Some(());
@@ -938,6 +944,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         carrier: TypeId,
         [len, old_cap, needed]: [ValueId; 3],
         len_over: ValueId,
+        hint: Option<ValueId>,
         [success, refused]: [BlockId; 2],
         n: NodeId,
     ) -> Option<()> {
@@ -972,7 +979,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Capacity 0 owns no storage (empty, or static bytes): allocate in the
         // current limit and copy the elements over.
         self.start(current);
-        let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
+        let mut initial = plan.clone();
+        if let Some(hint) = hint {
+            let limit = self.konst(Ty::Scalar(Scalar::U64), 64, n)?;
+            let bounded = self.value(Ty::Scalar(Scalar::U64));
+            self.inst(
+                Inst::Binary {
+                    result: bounded,
+                    op: BinaryOp::Min,
+                    left: hint,
+                    right: limit,
+                    fail: None,
+                },
+                n,
+            );
+            initial.size = self.list_max(initial.size, bounded, n);
+        }
+        let (block, available) = self.list_allocate(&initial, AllocPlace::Current, n);
         let ok = self.list_compare(CompareOp::Ne, block, null, n);
         let copy = self.new_block(&[]);
         let refused_here = self.new_block(&[]);

@@ -328,6 +328,83 @@ fn log_charges_are_exact() -> bool {
     all && entries && node
 }
 
+// An initial capacity of 22 charges 24 bytes. Reserving 22 more after one
+// push doubles it to 44, charging 48 before refunding the original 24.
+fn hinted_buffer_under(limit: u64) -> Result[bool, Capacity] {
+    bound bytes limit {
+        let mut b: Bytes = list.new()
+        let initial = bytebuf.try_reserve_hint(mut b, 22, 44)
+        if let Error(_) = initial {
+            return Ok(false)
+        }
+        let before = list.capacity(b)
+        list.push(mut b, 71u8)
+        let grown = list.try_reserve(mut b, 22)
+        if limit == 71 {
+            match grown {
+                Error(c) => before == 22 && c.requested == 48 && c.available == 47 && list.capacity(b) == 22 && b[0] == 71,
+                _ => false,
+            }
+        } else {
+            match grown {
+                Ok(()) => {
+                    let spare: Bytes = list.with_capacity(24)
+                    before == 22 && list.capacity(b) == 44 && list.capacity(spare) == 24 && b[0] == 71
+                },
+                _ => false,
+            }
+        }
+    }
+}
+
+// Growing in a different limit must refund the original payer and leave the
+// replacement charged as it crosses back out of its paying scope.
+fn hinted_buffer_changes_payer() -> bool {
+    let charged = bound bytes 72 {
+        let mut b: Bytes = list.new()
+        result.unwrap(bytebuf.try_reserve_hint(mut b, 22, 44))
+        list.push(mut b, 73u8)
+        let grown = bound bytes 48 {
+            list.try_reserve(mut b, 22)
+        }
+        match grown {
+            Ok(Ok(())) => {
+                let spare: Bytes = list.with_capacity(24)
+                list.capacity(b) == 44 && b[0] == 73 && list.capacity(spare) == 24
+            },
+            _ => false,
+        }
+    }
+    match charged {
+        Ok(ok) => ok,
+        _ => false,
+    }
+}
+
+// expect: run reserve_hint_charges_are_exact() = true
+fn reserve_hint_charges_are_exact() -> bool {
+    let attempts = isolate(fn() -> Result[bool, Capacity] {
+        bound bytes 72 {
+            let charges = match (hinted_buffer_under(71), hinted_buffer_under(72), hinted_buffer_changes_payer()) {
+                (Ok(true), Ok(true), true) => true,
+                _ => false,
+            }
+            let steps = bound steps 2 {
+                let mut b: Bytes = list.new()
+                bytebuf.try_reserve_hint(mut b, 22, 44)
+            }
+            match steps {
+                Ok(Ok(())) => charges,
+                _ => false,
+            }
+        }
+    })
+    match attempts {
+        Ok(Ok(Ok(true))) => true,
+        _ => false,
+    }
+}
+
 fn present(o: Option[View[u64]]) -> u64 {
     match o {
         Some(v) => v,

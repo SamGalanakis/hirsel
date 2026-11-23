@@ -31,6 +31,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 ),
                 "freeze" => Some(self.freeze_bytes(vals[0]?, result, n)),
                 "as_bytes" => Some(self.view_frozen_bytes(vals[0]?, result, n)),
+                "try_reserve_hint" => Some(self.list_try_reserve(
+                    scalar(Scalar::U8),
+                    vals[0]?,
+                    vals[1]?,
+                    Some(vals[2]?),
+                    result,
+                    n,
+                )),
                 _ => None,
             };
         }
@@ -196,7 +204,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return Some(None);
             }
             "try_reserve" => {
-                return Some(self.list_try_reserve(item, vals[0]?, vals[1]?, result, n));
+                return Some(self.list_try_reserve(item, vals[0]?, vals[1]?, None, result, n));
             }
             "get" => return Some(self.list_get(item, vals[0]?, vals[1]?, result, n)),
             "set" => return Some(self.list_set(item, vals[0]?, vals[1]?, vals[2], n)),

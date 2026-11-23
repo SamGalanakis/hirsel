@@ -3688,7 +3688,9 @@ fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
 fn put_impl[K, V](mut tx: Tx, t: Table[K, V], take p: Bytes, v: V) -> Result[(), Error] {
     // The schema tag and the codec's least length, so a fixed-width value encodes without growing.
     let mut raw: Bytes = list.new()
-    capacity(list.try_reserve(mut raw, 2 + std.codec.least(t.readers.codec)))?
+    let least = 2 + std.codec.least(t.readers.codec)
+    let hint = if least <= 32 { least * 2 } else { least }
+    capacity(bytebuf.try_reserve_hint(mut raw, least, hint))?
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
     let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?

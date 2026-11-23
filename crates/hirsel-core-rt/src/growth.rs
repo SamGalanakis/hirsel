@@ -8,8 +8,8 @@ use std::ptr::NonNull;
 /// Kind, alignment, moved prefix and both charges are exact FORM operands.
 /// Static, fixed, resource and region storage cannot reach this. `stride` is the
 /// element's native size, so the old carrier's capacity times `stride` is its
-/// native payload: from the shared threshold upward the backing may be reused
-/// in place, below it it is replaced.
+/// native payload. Small byte buffers can use spare room in their slab slot.
+/// From the shared threshold upward a dedicated backing may also extend.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn grow_cold(
     context: &Context,
@@ -61,6 +61,18 @@ pub(crate) unsafe fn replace(
     // billed to the same payer, with the old charge refunded after installation.
     let heap = context.heap.get_or_init(std::sync::Arc::default);
     let frame_payer = context.frame_lists.remove(old);
+    // Memcheck tracks requested extents and lacks per-slot resize metadata.
+    #[cfg(not(feature = "memcheck"))]
+    if kind == block::PLAIN
+        && bytes <= 64
+        && frame_payer.is_none()
+        && let Some(original) =
+            unsafe { task_heap::try_reassign_slab(old, payer, bytes, align, kind) }
+    {
+        unsafe { carrier.add(16).cast::<u64>().write(capacity) };
+        original.settle_in(context, refund);
+        return Ok(old);
+    }
     if reuse
         && frame_payer.is_none()
         && unsafe { task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind) }

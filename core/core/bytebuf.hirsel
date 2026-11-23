@@ -5,6 +5,10 @@ pub fn freeze(take data: Bytes) -> FrozenBytes
 
 pub fn as_bytes(data: FrozenBytes) -> View[Bytes] in data
 
+/// Like list.try_reserve. A fresh buffer may reserve up to 64 physical bytes
+/// using hint. The capacity, charges and refusal are those of list.try_reserve.
+pub fn try_reserve_hint(mut data: Bytes, n: u64, hint: u64) -> Result[(), Capacity]
+
 /// Appends src[start .. end] from Inline[u8, N] when the range and spare
 /// capacity both fit. Returns false with the destination unchanged otherwise.
 pub fn append_inline[A: plain](mut out: Bytes, src: A, start: u64, end: u64) -> bool

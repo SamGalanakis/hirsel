@@ -1,4 +1,4 @@
-//! One shared runtime call above the native payload threshold, the entry LLVM
+//! One shared runtime call for byte buffers and above the native payload threshold, the entry LLVM
 //! uses for every growth it does not complete inline. Small buffers retain the
 //! inline classic allocation/copy/install/free sequence.
 use super::function::Function;
@@ -36,13 +36,17 @@ impl Function<'_, '_, '_> {
         let dispatch = stride != 0;
         if dispatch {
             let cap = self.load_word(at, 16);
-            let large = self.b.ins().icmp_imm_s(
-                IntCC::UnsignedGreaterThanOrEqual,
-                cap,
-                memory_layout::GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride) as i64,
-            );
             let native = self.b.create_block();
-            self.b.ins().brif(large, native, &[], classic, &[]);
+            if stride == 1 {
+                self.b.ins().jump(native, &[]);
+            } else {
+                let large = self.b.ins().icmp_imm_s(
+                    IntCC::UnsignedGreaterThanOrEqual,
+                    cap,
+                    memory_layout::GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride) as i64,
+                );
+                self.b.ins().brif(large, native, &[], classic, &[]);
+            }
             self.b.switch_to_block(native);
             let alignment = self.b.ins().iconst(types::I64, align as i64);
             let stride_word = self.b.ins().iconst(types::I64, stride as i64);

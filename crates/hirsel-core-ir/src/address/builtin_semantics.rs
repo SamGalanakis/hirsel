@@ -17,6 +17,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("bytebuf", "append_inline", 1),
     ("bytebuf", "as_bytes", 1),
     ("bytebuf", "freeze", 1),
+    ("bytebuf", "try_reserve_hint", 1),
     ("channel", "new", 2),
     ("channel", "receive", 1),
     ("channel", "send", 1),

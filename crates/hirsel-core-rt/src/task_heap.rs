@@ -1336,6 +1336,32 @@ pub(crate) unsafe fn kind(payload: NonNull<u8>) -> u8 {
 }
 
 /// # Safety
+/// The caller owns the live buffer exclusively and has admitted the full
+/// new charge. On success the caller must install the new logical capacity
+/// and settle the returned payer with the old charge.
+#[cfg(not(feature = "memcheck"))]
+pub(crate) unsafe fn try_reassign_slab(
+    payload: NonNull<u8>,
+    payer: Payer,
+    bytes: usize,
+    align: usize,
+    kind: u8,
+) -> Option<Payer> {
+    if payload.addr().get() & (SLAB - 1) == 0 {
+        return None;
+    }
+    // SAFETY: the unique live slot pins its slab and owns its payer word.
+    unsafe {
+        let class = Page::class(page_of(payload));
+        if class.kind != kind || class.align < align || bytes > class.stride - class.offset() {
+            return None;
+        }
+        let tag = Page::payer_tag(payload, class.payer_offset);
+        Some(tag.replace(payer))
+    }
+}
+
+/// # Safety
 /// The caller owns the live buffer exclusively and has already admitted the
 /// full new charge. The layout describes the same element type and kind.
 pub(crate) unsafe fn try_grow_in_place(

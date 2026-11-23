@@ -1,5 +1,5 @@
 //! A small sequence backing whose charge fits grows inline: admit, allocate,
-//! copy, free. Every other case (native reuse of a large backing, refusal,
+//! copy, free. Every other case (byte backing, native reuse, refusal,
 //! overflow) shares one cold runtime call that makes the same decisions, as
 //! Rust's `RawVec` keeps one non-generic `finish_grow` behind each element
 //! type's `grow_one`. Zero-sized elements keep the inline replacement.
@@ -44,12 +44,16 @@ impl FunctionEmitter<'_> {
             // copied and freed inline, exactly as an own allocation would be.
             let payer = self.current_payer();
             let cap = self.load_native(at, 16, Type::I64);
-            let small = self.cmp(
-                Predicate::Ult,
-                &i64,
-                &cap,
-                &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
-            );
+            let small = if stride == 1 {
+                FALSE
+            } else {
+                self.cmp(
+                    Predicate::Ult,
+                    &i64,
+                    &cap,
+                    &int(GROW_CALL_MIN_PAYLOAD_BYTES.div_ceil(stride)),
+                )
+            };
             let over = overflow.map_or(FALSE, |v| {
                 let flag = self.numeric(v);
                 self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))

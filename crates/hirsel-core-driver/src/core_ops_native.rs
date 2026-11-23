@@ -7,13 +7,13 @@ fn core_operations(backend: Backend) {
         (
             "channel FIFO and sender clone",
             "fn end(take tx: Sender[u64]) {}\nfn run() -> u64 waits { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(2); let other = channel.sender(tx); result.unwrap(channel.send(tx,7u64)); result.unwrap(channel.send(other,11u64)); let a = result.unwrap(channel.receive(rx)); let b = result.unwrap(channel.receive(rx)); end(take tx); end(take other); match channel.receive(rx) { Ok(_) => 0u64, Error(Closed(())) => a*100u64+b } }\npub fn main() -> Result[(), Exit] { task.check_cancel(); if run()==711u64 { Ok(()) } else { Error(Exit(status:1)) } }",
-            1_048_576,
+            (1_048_576, 0),
             0,
         ),
         (
             "channel Full and Closed keep input",
             "fn end(take rx: Receiver[u64]) {}\nfn run() -> u64 waits { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(1); result.unwrap(channel.try_send(tx,7u64)); let a = match channel.try_send(tx,11u64) { Ok(()) => 0u64, Error(Full(x)) => x, Error(Closed(_)) => 1u64 }; end(take rx); let b = match channel.try_send(tx,13u64) { Ok(()) => 0u64, Error(Full(_)) => 1u64, Error(Closed(x)) => x }; let z = match channel.send(tx,17u64) { Ok(()) => 0u64, Error(Closed(x)) => x }; a*10000u64+b*100u64+z }\npub fn main() -> Result[(), Exit] { if run()==111317u64 { Ok(()) } else { Error(Exit(status:1)) } }",
-            1_048_576,
+            (1_048_576, 0),
             0,
         ),
         // Main's 288 startup bytes and isolate's 32-byte cause cell (MEM-24) leave 60.
@@ -21,54 +21,54 @@ fn core_operations(backend: Backend) {
         (
             "channel Capacity",
             "pub fn main() -> Result[(), Exit] { let attempt = isolate(fn() { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(2); let _ = take tx; let _ = take rx; }); let Ok(Error(take causes)) = take attempt else { return Error(Exit(status:1)) }; for c in causes { return match c.kind { Capacity(k) => if k.requested==80u64 && k.available==60u64 { Ok(()) } else { Error(Exit(status:2)) }, _ => Error(Exit(status:3)) } }; Error(Exit(status:4)) }",
-            380,
+            (380, 0),
             0,
         ),
         (
             "channel zero Bounds",
             "pub fn main() -> Result[(), Exit] { let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(0); let _ = take tx; let _ = take rx; Ok(()) }",
-            1_048_576,
+            (1_048_576, 0),
             101,
         ),
         (
             "spawn scalar ABI",
             "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 64,41u64,child); if result.unwrap(task.join(take h))==42u64 { Ok(()) } else { Error(Exit(status:1)) } }",
-            1_048_576,
+            (1_048_576, 1 << 9),
             0,
         ),
         (
             "spawn unit ABI",
             "fn child(take x:()) {}\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 0,(),child); result.unwrap(task.join(take h)); Ok(()) }",
-            1_048_576,
+            (1_048_576, 1 << 9),
             0,
         ),
         (
             "spawn aggregate ABI",
             "type Pair: send { a:u64,b:u64 }\nfn child(take x:Pair) -> Pair { Pair(a:x.b,b:x.a) }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 64,Pair(a:7u64,b:11u64),child); let p = result.unwrap(task.join(take h)); if p.a==11u64 && p.b==7u64 { Ok(()) } else { Error(Exit(status:1)) } }",
-            1_048_576,
+            (1_048_576, 1 << 9),
             0,
         ),
         // Main's 288 leaves 359. 256+32+8+64 = 360, input 41 comes back.
         (
             "spawn Capacity returns X",
             "fn child(take x:u64) -> u64 { x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let c = task.try_spawn(tasks,bytes 64,41u64,child); match take c { Ok(_) => Error(Exit(status:1)), Error((e,x)) => if e.requested==360u64 && e.available==359u64 && x==41u64 { Ok(()) } else { Error(Exit(status:2)) } } }",
-            647,
+            (647, 1 << 9),
             0,
         ),
         (
             "join Failed owns causes",
             "fn child(take x:u64) -> u64 { x+1u64 }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let h = task.spawn(tasks,bytes 64,18446744073709551615u64,child); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Failed(take causes)) => { let _ = take causes; Ok(()) }, Error(Cancelled(_)) => Error(Exit(status:2)) } }",
-            1_048_576,
+            (1_048_576, 1 << 9),
             0,
         ),
         (
             "cancel observed at explicit check",
             "fn child(take x:u64) -> u64 { task.check_cancel(); x }\npub fn main(tasks:Tasks) -> Result[(), Exit] { let mut h = task.spawn(tasks,bytes 64,41u64,child); task.cancel(mut h); match task.join(take h) { Ok(_) => Error(Exit(status:1)), Error(Cancelled(take causes)) => { let _ = take causes; Ok(()) }, Error(Failed(_)) => Error(Exit(status:2)) } }",
-            1_048_576,
+            (1_048_576, 1 << 9),
             0,
         ),
     ];
-    let mut cases: Vec<(&str, String, u64, i32)> = cases
+    let mut cases: Vec<_> = cases
         .into_iter()
         .map(|(name, source, limit, exit)| (name, source.to_owned(), limit, exit))
         .collect();
@@ -84,12 +84,12 @@ fn core_operations(backend: Backend) {
         cases.push((
             name,
             format!("fn child(take x:u64) -> u64 {{ x }}\nfn room() -> u64 {{ let attempt = isolate(fn() {{ let (tx,rx): (Sender[u64], Receiver[u64]) = channel.new(18446744073709551615u64); let _ = take tx; let _ = take rx; }}); let Ok(Error(take causes)) = take attempt else {{ return 0u64 }}; for c in causes {{ return match c.kind {{ Capacity(k) => k.available, _ => 0u64 }} }}; 0u64 }}\npub fn main(tasks:Tasks) -> Result[(), Exit] {{ let a = arc.new(7u64); let h = task.spawn(tasks,bytes 64,41u64,child); {polls}{share}let first = room(); let second = room(); let _ = result.unwrap(task.join(take h)); if second - first == {expected}u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"),
-            1_048_576,
+            (1_048_576, 1 << 9),
             0,
         ));
     }
     let mut failures = vec![];
-    for (name, source, limit, exit) in cases {
+    for (name, source, (limit, grant_mask), exit) in cases {
         let source = source.as_str();
         let dir = tempfile::tempdir().unwrap();
         let mut request = source_request(source, dir.path());
@@ -117,7 +117,7 @@ fn core_operations(backend: Backend) {
             root_limit: limit,
             instance_limit: 64,
             directories: vec![],
-            grant_mask: 1 << 9,
+            grant_mask,
             logical_charge_report: None,
             net_rules: vec![],
             unix_roots: Default::default(),

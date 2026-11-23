@@ -90,6 +90,9 @@ pub opaque type Db {
     acked_bytes: u64,
     written: Option[Receiver[WriteNotice]],
     written_send: Option[Sender[WriteNotice]],
+    // One coalesced notice after each journal group sync or failure, for a
+    // writer that releases replies while later commits run (sync_notices).
+    synced: Option[Receiver[()]],
     checkpointed: u64,
     poison: Option[IoError],
     journal: Option[Sender[JournalMsg]],
@@ -597,7 +600,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: map.new())
+    Db(store: id, fence: 0, disk: list.new(), clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, acks: None, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0, written: None, written_send: None, synced: None, checkpointed: 0, poison: None, journal: None, pending: None, journal_task: None, admits: map.new())
 }
 
 pub type Accounts {
@@ -2015,6 +2018,44 @@ fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped
 pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
     let _ = durable_groups(mut db, t)?
     Ok(())
+}
+
+/// The journal's sync notices, taken once: one coalesced () after each group sync or
+/// failure, and the channel closes when the journal worker ends. A store without a
+/// journal returns None; its tickets are durable when committed.
+pub fn sync_notices(mut db: Db) -> Option[Receiver[()]] {
+    replace(mut db.synced, None)
+}
+
+/// `durable` without waiting: whether t's commit is synced now. A journal that ended
+/// without an ack is terminal, as in journal_receive.
+pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
+    if !same(db.store, t.store) || t.open != open_number(db) {
+        return Error(Foreign)
+    }
+    if let Some(e) = db.poison {
+        return Error(Poisoned(e))
+    }
+    if let Cut(generation) = t.mark {
+        if list.len(db.disk) != 0 {
+            disk_wait_cut(db, generation)?
+            return Ok(true)
+        }
+    }
+    let _ = journal_poll_groups(mut db)?
+    if covered(db, t.mark) {
+        return Ok(true)
+    }
+    let pending = match db.acks {
+        Some(receiver) => channel.try_receive(receiver),
+        None => return Ok(true)
+    }
+    match take pending {
+        Ok(take ack) => journal_ack(mut db, take ack)?,
+        Error(Empty) => {},
+        Error(Closed) => journal_ack(mut db, Broken(Closed))?,
+    }
+    Ok(covered(db, t.mark))
 }
 
 // The worker sends one Journaled ack after each successful group sync.
@@ -12179,7 +12220,9 @@ type JournalChannels {
     ready: Sender[Result[(), Capacity]],
     waiting: Receiver[Result[(), Capacity]],
     written_send: Sender[WriteNotice],
-    written_receive: Receiver[WriteNotice]
+    written_receive: Receiver[WriteNotice],
+    synced_send: Sender[()],
+    synced_receive: Receiver[()]
 }
 
 fn journal_channels(group_count: u64) -> JournalChannels {
@@ -12189,7 +12232,8 @@ fn journal_channels(group_count: u64) -> JournalChannels {
     let (acks, received): (Sender[Ack], Receiver[Ack]) = channel.new(group_count * 3 + 3)
     let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
     let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(2)
-    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive)
+    let (synced_send, synced_receive): (Sender[()], Receiver[()]) = channel.new(1)
+    JournalChannels(frames: take frames, queued: take queued, acks: take acks, received: take received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive)
 }
 
 // S3 makes the disk opener public with its journal and final durability path.
@@ -12294,10 +12338,10 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
         Ok(journal_channels(int.widen(options.group_commits)))
     })?
-    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive) = take channels
+    let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, ready: take ready, waiting: take waiting, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive) = take channels
     let written_worker = channel.sender(written_send)
     let reserve: u64 = int.widen(options.group_bytes)
-    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker)
+    let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker, synced: take synced_send)
     let writer = match task.try_spawn(tasks, bytes reserve + 65536, take input, journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
@@ -12305,6 +12349,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     capacity(result.unwrap(channel.receive(waiting)))?
     db.written = Some(take written_receive)
     db.written_send = Some(take written_send)
+    db.synced = Some(take synced_receive)
     db.journal = Some(take frames)
     db.acks = Some(take journal_received)
     db.journal_task = Some(take writer)
@@ -15495,7 +15540,8 @@ type JournalWorker: send {
     receive: Receiver[JournalMsg],
     send: Sender[Ack],
     ready: Sender[Result[(), Capacity]],
-    written: Sender[WriteNotice]
+    written: Sender[WriteNotice],
+    synced: Sender[()]
 }
 
 type JournalBuffers {
@@ -15566,7 +15612,7 @@ fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mu
 }
 
 fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Result[(), Error] waits {
-    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _, written: take notices) = take input
+    let JournalWorker(store: id, seq: initial_seq, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take send, ready: _, written: take notices, synced: take synced) = take input
     let mut segment_file = take segment
     let mut end_handle = take end_file
     let mut seq = initial_seq
@@ -15689,6 +15735,8 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
             if let Error(_) = channel.send(send, Journaled(last_frame, written)) {
                 return Ok(())
             }
+            // After the ack, so a writer woken by this notice finds it.
+            let _ = channel.try_send(synced, ())
             groups += 1
         }
         let rotate_now = match rotating {
@@ -15731,10 +15779,12 @@ fn journal_worker(take input: JournalWorker) -> Result[(), Error] waits {
     }
     let send = channel.sender(input.send)
     let written = channel.sender(input.written)
+    let synced = channel.sender(input.synced)
     let result = journal_loop(take input, take reserved)
     if let Error(Io(e)) = result {
         let _ = channel.try_send(written, WriteFailed(e))
         let _ = channel.send(send, Broken(e))
+        let _ = channel.try_send(synced, ())
     }
     take result
 }
@@ -15746,6 +15796,7 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     let (acks, received): (Sender[Ack], Receiver[Ack]) = channel.new(128)
     let (ready, waiting): (Sender[Result[(), Capacity]], Receiver[Result[(), Capacity]]) = channel.new(1)
     let (written_send, written_receive): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(2)
+    let (synced_send, _synced): (Sender[()], Receiver[()]) = channel.new(1)
     let first = journal_empty_commit(DiskContext(store: id, role: 2, seq: 7), 72, 1)
     result.unwrap(channel.send(send, Frame(take first, 1)))
     if mode == 3 {
@@ -15776,7 +15827,7 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     } else {
         100u32
     }
-    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take acks, ready: take ready, written: take written_send)
+    let input = JournalWorker(store: id, seq: 7, segment: take segment, end_file: take end_file, group_commits: max_frames, group_bytes: max_bytes, receive: take receive, send: take acks, ready: take ready, written: take written_send, synced: take synced_send)
     let reserve: u64 = int.widen(max_bytes)
     let worker = if mode == 0 || mode == 2 {
         task.spawn(tasks, bytes reserve + 65536, take input, journal_worker_zero)

@@ -2484,6 +2484,12 @@ type Head[G: send, H: send] {
     waiting: List[Waiting],
     group: List[Bytes],
     last: Option[store.Ticket],
+    // Closed groups waiting for their own sync, oldest first, and the commitless
+    // Releases that arrived behind them (V3 FIFO). Their workers stay in `busy`.
+    held: List[Held],
+    // Sync notices reach the inbox as SyncWake, so the head runs later work while
+    // a group's sync is outstanding; without them each group waits at its close.
+    wakes: bool,
     minted: u64,
     // The publisher refused a Release: it has stopped, and R = u64::MAX is published. The
     // head commits nothing more and the place ends with OpenError.PublisherStopped.
@@ -2558,10 +2564,73 @@ fn run_head[G: send, H: send](take db: store.Db, take r: Registry[G, H], take re
             }
         }
     }
-    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
+    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take h, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
     let mut tables: Option[triggers.Tables] = None
-    let served = serve_head(mut hd, take inbox, take drain, mut tables)
+    let (take woken, take helpers) = head_wakes(mut hd, take inbox, drain, tasks)
+    let served = serve_head(mut hd, take woken, take drain, mut tables)
+    for take helper in take helpers {
+        let mut stopping = take helper
+        task.cancel(mut stopping)
+        let _ = task.join(take stopping)
+    }
     finish_head(take hd, take publisher_task, take served, take tables)
+}
+
+type SyncRelay: send { notices: Receiver[()], to: Sender[HeadInput] }
+
+// One SyncWake per sync notice, and a last one when the journal worker ends, so a head
+// waiting on its inbox looks at its held groups again. A full inbox drops the wake: the
+// head then has input to take, and it polls the journal before it waits again.
+fn relay_syncs(take relay: SyncRelay) -> () waits {
+    loop {
+        let more = match channel.receive(relay.notices) { Ok(()) => true, Error(_) => false }
+        let _ = channel.try_send(relay.to, SyncWake)
+        if !more { return }
+    }
+}
+
+type Forward: send { from: HeadRequests, to: Sender[HeadInput] }
+
+// A head the caller feeds through its own channel gets one inbox that also carries the
+// relay's wakes. The caller closing its channel arrives as InboxEnded.
+fn forward_requests(take forward: Forward) -> () waits {
+    loop {
+        match head_next(forward.from, true) {
+            Some(take message) => if let Error(_) = channel.send(forward.to, take message) { return },
+            None => {
+                let _ = channel.send(forward.to, InboxEnded)
+                return
+            },
+        }
+    }
+}
+
+// A journaled store's syncs wake the head through its inbox (Head.wakes). A store
+// without a journal is durable at commit, so its groups release at close.
+fn head_wakes[G: send, H: send](mut hd: Head[G, H], take inbox: HeadRequests, drain: Option[HeadDrain], tasks: Tasks) -> (HeadRequests, List[Task[()]]) {
+    let mut helpers: List[Task[()]] = list.new()
+    let Some(take notices) = store.sync_notices(mut hd.db) else { return (take inbox, take helpers) }
+    let (to, woken): (Sender[HeadInput], HeadRequests) = match drain {
+        Some(control) => (channel.sender(control.head_to), take inbox),
+        None => {
+            let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
+            let forward = Forward(from: take inbox, to: channel.sender(to))
+            match task.try_spawn(tasks, bytes 65536u64, take forward, forward_requests) {
+                Ok(take running) => list.push(mut helpers, take running),
+                Error((_, take back)) => {
+                    let Forward(from: take original, ..) = take back
+                    return (take original, take helpers)
+                },
+            }
+            (take to, ManagedRequests(take from))
+        },
+    }
+    let relay = SyncRelay(notices: take notices, to: take to)
+    if let Ok(take running) = task.try_spawn(tasks, bytes 65536u64, take relay, relay_syncs) {
+        list.push(mut helpers, take running)
+        hd.wakes = true
+    }
+    (take woken, take helpers)
 }
 
 fn finish_head[G: send, H: send](take head: Head[G, H], take publishing: Task[()], take served: Result[bool, store.Error], take drained_tables: Option[triggers.Tables]) -> Result[Option[u64], OpenError] waits {
@@ -2642,6 +2711,7 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
     | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64)
     | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle
+    | SyncWake | InboxEnded
 
 pub type CutoverWork: send { request: store.Cutover, result_to: Sender[Result[(u64, bool), store.DeployError]] }
 
@@ -2881,7 +2951,7 @@ type WritePause {
     work: Option[CutoverWork],
 }
 
-pub type HeadRequests = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver[HeadInput])
+pub type HeadRequests: send = DirectRequests(Receiver[Req]) | ManagedRequests(Receiver[HeadInput])
 type HeadDrain {
     finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]],
     clock: Clock, tasks: Tasks, head_to: Sender[HeadInput], n_place: u64, cut: CutActivity, idle: Option[u64],
@@ -3426,7 +3496,7 @@ fn pause_progress[G: send, H: send](mut head: Head[G, H], mut pause: Option[Writ
         host.sleep_until(control.clock, std.order.min(deadline, int.saturating_add(now, 1000000u64)))
         return Ok(false)
     }
-    if list.len(head.group) != 0u64 { gate(mut head)? }
+    if unreleased(head) { gate(mut head)? }
     let mut active = option.unwrap(replace(mut pause, None))
     let work = replace(mut active.work, None)
     let CutoverWork(request: take request, result_to: take host_result) = option.unwrap(take work)
@@ -3482,10 +3552,12 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
     let mut held_write = false
     let mut resuming = false
     let mut idle = false
+    // The forwarded request channel closed (InboxEnded); the head ends once idle.
+    let mut ended = false
     loop {
         if head.cut { return Ok(false) }
         if let Some(control) = drain {
-            if let Ok(()) = channel.try_receive(control.finish) { return Ok(false) }
+            if let Ok(()) = channel.try_receive(control.finish) { release_held(mut head, true)?; return Ok(false) }
             if let Some(_) = drain_window(latest.read(control.window)) {
                 end_write_pause(mut head.db, mut pause, control, AttemptBusy)
                 // A drain cuts running attempts. Their current rows stay until
@@ -3507,7 +3579,7 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
                 closed = true
                 close_head_admission(mut head)?
             }
-            if closed && !settled && list.len(head.group) == 0u64 {
+            if closed && !settled && list.len(head.group) == 0u64 && list.len(head.held) == 0u64 {
                 let _ = channel.send(control.events, Settled)
                 settled = true
             }
@@ -3596,7 +3668,9 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
                 continue
             },
             Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
-            Some(HeadFinish) => return Ok(false),
+            Some(HeadFinish) => { release_held(mut head, true)?; return Ok(false) },
+            Some(SyncWake) => { release_held(mut head, false)?; continue },
+            Some(InboxEnded) => { ended = true; continue },
             Some(CheckHeadIdle) => {
                 if let Some(control) = drain {
                     let eligible = match control.idle {
@@ -3628,9 +3702,22 @@ fn serve_head[G: send, H: send](mut head: Head[G, H], take inbox: HeadRequests, 
         if none(pause) && !closed && next_waiting(mut head, drain)? { continue }
         if list.len(head.group) > 0u64 {
             if let Some(take more) = settle_probe(inbox) { input = Some(take more); continue }
-            gate(mut head)?
+            // The group's sync runs while the head takes later work; its replies wait
+            // for that sync (release_held), behind every earlier group's.
+            close_group(mut head)
+            let blocking = !head.wakes
+            release_held(mut head, blocking)?
             continue
         }
+        if list.len(head.held) != 0u64 {
+            // Every group is closed. A SyncWake or new work ends this wait.
+            release_held(mut head, false)?
+            if list.len(head.held) != 0u64 {
+                match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => { release_held(mut head, true)?; return Ok(false) } }
+            }
+            continue
+        }
+        if ended { return Ok(false) }
         match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
     }
 }
@@ -3898,40 +3985,79 @@ fn worker[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome
 }
 
 // V3: a commitless answer goes at once, in a snapshot-less Release behind every earlier
-// Release on the one FIFO to the publisher.
+// Release on the one FIFO to the publisher, held ones included.
 fn commitless[G: send, H: send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
     let mut answers: List[Answer] = list.new()
     list.push(mut answers, Answer(recipient: Recipient(owner: owner, to: take to), row: KeyedDone(stream: take stream, p: p, outcome: take o)))
-    if let Error(_) = channel.send(hd.out, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers)))) { hd.cut = true }
+    let release = Release(version: 0u64, snapshot: None, answers: take answers)
+    if list.len(hd.held) != 0u64 {
+        list.push(mut hd.held, Loose(take release))
+    } else {
+        publish_release(mut hd, take release)
+    }
     Ok(())
 }
 
-// H3, V4: one durable and one Release for the group, with every worker's answer
-// in commit order. The publisher can now expose the version in one update per owner.
-fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
+type Held = Sealed(store.Ticket, u64, store.Snapshot, List[Bytes]) | Loose(Release)
+
+fn publish_release[G: send, H: send](mut hd: Head[G, H], take release: Release) waits {
+    if let Error(_) = channel.send(hd.out, PubIn(e: Released(take release))) { hd.cut = true }
+}
+
+fn unreleased[G: send, H: send](hd: Head[G, H]) -> bool {
+    !none(hd.last) || list.len(hd.held) != 0u64
+}
+
+// H3: the open group closes behind the held ones with the version and snapshot it
+// committed; later commits never reach its Release.
+fn close_group[G: send, H: send](mut hd: Head[G, H]) {
     if let Some(t) = replace(mut hd.last, None) {
-        store.durable(mut hd.db, t)?
+        let at = store.snapshot(hd.db)
+        let d = store.version(at)
+        let group = replace(mut hd.group, list.new())
+        list.push(mut hd.held, Sealed(t, d, take at, take group))
     }
-    let d = store.version(store.snapshot(hd.db))
-    let group = replace(mut hd.group, list.new())
-    let mut answers: List[Answer] = list.new()
-    for stream in group {
-        let w = match map.remove(mut hd.busy, stream) {
-            Some(take x) => take x,
-            None => continue,
+}
+
+// V4: held entries leave in order, each group only once its own sync covers its last
+// commit, with every worker's answer in commit order and the waiters that joined it.
+// With `wait` each sync is awaited; otherwise the first unsynced group stops the scan.
+fn release_held[G: send, H: send](mut hd: Head[G, H], wait: bool) -> Result[(), store.Error] waits {
+    while list.len(hd.held) != 0u64 {
+        let ticket = match hd.held[0] { Sealed(t, ..) => Some(t), Loose(_) => None }
+        if let Some(t) = ticket {
+            if wait { store.durable(mut hd.db, t)? } else if !store.durable_now(mut hd.db, t)? { return Ok(()) }
         }
-        let Worker(p: p, digest: _, version: _, outcome: take o, waiters: take waiters) = take w
-        for take recipient in waiters {
-            let s: Bytes = clone(stream)
-            let each: Outcome = clone(o)
-            list.push(mut answers, Answer(recipient: take recipient, row: KeyedDone(stream: take s, p: p, outcome: take each)))
+        match list.remove(mut hd.held, 0u64) {
+            Loose(take release) => publish_release(mut hd, take release),
+            Sealed(_, d, take at, take group) => {
+                let mut answers: List[Answer] = list.new()
+                for stream in group {
+                    let w = match map.remove(mut hd.busy, stream) {
+                        Some(take x) => take x,
+                        None => continue,
+                    }
+                    let Worker(p: p, digest: _, version: _, outcome: take o, waiters: take waiters) = take w
+                    for take recipient in waiters {
+                        let s: Bytes = clone(stream)
+                        let each: Outcome = clone(o)
+                        list.push(mut answers, Answer(recipient: take recipient, row: KeyedDone(stream: take s, p: p, outcome: take each)))
+                    }
+                }
+                publish_release(mut hd, Release(version: d, snapshot: Some(take at), answers: take answers))
+                refresh_waiting(mut hd, true)
+            },
         }
     }
-    if let Error(_) = channel.send(hd.out, PubIn(e: Released(Release(version: d, snapshot: Some(store.snapshot(hd.db)), answers: take answers)))) { hd.cut = true }
-    refresh_waiting(mut hd, true)
     Ok(())
+}
+
+// H3, V4: every commit so far is durable and released, in commit order.
+fn gate[G: send, H: send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
+    close_group(mut hd)
+    release_held(mut hd, true)
 }
 
 // These messages travel on the existing head inbox, so a run can only write
@@ -4345,7 +4471,7 @@ fn advance_trigger[G: send, H: send](mut hd: Head[G, H], mut drive: Box[TriggerD
         arm_trigger_timer(mut drive, due)?
         return Ok(false)
     }
-    if let Some(_) = hd.last { gate(mut hd)? }
+    if unreleased(hd) { gate(mut hd)? }
     if hd.cut { return Ok(false) }
     if triggers.cancelling(p) {
         let settled = store.run(mut hd.db, None, scoped fn(mut tx: store.Tx) -> Result[(), triggers.Error] {
@@ -4427,7 +4553,7 @@ fn checked_boundary(take seen: Result[bool, triggers.Error]) -> Result[(), Trigg
 }
 
 fn answer_trigger[G: send, H: send](mut hd: Head[G, H], drive: Box[TriggerDrive[G]], take action: TriggerAction, closed: bool) -> Result[(), store.Error] waits {
-    if let Some(_) = hd.last { gate(mut hd)? }
+    if unreleased(hd) { gate(mut hd)? }
     let stopped = closed || hd.cut
     match take action {
         Invoke(a, take key, take arg, take answer) => {
@@ -4501,7 +4627,7 @@ pub fn journal_attempt_gate(take db: store.Db, take registered: Registry[(), ()]
     -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
     let mut head = Head(db: take db, r: take registered, replay_identity: list.new(), h: (), out: take to,
-        busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false, trigger_drive: None)
+        busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
     let Head(db: take kept, ..) = take head
@@ -4588,7 +4714,7 @@ fn trigger_law_initial(take db: store.Db, c: Clock, tasks: Tasks, take to: Sende
     let h = result.unwrap(store.with_schema(db, code.describe(trigger_law_handles)))
     let (out, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(32u64)
     let head = Head(db: take db, r: take reg, replay_identity: list.new(), h: take h, out: take out,
-        busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false,
+        busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false,
         trigger_drive: Some(take drive))
     (take head, take from)
 }

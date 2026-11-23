@@ -254,7 +254,7 @@ fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
     list.push(mut owner.entries, w3c_retired())
     let mut entries = w3c_registry()
     let head = Head(db: take db, r: take entries, replay_identity: list.new(),
-        h: W3cHandles(data: data), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, minted: 0u64, cut: false, trigger_drive: None)
+        h: W3cHandles(data: data), out: take to_pub, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
     W3cRig(head: take head, owner: take owner, work: wire_work(), requests: take requests, releases: take releases, inbox: take inbox)
 }
 

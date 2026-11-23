@@ -5,9 +5,9 @@
 rustfmt starts from each target's root file and follows its modules.
 Changed new-language sources are checked, never rewritten, and the primer's copies
 (tools/site_sync.py --check) must match docs/PRIMER.md. Documentation references
-and the std operation index must match the code. The editor parser checks the core
-and spec corpus. Explicit expectation comments exclude refusal/gap fixtures
-from formatting to preserve diagnostic coordinates.
+and the std operation index must match the code. Changed source files must fit
+their line limits. The editor parser checks the core and spec corpus. Explicit
+expectation comments exclude refusal/gap fixtures to preserve diagnostic coordinates.
 """
 
 import json
@@ -19,6 +19,9 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools'))
+from check_file_lengths import check_changed as check_file_lengths
+
 BUCK2 = ROOT / '.buck2/bin/buck2'
 RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
 
@@ -72,6 +75,8 @@ def check_cases(paths):
 
 
 def main():
+    if not check_file_lengths(ROOT):
+        return 1
     rustfmt_flags = sys.argv[1:]
     query = 'kind("^rust_(library|binary)$", root//:)'
     attributes = json.loads(subprocess.run(

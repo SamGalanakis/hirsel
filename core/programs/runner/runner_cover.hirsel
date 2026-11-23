@@ -107,7 +107,7 @@ fn fill(mut db: store.Db, t: store.Table[u64, u64], from: u64, to: u64) -> () wa
 pub fn main(clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) -> Result[(), Exit] waits {
     let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let covered = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { ROWS } else { 10u64 }
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let h = match store.with_schema(db, code.describe(handles)) {

@@ -100,7 +100,7 @@ fn deliver_counter(mut source: CounterSource, take request: (Socket, u64)) waits
 
 fn place_writer(take job: PlaceJob) waits {
     let PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take listener, ready: take ready, err: err) = take job
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.defaults()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64))))
     let codec: std.codec.Codec[u64] = std.codec.of()
     let ticket = result.unwrap(store.create_table(mut db, store.spec("counter", std.codec.key_u64(), codec)))
     result.unwrap(store.durable(mut db, ticket))

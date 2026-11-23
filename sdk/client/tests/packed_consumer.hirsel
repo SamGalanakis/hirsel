@@ -62,7 +62,7 @@ fn first_batch(take publisher: Publisher) -> runner.Frame waits {
 }
 
 fn payload(out: Stdout, clock: Clock, random: Random, tasks: Tasks) -> Result[(), Exit] waits {
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     result.unwrap(store.create_table(mut db, store.spec("items", std.codec.key_u64(), item_codec())))
     let items = result.unwrap(store.table(mut db, "items", std.codec.key_u64(), item_codec()))
     match result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {

@@ -29,9 +29,9 @@
     "lines": 1409
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 8058,
-    "raise_revision": 1,
-    "reason": "m2-authority-1980"
+    "lines": 8040,
+    "raise_revision": 4,
+    "reason": "w3a-b-sized-2009"
   },
   "core/programs/runner/runner_calls.hirsel": {
     "lines": 2507
@@ -69,9 +69,9 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 2706,
-    "raise_revision": 4,
-    "reason": "m2-authority-1980"
+    "lines": 2721,
+    "raise_revision": 6,
+    "reason": "w3a-b-sized-2009"
   },
   "core/std/omap.hirsel": {
     "lines": 1374

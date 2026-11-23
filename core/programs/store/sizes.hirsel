@@ -1,0 +1,103 @@
+pub type Kind = Memory | Directory | Bucket(std.object.LaneConfig)
+
+pub type Overrides: send {
+    resident_limit: Option[u64],
+    journal_limit: Option[u64],
+    checkpoint_bytes: Option[u64],
+    pack_bytes: Option[u64],
+    group_bytes: Option[u64],
+}
+
+pub type Shortage: send { need: u64, have: u64, parts: List[(String, u64)] }
+
+const MIB: u64 = 1048576
+const CUT_FIXED_BYTES: u64 = 65536
+const BUCKET_HEAD_BYTES: u64 = 131552
+
+pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage] {
+    sized_with(kind, share, Overrides(resident_limit: None, journal_limit: None,
+        checkpoint_bytes: None, pack_bytes: None, group_bytes: None))
+}
+
+fn size_or(overridden: Option[u64], derived: u64) -> u64 {
+    match overridden { Some(n) => n, None => derived }
+}
+
+fn add_size(mut parts: List[(String, u64)], name: String, n: u64) -> () {
+    list.push(mut parts, (string.from(name), n))
+}
+
+fn total_sizes(parts: List[(String, u64)]) -> Option[u64] {
+    let mut total = 0u64
+    for i in 0u64 .. list.len(parts) {
+        total = int.checked_add(total, parts[i].1)?
+    }
+    Some(total)
+}
+
+fn shortage(have: u64, take parts: List[(String, u64)]) -> Shortage {
+    Shortage(need: size_or(total_sizes(parts), 18446744073709551615u64), have: have, parts: take parts)
+}
+
+fn cut_work(resident: u64) -> u64 {
+    // Dividing first keeps ceil(resident / 11) and the doubled result in range.
+    let blocks = resident / 11 + if resident % 11 == 0 { 0u64 } else { 1u64 }
+    2 * blocks + CUT_FIXED_BYTES
+}
+
+fn largest_resident(room: u64) -> u64 {
+    // Each 11 resident bytes use 13 bytes including the two cut working bytes.
+    let tail = size_or(int.checked_sub(room % 13, 2), 0)
+    11 * (room / 13) + tail
+}
+
+pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage] {
+    let mut parts: List[(String, u64)] = list.with_capacity(9)
+    let mut checkpoint_budget = 0u64
+    let mut journal = 0u64
+    let mut pack = 0u64
+    let mut group = 4 * MIB
+    let mut valid = true
+    match kind {
+        Memory => add_size(mut parts, "memory_keep", MIB),
+        _ => {
+            pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
+            checkpoint_budget = size_or(o.checkpoint_bytes, pack)
+            let floor = int.checked_add(checkpoint_budget, FRAME_LIMIT)
+            let minimum_journal = size_or(floor, 18446744073709551615u64)
+            journal = size_or(o.journal_limit, minimum_journal)
+            group = size_or(o.group_bytes, group)
+            valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64
+            add_size(mut parts, "journal_limit", order.max(journal, minimum_journal))
+            add_size(mut parts, "frame", FRAME_LIMIT)
+            add_size(mut parts, "pack_bytes", pack)
+            add_size(mut parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
+            if let Bucket(config) = kind {
+                let lanes = std.object.lane_reservation(config)
+                valid = valid && lanes != None
+                add_size(mut parts, "client_lanes", size_or(lanes, 18446744073709551615u64))
+                add_size(mut parts, "entry_buffers", 2 * (112 + order.min(group, 4294967295u64)))
+                add_size(mut parts, "head_buffers", BUCKET_HEAD_BYTES)
+                add_size(mut parts, "put_buffer", pack)
+            }
+        },
+    }
+    let fixed = total_sizes(parts)
+    let room = match fixed { Some(n) => size_or(int.checked_sub(share, n), 0), None => 0u64 }
+    let derived = match kind { Memory => room, _ => largest_resident(room) }
+    let resident = size_or(o.resident_limit, order.max(derived, MIB))
+    let minimum = order.max(resident, MIB)
+    add_size(mut parts, "resident_limit", minimum)
+    match kind {
+        Memory => (),
+        _ => add_size(mut parts, "checkpoint_task_work", cut_work(minimum) - CUT_FIXED_BYTES),
+    }
+    let total = total_sizes(parts)
+    if !valid || resident < MIB || total == None || size_or(total, 0) > share {
+        return Error(shortage(share, take parts))
+    }
+    Ok(Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: int.truncate(group),
+        checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack,
+        resident_limit: resident, authority: Directory(), expect: None, activation: None,
+        binding: None, claim_ms: 30000))
+}

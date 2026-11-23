@@ -62,7 +62,7 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
     } else {
         3
     }
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), accounts())))
     let mut t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts()))
     for i in 0u64 .. count {

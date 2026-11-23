@@ -402,7 +402,7 @@ const LATER: u64 = 10000000000u64
 // One place: a fresh memory store with "data", place_head on this task, and the case's
 // client driver as a task that ends by dropping its head sender.
 fn served(c: Clock, r: Random, tasks: Tasks, n: Net, f: fn(take Drive) -> () waits) -> bool waits {
-    served_in(c, r, tasks, n, store.defaults(), f)
+    served_in(c, r, tasks, n, result.unwrap(store.sized(Directory, 2147483648u64)), f)
 }
 
 fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(take Drive) -> () waits) -> bool waits {
@@ -624,9 +624,9 @@ pub fn law_calls_session_charge(c: Clock, r: Random, tasks: Tasks, n: Net) -> bo
 
 pub fn law_calls_group_version(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut plain_token: Bytes = list.new()
-    let plain = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut plain_token, 2u64, drive_group)
+    let plain = served_on(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut plain_token, 2u64, drive_group)
     let mut subscribed_token: Bytes = list.new()
-    let subscribed = served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut subscribed_token, 2u64, drive_group_subscribed)
+    let subscribed = served_on(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut subscribed_token, 2u64, drive_group_subscribed)
     plain && subscribed
 }
 
@@ -659,7 +659,7 @@ fn drive_joiners(take d: Drive) -> () waits {
 
 pub fn law_calls_joiners(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut token: Bytes = list.new()
-    served_on(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, 3u64, drive_joiners)
+    served_on(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut token, 3u64, drive_joiners)
 }
 
 // L21/V2 (join_digest): one session sends p with x, then p with y while p is held. The
@@ -1403,7 +1403,7 @@ fn record_is(got: Option[store.Recorded], key: Bytes, arg: u64, entry: u64, toke
 }
 
 fn disk_options() -> store.Options {
-    let mut o = store.defaults()
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
 
     o.resident_limit = 1048576u64
     o.pack_bytes = 512u64
@@ -2027,7 +2027,7 @@ fn drive_store_refusal(take d: Drive) -> () waits {
 const FLOOD: u64 = 512u64
 
 pub fn law_calls_store_refusal(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    let mut o = store.defaults()
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
     o.resident_limit = 32768u64
     served_in(c, r, tasks, n, o, drive_store_refusal)
 }
@@ -2148,7 +2148,7 @@ pub fn law_calls_held_head(c: Clock, tasks: Tasks, n: Net, r: Random) -> bool wa
     let mail = result.unwrap(runner.mailbox(1u64))
     let post = runner.post(mail)
     let credential = ingress.credential(r)
-    let db = store.memory(c, r, store.defaults())
+    let db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let d = Drive(head: channel.sender(head), post: channel.sender(post), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: None)
     let s0 = conn(d, 0u64)
     ask(s0, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
@@ -2387,7 +2387,7 @@ fn drive_notes(take d: NoteDriver) -> () waits {
 }
 
 pub fn law_duplicate_own_reply(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(note_migrate)))
     let hd = result.unwrap(store.with_schema(db, code.describe(note_handles)))
     let seeded = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {

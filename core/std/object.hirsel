@@ -2144,18 +2144,33 @@ pub opaque type Upload: send {
     parts: List[PartReceipt]
 }
 
+pub type LaneConfig: send {
+    requested_lanes: u64,
+    lane_bytes: u64
+}
+
+fn lane_count(config: LaneConfig) -> u64 {
+    if config.requested_lanes == 0 {
+        DEFAULT_LANES
+    } else {
+        config.requested_lanes
+    }
+}
+
+/// The reservation of the lane owner tasks.
+pub fn lane_reservation(config: LaneConfig) -> Option[u64] {
+    int.checked_mul(lane_count(config), config.lane_bytes)
+}
+
 /// Starts one owner task per lane. Supply the credential grant as source for
 /// expiring credentials. Static credentials use None.
-pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, source: Option[Cred], take trust: Trust, c: Clock, random: Random, requested_lanes: u64, lane_bytes: u64, deadline: u64) -> Result[Client, Error] waits {
+pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, source: Option[Cred], take trust: Trust, c: Clock, random: Random, config: LaneConfig, deadline: u64) -> Result[Client, Error] waits {
     let server = endpoint(bucket, take trust)?
     if has_source(source) && !server.secure {
         return Error(Fatal(Malformed))
     }
-    let lanes = if requested_lanes == 0 {
-        DEFAULT_LANES
-    } else {
-        requested_lanes
-    }
+    let lanes = lane_count(config)
+    let lane_bytes = config.lane_bytes
     let mut peers: List[Peer] = list.with_capacity(16)
     if let Error(e) = resolve_peers(n, c, server.name, deadline, mut peers) {
         return Error(Retriable(Net(e)))
@@ -2210,8 +2225,8 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
 }
 
 /// Starts a client whose provider port belongs to the S3 simulator.
-pub fn start_simulated(n: sim.s3.Endpoint, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, c: Clock, random: Random, requested_lanes: u64, lane_bytes: u64, deadline: u64) -> Result[Client, Error] waits {
-    let mut client = start(sim.s3.endpoint_network(n), tasks, take bucket, take credentials_set, None, System, c, random, requested_lanes, lane_bytes, deadline)?
+pub fn start_simulated(n: sim.s3.Endpoint, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, c: Clock, random: Random, config: LaneConfig, deadline: u64) -> Result[Client, Error] waits {
+    let mut client = start(sim.s3.endpoint_network(n), tasks, take bucket, take credentials_set, None, System, c, random, config, deadline)?
     client.requests.simulated = true
     Ok(take client)
 }

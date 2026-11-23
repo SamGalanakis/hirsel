@@ -301,7 +301,7 @@ fn rig_on(take db: store.Db, f: launcher.Fake, max_places: u64, now: Now) -> Rig
 }
 
 fn rig(c: Clock, rnd: Random, max_places: u64) -> Rig waits {
-    rig_on(store.memory(c, rnd, store.defaults()), launcher.fake(), max_places, Now(wall_ms: T0, mono_ns: SECOND_NS))
+    rig_on(store.memory(c, rnd, result.unwrap(store.sized(Memory, 1074790400u64))), launcher.fake(), max_places, Now(wall_ms: T0, mono_ns: SECOND_NS))
 }
 
 // Ends the host process: only its store and the launcher survive.
@@ -1554,7 +1554,7 @@ fn pin_offline_reader(d: Dir, c: Clock, rnd: Random, tasks: Tasks) -> Result[(),
     let Ok(none) = host.mkdtemp(d, mut empty) else {
         fail("mkdtemp")
     }
-    let db = match store.open(tasks, at, c, rnd, store.defaults()) {
+    let db = match store.open(tasks, at, c, rnd, result.unwrap(store.sized(Directory, 2147483648u64))) {
         Ok(take db) => take db,
         Error(_) => fail("open the catalog")
     }

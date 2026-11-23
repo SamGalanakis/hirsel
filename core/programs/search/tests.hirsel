@@ -44,7 +44,7 @@ fn snapshot_bm25(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] w
             fail("Unicode tokenizer vector")
         }
     }
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(install)))
     let layout: search.Spec[bool] = search.spec("test")
     let index = result.unwrap(search.open(store.snapshot_schema(store.snapshot(db)), layout, take analyzer))
@@ -136,7 +136,7 @@ fn mask_contains(mask: u64, id: u64) -> bool {
 
 @test
 fn filtered_top_k(clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(install)))
     let layout: search.Spec[bool] = search.spec("test")
     let mut stop_words: List[String] = list.new()

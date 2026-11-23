@@ -347,7 +347,7 @@ fn law_location_commit(done: Outcome[(), Error]) -> Result[(), Error] {
 }
 
 fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     // Three 1,100-byte values fit in a BLOB pack, four do not. The
     // unrelated inline page keeps the old data pack dense after P moves.
     options.pack_bytes = 3500

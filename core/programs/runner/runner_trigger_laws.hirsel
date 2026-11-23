@@ -834,7 +834,7 @@ fn step_held[G: send, H: send](mut b: Board[G, H]) -> List[Owe] {
 }
 
 pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -934,7 +934,7 @@ fn range_limit(n: u32) -> Bytes {
 // A tail insert misses a prefix subscription but hits a cursor that received
 // None. An insert before the prefix's first row also changes its Cover.
 pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv = std.codec.of_u64()
     result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))

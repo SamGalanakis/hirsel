@@ -2,7 +2,7 @@ fn object_cut_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] 
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
     let mut workspace = history_buffers(1057000)?
-    let (take opened, _) = history_open_register(mut source, sim.time, r, defaults(), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let (take opened, _) = history_open_register(mut source, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let mut held = take opened
     let id = held.head.store
     let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket"))?
@@ -81,10 +81,10 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
     let mut workspace = history_buffers(65536)?
-    let (take opened, _) = history_open_register(mut source, sim.time, r, defaults(), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let (take opened, _) = history_open_register(mut source, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let mut held = take opened
     let id = held.head.store
-    let mut draft = memory_at(sim.time, id, defaults())
+    let mut draft = memory_at(sim.time, id, result.unwrap(sized(Memory, 1074790400u64)))
     let _ = create_table(mut draft, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let rows = table(mut draft, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let value = bucket_m2_pack_value()

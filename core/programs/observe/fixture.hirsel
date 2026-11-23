@@ -75,7 +75,7 @@ pub fn k_record(mut tx: store.Tx, h: Handles, take a: Request) -> Result[u64, st
 }
 
 pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let ca: std.codec.Codec[Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let t = result.unwrap(store.table(mut db, "ran", std.codec.key_bytes(), ca))

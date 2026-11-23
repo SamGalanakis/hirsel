@@ -261,7 +261,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     // (1 + 4 + 1 + 4 + 43) = 58, so 95 with no data section. The CALL
     // is 145 B (four blobs of sizes 32, 16, 32 and 48, and the settle byte).
     // A 12-byte key and 8-byte value add 34 B for data.
-    let sized = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
+    let measured = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), u64] {
         if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(copied(string.as_bytes("ab"))), call_for(s, 32)) {
             return Error(1)
         }
@@ -283,7 +283,7 @@ pub fn law_streams(c: Clock) -> bool waits {
         }
         Ok(())
     }))
-    match take sized {
+    match take measured {
         Committed(_) => {},
         _ => return false
     }

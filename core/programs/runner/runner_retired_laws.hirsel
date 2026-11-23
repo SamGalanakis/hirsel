@@ -1,5 +1,5 @@
 pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -42,7 +42,7 @@ fn test_subs_reset_keeps_diff(c: Clock, r: Random) -> Result[(), ()] waits {
 // together, so G1 coalesces them (v2.23): c2 (row 2 = 7) follows in one round at the newest
 // version.
 pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -160,7 +160,7 @@ fn drain_content(from: Receiver[WireEvent], mut versions: List[u64], sub: u32, m
 // channel holds its two contents and is closed (its Joiner is gone), and sub 2 registered
 // nothing. Then c2's round reaches L.
 fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -258,7 +258,7 @@ fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool 
 // retry pass leave session 1's sub and Joiner, and remove session 2's two subs, its Joiner
 // (with its waiting Ended and its mark) and its waiting Told.
 fn retired_state(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -525,7 +525,7 @@ pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits
 // entry left at its first hit. Repair waits for session 4's drain token, then owes q1's whole
 // image at the base: perm is set, so rows 1 and 2, in one `complete`.
 fn ended_trace(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -620,7 +620,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
 // carries more answers for one owner than the publisher's byte limit holds, and
 // keep_answers' push unwraps the refusal.
 fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -666,7 +666,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
 }
 
 fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
@@ -858,7 +858,7 @@ fn row_is(r: Row, key: Bytes, value: Bytes) -> bool {
 }
 
 pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     for i in 0i64 .. 257i64 {
         let mut name = string.from("pad")
         string.push_i64(mut name, i)
@@ -919,7 +919,7 @@ fn projection_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
 }
 
 fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let oc: std.codec.Codec[Old] = std.codec.make(old_put, old_take, old_schema, 8u64)
     let nc: std.codec.Codec[New] = std.codec.make(new_put, faulting_new_take, new_schema, 16u64)
     let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))

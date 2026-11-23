@@ -99,7 +99,7 @@ fn test_replay_caller(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -
     let mut name = string.with_capacity(64u64)
     string.push(mut name, "runner-replay-")
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.defaults()))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64))))
     let migration = result.unwrap(store.stage_migration(db, tasks, code.describe(replay_migrate)))
     result.unwrap(store.install_activation(mut db, take migration))
     let h = result.unwrap(store.with_schema(db, code.describe(replay_members)))

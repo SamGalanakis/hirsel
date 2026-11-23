@@ -405,8 +405,8 @@ STORE-SPEC §11 specifies the paged store, scoped views and journaled forks.
 
 `store.defaults()` and its fixed 1 GiB `resident_limit` are deleted. `sized(kind, share)`
 derives every byte figure from `share`, the bytes this store may use, and returns
-`Result[Options, Shortage]`. `kind` is `Memory | Directory | Bucket`. The fractions are
-STORE-SPEC v2.57 §1.1 "Derived sizes". The runner computes `share` from the
+`Result[Options, Shortage]`. `kind` is `Memory | Directory | Bucket(std.object.LaneConfig)`. The fractions are
+STORE-SPEC v2.60 §1.1 "Derived sizes". The runner computes `share` from the
 executable's root limit (`hirsel build --limit`), minus `operate_bytes` and main's keep,
 so a place has no store numbers to choose. `Overrides` holds an `Option` per figure,
 and each `Some` replaces the derived value. The result must still fit `share`. A

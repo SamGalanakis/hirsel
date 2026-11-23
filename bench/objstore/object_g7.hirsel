@@ -75,7 +75,7 @@ pub fn main(net: Net, time: Clock, tasks: Tasks, random: Random, root: Secret, a
     let bucket = std.object.Bucket(endpoint: string.from(endpoint), aws_region: string.from(region_name), bucket: string.from(bucket_name), prefix: string.from(prefix), style: Path)
     let credentials_set = cred.from_secret(string.from(access_id), secret.share(root), string.new())
     let end = clock.deadline_after_ms(host.mono_ns(time), 180000)
-    let mut client = match std.object.start(net, tasks, take bucket, take credentials_set, None, System, time, random, lanes, 1048576, end) {
+    let mut client = match std.object.start(net, tasks, take bucket, take credentials_set, None, System, time, random, std.object.LaneConfig(requested_lanes: lanes, lane_bytes: 1048576), end) {
         Ok(take c) => take c,
         Error(_) => return Error(Exit(status: 3)),
     }

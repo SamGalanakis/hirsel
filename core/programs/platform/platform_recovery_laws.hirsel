@@ -7,7 +7,7 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
     let raw = result.unwrap(std.io.read_all(input))
     let codec: std.codec.Codec[HandInstall] = std.codec.of()
     let fixture = result.unwrap(std.codec.decode(codec, raw))
-    let db = result.unwrap(store.open(tasks, dir, c, rnd, store.defaults()))
+    let db = result.unwrap(store.open(tasks, dir, c, rnd, result.unwrap(store.sized(Directory, 2147483648u64))))
     let (take opened, _) = must(open(take db, Config(max_places: 4u64, idle_ms: 60000u64)), "T1: catalog")
     let mut h = take opened
     let name = "app"

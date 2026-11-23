@@ -108,7 +108,7 @@ type ExportRead: send { d: Dir, c: Clock, limit: u64 }
 fn law_export_read(take job: ExportRead) -> Result[Option[DeployError], Capacity] waits {
     let empty: Bytes = list.new()
     bound bytes job.limit {
-        match open_export(job.d, job.c, empty, defaults()) {
+        match open_export(job.d, job.c, empty, result.unwrap(sized(Directory, 2147483648u64))) {
             Ok(_) => None,
             Error(take problem) => Some(take problem),
         }
@@ -221,12 +221,12 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
         _ => return false,
     }
     result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 216)))
-    match open_export(d, c, empty, defaults()) {
+    match open_export(d, c, empty, result.unwrap(sized(Directory, 2147483648u64))) {
         Error(Store(Corrupt(_))) => {},
         _ => return false,
     }
     result.unwrap(std.file.write(d, "EXPORT", fixture))
-    match open_export(d, c, empty, defaults()) {
+    match open_export(d, c, empty, result.unwrap(sized(Directory, 2147483648u64))) {
         Error(Scratch(Corrupt(fault))) => {
             if fault.offset != 216 {
                 return false

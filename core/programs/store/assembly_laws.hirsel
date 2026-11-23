@@ -6,7 +6,7 @@ fn assembly_bucket(v: u64) -> Result[u64, Capacity] {
 }
 
 pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     result.unwrap(store.create_table(mut db, store.spec("t", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))

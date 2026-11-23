@@ -230,7 +230,7 @@ type W3cRig {
 // The real wire owner, head and publisher delivery path, stepped without sockets.
 // One pre-admitted unreplied gone call gives the same version oracle as the socket fixture.
 fn w3c_rig(tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
-    w3c_rig_on(store.memory(clock, random, store.defaults()), tasks, clock, random)
+    w3c_rig_on(store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64))), tasks, clock, random)
 }
 
 fn w3c_rig_on(take backing: store.Db, tasks: Tasks, clock: Clock, random: Random) -> W3cRig waits {
@@ -427,7 +427,7 @@ fn wire_initial_count(frame: Option[Frame], sub: u32, count: u64) -> bool {
 // G3 permits replacing a live id. Both the publisher's deliveries and the
 // frames waiting for the writer can outlive the query that produced them.
 pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let codec = std.codec.of_u64()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), codec)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), codec))
@@ -514,7 +514,7 @@ fn test_wire_replacement_generation(tasks: Tasks, clock: Clock, random: Random) 
 pub fn law_after_publication(d: Dir, tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut label = string.with_capacity(32)
     let dir = result.unwrap(host.mkdtemp(d, mut label))
-    let disk = result.unwrap(store.open(tasks, dir, clock, random, store.defaults()))
+    let disk = result.unwrap(store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64))))
     let mut rig = w3c_rig_on(take disk, tasks, clock, random)
     let caller = store.Caller(issuer: 1u8, subject: list.new())
     let stream = result.unwrap(stream_key(caller, 51u32))
@@ -746,7 +746,7 @@ fn owner_takes(mut owner: WireSession[(), ()], mut work: WireWork, inbox: Receiv
 // the publisher, and the next pass owes exactly one `complete` of sub 1. Red when the publisher
 // repairs on the drain token alone (v2.20), which queues a second whole repair behind the first.
 pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
-    let mut db = store.memory(c, r, store.defaults())
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))

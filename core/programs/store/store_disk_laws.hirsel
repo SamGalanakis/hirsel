@@ -699,7 +699,7 @@ fn wait_lock(take waiting: WaitedLock) -> bool waits {
 // opener excludes another, close and drop release it, identity survives and
 // every successful reopen has a distinct segment/open number.
 pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     options.create = false
@@ -842,7 +842,7 @@ fn journal_test_cap_arithmetic() -> Result[(), ()] {
 // exact account of 448. With the old binding, reopen drops the frame as a
 // torn tail.
 pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))

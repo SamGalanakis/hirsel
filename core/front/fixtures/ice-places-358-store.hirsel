@@ -57,7 +57,7 @@ fn run(out: Stdout, clock: Clock, rand: Random, d: Dir, argv: Args) -> Result[()
     }
     let Some(path) = args.get(argv, 0) else { return Error(Usage) }
     let text = match std.file.read_string(d, path) { Ok(take s) => s, Error(_) => return Error(Unreadable) }
-    let mut db = store.memory(clock, rand, store.defaults())
+    let mut db = store.memory(clock, rand, result.unwrap(store.sized(Memory, 1074790400u64)))
     match store.create_table(mut db, store.spec("kv", std.codec.key_u64(), std.codec.of_u64())) {
         Ok(_) => {},
         Error(_) => return Error(Setup)

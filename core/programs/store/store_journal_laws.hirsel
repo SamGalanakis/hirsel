@@ -139,7 +139,7 @@ fn journal_test_recovery(d: Dir) -> Result[(), ()] waits {
 // Recovery precedes admission and rotation. The pack account alone is too
 // small after replay; a refused open releases LOCK without publishing a cut.
 pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
@@ -367,7 +367,7 @@ fn journal_test_worker(d: Dir, tasks: Tasks) -> Result[(), ()] waits {
 // L18c/L21a: commits without an explicit cut survive close and reopen, and
 // close releases LOCK. A subsequent cut retires their live journal segment.
 pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let mut db = result.unwrap(open(tasks, d, c, r, options))
@@ -472,7 +472,7 @@ fn journal_worker_zero(take input: JournalWorker) -> Result[(), Error] waits {
 // L24's S3 half writes the specified CALL frame directly. record/reply are
 // S5's producers; the S3 reader retains no call record in resident trees.
 pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     let db = result.unwrap(open(tasks, d, c, r, options))
@@ -658,7 +658,7 @@ fn journal_test_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
 fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
     let source = disk_test_directory(d)
     let scratch = disk_test_directory(d)
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 1048576
     let mut db = deploy_result(open(tasks, source, c, r, options))?
     db.fence = 1
@@ -733,7 +733,7 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
 @test
 fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let child = disk_test_directory(d)
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 1048576
     let mut db = open(tasks, child, c, r, options)?
     create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
@@ -812,7 +812,7 @@ fn fork_history(mut db: Db) -> Result[Branch, Error] waits {
 
 @test
 fn journal_test_fork_history(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 1048576
     options.resident_limit = 7806
     let mut mem = memory(c, r, options)

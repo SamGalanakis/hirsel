@@ -99,7 +99,7 @@ fn drive(take d: D) -> () waits {
 pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) -> Result[(), Exit] waits {
     let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
     let flood = result.unwrap(std.int.parse_uint(m, 10u32))
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)

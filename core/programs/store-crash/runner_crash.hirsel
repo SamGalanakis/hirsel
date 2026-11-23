@@ -229,7 +229,7 @@ fn resends(scenario: View[String]) -> (List[Pos], u64) {
 }
 
 fn options() -> store.Options {
-    let mut o = store.defaults()
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
 
     o.resident_limit = 1048576u64
     o.pack_bytes = 512u64

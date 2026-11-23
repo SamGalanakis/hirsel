@@ -121,7 +121,7 @@ fn finish(take cn: Conn, code: u64) -> bool waits {
 pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
     let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))
-    let db = store.memory(c, r, store.defaults())
+    let db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
         tasks: tasks, net: n, random: r,
         token: ingress.credential(r), accepted: None)

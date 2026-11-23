@@ -31,10 +31,6 @@ pub type Options: send {
     claim_ms: u64
 }
 
-pub fn defaults() -> Options {
-    Options(create: true, lock_wait_ms: 0, group_commits: 64, group_bytes: 4194304, checkpoint_bytes: 67108864, journal_limit: 268435456, pack_bytes: 67108864, resident_limit: 1073741824, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000)
-}
-
 pub type Limit = Key | Value | Transaction | Name | Ids | Manifest | Triggers
 
 pub type Why = Checksum | Truncated | Flags | Kind(u64) | Header | Gap(u64) | Order | Dangling(u64) | Absent | Malformed
@@ -47,7 +43,7 @@ pub type Fault: send {
 
 pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error)
 
 type Roots = PageRoots
 
@@ -2502,7 +2498,7 @@ fn key_word(n: u64) -> Bytes {
 }
 
 fn test_db(c: Clock, cap: u64) -> Db {
-    let mut opts = defaults()
+    let mut opts = result.unwrap(sized(Memory, 1074790400u64))
     opts.resident_limit = cap
     memory_at(c, StoreId(hi: 1, lo: 2), opts)
 }

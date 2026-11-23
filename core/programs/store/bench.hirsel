@@ -43,7 +43,7 @@ fn reader(take r: Reader) -> u64 {
 
 pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, argv: Args) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let accounts: std.codec.Codec[Account] = std.codec.of()
     result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), accounts)))
     let t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts))

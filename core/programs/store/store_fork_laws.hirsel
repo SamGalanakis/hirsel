@@ -186,7 +186,7 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
 // L27(a). The catalog row is 134 bytes, the collection descriptor is 126,
 // and the current row is 94. The 448-byte ceiling has room for one extra row.
 pub fn law_overwrite_account(c: Clock) -> bool waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 448
     let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
@@ -349,7 +349,7 @@ pub fn law_branches(c: Clock) -> bool waits {
         _ => return false
     }
     // L20: a Snapshot of another store or of another open is Foreign.
-    let other = memory_at(c, StoreId(hi: 3, lo: 4), defaults())
+    let other = memory_at(c, StoreId(hi: 3, lo: 4), result.unwrap(sized(Memory, 1074790400u64)))
     match fork(mut db, "x", snapshot(other)) {
         Error(Foreign) => {},
         _ => return false
@@ -370,7 +370,7 @@ pub fn law_branches(c: Clock) -> bool waits {
 // A conservative overwrite reaches 542. The next overwrite settles the
 // proposed union to 448, for the pinned and proposed versions.
 pub fn law_pin_settle(c: Clock) -> bool waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 542
     let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
@@ -463,7 +463,7 @@ fn pinned_draft_at_bound(mut db: Db) -> Result[(), Error] waits {
 
 @test
 fn test_pinned_draft_at_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 354
     options.pack_bytes = 512
     let mut mem = memory(c, r, options)

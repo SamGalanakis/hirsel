@@ -390,7 +390,7 @@ pub fn fetch_outcome(tx: store.Tx, t: Tables, id: Id) -> Result[Option[Terminal]
 }
 
 pub fn law_options() -> store.Options {
-    let mut options = store.defaults()
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
 
     options.resident_limit = 1048576u64
     options.pack_bytes = 512u64

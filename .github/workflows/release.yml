@@ -84,7 +84,7 @@ jobs:
               hirsel run
               hirsel build
               sed -i "/^\[dependencies\]/a store = { major = 1 }" hirsel.toml
-              sed -i "/^pub fn main/a\    let _ = store.defaults()" main.hirsel
+              sed -i "/^pub fn main/a\    let _ = result.unwrap(store.sized(Directory, 2147483648u64))" main.hirsel
               hirsel lock 2>&3
               hirsel check --locked
               test ! -s /tmp/hirsel-smoke.stderr

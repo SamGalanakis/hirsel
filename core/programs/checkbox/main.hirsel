@@ -148,7 +148,7 @@ fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Task
     let Settings(listen: listen, proxies: take proxies) = settings(a) ?=> Usage
     let mut session = runner.wire_defaults(65536u64)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    let config: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(directory, store.defaults()),
+    let config: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(directory, result.unwrap(store.sized(Directory, 2147483648u64))),
         selection: selection, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
         listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
@@ -160,7 +160,7 @@ pub fn main(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: T
     runner.main(a, process, errors, tasks, code.describe(place), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
         if let Some(take candidate) = runner.launch_prepare_args(a) ?=> Usage {
             let runner.PrepareArgs(attempt: take attempt, digest: take digest) = take candidate
-            let setup = runner.PrepareConfig(scratch: directory, options: store.defaults(),
+            let setup = runner.PrepareConfig(scratch: directory, options: result.unwrap(store.sized(Directory, 2147483648u64)),
                 attempt: take attempt, image_digest: take digest, clock: c, tasks: tasks, n_place: N_PLACE,
                 place: code.describe(place), migrate: code.describe(migrate), handles: code.describe(handles),
                 triggers: runner.triggers.empty_entries())

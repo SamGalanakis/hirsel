@@ -44,7 +44,7 @@ fn drive_hung_extra(take d: Drive) -> () waits {
 pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
     let mut token: Bytes = list.new()
     served(c, r, tasks, n, drive_hung_base) &&
-        served_on_with_place(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, 0u64, drive_hung_extra, code.describe(place_hung_extra))
+        served_on_with_place(store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64))), c, tasks, n, r, mut token, 0u64, drive_hung_extra, code.describe(place_hung_extra))
 }
 
 @test

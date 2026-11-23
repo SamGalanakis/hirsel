@@ -220,9 +220,9 @@ pub fn disk_store_bytes(options: store.Options) -> u64 {
 fn head_bytes(backing: Backing, n_place: u64, n_publisher: u64) -> u64 {
     let names = int.saturating_add(n_place, n_publisher)
     match backing {
-        Memory => int.saturating_add(int.saturating_add(store.defaults().resident_limit, names), 2097152u64),
+        Memory => int.saturating_add(int.saturating_add(result.unwrap(store.sized(Memory, 1074790400u64)).resident_limit, names), 2097152u64),
         Disk(_, options) => int.saturating_add(disk_store_bytes(options), names),
-        Temp(_) => int.saturating_add(disk_store_bytes(store.defaults()), names),
+        Temp(_) => int.saturating_add(disk_store_bytes(result.unwrap(store.sized(Directory, 2147483648u64))), names),
     }
 }
 
@@ -1049,6 +1049,8 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Decode(_) => string.push(mut line, "a stored value does not decode with this build's codec"),
         Exists(name) => { string.push(mut line, "already exists: "); string.push(mut line, name) },
         Missing(name) => { string.push(mut line, "missing: "); string.push(mut line, name) },
+        Changed(name) => { string.push(mut line, "changed index: "); string.push(mut line, name) },
+        Undeclared(name) => { string.push(mut line, "undeclared table or index: "); string.push(mut line, name) },
         NoLevel(name) => { string.push(mut line, "unknown durability level "); string.push(mut line, name) },
         Behind(_) => string.push(mut line, "the follower has not applied the requested version"),
         Gone(id) => { string.push(mut line, "deleted branch "); string.push_u64(mut line, int.widen(id)) },
@@ -2867,14 +2869,14 @@ fn head_ended[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> () w
 fn open_backing(take backing: Backing, tasks: Tasks, clock: Clock, random: Random) -> Result[(store.Db, Option[TemporaryBacking]), StartError] waits {
     let mut temporary: Option[TemporaryBacking] = None
     let opened: Result[store.Db, store.Error] = match backing {
-        Memory => Ok(store.memory(clock, random, store.defaults())),
+        Memory => Ok(store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))),
         Disk(dir, options) => store.open(tasks, dir, clock, random, options),
         Temp(parent) => {
             let name = string.with_capacity(32u64)
             let mut cleanup = match TemporaryBacking(dir: parent, name: take name) { Ok(take guard) => take guard, Error((cap, _)) => return Error(Full(cap)) }
             let dir = match std.dir.create_temp(parent, mut cleanup.name) { Ok(dir) => dir, Error(problem) => return Error(Open(Store(Io(problem)))) }
             temporary = Some(take cleanup)
-            store.open(tasks, dir, clock, random, store.defaults())
+            store.open(tasks, dir, clock, random, result.unwrap(store.sized(Directory, 2147483648u64)))
         },
     }
     let db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }

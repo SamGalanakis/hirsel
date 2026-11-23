@@ -15,7 +15,7 @@ fn replication_writer(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, expect
     let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(client), level: "bucket"))?
     let mut source = ObjectPackRead(client: take client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
     let mut buffers = history_buffers(1024)?
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
     options.create = match expected {
         Some(_) => false,
         None => true,
@@ -76,7 +76,7 @@ fn replication_advance(mut writer: ReplicationWriter, entry_version: u64, value:
 
 fn replication_open_follower(mut ids: Followers, tasks: Tasks, sim: BucketSim, host_name: String, seed: u64, store: StoreId, op_ms: u64) -> Result[Follower, Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, host_name, seed, true, 1)?
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
     options.expect = Some(store)
     follower(mut ids, tasks, object_authority(take client, "bucket", op_ms), sim.time, options)
 }

@@ -267,24 +267,24 @@ fn heads_canonical(db: Db) -> bool {
 // answers. The checkpoint must also seal the pages it publishes.
 pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let dir = disk_test_directory(d)
-    let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     if !layout_commits(mut db, false) {
         return false
     }
     let live = layout_answers(mut db)
     result.unwrap(close(take db))
-    let mut replayed_db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let mut replayed_db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     let replayed = layout_answers(mut replayed_db)
     let _ = result.unwrap(checkpoint(mut replayed_db))
     let cut = layout_answers(mut replayed_db)
     let mut sealed = heads_canonical(replayed_db)
     result.unwrap(close(take replayed_db))
-    let mut loaded_db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let mut loaded_db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     let loaded = layout_answers(mut loaded_db)
     sealed = sealed && heads_canonical(loaded_db)
     result.unwrap(close(take loaded_db))
     let pinned_dir = disk_test_directory(d)
-    let mut held_db = result.unwrap(open(tasks, pinned_dir, c, r, defaults()))
+    let mut held_db = result.unwrap(open(tasks, pinned_dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     if !layout_commits(mut held_db, true) {
         return false
     }

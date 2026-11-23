@@ -224,7 +224,7 @@ fn check_pack_membership_selection() -> Result[(), Error] {
 fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     check_pack_membership_selection()?
     let directory = disk_test_directory(d)
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.pack_bytes = 4096
     let mut db = open(tasks, directory, c, r, options)?
     let codec = std.codec.of_bytes()

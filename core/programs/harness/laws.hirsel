@@ -1211,7 +1211,7 @@ fn blob_fixture(tasks: Tasks, clock: Clock, random: Random, capacity: u64, seed:
 fn blob_client(f: BlobFixture) -> Result[std.object.Client, harness.Fault] waits {
     let bucket = std.object.Bucket(endpoint: "http://s3.test:8080", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Virtual)
     let until = std.clock.deadline_after_ms(host.mono_ns(f.clock), 1000u64)
-    match std.object.start(f.net, f.tasks, take bucket, blob_credentials(), None, System, f.clock, f.random, 1u64, 1048576u64, until) {
+    match std.object.start(f.net, f.tasks, take bucket, blob_credentials(), None, System, f.clock, f.random, std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), until) {
         Ok(take client) => Ok(take client),
         Error(Retriable(Net(_))) => Error(Refused("blob: simulated S3 resolution failed")),
         Error(_) => Error(Refused("blob: could not start the object client")),

@@ -5,7 +5,7 @@
 // after commit, or 9s if the transaction did not commit.
 fn typed_error_tail_case(d: Dir, c: Clock, r: Random, tasks: Tasks, bounded: bool) -> (u64, u64, u64, u64) waits {
     let dir = disk_test_directory(d)
-    let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
     let seeded = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
@@ -926,7 +926,7 @@ fn is_foreign[T](take r: Result[T, Error]) -> bool {
 
 fn typed_foreign_at(c: Clock, other_id: StoreId) -> bool waits {
     let mut a = test_db(c, 1073741824)
-    let mut b = memory_at(c, other_id, defaults())
+    let mut b = memory_at(c, other_id, result.unwrap(sized(Memory, 1074790400u64)))
     result.unwrap(create_table(mut a, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut a, t, "i", code.describe(bucket), std.codec.key_u64()))

@@ -19,7 +19,7 @@ pub const LIVE_MODEL: String = "deepseek/deepseek-v4.1-flash-1017"
 // buffer and its journal group up front, and the defaults size those for a
 // large database (1 GiB resident).
 pub fn options() -> store.Options {
-    let mut o = store.defaults()
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
     o.resident_limit = 4194304u64
     o.pack_bytes = 1048576u64
     o.group_bytes = 1048576u32

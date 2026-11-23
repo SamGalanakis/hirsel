@@ -205,7 +205,7 @@ fn drive(take d: Drive) -> () waits {
 }
 
 pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net, seed: u64, mix: Mix) -> bool waits {
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
@@ -226,7 +226,7 @@ type JoinDrive: send { drive: Drive, scenario: JoinCase }
 // The original early-then-late observer case retains its 1000 ns timing oracle
 // on the evaluator's virtual Clock. Wire ordering is checked separately.
 pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let db = store.memory(clock, random, store.defaults())
+    let db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
@@ -307,7 +307,7 @@ fn drive_join(take input: JoinDrive) -> () waits {
 }
 
 pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: JoinCase) -> bool waits {
-    let mut db = store.memory(clock, random, store.defaults())
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let ca: std.codec.Codec[observe_fixture.Request] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("ran", std.codec.key_bytes(), ca)))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)

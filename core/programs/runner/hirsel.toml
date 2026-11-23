@@ -26,6 +26,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"sizes_law.hirsel" = "runner_laws"
 "steps_laws.hirsel" = "steps"
 "signup.hirsel" = "signup"
 "runner_laws.hirsel" = "runner_laws"

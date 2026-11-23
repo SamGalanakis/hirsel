@@ -2,7 +2,7 @@
 // storage to grow under the zero-byte grant.
 @test
 fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut mem = memory(c, r, defaults())
+    let mut mem = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let slots = list.capacity(mem.heads)
     for id in 1u64 .. slots {
         let saved = snapshot(mem)
@@ -304,7 +304,7 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
 }
 
 fn journal_crash_options() -> Options {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     options.resident_limit = 1048576
     options.pack_bytes = 512
     options.group_commits = 2

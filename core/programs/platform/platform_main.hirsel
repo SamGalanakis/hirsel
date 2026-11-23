@@ -238,7 +238,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, argv: Args) -> Re
         return Error(Exit(status: 64u8))
     }
     let config = platform.Config(max_places: number(argv, 2u64)?, idle_ms: number(argv, 3u64)?)
-    let db = match store.open(tasks, d, c, r, store.defaults()) {
+    let db = match store.open(tasks, d, c, r, result.unwrap(store.sized(Directory, 2147483648u64))) {
         Ok(take db) => take db,
         Error(_) => return Error(Exit(status: 74u8))
     }

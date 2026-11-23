@@ -828,7 +828,7 @@ fn old_handles(_schema: legacy.store.Schema) -> Result[(), legacy.store.Error] {
 }
 
 fn probe_pre_fence(d: Dir, c: Clock, r: Random, tasks: Tasks, fenced: bool) -> () waits {
-    let mut opt = legacy.store.defaults()
+    let mut opt = result.unwrap(legacy.store.sized(Directory, 2147483648u64))
     opt.checkpoint_task_bytes = 1048576u64
     opt.resident_limit = 1048576u64
     opt.pack_bytes = 512u64

@@ -2,7 +2,7 @@
 @test
 fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
-    let mut db = open(tasks, directory, c, r, defaults())?
+    let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
     let declared = levels(db)
     if list.len(declared) != 1 || declared[0] != "host" {
         fail("the directory store did not declare host")
@@ -15,7 +15,7 @@ fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         fail("an undeclared level resolved")
     }
     let host_level = level(db, "host")?
-    let mem = memory(c, r, defaults())
+    let mem = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let memory_level = level(mem, "memory")?
     let schema = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     if let Error(Foreign) = durable_at(mut db, schema, memory_level) {} else {
@@ -29,7 +29,7 @@ fn log_level_uses_host_barrier(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 @test
 fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
-    let mut db = open(tasks, directory, c, r, defaults())?
+    let mut db = open(tasks, directory, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
@@ -67,8 +67,8 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
     }
     close(take db)?
     let mut ids = followers()
-    let mut first = follower(mut ids, tasks, log_authority(directory), c, defaults())?
-    let second = follower(mut ids, tasks, log_authority(directory), c, defaults())?
+    let mut first = follower(mut ids, tasks, log_authority(directory), c, result.unwrap(sized(Directory, 2147483648u64)))?
+    let second = follower(mut ids, tasks, log_authority(directory), c, result.unwrap(sized(Directory, 2147483648u64)))?
     let main = option.unwrap(follower_branch(first, "main"))
     let due = clock.deadline_after_ms(host.mono_ns(c), 1000)
     let found = at_least(mut first, saved, due)?

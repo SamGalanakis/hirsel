@@ -525,7 +525,7 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
     let bucket = object.Bucket(endpoint: string.from("http://s3.test:8080"), aws_region: string.from("us-east-1"), bucket: string.from("bucket"), prefix: string.from(""), style: Virtual)
     let credentials_set = cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
-    let client = result.unwrap(object.start_simulated(endpoint, tasks, take bucket, take credentials_set, time, provide.random(seed), 0, 1048576, 1000000000))
+    let client = result.unwrap(object.start_simulated(endpoint, tasks, take bucket, take credentials_set, time, provide.random(seed), object.LaneConfig(requested_lanes: 0, lane_bytes: 1048576), 1000000000))
     (take client, time, take server_task, take driver)
 }
 

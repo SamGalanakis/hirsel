@@ -540,8 +540,8 @@ fn test_reader_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
 // The public constructor must draw identity once from Random's spare-capacity API.
 @test
 fn test_memory_identity(c: Clock, r: Random) -> Result[(), ()] {
-    let a = memory(c, r, defaults())
-    let b = memory(c, r, defaults())
+    let a = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
+    let b = memory(c, r, result.unwrap(sized(Memory, 1074790400u64)))
     let first_id = identity(a)
     if same(first_id, identity(a)) && !same(first_id, identity(b)) && version(snapshot(a)) == 0 {
         Ok(())

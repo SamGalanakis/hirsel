@@ -48,7 +48,7 @@ fn disk_bench_commit(mut db: Db, t: Table[u64, DiskAccount], c: u64) -> Ticket w
 // store is closed, reopened by replay, and its 16 rows and version are checked.
 fn disk_bench_journal(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, mode: String) -> Result[(), Exit] waits {
     let child = disk_test_directory(d)
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()
     result.unwrap(create_table(mut db, spec("accounts", std.codec.key_u64(), dictionary)))
@@ -145,7 +145,7 @@ pub fn disk_bench_main(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, a
         started = host.mono_ns(c)
     }
     let child = disk_test_directory(d)
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
     // The journal worker allowance and resident limit keep their defaults.
     let mut db = result.unwrap(open(tasks, child, c, r, options))
     let dictionary: std.codec.Codec[DiskAccount] = std.codec.of()

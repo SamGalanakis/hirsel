@@ -100,6 +100,10 @@ fn bucket_law_client(s: BucketSim, tasks: Tasks, host_name: String, seed: u64) -
     bucket_law_client_with(s, tasks, host_name, seed, false)
 }
 
+fn bucket_law_lanes(lanes: u64) -> std.object.LaneConfig {
+    std.object.LaneConfig(requested_lanes: lanes, lane_bytes: 1048576)
+}
+
 fn bucket_law_client_with(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, typed: bool) -> Result[std.object.Client, Error] waits {
     bucket_law_client_lanes(s, tasks, host_name, seed, typed, 0)
 }
@@ -112,9 +116,9 @@ fn bucket_law_client_lanes(s: BucketSim, tasks: Tasks, host_name: String, seed: 
     let place = bucket_law_place(host_name)
     let random = provide.random(seed)
     let connected = if typed {
-        std.object.start_simulated(s.endpoint, tasks, take place, take credentials_set, s.time, random, lanes, 1048576, deadline)
+        std.object.start_simulated(s.endpoint, tasks, take place, take credentials_set, s.time, random, bucket_law_lanes(lanes), deadline)
     } else {
-        std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, random, lanes, 1048576, deadline)
+        std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, random, bucket_law_lanes(lanes), deadline)
     }
     match take connected {
         Ok(take client) => Ok(take client),
@@ -123,7 +127,7 @@ fn bucket_law_client_lanes(s: BucketSim, tasks: Tasks, host_name: String, seed: 
 }
 
 fn bucket_law_options(create: bool) -> Options {
-    let mut options = defaults()
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     options.create = create
     options.authority = Bucket(bucket_law_place("s3.test"))
     options
@@ -646,7 +650,7 @@ fn bucket_m2_pack_value() -> Bytes {
 }
 
 fn bucket_m2_seed_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut db = open(tasks, d, c, r, defaults())?
+    let mut db = open(tasks, d, c, r, result.unwrap(sized(Directory, 2147483648u64)))?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let data = bucket_m2_pack_value()
@@ -853,7 +857,7 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
         fail("could not publish the checkpoint fixture")
     }
     let mut incumbent = HistoryRegister(head, tag, terminal: None)
-    let mut requested = defaults()
+    let mut requested = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     requested.create = false
     requested.expect = Some(head.store)
     requested.resident_limit = 0
@@ -905,10 +909,10 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), E
     let mut writer = ObjectPackRead(client: take initial_client, locator: HistoryLocator(rows: map.new(), chunks: list.new(), last_pack: 0), deadline: 0)
     let mut workspace = history_buffers(1024)?
     let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(writer.client), level: "bucket"))?
-    let (take opened, _) = history_open_register(mut writer, sim.time, r, defaults(), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let (take opened, _) = history_open_register(mut writer, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let mut held = take opened
     let mut source = followers()
-    let mut settings = defaults()
+    let mut settings = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     settings.expect = Some(held.head.store)
     // Writer selection never constrains a read-only follower.
     settings.activation = Some(17)

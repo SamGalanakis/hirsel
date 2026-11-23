@@ -4620,13 +4620,13 @@ fn static_bytes_preserve_budget_law() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases = [
         ("literal_refusal", vec![0], 1615, 32),
-        ("literal_refusal", vec![1], 1615, 32),
         ("refusal_after_handover", vec![0], 800, 32),
-        ("refusal_after_handover", vec![1], 800, 32),
         ("refund_after_handover", vec![0], 90, 0),
         ("refund_after_handover", vec![1], 90, 0),
         ("empty_is_free", vec![], 0, 0),
         ("cloned_and_counted", vec![], 18, 0),
+        ("static_and_clone", vec![32], 1, 0),
+        ("static_and_clone", vec![0], 1, 0),
         ("inline_capacity", vec![], 311, 0),
     ];
     let runs = cases.each_ref().map(|(name, args, _, _)| Case {

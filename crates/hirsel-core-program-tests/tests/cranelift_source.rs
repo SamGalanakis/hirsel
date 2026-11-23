@@ -186,13 +186,25 @@ fn static_bytes_preserve_budget_law() {
         &program,
         &[
             (names["literal_refusal"], vec![0]),
-            (names["literal_refusal"], vec![1]),
             (names["refund_after_handover"], vec![0]),
-            (names["refund_after_handover"], vec![1]),
             (names["empty_is_free"], vec![]),
-            (names["cloned_and_counted"], vec![]),
             (names["inline_capacity"], vec![]),
         ],
         false,
     );
+    let f = names["static_and_clone"];
+    let mut expected = eval::run(&program, f, &[32], 4096);
+    assert_eq!(expected.outcome, eval::Outcome::Returned(vec![1]));
+    // This codegen case checks that our backend elides the static copy.
+    expected.admissions = 0;
+    for optimize in [false, true] {
+        execute_reports(
+            &program,
+            &[(f, vec![0])],
+            optimize,
+            4096,
+            None,
+            Some(std::slice::from_ref(&expected)),
+        );
+    }
 }

@@ -71,3 +71,7 @@ mod tests;
 pub const FRAME_LIST_BYTES: u64 = 128;
 /// A loaned list's frame slot also holds its allocation link and original payer.
 pub const FRAME_LIST_LINK_BYTES: u64 = 24;
+
+/// FrozenBytes metadata for uncharged static data. The low bit marks static
+/// storage; the length is stored in the capacity word.
+pub const FROZEN_STATIC_UNCHARGED: u64 = 1;

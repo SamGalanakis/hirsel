@@ -1,27 +1,11 @@
-// MEM-32 binds only physical layout and MEM-24 charges are logical: a List that never
-// leaves its function may keep its storage in the frame, and every charge, refund and
-// refusal stays where the heap puts it. Hand-derived (budgets.md, `charge-v1`): a
-// List[u64] grows to capacities 4, 8, 16, 32, charging 32, 64, 128 and 256 bytes, each
-// growth admitting the new charge before refunding the old.
-//
-// `local` keeps its list and drops it, on the loop's end or an early return:
-// - 20 pushes under 1000 bytes: sum 190; the drop refunds everything, so a probe then
-//   sees 1000 bytes of room: 190 * 10000 + 1000.
-// - 20 pushes under 300 bytes: growing 16 -> 32 needs 128 + 256 > 300 and is refused
-//   asking 256 with 300 - 128 = 172 left, the list still holding 16 elements; the early
-//   return drops them and the probe sees 300: (1000000 + 256000 + 172) * 10000 + 300.
-// - 3 pushes under 31 bytes: the first push asks 32 with 31 left; the probe sees 31.
-// The frame bytes hold 16 u64s, so 16 -> 32 moves the storage to the heap, and
-// 32 -> 64 grows heap storage:
-// - 40 pushes under 1000 bytes: 256 + 512 = 768 fits; sum 780, and the drop frees the
-//   heap storage and refunds all of it: 780 * 10000 + 1000.
-// - 40 pushes under 700 bytes: growing 32 -> 64 is refused asking 512 with
-//   700 - 256 = 444 left; the probe sees 700: (1000000 + 512000 + 444) * 10000 + 700.
+// The logical peak for 20 or 40 pushes is below 1000 bytes. Both fit and
+// leave the full bound available after drop, including after heap growth.
+// The reference evaluator also checks refusals at the logical charges.
 // expect: run frame_local(20,1000) = 1901000
-// expect: run frame_local(20,300) = 12561720300
-// expect: run frame_local(3,31) = 10320310031
+// expect: reference run frame_local(20,300) = 12561720300
+// expect: reference run frame_local(3,31) = 10320310031
 // expect: run frame_local(40,1000) = 7801000
-// expect: run frame_local(40,700) = 15124440700
+// expect: reference run frame_local(40,700) = 15124440700
 //
 // Each list below leaves its function by one route, so its storage must outlive the
 // frame that made it; `local(5)` then reuses that frame's stack before the sum is

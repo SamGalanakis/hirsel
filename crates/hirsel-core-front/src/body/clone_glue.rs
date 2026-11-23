@@ -296,6 +296,7 @@ impl Derive<'_> {
             }
             FieldTy::Seq(_) | FieldTy::FrozenBytes => {
                 let u = Ty::Scalar(Scalar::U64);
+                let done = c.block(&[]);
                 let byte = FieldTy::Scalar(Scalar::U8);
                 let (item, len) = if let FieldTy::Seq(item) = field {
                     let at = c.offset(from, 8);
@@ -303,6 +304,17 @@ impl Derive<'_> {
                 } else {
                     let at = c.offset(from, 8);
                     let meta = c.read(at, u);
+                    // A native static carrier is immutable and owns no charge.
+                    // The evaluator's charged static carrier takes the copy path.
+                    let uncharged = c.constant(hirsel_core_layout::FROZEN_STATIC_UNCHARGED);
+                    let shareable = c.compare(CompareOp::Eq, meta, uncharged);
+                    let (share, copy) = (c.block(&[]), c.block(&[]));
+                    c.branch(shareable, share, copy);
+                    c.start(share);
+                    let carrier_bytes = c.constant(24);
+                    copy_value(c, to, from, carrier_bytes);
+                    c.jump(done, &[]);
+                    c.start(copy);
                     let one = c.constant(1);
                     let tag = c.binary(BinaryOp::BitAnd, meta, one);
                     let zero = c.constant(0);
@@ -321,7 +333,7 @@ impl Derive<'_> {
                 };
                 let zero = c.constant(0);
                 let empty = c.compare(CompareOp::Eq, len, zero);
-                let (none, some, done) = (c.block(&[]), c.block(&[]), c.block(&[]));
+                let (none, some) = (c.block(&[]), c.block(&[]));
                 c.branch(empty, none, some);
                 // An empty copy allocates nothing (budgets.md).
                 c.start(none);

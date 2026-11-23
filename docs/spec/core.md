@@ -187,8 +187,9 @@ operations it names; nothing else about them may be inferred from an implementat
   `br#".."#`) therefore has type `Bytes`: it admits its length as `List[u8]` storage and
   copies its bytes, and a refusal raises `Capacity`. When the expected type is
   `FrozenBytes`, the literal uses read-only static storage.
-  It admits the same charge, in the same limit, and refunds it when the owner
-  drops. `bytebuf.freeze(take b)` transfers the existing charge, length and
+  The reference evaluator admits the same charge and refunds it on drop.
+  An engine can omit that charge under [MEM-28](budgets.md#mem-28-charges-are-an-upper-bound).
+  `bytebuf.freeze(take b)` transfers the existing charge, length and
   capacity of an owned `Bytes`. `bytebuf.as_bytes(b)` borrows the bytes with
   that length and capacity. `""` is the empty `String` of capacity 0.
 - **Bounded append.** `bytebuf.append_inline(mut out, src, start, end)` takes

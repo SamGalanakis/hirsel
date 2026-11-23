@@ -175,8 +175,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let Some(charge) = self.konst(u64t, len.next_multiple_of(8), n) else {
                 return (ty, None);
             };
-            // MEM-24: both carriers admit a List[u8] of capacity len, rounded
-            // up to eight. The heap block uses the rounded size for word stores.
+            // MEM-24 gives the reference charge for both carriers. The heap
+            // block also uses the rounded size for its word stores.
             let block = self.value(Ty::Ptr);
             let Some(size) = (if frozen {
                 self.konst(u64t, 0, n)

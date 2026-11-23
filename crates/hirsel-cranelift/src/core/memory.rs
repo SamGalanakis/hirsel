@@ -161,13 +161,12 @@ impl Function<'_, '_, '_> {
                         edge: hirsel_core_layout::FieldTy::FrozenBytes
                     }
                 ) {
-                    let r = self.c_call(
-                        "hirsel_core_admit_frozen_bytes",
-                        &[p, u],
-                        &[p, u, u],
-                        &[ctx, charge],
-                    )?;
-                    [r[0], r[1], r[2]]
+                    let tag = self.b.ins().iconst(
+                        types::I64,
+                        hirsel_core_layout::FROZEN_STATIC_UNCHARGED as i64,
+                    );
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    [tag, zero, zero]
                 } else if let AllocPlace::Frame(frame) = place {
                     let frame = self.get(frame);
                     let overflow = overflow.map(|v| self.get(v));

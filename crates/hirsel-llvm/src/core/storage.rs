@@ -664,9 +664,9 @@ impl FunctionEmitter<'_> {
                 edge: FieldTy::FrozenBytes
             }
         ) {
-            return self.allocation(
-                "hirsel_core_admit_frozen_bytes",
-                &[ptr(CONTEXT), word(charge.clone())],
+            return (
+                Value::IntToPtr(hirsel_core_layout::FROZEN_STATIC_UNCHARGED),
+                int(0),
             );
         }
         // The prefix follows the block's cleanup class (crate docs,

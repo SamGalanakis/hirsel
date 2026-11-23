@@ -1,5 +1,5 @@
 //! Read-only byte storage. Its descriptor has the same size and capacity
-//! niche as Bytes, but word 1 holds an encoded length or the static payer.
+//! niche as Bytes, but word 1 holds an encoded length or an odd static tag.
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {

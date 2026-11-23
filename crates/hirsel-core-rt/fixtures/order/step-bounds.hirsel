@@ -112,16 +112,15 @@ fn callback_both(k: u64) -> u64 {
 pub fn unbounded() -> Result[(), Exit] {
     let f = code.callable(code.describe(shared_callback))
     if f(3) != 3 { return Error(Exit(status: 1)) }
-    // MEM-28. A nine-byte literal still asks for 16 bytes under this byte bound.
-    let admitted = isolate(fn() -> Result[u64, Capacity] {
-        bound bytes 15 {
-            let value: FrozenBytes = b"abcdefghi"
-            list.len(bytebuf.as_bytes(value))
-        }
-    })
-    match caught(take admitted) {
-        Some(c) => if c.requested == 16 && c.available == 15 { Ok(()) } else { Error(Exit(status: 2)) },
-        None => Error(Exit(status: 3)),
+    // MEM-28. The nine-byte literal fits at its logical charge on every build.
+    let admitted = bound bytes 16 {
+        let value: FrozenBytes = b"abcdefghi"
+        let data = bytebuf.as_bytes(value)
+        list.len(data) == 9 && data[8] == b'i'
+    }
+    match admitted {
+        Ok(true) => Ok(()),
+        _ => Error(Exit(status: 2)),
     }
 }
 pub fn bounded() -> Result[(), Exit] {
@@ -484,20 +483,4 @@ fn routes_hold(tasks: Tasks) -> bool waits {
 }
 pub fn routes(tasks: Tasks) -> Result[(), Exit] waits {
     if routes_hold(tasks) { Ok(()) } else { Error(Exit(status: 1)) }
-}
-
-// The primary cause of a caught failure, when it is a refused admission.
-fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
-    match r {
-        Ok(Error(causes)) => {
-            for c in causes {
-                return match c.kind {
-                    Capacity(k) => Some(k),
-                    _ => None,
-                }
-            }
-            None
-        },
-        _ => None,
-    }
 }

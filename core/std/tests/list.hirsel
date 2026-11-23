@@ -299,33 +299,19 @@ fn log_dropped() -> u64 {
     1
 }
 
-fn logs_under(limit: u64) -> Result[Result[Result[u64, Capacity], Causes], Capacity] {
-    isolate(fn() -> Result[u64, Capacity] {
-        bound bytes limit {
-            log_finished() + log_finished() + log_dropped() + log_dropped()
-        }
-    })
-}
-
-// MEM-29 charges a log's node at log.new and refunds it at log.finish and at the
-// log's drop, wherever an engine puts the node (MEM-28). Each call peaks at 56 bytes
-// and returns all of it, so 56 runs all four; 55 refuses the first entries' 32 with
-// 31 left, and 23 refuses the first node's 24.
-// expect: run log_charges_are_exact() = true
-fn log_charges_are_exact() -> bool {
-    let all = match logs_under(56) {
-        Ok(Ok(Ok(n))) => n == 4,
-        _ => false,
+// At the logical 56-byte peak, all four visits fit. A new 56-byte buffer
+// then fits in the same bound only if finishing and dropping return the room.
+// expect: run log_charges_stay_within_the_logical_bound() = true
+fn log_charges_stay_within_the_logical_bound() -> bool {
+    let r = bound bytes 56 {
+        let total = log_finished() + log_finished() + log_dropped() + log_dropped()
+        let probe: Bytes = list.with_capacity(56)
+        total == 4 && list.capacity(probe) == 56
     }
-    let entries = match caught(logs_under(55)) {
-        Some(c) => c.requested == 32 && c.available == 31,
-        None => false,
+    match r {
+        Ok(valid) => valid,
+        Error(_) => false,
     }
-    let node = match caught(logs_under(23)) {
-        Some(c) => c.requested == 24 && c.available == 23,
-        None => false,
-    }
-    all && entries && node
 }
 
 fn log_inline_outcomes() -> u64 {

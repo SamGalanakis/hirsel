@@ -51,7 +51,8 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 19248
+    "lines": 19261,
+    "reason": "reexec-1902"
   },
   "core/std/char.hirsel": {
     "lines": 4741
@@ -78,7 +79,8 @@
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 2944
+    "lines": 3041,
+    "reason": "reexec-1902"
   },
   "core/std/prop.hirsel": {
     "lines": 1743

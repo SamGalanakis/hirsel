@@ -1,0 +1,147 @@
+// AP3 in memory: every page a commit or a cut stamped from `from` on takes its
+// canonical image, the one a load of that state builds.
+fn canonical_roots(mut roots: Roots, from: u64) -> Result[(), Error] {
+    page_result(std.page.canonicalize(mut roots.collections.root, from))?
+    page_result(std.page.canonicalize(mut roots.streams.root, from))?
+    page_result(std.page.canonicalize(mut roots.catalog.root, from))
+}
+
+fn canonical_tree(mut tree: PageTree, from: u64) -> Result[(), Error] {
+    page_result(std.page.canonicalize(mut tree.root, from))
+}
+
+// The least step bound under which fetching key `k` returns.
+fn fetch_threshold[V](tx: Tx, sh: Shape[u64, V], k: u64) -> u64 {
+    let mut low = 0u64
+    let mut high = 100000u64
+    while low < high {
+        let mid = (low + high) / 2
+        let probe = bound steps mid {
+            let _ = fetch(tx, sh, k)
+        }
+        match probe {
+            Ok(_) => {
+                high = mid
+            },
+            Error(_) => {
+                low = mid + 1
+            },
+        }
+    }
+    low
+}
+
+// The fetch threshold of every 17th key of `rows` and of keys 1 and 2 of `large`.
+fn layout_thresholds(mut db: Db) -> List[u64] waits {
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let big = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    let again = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[List[u64], Error] {
+        let mut seen: List[u64] = list.new()
+        let mut k = 1u64
+        while k <= 2000 {
+            list.push(mut seen, fetch_threshold(tx, shape(t), k))
+            k += 17
+        }
+        list.push(mut seen, fetch_threshold(tx, shape(big), 1))
+        list.push(mut seen, fetch_threshold(tx, shape(big), 2))
+        Ok(take seen)
+    }))
+    match take again {
+        Committed(Done(value: take seen, ..)) => take seen,
+        _ => fail("layout read"),
+    }
+}
+
+// Commits: 2,000 rows written in descending key order in one transaction,
+// then a large and a small row of `large`, then every seventh row deleted,
+// then single-row writes. Under `held`, a pin keeps the tables' first
+// version, so every commit copies the pages it edits.
+fn layout_commits(mut db: Db, held: bool) -> bool waits {
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(create_table(mut db, spec("large", std.codec.key_u64(), std.codec.of_string())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let big = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    let mut raw: Bytes = list.with_capacity(65536)
+    list.fill(mut raw, 65536, 97u8)
+    let large = result.unwrap(string.from_utf8(take raw))
+    let steps = [0u8, 1u8, 2u8, 3u8, 3u8, 3u8, 4u8, 4u8]
+    let mut fresh = 5000u64
+    for step in steps {
+        if held && step == 0u8 {
+            let first = snapshot(db)
+            let _ = result.unwrap(pin(mut db, "held", first))
+        }
+        let wrote = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+            match step {
+                0u8 => {
+                    let mut k = 2000u64
+                    while k > 0 {
+                        put(mut tx, t, k, k)?
+                        k -= 1
+                    }
+                },
+                1u8 => {
+                    put(mut tx, big, 1, large)?
+                    put(mut tx, big, 2, "small")?
+                },
+                2u8 => {
+                    let mut k = 7u64
+                    while k <= 2000 {
+                        let _ = delete(mut tx, t, k)?
+                        k += 7
+                    }
+                },
+                3u8 => put(mut tx, t, fresh, fresh)?,
+                _ => put(mut tx, t, fresh - 4000, fresh)?,
+            }
+            Ok(())
+        }))
+        match take wrote {
+            Committed(_) => (),
+            _ => return false,
+        }
+        fresh += 1
+    }
+    true
+}
+
+// MEM-30: a body's steps follow from its source and its values, and the page
+// layout it reads is one of those values. A re-execution reads a base that a
+// checkpoint, a MANIFEST load or journal recovery may have rebuilt, so every
+// load path must leave the layout the live commits left, and so must commits
+// made while a pin shares their pages. Oracle: the fetch step thresholds of
+// the live store, compared across the four load paths and the pinned run.
+pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let dir = disk_test_directory(d)
+    let mut db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    if !layout_commits(mut db, false) {
+        return false
+    }
+    let live = layout_thresholds(mut db)
+    result.unwrap(close(take db))
+    let mut replayed_db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let replayed = layout_thresholds(mut replayed_db)
+    let _ = result.unwrap(checkpoint(mut replayed_db))
+    let cut = layout_thresholds(mut replayed_db)
+    result.unwrap(close(take replayed_db))
+    let mut loaded_db = result.unwrap(open(tasks, dir, c, r, defaults()))
+    let loaded = layout_thresholds(mut loaded_db)
+    result.unwrap(close(take loaded_db))
+    let pinned_dir = disk_test_directory(d)
+    let mut held_db = result.unwrap(open(tasks, pinned_dir, c, r, defaults()))
+    if !layout_commits(mut held_db, true) {
+        return false
+    }
+    let held = layout_thresholds(mut held_db)
+    result.unwrap(close(take held_db))
+    live == replayed && live == cut && live == loaded && live == held
+}
+
+@test
+fn disk_test_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_load_path_layout(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

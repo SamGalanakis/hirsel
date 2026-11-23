@@ -1574,6 +1574,7 @@ fn prepare_metered_pages[R, A](take finished: Finished[R, A]) -> Result[Finished
             let mut draw = first
             materialize_rows(mut prepared.roots.collections, prepared.ops, first, mut draw)?
             materialize_rows(mut prepared.roots.streams, prepared.stream_ops, first, mut draw)?
+            canonical_roots(mut prepared.roots, first)?
             prepared.prepared_roots = true
             Ok(Prepared(take prepared))
         },
@@ -1747,6 +1748,7 @@ fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[
         let mut stamp_out = first
         materialize_rows(mut roots.collections, ran.edits, first, mut stamp_out)?
         materialize_rows(mut roots.streams, ran.replies, first, mut stamp_out)?
+        canonical_roots(mut roots, ran.first_stamp)?
         Ok((take roots, stamp_out))
     })?
     db.next_node = order.max(db.next_node, after - 1)
@@ -3131,9 +3133,12 @@ fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u
     newest
 }
 
+// Applies the rows in key order, the order their journal frame records and
+// replay applies them, so a commit splits and merges pages as recovery does.
 fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut draw: u64) -> Result[(), Error] {
-    for slot in 0u64 .. operations.count {
-        let op = data_row(operations, slot)
+    let order = capacity(data_order(operations))?
+    for position in 0u64 .. operations.count {
+        let op = ordered_row(operations, order, position)
         match op.value {
             Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
             Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
@@ -4533,6 +4538,7 @@ fn define_store_collection(mut tree: PageTree, id: u32, kind: u8, mut last: u64)
     let first = stamp_after(last)?
     let mut next_stamp = first
     define_collection(mut tree, id, kind, first, mut next_stamp)?
+    canonical_tree(mut tree, first)?
     last = next_stamp - 1
     Ok(())
 }
@@ -4541,6 +4547,7 @@ fn bulk_store_collection(mut tree: PageTree, id: u32, kind: u8, rows: List[std.p
     let first = stamp_after(last)?
     let mut next_stamp = first
     bulk_collection(mut tree, id, kind, rows, first, mut next_stamp)?
+    canonical_tree(mut tree, first)?
     last = next_stamp - 1
     Ok(())
 }
@@ -4549,6 +4556,7 @@ fn remove_store_row(mut tree: PageTree, key: Bytes, mut last: u64) -> Result[(),
     let first = stamp_after(last)?
     let mut next_stamp = first
     let _ = remove_page_row(mut tree, key, first, mut next_stamp)?
+    canonical_tree(mut tree, first)?
     last = next_stamp - 1
     Ok(())
 }
@@ -4562,6 +4570,7 @@ fn remove_store_collection(mut tree: PageTree, id: u32, mut last: u64) -> Result
     let first = stamp_after(last)?
     let mut next_stamp = first
     let _ = drop_collection(mut tree, id, first, mut next_stamp)?
+    canonical_tree(mut tree, first)?
     last = next_stamp - 1
     Ok(charge)
 }
@@ -5115,6 +5124,7 @@ fn insert_row(mut ids: u64, mut roots: Roots, take p: Bytes, take raw: Bytes) ->
         define_collection(mut roots.collections, list.word_be(p, 0), 1, first, mut next_stamp)?
     }
     put_page_row(mut roots.collections, p, raw, first, mut next_stamp)?
+    canonical_tree(mut roots.collections, first)?
     ids = next_stamp - 1
     Ok(replaced)
 }
@@ -5282,6 +5292,7 @@ fn catalog_insert(mut ids: u64, roots: Roots, k: Bytes, v: Bytes) -> Result[Root
     let first = stamp_after(ids)?
     let mut next_stamp = first
     put_page_row(mut edited.catalog, k, v, first, mut next_stamp)?
+    canonical_tree(mut edited.catalog, first)?
     ids = next_stamp - 1
     Ok(take edited)
 }
@@ -11344,6 +11355,7 @@ fn planned_ranges(mut plan: SchemaPlan, imported: List[ImportedRange]) -> Result
             deploy_result(put_collection(mut plan.roots.collections, key, replaced.tree, replaced.kind, private_from, mut next_stamp))?
         }
     }
+    deploy_result(canonical_tree(mut plan.roots.collections, private_from))?
     plan.next_node = next_stamp - 1
     Ok(())
 }
@@ -15115,6 +15127,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             },
         }
     }
+    canonical_tree(mut tree, stamp_after(ids)?)?
     ids = next_stamp - 1
     Ok(())
 }

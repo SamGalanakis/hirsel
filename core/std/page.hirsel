@@ -1032,10 +1032,13 @@ fn checked_sealed_shape(image: Image) -> Result[(u64, u64), Error] {
 
 /// Write a fresh canonical image and return the old body indices in disk order.
 pub fn seal(page: Arc[Page]) -> Result[(Image, List[u16]), Error] {
-    let image = view page.image
+    sealed_image(page.image, list.len(page.blobs))
+}
+
+fn sealed_image(image: Image, bodies_held: u64) -> Result[(Image, List[u16]), Error] {
     let (size, extension) = checked_sealed_shape(image)?
     let mut raw: Bytes = list.with_capacity(size)
-    let mut bodies: List[u16] = list.with_capacity(list.len(page.blobs))
+    let mut bodies: List[u16] = list.with_capacity(bodies_held)
     let is_leaf = level(image) == 0
     write_sealed(mut raw, image, size, extension, scoped fn(mut out: Bytes, value: u64) {
         if is_leaf && out[value] == 1 {
@@ -1045,6 +1048,47 @@ pub fn seal(page: Arc[Page]) -> Result[(Image, List[u16]), Error] {
         }
     })
     Ok((Image(raw: take raw, domain: image.domain), take bodies))
+}
+
+/// Put each page stamped `from` or later, reached through such pages, in its
+/// canonical image (AP3): no dead space, entries packed in slot order under
+/// the longest common prefix, blob bodies numbered in slot order. A commit's
+/// edits and a load of that commit then leave the same images, and a body's
+/// steps over them (MEM-30) do not depend on how its base was loaded.
+pub fn canonicalize(mut root: Arc[Page], from: u64) -> Result[(), Error] {
+    if stamp(root.image) < from {
+        return Ok(())
+    }
+    // A page stamped from `from` on was made or restamped by these edits; one a
+    // draft still shares with its base is copied before it is rewritten.
+    arc.update(mut root, scoped fn(mut page: Page) -> Result[(), Error] {
+        for slot in 0u64 .. list.len(page.kids) {
+            canonicalize(mut page.kids[slot], from)?
+        }
+        canonical_page(mut page)
+    })
+}
+
+fn canonical_page(mut page: Page) -> Result[(), Error] {
+    if count(page.image) == 0 {
+        if list.len(page.image.raw) != HEADER {
+            let mut raw: Bytes = list.with_capacity(HEADER)
+            list.fill(mut raw, HEADER, 0)
+            header(mut raw, 0, level(page.image), stamp(page.image), 0, 0, HEADER)
+            page.image = Image(raw: take raw, domain: page.image.domain)
+        }
+        return Ok(())
+    }
+    let (take image, bodies) = sealed_image(page.image, list.len(page.blobs))?
+    if list.len(bodies) != 0 {
+        let mut blobs: List[Arc[Bytes]] = list.with_capacity(list.len(bodies))
+        for held in bodies {
+            list.push(mut blobs, arc.share(page.blobs[int.widen(held)]))
+        }
+        page.blobs = take blobs
+    }
+    page.image = take image
+    Ok(())
 }
 
 /// Append a canonical PAGE to the pack buffer, filling edges from the
@@ -2355,7 +2399,8 @@ fn inline_leaf_fit(page: Page, key: Bytes, data: Bytes, has_sibling: bool) -> Op
     } else {
         (0u64, 0u64, 0u64)
     }
-    if key_width < p {
+    // An empty leaf's first key takes the whole key as its prefix.
+    if key_width < p || count(page.image) == 0 {
         return None
     }
     if list.compare_bytes(list.slice(page.image.raw, HEADER, HEADER + p), list.slice(key, 0, p)) != Equal {
@@ -2366,9 +2411,11 @@ fn inline_leaf_fit(page: Page, key: Bytes, data: Bytes, has_sibling: bool) -> Op
     } else {
         1u64
     })
+    // The leaf is canonical, so its size after the write is its length with
+    // the entry's new width in place of its old one.
     let suffix = key_width - p
-    let needed = u32_at(page.image.raw, 16) + 5 + suffix + value_width + 2 * total
-    if needed > PRIVATE_MAX || !legal(0, total, needed - u16_at(page.image.raw, 6) - old_size) {
+    let needed = u32_at(page.image.raw, 16) + 5 + suffix + value_width + 2 * total - old_size
+    if needed > PRIVATE_MAX || !legal(0, total, needed) {
         return None
     }
     Some(InlineFit(slot: slot, hit: hit, rewrite: false, old_size: old_size, old_rows: old_rows, old_charge: old_charge, charge: charge, needed: needed))
@@ -2384,6 +2431,56 @@ fn reserve_inline_fit(mut page: Page, fit: InlineFit) -> Result[(), Capacity] {
     Ok(())
 }
 
+// Open `size` bytes for slot's entry in a canonical leaf, in slot order, and
+// keep the leaf canonical: the entries after it and the slot array move, and
+// the image ends at `needed`, within the room its fit reserved. The prefix
+// stays the longest common one, since the key shares it and adding a key
+// between or beyond the first and last cannot lengthen it.
+fn canonical_space(mut image: Image, slot: u64, hit: bool, old_size: u64, size: u64, needed: u64) -> u64 {
+    let n = count(image)
+    let old_len = list.len(image.raw)
+    let heap = old_len - 2 * n
+    let at = if slot < n {
+        entry_at(image, slot)
+    } else {
+        heap
+    }
+    let tail = at + old_size
+    let new_heap = heap + size - old_size
+    if needed >= old_len {
+        list.fill(mut image.raw, needed - old_len, 0)
+        if hit {
+            list.copy_within(mut image.raw, heap, new_heap, 2 * n)
+        } else {
+            list.copy_within(mut image.raw, heap + 2 * slot, new_heap + 2 * slot + 2, 2 * (n - slot))
+            list.copy_within(mut image.raw, heap, new_heap, 2 * slot)
+        }
+        list.copy_within(mut image.raw, tail, at + size, heap - tail)
+    } else {
+        list.copy_within(mut image.raw, tail, at + size, heap - tail)
+        list.copy_within(mut image.raw, heap, new_heap, 2 * n)
+        list.truncate(mut image.raw, needed)
+    }
+    let total = if hit {
+        n
+    } else {
+        n + 1
+    }
+    for i in 0u64 .. total {
+        if i != slot {
+            let field = new_heap + 2 * i
+            let offset = u16_at(image.raw, field)
+            if offset > at || (!hit && offset == at) {
+                put16(mut image.raw, field, offset + size - old_size)
+            }
+        }
+    }
+    put16(mut image.raw, new_heap + 2 * slot, at)
+    put16(mut image.raw, 2, total)
+    put32(mut image.raw, 16, new_heap)
+    at
+}
+
 fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling: bool) -> Result[bool, Capacity] {
     let Some(fit) = inline_leaf_fit(page, key, data, has_sibling) else {
         return Ok(false)
@@ -2397,14 +2494,14 @@ fn put_inline_leaf(mut page: Page, key: Bytes, data: Bytes, id: u64, has_sibling
     let p = u16_at(page.image.raw, 4)
     let key_width = list.len(key)
     let value_width = list.len(data)
-    let at = slot_space(mut page.image, fit.slot, fit.hit, fit.old_size, fit.needed)
+    let size = 5 + key_width - p + value_width
+    let at = canonical_space(mut page.image, fit.slot, fit.hit, fit.old_size, size, fit.needed)
     put16(mut page.image.raw, at, key_width - p)
     list.copy_from_slice(mut page.image.raw, at + 2, list.slice(key, p, key_width))
     let value = at + 2 + key_width - p
     page.image.raw[value] = 0
     put16(mut page.image.raw, value + 1, value_width)
     list.copy_from_slice(mut page.image.raw, value + 3, data)
-    put32(mut page.image.raw, 16, value + 3 + value_width)
     changed_totals(mut page, fit.old_rows, fit.old_charge, 1, fit.charge)
     list.set_word_le(mut page.image.raw, 8, id)
     Ok(true)

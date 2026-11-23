@@ -119,11 +119,17 @@ impl CodeStore {
         sync_dir(&self.root)
     }
 
-    /// Remove every object `keep` refuses; answer how many.
+    /// Remove every object `keep` refuses that was not published within `fresh`; answer
+    /// how many. `put` refreshes an object it finds present, so a publication's whole
+    /// closure stays at least `fresh` after it was published, until an admission roots it.
     pub(crate) fn collect(
         &self,
         keep: impl Fn(ObjectKind, ContentHash) -> bool,
+        fresh: std::time::Duration,
     ) -> io::Result<u64> {
+        let floor = std::time::SystemTime::now()
+            .checked_sub(fresh)
+            .unwrap_or(std::time::UNIX_EPOCH);
         let mut removed = 0;
         for kind in [
             ObjectKind::Recipe,
@@ -143,6 +149,7 @@ impl CodeStore {
                 if let Some(name) = row.file_name().to_str()
                     && let Ok(hash) = crate::native::recipe_build::parse_root(name)
                     && !keep(kind, hash)
+                    && row.metadata()?.modified()? < floor
                 {
                     fs::remove_file(row.path())?;
                     removed += 1;
@@ -161,6 +168,12 @@ impl CodeStore {
         };
         let path = self.path(kind, object.hash);
         if path.try_exists()? {
+            // Published again: refresh it, so collection keeps it as long as a new object.
+            // A store this user does not own is not this user's to collect either.
+            match File::open(&path)?.set_modified(std::time::SystemTime::now()) {
+                Err(error) if error.kind() != io::ErrorKind::PermissionDenied => return Err(error),
+                _ => {}
+            }
             return Ok(object);
         }
         let parent = path.parent().expect("objects have a kind directory");

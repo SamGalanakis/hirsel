@@ -1,4 +1,4 @@
-// Laws of the platform host (RUNNER-SPEC §14.7: L39, L41, L42, L43, L45, L48, L49, L51) over the faked
+// Laws of the platform host (RUNNER-SPEC §14.7: L39, L41, L42, L43, L45, L48, L49, L51, L52) over the faked
 // launcher. Each law drives the host through the session's requests and events. Its oracle
 // is the outcome the cited rule states: which serving launches the launcher is asked for,
 // at which generation, and what each wake row then holds. A started serving launch stands
@@ -875,10 +875,10 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let tried = prepared(mut d, serving)
     pump(mut d, take tried)
     let discarded = last(d, "g")
-    answer(mut d, serving, PlaceDrift)
+    answer(mut d, serving, PlaceRefused("ExportMismatch"))
     expect(is_dirty(d, "g", 1u64), "L43: a refused cutover moved the row")
     match deploy_outcome(d.h, "g") {
-        Some(Failed(why)) => expect(why == "drift", "L43: the refused deploy's reason"),
+        Some(Failed(why)) => expect(why == "ExportMismatch", "L43: the refused deploy's reason"),
         _ => fail("L43: the refused deploy's outcome is not recorded")
     }
     finish(mut d, discarded, Code(0i32), Some(None))
@@ -931,6 +931,76 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
     list.push(mut late, Ended(clone(first), launcher.End(status: Code(0i32), report: Some(None), readable: false)))
     feed(mut re, take late)
     expect(is_dirty(re, "g", 1u64), "L43: the old incarnation's late report cleared the re-added group")
+    Ok(())
+}
+
+// The deploy row's current attempt.
+fn deploy_attempt(r: Rig) -> launcher.Attempt {
+    match store.get(store.snapshot(r.h.db), store.shape(r.h.t.deploys), "g") {
+        Ok(Some(d)) => d.attempt,
+        _ => fail("no deploy row")
+    }
+}
+
+// The last export command OLD was sent: its attempt and whether it is a retry.
+fn last_export(r: Rig) -> Option[(Bytes, bool)] {
+    let mut found: Option[(Bytes, bool)] = None
+    for q in r.asked {
+        if let Command(_, HostExport(a, retry)) = q {
+            found = Some((clone(a), retry))
+        }
+    }
+    found
+}
+
+// The last cutover command OLD was sent: its attempt and whether it is a retry.
+fn last_cutover(r: Rig) -> Option[(Bytes, bool)] {
+    let mut found: Option[(Bytes, bool)] = None
+    for q in r.asked {
+        if let Command(_, HostCutover(a, _, _, retry)) = q {
+            found = Some((clone(a), retry))
+        }
+    }
+    found
+}
+
+// L52 `deploy_drift_retry` (launch.md "Hot deploy", RUNNER-SPEC §14.3 "Abort"): OLD's first
+// drift spends the deploy's one retry. OLD is not aborted; it exports again at a fresh
+// attempt as a retry under its original pause, the import starts a candidate at a new
+// generation, and that cutover is a retry. The discarded candidate's end changes nothing.
+// A second drift aborts the retried attempt and records `Failed("drift")` with the row at
+// `Dirty(g)`.
+@test
+fn deploy_drift_retry(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let (r0, old, go) = cut_case(c, rnd)
+    let mut r = take r0
+    pump(mut r, take go)
+    let first = deploy_attempt(r)
+    let discarded = last(r, "g")
+    answer(mut r, old, PlaceDrift)
+    let retry = deploy_attempt(r)
+    expect(still_preparing(r) && asked_of(r, 3u64) == 0u64, "L52: the first drift aborted OLD or failed the deploy")
+    expect(retry.lo != first.lo || retry.hi != first.hi, "L52: the retry reused the drifted attempt")
+    match last_export(r) {
+        Some((a, true)) => expect(a == attempt_bytes(retry), "L52: the retry export does not name the fresh attempt"),
+        _ => fail("L52: OLD was not asked to export again as a retry")
+    }
+    finish(mut r, discarded, Code(0i32), Some(None))
+    expect(is_dirty(r, "g", 1u64) && gens(r, "g") == two(1u64, 2u64), "L52: the discarded candidate's end changed the row or started a probe")
+    old_says(mut r, old, PlaceExported(1u64, "export-2"))
+    finish(mut r, helper_child(old, PrepareMode(retry, "export-2")), Code(0i32), None)
+    let cut = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
+    pump(mut r, take cut)
+    let mut three = two(1u64, 2u64)
+    list.push(mut three, 3u64)
+    expect(gens(r, "g") == three, "L52: the retry's candidate did not start at a new generation")
+    match last_cutover(r) {
+        Some((a, true)) => expect(a == attempt_bytes(retry), "L52: the retry cutover does not name the fresh attempt"),
+        _ => fail("L52: the retry's cutover is not a retry under the original pause")
+    }
+    answer(mut r, old, PlaceDrift)
+    expect(failed_with(r, "drift") && is_dirty(r, "g", 1u64), "L52: the second drift did not fail the deploy at Dirty(g)")
+    expect(asked_of(r, 3u64) == 1u64 && launcher.held(r.f) == 0u64, "L52: the second drift did not abort OLD once and release the held answer")
     Ok(())
 }
 

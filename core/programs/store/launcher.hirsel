@@ -150,6 +150,9 @@ pub type Request: codec + send = Hello
     | Assemble(Attempt)
 // The host's decision on this cutover is durable: forget its saved result.
     | CutoverAck(Child, Attempt)
+// The host could not read its roots: end the fence, remove nothing, and apply the
+// releases it deferred. Answered `Collected(0)`.
+    | CollectAbort
 
 pub type Status: codec + send = Code(i32) | Signal(i32)
 
@@ -538,6 +541,10 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
             push_event(mut out, Fenced)
         },
         Collect(_) => {
+            f.fenced = false
+            push_event(mut out, Collected(0u64))
+        },
+        CollectAbort => {
             f.fenced = false
             push_event(mut out, Collected(0u64))
         },

@@ -228,6 +228,7 @@ pub(crate) enum Request {
     AdmitEnd(Attempt),
     Assemble(Attempt),
     CutoverAck(Child, Attempt),
+    CollectAbort,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -860,6 +861,7 @@ session_wire!(Request, "request tag", w, r;
         c.put(w);
         a.put(w);
     } => Self::CutoverAck(Child::get(r)?, Attempt::get(r)?),
+    17 => CollectAbort => Self::CollectAbort,
 );
 
 impl Wire for End {
@@ -1248,6 +1250,7 @@ mod tests {
                 Request::CutoverAck(serving(), attempt()),
                 "100000000100000067030000000000000001000000070000000000000008070605040302011817161514131211".into(),
             ),
+            (Request::CollectAbort, "11000000".into()),
         ];
         let events = [
             (

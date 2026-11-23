@@ -827,6 +827,10 @@ impl<I: Images> Launcher<I> {
             Request::AdmitEnd(attempt) => self.admit_end(attempt),
             Request::Assemble(attempt) => self.assemble(attempt),
             Request::CutoverAck(child, attempt) => drop(self.cutovers.remove(&(child, attempt))),
+            Request::CollectAbort => {
+                self.unfence();
+                self.emit(Event::Collected(0));
+            }
         }
     }
 

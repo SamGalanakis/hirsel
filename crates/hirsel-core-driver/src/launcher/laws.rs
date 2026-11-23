@@ -637,6 +637,21 @@ fn collect_reservation_handoff() {
     ));
     assert_eq!(rig.ask(Request::Collect(vec![])), [Event::Collected(0)]);
     assert!(exists(1));
+
+    // A host that cannot read its roots aborts: nothing is removed, the fence ends at
+    // once, and the release it deferred applies, so the next collection removes 4.
+    fs::write(objects.join(name_hex(name(4))), b"object").unwrap();
+    rig.launcher.reserve(attempt(6), BTreeSet::from([name(4)]));
+    rig.ask(Request::CollectBegin);
+    assert!(rig.ask(Request::Release(attempt(6))).is_empty());
+    assert_eq!(rig.ask(Request::CollectAbort), [Event::Collected(0)]);
+    assert!(exists(1) && exists(4));
+    rig.ask(Request::CollectBegin);
+    assert_eq!(
+        rig.ask(Request::Collect(vec![name(1).to_vec()])),
+        [Event::Collected(1)]
+    );
+    assert!(exists(1) && !exists(4));
 }
 
 /// `child_mode_authority`, launcher half (launch.md "Child modes"): the serving child holds
@@ -1261,7 +1276,7 @@ fn host_restart_wired() {
 /// object a kept assembly's recipe lists and each object an admission in flight reserved,
 /// and removes every other code object, assembly record and image.
 #[test]
-fn code_collection_keeps_reached_and_reserved_objects() {
+fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     use super::stores::Stores;
     use crate::code_admission::ObjectKey;
     use crate::code_store::{CodeStore, ObjectKind};
@@ -1279,6 +1294,7 @@ fn code_collection_keeps_reached_and_reserved_objects() {
     let annex = put(ObjectKind::Annex, b"listed annex");
     let reserved = put(ObjectKind::Body, b"reserved body");
     let garbage = put(ObjectKind::Body, b"unlisted body");
+    let reused = put(ObjectKind::Body, b"body an old publication shared");
     let recipe = |groups, bodies| Recipe {
         entry: Identity::plain(DefPath::from_full("app@1/main/main").unwrap()),
         address: ContentHash([0; 32]),
@@ -1307,6 +1323,31 @@ fn code_collection_keeps_reached_and_reserved_objects() {
     };
     let live = assemble(kept.hash, b"kept image");
     let old = assemble(dropped.hash, b"dropped image");
+    // Everything so far was published two days ago.
+    let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+    for kind in std::fs::read_dir(state.join("code")).unwrap() {
+        for object in std::fs::read_dir(kind.unwrap().path()).unwrap() {
+            let file = std::fs::File::open(object.unwrap().path()).unwrap();
+            file.set_modified(long_ago).unwrap();
+        }
+    }
+    // An operator publishes a recipe now and admits it after the collection below: no
+    // root names it yet, and it shares a body an old publication already stored.
+    let new_group = put(ObjectKind::Group, b"group published now");
+    let shared = put(ObjectKind::Body, b"body an old publication shared");
+    let annex_now = put(ObjectKind::Annex, b"annex published now");
+    let published = put(
+        ObjectKind::Recipe,
+        &recipe(
+            vec![new_group],
+            vec![BodyRef {
+                body: shared,
+                annex: annex_now,
+            }],
+        )
+        .encode(),
+    );
+    assert_eq!(shared.hash, reused.hash);
 
     let reserved_key = ObjectKey {
         kind: ObjectKind::Body,
@@ -1324,6 +1365,10 @@ fn code_collection_keeps_reached_and_reserved_objects() {
         (ObjectKind::Body, body),
         (ObjectKind::Annex, annex),
         (ObjectKind::Body, reserved),
+        (ObjectKind::Recipe, published),
+        (ObjectKind::Group, new_group),
+        (ObjectKind::Body, shared),
+        (ObjectKind::Annex, annex_now),
     ] {
         assert!(held(kind, object.hash), "{kind:?} removed");
     }

@@ -409,7 +409,12 @@ The platform host records the attempt as `Preparing` before its describe, previe
 prepare children and OLD's export. A `Preparing` row proves no cutover was sent, so after a host
 loss it is aborted: OLD, if it still runs, is sent `HostAbort`, and the failure is recorded on
 OLD's answer or end, never before (RUNNER-SPEC §14.3 "Preparing"). An open that proves NEW's
-install must also report the release that the preview reported for NEW.
+install must also report the release that the preview reported for NEW. The catalog records no store
+ID to match against the open's: a group's store is the one directory its registration bound,
+which no other group may register; activation `v` comes from OLD's export of that store; and the
+runner's write pause already checks that the prepared file came from its own store. A store ID
+would add only the case of an operator swapping two groups' directories out of band, where the
+group serves the swapped data whatever the host records.
 The platform host's catalog keeps the attempt's pending row from before the candidate's start
 to the cutover's decision, with the exact cutover command it sent; a new session sends that
 command again and the launcher answers it from what it kept, so a host lost at any point in
@@ -423,8 +428,12 @@ the deploy before anything is touched. The preview, the prepare child and the cu
 the attempt's one assembly record: the preview runs that record's image with the recipe's
 `n_place` and grant bindings; the prepare child is given that image's digest; and before the
 host accepts the import it checks that the prepared target's `Describe` and release record are
-the ones the preview reported for that record. A retry after drift keeps the record and takes a
-fresh attempt and export. The write pause keeps hot deploy's own checks (attempt and prepared
+the ones the preview reported for that record. OLD's first drift is retried once and keeps the
+record: the deploy row returns to `Preparing` at a fresh attempt, OLD exports again under its
+original write pause, the prepare child and import run again with the preview's `Describe` and
+release, and the candidate starts at a new generation; that cutover keeps the original pause
+deadline. A drift of the retried attempt fails the deploy (`drift`). The row records that the
+retry is spent, so a host restarted after it re-sends the retry's cutover unchanged. The write pause keeps hot deploy's own checks (attempt and prepared
 digest, store identity, version and activation, capacity, and the deadline), and no fetch,
 assembly or closure walk runs inside it. The deploy reports the fetch time, the assembly time
 and the write pause as three separate figures. The write pause starts with the first cutover
@@ -832,16 +841,21 @@ cold listeners, child endpoints, pidfds and cgroup population changes.
      one, so an unresolved deploy keeps both choices), and each unexpired recording pin's.
      A Failed or Installed deploy row is history and roots nothing. The host starts a
      collection only after the session's inventory is reconciled, and runs one at a time.
-     If it cannot read the snapshot it sends no `Collect`: the fence stays, nothing is
-     removed, and the fence ends with the session.
+     If it cannot read the snapshot it sends `CollectAbort` instead: the launcher removes
+     nothing, ends the fence at once, applies the releases it deferred and answers
+     `Collected(0)`, so a later collection can run in the same session.
   3. The launcher removes each object that neither those roots nor any reservation it holds
      reaches, then ends the fence and applies the deferred releases. A kept assembly record
      keeps its image and its recipe's closure in the code store (recipe, groups, bodies,
      annexes, foreign archives). The code store is collected under the admission lock: the
      launcher first applies the running admissions' notes, keeps every object an admission
      still holds, and an admission gives up its hold only after its assembly record is put.
-     A publication that no root reaches may therefore be removed before an `Admit` names it;
-     that admission fails (`AdmissionFailed`), and the operator publishes it again.
+     Nor is any code object removed within 24 hours of its publication: a publish that
+     finds an object already stored refreshes its modification time, so every object of a
+     publication's closure, shared ones included, outlives a collection that runs between
+     the publish and the `Admit` that names it (git's `gc.pruneExpire`, for the same
+     reason). Only a publication left unadmitted for a day may be removed, and its admission
+     then fails (`AdmissionFailed`) until it is published again.
 
   An object synced under a reservation is therefore either named by a pending row that was
   durable before the host's snapshot, or still reserved when the launcher unlinks. A new

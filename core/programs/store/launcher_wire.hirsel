@@ -138,6 +138,7 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_request(AdmitEnd(attempt()), "0e00000008070605040302011817161514131211") && ok
     ok = vector_request(Assemble(attempt()), "0f00000008070605040302011817161514131211") && ok
     ok = vector_request(CutoverAck(serving(), attempt()), "100000000100000067030000000000000001000000070000000000000008070605040302011817161514131211") && ok
+    ok = vector_request(CollectAbort, "11000000") && ok
     let mut wanted: List[Wanted] = list.new()
     list.push(mut wanted, GroupKey(hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
     list.push(mut wanted, ArchiveKey(hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))

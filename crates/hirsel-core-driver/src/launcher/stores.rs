@@ -92,13 +92,20 @@ impl Images for Stores {
             );
         }
         let removed = self.records.collect(&assemblies, &images)?;
-        let code_removed = self.code.collect(|kind, hash| {
-            let object = key_of(kind, hash);
-            code.contains(&object) || reserved(object)
-        })?;
+        let code_removed = self.code.collect(
+            |kind, hash| {
+                let object = key_of(kind, hash);
+                code.contains(&object) || reserved(object)
+            },
+            PUBLISHED_FLOOR,
+        )?;
         Ok(removed + code_removed)
     }
 }
+
+/// How long a published code object outlives collection without a root: an operator may
+/// publish and admit it later, as git keeps unreachable objects for `gc.pruneExpire`.
+const PUBLISHED_FLOOR: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 fn key_of(kind: ObjectKind, hash: ContentHash) -> ObjectKey {
     ObjectKey { kind, hash }

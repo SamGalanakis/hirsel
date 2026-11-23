@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 import time
 import traceback
 
-from wire_process import accept_from, stop_process
+from wire_process import accept_from, stop_listener, stop_process
 from wire_wsock import GUID, REQUEST, connect, frame, head, read_frame, wait_ready
 
 
@@ -449,12 +449,12 @@ def main():
             TRACE.clear()
             CASES[name]()
             if name == 'welcome_with_small_budget':
-                stop_process(process)
+                stop_listener(process, 18094)
                 refused = subprocess.Popen([str(args.server.resolve()), 'wire_control_budget_too_small'])
                 try:
                     assert refused.wait(timeout=8) == 0, 'mandatory control budget was not refused at serve'
                 finally:
-                    stop_process(refused)
+                    stop_listener(refused, 18094)
             rows.append({'law': name, 'passed': True})
             print(f'{name}: PASS', flush=True)
         except Exception as error:
@@ -462,7 +462,7 @@ def main():
             print(f'{name}: FAIL {error}; received {repr(TRACE)[-3000:]}', flush=True)
             traceback.print_exc()
         finally:
-            stop_process(process)
+            stop_listener(process, 18094)
             if temporary:
                 temporary.cleanup()
             stderr = process.stderr.read().decode(errors='replace')

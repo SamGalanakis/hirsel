@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-from wire_process import accept_from, stop_process
+from wire_process import accept_from, stop_listener, stop_process
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -219,7 +219,7 @@ def main():
                         assert s.recv(1) == b''
                     print('session text message Close 1003: PASS', flush=True)
                 finally:
-                    stop_process(process)
+                    stop_listener(process, 18094)
             if args.idle_session:
                 with (Path(tmp)/'idle-stderr').open('wb') as errors:
                     process = subprocess.Popen([str(args.idle_session.resolve())], env=os.environ | {'LD_PRELOAD': str(shim)}, stderr=errors)
@@ -235,7 +235,7 @@ def main():
                             assert s.recv(1) == b''
                         print('session idle Ping then Close 1001: PASS', flush=True)
                     finally:
-                        stop_process(process)
+                        stop_listener(process, 18094)
         return 0
     if args.echo is None or args.client is None:
         parser.error('--echo and --client are required unless --session is selected')

@@ -395,7 +395,26 @@ pub type Resumed[K, V]: send = Paged(Page[K, V]) | Moved(u64)
 
 type DataOp: shareable + send {
     key: Bytes,
-    value: Option[Arc[Bytes]]
+    value: Option[StagedValue]
+}
+
+// Inline pages copy the bytes into the page image. Overflow pages share the
+// body with the staged operation.
+type StagedValue: shareable + send = PageValue(Bytes) | BlobBody(Arc[Bytes])
+
+fn stage_value(take raw: Bytes, inline: u64) -> StagedValue {
+    if list.len(raw) <= inline {
+        PageValue(take raw)
+    } else {
+        BlobBody(arc.new(take raw))
+    }
+}
+
+fn staged_bytes(value: StagedValue) -> View[Bytes] in value {
+    match value {
+        PageValue(raw) => view raw,
+        BlobBody(raw) => view raw,
+    }
 }
 
 // A commit's rows by key. Up to SCANNED_OPS rows are found by scanning; the
@@ -1443,7 +1462,7 @@ fn stream_live(db: Db, i: u64, ops: DataOps) -> Result[u64, Capacity] {
                     live = int.saturating_sub(live, entry(k, old))
                 }
             }
-            live = int.saturating_add(live, entry(k, raw))
+            live = int.saturating_add(live, entry(k, staged_bytes(raw)))
         }
     }
     Ok(live)
@@ -1532,7 +1551,7 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
                 let inline = db.heads[i].roots.streams.inline
                 let empty_key: Bytes = list.new()
                 let mut stamps = ran.first_stamp
-                std.page.put_inline_unique(mut db.heads[i].roots.streams.root, empty_key, op.key, raw, inline, mut stamps)?
+                std.page.put_inline_unique(mut db.heads[i].roots.streams.root, empty_key, op.key, staged_bytes(raw), inline, mut stamps)?
             },
         }
     }
@@ -1565,7 +1584,7 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
                 return Ok(false)
             }
         }
-        if !std.page.inline_unique_ready(mut db.heads[i].roots.collections.root, collection, list.slice(op.key, 4, list.len(op.key)), raw, inline)? {
+        if !std.page.inline_unique_ready(mut db.heads[i].roots.collections.root, collection, list.slice(op.key, 4, list.len(op.key)), staged_bytes(raw), inline)? {
             return Ok(false)
         }
     }
@@ -1574,7 +1593,7 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
         let Some(raw) = view op.value else {
             fail("store: a checked direct edit lost its value")
         }
-        match std.page.put_inline_unique(mut db.heads[i].roots.collections.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), raw, inline, mut stamps) {
+        match std.page.put_inline_unique(mut db.heads[i].roots.collections.root, list.slice(op.key, 0, 4), list.slice(op.key, 4, list.len(op.key)), staged_bytes(raw), inline, mut stamps) {
             Ok(true) => (),
             _ => fail("store: a checked direct edit did not apply"),
         }
@@ -2087,7 +2106,7 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
         } else {
             match op_slot(tx.ops, p) {
                 Some(slot) => match tx.ops.rows[slot].value {
-                    Some(value) => entry(p, value),
+                    Some(value) => entry(p, staged_bytes(value)),
                     None => 0,
                 },
                 None => match std.page.lookup(child, list.slice(p, 4, list.len(p))) {
@@ -2100,8 +2119,8 @@ fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
         (old, tree_height(tx.roots.collections) + child_depth + 1)
     }
     let _ = reserve_ids(mut tx, height)?
-    let shared_value = arc.new(take val)
-    save_data_op(mut tx.ops, take p, Some(take shared_value))
+    let value = stage_value(take val, tx.roots.collections.inline)
+    save_data_op(mut tx.ops, take p, Some(take value))
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
     tx.wrote = true
     Ok(())
@@ -2279,7 +2298,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     }
     let height = tree_height(tx.roots.streams)
     let _ = reserve_ids(mut tx, height)?
-    let raw = arc.new(take value)
+    let raw = stage_value(take value, tx.roots.streams.inline)
     save_data_op(mut tx.stream_ops, take key, Some(take raw))
     tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
     tx.extra_bytes = extra
@@ -2830,7 +2849,7 @@ fn test_foreign(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[Arc[Bytes]]) {
+fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[StagedValue]) {
     if let Some(slot) = op_slot(ops, key) {
         ops.rows[slot].value = take value
     } else {
@@ -2850,7 +2869,7 @@ fn save_data_op(mut ops: DataOps, take key: Bytes, take value: Option[Arc[Bytes]
 fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
     if let Some(slot) = op_slot(tx.ops, key) {
         return match tx.ops.rows[slot].value {
-            Some(raw) => Some(view raw),
+            Some(raw) => Some(staged_bytes(raw)),
             None => None,
         }
     }
@@ -2860,7 +2879,7 @@ fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
 fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
     if let Some(slot) = op_slot(tx.stream_ops, key) {
         return match tx.stream_ops.rows[slot].value {
-            Some(raw) => Some(view raw),
+            Some(raw) => Some(staged_bytes(raw)),
             None => None,
         }
     }
@@ -2870,7 +2889,8 @@ fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
 fn materialize_rows(mut tree: PageTree, operations: List[DataOp], first: u64, mut draw: u64) -> Result[(), Error] {
     for op in operations {
         match op.value {
-            Some(raw) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
+            Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
+            Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
             None => {
                 let _ = remove_page_row(mut tree, op.key, first, mut draw)?
             },
@@ -2901,7 +2921,7 @@ fn data_op_size(operation: DataOp) -> u64 {
     let size = 5 + list.len(operation.key)
     match operation.value {
         None => size,
-        Some(raw) => size + 4 + list.len(raw),
+        Some(raw) => size + 4 + list.len(staged_bytes(raw)),
     }
 }
 
@@ -2994,7 +3014,7 @@ fn encode_data_ops(mut payload: Bytes, ops: List[DataOp], slots: List[u64]) -> R
     Ok(())
 }
 
-fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[Arc[Bytes]]) -> Result[(), Capacity] {
+fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue]) -> Result[(), Capacity] {
     match value {
         None => {
             le(mut payload, 2, 1)?;
@@ -3003,7 +3023,7 @@ fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[Arc[Bytes]]) -> 
         Some(raw) => {
             le(mut payload, 1, 1)?;
             blob(mut payload, key)?;
-            blob(mut payload, raw)
+            blob(mut payload, staged_bytes(raw))
         }
     }
 }
@@ -3013,7 +3033,7 @@ fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[Cal
         if operation.key == record.stream {
             le(mut payload, 3, 1)?
             blob(mut payload, operation.key)?
-            blob(mut payload, raw)?
+            blob(mut payload, staged_bytes(raw))?
             return encode_call(mut payload, record, settlement)
         }
     }
@@ -6935,7 +6955,7 @@ fn frame_boundary_points() -> bool {
     for i in 0u64 .. 32 {
         list.push(mut value, int.truncate(i))
     }
-    list.push(mut ops, DataOp(key: take key, value: Some(arc.new(take value))))
+    list.push(mut ops, DataOp(key: take key, value: Some(PageValue(take value))))
     for i in 0u64 .. 5 {
         let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
         let raw = result.unwrap(encode_commit(ci, ops, segments[i], offsets[i]))
@@ -14567,7 +14587,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     result.unwrap(le(mut stored, 70, 8))
     let key = result.unwrap(logical_key(1, key_word(7)))
     let mut written: List[DataOp] = list.new()
-    list.push(mut written, DataOp(key: take key, value: Some(arc.new(take stored))))
+    list.push(mut written, DataOp(key: take key, value: Some(PageValue(take stored))))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
     let raw = result.unwrap(encode_commit(ci, written, seq, 72))
     if list.len(raw) != 73 {
@@ -16738,7 +16758,7 @@ pub fn journal_law_call_vector() -> bool {
     list.fill(mut value, 32, 4u8)
     let key = result.unwrap(logical_key(1, key_word(7)))
     let mut data: List[DataOp] = list.new()
-    list.push(mut data, DataOp(key: take key, value: Some(arc.new(take value))))
+    list.push(mut data, DataOp(key: take key, value: Some(PageValue(take value))))
     let mut stream_value: Bytes = list.new()
     result.unwrap(le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
@@ -16746,7 +16766,7 @@ pub fn journal_law_call_vector() -> bool {
     list.fill(mut stream_value, 8, 3u8)
     let stream = result.unwrap(copied(string.as_bytes("stream00")))
     let mut streams: List[DataOp] = list.new()
-    list.push(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(arc.new(take stream_value))))
+    list.push(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take stream_value))))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()
@@ -16847,7 +16867,7 @@ fn journal_fixture_call(mut db: Db, i: u64, large: bool, take revision: Option[B
         8u64
     }, 3u8)
     let mut streams: List[DataOp] = list.new()
-    list.push(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(arc.new(take value))))
+    list.push(mut streams, DataOp(key: result.unwrap(copied(stream)), value: Some(PageValue(take value))))
     let mut entry_key: Bytes = list.new()
     list.fill(mut entry_key, 32, 1u8)
     let mut args: Bytes = list.new()

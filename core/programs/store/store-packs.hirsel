@@ -148,7 +148,7 @@ fn encode_pack(id: StoreId, layout: PackRun, planned: PlannedPack, mut known: Pa
     list.clear(mut out)
     let context = DiskContext(store: id, role: 3, seq: planned.seq)
     let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        capacity(disk_header_bytes(context, 0))
+        capacity(disk_header_bytes(context, 0, 0))
     })?
     list.append(mut out, header)
     for slot in planned.first .. planned.end {

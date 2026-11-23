@@ -142,14 +142,10 @@ fn decode_authority(path: String, at: u64, raw: Bytes, epoch: u64, holder: Store
     Ok(BucketClaim(epoch, holder, endpoint: take endpoint, aws_region: take aws_region, bucket: take bucket_name, prefix: take key_prefix, style: raw[0u64]))
 }
 
-// Marks a sealed MANIFEST as a Bucket store's: HEADER authority 1, then the
-// CLAIM and AUTHORITY frames after the MANIFEST frame.
 fn append_bucket_frames(mut raw: Bytes, context: DiskContext, claim: BucketClaim) -> Result[(), Error] {
     let authority = authority_payload(claim)?
-    raw[29u64] = 1
     let start = list.len(raw)
-    let sealed = disk_allocation(scoped fn() -> Result[(u64, Bytes), Error] {
-        let check = capacity(disk_check(context, 0, list.slice(raw, 0, 8), list.slice(raw, 16, 72)))?
+    let tail = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         let mut payload: Bytes = list.with_capacity(CLAIM_BYTES)
         capacity(le(mut payload, claim.epoch, 8))?
         capacity(le(mut payload, claim.holder.hi, 8))?
@@ -159,10 +155,8 @@ fn append_bucket_frames(mut raw: Bytes, context: DiskContext, claim: BucketClaim
         let mut tail: Bytes = list.with_capacity(list.len(frame) + list.len(second))
         list.append(mut tail, frame)
         list.append(mut tail, second)
-        Ok((check, take tail))
+        Ok(take tail)
     })?
-    let (check, take tail) = take sealed
-    list.set_word_le(mut raw, 8, check)
     capacity(list.try_reserve(mut raw, list.len(tail)))?
     list.append(mut raw, tail)
     Ok(())
@@ -469,7 +463,8 @@ fn fill_page_manifest_file(mut raw: Bytes, id: StoreId, m: PageManifest) -> Resu
         return Error(Limit(Manifest))
     }
     let context = DiskContext(store: id, role: 1, seq: m.generation)
-    begin_page_manifest_file(mut raw, context)?
+    let authority: u8 = match m.claim { Some(_) => 1, None => 0 }
+    begin_page_manifest_file(mut raw, context, authority)?
     append_page_manifest(mut raw, m)?
     seal_page_manifest_file(mut raw, context, m.fence)?
     if let Some(claim) = m.claim {
@@ -478,9 +473,9 @@ fn fill_page_manifest_file(mut raw: Bytes, id: StoreId, m: PageManifest) -> Resu
     Ok(())
 }
 
-fn begin_page_manifest_file(mut raw: Bytes, context: DiskContext) -> Result[(), Error] {
+fn begin_page_manifest_file(mut raw: Bytes, context: DiskContext, authority: u8) -> Result[(), Error] {
     let header = disk_allocation(scoped fn() -> Result[Bytes, Error] {
-        capacity(disk_header_bytes(context, 0))
+        capacity(disk_header_bytes(context, 0, authority))
     })?
     list.clear(mut raw)
     list.append(mut raw, header)

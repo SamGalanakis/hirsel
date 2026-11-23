@@ -9989,13 +9989,13 @@ fn disk_frame_bytes(file: String, ctx: DiskContext, raw: Bytes, at: u64) -> Resu
     Ok(DiskFrame(kind: frame.kind, flags: frame.flags, payload: at + 16, end: end))
 }
 
-fn disk_header_bytes(ctx: DiskContext, prev_end: u64) -> Result[Bytes, Capacity] {
+fn disk_header_bytes(ctx: DiskContext, prev_end: u64, authority: u8) -> Result[Bytes, Capacity] {
     let mut payload: Bytes = list.with_capacity(56)
     list.append(mut payload, string.as_bytes("HIRSTORE"))
     le(mut payload, DISK_FORMAT, 4)?
-    le(mut payload, int.widen(ctx.role), 1)?
-    le(mut payload, 0, 1)?
-    le(mut payload, 0, 2)?
+    list.push(mut payload, ctx.role)
+    list.push(mut payload, authority)
+    list.put_word_le(mut payload, 0u16)
     le(mut payload, ctx.store.hi, 8)?
     le(mut payload, ctx.store.lo, 8)?
     le(mut payload, 0, 8)?
@@ -10021,7 +10021,6 @@ fn disk_read_header(file: String, raw: Bytes, role: u8, seq: Option[u64], expect
     if format != DISK_FORMAT {
         return Error(Unsupported(format))
     }
-    // Authority 1 marks a Bucket store's MANIFEST; every other file is 0.
     if raw[29] > 1 || (raw[29] == 1 && role != 1) {
         return Error(Unsupported(int.widen(raw[29])))
     }
@@ -10059,7 +10058,7 @@ fn disk_corrupt[T](take r: Result[T, Error]) -> bool {
 pub fn disk_law_frames() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 3, seq: 7)
-    let raw = result.unwrap(disk_header_bytes(ctx, 0))
+    let raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
     let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 80, 128, 247, 96, 131, 16, 208, 66, 72, 73, 82, 83, 84, 79, 82, 69, 3, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     if list.len(raw) != 72 {
         return false
@@ -10215,7 +10214,7 @@ pub fn disk_law_frames() -> bool {
             return false
         }
     }
-    let mut pack = result.unwrap(disk_header_bytes(page_ctx, 0))
+    let mut pack = result.unwrap(disk_header_bytes(page_ctx, 0, 0))
     list.append(mut pack, page_frame)
     let read_back = result.unwrap(disk_read_frame("p-3", page_ctx, pack, 72))
     let image = result.unwrap(std.page.decode(result.unwrap(copied(list.slice(pack, read_back.payload, read_back.end))), Collection))
@@ -10438,9 +10437,9 @@ fn disk_new_segment(d: Dir, id: StoreId, seq: u64, prev_end: u64) -> Result[(Hos
     let (take path, take end_path, take journal, take end_bytes) = disk_allocation(scoped fn() -> Result[(String, String, Bytes, Bytes), Error] {
         let path = capacity(disk_path("j-", seq, ""))?
         let end_path = capacity(disk_path("j-", seq, ".end"))?
-        let header = capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq), prev_end))?
+        let header = capacity(disk_header_bytes(DiskContext(store: id, role: 2, seq: seq), prev_end, 0))?
         let ctx = DiskContext(store: id, role: 4, seq: seq)
-        let mut end_bytes = capacity(disk_header_bytes(ctx, 0))?
+        let mut end_bytes = capacity(disk_header_bytes(ctx, 0, 0))?
         let mut payload: Bytes = list.with_capacity(8)
         capacity(le(mut payload, 72, 8))?
         let frame = capacity(disk_seal(ctx, 72, 0x0012, 1, payload))?
@@ -10604,7 +10603,7 @@ fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Resul
 fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
     let codec: std.codec.Codec[ExportStamp] = std.codec.of()
     let ctx = DiskContext(store: StoreId(hi: stamp.store_hi, lo: stamp.store_lo), role: 5, seq: stamp.opened)
-    let mut raw = capacity(disk_header_bytes(ctx, 0))?
+    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
     let mut body: Bytes = list.new()
     std.codec.encode(codec, stamp, mut body) ?=> |_| Limit(Value)
     list.append(mut raw, capacity(disk_seal(ctx, 72, 0x0080, 1, body))?)
@@ -10966,7 +10965,7 @@ pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take
         return Error(Scratch(Limit(Value)))
     }
     let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Write)))?
-    let header = scratch_result(capacity(disk_header_bytes(ctx, 0u64)))?
+    let header = scratch_result(capacity(disk_header_bytes(ctx, 0u64, 0)))?
     if let Error(e) = host.write(mut file, header) {
         return Error(Scratch(Io(e.error)))
     }
@@ -11692,7 +11691,7 @@ fn disk_end(d: Dir, id: StoreId, seq: u64) -> Result[Option[u64], Error] waits {
 pub fn journal_law_end() -> bool {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 4, seq: 7)
-    let header = result.unwrap(disk_header_bytes(ctx, 0))
+    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
     let empty: Bytes = list.new()
     for value in[72u64, 169u64] {
         let mut payload: Bytes = list.new()
@@ -12485,7 +12484,8 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
     }
     let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account: account, pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new(), claim: None)
     let context = DiskContext(store: db.store, role: 1, seq: generation)
-    begin_page_manifest_file(mut raw, context)?
+    let claim = bucket_claim_of(db)
+    begin_page_manifest_file(mut raw, context, match claim { Some(_) => 1, None => 0 })?
     append_page_manifest_fields(mut raw, manifest)?
     let heads = list.len(db.heads)
     let branch_count = match delta {
@@ -12509,9 +12509,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
         append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots))
     })?
     seal(mut raw, context, db.fence)?
-    if let Some(claim) = bucket_claim_of(db) {
-        append_bucket_frames(mut raw, context, claim)?
-    }
+    if let Some(held_claim) = claim { append_bucket_frames(mut raw, context, held_claim)? }
     Ok(())
 }
 
@@ -13728,8 +13726,8 @@ fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) 
         let seq = loaded.manifest.next_pack
         let first_name = capacity(disk_path("p-", seq, ""))?
         let second_name = capacity(disk_path("p-", seq + 1, ""))?
-        let first = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq), 0))?
-        let second = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq + 1), 0))?
+        let first = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq), 0, 0))?
+        let second = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq + 1), 0, 0))?
         disk_write_synced(d, first_name, first)?
         disk_write_synced(d, second_name, second)?
         disk_io(host.sync_dir(d))?
@@ -14986,7 +14984,7 @@ fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], 
 fn journal_law_segment_boundaries(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 2, seq: 7)
-    let header = result.unwrap(disk_header_bytes(ctx, 0))
+    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
     let first = journal_empty_commit(ctx, 72, 1)
     let second = journal_empty_commit(ctx, 114, 2)
     let mut raw = result.unwrap(copied(header))
@@ -15056,7 +15054,7 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
 fn journal_law_segment_fork(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 2, seq: 7)
-    let mut raw = result.unwrap(disk_header_bytes(ctx, 0))
+    let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
     list.append(mut raw, journal_empty_commit(ctx, 72, 64))
     list.append(mut raw, fork_frame_bytes())
     let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(152), true))
@@ -15072,7 +15070,7 @@ fn journal_law_segment_fork(d: Dir) -> bool waits {
 fn journal_law_chunked_segment(d: Dir) -> bool waits {
     let id = StoreId(hi: 1, lo: 2)
     let context = DiskContext(store: id, role: 2, seq: 7)
-    let mut raw = result.unwrap(disk_header_bytes(context, 0))
+    let mut raw = result.unwrap(disk_header_bytes(context, 0, 0))
     // Optional extension: offset 72, length 16 + 65,536, ending at 65,624.
     // Checksums are libxxhash over the independent wire layout and binding.
     result.unwrap(le(mut raw, 0x7ffe, 2))
@@ -15395,7 +15393,7 @@ fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
 
 fn journal_end_bytes(id: StoreId, seq: u64, end: u64) -> Bytes {
     let ctx = DiskContext(store: id, role: 4, seq: seq)
-    let mut raw = result.unwrap(disk_header_bytes(ctx, 0))
+    let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
     let mut payload: Bytes = list.new()
     result.unwrap(le(mut payload, end, 8))
     let frame = result.unwrap(disk_seal(ctx, 72, 0x0012, 1, payload))
@@ -16651,7 +16649,7 @@ fn fork_limit_manifest() -> PageManifest {
 
 fn fork_limit_image(d: Dir, id: StoreId, attempt: Bytes, name: String, end: u64) -> Result[(), DeployError] waits {
     let ctx = DiskContext(store: id, role: 2, seq: 1)
-    deploy_result(disk_write_synced(d, "j-1", result.unwrap(disk_header_bytes(ctx, 0))))?
+    deploy_result(disk_write_synced(d, "j-1", result.unwrap(disk_header_bytes(ctx, 0, 0))))?
     deploy_result(fork_test_append(d, id, 1, 72, 1, name))?
     let stamp = ExportStamp(attempt: result.unwrap(copied(attempt)), store_hi: id.hi, store_lo: id.lo, opened: 1, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 1, end: end)
     deploy_result(disk_write_synced(d, "EXPORT", deploy_result(export_bytes(stamp))?))
@@ -16856,7 +16854,7 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     // A class-2 pack can be present before its MANIFEST replaces the old one.
     let orphan = paged_pack_path(after)?
     let ctx = DiskContext(store: id, role: 3, seq: after)
-    let mut orphan_wire = capacity(disk_header_bytes(ctx, 0))?
+    let mut orphan_wire = capacity(disk_header_bytes(ctx, 0, 0))?
     let prior_list = page_list_pack_vector()
     let unused_page = list.slice(prior_list, 88, list.len(prior_list))
     list.append(mut orphan_wire, capacity(disk_seal(ctx, 72, 33, 1, unused_page))?)
@@ -18758,7 +18756,7 @@ pub fn journal_law_frame_oversize() -> bool {
     let check = result.unwrap(disk_check(ctx, 72, frame, payload))
     result.unwrap(le(mut frame, check, 8))
     list.append(mut frame, payload)
-    let mut file = result.unwrap(disk_header_bytes(ctx, 0))
+    let mut file = result.unwrap(disk_header_bytes(ctx, 0, 0))
     list.append(mut file, frame)
     match disk_read_frame("j-7", ctx, file, 72) {
         Error(Corrupt(f)) => match f.why {

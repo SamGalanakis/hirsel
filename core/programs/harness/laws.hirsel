@@ -297,3 +297,197 @@ pub fn law_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks:
 fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_round_bytes_bounded(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }
+
+// ---- gates, approvals and inside tools ----
+
+fn pass_gate(c: harness.Call) -> harness.Verdict { Pass }
+fn hold_gate(c: harness.Call) -> harness.Verdict { Hold("ask") }
+fn deny_gate(c: harness.Call) -> harness.Verdict { Deny("no") }
+
+fn gate_named(n: u8) -> harness.Gate {
+    if n == 0u8 { harness.Gate(name: "pass", check: code.describe(pass_gate)) }
+    else if n == 1u8 { harness.Gate(name: "hold", check: code.describe(hold_gate)) }
+    else { harness.Gate(name: "deny", check: code.describe(deny_gate)) }
+}
+
+fn gated(take order: List[u8]) -> harness.Agent[Grants] {
+    let mut a = crash_agent()
+    for n in order { list.push(mut a.gates, gate_named(n)) }
+    a
+}
+
+fn bump_call(take args: String) -> harness.Call { harness.Call(id: "c1", name: "bump", args: Inline(string.into_bytes(take args))) }
+
+fn rank_of(v: harness.Verdict) -> u8 { match v { Pass => 0u8, Hold(_) => 1u8, Deny(_) => 2u8 } }
+
+// Law G1 (Fable: monotonic gates): the verdict of a gate list is its
+// greatest verdict under Pass < Hold < Deny, whatever the order. Oracle: the
+// maximum of each list's ranks, computed by hand here from the list itself.
+pub fn law_gates_fold_by_maximum() -> bool {
+    // Every sequence of 0 to 3 gates (0 pass, 1 hold, 2 deny): 40 orders.
+    let mut len = 0u64
+    while len <= 3u64 {
+      let mut count = 1u64
+      for _ in 0u64..len { count = count * 3u64 }
+      for i in 0u64..count {
+        let mut order: List[u8] = list.new()
+        let mut rest = i
+        for _ in 0u64..len { let d = rest % 3u64
+          list.push(mut order, if d == 0u64 { 0u8 } else if d == 1u64 { 1u8 } else { 2u8 })
+          rest = rest / 3u64 }
+        let mut want = 0u8
+        for n in order { if n > want { want = n } }
+        if rank_of(harness.verdict(gated(clone(order)), bump_call("{}"))) != want { return false }
+      }
+      len = len + 1u64
+    }
+    true
+}
+
+@test
+fn test_gates_fold_by_maximum() -> Result[(), ()] {
+    if law_gates_fold_by_maximum() { Ok(()) } else { Error(()) }
+}
+
+// Strips ASCII spaces: the arguments the gates and approvals see.
+fn strip_spaces(raw: Bytes) -> Result[Bytes, harness.Fault] {
+    let mut out: Bytes = list.new()
+    for b in raw { if b != 32u8 { list.push(mut out, b) } }
+    Ok(take out)
+}
+
+fn scribble_ok(mut tx: store.Tx, args: Bytes) -> Result[Bytes, harness.Fault] {
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+    let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
+    Ok(string.into_bytes("ok"))
+}
+
+fn scribble_bad(mut tx: store.Tx, args: Bytes) -> Result[Bytes, harness.Fault] {
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+    let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
+    Error(BadArgs("bad"))
+}
+
+fn alice() -> store.Caller { store.Caller(issuer: 1u8, subject: string.into_bytes("alice")) }
+
+// A session whose run 0 has its model answer (one call) committed and not yet
+// derived.
+fn answered(dir: Dir, clock: Clock, random: Random, tasks: Tasks, take call: harness.Call) -> store.Db waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        let mut calls: List[harness.Call] = list.new()
+        list.push(mut calls, clone(call))
+        let answer = harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: usage())
+        store.put(mut tx, h.entries, 0u64, User("go"))?
+        store.put(mut tx, h.entries, 1u64, Assistant(clone(answer)))?
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, head_pos: 0u64, next_pos: 2u64,
+            active_run: Some(0u64), next_run: 1u64, active_sections_hashes: list.new(), active_tools_hash: list.new()))?
+        store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64), round: 0u64, rounds_left: 4u64,
+            spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
+        let model_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+        store.put(mut tx, h.effects, model_key, harness.Effect(cutoff: harness.Cutoff(head_pos: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64),
+            call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, reserve: 0u64))
+    })
+    match take filled { Ok(Committed(_)) => (), _ => fail("answered: fill did not commit") }
+    take db
+}
+
+fn kick(mut db: store.Db, a: harness.Agent[Grants]) -> () waits {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.advance(mut tx, h, a, w, Kick) })
+    match take ran { Ok(Committed(_)) => (), _ => fail("kick: advance did not commit") }
+}
+
+fn deciding(mut db: store.Db, a: harness.Agent[Grants], who: store.Caller, take d: harness.Decision) -> Result[(), harness.Refused] waits {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.decide(mut tx, h, a, w, who, clone(d)) })
+    match take ran {
+        Ok(Committed(_)) => Ok(()),
+        Ok(Aborted(store.Undone(value: take why, ..))) => Error(take why),
+        _ => fail("decide: transaction failed"),
+    }
+}
+
+fn member(db: store.Db) -> harness.EffectPhase {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
+    let Some(found) = result.unwrap(store.get(store.snapshot(db), store.shape(h.effects), key)) else { fail("member: no row") }
+    clone(found.phase)
+}
+
+fn decision(take key: Bytes, allow: bool) -> harness.Decision { harness.Decision(run: 0u64, round: 0u64, ordinal: 0u64, key: take key, allow: allow) }
+
+// Law G2 (astra: argument-bound approvals): a held call is approved only by
+// its run's caller and only under the key of the tool, revision and
+// arguments the gates saw, which are the repaired ones. A key for the
+// unrepaired arguments or another revision conflicts and changes nothing.
+// Oracle: hand-derived outcomes per decision; the call is sealed only after
+// the one matching approval.
+pub fn law_approval_bound_to_arguments(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut hold_only: List[u8] = list.new()
+    list.push(mut hold_only, 1u8)
+    let mut a = gated(take hold_only)
+    a.tools[0].repair = Some(code.describe(strip_spaces))
+    let mut db = answered(dir, clock, random, tasks, bump_call("{ }"))
+    kick(mut db, a)
+    let held = match member(db) { Held => true, _ => false }
+    let raw_key = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{ }")))
+    let rev_key = harness.approval_key("bump", 2u64, Inline(string.into_bytes("{}")))
+    let right = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
+    let unrepaired = match deciding(mut db, a, alice(), decision(take raw_key, true)) { Error(Conflict) => true, _ => false }
+    let revised = match deciding(mut db, a, alice(), decision(take rev_key, true)) { Error(Conflict) => true, _ => false }
+    let stranger = match deciding(mut db, a, store.Caller(issuer: 1u8, subject: string.into_bytes("mallory")), decision(clone(right), true)) { Error(NotAllowed) => true, _ => false }
+    let still_held = match member(db) { Held => true, _ => false }
+    let approved = match deciding(mut db, a, alice(), decision(take right, true)) { Ok(()) => true, _ => false }
+    let sealed = match member(db) { Sealed => true, _ => false }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    held && unrepaired && revised && stranger && still_held && approved && sealed
+}
+
+@test
+fn test_approval_bound_to_arguments(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_approval_bound_to_arguments(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn inside_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, good: bool) -> (bool, harness.EffectPhase) waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut a = crash_agent()
+    let f = if good { code.describe(scribble_ok) } else { code.describe(scribble_bad) }
+    list.push(mut a.tools, harness.inside("scribble", "writes a row", "{}", f))
+    let mut db = answered(dir, clock, random, tasks, harness.Call(id: "c1", name: "scribble", args: Inline(string.into_bytes("{}"))))
+    kick(mut db, a)
+    let phase_after_derive = member(db)
+    let _ = phase_after_derive
+    kick(mut db, a)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let wrote = match result.unwrap(store.get(store.snapshot(db), store.shape(h.views), 999u64)) { Some(_) => true, None => false }
+    let phase = member(db)
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    (wrote, take phase)
+}
+
+// Law I1 (Fable: Inside tools run once in advance's transaction): an Inside
+// tool's writes commit with its result, and a tool that returns an error
+// leaves none of its writes, while the advance itself still commits the
+// failure. Oracle: the row each tool writes, by hand.
+pub fn law_inside_rolls_back_on_error(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let (kept_row, ok_phase) = inside_case(parent, clock, random, tasks, true)
+    let (bad_row, bad_phase) = inside_case(parent, clock, random, tasks, false)
+    let ok_settled = match ok_phase { Settled(Tool(Returned(Inline(out)))) => out == string.into_bytes("ok"), _ => false }
+    let bad_settled = match bad_phase { Settled(Tool(Failed(why))) => why == "bad", _ => false }
+    kept_row && ok_settled && !bad_row && bad_settled
+}
+
+@test
+fn test_inside_rolls_back_on_error(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_inside_rolls_back_on_error(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}

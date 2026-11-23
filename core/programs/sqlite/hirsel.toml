@@ -19,4 +19,5 @@ grants = ["Foreign=sqlite@1/sqlite/Sqlite", "Tasks", "Stdout"]
 dirs = ["."]
 
 [tests.sources]
+"error_buffer_test.hirsel" = "sqlite"
 "tests.hirsel" = "tests"

@@ -28,6 +28,7 @@ class FileLengthRatchet(unittest.TestCase):
             for path in (CHECK, '.githooks/pre-commit'):
                 (root / path).parent.mkdir(exist_ok=True)
                 shutil.copy2(ROOT / path, root / path)
+            (root / 'tools/check_boundaries.py').write_text('# No Hirsel packages in this fixture.\n')
 
             targets = {'below.py': 1150, 'equal.py': 1200}
             entries = {path: {'lines': 1200, 'reason': 'fixture-lane'} for path in targets}

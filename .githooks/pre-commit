@@ -1,2 +1,3 @@
 #!/bin/sh
-exec python3 -B tools/check_file_lengths.py
+python3 -B tools/check_file_lengths.py || exit $?
+exec python3 -B tools/check_boundaries.py --staged

@@ -22,6 +22,7 @@ fn open_frame(mut tx: store.Tx, h: Handles, mut s: Session, take o: FrameOpen) -
     }
     let FrameOpen(base: base, reason: take reason, seed: take seed) = take o
     kept(store.put(mut tx, h.frames, base, Frame(parent: s.frame, reason: take reason, seed: take seed)))?
+    cancel_warm(mut tx, h, mut s)?
     s.frame = base
     s.active_sections_hashes = list.new()
     s.active_tools_hash = list.new()

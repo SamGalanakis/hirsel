@@ -48,7 +48,7 @@ pub type Submit: codec + send {
 
 // Ends the run. Queued ingress gets a Kick that commits with the finish, so
 // the boundary runs in the next transaction even after a crash.
-fn finish(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, id: u64, take r: Run, take why: Finish) -> Result[(), Refused] {
+fn finish(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, id: u64, take r: Run, take why: Finish, warm: Option[(KeepWarm, u64)]) -> Result[(), Refused] {
     let mut run = take r
     let shown = match why {
         Answered => "answered",
@@ -56,13 +56,17 @@ fn finish(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, id: u64, take
         Stopped(_) => "stopped",
         Cancelled => "cancelled"
     }
+    let round = run.round
     run.phase = Finished(take why)
     kept(store.put(mut tx, h.runs, id, run))?
     s.active_run = None
-    kept(store.put(mut tx, h.session, 0u64, s))?
     if !queue_empty(tx, h)? {
         let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+    } else if let Some((config, answered_ms)) = warm {
+        s.warm_left = config.requests
+        arm_warm(mut tx, h, w, mut s, EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64), config, answered_ms)?
     }
+    kept(store.put(mut tx, h.session, 0u64, s))?
     status(mut tx, h, take shown)
 }
 
@@ -92,7 +96,7 @@ pub fn cancel(mut tx: store.Tx, h: Handles, w: Wiring, caller: store.Caller, id:
         },
         _ => (),
     }
-    finish(mut tx, h, w, mut s, id, take run, Cancelled)?
+    finish(mut tx, h, w, mut s, id, take run, Cancelled, None)?
     Ok(Cancelled)
 }
 
@@ -483,6 +487,14 @@ fn now(mut tx: store.Tx) -> u64 {
 // and schedules itself AfterCommit when more remain.
 pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take wake: Wake) -> Result[(), Refused] {
     let mut s = session_of(tx, h)?
+    if let Warm(frame) = wake {
+        return warm_wake(mut tx, h, a, w, mut s, frame)
+    }
+    if let Deadline(key) = wake {
+        if key.kind == WARM {
+            return expire_warm(mut tx, h, mut s, key)
+        }
+    }
     let Some(id) = s.active_run else {
         if let Kick = wake {
             return boundary(mut tx, h, a, w, mut s)
@@ -497,6 +509,7 @@ pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, ta
             expire(mut tx, h, wait)?
         },
         Kick => (),
+        Warm(_) => return Ok(()),
     }
     s = session_of(tx, h)?
     if s.active_run != Some(id) {
@@ -509,7 +522,7 @@ pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, ta
     match run.phase {
         Preparing => prepare(mut tx, h, a, w, mut s, id, take run),
         AwaitingModel(_) => Ok(()),
-        AnswerReady(round) => derive(mut tx, h, a, w, mut s, id, take run, round),
+        AnswerReady(round, at) => derive(mut tx, h, a, w, mut s, id, take run, round, at),
         AwaitingRound(round, n) => step_round(mut tx, h, a, w, mut s, id, take run, round, n),
         Finished(_) => Ok(()),
     }
@@ -518,7 +531,7 @@ pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, ta
 fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run) -> Result[(), Refused] {
     let mut run = take r
     if run.rounds_left == 0u64 {
-        return finish(mut tx, h, w, mut s, id, take run, OutOfRounds)
+        return finish(mut tx, h, w, mut s, id, take run, OutOfRounds, None)
     }
     steer(mut tx, h, a, mut s, id, run.caller)?
     pressed(mut tx, h, a, mut s, id, run.round)?
@@ -539,7 +552,7 @@ fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
 // After model.answer committed: one member row per returned call, in model
 // order. Calls beyond the limit, unknown tools and narrowed-away tools are
 // settled at once with a typed outcome and never dispatched.
-fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64) -> Result[(), Refused] {
+fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, answered_ms: u64) -> Result[(), Refused] {
     let mut run = take r
     let model_key = EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64)
     let Some(e) = kept(store.fetch(tx, store.shape(h.effects), model_key))? else {
@@ -549,7 +562,11 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
         return Error(Malformed("model answer"))
     }
     if list.len(answer.calls) == 0u64 {
-        return finish(mut tx, h, w, mut s, id, take run, Answered)
+        let warm = match a.keep_warm {
+            Some(config) => Some((config, answered_ms)),
+            None => None,
+        }
+        return finish(mut tx, h, w, mut s, id, take run, Answered, warm)
     }
     let mut ordinal = 0u64
     for given in answer.calls {
@@ -760,7 +777,7 @@ fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
     run.stalled = if progressed { 0u64 } else { run.stalled + 1u64 }
     if let Bounded(most) = a.limits.no_progress {
         if run.stalled >= most {
-            return finish(mut tx, h, w, mut s, id, take run, Stopped("no progress"))
+            return finish(mut tx, h, w, mut s, id, take run, Stopped("no progress"), None)
         }
     }
     prepare(mut tx, h, a, w, mut s, id, take run)
@@ -821,7 +838,7 @@ fn model_closed(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, reserve
     } else {
         "model failed"
     }
-    finish(mut tx, h, w, mut s, key.run, take run, Stopped(why))
+    finish(mut tx, h, w, mut s, key.run, take run, Stopped(why), None)
 }
 
 // ---- the effect protocol: begin and settle are fenced attempt entries ----
@@ -852,12 +869,12 @@ fn begin(mut tx: store.Tx, attempt: runner.triggers.Attempt, take key: EffectKey
     if t != runner.triggers.run_id(attempt) {
         return Ok(Shut)
     }
-    if !active(tx, h, key.run)? {
+    if !effect_active(tx, h, key)? {
         return Ok(Shut)
     }
     let n = runner.triggers.number(attempt)
     match e.phase {
-        Sealed => if e.dispatches > 0u64 && now(mut tx) >= e.deadline { return Ok(Shut) },
+        Sealed => if (e.dispatches > 0u64 || key.kind == WARM) && now(mut tx) >= e.deadline { return Ok(Shut) },
         Dispatched(prev) => {
             if prev >= n {
                 return Ok(Shut)
@@ -877,8 +894,9 @@ fn begin(mut tx: store.Tx, attempt: runner.triggers.Attempt, take key: EffectKey
     }
     e.phase = Dispatched(n)
     e.dispatches += 1u64
+    let dispatches = e.dispatches
     store.put(mut tx, h.effects, key, e)?
-    Ok(Go(n))
+    Ok(Go(dispatches))
 }
 
 // A resend: the earlier dispatch may have been charged and will never be
@@ -893,9 +911,49 @@ fn resend_reserve(mut tx: store.Tx, h: Handles, id: u64, reserve: u64) -> Result
     store.put(mut tx, h.runs, id, run)
 }
 
+// A hedge belongs to the dispatch that received this permit. Consuming it
+// adds one possible charge, even if the competing connection is cancelled.
+pub opaque type Hedge: send {
+    context: runner.TriggerContext,
+    key: EffectKey,
+    dispatches: u64,
+}
+
+pub fn share_hedge(h: Hedge) -> Hedge {
+    Hedge(context: runner.share_trigger_context(h.context), key: h.key, dispatches: h.dispatches)
+}
+
+pub fn try_hedge(h: Hedge) -> bool waits {
+    let allowed: Option[bool] = call_attempt(h.context, code.describe(hedge_attempt), (h.key, h.dispatches))
+    allowed == Some(true)
+}
+
+fn hedge_attempt(mut tx: store.Tx, attempt: runner.triggers.Attempt, take ask: (EffectKey, u64)) -> Result[bool, store.Error] {
+    let (key, dispatches) = take ask
+    if key.kind != MODEL { return Ok(false) }
+    let h = handles(store.tx_schema(tx))?
+    if !active(tx, h, key.run)? { return Ok(false) }
+    let Some(take saved) = store.fetch(tx, store.shape(h.effects), key)? else { return Ok(false) }
+    let mut e = take saved
+    let Repeatable(max) = e.repeat else { return Ok(false) }
+    let Dispatched(n) = view e.phase else { return Ok(false) }
+    if e.trigger != Some(runner.triggers.run_id(attempt)) || n != runner.triggers.number(attempt) {
+        return Ok(false)
+    }
+    if !e.stream || e.dispatches != dispatches || e.dispatches >= max || now(mut tx) >= e.deadline {
+        return Ok(false)
+    }
+    resend_reserve(mut tx, h, key.run, e.reserve)?
+    e.dispatches += 1u64
+    store.put(mut tx, h.effects, key, e)?
+    Ok(true)
+}
+
 pub fn register[G: send, H: send](mut r: runner.Registry[G, H], n: u64, steps: u64) -> Result[(), runner.RegisterError] {
     let f: own[send] fn(mut store.Tx, runner.triggers.Attempt, take EffectKey) -> Result[Permit, store.Error] = begin
-    runner.register_attempt(mut r, code.describe(begin), take f, n, steps)
+    runner.register_attempt(mut r, code.describe(begin), take f, n, steps)?
+    let more: own[send] fn(mut store.Tx, runner.triggers.Attempt, take (EffectKey, u64)) -> Result[bool, store.Error] = hedge_attempt
+    runner.register_attempt(mut r, code.describe(hedge_attempt), take more, n, steps)
 }
 
 // The entries every harness place registers: the app's advance, its granted

@@ -80,11 +80,6 @@ pub type TriggerConfig[G: send, S: send]: send {
     grant_bytes: u64,
 }
 
-pub opaque type TriggerContext: send {
-    attempt: triggers.Attempt,
-    to: Sender[HeadInput]
-}
-
 // `Exceeds` names a PlaceConfig or WireConfig setting, its value and the most this
 // place accepts for it (RUNNER-SPEC §12.1, runner.md "Sizing a place").
 pub type Bound: send { name: String, value: u64, limit: u64 }
@@ -3998,8 +3993,6 @@ type TriggerAction: send =
     | Snap(triggers.Attempt, Sender[Result[store.Snapshot, TriggerCallError]])
 
 pub opaque type TriggerInput: send { action: TriggerAction }
-
-pub fn trigger_attempt(ctx: TriggerContext) -> triggers.Attempt { ctx.attempt }
 
 fn trigger_request[P, R: send](ctx: TriggerContext, take payload: P, message: fn(triggers.Attempt, take P, take Sender[Result[R, TriggerCallError]]) -> TriggerAction) -> Result[R, TriggerCallError] waits {
     let (to, from): (Sender[Result[R, TriggerCallError]], Receiver[Result[R, TriggerCallError]]) = channel.new(1u64)

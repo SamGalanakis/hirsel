@@ -1,0 +1,96 @@
+// Module harness: one bounded cache refresh cycle follows an idle answer.
+fn warm_delay(config: KeepWarm) -> Option[u64] {
+    if config.cache == Ephemeral && config.requests > 0u64 && config.margin_ms < config.lifetime_ms {
+        Some(config.lifetime_ms - config.margin_ms)
+    } else {
+        None
+    }
+}
+
+fn arm_warm(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, model: EffectKey, config: KeepWarm, answered_ms: u64) -> Result[(), Refused] {
+    let Some(delay) = warm_delay(config) else {
+        s.warm_left = 0u64
+        return Ok(())
+    }
+    if s.warm_left == 0u64 { return Ok(()) }
+    let due = int.saturating_add(answered_ms, delay)
+    let id = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Warm(s.frame), At(due)))?
+    s.warm = Some(Waiting(model, id, due))
+    Ok(())
+}
+
+fn cancel_warm(mut tx: store.Tx, h: Handles, mut s: Session) -> Result[(), Refused] {
+    match s.warm {
+        Some(Waiting(_, id, _)) => cancel_trigger(mut tx, h, Some(id))?,
+        Some(Warming(key)) => {
+            if let Some(e) = kept(store.fetch(tx, store.shape(h.effects), key))? {
+                cancel_trigger(mut tx, h, e.trigger)?
+                let _ = kept(store.delete(mut tx, h.effects, key))?
+            }
+        },
+        None => (),
+    }
+    s.warm = None
+    s.warm_left = 0u64
+    Ok(())
+}
+
+fn warm_wake[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, frame: u64) -> Result[(), Refused] {
+    let Some(Waiting(model, _, due)) = s.warm else { return Ok(()) }
+    if s.active_run != None || frame != s.frame || s.warm_left == 0u64 || now(mut tx) < due || !queue_empty(tx, h)? {
+        return Ok(())
+    }
+    let enabled = match a.keep_warm { Some(config) => warm_delay(config) != None, None => false }
+    if !enabled {
+        s.warm = None
+        s.warm_left = 0u64
+        return kept(store.put(mut tx, h.session, 0u64, s))
+    }
+    let Some(previous) = kept(store.fetch(tx, store.shape(h.effects), model))? else {
+        return Error(Malformed("last model effect"))
+    }
+    let key = EffectKey(run: model.run, round: model.round, kind: WARM, ordinal: s.warm_left)
+    let deadline = int.saturating_add(now(mut tx), a.limits.model_ms)
+    let e = Effect(cutoff: clone(previous.cutoff), call: None, repeat: Once, deadline: deadline, phase: Pending, trigger: None, dispatches: 0u64, stream: false, reserve: 0u64)
+    seal(mut tx, h, w, key, take e)?
+    s.warm_left -= 1u64
+    s.warm = Some(Warming(key))
+    kept(store.put(mut tx, h.session, 0u64, s))
+}
+
+fn settle_warm[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key: EffectKey, receipt: Option[Receipt]) -> Result[(), Refused] {
+    let _ = kept(store.delete(mut tx, h.effects, key))?
+    let mut s = session_of(tx, h)?
+    s.warm = None
+    if let Some(Model(_)) = receipt {
+        if let Some(config) = a.keep_warm {
+            let answered_ms = now(mut tx)
+            let model = EffectKey(run: key.run, round: key.round, kind: MODEL, ordinal: 0u64)
+            arm_warm(mut tx, h, w, mut s, model, config, answered_ms)?
+        }
+    }
+    if let None = s.warm { s.warm_left = 0u64 }
+    kept(store.put(mut tx, h.session, 0u64, s))
+}
+
+fn expire_warm(mut tx: store.Tx, h: Handles, mut s: Session, key: EffectKey) -> Result[(), Refused] {
+    let Some(Warming(current)) = s.warm else { return Ok(()) }
+    if !same_effect(current, key) { return Ok(()) }
+    let Some(e) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Ok(()) }
+    if now(mut tx) < e.deadline { return Ok(()) }
+    cancel_warm(mut tx, h, mut s)?
+    kept(store.put(mut tx, h.session, 0u64, s))
+}
+
+fn same_effect(a: EffectKey, b: EffectKey) -> bool {
+    a.run == b.run && a.round == b.round && a.kind == b.kind && a.ordinal == b.ordinal
+}
+
+fn effect_active(tx: store.Tx, h: Handles, key: EffectKey) -> Result[bool, store.Error] {
+    if key.kind != WARM { return active(tx, h, key.run) }
+    let Some(s) = store.fetch(tx, store.shape(h.session), 0u64)? else { return Ok(false) }
+    Ok(match s.warm {
+        Some(Warming(current)) => s.active_run == None && same_effect(current, key),
+        _ => false,
+    })
+}

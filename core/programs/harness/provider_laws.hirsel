@@ -139,7 +139,7 @@ fn request() -> harness.Request {
     list.push(mut tools, harness.ToolDef(name: "get_weather", about: "weather", input: "{\"type\":\"object\"}", rev: 1u64, catalog: None))
     let mut system: List[String] = list.new()
     list.push(mut system, "be brief")
-    harness.Request(route: "m", system: take system, tools: take tools, messages: take messages, key: bytes_of("k"), stream: true)
+    harness.Request(route: "m", system: take system, tools: take tools, messages: take messages, key: bytes_of("k"), stream: true, warm: false)
 }
 
 fn str_is(x: std.json.Json, p: String, want: String) -> bool {
@@ -213,7 +213,7 @@ fn test_request_bodies_follow_wire_format() -> Result[(), u64] {
 
 const PEER: String = "api.provider.test"
 
-type Link: send { port: Served[NetOp], clock: Clock, plan: std.sim.world.Plan }
+type Link: send { port: Served[NetOp], clock: Clock, plan: std.sim.world.Plan, queue_bytes: u64 }
 
 fn drive_clock(take input: std.sim.world.World) waits {
     let mut world = take input
@@ -221,9 +221,11 @@ fn drive_clock(take input: std.sim.world.World) waits {
 }
 
 fn serve_link(take input: Link) waits {
-    let Link(port: take port, clock: clock, plan: take initial) = take input
+    let Link(port: take port, clock: clock, plan: take initial, queue_bytes: queue_bytes) = take input
     let mut plan = take initial
-    let mut link = std.sim.net.new(std.sim.net.defaults())
+    let mut cfg = std.sim.net.defaults()
+    cfg.queue_bytes = queue_bytes
+    let mut link = std.sim.net.new(cfg)
     std.sim.net.handshake_as(mut link, string.from(PEER), Ok(Handshake(protocol: Some(0), peer: (0, 0, 0, 0))))
     let _ = std.sim.net.serve(link, mut plan, clock, take port)
 }
@@ -282,7 +284,7 @@ fn route(d: provider.Dialect, at: Addr) -> provider.Provider {
 fn simple_request() -> harness.Request {
     let mut messages: List[harness.Entry] = list.new()
     list.push(mut messages, User("weather in San Francisco?"))
-    harness.Request(route: "m", system: list.new(), tools: list.new(), messages: take messages, key: bytes_of("k"), stream: true)
+    harness.Request(route: "m", system: list.new(), tools: list.new(), messages: take messages, key: bytes_of("k"), stream: true, warm: false)
 }
 
 // One exchange in a fresh simulated world. With `reply` = None nobody
@@ -304,7 +306,7 @@ fn exchange_preview(tasks: Tasks, d: provider.Dialect, take reply: Option[Bytes]
     let plan = std.sim.world.detach(mut world)
     let timer = task.spawn(tasks, bytes 65536u64, take world, drive_clock)
     let (n, port) = provide.net(bytes 4096u64)
-    let link = task.spawn(tasks, bytes 4194304u64, Link(port: take port, clock: clock, plan: take plan), serve_link)
+    let link = task.spawn(tasks, bytes 4194304u64, Link(port: take port, clock: clock, plan: take plan, queue_bytes: 8u64), serve_link)
     let (listener, at) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433u32), port: 0u16), 1u16))
     let mut p = route(d, at)
     p.bounds = caps
@@ -572,4 +574,359 @@ fn test_harness_fixes(tasks: Tasks, random: Random) -> Result[(), u64] waits {
     if !law_typed_retry(tasks, random) { return Error(2u64) }
     if !law_blob_excerpt() { return Error(3u64) }
     Ok(())
+}
+
+fn read_session(db: store.Db, h: harness.Handles) -> harness.Session {
+    option.unwrap(result.unwrap(store.get(store.snapshot(db), store.shape(h.session), 0u64)))
+}
+
+fn pending_id(db: store.Db, h: harness.Handles, wanted: runner.triggers.Id) -> runner.triggers.Pending {
+    option.unwrap(result.unwrap(runner.triggers.next_pending(store.snapshot(db), h.triggers, scoped fn(id) { id != wanted })))
+}
+
+fn warm_agent() -> harness.Agent[Clock] {
+    let mut a = harness.agent("warm", "m", code.describe(retry_model))
+    a.keep_warm = Some(harness.KeepWarm(cache: Ephemeral, lifetime_ms: 5000u64, margin_ms: 1000u64, requests: 2u64))
+    take a
+}
+
+fn warm_tick(mut db: store.Db, h: harness.Handles, w: harness.Wiring, wake: harness.Wake) waits {
+    let advanced = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+        harness.advance(mut tx, h, warm_agent(), w, clone(wake))
+    })
+    if let Ok(Committed(_)) = advanced {} else { fail("warm: advance refused") }
+}
+
+fn warm_answer(mut db: store.Db, h: harness.Handles, w: harness.Wiring, key: harness.EffectKey) -> u64 waits {
+    let e = retry_effect(db, h, key)
+    let p = pending_id(db, h, option.unwrap(e.trigger))
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Filed, store.Error] {
+        let started = runner.triggers.start(mut tx, h.triggers, p, b"revision") ?=> |_| Missing("warm trigger")
+        let Body(attempt) = started else { return Error(Missing("warm attempt")) }
+        let mut dispatched: harness.Effect = clone(e)
+        dispatched.phase = Dispatched(runner.triggers.number(attempt))
+        dispatched.dispatches = 1u64
+        store.put(mut tx, h.effects, key, dispatched)?
+        let answer = harness.Answer(text: "answered", calls: list.new(), stop: "stop",
+            usage: harness.Usage(input: 0u64, output: 0u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64))
+        let filed = harness.settle(mut tx, warm_agent(), w, attempt, harness.Settle(key: key, receipt: Some(Model(take answer))))?
+        runner.triggers.finish(mut tx, h.triggers, attempt, Returned(b"")) ?=> |_| Missing("finish warm trigger")
+        Ok(filed)
+    })
+    match ran {
+        Ok(Committed(store.Done(value: Recorded, info: info, ..))) => info.at,
+        _ => fail("warm: model answer did not settle"),
+    }
+}
+
+fn warm_wait(db: store.Db, h: harness.Handles, due: u64) -> runner.triggers.Id {
+    let Some(Waiting(_, id, _)) = read_session(db, h).warm else { fail("warm: no timer") }
+    if runner.triggers.due_time(pending_id(db, h, id)) != due { fail("warm: wrong due time") }
+    id
+}
+
+fn warm_submit(mut db: store.Db, h: harness.Handles, w: harness.Wiring, key: String) waits {
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+        let caller = store.Caller(issuer: 1u8, subject: b"warm")
+        harness.submit(mut tx, h, warm_agent(), w, caller, NextTurn, harness.Submit(client_key: clone(key), text: "keep this prefix"))
+    })
+    if let Ok(Committed(_)) = ran {} else { fail("warm: submit refused") }
+}
+
+fn law_warm_bounds(tasks: Tasks, random: Random) -> Result[(), u64] waits {
+    let (time, take controller) = provide.clock(0u64, 1000u64)
+    let mut hand = take controller
+    let mut db = store.memory(time, random, runner.triggers.law_options())
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(harness.wiring(code.describe(retry_advance), code.describe(retry_entry)))
+    let opened = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+        harness.open_session(mut tx, h, "m", All)
+    })
+    if let Ok(Committed(_)) = opened {} else { return Error(1u64) }
+    warm_submit(mut db, h, w, "one")
+    warm_tick(mut db, h, w, Warm(0u64))
+    if read_session(db, h).warm_left != 0u64 { return Error(2u64) }
+    let model = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+    let answered = warm_answer(mut db, h, w, model)
+    clock.set_wall(mut hand, answered + 100u64)
+    warm_tick(mut db, h, w, Kick)
+    let _ = warm_wait(db, h, answered + 4000u64)
+    let before = read_session(db, h).next_pos
+    let p = harness.provider.Model(dialect: Anthropic, name: "m", max_tokens: 64u64, cache_control: Ephemeral)
+    let mut due = answered + 4000u64
+    clock.set_wall(mut hand, due - 1u64)
+    warm_tick(mut db, h, w, Warm(0u64))
+    if read_session(db, h).warm_left != 2u64 { return Error(3u64) }
+    for i in 0u64 .. 2u64 {
+        let ordinal = 2u64 - i
+        clock.set_wall(mut hand, due)
+        warm_tick(mut db, h, w, Warm(1u64))
+        if read_session(db, h).warm_left != ordinal { return Error(4u64) }
+        warm_tick(mut db, h, w, Warm(0u64))
+        let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.WARM, ordinal: ordinal)
+        let refresh = retry_effect(db, h, key)
+        let req = result.unwrap(harness.request(store.snapshot(db), h, key, refresh))
+        let wire = result.unwrap(provider.body(p, req))
+        if req.stream || !req.warm || list.len(req.messages) != 1u64 || !has(wire, "\"max_tokens\":1") ||
+            !has(wire, "\"stream\":false") || !has(wire, "keep this prefix") || has(wire, "answered") ||
+            refresh.cutoff.tail_pos != retry_effect(db, h, model).cutoff.tail_pos {
+            return Error(5u64)
+        }
+        let at = warm_answer(mut db, h, w, key)
+        due = at + 4000u64
+        if ordinal == 2u64 { let _ = warm_wait(db, h, due) }
+    }
+    clock.set_wall(mut hand, due)
+    warm_tick(mut db, h, w, Warm(0u64))
+    let idle = read_session(db, h)
+    if idle.warm_left != 0u64 || idle.next_pos != before { return Error(6u64) }
+    if let Some(_) = idle.warm { return Error(7u64) }
+
+    warm_submit(mut db, h, w, "two")
+    let second = harness.EffectKey(run: 1u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+    let at = warm_answer(mut db, h, w, second)
+    warm_tick(mut db, h, w, Kick)
+    let timer = warm_wait(db, h, at + 4000u64)
+    warm_submit(mut db, h, w, "three")
+    if !runner.triggers.cancelling(pending_id(db, h, timer)) { return Error(8u64) }
+    clock.set_wall(mut hand, at + 4000u64)
+    warm_tick(mut db, h, w, Warm(0u64))
+    let active = read_session(db, h)
+    if active.active_run != Some(2u64) || active.warm_left != 0u64 { return Error(9u64) }
+    if let Some(_) = active.warm { return Error(10u64) }
+
+    let third = harness.EffectKey(run: 2u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+    let _ = warm_answer(mut db, h, w, third)
+    let off = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+        let mut a = warm_agent()
+        a.keep_warm = Some(harness.KeepWarm(cache: Off, lifetime_ms: 5000u64, margin_ms: 1000u64, requests: 2u64))
+        harness.advance(mut tx, h, a, w, Kick)
+    })
+    if let Ok(Committed(_)) = off {} else { return Error(11u64) }
+    let cold = read_session(db, h)
+    if cold.warm_left != 0u64 { return Error(12u64) }
+    if let Some(_) = cold.warm { return Error(13u64) }
+    result.unwrap(store.close(take db))
+    Ok(())
+}
+
+const HEDGE_ENTRY_BYTES: u64 = 1048576u64
+
+type HedgePeer: send { listener: Listener, clock: Clock, hedge: bool }
+
+fn provider_socket(mut listener: Listener, clock: Clock) -> (ReadHalf, WriteHalf) waits {
+    let Ok((take c, _)) = host.accept(mut listener, later(clock)) else { fail("hedge peer: accept failed") }
+    let (take input, take output) = net.split(take c)
+    let mut reader = take input
+    let mut received: Bytes = list.with_capacity(8192u64)
+    let until = later(clock)
+    loop {
+        let Ok(n) = host.recv_bounded(mut reader, mut received, 8192u64, until) else { fail("hedge peer: read failed") }
+        if n == 0u64 { fail("hedge peer: incomplete request") }
+        if complete_request(received) { return (take reader, take output) }
+    }
+}
+
+fn complete_request(raw: Bytes) -> bool {
+    if raw[list.len(raw) - 1u64] != b'}' { return false }
+    let Ok(take text) = string.from_utf8(clone(raw)) else { return false }
+    region r {
+        match std.json.parse(r, text) { Ok(_) => true, Error(_) => false }
+    }
+}
+
+fn serve_hedge_peer(take job: HedgePeer) -> u64 waits {
+    let HedgePeer(listener: take l, clock: clock, hedge: hedge) = take job
+    let mut listener = take l
+    let head = reply_with("200 OK", "text/event-stream", "")
+    let sse = bytes_of("data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")
+    let fast = if hedge { 9u64 } else { 0u64 }
+    for _ in 0u64 .. fast {
+        let (take request_in, take output) = provider_socket(mut listener, clock)
+        let mut writer = take output
+        if let Error(_) = std.http.write_wire(mut writer, head, sse, clock, std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)) {
+            fail("hedge peer: fast reply failed")
+        }
+        drop(take request_in)
+    }
+    let (take slow_in, take slow_out) = provider_socket(mut listener, clock)
+    let mut slow = take slow_out
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
+    if let Error(_) = std.http.write_wire(mut slow, head, b"", clock, deadline) { fail("hedge peer: response head failed") }
+    if !hedge {
+        std.clock.sleep_ns(clock, 1750000000u64)
+        if let Error(_) = std.http.write_wire(mut slow, sse, b"", clock, deadline) { fail("hedge peer: slow reply failed") }
+        return 1u64
+    }
+    let (take winner_in, take winner_out) = provider_socket(mut listener, clock)
+    let mut winner = take winner_out
+    let won = bytes_of("data: {\"choices\":[{\"delta\":{\"content\":\"winner\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")
+    if let Error(_) = std.http.write_wire(mut winner, head, won, clock, deadline) { fail("hedge peer: hedge reply failed") }
+    drop(take winner_in)
+    let mut reader = take slow_in
+    let mut after: Bytes = list.with_capacity(8192u64)
+    // The primary receives no response body. It must close when the second
+    // connection wins, while the peer still owns its writer.
+    loop {
+        match host.recv_bounded(mut reader, mut after, 8192u64, At(clock, deadline)) {
+            Ok(0u64) => return 11u64,
+            Ok(_) => list.clear(mut after),
+            Error(_) => return 0u64,
+        }
+    }
+}
+
+type HedgeServices: send { worker: provider.Worker, net: Net, address: Addr, clock: Clock, enabled: bool }
+type HedgeGrants: send { context: runner.TriggerContext, service: HedgeServices }
+
+fn grant_hedge(s: HedgeServices, take ctx: runner.TriggerContext) -> Result[HedgeGrants, Capacity] {
+    Ok(HedgeGrants(context: take ctx, service: HedgeServices(worker: provider.share_worker(s.worker), net: s.net,
+        address: s.address, clock: s.clock, enabled: s.enabled)))
+}
+
+fn model_single(g: HedgeGrants, take req: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
+    let s = view g.service
+    provider.ask_with_preview(s.net, s.clock, route(OpenAi, s.address), take req, mut sink)
+}
+
+fn model_hedged(g: HedgeGrants, take req: harness.Request, mut sink: Option[harness.preview.Source], permit: harness.Hedge) -> Result[harness.Answer, harness.ModelFault] waits {
+    let s = view g.service
+    if !s.enabled { return Error(Rejected("guaranteed model entered the hedge worker")) }
+    let answer = provider.ask_hedged(s.worker, s.net, s.clock, route(OpenAi, s.address), take req, mut sink, permit)?
+    if answer.text == "winner" {
+        if harness.try_hedge(permit) { return Error(Rejected("second hedge admitted")) }
+    }
+    Ok(take answer)
+}
+
+fn hedge_agent(enabled: bool) -> harness.Agent[HedgeGrants] {
+    let mut a = harness.agent("hedge", "m", code.describe(model_single))
+    if enabled { a.charge = BoundedDuplicate(2u64) }
+    a.hedged_model = Some(code.describe(model_hedged))
+    a.limits.model_reserve = 2u64
+    take a
+}
+
+fn hedge_wire() -> harness.Wiring {
+    result.unwrap(harness.wiring(code.describe(hedge_advance), code.describe(hedge_effect)))
+}
+
+fn hedge_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+    harness.advance(mut tx, h, hedge_agent(true), hedge_wire(), take wake)
+}
+
+fn hedge_effect(g: HedgeGrants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
+    harness.effect(g.context, g, take key, hedge_agent(g.service.enabled), code.describe(hedge_settle), None)
+}
+
+fn hedge_settle(mut tx: store.Tx, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    harness.settle(mut tx, hedge_agent(false), hedge_wire(), attempt, take m)
+}
+
+fn hedge_place(mut r: runner.Registry[HedgeGrants, harness.Handles]) -> Result[(), runner.RegisterError] {
+    harness.register_standard(mut r, code.describe(hedge_advance), code.describe(hedge_effect), code.describe(hedge_settle), 131072u64, HEDGE_ENTRY_BYTES)
+}
+
+fn hedge_submit(mut tx: store.Tx, h: harness.Handles, i: u64, enabled: bool) -> Result[(), harness.Refused] {
+    let mut key = string.new()
+    string.push_u64(mut key, i)
+    let caller = store.Caller(issuer: 1u8, subject: b"hedge")
+    let _ = harness.submit(mut tx, h, hedge_agent(enabled), hedge_wire(), caller, NextTurn, harness.Submit(client_key: take key, text: "test"))?
+    Ok(())
+}
+
+fn seed_hedge(dir: Dir, clock: Clock, random: Random, tasks: Tasks, enabled: bool) waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let setup = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] {
+        harness.open_session(mut tx, h, "m", All)?
+        let count = if enabled { 10u64 } else { 1u64 }
+        for i in 0u64 .. count { hedge_submit(mut tx, h, i, enabled)? }
+        Ok(())
+    })
+    if let Ok(Committed(_)) = setup {} else { fail("hedge: could not seed") }
+    result.unwrap(store.close(take db))
+}
+
+fn law_hedge_charge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, enabled: bool) -> Result[(), u64] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    seed_hedge(dir, clock, random, tasks, enabled)
+    let (initial, virtual_clock) = std.sim.world.new(0u64, 0u64, 0u64)
+    let mut world = take initial
+    let plan = std.sim.world.detach(mut world)
+    let (fake, port) = provide.net(bytes 65536u64)
+    let link = task.spawn(tasks, bytes 4194304u64, Link(port: take port, clock: virtual_clock, plan: take plan, queue_bytes: 8192u64), serve_link)
+    let loopback = Addr(ip: V4(2130706433u32), port: 0u16)
+    let (listener, address) = result.unwrap(host.listen(fake, loopback, 2u16))
+    let peer = task.spawn(tasks, bytes 1048576u64, HedgePeer(listener: take listener, clock: clock, hedge: enabled), serve_hedge_peer)
+    let (worker, history) = provider.worker(tasks, 262144u64)
+    let service = HedgeServices(worker: take worker, net: fake, address: address, clock: clock, enabled: enabled)
+    let config = runner.TriggerConfig(entries: harness.entries(hedge_wire()), author: store.Caller(issuer: 0u8, subject: b""),
+        grants: take service, grant: grant_hedge, grant_bytes: 65536u64)
+    let mut session = runner.wire_defaults(65536u64, HEDGE_ENTRY_BYTES)
+    session.n_pool = 4194304u64
+    let settings: runner.PlaceConfig[HedgeGrants, harness.Handles, HedgeServices, ()] = runner.PlaceConfig(
+        backing: Disk(dir, runner.triggers.law_options()), selection: Reopen, place: code.describe(hedge_place), n_place: HEDGE_ENTRY_BYTES,
+        migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: take session, max_sessions: 1u64,
+        proxies: list.new(), n_publisher: HEDGE_ENTRY_BYTES, listen: loopback, net: net, tasks: tasks,
+        clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: None, triggers: Some(take config), idle: Some(300u64))
+    let (stop, from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let status = result.unwrap(runner.status_root())
+    let ended = runner.operate(take settings, take from, latest.handle(status), None)
+    let _ = take stop
+    let observed = task.join(take peer)
+    drop(take fake)
+    let _ = task.join(take link)
+    let _ = task.join(take history)
+    let _ = take world
+    let Ok(_) = ended else { return Error(20u64) }
+    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let expected = if enabled { 10u64 } else { 1u64 }
+    for id in 0u64 .. expected {
+        let key = harness.EffectKey(run: id, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+        let e = retry_effect(db, h, key)
+        let raced = enabled && id == 9u64
+        let dispatches = if raced { 2u64 } else { 1u64 }
+        let text = if raced { "winner" } else { "answer" }
+        let Settled(Model(answer)) = view e.phase else {
+            let mut message = string.from("model did not settle for run ")
+            string.push_u64(mut message, id)
+            if let Settled(ModelFailed(fault)) = view e.phase {
+                match fault {
+                    Rejected(why) => { string.push(mut message, " rejected "); string.push(mut message, why) },
+                    StreamDropped(why) => { string.push(mut message, " dropped "); string.push(mut message, why) },
+                    _ => (),
+                }
+            }
+            fail(take message)
+        }
+        if answer.text != text || e.dispatches != dispatches { return Error(23u64) }
+        let run = option.unwrap(result.unwrap(store.get(store.snapshot(db), store.shape(h.runs), id)))
+        if run.spend.reserved != 0u64 || run.spend.known != 2u64 || run.spend.unresolved != (dispatches - 1u64) * 2u64 {
+            return Error(24u64)
+        }
+    }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    match take observed {
+        Ok(n) if n == (if enabled { 11u64 } else { 1u64 }) => Ok(()),
+        Error(Failed(causes)) => {
+            for cause in causes {
+                if let Fail(why) = cause.kind { fail(clone(why)) }
+            }
+            Error(21u64)
+        },
+        _ => Error(21u64),
+    }
+}
+
+@test
+fn test_warm_and_hedge(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    law_warm_bounds(tasks, random)?
+    law_hedge_charge(parent, clock, random, tasks, net, true)?
+    law_hedge_charge(parent, clock, random, tasks, net, false)
 }

@@ -1,0 +1,11 @@
+// Module runner: authority for calls from a granted trigger attempt.
+pub opaque type TriggerContext: send {
+    attempt: triggers.Attempt,
+    to: Sender[HeadInput]
+}
+
+pub fn share_trigger_context(ctx: TriggerContext) -> TriggerContext {
+    TriggerContext(attempt: ctx.attempt, to: channel.sender(ctx.to))
+}
+
+pub fn trigger_attempt(ctx: TriggerContext) -> triggers.Attempt { ctx.attempt }

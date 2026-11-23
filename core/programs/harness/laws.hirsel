@@ -360,7 +360,7 @@ fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harnes
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         for p in 0u64..list.len(log) { store.put(mut tx, h.entries, p, clone(log[p]))? }
         store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: list.len(log),
-            active_run: None, next_run: 3u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
+            active_run: None, next_run: 3u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None))
     })
     match take ran { Ok(Committed(_)) => (), _ => fail("logged: fill did not commit") }
     take db
@@ -721,7 +721,7 @@ fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits
     let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         store.put(mut tx, h.entries, 0u64, User("go"))?
         store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: 1u64,
-            active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
+            active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None, warm_left: 0u64, warm: None))
     })
     match take filled { Ok(Committed(_)) => (), _ => fail("fresh: fill did not commit") }
     take db
@@ -1921,7 +1921,7 @@ fn ready_catalog_call(mut db: store.Db, round: u64, name: String) -> () waits {
         store.put(mut tx, h.effects, key, model_effect)?
         let Some(take old) = store.fetch(tx, store.shape(h.runs), 0u64)? else { return Error(Missing("run")) }
         let mut run = take old
-        run.phase = AnswerReady(round)
+        run.phase = AnswerReady(round, 0u64)
         store.put(mut tx, h.runs, 0u64, run)
     })
     match take ran { Ok(Committed(_)) => (), _ => fail("catalog model answer did not commit") }

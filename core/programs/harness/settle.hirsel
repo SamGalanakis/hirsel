@@ -20,7 +20,7 @@ pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: runner
 
 fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
     let Settle(key: key, receipt: take receipt) = take m
-    if !kept(active(tx, h, key.run))? {
+    if !kept(effect_active(tx, h, key))? {
         return Ok(Ignored)
     }
     let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
@@ -36,6 +36,10 @@ fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, atte
     match e.phase {
         Dispatched(_) => (),
         _ => return Ok(Ignored)
+    }
+    if key.kind == WARM {
+        settle_warm(mut tx, h, a, w, key, receipt)?
+        return Ok(Recorded)
     }
     match take receipt {
         None => {
@@ -57,7 +61,7 @@ fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, atte
             let mut run = take found_run
             run.spend.reserved -= e.reserve
             run.spend.known += answer.usage.input + answer.usage.output
-            run.phase = AnswerReady(key.round)
+            run.phase = AnswerReady(key.round, now(mut tx))
             let mut s = session_of(tx, h)?
             let said: Answer = clone(answer)
             let _ = append(mut tx, h, a, mut s, Assistant(take said))?

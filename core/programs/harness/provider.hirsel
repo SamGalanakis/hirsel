@@ -56,6 +56,7 @@ fn checked(req: harness.Request) -> Result[(), String] {
 // same bytes.
 pub fn body(m: Model, req: harness.Request) -> Result[String, String] {
     checked(req)?
+    if req.warm && (req.stream || m.cache_control != Ephemeral) { return Error("keep-warm requires nonstreaming ephemeral cache control") }
     let mut out = string.new()
     std.json.write(mut out, false, fn(doc) {
         std.json.object(doc, 0u64, fn(w, mut items) {
@@ -110,7 +111,7 @@ fn last_message(messages: List[harness.Entry]) -> Option[u64] {
 fn anthropic_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: harness.Request) {
     member_string(w, mut items, "model", m.name)
     std.json.write_member(w, mut items, "max_tokens")
-    let _ = std.json.write_u64(w, m.max_tokens)
+    let _ = std.json.write_u64(w, if req.warm { 1u64 } else { m.max_tokens })
     std.json.write_member(w, mut items, "stream")
     std.json.write_bool(w, req.stream)
     let cache = m.cache_control == Ephemeral
@@ -219,7 +220,7 @@ fn user_message(w: std.json.Writer, mut msgs: std.json.Items, text: String, arra
 fn openai_body(w: std.json.Writer, mut items: std.json.Items, m: Model, req: harness.Request) {
     member_string(w, mut items, "model", m.name)
     std.json.write_member(w, mut items, "max_completion_tokens")
-    let _ = std.json.write_u64(w, m.max_tokens)
+    let _ = std.json.write_u64(w, if req.warm { 1u64 } else { m.max_tokens })
     std.json.write_member(w, mut items, "stream")
     std.json.write_bool(w, req.stream)
     if req.stream {
@@ -558,6 +559,24 @@ pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Req
     mut sink: Option[preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let text = match body(p.model, req) { Ok(take text) => take text, Error(take why) => return Error(Rejected(take why)) }
     let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), p.deadline_ms)
+    let mut response = open_response(n, clock, p, text, req.stream, deadline, None)?
+    if response.status != 200u16 { return Error(http_fault(mut response.connection, response.status, response.delay)) }
+    if !req.stream {
+        let raw = read_body(mut response.connection, p.bounds.body_bytes)?
+        return complete(p.model.dialect, p.bounds, response.delay, take raw)
+    }
+    if !response.events { return Error(Rejected("provider did not send an event stream")) }
+    read_stream(mut response.connection, p.model.dialect, p.bounds, response.delay, mut sink, list.with_capacity(8192u64), None)
+}
+
+type Response: send {
+    connection: std.http_client.Connection,
+    status: u16,
+    events: bool,
+    delay: u64,
+}
+
+fn open_response(n: Net, clock: Clock, p: Provider, text: String, streaming: bool, deadline: u64, history: Option[Sender[HistoryMessage]]) -> Result[Response, harness.ModelFault] waits {
     let opened = match p.endpoint.security {
         Plain => std.http_client.open(n, p.endpoint.address, p.endpoint.authority, clock, deadline),
         Https(name, trust) => std.http_client.open_tls(n, p.endpoint.address, p.endpoint.authority, name, trust, clock, deadline),
@@ -566,9 +585,10 @@ pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Req
         Ok(take ready) => take ready,
         Error(_) => return Error(Rejected("could not connect to the provider")),
     }
-    let request = std.http_client.Request(method: "POST", target: path(p), headers: headers(p, req.stream), body: Fixed(string.byte_len(text)))
+    let request = std.http_client.Request(method: "POST", target: path(p), headers: headers(p, streaming), body: Fixed(string.byte_len(text)))
     if let Error(_) = std.http_client.start(mut c, request, deadline) { return Error(send_failure(c, "could not start the request")) }
     if let Error(_) = std.http_client.write(mut c, string.as_bytes(text)) { return Error(send_failure(c, "could not send the request")) }
+    if let Some(to) = history { let _ = channel.send(to, Sent) }
     match std.http_client.finish_request(mut c, p.bounds.body_bytes) {
         Ok(()) => (),
         Error(TooLarge) => return Error(Rejected("response body exceeds its bound")),
@@ -579,13 +599,7 @@ pub fn ask_with_preview(n: Net, clock: Clock, p: Provider, take req: harness.Req
         let status = std.http_client.status(head)
         (status, event_stream(head), retry_after(head, host.wall_ms(clock)))
     }
-    if status != 200u16 { return Error(http_fault(mut c, status, delay)) }
-    if !req.stream {
-        let raw = read_body(mut c, p.bounds.body_bytes)?
-        return complete(p.model.dialect, p.bounds, delay, take raw)
-    }
-    if !events { return Error(Rejected("provider did not send an event stream")) }
-    read_stream(mut c, p.model.dialect, p.bounds, delay, mut sink)
+    Ok(Response(connection: take c, status: status, events: events, delay: delay))
 }
 
 fn read_body(mut c: std.http_client.Connection, max: u64) -> Result[Bytes, harness.ModelFault] waits {
@@ -615,20 +629,21 @@ fn http_fault(mut c: std.http_client.Connection, status: u16, delay: u64) -> har
 }
 
 fn read_stream(mut c: std.http_client.Connection, d: Dialect, limits: Bounds, delay: u64,
-    mut sink: Option[preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
+    mut sink: Option[preview.Source], take first: Bytes, take timing: Option[TokenTiming]) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut dec = decoder(limits)
     let mut st = stream(d, limits)
     st.retry_delay = delay
-    let mut chunk: Bytes = list.with_capacity(8192u64)
+    let mut chunk = take first
+    let mut sample = take timing
     loop {
-        match std.http_client.read(mut c, mut chunk) {
-            Ok(0u64) => break,
-            Ok(_) => (),
-            Error(TooLarge) => return Error(Rejected("response body exceeds its bound")),
-            Error(_) => return Error(StreamDropped("provider interrupted the response stream")),
-        }
+        if list.len(chunk) == 0u64 && stream_chunk(mut c, mut chunk)? == 0u64 { break }
         let from = string.byte_len(st.text)
         let done = feed(mut dec, mut st, chunk)?
+        if string.byte_len(st.text) > 0u64 || list.len(st.parts) > 0u64 {
+            if let Some(take stamp) = replace(mut sample, None) {
+                record_token(stamp)
+            }
+        }
         if let Some(mut preview_out) = sink {
             preview.delta(mut preview_out, string.slice(st.text, from, string.byte_len(st.text)))
         }
@@ -637,6 +652,14 @@ fn read_stream(mut c: std.http_client.Connection, d: Dialect, limits: Bounds, de
     }
     std.sse.finish(mut dec)
     answer(take st)
+}
+
+fn stream_chunk(mut c: std.http_client.Connection, mut chunk: Bytes) -> Result[u64, harness.ModelFault] waits {
+    match std.http_client.read(mut c, mut chunk) {
+        Ok(n) => Ok(n),
+        Error(TooLarge) => Error(Rejected("response body exceeds its bound")),
+        Error(_) => Error(StreamDropped("provider interrupted the response stream")),
+    }
 }
 
 fn complete(d: Dialect, limits: Bounds, delay: u64, take raw: Bytes) -> Result[harness.Answer, harness.ModelFault] {

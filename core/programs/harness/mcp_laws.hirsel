@@ -203,7 +203,7 @@ fn admission_answer(mut db: store.Db, h: harness.Handles, a: harness.Agent[Grant
         store.put(mut tx, h.entries, s.next_pos, Assistant(clone(answer)))?
         s.next_pos += 1u64
         e.phase = Settled(Model(take answer))
-        r.phase = AnswerReady(round)
+        r.phase = AnswerReady(round, 0u64)
         store.put(mut tx, h.effects, key, e)?
         store.put(mut tx, h.session, 0u64, s)?
         store.put(mut tx, h.runs, 0u64, r)

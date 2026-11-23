@@ -251,7 +251,11 @@ pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, e: Effect) -> R
     let mut stable: Bytes = list.new()
     std.codec.put_u64(key.run, mut stable)
     std.codec.put_u64(key.round, mut stable)
-    Ok(Request(route: clone(cutoff.route), system: take texts, tools: take tools, messages: take messages, key: take stable, stream: e.stream))
+    if key.kind == WARM {
+        list.push(mut stable, WARM)
+        std.codec.put_u64(key.ordinal, mut stable)
+    }
+    Ok(Request(route: clone(cutoff.route), system: take texts, tools: take tools, messages: take messages, key: take stable, stream: e.stream, warm: key.kind == WARM))
 }
 
 fn fold(mut system: List[Change], mut tools: List[ToolDef], take p: Patch) {

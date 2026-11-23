@@ -32,6 +32,7 @@ fn lodge[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take key
         return Ok(clone(seen.disposition))
     }
     let mut s = session_of(tx, h)?
+    cancel_warm(mut tx, h, mut s)?
     let seq = s.next_seq
     s.next_seq = seq + 1u64
     kept(store.put(mut tx, h.session, 0u64, s))?

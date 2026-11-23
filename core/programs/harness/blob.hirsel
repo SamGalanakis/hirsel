@@ -208,9 +208,9 @@ fn reconcile_tool[G: send](port: G, a: Agent[G], key: EffectKey, e: Effect) -> O
 // A target streams the model's draft and each tool's progress to the preview hub.
 pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
     let permit: Option[Permit] = call_attempt(ctx, code.describe(begin), key)
-    let recover = match permit {
-        Some(Go(_)) => false,
-        Some(Doubt) if key.kind == TOOL => true,
+    let (recover, dispatches) = match permit {
+        Some(Go(n)) => (false, n),
+        Some(Doubt) if key.kind == TOOL => (true, 0u64),
         Some(Doubt) => return Ok(doubt(ctx, settle_entry, key)),
         Some(Shut) => return Ok(Skipped),
         None => return Ok(Lost),
@@ -229,13 +229,25 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
             return Ok(doubt(ctx, settle_entry, key))
         }
         take recovered
-    } else if key.kind == MODEL {
+    } else if key.kind == MODEL || key.kind == WARM {
         let Ok(take asked) = request(snap, h, key, e) else {
             return Ok(Lost)
         }
-        let mut sink = effect_preview(target, snap, h, ctx, key)
-        let call = code.callable(a.model)
-        let answered = call(port, take asked, mut sink)
+        let mut sink: Option[preview.Source] = if key.kind == WARM { None } else { effect_preview(target, snap, h, ctx, key) }
+        let race = match e.repeat {
+            Repeatable(max) if key.kind == MODEL && e.stream && dispatches < max => a.hedged_model,
+            _ => None,
+        }
+        let answered = match race {
+            Some(f) => {
+                let call = code.callable(f)
+                call(port, take asked, mut sink, Hedge(context: runner.share_trigger_context(ctx), key: key, dispatches: dispatches))
+            },
+            None => {
+                let call = code.callable(a.model)
+                call(port, take asked, mut sink)
+            },
+        }
         match take answered {
             Ok(take answer) => Model(take answer),
             Error(take fault) => ModelFailed(take fault),

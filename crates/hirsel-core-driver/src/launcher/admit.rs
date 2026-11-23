@@ -209,7 +209,8 @@ pub(super) fn tree(bytes: &[u8]) -> Result<Tree, Failure> {
                 .split('/')
                 .all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains('\0'))
     };
-    if tree.package != "." && !plain(&tree.package) {
+    // The package is the child's one positional argument, so it never reads as an option.
+    if tree.package.starts_with('-') || tree.package != "." && !plain(&tree.package) {
         return Err(invalid(
             "the package directory is not a plain relative path",
         ));

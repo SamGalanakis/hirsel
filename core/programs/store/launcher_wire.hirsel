@@ -97,6 +97,19 @@ fn vector_event(take value: Event, expected: String) -> bool {
     }
 }
 
+fn vector_tree(take value: Tree, expected: String) -> bool {
+    let c: std.codec.Codec[Tree] = std.codec.of()
+    let mut out: Bytes = list.new()
+    if let Error(_) = std.codec.encode(c, value, mut out) {
+        return false
+    }
+    let want = hex(expected)
+    match tree_of(want) {
+        Some(_) => out == want,
+        None => false,
+    }
+}
+
 @test
 fn session_vectors() -> Result[(), ()] {
     let mut ok = true
@@ -151,6 +164,9 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_event(Admitted(attempt(), hex("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), Summary(root_limit: 1024u64, old_root_limit: 2048u64, grants: Grants(added: one("Clock"), dropped: one("Dir=a")), target: "t", n_place: 3u64), "l"), "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d6101000000740300000000000000010000006c") && ok
     ok = vector_event(Assembled(attempt(), hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), hex("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"), 5u64, 6u64), "0f0000000807060504030201181716151413121120000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05000000000000000600000000000000") && ok
     ok = vector_event(AdmissionFailed(attempt(), Denied("no")), "100000000807060504030201181716151413121100000000020000006e6f") && ok
+    ok = vector_event(AdmissionFailed(attempt(), Uncompiled("no")), "100000000807060504030201181716151413121103000000020000006e6f") && ok
+    ok = vector_event(AdmissionFailed(attempt(), Exhausted("om")), "100000000807060504030201181716151413121104000000020000006f6d") && ok
+    ok = vector_tree(Tree(package: ".", grants: one("G"), dirs: one("d"), files: one(SourceFile(path: "a", content: hex("0102")))), "010000002e010000000100000047010000000100000064010000000100000061020000000102") && ok
     ok = vector_event(CutoverResult(serving(), attempt(), PlaceInstalled(4u64, true)), "11000000010000006703000000000000000100000007000000000000000807060504030201181716151413121105000000040000000000000001") && ok
     if ok {
         Ok(())

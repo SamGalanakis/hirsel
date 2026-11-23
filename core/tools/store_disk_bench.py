@@ -70,7 +70,7 @@ def main():
                   + (ROOT / 'core/programs/store/disk_bench.hirsel').read_text())
         frozen = out / 'store.hirsel'
         frozen.write_text(source)
-        corpus = inputs(ROOT)
+        corpus = inputs(ROOT, tests=True)
         corpus['packages'][-1]['sources'][0]['file'] = str(frozen)
         manifest = out / 'inputs.json'
         manifest.write_text(json.dumps(corpus))

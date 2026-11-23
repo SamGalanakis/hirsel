@@ -1,0 +1,980 @@
+fn commit_ran[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome[R, A], Error] {
+    let checked = prepare_run_commit(mut db, i, take ran)?
+    match take checked {
+        Ready(take draft, take publication) => Ok(commit_prepared(mut db, i, take draft, take publication)),
+        OverLimit(_, c) => Ok(Refused(c))
+    }
+}
+
+// Runs and commits without the I4 settle: the S1 laws' direct entry.
+fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] {
+    let keep_reply: Option[fn(A) -> bool] = None
+    match stage(mut db, i, wall, steps, keep_reply, body) {
+        Over(take o) => Ok(take o),
+        Ran(take ran) => commit_ran(mut db, i, take ran)
+    }
+}
+
+fn fetch_raw(tx: Tx, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
+    match fetch_logical(tx, logical_key(id, key)?) {
+        Some(v) => Ok(Some(copied(v)?)),
+        None => Ok(None)
+    }
+}
+
+fn put_bytes(mut tx: Tx, id: u32, key: Bytes, val: Bytes) -> Result[(), Error] {
+    let p = logical_key(id, key)?
+    let frame = put_frame(tx, p, val, tx.frame_bytes)?
+    let exists = match std.page.collection_child(tx.roots.collections.root, list.slice(p, 0, 4)) {
+        Some(_) => true,
+        None => false,
+    }
+    if !exists {
+        let height = tree_height(tx.roots.collections)
+        let mut draw = reserve_ids(mut tx, height)?
+        define_collection(mut tx.roots.collections, id, 1, tx.private_from, mut draw)?
+        tx.resident += 126
+    }
+    apply_put(mut tx, take p, copied(val)?, false)?
+    tx.frame_bytes = frame
+    Ok(())
+}
+
+fn put_logical_key(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Error] {
+    let frame = put_frame(tx, p, val, tx.frame_bytes)?
+    apply_put(mut tx, take p, take val, false)?
+    tx.frame_bytes = frame
+    Ok(())
+}
+
+fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
+    let p = logical_key(id, key)?
+    let Some(refund) = delete_refund(tx, p) else {
+        return Ok(false)
+    }
+    let frame = edit_frame(tx, p, 5 + list.len(p), tx.frame_bytes)?
+    apply_delete(mut tx, take p, refund)?
+    tx.frame_bytes = frame
+    Ok(true)
+}
+
+// The COMMIT frame this Tx encodes (section 2.4). A frame with stream ops and
+// no data ops has no data head.
+fn tx_frame(tx: Tx) -> u64 {
+    let total = int.saturating_add(tx.frame_bytes, tx.extra_bytes)
+    if tx.rows == 0 && tx.streams != 0 {
+        total - 5
+    } else {
+        total
+    }
+}
+
+// G1: admit the entire frame before staging either the reply or the CALL.
+fn reply_recorded(mut tx: Tx, p: u64, take r: Bytes, take c: CallRecord) -> Result[(), Error] {
+    if let Some(_) = tx.call {
+        return Error(Exists("call"))
+    }
+    for layer in tx.below {
+        if let Some(_) = layer.call {
+            return Error(Exists("call"))
+        }
+    }
+    let (take key, take value) = reply_row(tx, c.stream, p, r)?
+    call_checked(c)?
+    let size = call_section_bytes(c, false)
+    stream_write(mut tx, take key, take value, size)?
+    tx.call = Some(CallSection(record: take c, settlement: None))
+    Ok(())
+}
+
+fn get_raw(s: Snapshot, id: u32, key: Bytes) -> Result[Option[Bytes], Error] {
+    let p = logical_key(id, key)?
+    match get_page_row(s.roots.collections, p) {
+        Some(v) => Ok(Some(copied(v)?)),
+        None => Ok(None)
+    }
+}
+
+fn decode_word(b: Bytes) -> u64 {
+    let mut n: u64 = 0
+    for byte in b {
+        n = (n << 8) | int.widen(byte)
+    }
+    n
+}
+
+fn raw_test_db(c: Clock, cap: u64) -> Db {
+    let mut db = test_db(c, cap)
+    result.unwrap(define_store_collection(mut db.heads[0].roots.collections, 1, 1, mut db.next_node))
+    db.resident = 126
+    take db
+}
+
+fn put_one(mut db: Db, k: u64, v: u64) -> bool {
+    let outcome = execute(mut db, 0, 20, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(k), key_word(v))
+    })
+    match take outcome {
+        Ok(Committed(_)) => true,
+        _ => false
+    }
+}
+
+fn value_at(s: Snapshot, k: u64) -> u64 {
+    match result.unwrap(get_raw(s, 1, key_word(k))) {
+        Some(raw) => decode_word(raw),
+        None => 0
+    }
+}
+
+// L1: sorted slot model, own writes, abort and fault never change published roots.
+// Wrong implementation caught: publish before body success; omit old-root lookup.
+pub fn law_model(c: Clock) -> bool {
+    for seed in 0u64 .. 2 {
+        let mut db = raw_test_db(c, 1073741824)
+        let mut model: List[u64] = list.with_capacity(24)
+        list.fill(mut model, 24, 0u64)
+        for step in 0u64 .. 64 {
+            let wall = seed * 64 + step
+            let state = splitmix64(wall)
+            let k = state % 24
+            let choice = (state >> 8) % 5
+            let v = wall + 1
+            let ok = model_step(mut db, wall)
+            if !ok {
+                return false
+            }
+            if choice < 3 {
+                let _ = list.set(mut model, k, if choice == 0 {
+                    0u64
+                } else {
+                    v
+                })
+            }
+            let held = snapshot(db)
+            for at in 0u64 .. 24 {
+                if value_at(held, at) != model[at] {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+// L2: an escaped cursor and snapshot retain exactly the transaction's frozen tree.
+// Wrong implementation caught: cursor over the current head or in-place mutation.
+pub fn law_snapshots(c: Clock) -> bool {
+    let mut db = raw_test_db(c, 1073741824)
+    for k in 0u64 .. 24 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+    }
+    let held = snapshot(db)
+    let before = version(held)
+    let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[ByteRows, Error] {
+        let rows = byte_cursor(tx.roots.collections, Included(prefix(1)?), prefix(2)?)?
+        put_bytes(mut tx, 1, key_word(0), key_word(9999))?
+        Ok(take rows)
+    })
+    let mut rows = match take rows_result {
+        Ok(Committed(take done)) => {
+            let Done(value: take cursor, ticket: _, info: _, reads: _) = take done;
+            take cursor
+        },
+        _ => return false
+    }
+    for k in 0u64 .. 1000 {
+        if !put_one(mut db, k % 24, 10000 + k) {
+            return false
+        }
+    }
+    for k in 0u64 .. 24 {
+        if value_at(held, k) != k + 1 {
+            return false
+        }
+        match result.unwrap(next_bytes(mut rows)) {
+            Some((_, v)) => if decode_word(v) != k + 1 {
+                return false
+            },
+            None => return false
+        }
+    }
+    version(held) == before && result.unwrap(next_bytes(mut rows)) == None
+}
+
+// L15: reads see their own writes. The two point reads precede the adjacent
+// gaps that cover exactly the exhausted range.
+pub fn law_reads_ranges(c: Clock) -> bool waits {
+    if !range_boundary_points(c) {
+        return false
+    }
+    let mut db = test_db(c, 1073741824)
+    let cv = std.codec.of_u64()
+    result.unwrap(create_table(mut db, spec("range-law", std.codec.key_u64(), cv)))
+    let t = result.unwrap(table(mut db, "range-law", std.codec.key_u64(), cv))
+    let sh = shape(t)
+    for k in 0u64 .. 6 {
+        if !typed_put(mut db, t, k, k + 1) {
+            return false
+        }
+    }
+    let outcome = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[u64, Error] {
+        let _ = fetch(tx, sh, 1)?
+        put(mut tx, t, 2, 42)?
+        if fetch(tx, sh, 2)? != Some(42u64) {
+            return Error(Foreign)
+        }
+        let mut rows = range(tx, sh, Excluded(1), Included(3))?
+        let mut sum: u64 = 0
+        while let Some((_, val)) = next_range(mut rows)? {
+            sum += val
+        }
+        Ok(sum)
+    })
+    match take outcome {
+        Ok(Committed(done)) => {
+            if done.value != 46 || list.len(done.reads) != 4 {
+                return false
+            }
+            let one = result.unwrap(logical_key(t.id, key_word(1)))
+            let two = result.unwrap(logical_key(t.id, key_word(2)))
+            let lo = result.unwrap(lower_bytes(t.id, Excluded(key_word(1)), false))
+            let middle = result.unwrap(lower_bytes(t.id, Excluded(key_word(2)), false))
+            let hi = result.unwrap(lower_bytes(t.id, Included(key_word(3)), true))
+            same_read(done.reads[0], Point(take one)) && same_read(done.reads[1], Point(take two)) && same_read(done.reads[2], Span(take lo, result.unwrap(copied(middle)))) && same_read(done.reads[3], Span(take middle, take hi))
+        },
+        _ => false
+    }
+}
+
+// L18a,b,d: published SplitMix64 vector, backward wall clock, branch in id/seed.
+// Wrong implementation caught: seed=0, raw clock, branch omitted from the id.
+pub fn law_call_info(c: Clock) -> bool {
+    if !seed_boundary_points() {
+        return false
+    }
+    if splitmix64(0) != 0xE220A8397B1DCDAFu64 {
+        return false
+    }
+    let id = StoreId(hi: 1, lo: 2)
+    let a = call_info(id, 0, 1, 30, 0)
+    let b = call_info(id, 1, 1, 20, 0)
+    if a.seed != 0xC817A9BF84F9A191u64 || a.id.branch == b.id.branch || a.seed == b.seed {
+        return false
+    }
+    let mut db = test_db(c, 1073741824)
+    for wall in 0u64 .. 4 {
+        let outcome = execute(mut db, 0, 30 - wall, None, fn(mut tx: Tx) -> Result[u64, ()] {
+            Ok(info(mut tx).at)
+        })
+        match take outcome {
+            Ok(Committed(done)) => if done.value != 30 || done.info.at != 30 {
+                return false
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+// Resident: exact entry arithmetic, ignored operation failure still refuses a commit.
+// Wrong implementation caught: charge payload alone or publish beyond the ceiling.
+pub fn law_resident(c: Clock) -> bool {
+    if !resident_rounding_points() {
+        return false
+    }
+    let mut db = raw_test_db(c, 212)
+    if !put_one(mut db, 1, 10) || db.resident != 212 {
+        return false
+    }
+    let refused_write = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(2), key_word(20))
+    })
+    match take refused_write {
+        Ok(Refused(Resident(cap))) => if cap.requested != 298 || cap.available != 212 {
+            return false
+        },
+        _ => return false
+    }
+    if value_at(snapshot(db), 2) != 0 || db.heads[0].head != 1 {
+        return false
+    }
+    let removed = execute(mut db, 0, 2, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete_bytes(mut tx, 1, key_word(1))
+    })
+    match take removed {
+        Ok(Committed(done)) => if !done.value {
+            return false
+        },
+        _ => return false
+    }
+    db.resident == 126 && value_at(snapshot(db), 1) == 0
+}
+
+// L20's byte-core handle boundary; typed handles await S0's reader ruling.
+pub fn law_foreign(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    let stores: Inline[StoreId, 3] =[StoreId(hi: 9, lo: 2), StoreId(hi: 1, lo: 9), StoreId(hi: 9, lo: 9)]
+    for i in 0u64 .. 3 {
+        let foreign = Branch(store: stores[i], id: 0)
+        let outcome = run_on(mut db, foreign, None, fn(mut tx: Tx) -> Result[(), ()] {
+            fail("foreign body must not run")
+        })
+        match take outcome {
+            Error(Foreign) => if db.heads[0].head != 0 {
+                return false
+            },
+            _ => return false
+        }
+    }
+    true
+}
+
+fn model_step(mut db: Db, wall: u64) -> bool {
+    let outer_choice = (splitmix64(wall) >> 8) % 5
+    let outcome = execute(mut db, 0, wall, None, fn(mut tx: Tx) -> Result[u64, Error] {
+        let at = info(mut tx).at
+        let state = splitmix64(at)
+        let choice = (state >> 8) % 5
+        let k = state % 24
+        let v = at + 1
+        if choice == 0 {
+            let _ = delete_bytes(mut tx, 1, key_word(k))?
+        } else {
+            put_bytes(mut tx, 1, key_word(k), key_word(v))?
+            let raw = option.unwrap(fetch_raw(tx, 1, key_word(k))?)
+            if decode_word(raw) != v {
+                return Error(Missing("law"))
+            }
+        }
+        if choice == 3 {
+            return Error(Foreign)
+        }
+        if choice == 4 {
+            fail("L1 injected fault")
+        }
+        Ok(1)
+    })
+    match take outcome {
+        Ok(Committed(_)) => outer_choice < 3,
+        Ok(Aborted(Undone(value: Foreign, ticket: None))) => outer_choice == 3,
+        Ok(Failed(_)) => outer_choice == 4,
+        _ => false
+    }
+}
+
+@test
+fn test_model(c: Clock) -> Result[(), ()] {
+    if law_model(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_snapshots(c: Clock) -> Result[(), ()] {
+    if law_snapshots(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_reads_ranges(c: Clock) -> Result[(), ()] waits {
+    if law_reads_ranges(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_call_info(c: Clock) -> Result[(), ()] {
+    if law_call_info(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_resident(c: Clock) -> Result[(), ()] {
+    if law_resident(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_foreign(c: Clock) -> Result[(), ()] waits {
+    if law_foreign(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn encode_commit(ci: CallInfo, mut ops: DataRows, seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+    let streams: DataRows = new_data_rows()
+    encode_sections(ci, mut ops, streams, None, seq, offset)
+}
+
+@test
+fn journal_test_order_workspace() -> Result[(), ()] {
+    let n = 10000u64
+    let mut ops = new_data_rows()
+    list.reserve(mut ops.rest, n - 2)
+    for position in 0u64 .. n {
+        push_data_row(mut ops, DataOp(key: key_word(n - position), value: None))
+    }
+    // Independently observe the allocator's grant for the index list. The
+    // encoder's ordering pass can fit into that grant without owning any key.
+    let room = {
+        let mut reserved: List[u64] = list.new()
+        result.unwrap(list.try_reserve(mut reserved, n))
+        8 * list.capacity(reserved)
+    }
+    let ordered = bound bytes room {
+        data_order(ops)
+    }
+    let Ok(Ok(SortedSlots(take slots))) = take ordered else {
+        return Error(())
+    }
+    if list.len(slots) != n || list.capacity(slots) < n || 8 * list.capacity(slots) != room {
+        return Error(())
+    }
+    for position in 0u64 .. n {
+        if slots[position] != n - position - 1 {
+            return Error(())
+        }
+    }
+    Ok(())
+}
+
+fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+    encode_staged(ci, mut ops, NO_FRAME_TAIL, streams, call, None, None, seq, offset)
+}
+
+// Hand-derived COMMIT bytes: delete key 1, then put key 2 = 33. Check from
+// libxxhash 0.8.2, including store/file/offset binding and head[0..8] + payload.
+// Wrong implementation caught: insertion order, duplicate ops, wrong check extent.
+pub fn law_frames(c: Clock) -> bool {
+    if !frame_boundary_points() {
+        return false
+    }
+    let mut db = raw_test_db(c, 1073741824)
+    let outcome = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[Bytes, Error] {
+        put_bytes(mut tx, 1, key_word(2), key_word(22))?
+        put_bytes(mut tx, 1, key_word(1), key_word(11))?
+        put_bytes(mut tx, 1, key_word(2), key_word(33))?
+        let _ = delete_bytes(mut tx, 1, key_word(1))?
+        if tx.frame_bytes != 88 || tx.ops.rows.count != 2 {
+            return Error(Foreign)
+        }
+        capacity(encode_commit(info(mut tx), mut tx.ops.rows, 1, 72))
+    })
+    match take outcome {
+        Ok(Committed(done)) => {
+            let expected: Inline[u8, 88] =[17u8, 0u8, 1u8, 0u8, 72u8, 0u8, 0u8, 0u8, 113u8, 81u8, 236u8, 174u8, 179u8, 213u8, 128u8, 52u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 30u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 2u8, 0u8, 0u8, 0u8, 2u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 33u8]
+            if list.len(done.value) != 88 {
+                return false
+            }
+            for i in 0u64 .. 88 {
+                if done.value[i] != expected[i] {
+                    return false
+                }
+            }
+            value_at(snapshot(db), 1) == 0 && value_at(snapshot(db), 2) == 33
+        },
+        _ => false
+    }
+}
+
+@test
+fn test_frames(c: Clock) -> Result[(), ()] {
+    if law_frames(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L2 across task ownership: the reader owns roots from before 1000 later commits.
+// Wrong implementation caught: a non-send snapshot or a view tied to the writer.
+pub fn law_reader_task(c: Clock, tasks: Tasks) -> bool waits {
+    let mut db = raw_test_db(c, 1073741824)
+    for k in 0u64 .. 24 {
+        if !put_one(mut db, k, k + 1) {
+            return false
+        }
+    }
+    let held = snapshot(db)
+    let reader = task.spawn(tasks, bytes 1048576, take held, fn(take s: Snapshot) -> bool {
+        let mut rows = result.unwrap(scan_raw(s, 1, Unbounded, Unbounded))
+        for k in 0u64 .. 24 {
+            if value_at(s, k) != k + 1 {
+                return false
+            }
+            match result.unwrap(next_bytes(mut rows)) {
+                Some((_, v)) => if decode_word(v) != k + 1 {
+                    return false
+                },
+                None => return false
+            }
+        }
+        version(s) == 24 && result.unwrap(next_bytes(mut rows)) == None
+    })
+    for k in 0u64 .. 1000 {
+        if !put_one(mut db, k % 24, 10000 + k) {
+            return false
+        }
+    }
+    result.unwrap(task.join(take reader))
+}
+
+@test
+fn test_reader_task(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    if law_reader_task(c, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// The public constructor must draw identity once from Random's spare-capacity API.
+@test
+fn test_memory_identity(c: Clock, r: Random) -> Result[(), ()] {
+    let a = memory(c, r, defaults())
+    let b = memory(c, r, defaults())
+    let first_id = identity(a)
+    if same(first_id, identity(a)) && !same(first_id, identity(b)) && version(snapshot(a)) == 0 {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L2 following: publish only admitted roots; handles survive the writer.
+// Wrong implementation caught: publish before admission or miss a successful swap.
+pub fn law_follow(c: Clock) -> bool {
+    let mut db = raw_test_db(c, 212)
+    let h = result.unwrap(follow(mut db, Branch(store: StoreId(hi: 1, lo: 2), id: 0)))
+    let initial = latest.read(h)
+    if version(initial) != 0 || !put_one(mut db, 1, 10) {
+        return false
+    }
+    let first = latest.read(h)
+    if version(first) != 1 || value_at(first, 1) != 10 || version(initial) != 0 {
+        return false
+    }
+    if put_one(mut db, 2, 20) {
+        return false
+    }
+    let after_refusal = latest.read(h)
+    if version(after_refusal) != 1 || value_at(after_refusal, 2) != 0 {
+        return false
+    }
+    let second = result.unwrap(follow(mut db, Branch(store: StoreId(hi: 1, lo: 2), id: 0)))
+    let removed = execute(mut db, 0, 2, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete_bytes(mut tx, 1, key_word(1))
+    })
+    match take removed {
+        Ok(Committed(_)) => {},
+        _ => return false
+    }
+    let final_root = latest.read(second)
+    version(final_root) == 2 && value_at(final_root, 1) == 0 && value_at(first, 1) == 10
+}
+
+@test
+fn test_follow(c: Clock) -> Result[(), ()] {
+    if law_follow(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+type FollowingReader: send {
+    current: Latest[Snapshot],
+    done: Receiver[()]
+}
+
+fn read_following(take reader: FollowingReader) -> bool waits {
+    let mut previous: u64 = 0
+    for _ in 0u64 .. 64 {
+        result.unwrap(channel.receive(reader.done))
+        let s = latest.read(reader.current)
+        let v = version(s)
+        if v < previous || value_at(s, 1) != v {
+            return false
+        }
+        previous = v
+    }
+    let final_root = latest.read(reader.current)
+    version(final_root) == 64 && value_at(final_root, 1) == 64
+}
+
+// L2 under W4: every read is an admitted version; after the writer's completion
+// event the reader sees its last publish. Wrong implementation: missed publication.
+@test
+fn follow_schedules(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    let mut db = raw_test_db(c, 1073741824)
+    let h = result.unwrap(follow(mut db, Branch(store: StoreId(hi: 1, lo: 2), id: 0)))
+    let (send, receive): (Sender[()], Receiver[()]) = channel.new(1)
+    let (send2, receive2): (Sender[()], Receiver[()]) = channel.new(1)
+    let payload = FollowingReader(current: latest.handle(h), done: take receive)
+    let payload2 = FollowingReader(current: take h, done: take receive2)
+    let reader = task.spawn(tasks, bytes 1048576, take payload, read_following)
+    let reader2 = task.spawn(tasks, bytes 1048576, take payload2, read_following)
+    for v in 1u64 .. 65 {
+        if !put_one(mut db, 1, v) {
+            return Error(())
+        }
+        result.unwrap(channel.send(send, ()))
+        result.unwrap(channel.send(send2, ()))
+    }
+    let a = result.unwrap(task.join(take reader))
+    let b = result.unwrap(task.join(take reader2))
+    if a && b {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// Capacity after reserving ids and a body fault both consume their id ranges.
+// Wrong implementation caught: returning the writer counter to its old value.
+pub fn law_node_ids(c: Clock) -> bool {
+    let mut db = raw_test_db(c, 1073741824)
+    let failed = execute(mut db, 0, 1, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(1), key_word(10))?
+        fail("node id fault")
+    })
+    match take failed {
+        Ok(Failed(_)) => {},
+        _ => return false
+    }
+    let after_fault = db.next_node
+    if after_fault == 0 || db.heads[0].head != 0 {
+        return false
+    }
+    let capacity_result = result.unwrap(bound bytes 512 {
+        execute(mut db, 0, 2, None, fn(mut tx: Tx) -> Result[(), Error] {
+            for k in 0u64 .. 100 {
+                put_bytes(mut tx, 1, key_word(k), key_word(k))?
+            }
+            Ok(())
+        })
+    })
+    match take capacity_result {
+        Ok(Refused(_)) => {},
+        _ => return false
+    }
+    let after_capacity = db.next_node
+    if after_capacity <= after_fault || db.heads[0].head != 0 {
+        return false
+    }
+    if !put_one(mut db, 2, 20) {
+        return false
+    }
+    tree_stamp(db.heads[0].roots.collections) > after_capacity
+}
+
+@test
+fn test_node_ids(c: Clock) -> Result[(), ()] {
+    if law_node_ids(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn catalog_entry(db: Db, k: Bytes) -> Result[Catalog, Error] {
+    healthy(db)?
+    catalog_entry_in(db.heads[0].roots.catalog, k)
+}
+
+fn catalog_put(mut db: Db, roots: Roots, k: Bytes, v: Bytes) -> Result[Roots, Error] {
+    catalog_insert(mut db.next_node, roots, k, v)
+}
+
+fn index_catalog(db: Db, id: u32) -> Result[List[Catalog], Error] {
+    index_catalog_in(db.heads[0].roots.catalog, id)
+}
+
+fn quotient(v: u64) -> Result[u64, Capacity] {
+    Ok(v / 4)
+}
+
+fn typed_value(s: Snapshot, t: Shape[u64, u64], k: u64) -> u64 {
+    match result.unwrap(get(s, t, k)) {
+        None => 0,
+        Some(v) => v
+    }
+}
+
+// One transaction writes row 1, nests a body that writes row 2 and spins
+// under a bound of N inside an outer bound of `outer`, tries to reserve one
+// more step in the outer bound, then writes row 3. Answers whether the
+// spinning body ran, the committed rows 1, 2 and 3, and whether the one-step
+// reservation after it was admitted.
+fn overrun_case(c: Clock, outer: u64) -> (u64, u64, u64, u64, bool) waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let ran: Log[u64] = log.new()
+    let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+        put(mut tx, t, 1, 10)?
+        let nested = rollback_writes_on_overrun(mut tx, outer, scoped fn(mut o: Tx) -> Result[(Result[Result[(), Error], OutOfTime], bool), Error] {
+            let inner = rollback_writes_on_overrun(mut o, 1000, scoped fn(mut i: Tx) -> Result[(), Error] {
+                log.append(ran, 1)
+                put(mut i, t, 2, 20)?
+                loop {}
+            })
+            let probe = bound steps 1 {
+                ()
+            }
+            let admitted = match probe {
+                Ok(_) => true,
+                Error(_) => false,
+            }
+            Ok((take inner, admitted))
+        })
+        let probed = match nested {
+            Ok(Ok((Error(OutOfTime(steps: 1000)), admitted))) => admitted,
+            _ => return Error(Missing("overrun")),
+        }
+        put(mut tx, t, 3, 30)?
+        Ok(probed)
+    })
+    let probed = match take out {
+        Ok(Committed(done)) => done.value,
+        _ => return (9, 0, 0, 0, false),
+    }
+    let s = snapshot(db)
+    let sh = shape(t)
+    (list.len(log.finish(take ran)), typed_value(s, sh, 1), typed_value(s, sh, 2), typed_value(s, sh, 3), probed)
+}
+
+// MEM-30 with a rollback-able Tx. An overrun leaves none of the body's writes,
+// and the transaction goes on to write and commit. Oracle for the charge, by
+// hand from rollback_writes_on_overrun's source: the outer body's call (1),
+// the call of rollback_writes_on_overrun (1), freeze (its call, three
+// replace, two empty_ops at 6 each: its call, new_data_rows with three
+// list.new, map.new; then list.push and arc.new: 18), share_roots (1 + 3
+// share_page_tree + 4 arc.share: the collection map's root and empty child,
+// the streams and catalog roots), two empty_ops (12) and the clone of the
+// layer list (1) come to 41 before the inner bound of N is reserved, and the
+// overrun returns at `?` with no step. So an outer bound of N + 41 runs the
+// body and is then exhausted: a one-step reservation after it is refused,
+// which an overrun that refunded a step would admit. N + 42 leaves that step,
+// and N + 40 refuses the body's entry and keeps N - 1.
+pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
+    let exact = overrun_case(c, 1041)
+    let spare = overrun_case(c, 1042)
+    let short = overrun_case(c, 1040)
+    exact.0 == 1 && exact.1 == 10 && exact.2 == 0 && exact.3 == 30 && !exact.4 && spare.0 == 1 && spare.4 && short.0 == 0 && short.1 == 10 && short.2 == 0 && short.3 == 30 && short.4
+}
+
+@test
+fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
+    if law_rollback_on_overrun(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// ADVICE 5: a callback copies none of the rows staged before it. Oracle: 64
+// staged rows of 1,000-byte values are 64,000 bytes, so a callback that
+// copied them could not start under a 32 KiB byte bound; one that shares
+// them needs only its own empty overlay. Then the merge rules, by hand:
+// nested callbacks replace row 1, delete row 2 and add rows 100 and 101; a
+// typed error drops its write of row 3; an overrun drops its write of row 4;
+// rollback_writes_on_error keeps its write of row 5. Every other row keeps
+// its value. A body reads through the frozen layers below its overlay: after
+// the inner callback returns, and after the overrun, a fetch and a range see
+// row 1 as "one", row 2 gone, rows 3, 4 and 64 as staged, row 101 present,
+// and 65 rows in all (64 staged, less row 2, plus rows 100 and 101). The inner callback's bound is below what its enclosing bound has
+// left, since a nested bound cannot grant steps its parent no longer holds.
+fn layered_reads(tx: Tx, sh: Shape[u64, String], big: String) -> Result[bool, Error] {
+    let mut rows = range(tx, sh, Included(1), Included(200))?
+    let mut seen = 0u64
+    while let Some(_) = next_range(mut rows)? {
+        seen += 1
+    }
+    let one = fetch(tx, sh, 1)? == Some(string.from("one"))
+    let gone = fetch(tx, sh, 2)? == None
+    let kept = fetch(tx, sh, 3)? == Some(clone(big)) && fetch(tx, sh, 4)? == Some(clone(big)) && fetch(tx, sh, 64)? == Some(clone(big))
+    let added = fetch(tx, sh, 101)? == Some(string.from("hundred one"))
+    Ok(seen == 65 && one && gone && kept && added)
+}
+
+pub fn law_callback_shares_staged(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_string())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
+    let mut raw: Bytes = list.with_capacity(1000)
+    list.fill(mut raw, 1000, 97u8)
+    let big = result.unwrap(string.from_utf8(take raw))
+    let sh = shape(t)
+    let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+        for k in 1u64 .. 65 {
+            put(mut tx, t, k, big)?
+        }
+        let shared = bound bytes 32768 {
+            rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
+                put(mut w, t, 1, "one")
+            })
+        }
+        let fits = match shared {
+            Ok(Ok(Ok(()))) => true,
+            _ => false,
+        }
+        let nested = rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
+            put(mut w, t, 100, "hundred")?
+            let inner = rollback_writes_on_overrun(mut w, 50000, scoped fn(mut v: Tx) -> Result[(), Error] {
+                let _ = delete(mut v, t, 2)?
+                put(mut v, t, 101, "hundred one")
+            })
+            match inner {
+                Ok(Ok(())) => {},
+                _ => return Error(Missing("inner")),
+            }
+            if layered_reads(w, sh, big)? {
+                Ok(())
+            } else {
+                Error(Missing("reads"))
+            }
+        })
+        let typed = rollback_writes_on_overrun(mut tx, 100000, scoped fn(mut w: Tx) -> Result[(), Error] {
+            put(mut w, t, 3, "three")?
+            Error(Missing("typed"))
+        })
+        let over = rollback_writes_on_overrun(mut tx, 1000, scoped fn(mut w: Tx) -> Result[(), Error] {
+            put(mut w, t, 4, "four")?
+            loop {}
+        })
+        let kept = rollback_writes_on_error(mut tx, scoped fn(mut w: Tx) -> Result[(), Error] {
+            if !layered_reads(w, sh, big)? {
+                return Error(Missing("reads after overrun"))
+            }
+            put(mut w, t, 5, "five")
+        })
+        let shapes = match (nested, typed, over, kept) {
+            (Ok(Ok(())), Ok(Error(_)), Error(_), Ok(())) => true,
+            _ => false,
+        }
+        Ok(fits && shapes)
+    })
+    let shaped = match take out {
+        Ok(Committed(done)) => done.value,
+        _ => false,
+    }
+    let s = snapshot(db)
+    let mut good = shaped
+    for k in 1u64 .. 65 {
+        let want = if k == 1 {
+            Some(string.from("one"))
+        } else if k == 2 {
+            None
+        } else if k == 5 {
+            Some(string.from("five"))
+        } else {
+            Some(string.from(big))
+        }
+        if result.unwrap(get(s, sh, k)) != want {
+            good = false
+        }
+    }
+    good && result.unwrap(get(s, sh, 100)) == Some(string.from("hundred")) && result.unwrap(get(s, sh, 101)) == Some(string.from("hundred one"))
+}
+
+@test
+fn test_callback_shares_staged(c: Clock) -> Result[(), ()] waits {
+    if law_callback_shares_staged(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// For each bound in 0..`top`, whether a bounded body that deletes row 2 and
+// writes rows 3 and 5 returns, on a store with rows 1..64
+// whose old rows are retained (a pin) or not.
+fn retention_outcomes(c: Clock, retained: bool, top: u64) -> List[bool] waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let seeded = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 1u64 .. 65 {
+            put(mut tx, t, k, k)?
+        }
+        Ok(())
+    }))
+    match take seeded {
+        Committed(_) => (),
+        _ => fail("retention seed"),
+    }
+    if retained {
+        let held = snapshot(db)
+        let _ = result.unwrap(pin(mut db, "held", held))
+    }
+    let mut out: List[bool] = list.new()
+    for b in 0u64 .. top {
+        let ran = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
+            let bounded = rollback_writes_on_overrun(mut tx, b, scoped fn(mut w: Tx) -> Result[(), Error] {
+                let _ = delete(mut w, t, 2)?
+                put(mut w, t, 3, 30)?
+                put(mut w, t, 5, 50)
+            })
+            let returned = match bounded {
+                Ok(_) => true,
+                Error(_) => false,
+            }
+            // Abort, so every bound starts from the same rows.
+            Error(Missing(if returned {
+                "returned"
+            } else {
+                "overran"
+            }))
+        }))
+        match take ran {
+            Aborted(Undone(value: Missing(why), ..)) => list.push(mut out, why == "returned"),
+            _ => fail("retention run"),
+        }
+    }
+    take out
+}
+
+// Re-executing a body on a replay fork runs it with old rows retained, where
+// the live run may not have. Its metered steps must not depend on that, or a
+// tight bound gives the two runs different outcomes. Oracle: the outcome of
+// each bound without retention; the bound sweeps past the body's whole cost.
+pub fn law_retention_keeps_steps(c: Clock) -> bool waits {
+    let live = retention_outcomes(c, false, 1200)
+    let held = retention_outcomes(c, true, 1200)
+    live[1199] && live == held
+}
+
+@test
+fn test_retention_keeps_steps(c: Clock) -> Result[(), ()] waits {
+    if law_retention_keeps_steps(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn tail_body(mut w: Tx, t: Table[u64, u64]) -> Result[(), Error] {
+    let _ = delete(mut w, t, 1)?
+    let _ = delete(mut w, t, 2)?
+    put(mut w, t, 3, 30)?
+    Error(Missing("typed"))
+}

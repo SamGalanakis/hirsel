@@ -1,0 +1,974 @@
+pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    let h = result.unwrap(subs_handles(mut db))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let schema = 7u64
+    let rejected = fn(_ch: store.Change) -> Result[Option[Bytes], store.Error] { Error(Schema(schema)) }
+    let value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take rejected
+    let mut next = Some(take value)
+    let _ = map.update(mut b.subs.by_session, 2u64, scoped fn(mut group: Map[u32, Sub]) {
+        let _ = map.update(mut group, 1u32, scoped fn(mut entry: Sub) {
+            let mut kept = option.unwrap(replace(mut entry.cover, None))
+            kept.value = option.unwrap(replace(mut next, None))
+            entry.cover = Some(take kept)
+        })
+    })
+    set(mut db, t, 1u64, 7u64)
+    let owes = step(mut b, db)
+    list.len(owes) == 3u64
+        && owes[0].session == 1u64 && list.len(owes[0].rows) == 1u64
+        && owes[1].session == 2u64 && owes[1].reset
+        && owes[2].session == 3u64 && list.len(owes[2].rows) == 1u64
+}
+
+@test
+fn test_subs_reset_keeps_diff(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_subs_reset_keeps_diff(c, r) { Ok(()) } else { Error(()) }
+}
+
+// L22 (RUNNER-SPEC v2.12, subscribe_order): a Subscribe runs at the version of the last
+// Released taken before it in PubIn's order, and each later Release reaches it in a round.
+// The publisher's own loop drains one inbox filled in that order: Joined, c1's Release, the
+// Subscribe, c2's Release, a Release outside the sub's reads, Halt. Sub 1's initial result
+// holds c1 (row 1 = 1, row 2 = 0) at c1's version. The two later Releases are queued
+// together, so G1 coalesces them (v2.23): c2 (row 2 = 7) follows in one round at the newest
+// version.
+pub fn law_subscribe_order(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    let empty = store.snapshot(db)
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let mut keys: List[Bytes] = list.new()
+    for ch in result.unwrap(store.changes(empty, base)) {
+        list.push(mut keys, clone(ch.tree_key))
+    }
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let reg = match placed(code.describe(subs_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    set(mut db, t, 1u64, 1u64)
+    let c1 = store.snapshot(db)
+    set(mut db, t, 2u64, 7u64)
+    let c2 = store.snapshot(db)
+    set(mut db, t, 4u64, 1u64)
+    let outside = store.snapshot(db)
+    let v1 = store.version(c1)
+    let v2 = store.version(c2)
+    let v3 = store.version(outside)
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let (ev_to, ev_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(8u64)
+    let (told_to, told_from): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
+    let mut queue: List[ToPub] = list.new()
+    list.push(mut queue, Joined(Join(to: take ev_to, told: take told_to, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None)))
+    list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new())))
+    list.push(mut queue, Subscribed(1u64, 1u32, law_caller(1u64), query_key(code.describe(q1)), no_arg()))
+    list.push(mut queue, Released(Release(version: v2, snapshot: Some(take c2), answers: list.new())))
+    list.push(mut queue, Released(Release(version: store.version(outside), snapshot: Some(take outside), answers: list.new())))
+    list.push(mut queue, Halt)
+    for take e in queue {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    publisher(take reg, take h, take base, take from, take rounds)
+    match channel.try_receive(told_from) {
+        Ok(a) => if a.who != 1u64 { return false },
+        _ => return false,
+    }
+    let mut cl = Client(caches: list.new(), last: list.new())
+    let mut n = 0u64
+    while let Ok(take x) = channel.try_receive(ev_from) {
+        let Notice(e: take e) = publisher_notice(take x)
+        let o = match take e {
+            Updated(Update(version: _, content: Some(take o), outcomes: _)) => take o,
+            _ => return false,
+        }
+        let ok = if n == 0u64 {
+            o.version == v1 && list.len(o.complete) == 1u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8))
+        } else {
+            o.version == v3 && list.len(o.complete) == 0u64 && apply(mut cl, take o) && holds(cl, keys, 1u64, 1u32, Some(1u8), Some(7u8))
+        }
+        if !ok {
+            return false
+        }
+        n += 1u64
+    }
+    n == 2u64
+}
+
+// L25 (RUNNER-SPEC v2.14, retired_without_waiting): a marked session's end waits on nothing,
+// and after the next message the publisher takes, Released or not, that session's
+// subscriptions, Joiner (its ledger and mark) and waiting replies are gone; a live session is
+// unchanged by every sweep. The oracle is the state itself, in place of §8's retained-bytes
+// figure (followups.md, 2026-11-17): a closed event channel for the publisher's Joiner, the
+// Board's subs and the waiting list for the sweep, and the Drained messages on PubIn for the
+// session's end.
+pub fn law_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    retired_at_publisher(c, r, tasks, true) && retired_at_publisher(c, r, tasks, false) && retired_state(c, r) && retired_session(c, r, tasks, 0u64) && retired_session(c, r, tasks, 1u64) && retired_session(c, r, tasks, 2u64) && retired_session(c, r, tasks, 3u64)
+}
+
+// A session joins the publisher and is told its id (0 if it could not): a sync point that is
+// not a Released, since the publisher has taken every message sent before it.
+fn join_as(to: Sender[PubIn], take ev: Sender[WireEvent], take mark: Option[Receiver[()]]) -> u64 waits {
+    join_with(to, take ev, take mark, None)
+}
+
+// Takes every event `from` holds: each Content's version, and whether any names `sub`.
+// True if the channel is then closed, false if it is only empty.
+fn drain_content(from: Receiver[WireEvent], mut versions: List[u64], sub: u32, mut named: bool) -> bool {
+    loop {
+        match channel.try_receive(from) {
+            Ok(take x) => {
+                let Notice(e: take e) = publisher_notice(take x)
+                if let Updated(Update(version: _, content: Some(take o), outcomes: _)) = take e {
+                    for s in o.complete {
+                        named = named || s == sub
+                    }
+                    for w in o.rows {
+                        named = named || w.sub == sub
+                    }
+                    list.push(mut versions, o.version)
+                }
+            },
+            Error(Empty) => return false,
+            Error(Closed) => return true,
+        }
+    }
+}
+
+// The publisher, as a task. Marked sessions L and M and an unmarked filler F join; L and M
+// subscribe sub 1, and both take c1's round. M's mark then closes in a quiet place, and the
+// next message is M's wake (woken) or, with the wake dropped, F's Unsubscribe followed by M's
+// queued Subscribe of sub 2. After that and a Joined, with no Released between, M's event
+// channel holds its two contents and is closed (its Joiner is gone), and sub 2 registered
+// nothing. Then c2's round reaches L.
+fn retired_at_publisher(c: Clock, r: Random, tasks: Tasks, woken: bool) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let v0 = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    set(mut db, t, 1u64, 1u64)
+    let c1 = store.snapshot(db)
+    set(mut db, t, 2u64, 7u64)
+    let c2 = store.snapshot(db)
+    let v1 = store.version(c1)
+    let v2 = store.version(c2)
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
+    match channel.receive(ready_from) {
+        Ok(None) => (),
+        _ => return false,
+    }
+    let (l_to, l_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
+    let (l_send, l_mark): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let mut l_keep = Some(take l_send)
+    let l = join_as(to, take l_to, Some(take l_mark))
+    let (m_to, m_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
+    let (m_send, m_mark): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let mut m_keep = Some(take m_send)
+    let m = join_as(to, take m_to, Some(take m_mark))
+    let (f_to, f_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
+    let f = join_as(to, take f_to, None)
+    let k1 = query_key(code.describe(q1))
+    let mut queue: List[ToPub] = list.new()
+    list.push(mut queue, Subscribed(l, 1u32, law_caller(l), clone(k1), no_arg()))
+    list.push(mut queue, Subscribed(m, 1u32, law_caller(m), clone(k1), no_arg()))
+    list.push(mut queue, Released(Release(version: v1, snapshot: Some(take c1), answers: list.new())))
+    for take e in queue {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    let (g_to, g_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let g = join_as(to, take g_to, None)
+    // M ends: its mark's only Sender goes. Nothing is Released until M's channel is read.
+    m_keep = None
+    let mut quiet: List[ToPub] = list.new()
+    if woken {
+        list.push(mut quiet, Drained)
+    } else {
+        list.push(mut quiet, Unsubscribed(f, 9u32))
+        list.push(mut quiet, Subscribed(m, 2u32, law_caller(m), clone(k1), no_arg()))
+    }
+    for take e in quiet {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    let (n_to, n_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let n = join_as(to, take n_to, None)
+    let mut mv: List[u64] = list.new()
+    let mut m2 = false
+    let m_closed = drain_content(m_from, mut mv, 2u32, mut m2)
+    if !m_closed || m2 || list.len(mv) != 2u64 || mv[0] != v0 || mv[1] != v1 {
+        return false
+    }
+    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: v2, snapshot: Some(take c2), answers: list.new())))) {
+        return false
+    }
+    let (k_to, k_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let k = join_as(to, take k_to, None)
+    let mut lv: List[u64] = list.new()
+    let mut l2 = false
+    let l_closed = drain_content(l_from, mut lv, 2u32, mut l2)
+    if l_closed || l2 || list.len(lv) != 3u64 || lv[0] != v0 || lv[1] != v1 || lv[2] != v2 {
+        return false
+    }
+    if let Error(_) = channel.send(to, PubIn(e: Halt)) {
+        return false
+    }
+    let stopped = match task.join(take publishing) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    l_keep = None
+    let _ = (f_from, g_from, n_from, k_from)
+    stopped && l != 0u64 && m != 0u64 && f != 0u64 && g != 0u64 && n != 0u64 && k != 0u64 && none(l_keep) && none(m_keep)
+}
+
+// The sweep's own state: session 2's mark is closed, session 1's is open. One sweep and the
+// retry pass leave session 1's sub and Joiner, and remove session 2's two subs, its Joiner
+// (with its waiting Ended and its mark) and its waiting Told.
+fn retired_state(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    let base = store.snapshot(db)
+    let at = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let reg = match placed(code.describe(subs_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let mut b = Board(r: take reg, h: take h, base: take base, newest: None, subs: subscriptions())
+    let k1 = query_key(code.describe(q1))
+    let _ = at_base(mut b, 1u64, 1u32, clone(k1), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, clone(k1), no_arg())
+    let _ = at_base(mut b, 2u64, 2u32, clone(k1), no_arg())
+    let (l_send, l_mark): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (m_send, m_mark): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let mut m_keep = Some(take m_send)
+    m_keep = None
+    let (l_to, l_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(4u64)
+    let (m_to, m_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(4u64)
+    let m_told = channel.sender(m_to)
+    let mut m_inbox = Some(take m_from)
+    m_inbox = None
+    let mut ended: List[(u32, u64, Outcome)] = list.new()
+    list.push(mut ended, (1u32, 0u64, Refused(Overloaded)))
+    let mut joined: List[Joiner] = list.new()
+    list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64))
+    list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, ended_at: ROUND_HALTED, reset: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64))
+    let mut outcomes: List[KeyedDone] = list.new()
+    list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded)))
+    let mut waiting: List[Replies] = list.new()
+    list.push(mut waiting, Replies(recipient: Recipient(owner: 2u64, to: take m_told), rows: take outcomes))
+    sweep(mut b.subs, mut joined)
+    settle(mut b.subs, mut joined, mut waiting, list.new(), at)
+    let _ = (l_send, l_from)
+    map.len(b.subs.by_session) == 1u64 && map.contains(b.subs.by_session, 1u64) && list.len(joined) == 1u64 && joined[0].who == 1u64 && list.len(waiting) == 0u64 && none(m_keep) && none(m_inbox)
+}
+
+fn is_ended(take d: Down, sub: u32) -> bool {
+    match take d {
+        Ended(s, take o) => s == sub && match o {
+            Refused(Overloaded) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// The session's end. A marked session on a mailbox of 2, with this law as its publisher,
+// joins and subscribes sub 1; its mark is Empty while it lives. It ends (0) normally on an
+// empty PubIn, (1) normally on a full one, (2) by a fault, or (3) by cancellation. Its end
+// waits on nothing: the session's own Drained is on PubIn before `join_marked` in (0), and in
+// (1) it was dropped, so `join_marked` adds only its own. In (2) and (3) only the joiner offers
+// one. The mark is closed after the join in each. (1) also holds v2.12 item 3: on the full
+// PubIn, a Subscribe of sub 2 is answered Ended(2, Refused(Overloaded)), and an Unsubscribe of
+// sub 1 is applied at the owner, which drops sub 1's rows from later content.
+fn fixture_generations(g: u64) -> List[(u32, u64)] {
+    let mut stamps: List[(u32, u64)] = list.new()
+    list.push(mut stamps, (1u32, 1u64))
+    list.push(mut stamps, (3u32, g))
+    stamps
+}
+
+// This unit driver feeds the production wire service, including its finish path.
+// It owns no public client transport. The existing publisher tests exercise marks.
+type RetiredOwner: send { service: Service[WireSession[(), Qh, ()]], from: Receiver[WireEvent], output: Sender[Down], publisher: Sender[PubIn] }
+
+fn retired_owner(take seed: RetiredOwner) -> Result[(), ()] waits {
+    let RetiredOwner(service: take initial, from: take from, output: take output, publisher: take pub_to) = take seed
+    let mut service = take initial
+    let mut work = wire_work()
+    loop {
+        wire_join_send(mut work, pub_to)
+        let event = match channel.receive(from) { Ok(take x) => take x, _ => break }
+        let WireEvent(e: take input_event) = take event
+        let input = match take input_event {
+            Input(take frame, at) => WClient(take frame, at),
+            FromRunner(take notice) => WRunner(take notice),
+            JoinReady => WPoll(false),
+            Ended(_) => break,
+            _ => continue,
+        }
+        let _ = result.unwrap((service.step)(mut service.context, mut work, take input))
+        while let Some(take frame) = result.unwrap((service.step)(mut service.context, mut work, WPoll(true))) {
+            let _ = result.unwrap((service.step)(mut service.context, mut work, WSent))
+            let down = match take frame {
+                Batch(v, take complete, take rows, _) => Batched(KeyedBatch(version: v, complete: take complete, rows: take rows, outcomes: list.new())),
+                Ended(sub, take outcome) => Ended(sub, take outcome),
+                Reset(v, _) => KeyedReset(v, list.new()),
+                _ => continue,
+            }
+            let _ = channel.send(output, take down)
+        }
+    }
+    wire_finish_owner(mut service, pub_to)
+    Ok(())
+}
+
+fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(2u64))
+    let (head, heads): (Sender[Req], Receiver[Req]) = channel.new(1u64)
+    let (down_to, down): (Sender[Down], Receiver[Down]) = channel.new(16u64)
+    let (inbox, events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let mut service = wire_service_seed(take reg, r, no_wire(), head, c, tasks, wire_defaults(1048576u64, 1048576u64), "fixture")
+    service.context.marked = true
+    service.context.phase = 3u8
+    // Past hello every session holds a Caller; a Subscribe without one ends it (1008).
+    service.context.caller = Some(law_caller(7u64))
+    service.context.me = Some(channel.sender(inbox))
+    service.context.publisher = Some(channel.sender(to))
+    let k1 = query_key(code.describe(q1))
+    list.push(mut service.context.entries, clone(k1))
+    let seed = RetiredOwner(service: take service, from: take events, output: take down_to, publisher: channel.sender(to))
+    let mut running = task.spawn(tasks, bytes 4194304u64, take seed, retired_owner)
+    if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(1u32, 0u32, no_arg(), None), 0u64))) { return false }
+    let joining = match channel.receive(from) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let PubIn(e: take first) = take joining
+    // v2.22: the Subscribe that made the owner join rides in its Join.
+    let (ses, held, subscribed) = match take first {
+        Joined(take j) => {
+            let Join(to: take delivery, told: take told, mark: take given, closed: _, identity: _, fence: _, progress: _, taken: _, first: take carried) = take j
+            let ses_to = take delivery
+            let _ = channel.try_send(told, Admit(who: 7u64, round: latest.handle(rounds.round)))
+            let _ = channel.send(ses_to, wire_event(JoinReady))
+            let one = match carried { Some(f) => f.sub == 1u32, None => false }
+            (take ses_to, take given, one)
+        },
+        _ => return false,
+    }
+    let m = match take held {
+        Some(take x) => take x,
+        None => return false,
+    }
+    let live = match channel.try_receive(m) {
+        Error(Empty) => true,
+        _ => false,
+    }
+    if !subscribed || !live {
+        return false
+    }
+    if end == 1u64 {
+        if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(3u32, 0u32, no_arg(), None), 0u64))) { return false }
+        let generation = match channel.receive(from) {
+            Ok(take x) => { let PubIn(e: take e) = take x; match take e { WireSubscribed(7u64, 3u32, g, _) => g, _ => return false } },
+            _ => return false,
+        }
+        for _ in 0u64 .. 2u64 {
+            if let Error(_) = channel.send(to, PubIn(e: Drained)) {
+                return false
+            }
+        }
+        let mut rows: List[Row] = list.new()
+        list.push(mut rows, Row(sub: 1u32, key: no_arg(), value: None))
+        list.push(mut rows, Row(sub: 3u32, key: no_arg(), value: None))
+        let o = Owe(session: 7u64, version: 9u64, generations: fixture_generations(generation), complete: list.new(), rows: take rows, ended: list.new(), reset: false)
+        if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(2u32, 0u32, no_arg(), None), 0u64))) {
+            return false
+        }
+        if let Error(_) = channel.send(inbox, wire_event(Input(Unsubscribe(1u32), 0u64))) {
+            return false
+        }
+        if let Error(_) = channel.send(inbox, wire_event(FromRunner(update(9u64, Some(take o), list.new())))) {
+            return false
+        }
+        let refused = match channel.receive(down) {
+            Ok(take d) => is_ended(take d, 2u32),
+            Error(_) => false,
+        }
+        let only_three = match channel.receive(down) {
+            Ok(Batched(take x)) => list.len(x.rows) == 1u64 && x.rows[0].sub == 3u32,
+            _ => false,
+        }
+        if !refused || !only_three {
+            return false
+        }
+    }
+    if end == 2u64 {
+        // A Told whose stream is over the session's bytes: slot_key's allocation faults.
+        let mut big: Bytes = list.new()
+        list.fill(mut big, 8388608u64, 0u8)
+        let mut answers: List[KeyedDone] = list.new()
+        list.push(mut answers, KeyedDone(stream: take big, p: 0u64, outcome: Refused(Overloaded)))
+        if let Error(_) = channel.send(inbox, wire_event(FromRunner(update(0u64, None, take answers)))) {
+            return false
+        }
+    } else if end == 3u64 {
+        task.cancel(mut running)
+    } else if let Error(_) = channel.send(inbox, wire_event(Ended(1000u16))) {
+        return false
+    }
+    // The session's end drops its client; this waits for that, never for the task.
+    while let Ok(_) = channel.receive(down) {
+    }
+    let before = drained(from)
+    let outcome = match join_marked(take running, to) {
+        Ok(Ok(_)) => end <= 1u64,
+        Error(Failed(_)) => end == 2u64,
+        Error(Cancelled(_)) => end == 3u64,
+        _ => false,
+    }
+    let after = drained(from)
+    let closed = match channel.try_receive(m) {
+        Error(Closed) => true,
+        _ => false,
+    }
+    let want = if end == 0u64 {
+        1u64
+    } else if end == 1u64 {
+        2u64
+    } else {
+        0u64
+    }
+    let _ = heads
+    outcome && closed && before == want && after == 1u64
+}
+
+@test
+fn test_retired_without_waiting(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_retired_without_waiting(c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L28 (RUNNER-SPEC v2.19.2, stale_never_released): once commit b's round register value is
+// published, no writer accepts a content unit below b for a session whose read set b hit.
+// The decision rows are hand-derived from §3: R = u64::MAX drops; the fence acts at `latest`
+// once R has reached it and at `prior` before. The trace runs the publisher as a task: one
+// session joins with its fence root and subscribes q1 at v0 (q1 reads perm, covers rows 0
+// and 1). Commit c writes only a covered row, so the fence stays at 0 and R = c; commit b
+// clears perm, a read hit, so the fence becomes {0, b} and R = b, and the writer's check
+// then refuses a unit at c and accepts one at b.
+pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let table = !release_passes(ROUND_HALTED, Fence(prior: 0u64, latest: 0u64), 5u64)
+        && !release_passes(7u64, Fence(prior: 3u64, latest: 7u64), 5u64)
+        && release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 4u64)
+        && !release_passes(5u64, Fence(prior: 3u64, latest: 9u64), 2u64)
+        && release_passes(9u64, Fence(prior: 3u64, latest: 9u64), 9u64)
+    table && stale_trace(c, r, tasks) && trap_trace(c, r, tasks) && ended_trace(c, r)
+}
+
+// v2.19.2 ended entries (RECHECK B1, B1a): a sub the publisher ends keeps its read set
+// indexed until a read-set hit fences its session. Three sessions end at commit c with no
+// fence of their own: session 1's q1 by a Cover-only conversion that faults (Ended), session
+// 2's q1 by one that loses (a publisher-made Reset), and session 3's q_late by a re-run that
+// faults after reading perm, which its last good run never read. Session 4's q1 gets round
+// c's rows, which bounce at its full owner inbox after c's R is published (B1d), so it is due
+// for repair (§3 "Repair"): no Ended, no fence. Commit b then writes only perm: all four
+// sessions are fenced at b, and nothing is owed, since session 4's sub is due and is not re-run.
+// A second write to perm fences only session 4, whose due sub keeps its read set; each ended
+// entry left at its first hit. Repair waits for session 4's drain token, then owes q1's whole
+// image at the base: perm is set, so rows 1 and 2, in one `complete`.
+fn ended_trace(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let h = result.unwrap(subs_handles(mut db))
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    let _ = at_base(mut b, 1u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let _ = at_base(mut b, 2u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let _ = at_base(mut b, 3u64, 1u32, query_key(code.describe(q_late)), no_arg())
+    let _ = at_base(mut b, 4u64, 1u32, query_key(code.describe(q1)), no_arg())
+    let schema = 7u64
+    let faults = fn(_ch: store.Change) -> Result[Option[Bytes], store.Error] {
+        if schema != 0u64 { fail("subs: a Cover's value faults") }
+        Error(Schema(schema))
+    }
+    let loses = fn(_ch: store.Change) -> Result[Option[Bytes], store.Error] { Error(Schema(schema)) }
+    let faulting_value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take faults
+    let losing_value: own[send] fn(store.Change) -> Result[Option[Bytes], store.Error] = take loses
+    let mut faulting = Some(take faulting_value)
+    let mut losing = Some(take losing_value)
+    let _ = map.update(mut b.subs.by_session, 1u64, scoped fn(mut group: Map[u32, Sub]) {
+        let _ = map.update(mut group, 1u32, scoped fn(mut entry: Sub) {
+            let mut kept = option.unwrap(replace(mut entry.cover, None))
+            kept.value = option.unwrap(replace(mut faulting, None))
+            entry.cover = Some(take kept)
+        })
+    })
+    let _ = map.update(mut b.subs.by_session, 2u64, scoped fn(mut group: Map[u32, Sub]) {
+        let _ = map.update(mut group, 1u32, scoped fn(mut entry: Sub) {
+            let mut kept = option.unwrap(replace(mut entry.cover, None))
+            kept.value = option.unwrap(replace(mut losing, None))
+            entry.cover = Some(take kept)
+        })
+    })
+    set(mut db, t, 2u64, 2u64)
+    b.newest = Some(store.snapshot(db))
+    let mut at_c = Fenced(sessions: list.new(), all: false)
+    let mut owes_c = round(mut b, mut at_c)
+    let (full_to, _full_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let (progressed, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let mut joined: List[Joiner] = list.new()
+    list.push(mut joined, Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), ended_at: ROUND_HALTED, reset: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64))
+    let mut bounced = 0u64
+    let mut i = 0u64
+    while i < list.len(owes_c) {
+        if owes_c[i].session == 4u64 {
+            let o = list.remove(mut owes_c, i)
+            if list.len(o.rows) > 0u64 { bounced += 1u64 }
+            overloaded(mut b.subs, mut joined[0], take o)
+        } else {
+            i += 1u64
+        }
+    }
+    let marked = joined[0].due && list.len(joined[0].ended) == 0u64
+    let mut ended = 0u64
+    for o in owes_c {
+        if o.session == 2u64 && o.reset { ended += 1u64 }
+        for e in o.ended {
+            let raised_fail = match e.2 { Failed(Raised(n)) => n == 5u32, _ => false }
+            if (o.session == 1u64 || o.session == 3u64) && e.0 == 1u32 && raised_fail { ended += 1u64 }
+        }
+    }
+    let c_fences = !at_c.all && list.len(at_c.sessions) == 1u64 && list.contains(at_c.sessions, 3u64)
+    set(mut db, t, 0u64, 5u64)
+    b.newest = Some(store.snapshot(db))
+    let mut at_b = Fenced(sessions: list.new(), all: false)
+    let owes_b = round(mut b, mut at_b)
+    let b_fences = !at_b.all && list.len(at_b.sessions) == 4u64 && list.contains(at_b.sessions, 1u64)
+        && list.contains(at_b.sessions, 2u64) && list.contains(at_b.sessions, 3u64) && list.contains(at_b.sessions, 4u64)
+    set(mut db, t, 0u64, 6u64)
+    b.newest = Some(store.snapshot(db))
+    let mut again = Fenced(sessions: list.new(), all: false)
+    let owes_again = round(mut b, mut again)
+    let kept = !again.all && list.len(again.sessions) == 1u64 && list.contains(again.sessions, 4u64) && list.len(owes_again) == 0u64
+    let mut idle: List[Owe] = list.new()
+    repair(mut b, mut joined, mut idle)
+    let _ = channel.try_send(progressed, ())
+    let mut fixed: List[Owe] = list.new()
+    repair(mut b, mut joined, mut fixed)
+    let image = list.len(fixed) == 1u64 && fixed[0].session == 4u64 && fixed[0].version == store.version(b.base)
+        && list.len(fixed[0].complete) == 1u64 && fixed[0].complete[0] == 1u32 && list.len(fixed[0].ended) == 0u64 && !fixed[0].reset
+        && list.len(fixed[0].rows) == 2u64 && fixed[0].rows[0].sub == 1u32 && fixed[0].rows[1].sub == 1u32 && !joined[0].due
+    bounced == 1u64 && marked && ended == 3u64 && c_fences && b_fences && list.len(owes_b) == 0u64
+        && kept && list.len(idle) == 0u64 && image
+}
+
+// publisher_trap_open: a publisher that traps publishes R = u64::MAX before it goes, so the
+// head's next commit is never released unfenced. The trap is real: one commitless Release
+// carries more answers for one owner than the publisher's byte limit holds, and
+// keep_answers' push unwraps the refusal.
+fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    let base = store.snapshot(db)
+    let v0 = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
+    let p = Publish(place: code.describe(subs_place), n_place: 131072u64, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let publishing = task.spawn(tasks, bytes 524288u64, take p, publish)
+    match channel.receive(ready_from) {
+        Ok(None) => (),
+        _ => return false,
+    }
+    let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: channel.sender(s_to), told: take told, mark: None, closed: None, identity: None, fence: None, progress: None, taken: None, first: None)))) {
+        return false
+    }
+    let Admit(who: s, round: take register) = match channel.receive(hear) {
+        Ok(take a) => take a,
+        Error(_) => return false,
+    }
+    let before = latest.read(register).at == v0
+    let mut answers: List[Answer] = list.new()
+    for i in 0u64 .. 16384u64 {
+        let row = KeyedDone(stream: list.new(), p: i, outcome: Abandoned)
+        list.push(mut answers, Answer(recipient: Recipient(owner: 999u64, to: channel.sender(s_to)), row: take row))
+    }
+    let _ = channel.send(to, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))
+    let trapped = match task.join(take publishing) {
+        Ok(_) => false,
+        Error(_) => true,
+    }
+    let refused = match channel.send(to, PubIn(e: Drained)) { Error(_) => true, Ok(_) => false }
+    let at = latest.read(register).at
+    let _ = (s_from, take s_to)
+    before && s != 0u64 && trapped && refused && at == ROUND_HALTED && !release_passes(at, Fence(prior: 0u64, latest: 0u64), v0)
+}
+
+fn stale_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let cv: std.codec.Codec[u64] = std.codec.of()
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
+    let t = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), cv))
+    set(mut db, t, 0u64, 1u64)
+    set(mut db, t, 1u64, 0u64)
+    set(mut db, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let v0 = store.version(base)
+    let h = match subs_handles(mut db) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    set(mut db, t, 1u64, 5u64)
+    let cs = store.snapshot(db)
+    set(mut db, t, 0u64, 0u64)
+    let bs = store.snapshot(db)
+    let vc = store.version(cs)
+    let vb = store.version(bs)
+    let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
+    let p = Publish(place: code.describe(subs_place), n_place: 1048576u64, h: take h, base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let publishing = task.spawn(tasks, bytes 8388608u64, take p, publish)
+    match channel.receive(ready_from) {
+        Ok(None) => (),
+        _ => return false,
+    }
+    let first = arc.new(Fence(prior: 0u64, latest: 0u64))
+    let root = latest.new(take first)
+    let (s_to, s_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(16u64)
+    let (told, hear): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
+    if let Error(_) = channel.send(to, PubIn(e: Joined(Join(to: take s_to, told: take told, mark: None, closed: None, identity: None, fence: Some(latest.handle(root)), progress: None, taken: None, first: None)))) {
+        return false
+    }
+    let Admit(who: s, round: take register) = match channel.receive(hear) {
+        Ok(take a) => take a,
+        Error(_) => return false,
+    }
+    let mut queue: List[ToPub] = list.new()
+    list.push(mut queue, Subscribed(s, 1u32, law_caller(s), query_key(code.describe(q1)), no_arg()))
+    list.push(mut queue, Released(Release(version: vc, snapshot: Some(take cs), answers: list.new())))
+    for take e in queue {
+        if let Error(_) = channel.send(to, PubIn(e: take e)) {
+            return false
+        }
+    }
+    let (x_to, x_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let x = join_as(to, take x_to, None)
+    // Round c named only q1's cover: no fence moved.
+    let at_c = latest.read(register).at == vc && latest.read(root).latest == 0u64
+        && release_load(register, root, v0) && release_load(register, root, vc)
+    if let Error(_) = channel.send(to, PubIn(e: Released(Release(version: vb, snapshot: Some(take bs), answers: list.new())))) {
+        return false
+    }
+    let (y_to, y_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
+    let y = join_as(to, take y_to, None)
+    let at_b = {
+        let f = latest.read(root)
+        f.prior == 0u64 && f.latest == vb
+    } && latest.read(register).at == vb && !release_load(register, root, vc) && release_load(register, root, vb)
+    if let Error(_) = channel.send(to, PubIn(e: Halt)) {
+        return false
+    }
+    let stopped = match task.join(take publishing) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    let _ = (s_from, x_from, y_from)
+    stopped && s != 0u64 && x != 0u64 && y != 0u64 && at_c && at_b
+}
+
+@test
+fn test_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_stale_never_released(c, r, tasks) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_subscribe_order(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_subscribe_order(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_subs_main(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_subs_main(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// ---- L16 (rows_normalized, RUNNER-SPEC v2.11.1 §3 Rows): a Row's key is the table id
+// big-endian ‖ the key codec, and its value is the table's current value codec without the
+// stored u16 schema prefix. 257 pad tables take ids 1..257, so "accounts" is 0x00000102,
+// whose bytes differ under the two byte orders. Its row 1 is stored under schema 0
+// ({balance}); the table is then opened at schema 1 ({balance, bonus = 7}) and row 2 is put.
+// The expected bytes are written out by hand: u64 keys are 8 bytes big-endian (codec.md's
+// order-preserving key format), u64 values 8 bytes little-endian.
+type Old { balance: u64 }
+
+fn old_put(v: Old, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(v.balance, mut b)
+    Ok(())
+}
+
+fn old_take(b: Bytes, mut at: u64) -> Result[Old, std.codec.DecodeError] {
+    Ok(Old(balance: std.codec.take_u64(b, mut at)?))
+}
+
+fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Old]) -> Result[(), std.codec.EncodeError] {
+    std.codec.define(mut s, "runner.tests.Account", 0)?
+    if std.codec.record(mut s, 1)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "balance")?
+    std.codec.schema_u64(mut s)
+    std.codec.close(mut s)
+    Ok(())
+}
+
+fn new_put(v: New, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(v.balance, mut b)
+    std.codec.put_u64(v.bonus, mut b)
+    Ok(())
+}
+
+fn new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
+    let balance = std.codec.take_u64(b, mut at)?
+    let bonus = std.codec.take_u64(b, mut at)?
+    Ok(New(balance: balance, bonus: bonus))
+}
+
+fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[New]) -> Result[(), std.codec.EncodeError] {
+    std.codec.define(mut s, "runner.tests.Account", 0)?
+    if std.codec.record(mut s, 2)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "balance")?
+    std.codec.schema_u64(mut s)
+    std.codec.field_default(mut s, "bonus", std.codec.of_u64(), 7)?
+    std.codec.close(mut s)
+    Ok(())
+}
+
+type Ah: send { t: store.Shape[u64, New] }
+
+fn accounts_q(tx: store.Tx, h: Ah, take _arg: u32) -> Result[Cover, Capacity] {
+    cover(h.t, Included(1u64), Included(2u64))
+}
+
+fn accounts_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(accounts_q), std.codec.key_u64(), std.codec.make(new_put, new_take, new_schema, 16u64), 65536u64, DEFAULT_STEPS)
+}
+
+fn push_bytes(mut out: Bytes, x: u8, n: u64) {
+    for _ in 0u64 .. n {
+        list.push(mut out, x)
+    }
+}
+
+// The tree key of accounts row k (k < 256), by hand.
+fn account_key(k: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    push_bytes(mut out, 0u8, 2u64)
+    push_bytes(mut out, 1u8, 1u64)
+    push_bytes(mut out, 2u8, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    push_bytes(mut out, k, 1u64)
+    out
+}
+
+// A New value by hand: balance then bonus, each 8 bytes little-endian (both < 256).
+fn account_value(balance: u8, bonus: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    push_bytes(mut out, balance, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    push_bytes(mut out, bonus, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    out
+}
+
+fn row_is(r: Row, key: Bytes, value: Bytes) -> bool {
+    r.sub == 7u32 && r.key == key && match r.value {
+        Some(v) => v == value,
+        None => false,
+    }
+}
+
+pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    for i in 0i64 .. 257i64 {
+        let mut name = string.from("pad")
+        string.push_i64(mut name, i)
+        let _ = result.unwrap(store.create_table(mut db, store.spec(take name, std.codec.key_u64(), std.codec.of_u64())))
+    }
+    let oc: std.codec.Codec[Old] = std.codec.make(old_put, old_take, old_schema, 8u64)
+    let nc: std.codec.Codec[New] = std.codec.make(new_put, new_take, new_schema, 16u64)
+    let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))
+    let old = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), oc))
+    let first = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, old, 1u64, Old(balance: 10u64))
+    })
+    match take first {
+        Ok(Committed(_)) => (),
+        _ => return false,
+    }
+    let current = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), nc))
+    let h = Ah(t: store.shape(current))
+    let reg = match placed(code.describe(accounts_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
+    let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
+    let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
+    if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
+        return false
+    }
+    // G2: row 2, put at schema 1, arrives from changes with the same normalization.
+    let second = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, current, 2u64, New(balance: 20u64, bonus: 9u64))
+    })
+    match take second {
+        Ok(Committed(_)) => (),
+        _ => return false,
+    }
+    let owes = step(mut b, db)
+    list.len(owes) == 1u64 && list.len(owes[0].rows) == 1u64 && row_is(owes[0].rows[0], account_key(2u8), account_value(20u8, 9u8))
+}
+
+fn faulting_new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
+    let value = new_take(b, mut at)?
+    if value.balance == 10u64 {
+        fail("fixture: old row failed in the current decoder")
+    }
+    let mut i = 0u64
+    while i < 8192u64 {
+        i += 1u64
+    }
+    Ok(value)
+}
+
+fn projection_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(accounts_q), std.codec.key_u64(), std.codec.make(new_put, new_take, new_schema, 16u64), 65536u64, 4096u64)
+}
+
+fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
+    let mut db = store.memory(c, r, store.defaults())
+    let oc: std.codec.Codec[Old] = std.codec.make(old_put, old_take, old_schema, 8u64)
+    let nc: std.codec.Codec[New] = std.codec.make(new_put, faulting_new_take, new_schema, 16u64)
+    let _ = result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), oc)))
+    let old = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), oc))
+    let _ = result.unwrap(store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        store.put(mut tx, old, 1u64, Old(balance: balance))
+    }))
+    let current = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), nc))
+    let h = Ah(t: store.shape(current))
+    let reg = result.unwrap(placed(code.describe(projection_place), 1048576u64))
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let result_schema = result.unwrap(query_result_schema(std.codec.key_u64(), nc))
+    let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
+    let mut b = Board(r: take reg, h: take h, base: store.snapshot(db), newest: None, subs: subscriptions())
+    let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
+    !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64
+        && list.len(o.ended) == 1u64 && o.ended[0].0 == 7u32 && ended_entry(b.subs, SubId(who: 1u64, sub: 7u32, serial: 0u64))
+        && match o.ended[0].2 {
+            Failed(Raised(5u32)) => balance == 10u64,
+            Failed(OutOfTime(4096u64)) => balance == 11u64,
+            _ => false,
+        }
+}
+
+// The old stored layout takes the reader path and executes application code. The faulted
+// first run stays only as an ended entry (v2.19.2).
+pub fn law_projection_isolated(c: Clock, r: Random) -> bool waits {
+    faulting_projection(c, r, 10u64) && faulting_projection(c, r, 11u64)
+}
+
+@test
+fn test_projection_isolated(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_projection_isolated(c, r) { Ok(()) } else { Error(()) }
+}
+
+@test
+fn test_rows_normalized(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_rows_normalized(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn queued_update(version: u64) -> WireEvent {
+    wire_event(FromRunner(Notice(e: Updated(Update(version: version, content: None, outcomes: list.new())))))
+}
+
+// Whether `updates` holds Updates 1 to n, in order.
+fn queued_versions(updates: List[Update], n: u64) -> bool {
+    if list.len(updates) != n { return false }
+    for i in 0u64 .. n { if updates[i].version != i + 1u64 { return false } }
+    true
+}

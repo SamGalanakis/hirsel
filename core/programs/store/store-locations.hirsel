@@ -55,32 +55,6 @@ fn location_storage_charge(known: PageLocations) -> u64 {
     int.saturating_add(int.saturating_add(records, packs), int.saturating_add(members, known.frames.payload))
 }
 
-fn scan_location_storage_charge(known: PageLocations) -> u64 {
-    // FrameLocation is PagePtr (36), class (1), image (2) and two List headers (48).
-    // PagePack is class (1), frames (4), live (8) and payload bytes (8).
-    let records = std.omap.scan_storage_charge(known.frames.values, 8, 87)
-    let packs = std.omap.scan_storage_charge(known.packs.values, 8, 21)
-    let members = std.omap.scan_storage_charge(known.members.values, 16, 0)
-    let mut total = int.saturating_add(int.saturating_add(records, packs), members)
-    let root = std.omap.root(known.frames.values)
-    if let Some(node) = root {
-        total = int.saturating_add(total, location_edge_charge(node))
-    }
-    total
-}
-
-fn location_edge_charge(n: Arc[std.omap.Node[u64, FrameLocation]]) -> u64 {
-    let mut total = 0u64
-    for slot in 0u64 .. std.omap.node_count(n) {
-        if let Some(record) = std.omap.node_value(n, slot) {
-            total = int.saturating_add(total, frame_edge_charge(record))
-        } else if let Some(child) = std.omap.node_child(n, slot) {
-            total = int.saturating_add(total, location_edge_charge(child))
-        }
-    }
-    total
-}
-
 fn frame_edge_charge(record: FrameLocation) -> u64 {
     let outgoing = 8 * list.capacity(record.outgoing)
     // IncomingEdge's largest payload has u8, u64, u8 and a tag.
@@ -390,49 +364,6 @@ fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.pa
     list.push(mut output.pages, PageWrite(stamp: stamp, body: arc.share(root)))
 }
 
-fn check_page_location_closure() -> Result[(), Error] {
-    let mut installed = new_page_locations()
-    capacity(disk_index_put(mut installed.packs, 1, PagePack(class: 1, frames: 1, live: 10, payload_bytes: 10), pack_edge_charge))?
-    capacity(disk_index_put(mut installed.packs, 2, PagePack(class: 0, frames: 2, live: 66, payload_bytes: 66), pack_edge_charge))?
-    add_location(mut installed, std.page.PagePtr(pack: 1, offset: 72, len: 10, checksum: 1, stamp: 1), 1, 0, list.new())?
-    for parent in 2u64 .. 4 {
-        let mut outgoing: List[u64] = list.with_capacity(1)
-        list.push(mut outgoing, 1)
-        let ptr = std.page.PagePtr(pack: 2, offset: 72 + 49 * (parent - 2), len: 33, checksum: parent, stamp: parent)
-        add_location(mut installed, ptr, 0, 0, take outgoing)?
-        add_page_source(mut installed, parent, HolderSource(0, parent, 0))?
-    }
-    let mut moved: List[u64] = list.with_capacity(1)
-    list.push(mut moved, 1)
-    let marked = relocation_ancestors(installed, moved)
-    if map.len(marked) != 3 || !map.contains(marked, 1) || !map.contains(marked, 2) || !map.contains(marked, 3) {
-        return Error(Foreign)
-    }
-    let mut candidate = share_page_locations(installed)
-    let mut outgoing: List[u64] = list.with_capacity(1)
-    list.push(mut outgoing, 1)
-    add_location(mut candidate, std.page.unlocated(4), 0, 0, take outgoing)?
-    add_page_source(mut candidate, 4, HolderSource(0, 2, 0))?
-    remove_page_source(mut candidate, 2, HolderSource(0, 2, 0))?
-    let after = relocation_ancestors(candidate, moved)
-    if map.len(after) != 2 || !map.contains(after, 1) || !map.contains(after, 3) {
-        return Error(Foreign)
-    }
-    let Some(body) = disk_index_get(candidate.frames, 1) else {
-        return Error(Foreign)
-    }
-    let Some(old_pack) = disk_index_get(installed.packs, 2) else {
-        return Error(Foreign)
-    }
-    let Some(new_pack) = disk_index_get(candidate.packs, 2) else {
-        return Error(Foreign)
-    }
-    if list.len(body.incoming) != 2 || old_pack.live != 66 || new_pack.live != 33 {
-        return Error(Foreign)
-    }
-    Ok(())
-}
-
 type DiskIndex[K: ordered + shareable + send, T: shareable + send]: send {
     values: std.omap.OMap[K, T],
     ids: u64,
@@ -487,20 +418,4 @@ fn disk_index_remove[K: ordered + shareable + send, T: shareable + send](mut tab
     table_index.values = std.omap.remove(mut table_index.ids, table_index.values, key)
     table_index.payload -= removed
     Ok(Some(take value))
-}
-
-fn disk_index_len[K: ordered + shareable + send, T: shareable + send](table_index: DiskIndex[K, T]) -> u64 {
-    std.omap.len(table_index.values)
-}
-
-pub fn disk_law_page_location_closure() -> bool {
-    match check_page_location_closure() {
-        Ok(()) => true,
-        Error(_) => false,
-    }
-}
-
-@test
-fn disk_test_page_location_closure() -> Result[(), Error] {
-    check_page_location_closure()
 }

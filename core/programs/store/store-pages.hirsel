@@ -165,20 +165,6 @@ fn resident_images(roots: List[PageRoots], lists: Option[View[PagedLists]]) -> u
     total
 }
 
-fn page_row_count(tree: PageTree) -> u64 {
-    if tree_domain(tree) != CollectionMap {
-        let (rows, _) = std.page.totals(tree.root)
-        return rows
-    }
-    let mut rows = 0u64
-    let mut cursor = std.page.cursor_open(tree.root, None, true, false)
-    while let Some(item) = std.page.cursor_next(mut cursor) {
-        let count_in_collection: u64 = list.word_le(item.value, 36)
-        rows = int.saturating_add(rows, count_in_collection)
-    }
-    rows
-}
-
 fn account_frontier(mut ready: Heap[(Bytes, u64)], walks: List[std.page.Walk], slot: u64) {
     if let Some(take key) = std.page.walk_key(walks[slot]) {
         heap.push(mut ready, (take key, slot))
@@ -294,33 +280,6 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
         charge = int.saturating_add(charge, int.saturating_add(126, row_version_union(group, 4)))
     }
     charge
-}
-
-@test
-fn test_paged_row_account() -> Result[(), Error] {
-    let mut next_stamp = 1u64
-    let mut collections = new_page_tree(CollectionMap, 0)
-    define_collection(mut collections, 8, 1, 1, mut next_stamp)?
-    let key = logical_key(8, key_word(1))?
-    put_page_row(mut collections, key, string.as_bytes("A"), 1, mut next_stamp)?
-    let mut participants: List[PageRoots] = list.with_capacity(3)
-    list.push(mut participants, PageRoots(collections: share_page_tree(collections),
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
-    // One descriptor at 126, one logical 12-byte key and a one-byte value.
-    if page_row_account(participants) != 212 { return Error(Foreign) }
-    let changed_from = next_stamp
-    put_page_row(mut collections, key, string.as_bytes("B"), changed_from, mut next_stamp)?
-    define_collection(mut collections, 9, 2, changed_from, mut next_stamp)?
-    list.push(mut participants, PageRoots(collections: share_page_tree(collections),
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
-    // The same value is written under a new blob stamp.
-    let rewritten_from = next_stamp
-    put_page_row(mut collections, key, string.as_bytes("B"), rewritten_from, mut next_stamp)?
-    list.push(mut participants, PageRoots(collections: take collections,
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
-    // Two distinct descriptors and two byte-distinct versions of key 1.
-    if page_row_account(participants) != 424 { return Error(Foreign) }
-    Ok(())
 }
 
 fn get_page_row(tree: PageTree, key: Bytes) -> Option[View[Bytes]] in tree {
@@ -550,131 +509,4 @@ fn compare_page_collections(before: PageTree, after: PageTree) -> Result[List[Ch
         if comparison != Greater { old_collection = std.page.cursor_next(mut left) }
         if comparison != Less { new_collection = std.page.cursor_next(mut right) }
     }
-}
-
-@test
-fn test_paged_collection_paths() -> Result[(), Error] {
-    let mut stamps = 1u64
-    let mut tree = new_page_tree(CollectionMap, 1024)
-    define_collection(mut tree, 7, 1, 1, mut stamps)?
-    define_collection(mut tree, 9, 2, 1, mut stamps)?
-    let mut small: Bytes = list.with_capacity(64)
-    list.fill(mut small, 64, 7u8)
-    for row in 0u64 .. 160 {
-        put_page_row(mut tree, logical_key(7, key_word(row))?, small, 1, mut stamps)?
-    }
-    let earlier = share_page_tree(tree)
-    let floor = stamps
-    for row in 0u64 .. 40 {
-        if !remove_page_row(mut tree, logical_key(7, key_word(row))?, floor, mut stamps)? {
-            return Error(Missing("present row"))
-        }
-    }
-    let mut large: Bytes = list.with_capacity(1025)
-    list.fill(mut large, 1025, 55u8)
-    let rewritten = logical_key(7, key_word(100))?
-    put_page_row(mut tree, rewritten, large, floor, mut stamps)?
-    {
-        let Some(current) = get_page_row(tree, rewritten) else { return Error(Missing("new row")) }
-        let Some(old) = get_page_row(earlier, rewritten) else { return Error(Missing("old row")) }
-        if current != large || old != small { return Error(Foreign) }
-    }
-    {
-        let Some(subtree) = std.page.collection_child(tree.root, prefix(7)?) else { return Error(Missing("collection")) }
-        let (row_count, _) = std.page.totals(subtree)
-        if row_count != 120 || std.page.rank(subtree, key_word(110), true) != 71 {
-            return Error(Foreign)
-        }
-    }
-    let mut forward = open_page_range(tree, None, true, false, None)?
-    for row in 40u64 .. 160 {
-        let Some((key, _)) = next_page_range(mut forward)? else { return Error(Missing("range row")) }
-        if key != logical_key(7, key_word(row))? { return Error(Foreign) }
-    }
-    if let Some(_) = next_page_range(mut forward)? { return Error(Foreign) }
-    let mut reverse = open_page_range(tree, Some(logical_key(7, key_word(111))?), false, true, None)?
-    let Some((key, _)) = next_page_range(mut reverse)? else { return Error(Missing("reverse row")) }
-    if key != logical_key(7, key_word(110))? { return Error(Foreign) }
-    let delta = compare_page_collections(earlier, tree)?
-    if list.len(delta) != 41 { return Error(Foreign) }
-    for row in 0u64 .. 40 {
-        if delta[row].tree_key != logical_key(7, key_word(row))? { return Error(Foreign) }
-        if let Some(_) = delta[row].value { return Error(Foreign) }
-    }
-    if delta[40u64].tree_key != rewritten { return Error(Foreign) }
-    let Some(replacement) = view delta[40u64].value else { return Error(Foreign) }
-    if list.compare_bytes(replacement, large) != Equal { return Error(Foreign) }
-    if !drop_collection(mut tree, 9, floor, mut stamps)? { return Error(Missing("empty index")) }
-    if let None = std.page.collection_child(earlier.root, prefix(9)?) {
-        return Error(Missing("held index"))
-    }
-    Ok(())
-}
-
-fn check_shrunk_collection(db: Db, rows: Table[u64, Bytes], wide: Bytes, short: Bytes) -> Result[(), Error] {
-    let tree = db.heads[0u64].roots.collections
-    let Some(root) = std.page.collection_child(tree.root, prefix(rows.id)?) else { return Error(Missing("collection")) }
-    let image = std.page.image_of(root)
-    if std.page.level(image) != 0 || std.page.count(image) != 5 || std.page.sealed_size(image) != 3758 {
-        return Error(Missing("merged root leaf"))
-    }
-    let s = snapshot(db)
-    let reader = shape(rows)
-    if get(s, reader, 0)? != Some(clone(short)) { return Error(Missing("overwritten row")) }
-    for key in 1u64 .. 5 {
-        if get(s, reader, key)? != Some(clone(wide)) { return Error(Missing("unchanged row")) }
-    }
-    Ok(())
-}
-
-@test
-fn test_paged_shrinking_overwrite(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let dir = disk_test_directory(d)
-    let mut options = defaults()
-    options.pack_bytes = 4096
-    let mut db = open(tasks, dir, c, r, options)?
-    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
-    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    let seq = db.file_seq
-    let mut wide: Bytes = list.with_capacity(914)
-    list.fill(mut wide, 914, b'w')
-    let short = string.as_bytes("s")
-
-    // AP3: 24-byte header, 7 common key bytes, and 8 bytes per slot
-    // including its one-byte key suffix. A typed value adds six bytes.
-    // Five 920-byte values force a split, with the leftmost minimax cut 2/3.
-    let filled = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        for key in 0u64 .. 5 { put(mut tx, rows, key, wide)? }
-        Ok(())
-    })?
-    if let Committed(_) = take filled {} else { return Error(Missing("initial commit")) }
-    {
-        let Some(root) = std.page.collection_child(db.heads[0u64].roots.collections.root, prefix(rows.id)?) else {
-            return Error(Missing("collection"))
-        }
-        let image = std.page.image_of(root)
-        if std.page.level(image) != 1 || std.page.count(image) != 2 {
-            return Error(Missing("two-leaf tree"))
-        }
-        let left = option.unwrap(std.page.child(root, 0))
-        let right = option.unwrap(std.page.child(root, 1))
-        if std.page.sealed_size(std.page.image_of(left)) != 1887 || std.page.sealed_size(std.page.image_of(right)) != 2815 {
-            return Error(Missing("2/3 split"))
-        }
-    }
-
-    // The overwrite leaves the left leaf at 31 + 2*8 + 920 + 7 = 974,
-    // below 1024. AP3 joins it with the right leaf and collapses the root:
-    // 31 + 5*8 + 4*920 + 7 = 3758 bytes, within 4096.
-    let shrunk = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] { put(mut tx, rows, 0, short) })?
-    let Committed(done) = take shrunk else { return Error(Missing("overwrite commit")) }
-    durable(mut db, done.ticket)?
-    if db.file_seq != seq { return Error(Missing("uncovered journal")) }
-    check_shrunk_collection(db, rows, wide, short)?
-    close(take db)?
-
-    let mut reopened = open(tasks, dir, c, r, options)?
-    let replayed_rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    check_shrunk_collection(reopened, replayed_rows, wide, short)?
-    close(take reopened)
 }

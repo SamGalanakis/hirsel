@@ -52,7 +52,7 @@ def main():
     rows = []
     with tempfile.TemporaryDirectory(prefix='hirsel-store-disk-laws-') as tmp, contextlib.ExitStack() as resources:
         work = Path(tmp)
-        corpus = inputs(args.root.resolve())
+        corpus = inputs(args.root.resolve(), tests=True)
         crash_manifest = work / 'crash-inputs.json'
         crash_manifest.write_text(json.dumps(corpus))
         manifest = work / 'inputs.json'

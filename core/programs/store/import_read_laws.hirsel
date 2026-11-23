@@ -257,7 +257,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     }
     let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 6, seq: 3)
     let mut prepared_file = result.unwrap(host.open(d, "PREPARED", Write))
-    let header = result.unwrap(disk_header_bytes(ctx, 0))
+    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
     result.unwrap(host.write(mut prepared_file, header))
     let meta = PreparedMeta(base: ExportStamp(attempt: install_fixture_bytes(16, 7), store_hi: 1, store_lo: 2, opened: 3, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 3, end: 72), target: PreparedTarget(describe: install_fixture_bytes(32, 21), release: install_fixture_bytes(32, 22), digest: install_fixture_bytes(32, 23), resident_limit: 1048576, pack_bytes: 1048576, checkpoint_bytes: 67108864, journal_limit: 268435456), next_table: 1, changes: 0, ranges: 0)
     let mut at = 72u64

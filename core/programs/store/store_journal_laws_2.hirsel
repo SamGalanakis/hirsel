@@ -1,0 +1,974 @@
+// L51(h). Keep enough capacity in the name index, then force only branch
+// storage to grow under the zero-byte grant.
+@test
+fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut mem = memory(c, r, defaults())
+    let slots = list.capacity(mem.heads)
+    for id in 1u64 .. slots {
+        let saved = snapshot(mem)
+        let name = capacity(disk_path("branch-", id, ""))?
+        let _ = fork(mut mem, name, saved)?
+    }
+    capacity(map.try_reserve(mut mem.branch_names, 1))?
+    let saved = snapshot(mem)
+    let before = mem.next_branch
+    let refused = bound bytes 0 {
+        fork(mut mem, "", saved)
+    }
+    match refused {
+        Ok(Error(Full(Allocation(_)))) => (),
+        _ => return Error(Foreign),
+    }
+    if mem.next_branch != before || list.len(mem.heads) != slots {
+        return Error(Foreign)
+    }
+    if let Some(_) = branch(mem, "") {
+        return Error(Foreign)
+    }
+    close(take mem)?
+    let root = disk_test_directory(d)
+    let mut db = open(tasks, root, c, r, journal_crash_options())?
+    let (sender, take receiver): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(1)
+    let _ = take receiver
+    let original = replace(mut db.journal, Some(sender))
+    let saved_disk = snapshot(db)
+    match fork(mut db, "beta", saved_disk) {
+        Error(Poisoned(Closed)) => (),
+        _ => return Error(Foreign)
+    }
+    if let Some(_) = branch(db, "beta") {
+        return Error(Foreign)
+    }
+    if accounts(db).journal != 0 || db.record_bytes != 147 {
+        return Error(Foreign)
+    }
+    let _ = take original
+    match close(take db) {
+        Error(Poisoned(Closed)) => Ok(()),
+        _ => Error(Foreign)
+    }
+}
+
+// L51(a) and (k). Main is 147 bytes. 44,500 full pins and two
+// 89-byte names take the total to 16,777,069, leaving exactly 147 bytes.
+fn fork_limit_manifest() -> PageManifest {
+    let mut manifest = page_manifest_empty()
+    manifest.fence = 1
+    let roots = manifest.branches[0].roots
+    let padding = string.repeat("x", 249)
+    for i in 0u64 .. 44500 {
+        let name = result.unwrap(disk_path("", 100000 + i, padding))
+        list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: roots))
+    }
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 89), branch: 0, version: 0, roots: roots))
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 89), branch: 0, version: 0, roots: roots))
+    take manifest
+}
+
+fn fork_limit_image(d: Dir, id: StoreId, attempt: Bytes, name: String, end: u64) -> Result[(), DeployError] waits {
+    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    deploy_result(disk_write_synced(d, "j-1", result.unwrap(disk_header_bytes(ctx, 0, 0))))?
+    deploy_result(fork_test_append(d, id, 1, 72, 1, name))?
+    let stamp = ExportStamp(attempt: result.unwrap(copied(attempt)), store_hi: id.hi, store_lo: id.lo, opened: 1, branch: 0, head: 0, next_table: 1, activation: 0, terminal: 1, end: end)
+    deploy_result(disk_write_synced(d, "EXPORT", deploy_result(export_bytes(stamp))?))
+}
+
+@test
+fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let child = disk_test_directory(d)
+    let options = journal_crash_options()
+    let id = StoreId(hi: 1, lo: 2)
+    deploy_result(disk_publish_manifest(child, id, fork_limit_manifest()))?
+    let mut attempt: Bytes = list.with_capacity(16)
+    list.fill(mut attempt, 16, 2u8)
+    fork_limit_image(child, id, attempt, "betas", 111)?
+    match open_export(child, c, attempt, options) {
+        Error(Store(Corrupt(Fault(why: Malformed, ..)))) => (),
+        _ => fail("export accepted the over-limit FORK"),
+    }
+    deploy_result(disk_io(host.remove(child, "EXPORT")))?
+    match open(tasks, child, c, r, options) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => fail("open accepted the over-limit FORK"),
+    }
+    fork_limit_image(child, id, attempt, "beta", 110)?
+    let exported = open_export(child, c, attempt, options)?
+    if exported.db.record_bytes != 16777216 || option.unwrap(branch(exported.db, "beta")).id != 1 {
+        fail("export lost the equality FORK")
+    }
+    deploy_result(disk_io(host.remove(child, "EXPORT")))?
+    let mut db = deploy_result(open(tasks, child, c, r, options))?
+    if db.record_bytes != 16777216 || db.uncovered != 38 {
+        fail("open lost the equality FORK")
+    }
+    let beta = option.unwrap(branch(db, "beta"))
+    let _ = deploy_result(delete_branch(mut db, beta))?
+    let held = snapshot(db)
+    match fork(mut db, "betas", held) {
+        Error(Limit(Manifest)) => (),
+        _ => fail("over-limit live fork was accepted"),
+    }
+    if db.frame_seq != 0 || db.next_branch != 2 || db.record_bytes != 16777069 {
+        fail("refused live fork changed branch metadata")
+    }
+    let (refork, _) = deploy_result(fork(mut db, "beta", held))?
+    let _ = deploy_result(checkpoint(mut db))?
+    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777476))?
+    if read_le(manifest, 76, 4) != 16777368 {
+        fail("cut encoded the wrong fork record total")
+    }
+    let _ = deploy_result(delete_branch(mut db, refork))?
+    let too_long = string.repeat("q", 26)
+    match pin(mut db, too_long, held) {
+        Error(Limit(Manifest)) => (),
+        _ => fail("over-limit pin was accepted"),
+    }
+    let fitting = string.repeat("q", 25)
+    let _ = deploy_result(pin(mut db, fitting, held))?
+    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777476))?
+    if db.record_bytes != 16777216 || read_le(pinned_manifest, 76, 4) != 16777368 {
+        fail("cut encoded the wrong pin record total")
+    }
+    deploy_result(close(take db))
+}
+
+// L51(d). Each stored value is six bytes. The same retained versions charge
+// 260 + 3*86 after recovery, and 260 + 4*86 before the live account is settled.
+@test
+fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let mut options = journal_crash_options()
+    options.resident_limit = 710
+    let mut db = deploy_result(open(tasks, disk_test_directory(d), c, r, options))?
+    db.fence = 1
+    deploy_result(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32())))?
+    let rows = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let initial = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 1u32)?
+        put(mut tx, rows, 2, 2u32)
+    }))?
+    let Committed(_) = initial else {
+        return Error(ExportMismatch)
+    }
+    let old = snapshot(db)
+    let _ = deploy_result(pin(mut db, "pin", old))?
+    for value in 3u32 .. 5 {
+        let updated = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, rows, 2, value)
+        }))?
+        let Committed(_) = updated else {
+            return Error(ExportMismatch)
+        }
+    }
+    let mut attempt: Bytes = list.with_capacity(16)
+    list.fill(mut attempt, 16, 3u8)
+    let captured = begin_export_copy(mut db, disk_test_directory(d), result.unwrap(copied(attempt)), 0)?
+    let exported = export_copy(take captured)?
+    deploy_result(disk_io(host.remove(exported.dir, "EXPORT")))?
+    let mut reopened = deploy_result(open(tasks, exported.dir, c, r, options))?
+    let name = string.repeat("n", 100)
+    let live = snapshot(db)
+    let loaded = snapshot(reopened)
+    let (direct, _) = deploy_result(fork(mut db, name, live))?
+    let (from_disk, _) = deploy_result(fork(mut reopened, name, loaded))?
+    if direct.id != 1 || from_disk.id != 1 || accounts(db).logical != 604 || accounts(db).exact || accounts(reopened).logical != 518 || !accounts(reopened).exact {
+        return Error(ExportMismatch)
+    }
+    release_export(mut db, attempt)
+    deploy_result(close(take reopened))?
+    deploy_result(close(take db))
+}
+
+// AP17. A 73-byte put and a 38-byte FORK cross 110 bytes. A successful
+// cut covers both. An allocation refusal during planning leaves both in
+// the original segment.
+@test
+fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = journal_crash_options()
+    options.checkpoint_bytes = 110
+    for refuse in[false, true] {
+        let child = disk_test_directory(d)
+        let mut db = open(tasks, child, c, r, options)?
+        create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+        let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        if !typed_put(mut db, rows, 1, 11) || db.uncovered != 73 {
+            return Error(Foreign)
+        }
+        let previous = db.file_seq
+        let generation = db.checkpointed
+        let saved = snapshot(db)
+        let (beta, receipt) = if refuse {
+            let attempt = bound bytes 4096 {
+                fork(mut db, "beta", saved)
+            }
+            result.unwrap(take attempt)?
+        } else {
+            fork(mut db, "beta", saved)?
+        }
+        let expected_segment = if refuse {
+            previous
+        } else {
+            previous + 1
+        }
+        if !covered(db, receipt.mark) || journal_mark(receipt) != 2 || db.file_seq != expected_segment || db.since_cut != 0 {
+            return Error(Foreign)
+        }
+        let expected_journal = if refuse {
+            111u64
+        } else {
+            0u64
+        }
+        if db.uncovered != expected_journal || db.checkpointed != (if refuse {
+            generation
+        } else {
+            generation + 1
+        }) {
+            return Error(Foreign)
+        }
+        close(take db)?
+        let reopened = open(tasks, child, c, r, options)?
+        if option.unwrap(branch(reopened, "beta")).id != 1 || reopened.uncovered != expected_journal || get(snapshot_of(reopened, beta)?, shape(rows), 1)? != Some(11u64) {
+            return Error(Foreign)
+        }
+        close(take reopened)?
+    }
+    Ok(())
+}
+
+// L51(g), at full page size. The distinct blobs force one pack per row and
+// more than one branch of pack-list pages. The manifest still holds 299 bytes.
+@test
+fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let child = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 33554432
+    options.pack_bytes = 1024
+    let mut db = open(tasks, child, c, r, options)?
+    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let mut values: List[std.page.Row] = list.with_capacity(12000)
+    for key in 0u64 .. 12000 {
+        let mut raw: Bytes = list.with_capacity(1030)
+        capacity(le(mut raw, 0, 2))?
+        capacity(le(mut raw, 1024, 4))?
+        capacity(le(mut raw, key, 8))?
+        list.fill(mut raw, 1016, 0u8)
+        list.push(mut values, std.page.Row(key: key_word(key), value: take raw, charge: 1108))
+    }
+    bulk_store_collection(mut db.heads[0].roots.collections, rows.id, 1, values, mut db.next_node)?
+    let first = db.disk[0].pages.next_pack
+    let _ = checkpoint(mut db)?
+    let after = db.disk[0].pages.next_pack
+    let manifest = disk_read_file(child, "MANIFEST", 387)?
+    if read_le(manifest, 76, 4) != 299 || std.page.level(std.page.image_of(db.disk[0].pages.lists.packs)) < 2 {
+        return Error(Foreign)
+    }
+    let held = snapshot(db)
+    let (beta, receipt) = fork(mut db, "beta", held)?
+    if beta.id != 1 || !covered(db, receipt.mark) || db.disk[0].pages.next_pack != after {
+        return Error(Foreign)
+    }
+    let id = db.store
+    close(take db)?
+    // A class-2 pack can be present before its MANIFEST replaces the old one.
+    let orphan = paged_pack_path(after)?
+    let ctx = DiskContext(store: id, role: 3, seq: after)
+    let mut orphan_wire = capacity(disk_header_bytes(ctx, 0, 0))?
+    let prior_list = page_list_pack_vector()
+    let unused_page = list.slice(prior_list, 88, list.len(prior_list))
+    list.append(mut orphan_wire, capacity(disk_seal(ctx, 72, 33, 1, unused_page))?)
+    disk_write_synced(child, orphan, orphan_wire)?
+    let reopened = open(tasks, child, c, r, options)?
+    if disk_exists(child, orphan)? || option.unwrap(branch(reopened, "beta")).id != 1 || std.page.level(std.page.image_of(reopened.disk[0].pages.lists.packs)) < 2 {
+        return Error(Foreign)
+    }
+    let mut blob_count = 0u64
+    for seq in first .. after {
+        let Some(pack) = disk_index_get(reopened.disk[0].pages.locations.packs, seq) else {
+            continue
+        }
+        if pack.class != 1 {
+            continue
+        }
+        let wire = disk_read_file(child, paged_pack_path(seq)?, 1126)?
+        if list.len(wire) != 1126 || read_le(wire, 72, 2) != 34 || read_le(wire, 76, 4) != 1038 || pack.live != 1038 || pack.payload_bytes != 1038 || pack.frames != 1 {
+            return Error(Foreign)
+        }
+        blob_count += 1
+    }
+    if blob_count != 12000 {
+        return Error(Foreign)
+    }
+    close(take reopened)
+}
+
+fn journal_crash_options() -> Options {
+    let mut options = defaults()
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    options.group_commits = 2
+    options.group_bytes = 1048576
+    options
+}
+
+fn journal_note(out: Stdout, head: u64) waits {
+    let mut line = string.with_capacity(32)
+    string.push(mut line, "ACK ")
+    string.push_u64(mut line, head)
+    result.unwrap(stdout.write(out, line))
+}
+
+fn journal_is_poisoned[T](take response: Result[T, Error]) -> bool {
+    match take response {
+        Error(Poisoned(Other(125))) => true,
+        _ => false
+    }
+}
+
+fn journal_put_ticket(mut db: Db, t: Table[u64, u64], key: u64) -> Result[Ticket, Error] waits {
+    let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, key, key + 10)
+    })?
+    match take committed {
+        Committed(done) => Ok(done.ticket),
+        _ => fail("journal commit refused")
+    }
+}
+
+fn journal_place_idle_turn(take signal: Receiver[()]) waits {
+    result.unwrap(channel.receive(signal))
+}
+
+// group_commits = 1: the group ends at its cap without finding the queue
+// empty, so the next probe must find it empty and write END before waiting.
+fn journal_place_idle(d: Dir, tasks: Tasks, mut db: Db, t: Table[u64, u64], out: Option[Stdout]) -> Result[bool, Error] waits {
+    let saved = journal_put_ticket(mut db, t, 0)?
+    durable(mut db, saved)?
+    if let Some(o) = out {
+        journal_note(o, db.heads[0].head)
+    }
+    // Give the ready journal task a scheduler turn with its sender still open.
+    let (wake, signal): (Sender[()], Receiver[()]) = channel.new(1)
+    let turn = task.spawn(tasks, bytes 4096, take signal, journal_place_idle_turn)
+    result.unwrap(channel.send(wake, ()))
+    result.unwrap(task.join(take turn))
+    let boundary = disk_end(d, db.store, db.file_seq)?
+    // HEADER (72) + empty COMMIT with DATA section (42) + the put's
+    // overhead (9), table-prefixed u64 key (12), and schema-tagged row (10).
+    Ok(boundary == Some(145u64))
+}
+
+pub fn journal_law_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = journal_crash_options()
+    options.group_commits = 1
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let commit_ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    result.unwrap(durable(mut db, commit_ticket))
+    let rows = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let good = result.unwrap(journal_place_idle(d, tasks, mut db, rows, None))
+    result.unwrap(close(take db))
+    good
+}
+
+@test
+fn journal_test_place_idle(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_place_idle(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn journal_poison_write(mut db: Db, t: Table[u64, u64], out: Stdout, scenario: String) -> bool waits {
+    let pack = scenario == "poison-pack"
+    if !pack {
+        result.unwrap(stdout.write(out, "ARM"))
+    }
+    let saved = match run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 0, 10)
+    }) {
+        Ok(Committed(done)) => done.ticket,
+        _ => return false
+    }
+    if scenario == "poison-write" {
+        let b = main_branch(db)
+        if !journal_is_poisoned(recorded(db, b, db.heads[0].head)) {
+            return false
+        }
+        // The failure notice is retained, independently of ack consumption.
+        let retained = journal_failure_notice(db)
+        match retained {
+            Some(Other(125)) => {},
+            _ => return false
+        }
+        if !journal_is_poisoned(recorded(db, b, db.heads[0].head)) {
+            return false
+        }
+    }
+    let first = durable(mut db, saved)
+    if pack {
+        if let Error(_) = first {
+            return false
+        }
+        journal_note(out, db.heads[0].head)
+        result.unwrap(stdout.write(out, "ARM"))
+        if !journal_is_poisoned(checkpoint(mut db)) {
+            return false
+        }
+    } else if scenario == "poison-segment" || scenario == "poison-write" {
+        if !journal_is_poisoned(take first) {
+            return false
+        }
+    } else {
+        match take first {
+            Error(Poisoned(Other(125))) => {},
+            Ok(()) => {
+                let second = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+                    put(mut tx, t, 1, 11)
+                })
+                match take second {
+                    Error(Poisoned(Other(125))) => {},
+                    Ok(Committed(done)) => if !journal_is_poisoned(durable(mut db, done.ticket)) {
+                        return false
+                    },
+                    _ => return false
+                }
+            },
+            _ => return false
+        }
+    }
+    if !journal_is_poisoned(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 2, 12)
+    })) {
+        return false
+    }
+    if !journal_is_poisoned(create_table(mut db, spec("later", std.codec.key_u64(), std.codec.of_u64()))) {
+        return false
+    }
+    if !journal_is_poisoned(checkpoint(mut db)) {
+        return false
+    }
+    if !journal_is_poisoned(durable(mut db, saved)) {
+        return false
+    }
+    true
+}
+
+// A Barrier-only group: the journal wakes, finds no frame, answers Written.
+fn journal_frameless_wakes(db: Db, wakes: u64) -> Result[(), Error] waits {
+    for _ in 0u64 .. wakes {
+        if let Some(sender) = db.journal {
+            result.unwrap(channel.send(sender, Barrier))
+        }
+        if let Some(receiver) = db.written {
+            match result.unwrap(channel.receive(receiver)) {
+                Written => {},
+                WriteFailed(e) => return Error(Poisoned(e))
+            }
+        }
+    }
+    Ok(())
+}
+
+// §2.4 and §3.2's Syncs table, counted by the provider after ARM (store_crash.c
+// checks the totals). Frameless wakes do no I/O. Four commits sent before one
+// durable, with group_commits = 2, are two groups: two segment syncs, then one
+// END sync when the queue is found empty. Close leaves d where that END put it,
+// so it writes no END. The END file is opened only when its segment is created.
+fn journal_sync_count(take db: Db, t: Table[u64, u64], out: Stdout) -> Result[(), Error] waits {
+    let mut owned = take db
+    result.unwrap(stdout.write(out, "ARM"))
+    journal_frameless_wakes(owned, 8)?
+    let mut last = journal_put_ticket(mut owned, t, 0)?
+    for k in 1u64 .. 4 {
+        last = journal_put_ticket(mut owned, t, k)?
+    }
+    durable(mut owned, last)?
+    journal_note(out, owned.heads[0].head)
+    journal_frameless_wakes(owned, 8)?
+    close(take owned)
+}
+
+fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, scenario: String) -> Result[(), Error] waits {
+    let mut options = journal_crash_options()
+    if scenario == "journal-place-idle" {
+        options.group_commits = 1
+    }
+    if scenario == "journal-place-split" || scenario == "journal-place-short" {
+        options.group_bytes = 100
+    }
+    let mut db = open(tasks, d, c, r, options)?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if let Some(fork_case) = journal_fork_case(scenario) {
+        return journal_crash_fork_write(take db, t, out, fork_case)
+    }
+    if scenario == "journal-place-idle" {
+        if !journal_place_idle(d, tasks, mut db, t, Some(out))? {
+            fail("exact-cap reply left a stale END while idle")
+        }
+        return close(take db)
+    }
+    // group_bytes = 100 defers B to its own group; that group's sync fails
+    // (split) or B's write is short (short). A alone is acknowledged.
+    if scenario == "journal-place-split" || scenario == "journal-place-short" {
+        result.unwrap(stdout.write(out, "ARM"))
+        let a = journal_put_ticket(mut db, t, 0)?
+        let a_version = db.heads[0].head
+        let b = journal_put_ticket(mut db, t, 1)?
+        durable(mut db, a)?
+        journal_note(out, a_version)
+        if !journal_is_poisoned(durable(mut db, b)) || !journal_is_poisoned(close(take db)) {
+            fail("byte split lost the journal's first error")
+        }
+        return Ok(())
+    }
+    if scenario == "poison-cut" {
+        result.unwrap(stdout.write(out, "ARM"))
+        let pending = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, t, 0, 10)
+        })?
+        match take pending {
+            Committed(_) => {},
+            _ => fail("cut input refused")
+        }
+        let next_path = capacity(disk_path("j-", db.file_seq + 1, ""))?
+        if !journal_is_poisoned(checkpoint(mut db)) {
+            fail("cut missed prior sync failure")
+        }
+        if disk_exists(d, next_path)? {
+            fail("cut created successor after prior failure")
+        }
+        if !journal_is_poisoned(close(take db)) {
+            fail("cut close lost first error")
+        }
+        return Ok(())
+    }
+    if scenario == "journal-sync-count" {
+        return journal_sync_count(take db, t, out)
+    }
+    if scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" {
+        if !journal_poison_write(mut db, t, out, scenario) {
+            fail("poison contract")
+        }
+        if !journal_is_poisoned(close(take db)) {
+            fail("poison close lost first error")
+        }
+        return Ok(())
+    }
+    for k in 0u64 .. 6 {
+        let committed = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, t, k, k + 10)
+        })?
+        let commit_ticket = match take committed {
+            Committed(done) => done.ticket,
+            _ => fail("journal crash commit")
+        }
+        // Seeded schedules park this test-only witness while the journal
+        // worker can receive the frame. The filesystem cut inventory is unchanged.
+        if scenario == "journal-group" || scenario == "journal-rotate" {
+            result.unwrap(stdout.write(out, "SCHEDULE"))
+        }
+        if scenario != "journal-group" || k % 3 == 2 {
+            durable(mut db, commit_ticket)?
+            journal_note(out, db.heads[0].head)
+        }
+        if (scenario == "journal-rotate" || scenario == "journal-cancel") && k == 2 {
+            let cut = checkpoint(mut db)?
+            durable(mut db, cut)?
+            journal_note(out, db.heads[0].head)
+        }
+    }
+    if scenario == "journal" {
+        // L24(vi): head 8 is a CALL frame whose revision is AD1's vector.
+        let commit_ticket = journal_fixture_call(mut db, 0, false, Some(revision_vector()))?
+        durable(mut db, commit_ticket)?
+        journal_note(out, db.heads[0].head)
+    }
+    close(take db)
+}
+
+type ForkCrash = ForkCuts | ForkLostAck | ForkComplete | ForkTorn | ForkBadEnd | ForkUnwrittenChild
+
+fn journal_fork_case(scenario: String) -> Option[ForkCrash] {
+    if scenario == "journal-fork" {
+        Some(ForkCuts)
+    } else if scenario == "journal-fork-ack-cut" {
+        Some(ForkLostAck)
+    } else if scenario == "journal-fork-complete" {
+        Some(ForkComplete)
+    } else if scenario == "journal-fork-torn" {
+        Some(ForkTorn)
+    } else if scenario == "journal-fork-bad-end" {
+        Some(ForkBadEnd)
+    } else if scenario == "journal-fork-child-unwritten" {
+        Some(ForkUnwrittenChild)
+    } else {
+        None
+    }
+}
+
+fn journal_crash_fork_write(take writer: Db, rows: Table[u64, u64], out: Stdout, fork_case: ForkCrash) -> Result[(), Error] waits {
+    let mut db = take writer
+    let initial = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 11)
+    })?
+    let Committed(first) = take initial else {
+        fail("fork parent commit refused")
+    }
+    durable(mut db, first.ticket)?
+    journal_note(out, 2)
+    let saved = snapshot(db)
+    let created = fork(mut db, "beta", saved)
+    let fail_fork = match fork_case {
+        ForkCuts => false,
+        ForkUnwrittenChild => false,
+        _ => true
+    }
+    if fail_fork {
+        if let Error(Poisoned(Other(125))) = created {
+            if let None = branch(db, "beta") {
+                if journal_is_poisoned(close(take db)) {
+                    return Ok(())
+                }
+            }
+        }
+        fail("fork escaped the injected sync failure")
+    }
+    let (beta, forked) = created?
+    if beta.id != 1 || !covered(db, forked.mark) || accounts(db).frames != 0 {
+        fail("fork returned before its ack")
+    }
+    journal_note(out, 3)
+    let update = run_on(mut db, beta, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 2, 22)
+    })?
+    let Committed(child) = take update else {
+        fail("fork child commit refused")
+    }
+    result.unwrap(stdout.write(out, "CHILD RETURNED"))
+    if let ForkUnwrittenChild = fork_case {
+        if journal_is_poisoned(durable(mut db, child.ticket)) && journal_is_poisoned(close(take db)) {
+            return Ok(())
+        }
+        fail("child commit escaped the injected write failure")
+    }
+    durable(mut db, child.ticket)?
+    journal_note(out, 4)
+    let child_call = journal_fixture_call(mut db, 1, false, Some(revision_vector()))?
+    durable(mut db, child_call)?
+    journal_note(out, 5)
+    let main_call = journal_fixture_call(mut db, 0, false, None)?
+    durable(mut db, main_call)?
+    journal_note(out, 6)
+    close(take db)
+}
+
+fn journal_crash_fork_read(mut db: Db, rows: Table[u64, u64], minimum: u64, fork_case: ForkCrash) -> Result[bool, Error] waits {
+    let main = snapshot(db)
+    let main_version = version(main)
+    if main_version < 1 || main_version > 3 {
+        return Ok(false)
+    }
+    if get(main, shape(rows), 1)? != (if main_version >= 2 {
+        Some(11u64)
+    } else {
+        None
+    }) || get(main, shape(rows), 2)? != None {
+        return Ok(false)
+    }
+    let main_call = recorded(db, main_branch(db), 3)?
+    if let Some(observed) = main_call {
+        if main_version != 3 || !revision_is_none(observed.record.revision) {
+            return Ok(false)
+        }
+    } else if main_version == 3 {
+        return Ok(false)
+    }
+    let beta = branch(db, "beta")
+    let mut event_count = main_version
+    if let Some(b) = beta {
+        if b.id != 1 || main_version < 2 || db.next_branch != 2 || db.heads[1].parent != 0 || db.heads[1].forked_at != 2 {
+            return Ok(false)
+        }
+        let child = snapshot_of(db, b)?
+        let child_head = version(child)
+        if child_head < 2 || child_head > 4 || get(child, shape(rows), 1)? != Some(11u64) || get(child, shape(rows), 2)? != (if child_head >= 3 {
+            Some(22u64)
+        } else {
+            None
+        }) {
+            return Ok(false)
+        }
+        if main_version == 3 && child_head != 4 {
+            return Ok(false)
+        }
+        let child_call = recorded(db, b, 4)?
+        if let Some(observed) = child_call {
+            if child_head != 4 || !revision_is_vector(observed.record.revision) {
+                return Ok(false)
+            }
+        } else if child_head == 4 {
+            return Ok(false)
+        }
+        if let Some(_) = recorded(db, b, 2)? {
+            return Ok(false)
+        }
+        event_count = child_head + 1 + (main_version - 2)
+    } else if main_version == 3 || db.next_branch != 1 {
+        return Ok(false)
+    }
+    if event_count < minimum {
+        return Ok(false)
+    }
+    match fork_case {
+        ForkTorn => if event_count != 2 {
+            return Ok(false)
+        },
+        ForkCuts => (),
+        _ => if event_count != 3 {
+            return Ok(false)
+        },
+    }
+    let (gamma, _) = fork(mut db, "gamma", main)?
+    if gamma.id != (if event_count >= 3 {
+        2u32
+    } else {
+        1u32
+    }) {
+        return Ok(false)
+    }
+    if event_count >= 3 {
+        let old = Branch(store: db.store, id: 1)
+        let written = run_on(mut db, old, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, rows, 9, 99)
+        })?
+        let Committed(done) = written else {
+            return Ok(false)
+        }
+        durable(mut db, done.ticket)?
+        if get(snapshot_of(db, old)?, shape(rows), 9)? != Some(99u64) || get(snapshot_of(db, gamma)?, shape(rows), 9)? != None {
+            return Ok(false)
+        }
+        let _ = delete_branch(mut db, old)?
+        if let Some(_) = branch(db, "beta") {
+            return Ok(false)
+        }
+        if option.unwrap(branch(db, "gamma")).id != 2 {
+            return Ok(false)
+        }
+    }
+    Ok(true)
+}
+
+fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, scenario: String) -> Result[bool, Error] waits {
+    let mut options = journal_crash_options()
+    options.create = false
+    let mut db = open(tasks, d, c, r, options)?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if let Some(fork_case) = journal_fork_case(scenario) {
+        let valid = journal_crash_fork_read(mut db, t, minimum, fork_case)?
+        close(take db)?
+        return Ok(valid)
+    }
+    let sh = shape(t)
+    let head = db.heads[0].head
+    let last = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" || scenario == "journal-place-short" {
+        2u64
+    } else if scenario == "journal" {
+        8u64
+    } else if scenario == "journal-sync-count" {
+        5u64
+    } else {
+        7u64
+    }
+    if head < 1 || head > last || head < minimum {
+        return Ok(false)
+    }
+    // The independent W2 provider returns wall_ms=phase: genesis0, writes1.
+    // Every replayed write must retain1; recovery itself runs under clock2.
+    // The fixture CALL frame at head 8 takes the previous at + 1.
+    if db.heads[0].at != (if head == 1 || scenario == "orphan-end" {
+        0u64
+    } else if head == 8 {
+        2u64
+    } else {
+        1u64
+    }) {
+        return Ok(false)
+    }
+    if scenario == "journal" {
+        let b = main_branch(db)
+        match recorded(db, b, 8)? {
+            Some(captured) => if head != 8 || !revision_is_vector(captured.record.revision) {
+                return Ok(false)
+            },
+            None => if head == 8 {
+                return Ok(false)
+            }
+        }
+    }
+    for k in 0u64 .. 6 {
+        let expected = if k + 1 < head {
+            Some(k + 10)
+        } else {
+            None
+        }
+        if get(snapshot(db), sh, k)? != expected {
+            return Ok(false)
+        }
+    }
+    close(take db)?
+    Ok(true)
+}
+
+fn journal_crash_retry(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Exit] waits {
+    let mut options = journal_crash_options()
+    options.create = false
+    match open(tasks, d, c, r, options) {
+        Error(Io(Other(125))) => (),
+        _ => return Error(Exit(status: 35))
+    }
+    // Both attempts share a provider and process. The failed open must
+    // release the lock before the exact predecessor can be read again.
+    match journal_crash_read(d, c, r, tasks, 2, "orphan-end") {
+        Ok(true) => Ok(()),
+        _ => Error(Exit(status: 36))
+    }
+}
+
+// Test-only entry: the existing W2 adapter runs init, a cut/failure, then an
+// independent prefix oracle whose minimum comes only from returned durable.
+pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0))
+    let scenario = option.unwrap(args.get(argv, 1))
+    let recovery_sync = scenario == "orphan-end-recovery-sync"
+    let orphan_end = recovery_sync || scenario == "orphan-end"
+    if phase == "init" {
+        let mut db = result.unwrap(open(tasks, d, c, r, journal_crash_options()))
+        result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+        if orphan_end {
+            let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+            let written = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+                put(mut tx, t, 0, 10)
+            }))
+            match take written {
+                Committed(done) => result.unwrap(durable(mut db, done.ticket)),
+                _ => fail("orphan END predecessor did not commit")
+            }
+        }
+        result.unwrap(close(take db))
+        Ok(())
+    } else if recovery_sync && phase == "reopen" {
+        journal_crash_retry(d, c, r, tasks)
+    } else if orphan_end {
+        if phase == "read" {
+            // Both crashes happened during successor creation. The predecessor's
+            // acknowledged value survives, and the incomplete successor is absent.
+            return match journal_crash_read(d, c, r, tasks, 2, scenario) {
+                Ok(true) => Ok(()),
+                Error(Corrupt(fault)) => match fault.why {
+                    Header => Error(Exit(status: 34)),
+                    _ => Error(Exit(status: 33))
+                },
+                _ => Error(Exit(status: 33))
+            }
+        }
+        return match open(tasks, d, c, r, journal_crash_options()) {
+            Error(Io(Other(125))) => Ok(()),
+            _ => Error(Exit(status: 32))
+        }
+    } else if phase == "write" {
+        if scenario == "journal-cancel" {
+            let input = JournalCancelInput(d: d, c: c, r: r, tasks: tasks, out: out)
+            let worker = task.spawn(tasks, bytes 50331648, take input, journal_cancel_owner)
+            return match task.join(take worker) {
+                Ok(Ok(())) => {
+                    let _ = stdout.write(out, "DONE");
+                    Ok(())
+                },
+                Error(Cancelled(_)) => Ok(()),
+                _ => Error(Exit(status: 32))
+            }
+        }
+        if scenario == "journal-ack" {
+            return match journal_ack_held(d, c, r, tasks) {
+                Ok(()) => {
+                    let _ = stdout.write(out, "DONE");
+                    Ok(())
+                },
+                _ => Error(Exit(status: 32))
+            }
+        }
+        match journal_crash_write(d, c, r, tasks, out, scenario) {
+            Ok(()) => {
+                let _ = stdout.write(out, "DONE");
+                Ok(())
+            },
+            Error(Io(_)) => Ok(()),
+            Error(Poisoned(_)) => Ok(()),
+            _ => Error(Exit(status: 32))
+        }
+    } else {
+        let text = option.unwrap(args.get(argv, 3))
+        let mut minimum = 0u64
+        for digit in string.as_bytes(text) {
+            minimum = minimum * 10 + int.widen(digit - b'0')
+        }
+        match journal_crash_read(d, c, r, tasks, minimum, scenario) {
+            Ok(true) => Ok(()),
+            _ => Error(Exit(status: 33))
+        }
+    }
+}
+
+// L21e: validation is before LOCK and creates no files. Memory ignores the
+// journal-only bounds. One/one is legal and writes each oversized frame alone.
+pub fn journal_law_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = journal_crash_options()
+    options.group_commits = 0
+    match open(tasks, d, c, r, options) {
+        Error(Missing(name)) => if name != "group_commits" {
+            return false
+        },
+        _ => return false
+    }
+    if result.unwrap(disk_exists(d, "LOCK")) || result.unwrap(disk_exists(d, "MANIFEST")) || result.unwrap(disk_exists(d, "j-1")) {
+        return false
+    }
+    options.group_commits = 1
+    options.group_bytes = 0
+    match open(tasks, d, c, r, options) {
+        Error(Missing(name)) => if name != "group_bytes" {
+            return false
+        },
+        _ => return false
+    }
+    if result.unwrap(disk_exists(d, "LOCK")) || result.unwrap(disk_exists(d, "MANIFEST")) || result.unwrap(disk_exists(d, "j-1")) {
+        return false
+    }
+    options.group_commits = 0
+    let in_memory = memory(c, r, options)
+    result.unwrap(close(take in_memory))
+    options.group_commits = 1
+    options.group_bytes = 1
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 11) || !typed_put(mut db, t, 2, 22) {
+        return false
+    }
+    let sh = shape(t)
+    result.unwrap(close(take db))
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    let good = result.unwrap(get(snapshot(reopened), sh, 1)) == Some(11u64) && result.unwrap(get(snapshot(reopened), sh, 2)) == Some(22u64)
+    result.unwrap(close(take reopened))
+    good
+}
+
+@test
+fn journal_test_options(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_options(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

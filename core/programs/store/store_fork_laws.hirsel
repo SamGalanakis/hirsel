@@ -1,0 +1,700 @@
+fn range_boundary_points(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("boundary", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "boundary", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    // The review's one-row witness, before any node split can distract from it.
+    let witness = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        put(mut tx, t, 32, 7)?
+        let mut rows = range(tx, sh, Included(32), Included(32))?
+        Ok(next_range(mut rows)? == Some((32u64, 7u64)) && next_range(mut rows)? == None)
+    }))
+    match take witness {
+        Committed(done) => if !done.value {
+            return false
+        },
+        _ => return false
+    }
+    for k in 0u64 .. 96 {
+        if !typed_put(mut db, t, k, k + 1) {
+            return false
+        }
+    }
+    let points: Inline[u64, 10] =[0, 15, 16, 31, 32, 33, 63, 64, 95, 96]
+    for i in 0u64 .. 10 {
+        let pivot = points[i]
+        for a in 0u64 .. 3 {
+            for b in 0u64 .. 3 {
+                let lo: Bound[u64] = match a {
+                    0 => Unbounded,
+                    1 => Included(pivot),
+                    _ => Excluded(pivot)
+                }
+                let hi: Bound[u64] = match b {
+                    0 => Unbounded,
+                    1 => Included(pivot + 1),
+                    _ => Excluded(pivot + 1)
+                }
+                let outcome = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+                    let mut rows = range(tx, sh, lo, hi)?
+                    for k in 0u64 .. 96 {
+                        let lower = a == 0 || (a == 1 && k >= pivot) || (a == 2 && k > pivot)
+                        let upper = b == 0 || (b == 1 && k <= pivot + 1) || (b == 2 && k < pivot + 1)
+                        if lower && upper {
+                            if next_range(mut rows)? != Some((k, k + 1)) {
+                                return Ok(false)
+                            }
+                        }
+                    }
+                    Ok(next_range(mut rows)? == None)
+                }))
+                match take outcome {
+                    Committed(done) => if !done.value {
+                        return false
+                    },
+                    _ => return false
+                }
+            }
+        }
+    }
+    result.unwrap(create_table(mut db, spec("other_boundary", std.codec.key_u64(), std.codec.of_u64())))
+    let second_table = result.unwrap(table(mut db, "other_boundary", std.codec.key_u64(), std.codec.of_u64()))
+    let second_shape = shape(second_table)
+    let second_witness = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        put(mut tx, second_table, 32, 17)?
+        let mut rows = range(tx, second_shape, Included(32), Included(32))?
+        Ok(next_range(mut rows)? == Some((32u64, 17u64)) && next_range(mut rows)? == None)
+    }))
+    match take second_witness {
+        Committed(done) => if !done.value {
+            return false
+        },
+        _ => return false
+    }
+    true
+}
+
+fn stale_reads(tx: Tx, sh: Shape[u64, u64], ix: Index[u64, u64, u64], table_id: u32, index_id: u32) -> bool {
+    let point = match fetch(tx, sh, 1) {
+        Error(Stale(id)) => id == table_id,
+        _ => false
+    }
+    let span = match range(tx, sh, Unbounded, Unbounded) {
+        Error(Stale(id)) => id == table_id,
+        _ => false
+    }
+    let index_read = match lookup(tx, ix, Unbounded, Unbounded) {
+        Error(Stale(id)) => id == index_id,
+        _ => false
+    }
+    point && span && index_read
+}
+
+// L16/I3: catalog liveness belongs to the roots read. Epoch changes alone do
+// not invalidate readers; drop/recreate replaces the incarnation (ids1 ->4).
+pub fn law_read_liveness(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
+    let mut old = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
+    let old_shape = shape(old)
+    if !typed_put(mut db, old, 1, 10) {
+        return false
+    }
+    result.unwrap(create_index(mut db, old, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let old_index = result.unwrap(index(db, mut old, "bucket", code.describe(bucket), std.codec.key_u64()))
+    result.unwrap(create_index(mut db, old, "other", code.describe(quotient), std.codec.key_u64()))
+    let before = snapshot(db)
+    if result.unwrap(get(before, old_shape, 1)) != Some(10u64) {
+        return false
+    }
+    let mut old_matches = result.unwrap(find(before, old_index, Included(2), Included(2)))
+    if result.unwrap(next(mut old_matches)) != Some((1u64, 10u64)) {
+        return false
+    }
+    result.unwrap(drop_table(mut db, take old))
+    match get(snapshot(db), old_shape, 1) {
+        Error(Stale(1)) => {},
+        _ => return false
+    }
+    result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
+    let mut fresh = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
+    result.unwrap(create_index(mut db, fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_index = result.unwrap(index(db, mut fresh, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_shape = shape(fresh)
+    if fresh.id != 4 || fresh_index.id != 5 || !typed_put(mut db, fresh, 1, 20) {
+        return false
+    }
+    let current = snapshot(db)
+    match get(current, old_shape, 1) {
+        Error(Stale(1)) => {},
+        _ => return false
+    }
+    match scan(current, old_shape, Unbounded, Unbounded) {
+        Error(Stale(1)) => {},
+        _ => return false
+    }
+    match find(current, old_index, Unbounded, Unbounded) {
+        Error(Stale(2)) => {},
+        _ => return false
+    }
+    let observed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        Ok(stale_reads(tx, old_shape, old_index, 1, 2))
+    }))
+    match take observed {
+        Committed(done) => if !done.value || list.len(done.reads) != 0 {
+            return false
+        },
+        _ => return false
+    }
+    let query = result.unwrap(look(current, None, fn(tx: Tx) -> bool {
+        stale_reads(tx, old_shape, old_index, 1, 2)
+    }))
+    match take query {
+        Seen(done) => if !done.value || list.len(done.reads) != 0 {
+            return false
+        },
+        _ => return false
+    }
+    if result.unwrap(get(before, old_shape, 1)) != Some(10u64) {
+        return false
+    }
+    let mut old_rows = result.unwrap(scan(before, old_shape, Unbounded, Unbounded))
+    if result.unwrap(next(mut old_rows)) != Some((1u64, 10u64)) || result.unwrap(next(mut old_rows)) != None {
+        return false
+    }
+    match get(before, fresh_shape, 1) {
+        Error(Stale(4)) => {},
+        _ => return false
+    }
+    match scan(before, fresh_shape, Unbounded, Unbounded) {
+        Error(Stale(4)) => {},
+        _ => return false
+    }
+    match find(before, fresh_index, Unbounded, Unbounded) {
+        Error(Stale(5)) => {},
+        _ => return false
+    }
+    let old_query = result.unwrap(look(before, None, fn(tx: Tx) -> bool {
+        stale_reads(tx, fresh_shape, fresh_index, 4, 5)
+    }))
+    match take old_query {
+        Seen(done) => done.value && list.len(done.reads) == 0,
+        _ => false
+    }
+}
+
+// L27(a). The catalog row is 134 bytes, the collection descriptor is 126,
+// and the current row is 94. The 448-byte ceiling has room for one extra row.
+pub fn law_overwrite_account(c: Clock) -> bool waits {
+    let mut options = defaults()
+    options.resident_limit = 448
+    let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if db.resident != 260 {
+        return false
+    }
+    for step in 0u64 .. 100000 {
+        if !typed_put(mut db, t, 1, step + 1) || db.resident != 354 {
+            return false
+        }
+    }
+    result.unwrap(get(snapshot(db), shape(t), 1)) == Some(100000u64)
+}
+
+// L30, AA1's trace by hand. Main is at v1 after create_table; b forks there
+// (parent 0, forked_at 1). Main's A (k1 = 100) is main v2, b's B (k1 = 200)
+// is b v2, and c forks from b at 2, so c's parent is b. adopt(c) is
+// Diverged(c) and main still reads A at v2. A fork of main with no main
+// commit since adopts as a fast-forward; one more main commit after a fork
+// makes it Diverged; adopt(main) is Diverged(0). Branch ids are b 1, c 2,
+// d 3, e 4, never reused. Wrong implementation caught: an adopt that
+// compares versions only, which gives main B at v2.
+pub fn law_branches(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    if version(snapshot(db)) != 1 {
+        return false
+    }
+    let arg1 = snapshot(db)
+    let (b, _) = result.unwrap(fork(mut db, "b", arg1))
+    let arg2 = snapshot(db)
+    match fork(mut db, "b", arg2) {
+        Error(Exists(_)) => {},
+        _ => return false
+    }
+    if !typed_put(mut db, t, 1, 100) {
+        return false
+    }
+    let on_b = result.unwrap(run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, 200)
+    }))
+    match take on_b {
+        Committed(done) => if done.info.id.branch != 1 || done.info.id.version != 2 {
+            return false
+        },
+        _ => return false
+    }
+    let at_b = result.unwrap(snapshot_of(db, b))
+    if version(at_b) != 2 || result.unwrap(get(at_b, sh, 1)) != Some(200u64) {
+        return false
+    }
+    let (cb, _) = result.unwrap(fork(mut db, "c", at_b))
+    match adopt(mut db, cb) {
+        Error(Diverged(id)) => if id != 2 {
+            return false
+        },
+        _ => return false
+    }
+    if version(snapshot(db)) != 2 || result.unwrap(get(snapshot(db), sh, 1)) != Some(100u64) {
+        return false
+    }
+    let arg3 = main_branch(db)
+    match adopt(mut db, arg3) {
+        Error(Diverged(id)) => if id != 0 {
+            return false
+        },
+        _ => return false
+    }
+    // D5 per branch: b's handle sees b's commits and not main's.
+    let h = result.unwrap(follow(mut db, b))
+    if version(latest.read(h)) != 2 {
+        return false
+    }
+    let on_b_again = result.unwrap(run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 4, 500)
+    }))
+    match take on_b_again {
+        Committed(_) => {},
+        _ => return false
+    }
+    if version(latest.read(h)) != 3 || result.unwrap(get(latest.read(h), sh, 4)) != Some(500u64) {
+        return false
+    }
+    // (b) a fork of main with no main commit since its fork: a fast-forward.
+    let arg4 = snapshot(db)
+    let (dd, _) = result.unwrap(fork(mut db, "d", arg4))
+    let on_d = result.unwrap(run_on(mut db, dd, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 2, 300)
+    }))
+    match take on_d {
+        Committed(_) => {},
+        _ => return false
+    }
+    let _ = result.unwrap(adopt(mut db, dd))
+    let main_now = snapshot(db)
+    if version(main_now) != 3 || result.unwrap(get(main_now, sh, 2)) != Some(300u64) || result.unwrap(get(main_now, sh, 1)) != Some(100u64) {
+        return false
+    }
+    if let Some(_) = branch(db, "d") {
+        return false
+    }
+    match snapshot_of(db, dd) {
+        Error(Missing(_)) => {},
+        _ => return false
+    }
+    match adopt(mut db, dd) {
+        Error(Diverged(id)) => if id != 3 {
+            return false
+        },
+        _ => return false
+    }
+    // (d) one more main commit after the fork.
+    let arg5 = snapshot(db)
+    let (e, _) = result.unwrap(fork(mut db, "e", arg5))
+    if e.id != 4 || !typed_put(mut db, t, 3, 400) {
+        return false
+    }
+    match adopt(mut db, e) {
+        Error(Diverged(id)) => if id != 4 {
+            return false
+        },
+        _ => return false
+    }
+    let _ = result.unwrap(delete_branch(mut db, e))
+    match snapshot_of(db, e) {
+        Error(Missing(_)) => {},
+        _ => return false
+    }
+    let arg6 = main_branch(db)
+    match delete_branch(mut db, arg6) {
+        Error(Missing(_)) => {},
+        _ => return false
+    }
+    // A pin reads its version after later commits; unpin forgets it.
+    let arg7 = snapshot(db)
+    let _ = result.unwrap(pin(mut db, "p", arg7))
+    let arg8 = snapshot(db)
+    match pin(mut db, "p", arg8) {
+        Error(Exists(_)) => {},
+        _ => return false
+    }
+    if !typed_put(mut db, t, 3, 401) {
+        return false
+    }
+    match pinned(db, "p") {
+        Some(s) => if version(s) != 4 || result.unwrap(get(s, sh, 3)) != Some(400u64) {
+            return false
+        },
+        None => return false
+    }
+    let _ = result.unwrap(unpin(mut db, "p"))
+    if let Some(_) = pinned(db, "p") {
+        return false
+    }
+    match unpin(mut db, "p") {
+        Error(Missing(_)) => {},
+        _ => return false
+    }
+    // L20: a Snapshot of another store or of another open is Foreign.
+    let other = memory_at(c, StoreId(hi: 3, lo: 4), defaults())
+    match fork(mut db, "x", snapshot(other)) {
+        Error(Foreign) => {},
+        _ => return false
+    }
+    let mut stale = snapshot(db)
+    stale.open = 9
+    match pin(mut db, "x", stale) {
+        Error(Foreign) => {},
+        _ => return false
+    }
+    match branch(db, "b") {
+        Some(found) => found.id == 1 && version(snapshot(db)) == 5,
+        None => false
+    }
+}
+
+// L27(b). The descriptor and catalog charge 260 and each row version 94.
+// A conservative overwrite reaches 542. The next overwrite settles the
+// proposed union to 448, for the pinned and proposed versions.
+pub fn law_pin_settle(c: Clock) -> bool waits {
+    let mut options = defaults()
+    options.resident_limit = 542
+    let mut db = memory_at(c, StoreId(hi: 1, lo: 2), options)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 1) || db.resident != 354 {
+        return false
+    }
+    let arg9 = snapshot(db)
+    let _ = result.unwrap(pin(mut db, "p", arg9))
+    if db.resident != 354 {
+        return false
+    }
+    for step in 0u64 .. 100 {
+        if !typed_put(mut db, t, 1, step + 2) {
+            return false
+        }
+        if db.resident != (if step % 2 == 0 {
+            448u64
+        } else {
+            542u64
+        }) {
+            return false
+        }
+    }
+    let _ = result.unwrap(checkpoint(mut db))
+    if db.resident != 448 {
+        return false
+    }
+    let _ = result.unwrap(unpin(mut db, "p"))
+    if db.resident != 354 || !typed_put(mut db, t, 1, 7) || db.resident != 354 {
+        return false
+    }
+    result.unwrap(get(snapshot(db), shape(t), 1)) == Some(7u64)
+}
+
+// AP15. The catalog and descriptor cost 260 and one row version costs 94.
+// Rewriting or restoring the pinned value keeps the union at 354. Adding a
+// second key costs 448 in total, even if the draft also rewrites the first.
+fn pinned_draft_at_bound(mut db: Db) -> Result[(), Error] waits {
+    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut db, rows, 1, 1) {
+        return Error(Foreign)
+    }
+    let base = snapshot(db)
+    let _ = pin(mut db, "p", base)?
+    if accounts(db).logical != 354 || !accounts(db).exact {
+        return Error(Foreign)
+    }
+    if !typed_put(mut db, rows, 1, 1) {
+        return Error(Foreign)
+    }
+    if accounts(db).logical != 354 || !accounts(db).exact {
+        return Error(Foreign)
+    }
+    let deleted = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete(mut tx, rows, 1)
+    })?
+    if let Committed(Done(value: true, ..)) = deleted {} else {
+        return Error(Foreign)
+    }
+    if accounts(db).logical != 354 || accounts(db).exact {
+        return Error(Foreign)
+    }
+    let cut = db.checkpointed
+    let restored = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 1)
+    })?
+    let Committed(done) = restored else {
+        return Error(Foreign)
+    }
+    if db.checkpointed != cut + 1 {
+        return Error(Foreign)
+    }
+    durable(mut db, done.ticket)?
+    let journal = accounts(db).journal
+    let refused = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 1)?
+        put(mut tx, rows, 2, 2)
+    })?
+    let Refused(Resident(cap)) = refused else {
+        return Error(Foreign)
+    }
+    let head = snapshot(db)
+    if cap.requested != 448 || cap.available != 354 || accounts(db).journal != journal || accounts(db).logical != 354 || !accounts(db).exact || version(head) != 5 || get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+@test
+fn test_pinned_draft_at_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = defaults()
+    options.resident_limit = 354
+    options.pack_bytes = 512
+    let mut mem = memory(c, r, options)
+    pinned_draft_at_bound(mut mem)?
+    close(take mem)?
+    let child = disk_test_directory(d)
+    let mut db = open(tasks, child, c, r, options)?
+    pinned_draft_at_bound(mut db)?
+    close(take db)?
+    let mut reopened = open(tasks, child, c, r, options)?
+    let rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let head = snapshot(reopened)
+    if accounts(reopened).logical != 354 || !accounts(reopened).exact || version(head) != 5 || get(head, shape(rows), 1)? != Some(1u64) || get(head, shape(rows), 2)? != None {
+        return Error(Foreign)
+    }
+    close(take reopened)
+}
+
+// L27(c)(i) and L51(h). A live-head fork shares the 354-byte account.
+pub fn law_fork_shared_head(c: Clock) -> bool waits {
+    let mut db = test_db(c, 500)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 1) || db.resident != 354 {
+        return false
+    }
+    let from = snapshot(db)
+    let cut = db.checkpointed
+    let before = db.changes
+    match fork(mut db, "fork", from) {
+        Ok((b, receipt)) => {
+            result.unwrap(durable(mut db, receipt))
+            db.resident == 354 && db.checkpointed == cut && journal_mark(receipt) == before + 1 && accounts(db).exact && option.unwrap(branch(db, "fork")).id == b.id && result.unwrap(get(result.unwrap(snapshot_of(db, b)), shape(t), 1)) == Some(1u64)
+        },
+        _ => false,
+    }
+}
+
+// L27(c). Adding the reader's older version would cost 448 bytes,
+// one more than the available 447. The refused cut consumes its branch id.
+pub fn law_fork_old_snapshot(c: Clock) -> bool waits {
+    let mut db = test_db(c, 447)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 1, 1) {
+        return false
+    }
+    let held = snapshot(db)
+    if !typed_put(mut db, t, 1, 2) || db.resident != 354 {
+        return false
+    }
+    let cut = db.checkpointed
+    let next_id = db.next_branch
+    match fork(mut db, "fork", held) {
+        Error(Full(Resident(cap))) => if cap.requested != 448 || cap.available != 447 {
+            return false
+        },
+        _ => return false,
+    }
+    let head = snapshot(db)
+    if let Some(_) = branch(db, "fork") {
+        return false
+    }
+    db.checkpointed == cut && db.next_branch == next_id + 1 && db.resident == 354 && version(head) == 3 && result.unwrap(get(head, shape(t), 1)) == Some(2u64) && result.unwrap(get(held, shape(t), 1)) == Some(1u64)
+}
+
+// L27(c). A pin of the empty table keeps the descriptor and catalog once.
+// Four writes charge 636 bytes. The live-head fork preserves that exact
+// conservative bound and its unsettled status.
+pub fn law_fork_settle(c: Clock) -> bool waits {
+    let mut db = test_db(c, 636)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let empty = snapshot(db)
+    result.unwrap(pin(mut db, "empty", empty))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    for v in 1u64 .. 5 {
+        if !typed_put(mut db, t, 1, v) {
+            return false
+        }
+    }
+    if db.resident != 636 {
+        return false
+    }
+    let from = snapshot(db)
+    let settled = db.settled
+    let cut = db.checkpointed
+    match fork(mut db, "fork", from) {
+        Ok((b, _)) => db.resident == 636 && !accounts(db).exact && db.settled == settled && db.checkpointed == cut && result.unwrap(get(result.unwrap(snapshot_of(db, b)), shape(t), 1)) == Some(4u64) && result.unwrap(get(option.unwrap(pinned(db, "empty")), shape(t), 1)) == None,
+        _ => false,
+    }
+}
+
+@test
+fn test_fork_shared_head(c: Clock) -> Result[(), ()] waits {
+    if law_fork_shared_head(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_fork_old_snapshot(c: Clock) -> Result[(), ()] waits {
+    if law_fork_old_snapshot(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_fork_settle(c: Clock) -> Result[(), ()] waits {
+    if law_fork_settle(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_branches(c: Clock) -> Result[(), ()] waits {
+    if law_branches(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn test_pin_settle(c: Clock) -> Result[(), ()] waits {
+    if law_pin_settle(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// I4: each 12-byte key and 8-byte value charges 62 + 16 + 8 = 86.
+// The 126-byte collection descriptor stays live. After deletion the pin
+// keeps its 86-byte row, so another row needs 298 of the available 216.
+pub fn law_pinned_delete(c: Clock) -> bool waits {
+    let mut db = raw_test_db(c, 216)
+    if !put_one(mut db, 1, 10) {
+        return false
+    }
+    let first = snapshot(db)
+    let _ = result.unwrap(pin(mut db, "p", first))
+    let removed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete_bytes(mut tx, 1, key_word(1))
+    }))
+    match take removed {
+        Committed(done) => if !done.value {
+            return false
+        },
+        _ => return false
+    }
+    let after_delete = version(snapshot(db))
+    let inserted = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(2), key_word(20))
+    }))
+    match take inserted {
+        Refused(Resident(cap)) => if cap.requested != 298 || cap.available != 216 {
+            return false
+        },
+        _ => return false
+    }
+    let head = snapshot(db)
+    if version(head) != after_delete || value_at(head, 1) != 0 || value_at(head, 2) != 0 {
+        return false
+    }
+    match pinned(db, "p") {
+        Some(held) => if value_at(held, 1) != 10 {
+            return false
+        },
+        None => return false
+    }
+    let _ = result.unwrap(unpin(mut db, "p"))
+    put_one(mut db, 2, 20) && value_at(snapshot(db), 2) == 20
+}
+
+@test
+fn test_pinned_delete(c: Clock) -> Result[(), ()] waits {
+    if law_pinned_delete(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn mark_is(t: Ticket, n: u64) -> bool {
+    match t.mark {
+        Journal(m) => m == n,
+        Cut(_) => false
+    }
+}
+
+// (position, state) of a stream on main, or (0, 0) when it has none.
+fn stream_now(db: Db, name: Bytes) -> (u64, u64) {
+    match get_page_row(db.heads[0].roots.streams, name) {
+        Some(raw) => (read_le(raw, 0, 8), int.widen(raw[40])),
+        None => (0, 0)
+    }
+}
+
+fn stream_reply_is(db: Db, name: Bytes, want: Bytes) -> bool {
+    match get_page_row(db.heads[0].roots.streams, name) {
+        Some(raw) => list.len(raw) >= 41 && list.slice(raw, 41, list.len(raw)) == want,
+        None => false
+    }
+}
+
+fn call_for(stream: Bytes, revision: u64) -> CallRecord {
+    let mut key: Bytes = list.new()
+    list.fill(mut key, 32, 1u8)
+    let mut args: Bytes = list.new()
+    list.fill(mut args, 16, 2u8)
+    let mut r: Bytes = list.new()
+    list.fill(mut r, revision, 3u8)
+    CallRecord(key: take key, args: take args, stream: result.unwrap(copied(stream)), revision: Some(take r), code: code_vector())
+}
+
+// The digest of a request with call_for's entry key and these args.
+fn digest_for(args: String) -> RequestDigest {
+    let mut key: Bytes = list.new()
+    list.fill(mut key, 32, 1u8)
+    request_digest(key, string.as_bytes(args))
+}
+
+fn missing_is(r: Result[(), Error], name: String) -> bool {
+    match r {
+        Error(Missing(n)) => n == name,
+        _ => false
+    }
+}

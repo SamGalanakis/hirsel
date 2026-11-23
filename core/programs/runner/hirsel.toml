@@ -31,6 +31,10 @@ dirs = ["."]
 "session-laws.hirsel" = "runner"
 "admission-laws.hirsel" = "runner"
 "runner_wire.hirsel" = "runner_wire"
+"runner_trigger_laws.hirsel" = "runner"
+"runner_retired_laws.hirsel" = "runner"
+"runner_owner_laws.hirsel" = "runner"
+"triggers_journal_laws.hirsel" = "triggers"
 
 [tests.runs."runner@1/runner_calls/test_fixture_granted"]
 limit = 1342177280

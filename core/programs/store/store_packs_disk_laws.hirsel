@@ -1,0 +1,390 @@
+fn locate_page_cut(mut manifest: PageManifest, layout: PagedCutLayout, roots: List[PageRoots], next_stamp: u64, account: u64) {
+    for slot in 0u64 .. list.len(manifest.branches) {
+        manifest.branches[slot].roots = published_page_roots(layout.locations, roots[slot])
+    }
+    let branch_count = list.len(manifest.branches)
+    for slot in 0u64 .. list.len(manifest.pins) {
+        manifest.pins[slot].roots = published_page_roots(layout.locations, roots[branch_count + slot])
+    }
+    manifest.pack_root = published_tree_pointer(layout.locations, layout.lists.roots.packs)
+    manifest.retirement_root = published_tree_pointer(layout.locations, layout.lists.roots.retired)
+    manifest.next_pack = layout.lists.run_packs.next_pack
+    manifest.next_stamp = next_stamp
+    manifest.account = account
+}
+
+fn check_page_emission() -> Result[(), Error] {
+    let id = StoreId(hi: 1, lo: 2)
+    let mut tree = std.page.empty(0, 0, Unprefixed)
+    let mut stamp = 1u64
+    let mut key: Bytes = list.with_capacity(1)
+    list.push(mut key, 16u8)
+    page_result(std.page.insert(mut tree, key, string.as_bytes("x"), None, 1024, 1, mut stamp))?
+    let mut known = new_page_locations()
+    record_fresh_tree(mut known, tree, 0)?
+    let mut emission = empty_cut_frames()
+    plan_tree_frames(known, map.new(), tree, mut emission)
+    let layout = layout_packs(page_frames(emission), 0, 1, 96)?
+    apply_pack_layout(mut known, layout)?
+    let mut raw: Bytes = list.with_capacity(121)
+    if layout.next_pack != 2 || list.len(layout.packs) != 1 || layout.packs[0u64].size != 121 || layout.packs[0u64].payload_bytes != 33 {
+        return Error(Foreign)
+    }
+    encode_pack(id, layout, layout.packs[0u64], mut known, mut raw)?
+    if raw != page_data_pack_vector() {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+// L51(l). The two independent pack vectors each contain one frame.
+// The hand-laid MANIFEST gives the stream holder and the pack-list root.
+fn law_generation_locations(known: PageLocations) -> bool {
+    if disk_index_len(known.frames) != 2 || disk_index_len(known.packs) != 2 { return false }
+    for seq in 1u64 .. 3 {
+        let raw = if seq == 1 { page_data_pack_vector() } else { page_list_pack_vector() }
+        let width = read_le(raw, 76, 4)
+        let stamp = read_le(raw, 96, 8)
+        let class = if seq == 1 { 0u8 } else { 2u8 }
+        let owner: IncomingEdge = if seq == 1 { HolderSource(0, 0, 1) } else { ListSource(0) }
+        let Some(frame) = disk_index_get(known.frames, stamp) else { return false }
+        let Some(physical) = disk_index_get(known.packs, seq) else { return false }
+        let payload_width: u64 = int.widen(frame.place.len)
+        if frame.place.pack != seq || frame.place.offset != 72 || payload_width != width
+            || frame.place.checksum != std.check.xxh3(raw, 88, 88 + width) || frame.class != class
+            || list.len(frame.outgoing) != 0 || list.len(frame.incoming) != 1 || frame.incoming[0u64] != owner
+            || physical.class != class || physical.frames != 1 || physical.live != width || physical.payload_bytes != width {
+            return false
+        }
+    }
+    true
+}
+
+fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let id = StoreId(hi: 1, lo: 2)
+    let mut roots = PageRoots(collections: new_page_tree(CollectionMap, 1024), streams: new_page_tree(Unprefixed, 1024), catalog: new_page_tree(Unprefixed, 1024))
+    let mut key: Bytes = list.with_capacity(1)
+    list.push(mut key, 16u8)
+    let mut next_stamp = 1u64
+    put_page_row(mut roots.streams, key, string.as_bytes("x"), 1, mut next_stamp)?
+    let mut holders: List[HeldPage] = list.with_capacity(1)
+    list.push(mut holders, HeldPage(source: HolderSource(0, 0, 1), root: arc.share(roots.streams.root)))
+    let mut all: List[PageRoots] = list.with_capacity(1)
+    list.push(mut all, take roots)
+    let base = page_retry_base(new_page_locations(), map.new(), holders, all)?
+    let installed = PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: std.page.empty(0, 0, Unprefixed))
+    let mut manifest = page_manifest_empty()
+    let planned = plan_page_cut(base, holders, installed, list.new(), 1, 512, map.new(), None, mut next_stamp)?
+    let mut buffers = cut_output_buffers(planned, page_manifest_file_size(page_manifest_size(manifest), manifest.fence), page_manifest_file_size(MANIFEST_LIMIT, 1))?
+    let layout = write_page_cut(directory, id, take planned, mut buffers)?
+    manifest.generation = 2
+    locate_page_cut(mut manifest, layout, all, next_stamp, base.account)
+    publish_page_manifest(directory, id, manifest, None, mut buffers.out)?
+    // Both pack vectors were assembled independently from AP3, AP14 and
+    // the frame checksum binding. The persisted account is one 78-byte row.
+    if disk_read_paged_file(directory, "p-1", 121)? != page_data_pack_vector() || disk_read_paged_file(directory, "p-2", 148)? != page_list_pack_vector() {
+        return Error(Foreign)
+    }
+    if !law_generation_locations(layout.locations) { return Error(Foreign) }
+    let (_, take selected) = read_selected_page_manifest(directory)?
+    let loaded = rebuild_page_store(take selected)?
+    if loaded.manifest.generation != 2 || loaded.manifest.next_pack != 3 || loaded.manifest.account != 78 || list.len(loaded.holders) != 1
+        || one_page_account(loaded.holders[0u64]) != 78 || !law_generation_locations(loaded.locations) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+pub fn disk_law_page_emission() -> bool {
+    match check_page_emission() {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+@test
+fn disk_test_page_emission() -> Result[(), Error] {
+    check_page_emission()
+}
+
+pub fn disk_law_paged_generation(d: Dir) -> bool waits {
+    match check_paged_generation(d) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+@test
+fn disk_test_paged_generation(d: Dir) -> Result[(), Error] waits {
+    check_paged_generation(d)
+}
+
+// Read the byte fields of an AP6 PagePtr and follow it without the Store decoder.
+fn law_pointed_payload(d: Dir, raw: Bytes, ptr: u64, limit: u64) -> Result[Bytes, Error] waits {
+    let seq = read_le(raw, ptr, 8)
+    let at = read_le(raw, ptr + 8, 8)
+    let width = read_le(raw, ptr + 16, 4)
+    let pack = disk_read_paged_file(d, paged_pack_path(seq)?, limit)?
+    if at < 72 || at + 16 + width > list.len(pack) || read_le(pack, at + 4, 4) != width {
+        return Error(Foreign)
+    }
+    copied(list.slice(pack, at + 16, at + 16 + width))
+}
+
+fn law_leaf_cell(raw: Bytes, slot: u64) -> u64 {
+    let slots = list.len(raw) - 2 * read_le(raw, 2, 2)
+    let at = read_le(raw, slots + 2 * slot, 2)
+    at + 2 + read_le(raw, at, 2)
+}
+
+fn law_full_frame_selection(known: PageLocations, lists: bool) -> List[u64] {
+    let mut expected: List[u64] = list.new()
+    let mut frames = std.omap.range(known.frames.values, Unbounded, Unbounded)
+    while let Some((stamp, frame)) = std.omap.next(mut frames) {
+        if let Some(pack) = disk_index_get(known.packs, frame.place.pack) {
+            if (pack.class == 2) == lists && pack.frames > 1 && 2 * pack.live < pack.payload_bytes {
+                list.push(mut expected, stamp)
+            }
+        }
+    }
+    take expected
+}
+
+fn law_pack_stamp(seed: u64, seq: u64, slot: u64) -> u64 {
+    slot * 64 + (seq + seed) % 64 + 1
+}
+
+fn check_pack_membership_selection() -> Result[(), Error] {
+    let seed = splitmix64(1787) % 64
+    let mut installed = new_page_locations()
+    for seq in 1u64 .. 65 {
+        let class: u8 = int.truncate(seq % 3)
+        let (live, frames) = match seq {
+            11 => (2u64, 8u64),
+            29 => (2u64, 8u64),
+            52 => (2u64, 8u64),
+            17 => (4u64, 8u64),
+            37 => (1u64, 1u64),
+            47 => (0u64, 8u64),
+            _ => (8u64, 8u64),
+        }
+        capacity(disk_index_put(mut installed.packs, seq, PagePack(class: class, frames: int.truncate(frames), live: 16 * live, payload_bytes: 16 * frames), pack_edge_charge))?
+        for slot in 0u64 .. live {
+            let stamp = law_pack_stamp(seed, seq, slot)
+            let ptr = std.page.PagePtr(pack: seq, offset: 72 + 32 * slot, len: 16, checksum: stamp, stamp: stamp)
+            add_location(mut installed, ptr, class, 0, list.new())?
+            add_page_source(mut installed, stamp, HolderSource(0, stamp, 0))?
+        }
+    }
+    let data = law_full_frame_selection(installed, false)
+    let lists = law_full_frame_selection(installed, true)
+    if list.len(data) != 2 || list.len(lists) != 4 || moved_frames(installed, false) != data || moved_frames(installed, true) != lists {
+        return Error(Foreign)
+    }
+
+    let mut candidate = share_page_locations(installed)
+    let moved = law_pack_stamp(seed, 52, 0)
+    let first = law_pack_stamp(seed, 55, 0)
+    let second = law_pack_stamp(seed, 55, 1)
+    let mut layout_frames: List[PackFrame] = list.with_capacity(3)
+    for stamp in [moved, first, second] {
+        list.push(mut layout_frames, PackFrame(stamp: stamp, size: 16, body: BlobBody(arc.new(list.new()))))
+    }
+    let layout = layout_packs(take layout_frames, 1, 65, 4096)?
+    apply_pack_layout(mut candidate, layout)?
+    for stamp in [first, second, law_pack_stamp(seed, 11, 0)] {
+        remove_page_source(mut candidate, stamp, HolderSource(0, stamp, 0))?
+    }
+    if moved_frames(candidate, false) != law_full_frame_selection(candidate, false)
+       || moved_frames(candidate, true) != law_full_frame_selection(candidate, true)
+       || moved_frames(installed, false) != data || moved_frames(installed, true) != lists
+       || disk_index_len(candidate.members) != disk_index_len(candidate.frames)
+       || location_storage_charge(candidate) != scan_location_storage_charge(candidate) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+// L41(vii). Three equal-sized blobs fit in one pack. Deleting two selects
+// the pack for relocation, but the mandatory layout keeps the last blob in it.
+@test
+fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    check_pack_membership_selection()?
+    let directory = disk_test_directory(d)
+    let mut options = defaults()
+    options.pack_bytes = 4096
+    let mut db = open(tasks, directory, c, r, options)?
+    let codec = std.codec.of_bytes()
+    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let t = table(mut db, "values", std.codec.key_u64(), codec)?
+    let old_blob_pack = db.disk[0u64].pages.next_pack
+    let initial = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        for k in 1u64 .. 4 {
+            let mut value: Bytes = list.with_capacity(1024)
+            list.fill(mut value, 1024, int.truncate(k))
+            put(mut tx, t, k, value)?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = initial {} else { return Error(Foreign) }
+    let _ = checkpoint(mut db)?
+    let (_, take old) = read_page_manifest_file(directory)?
+    let old_name = paged_pack_path(old_blob_pack)?
+    let original = disk_read_paged_file(directory, old_name, 4096)?
+    let payload = 1038u64 // 8 stamp bytes, 6 codec bytes and 1024 value bytes.
+    if list.len(original) != 72 + 3 * (16 + payload) { return Error(Foreign) }
+
+    let edited = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let _ = delete(mut tx, t, 2)?
+        let _ = delete(mut tx, t, 3)?
+        Ok(())
+    })?
+    if let Committed(_) = edited {} else { return Error(Foreign) }
+    let first_path = paged_pack_path(old.next_pack)?
+    let refused_watermarks: Log[u64] = log.new()
+    let _ = disk_cut_state(mut db, NoHolderChange,
+        scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] waits {
+            let first = disk_read_paged_file(directory, first_path, 4096)?
+            if read_le(first, 72, 2) == 0x0022 {
+                // The optional blob has already been renamed. Cap the real
+                // MANIFEST checksum allocation for this layout only.
+                log.append(refused_watermarks, read_le(raw, 112, 8))
+                let refused = bound bytes 0 { seal_page_manifest_file(mut raw, context, fence) }
+                match take refused {
+                    Ok(Error(Full(Allocation(problem)))) => return Error(Full(Allocation(problem))),
+                    _ => return Error(Foreign),
+                }
+            }
+            seal_page_manifest_file(mut raw, context, fence)
+        })?
+    let watermarks = log.finish(take refused_watermarks)
+    if list.len(watermarks) != 1 { return Error(Foreign) }
+    close(take db)?
+
+    let raw = disk_read_paged_file(directory, "MANIFEST", 387)?
+    let (id, take published) = read_page_manifest_file(directory)?
+    if published.generation != old.generation + 1 || published.first_live != old.first_live + 1
+        || published.branches[0u64].version != old.branches[0u64].version + 1
+        || published.pack_root.stamp < watermarks[0u64] || published.next_stamp <= published.pack_root.stamp {
+        return Error(Foreign)
+    }
+    let replacement = disk_read_paged_file(directory, first_path, 4096)?
+    if read_le(replacement, 72, 2) != 0x0021 || disk_read_paged_file(directory, old_name, 4096)? != original {
+        return Error(Foreign)
+    }
+    let collection_map = law_pointed_payload(directory, raw, 274, 4096)?
+    let values = law_pointed_payload(directory, collection_map, law_leaf_cell(collection_map, 0) + 3, 4096)?
+    let cell = law_leaf_cell(values, 0)
+    if read_le(values, 2, 2) != 1 || values[cell] != 1 || read_le(values, cell + 25, 8) != old_blob_pack {
+        return Error(Foreign)
+    }
+    let checked = validate_page_manifest(directory, id, take published)?
+    let Some(blob_pack) = map.get(checked.inventory, old_blob_pack) else { return Error(Foreign) }
+    if blob_pack.class != 1 || blob_pack.frames != 3 || blob_pack.live != payload || blob_pack.payload_bytes != 3 * payload {
+        return Error(Foreign)
+    }
+    let reopened = open(tasks, directory, c, r, options)?
+    {
+        let known = view reopened.disk[0u64].pages.locations
+        let old_stamp = read_le(original, 88, 8)
+        if std.omap.get(known.members.values, (old_blob_pack, old_stamp)) == None
+           || moved_frames(known, false) != law_full_frame_selection(known, false)
+           || disk_index_len(known.members) != disk_index_len(known.frames) {
+            return Error(Foreign)
+        }
+    }
+    let held = snapshot(reopened)
+    let sh = shape(t)
+    let Some(value) = get(held, sh, 1)? else { return Error(Foreign) }
+    if list.len(value) != 1024 || value[0u64] != 1 || get(held, sh, 2)? != None || get(held, sh, 3)? != None {
+        return Error(Foreign)
+    }
+    close(take reopened)
+}
+
+fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) -> Result[(), Error] waits {
+    let mut options = journal_crash_options()
+    let original = open(tasks, d, c, r, options)?
+    let id = identity(original)
+    close(take original)?
+    if cutoff != 1024 {
+        // AP14 places inline 16 bytes into the MANIFEST payload. Bind the
+        // hand-edited genesis payload to the same frame at byte 72.
+        let mut genesis = disk_read_paged_file(d, "MANIFEST", 387)?
+        let width: u32 = int.truncate(cutoff)
+        list.set_word_le(mut genesis, 104, width)
+        let digest = capacity(disk_check(DiskContext(store: id, role: 1, seq: 1), 72,
+            list.slice(genesis, 72, 80), list.slice(genesis, 88, 387)))?
+        list.set_word_le(mut genesis, 80, digest)
+        disk_write_synced(d, "MANIFEST", genesis)?
+    }
+    options.create = false
+    let codec = std.codec.of_bytes()
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let shape_table = table(mut db, "values", std.codec.key_u64(), codec)?
+    let mut inline_value: Bytes = list.with_capacity(cutoff - 6)
+    list.fill(mut inline_value, cutoff - 6, 13u8)
+    let mut blob_value: Bytes = list.with_capacity(cutoff - 5)
+    list.fill(mut blob_value, cutoff - 5, 23u8)
+    let finished = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, shape_table, 1, inline_value)?
+        put(mut tx, shape_table, 2, blob_value)
+    })?
+    if let Committed(_) = finished {} else { return Error(Foreign) }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+
+    let manifest = disk_read_paged_file(d, "MANIFEST", 387)?
+    if read_le(manifest, 104, 4) != cutoff { return Error(Foreign) }
+    // One main branch, named main. Its collections pointer starts at 274.
+    let collection_map = law_pointed_payload(d, manifest, 274, 4096)?
+    let descriptor = law_leaf_cell(collection_map, 0) + 3
+    let values = law_pointed_payload(d, collection_map, descriptor, 4096)?
+    let a = law_leaf_cell(values, 0)
+    let b = law_leaf_cell(values, 1)
+    if values[a] != 0 || read_le(values, a + 1, 2) != cutoff
+        || values[b] != 1 || read_le(values, b + 9, 8) != cutoff + 1 {
+        return Error(Foreign)
+    }
+    // BlobRef names the value after an eight-byte stamp in a BLOB frame.
+    let blob_pack = read_le(values, b + 25, 8)
+    let offset = read_le(values, b + 33, 8)
+    let pack = disk_read_paged_file(d, paged_pack_path(blob_pack)?, 4096)?
+    if offset != 72 || read_le(pack, offset, 2) != 0x0022 || read_le(pack, offset + 4, 4) != cutoff + 9
+        || read_le(pack, offset + 16, 8) != read_le(values, b + 1, 8)
+        || list.len(pack) != 72 + 16 + cutoff + 9 {
+        return Error(Foreign)
+    }
+    // The pack-list leaf marks that pack as class 1, with one frame.
+    let listed = law_pointed_payload(d, manifest, 160, 4096)?
+    let key_prefix = read_le(listed, 4, 2)
+    let slots = list.len(listed) - 2 * read_le(listed, 2, 2)
+    let mut found = false
+    for slot in 0u64 .. read_le(listed, 2, 2) {
+        let at = read_le(listed, slots + 2 * slot, 2)
+        let width = read_le(listed, at, 2)
+        let mut key: Bytes = list.with_capacity(8)
+        list.append(mut key, list.slice(listed, 24, 24 + key_prefix))
+        list.append(mut key, list.slice(listed, at + 2, at + 2 + width))
+        let seq: u64 = list.word_be(key, 0)
+        if seq == blob_pack {
+            let cell = at + 2 + width
+            found = listed[cell + 3] == 1 && read_le(listed, cell + 4, 4) == 1
+        }
+    }
+    if !found { return Error(Foreign) }
+    let again = open(tasks, d, c, r, options)?
+    let held = snapshot(again)
+    let sh = shape(shape_table)
+    let values_match = get(held, sh, 1)? == Some(clone(inline_value)) && get(held, sh, 2)? == Some(clone(blob_value))
+    close(take again)?
+    if values_match { Ok(()) } else { Error(Foreign) }
+}
+
+@test
+fn disk_test_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    check_blob_threshold(disk_test_directory(d), c, r, tasks, 1024)?
+    check_blob_threshold(disk_test_directory(d), c, r, tasks, 512)
+}

@@ -1,0 +1,988 @@
+// L42. A pin and a journaled sibling still own the indexed collection after
+// dropping it from main. Their two versions use 2*94 + 2*86 bytes.
+fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let options = journal_crash_options()
+    let mut db = open(tasks, d, c, r, options)?
+    create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let mut rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let by = code.describe(crash_value)
+    create_index(mut db, rows, "iv", by, std.codec.key_u64())?
+    let ix = index(db, mut rows, "iv", by, std.codec.key_u64())?
+    if !typed_put(mut db, rows, 1, 11) {
+        return Error(Foreign)
+    }
+    let original = snapshot(db)
+    let _ = pin(mut db, "saved", original)?
+    let (beta, forked) = fork(mut db, "beta", original)?
+    if !covered(db, forked.mark) {
+        return Error(Foreign)
+    }
+    if !typed_put(mut db, rows, 1, 12) {
+        return Error(Foreign)
+    }
+    let updated = run_on(mut db, beta, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, rows, 1, 13)
+    })?
+    let Committed(_) = updated else {
+        return Error(Foreign)
+    }
+    let sh = shape(rows)
+    let first = db.disk[0].pages.next_pack
+    let _ = drop_table(mut db, take rows)?
+    let after = db.disk[0].pages.next_pack
+    let mut stamps: Map[u64, ()] = map.new()
+    for seq in first .. after {
+        let raw = disk_read_file(d, capacity(disk_path("p-", seq, ""))?, 8500)?
+        let mut at = 72u64
+        while at < list.len(raw) {
+            let kind = read_le(raw, at, 2)
+            let stamp = read_le(raw, at + (if kind == 33 {
+                24u64
+            } else {
+                16u64
+            }), 8)
+            if map.contains(stamps, stamp) {
+                return Error(Foreign)
+            }
+            map.insert(mut stamps, stamp, ())
+            at += 16 + read_le(raw, at + 4, 4)
+        }
+    }
+    let manifest = disk_read_file(d, "MANIFEST", 4096)?
+    // The index catalog key is 1 + 4 + 2 bytes. Its value has 33 fixed
+    // bytes, the key schema and the extractor's static identity.
+    let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
+    let index_charge = 62 + round8(7 + 33 + list.len(schema) + list.len(code.identity(by)))
+    let logical = 2 * 126 + 2 * 94 + 2 * 86 + 134 + index_charge
+    if read_le(manifest, 152, 8) != logical {
+        return Error(Foreign)
+    }
+    close(take db)?
+    let reopened = open(tasks, d, c, r, options)?
+    if reopened.resident != logical {
+        return Error(Foreign)
+    }
+    if let Error(Stale(_)) = get(snapshot(reopened), sh, 1) {} else {
+        return Error(Foreign)
+    }
+    let saved = option.unwrap(pinned(reopened, "saved"))
+    let sibling = snapshot_of(reopened, beta)?
+    if get(saved, sh, 1)? != Some(11u64) || get(sibling, sh, 1)? != Some(13u64) {
+        return Error(Foreign)
+    }
+    let mut in_pin = find(saved, ix, Included(11u64), Included(11u64))?
+    let mut in_child = find(sibling, ix, Included(13u64), Included(13u64))?
+    if next(mut in_pin)? != Some((1u64, 11u64)) || next(mut in_pin)? != None || next(mut in_child)? != Some((1u64, 13u64)) || next(mut in_child)? != None {
+        return Error(Foreign)
+    }
+    close(take reopened)
+}
+
+@test
+fn disk_test_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_branches(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L31 (a) on disk: law_migrate's trace to v4, made durable, then reopen.
+// The catalog lists t as id 3 with only by_b (id 4), by_b gives k3, k1, k2,
+// and the old ids hold nothing. Wrong implementation caught: a cut that
+// writes the migrated catalog but not the new rows' tree, or the reverse.
+pub fn disk_law_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let mut declared = spec("t", std.codec.key_u64(), old_codec())
+    result.unwrap(with_index(mut declared, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    result.unwrap(create_table(mut db, take declared))
+    let mut t = result.unwrap(table(mut db, "t", std.codec.key_u64(), old_codec()))
+    let _ = result.unwrap(index(db, mut t, "by_a", code.describe(old_balance), std.codec.key_u64()))
+    let first = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, OldAccount(balance: 7))?
+        put(mut tx, t, 2, OldAccount(balance: 9))
+    }))
+    match take first {
+        Committed(_) => {},
+        _ => return false
+    }
+    result.unwrap(migrate(mut db, take t, new_spec("t", "by_b"), upgrade))
+    let mut nt = result.unwrap(table(mut db, "t", std.codec.key_u64(), new_codec()))
+    let _ = result.unwrap(index(db, mut nt, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let late = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, nt, 3, NewAccount(balance: 5, bonus: 50))
+    }))
+    match take late {
+        Committed(done) => result.unwrap(durable(mut db, done.ticket)),
+        _ => return false
+    }
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, d, c, r, options))
+    let mut back = result.unwrap(table(mut reopened, "t", std.codec.key_u64(), new_codec()))
+    let ix = result.unwrap(index(reopened, mut back, "by_b", code.describe(new_bonus), std.codec.key_u64()))
+    let listed = result.unwrap(index_catalog(reopened, 3))
+    let now = snapshot(reopened)
+    let mut leftovers = result.unwrap(scan_raw(now, 1, Unbounded, Unbounded))
+    let mut old_index = result.unwrap(scan_raw(now, 2, Unbounded, Unbounded))
+    let empty_old = match result.unwrap(next_bytes(mut leftovers)) {
+        None => true,
+        Some(_) => false
+    }
+    let empty_index = match result.unwrap(next_bytes(mut old_index)) {
+        None => true,
+        Some(_) => false
+    }
+    let good = back.id == 3 && ix.id == 4 && list.len(listed) == 1 && version(now) == 4 && empty_old && empty_index && result.unwrap(bonus_order(now, ix)) == 305010702090
+    result.unwrap(close(take reopened))
+    good
+}
+
+@test
+fn disk_test_migrate(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_migrate(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// Private S2 opener, final cut/handle rules. Journal durability and close's
+// last-frame promise are exercised in S3 (T1); this law explicitly cuts first.
+pub fn disk_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    let id = identity(db)
+    let open_id = open_number(db)
+    if open_id != 1 {
+        return false
+    }
+    match open(tasks, d, c, r, options) {
+        Error(Held) => {},
+        _ => return false
+    }
+    let schema_ticket = result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    if version(snapshot(db)) != 1 || schema_ticket.open != open_id {
+        return false
+    }
+    match schema_ticket.mark {
+        Cut(2) => {},
+        _ => return false
+    }
+    result.unwrap(durable(mut db, schema_ticket))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    if version(snapshot(db)) != 1 || !typed_put(mut db, t, 1, 10) {
+        return false
+    }
+    let held = snapshot(db)
+    let high = db.next_node
+    let commit_ticket = result.unwrap(checkpoint(mut db))
+    match commit_ticket.mark {
+        Cut(3) => {},
+        _ => return false
+    }
+    if version(snapshot(db)) != 2 {
+        return false
+    }
+    result.unwrap(durable(mut db, commit_ticket))
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, d, c, r, options))
+    if !same(identity(reopened), id) || open_number(reopened) != 4 || version(snapshot(reopened)) != 2 || reopened.next_node < high {
+        return false
+    }
+    if result.unwrap(get(snapshot(reopened), sh, 1)) != Some(10u64) || result.unwrap(get(held, sh, 1)) != Some(10u64) {
+        return false
+    }
+    match durable(mut reopened, commit_ticket) {
+        Error(Foreign) => {},
+        _ => return false
+    }
+    match changes(held, snapshot(reopened)) {
+        Error(Foreign) => {},
+        _ => return false
+    }
+    result.unwrap(create_table(mut reopened, spec("second", std.codec.key_u64(), std.codec.of_u64())))
+    let second = result.unwrap(table(mut reopened, "second", std.codec.key_u64(), std.codec.of_u64()))
+    if second.id != 2 {
+        return false
+    }
+    // Replay edits a path already named by the selected MANIFEST. The next
+    // cut must write the new stamps before it removes the journal suffix.
+    if !typed_put(mut reopened, t, 1, 40) {
+        return false
+    }
+    result.unwrap(close(take reopened))
+    let mut replayed = result.unwrap(open(tasks, d, c, r, options))
+    if result.unwrap(get(snapshot(replayed), sh, 1)) != Some(40u64) {
+        return false
+    }
+    result.unwrap(checkpoint(mut replayed))
+    result.unwrap(close(take replayed))
+    let final_open = result.unwrap(open(tasks, d, c, r, options))
+    let row = result.unwrap(get(snapshot(final_open), sh, 1))
+    result.unwrap(close(take final_open))
+    row == Some(40u64)
+}
+
+@test
+fn disk_test_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_db(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_watermark_rows(s: Snapshot, sh: Shape[u64, u64], expected: Option[(u64, u64)]) -> Result[bool, Error] {
+    let old = match expected {
+        Some((1, v)) => Some(v),
+        _ => None
+    }
+    let new = match expected {
+        Some((2, v)) => Some(v),
+        _ => None
+    }
+    if get(s, sh, 1)? != old || get(s, sh, 2)? != new {
+        return Ok(false)
+    }
+    let mut rows = scan(s, sh, Unbounded, Unbounded)?
+    if next(mut rows)? != expected || next(mut rows)? != None {
+        return Ok(false)
+    }
+    let inspected = look(s, None, fn(tx: Tx) -> Result[bool, Error] {
+        if fetch(tx, sh, 1)? != old || fetch(tx, sh, 2)? != new {
+            return Ok(false)
+        }
+        let mut ranged = range(tx, sh, Unbounded, Unbounded)?
+        Ok(next_range(mut ranged)? == expected && next_range(mut ranged)? == None)
+    })?
+    match take inspected {
+        Seen(take seen) => {
+            let Seen(value: take result_value, ..) = take seen
+            take result_value
+        },
+        _ => Ok(false)
+    }
+}
+
+// STORE-SPEC §§1.5, 1.9 and 3.4. The checkpoint contains the table and no
+// data rows. The discarded COMMIT inserts (1, 10). After recovery, the first
+// insert (2, 20) reuses the discarded leaf's id. Reads from each snapshot
+// stay on its own leaf, and the old snapshot confers no authority to fork.
+fn disk_watermark_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, torn: bool) -> Result[(), Error] waits {
+    let mut options = disk_crash_options("watermark-absent")
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let sh = shape(t)
+    let (_, take manifest) = disk_read_page_manifest("MANIFEST", disk_read_file(d, "MANIFEST", 4096)?)?
+    let segment = capacity(disk_path("j-", db.file_seq, ""))?
+    let end = capacity(disk_path("j-", db.file_seq, ".end"))?
+    let durable_prefix = disk_read_file(d, segment, 4096)?
+    let boundary = disk_read_file(d, end, 4096)?
+    if !typed_put(mut db, t, 1, 10) {
+        fail("watermark: old insert did not commit")
+    }
+    let old = snapshot(db)
+    let old_id = tree_stamp(old.roots.collections)
+    if old_id < manifest.next_stamp {
+        fail("watermark: old node was below the cut")
+    }
+    // Drain the writer to materialize the frame, then construct the two
+    // legal power-cut images before its sync: absent write or torn tail.
+    // The retained Snapshot models a reader holding the old-open roots.
+    close(take db)?
+    if torn {
+        let written = disk_read_file(d, segment, 4096)?
+        if list.len(written) <= list.len(durable_prefix) + 1 {
+            fail("watermark: no frame to tear")
+        }
+        disk_write_synced(d, segment, list.slice(written, 0, list.len(written) - 1))?
+    } else {
+        disk_write_synced(d, segment, durable_prefix)?
+    }
+    disk_write_synced(d, end, boundary)?
+    options.create = false
+    let mut reopened = open(tasks, d, c, r, options)?
+    let recovered = snapshot(reopened)
+    if !same(old.store, recovered.store) || old.open == recovered.open {
+        fail("watermark: missing reopen fence")
+    }
+    if !disk_watermark_rows(recovered, sh, None)? {
+        fail("watermark: discarded row visible after reopen")
+    }
+    let reopened_table = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut reopened, reopened_table, 2, 20) {
+        fail("watermark: new insert did not commit")
+    }
+    let new = snapshot(reopened)
+    let new_id = tree_stamp(new.roots.collections)
+    if new_id != old_id {
+        fail("watermark: fixture did not reissue the old node id")
+    }
+    if !disk_watermark_rows(old, sh, Some((1, 10)))? || !disk_watermark_rows(new, sh, Some((2, 20)))? {
+        fail("watermark: snapshots alias after node id reissue")
+    }
+    if !is_foreign(changes(old, new)) || !is_foreign(changes(new, old)) || !is_foreign(fork(mut reopened, "stale", old)) || !is_foreign(pin(mut reopened, "stale", old)) {
+        fail("watermark: accepted an old-open snapshot with a reissued node id")
+    }
+    let (b, _) = fork(mut reopened, "fresh", new)?
+    if !disk_watermark_rows(snapshot_of(reopened, b)?, sh, Some((2, 20)))? {
+        fail("watermark: fresh fork saw the discarded row")
+    }
+    close(take reopened)
+}
+
+pub fn disk_law_watermark_reissue(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    result.unwrap(disk_watermark_cut(disk_test_directory(d), c, r, tasks, false))
+    result.unwrap(disk_watermark_cut(disk_test_directory(d), c, r, tasks, true))
+    true
+}
+
+// L28 caller component: Full is not poison, a refused cut changes no version
+// or manifest generation, and deleting the oversized row permits the retry.
+pub fn disk_law_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    // S3 also admits the queued 1 MiB frame.
+    options.resident_limit = 2097152 + 1048639
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, spec("large", std.codec.key_u64(), std.codec.of_string())))
+    let t = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    let mut raw: Bytes = list.with_capacity(1048566)
+    list.fill(mut raw, 1048566, 97u8)
+    let large = result.unwrap(string.from_utf8(take raw))
+    let saved = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, large)
+    }))
+    match take saved {
+        Committed(_) => {},
+        _ => return false
+    }
+    let before = version(snapshot(db))
+    if before != 2 {
+        return false
+    }
+    match (bound bytes 524288 {
+        checkpoint(mut db)
+    }) {
+        Ok(Error(Full(Allocation(_)))) => {},
+        _ => return false
+    }
+    if version(snapshot(db)) != before || db.checkpointed != 2 {
+        return false
+    }
+    if let Some(_) = db.poison {
+        return false
+    }
+    let unchanged = result.unwrap(disk_load(d, 2097152))
+    if unchanged.manifest.generation != 2 || unchanged.manifest.branches[0].version != 1 {
+        return false
+    }
+    let removed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete(mut tx, t, 1)
+    }))
+    match take removed {
+        Committed(done) => if !done.value {
+            return false
+        },
+        _ => return false
+    }
+    let commit_ticket = result.unwrap(checkpoint(mut db))
+    match commit_ticket.mark {
+        Cut(3) => {},
+        _ => return false
+    }
+    if version(snapshot(db)) != 3 {
+        return false
+    }
+    result.unwrap(close(take db))
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    let value = result.unwrap(get(snapshot(reopened), shape(t), 1))
+    let good = version(snapshot(reopened)) == 3 && value == None
+    result.unwrap(close(take reopened))
+    if !good {
+        return false
+    }
+    // Loading the graph in the worker can be refused too. Each room either
+    // opens at version3 or refuses with Full; a refusal leaves MANIFEST at
+    // generation3 and releases LOCK, so the next open goes ahead.
+    let mut load_refused: u64 = 0
+    let mut load_opened: u64 = 0
+    let rooms: Inline[u64, 4] =[128, 1024, 20971520, 33554432]
+    for room in rooms {
+        match (bound bytes room {
+            open(tasks, d, c, r, options)
+        }) {
+            Ok(Ok(take opened)) => {
+                load_opened += 1
+                let at = version(snapshot(opened))
+                result.unwrap(close(take opened))
+                if at != 3 {
+                    return false
+                }
+            },
+            Ok(Error(Full(_))) => {
+                load_refused += 1
+                let kept = result.unwrap(disk_load(d, 2097152))
+                if kept.manifest.generation != 3 {
+                    return false
+                }
+            },
+            _ => return false,
+        }
+    }
+    load_refused > 0 && load_opened > 0
+}
+
+@test
+fn disk_test_db_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_db_refusal(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// Q1/K1: sweep task allowances through open and schema-cut refusal. A refused
+// create_table leaves the base reader roots and durable generation unchanged.
+pub fn disk_law_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let limits: Inline[u64, 4] =[8192, 32768, 131072, 1048576]
+    let mut refusals: u64 = 0
+    let mut successes: u64 = 0
+    for allowance in limits {
+        let mut name = string.from("schema-cut-")
+        string.reserve(mut name, 32)
+        let child = result.unwrap(host.mkdtemp(d, mut name))
+        let mut options = defaults()
+        options.resident_limit = 1048576
+        options.pack_bytes = 512
+        let attempt = open(tasks, child, c, r, options)
+        let mut db = match take attempt {
+            Ok(take db) => take db,
+            Error(Full(_)) => continue,
+            _ => return false
+        }
+        match create_table(mut db, spec("base", std.codec.key_u64(), std.codec.of_u64())) {
+            Ok(_) => {},
+            Error(Full(_)) => {
+                result.unwrap(close(take db));
+                continue
+            },
+            _ => return false
+        }
+        let base = result.unwrap(table(mut db, "base", std.codec.key_u64(), std.codec.of_u64()))
+        for k in 0u64 .. 512 {
+            if !typed_put(mut db, base, k, k + 1) {
+                return false
+            }
+        }
+        let made = bound bytes allowance {
+            create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))
+        }
+        match take made {
+            Ok(Error(Full(Allocation(_)))) => {
+                refusals += 1
+                if db.heads[0].head != 513 || db.resident != 260 + 512 * 94 || db.checkpointed != 2 || db.next_table != 2 || page_row_count(db.heads[0].roots.catalog) != 1 || page_row_count(db.heads[0].roots.collections) != 512 {
+                    return false
+                }
+                let persisted = result.unwrap(disk_load(child, 1048576))
+                if persisted.manifest.generation != 2 || persisted.manifest.branches[0].version != 1 || persisted.manifest.next_table != 2 || page_row_count(persisted.all[0u64].catalog) != 1 || page_row_count(persisted.all[0u64].collections) != 0 {
+                    return false
+                }
+            },
+            Ok(Ok(commit_ticket)) => {
+                successes += 1
+                if db.heads[0].head != 514 || db.checkpointed != 3 || db.next_table != 3 {
+                    return false
+                }
+                result.unwrap(durable(mut db, commit_ticket))
+            },
+            _ => return false
+        }
+        result.unwrap(close(take db))
+    }
+    refusals > 0 && successes > 0
+}
+
+@test
+fn disk_test_schema_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_schema_refusal(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L28(a). One BLOB dominates the scratch reservation, including its store
+// header, frame header, stamp and Bytes codec envelope.
+fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = defaults()
+    let mut db = open(tasks, directory, c, r, options)?
+    let codec = std.codec.of_bytes()
+    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let t = table(mut db, "values", std.codec.key_u64(), codec)?
+    let saved = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let mut value: Bytes = list.with_capacity(1024)
+        list.fill(mut value, 1024, 7u8)
+        put(mut tx, t, 1, value)
+    })?
+    let Committed(done) = saved else {
+        return Error(Foreign)
+    }
+    durable(mut db, done.ticket)?
+    let entries = result.unwrap(std.dir.list(directory))
+    let mut original: List[Bytes] = list.with_capacity(list.len(entries))
+    for file in entries {
+        list.push(mut original, disk_read_paged_file(directory, file.name, 4096)?)
+    }
+    let planned = 72u64 + 16 + 8 + 6 + 1024
+    let pack = paged_pack_path(db.disk[0u64].pages.next_pack)?
+    let mut timing: Option[CutTiming] = None
+    match disk_cut_with_limit(mut db, NoHolderChange, seal_page_manifest_file, None, options.pack_bytes, planned - 1, mut timing) {
+        Error(Full(Allocation(problem))) if problem.requested == planned && problem.available == planned - 1 => (),
+        _ => return Error(Foreign),
+    }
+    let after = result.unwrap(std.dir.list(directory))
+    if list.len(after) != list.len(entries) {
+        return Error(Foreign)
+    }
+    for i in 0u64 .. list.len(entries) {
+        if after[i].name != entries[i].name || disk_read_paged_file(directory, after[i].name, 4096)? != original[i] {
+            return Error(Foreign)
+        }
+    }
+    let committed_at = disk_cut_with_limit(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+        if list.capacity(raw) != planned {
+            return Error(Foreign)
+        }
+        seal_page_manifest_file(mut raw, context, fence)
+    }, None, options.pack_bytes, planned, mut timing)?
+    durable(mut db, committed_at)?
+    let written = disk_read_paged_file(directory, pack, planned)?
+    if list.len(written) != planned || read_le(written, 72, 2) != 0x0022 {
+        return Error(Foreign)
+    }
+    close(take db)
+}
+
+pub fn disk_law_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    match check_publish_refusal(d, c, r, tasks) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+@test
+fn disk_test_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    check_publish_refusal(d, c, r, tasks)
+}
+
+pub fn disk_law_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.pack_bytes = 41943040
+    options.resident_limit = 134217728
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, spec("large", std.codec.key_u64(), std.codec.of_string())))
+    let t = result.unwrap(table(mut db, "large", std.codec.key_u64(), std.codec.of_string()))
+    let base = db.resident
+    let mut raw: Bytes = list.with_capacity(1048566)
+    list.fill(mut raw, 1048566, 97u8)
+    let text = result.unwrap(string.from_utf8(take raw))
+    for k in 0u64 .. 36 {
+        let saved = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, t, k, text)
+        }))
+        if let Committed(_) = saved {} else {
+            return false
+        }
+    }
+    let cut = result.unwrap(checkpoint(mut db))
+    result.unwrap(durable(mut db, cut))
+    let (_, manifest) = result.unwrap(read_page_manifest_file(d))
+    let checked = result.unwrap(validate_page_manifest(d, db.store, clone(manifest)))
+    let mut large_pack = false
+    for (seq, pack) in checked.inventory {
+        if pack.class != 1 {
+            continue
+        }
+        let path = result.unwrap(paged_pack_path(seq))
+        let bytes_in_pack = result.unwrap(disk_read_paged_file(d, path, 41943040))
+        if list.len(bytes_in_pack) == 72 + 36 * (16 + 8 + 1048572) {
+            large_pack = true
+        }
+    }
+    if !large_pack {
+        return false
+    }
+    result.unwrap(close(take db))
+    options.pack_bytes = 512
+    options.create = false
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    if reopened.resident != base + 36 * (62 + 16 + 1048576) {
+        return false
+    }
+    for k in 0u64 .. 36 {
+        match result.unwrap(get(snapshot(reopened), shape(t), k)) {
+            Some(take value) => if value != text {
+                return false
+            },
+            None => return false
+        }
+    }
+    result.unwrap(close(take reopened))
+    true
+}
+
+@test
+fn disk_pack_bound(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_pack_bound(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// AP15's resident report. The reference is the full scan: every distinct
+// page image reachable from the heads, the pins and the two list roots,
+// each distinct blob body, and the location table's charges.
+fn law_resident_scan(db: Db) -> bool {
+    let mut roots: List[PageRoots] = list.with_capacity(list.len(db.heads) + list.len(db.pins))
+    for head in db.heads {
+        list.push(mut roots, share_roots(head.roots))
+    }
+    for held in db.pins {
+        list.push(mut roots, share_roots(held.roots))
+    }
+    let images = resident_images(roots, Some(view db.disk[0u64].pages.lists))
+    accounts(db).resident == int.saturating_add(images, scan_location_storage_charge(db.disk[0u64].pages.locations))
+}
+
+fn law_empty_collection_pages() -> Result[List[Arc[std.page.Page]], Error] {
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    let mut stamps = 1u64
+    for id in 1u32 .. 5 {
+        define_collection(mut tree, id, 1, 1, mut stamps)?
+        put_page_row(mut tree, logical_key(id, key_word(1))?, string.as_bytes("x"), 1, mut stamps)?
+    }
+    define_collection(mut tree, 5, 1, 1, mut stamps)?
+    bulk_collection(mut tree, 6, 1, list.new(), 1, mut stamps)?
+    for id in 1u32 .. 5 {
+        if !remove_page_row(mut tree, logical_key(id, key_word(1))?, 1, mut stamps)? {
+            return Error(Foreign)
+        }
+    }
+    let mut children: List[Arc[std.page.Page]] = list.with_capacity(6)
+    for id in 1u32 .. 7 {
+        let Some((page, descriptor)) = std.page.collection_entry(tree.root, prefix(id)?) else {
+            return Error(Foreign)
+        }
+        let image = std.page.image_of(page)
+        if std.page.stamp(image) != 0 || std.page.count(image) != 0 || list.slice(descriptor, 0, 36) != std.page.encode_ptr(std.page.unlocated(0)) {
+            return Error(Foreign)
+        }
+        list.push(mut children, arc.share(page))
+    }
+    Ok(take children)
+}
+
+fn law_empty_collection_resident() -> bool {
+    let mut pages = result.unwrap(law_empty_collection_pages())
+    let mut resident = 0u64
+    // The fixture has dropped the map. Only the last handle to each distinct
+    // allocation unwraps, so its image capacity contributes exactly once.
+    while let Some(take page) = list.pop(mut pages) {
+        let image_capacity = list.capacity(std.page.payload(std.page.image_of(page)))
+        if let Ok(_) = arc.try_unwrap(take page) {
+            resident += image_capacity
+        }
+    }
+    // AP3's 24-byte header is the whole image of AP2's shared empty page.
+    resident == 24
+}
+
+fn law_resident_text(state: u64) -> String {
+    // Values of 1,500 bytes are over the 1,024-byte inline threshold.
+    let width = if (state >> 40) % 4 == 0 {
+        1500u64
+    } else {
+        1 + (state >> 44) % 48
+    }
+    let mut raw: Bytes = list.with_capacity(width)
+    list.fill(mut raw, width, 97u8 + int.truncate((state >> 52) % 26))
+    result.unwrap(string.from_utf8(take raw))
+}
+
+fn law_resident_name(lead: String, slot: u64) -> String {
+    let mut name = string.from(lead)
+    string.push(mut name, if slot == 0 {
+        "0"
+    } else if slot == 1 {
+        "1"
+    } else {
+        "2"
+    })
+    take name
+}
+
+// A copied leaf keeps its rows but drops the installed leaf's spare slots.
+fn law_location_cow_charge() -> Result[bool, Error] {
+    let mut installed = new_page_locations()
+    for stamp in 1u64 .. 3 {
+        add_location(mut installed, std.page.unlocated(stamp), 0, 0, list.new())?
+    }
+    let mut candidate = share_page_locations(installed)
+    add_page_source(mut candidate, 1, HolderSource(0, 0, 0))?
+    let before = std.omap.storage_charge(installed.frames.values, 8, 87)
+    let after = std.omap.storage_charge(candidate.frames.values, 8, 87)
+    Ok(before > after && resident_location_charge(installed) == scan_location_storage_charge(installed) && resident_location_charge(candidate) == scan_location_storage_charge(candidate))
+}
+
+// Wrong implementations caught: a record charged twice when a second holder
+// reaches it, a refund missed when unpin, delete_branch or a commit retires
+// the last path to a page, a blob charged per leaf instead of per stamp, a
+// relocation that charges a moved frame again, and an open whose seed
+// disagrees with the pages a journal replay replaced.
+pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    if !law_empty_collection_resident() || !result.unwrap(law_location_cow_charge()) {
+        return false
+    }
+    let mut options = defaults()
+    options.resident_limit = 16777216
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_string())))
+    let mut t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
+    let _ = result.unwrap(checkpoint(mut db))
+    let before = accounts(db).resident
+    let installed = share_page_locations(db.disk[0].pages.locations)
+    let _ = result.unwrap(checkpoint(mut db))
+    let frame_ids = db.disk[0].pages.locations.frames.ids
+    let pack_ids = db.disk[0].pages.locations.packs.ids
+    if before != accounts(db).resident || installed.frames.ids != frame_ids || installed.packs.ids != pack_ids || !law_resident_scan(db) {
+        return false
+    }
+    let mut forked = 0u64
+    let mut held = 0u64
+    let mut state = 1721u64
+    let mut cuts = 0u64
+    for step in 0u64 .. 96 {
+        state = splitmix64(state + step)
+        let k = (state >> 8) % 48
+        let slot = (state >> 16) % 3
+        let bit = 1u64 << slot
+        let choice = (state >> 24) % 16
+        if choice < 6 {
+            let text = law_resident_text(state)
+            let out = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+                put(mut tx, t, k, text)
+            }))
+            if let Committed(_) = out {} else {
+                return false
+            }
+        } else if choice == 6 {
+            let out = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+                delete(mut tx, t, k)
+            }))
+            if let Committed(_) = out {} else {
+                return false
+            }
+        } else if choice == 7 && forked & bit == 0 {
+            let from = snapshot(db)
+            let _ = result.unwrap(fork(mut db, law_resident_name("b", slot), from))
+            forked = forked | bit
+        } else if choice == 8 && forked & bit != 0 {
+            let b = option.unwrap(branch(db, law_resident_name("b", slot)))
+            let text = law_resident_text(splitmix64(state))
+            let out = result.unwrap(run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
+                put(mut tx, t, k, text)
+            }))
+            if let Committed(_) = out {} else {
+                return false
+            }
+        } else if choice == 9 && forked & bit != 0 {
+            let b = option.unwrap(branch(db, law_resident_name("b", slot)))
+            let _ = result.unwrap(delete_branch(mut db, b))
+            forked = forked & ~bit
+            cuts += 1
+            if !law_resident_scan(db) {
+                return false
+            }
+        } else if choice == 10 && held & bit == 0 {
+            let from = snapshot(db)
+            let _ = result.unwrap(pin(mut db, law_resident_name("p", slot), from))
+            held = held | bit
+            cuts += 1
+            if !law_resident_scan(db) {
+                return false
+            }
+        } else if choice == 11 && held & bit != 0 {
+            let _ = result.unwrap(unpin(mut db, law_resident_name("p", slot)))
+            held = held & ~bit
+            cuts += 1
+            if !law_resident_scan(db) {
+                return false
+            }
+        } else if choice < 14 {
+            let _ = result.unwrap(checkpoint(mut db))
+            cuts += 1
+            if !law_resident_scan(db) {
+                return false
+            }
+        } else if choice == 14 {
+            // The journal tail since the last cut replays over the MANIFEST's pages.
+            result.unwrap(close(take db))
+            db = result.unwrap(open(tasks, d, c, r, options))
+            t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_string()))
+        }
+    }
+    let _ = result.unwrap(checkpoint(mut db))
+    let good = cuts >= 8 && law_resident_scan(db)
+    result.unwrap(close(take db))
+    good
+}
+
+@test
+fn disk_test_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_resident_charge(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_test_directory(d: Dir) -> Dir waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "store-law-")
+    result.unwrap(host.mkdtemp(d, mut name))
+}
+
+fn disk_crash_options(scenario: String) -> Options {
+    let mut options = defaults()
+    options.resident_limit = if scenario == "refusal" {
+        2097152u64 + 1048639
+    } else {
+        2097152u64
+    }
+    options.pack_bytes = if scenario == "oversize" {
+        1
+    } else {
+        512
+    }
+    options
+}
+
+fn disk_crash_init(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) -> Result[(), Error] waits {
+    let options = disk_crash_options(scenario)
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    if scenario == "refusal" {
+        let _ = create_table(mut db, spec("big", std.codec.key_u64(), std.codec.of_string()))?
+    }
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 96 {
+        let inserted = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, t, k, k + 1)
+        })?
+        match take inserted {
+            Committed(_) => {},
+            _ => fail("crash init put")
+        }
+    }
+    let _ = checkpoint(mut db)?
+    if scenario == "gap" {
+        let loaded = disk_load(d, options.resident_limit)?
+        let seq = loaded.manifest.next_pack
+        let first_name = capacity(disk_path("p-", seq, ""))?
+        let second_name = capacity(disk_path("p-", seq + 1, ""))?
+        let first = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq), 0, 0))?
+        let second = capacity(disk_header_bytes(DiskContext(store: db.store, role: 3, seq: seq + 1), 0, 0))?
+        disk_write_synced(d, first_name, first)?
+        disk_write_synced(d, second_name, second)?
+        disk_io(host.sync_dir(d))?
+        // Explicit legal post-cleanup gap from H3's partial-persistence model.
+        // W2's restart itself still discards all volatile directory operations.
+        let _ = disk_remove_optional(d, first_name)?
+        disk_io(host.sync_dir(d))?
+    }
+    if scenario == "checkpoint" || scenario == "gap" || scenario == "oversize" {
+        // L4 cuts only the checkpoint. Its input commits are durable before
+        // the adapter arms filesystem cuts, so every reopen must keep them.
+        for k in 0u64 .. 64 {
+            if !typed_put(mut db, t, k, k + 101) {
+                fail("checkpoint input")
+            }
+        }
+        let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+        durable(mut db, last)?
+    }
+    close(take db)
+}
+
+fn disk_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String) -> Result[(), Error] waits {
+    if scenario == "genesis" {
+        return disk_crash_init(d, c, r, tasks, scenario)
+    }
+    let options = disk_crash_options(scenario)
+    let mut db = open(tasks, d, c, r, options)?
+    if scenario == "schema" {
+        let _ = create_table(mut db, spec("added", std.codec.key_u64(), std.codec.of_u64()))?
+    } else if scenario == "refusal" {
+        let big = table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
+        let mut raw: Bytes = list.with_capacity(1048566)
+        list.fill(mut raw, 1048566, 97u8)
+        let large = result.unwrap(string.from_utf8(take raw))
+        let inserted = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, big, 1, large)
+        })?
+        match take inserted {
+            Committed(_) => {},
+            _ => fail("crash refusal put")
+        }
+        let cut = bound bytes 524288 {
+            checkpoint(mut db)
+        }
+        match take cut {
+            Ok(Error(Full(Allocation(_)))) => {},
+            Ok(Error(take problem)) => return Error(take problem),
+            Ok(Ok(_)) => fail("oversized cut unexpectedly fits"),
+            Error(_) => fail("cut did not return its allocation refusal"),
+        }
+        let deleted = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+            delete(mut tx, big, 1)
+        })?
+        match take deleted {
+            Committed(done) => if !done.value {
+                fail("crash refusal delete")
+            },
+            _ => fail("crash refusal delete")
+        }
+        let _ = checkpoint(mut db)?
+    } else if scenario == "migrate" {
+        run_migration(mut db, tasks, code.describe(crash_migration))?
+    } else if scenario == "branches" {
+        // L7 at every W2 cut: pin, fork, a fork commit made durable, unpin.
+        let arg10 = snapshot(db)
+        let _ = pin(mut db, "p", arg10)?
+        let arg11 = snapshot(db)
+        let (b, _) = fork(mut db, "b", arg11)?
+        let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        let on_b = run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, t, 0, 500)
+        })?
+        match take on_b {
+            Committed(done) => durable(mut db, done.ticket)?,
+            _ => fail("crash fork put")
+        }
+        let _ = unpin(mut db, "p")?
+    } else {
+        let _ = checkpoint(mut db)?
+    }
+    close(take db)
+}

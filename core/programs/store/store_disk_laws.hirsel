@@ -1,0 +1,977 @@
+fn law_leaf_range_stop(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    let format = std.codec.key_u64()
+    let dictionary = std.codec.of_u64()
+    result.unwrap(create_table(mut db, spec("leaves", format, dictionary)))
+    result.unwrap(create_table(mut db, spec("neighbor", format, dictionary)))
+    let t = result.unwrap(table(mut db, "leaves", format, dictionary))
+    let neighbor = result.unwrap(table(mut db, "neighbor", format, dictionary))
+    if !typed_put(mut db, neighbor, 0, 10) {
+        return false
+    }
+    for i in 0u64 .. 512 {
+        if !typed_put(mut db, t, 2 * i, 2 * i + 1) {
+            return false
+        }
+    }
+    let s = snapshot(db)
+    let sh = shape(t)
+    let root = option.unwrap(std.page.collection_child(s.roots.collections.root, result.unwrap(prefix(sh.id))))
+    let Some(first) = std.page.child(root, 0) else {
+        return false
+    }
+    let leaf = std.page.image_of(first)
+    let n = std.page.count(leaf)
+    let edge = result.unwrap(std.codec.decode_key(format, option.unwrap(std.page.key_at(leaf, n - 1))))
+    let middle = result.unwrap(std.codec.decode_key(format, option.unwrap(std.page.key_at(leaf, n / 2))))
+    for reverse in[false, true] {
+        if !scan_matches_rows(s, sh, 0, edge, Excluded(edge), reverse) || !scan_matches_rows(s, sh, middle, 1024, Unbounded, reverse) || !scan_matches_rows(s, sh, 1, middle + 1, Included(middle), reverse) || !scan_matches_rows(s, sh, 0, middle + 1, Excluded(middle + 1), reverse) || !scan_matches_rows(s, sh, edge, middle, Excluded(middle), reverse) {
+            return false
+        }
+    }
+    true
+}
+
+@test
+fn test_range_prefix(c: Clock) -> Result[(), ()] waits {
+    if law_range_prefix(c) && law_leaf_range_stop(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn same_read(a: Read, b: Read) -> bool {
+    match a {
+        Point(x) => match b {
+            Point(y) => x == y,
+            _ => false
+        },
+        Span(l, h) => match b {
+            Span(m, i) => l == m && h == i,
+            _ => false
+        }
+    }
+}
+
+@test
+fn test_read_spans(c: Clock) -> Result[(), ()] waits {
+    if law_read_spans(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+type FrameRow {
+    present: bool,
+    op: u8,
+    size: u64,
+    key_size: u64
+}
+
+// L29(a): an independent slot history counts the fields in section2.4.
+// An overwritten key has one final op; deleting an absent key adds none.
+// Table keys have12 bytes; the index keys have20 and empty values.
+pub fn law_frame_size(c: Clock) -> bool {
+    let mut db = raw_test_db(c, 1073741824)
+    let budgeted = result.unwrap(bound bytes 80 {
+        execute(mut db, 0, 16, None, fn(mut tx: Tx) -> Result[u64, Error] {
+            let _ = info(mut tx)
+            Ok(19)
+        })
+    })
+    match take budgeted {
+        Ok(Committed(done)) => if done.value != 19 {
+            return false
+        },
+        _ => return false
+    }
+    let outcome = result.unwrap(execute(mut db, 0, 17, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        let mut model: List[FrameRow] = list.new()
+        for slot in 0u64 .. 24 {
+            let width = if slot < 12 {
+                12u64
+            } else {
+                20u64
+            }
+            list.push(mut model, FrameRow(present: false, op: 0, size: 0, key_size: width))
+        }
+        for step in 0u64 .. 96 {
+            let k = splitmix64(step) % 24
+            let id: u32 = if k < 12 {
+                1
+            } else {
+                2
+            }
+            let mut key = key_word(k % 12)
+            if id == 2 {
+                list.append(mut key, key_word(k % 4))
+            }
+            if step % 5 == 0 {
+                let removed = delete_bytes(mut tx, id, key)?
+                if removed != model[k].present {
+                    return Ok(false)
+                }
+                if removed {
+                    model[k].present = false
+                    model[k].op = 2
+                    model[k].size = 0
+                }
+            } else {
+                let size = if id == 2 {
+                    0u64
+                } else {
+                    splitmix64(step + 1) % 33
+                }
+                let mut value: Bytes = list.with_capacity(size)
+                list.fill(mut value, size, int.truncate(step))
+                put_bytes(mut tx, id, key, value)?
+                model[k].present = true
+                model[k].op = 1
+                model[k].size = size
+            }
+            // head16 + branch4 + version8 + at8 + sections1 + data-tag1 + count4.
+            let mut expected: u64 = 16 + 4 + 8 + 8 + 1 + 1 + 4
+            for row in model {
+                if row.op == 1 {
+                    expected += 1 + 4 + row.key_size + 4 + row.size
+                } else if row.op == 2 {
+                    expected += 1 + 4 + row.key_size
+                }
+            }
+            let ci = info(mut tx)
+            let raw = capacity(encode_commit(ci, mut tx.ops.rows, 1, 72))?
+            if tx.frame_bytes != expected || list.len(raw) != expected || read_le(raw, 4, 4) != expected - 16 {
+                return Ok(false)
+            }
+        }
+        Ok(true)
+    }))
+    match take outcome {
+        Committed(done) => done.value,
+        _ => false
+    }
+}
+
+@test
+fn test_frame_size(c: Clock) -> Result[(), ()] {
+    if law_frame_size(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn frame_boundary(c: Clock, last: u64, accepted: bool) -> bool {
+    let mut db = raw_test_db(c, 1073741824)
+    let result = result.unwrap(execute(mut db, 0, 17, None, fn(mut tx: Tx) -> Result[u64, Error] {
+        for k in 0u64 .. 16 {
+            let size = if k == 15 {
+                last
+            } else {
+                1048576u64
+            }
+            let mut value: Bytes = list.with_capacity(size)
+            list.fill(mut value, size, 0u8)
+            put_bytes(mut tx, 1, key_word(k), value)?
+        }
+        let ci = info(mut tx)
+        let raw = capacity(encode_commit(ci, mut tx.ops.rows, 1, 72))?
+        // U1: payload26 +16*(op1+key-length4+key12+value-length4)
+        // +15*1048576 +last; the frame also has its16-byte head.
+        let expected = 16 + 26 + 16 * 21 + 15 * 1048576 + last
+        if tx.frame_bytes != expected || list.len(raw) != expected || read_le(raw, 4, 4) != expected - 16 {
+            fail("L29 frame size")
+        }
+        Ok(expected)
+    }))
+    match take result {
+        Committed(done) => accepted && done.value == 15729018 + last && db.heads[0].head == 1 && page_row_count(db.heads[0].roots.collections) == 16,
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => !accepted && db.heads[0].head == 0 && page_row_count(db.heads[0].roots.collections) == 0,
+        _ => false
+    }
+}
+
+// L29(b), U1's hand-derived payload cap-1, cap, and cap+1. The stored values
+// include schema0's two zero bytes. No journal or frame allocation in execute.
+pub fn law_frame_size_boundary(c: Clock) -> bool {
+    frame_boundary(c, 1048277, true) && frame_boundary(c, 1048278, true) && frame_boundary(c, 1048279, false)
+}
+
+@test
+fn frame_size_boundary(c: Clock) -> Result[(), ()] {
+    if law_frame_size_boundary(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// T2: key12 rounds to16; schema0's value2+8 rounds to16, schema1's2+16
+// rounds to24. Replacing the old stored row must therefore add exactly8.
+// Subtracting a re-encode of the resolved old value would add nothing.
+pub fn law_stored_size(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("sizes", std.codec.key_u64(), old_codec())))
+    let old = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), old_codec()))
+    let first = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, old, 1, OldAccount(balance: 10))
+    }))
+    if let Committed(_) = first {} else {
+        return false
+    }
+    let held = snapshot(db)
+    let current = result.unwrap(table(mut db, "sizes", std.codec.key_u64(), new_codec()))
+    let sh = shape(current)
+    let before = db.resident
+    let changed = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, current, 1, NewAccount(balance: 10, bonus: 7))
+    }))
+    if let Committed(_) = changed {} else {
+        return false
+    }
+    if db.resident != before + 8 {
+        return false
+    }
+    let second = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, current, 1, NewAccount(balance: 11, bonus: 9))
+    }))
+    if let Committed(_) = second {} else {
+        return false
+    }
+    let a = option.unwrap(result.unwrap(get(held, sh, 1)))
+    let b = option.unwrap(result.unwrap(get(snapshot(db), sh, 1)))
+    db.resident == before + 8 && a.balance == 10 && a.bonus == 7 && b.balance == 11 && b.bonus == 9
+}
+
+@test
+fn test_stored_size(c: Clock) -> Result[(), ()] waits {
+    if law_stored_size(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_corrupt[T](take r: Result[T, Error]) -> bool {
+    match take r {
+        Error(Corrupt(_)) => true,
+        _ => false
+    }
+}
+
+// Frame corpus, independent libxxhash HEADER vector plus every single-byte
+// mutation and truncation. Wrong implementations: checksum without binding,
+// unchecked flags/lengths, or treating unknown MUST kinds as optional.
+pub fn disk_law_frames() -> bool {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 3, seq: 7)
+    let raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    let expected: Inline[u8, 72] =[1, 0, 1, 0, 56, 0, 0, 0, 80, 128, 247, 96, 131, 16, 208, 66, 72, 73, 82, 83, 84, 79, 82, 69, 3, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    if list.len(raw) != 72 {
+        return false
+    }
+    for i in 0u64 .. 72 {
+        if raw[i] != expected[i] {
+            return false
+        }
+    }
+    let header = result.unwrap(disk_read_header("p-7", raw, 3, Some(7), Some(id)))
+    if header.prev_end != 0 || header.context.seq != 7 {
+        return false
+    }
+    for i in 0u64 .. 72 {
+        let mut broken = result.unwrap(copied(raw))
+        let changed = broken[i] ^ 1u8
+        let _ = list.set(mut broken, i, changed)
+        if !disk_corrupt(disk_read_header("p-7", broken, 3, Some(7), Some(id))) {
+            return false
+        }
+        let short = list.slice(raw, 0, i)
+        if !disk_corrupt(disk_read_header("p-7", short, 3, Some(7), Some(id))) {
+            return false
+        }
+    }
+    if !disk_corrupt(disk_read_frame("p-8", DiskContext(store: id, role: 3, seq: 8), raw, 0)) {
+        return false
+    }
+    if !disk_corrupt(disk_read_frame("j-7", DiskContext(store: id, role: 2, seq: 7), raw, 0)) {
+        return false
+    }
+    if !disk_corrupt(disk_read_header("p-7", raw, 3, Some(7), Some(StoreId(hi: 9, lo: 9)))) {
+        return false
+    }
+    let mut moved: Bytes = list.with_capacity(88)
+    list.fill(mut moved, 16, 0u8)
+    list.append(mut moved, raw)
+    if !disk_corrupt(disk_read_frame("p-7", ctx, moved, 16)) {
+        return false
+    }
+    let payload = key_word(42)
+    let optional = result.unwrap(disk_seal(ctx, 72, 0x0066, 0, payload))
+    let mut file = result.unwrap(copied(raw))
+    list.append(mut file, optional)
+    let following_frame = result.unwrap(disk_read_frame("p-7", ctx, file, 72))
+    if following_frame.kind != 0x0066 || following_frame.end != 96 {
+        return false
+    }
+    let must = result.unwrap(disk_seal(ctx, 72, 0x0066, 1, payload))
+    let mut required = result.unwrap(copied(raw))
+    list.append(mut required, must)
+    match disk_read_frame("p-7", ctx, required, 72) {
+        Error(Unsupported(0x0066)) => {},
+        _ => return false
+    }
+    let mut too_large = result.unwrap(copied(file))
+    let _ = list.set(mut too_large, 76, 255u8)
+    let _ = list.set(mut too_large, 77, 255u8)
+    let _ = list.set(mut too_large, 78, 255u8)
+    let _ = list.set(mut too_large, 79, 255u8)
+    if !disk_corrupt(disk_read_frame("p-7", ctx, too_large, 72)) {
+        return false
+    }
+    // §11.14's Leaf A and its frame bound to offset 72 of pack 3.
+    let outer: Inline[u8, 75] =[
+        33,
+        0,
+        1,
+        0,
+        59,
+        0,
+        0,
+        0,
+        65,
+        248,
+        145,
+        249,
+        170,
+        68,
+        21,
+        34,
+        0,
+        0,
+        2,
+        0,
+        7,
+        0,
+        0,
+        0,
+        5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        55,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        1,
+        0,
+        6,
+        0,
+        0,
+        0,
+        7,
+        0,
+        0,
+        0,
+        1,
+        0,
+        2,
+        0,
+        6,
+        0,
+        0,
+        0,
+        9,
+        0,
+        0,
+        0,
+        31,
+        0,
+        43,
+        0,
+    ]
+    let mut leaf_payload: Bytes = list.with_capacity(59)
+    for i in 16u64 .. 75 {
+        list.push(mut leaf_payload, outer[i])
+    }
+    let page_ctx = DiskContext(store: id, role: 3, seq: 3)
+    let page_frame = result.unwrap(disk_seal(page_ctx, 72, 0x0021, 1, leaf_payload))
+    if list.len(page_frame) != 75 {
+        return false
+    }
+    for i in 0u64 .. 75 {
+        if page_frame[i] != outer[i] {
+            return false
+        }
+    }
+    let mut pack = result.unwrap(disk_header_bytes(page_ctx, 0, 0))
+    list.append(mut pack, page_frame)
+    let read_back = result.unwrap(disk_read_frame("p-3", page_ctx, pack, 72))
+    let image = result.unwrap(std.page.decode(result.unwrap(copied(list.slice(pack, read_back.payload, read_back.end))), Collection))
+    read_back.kind == 0x0021 && read_back.end == 147 && std.page.stamp(image) == 5 && std.page.level(image) == 0 && std.page.count(image) == 2 && fork_frame_vector(id)
+}
+
+// L37: AP19's beta vector, with the outer checksum from libxxhash.
+fn fork_frame_bytes() -> Bytes {
+    let wire: Inline[u8, 38] =[
+        19,
+        0,
+        1,
+        0,
+        22,
+        0,
+        0,
+        0,
+        104,
+        100,
+        110,
+        15,
+        101,
+        85,
+        18,
+        178,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        64,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        4,
+        0,
+        98,
+        101,
+        116,
+        97,
+    ]
+    let mut frame: Bytes = list.with_capacity(38)
+    for b in wire {
+        list.push(mut frame, b)
+    }
+    take frame
+}
+
+fn fork_frame_fields(read_fork: JournalFork) -> bool {
+    read_fork.id == 1 && read_fork.parent == 0 && read_fork.forked_at == 64 && read_fork.name == "beta"
+}
+
+fn fork_frame_vector(id: StoreId) -> bool {
+    let beta = Head(id: 1, name: "beta", parent: 0, forked_at: 64, roots: empty_roots(), head: 64, at: 100, following: None)
+    let journal_ctx = DiskContext(store: id, role: 2, seq: 7)
+    let encoded = result.unwrap(encode_fork(journal_ctx, 114, beta))
+    let expected = fork_frame_bytes()
+    if list.len(encoded) != 38 {
+        return false
+    }
+    for i in 0u64 .. 38 {
+        if encoded[i] != expected[i] {
+            return false
+        }
+    }
+    let payload = list.slice(expected, 16, 38)
+    let Ok(Fork(read_fork)) = journal_decode("j-7", 0x0013, payload) else {
+        return false
+    }
+    if !fork_frame_fields(read_fork) {
+        return false
+    }
+    let mut trailing = result.unwrap(copied(payload))
+    list.push(mut trailing, 0u8)
+    if !disk_corrupt(journal_decode("j-7", 0x0013, trailing)) {
+        return false
+    }
+    let _ = list.set(mut trailing, 18, 255u8)
+    disk_corrupt(journal_decode("j-7", 0x0013, list.slice(trailing, 0, 22)))
+}
+
+@test
+fn disk_test_frames() -> Result[(), ()] {
+    if disk_law_frames() {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_load(d: Dir, ceiling: u64) -> Result[DiskLoaded, Error] waits {
+    let (id, take manifest) = read_page_manifest_file(d)?
+    let validated = validate_page_manifest(d, id, take manifest)?
+    let loaded = disk_loaded(id, take validated)?
+    over_ceiling(page_row_account(loaded.all), ceiling)?
+    Ok(take loaded)
+}
+
+fn disk_load_manifest(d: Dir, raw: Bytes, ceiling: u64) -> Result[DiskLoaded, Error] waits {
+    let (id, take manifest) = disk_read_page_manifest("MANIFEST", raw)?
+    let validated = validate_page_manifest(d, id, take manifest)?
+    let loaded = disk_loaded(id, take validated)?
+    over_ceiling(page_row_account(loaded.all), ceiling)?
+    Ok(take loaded)
+}
+
+fn cut_lease(lease: Option[Arc[ExportLease]]) -> Option[Arc[ExportLease]] {
+    match lease {
+        Some(kept) => Some(arc.share(kept)),
+        None => None
+    }
+}
+
+fn db_lease(db: Db) -> Option[Arc[ExportLease]] {
+    if is_disk(db) {
+        cut_lease(db.disk[0].lease)
+    } else {
+        None
+    }
+}
+
+@test
+fn disk_test_removal_spans() -> Result[(), ()] {
+    // L28(c). After the first cut, both 7 and 8 are leased. After the
+    // second, exactly segment 9 and its END can be unlinked.
+    let (before, after) = removal_spans(7, 9, Some((7, 8)))
+    if before.first != 7 || before.end != 7 || after.first != 9 || after.end != 9 {
+        return Error(())
+    }
+    let (before_second, after_second) = removal_spans(7, 10, Some((7, 8)))
+    if before_second.first != 7 || before_second.end != 7 || after_second.first != 9 || after_second.end != 10 {
+        return Error(())
+    }
+    let (unleased, empty) = removal_spans(7, 11, None)
+    if unleased.first != 7 || unleased.end != 11 || empty.first != 11 || empty.end != 11 {
+        return Error(())
+    }
+    Ok(())
+}
+
+fn disk_read_synced(d: Dir, path: String, limit: u64) -> Result[Bytes, Error] waits {
+    let mut file = disk_io(host.open(d, path, Read))?
+    disk_io(host.sync(mut file))?
+    let mut raw: Bytes = list.new()
+    loop {
+        let size = list.len(raw)
+        let room = if size < limit {
+            if limit - size < 16384 {
+                limit - size
+            } else {
+                16384u64
+            }
+        } else {
+            1u64
+        }
+        let mut chunk: Bytes = list.with_capacity(room)
+        let total_count = disk_io(host.read(mut file, mut chunk))?
+        if total_count == 0 {
+            break
+        }
+        if size == limit {
+            return Error(disk_fault(path, size, Malformed))
+        }
+        list.append(mut raw, chunk)
+    }
+    disk_io(host.close(take file))?
+    Ok(take raw)
+}
+
+// L11/L12: independent d values, optional frames on both sides, required
+// future kinds, every truncation/bit flip and exact END payload decode.
+pub fn journal_law_end() -> bool {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 4, seq: 7)
+    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    let empty: Bytes = list.new()
+    for value in[72u64, 169u64] {
+        let mut payload: Bytes = list.new()
+        result.unwrap(le(mut payload, value, 8))
+        let end = result.unwrap(disk_seal(ctx, 72, 0x0012, 1, payload))
+        let mut plain = result.unwrap(copied(header))
+        list.append(mut plain, end)
+        if result.unwrap(disk_read_end("j-7.end", id, 7, plain)) != value {
+            return false
+        }
+        for n in 0u64 .. 96 {
+            if !disk_corrupt(disk_read_end("j-7.end", id, 7, list.slice(plain, 0, n))) {
+                return false
+            }
+            let mut broken = result.unwrap(copied(plain))
+            let byte = broken[n] ^ 1u8
+            let _ = list.set(mut broken, n, byte)
+            if !disk_corrupt(disk_read_end("j-7.end", id, 7, broken)) {
+                return false
+            }
+        }
+        let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
+        let shifted = result.unwrap(disk_seal(ctx, 88, 0x0012, 1, payload))
+        let tail = result.unwrap(disk_seal(ctx, 112, 0x7fff, 0, empty))
+        let mut extended = result.unwrap(copied(header))
+        list.append(mut extended, optional)
+        list.append(mut extended, shifted)
+        list.append(mut extended, tail)
+        if result.unwrap(disk_read_end("j-7.end", id, 7, extended)) != value {
+            return false
+        }
+        let required = result.unwrap(disk_seal(ctx, 96, 0x7ffe, 1, empty))
+        let mut newer = result.unwrap(copied(plain))
+        list.append(mut newer, required)
+        match disk_read_end("j-7.end", id, 7, newer) {
+            Error(Unsupported(0x7ffe)) => {},
+            _ => return false
+        }
+        let duplicate = result.unwrap(disk_seal(ctx, 96, 0x0012, 1, payload))
+        let mut doubled = result.unwrap(copied(plain))
+        list.append(mut doubled, duplicate)
+        if !disk_corrupt(disk_read_end("j-7.end", id, 7, doubled)) {
+            return false
+        }
+    }
+    let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
+    let mut missing = result.unwrap(copied(header))
+    list.append(mut missing, optional)
+    if !disk_corrupt(disk_read_end("j-7.end", id, 7, missing)) {
+        return false
+    }
+    // UNKNOWN_ROOM includes heads. Fifteen full optional frames plus one
+    // 65,296-byte frame consume exactly1MiB; another empty head exceeds it.
+    let mut room_file = result.unwrap(copied(header))
+    let mut full: Bytes = list.with_capacity(65536)
+    list.fill(mut full, 65536, 0u8)
+    for i in 0u64 .. 16 {
+        let length = if i < 15 {
+            65536u64
+        } else {
+            65280u64
+        }
+        let part = list.slice(full, 0, length)
+        let skipped = result.unwrap(disk_seal(ctx, list.len(room_file), 0x7ffe, 0, part))
+        list.append(mut room_file, skipped)
+    }
+    let mut boundary: Bytes = list.new()
+    result.unwrap(le(mut boundary, 169, 8))
+    let final_end = result.unwrap(disk_seal(ctx, list.len(room_file), 0x0012, 1, boundary))
+    list.append(mut room_file, final_end)
+    if result.unwrap(disk_read_end("j-7.end", id, 7, room_file)) != 169 {
+        return false
+    }
+    let overflow = result.unwrap(disk_seal(ctx, list.len(room_file), 0x7ffe, 0, empty))
+    list.append(mut room_file, overflow)
+    if !disk_corrupt(disk_read_end("j-7.end", id, 7, room_file)) {
+        return false
+    }
+    let mut overlong: Bytes = list.new()
+    result.unwrap(le(mut overlong, 72, 8))
+    list.push(mut overlong, 0u8)
+    let invalid = result.unwrap(disk_seal(ctx, 72, 0x0012, 1, overlong))
+    let mut invalid_file = result.unwrap(copied(header))
+    list.append(mut invalid_file, invalid)
+    disk_corrupt(disk_read_end("j-7.end", id, 7, invalid_file))
+}
+
+@test
+fn journal_test_end() -> Result[(), ()] {
+    if journal_law_end() {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn disk_session_close(take session: DiskSession) -> Result[(), Error] waits {
+    let DiskSession(lock: take lock, startup: _) = take session
+    disk_io(host.close(take lock))
+}
+
+type WaitedLock: send {
+    d: Dir,
+    clock: Clock
+}
+
+fn wait_lock(take waiting: WaitedLock) -> bool waits {
+    match disk_lock(waiting.d, waiting.clock, 1000u64) {
+        Ok(take held) => {
+            let _ = take held;
+            true
+        },
+        Error(_) => false,
+    }
+}
+
+// L19/L21 bootstrap: create=false is NotFound and releases LOCK; a live
+// opener excludes another, close and drop release it, identity survives and
+// every successful reopen has a distinct segment/open number.
+pub fn disk_law_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    options.create = false
+    match disk_session(d, c, r, options) {
+        Error(NotFound) => {},
+        _ => return false
+    }
+    options.create = true
+    let first = result.unwrap(disk_session(d, c, r, options))
+    let id = first.startup.store
+    if first.startup.seq != 1 || first.startup.state.tips[0].head != 0 || first.startup.next_node != 0 || first.startup.next_table != 1 {
+        return false
+    }
+    match disk_session(d, c, r, options) {
+        Error(Held) => {},
+        _ => return false
+    }
+    result.unwrap(disk_session_close(take first))
+    let second = result.unwrap(disk_session(d, c, r, options))
+    if second.startup.seq != 2 || !same(second.startup.store, id) {
+        return false
+    }
+    result.unwrap(disk_session_close(take second))
+    {
+        let third = result.unwrap(disk_session(d, c, r, options))
+        if third.startup.seq != 3 || !same(third.startup.store, id) {
+            return false
+        }
+    }
+    let fourth = result.unwrap(disk_session(d, c, r, options))
+    let good = fourth.startup.seq == 4 && same(fourth.startup.store, id)
+    result.unwrap(disk_session_close(take fourth))
+    if !good {
+        return false
+    }
+    {
+        let held = result.unwrap(disk_lock(d, c, 0u64))
+        let waiting = task.spawn(tasks, bytes 16384, WaitedLock(d: d, clock: c), wait_lock)
+        host.sleep_until(c, std.clock.deadline_after_ms(host.mono_ns(c), 20u64))
+        let _ = take held
+        if !result.unwrap(task.join(take waiting)) {
+            return false
+        }
+    }
+    let mut too_new = page_manifest_empty()
+    too_new.fence = 2
+    result.unwrap(disk_publish_manifest(d, id, too_new))
+    let left: Bytes = list.new()
+    result.unwrap(disk_write_synced(d, "MANIFEST.tmp", left))
+    match open(tasks, d, c, r, options) {
+        Error(Unsupported(0x0070)) => {},
+        _ => return false
+    }
+    if !result.unwrap(disk_exists(d, "MANIFEST.tmp")) {
+        return false
+    }
+    // AP21 rejects the corrupt list before removing any file.
+    let mut damaged = page_manifest_empty()
+    damaged.next_pack = 2
+    damaged.next_stamp = 2
+    damaged.pack_root = std.page.PagePtr(pack: 1, offset: 72, len: 60, checksum: 0, stamp: 1)
+    result.unwrap(disk_publish_manifest(d, id, damaged))
+    let empty: Bytes = list.new()
+    result.unwrap(disk_write_synced(d, "p-1", empty))
+    result.unwrap(disk_write_synced(d, "p-2", empty))
+    result.unwrap(disk_write_synced(d, "MANIFEST.tmp", empty))
+    match disk_session(d, c, r, options) {
+        Error(Corrupt(_)) => {},
+        _ => return false
+    }
+    result.unwrap(disk_exists(d, "p-2")) && result.unwrap(disk_exists(d, "MANIFEST.tmp"))
+}
+
+@test
+fn disk_test_opening(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if disk_law_opening(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn journal_test_floor() -> Result[(), ()] {
+    let Some(short) = journal_floor(67108864, 83886159) else {
+        return Error(())
+    }
+    if short.requested != 83886160 || short.available != 83886159 {
+        return Error(())
+    }
+    if let Some(_) = journal_floor(67108864, 83886160) {
+        return Error(())
+    }
+    if let Some(_) = journal_floor(18446744073692774319, 18446744073709551615) {
+        return Error(())
+    }
+    let Some(overflow) = journal_floor(18446744073692774320, 18446744073709551615) else {
+        return Error(())
+    }
+    if overflow.requested != 18446744073709551615 || overflow.available != 18446744073709551615 {
+        return Error(())
+    }
+    Ok(())
+}
+
+@test
+fn journal_test_cap_arithmetic() -> Result[(), ()] {
+    if let Some(_) = journal_refusal(4096, FRAME_LIMIT, 16781392) {
+        return Error(())
+    }
+    let Some(full) = journal_refusal(16781392, 59, 16781392) else {
+        return Error(())
+    }
+    if full.requested != 16781451 || full.available != 16781392 {
+        return Error(())
+    }
+    let Some(lowered) = journal_refusal(16781392, 59, 16781391) else {
+        return Error(())
+    }
+    if lowered.requested != 16781451 || lowered.available != 16781391 {
+        return Error(())
+    }
+    let Some(overflow) = journal_refusal(18446744073709551605, 59, 18446744073709551615) else {
+        return Error(())
+    }
+    if overflow.requested != 18446744073709551615 || overflow.available != 18446744073709551615 {
+        return Error(())
+    }
+    Ok(())
+}
+
+// L30(a) on disk: AA1's trace, then b's v3 (k5 = 555) as a journal frame
+// after the last cut. Reopen gives main v2 with A and no k5, b v3, c with
+// parent b at 2, and adopt(c) still Diverged. Wrong implementations caught: a
+// COMMIT that names main (replay puts k5 on main); a cut that writes only
+// main (b and c are lost, and b's frame is a Gap).
+// I4 on disk: law_pin_settle's 448 and 542 byte figures also alternate at a
+// 544 byte limit. Each settle is a cut that rotates the segment, so the
+// staged frame needs the new binding. Reopen recovers the last value and an
+// exact account of 448. With the old binding, reopen drops the frame as a
+// torn tail.
+pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = defaults()
+    options.resident_limit = 1048576
+    options.pack_bytes = 512
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let sh = shape(t)
+    let at_one = snapshot(db)
+    let (b, _) = result.unwrap(fork(mut db, "b", at_one))
+    if !typed_put(mut db, t, 1, 100) {
+        return false
+    }
+    let on_b = result.unwrap(run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, 200)
+    }))
+    match take on_b {
+        Committed(_) => {},
+        _ => return false
+    }
+    let at_b_two = result.unwrap(snapshot_of(db, b))
+    let (cb, _) = result.unwrap(fork(mut db, "c", at_b_two))
+    match adopt(mut db, cb) {
+        Error(Diverged(_)) => {},
+        _ => return false
+    }
+    let late = result.unwrap(run_on(mut db, b, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 5, 555)
+    }))
+    match take late {
+        Committed(done) => result.unwrap(durable(mut db, done.ticket)),
+        _ => return false
+    }
+    result.unwrap(close(take db))
+    let mut reopened = result.unwrap(open(tasks, d, c, r, options))
+    let main_now = snapshot(reopened)
+    if version(main_now) != 2 || result.unwrap(get(main_now, sh, 1)) != Some(100u64) || result.unwrap(get(main_now, sh, 5)) != None {
+        return false
+    }
+    let again_b = match branch(reopened, "b") {
+        Some(x) => x,
+        None => return false
+    }
+    let at_b = result.unwrap(snapshot_of(reopened, again_b))
+    if again_b.id != 1 || version(at_b) != 3 || result.unwrap(get(at_b, sh, 1)) != Some(200u64) || result.unwrap(get(at_b, sh, 5)) != Some(555u64) {
+        return false
+    }
+    let again_c = match branch(reopened, "c") {
+        Some(x) => x,
+        None => return false
+    }
+    let at_c = result.unwrap(snapshot_of(reopened, again_c))
+    if again_c.id != 2 || version(at_c) != 2 || reopened.heads[2].parent != 1 || reopened.heads[2].forked_at != 2 {
+        return false
+    }
+    match adopt(mut reopened, again_c) {
+        Error(Diverged(_)) => {},
+        _ => return false
+    }
+    result.unwrap(close(take reopened))
+    let settle_dir = disk_test_directory(d)
+    options.resident_limit = 544
+    let mut sdb = result.unwrap(open(tasks, settle_dir, c, r, options))
+    result.unwrap(create_table(mut sdb, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let st = result.unwrap(table(mut sdb, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut sdb, st, 1, 1) {
+        return false
+    }
+    let first = Ticket(store: sdb.store, open: open_number(sdb), mark: Journal(sdb.frame_seq))
+    result.unwrap(durable(mut sdb, first))
+    let first_snap = snapshot(sdb)
+    let _ = result.unwrap(pin(mut sdb, "p", first_snap))
+    if sdb.resident != 354 {
+        return false
+    }
+    for step in 0u64 .. 20 {
+        let committed = result.unwrap(run(mut sdb, None, fn(mut tx: Tx) -> Result[(), Error] {
+            put(mut tx, st, 1, step + 2)
+        }))
+        match take committed {
+            Committed(done) => result.unwrap(durable(mut sdb, done.ticket)),
+            _ => return false
+        }
+        if sdb.resident != (if step % 2 == 0 {
+            448u64
+        } else {
+            542u64
+        }) {
+            return false
+        }
+    }
+    result.unwrap(close(take sdb))
+    let settled_open = result.unwrap(open(tasks, settle_dir, c, r, options))
+    let held = match pinned(settled_open, "p") {
+        Some(s) => s,
+        None => return false
+    }
+    let good = settled_open.resident == 448 && result.unwrap(get(snapshot(settled_open), shape(st), 1)) == Some(21u64) && result.unwrap(get(held, shape(st), 1)) == Some(1u64)
+    result.unwrap(close(take settled_open))
+    if !good {
+        return false
+    }
+    match journaled_branch_drop(disk_test_directory(d), c, r, tasks) {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}

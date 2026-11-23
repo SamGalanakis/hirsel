@@ -1,0 +1,932 @@
+// L17 and L33. The rewrite, its index and the extra table are published at
+// one version by the migration phase.
+fn crash_migration(mut phase: Migration) -> Result[(), Error] {
+    let t = migration_table(mut phase, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let mut declared = spec("rows", std.codec.key_u64(), std.codec.of_u64())
+    with_index(mut declared, "by_v", code.describe(crash_value), std.codec.key_u64())?
+    migration_migrate(mut phase, take t, take declared, crash_thousand)?
+    migration_create_table(mut phase, spec("added", std.codec.key_u64(), std.codec.of_u64()))
+}
+
+fn crash_value(v: u64) -> Result[u64, Capacity] {
+    Ok(v)
+}
+
+fn crash_thousand(k: u64, v: u64) -> Result[Option[(u64, u64)], Capacity] {
+    Ok(Some((k, v + 1000)))
+}
+
+fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, required_new: bool) -> Result[bool, Error] waits {
+    let mut options = disk_crash_options(scenario)
+    options.create = false
+    let mut db = match open(tasks, d, c, r, options) {
+        Ok(take db) => take db,
+        Error(NotFound) => return Ok(scenario == "genesis" && !required_new),
+        Error(take e) => return Error(take e)
+    }
+    if scenario == "genesis" && db.heads[0].head == 0 {
+        let empty = page_row_count(db.heads[0].roots.collections) == 0 && page_row_count(db.heads[0].roots.catalog) == 0
+        close(take db)?
+        return Ok(empty && !required_new)
+    }
+    let mut old = true
+    let mut new = true
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let sh = shape(t)
+    for k in 0u64 .. 96 {
+        let found = get(snapshot(db), sh, k)?
+        let old_value: Option[u64] = if scenario == "genesis" {
+            if k + 1 < db.heads[0].head {
+                Some(k + 1)
+            } else {
+                None
+            }
+        } else {
+            Some(k + 1)
+        }
+        if found != old_value {
+            old = false
+        }
+        let expected = if k < 64 {
+            k + 101
+        } else {
+            k + 1
+        }
+        if found != Some(expected) {
+            new = false
+        }
+    }
+    // L4's input was durable in init; a checkpoint cut never loses it.
+    let mut good = if scenario == "branches" || scenario == "migrate" {
+        true
+    } else {
+        new
+    }
+    if scenario == "schema" {
+        good = old
+        match table(mut db, "added", std.codec.key_u64(), std.codec.of_u64()) {
+            Ok(take added) => {
+                if added.id != 2 || db.heads[0].head != 98 {
+                    good = false
+                }
+            },
+            Error(Missing(_)) => {
+                if db.heads[0].head != 97 || required_new {
+                    good = false
+                }
+            },
+            _ => {
+                good = false
+            }
+        }
+    } else if scenario == "refusal" {
+        good = old
+        let big = table(mut db, "big", std.codec.key_u64(), std.codec.of_string())?
+        if !old || db.heads[0].head < 98 || db.heads[0].head > 100 || (required_new && db.heads[0].head != 100) {
+            good = false
+        }
+        match get(snapshot(db), shape(big), 1)? {
+            Some(value) => {
+                if db.heads[0].head != 99 || string.byte_len(value) != 1048566 {
+                    good = false
+                }
+                for byte in string.as_bytes(value) {
+                    if byte != 97u8 {
+                        good = false
+                    }
+                }
+            },
+            None => if db.heads[0].head == 99 {
+                good = false
+            }
+        }
+    } else if scenario == "migrate" {
+        // Before: head 97, rows k + 1, no index. After: head 98, rows
+        // k + 1001, and by_v lists all 96 in key order. Nothing between.
+        let mut moved = true
+        for k in 0u64 .. 96 {
+            if get(snapshot(db), sh, k)? != Some(k + 1001) {
+                moved = false
+            }
+        }
+        let listed = list.len(index_catalog(db, t.id)?)
+        let mut whole = false
+        if moved && listed == 1 && db.heads[0].head == 98 {
+            let mut indexed = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+            let ix = index(db, mut indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
+            let mut rows = find(snapshot(db), ix, Unbounded, Unbounded)?
+            let mut expect = 0u64
+            whole = true
+            while let Some((k, v)) = next(mut rows)? {
+                if k != expect || v != k + 1001 {
+                    whole = false
+                }
+                expect += 1
+            }
+            whole = whole && expect == 96
+        }
+        let added = table(mut db, "added", std.codec.key_u64(), std.codec.of_u64())
+        let before = old && listed == 0 && db.heads[0].head == 97
+        good = match take added {
+            Ok(created) => whole && created.id == 4,
+            Error(Missing(_)) => before && !required_new,
+            _ => false,
+        }
+    } else if scenario == "branches" {
+        // The states in write order: nothing; pin p at 97; and b at 97; b at
+        // 98 with k0 = 500; p gone. Main is at 97 with every row k + 1 in all.
+        let has_pin = match pinned(db, "p") {
+            Some(s) => {
+                if version(s) != 97 || get(s, sh, 0)? != Some(1u64) {
+                    good = false
+                };
+                true
+            },
+            None => false
+        }
+        let b_head = match branch(db, "b") {
+            Some(b) => {
+                let at_b = snapshot_of(db, b)?
+                let k0: Option[u64] = if version(at_b) == 98 {
+                    Some(500)
+                } else {
+                    Some(1)
+                }
+                if get(at_b, sh, 0)? != k0 || get(at_b, sh, 95)? != Some(96u64) {
+                    good = false
+                }
+                version(at_b)
+            },
+            None => 0u64
+        }
+        let known = (b_head == 0) || (has_pin && b_head == 97) || b_head == 98
+        good = good && old && db.heads[0].head == 97 && known && (!required_new || (!has_pin && b_head == 98))
+    } else if scenario == "genesis" {
+        good = old && db.heads[0].head >= 1 && db.heads[0].head <= 97 && (!required_new || db.heads[0].head == 97)
+    }
+    close(take db)?
+    Ok(good)
+}
+
+fn install_old(mut phase: Migration) -> Result[(), Error] {
+    migration_create_table(mut phase, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    migration_create_table(mut phase, spec("other", std.codec.key_u64(), std.codec.of_u64()))
+}
+
+fn install_next(mut phase: Migration) -> Result[(), Error] {
+    crash_migration(mut phase)?
+    let second = migration_table(mut phase, "other", std.codec.key_u64(), std.codec.of_u64())?
+    let mut replacement = spec("other", std.codec.key_u64(), std.codec.of_u64())
+    with_index(mut replacement, "empty", code.describe(crash_value), std.codec.key_u64())?
+    migration_migrate(mut phase, take second, take replacement, crash_thousand)
+}
+
+fn install_target_value(target: PreparedTarget) -> Result[Bytes, DeployError] {
+    deploy_result(copied(target.release))
+}
+
+fn install_fixture_bytes(n: u64, b: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    list.fill(mut out, n, b)
+    take out
+}
+
+fn crash_install_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
+    let mut staging = stage_migration(db, tasks, code.describe(install_old))?
+    let description = install_fixture_bytes(32u64, 65u8)
+    stage_activation(mut staging, 1u64, None, description, std.codec.of_bytes(), description)?
+    install_activation(mut db, take staging)?
+    let target = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 96u64 {
+        if !typed_put(mut db, target, k, k + 1) {
+            fail("install seed row")
+        }
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+fn crash_install_prepared(mut db: Db, d: Dir, c: Clock, tasks: Tasks, attempt: Bytes) -> Result[(Dir, u64), DeployError] waits {
+    let copying = begin_export(mut db, tasks, d, deploy_result(copied(attempt))?, 1u64, 4194304u64)?
+    let exported = match task.join(take copying) {
+        Ok(take answer) => (take answer)?,
+        Error(_) => return Error(ExportMismatch),
+    }
+    Ok((exported.dir, exported.stamp.head))
+}
+
+fn crash_import(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, image: u8, journal_cap: u64) -> Result[Inline[u8, 32], DeployError] waits {
+    let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    let staged = deploy_result(stage_export_migration(source, tasks, code.describe(install_next)))?
+    let header = PreparedTarget(describe: install_fixture_bytes(32u64, image), release: install_fixture_bytes(32u64, 67u8), digest: install_fixture_bytes(32u64, 68u8), resident_limit: 2097152u64, pack_bytes: 1048576u64, checkpoint_bytes: 4096u64, journal_limit: journal_cap)
+    write_prepared(source, staged, scratch, take header)?
+    let checked = validate_prepared(scratch)?
+    let work = reserve_import(mut db, take checked)?
+    let assembled = import_trees(take work)?
+    let digest = imported_digest(assembled)
+    keep_import(mut db, take assembled)?
+    Ok(digest)
+}
+
+fn crash_apply(mut db: Db, attempt: Bytes, digest: Inline[u8, 32]) -> Result[u64, DeployError] waits {
+    let requested = Cutover(attempt: deploy_result(copied(attempt))?, digest: digest, deadline: 18446744073709551615u64)
+    let description = install_fixture_bytes(32u64, 65u8)
+    perform_cutover(mut db, requested, 1u64, description, std.codec.of_bytes(), install_target_value, scoped fn() -> bool {
+        true
+    })
+}
+
+fn crash_install_run(mut db: Db, d: Dir, c: Clock, tasks: Tasks) -> Result[u64, DeployError] waits {
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let (scratch, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let digest = crash_import(mut db, scratch, c, tasks, attempt, 66u8, 16781392u64)?
+    crash_apply(mut db, attempt, digest)
+}
+
+fn crash_prepared_meta(d: Dir) -> Result[Bytes, DeployError] waits {
+    let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
+    // AP1b gives 212 + 32 bytes for this fixture's 32-byte describe.
+    let frame = scratch_result(read_disk_bytes(mut file, "PREPARED", 72, 16 + 244))?
+    scratch_result(disk_io(host.close(take file)))?
+    let kind: u16 = list.word_le(frame, 0)
+    let width: u32 = list.word_le(frame, 4)
+    if kind != 0x0081 || width != 244 {
+        fail("unexpected PREPARED metadata frame")
+    }
+    deploy_result(copied(list.slice(frame, 16, 260)))
+}
+
+// Exercise the pre-rename refusals together with a fresh export after drift.
+// No cut in this case is permitted to change the activation until the retry.
+fn crash_install_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let mut db = deploy_result(open(tasks, d, c, r, disk_crash_options("install")))?
+    let attempt = install_fixture_bytes(16u64, 7u8)
+    let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    if base != 97u64 {
+        fail("fixture base")
+    }
+    let first = crash_import(mut db, scratch, c, tasks, attempt, 66u8, 16781392u64)?
+    let fitted_meta = crash_prepared_meta(scratch)?
+    let second = crash_import(mut db, scratch, c, tasks, attempt, 70u8, 16781392u64)?
+    if first == second {
+        fail("candidate digests are equal")
+    }
+    match crash_apply(mut db, attempt, first) {
+        Error(ExportMismatch) => (),
+        _ => fail("cutover accepted a superseded candidate"),
+    }
+    let (scratch_limit, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let before = deploy_result(disk_read_paged_file(d, "MANIFEST", MANIFEST_LIMIT))?
+    let blocked = crash_import(mut db, scratch_limit, c, tasks, attempt, 66u8, 16781391u64)?
+    let limited_meta = crash_prepared_meta(scratch_limit)?
+    let fitted: u64 = list.word_le(fitted_meta, 216)
+    let limited: u64 = list.word_le(limited_meta, 216)
+    if fitted != 16781392 || limited != 16781391 || list.slice(fitted_meta, 0, 216) != list.slice(limited_meta, 0, 216) || list.slice(fitted_meta, 224, 244) != list.slice(limited_meta, 224, 244) {
+        fail("PREPARED did not preserve the exact target options")
+    }
+    match crash_apply(mut db, attempt, blocked) {
+        Error(FullNew(Journal(problem))) if problem.requested == 16781392 && problem.available == 16781391 => (),
+        _ => fail("cutover ignored NEW's journal floor"),
+    }
+    let after = deploy_result(disk_read_paged_file(d, "MANIFEST", MANIFEST_LIMIT))?
+    if version(snapshot(db)) != base || before != after || db.disk[0u64].options.journal_limit != 268435456 {
+        fail("a refused install changed OLD")
+    }
+    let (scratch_writes, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let stale = crash_import(mut db, scratch_writes, c, tasks, attempt, 66u8, 16781392u64)?
+    let t = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let acknowledged = deploy_result(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 0u64, 77u64)
+    }))?
+    if let Committed(done) = acknowledged {
+        deploy_result(durable(mut db, done.ticket))?
+    } else {
+        fail("could not acknowledge the drift write")
+    }
+    match crash_apply(mut db, attempt, stale) {
+        Error(Drift) => (),
+        _ => fail("cutover accepted an intervening journal commit"),
+    }
+    let (scratch_schema, _) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let stale_schema = crash_import(mut db, scratch_schema, c, tasks, attempt, 66u8, 16781392u64)?
+    let _ = deploy_result(create_table(mut db, spec("kept", std.codec.key_u64(), std.codec.of_u64())))?
+    match crash_apply(mut db, attempt, stale_schema) {
+        Error(Drift) => (),
+        _ => fail("cutover accepted an intervening schema commit"),
+    }
+    let installed = crash_install_run(mut db, d, c, tasks)?
+    if installed != 100u64 {
+        fail("fresh export lost an intervening version")
+    }
+    deploy_result(close(take db))?
+    let reopened = deploy_result(open(tasks, d, c, r, disk_crash_options("install")))?
+    let migrated = deploy_result(system_table(reopened, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(system_table(reopened, "kept", std.codec.key_u64(), std.codec.of_u64()))?
+    if deploy_result(get(snapshot(reopened), shape(migrated), 0u64))? != Some(1077u64) {
+        fail("fresh export lost the acknowledged row")
+    }
+    deploy_result(close(take reopened))
+}
+
+fn crash_install_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
+    match crash_install_run(mut db, d, c, tasks) {
+        Ok(v) => if v != 98 {
+            fail("wrong installed version")
+        },
+        Error(Store(take problem)) => return Error(take problem),
+        Error(Scratch(take problem)) => return Error(take problem),
+        Error(_) => fail("install fixture refused"),
+    }
+    close(take db)
+}
+
+fn crash_install_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: bool) -> Result[bool, Error] waits {
+    let mut db = open(tasks, d, c, r, disk_crash_options("install"))?
+    let snap = snapshot(db)
+    let v = version(snap)
+    if v != 98 && (v != 97 || required_new) {
+        return Ok(false)
+    }
+    let installed = v == 98
+    let activated = system_table(db, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
+    let release = system_table(db, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_bytes())?
+    let found = option.unwrap(get(snap, shape(activated), 0u8)?)
+    if found != install_fixture_bytes(32u64, if installed {
+        66u8
+    } else {
+        65u8
+    }) || db.fence != 1 {
+        return Ok(false)
+    }
+    let new_release = get(snap, shape(release), 98u64)?
+    if installed {
+        if option.unwrap(take new_release) != install_fixture_bytes(32u64, 67u8) || db.next_table != 10u32 {
+            return Ok(false)
+        }
+    } else if let Some(_) = new_release {
+        return Ok(false)
+    }
+    let t = system_table(db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    for k in 0u64 .. 96u64 {
+        if get(snap, shape(t), k)? != Some(k + if installed {
+            1001u64
+        } else {
+            1u64
+        }) {
+            return Ok(false)
+        }
+    }
+    if installed {
+        let other = system_table(db, "other", std.codec.key_u64(), std.codec.of_u64())?
+        if list.len(index_catalog(db, other.id)?) != 1 || page_row_count(db.heads[0].roots.streams) != 0u64 {
+            return Ok(false)
+        }
+        let _ = create_table(mut db, spec("after", std.codec.key_u64(), std.codec.of_u64()))?
+        let after = system_table(db, "after", std.codec.key_u64(), std.codec.of_u64())?
+        if after.id != 10u32 {
+            return Ok(false)
+        }
+        let _ = checkpoint(mut db)?
+        close(take db)?
+        let reopened = open(tasks, d, c, r, disk_crash_options("install"))?
+        for k in 0u64 .. 96u64 {
+            if get(snapshot(reopened), shape(t), k)? != Some(k + 1001u64) {
+                return Ok(false)
+            }
+        }
+        close(take reopened)?
+    } else {
+        close(take db)?
+    }
+    Ok(true)
+}
+
+// Native provider entry; the adapter invokes it for init, one cut and reopen.
+// The expected rows and schema versions above follow the specified history.
+pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0))
+    let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "read-only" {
+        if phase == "init" {
+            disk_crash_init(d, c, r, tasks, "checkpoint") ?=> |_| Exit(status: 31)
+            return Ok(())
+        }
+        if phase == "write" {
+            return match disk_crash_torn_manifest(d) {
+                Ok(()) => {
+                    let _ = stdout.write(out, "DONE");
+                    Ok(())
+                },
+                Error(Io(_)) => Ok(()),
+                Error(_) => Error(Exit(status: 32)),
+            }
+        }
+        let published = option.unwrap(args.get(argv, 2)) == "new"
+        disk_crash_read_only(d, published) ?=> |_| Exit(status: 33)
+        return Ok(())
+    }
+    if scenario == "watermark-absent" || scenario == "watermark-torn" {
+        if phase == "write" {
+            if let Error(_) = disk_watermark_cut(d, c, r, tasks, scenario == "watermark-torn") {
+                return Error(Exit(status: 65u8))
+            }
+            let _ = stdout.write(out, "DONE")
+        }
+        return Ok(())
+    }
+    if scenario == "install-refusals" {
+        if phase == "init" {
+            return match crash_install_init(d, c, r, tasks) {
+                Ok(()) => Ok(()),
+                Error(_) => Error(Exit(status: 61u8))
+            }
+        }
+        if phase == "write" {
+            if let Ok(()) = crash_install_refusals(d, c, r, tasks) {
+                let _ = stdout.write(out, "DONE");
+                return Ok(())
+            }
+            return Error(Exit(status: 64u8))
+        }
+        return Ok(())
+    }
+    if scenario == "install" {
+        if phase == "init" {
+            return match crash_install_init(d, c, r, tasks) {
+                Ok(()) => Ok(()),
+                Error(_) => Error(Exit(status: 61u8))
+            }
+        }
+        if phase == "write" {
+            if let Ok(()) = crash_install_write(d, c, r, tasks) {
+                let _ = stdout.write(out, "DONE")
+            }
+            return Ok(())
+        }
+        let required_new = option.unwrap(args.get(argv, 2u64)) == "new"
+        return match crash_install_read(d, c, r, tasks, required_new) {
+            Ok(true) => Ok(()),
+            _ => Error(Exit(status: 63u8))
+        }
+    }
+    if phase == "init" {
+        if scenario == "genesis" {
+            return Ok(())
+        }
+        match disk_crash_init(d, c, r, tasks, scenario) {
+            Ok(()) => Ok(()),
+            Error(_) => Error(Exit(status: 31))
+        }
+    } else if phase == "write" {
+        match disk_crash_write(d, c, r, tasks, scenario) {
+            Ok(()) => {
+                let _ = stdout.write(out, "DONE");
+                Ok(())
+            },
+            Error(Io(_)) => Ok(()),
+            Error(Poisoned(_)) => Ok(()),
+            Error(_) => Error(Exit(status: 32))
+        }
+    } else if phase == "reopen" {
+        match open(tasks, d, c, r, disk_crash_options(scenario)) {
+            Error(Io(_)) => Ok(()),
+            _ => Error(Exit(status: 34))
+        }
+    } else {
+        let expected = option.unwrap(args.get(argv, 2))
+        match disk_crash_read(d, c, r, tasks, scenario, expected == "new") {
+            Ok(true) => Ok(()),
+            _ => Error(Exit(status: 33))
+        }
+    }
+}
+
+fn disk_crash_torn_manifest(d: Dir) -> Result[(), Error] waits {
+    let raw = read_page_manifest_bytes(d)?
+    let torn = list.slice(raw, 0, list.len(raw) - 1)
+    disk_write_synced(d, "MANIFEST.tmp", torn)?
+    disk_io(host.rename(d, "MANIFEST.tmp", "MANIFEST"))?
+    disk_io(host.sync_dir(d))
+}
+
+fn disk_crash_read_only(d: Dir, torn: bool) -> Result[(), Error] waits {
+    let opened = open_read_only(d, disk_crash_options("checkpoint"))
+    if torn {
+        match opened {
+            Error(Corrupt(f)) => if f.file == "MANIFEST" {
+                if let Truncated = f.why {
+                    return Ok(())
+                }
+            },
+            _ => (),
+        }
+        fail("read-only open accepted a published torn MANIFEST or lost its fault")
+    }
+    let reader = opened?
+    let rows = read_only_table(reader, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if version(reader.snapshot) != 161 {
+        fail("read-only open recovered the wrong journal prefix")
+    }
+    for k in 0u64 .. 96 {
+        let expected = if k < 64 {
+            k + 101
+        } else {
+            k + 1
+        }
+        if read_only_get(reader, rows, k)? != Some(expected) {
+            fail("read-only open recovered the wrong row")
+        }
+    }
+    Ok(())
+}
+
+@test
+fn disk_test_read_only_snapshot(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let child = disk_test_directory(d)
+    if let Error(NotFound) = open_read_only(child, defaults()) {} else {
+        fail("read-only open of an empty directory must refuse")
+    }
+    let mut db = open(tasks, child, c, r, defaults())?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let opened_rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !typed_put(mut db, opened_rows, 7, 70) {
+        fail("could not commit first row")
+    }
+    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq))
+    durable(mut db, last)?
+    let saved = open_read_only(child, defaults())?
+    let rows = read_only_table(saved, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) {
+        fail("read-only open missed a durable journal row")
+    }
+    if !typed_put(mut db, opened_rows, 7, 71) {
+        fail("could not commit replacement row")
+    }
+    checkpoint(mut db)?
+    close(take db)?
+    let fresh = open_read_only(child, defaults())?
+    if version(saved.snapshot) != 2 || read_only_get(saved, rows, 7)? != Some(70u64) || version(fresh.snapshot) != 3 || read_only_get(fresh, rows, 7)? != Some(71u64) {
+        fail("read-only reads changed after the writer replaced the row")
+    }
+    Ok(())
+}
+
+// AD1 (vi): the hand-written revision 0x00, 0x01, ..., 0x1f.
+fn code_vector() -> Bytes {
+    let mut raw: Bytes = list.new()
+    list.fill(mut raw, 48, 9u8)
+    raw
+}
+
+fn revision_vector() -> Bytes {
+    let mut r: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut r, int.truncate(i))
+    }
+    r
+}
+
+fn revision_is_vector(got: Option[Bytes]) -> bool {
+    match got {
+        Some(r) => r == revision_vector(),
+        None => false
+    }
+}
+
+fn revision_is_none(got: Option[Bytes]) -> bool {
+    match got {
+        Some(_) => false,
+        None => true
+    }
+}
+
+// L10/L12/L29: hand-laid payload with data followed by a Replied stream op and its CALL.
+pub fn journal_law_payload() -> bool {
+    let mut payload: Bytes = list.new()
+    result.unwrap(le(mut payload, 3, 4))
+    result.unwrap(le(mut payload, 257, 8))
+    result.unwrap(le(mut payload, 1234, 8))
+    result.unwrap(le(mut payload, 2, 1))
+    result.unwrap(le(mut payload, 0, 1))
+    result.unwrap(le(mut payload, 2, 4))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("key")))
+    result.unwrap(blob(mut payload, string.as_bytes("value")))
+    result.unwrap(le(mut payload, 2, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("gone")))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(le(mut payload, 1, 4))
+    result.unwrap(le(mut payload, 3, 1))
+    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    let mut replied: Bytes = list.new()
+    list.fill(mut replied, 40, 0u8)
+    list.push(mut replied, 2u8)
+    list.append(mut replied, string.as_bytes("reply"))
+    result.unwrap(blob(mut payload, replied))
+    result.unwrap(blob(mut payload, string.as_bytes("entry")))
+    result.unwrap(blob(mut payload, string.as_bytes("arguments")))
+    result.unwrap(blob(mut payload, revision_vector()))
+    result.unwrap(blob(mut payload, code_vector()))
+    result.unwrap(le(mut payload, 0, 1))
+    let got = result.unwrap(journal_decode_commit("j-7", payload))
+    if got.branch != 3 || got.version != 257 || got.at != 1234 || list.len(got.data) != 2 || list.len(got.streams) != 1 {
+        return false
+    }
+    if got.data[0].key != string.as_bytes("key") {
+        return false
+    }
+    match got.data[0].value {
+        Some(v) => if v != string.as_bytes("value") {
+            return false
+        },
+        None => return false
+    }
+    if got.data[1].key != string.as_bytes("gone") || got.data[1].value != None {
+        return false
+    }
+    if got.streams[0].key != string.as_bytes("stream") {
+        return false
+    }
+    match got.streams[0].value {
+        Some(v) => if v != replied {
+            return false
+        },
+        None => return false
+    }
+    match got.call {
+        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != string.as_bytes("stream") || !revision_is_vector(c.record.revision) {
+            return false
+        },
+        None => return false
+    }
+    // The 21-byte fixed header, 31-byte data section, 66-byte streams prefix,
+    // 9-byte entry key and 13-byte args place revision at [140, 176).
+    for size in 0u64 .. 2 {
+        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 140)))
+        result.unwrap(le(mut other, size, 4))
+        if size == 1 {
+            list.push(mut other, 0u8)
+        }
+        list.append(mut other, list.slice(payload, 176, list.len(payload)))
+        let read_back = journal_decode_commit("j-7", other)
+        if size == 1 {
+            match read_back {
+                Error(Corrupt(fault)) => match fault.why {
+                    Malformed => {},
+                    _ => return false
+                },
+                _ => return false
+            }
+        } else {
+            match result.unwrap(take read_back).call {
+                Some(c) => if !revision_is_none(c.record.revision) {
+                    return false
+                },
+                None => return false
+            }
+        }
+    }
+    for i in 0u64 .. list.len(payload) {
+        if !disk_corrupt(journal_decode_commit("j-7", list.slice(payload, 0, i))) {
+            return false
+        }
+    }
+    let mut trailing = result.unwrap(copied(payload))
+    list.push(mut trailing, 0u8)
+    if !disk_corrupt(journal_decode_commit("j-7", trailing)) {
+        return false
+    }
+    // The CALL's stream op must have state Replied. The value starts at 72.
+    let mut no_reply = result.unwrap(copied(payload))
+    let _ = list.set(mut no_reply, 112, 1u8)
+    if !disk_corrupt(journal_decode_commit("j-7", no_reply)) {
+        return false
+    }
+    // A second op, put or delete, cannot overwrite the CALL's stream op.
+    for tag in 1u64 .. 3 {
+        let mut repeated: Bytes = result.unwrap(copied(payload))
+        list.set_word_le(mut repeated, 53, 2u32)
+        result.unwrap(le(mut repeated, tag, 1))
+        result.unwrap(blob(mut repeated, string.as_bytes("stream")))
+        if tag == 1 {
+            result.unwrap(blob(mut repeated, replied))
+        }
+        if !disk_corrupt(journal_decode_commit("j-7", repeated)) {
+            return false
+        }
+    }
+    let mut two_calls: Bytes = result.unwrap(copied(payload))
+    list.set_word_le(mut two_calls, 53, 2u32)
+    list.append(mut two_calls, list.slice(payload, 57, list.len(payload)))
+    let _ = list.set(mut two_calls, 234, 120u8)
+    if !disk_corrupt(journal_decode_commit("j-7", two_calls)) {
+        return false
+    }
+    // The stream section cannot precede data. Tag 2 is retired.
+    let mut reversed: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
+    list.append(mut reversed, list.slice(payload, 52, list.len(payload)))
+    list.append(mut reversed, list.slice(payload, 21, 52))
+    if !disk_corrupt(journal_decode_commit("j-7", reversed)) {
+        return false
+    }
+    let mut retired: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
+    let _ = list.set(mut retired, 20, 1u8)
+    result.unwrap(le(mut retired, 2, 1))
+    list.append(mut retired, list.slice(payload, 118, list.len(payload)))
+    if !disk_corrupt(journal_decode_commit("j-7", retired)) {
+        return false
+    }
+    // Two sections with the same tag are malformed, including an empty one.
+    let mut duplicate: Bytes = list.new()
+    result.unwrap(le(mut duplicate, 0, 4))
+    result.unwrap(le(mut duplicate, 1, 8))
+    result.unwrap(le(mut duplicate, 2, 8))
+    result.unwrap(le(mut duplicate, 2, 1))
+    for i in 0u64 .. 2 {
+        result.unwrap(le(mut duplicate, 0, 1))
+        result.unwrap(le(mut duplicate, 0, 4))
+    }
+    disk_corrupt(journal_decode_commit("j-7", duplicate))
+}
+
+@test
+fn journal_test_payload() -> Result[(), ()] {
+    if journal_law_payload() {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn journal_empty_commit(ctx: DiskContext, offset: u64, head: u64) -> Bytes {
+    let mut payload: Bytes = list.new()
+    result.unwrap(le(mut payload, 0, 4))
+    result.unwrap(le(mut payload, head, 8))
+    result.unwrap(le(mut payload, head + 100, 8))
+    result.unwrap(le(mut payload, 1, 1))
+    result.unwrap(le(mut payload, 0, 1))
+    result.unwrap(le(mut payload, 0, 4))
+    result.unwrap(disk_seal(ctx, offset, 0x0011, 1, payload))
+}
+
+fn journal_scan_fixture(d: Dir, id: StoreId, raw: Bytes, boundary: Option[u64], last: bool) -> Result[(u64, u64, List[JournalEvent]), Error] waits {
+    disk_write_synced(d, "j-7", raw)?
+    let mut input = journal_input(disk_io(host.open(d, "j-7", Read))?, false)?
+    let mut events: List[JournalEvent] = list.new()
+    let scanned = journal_scan(mut input, "j-7", id, 7, boundary, last, mut events, scoped fn(mut observed: List[JournalEvent], take event: JournalEvent) -> Result[(), Error] {
+        list.push(mut observed, take event)
+        Ok(())
+    })
+    let JournalInput(file: take opened_file, ..) = take input
+    disk_io(host.close(take opened_file))?
+    let (end, accepted) = scanned?
+    Ok((end, accepted, take events))
+}
+
+// L3/L10/L11/L12: the fixture's two COMMIT frames are 42 bytes each.
+// Every short prefix of the second frame is a torn tail at d=114
+// and corruption at d=156.
+fn journal_law_segment_boundaries(d: Dir) -> bool waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let header = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    let first = journal_empty_commit(ctx, 72, 1)
+    let second = journal_empty_commit(ctx, 114, 2)
+    let mut raw = result.unwrap(copied(header))
+    list.append(mut raw, first)
+    list.append(mut raw, second)
+    if list.len(raw) != 156 {
+        return false
+    }
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), true))
+    if end != 156 || accepted != 84 || list.len(events) != 2 {
+        return false
+    }
+    let (Commit(left), Commit(right)) = (events[0], events[1]) else {
+        return false
+    }
+    if left.version != 1 || right.version != 2 {
+        return false
+    }
+    let (middle_end, middle_bytes, take middle) = result.unwrap(journal_scan_fixture(d, id, raw, Some(114), false))
+    if middle_end != 114 || middle_bytes != 42 || list.len(middle) != 1 {
+        return false
+    }
+    for n in 114u64 .. 156 {
+        let tail = list.slice(raw, 0, n)
+        let (partial_end, partial_bytes, take partial) = result.unwrap(journal_scan_fixture(d, id, tail, Some(114), true))
+        if partial_end != 114 || partial_bytes != 42 || list.len(partial) != 1 {
+            return false
+        }
+        if !disk_corrupt(journal_scan_fixture(d, id, tail, Some(156), true)) {
+            return false
+        }
+    }
+    for n in 72u64 .. 114 {
+        let mut broken = result.unwrap(copied(raw))
+        let changed = broken[n] ^ 1u8
+        let _ = list.set(mut broken, n, changed)
+        if !disk_corrupt(journal_scan_fixture(d, id, broken, Some(114), true)) {
+            return false
+        }
+        let (torn_end, torn_bytes, take torn) = result.unwrap(journal_scan_fixture(d, id, broken, None, true))
+        if torn_end != 72 || torn_bytes != 0 || list.len(torn) != 0 {
+            return false
+        }
+    }
+    if !disk_corrupt(journal_scan_fixture(d, id, raw, Some(115), true)) {
+        return false
+    }
+    let empty: Bytes = list.new()
+    let optional = result.unwrap(disk_seal(ctx, 72, 0x7ffe, 0, empty))
+    let shifted = journal_empty_commit(ctx, 88, 1)
+    let mut extended = result.unwrap(copied(header))
+    list.append(mut extended, optional)
+    list.append(mut extended, shifted)
+    let (future_end, future_bytes, take future) = result.unwrap(journal_scan_fixture(d, id, extended, None, true))
+    if future_end != 130 || future_bytes != 42 || list.len(future) != 1 {
+        return false
+    }
+    // PRINCIPAL is a MUST kind no reader builds yet.
+    let required = result.unwrap(disk_seal(ctx, 156, 0x0060, 1, empty))
+    list.append(mut raw, required)
+    match journal_scan_fixture(d, id, raw, Some(114), true) {
+        Error(Unsupported(0x0060)) => true,
+        _ => false
+    }
+}
+
+fn journal_law_segment_fork(d: Dir) -> bool waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let mut raw = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    list.append(mut raw, journal_empty_commit(ctx, 72, 64))
+    list.append(mut raw, fork_frame_bytes())
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(152), true))
+    if end != 152 || accepted != 80 || list.len(events) != 2 {
+        return false
+    }
+    let (Commit(previous), Fork(read_fork)) = (events[0], events[1]) else {
+        return false
+    }
+    previous.version == 64 && fork_frame_fields(read_fork)
+}
+
+fn journal_law_chunked_segment(d: Dir) -> bool waits {
+    let id = StoreId(hi: 1, lo: 2)
+    let context = DiskContext(store: id, role: 2, seq: 7)
+    let mut raw = result.unwrap(disk_header_bytes(context, 0, 0))
+    // Optional extension: offset 72, length 16 + 65,536, ending at 65,624.
+    // Checksums are libxxhash over the independent wire layout and binding.
+    result.unwrap(le(mut raw, 0x7ffe, 2))
+    result.unwrap(le(mut raw, 0, 2))
+    result.unwrap(le(mut raw, 65536, 4))
+    result.unwrap(le(mut raw, 17032182677987914202, 8))
+    list.fill(mut raw, 65536, 9u8)
+    // One COMMIT: 42 + put (9 + key 12 + value 65,536) = 65,599.
+    result.unwrap(le(mut raw, 0x0011, 2))
+    result.unwrap(le(mut raw, 1, 2))
+    result.unwrap(le(mut raw, 65583, 4))
+    result.unwrap(le(mut raw, 11866033783025652971, 8))
+    result.unwrap(le(mut raw, 0, 4))
+    result.unwrap(le(mut raw, 1, 8))
+    result.unwrap(le(mut raw, 100, 8))
+    result.unwrap(le(mut raw, 1, 1))
+    result.unwrap(le(mut raw, 0, 1))
+    result.unwrap(le(mut raw, 1, 4))
+    result.unwrap(le(mut raw, 1, 1))
+    result.unwrap(le(mut raw, 12, 4))
+    result.unwrap(append_be(mut raw, 1, 4))
+    result.unwrap(append_be(mut raw, 7, 8))
+    result.unwrap(le(mut raw, 65536, 4))
+    list.fill(mut raw, 65536, 17u8)
+    list.fill(mut raw, 11, 0u8)
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131223), true))
+    if end != 131223 || accepted != 65599 || list.len(events) != 1 {
+        return false
+    }
+    let Commit(commit) = events[0] else {
+        return false
+    }
+    commit.version == 1
+}
+
+pub fn journal_law_segment(d: Dir) -> bool waits {
+    let child = disk_test_directory(d)
+    journal_law_segment_boundaries(child) && journal_law_segment_fork(child) && journal_law_chunked_segment(child)
+}
+
+@test
+fn journal_test_segment(d: Dir) -> Result[(), ()] waits {
+    if journal_law_segment(d) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+fn journal_main(take roots: Roots, head: u64, at: u64, next_node: u64) -> JournalReplay {
+    result.unwrap(journal_replay(result.unwrap(main_state(take roots, head, at)), next_node))
+}

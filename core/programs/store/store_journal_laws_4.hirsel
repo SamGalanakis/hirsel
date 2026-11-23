@@ -1,0 +1,432 @@
+// L28(d) and L50(e). Give the threshold cut less room than the large BLOB
+// needs. Both frames remain in the recovered suffix.
+fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    options.checkpoint_bytes = 4096
+    options.journal_limit = 16781392
+    let mut first = open(tasks, d, c, r, options)?
+    let _ = create_table(mut first, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    close(take first)?
+    options.create = false
+    let mut db = open(tasks, d, c, r, options)?
+    let initial_generation = db.checkpointed
+    let initial_segment = db.file_seq
+    let start = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let mut body: Bytes = list.with_capacity(4027)
+        list.fill(mut body, 4027, 7u8)
+        put(mut tx, rows, 1, body)
+    })?
+    let Committed(_) = start else {
+        return Error(Foreign)
+    }
+    if db.uncovered != 4096 || db.since_cut != 4096 || db.file_seq != initial_segment {
+        return Error(Foreign)
+    }
+    let keep_reply: Option[fn(Error) -> bool] = None
+    let final_frame = append_transaction(mut db, 0, None, keep_reply, fn(mut tx: Tx) -> Result[(), Error] {
+        journal_full_frame(mut tx, rows)
+    })?
+    let Committed(last) = final_frame else {
+        return Error(Foreign)
+    }
+    durable(mut db, last.ticket)?
+    result.unwrap(bound bytes 1048576 {
+        maybe_checkpoint(mut db)
+    })?
+    if db.checkpointed != initial_generation || db.file_seq != initial_segment || db.uncovered != 16781392 || db.since_cut != 0 || db.inflight != 0 {
+        return Error(Foreign)
+    }
+    let previous_head = version(snapshot(db))
+    let refused = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete(mut tx, rows, 1)
+    })?
+    match refused {
+        Refused(Journal(problem)) if problem.requested == 16781451 && problem.available == 16781392 => (),
+        _ => return Error(Foreign),
+    }
+    let overwritten = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        let replacement: Bytes = list.new()
+        put(mut tx, rows, 1, replacement)?
+        delete(mut tx, rows, 1)
+    })?
+    match overwritten {
+        Refused(Journal(problem)) if problem.requested == 16781451 && problem.available == 16781392 => (),
+        _ => return Error(Foreign),
+    }
+    let empty_args: Bytes = list.new()
+    let request = request_digest(key_word(7), empty_args)
+    match admit(mut db, string.as_bytes("stream01"), 0, request) {
+        Error(Full(Journal(problem))) if problem.requested == 16781492 && problem.available == 16781392 => (),
+        _ => return Error(Foreign),
+    }
+    let id_before = db.next_branch
+    let frame_before = db.frame_seq
+    let bytes_before = db.record_bytes
+    let from = snapshot(db)
+    match fork(mut db, "beta", from) {
+        Error(Full(Journal(problem))) if problem.requested == 16781430 && problem.available == 16781392 => (),
+        _ => return Error(Foreign),
+    }
+    if db.next_branch != id_before || db.frame_seq != frame_before || db.record_bytes != bytes_before {
+        return Error(Foreign)
+    }
+    if db.uncovered != 16781392 || version(snapshot(db)) != previous_head {
+        return Error(Foreign)
+    }
+    close(take db)?
+    let mut recovered = open(tasks, d, c, r, options)?
+    if accounts(recovered).journal != 16781392 || recovered.since_cut != 0 || version(snapshot(recovered)) != previous_head {
+        return Error(Foreign)
+    }
+    let refused_again = run(mut recovered, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete(mut tx, rows, 1)
+    })?
+    match refused_again {
+        Refused(Journal(problem)) if problem.requested == 16781451 && problem.available == 16781392 => (),
+        _ => return Error(Foreign),
+    }
+    let _ = checkpoint(mut recovered)?
+    if accounts(recovered).journal != 0 {
+        return Error(Foreign)
+    }
+    let retry = run(mut recovered, None, fn(mut tx: Tx) -> Result[bool, Error] {
+        delete(mut tx, rows, 1)
+    })?
+    match retry {
+        Committed(done) if done.value => (),
+        _ => return Error(Foreign),
+    }
+    close(take recovered)
+}
+
+@test
+fn journal_test_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    journal_cap_restart(disk_test_directory(d), c, r, tasks)
+}
+
+// L50(e). Two 100-byte admits and a 3,896-byte put reach the threshold
+// exactly. The crossing COMMIT attempts a cut inside an insufficient grant.
+@test
+fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    options.checkpoint_bytes = 4096
+    options.journal_limit = 16781392
+    let mut created = result.unwrap(open(tasks, directory, c, r, options))
+    result.unwrap(create_table(mut created, spec("rows", std.codec.key_u64(), std.codec.of_bytes())))
+    let rows = result.unwrap(table(mut created, "rows", std.codec.key_u64(), std.codec.of_bytes()))
+    result.unwrap(close(take created))
+    options.create = false
+    let mut db = result.unwrap(open(tasks, directory, c, r, options))
+    let first_stream = string.as_bytes("stream01")
+    let other_stream = string.as_bytes("stream02")
+    let record = call_for(other_stream, 32)
+    let digest = request_digest(record.key, record.args)
+    let Admitted(take first) = result.unwrap(admit(mut db, first_stream, 0, digest)) else {
+        return Error(())
+    }
+    let Admitted(take second) = result.unwrap(admit(mut db, other_stream, 0, digest)) else {
+        return Error(())
+    }
+    let plan = Plan(n_e: 65536, s_e: 1048576, reply_max: 8)
+    let failed = result.unwrap(serve(mut db, take second, plan, Some(take record), fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        fail("body intentionally stopped before its reply")
+    }))
+    let Failed(take pend, Raised(5)) = take failed else {
+        return Error(())
+    }
+    let attempted = pend.attempted
+    let padding = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let mut body: Bytes = list.with_capacity(3827)
+        list.fill(mut body, 3827, 7u8)
+        put(mut tx, rows, 1, body)
+    }))
+    let Committed(_) = padding else {
+        return Error(())
+    }
+    if accounts(db).journal != 4096 {
+        return Error(())
+    }
+    let keep_reply: Option[fn(Error) -> bool] = None
+    let crossing = bound bytes 134217728 {
+        append_transaction(mut db, 0, None, keep_reply, fn(mut tx: Tx) -> Result[(), Error] {
+            journal_full_frame(mut tx, rows)
+        })
+    }
+    let Ok(Ok(Committed(last))) = crossing else {
+        return Error(())
+    }
+    result.unwrap(durable(mut db, last.ticket))
+    result.unwrap(result.unwrap(bound bytes 1048576 {
+        maybe_checkpoint(mut db)
+    }))
+    let before = version(snapshot(db))
+    let frames = db.frame_seq
+    if accounts(db).journal != 16781392 || db.since_cut != 0 {
+        return Error(())
+    }
+    // Two section heads (47 including the frame header), one data put
+    // (27 bytes) and the 66-byte reply op. Nothing reaches the journal.
+    let refused = serve(mut db, take first, plan, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        let empty: Bytes = list.new()
+        if let Error(_) = put(mut tx, rows, 4, empty) {
+            return Error(key_word(0))
+        }
+        Ok(key_word(7))
+    })
+    match take refused {
+        Error(Before(Full(Journal(problem)), None)) if problem.requested == 16781532 && problem.available == 16781392 => (),
+        _ => return Error(()),
+    }
+    let Abandoned(_) = result.unwrap(admit(mut db, first_stream, 0, digest)) else {
+        return Error(())
+    }
+    // The 337-byte vector in L29(d) without its 60-byte data section.
+    let settle_refusal = conclude(mut db, take pend, key_word(7), Resident)
+    let Error(Before(Full(Journal(problem)), Some(take retry))) = take settle_refusal else {
+        return Error(())
+    }
+    if problem.requested != 16781669 || problem.available != 16781392 || db.frame_seq != frames || version(snapshot(db)) != before {
+        return Error(())
+    }
+    result.unwrap(checkpoint(mut db))
+    let answered = result.unwrap(conclude(mut db, take retry, key_word(7), Resident))
+    let Committed(receipt) = answered else {
+        return Error(())
+    }
+    if receipt.reply != key_word(7) {
+        return Error(())
+    }
+    let observed = result.unwrap(recorded(db, main_branch(db), before + 1))
+    let Some(saved) = observed else {
+        return Error(())
+    }
+    if saved.settle != 1 || saved.base + 1 != attempted.id.version || saved.at != attempted.at || saved.seed != attempted.seed {
+        return Error(())
+    }
+    if let Error(_) = close(take db) {
+        return Error(())
+    }
+    Ok(())
+}
+
+// L21c: dropping the owner cancels/joins both workers and releases LOCK.
+// The next open sees one exact commit prefix, whether handoff had drained.
+pub fn journal_law_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let options = journal_crash_options()
+    let mut db = result.unwrap(open(tasks, d, c, r, options))
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    if !typed_put(mut db, t, 7, 70) {
+        return false
+    }
+    let sh = shape(t)
+    let _ = take db
+    let reopened = result.unwrap(open(tasks, d, c, r, options))
+    if reopened.heads[0].head != 1 && reopened.heads[0].head != 2 {
+        return false
+    }
+    let expected: Option[u64] = if reopened.heads[0].head == 2 {
+        Some(70u64)
+    } else {
+        None
+    }
+    if result.unwrap(get(snapshot(reopened), sh, 7)) != expected {
+        return false
+    }
+    result.unwrap(close(take reopened))
+    true
+}
+
+@test
+fn journal_test_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if journal_law_drop(disk_test_directory(d), c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// L29c: a separately laid out over-limit frame has a valid checksum, so it
+// must be rejected for its length even though none of its bytes are torn.
+pub fn journal_law_frame_oversize() -> bool {
+    let ctx = DiskContext(store: StoreId(hi: 1, lo: 2), role: 2, seq: 7)
+    let mut payload: Bytes = list.with_capacity(16777281)
+    list.fill(mut payload, 16777281, 0u8)
+    let mut frame: Bytes = list.with_capacity(16777297)
+    result.unwrap(le(mut frame, 0x0011, 2))
+    result.unwrap(le(mut frame, 1, 2))
+    result.unwrap(le(mut frame, 16777281, 4))
+    let check = result.unwrap(disk_check(ctx, 72, frame, payload))
+    result.unwrap(le(mut frame, check, 8))
+    list.append(mut frame, payload)
+    let mut file = result.unwrap(disk_header_bytes(ctx, 0, 0))
+    list.append(mut file, frame)
+    match disk_read_frame("j-7", ctx, file, 72) {
+        Error(Corrupt(f)) => match f.why {
+            Malformed => f.offset == 72,
+            _ => false
+        },
+        _ => false
+    }
+}
+
+@test
+fn journal_frame_oversize() -> Result[(), ()] {
+    if journal_law_frame_oversize() {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+pub fn law_step_bounds(c: Clock) -> bool waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("steps", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
+    let before = db.heads[0].head
+    let live = db.resident
+    let ran = result.unwrap(run(mut db, Some(65536u64), scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 91u64)?
+        loop {}
+    }))
+    match take ran {
+        Stopped(e) => if e.steps != 65536 {
+            return false
+        },
+        _ => return false
+    }
+    if db.heads[0].head != before || db.resident != live {
+        return false
+    }
+    let stopped = result.unwrap(look(snapshot(db), Some(65536u64), scoped fn(tx: Tx) -> u64 {
+        loop {}
+    }))
+    match take stopped {
+        Stopped(e) => if e.steps != 65536 {
+            return false
+        },
+        _ => return false
+    }
+    let inspected = result.unwrap(look(snapshot(db), None, scoped fn(tx: Tx) -> Result[Option[u64], Error] {
+        fetch(tx, shape(t), 1u64)
+    }))
+    match take inspected {
+        Seen(v) => match v.value {
+            Ok(None) => db.heads[0].head == before,
+            _ => false
+        },
+        _ => false
+    }
+}
+
+@test
+fn test_step_bounds(c: Clock) -> Result[(), ()] waits {
+    if law_step_bounds(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+// A body that puts one row `k` times, so it logs `k` issued ids, then burns
+// `burn` steps.
+fn latch_body(mut tx: Tx, k: u64, burn: u64) -> Result[Bytes, Bytes] {
+    for i in 0u64 .. k {
+        if let Error(_) = put_bytes(mut tx, 1, key_word(1), key_word(i)) {
+            return Error(key_word(1))
+        }
+    }
+    for _ in 0u64 .. burn {}
+    Ok(key_word(7))
+}
+
+// L33's latch term: the grant of s_e + 6 + n_e / 8 steps covers a body that
+// spends its whole s_e and logs as many issued ids as n_e bytes hold. Here
+// k = 255 puts and the reply's reservation log 256 ids in the least n_e that
+// admits them, 8 bytes each and the draft's other admissions besides, so
+// n_e / 8 is 256 plus a few latches. Oracle, by hand from MEM-30:
+// reconciling the log takes one loop step per entry, 256 steps, and fits; a
+// reconciliation of two steps per entry would need 512, and does not.
+pub fn law_reserve_latches(c: Clock) -> bool waits {
+    let k = 255u64
+    let mut db = raw_test_db(c, 1073741824)
+    let key = key_word(29)
+    let admission = result.unwrap(admit(mut db, key, 0, request_digest(key, key)))
+    let Admitted(take complete) = take admission else {
+        return false
+    }
+    let ci = next_call_info(db)
+    let no_record: Option[CallRecord] = None
+    let s_e = 200000u64
+    // The least n_e that admits the body.
+    let mut low = 1u64
+    let mut high = 65536u64
+    while low < high {
+        let mid = (low + high) / 2
+        let drafted = draft_call(db, complete, ci, Plan(n_e: mid, s_e: s_e, reply_max: 64), no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            latch_body(mut tx, k, 0)
+        })
+        match drafted.stage {
+            Ran(_) => {
+                high = mid
+            },
+            _ => {
+                low = mid + 1
+            },
+        }
+    }
+    let plan = Plan(n_e: low, s_e: s_e, reply_max: 64)
+    let Some(grant) = call_reserves(plan) else {
+        return false
+    }
+    // The most steps the body can burn and still return within s_e.
+    let mut least = 0u64
+    let mut most = s_e
+    while least < most {
+        let mid = (least + most + 1) / 2
+        let drafted = draft_call(db, complete, ci, plan, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            latch_body(mut tx, k, mid)
+        })
+        match drafted.stage {
+            Ran(_) => {
+                least = mid
+            },
+            _ => {
+                most = mid - 1
+            },
+        }
+    }
+    let saturated = least
+    let full = draft_call(db, complete, ci, plan, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        latch_body(mut tx, k, saturated)
+    })
+    match full.stage {
+        Ran(_) => (),
+        _ => return false,
+    }
+    let granted = bound steps grant.steps + 1u64 {
+        metered_draft(db, complete, ci, plan, grant, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            latch_body(mut tx, k, saturated)
+        })
+    }
+    match take granted {
+        Ok(Ok(draft)) => match draft.stage {
+            Ran(_) => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+@test
+fn test_reserve_latches(c: Clock) -> Result[(), ()] waits {
+    if law_reserve_latches(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

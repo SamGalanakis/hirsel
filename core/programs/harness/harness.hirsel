@@ -426,9 +426,10 @@ pub type Limits: send {
 pub type Agent[G: send]: send {
     name: String,
     route: String,
-    model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits],
+    // The model gets a draft source when the effect has a preview target; it may
+    // ignore it.
+    model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits],
     model_repeat: Repeat,
-    preview_model: Option[StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits]],
     // The app supplies object authority when a result outgrows the journal.
     store_result: Option[StaticFn[fn(G, take Bytes) -> Result[BlobRef, Fault] waits]],
     tools: List[Tool[G]],
@@ -439,8 +440,8 @@ pub type Agent[G: send]: send {
     limits: Limits,
 }
 
-pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits]) -> Agent[G] {
-    Agent(name: take name, route: take route, model: model, model_repeat: Once, preview_model: None, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
+pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits]) -> Agent[G] {
+    Agent(name: take name, route: take route, model: model, model_repeat: Once, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
     // Gates and sections read rows; opening a table alone takes over
     // 10,000 steps.
     inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64, section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64))

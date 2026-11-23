@@ -19,7 +19,7 @@ const EFFECT_GRANT: u64 = 8388608u64
 type Services: send {
     model: Sender[Sender[()]],
     tallies: Sender[Sender[()]],
-    door: harness.gateway.Door[Services],
+    door: harness.gateway.Door,
     name: String,
     tasks: Tasks,
     clock: Clock,
@@ -72,9 +72,8 @@ fn ask_service(to: Sender[Sender[()]]) -> Result[(), harness.Fault] waits {
 
 // The script: once a tool has answered, end with "done"; before that, call the tool the
 // user's message names ("bump it", "tally it", "delegate it").
-fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
     if g.s.chunks > 0u64 {
-        let mut sink: Option[harness.preview.Source] = None
         return streaming_model(g, take r, mut sink)
     }
     let mut tool = "bump"
@@ -171,14 +170,11 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    let Some(p) = view g.s.preview else {
-        return harness.effect(g.context, g, take key, gated_agent(), code.describe(settle))
+    let target = match g.s.preview {
+        Some(p) => Some(harness.preview.target(p, g.s.name, g.s.clock)),
+        None => None,
     }
-    let mut a = gated_agent()
-    if g.s.chunks > 0u64 {
-        a.preview_model = Some(code.describe(streaming_model))
-    }
-    harness.effect_with_preview(g.context, g, take key, a, code.describe(settle), Some(harness.preview.target(p, g.s.name, g.s.clock)))
+    harness.effect(g.context, g, take key, gated_agent(), code.describe(settle), take target)
 }
 
 fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -255,7 +251,7 @@ fn bytes_of[A: codec](a: A) -> Bytes {
 }
 
 // Routes to a session (waking it), makes one wire call and lets go of the session.
-fn call_routed[A: codec, R: codec](door: harness.gateway.Door[Services], id: u64, credential: Bytes, first_p: u64, e: store.fixture.Callee[A, R], take a: A, tasks: Tasks, clock: Clock, random: Random, net: Net) -> Result[R, u64] waits {
+fn call_routed[A: codec, R: codec](door: harness.gateway.Door, id: u64, credential: Bytes, first_p: u64, e: store.fixture.Callee[A, R], take a: A, tasks: Tasks, clock: Clock, random: Random, net: Net) -> Result[R, u64] waits {
     let lease = match harness.gateway.route(door, id) {
         Ok(take l) => take l,
         Error(Place(_)) => return Error(101u64),
@@ -350,7 +346,7 @@ pub fn law_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, ta
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (watch, changes): (Sender[store.local.Change], Receiver[store.local.Change]) = channel.new(64u64)
-    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
     let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
@@ -456,7 +452,7 @@ fn both_stopped(changes: Receiver[store.local.Change]) -> bool waits {
     false
 }
 
-fn unload_task(take job: (harness.gateway.Door[Services], u64, Sender[Result[store.local.Unloaded, harness.gateway.Refused]])) -> () waits {
+fn unload_task(take job: (harness.gateway.Door, u64, Sender[Result[store.local.Unloaded, harness.gateway.Refused]])) -> () waits {
     let (door, id, reply) = take job
     let _ = channel.send(reply, harness.gateway.unload(door, id))
 }
@@ -475,7 +471,7 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let (tallies, held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (watch, changes): (Sender[store.local.Change], Receiver[store.local.Change]) = channel.new(256u64)
-    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
     let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 134217728u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
@@ -751,7 +747,7 @@ fn same_rows(got: List[(u64, Bytes)], want: List[(u64, Bytes)]) -> bool {
 }
 
 // Waits up to five seconds for the session's place to be down, as the gateway saw it.
-fn down_within(door: harness.gateway.Door[Services], id: u64, clock: Clock) -> Option[harness.gateway.Marks] waits {
+fn down_within(door: harness.gateway.Door, id: u64, clock: Clock) -> Option[harness.gateway.Marks] waits {
     for i in 0u64 .. 100u64 {
         let m = harness.gateway.marks(door, id)
         if m.downs >= 1u64 && m.ups == m.downs {
@@ -779,7 +775,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
     let (tallies, held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
     let worker_port = if enabled {
         Some(harness.preview.door(hub))
@@ -971,7 +967,7 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes) -> u64 waits {
 // The source's five entries come from the scripted tool round. A fork owns
 // that pinned prefix even after the source is deleted. Only its two new
 // entries precede the first cut; paging from the cut yields the source rows.
-fn fork_history(door: harness.gateway.Door[Services], root: Dir, net: Net, clock: Clock, random: Random, tasks: Tasks, port: u16, me: Bytes) -> u64 waits {
+fn fork_history(door: harness.gateway.Door, root: Dir, net: Net, clock: Clock, random: Random, tasks: Tasks, port: u16, me: Bytes) -> u64 waits {
     let Some(_) = down_within(door, 0u64, clock) else { return 1u64 }
     let dir = result.unwrap(std.dir.narrow(root, "s0"))
     let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
@@ -1177,7 +1173,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
     let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
     let worker_port = if enabled {
         Some(harness.preview.door(hub))

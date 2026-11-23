@@ -204,9 +204,9 @@ committed. Its reads still count in the transaction's read set.
 ## Live preview on the gateway
 
 Start a `harness.preview` hub and pass its door to the HTTP front and the
-worker grants. In the worker, call `effect_with_preview` with a target for the
-session's place name. Set `agent.preview_model` to the streaming adapter,
-which can pass its sink to `provider.ask_with_preview`. Outside tools publish
+worker grants. In the worker, pass `harness.effect` a target for the
+session's place name. The model then gets a draft source, which a streaming
+model can pass to `provider.ask_with_preview`. Outside tools publish
 a running status keyed by their call ordinal. They never publish arguments
 or results.
 

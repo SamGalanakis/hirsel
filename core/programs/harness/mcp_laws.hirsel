@@ -11,13 +11,13 @@ fn mcp_peer(g: Grants, id: String) -> Option[mcp_tools.Peer] {
         identity: mcp.rpc.Identity(name: "harness-law", version: "1")))
 }
 
-fn mcp_blob_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+fn mcp_blob_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
     let name = mcp_tools.offered_name("fixture", "echo")
     let mut offered = false
     for t in r.tools {
         if t.name == name { offered = true }
     }
-    let mut answer = scripted_model(g, take r)?
+    let mut answer = scripted_model(g, take r, mut draft)?
     if list.len(answer.calls) == 0u64 { return Ok(take answer) }
     if !offered { return Error(Refused("missing MCP tool")) }
     answer.calls[0u64].name = take name
@@ -40,7 +40,7 @@ fn mcp_blob_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, 
 }
 
 fn mcp_blob_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle))
+    harness.effect(g.context, g, take key, mcp_blob_agent(), code.describe(mcp_blob_settle), None)
 }
 
 fn mcp_blob_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {

@@ -9,7 +9,7 @@
     "lines": 2344
   },
   "core/programs/harness/gateway_laws.hirsel": {
-    "lines": 1493,
+    "lines": 1489,
     "reason": "gateway-push-1905"
   },
   "core/programs/harness/laws.hirsel": {
@@ -289,7 +289,7 @@
     "lines": 1469
   },
   "crates/hirsel-core-net/src/reactor.rs": {
-    "lines": 2006
+    "lines": 2003
   },
   "crates/hirsel-core-program-tests/src/cases.rs": {
     "lines": 2726
@@ -328,7 +328,7 @@
     "lines": 1253
   },
   "crates/hirsel-core-rt/src/os_net.rs": {
-    "lines": 1014
+    "lines": 1013
   },
   "crates/hirsel-core-rt/src/provide.rs": {
     "lines": 2336

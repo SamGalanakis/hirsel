@@ -143,11 +143,8 @@ fn tool_result[G: send](port: G, a: Agent[G], take reply: Result[Bytes, Fault]) 
 
 // The body of the app's granted effect entry: begin, read the sealed cutoff
 // through the fenced snapshot, make the one outside call, settle.
-pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F]) -> Result[Worked, Capacity] waits {
-    effect_with_preview(ctx, port, take key, a, settle_entry, None)
-}
-
-pub fn effect_with_preview[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
+// A target streams the model's draft and each tool's progress to the preview hub.
+pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
     let permit: Option[Permit] = call_attempt(ctx, code.describe(begin), key)
     match permit {
         Some(Go(_)) => (),
@@ -168,17 +165,9 @@ pub fn effect_with_preview[G: send, F](ctx: store.runner.TriggerContext, port: G
         let Ok(take asked) = request(snap, h, key, e.cutoff) else {
             return Ok(Lost)
         }
-        let answered = match (a.preview_model, has_preview(target)) {
-            (Some(streaming), true) => {
-                let mut sink = effect_preview(target, snap, h, ctx, key)
-                let call = code.callable(streaming)
-                call(port, take asked, mut sink)
-            },
-            _ => {
-                let call = code.callable(a.model)
-                call(port, take asked)
-            },
-        }
+        let mut sink = effect_preview(target, snap, h, ctx, key)
+        let call = code.callable(a.model)
+        let answered = call(port, take asked, mut sink)
         match take answered {
             Ok(take answer) => Model(take answer),
             // Unavailable after the send may have been charged: record doubt.
@@ -209,13 +198,6 @@ pub fn effect_with_preview[G: send, F](ctx: store.runner.TriggerContext, port: G
     match done {
         Some(_) => Ok(Sent),
         None => Ok(Lost)
-    }
-}
-
-fn has_preview(target: Option[preview.Target]) -> bool {
-    match target {
-        Some(_) => true,
-        None => false
     }
 }
 

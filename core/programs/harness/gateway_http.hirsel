@@ -119,7 +119,7 @@ fn turned(why: harness.gateway.Refused) -> u16 {
 // Checks a cold ACL before waking a place. If the place is already running,
 // authorize on its live query. A disconnect retries the check as well as the
 // connection, since the place may have unloaded in between.
-fn reach[T: send](d: harness.gateway.Door[T], f: Front, id: u64, identity: Identity, first_p: u64, wake: bool) -> Result[Option[store.client.Client], u16] waits {
+fn reach(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, first_p: u64, wake: bool) -> Result[Option[store.client.Client], u16] waits {
     let until = deadline_ms(f.clock, f.within_ms)
     loop {
         match harness.gateway.access(d, id, identity.caller, wake) {
@@ -181,7 +181,7 @@ fn bearer(f: Front, req: Request) -> Result[Identity, u16] waits {
     Ok(Identity(credential: take credential, caller: take caller))
 }
 
-fn call_place[T: send, A: codec, R: codec](d: harness.gateway.Door[T], f: Front, id: u64, identity: Identity, p: u64, e: store.client.Callee[A, Result[R, harness.Refused]], take a: A) -> Result[R, u16] waits {
+fn call_place[A: codec, R: codec](d: harness.gateway.Door, f: Front, id: u64, identity: Identity, p: u64, e: store.client.Callee[A, Result[R, harness.Refused]], take a: A) -> Result[R, u16] waits {
     let mut client = option.unwrap(reach(d, f, id, identity, p, true)?)
     let replied = store.client.call(mut client, e, take a, int.truncate(f.within_ms))
     store.client.close(take client)
@@ -213,7 +213,7 @@ type Following {
 // A client following the session's transcript. One opened for a nudge stays at least one
 // beat even if the session looks quiet, so a change whose run has not yet written its
 // busy status is not missed.
-fn follow_from[T: send](d: harness.gateway.Door[T], f: Front, id: u64, wake: bool, nudged: bool, identity: Identity, tail: u64, mut first: Option[u64]) -> Result[Option[Following], u16] waits {
+fn follow_from(d: harness.gateway.Door, f: Front, id: u64, wake: bool, nudged: bool, identity: Identity, tail: u64, mut first: Option[u64]) -> Result[Option[Following], u16] waits {
     let Some(take opened) = reach(d, f, id, identity, 0u64, wake)? else {
         return Ok(None)
     }
@@ -440,7 +440,7 @@ fn halted(quit: Receiver[()]) -> bool {
 
 // The gateway wakes quiet streams on place starts and requests. While attached
 // to a place, WIRE drives durable rows and the hub signals changed drafts.
-fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], identity: Identity, tail: u64) -> () waits {
+fn follow(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], identity: Identity, tail: u64) -> () waits {
     let (notify, changed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let Some(token) = harness.gateway.watch_marks(d, id, notify) else {
         return reply(mut w, f, 503u16, list.new())
@@ -451,7 +451,7 @@ fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHa
     harness.gateway.unwatch_marks(d, id, token)
 }
 
-fn follow_loop[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], identity: Identity, tail: u64, notify: Sender[()], changed: Receiver[()], mut watch: PreviewWatch) -> () waits {
+fn follow_loop(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], identity: Identity, tail: u64, notify: Sender[()], changed: Receiver[()], mut watch: PreviewWatch) -> () waits {
     let mut last = harness.gateway.marks(d, id)
     let mut first: Option[u64] = None
     let initial = follow_from(d, f, id, true, false, identity, tail, mut first)
@@ -504,7 +504,7 @@ fn heartbeat(mut w: WriteHalf, f: Front, mut at: u64) -> bool waits {
 }
 
 // Returns true when the browser can wait for this place to start again.
-fn place_stream[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], mut place: Following, mut sent: Map[u64, Bytes], mut watch: PreviewWatch, mut beat_at: u64, mut marks: harness.gateway.Marks) -> bool waits {
+fn place_stream(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], mut place: Following, mut sent: Map[u64, Bytes], mut watch: PreviewWatch, mut beat_at: u64, mut marks: harness.gateway.Marks) -> bool waits {
     let group = harness.gateway.name_of(id)
     let mut active = false
     let mut draft_changed = false
@@ -681,7 +681,7 @@ fn query_uint(target: Bytes, name: String) -> Option[u64] {
 }
 
 // The fresh status query follows the data queries and applies the same ACL.
-fn history[T: send](d: harness.gateway.Door[T], f: Front, id: u64, identity: Identity, before: u64, lines: u64) -> Result[Page, u16] waits {
+fn history(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, before: u64, lines: u64) -> Result[Page, u16] waits {
     let mut client = option.unwrap(reach(d, f, id, identity, 0u64, true)?)
     let page = history_page(mut client, f, before, lines)
     store.client.close(take client)
@@ -720,8 +720,8 @@ fn json_body[V: codec](req: Request, f: Front) -> Option[V] {
     }
 }
 
-type Conn[T: send]: send {
-    door: harness.gateway.Door[T],
+type Conn: send {
+    door: harness.gateway.Door,
     front: Front,
     socket: Socket,
     slot: u64,
@@ -729,7 +729,7 @@ type Conn[T: send]: send {
     quit: Receiver[()]
 }
 
-fn connection[T: send](take job: Conn[T]) -> () waits {
+fn connection(take job: Conn) -> () waits {
     let Conn(door: take d, front: take f, socket: take socket, slot: slot, done: take done, quit: take quit) = take job
     let (r, w) = net.split(take socket)
     let mut read = take r
@@ -738,7 +738,7 @@ fn connection[T: send](take job: Conn[T]) -> () waits {
     let _ = channel.send(done, Finished(slot))
 }
 
-fn serve_one[T: send](d: harness.gateway.Door[T], f: Front, mut read: ReadHalf, mut write: WriteHalf, quit: Receiver[()]) -> () waits {
+fn serve_one(d: harness.gateway.Door, f: Front, mut read: ReadHalf, mut write: WriteHalf, quit: Receiver[()]) -> () waits {
     let req = match read_request(mut read, f) {
         Ok(take q) => take q,
         Error(code) => return reply(mut write, f, code, list.new())
@@ -871,15 +871,15 @@ fn accept_sockets(take job: Acceptor) waits {
     }
 }
 
-type FrontJob[T: send]: send {
-    door: harness.gateway.Door[T],
+type FrontJob: send {
+    door: harness.gateway.Door,
     front: Front,
     listener: Listener,
     to: Sender[FrontEvent],
     inbox: Receiver[FrontEvent]
 }
 
-fn serve_front[T: send](take job: FrontJob[T]) -> () waits {
+fn serve_front(take job: FrontJob) -> () waits {
     let FrontJob(door: take d, front: take f, listener: take listener, to: take to, inbox: take inbox) = take job
     let (permit, permits): (Sender[()], Receiver[()]) = channel.new(1u64)
     let acceptor = Acceptor(listener: take listener, permit: take permits, to: channel.sender(to))
@@ -887,7 +887,7 @@ fn serve_front[T: send](take job: FrontJob[T]) -> () waits {
     let _ = channel.try_send(permit, ())
     let mut conns: Map[u64, (Sender[()], Task[()])] = map.new()
     let mut next = 0u64
-    let run: fn(take Conn[T]) -> () waits = connection
+    let run: fn(take Conn) -> () waits = connection
     while let Ok(take event) = channel.receive(inbox) {
         match take event {
             Accepted(take socket) => {
@@ -915,13 +915,13 @@ fn serve_front[T: send](take job: FrontJob[T]) -> () waits {
 }
 
 // Serves the gateway behind `d` on `listener` until `halt`.
-pub fn serve[T: send](d: harness.gateway.Door[T], take front: Front, take listener: Listener) -> Served {
+pub fn serve(d: harness.gateway.Door, take front: Front, take listener: Listener) -> Served {
     let (to, inbox): (Sender[FrontEvent], Receiver[FrontEvent]) = channel.new(front.conns_max + 2u64)
     let tasks = front.tasks
     // The supervisor and acceptor's buffers, and the connections' tasks.
     let room = 1048576u64 + front.conns_max * front.conn_bytes
     let job = FrontJob(door: harness.gateway.copy_door(d), front: take front, listener: take listener, to: channel.sender(to), inbox: take inbox)
-    let run: fn(take FrontJob[T]) -> () waits = serve_front
+    let run: fn(take FrontJob) -> () waits = serve_front
     let serving = task.spawn(tasks, bytes room, take job, run)
     Served(to: take to, serving: take serving)
 }

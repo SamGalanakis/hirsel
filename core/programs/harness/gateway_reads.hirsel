@@ -1,6 +1,6 @@
 // Authorized reads for the HTTP front.
 
-fn allowed[T: send](d: harness.gateway.Door[T], f: Front, id: u64, identity: Identity) -> Result[(), u16] waits {
+fn allowed(d: harness.gateway.Door, f: Front, id: u64, identity: Identity) -> Result[(), u16] waits {
     if let Some(take client) = reach(d, f, id, identity, 0u64, false)? {
         store.client.close(take client)
     }
@@ -73,7 +73,7 @@ fn waits_page(mut client: store.client.Client, f: Front) -> Result[List[harness.
     Ok(take waits)
 }
 
-fn visible_sessions[T: send](d: harness.gateway.Door[T], f: Front, identity: Identity) -> Result[List[u64], u16] waits {
+fn visible_sessions(d: harness.gateway.Door, f: Front, identity: Identity) -> Result[List[u64], u16] waits {
     let mut visible: List[u64] = list.new()
     for id in harness.gateway.listing(d) {
         match allowed(d, f, id, identity) {

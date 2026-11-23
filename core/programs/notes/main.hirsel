@@ -371,15 +371,18 @@ fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[ha
     Ok(take answer)
 }
 
-fn model(g: Grants, take request: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
-    let mut draft: Option[harness.preview.Source] = None
-    live_model(g, take request, mut draft)
+// Live asks OpenRouter, stream drafts the script, otherwise the script answers.
+fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+    if let Some(live) = view g.live {
+        return live_model(g, live, take request, mut draft)
+    }
+    if let Some(_) = view g.stream {
+        return scripted_stream(g, take request, mut draft)
+    }
+    scripted_model(g, take request)
 }
 
-fn live_model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
-    let Some(live) = view g.live else {
-        return scripted_model(g, take request)
-    }
+fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
     let mut req = take request
     let mut replies = 0u64
     let mut prompt = string.new()
@@ -448,17 +451,14 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    let Some(l) = view g.live else {
-        let Some(d) = view g.stream else {
-            return harness.effect(g.context, g, take key, notes_agent(), code.describe(settle))
-        }
-        let mut a = notes_agent()
-        a.preview_model = Some(code.describe(scripted_stream))
-        return harness.effect_with_preview(g.context, g, take key, a, code.describe(settle), Some(harness.preview.target(d.door, d.group, g.clock)))
+    let mut target: Option[harness.preview.Target] = None
+    if let Some(d) = view g.stream {
+        target = Some(harness.preview.target(d.door, d.group, g.clock))
     }
-    let mut a = notes_agent()
-    a.preview_model = Some(code.describe(live_model))
-    harness.effect_with_preview(g.context, g, take key, a, code.describe(settle), Some(harness.preview.target(l.preview, l.group, g.clock)))
+    if let Some(l) = view g.live {
+        target = Some(harness.preview.target(l.preview, l.group, g.clock))
+    }
+    harness.effect(g.context, g, take key, notes_agent(), code.describe(settle), take target)
 }
 
 fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -502,7 +502,7 @@ fn helper_grants(s: (), take ctx: store.runner.TriggerContext) -> Result[HelperG
 }
 
 // Answers with the first sentence of the newest user message.
-fn helper_model(g: HelperGrants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+fn helper_model(g: HelperGrants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
     let mut last = string.new()
     for e in r.messages {
         if let User(t) = e {
@@ -542,7 +542,7 @@ fn helper_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, ta
 }
 
 fn helper_effect(g: HelperGrants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, helper_agent(), code.describe(helper_settle))
+    harness.effect(g.context, g, take key, helper_agent(), code.describe(helper_settle), None)
 }
 
 fn helper_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -1132,7 +1132,7 @@ fn browser_reply(mut c: std.http_client.Connection, mut dec: std.sse.Decoder, cl
     }
 }
 
-fn live_down(d: harness.gateway.Door[Services], clock: Clock, after: u64) -> Result[harness.gateway.Marks, String] waits {
+fn live_down(d: harness.gateway.Door, clock: Clock, after: u64) -> Result[harness.gateway.Marks, String] waits {
     for i in 0u64 .. 100u64 {
         let marks = harness.gateway.marks(d, 0u64)
         if marks.ups > after && marks.ups == marks.downs {
@@ -1218,7 +1218,7 @@ fn live_result(out: Stdout, dir: Dir, b: Browser, tasks: Tasks, random: Random) 
     Ok(())
 }
 
-fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door[Services], b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
+fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door, b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
     post(b, "/sessions", browser_headers(b.credential, 0u64), string.into_bytes("notes smoke"), 201u16, b"0")?
     let Ok(dir) = std.dir.narrow(root, "s0") else {
         return Error("missing HTTP-created session directory")
@@ -1283,7 +1283,7 @@ pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: T
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
     let (helper, _unused): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
     let live = Live(net: network, address: upstream, key: secret.share(api_key), out: out, preview: harness.preview.door(hub), group: "")
-    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
     let d = harness.gateway.door_of(way)
     let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: live_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live), stream: None))
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
@@ -1330,7 +1330,7 @@ fn scripted_factory() -> store.local.Factory[Services] {
     store.local.seeded_factory(scripted_place)
 }
 
-type ScriptedWatch: send { door: harness.gateway.Door[Services], out: Stdout, clock: Clock }
+type ScriptedWatch: send { door: harness.gateway.Door, out: Stdout, clock: Clock }
 
 fn scripted_downs(take watch: ScriptedWatch) -> () waits {
     let mut downs = 0u64
@@ -1346,7 +1346,7 @@ fn scripted_downs(take watch: ScriptedWatch) -> () waits {
 
 type ScriptedControl: codec { action: String, credential: String, at: u64 }
 
-fn scripted_fork(data: Dir, d: harness.gateway.Door[Services], caller: store.Caller, cut: u64, clock: Clock, random: Random, tasks: Tasks) -> Result[u64, String] waits {
+fn scripted_fork(data: Dir, d: harness.gateway.Door, caller: store.Caller, cut: u64, clock: Clock, random: Random, tasks: Tasks) -> Result[u64, String] waits {
     let _ = harness.gateway.unload(d, 0u64)
     let Ok(dir) = std.dir.narrow(data, "s0") else { return Error("no fork source") }
     let Ok(take db) = store.open(tasks, dir, clock, random, options()) else { return Error("could not open the fork source") }
@@ -1360,7 +1360,7 @@ fn scripted_fork(data: Dir, d: harness.gateway.Door[Services], caller: store.Cal
     }
 }
 
-fn scripted_revoke(d: harness.gateway.Door[Services], credential: Bytes, p: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[u64, String] waits {
+fn scripted_revoke(d: harness.gateway.Door, credential: Bytes, p: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[u64, String] waits {
     let Ok(take lease) = harness.gateway.route(d, 0u64) else { return Error("could not route revocation") }
     let Some(address) = latest.read(store.local.status(lease)).addr else { return Error("no place address") }
     let keys = result.unwrap(store.fixture.entry_keys(code.describe(scripted_entries)))
@@ -1378,7 +1378,7 @@ fn scripted_revoke(d: harness.gateway.Door[Services], credential: Bytes, p: u64,
     Error("revocation was refused")
 }
 
-fn scripted_controls(input: Stdin, out: Stdout, data: Dir, d: harness.gateway.Door[Services], clock: Clock, random: Random, tasks: Tasks, net: Net) -> () waits {
+fn scripted_controls(input: Stdin, out: Stdout, data: Dir, d: harness.gateway.Door, clock: Clock, random: Random, tasks: Tasks, net: Net) -> () waits {
     let format: std.json.Format[ScriptedControl] = result.unwrap(std.json.interop())
     let mut lines = std.io.lines(Stdin(input), 1024u64)
     let mut line = string.new()
@@ -1418,7 +1418,7 @@ pub fn serve_scripted(out: Stdout, input: Stdin, data: Dir, clock: Clock, random
     let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
     let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper_dir, clock: clock, random: random, tasks: tasks, net: net), helper_service)
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
-    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
     let d = harness.gateway.door_of(way)
     let seed = Services(helper: channel.sender(ask), clock: clock, live: None, stream: Some(Stream(door: harness.preview.door(hub), group: "")))
     let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: scripted_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)

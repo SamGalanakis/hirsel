@@ -26,7 +26,7 @@ fn cold_routes(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     let root = result.unwrap(host.mkdtemp(parent, mut name))
     let (asks, _inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let way: harness.gateway.Doorway = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
     let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)

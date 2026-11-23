@@ -51,8 +51,8 @@ type GwIn: send =
     | UnwatchMarks(u64, u64)
     | Halt(Sender[List[store.local.Unloaded]])
 
-pub opaque type Gateway[T: send] { to: Sender[GwIn], actor: Task[()] }
-pub opaque type Door[T: send]: send { to: Sender[GwIn] }
+pub opaque type Gateway { to: Sender[GwIn], actor: Task[()] }
+pub opaque type Door: send { to: Sender[GwIn] }
 
 // ---- the catalog ----
 
@@ -403,18 +403,18 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
 
 // A gateway's inbox, made before the gateway so that its seed can hold a door to it
 // (a session's subagent tool starts its child through that door).
-pub type Doorway[T: send]: send { to: Sender[GwIn], inbox: Receiver[GwIn] }
+pub type Doorway: send { to: Sender[GwIn], inbox: Receiver[GwIn] }
 
-pub fn doorway[T: send]() -> Doorway[T] {
+pub fn doorway() -> Doorway {
     let (to, inbox): (Sender[GwIn], Receiver[GwIn]) = channel.new(256u64)
     Doorway(to: take to, inbox: take inbox)
 }
 
-pub fn door_of[T: send](w: Doorway[T]) -> Door[T] { Door(to: channel.sender(w.to)) }
+pub fn door_of(w: Doorway) -> Door { Door(to: channel.sender(w.to)) }
 
-pub fn copy_door[T: send](d: Door[T]) -> Door[T] { Door(to: channel.sender(d.to)) }
+pub fn copy_door(d: Door) -> Door { Door(to: channel.sender(d.to)) }
 
-pub fn gateway[T: send](take way: Doorway[T], take config: GatewayConfig[T]) -> Result[Gateway[T], Refused] waits {
+pub fn gateway[T: send](take way: Doorway, take config: GatewayConfig[T]) -> Result[Gateway, Refused] waits {
     if config.max_sessions == 0u64 || config.place_bytes == 0u64 || config.idle_ms == 0u64 { return Error(Full) }
     let tasks = config.tasks
     let need = int.saturating_add(store.local.host_bytes(config.options, config.place_bytes), GATEWAY_BYTES)
@@ -433,40 +433,40 @@ pub fn gateway[T: send](take way: Doorway[T], take config: GatewayConfig[T]) -> 
     }
 }
 
-pub fn door[T: send](g: Gateway[T]) -> Door[T] { Door(to: channel.sender(g.to)) }
+pub fn door(g: Gateway) -> Door { Door(to: channel.sender(g.to)) }
 
-pub fn create[T: send](d: Door[T], take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
+pub fn create(d: Door, take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
     create_seeded(d, take key, take seeding, None)
 }
 
 // Seeds a private session and its initial reader before publishing the catalog row.
-pub fn create_visible[T: send](d: Door[T], key: Bytes, take seeding: Seeding, take caller: store.Caller) -> Result[u64, Refused] waits {
+pub fn create_visible(d: Door, key: Bytes, take seeding: Seeding, take caller: store.Caller) -> Result[u64, Refused] waits {
     let mut scoped_key: Bytes = list.new()
     if let Error(_) = store.runner.caller_key(caller, mut scoped_key) { return Error(Seed(Malformed("reader identity"))) }
     list.append(mut scoped_key, key)
     create_seeded(d, take scoped_key, take seeding, Some(take caller))
 }
 
-fn create_seeded[T: send](d: Door[T], take key: Bytes, take seeding: Seeding, take reader: Option[store.Caller]) -> Result[u64, Refused] waits {
+fn create_seeded(d: Door, take key: Bytes, take seeding: Seeding, take reader: Option[store.Caller]) -> Result[u64, Refused] waits {
     let (reply, answer): (Sender[Result[u64, Refused]], Receiver[Result[u64, Refused]]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Create(take key, take seeding, take reader, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 
 // Unlists a session, then drains its place and deletes its store.
-pub fn delete[T: send](d: Door[T], id: u64) -> Result[(), Refused] waits {
+pub fn delete(d: Door, id: u64) -> Result[(), Refused] waits {
     let (reply, answer): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Delete(id, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 
-pub fn listing[T: send](d: Door[T]) -> List[u64] waits {
+pub fn listing(d: Door) -> List[u64] waits {
     let (reply, answer): (Sender[List[u64]], Receiver[List[u64]]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Listing(take reply)) { return list.new() }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => list.new() }
 }
 
-fn reach[T: send](d: Door[T], id: u64) -> Result[store.local.Door, Refused] waits {
+fn reach(d: Door, id: u64) -> Result[store.local.Door, Refused] waits {
     let (reply, answer): (Sender[Result[store.local.Door, Refused]], Receiver[Result[store.local.Door, Refused]]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Reach(id, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
@@ -474,14 +474,14 @@ fn reach[T: send](d: Door[T], id: u64) -> Result[store.local.Door, Refused] wait
 
 // Routes to a session, waking its place if it is unloaded. The lease's status holds the
 // place's address. A lease does not hold the place: a client's session does (§14.9).
-pub fn route[T: send](d: Door[T], id: u64) -> Result[store.local.Lease, Refused] waits {
+pub fn route(d: Door, id: u64) -> Result[store.local.Lease, Refused] waits {
     let hd = reach(d, id)?
     match store.local.route(hd, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
 }
 
 // Enforces the session ACL before a cold wake. A returned lease still needs
 // the live query under the credential bound to its wire connection.
-pub fn access[T: send](d: Door[T], id: u64, caller: store.Caller, wake: bool) -> Result[Option[store.local.Lease], Refused] waits {
+pub fn access(d: Door, id: u64, caller: store.Caller, wake: bool) -> Result[Option[store.local.Lease], Refused] waits {
     let hd = reach(d, id)?
     let check = store.local.ColdCheck(caller: clone(caller), check: code.describe(harness.cold_reader_allowed))
     match store.local.access(hd, name_of(id), take check, wake) {
@@ -494,7 +494,7 @@ pub fn access[T: send](d: Door[T], id: u64, caller: store.Caller, wake: bool) ->
 }
 
 // Like `route`, but only to a session whose place serves; it never starts one.
-pub fn peek[T: send](d: Door[T], id: u64) -> Result[store.local.Lease, Refused] waits {
+pub fn peek(d: Door, id: u64) -> Result[store.local.Lease, Refused] waits {
     let hd = reach(d, id)?
     match store.local.peek(hd, name_of(id)) {
         Ok(take lease) => Ok(take lease),
@@ -504,9 +504,9 @@ pub fn peek[T: send](d: Door[T], id: u64) -> Result[store.local.Lease, Refused] 
 }
 
 // Tells the gateway that a front changed a session, so streams that follow it look again.
-pub fn nudge[T: send](d: Door[T], id: u64) -> () waits { let _ = channel.send(d.to, Nudge(id)) }
+pub fn nudge(d: Door, id: u64) -> () waits { let _ = channel.send(d.to, Nudge(id)) }
 
-pub fn marks[T: send](d: Door[T], id: u64) -> Marks waits {
+pub fn marks(d: Door, id: u64) -> Marks waits {
     let (reply, answer): (Sender[Marks], Receiver[Marks]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Marked(id, take reply)) { return Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
     match channel.receive(answer) { Ok(m) => m, Error(_) => Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
@@ -514,18 +514,18 @@ pub fn marks[T: send](d: Door[T], id: u64) -> Marks waits {
 
 // The caller registers before sampling marks. A queued notification is enough
 // because marks contain the cumulative counts.
-pub fn watch_marks[T: send](d: Door[T], id: u64, notify: Sender[()]) -> Option[u64] waits {
+pub fn watch_marks(d: Door, id: u64, notify: Sender[()]) -> Option[u64] waits {
     let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, WatchMarks(id, channel.sender(notify), take reply)) { return None }
     match channel.receive(answer) { Ok(token) => Some(token), Error(_) => None }
 }
 
-pub fn unwatch_marks[T: send](d: Door[T], id: u64, token: u64) -> () waits {
+pub fn unwatch_marks(d: Door, id: u64, token: u64) -> () waits {
     let _ = channel.send(d.to, UnwatchMarks(id, token))
 }
 
 // Stops every live session through its graceful stop and answers how each ended.
-pub fn stop[T: send](take g: Gateway[T]) -> List[store.local.Unloaded] waits {
+pub fn stop(take g: Gateway) -> List[store.local.Unloaded] waits {
     let Gateway(to: take to, actor: take actor) = take g
     let (reply, answer): (Sender[List[store.local.Unloaded]], Receiver[List[store.local.Unloaded]]) = channel.new(1u64)
     let _ = channel.send(to, Halt(take reply))
@@ -536,20 +536,20 @@ pub fn stop[T: send](take g: Gateway[T]) -> List[store.local.Unloaded] waits {
 
 // Stops a session's place now, as an operator would (§14.4 "Unload"); a cut run is
 // started again by the host.
-pub fn unload[T: send](d: Door[T], id: u64) -> Result[store.local.Unloaded, Refused] waits {
+pub fn unload(d: Door, id: u64) -> Result[store.local.Unloaded, Refused] waits {
     let hd = reach(d, id)?
     match store.local.unload(hd, name_of(id)) { Ok(take u) => Ok(take u), Error(take why) => Error(Place(take why)) }
 }
 
 // How many times the session's place has ended since the gateway started.
-pub fn downs[T: send](d: Door[T], id: u64) -> u64 waits {
+pub fn downs(d: Door, id: u64) -> u64 waits {
     let (reply, answer): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Downs(id, take reply)) { return 0u64 }
     match channel.receive(answer) { Ok(n) => n, Error(_) => 0u64 }
 }
 
 // Waits until the session's place has ended more than `after` times, and answers how many.
-pub fn await_down[T: send](d: Door[T], id: u64, after: u64) -> Result[u64, Refused] waits {
+pub fn await_down(d: Door, id: u64, after: u64) -> Result[u64, Refused] waits {
     let (reply, answer): (Sender[Result[u64, Refused]], Receiver[Result[u64, Refused]]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, AwaitDown(id, after, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
@@ -593,7 +593,7 @@ type Seen: send = Busy(String, u64) | Ended(String, String)
 
 // One look at the child: its status and its last assistant line, read from one image
 // of its transcript query.
-fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: Option[harness.Submit]) -> Result[Seen, harness.Fault] waits {
+fn look(d: Door, id: u64, c: Child, credential: Bytes, take submit: Option[harness.Submit]) -> Result[Seen, harness.Fault] waits {
     let Ok(lease) = route(d, id) else { return Error(Unavailable) }
     let Some(address) = latest.read(store.local.status(lease)).addr else { return Error(Unavailable) }
     let Ok(take opened) = store.client.client_at(c.net, c.clock, c.random, c.keys, c.socket, address, c.authority, Some(clone(credential)), 0u64, c.within_ms) else { return Error(Unavailable) }
@@ -645,7 +645,7 @@ fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: 
 // waiting on a person therefore costs one wake per outside wake, not a wake loop.
 // Starting is idempotent by key and the submit by the child's Caller and client key, so
 // a repeated attempt reaches the same child and the same run.
-pub fn ask[T: send](d: Door[T], take key: Bytes, take seeding: Seeding, c: Child, take text: String) -> Result[Bytes, harness.Fault] waits {
+pub fn ask(d: Door, take key: Bytes, take seeding: Seeding, c: Child, take text: String) -> Result[Bytes, harness.Fault] waits {
     let credential = child_credential(key)
     let Ok(take caller) = store.ingress.caller((), credential) else { return Error(Unavailable) }
     let id = match create_seeded(d, take key, take seeding, Some(take caller)) { Ok(n) => n, Error(_) => return Error(Unavailable) }

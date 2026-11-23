@@ -81,7 +81,7 @@ fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Gra
     Ok(Grants(context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
 }
 
-fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
     let mut after_tool = false
     for e in r.messages { if let ToolResult(_, _) = e { after_tool = true } }
     let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
@@ -112,7 +112,7 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, crash_agent(), code.describe(settle))
+    harness.effect(g.context, g, take key, crash_agent(), code.describe(settle), None)
 }
 
 fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -1072,7 +1072,7 @@ fn matrix_action(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, tak
 }
 
 fn matrix_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, matrix_agent(), code.describe(matrix_settle))
+    harness.effect(g.context, g, take key, matrix_agent(), code.describe(matrix_settle), None)
 }
 
 fn matrix_settle(mut tx: store.Tx, attempt: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
@@ -1624,7 +1624,7 @@ fn race_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take
 }
 
 fn race_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
-    harness.effect(g.context, g, take key, race_agent(), code.describe(race_settle))
+    harness.effect(g.context, g, take key, race_agent(), code.describe(race_settle), None)
 }
 
 fn race_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {

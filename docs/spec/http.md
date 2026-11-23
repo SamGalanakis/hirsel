@@ -550,7 +550,6 @@ request body in one of three modes:
 pub type Coding: key + send = Raw | Form
 pub type Segment: send = Plain(Bytes) | Sealed(Secret, Coding)
 pub type RequestBody: send = Fixed(u64) | Chunked | Segments(List[Segment])
-pub fn write_segments(mut c: Connection, segments: List[Segment]) -> Result[(), Error] waits
 ```
 
 - **`Fixed(n)`** declares `Content-Length: n`, and `write` sends exactly `n` plain bytes.
@@ -558,6 +557,12 @@ pub fn write_segments(mut c: Connection, segments: List[Segment]) -> Result[(), 
   bytes, and `write_segments` sends one chunk made of a sequence of segments.
 - **`Segments(list)`** is a whole body given with the request. `start` sends the head and
   the body together, and `finish_request` follows with no `write`.
+
+```hirsel
+fn write_chunk(mut c: std.http_client.Connection, segments: List[std.http_client.Segment]) -> Result[(), std.http_client.Error] waits {
+    std.http_client.write_segments(mut c, segments)
+}
+```
 
 A body is a sequence of **plain** and **protected** segments. `Plain(bytes)` is sent as
 it is. `Sealed(s, coding)` is the bytes of the `Secret` `s`, written by the runtime in

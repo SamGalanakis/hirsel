@@ -598,7 +598,10 @@ pub type Accounts {
 }
 
 pub fn accounts(db: Db) -> Accounts {
-    let (frames, journal) = match db.disk { Some(state) => (state.inflight, state.uncovered), None => (0u64, 0u64) }
+    let (frames, journal) = match db.disk {
+        Some(state) => (state.inflight, state.uncovered),
+        None => (0u64, 0u64)
+    }
     Accounts(logical: db.resident, exact: !retaining(db) || db.changes == db.settled, frames: frames, journal: journal, resident: db.page_resident)
 }
 
@@ -607,7 +610,10 @@ pub fn fence_level(db: Db) -> u32 {
 }
 
 pub fn is_disk(db: Db) -> bool {
-    match db.disk { Some(_) => true, None => false }
+    match db.disk {
+        Some(_) => true,
+        None => false
+    }
 }
 
 fn disk_state(db: Db) -> View[DiskState] in db {
@@ -632,7 +638,10 @@ fn write_disk[R, T](mut connection: Option[DiskState], take value: T, edit: scop
 }
 
 fn journal_poison(db: Db) -> Option[IoError] {
-    match db.disk { Some(state) => state.poison, None => None }
+    match db.disk {
+        Some(state) => state.poison,
+        None => None
+    }
 }
 
 pub fn identity(db: Db) -> StoreId {
@@ -813,7 +822,9 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let sequence = if let Some(take raw) = take frame {
         db.file_end += size
         db.frame_seq += 1
-        write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) { state.pending = Some(take frame_bytes) })
+        write_disk(mut db.disk, take raw, scoped fn(mut state: DiskState, take frame_bytes: Bytes) {
+            state.pending = Some(take frame_bytes)
+        })
         handoff(mut db)?
         db.frame_seq
     } else {
@@ -1051,7 +1062,10 @@ fn cause_number(causes: Causes) -> u32 {
 fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement]) -> Result[(), Error] {
     let size = if let Some(_) = tx.frame_bytes {
         match rec {
-            Some(value) => call_section_bytes(value, match settlement { Some(_) => true, None => false }),
+            Some(value) => call_section_bytes(value, match settlement {
+                Some(_) => true,
+                None => false
+            }),
             None => 0u64,
         }
     } else {
@@ -1732,11 +1746,16 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     let Ran(value: take value, roots: take roots, live: live, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
     match db.disk {
         Some(mut state) => {
-            db.file_end += match frame { Some(raw) => list.len(raw), None => 0u64 }
+            db.file_end += match frame {
+                Some(raw) => list.len(raw),
+                None => 0u64
+            }
             state.pending = take frame
             db.frame_seq += 1
         },
-        None => { let _ = take frame },
+        None => {
+            let _ = take frame
+        },
     }
     if let Some(take candidate) = take roots {
         let PageRoots(collections: take collections, streams: take streams, catalog: take catalog) = take candidate
@@ -1860,7 +1879,10 @@ pub fn durable(mut db: Db, t: Ticket) -> Result[(), Error] waits {
 /// failure, and the channel closes when the journal worker ends. A store without a
 /// journal returns None; its tickets are durable when committed.
 pub fn sync_notices(mut db: Db) -> Option[Receiver[()]] {
-    match db.disk { Some(mut state) => replace(mut state.synced, None), None => None }
+    match db.disk {
+        Some(mut state) => replace(mut state.synced, None),
+        None => None
+    }
 }
 
 /// `durable` without waiting: whether t's commit is synced now. A journal that ended
@@ -1882,7 +1904,10 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
     if covered(db, t.mark) {
         return Ok(true)
     }
-    let pending = match db.disk { Some(state) => channel.try_receive(state.acks), None => return Ok(true) }
+    let pending = match db.disk {
+        Some(state) => channel.try_receive(state.acks),
+        None => return Ok(true)
+    }
     match take pending {
         Ok(take ack) => journal_ack(mut db, take ack)?,
         Error(Empty) => {},
@@ -1918,18 +1943,25 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
 
 fn covered(db: Db, mark: Mark) -> bool {
     match mark {
-        Journal(n, _, _) => match db.disk { Some(state) => state.journaled >= n, None => n == 0 },
+        Journal(n, _, _) => match db.disk {
+            Some(state) => state.journaled >= n,
+            None => n == 0
+        },
         Cut(n) => db.checkpointed >= n
     }
 }
 
 pub fn close(take db: Db) -> Result[(), Error] waits {
     let mut owned = take db
-    if !is_disk(owned) { return Ok(()) }
+    if !is_disk(owned) {
+        return Ok(())
+    }
     let mut failure: Option[Error] = None
     if let None = journal_poison(owned) {
         let last_frame = Ticket(store: owned.store, open: open_number(owned), mark: Journal(owned.frame_seq, 0, 0))
-        if let Error(take e) = durable(mut owned, last_frame) { failure = Some(take e) }
+        if let Error(take e) = durable(mut owned, last_frame) {
+            failure = Some(take e)
+        }
     }
     let connection = replace(mut owned.disk, None)
     let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_idle_task: take timer, lock: take lock, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
@@ -1943,22 +1975,32 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
         Some(take acknowledgements)
     }
     match task.join(take writer) {
-        Ok(Error(Io(e))) => if let None = poison { poison = Some(e) },
-        Ok(Error(take e)) => if let None = failure { failure = Some(take e) },
+        Ok(Error(Io(e))) => if let None = poison {
+            poison = Some(e)
+        },
+        Ok(Error(take e)) => if let None = failure {
+            failure = Some(take e)
+        },
         Ok(Ok(())) => (),
-        Error(_) => if let None = poison { poison = Some(Closed) },
+        Error(_) => if let None = poison {
+            poison = Some(Closed)
+        },
     }
     if let Some(receiver) = remaining {
         while let Ok(ack) = channel.try_receive(receiver) {
             if let Broken(e) = ack {
-                if let None = poison { poison = Some(e) }
+                if let None = poison {
+                    poison = Some(e)
+                }
             }
         }
     }
     let _ = take notices
     let _ = take notice_to
     if let Error(e) = host.close(take lock) {
-        if let None = poison { poison = Some(e) }
+        if let None = poison {
+            poison = Some(e)
+        }
     }
     match poison {
         Some(e) => Error(Poisoned(e)),
@@ -1970,7 +2012,9 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
 }
 
 fn close_ack(db: Db) -> Option[Ack] {
-    let Some(state) = view db.disk else { return None }
+    let Some(state) = view db.disk else {
+        return None
+    }
     match channel.try_receive(state.acks) {
         Ok(ack) => Some(ack),
         Error(_) => None,
@@ -2229,8 +2273,16 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
     }
     let mut extra = 0u64
     if let Some(frame_bytes) = tx.frame_bytes {
-        let head = if tx.streams == 0 { 5u64 } else { 0u64 }
-        let data_head = if tx.rows == 0 { 5u64 } else { 0u64 }
+        let head = if tx.streams == 0 {
+            5u64
+        } else {
+            0u64
+        }
+        let data_head = if tx.rows == 0 {
+            5u64
+        } else {
+            0u64
+        }
         extra = int.saturating_add(tx.extra_bytes - old_data_op_size(tx.stream_ops, tx.below, true, key), head + 9 + list.len(key) + list.len(value) + call_size)
         if int.saturating_add(frame_bytes, extra) - data_head - 16 > 16777280 {
             return Error(Limit(Transaction))
@@ -5306,7 +5358,9 @@ pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activati
     let kept = ExportLease(attempt: take lease_attempt, packs: take packs, first: first_live, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
     let lease = arc.new(take kept)
     let job = ExportCopy(from: from, scratch: scratch, raw: take raw, stamp: take stamp, lease: arc.share(lease))
-    write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[ExportLease]) { state.lease = Some(take held) })
+    write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[ExportLease]) {
+        state.lease = Some(take held)
+    })
     Ok(take job)
 }
 
@@ -6054,7 +6108,9 @@ pub fn keep_import(mut db: Db, take completed: Imported) -> Result[(), DeployErr
     if !is_disk(db) || !matches_export(db, completed.meta.base) || disk_state(db).reserving != Some(completed.digest) {
         return Error(ExportMismatch)
     }
-    write_disk(mut db.disk, take completed, scoped fn(mut state: DiskState, take ready: Imported) { state.imported = Some(take ready) })
+    write_disk(mut db.disk, take completed, scoped fn(mut state: DiskState, take ready: Imported) {
+        state.imported = Some(take ready)
+    })
     Ok(())
 }
 
@@ -6065,7 +6121,9 @@ fn accept_cutover(mut db: Db, request: Cutover) -> Result[Imported, DeployError]
     }
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, last))?
-    let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[Imported] { replace(mut state.imported, None) })
+    let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[Imported] {
+        replace(mut state.imported, None)
+    })
     let Some(take staged) = take finished else {
         return Error(ExportMismatch)
     }
@@ -6120,10 +6178,14 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     }
     db.ceiling = disk_limit
     let limits = TargetLimits(resident: target.resident_limit, pack: target.pack_bytes, checkpoint: target.checkpoint_bytes, journal: target.journal_limit)
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) { state.target = Some(limits) })
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.target = Some(limits)
+    })
     let StagedMigration(plan: take ready) = take installation
     let installed = publish_schema_plan(mut db, take ready)
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) { state.target = None })
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.target = None
+    })
     match take installed {
         Ok(_) => Ok(release_at),
         Error(Full(cause)) => Error(FullNew(cause)),
@@ -6710,12 +6772,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: take lock, d: d, open: seq, options: clone(options), lease: None,
-        scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first,
-        recorded_after: recorded_after, pages: take pages, bucket: take remote_writer,
-        acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0,
-        written: take written_receive, written_send: take written_send, synced: Some(take synced_receive),
-        poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer))
+    db.disk = Some(DiskState(lock: take lock, d: d, open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, bucket: take remote_writer, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer))
     Ok(take db)
 }
 
@@ -6845,7 +6902,10 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
     let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account: account, pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new(), claim: None)
     let context = DiskContext(store: db.store, role: 1, seq: generation)
     let claim = bucket_claim_of(db)
-    begin_page_manifest_file(mut raw, context, match claim { Some(_) => 1, None => 0 })?
+    begin_page_manifest_file(mut raw, context, match claim {
+        Some(_) => 1,
+        None => 0
+    })?
     append_page_manifest_fields(mut raw, manifest)?
     let heads = list.len(db.heads)
     let branch_count = match delta {
@@ -6869,7 +6929,9 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64
         append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots))
     })?
     seal(mut raw, context, db.fence)?
-    if let Some(held_claim) = claim { append_bucket_frames(mut raw, context, held_claim)? }
+    if let Some(held_claim) = claim {
+        append_bucket_frames(mut raw, context, held_claim)?
+    }
     Ok(())
 }
 
@@ -6911,7 +6973,9 @@ fn cut_io_error(mut db: Db, take problem: Error) -> Error {
     match take problem {
         Io(e) => {
             edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Error {
-                if let None = state.poison { state.poison = Some(e) }
+                if let None = state.poison {
+                    state.poison = Some(e)
+                }
                 Poisoned(option.unwrap(state.poison))
             })
         },
@@ -6949,7 +7013,9 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes
 
 fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64, mut timing: Option[CutTiming]) -> Result[Ticket, Error] waits {
     healthy(db)?
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) { state.since_cut = 0 })
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.since_cut = 0
+    })
     let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     let observe = match timing {
         Some(_) => true,
@@ -6969,7 +7035,9 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut 
     }
     let id = db.store
     prepare_holder_slot(mut db, delta)?
-    edit_disk(mut db.disk, scoped fn(mut state: DiskState) { prune_scrubs(mut state.scrubs) })
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        prune_scrubs(mut state.scrubs)
+    })
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] {
         cut_participants(db, delta)
     })?
@@ -7024,7 +7092,10 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, seal: scoped fn(mut 
     if let Error(take problem) = publish_page_manifest_bytes(d, manifest) {
         return Error(cut_io_error(mut db, take problem))
     }
-    let recorded_after = match delta { ReplaceMain(main, _) => main.head, _ => db.heads[0u64].head }
+    let recorded_after = match delta {
+        ReplaceMain(main, _) => main.head,
+        _ => db.heads[0u64].head
+    }
     write_disk(mut db.disk, take pages, scoped fn(mut state: DiskState, take installed: PageDisk) {
         state.pages = take installed
         state.record_cut = seq
@@ -7059,8 +7130,6 @@ pub fn checkpoint(mut db: Db) -> Result[Ticket, Error] waits {
     healthy(db)?
     cut_install(mut db, NoHolderChange)
 }
-
-
 
 // S3 journal payloads are decoded exactly before their effects are applied.
 pub type CallRecord: codec + shareable + send {
@@ -7655,7 +7724,9 @@ fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
                 Ok(())
             },
             Broken(e) => {
-                if let None = state.poison { state.poison = Some(e) }
+                if let None = state.poison {
+                    state.poison = Some(e)
+                }
                 Error(Poisoned(option.unwrap(state.poison)))
             },
         }

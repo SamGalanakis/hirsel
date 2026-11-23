@@ -102,10 +102,7 @@ fn query_callee[F, A: codec, K, V](f: StaticFn[F], key_codec: std.codec.Key[K], 
     let args: std.codec.Codec[A] = std.codec.of()
     let schema = result.unwrap(runner.query_result_schema(key_codec, value_codec))
     let identity = code.identity(f)
-    let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
-    list.append(mut key, identity)
-    std.codec.put_u64(result.unwrap(std.codec.fingerprint(args)), mut key)
-    std.codec.put_u64(std.codec.fingerprint_of(schema), mut key)
+    let key = runner.entry_key(identity, result.unwrap(std.codec.fingerprint(args)), std.codec.fingerprint_of(schema))
     Callee(key: take key, args: args, reply: std.codec.of_unit())
 }
 
@@ -135,11 +132,7 @@ fn place_keys[G: send, H: send](place: StaticFn[fn(mut runner.Registry[G, H]) ->
     }
     let mut keys: List[Bytes] = list.with_capacity(list.len(entries))
     for d in entries {
-        let mut key: Bytes = list.with_capacity(list.len(d.identity) + 16u64)
-        list.append(mut key, d.identity)
-        std.codec.put_u64(std.codec.fingerprint_of(d.args), mut key)
-        std.codec.put_u64(std.codec.fingerprint_of(d.result), mut key)
-        list.push(mut keys, take key)
+        list.push(mut keys, runner.entry_key(view d.identity, std.codec.fingerprint_of(d.args), std.codec.fingerprint_of(d.result)))
     }
     Ok(take keys)
 }

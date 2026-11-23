@@ -133,12 +133,7 @@ fn encode[A: codec](a: A) -> Result[Bytes, std.codec.EncodeError] {
 fn entry_key[A: codec, R: codec](f: StaticFn[fn(mut store.Tx, Tables, store.Caller, take A) -> Result[R, WriteError]]) -> Result[Bytes, std.codec.EncodeError] {
     let input: std.codec.Codec[A] = std.codec.of()
     let reply: std.codec.Codec[Result[R, WriteError]] = std.codec.of()
-    let identity = code.identity(f)
-    let mut raw: Bytes = list.with_capacity(list.len(identity) + 16u64)
-    list.append(mut raw, identity)
-    std.codec.put_u64(std.codec.fingerprint(input)?, mut raw)
-    std.codec.put_u64(std.codec.fingerprint(reply)?, mut raw)
-    Ok(take raw)
+    runner.attempt_key(f, input, reply)
 }
 
 fn decode_reply[R: codec](outcome: runner.Outcome) -> Result[R, Capacity] {

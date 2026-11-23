@@ -831,12 +831,9 @@ fn described[A, R](identity: View[Bytes], revision: Option[View[Bytes]], kind: K
 
 fn described_result[A](identity: View[Bytes], revision: Option[View[Bytes]], kind: Kind, ca: std.codec.Codec[A], take result: Bytes) -> Result[(Bytes, Exported), std.codec.EncodeError] {
     let args = std.codec.schema(ca)?
-    let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
-    list.append(mut key, identity)
     let args_fp = std.codec.fingerprint_of(args)
     let result_fp = std.codec.fingerprint_of(result)
-    std.codec.put_u64(args_fp, mut key)
-    std.codec.put_u64(result_fp, mut key)
+    let key = entry_key(identity, args_fp, result_fp)
     let mut id: Bytes = list.with_capacity(list.len(identity))
     list.append(mut id, identity)
     let mut rev: Bytes = list.new()
@@ -946,9 +943,7 @@ fn preview_answers[G: send, H: send](r: Registry[G, H]) -> Result[List[Entry], R
     let mut answers: List[Entry] = list.with_capacity(list.len(old))
     for i in 0u64 .. list.len(old) {
         let row = view old[i]
-        let key = match entry_key(view row.described.identity, row.args_fp, row.result_fp) {
-            Ok(take key) => take key, Error(c) => return Error(Full(c)),
-        }
+        let key = entry_key(view row.described.identity, row.args_fp, row.result_fp)
         list.push(mut answers, answer_want(r, key, int.narrow(i)))
     }
     Ok(take answers)
@@ -1379,11 +1374,7 @@ pub fn transact[G: send, H: send, A: codec, R: codec, E: codec](mut r: Registry[
 
 pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, std.codec.EncodeError] {
     let identity = code.identity(definition)
-    let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
-    list.append(mut key, identity)
-    std.codec.put_u64(std.codec.fingerprint(arg)?, mut key)
-    std.codec.put_u64(std.codec.fingerprint(reply)?, mut key)
-    Ok(take key)
+    Ok(entry_key(identity, std.codec.fingerprint(arg)?, std.codec.fingerprint(reply)?))
 }
 
 // An attempt entry has no wire slot or call record. Only the head can attach
@@ -4280,10 +4271,7 @@ fn trigger_key[G: send, H: send](r: Registry[G, H], p: triggers.Pending, choices
     for index in 0u64 .. list.len(r.exported) {
         let entry = view r.exported[index]
         if trigger_matches(p, entry.described) {
-            let mut key = copy_bytes(entry.described.identity)?
-            std.codec.put_u64(entry.args_fp, mut key)
-            std.codec.put_u64(entry.result_fp, mut key)
-            return Ok(Some((take key, index)))
+            return Ok(Some((entry_key(view entry.described.identity, entry.args_fp, entry.result_fp), index)))
         }
     }
     Ok(None)
@@ -8904,15 +8892,15 @@ fn wire_can_read[G: send, H: send, B: send](s: WireSession[G, H, B]) -> bool {
     (s.phase == 0u8 || s.phase == 3u8) && (match s.pending { None => true, _ => false }) && match s.joining { None => true, _ => false }
 }
 
-fn entry_key(identity: View[Bytes], args_fp: u64, result_fp: u64) -> Result[Bytes, Capacity] {
+pub fn entry_key(identity: View[Bytes], args_fp: u64, result_fp: u64) -> Bytes {
     let mut key: Bytes = list.with_capacity(list.len(identity) + 16u64)
     list.append(mut key, identity)
     std.codec.put_u64(args_fp, mut key)
     std.codec.put_u64(result_fp, mut key)
-    Ok(take key)
+    take key
 }
 
-fn wire_key(w: Want) -> Result[Bytes, Capacity] { entry_key(view w.identity, w.args_fp, w.result_fp) }
+fn wire_key(w: Want) -> Bytes { entry_key(view w.identity, w.args_fp, w.result_fp) }
 
 fn answer_want[G: send, H: send](r: Registry[G, H], key: Bytes, slot: u32) -> Entry {
     if map.contains(r.slots, key) { Ready(slot) } else { Gone }
@@ -9815,7 +9803,7 @@ fn wire_accept_hello[G: send, H: send, B: send](mut s: WireSession[G, H, B], tak
     }
     let wanted = replace(mut s.wants, list.new())
     for take want in take wanted {
-        let key = match wire_key(want) { Ok(take key) => take key, Error(_) => return Error(1013u16) }
+        let key = wire_key(want)
         list.push(mut s.entries, take key)
     }
     s.phase = 2u8

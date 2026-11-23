@@ -143,7 +143,7 @@ pub fn law_hello_and_slots(tasks: Tasks, clock: Clock, random: Random) -> bool {
     list.push(mut s.entries, clone(entry))
     let mut unknown: Bytes = list.new()
     list.append(mut unknown, string.as_bytes("missing"))
-    let missing = result.unwrap(wire_key(Want(identity: take unknown, args_fp: 0u64, result_fp: 0u64)))
+    let missing = wire_key(Want(identity: take unknown, args_fp: 0u64, result_fp: 0u64))
     list.push(mut s.entries, take missing)
     list.push(mut s.entries, clone(entry))
     if wire_can_read(s) { return false }

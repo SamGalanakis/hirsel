@@ -59,24 +59,9 @@ CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply',
 NATIVE_ONLY_CALLS = {'drain_reopened', 'lag_window', 'local_one_head', 'local_route_during_unload', 'local_idle_unload', 'local_reopen_keeps'}
 PERSISTENT_PLACE_CALLS = {'atomic_migration', 'ready_after_activation', 'calls_recorded'}
 
-# L3 (RUNNER-SPEC v2.6): execution counts read from CONC-10 events, (event kind, count).
-# TRY_SEND is kind 7 in crates/hirsel-core-layout/src/event.rs. calls_runs_once
-# reaches tally once and receives four answers. The session sends one retirement
-# wake to the head, so the total is 1 + 4 + 1. The evaluator's count comes from
-# its event log; natively, core/tools/runner_count.c is linked into the case's test
-# executable as its event sink and fails the run on any other count.
-# L7 adds the source-derived sends from hung and one marker by the other session's
-# compute body. RUNNER-SPEC.md §8, L6+L7 orders the compute before the hung
-# call's stop, observed at its first publisher offer. MEM-30 makes the slice
-# a scheduling point. The three answers to s0 go to one inbox.
-# The body's prelude inside its 65,536-step bound is 158 steps: the 165 counted at
-# 3a3ccdc8, less the seven calls STORE v2.30 AN1 deleted from that path
-# (current_authority, share_authority, arc.share and full_scope's call and
-# list.new in draft_body's Tx; clone of the granted scope in stage_reply; and
-# check_key in put).
-HUNG_BODY_SENDS = (65536 - 158 + 1) // 2
-HUNG_TOLDS = 3
-COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, HUNG_BODY_SENDS + HUNG_TOLDS + 2)}
+# L3 counts the body, four publisher answers, and the retirement wake.
+HUNG_STEPS, HUNG_TOLDS = 65538, 3
+COUNTS = {'calls_runs_once': (7, 6), 'calls_deadline_hung': (7, None)}
 PLACEMENT_OBSERVERS = {'ready_after_activation': 'READY_BEFORE_ACCEPT', 'lag_window': 'LAG_ADMISSION'}
 
 # Wire floods retain all 10,000 frames. The evaluator's generic 1B test envelope
@@ -115,36 +100,44 @@ def counted(name, report):
         wakes_head = site == 'runner@1/runner/try_head' and e[1] in retirement
         if e[0] != kind or site in observed or wakes_head:
             attributed.append((e, site))
-    if sum(1 for e, _ in attributed if e[0] == kind) != want:
-        return False
-    if name == 'calls_deadline_hung':
-        sends = {}
-        for at, (e, site) in enumerate(attributed):
-            if e[0] == kind:
-                sends.setdefault(e[2], []).append((at, e[1], site))
-        if sorted(map(len, sends.values())) != [1, 1, HUNG_TOLDS, HUNG_BODY_SENDS]:
-            return False
-        told = next(v for v in sends.values() if len(v) == HUNG_TOLDS)
-        marker = next((v[0] for v in sends.values() if len(v) == 1
-                       and v[0][2] == 'runner@1/runner_calls/answer'), None)
-        retirement = next((v[0] for v in sends.values() if len(v) == 1
-                           and v[0][2] == 'runner@1/runner/try_head'), None)
-        body = next(v for v in sends.values() if len(v) == HUNG_BODY_SENDS)
-        slices = [(at, e[1]) for at, (e, _) in enumerate(attributed) if e[0] == 21]
-        return (marker is not None and retirement is not None and len(slices) == 1
-                and marker[0] < told[0][0]
-                and slices[0][0] < told[0][0] < retirement[0]
-                and marker[1] != slices[0][1] == body[0][1]
-                and all(t != slices[0][1] and site == 'runner@1/runner/offer' for _, t, site in told))
-    return True
+    if name != 'calls_deadline_hung':
+        return sum(1 for e, _ in attributed if e[0] == kind) == want
+    counts, group = [], []
+    for event, site in attributed:
+        group.append((event, site))
+        if event[0] == kind and site == 'runner@1/runner/try_head':
+            count = hung_count(group, HUNG_STEPS + 2 * len(counts))
+            if count is None:
+                return False
+            counts.append(count)
+            group.clear()
+    return len(counts) == 2 and counts[1] == counts[0] + 1 and not any(
+        e[0] in (kind, 21) for e, _ in group)
 
 
-# L4 (RUNNER-SPEC v2.5 §8): runner_rss.hirsel's program, built per native backend against
-# the charge-observation runtime and run in two modes, one valid call (0) and 10,000
-# malformed frames before it (1). Both exit 0 and their --logical-charge-report
-# peak_retained_bytes (the runtime's exact peak of live backing requests) are equal: a
-# refused frame that leaves any bytes behind raises mode 1's peak. ru_maxrss, the
-# earlier figure, moves by 256 KB steps from run to run and cannot see a small leak.
+def hung_count(events, steps):
+    sends = {}
+    slices = []
+    for at, (e, site) in enumerate(events):
+        if e[0] == 7:
+            sends.setdefault(e[2], []).append((at, e[1], site.rsplit('/', 1)[-1]))
+        elif e[0] == 21:
+            slices.append((at, e[1]))
+    by_site = {seq[0][2]: seq for seq in sends.values()}
+    if len(sends) != 4 or set(by_site) != {'hung', 'answer', 'offer', 'try_head'} or len(slices) != 1:
+        return None
+    body, marker, told, retirement = (by_site[site] for site in ('hung', 'answer', 'offer', 'try_head'))
+    cut, head = slices[0]
+    if (len(marker) == len(retirement) == 1 and len(told) == HUNG_TOLDS
+            and 1 <= len(body) <= (steps + 1) // 2
+            and marker[0][0] < told[0][0] and cut < told[0][0] < retirement[0][0]
+            and marker[0][1] != head and all(t == head and site == 'hung' for _, t, site in body)
+            and all(t != head and site == 'offer' for _, t, site in told)):
+        return len(body)
+    return None
+
+
+# L4 compares the exact retained peak for 10 and 10,000 malformed calls on one build.
 def charged(args, root, work, engine, module, modes, figure, cc=None):
     """Build programs/runner/<module>.hirsel on the charge-observation runtime and run it in
     each (argv, label) mode: {label: (exit status, figure(charge report))}, or None and the
@@ -187,12 +180,12 @@ def charged(args, root, work, engine, module, modes, figure, cc=None):
 
 
 def l4_retained(args, root, work, engine):
-    figures, error = charged(args, root, work, engine, 'runner_rss', (('0', 'valid'), ('1', 'flood')),
+    figures, error = charged(args, root, work, engine, 'runner_rss', (('10', 'ten'), ('10000', 'flood')),
                              lambda r: r['peak_retained_bytes'])
     if figures is None:
         return False, {'build': error}
-    held = (figures['valid'][0] == 0 and figures['flood'][0] == 0 and figures['valid'][1] is not None
-            and figures['flood'][1] == figures['valid'][1])
+    held = (figures['ten'][0] == 0 and figures['flood'][0] == 0 and figures['ten'][1] is not None
+            and figures['flood'][1] == figures['ten'][1])
     return held, figures
 
 
@@ -923,10 +916,14 @@ def simulation_entry(inputs_path, definition, scratch, window):
     package_name, version = package.split('@')
     sources = next(p['sources'] for p in inputs['packages']
                    if p['package'] == {'name': package_name, 'version': version})
-    module = next(source for source in sources if source['modules'] == modules)
-    source = Path(module['file']).read_text()
-    signature = re.search(rf'^pub fn {re.escape(name)}\(([^)]*)\)\s*->\s*([a-zA-Z0-9_]+)\s+waits\s*{{', source, re.M)
-    if signature is None or not re.search(r':\s*Net\b', signature[1]):
+    pattern = re.compile(rf'^pub fn {re.escape(name)}\(([^)]*)\)\s*->\s*([a-zA-Z0-9_]+)\s+waits\s*{{', re.M)
+    for module in sources:
+        if module['modules'] != modules:
+            continue
+        source = Path(module['file']).read_text()
+        if (signature := pattern.search(source)) is not None and re.search(r':\s*Net\b', signature[1]):
+            break
+    else:
         return inputs_path, definition
     parameters = [tuple(part.strip() for part in pair.split(':')) for pair in signature[1].split(',') if pair.strip()]
     task_name = next((name for name, ty in parameters if ty == 'Tasks'), None)
@@ -1192,10 +1189,10 @@ def counting_cc(args, root, inputs_path, name):
     work = inputs_path.parent.absolute()
     support = work / f'count_{name}.o'
     run_case(f'{name}:observer', 'cc', [str(cc), '-c', '-fPIC', str(root / 'core/tools/runner_count.c'),
-                    '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want}',
+                    '-I' + str(root / 'crates/hirsel-core-rt/include'), f'-DTRY_SENDS={want or 0}',
                     f'-DSOURCE_MANIFEST_DIR={json.dumps(str(work), ensure_ascii=False)}',
                     *([f'-D{PLACEMENT_OBSERVERS[name]}'] if name in PLACEMENT_OBSERVERS else []),
-                    *([f'-DHUNG_BODY_SENDS={HUNG_BODY_SENDS}', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
+                    *([f'-DHUNG_STEPS={HUNG_STEPS}', f'-DHUNG_TOLDS={HUNG_TOLDS}'] if name == 'calls_deadline_hung' else []),
                     '-o', str(support)], check=True)
     wrapper = work / f'count_{name}-cc'
     wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(str(cc)) + ' "$@" '

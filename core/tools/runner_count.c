@@ -108,7 +108,7 @@ HirselCoreChannelNew __wrap_hirsel_core_channel_new(HirselCoreContext *ctx, uint
 #endif
     HirselCoreChannelNew out = __real_hirsel_core_channel_new(ctx, capacity, layout, site);
     if (item_named(site, "answer")) marker_channel = out.sender;
-    if (!head_channel && item_named(site, "served_on")) head_channel = out.sender;
+    if (item_named(site, "calls_inbox")) head_channel = out.sender;
 #if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
     permit_create = 0;
 #endif
@@ -125,11 +125,39 @@ uint8_t __wrap_hirsel_core_try_send(HirselCoreChannel *channel, void *input) {
     return result;
 }
 static uint64_t try_sends;
-#ifdef HUNG_BODY_SENDS
+#ifdef HUNG_STEPS
 static struct { uint64_t object, task, count, first; int marker, retirement; } senders[4];
 static size_t sender_count;
 static uint64_t slice_task, slices, slice_at;
-static int too_many_senders;
+static int too_many_senders, hung_laws, bad_hung;
+static uint64_t first_hung_count;
+
+static void finish_hung(void) {
+    uint64_t steps = HUNG_STEPS + 2 * hung_laws;
+    size_t body = 4, marker = 4, told = 4, retirement = 4;
+    for (size_t k = 0; k < sender_count; k++) {
+        if (senders[k].count == 1 && senders[k].marker) marker = k;
+        else if (senders[k].count == 1 && senders[k].retirement) retirement = k;
+        else if (senders[k].count == HUNG_TOLDS && senders[k].task == publisher_task) told = k;
+        else if (senders[k].task == head_task) body = k;
+    }
+    if (too_many_senders || sender_count != 4 || slices != 1 ||
+        body == 4 || marker == 4 || told == 4 || retirement == 4 ||
+        senders[body].count < 1 || senders[body].count > (steps + 1) / 2 ||
+        senders[body].task != slice_task || senders[marker].task == slice_task ||
+        senders[marker].first >= senders[told].first ||
+        slice_at >= senders[told].first || senders[told].first >= senders[retirement].first) {
+        bad_hung = 1;
+        return;
+    }
+    uint64_t count = senders[body].count;
+    fprintf(stderr, "runner_count: %llu steps, %llu hung sends\n",
+            (unsigned long long)steps, (unsigned long long)count);
+    if (hung_laws++ == 0) first_hung_count = count;
+    else if (count != first_hung_count + 1) bad_hung = 1;
+    memset(senders, 0, sizeof senders);
+    sender_count = slices = try_sends = 0;
+}
 #endif
 static void event(void *state, HirselCoreEvent e) {
     (void)state;
@@ -155,6 +183,9 @@ static void event(void *state, HirselCoreEvent e) {
     if (e.kind == HIRSEL_CORE_EVENT_END && e.object == publisher_task) publisher_live = 0;
 #endif
     if (e.kind == HIRSEL_CORE_EVENT_SPAWN && publisher_spawn) {
+#ifdef HUNG_STEPS
+        if (observed) finish_hung();
+#endif
         publisher_task = e.object;
         head_task = e.task;
         observed = 1;
@@ -168,7 +199,7 @@ static void event(void *state, HirselCoreEvent e) {
         && (e.task == head_task || e.task == publisher_task || marker_send
             || (retirement_send && e.task == retiring_task))) {
         try_sends++;
-#ifdef HUNG_BODY_SENDS
+#ifdef HUNG_STEPS
         size_t i = 0;
         while (i < sender_count && senders[i].object != e.object) i++;
         if (i == 4) { too_many_senders = 1; return; }
@@ -183,7 +214,7 @@ static void event(void *state, HirselCoreEvent e) {
         senders[i].count++;
 #endif
     }
-#ifdef HUNG_BODY_SENDS
+#ifdef HUNG_STEPS
     if (e.kind == HIRSEL_CORE_EVENT_STEP_SLICE) {
         slice_task = e.task;
         slice_at = try_sends;
@@ -191,7 +222,7 @@ static void event(void *state, HirselCoreEvent e) {
     }
 #endif
 }
-#ifdef HUNG_BODY_SENDS
+#ifdef HUNG_STEPS
 extern uint8_t hirsel_core_test_run_last(const HirselCoreProcessConfig *, HirselCoreEntry);
 #endif
 uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
@@ -203,7 +234,7 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     hirsel_core_os_process_set_sources(open.process, sources);
     HirselCoreProcessConfig cfg = *hirsel_core_os_process_config(open.process);
     cfg.scheduler.event = event;
-#ifdef HUNG_BODY_SENDS
+#ifdef HUNG_STEPS
     uint8_t status = hirsel_core_test_run_last(&cfg, entry);
 #else
     uint8_t status = hirsel_core_run(&cfg, entry);
@@ -228,33 +259,14 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
         return 105;
     }
     return 0;
+#elif defined(HUNG_STEPS)
+    if (status) return status;
+    if (observed) finish_hung();
+    return !bad_hung && hung_laws == 2 ? 0 : 105;
 #else
     dprintf(2, "runner_count: try_send %llu, want %llu\n", (unsigned long long)try_sends,
             (unsigned long long)TRY_SENDS);
     if (status) return status;
-#ifdef HUNG_BODY_SENDS
-    if (try_sends != TRY_SENDS || too_many_senders || sender_count != 4 || slices != 1) {
-        for (size_t k = 0; k < sender_count; k++) fprintf(stderr, "runner_count: object %llu task %llu sends %llu\n", (unsigned long long)senders[k].object, (unsigned long long)senders[k].task, (unsigned long long)senders[k].count);
-        return 105;
-    }
-    /* RUNNER-SPEC §8, L6+L7 orders the compute before the hung call's stop.
-     * MEM-30 permits the compute to run at the slice end. */
-    size_t body = 4, marker = 4, told = 4, retirement = 4;
-    for (size_t k = 0; k < 4; k++) {
-        if (senders[k].count == HUNG_BODY_SENDS) body = k;
-        else if (senders[k].count == 1 && senders[k].marker) marker = k;
-        else if (senders[k].count == 1 && senders[k].retirement) retirement = k;
-        else if (senders[k].count == HUNG_TOLDS && senders[k].task == publisher_task) told = k;
-    }
-    if (body == 4 || marker == 4 || told == 4 || retirement == 4 ||
-        senders[body].task != slice_task || senders[marker].task == slice_task ||
-        senders[marker].first >= senders[told].first ||
-        slice_at >= senders[told].first || senders[told].first >= senders[retirement].first) {
-        fprintf(stderr, "runner_count: body=%zu marker=%zu told=%zu retirement=%zu slice_task=%llu\n",
-                body, marker, told, retirement, (unsigned long long)slice_task);
-        return 105;
-    }
-#endif
     return try_sends == TRY_SENDS ? 0 : 105;
 #endif
 }

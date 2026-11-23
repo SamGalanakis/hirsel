@@ -1,9 +1,7 @@
 // L4's native case (RUNNER-SPEC v2.5 §8): one program, two modes, compared by
 // core/tools/runner_tests.py on the charge-observation runtime's peak_retained_bytes.
-// argv: mode. Mode 0: one valid call through a session and the head. Mode 1: 10,000
-// malformed calls (a 4,096-byte String plus one byte, so each decode reads the whole
-// String before it is refused), then the same valid call. Refused frames leave nothing
-// behind, so the two modes' peaks are equal.
+// argv: number of malformed calls before the valid call. Each malformed call appends
+// one byte to a 4,096-byte String, so the decoder reads the full String before refusal.
 type Hd: send { t: store.Table[u64, u64] }
 
 type Calls = runner.Registry[(), Hd]
@@ -100,7 +98,7 @@ fn drive(take d: D) -> () waits {
 
 pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) -> Result[(), Exit] waits {
     let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
-    let flood = if result.unwrap(std.int.parse_uint(m, 10u32)) == 1u64 { 10000u64 } else { 0u64 }
+    let flood = result.unwrap(std.int.parse_uint(m, 10u32))
     let mut db = store.memory(clock, random, store.defaults())
     let cv: std.codec.Codec[u64] = std.codec.of()
     let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))

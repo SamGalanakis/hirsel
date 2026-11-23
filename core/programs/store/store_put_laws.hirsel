@@ -833,10 +833,28 @@ fn test_callback_shares_staged(c: Clock) -> Result[(), ()] waits {
     }
 }
 
-// For each bound in 0..`top`, whether a bounded body that deletes row 2 and
-// writes rows 3 and 5 returns, on a store with rows 1..64
-// whose old rows are retained (a pin) or not.
-fn retention_outcomes(c: Clock, retained: bool, top: u64) -> List[bool] waits {
+fn retention_returned(mut db: Db, t: Table[u64, u64], steps: u64) -> bool waits {
+    let ran = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        let bounded = rollback_writes_on_overrun(mut tx, steps, scoped fn(mut w: Tx) -> Result[(), Error] {
+            let _ = delete(mut w, t, 2)?
+            put(mut w, t, 3, 30)?
+            put(mut w, t, 5, 50)
+        })
+        let status = match bounded {
+            Ok(Ok(())) => "returned",
+            Error(_) => "overran",
+            _ => fail("retention body refused"),
+        }
+        // Abort so every bound starts from the same rows.
+        Error(Missing(status))
+    }))
+    match take ran {
+        Aborted(Undone(value: Missing(why), ..)) => why == "returned",
+        _ => fail("retention run"),
+    }
+}
+
+fn retention_threshold(c: Clock, retained: bool) -> u64 waits {
     let mut db = test_db(c, 1073741824)
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
@@ -854,41 +872,29 @@ fn retention_outcomes(c: Clock, retained: bool, top: u64) -> List[bool] waits {
         let held = snapshot(db)
         let _ = result.unwrap(pin(mut db, "held", held))
     }
-    let mut out: List[bool] = list.new()
-    for b in 0u64 .. top {
-        let ran = result.unwrap(run(mut db, None, scoped fn(mut tx: Tx) -> Result[bool, Error] {
-            let bounded = rollback_writes_on_overrun(mut tx, b, scoped fn(mut w: Tx) -> Result[(), Error] {
-                let _ = delete(mut w, t, 2)?
-                put(mut w, t, 3, 30)?
-                put(mut w, t, 5, 50)
-            })
-            let returned = match bounded {
-                Ok(_) => true,
-                Error(_) => false,
-            }
-            // Abort, so every bound starts from the same rows.
-            Error(Missing(if returned {
-                "returned"
-            } else {
-                "overran"
-            }))
-        }))
-        match take ran {
-            Aborted(Undone(value: Missing(why), ..)) => list.push(mut out, why == "returned"),
-            _ => fail("retention run"),
+    let mut low = 0u64
+    let mut high = 1u64
+    while !retention_returned(mut db, t, high) {
+        if high > 9223372036854775807 {
+            fail("retention body never returned")
+        }
+        high *= 2
+    }
+    while low < high {
+        let mid = low + (high - low) / 2
+        if retention_returned(mut db, t, mid) {
+            high = mid
+        } else {
+            low = mid + 1
         }
     }
-    take out
+    low
 }
 
-// Re-executing a body on a replay fork runs it with old rows retained, where
-// the live run may not have. Its metered steps must not depend on that, or a
-// tight bound gives the two runs different outcomes. Oracle: the outcome of
-// each bound without retention; the bound sweeps past the body's whole cost.
+// A replay fork retains old rows even when the live run does not. The body
+// must return at the same step threshold under either retention policy.
 pub fn law_retention_keeps_steps(c: Clock) -> bool waits {
-    let live = retention_outcomes(c, false, 1200)
-    let held = retention_outcomes(c, true, 1200)
-    live[1199] && live == held
+    retention_threshold(c, false) == retention_threshold(c, true)
 }
 
 @test

@@ -1,0 +1,53 @@
+// A stopped transaction is reply-only, is replayed for a Duplicate, and leaves
+// its writes absent. The second session's compute call also receives its answer.
+fn drive_deadline_hung(take d: Drive, steps: u64) -> () waits {
+    let s0 = conn(d, 1u64)
+    let s1 = conn(d, 1u64)
+    let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply())
+    let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
+    ask(s0, d.clock, 0u64, 0u64, clone(kh), u64_arg(5u64), LATER)
+    ask(s1, d.clock, 1u64, 0u64, take ka, u64_arg(19u64), LATER)
+    let computed = frame(s1)
+    match computed.outcome {
+        Returned(b) => {
+            let c: std.codec.Codec[u64] = std.codec.of()
+            match std.codec.decode(c, b) { Ok(19) => {}, _ => fail("hung: compute did not answer") }
+        },
+        _ => fail("hung: compute faulted"),
+    }
+    let stopped = frame(s0)
+    want(is(stopped.outcome, Failed(OutOfTime(steps))), "hung: wrong stop")
+    want(stopped.version == 3u64, "hung: stop is not a reply-only commit")
+    ask(s0, d.clock, 0u64, 0u64, take kh, u64_arg(5u64), LATER)
+    want(is(frame(s0).outcome, stopped.outcome), "hung: duplicate reran")
+    // The next admitted position still runs after the reply-only stop.
+    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(5u64), LATER)
+    want(ok_value(frame(s0).outcome) == Some(5u64), "hung: next position did not run")
+    hang(take s0)
+    hang(take s1)
+}
+
+const HUNG_STEPS: u64 = 65538u64
+
+fn place_hung_extra(mut r: Calls) -> Result[(), runner.RegisterError] {
+    place_with_hung_steps(mut r, HUNG_STEPS + 2)
+}
+
+fn drive_hung_base(take d: Drive) -> () waits {
+    drive_deadline_hung(take d, HUNG_STEPS)
+}
+
+fn drive_hung_extra(take d: Drive) -> () waits {
+    drive_deadline_hung(take d, HUNG_STEPS + 2)
+}
+
+pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    let mut token: Bytes = list.new()
+    served(c, r, tasks, n, drive_hung_base) &&
+        served_on_with_place(store.memory(c, r, store.defaults()), c, tasks, n, r, mut token, 0u64, drive_hung_extra, code.describe(place_hung_extra))
+}
+
+@test
+fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if law_calls_deadline_hung(c, r, tasks, n) { Ok(()) } else { Error(()) }
+}

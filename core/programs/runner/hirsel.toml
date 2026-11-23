@@ -29,6 +29,7 @@ dirs = ["."]
 "runner_laws.hirsel" = "runner_laws"
 "runner_reexec_laws.hirsel" = "runner"
 "runner_calls.hirsel" = "runner_calls"
+"runner_hung_laws.hirsel" = "runner_calls"
 "runner-idle-law.hirsel" = "runner_calls"
 "session-laws.hirsel" = "runner"
 "admission-laws.hirsel" = "runner"

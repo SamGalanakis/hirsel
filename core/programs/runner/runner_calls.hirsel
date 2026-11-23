@@ -118,12 +118,7 @@ fn flood(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[
     Ok(k)
 }
 
-// L7/MEM-30. The 65,536-step entry bound spends 165 before the loop:
-// draft setup 23, entry adapters and scope clone 8, argument decode 8,
-// put 124, and channel creation and unwrap 2. The put is its entry
-// (1), writable catalog check (18), encoded key (6), scope and index
-// checks (2), and put_impl (97). The data and operation trees start empty.
-// Send k is step 165 + 2*k - 1, so the body attempts exactly 32,686 sends.
+// L7/MEM-30 counts sends across this loop's call and back edge.
 fn hung(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
     let _ = store.put(mut tx, h.t, k, k)
     // Keep the receiver alive so the hung body's sends can poll a full channel.
@@ -139,13 +134,17 @@ fn answer(take k: u64) -> Result[u64, Capacity] {
 // The place's one `place` function (rule 10): the head, the publisher and every session
 // run it.
 fn place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    place_with_hung_steps(mut r, HUNG_STEPS)
+}
+
+fn place_with_hung_steps(mut r: Calls, steps: u64) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(refuse), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(crash), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(tally), 65536u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(named), 16384u64, runner.DEFAULT_STEPS)?
     runner.transact(mut r, code.describe(flood), 524288u64, runner.DEFAULT_STEPS)?
-    runner.transact(mut r, code.describe(hung), 65536u64, 65536u64)?
+    runner.transact(mut r, code.describe(hung), 65536u64, steps)?
     runner.compute(mut r, code.describe(answer), 65536u64, runner.DEFAULT_STEPS)?
     runner.query(mut r, code.describe(everything), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)?
     runner.query_as(mut r, code.describe(mine), std.codec.key_u64(), std.codec.of_u64(), 65536u64, runner.DEFAULT_STEPS)
@@ -412,11 +411,19 @@ fn served_in(c: Clock, r: Random, tasks: Tasks, n: Net, o: store.Options, f: fn(
 }
 
 fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits) -> bool waits {
+    served_on_with_place(take fresh, c, tasks, n, r, mut token, grouped, f, code.describe(place))
+}
+
+fn calls_inbox() -> (Sender[runner.HeadInput], Receiver[runner.HeadInput]) {
+    channel.new(64u64)
+}
+
+fn served_on_with_place(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mut token: Bytes, grouped: u64, f: fn(take Drive) -> () waits, register: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]]) -> bool waits {
     let db = take fresh
     // The disk fixture drives one connection. Leave room in its existing root
     // budget for the journal worker and the activation cut's buffer.
     let driving_bytes = if store.is_disk(db) { 25165824u64 } else { 33554432u64 }
-    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let (head, inbox) = calls_inbox()
     let mail = result.unwrap(runner.mailbox(4u64))
     let credential = ingress.credential(r)
     list.append(mut token, credential)
@@ -430,7 +437,7 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mu
     } else { (take head, None) }
     let d = Drive(head: take to_head, post: runner.post(mail), clock: c, tasks: tasks, net: n, random: r, token: clone(credential), accepted: take grouped_ack)
     let driving = task.spawn(tasks, bytes driving_bytes, take d, f)
-    let opened = runner.place_head(take db, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
+    let opened = runner.place_head(take db, register, N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     let drove = task.join(take driving)
     if let Some(take h) = take forwarding { let _ = task.join(take h) }
     match opened {
@@ -2296,44 +2303,6 @@ fn test_calls_deadline_held(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result
 @test
 fn test_calls_runs_once(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     if law_calls_runs_once(c, r, tasks, n) { Ok(()) } else { Error(()) }
-}
-
-// A stopped transaction is reply-only, is replayed for a Duplicate, and leaves
-// its writes absent. The second session's compute call also receives its answer.
-fn drive_deadline_hung(take d: Drive) -> () waits {
-    let s0 = conn(d, 1u64)
-    let s1 = conn(d, 1u64)
-    let kh = key_of(code.identity(code.describe(hung)), std.codec.of_u64(), reply())
-    let ka = key_of(code.identity(code.describe(answer)), std.codec.of_u64(), std.codec.of_u64())
-    ask(s0, d.clock, 0u64, 0u64, clone(kh), u64_arg(5u64), LATER)
-    ask(s1, d.clock, 1u64, 0u64, take ka, u64_arg(19u64), LATER)
-    let computed = frame(s1)
-    match computed.outcome {
-        Returned(b) => {
-            let c: std.codec.Codec[u64] = std.codec.of()
-            match std.codec.decode(c, b) { Ok(19) => {}, _ => fail("hung: compute did not answer") }
-        },
-        _ => fail("hung: compute faulted"),
-    }
-    let stopped = frame(s0)
-    want(is(stopped.outcome, Failed(OutOfTime(65536))), "hung: wrong stop")
-    want(stopped.version == 3u64, "hung: stop is not a reply-only commit")
-    ask(s0, d.clock, 0u64, 0u64, take kh, u64_arg(5u64), LATER)
-    want(is(frame(s0).outcome, stopped.outcome), "hung: duplicate reran")
-    // The next admitted position still runs after the reply-only stop.
-    ask(s0, d.clock, 0u64, 1u64, k_write(), u64_arg(5u64), LATER)
-    want(ok_value(frame(s0).outcome) == Some(5u64), "hung: next position did not run")
-    hang(take s0)
-    hang(take s1)
-}
-
-pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    served(c, r, tasks, n, drive_deadline_hung)
-}
-
-@test
-fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    if law_calls_deadline_hung(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
 fn migration_second_refuses(mut phase: store.Migration) -> Result[(), store.Error] {

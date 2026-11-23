@@ -1,0 +1,71 @@
+// L62's slot boundary. Use hand-laid pack locations and AP15 charges. The
+// cut prepares a separate root while the earlier capture still owns its data.
+@test
+fn test_l62_slots() -> Result[(), ()] {
+    let mut lo: Bytes = list.new()
+    let mut hi: Bytes = list.new()
+    list.push(mut lo, 1u8)
+    list.push(mut hi, 2u8)
+    let mut value: Bytes = list.with_capacity(1025)
+    list.fill(mut value, 1025, 106u8)
+    let blob_location = std.page.PagePtr(pack: 11, offset: 72, len: 1033, checksum: 101, stamp: 1)
+    let left = std.page.PagePtr(pack: 12, offset: 72, len: 72, checksum: 102, stamp: 2)
+    let right = std.page.PagePtr(pack: 12, offset: 160, len: 33, checksum: 103, stamp: 3)
+    let initial = std.page.BlobRef(stamp: 1, len: 1025, checksum: 101, pack: 0, offset: 0, body: 0)
+    let mut left_rows: List[std.page.Entry] = list.new()
+    list.push(mut left_rows, std.page.Entry(key: clone(lo), cell: BlobValue(initial)))
+    let left_image = result.unwrap(std.page.encode(left_rows, 0, 2, Collection))
+    let mut bodies: List[std.page.BlobSlot] = list.new()
+    list.push(mut bodies, HotBlob(arc.new(clone(value))))
+    let low = result.unwrap(std.page.attach(take left_image, list.new(), take bodies))
+    let mut small: Bytes = list.new()
+    list.push(mut small, 7u8)
+    let mut right_rows: List[std.page.Entry] = list.new()
+    list.push(mut right_rows, std.page.Entry(key: clone(hi), cell: InlineValue(take small)))
+    let right_image = result.unwrap(std.page.encode(right_rows, 0, 3, Collection))
+    let high = result.unwrap(std.page.attach(take right_image, list.new(), list.new()))
+    let mut branch_rows: List[std.page.Entry] = list.new()
+    list.push(mut branch_rows, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: std.page.unlocated(2), rows: 1, charge: 1102))))
+    list.push(mut branch_rows, std.page.Entry(key: clone(hi), cell: Child(std.page.Branch(child: std.page.unlocated(3), rows: 1, charge: 78))))
+    let root_image = result.unwrap(std.page.encode(branch_rows, 1, 4, Collection))
+    let mut kids: List[std.page.Slot] = list.new()
+    list.push(mut kids, HotPage(arc.share(low)))
+    list.push(mut kids, HotPage(take high))
+    let captured = result.unwrap(std.page.attach(take root_image, take kids, list.new()))
+    let locate: scoped[view] fn(u64) -> std.page.PagePtr = scoped fn(stamp: u64) -> std.page.PagePtr {
+        match stamp {
+            1 => blob_location,
+            2 => left,
+            3 => right,
+            _ => fail("unexpected stamp in sealed image"),
+        }
+    }
+    let cut = result.unwrap(sealed_tiered_root(captured, locate))
+    let cut_leaf = result.unwrap(sealed_tiered_root(low, locate))
+    let expected = std.page.BlobRef(stamp: 1, len: 1025, checksum: 101, pack: 11, offset: 72, body: 0)
+    let Some(ColdPage(a)) = std.page.child_slot(cut, 0) else {
+        return Error(())
+    }
+    let Some(ColdPage(b)) = std.page.child_slot(cut, 1) else {
+        return Error(())
+    }
+    let Some(ColdBlob(c)) = std.page.blob_slot(cut_leaf, 0) else {
+        return Error(())
+    }
+    if a != left || b != right || c != expected || std.page.totals(cut) != (2u64, 1180u64) {
+        return Error(())
+    }
+    let Some(head) = std.page.child(captured, 0) else {
+        return Error(())
+    }
+    let Some(retained) = std.page.body(head, 0) else {
+        return Error(())
+    }
+    let Some(found) = std.page.lookup(captured, lo) else {
+        return Error(())
+    }
+    if list.compare_bytes(retained, value) != Equal || found != value || std.page.rank(captured, hi, true) != 2 {
+        return Error(())
+    }
+    Ok(())
+}

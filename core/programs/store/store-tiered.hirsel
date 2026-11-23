@@ -1,0 +1,12 @@
+// Build the replacement root from the same sealed image the cut writes.
+// The old root and its Hot slots still belong to prior captures.
+fn sealed_tiered_root(root: Arc[std.page.Page], locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[Arc[std.page.Page], Error] {
+    let image = std.page.image_of(root)
+    if std.page.count(image) == 0 {
+        return Ok(arc.share(root))
+    }
+    let mut sealed: Bytes = list.with_capacity(std.page.sealed_size(image))
+    page_result(std.page.seal_located(mut sealed, root, locate))?
+    let ready = page_result(std.page.decode(take sealed, Collection))?
+    page_result(std.page.attach_cold(take ready))
+}

@@ -65,10 +65,14 @@ pub opaque type Image: shareable + send {
     domain: Domain
 }
 
+pub type Slot: shareable + send = HotPage(Arc[Page]) | ColdPage(PagePtr)
+
+pub type BlobSlot: shareable + send = HotBlob(Arc[Bytes]) | ColdBlob(BlobRef)
+
 pub opaque type Page: shareable + send {
     image: Image,
-    kids: List[Arc[Page]],
-    blobs: List[Arc[Bytes]],
+    kids: List[Slot],
+    blobs: List[BlobSlot],
     rows: u64,
     charge: u64,
     // This page's own image may be out of canonical form (AP3).
@@ -225,21 +229,54 @@ pub fn payload(image: Image) -> View[Bytes] in image {
     view image.raw
 }
 
-pub fn child(page: Arc[Page], slot: u64) -> Option[Arc[Page]] {
-    if slot < list.len(page.kids) {
-        Some(arc.share(page.kids[slot]))
-    } else {
-        None
+pub fn child_slot(page: Arc[Page], slot: u64) -> Option[View[Slot]] in page {
+    list.get(page.kids, slot)
+}
+
+pub fn blob_slot(page: Arc[Page], at: u16) -> Option[View[BlobSlot]] in page {
+    list.get(page.blobs, int.widen(at))
+}
+
+fn hot_child(slot: Slot) -> View[Arc[Page]] in slot {
+    match slot {
+        HotPage(kid) => view kid,
+        ColdPage(_) => fail("page: cold child requires a resolver"),
     }
 }
 
-pub fn body(page: Arc[Page], at: u16) -> Option[Arc[Bytes]] {
-    let i: u64 = int.widen(at)
-    if i < list.len(page.blobs) {
-        Some(arc.share(page.blobs[i]))
-    } else {
-        None
+fn hot_body(slot: BlobSlot) -> View[Arc[Bytes]] in slot {
+    match slot {
+        HotBlob(contents) => view contents,
+        ColdBlob(_) => fail("page: cold blob requires a resolver"),
     }
+}
+
+fn hot_bytes(slot: BlobSlot) -> View[Bytes] in slot {
+    match slot {
+        HotBlob(contents) => view contents,
+        ColdBlob(_) => fail("page: cold blob requires a resolver"),
+    }
+}
+
+fn child_loose(slot: Slot) -> bool {
+    match slot {
+        HotPage(kid) => kid.loose || kid.loose_below,
+        ColdPage(_) => false,
+    }
+}
+
+pub fn child(page: Arc[Page], slot: u64) -> Option[Arc[Page]] {
+    let Some(edge) = child_slot(page, slot) else {
+        return None
+    }
+    Some(arc.share(hot_child(edge)))
+}
+
+pub fn body(page: Arc[Page], at: u16) -> Option[Arc[Bytes]] {
+    let Some(edge) = blob_slot(page, at) else {
+        return None
+    }
+    Some(arc.share(hot_body(edge)))
 }
 
 pub fn copy_with_stamp(page: Arc[Page], id: u64) -> Arc[Page] {
@@ -260,12 +297,12 @@ pub fn value_at(page: Arc[Page], slot: u64) -> Option[View[Bytes]] in page {
     }
     let edge = ref_at(page.image.raw, value + 1)
     let index: u64 = int.widen(edge.body)
-    Some(view page.blobs[index])
+    Some(hot_bytes(page.blobs[index]))
 }
 
 pub fn lookup(root: Arc[Page], key: Bytes) -> Option[View[Bytes]] in root {
     if let Some(slot) = descend(root.image, key) {
-        return lookup(root.kids[slot], key)
+        return lookup(hot_child(root.kids[slot]), key)
     }
     let (slot, hit) = search(root.image, key)
     if hit {
@@ -277,11 +314,11 @@ pub fn lookup(root: Arc[Page], key: Bytes) -> Option[View[Bytes]] in root {
 
 pub fn collection_child(root: Arc[Page], key: Bytes) -> Option[View[Arc[Page]]] in root {
     if let Some(slot) = descend(root.image, key) {
-        return collection_child(root.kids[slot], key)
+        return collection_child(hot_child(root.kids[slot]), key)
     }
     let (slot, hit) = search(root.image, key)
     if hit && root.image.domain == CollectionMap {
-        Some(view root.kids[slot])
+        Some(hot_child(root.kids[slot]))
     } else {
         None
     }
@@ -289,14 +326,14 @@ pub fn collection_child(root: Arc[Page], key: Bytes) -> Option[View[Arc[Page]]] 
 
 pub fn collection_entry(root: Arc[Page], key: Bytes) -> Option[(View[Arc[Page]], View[Bytes])] in root {
     if let Some(slot) = descend(root.image, key) {
-        return collection_entry(root.kids[slot], key)
+        return collection_entry(hot_child(root.kids[slot]), key)
     }
     let (slot, hit) = search(root.image, key)
     if hit && root.image.domain == CollectionMap {
         let Some(descriptor) = value_at(root, slot) else {
             return None
         }
-        return Some((view root.kids[slot], descriptor))
+        return Some((hot_child(root.kids[slot]), descriptor))
     }
     None
 }
@@ -310,7 +347,7 @@ pub fn rank(root: Arc[Page], key: Bytes, inclusive: bool) -> u64 {
             let child_rows: u64 = list.word_le(root.image.raw, value + PTR_BYTES)
             prior = int.saturating_add(prior, child_rows)
         }
-        return int.saturating_add(prior, rank(root.kids[slot], key, inclusive))
+        return int.saturating_add(prior, rank(hot_child(root.kids[slot]), key, inclusive))
     }
     let (slot, hit) = search(root.image, key)
     if hit && inclusive {
@@ -372,7 +409,7 @@ fn changed_totals(mut page: Page, old_rows: u64, old_charge: u64, rows: u64, cha
 
 // A built or loaded image is canonical; `loose_below` marks kids that an edit
 // may have left loose.
-fn new_page(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]], loose_below: bool) -> Page {
+fn new_page(take image: Image, take kids: List[Slot], take blobs: List[BlobSlot], loose_below: bool) -> Page {
     let (rows, charge) = image_totals(image)
     Page(image: take image, kids: take kids, blobs: take blobs, rows: rows, charge: charge, loose: false, loose_below: loose_below)
 }
@@ -891,13 +928,41 @@ pub fn encode(rows: List[Entry], lvl: u8, id: u64, domain: Domain) -> Result[Ima
 }
 
 /// Attach the loader's already resolved edges, in slot and body order.
-pub fn attach(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]]) -> Result[Arc[Page], Error] {
+pub fn attach(take image: Image, take kids: List[Slot], take blobs: List[BlobSlot]) -> Result[Arc[Page], Error] {
     check_attachment(image, kids, blobs)?
     Ok(arc.new(new_page(take image, take kids, take blobs, false)))
 }
 
+/// A sealed Tiered data page keeps its referring edges without their owners.
+/// Its root may be held by a Memory collection-map page.
+pub fn attach_cold(take image: Image) -> Result[Arc[Page], Error] {
+    if image.domain != Collection || count(image) == 0 || u16_at(image.raw, 6) != 0 {
+        return Error(MalformedPage)
+    }
+    let mut kids: List[Slot] = list.new()
+    let mut blobs: List[BlobSlot] = list.new()
+    for slot in 0u64 .. count(image) {
+        match owning_edge(image, slot) {
+            Some(PageEdge(ptr)) => {
+                if ptr.pack == 0 || ptr.offset < 72 || ptr.len == 0 {
+                    return Error(MalformedPage)
+                }
+                list.push(mut kids, ColdPage(ptr))
+            },
+            Some(BlobEdge(reference)) => {
+                if reference.pack == 0 || reference.offset < 72 {
+                    return Error(MalformedPage)
+                }
+                list.push(mut blobs, ColdBlob(reference))
+            },
+            None => (),
+        }
+    }
+    Ok(arc.new(new_page(take image, take kids, take blobs, false)))
+}
+
 /// Attach without copying the adopted image, returning an allocation refusal.
-pub fn attach_fallible(take image: Image, take kids: List[Arc[Page]], take blobs: List[Arc[Bytes]]) -> Result[Result[Arc[Page], Error], Capacity] {
+pub fn attach_fallible(take image: Image, take kids: List[Slot], take blobs: List[BlobSlot]) -> Result[Result[Arc[Page], Error], Capacity] {
     if let Error(problem) = check_attachment(image, kids, blobs) {
         return Ok(Error(problem))
     }
@@ -926,7 +991,7 @@ pub fn attach_fallible(take image: Image, take kids: List[Arc[Page]], take blobs
     Ok(Ok(take resident))
 }
 
-fn check_attachment(image: Image, kids: List[Arc[Page]], blobs: List[Arc[Bytes]]) -> Result[(), Error] {
+fn check_attachment(image: Image, kids: List[Slot], blobs: List[BlobSlot]) -> Result[(), Error] {
     let n = count(image)
     let lvl = level(image)
     let owns_kids = lvl != 0 || image.domain == CollectionMap
@@ -947,13 +1012,20 @@ fn check_attachment(image: Image, kids: List[Arc[Page]], blobs: List[Arc[Bytes]]
             } else {
                 value
             })
-            if stamp(kids[i].image) != ptr.stamp || (lvl != 0 && level(kids[i].image) != lvl - 1) {
+            let invalid = match kids[i] {
+                HotPage(kid) => stamp(kid.image) != ptr.stamp || (lvl != 0 && level(kid.image) != lvl - 1),
+                ColdPage(edge) => image.domain != Collection || edge.pack == 0 || edge != ptr,
+            }
+            if invalid {
                 return Error(MalformedPage)
             }
         } else if image.raw[value] == 1 {
             let blob = ref_at(image.raw, value + 1)
             let b: u64 = int.widen(blob.body)
-            if b >= list.len(blobs) || list.len(blobs[b]) != blob.len {
+            if b >= list.len(blobs) || (match blobs[b] {
+                HotBlob(contents) => list.len(contents) != blob.len,
+                ColdBlob(edge) => image.domain != Collection || edge.pack == 0 || edge != blob,
+            }) {
                 return Error(MalformedPage)
             }
             body_count += 1
@@ -1070,7 +1142,9 @@ pub fn canonicalize(mut root: Arc[Page]) -> Result[(), Error] {
     arc.update(mut root, scoped fn(mut page: Page) -> Result[(), Error] {
         if page.loose_below {
             for slot in 0u64 .. list.len(page.kids) {
-                canonicalize(mut page.kids[slot])?
+                if let HotPage(mut kid) = page.kids[slot] {
+                    canonicalize(mut kid)?
+                }
             }
             page.loose_below = false
         }
@@ -1087,9 +1161,11 @@ pub fn canonical(root: Arc[Page]) -> Result[bool, Error] {
     if root.loose || root.loose_below {
         return Ok(false)
     }
-    for kid in root.kids {
-        if !canonical(kid)? {
-            return Ok(false)
+    for slot in root.kids {
+        if let HotPage(kid) = slot {
+            if !canonical(kid)? {
+                return Ok(false)
+            }
         }
     }
     if count(root.image) == 0 {
@@ -1117,9 +1193,9 @@ fn canonical_page(mut page: Page) -> Result[(), Error] {
     }
     let (take image, bodies) = sealed_image(page.image, list.len(page.blobs))?
     if list.len(bodies) != 0 {
-        let mut blobs: List[Arc[Bytes]] = list.with_capacity(list.len(bodies))
+        let mut blobs: List[BlobSlot] = list.with_capacity(list.len(bodies))
         for held in bodies {
-            list.push(mut blobs, arc.share(page.blobs[int.widen(held)]))
+            list.push(mut blobs, clone(page.blobs[int.widen(held)]))
         }
         page.blobs = take blobs
     }
@@ -1423,17 +1499,17 @@ fn private_put(mut page: Page, incoming: Entry, kid: Option[Arc[Page]], blob: Op
     }
     if let Some(k) = kid {
         if hit {
-            let _ = list.set(mut page.kids, slot, arc.share(k))
+            let _ = list.set(mut page.kids, slot, HotPage(arc.share(k)))
         } else {
-            open_slot(mut page.kids, slot, arc.share(k))
+            open_slot(mut page.kids, slot, HotPage(arc.share(k)))
         }
     }
     match blob {
         Some(b) => match old_body {
             Some(i) => {
-                let _ = list.set(mut page.blobs, i, arc.share(b))
+                let _ = list.set(mut page.blobs, i, HotBlob(arc.share(b)))
             },
-            None => list.push(mut page.blobs, arc.share(b)),
+            None => list.push(mut page.blobs, HotBlob(arc.share(b))),
         },
         None => if let Some(i) = old_body {
             move_last_body(mut page, i, slot)
@@ -1512,7 +1588,7 @@ fn draw(mut next: u64) -> u64 {
     id
 }
 
-fn leaf_cell(row: Row, inline: u64, mut next: u64, mut blobs: List[Arc[Bytes]]) -> Cell {
+fn leaf_cell(row: Row, inline: u64, mut next: u64, mut blobs: List[BlobSlot]) -> Cell {
     let n = list.len(row.value)
     if n <= inline {
         return InlineValue(clone(row.value))
@@ -1520,7 +1596,7 @@ fn leaf_cell(row: Row, inline: u64, mut next: u64, mut blobs: List[Arc[Bytes]]) 
     let b: u16 = int.truncate(list.len(blobs))
     let id = draw(mut next)
     let checksum = check.xxh3(row.value, 0, n)
-    list.push(mut blobs, arc.new(clone(row.value)))
+    list.push(mut blobs, HotBlob(arc.new(clone(row.value))))
     BlobValue(BlobRef(stamp: id, len: n, checksum: checksum, pack: 0, offset: 0, body: b))
 }
 
@@ -1546,7 +1622,7 @@ fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut
     // The rows are written straight into the image with pack_entries' cell
     // writers, so no row key or inline value is copied into an Entry first.
     let mut refs: List[BlobRef] = list.new()
-    let mut blobs: List[Arc[Bytes]] = list.new()
+    let mut blobs: List[BlobSlot] = list.new()
     let mut charge = 0u64
     let mut sum = 0u64
     for i in lo .. hi {
@@ -1582,7 +1658,7 @@ fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut
         list.copy_from_slice(mut raw, HEADER, list.slice(rows[lo].key, 0, p))
     }
     let mut at = HEADER + p
-    let mut blob_slot = 0u64
+    let mut ordinal = 0u64
     for i in lo .. hi {
         let row = view rows[i]
         put16(mut raw, slot_start + 2 * (i - lo), at)
@@ -1590,8 +1666,8 @@ fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut
         if list.len(row.value) <= inline {
             at = write_inline(mut raw, cell, row.value)
         } else {
-            at = write_blob(mut raw, cell, refs[blob_slot])
-            blob_slot += 1
+            at = write_blob(mut raw, cell, refs[ordinal])
+            ordinal += 1
         }
     }
     let image = Image(raw: take raw, domain: domain)
@@ -1613,7 +1689,7 @@ fn branch_end(seps: List[Bytes], start: u64) -> u64 {
 
 fn bulk_branch(nodes: List[Built], seps: List[Bytes], lo: u64, hi: u64, domain: Domain, mut next: u64) -> Result[Built, Error] {
     let mut entries: List[Entry] = list.with_capacity(hi - lo)
-    let mut kids: List[Arc[Page]] = list.with_capacity(hi - lo)
+    let mut kids: List[Slot] = list.with_capacity(hi - lo)
     let mut rows = 0u64
     let mut charge = 0u64
     let lvl = level(nodes[lo].root.image) + 1
@@ -1631,7 +1707,7 @@ fn bulk_branch(nodes: List[Built], seps: List[Bytes], lo: u64, hi: u64, domain: 
         }
         let branch = Branch(child: unlocated(stamp(node.root.image)), rows: node.rows, charge: node.charge)
         list.push(mut entries, Entry(key: take key, cell: Child(branch)))
-        list.push(mut kids, arc.share(node.root))
+        list.push(mut kids, HotPage(arc.share(node.root)))
     }
     let id = draw(mut next)
     let image = pack_entries(entries, lvl, id, domain)?
@@ -1756,13 +1832,13 @@ fn owned_slots(page: Page) -> List[PageSlot] {
     for i in 0u64 .. n {
         let row = option.unwrap(entry(page.image, i))
         let blob: Option[Arc[Bytes]] = match row.cell {
-            BlobValue(edge) => Some(arc.share(page.blobs[int.widen(edge.body)])),
+            BlobValue(edge) => Some(arc.share(hot_body(page.blobs[int.widen(edge.body)]))),
             _ => None,
         }
         let kid: Option[Arc[Page]] = if list.len(page.kids) == 0 {
             None
         } else {
-            Some(arc.share(page.kids[i]))
+            Some(arc.share(hot_child(page.kids[i])))
         }
         list.push(mut slots_out, PageSlot(row: take row, kid: take kid, blob: take blob))
     }
@@ -1984,8 +2060,8 @@ fn split_slots(n: u64, lvl: u8, width_at: scoped fn(u64) -> u64, section: scoped
 
 fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u64, id: u64) -> Result[Arc[Page], Error] {
     let mut rows: List[Entry] = list.with_capacity(hi - lo)
-    let mut kids: List[Arc[Page]] = list.new()
-    let mut blobs: List[Arc[Bytes]] = list.new()
+    let mut kids: List[Slot] = list.new()
+    let mut blobs: List[BlobSlot] = list.new()
     for i in lo .. hi {
         let piece = view items[i]
         let mut row: Entry = clone(piece.row)
@@ -1993,7 +2069,7 @@ fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u6
             list.clear(mut row.key)
         }
         if let Some(kid) = piece.kid {
-            list.push(mut kids, arc.share(kid))
+            list.push(mut kids, HotPage(arc.share(kid)))
         }
         if let BlobValue(edge) = row.cell {
             let mut located = edge
@@ -2002,7 +2078,7 @@ fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u6
             let Some(payload_arc) = piece.blob else {
                 return Error(MalformedPage)
             }
-            list.push(mut blobs, arc.share(payload_arc))
+            list.push(mut blobs, HotBlob(arc.share(payload_arc)))
         }
         list.push(mut rows, take row)
     }
@@ -2037,7 +2113,7 @@ fn extreme_key(root: Arc[Page], right: bool) -> Bytes {
     if level(root.image) == 0 {
         return option.unwrap(key_at(root.image, i))
     }
-    extreme_key(root.kids[i], right)
+    extreme_key(hot_child(root.kids[i]), right)
 }
 
 fn branch_slot(take key: Bytes, descendant: Arc[Page]) -> PageSlot {
@@ -2046,8 +2122,8 @@ fn branch_slot(take key: Bytes, descendant: Arc[Page]) -> PageSlot {
 }
 
 fn refresh_child(mut page: Page, slot: u64) {
-    let child_id = stamp(page.kids[slot].image)
-    let (rows, charge) = totals(page.kids[slot])
+    let child_id = stamp(hot_child(page.kids[slot]).image)
+    let (rows, charge) = totals(hot_child(page.kids[slot]))
     let start = entry_at(page.image, slot)
     let edge = start + 2 + u16_at(page.image.raw, start)
     let old_rows: u64 = list.word_le(page.image.raw, edge + PTR_BYTES)
@@ -2061,7 +2137,7 @@ fn refresh_child(mut page: Page, slot: u64) {
 // Puts the pieces that replace the child at slot into the private page itself
 // while they fit, and rebuilds the page into pieces only when one does not.
 fn adopt_children(mut page: Page, slot: u64, parts: List[Arc[Page]], mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
-    let _ = list.set(mut page.kids, slot, arc.share(parts[0]))
+    let _ = list.set(mut page.kids, slot, HotPage(arc.share(parts[0])))
     refresh_child(mut page, slot)
     for i in 1u64 .. list.len(parts) {
         let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
@@ -2086,18 +2162,18 @@ fn replace_children(page: Page, slot: u64, parts: List[Arc[Page]], from: u64, mu
 
 fn build_leaf_piece(page: Page, incoming: PageSlot, entries: List[PackedSlot], slot: u64, hit: bool, lo: u64, hi: u64, id: u64) -> Arc[Page] {
     let mut image = pack_leaf_section(page.image, incoming.row, None, entries, lo, hi, id)
-    let mut kids: List[Arc[Page]] = list.new()
-    let mut blobs: List[Arc[Bytes]] = list.new()
+    let mut kids: List[Slot] = list.new()
+    let mut blobs: List[BlobSlot] = list.new()
     for i in lo .. hi {
         if let Some(at) = blob_field(image, i - lo) {
             let blob_bytes = if i == slot {
                 let Some(staged_blob) = view incoming.blob else {
                     fail("page: split lost its incoming blob")
                 }
-                arc.share(staged_blob)
+                HotBlob(arc.share(staged_blob))
             } else {
                 let ordinal = u16_at(image.raw, at)
-                arc.share(page.blobs[ordinal])
+                clone(page.blobs[ordinal])
             }
             put16(mut image.raw, at, list.len(blobs))
             list.push(mut blobs, take blob_bytes)
@@ -2107,14 +2183,14 @@ fn build_leaf_piece(page: Page, incoming: PageSlot, entries: List[PackedSlot], s
                 let Some(staged_kid) = view incoming.kid else {
                     fail("page: split lost its incoming child")
                 }
-                arc.share(staged_kid)
+                HotPage(arc.share(staged_kid))
             } else {
                 let prior = if !hit && i > slot {
                     i - 1
                 } else {
                     i
                 }
-                arc.share(page.kids[prior])
+                clone(page.kids[prior])
             }
             list.push(mut kids, take kid)
         }
@@ -2152,8 +2228,11 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, mut nex
         }
         return Ok((None, edit == Shrunk))
     }
-    let (take revised, shrank) = insert_path(mut page.kids[slot], incoming, private_from, mut next)?
-    if page.kids[slot].loose || page.kids[slot].loose_below {
+    let (take revised, shrank) = match page.kids[slot] {
+        HotPage(mut kid) => insert_path(mut kid, incoming, private_from, mut next)?,
+        ColdPage(_) => fail("page: cold child requires a resolver"),
+    }
+    if child_loose(page.kids[slot]) {
         page.loose_below = true
     }
     if let Some(parts) = view revised {
@@ -2161,7 +2240,7 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, mut nex
         if !shrank {
             return Ok((adopt_children(mut page, slot, parts, mut next)?, false))
         }
-        page.kids[slot] = arc.share(parts[0])
+        page.kids[slot] = HotPage(arc.share(parts[0]))
     }
     if !shrank {
         refresh_child(mut page, slot)
@@ -2194,8 +2273,8 @@ fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, mut n
 }
 
 fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
-    let lvl = level(page.kids[slot].image)
-    let n = count(page.kids[slot].image)
+    let lvl = level(hot_child(page.kids[slot]).image)
+    let n = count(hot_child(page.kids[slot]).image)
     let siblings = count(page.image)
     if n == 0 {
         let top_key = option.unwrap(key_at(page.image, slot))
@@ -2203,7 +2282,7 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
         return Ok(None)
     }
     let unary = lvl != 0 && n == 1
-    if siblings == 1 || (!unary && sealed_size(page.kids[slot].image) >= TARGET / 4) {
+    if siblings == 1 || (!unary && sealed_size(hot_child(page.kids[slot]).image) >= TARGET / 4) {
         refresh_child(mut page, slot)
         return Ok(None)
     }
@@ -2213,9 +2292,9 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
         slot
     }
     let right = left + 1
-    let mut merged = owned_slots(page.kids[left])
+    let mut merged = owned_slots(hot_child(page.kids[left]))
     let first_right = list.len(merged)
-    let mut right_items = owned_slots(page.kids[right])
+    let mut right_items = owned_slots(hot_child(page.kids[right]))
     if lvl != 0 {
         right_items[0u64].row.key = option.unwrap(key_at(page.image, right))
     }
@@ -2259,14 +2338,17 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) 
         private_delete(mut page, key)
         return Ok(None)
     }
-    let revised = remove_path(mut page.kids[slot], key, private_from, mut next)?
-    if page.kids[slot].loose || page.kids[slot].loose_below {
+    let revised = match page.kids[slot] {
+        HotPage(mut kid) => remove_path(mut kid, key, private_from, mut next)?,
+        ColdPage(_) => fail("page: cold child requires a resolver"),
+    }
+    if child_loose(page.kids[slot]) {
         page.loose_below = true
     }
     if let Some(parts) = revised {
         page.loose_below = true
         if list.len(parts) == 1 {
-            page.kids[slot] = arc.share(parts[0])
+            page.kids[slot] = HotPage(arc.share(parts[0]))
             return rebalance_child(mut page, slot, mut next)
         }
         return adopt_children(mut page, slot, parts, mut next)
@@ -2333,7 +2415,7 @@ fn remove_to(mut root: Arc[Page], key: Bytes, empty_root: Option[View[Arc[Page]]
             None => empty(0, 0, root.image.domain),
         }
     } else if count(root.image) == 1 && level(root.image) != 0 {
-        root = arc.share(root.kids[0u64])
+        root = arc.share(hot_child(root.kids[0u64]))
     }
     Ok(true)
 }
@@ -2370,7 +2452,7 @@ fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[Vi
     if let Some(parts) = view revised {
         finish_split(mut root, parts, mut next)?
         if level(root.image) != 0 && count(root.image) == 1 {
-            root = arc.share(root.kids[0u64])
+            root = arc.share(hot_child(root.kids[0u64]))
         }
     }
     Ok(())
@@ -2378,8 +2460,11 @@ fn insert_value(mut root: Arc[Page], key: Bytes, value: Bytes, shared: Option[Vi
 
 fn collection_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64, edit: scoped fn(mut Arc[Page], mut u64) -> Result[(), Error]) -> Result[(), Error] {
     if let Some(slot) = descend(page.image, key) {
-        edit_collection(mut page.kids[slot], key, private_from, mut next, edit)?
-        if page.kids[slot].loose || page.kids[slot].loose_below {
+        match page.kids[slot] {
+            HotPage(mut kid) => edit_collection(mut kid, key, private_from, mut next, edit)?,
+            ColdPage(_) => fail("page: cold collection map edge"),
+        }
+        if child_loose(page.kids[slot]) {
             page.loose_below = true
         }
         refresh_child(mut page, slot)
@@ -2389,8 +2474,11 @@ fn collection_private(mut page: Page, key: Bytes, private_from: u64, mut next: u
     if !hit {
         return Error(MalformedPage)
     }
-    edit(mut page.kids[slot], mut next)?
-    if page.kids[slot].loose || page.kids[slot].loose_below {
+    match page.kids[slot] {
+        HotPage(mut kid) => edit(mut kid, mut next)?,
+        ColdPage(_) => fail("page: cold collection root edge"),
+    }
+    if child_loose(page.kids[slot]) {
         page.loose_below = true
     }
     refresh_collection(mut page, slot)
@@ -2398,11 +2486,11 @@ fn collection_private(mut page: Page, key: Bytes, private_from: u64, mut next: u
 }
 
 fn refresh_collection(mut page: Page, slot: u64) {
-    let (rows, charge) = totals(page.kids[slot])
+    let (rows, charge) = totals(hot_child(page.kids[slot]))
     let child_id = if rows == 0 {
         0u64
     } else {
-        stamp(page.kids[slot].image)
+        stamp(hot_child(page.kids[slot]).image)
     }
     let start = entry_at(page.image, slot)
     let value = start + 2 + u16_at(page.image.raw, start) + 3
@@ -2591,14 +2679,20 @@ fn inline_path_ready(mut root: Arc[Page], collection: Bytes, key: Bytes, data: B
             view key
         }
         if let Some(slot) = descend(page.image, page_key) {
-            return inline_path_ready(mut page.kids[slot], collection, key, data, count(page.image) > 1)
+            return match page.kids[slot] {
+                HotPage(mut kid) => inline_path_ready(mut kid, collection, key, data, count(page.image) > 1),
+                ColdPage(_) => Ok(false),
+            }
         }
         if map_page {
             let (slot, hit) = search(page.image, collection)
             if !hit {
                 return Ok(false)
             }
-            return inline_path_ready(mut page.kids[slot], collection, key, data, false)
+            return match page.kids[slot] {
+                HotPage(mut kid) => inline_path_ready(mut kid, collection, key, data, false),
+                ColdPage(_) => Ok(false),
+            }
         }
         let Some(fit) = inline_leaf_fit(page, key, data, has_sibling) else {
             return Ok(false)
@@ -2624,14 +2718,23 @@ fn put_inline_path(mut root: Arc[Page], collection: Bytes, key: Bytes, data: Byt
             view key
         }
         if let Some(slot) = descend(page.image, page_key) {
-            if !put_inline_path(mut page.kids[slot], collection, key, data, mut next, count(page.image) > 1)? {
-                return Ok(false)
+            match page.kids[slot] {
+                HotPage(mut kid) => if !put_inline_path(mut kid, collection, key, data, mut next, count(page.image) > 1)? {
+                    return Ok(false)
+                },
+                ColdPage(_) => return Ok(false),
             }
             refresh_child(mut page, slot)
         } else if map_page {
             let (slot, hit) = search(page.image, collection)
-            if !hit || !put_inline_path(mut page.kids[slot], collection, key, data, mut next, false)? {
+            if !hit {
                 return Ok(false)
+            }
+            match page.kids[slot] {
+                HotPage(mut kid) => if !put_inline_path(mut kid, collection, key, data, mut next, false)? {
+                    return Ok(false)
+                },
+                ColdPage(_) => return Ok(false),
             }
             refresh_collection(mut page, slot)
         } else {
@@ -2686,7 +2789,20 @@ pub fn install_planned(mut root: Arc[Page], take replacement: Arc[Page]) {
                 if level(installed.image) == level(fresh.image) && list.len(installed.kids) == list.len(fresh.kids) {
                     while let Some(take descendant) = list.pop(mut fresh.kids) {
                         let slot = list.len(fresh.kids)
-                        install_planned(mut installed.kids[slot], take descendant)
+                        match take descendant {
+                            HotPage(take ready) => {
+                                let mut next_child = Some(take ready)
+                                if let HotPage(mut kid) = installed.kids[slot] {
+                                    install_planned(mut kid, option.unwrap(replace(mut next_child, None)))
+                                }
+                                if let Some(take unattached) = take next_child {
+                                    installed.kids[slot] = HotPage(take unattached)
+                                }
+                            },
+                            ColdPage(ptr) => {
+                                installed.kids[slot] = ColdPage(ptr)
+                            },
+                        }
                     }
                     fresh.kids = replace(mut installed.kids, list.new())
                 }
@@ -2802,7 +2918,7 @@ fn cursor_path(mut cursor: Cursor, root: Arc[Page], boundary: Option[Bytes], inc
             },
             Some(key) => option.unwrap(descend(walking.image, key)),
         }
-        let descendant = arc.share(walking.kids[selected])
+        let descendant = arc.share(hot_child(walking.kids[selected]))
         let following = if cursor.reverse {
             selected
         } else {
@@ -2839,10 +2955,10 @@ fn cursor_row(page: Arc[Page], slot: u64) -> CursorRow {
         arc.new(take inline)
     } else {
         let edge = ref_at(page.image.raw, cell_offset + 1)
-        arc.share(page.blobs[int.widen(edge.body)])
+        arc.share(hot_body(page.blobs[int.widen(edge.body)]))
     }
     let collection: Option[Arc[Page]] = if page.image.domain == CollectionMap {
-        Some(arc.share(page.kids[slot]))
+        Some(arc.share(hot_child(page.kids[slot])))
     } else {
         None
     }
@@ -2876,7 +2992,7 @@ fn cursor_step(mut cursor: Cursor) -> Option[u64] {
         if level(cursor.path[top].page.image) == 0 {
             return Some(selected)
         }
-        let descendant = arc.share(cursor.path[top].page.kids[selected])
+        let descendant = arc.share(hot_child(cursor.path[top].page.kids[selected]))
         cursor_path(mut cursor, descendant, None, true)
     }
     None
@@ -2949,7 +3065,7 @@ pub fn cursor_read[T](mut cursor: Cursor, visit: scoped[view] fn(Bytes, Bytes) -
     let raw = if page.image.raw[cell] == 0 {
         list.slice(page.image.raw, cell + 3, cell + 3 + u16_at(page.image.raw, cell + 1))
     } else {
-        view page.blobs[int.widen(ref_at(page.image.raw, cell + 1).body)]
+        hot_bytes(page.blobs[int.widen(ref_at(page.image.raw, cell + 1).body)])
     }
     if prefix == 0 {
         return Some(visit(raw_suffix, raw))
@@ -3010,7 +3126,7 @@ pub fn walk_from(root: Arc[Page], low: Bytes) -> Walk {
 /// The child named by a collection-map row.
 pub fn walk_collection(walk: Walk) -> Arc[Page] {
     let top = option.unwrap(list.last(walk.path))
-    arc.share(top.page.kids[top.slot])
+    arc.share(hot_child(top.page.kids[top.slot]))
 }
 
 pub fn walk_empty() -> Walk {
@@ -3106,7 +3222,7 @@ pub fn walk_expand(mut walk: Walk) {
     let top = n - 1
     walk.path[top].whole = false
     if level(walk.path[top].page.image) != 0 {
-        let first = arc.share(walk.path[top].page.kids[0u64])
+        let first = arc.share(hot_child(walk.path[top].page.kids[0u64]))
         walk.path[top].slot = 1
         list.push(mut walk.path, WalkFrame(page: take first, slot: 0, whole: true))
     }
@@ -3129,7 +3245,7 @@ pub fn walk_next(mut walk: Walk) {
         let parent = list.len(walk.path) - 1
         let slot = walk.path[parent].slot
         if slot < count(walk.path[parent].page.image) {
-            let descendant = arc.share(walk.path[parent].page.kids[slot])
+            let descendant = arc.share(hot_child(walk.path[parent].page.kids[slot]))
             walk.path[parent].slot += 1
             list.push(mut walk.path, WalkFrame(page: take descendant, slot: 0, whole: true))
             return ()

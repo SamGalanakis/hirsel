@@ -490,8 +490,8 @@ fn collection_map_leaf() -> bool {
     if page.payload(encoded) != expected || !unpacked(decoded, 0, hex("00000001"), descriptor) {
         return false
     }
-    let mut kids: List[Arc[page.Page]] = list.new()
-    list.push(mut kids, page.empty(0, 0, Collection))
+    let mut kids: List[page.Slot] = list.new()
+    list.push(mut kids, HotPage(page.empty(0, 0, Collection)))
     let root = result.unwrap(page.attach(take decoded, take kids, list.new()))
     let mut wrong: Bytes = clone(expected)
     wrong[86u64] = 1

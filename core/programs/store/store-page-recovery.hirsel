@@ -19,8 +19,8 @@ fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page])
                 map.insert(mut bodies, stamp, take counted)
             },
             ReadPage(take image, take children, take refs) => {
-                let mut kids: List[Arc[std.page.Page]] = list.new()
-                let mut blobs: List[Arc[Bytes]] = list.new()
+                let mut kids: List[std.page.Slot] = list.new()
+                let mut blobs: List[std.page.BlobSlot] = list.new()
                 capacity(list.try_reserve(mut kids, list.len(children)))?
                 capacity(list.try_reserve(mut blobs, list.len(refs)))?
                 for child in children {
@@ -32,13 +32,13 @@ fn attach_page_graph(mut graph: PageGraph, empty_collection: Arc[std.page.Page])
                         }
                         arc.share(page)
                     }
-                    list.push(mut kids, take attached)
+                    list.push(mut kids, HotPage(take attached))
                 }
                 for body in refs {
                     let Some(value) = map.get(bodies, body) else {
                         fail("missing validated body")
                     }
-                    list.push(mut blobs, arc.share(value))
+                    list.push(mut blobs, HotBlob(arc.share(value)))
                 }
                 let page = page_result(capacity(std.page.attach_fallible(take image, take kids, take blobs))?)?
                 capacity(map.try_reserve(mut pages, 1))?

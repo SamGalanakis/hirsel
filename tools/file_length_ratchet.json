@@ -77,9 +77,9 @@
     "lines": 1374
   },
   "core/std/page.hirsel": {
-    "lines": 3139,
-    "raise_revision": 1,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 3255,
+    "raise_revision": 2,
+    "reason": "m3-s3-slots-2010"
   },
   "core/std/prop.hirsel": {
     "lines": 1743

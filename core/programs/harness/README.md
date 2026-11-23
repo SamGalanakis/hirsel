@@ -25,7 +25,9 @@ fn my_agent() -> harness.Agent[Grants] {
 fn wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(advance), code.describe(effect)) }
 ```
 
-`laws.hirsel` holds a complete place.
+`../notes` is a complete program built on the harness: every part an app
+composes, wired into one agent, built with `hirsel build` and run. `laws.hirsel`
+holds the places the laws run.
 
 ## The four forwarding entries
 
@@ -198,6 +200,7 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 | --- | --- | --- |
 | C1 `test_once_tool_crash` | A place stopped while a Once tool is in flight reopens without resending the tool. The tool result is InDoubt at once, the model answer is not bought again, and the run ends Answered. | The scripted services' own call counts, which outlive the place, plus the transcript and spend derived by hand from the script. |
 | M1 `test_crash_matrix` | At each of the run's 217 filesystem operations: the first life fails that operation with EIO, the image is cut at a seeded point that keeps every synced write, and a second life finishes. The Once tool runs at most once, and Returned means it ran. Each round's model is asked at most once, and an ask with no durable answer is a doubt that ends the run. Known spend is 15 per durable answer, nothing stays reserved, and a doubt leaves exactly its reserve unresolved. An Answered run has exactly the five scripted entries. | The services' own counts and the spend and transcript derived by hand from the script. Red when `begin` lets a Once effect dispatch again (caught at operation 128). |
+| D1 `test_deadline_races` | A deadline and a reply race for one effect, and the first to commit wins. Model deadline 1 s, tool 3 s. A model reply held 2.5 s leaves the call in doubt and stops the run, with its 4096 reserve unresolved and the late answer never recorded. A Once tool reply held 4 s is InDoubt, and the run still ends "done". A tool reply held 2 s lets the first answer's deadline fire after that answer settled, while the run is active, and that changes nothing. | The services' own counts, and outcomes and spend derived by hand from the script. |
 | G1 `test_gates_fold_by_maximum` | Over every sequence of 0 to 3 gates, the verdict is the greatest gate verdict under Pass < Hold < Deny. | The maximum of each sequence's ranks, computed from the sequence itself. |
 | G2 `test_approval_bound_to_arguments` | A held call is approved only by its run's caller and only under the key of the tool, revision and repaired arguments. Keys for the unrepaired arguments or another revision conflict, and a stranger is refused; the call is sealed only after the matching approval. A repeat approval returns Approved, and a later refusal conflicts. | Keys built by hand from the hand-repaired arguments, and the outcome each decision must have. |
 | I1 `test_inside_rolls_back_on_error` | An Inside tool's writes commit with its result, and a tool that returns an error leaves none of its writes while its failure commits. | The row each tool writes, by hand. |

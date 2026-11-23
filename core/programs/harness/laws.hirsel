@@ -17,18 +17,22 @@ fn usage() -> harness.Usage { harness.Usage(input: 10u64, output: 5u64) }
 
 // The script: with no tool result in the request, ask for one `bump` call;
 // after a tool result, answer in text.
+fn scripted_answer(after_tool: bool) -> harness.Answer {
+    let mut calls: List[harness.Call] = list.new()
+    if !after_tool {
+        list.push(mut calls, harness.Call(id: "c1", name: "bump", args: Inline(string.into_bytes("{}"))))
+    }
+    let text = if after_tool { "done" } else { "" }
+    harness.Answer(text: text, calls: take calls, stop: "end", usage: usage())
+}
+
 fn model_service(take inbox: Receiver[ModelAsk]) -> () waits {
     let mut asked = 0u64
     while let Ok(take request) = channel.receive(inbox) {
         match take request {
             Ask(after_tool, reply) => {
                 asked += 1u64
-                let mut calls: List[harness.Call] = list.new()
-                if !after_tool {
-                    list.push(mut calls, harness.Call(id: "c1", name: "bump", args: Inline(string.into_bytes("{}"))))
-                }
-                let text = if after_tool { "done" } else { "" }
-                let _ = channel.send(reply, harness.Answer(text: text, calls: take calls, stop: "end", usage: usage()))
+                let _ = channel.send(reply, scripted_answer(after_tool))
             },
             Asked(reply) => { let _ = channel.send(reply, asked) },
         }
@@ -120,13 +124,18 @@ fn live(take life: Life) -> Result[store.runner.Ended, store.runner.StartError] 
     store.runner.operate(take config, take stop, status, None)
 }
 
+type Registered = StaticFn[fn(mut store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError]]
+
 fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
-    let w = result.unwrap(wired())
+    settings_of(code.describe(place), result.unwrap(wired()), dir, clock, random, tasks, net, take s, idle)
+}
+
+fn settings_of(registered: Registered, w: harness.Wiring, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
     let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: take s, grant: make_grants, grant_bytes: 65536u64)
     let mut wire = store.runner.wire_defaults(65536u64, PLACE_BYTES)
     wire.n_pool = 4194304u64
-    store.runner.PlaceConfig(backing: Disk(dir, store.triggers.law_options()), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES,
+    store.runner.PlaceConfig(backing: Disk(dir, store.triggers.law_options()), selection: Reopen, place: registered, n_place: PLACE_BYTES,
         migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire, max_sessions: 1u64,
         proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
         net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
@@ -143,13 +152,18 @@ fn launch(tasks: Tasks, take config: store.runner.PlaceConfig[Grants, harness.Ha
 
 // One user message, committed before any place runs.
 fn seed_session(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> () waits {
+    seed_with(dir, clock, random, tasks, crash_agent(), result.unwrap(wired()))
+}
+
+// The submit's trigger names the advance entry of `w`, so the place that
+// runs the session must register that entry.
+fn seed_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, a: harness.Agent[Grants], w: harness.Wiring) -> () waits {
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
     result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let w = result.unwrap(wired())
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
         harness.open_session(mut tx, h, "scripted", All)?
-        harness.submit(mut tx, h, crash_agent(), w, store.Caller(issuer: 1u8, subject: list.new()), harness.Submit(client_key: "k1", text: "bump it"))
+        harness.submit(mut tx, h, a, w, store.Caller(issuer: 1u8, subject: list.new()), harness.Submit(client_key: "k1", text: "bump it"))
     })
     let done = match take ran { Ok(Committed(row)) => row, _ => fail("seed: submit did not commit") }
     result.unwrap(store.durable(mut db, done.ticket))
@@ -1023,4 +1037,168 @@ fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Re
     // plan no longer reaches the place's own writes.
     if site < 20u64 { fail("crash matrix: the faults never reached the run's writes") }
     Ok(())
+}
+
+// ---- deadline races ----
+
+// The race agent's deadlines, and how long each case's service holds its
+// reply.
+const RACE_MODEL_MS: u64 = 1000u64
+const RACE_TOOL_MS: u64 = 3000u64
+const LATE_MODEL_MS: u64 = 2500u64
+const LATE_TOOL_MS: u64 = 4000u64
+const SLOW_TOOL_MS: u64 = 2000u64
+
+fn race_agent() -> harness.Agent[Grants] {
+    let mut a = crash_agent()
+    a.limits.model_ms = RACE_MODEL_MS
+    a.limits.tool_ms = RACE_TOOL_MS
+    a
+}
+
+fn race_wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(race_advance), code.describe(race_effect)) }
+
+fn race_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+    let w = race_wired()?
+    harness.advance(mut tx, h, race_agent(), w, take wake)
+}
+
+fn race_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
+    harness.effect(g.context, g, take key, race_agent(), code.describe(race_settle))
+}
+
+fn race_settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    let Ok(w) = race_wired() else { return Error(Missing("harness: wiring")) }
+    harness.settle(mut tx, race_agent(), w, a, take m)
+}
+
+fn race_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut r, code.describe(race_advance), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.granted(mut r, code.describe(race_effect), BYTES, store.runner.DEFAULT_STEPS)?
+    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = race_settle
+    store.runner.register_attempt(mut r, code.describe(race_settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+}
+
+// Which reply comes after its deadline.
+type Late: key + send = SlowTool | LateModel | LateTool
+type LateModelSeed: send { inbox: Receiver[ModelAsk], clock: Clock, hold_ms: u64 }
+type LateToolSeed: send { inbox: Receiver[ToolAsk], clock: Clock, hold_ms: u64 }
+
+// The script's model; its first reply waits hold_ms.
+fn late_model_service(take seed: LateModelSeed) -> () waits {
+    let LateModelSeed(inbox: take inbox, clock, hold_ms) = take seed
+    let mut asked = 0u64
+    while let Ok(take request) = channel.receive(inbox) {
+        match take request {
+            Ask(after_tool, reply) => {
+                asked += 1u64
+                if asked == 1u64 && hold_ms > 0u64 { std.clock.sleep_ns(clock, hold_ms * 1000000u64) }
+                let _ = channel.send(reply, scripted_answer(after_tool))
+            },
+            Asked(reply) => { let _ = channel.send(reply, asked) },
+        }
+    }
+}
+
+// `bump`; its reply waits hold_ms.
+fn late_tool_service(take seed: LateToolSeed) -> () waits {
+    let LateToolSeed(inbox: take inbox, clock, hold_ms) = take seed
+    let mut ran = 0u64
+    while let Ok(take request) = channel.receive(inbox) {
+        match take request {
+            Run(_, take reply) => {
+                ran += 1u64
+                if hold_ms > 0u64 { std.clock.sleep_ns(clock, hold_ms * 1000000u64) }
+                let _ = channel.send(reply, string.into_bytes("1"))
+            },
+            Ran(reply) => { let _ = channel.send(reply, ran) },
+        }
+    }
+}
+
+type Raced { asked: u64, ran: u64, finish: Option[harness.Finish], spend: harness.Spend, next_pos: u64, result: Option[harness.Outcome], said: String }
+
+fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, late: Late) -> Raced waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    seed_with(dir, clock, random, tasks, race_agent(), result.unwrap(race_wired()))
+    let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
+    let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
+    let model_hold = if late == LateModel { LATE_MODEL_MS } else { 0u64 }
+    let tool_hold = match late { LateTool => LATE_TOOL_MS, SlowTool => SLOW_TOOL_MS, LateModel => 0u64 }
+    let models = task.spawn(tasks, bytes 65536u64, LateModelSeed(inbox: take model_in, clock: clock, hold_ms: model_hold), late_model_service)
+    let tools = task.spawn(tasks, bytes 65536u64, LateToolSeed(inbox: take tool_in, clock: clock, hold_ms: tool_hold), late_tool_service)
+    let services = Services(model: take model, tool: take tool)
+    let config = settings_of(code.describe(race_place), result.unwrap(race_wired()), dir, clock, random, tasks, net, copy_services(services), Some(IDLE_MS))
+    let (life, _stop, _) = launch(tasks, take config)
+    let ended = task.join(take life)
+    if let Ok(Ok(Stopped(_))) = ended { } else { fail("race: the place did not stop") }
+    let asked = model_asked(services)
+    let ran = tool_ran(services)
+    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let snap = store.snapshot(db)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
+    let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let ending: Option[harness.Finish] = match run.phase { Finished(f) => Some(clone(f)), _ => None }
+    let mut outcome: Option[harness.Outcome] = None
+    let mut said = string.new()
+    for pos in 0u64..session.next_pos {
+        match result.unwrap(store.get(snap, store.shape(h.entries), pos)) {
+            Some(ToolResult(_, o)) => { outcome = Some(clone(o)) },
+            Some(Assistant(a)) => { said = clone(a.text) },
+            _ => (),
+        }
+    }
+    let raced = Raced(asked: asked, ran: ran, finish: take ending, spend: clone(run.spend), next_pos: session.next_pos, result: take outcome, said: take said)
+    result.unwrap(store.close(take db))
+    let Services(model: take m2, tool: take t2) = take services
+    let _ = take m2
+    let _ = take t2
+    let _ = task.join(take models)
+    let _ = task.join(take tools)
+    result.unwrap(std.dir.remove_all(parent, name))
+    take raced
+}
+
+fn spent_as(r: Raced, known: u64, unresolved: u64) -> bool { r.spend.known == known && r.spend.reserved == 0u64 && r.spend.unresolved == unresolved }
+
+// Law D1 (astra: deadline races): a deadline and a reply race for one
+// effect, and the first to commit wins. The model's deadline is 1 s and the
+// tool's 3 s.
+// - The first model reply is held 2.5 s. The deadline dooms the call: it is
+//   in doubt, the run stops, the held answer is never recorded (its attempt
+//   is cancelled, so its settle is refused), and its 4096 reserve stays
+//   unresolved.
+// - The Once tool's reply is held 4 s. Its result is InDoubt, the run goes
+//   on to "done", and the held "1" is never recorded.
+// - The tool's reply is held 2 s. The first answer's deadline fires at 1 s,
+//   after that answer settled and while the run is still active, and it
+//   changes nothing: the tool's "1" is Returned and the run is the plain one.
+// Oracle: the services' own counts and the outcomes and spend derived by
+// hand from the script (10+5 tokens per answer).
+pub fn law_deadline_races(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> u64 waits {
+    let a = race_case(parent, clock, random, tasks, net, LateModel)
+    let model_late = a.asked == 1u64 && a.ran == 0u64 && a.next_pos == 2u64 && spent_as(a, 0u64, 4096u64)
+        && match a.finish { Some(Stopped(why)) => why == "model call in doubt", _ => false }
+    if !model_late { return 1u64 }
+    let b = race_case(parent, clock, random, tasks, net, LateTool)
+    let tool_late = b.asked == 2u64 && b.ran == 1u64 && b.next_pos == 5u64 && spent_as(b, 30u64, 0u64) && b.said == "done"
+        && match b.result { Some(InDoubt) => true, _ => false }
+        && match b.finish { Some(Answered) => true, _ => false }
+    if !tool_late { return 2u64 }
+    let c = race_case(parent, clock, random, tasks, net, SlowTool)
+    let prompt = c.asked == 2u64 && c.ran == 1u64 && c.next_pos == 5u64 && spent_as(c, 30u64, 0u64) && c.said == "done"
+        && match c.result { Some(Returned(Inline(out))) => out == string.into_bytes("1"), _ => false }
+        && match c.finish { Some(Answered) => true, _ => false }
+    if !prompt { return 3u64 }
+    0u64
+}
+
+@test
+fn test_deadline_races(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    // The law answers the first case that broke, or 0.
+    let bad = law_deadline_races(parent, clock, random, tasks, net)
+    if bad == 0u64 { Ok(()) } else { Error(bad) }
 }

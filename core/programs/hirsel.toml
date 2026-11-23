@@ -1,2 +1,2 @@
 [workspace]
-members = ["ffi_laws", "harness", "mcp", "postgres", "search", "sqlite", "store"]
+members = ["ffi_laws", "harness", "mcp", "notes", "postgres", "search", "sqlite", "store"]

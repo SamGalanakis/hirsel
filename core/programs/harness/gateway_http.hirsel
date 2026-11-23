@@ -113,9 +113,9 @@ fn turned(why: harness.gateway.Refused) -> u16 {
 
 // A wire client to the session's place under `credential`. `wake` routes to it, starting
 // it if it is unloaded; otherwise only a running place is reached. The lease is dropped
-// once the client is connected: the client's session keeps the place up. A place admits
-// one wire session and reaps a finished one only when the next arrives, so a connect just
-// after another front call closed may be turned away; it is retried until `within_ms`.
+// once the client is connected: the client's session keeps the place up. A place reaps
+// a finished wire session only when the next one arrives, and a busy session's stream
+// holds one, so a refused connect is retried until `within_ms`.
 fn reach[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credential: Bytes, first_p: u64, wake: bool) -> Result[store.fixture.Client, u16] waits {
     let got_lease = if wake {
         harness.gateway.route(d, id)

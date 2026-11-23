@@ -352,8 +352,12 @@ session's place can unload while its page stays open.
   `harness.window`: `Status` (row 0), `Tail(n)`, `From(first)` and
   `Page(before, n)`. The harness has no reader ACL yet; an application that
   needs one registers the window with `query_as` and refuses there.
-- A place admits one wire session, so a front call that finds it still held
-  retries the connect until `within_ms`.
+- While a session is busy, its following stream holds one of the place's wire
+  sessions. A place behind a front therefore needs `max_sessions` of at least 2.
+  A front call whose connect is refused retries until `within_ms`, which covers a
+  finished session the place has not yet reaped.
+- `ts-client/` is a TypeScript browser client for this front, with an example page
+  and a test against a running gateway.
 - `std.http` cannot hold a gateway door in a handler or stream producer
   (HTTP-10, HTTP-11), so the front runs its own accept loop. WebSocket is not
   served.

@@ -228,17 +228,32 @@ type Live: send {
     group: String
 }
 
+// A scripted session's draft: the preview hub and the session's group.
+type Stream: send {
+    door: harness.preview.Door,
+    group: String
+}
+
 type Services: send {
     helper: Sender[HelperAsk],
     clock: Clock,
-    live: Option[Live]
+    live: Option[Live],
+    stream: Option[Stream]
 }
 
 type Grants: send {
     context: store.runner.TriggerContext,
     helper: Sender[HelperAsk],
     clock: Clock,
-    live: Option[Live]
+    live: Option[Live],
+    stream: Option[Stream]
+}
+
+fn copy_stream(s: Option[Stream], group: String) -> Option[Stream] {
+    let Some(d) = view s else {
+        return None
+    }
+    Some(Stream(door: harness.preview.copy_door(d.door), group: string.from(group)))
 }
 
 fn copy_live(l: Live, group: String) -> Live {
@@ -250,7 +265,12 @@ fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Gra
         Some(l) => Some(copy_live(l, l.group)),
         None => None,
     }
-    Ok(Grants(context: take ctx, helper: channel.sender(s.helper), clock: s.clock, live: take live))
+    let group = match s.stream {
+        Some(d) => string.from(d.group),
+        None => string.new(),
+    }
+    let stream = copy_stream(s.stream, group)
+    Ok(Grants(context: take ctx, helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: take stream))
 }
 
 // ---- Outside tools: they run in a worker, off the write lock ----
@@ -328,6 +348,27 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
         Ok(take a) => Ok(take a),
         Error(_) => Error(Unavailable)
     }
+}
+
+// The scripted answer, its text drafted in eight pieces over about a second.
+fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+    let answer = scripted_model(g, take request)?
+    let n = string.byte_len(answer.text)
+    if list.len(answer.calls) == 0u64 && n > 0u64 {
+        let mut from = 0u64
+        for i in 1u64 .. 9u64 {
+            let mut to = n * i / 8u64
+            while to < n && (string.as_bytes(answer.text)[to] & 192u8) == 128u8 {
+                to += 1u64
+            }
+            if let Some(mut p) = sink {
+                harness.preview.delta(mut p, string.slice(answer.text, from, to))
+            }
+            from = to
+            std.clock.sleep_ns(g.clock, 150000000u64)
+        }
+    }
+    Ok(take answer)
 }
 
 fn model(g: Grants, take request: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
@@ -408,7 +449,12 @@ fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
     let Some(l) = view g.live else {
-        return harness.effect(g.context, g, take key, notes_agent(), code.describe(settle))
+        let Some(d) = view g.stream else {
+            return harness.effect(g.context, g, take key, notes_agent(), code.describe(settle))
+        }
+        let mut a = notes_agent()
+        a.preview_model = Some(code.describe(scripted_stream))
+        return harness.effect_with_preview(g.context, g, take key, a, code.describe(settle), Some(harness.preview.target(d.door, d.group, g.clock)))
     }
     let mut a = notes_agent()
     a.preview_model = Some(code.describe(live_model))
@@ -874,14 +920,14 @@ pub fn main(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, 
     emit(out, "you: ", prompt)
     let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
     let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper, clock: clock, random: random, tasks: tasks, net: net), helper_service)
-    let first = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None)))
+    let first = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = first {
         return quit(out, why)
     }
     if let Error(take why) = approve(out, parent, clock, random, tasks) {
         return quit(out, why)
     }
-    let second = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None)))
+    let second = until_idle(settings(Disk(parent, options()), clock, random, tasks, net, Services(helper: channel.sender(ask), clock: clock, live: None, stream: None)))
     if let Error(take why) = second {
         return quit(out, why)
     }
@@ -905,7 +951,7 @@ fn live_place(take supplied: store.places.Supplied, s: Services) -> Result[store
     let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, Services(helper: channel.sender(s.helper), clock: s.clock, live: match s.live {
         Some(l) => Some(copy_live(l, supplied.name)),
         None => None,
-    }))
+    }, stream: None))
     config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
     Ok(take config)
 }
@@ -1264,7 +1310,7 @@ pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: T
     let live = Live(net: network, address: upstream, key: secret.share(api_key), out: out, preview: harness.preview.door(hub), group: "")
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let d = harness.gateway.door_of(way)
-    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: live_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live)))
+    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: live_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live), stream: None))
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
         return quit(out, "could not start the gateway")
     }
@@ -1287,4 +1333,59 @@ pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: T
         },
         Error(take why) => quit(out, why),
     }
+}
+
+// ---- the scripted gateway that the TypeScript client is tested against ----
+fn scripted_place(take supplied: store.places.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
+    let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: copy_stream(s.stream, supplied.name)))
+    config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
+    // A following stream holds one wire session while the session is busy, so a page or
+    // a POST meanwhile needs another.
+    config.max_sessions = 4u64
+    Ok(take config)
+}
+
+fn scripted_factory() -> Result[store.places.Factory[Services], Capacity] {
+    store.places.seeded_factory(scripted_place)
+}
+
+// Serves the scripted notes agent over HTTP until it is killed. It prints `port N` once
+// it listens, then `down N` each time session 0's place stops.
+pub fn serve_scripted(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), Exit] waits {
+    let mut helper_name = string.with_capacity(32u64)
+    let Ok(helper_dir) = host.mkdtemp(data, mut helper_name) else {
+        return quit(out, "cannot make the helper directory")
+    }
+    let (ask, asks): (Sender[HelperAsk], Receiver[HelperAsk]) = channel.new(1u64)
+    let helping = task.spawn(tasks, bytes 67108864u64, HelperSeed(inbox: take asks, dir: helper_dir, clock: clock, random: random, tasks: tasks, net: net), helper_service)
+    let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
+    let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
+    let d = harness.gateway.door_of(way)
+    let seed = Services(helper: channel.sender(ask), clock: clock, live: None, stream: Some(Stream(door: harness.preview.door(hub), group: "")))
+    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: scripted_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let Ok(take g) = harness.gateway.gateway(take way, take config) else {
+        return quit(out, "could not start the gateway")
+    }
+    let Ok((take listener, address)) = host.listen(net, loopback(), 16u16) else {
+        return quit(out, "could not listen for HTTP")
+    }
+    let views: std.codec.Codec[harness.View] = std.codec.of()
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), shown: store.fixture.query_entry(code.describe(window), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: net, tail_lines: 4u64, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 200u64, conn_bytes: 8388608u64, conns_max: 8u64, head_max: 8192u64, body_max: 65536u64)
+    let served = harness.gateway_http.serve(d, take front, take listener)
+    count(out, "port ", int.widen(address.port))
+    let mut downs = 0u64
+    loop {
+        std.clock.sleep_ns(clock, 20000000u64)
+        let m = harness.gateway.marks(d, 0u64)
+        if m.downs != downs {
+            downs = m.downs
+            count(out, "down ", downs)
+        }
+    }
+    harness.gateway_http.halt(take served)
+    let _ = harness.gateway.stop(take g)
+    harness.preview.stop(take hub)
+    let _ = take ask
+    let _ = task.join(take helping)
+    Ok(())
 }

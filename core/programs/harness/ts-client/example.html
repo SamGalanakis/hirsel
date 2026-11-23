@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Harness session</title>
+<style>
+  body { font: 15px/1.45 system-ui, sans-serif; max-width: 44rem; margin: 2rem auto; padding: 0 1rem; }
+  #status { color: #666; }
+  #rows p { margin: .4rem 0; white-space: pre-wrap; }
+  #rows .who { font-weight: 600; margin-right: .4rem; }
+  #draft { color: #555; font-style: italic; white-space: pre-wrap; }
+  form { display: flex; gap: .5rem; margin-top: 1rem; }
+  input { flex: 1; font: inherit; padding: .4rem; }
+</style>
+</head>
+<body>
+<p id="status">connecting…</p>
+<button id="older" hidden>Show earlier</button>
+<div id="rows"></div>
+<p id="draft"></p>
+<form id="send"><input id="text" autocomplete="off" placeholder="Message"><button>Send</button></form>
+<script type="module">
+  import { Client } from "./client.js";
+  // The browser's credential and its next request position live together.
+  const saved = (() => { try { return JSON.parse(localStorage.getItem("harness") || "null"); } catch { return null; } })();
+  const credential = saved?.credential ?? btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
+  const remember = (c) => { try { localStorage.setItem("harness", JSON.stringify({ credential, position: c.position })); } catch {} };
+  const $ = (id) => document.getElementById(id);
+  const client = new Client({
+    base: location.origin, session: Number(new URLSearchParams(location.search).get("session") ?? 0),
+    credential, position: saved?.position ?? 0,
+    onChange(s) {
+      $("status").textContent = s.live ? s.status || "idle" : "reconnecting…";
+      $("older").hidden = !s.live || !s.older;
+      $("rows").replaceChildren(...s.rows.map((r) => {
+        const p = document.createElement("p");
+        const [who, text] = "Line" in r.line ? r.line.Line : ["status", r.line.Status];
+        const name = document.createElement("span");
+        name.className = "who"; name.textContent = who;
+        p.append(name, text);
+        return p;
+      }));
+      $("draft").textContent = s.draft ? (s.draft.offset > 0 ? "…" : "") + s.draft.text : "";
+    },
+  });
+  $("older").onclick = () => client.loadOlder();
+  $("send").onsubmit = async (e) => {
+    e.preventDefault();
+    const text = $("text").value.trim();
+    if (!text) return;
+    $("text").value = "";
+    const answer = await client.send(text, crypto.randomUUID());
+    remember(client);
+    if (answer.status !== 202) $("status").textContent = `not sent (HTTP ${answer.status})`;
+  };
+  client.start();
+</script>
+</body>
+</html>

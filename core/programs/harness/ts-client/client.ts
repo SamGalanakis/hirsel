@@ -32,6 +32,7 @@ export class Client {
   private draft: Draft | null = null;
   private live = false;
   private older = true;
+  private olderBefore: number | null = null;
   private generation = 0; // bumped on every Reset; stale history pages are dropped
   private abort: AbortController | null = null;
   private queue: Promise<unknown> = Promise.resolve();
@@ -120,7 +121,7 @@ export class Client {
             const payload = data.join("\n");
             if (event === "message") pending.push(JSON.parse(payload));
             else if (event === "batch") {
-              if (first) { this.rows.clear(); this.older = true; first = false; this.live = true; wait = 100; }
+              if (first) { this.rows.clear(); this.older = true; this.olderBefore = null; first = false; this.live = true; wait = 100; }
               for (const row of pending) this.rows.set(row.at, row.line);
               pending = [];
               this.supersede();
@@ -136,6 +137,7 @@ export class Client {
         this.draft = null;
         this.live = false;
         this.older = false;
+        this.olderBefore = null;
         this.changed();
       }
       if (!this.stopped) await new Promise((ok) => setTimeout(ok, wait));
@@ -166,14 +168,25 @@ export class Client {
   async loadOlder(): Promise<boolean> {
     const held = [...this.rows.keys()].filter((at) => at > 0);
     if (!this.live || !this.older || held.length === 0) return false;
-    const before = Math.min(...held);
+    const before = this.olderBefore ?? Math.min(...held);
     if (before <= 1) { this.older = false; this.changed(); return false; }
     const generation = this.generation;
-    const r = await fetch(this.url(`/history?before=${before}&lines=${this.o.page ?? 64}`), { headers: this.headers() });
-    if (!r.ok) throw new Error(`history: HTTP ${r.status}`);
+    const current = () => generation === this.generation && this.live &&
+      (this.olderBefore === null || this.olderBefore === before);
+    const url = this.url(`/history?before=${before}&lines=${this.o.page ?? 64}`);
+    let r = await fetch(url, { headers: this.headers() });
+    for (let wait = 50; r.status === 503 && wait <= 800; wait *= 2) {
+      await r.body?.cancel();
+      await new Promise((ok) => setTimeout(ok, wait));
+      if (!current()) return false;
+      r = await fetch(url, { headers: this.headers() });
+    }
+    if (!current()) { await r.body?.cancel(); return false; }
+    if (!r.ok) { await r.body?.cancel(); throw new Error(`history: HTTP ${r.status}`); }
     const page: { from: number; rows: Shown[] } = await r.json();
-    if (generation !== this.generation) return false; // a Reset came first; its image stands
+    if (!current()) return false;
     for (const row of page.rows) if (!this.rows.has(row.at)) this.rows.set(row.at, row.line);
+    this.olderBefore = page.from;
     this.older = page.from > 1;
     this.changed();
     return this.older;

@@ -29,9 +29,10 @@ While a session is busy, its stream's follow holds one wire session. The gateway
 host gives every session's place four, so a page or a POST meanwhile never waits for
 the run.
 
-The harness has no reader ACL. Every history page and stream is a fresh query under
-the browser's Caller, so an application can refuse readers by registering the window
-with `store.runner.query_as`.
+Creating a session makes the bearer credential's Caller its first reader.
+Each history page and live subscription checks the current conversation ACL.
+The client clears its rows and draft when the stream ends. History retries a
+503 with bounded backoff and resumes paging at the cursor from the prior page.
 
 ## Test
 
@@ -43,7 +44,8 @@ that also serves `example.html`, and drives the client through:
 - a drafted answer;
 - a stream cut mid-answer;
 - a Reset after paging;
-- paging back to the first row.
+- paging back to the first row, including a transient 503 and a fork cut;
+- clearing the client when read access is revoked during a draft.
 
 The oracle is a fresh reader: a raw stream's first image plus raw history pages,
 parsed without `client.ts`.
@@ -51,7 +53,7 @@ parsed without `client.ts`.
 ```sh
 out=$(mktemp -d)
 mkdir "$out/data"
-hirsel build gateway --limit 536870912 --dir "$out/data" --grant Stdout --grant Clock \
+hirsel build gateway --limit 536870912 --dir "$out/data" --grant Stdin --grant Stdout --grant Clock \
     --grant Random --grant Tasks --grant 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535' \
     -o "$out/gateway"
 node test.ts "$out/gateway"          # the checks

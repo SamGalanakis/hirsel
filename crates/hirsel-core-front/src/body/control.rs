@@ -130,7 +130,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let to = self
             .returned_local
             .and_then(|(local, to)| (self.binder(pat) == Some(local)).then_some(to));
+        self.frame_log_next = self.frame_log_let(s, pat, value);
         let (t, v) = self.expr_into(value, declared.and_then(expect), to);
+        self.frame_log_next = false;
         let ty = declared.unwrap_or(t);
         let kind = self.type_kind(ty);
         let anchors = if kind == Kind::Scoped {
@@ -182,6 +184,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.consume(v, pat);
                     (Binding::Value(v), Origin::Let)
                 };
+                if let Some(&item) = v.and_then(|v| self.frame_logs.get(&v)) {
+                    self.frame_log_owners.insert(b, item);
+                }
                 self.declare(b, ty, binding, origin, pat);
                 if let Binding::Slot(Some(address)) = binding
                     && to.is_none()

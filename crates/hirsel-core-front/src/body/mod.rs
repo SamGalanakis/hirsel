@@ -59,6 +59,7 @@ mod control;
 pub(crate) mod core_ops;
 pub(crate) mod flow;
 mod frame_lists;
+mod frame_logs;
 mod growth;
 mod key_glue;
 mod lists;
@@ -1332,6 +1333,14 @@ struct Cx<'c, 'a, 'e> {
     frame_binders: Option<HashMap<u32, bool>>,
     /// The frame bytes of each frame-backed list, by its slot.
     frame_slots: HashMap<SlotId, frame_lists::FrameList>,
+    /// Binders of logs whose node never leaves this body (frame_logs.rs).
+    frame_log_binders: Option<HashSet<u32>>,
+    /// Set by a candidate's `let` for the `log.new()` it lowers next.
+    frame_log_next: bool,
+    /// The Log values whose node is in this body's frame, with their entry type.
+    frame_logs: HashMap<ValueId, TyId>,
+    /// The binders that own a frame node, with their log's entry type.
+    frame_log_owners: HashMap<u32, TyId>,
 }
 
 /// The gap a body reports when its emission stopped with no refusal or gap to say why.
@@ -1482,6 +1491,10 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             anchor_path: vec![],
             frame_binders: None,
             frame_slots: HashMap::default(),
+            frame_log_binders: None,
+            frame_log_next: false,
+            frame_logs: HashMap::default(),
+            frame_log_owners: HashMap::default(),
         }
     }
 

@@ -63,6 +63,14 @@ pub(super) struct Own {
     pub flag: AddressId,
 }
 
+/// An owner whose storage sits in its body's frame.
+#[derive(Clone, Copy)]
+enum Frame {
+    List(frame_lists::FrameList),
+    /// A log node (frame_logs.rs), with its entry type.
+    Log(TyId),
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The row of a value of `ty` that needs cleanup.
     pub(super) fn drop_id(&mut self, ty: TyId) -> Option<TypeId> {
@@ -346,7 +354,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Owner::Slot(s) => {
                 let v = self.var(s);
                 let Some(own) = v.own else { return };
-                frame = self.frame_list_at(own.address);
+                frame = self
+                    .frame_list_at(own.address)
+                    .map(Frame::List)
+                    .or_else(|| self.frame_log_owners.get(&s).map(|&item| Frame::Log(item)));
                 (
                     AddressBase::Address(own.address),
                     own.id,
@@ -482,16 +493,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(head, &[], n);
         self.start(out);
     }
-    fn drop_owner(
-        &mut self,
-        base: AddressBase,
-        id: TypeId,
-        frame: Option<frame_lists::FrameList>,
-        n: NodeId,
-    ) {
+    fn drop_owner(&mut self, base: AddressBase, id: TypeId, frame: Option<Frame>, n: NodeId) {
         match (frame, base) {
-            (Some(f), AddressBase::Address(address)) => {
+            (Some(Frame::List(f)), AddressBase::Address(address)) => {
                 let _ = self.drop_frame_list(f, address, id, n);
+            }
+            (Some(Frame::Log(item)), AddressBase::Address(address)) => {
+                let _ = self.drop_frame_log(address, item, n);
             }
             _ => self.emit_drop(base, id, n),
         }

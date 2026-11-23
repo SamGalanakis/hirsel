@@ -1894,7 +1894,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    fn owner_charge(
+    pub(super) fn owner_charge(
         &mut self,
         ty: TyId,
         kind: Option<Counted>,
@@ -1995,6 +1995,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let id = self.runtime_type(list, n)?;
         let carrier = self.list_carrier(item, n)?;
         let payload = self.layout_size(list, false, n)?;
+        // A log whose node never leaves this body keeps it in the frame, charged
+        // as on the heap (frame_logs.rs).
+        let place = if std::mem::take(&mut self.frame_log_next) {
+            AllocPlace::Frame(self.frame_log_bytes(n)?)
+        } else {
+            AllocPlace::Current
+        };
+        let framed = matches!(place, AllocPlace::Frame(_));
         let node = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
         let edge = FieldTy::Box(TypeRef(id.0));
@@ -2004,7 +2012,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 available,
                 region_entry: None,
                 kind: AllocKind::Own { edge },
-                place: AllocPlace::Current,
+                place,
                 charge,
                 overflow: Some(overflow),
                 size: payload,
@@ -2015,13 +2023,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        self.runtime_admitted(result, ok, [charge, available], n, |cx, to| {
+        let log = self.runtime_admitted(result, ok, [charge, available], n, |cx, to| {
             // The node itself is the List carrier: {data, len, capacity}.
             cx.set_carrier_word(node, carrier, SeqWord::Data, null, n);
             cx.set_carrier_word(node, carrier, SeqWord::Cap, zero, n);
             cx.set_carrier_word(node, carrier, SeqWord::Len, zero, n);
             cx.runtime_store(to, &[Step::Field(0)], Ty::Ptr, node, n);
-        })
+        })?;
+        if framed {
+            self.frame_logs.insert(log, item);
+        }
+        Some(log)
     }
 
     /// Append through the pointer loaded from the Log carrier. A refused reserve
@@ -2082,13 +2094,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.copy_to(to, node, list_id, n);
         self.consume(Some(log), n);
         let (charge, _) = self.owner_charge(list, None, n)?;
-        self.inst(
-            Inst::Free {
-                block: node,
-                charge,
-            },
-            n,
-        );
+        if self.frame_logs.contains_key(&log) {
+            self.inst(Inst::FrameRefund { charge }, n);
+        } else {
+            self.inst(
+                Inst::Free {
+                    block: node,
+                    charge,
+                },
+                n,
+            );
+        }
         let value = self.pointer(to, n);
         self.temp(result, Some(value));
         Some(value)

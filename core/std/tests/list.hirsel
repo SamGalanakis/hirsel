@@ -286,6 +286,48 @@ fn helpers_retain_delays_cleanup() -> bool {
     count == 1 && digits(calls) == 123
 }
 
+// One u64 entry in a fresh log: the node, 24 bytes, then four entries, 32 (MEM-24).
+fn log_finished() -> u64 {
+    let l: Log[u64] = log.new()
+    log.append(l, 7)
+    list.len(log.finish(take l))
+}
+
+fn log_dropped() -> u64 {
+    let l: Log[u64] = log.new()
+    log.append(l, 7)
+    1
+}
+
+fn logs_under(limit: u64) -> Result[Result[Result[u64, Capacity], Causes], Capacity] {
+    isolate(fn() -> Result[u64, Capacity] {
+        bound bytes limit {
+            log_finished() + log_finished() + log_dropped() + log_dropped()
+        }
+    })
+}
+
+// MEM-29 charges a log's node at log.new and refunds it at log.finish and at the
+// log's drop, wherever an engine puts the node (MEM-28). Each call peaks at 56 bytes
+// and returns all of it, so 56 runs all four; 55 refuses the first entries' 32 with
+// 31 left, and 23 refuses the first node's 24.
+// expect: run log_charges_are_exact() = true
+fn log_charges_are_exact() -> bool {
+    let all = match logs_under(56) {
+        Ok(Ok(Ok(n))) => n == 4,
+        _ => false,
+    }
+    let entries = match caught(logs_under(55)) {
+        Some(c) => c.requested == 32 && c.available == 31,
+        None => false,
+    }
+    let node = match caught(logs_under(23)) {
+        Some(c) => c.requested == 24 && c.available == 23,
+        None => false,
+    }
+    all && entries && node
+}
+
 fn present(o: Option[View[u64]]) -> u64 {
     match o {
         Some(v) => v,

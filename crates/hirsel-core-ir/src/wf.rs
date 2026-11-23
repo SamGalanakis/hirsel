@@ -1190,14 +1190,23 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 c.is(v, Ty::Ptr)?;
             }
             if matches!(place, AllocPlace::Frame(_) | AllocPlace::LentFrame(_)) {
+                use hirsel_core_layout::FieldTy;
                 need(
                     matches!(
-                        kind,
-                        AllocKind::Own {
-                            edge: hirsel_core_layout::FieldTy::Seq(_)
-                        }
+                        (kind, place),
+                        (
+                            AllocKind::Own {
+                                edge: FieldTy::Seq(_)
+                            },
+                            _
+                        ) | (
+                            AllocKind::Own {
+                                edge: FieldTy::Box(_)
+                            },
+                            AllocPlace::Frame(_)
+                        )
                     ),
-                    || "frame bytes back only sequence storage".into(),
+                    || "frame bytes back only sequence storage and log nodes".into(),
                 )?;
             }
             // Region storage is stable and stable storage is in a region (crate docs,

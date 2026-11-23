@@ -462,6 +462,7 @@ impl OsProcess {
             let mut describe_mode = false;
             let mut preview_mode = false;
             let mut wake = false;
+            let mut install_child = None;
             let mut idle_ms = None;
             let mut store_id = None;
             let mut prefix = 0;
@@ -477,6 +478,15 @@ impl OsProcess {
                     }
                     describe_mode = true;
                     preview_mode = argument == b"--hirsel-preview";
+                } else if let Some(value) = argument.strip_prefix(b"--hirsel-install-child=") {
+                    install_child = Some(
+                        std::str::from_utf8(value)
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?,
+                    );
+                    prefix += 1;
+                    break;
                 } else if argument == b"--hirsel-wake" {
                     if wake {
                         return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
@@ -531,7 +541,9 @@ impl OsProcess {
             } else {
                 None
             };
-            if (wake && (describe_mode || prepare_path.is_some()))
+            let installing = install_child.is_some();
+            if (wake && (describe_mode || prepare_path.is_some() || installing))
+                || (installing && (describe_mode || prepare_path.is_some()))
                 || (!wake && (idle_ms.is_some() || store_id.is_some()))
             {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
@@ -568,6 +580,9 @@ impl OsProcess {
             if prepare_path.is_some() {
                 launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);
             }
+            if let Some(activation) = install_child {
+                launch = launch.with_install_child(activation);
+            }
             if preview_mode {
                 use std::io::Read;
                 let _blocking = crate::units::blocking();
@@ -585,6 +600,7 @@ impl OsProcess {
             // Receive before the first dup/open can reuse a missing activation fd.
             let net_ops = input.socket_activation.as_ref();
             let (inherited, operator) = if let Some(activation) = net_ops
+                && !installing
                 && input.grant_mask & (1 << NET) != 0
             {
                 ((activation.receive)()?, (activation.operator)()?)
@@ -592,7 +608,7 @@ impl OsProcess {
                 (None, None)
             };
             let host_control = receive_host_control()?;
-            if host_control.is_some() && (describe_mode || prepare_path.is_some()) {
+            if host_control.is_some() && (describe_mode || prepare_path.is_some() || installing) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
             let rows = if input.net_rules_len == 0 {
@@ -601,6 +617,7 @@ impl OsProcess {
                 std::slice::from_raw_parts(input.net_rules, input.net_rules_len)
             };
             let unix = !describe_mode
+                && !installing
                 && prepare_path.is_none()
                 && input.grant_mask & (1 << NET) != 0
                 && rows.iter().any(|row| row.address.dir == 4);
@@ -629,7 +646,7 @@ impl OsProcess {
             });
             let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
                 .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
-            let stdout = if !describe_mode && input.grant_mask & (1 << STDOUT) != 0 {
+            let stdout = if !describe_mode && !installing && input.grant_mask & (1 << STDOUT) != 0 {
                 duplicate_stream(input.stdout_fd, libc::STDOUT_FILENO)?
             } else {
                 duplicate_stream(input.stderr_fd, libc::STDERR_FILENO)?
@@ -640,7 +657,7 @@ impl OsProcess {
                 *os.inherited_listener.get_mut().unwrap() = inherited;
                 *os.inherited_unix.get_mut().unwrap() = operator;
             }
-            let describe_out = if describe_mode {
+            let describe_out = if describe_mode || installing {
                 Some(duplicate(input.stdout_fd)?)
             } else {
                 wake_report
@@ -684,7 +701,7 @@ impl OsProcess {
             let net_granted = input.grant_mask & (1 << NET) != 0;
             let net_rules = if describe_mode {
                 None
-            } else if prepare_path.is_some() {
+            } else if prepare_path.is_some() || installing {
                 net_granted.then(crate::net::RulesStorage::empty)
             } else if input.net_rules_len != 0 {
                 let ops = net_ops.ok_or(StartupError::NetRules)?;

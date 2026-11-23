@@ -244,6 +244,7 @@ pub unsafe extern "C" fn hirsel_core_describe_emit(
     unsafe {
         if hirsel_core_launch_word(context, 5, 0) == 0
             && hirsel_core_launch_word(context, 12, 0) == 0
+            && hirsel_core_launch_word(context, 15, 0) == 0
         {
             return false;
         }

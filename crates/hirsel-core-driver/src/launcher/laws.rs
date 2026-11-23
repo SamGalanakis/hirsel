@@ -673,6 +673,7 @@ fn child_mode_authority() {
         format!("{}\nprintf described", report("describe")),
         format!("{}\ncat", report("preview")),
         report("prepare"),
+        report("install"),
     ];
     let scripts: Vec<&str> = scripts.iter().map(String::as_str).collect();
     let mut rig = rig(&scripts);
@@ -737,6 +738,14 @@ fn child_mode_authority() {
         "--hirsel-prepare {} {attempt_hex} {image_hex}",
         export.display()
     )));
+
+    let installing = role(Role::Install(1));
+    rig.ask(launch(4, &work, Mode::Install(1, InstallKind::Genesis)));
+    rig.until(|events| ended(events, &installing));
+    assert_eq!(
+        held("install"),
+        ["args --hirsel-n-place=65536 --hirsel-install-child=0 app"]
+    );
 
     rig.ask(launch(0, &work, Mode::Serving(1, serve(5, None))));
     let end = Instant::now() + Duration::from_secs(10);

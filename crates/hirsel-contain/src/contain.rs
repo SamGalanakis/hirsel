@@ -267,10 +267,9 @@ fn report(contained: Contained, out: &mut BufReader<File>) -> (Contained, Vec<St
 /// What the mode's row lets a child, or its tool, do (launch.md "Child modes").
 fn expected(mode: Mode, group: &Group) -> Vec<String> {
     let reach: &[&str] = match mode {
-        Mode::Install => &["store"],
+        Mode::Install | Mode::Serving => &["store", "data"],
         Mode::Describe | Mode::Preview => &[],
         Mode::Prepare => &["export"],
-        Mode::Serving => &["store", "data"],
     };
     let files = group.files();
     let verdict = |name: &str| {

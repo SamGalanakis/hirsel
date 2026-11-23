@@ -19,6 +19,7 @@ import argparse
 import base64
 import ctypes
 import ctypes.util
+import fcntl
 from contextlib import contextmanager
 import hashlib
 import json
@@ -352,7 +353,7 @@ CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
 HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused',
-             'missing_store_mount')
+             'missing_store_mount', 'install_child', 'install_child_crash')
 
 
 def host_law(args, root, work, engine, name):
@@ -388,8 +389,8 @@ def host_law(args, root, work, engine, name):
 
     old_n_place, new_n_place = 1048576, 2097152
     old_recipe = publish(old_n_place)
-    new_recipe = old_recipe if name == 'missing_store_mount' else publish(new_n_place)
-    if name != 'missing_store_mount':
+    new_recipe = publish(new_n_place) if name not in ('missing_store_mount', 'install_child') else old_recipe
+    if name not in ('missing_store_mount', 'install_child'):
         assert old_recipe != new_recipe, 'the two allowances must produce distinct recipes'
 
     with socket.socket() as probe:
@@ -489,6 +490,16 @@ def host_law(args, root, work, engine, name):
         check = xxh3(checked_bytes, len(checked_bytes))
         copy.write_bytes(head + bytes(payload) + check.to_bytes(8, 'little'))
         return copy
+
+    if name in ('install_child', 'install_child_crash'):
+        with running_host():
+            _, registered = outcome(register, f'{name}:register')
+            if name == 'install_child_crash':
+                _, deployed = outcome(deploy, f'{name}:publish-new')
+        old = bytes.fromhex(registered['assembly'])
+        new = bytes.fromhex(deployed['assembly']) if name == 'install_child_crash' else None
+        install_child_law(compiler, state, work, old, new)
+        return
 
     if name == 'missing_store_mount':
         live = launch_store / 'live'
@@ -640,6 +651,139 @@ def host_law(args, root, work, engine, name):
         status = json.loads(checked([compiler, 'deploy', '--state', str(state), '--status', request],
                                     engine=engine, case=f'{name}:status').stdout)
         assert status == deployed, 'the recovered host forgot the request outcome'
+
+
+def install_child_law(compiler, state, work, old, new):
+    """Drive the actual launcher by the value-codec control session."""
+    place = work / 'install-place'
+    live = place / 'live'
+    live.mkdir(parents=True)
+    control = state / 'install-control.sock'
+    group = struct.pack('<I1sQ', 1, b'g', 1)
+    pack = struct.pack
+
+    def blob(raw):
+        return pack('<I', len(raw)) + raw
+
+    def child(tag, generation):
+        return group + pack('<IQ', tag, generation)
+
+    def start(assembly, identity, mode_args, args=()):
+        payload = (group + blob(assembly) + blob(os.fsencode(place))
+                   + pack('<I', len(args)) + b''.join(map(blob, args))
+                   + identity[len(group):] + mode_args + pack('<I', 0))
+        send(3, payload)
+        assert receive() == pack('<I', 1) + identity + pack('<I', 0)
+
+    def send(tag, payload=b''):
+        peer.sendall(blob(pack('<I', tag) + payload))
+
+    def receive():
+        header = stream.read(4)
+        assert len(header) == 4, 'launcher closed its control stream'
+        length, = struct.unpack('<I', header)
+        assert length <= 2**20
+        value = stream.read(length)
+        assert len(value) == length, 'launcher frame was truncated'
+        return value
+
+    def placed(identity, reply):
+        frame = receive()
+        assert frame == pack('<I', 9) + identity + reply, frame.hex()
+
+    def end(identity, exit_kind, code):
+        assert receive() == pack('<I', 3) + identity + pack('<IiIB', exit_kind, code, 0, 0)
+        send(6, identity)
+
+    def probe(assembly, gen, activation, found):
+        identity = child(1, gen)
+        start(assembly, identity, pack('<QQII', activation, 60_000, 0, 0))
+        frame = receive()
+        prefix = pack('<I', 9) + identity + pack('<I', 0 if activation == found else 1)
+        assert frame.startswith(prefix) and frame[len(prefix):len(prefix) + 8] == pack('<Q', found), frame
+        if found == activation:
+            send(5, identity)
+            end(identity, 1, 9)
+        else:
+            end(identity, 0, 1)
+
+    with tempfile.TemporaryFile() as log:
+        launcher = subprocess.Popen([compiler, 'launcher', '--control', str(control), '--state', str(state)],
+                                    stdout=log, stderr=log)
+        try:
+            deadline = time.monotonic() + 10
+            with socket.socket(socket.AF_UNIX) as peer:
+                peer.settimeout(15)
+                while True:
+                    try:
+                        peer.connect(str(control))
+                        break
+                    except (FileNotFoundError, ConnectionRefusedError):
+                        assert launcher.poll() is None and time.monotonic() < deadline
+                        time.sleep(0.025)
+                with peer.makefile('rb') as stream:
+                    send(0)
+                    assert receive() == bytes(16), 'a fresh launcher has an empty inventory'
+                    send(1, group + blob(b'127.0.0.1:0') + pack('<I', 1)
+                         + blob(os.fsencode(live)) + bytes(20))
+                    assert receive() == pack('<I', 5) + group
+                    # Genesis on an empty store commits exactly activation 1.
+                    genesis = child(0, 1)
+                    start(old, genesis, pack('<I', 0))
+                    installed = pack('<IQB', 5, 1, 0)
+                    placed(genesis, installed)
+                    exited = pack('<IiIB', 0, 0, 0, 0)
+                    assert receive() == pack('<I', 3) + genesis + exited
+                    # The result is replayable until the host acknowledges the end.
+                    send(0)
+                    assert receive() == pack('<II', 0, 1) + genesis + pack('<I', 1) + exited + bytes(8)
+                    placed(genesis, installed)
+                    send(6, genesis)
+                    if new is None:
+                        # There have been no data commits. A request for 3 must refuse
+                        # with the store's next version 2, and leave activation 1 intact.
+                        wrong = child(0, 2)
+                        start(old, wrong, pack('<IQ', 1, 3))
+                        placed(wrong, pack('<IIQ', 11, 8, 2))
+                        end(wrong, 0, 1)
+                        probe(old, 3, 1, 1)
+                        upgrade = child(0, 4)
+                        start(old, upgrade, pack('<IQ', 1, 2))
+                        placed(upgrade, pack('<IQB', 5, 2, 0))
+                        end(upgrade, 0, 0)
+                        probe(old, 5, 2, 2)
+                        return
+
+                    # The child is in the install's LOCK interval and is unable to
+                    # finish migrate. Kill it once. An end without proof is uncertain.
+                    crash = child(0, 2)
+                    with (live / 'LOCK').open('rb') as lock:
+                        start(new, crash, pack('<IQ', 1, 2), [b'hold-install'])
+                        deadline = time.monotonic() + 10
+                        while True:
+                            try:
+                                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            except BlockingIOError:
+                                break
+                            fcntl.flock(lock, fcntl.LOCK_UN)
+                            assert time.monotonic() < deadline, 'install did not take the store lock'
+                            time.sleep(0.005)
+                    send(5, crash)
+                    end(crash, 1, 9)
+                    # Undecided recovery first probes NEW at 2. Its Current(1)
+                    # selects OLD's pair. Only OLD's successful open proves refusal.
+                    probe(new, 3, 2, 1)
+                    probe(old, 4, 1, 1)
+        except Exception as error:
+            log.seek(0)
+            error.add_note(log.read().decode(errors='replace'))
+            raise
+        finally:
+            if launcher.poll() is None:
+                comm = subprocess.check_output(['ps', '-o', 'comm=', '-p', str(launcher.pid)], text=True)
+                assert comm.strip() == 'hirsel', comm
+                launcher.kill()
+            launcher.wait(timeout=15)
 
 
 def crashes(args, root, work, engine, name):

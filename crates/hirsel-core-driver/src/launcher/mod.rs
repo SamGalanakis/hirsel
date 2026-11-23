@@ -23,7 +23,8 @@ use ready::{CHANGE, Epoll, READ, WRITE, Watch};
 
 use session::{
     Approvals, Attempt, Bindings, Child, ChildState, End, Event, Failure, Group, HostCommand,
-    HostReply, Input, Label, Launch, Limits, Mode, Phase, Refusal, Request, Role, Status, Wire,
+    HostReply, Input, InstallKind, Label, Launch, Limits, Mode, Phase, Refusal, Request, Role,
+    Status, Wire,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -302,8 +303,9 @@ struct Process {
     opened: Option<HostReply>,
     /// A serving child's wake report (descriptor 5), the launcher's read end.
     report: Option<File>,
-    /// A describe or preview child's standard output, with its bound.
+    /// Standard output of a child with a bounded answer.
     answer: Option<(File, u64)>,
+    install_target: Option<u64>,
 }
 
 struct Ordinary {
@@ -447,6 +449,7 @@ fn send(pidfd: RawFd, signal: i32) -> io::Result<()> {
 struct Kept {
     state: ChildState,
     process: Option<Process>,
+    install_reply: Option<HostReply>,
 }
 
 /// A cutover forwarded to OLD, kept from first forward until the host's `CutoverAck`.
@@ -791,7 +794,14 @@ impl<I: Images> Launcher<I> {
                 self.emit(Event::Closed(group));
             }
             Request::Start(launch) => self.start(launch),
-            Request::Stop(child) => self.signal(&child, libc::SIGTERM),
+            Request::Stop(child) => {
+                let sig = if matches!(child.role, Role::Install(_)) {
+                    libc::SIGKILL
+                } else {
+                    libc::SIGTERM
+                };
+                self.signal(&child, sig);
+            }
             Request::Kill(child) => self.signal(&child, libc::SIGKILL),
             Request::Acknowledge(child) => {
                 if let Some(i) = self.child(&child)
@@ -1065,7 +1075,8 @@ impl<I: Images> Launcher<I> {
         let cutovers = self.cutovers.keys().cloned().collect();
         self.emit(Event::Inventory(children, cold, cutovers));
         for entry in &self.children {
-            if let Some(reply) = entry.process.as_ref().and_then(|p| p.opened.as_ref()) {
+            let serving_open = entry.process.as_ref().and_then(|p| p.opened.as_ref());
+            if let Some(reply) = serving_open.or(entry.install_reply.as_ref()) {
                 self.out
                     .push(Event::Placed(entry.state.child.clone(), reply.clone()));
             }
@@ -1136,7 +1147,11 @@ impl<I: Images> Launcher<I> {
         let child = launch.child();
         if let Some(i) = self.child(&child) {
             let phase = self.children[i].state.phase.clone();
-            return self.emit(Event::Launched(child, phase));
+            self.emit(Event::Launched(child.clone(), phase));
+            if let Some(reply) = self.children[i].install_reply.clone() {
+                self.emit(Event::Placed(child, reply));
+            }
+            return;
         }
         let refusal = match self.listener(&launch.group) {
             None => Some(Refusal::UnknownGroup),
@@ -1149,9 +1164,9 @@ impl<I: Images> Launcher<I> {
             {
                 Some(Refusal::Mismatch)
             }
-            Some(_) if matches!(launch.mode, Mode::Install(..)) => Some(Refusal::Unbuilt(
-                "install child: the runtime has no install-only launch".into(),
-            )),
+            Some(_) if matches!(launch.mode, Mode::Install(_, InstallKind::Standalone(0))) => {
+                Some(Refusal::Mismatch)
+            }
             Some(_) if !self.one_launch(&launch) => Some(Refusal::Held),
             Some(_) => None,
         };
@@ -1179,6 +1194,7 @@ impl<I: Images> Launcher<I> {
                         phase: Phase::Started,
                     },
                     process: Some(process),
+                    install_reply: None,
                 });
                 self.emit(Event::Launched(child, Phase::Started));
             }
@@ -1197,9 +1213,15 @@ impl<I: Images> Launcher<I> {
         let mut endpoint = None;
         let mut report = None;
         let mut answer = None;
+        let mut install_target = None;
         let mut input = None;
         let mut export_path = None;
         let scratch = self.scratch_of(&launch.group);
+        let host_pid = if listener.label == Label::Contained {
+            1
+        } else {
+            std::process::id()
+        };
         match &launch.mode {
             Mode::Serving(_, serve) => {
                 if listener.label == Label::Contained {
@@ -1225,11 +1247,6 @@ impl<I: Images> Launcher<I> {
                     .arg(format!("--hirsel-activation={}", serve.activation))
                     .args(&launch.args);
                 std::fs::create_dir_all(&scratch)?;
-                let host_pid = if listener.label == Label::Contained {
-                    1
-                } else {
-                    std::process::id()
-                };
                 command
                     .env("HIRSEL_CONTROL_FD", "4")
                     .env("HIRSEL_SCRATCH", &scratch)
@@ -1281,7 +1298,21 @@ impl<I: Images> Launcher<I> {
                     .arg(hex(&image.digest));
                 export_path = Some(path);
             }
-            Mode::Install(..) => return Err(io::ErrorKind::Unsupported.into()),
+            Mode::Install(_, kind) => {
+                let selection = match kind {
+                    InstallKind::Genesis => 0,
+                    InstallKind::Standalone(activation) => *activation,
+                };
+                command
+                    .args(&image.prefix)
+                    .arg(&n_place)
+                    .arg(format!("--hirsel-install-child={selection}"))
+                    .args(&launch.args)
+                    .env("HIRSEL_HOST_PID", host_pid.to_string());
+                install_target = Some(selection.max(1));
+                // HostReply::InstallRefused(WrongVersion) is the largest answer.
+                answer = Some((tempfile::tempfile()?, 16));
+            }
         }
         let child = if listener.label == Label::Contained {
             if let Some(input) = input {
@@ -1381,6 +1412,7 @@ impl<I: Images> Launcher<I> {
             opened: None,
             report,
             answer,
+            install_target,
         })
     }
 
@@ -1600,7 +1632,8 @@ impl<I: Images> Launcher<I> {
         let report = process.report.as_mut().and_then(read_report);
         let child = self.children[i].state.child.clone();
         if let Some((mut out, bound)) = process.answer.take()
-            && status == Status::Code(0)
+            && (status == Status::Code(0)
+                || (process.install_target.is_some() && status == Status::Code(1)))
         {
             let mut answer = Vec::new();
             out.rewind()?;
@@ -1608,7 +1641,23 @@ impl<I: Images> Launcher<I> {
                 .take(bound + 1)
                 .read_to_end(&mut answer)?;
             if answer.len() as u64 <= bound {
-                self.emit(Event::Answered(child.clone(), answer));
+                if let Some(target) = process.install_target {
+                    let reply = match (HostReply::decode(&answer), status) {
+                        (Ok(reply @ HostReply::Installed(version, false)), Status::Code(0))
+                            if version == target =>
+                        {
+                            Some(reply)
+                        }
+                        (Ok(reply @ HostReply::InstallRefused(_)), Status::Code(1)) => Some(reply),
+                        _ => None,
+                    };
+                    if let Some(reply) = reply {
+                        self.children[i].install_reply = Some(reply.clone());
+                        self.emit(Event::Placed(child.clone(), reply));
+                    }
+                } else {
+                    self.emit(Event::Answered(child.clone(), answer));
+                }
             }
         }
         let mut sample = false;

@@ -185,6 +185,10 @@ fn selection_of(activation: u64) -> runner.Selection { Current(activation) }
 fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[launcher.Event]) waits {
     let launcher.Launch(group: take group, workdir: take workdir, mode: take mode, ..) = take l
     let role = launcher.role_of(mode)
+    if let Install(_) = role {
+        list.push(mut events, Refused(launcher.Child(group: clone(group), role: role), Mismatch))
+        return
+    }
     let ServingMode(gen, serve) = take mode else {
         list.push(mut events, Refused(launcher.Child(group: clone(group), role: role), Unbuilt(string.from("in-process launcher serves only"))))
         return

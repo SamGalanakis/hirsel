@@ -55,7 +55,7 @@ pub(crate) struct Child {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum InstallKind {
     Genesis,
-    Standalone,
+    Standalone(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,6 +148,20 @@ pub(crate) enum HostReply {
     Uncertain,
     WriteAck(u64),
     StoreMismatch(u64, u64, u64, u64),
+    InstallRefused(InstallRefusal),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InstallRefusal {
+    Held,
+    Store,
+    Place,
+    Migration,
+    Current,
+    Identity,
+    Capacity,
+    Config,
+    WrongVersion(u64),
 }
 
 /// A group's containment label (launch.md "Containment (R27)").
@@ -484,10 +498,13 @@ impl Wire for Mode {
             Self::Install(g, kind) => {
                 w.u32(0);
                 w.u64(*g);
-                w.u32(match kind {
-                    InstallKind::Genesis => 0,
-                    InstallKind::Standalone => 1,
-                });
+                match *kind {
+                    InstallKind::Genesis => w.u32(0),
+                    InstallKind::Standalone(activation) => {
+                        w.u32(1);
+                        w.u64(activation);
+                    }
+                }
             }
             Self::Serving(g, serve) => {
                 w.u32(1);
@@ -519,7 +536,7 @@ impl Wire for Mode {
                 r.u64()?,
                 match r.u32()? {
                     0 => InstallKind::Genesis,
-                    1 => InstallKind::Standalone,
+                    1 => InstallKind::Standalone(r.u64()?),
                     _ => return Err(malformed("install kind tag")),
                 },
             ),
@@ -654,6 +671,23 @@ impl Wire for HostReply {
                 w.u64(*ahi);
                 w.u64(*alo);
             }
+            Self::InstallRefused(why) => {
+                w.u32(11);
+                match why {
+                    InstallRefusal::Held => w.u32(0),
+                    InstallRefusal::Store => w.u32(1),
+                    InstallRefusal::Place => w.u32(2),
+                    InstallRefusal::Migration => w.u32(3),
+                    InstallRefusal::Current => w.u32(4),
+                    InstallRefusal::Identity => w.u32(5),
+                    InstallRefusal::Capacity => w.u32(6),
+                    InstallRefusal::Config => w.u32(7),
+                    InstallRefusal::WrongVersion(next) => {
+                        w.u32(8);
+                        w.u64(*next);
+                    }
+                }
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -676,6 +710,18 @@ impl Wire for HostReply {
             8 => Self::Uncertain,
             9 => Self::WriteAck(r.u64()?),
             10 => Self::StoreMismatch(r.u64()?, r.u64()?, r.u64()?, r.u64()?),
+            11 => Self::InstallRefused(match r.u32()? {
+                0 => InstallRefusal::Held,
+                1 => InstallRefusal::Store,
+                2 => InstallRefusal::Place,
+                3 => InstallRefusal::Migration,
+                4 => InstallRefusal::Current,
+                5 => InstallRefusal::Identity,
+                6 => InstallRefusal::Capacity,
+                7 => InstallRefusal::Config,
+                8 => InstallRefusal::WrongVersion(r.u64()?),
+                _ => return Err(malformed("install refusal tag")),
+            }),
             _ => return Err(malformed("host reply tag")),
         })
     }
@@ -1159,6 +1205,10 @@ mod tests {
                 "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610000000001000000000000000000000000000000".into(),
             ),
             (
+                launch(Mode::Install(1, InstallKind::Standalone(3))),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006100000000010000000000000001000000030000000000000000000000".into(),
+            ),
+            (
                 launch(Mode::Serving(
                     7,
                     Serve {
@@ -1364,6 +1414,16 @@ mod tests {
             (
                 Event::Placed(serving(), HostReply::StoreMismatch(1, 2, 3, 4)),
                 "09000000010000006703000000000000000100000007000000000000000a0000000100000000000000020000000000000003000000000000000400000000000000",
+            ),
+            (
+                Event::Placed(
+                    Child {
+                        group: group(),
+                        role: Role::Install(1),
+                    },
+                    HostReply::InstallRefused(InstallRefusal::WrongVersion(2)),
+                ),
+                "09000000010000006703000000000000000000000001000000000000000b000000080000000200000000000000",
             ),
             (
                 Event::Answered(preparing(), vec![1, 2]),

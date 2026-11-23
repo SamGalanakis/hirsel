@@ -65,6 +65,7 @@ pub struct Metadata {
     store_id: Option<(u64, u64)>,
     preview: Option<Vec<u8>>,
     preparing: Option<([u8; 16], [u8; 32])>,
+    install_child: Option<u64>,
 }
 
 impl Metadata {
@@ -97,6 +98,7 @@ impl Metadata {
             store_id: None,
             preview: None,
             preparing: None,
+            install_child: None,
         }
     }
 
@@ -173,6 +175,11 @@ impl Metadata {
         self
     }
 
+    pub fn with_install_child(mut self, activation: u64) -> Self {
+        self.install_child = Some(activation);
+        self
+    }
+
     pub fn word(&self, field: u64, index: u64) -> u64 {
         let byte = |bytes: &[u8]| {
             usize::try_from(index)
@@ -207,6 +214,11 @@ impl Metadata {
                 (Some(_), 0) => 1,
                 (Some((hi, _)), 1) => hi,
                 (Some((_, lo)), 2) => lo,
+                _ => 0,
+            },
+            15 => match (self.install_child, index) {
+                (Some(_), 0) => 1,
+                (Some(activation), 1) => activation,
                 _ => 0,
             },
             _ => 0,

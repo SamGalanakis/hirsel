@@ -102,6 +102,12 @@ fn want(ok: bool, take what: String) {
     }
 }
 
+// Keep the install's staged catalog private until the launcher kills this child.
+fn hold_install(mut phase: store.Migration) -> Result[(), store.Error] {
+    migrate(mut phase)?
+    loop {}
+}
+
 // H4 uses the same registry and durable counter as the W2 crash scenarios.
 pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     let serve = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
@@ -110,9 +116,13 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
         wire.socket.max_frame = 131072u64
         let mut disk = options()
         disk.lock_wait_ms = 10000u64
+        let migration: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits] = match args.get(argv, 0u64) {
+            Some(arg) if arg == "hold-install" => code.describe(hold_install),
+            _ => code.describe(migrate),
+        }
         let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(
             backing: Disk(d, disk), selection: (runner.launch_selection(argv) ?=> Usage), place: code.describe(place), n_place: N_PLACE,
-            migrate: code.describe(migrate), handles: code.describe(handles), session: wire, max_sessions: 4u64,
+            migrate: migration, handles: code.describe(handles), session: wire, max_sessions: 4u64,
             proxies: list.new(), n_publisher: 3145728u64,
             listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
             stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)
@@ -604,7 +614,7 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let mut wire = runner.wire_defaults(131072u64, N_PLACE)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, existing), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
+    let settings: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d, clone(existing)), selection: chosen, place: code.describe(place), n_place: N_PLACE, migrate: code.describe(migrate), handles: code.describe(handles),
         session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
         stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(ingress.binding()), triggers: None, idle: None)

@@ -454,6 +454,8 @@ fn opened_text(e: runner.OpenError) -> String {
         NotCurrent(_) => "calls: place_head: activation is not current",
         IdentityUnknown => "calls: place_head: image identity is unavailable",
         PublisherStopped => "calls: place_head: publisher stopped",
+        InstallVersion(_) => "calls: place_head: wrong install activation",
+        InstallUncertain(_) => "calls: place_head: install outcome unknown",
     })
 }
 
@@ -1698,7 +1700,9 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let mut upgrade = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
     upgrade.selection = Install
     upgrade.place = code.describe(fixture_place)
-    let upgraded = serve_until_ready(tasks, take upgrade)
+    let (_keep, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let installed_only = runner.operate(take upgrade, take stop, result.unwrap(runner.status_root()), None)
+    if let Ok(Unstarted) = installed_only {} else { fail("restart: install did not exit successfully") }
     let mut after = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
     after.selection = Reopen
     after.place = code.describe(fixture_place)
@@ -1708,7 +1712,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let carried = result.unwrap(store.get(store.snapshot(last), store.shape(rows.t), 7u64)) == Some(70u64)
     result.unwrap(store.close(take last))
     result.unwrap(std.dir.remove_all(parent, name))
-    want(upgraded == 3u64 && resumed == upgraded, "restart: --hirsel-install did not activate the other registry after the row, or a restart did not reopen it")
+    want(resumed == 3u64, "restart: --hirsel-install did not activate the other registry after the row, or a restart did not reopen it")
     want(carried, "restart: installing the other registry lost the row written before it")
     want(installed == 1u64 && reopened == installed, "restart: reopen did not select the installed activation")
     want(survived, "restart: the row written before the restart is gone")

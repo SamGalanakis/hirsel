@@ -53,8 +53,8 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
 pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes)
 // `Reopen` opens the store at its current activation, or runs genesis on an empty
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
-pub type Selection: send = Current(u64) | Reopen | Install
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped
+pub type Selection: send = Current(u64) | Reopen | Install | InstallAt(u64)
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining | Paused
@@ -265,6 +265,17 @@ pub fn operate_bytes[G: send, H: send, S: send, B: send](p: PlaceConfig[G, H, S,
 
 pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     if launch_word(9u64, 0u64) != 0u64 { return operate_prepare(take p) }
+    if launch_word(15u64, 0u64) != 0u64 {
+        let result = operate_install(take p, InstallAt(launch_word(15u64, 1u64)), launch_word(0u64, 0u64))
+        return finish_install(take result)
+    }
+    let installing = match p.selection { Install => true, InstallAt(_) => true, _ => false }
+    if installing {
+        let configured = p.n_place
+        let selection = p.selection
+        let _ = operate_install(take p, selection, configured)?
+        return Ok(Unstarted)
+    }
     let launch_idle = launch_word(13u64, 0u64)
     if p.idle == Some(0u64) { return Error(Missing("idle")) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
@@ -583,6 +594,58 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
             },
         }
     }
+}
+
+// Installation shares the serving head's open and activation, then closes the store
+// before it sends proof. No publisher, triggers, or listener start for this launch.
+fn operate_install[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, B], selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
+    let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles, ..) = take p
+    let persistent = match backing { Disk(_, _) => true, _ => false }
+    if let InstallAt(_) = selection {
+        if !persistent { return Error(Missing("disk store")) }
+    }
+    let (take db, take temporary) = open_backing(take backing, tasks, clock, random)?
+    let mut opened = take db
+    let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, migrate, handles, n_place, tasks) {
+        Ok(_) => if persistent {
+            match activation_version(opened) { Ok(version) => Ok(version), Error(take problem) => Error(Open(InstallUncertain(take problem))) }
+        } else { Ok(0u64) },
+        Error(take problem) => {
+            let _ = close_store(take opened)
+            return Error(Open(take problem))
+        },
+    }
+    store.close(take opened) ?=> |problem| Open(InstallUncertain(problem))
+    let _ = take temporary
+    take installed
+}
+
+fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartError] {
+    // A failed durability barrier or close can leave the activation on disk.
+    // Let a recovery open decide it if we reached the cut without proof.
+    let reply: Option[HostReply] = match result {
+        Error(Open(InstallUncertain(_))) => None,
+        Ok(version) => Some(PlaceInstalled(version, false)),
+        Error(problem) => Some(PlaceInstallRefused(match problem {
+            Open(Store(Held)) => InstallHeld,
+            Open(Store(Full(_))) => InstallCapacity,
+            Full(_) => InstallCapacity,
+            Open(Store(_)) => InstallStore,
+            Open(Place(_)) => InstallPlace,
+            Open(Migrate(_)) => InstallMigration,
+            Open(NotCurrent(_)) => InstallCurrent,
+            Open(IdentityUnknown) => InstallIdentity,
+            Open(InstallVersion(next)) => InstallWrongVersion(next),
+            _ => InstallConfig,
+        })),
+    }
+    if let Some(take value) = take reply {
+        let codec: std.codec.Codec[HostReply] = std.codec.of()
+        let mut answer: Bytes = list.with_capacity(16u64)
+        let _ = std.codec.encode(codec, value, mut answer) ?=> |_| Missing("install answer")
+        if !launch_emit(answer) { return Error(Missing("install answer")) }
+    }
+    match take result { Ok(_) => Ok(Unstarted), Error(take problem) => Error(take problem) }
 }
 
 fn prepare_bytes(field: u64, size: u64) -> Result[Bytes, StartError] {
@@ -1122,6 +1185,11 @@ pub fn start_text(problem: StartError) -> String {
         Open(IdentityUnknown) => string.push(mut line, "image identity is unavailable"),
         Open(StoreMismatch(expected, actual)) => string.push(mut line, store_mismatch(expected, actual)),
         Open(PublisherStopped) => string.push(mut line, "publisher stopped"),
+        Open(InstallUncertain(e)) => { string.push(mut line, "install outcome unknown: "); push_store_error(mut line, e) },
+        Open(InstallVersion(next)) => {
+            string.push(mut line, "the next install activation is ")
+            string.push_u64(mut line, next)
+        },
     }
     take line
 }
@@ -2590,7 +2658,10 @@ pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes,
 pub type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64, ready_ns: u64 }
 pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
     | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64)
-    | PlaceStoreMismatch(u64, u64, u64, u64)
+    | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal)
+
+pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration
+    | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64)
 
 pub fn store_mismatch(expected: (u64, u64), actual: (u64, u64)) -> String {
     let mut msg = string.from("store identity mismatch (expected ")
@@ -2839,11 +2910,7 @@ fn head_ended[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> () w
     let _ = channel.send(to, HeadEnded(take ended))
 }
 
-fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
-    let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
-        n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
-        head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle) = take job
-    let persistent = match backing { Disk(_, _) => true, _ => false }
+fn open_backing(take backing: Backing, tasks: Tasks, clock: Clock, random: Random) -> Result[(store.Db, Option[TemporaryBacking]), StartError] waits {
     let mut temporary: Option[TemporaryBacking] = None
     let opened: Result[store.Db, store.Error] = match backing {
         Memory => Ok(store.memory(clock, random, store.defaults())),
@@ -2856,7 +2923,17 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
             store.open(tasks, dir, clock, random, store.defaults())
         },
     }
-    let mut db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
+    let db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
+    Ok((take db, take temporary))
+}
+
+fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
+    let ManagedHead(backing: take backing, selection: selection, tasks: tasks, clock: clock, random: random, place: place, migrate: migrate, handles: handles,
+        n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
+        head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle) = take job
+    let persistent = match backing { Disk(_, _) => true, _ => false }
+    let (take opened, take temporary) = open_backing(take backing, tasks, clock, random)?
+    let mut db = take opened
     if launch_word(14u64, 0u64) != 0u64 {
         let expected = (launch_word(14u64, 1u64), launch_word(14u64, 2u64))
         let actual = store.identity_words(db)
@@ -2914,6 +2991,13 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     let current = activation_result(current_description(db))?
     let selected: Option[u64] = match selection {
         Install => None,
+        InstallAt(target) => {
+            let next = store.version(store.snapshot(db)) + 1u64
+            if next != (if target == 0u64 { 1u64 } else { target }) {
+                return Error(InstallVersion(next))
+            }
+            None
+        },
         Reopen => match current {
             None => None,
             Some(_) => {
@@ -2956,7 +3040,10 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
     let h = activation_result(store.with_staged_schema(stage, handles))?
     let h2 = activation_result(store.with_staged_schema(stage, handles))?
-    if let Error(take problem) = store.install_activation(mut db, take stage) { return Error(Store(take problem)) }
+    if let Error(take problem) = store.install_activation(mut db, take stage) {
+        if let InstallAt(_) = selection { return Error(InstallUncertain(take problem)) }
+        return Error(Store(take problem))
+    }
     let ReleaseRecord(release: take release, ..) = take record
     Ok((take reg, take h, take h2, take release, take identity))
 }

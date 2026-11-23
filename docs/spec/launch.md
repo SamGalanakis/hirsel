@@ -133,9 +133,11 @@ expects an empty store. Omitting the option selects `Reopen`: genesis on an
 empty store, and otherwise the store's current activation, so a plain restart
 of the same executable reopens its store. `--hirsel-install` requests a
 standalone install and is mutually exclusive with an activation version. Use it
-after `--` with `hirsel run`. Both options are run arguments, which a recording
-holds like every entry argument. The platform host and launcher always pass
-`--hirsel-activation`.
+after `--` with `hirsel run`. The install runs `place` and `migrate`, validates
+both handle sets, commits the activation under the store lock, closes the store
+and exits. Start the executable again to serve. Both options are run arguments,
+which a recording holds like every entry argument. The launcher passes
+`--hirsel-activation` to serving children.
 
 A store is bound to the image that activated it (RUNNER-SPEC §6, "Restart and
 rebuild"). Another executable, the same source rebuilt in another mode
@@ -783,8 +785,8 @@ children according to each group's label, and collects unused objects. `Bind` su
 the group's approved store, Dir and Net bindings and its cgroup limits. `Start` selects
 the child's mode, and a serving `Start` may name a recording (its 16-byte recording ID
 and destination), which the child receives as `HIRSEL_RECORD` and `HIRSEL_RECORD_ID`.
-Install starts are refused because the runtime has no install-only mode. The launcher waits on a single epoll set for its control session,
-cold listeners, child endpoints, pidfds and cgroup population changes.
+The launcher waits on a single epoll set for its control session, cold listeners,
+child endpoints, pidfds and cgroup population changes.
 
 - **Publish and assemble.** It admits recipes (steps 1-8 above) and assembles images. It
   writes objects with the "Durable publication" order above, steps 1-3. Step 4, the pending
@@ -828,6 +830,17 @@ cold listeners, child endpoints, pidfds and cgroup population changes.
   launch is keyed by the child's identity, and the launcher holds at most one serving
   launch per group outside a cutover (RUNNER-SPEC §14.3). It reports each child's end to
   the host, with the Clean report of RUNNER-SPEC §14.4 when the child sends one.
+
+  An install start selects `Genesis` (activation 1 on an empty store) or
+  `Standalone(v)` (install exactly at the next store version `v`). The check
+  and install take the same store lock. The child writes one bounded value on
+  standard output after it closes the store. The launcher reports
+  `Placed(child, PlaceInstalled(v, false))` on success or
+  `Placed(child, PlaceInstallRefused(reason))` on a typed refusal. It keeps that
+  answer until the host acknowledges `Ended`. An end without proof leaves the
+  outcome uncertain. A recovery probe can resolve it by opening the store under
+  its lock ("When the host starts" above). The hot deploy protocol still uses
+  OLD's cutover and a serving candidate.
 - **Collect.** It removes objects only when the host names the full root set: the union
   that "Durable publication" lists, which the host reads from `groups`, `deploys` and `pins`,
   together with the launcher's own live reservations. A reservation is an object set that
@@ -957,7 +970,7 @@ with its mode's row. A mode narrows the grants; it never adds one.
 
 | Mode | Runs | Store | `Dir` bindings | `Net` bindings | Inherited listener | Private descriptors |
 |---|---|---|---|---|---|---|
-| install (genesis, standalone) | `place`, `migrate`, `handles` | the group's store directory | the group's | none | none | none |
+| install (genesis, standalone) | `place`, `migrate`, `handles` | the group's store directory | the group's | none | none | its answer on stdout |
 | describe | `place` | none | none | none | none | its answer |
 | preview | `place` | none | none | none | none | its answer |
 | prepare | `place`, `migrate`, `handles` | the export directory only ("Place activation") | none | none | none | none |

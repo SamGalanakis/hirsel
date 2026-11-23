@@ -158,22 +158,26 @@ pub struct Authority {
 }
 
 impl Authority {
-    /// The row of launch.md "Child modes": install has the store; describe and
-    /// preview nothing; prepare the export directory alone, which only it
-    /// takes; serving the store and the group's `Dir` and `Net` bindings.
+    /// The row of launch.md "Child modes": install and serving have the
+    /// store and the group's `Dir` bindings. Only serving has `Net` bindings.
+    /// Describe and preview have no directories, and prepare has its export.
     pub fn of(mode: Mode, bindings: &Bindings, export: Option<&Path>) -> Result<Self, Refused> {
         if (mode == Mode::Prepare) != export.is_some() {
             return Err(Refused::Export);
         }
-        let (dirs, net) = match mode {
-            Mode::Install => (vec![bindings.store.clone()], Vec::new()),
-            Mode::Describe | Mode::Preview => (Vec::new(), Vec::new()),
-            Mode::Prepare => (vec![export.unwrap().to_path_buf()], Vec::new()),
-            Mode::Serving => {
+        let dirs = match mode {
+            Mode::Describe | Mode::Preview => Vec::new(),
+            Mode::Prepare => vec![export.unwrap().to_path_buf()],
+            Mode::Install | Mode::Serving => {
                 let mut dirs = vec![bindings.store.clone()];
                 dirs.extend(bindings.dirs.iter().cloned());
-                (dirs, bindings.net.clone())
+                dirs
             }
+        };
+        let net = if mode == Mode::Serving {
+            bindings.net.clone()
+        } else {
+            Vec::new()
         };
         Ok(Self { mode, dirs, net })
     }

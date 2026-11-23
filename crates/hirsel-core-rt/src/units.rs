@@ -352,8 +352,8 @@ struct UP(*const Unit);
 // SAFETY: unit records are leaked and shared by design.
 unsafe impl Send for UP {}
 
-struct Pool {
-    w: usize,
+pub(crate) struct Pool {
+    pub(crate) w: usize,
     locals: Vec<Mutex<VecDeque<UP>>>,
     /// Per worker: the unit a unit running there last woke. Not stealable;
     /// run next by its worker, at most LIFO_RUNS times in a row (as Tokio's
@@ -408,7 +408,7 @@ static POOL: OnceLock<Pool> = OnceLock::new();
 /// start; any later unit is admitted with `admit`. Reaching zero is the
 /// decision to stop and is final: `admit` refuses from zero.
 static LIVE: AtomicUsize = AtomicUsize::new(0);
-fn pool() -> &'static Pool {
+pub(crate) fn pool() -> &'static Pool {
     POOL.get().unwrap()
 }
 pub(crate) fn memory() -> Option<&'static dyn SharedMemory> {

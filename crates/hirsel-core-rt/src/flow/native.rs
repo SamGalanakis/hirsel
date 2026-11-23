@@ -332,22 +332,17 @@ pub unsafe extern "C" fn hirsel_core_flow_drop(flow: *mut u8) {
     unsafe { drop(Box::from_raw(flow.cast::<NativeFlow>())) };
 }
 
+#[cfg(feature = "testing")]
+type FlowCases = unsafe extern "C" fn(*mut Context, *mut u8);
+
 /// # Safety
 /// The fixture pins its state through the synchronous callback.
 #[cfg(feature = "testing")]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_test_flow_run(
-    lazy: bool,
-    bytes: u64,
-    state: *mut u8,
-    body: unsafe extern "C" fn(*mut Context, *mut u8),
-) {
-    use crate::schedule_script::{FlowMode, ScheduleScript};
-
+unsafe fn run_flow_cases(bytes: u64, state: *mut u8, body: FlowCases) {
     #[derive(Clone, Copy)]
     struct Call {
         state: *mut u8,
-        body: unsafe extern "C" fn(*mut Context, *mut u8),
+        body: FlowCases,
     }
     unsafe extern "C" fn invoke(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
         // SAFETY: run_root copies Call into aligned storage on entry.
@@ -357,28 +352,63 @@ pub unsafe extern "C" fn hirsel_core_test_flow_run(
         }
         0
     }
+    let mut context = Context::new(bytes);
+    causes::task_start(&mut context).unwrap();
+    let mut call = Call { state, body };
+    // SAFETY: the root and callback state are pinned until the run ends.
+    unsafe {
+        crate::tasks::run_root(
+            &mut context,
+            invoke,
+            (&raw mut call).cast(),
+            std::ptr::null_mut(),
+            size_of::<Call>(),
+            0,
+            crate::tasks::SchedulerProvider::default(),
+        );
+    }
+}
 
+/// # Safety
+/// The fixture pins its state through the synchronous callback.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_flow_run(
+    lazy: bool,
+    bytes: u64,
+    state: *mut u8,
+    body: FlowCases,
+) {
+    use crate::schedule_script::{FlowMode, ScheduleScript};
     let mode = if lazy {
         FlowMode::Lazy
     } else {
         FlowMode::Eager
     };
     let script = std::sync::Arc::new(ScheduleScript::new(0).with_flow_mode(mode));
-    let mut context = Context::new(bytes);
-    causes::task_start(&mut context).unwrap();
-    let mut call = Call { state, body };
-    script.install(|| {
-        // SAFETY: the root and callback state are pinned until the run ends.
-        unsafe {
-            crate::tasks::run_root(
-                &mut context,
-                invoke,
-                (&raw mut call).cast(),
-                std::ptr::null_mut(),
-                size_of::<Call>(),
-                0,
-                crate::tasks::SchedulerProvider::default(),
-            )
-        }
+    // SAFETY: by the contract.
+    script.install(|| unsafe { run_flow_cases(bytes, state, body) });
+}
+
+/// The cases unscripted, as the root unit of a `workers`-thread pool, so a
+/// flow's stage calls run on helper units. A process launches one pool.
+/// # Safety
+/// The fixture pins its state through the synchronous callback.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_flow_run_pool(
+    workers: u64,
+    bytes: u64,
+    state: *mut u8,
+    body: FlowCases,
+) {
+    let state = state.expose_provenance();
+    // SAFETY: lengths, masks, descriptors and nullable pointers; the root
+    // reads none of them.
+    let config: crate::entry::OsConfig = unsafe { std::mem::zeroed() };
+    crate::units::launch(1, host_size(workers), &config, &|_| {
+        // SAFETY: by the contract.
+        unsafe { run_flow_cases(bytes, std::ptr::with_exposed_provenance_mut(state), body) };
+        0
     });
 }

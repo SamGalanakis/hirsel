@@ -56,6 +56,7 @@ fn native_flow_pipeline_returns_42_and_refunds_the_owner() {
 {sites}
 extern uint64_t hirsel_core_test_available(const HirselCoreContext *);
 extern void hirsel_core_test_flow_run(bool, uint64_t, uint8_t *, void (*)(HirselCoreContext *, uint8_t *));
+extern void hirsel_core_test_flow_run_pool(uint64_t, uint64_t, uint8_t *, void (*)(HirselCoreContext *, uint8_t *));
 typedef struct {{ uint64_t value; uint8_t status; }} FlowResult;
 typedef FlowResult (*Case)(HirselCoreContext *, uint64_t);
 {declarations}
@@ -79,6 +80,7 @@ static void cases(HirselCoreContext *ctx, uint8_t *state) {{
 int main(void) {{
     hirsel_core_test_flow_run(false,4000,0,cases);
     hirsel_core_test_flow_run(true,4000,0,cases);
+    hirsel_core_test_flow_run_pool(4,4000,0,cases);
     return 0;
 }}
 "#,

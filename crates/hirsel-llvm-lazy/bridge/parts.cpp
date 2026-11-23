@@ -1149,6 +1149,32 @@ std::vector<std::pair<const GlobalValue *, Declared>> declared_all(const Module 
     return all;
 }
 
+// The variables `f` reaches: those its instructions name, through constants
+// and the initializers of the variables they name (a load from a constant
+// folds to its initializer). A function pass sees no other variable, so a
+// tail of `f` changes the declaration of no other.
+void reached_variables(const Function &f, SmallPtrSetImpl<const GlobalVariable *> &out) {
+    SmallPtrSet<const Constant *, 32> seen;
+    SmallVector<const Constant *, 64> work;
+    auto push = [&](const Value *v) {
+        if (auto *c = dyn_cast<Constant>(v); c && !isa<ConstantData>(c) && seen.insert(c).second) work.push_back(c);
+    };
+    for (const BasicBlock &b : f)
+        for (const Instruction &i : b)
+            for (const Use &op : i.operands()) push(op.get());
+    while (!work.empty()) {
+        const Constant *c = work.pop_back_val();
+        if (auto *g = dyn_cast<GlobalValue>(c)) {
+            if (auto *v = dyn_cast<GlobalVariable>(g)) {
+                out.insert(v);
+                if (v->hasInitializer()) push(v->getInitializer());
+            }
+            continue;
+        }
+        for (const Use &op : c->operands()) push(op.get());
+    }
+}
+
 // One definition's release tail. Every part is keyed in module order before
 // any tail runs, the missed parts' tails run on worker threads, and each
 // tail is then applied in module order, so the module goes through exactly
@@ -1352,13 +1378,31 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
     auto stale = [&](const Tail &t) {
         return any_of(t.names, [&](const GlobalValue *g) { return !g || changed.contains(g); });
     };
+    // What each global the module had when a tail last looked at it
+    // declares. A tail may change any function's declaration (a library call
+    // it builds takes the existing declaration and its inferred attributes),
+    // but only the variables its definition reaches (`reached_variables`).
+    DenseMap<const GlobalValue *, Declared> known;
+    auto look = [&](const GlobalValue &g) { known.try_emplace(&g, declared(g)); };
+    auto recheck = [&](const GlobalValue &g) {
+        Declared now = declared(g);
+        auto [at, fresh] = known.try_emplace(&g, now);
+        if (!fresh && at->second != now) {
+            changed.insert(&g);
+            at->second = std::move(now);
+        }
+    };
     // Runs `t`'s tail in place, noting what it changed besides the body.
     auto run_live = [&](Tail &t) {
         if (!keyed) return hirsel_llvm_tail_run(tail, wrap(t.f));
-        auto before = declared_all(m);
+        SmallPtrSet<const GlobalVariable *, 32> variables;
+        reached_variables(*t.f, variables);
+        for (const Function &f : m) look(f);
+        for (const GlobalVariable *v : variables) look(*v);
         hirsel_llvm_tail_run(tail, wrap(t.f));
-        for (auto &[g, was] : before)
-            if (declared(*g) != was) changed.insert(g);
+        reached_variables(*t.f, variables);
+        for (const Function &f : m) recheck(f);
+        for (const GlobalVariable *v : variables) recheck(*v);
     };
     // Runs `t`'s tail in place and gives `keep` the part after it.
     auto run_kept = [&](Tail &t) {
@@ -1377,6 +1421,7 @@ extern "C" void hirsel_llvm_release_tails(LLVMModuleRef module, LLVMTargetMachin
         AttributeList was = t.f->getAttributes();
         if (!restore(m, *t.f, t.value, t.debug)) return false;
         if (t.f->getAttributes() != was) changed.insert(t.f);
+        if (auto at = known.find(t.f); at != known.end()) at->second = declared(*t.f);
         return true;
     };
     for (Tail &t : tails) {

@@ -3259,13 +3259,19 @@ fn helper_launch(name: String, g: GroupRow, assembly: Bytes, take mode: launcher
 }
 
 fn prep_of(h: Host, name: String) -> Option[Prep] {
-    clone(vol_read(h, name).prep)
+    match map.get(h.vol, name) {
+        Some(v) => clone(v.prep),
+        None => None,
+    }
 }
 
 fn set_prep(mut h: Host, name: String, take p: Option[Prep]) {
-    let mut v = vol_read(h, name)
+    let mut v = match map.remove(mut h.vol, name) {
+        Some(take v) => take v,
+        None => empty_vol(),
+    }
     v.prep = take p
-    vol_put(mut h, name, take v)
+    map.insert(mut h.vol, string.from(name), take v)
 }
 
 fn is_helper(p: Prep, c: launcher.Child) -> bool {
@@ -3275,68 +3281,25 @@ fn is_helper(p: Prep, c: launcher.Child) -> bool {
     }
 }
 
-fn copy_range(b: Bytes, from: u64, to: u64) -> Bytes {
-    let mut out: Bytes = list.with_capacity(to - from)
-    for i in from .. to {
-        list.push(mut out, b[i])
-    }
-    out
-}
-
-// OLD's describe answer, a whole `runner.Describe`: the exact bytes of its exported list,
-// which NEW's preview takes as its old list, and the list.
+// The new image's preview receives the old image's exported list.
 fn old_entries(b: Bytes) -> Option[(Bytes, List[runner.Exported])] {
-    let mut at = 0u64
-    let Ok(_) = std.codec.take_with(b, mut at, std.codec.of_bytes()) else {
+    let codec: std.codec.Codec[runner.Describe] = std.codec.of()
+    let Ok(runner.Describe(exported: take exported, ..)) = std.codec.decode(codec, b) else {
         return None
     }
-    let Ok(_) = std.codec.take_string(b, mut at) else {
-        return None
-    }
-    let Ok(_) = std.codec.take_u64(b, mut at) else {
-        return None
-    }
-    let from = at
-    let ce: std.codec.Codec[runner.Exported] = std.codec.of()
-    let Ok(exported) = std.codec.take_list(b, mut at, ce) else {
-        return None
-    }
-    if at != list.len(b) {
-        return None
-    }
-    Some((copy_range(b, from, at), take exported))
+    let list_codec: std.codec.Codec[List[runner.Exported]] = std.codec.of_list()
+    let mut raw: Bytes = list.new()
+    if let Error(_) = std.codec.encode(list_codec, exported, mut raw) { return None }
+    Some((take raw, take exported))
 }
 
-// NEW's preview answer, a whole `runner.Preview`, checked against the selected assembly
-// (image digest, target and allowance), a 32-byte release and one answer per old entry.
-// Gives NEW's exact Describe bytes, its release and its exported list.
+// The canonical Describe encoding is also the prefix of the Preview encoding.
 fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes, List[runner.Exported]), String] {
-    let mut at = 0u64
-    let Ok(digest) = std.codec.take_with(b, mut at, std.codec.of_bytes()) else {
+    let codec: std.codec.Codec[runner.Preview] = std.codec.of()
+    let Ok(runner.Preview(describe: take description, release: take release, answers: take answers)) = std.codec.decode(codec, b) else {
         return Error("preview: a malformed answer")
     }
-    let Ok(target) = std.codec.take_string(b, mut at) else {
-        return Error("preview: a malformed answer")
-    }
-    let Ok(n_place) = std.codec.take_u64(b, mut at) else {
-        return Error("preview: a malformed answer")
-    }
-    let ce: std.codec.Codec[runner.Exported] = std.codec.of()
-    let Ok(exported) = std.codec.take_list(b, mut at, ce) else {
-        return Error("preview: a malformed answer")
-    }
-    let described = at
-    let Ok(release) = std.codec.take_with(b, mut at, std.codec.of_bytes()) else {
-        return Error("preview: a malformed answer")
-    }
-    let ca: std.codec.Codec[runner.Entry] = std.codec.of()
-    let Ok(answers) = std.codec.take_list(b, mut at, ca) else {
-        return Error("preview: a malformed answer")
-    }
-    if at != list.len(b) {
-        return Error("preview: a malformed answer")
-    }
-    if digest != p.image || target != p.target || n_place != p.n_place {
+    if description.digest != p.image || description.target != p.target || description.n_place != p.n_place {
         return Error("preview does not describe the selected assembly")
     }
     if list.len(release) != 32u64 {
@@ -3345,7 +3308,11 @@ fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes, List[runner
     if list.len(answers) != count {
         return Error("preview answer count")
     }
-    Ok((copy_range(b, 0u64, described), release, take exported))
+    let describe_codec: std.codec.Codec[runner.Describe] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    let _ = std.codec.encode(describe_codec, description, mut raw) ?=> |_| "preview: a malformed answer"
+    let runner.Describe(exported: take exported, ..) = take description
+    Ok((take raw, take release, take exported))
 }
 
 // An export directory name: nonempty ASCII letters, digits, `-` and `_`.

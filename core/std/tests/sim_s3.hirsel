@@ -1,0 +1,166 @@
+const access: String = "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"
+
+const stamp: String = "20130524T000000Z"
+
+const host_name: String = "s3.test"
+
+type Server: send {
+    config: sim.s3.Config,
+    plan: sim.world.Plan,
+    time: Clock,
+    port: Served[NetOp]
+}
+
+type Wire {
+    network: Net,
+    time: Clock,
+    key: Secret,
+    address: Addr
+}
+
+type Field {
+    name: String,
+    value: String
+}
+
+type WireReply {
+    status: u16,
+    fields: Map[String, String],
+    data: Bytes
+}
+
+fn live_server(take input: Server) -> sim.s3.Report waits {
+    let Server(config: take config, plan: take initial, time, port: take port) = take input
+    let mut plan = take initial
+    sim.s3.serve(config, mut plan, time, take port)
+}
+
+fn live_clock(take input: sim.world.World) waits {
+    let mut world = take input
+    sim.world.run(mut world)
+}
+
+fn signing_key() -> Secret {
+    // AWS's documentation example key, derived for scope with Python hmac.
+    let raw: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut owned: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut owned, raw[i])
+    }
+    result.unwrap(secret.seal(take owned, "mac"))
+}
+
+fn fixture(tasks: Tasks, seed: u64, choices: List[u64], dialect: u16) -> (Wire, Task[sim.s3.Report], Task[()]) {
+    let address = Addr(ip: V4(2130706433), port: 8080)
+    let mut first = sim.net.new(sim.net.defaults())
+    let mut second = sim.net.new(sim.net.defaults())
+    let mut ips: List[Ip] = list.new()
+    list.push(mut ips, V4(2130706434))
+    sim.net.resolve_as(mut first, string.from(host_name), take ips)
+    let mut real_ips: List[Ip] = list.new()
+    list.push(mut real_ips, address.ip)
+    sim.net.resolve_as(mut second, string.from(host_name), take real_ips)
+    sim.net.handshake_as(mut second, string.from(host_name), Error(Certificate(NameMismatch)))
+    let mut faults: List[sim.s3.Fault] = list.new()
+    list.push(mut faults, Clean)
+    list.push(mut faults, ResetBeforeBody)
+    list.push(mut faults, ResetAfterBody)
+    list.push(mut faults, Stall(100000))
+    list.push(mut faults, InternalError)
+    list.push(mut faults, SlowDown)
+    list.push(mut faults, CompleteError)
+    list.push(mut faults, Clean)
+    let mut words: List[u64] = list.with_capacity(2 * list.len(choices))
+    for choice in choices {
+        list.push(mut words, choice << 61)
+        list.push(mut words, seed)
+    }
+    let mut scripts: List[List[u64]] = list.new()
+    list.push(mut scripts, take words)
+    let plan = sim.world.plan_from(sim.world.Script(tail_seed: seed, streams: take scripts), 0)
+    let key = signing_key()
+    let verify = result.unwrap(secret.narrow(key, "verify"))
+    let config = sim.s3.Config(address: address, network: take first, after_resolve: Some(take second), credential: string.from(access), signing_key: take verify, faults: take faults, exists_status: dialect, fragment_bytes: 64, max_body: 65536)
+    let (world, time) = sim.world.new(seed, 0, 0)
+    let (network, port) = provide.net(bytes 131072)
+    let driver = task.spawn(tasks, bytes 65536, take world, live_clock)
+    let server = task.spawn(tasks, bytes 8388608, Server(config: take config, plan: take plan, time: time, port: take port), live_server)
+    (Wire(network: network, time: time, key: take key, address: address), take server, take driver)
+}
+
+fn header(name: String, value: String) -> http_client.Header {
+    http_client.Header(name: clone(name), value: Public(string.into_bytes(clone(value))))
+}
+
+fn wire_request(method: String, path: String, size: u64, metadata: List[Field], digest: String, tag: String) -> http_client.Request {
+    let mut auth = string.from("AWS4-HMAC-SHA256 Credential=")
+    string.push(mut auth, access)
+    string.push(mut auth, ", SignedHeaders=host;x-amz-date")
+    for field in metadata {
+        if string.starts_with(field.name, "x-amz-") {
+            string.push(mut auth, ";")
+            string.push(mut auth, field.name)
+        }
+    }
+    string.push(mut auth, ", Signature=")
+    string.push(mut auth, tag)
+    let mut fields: List[http_client.Header] = list.new()
+    list.push(mut fields, header("Authorization", auth))
+    list.push(mut fields, header("x-amz-date", stamp))
+    list.push(mut fields, header("x-amz-content-sha256", digest))
+    for field in metadata {
+        list.push(mut fields, header(field.name, field.value))
+    }
+    http_client.Request(method: clone(method), target: clone(path), headers: take fields, body: Fixed(size))
+}
+
+fn fetch_wire(w: Wire, req: http_client.Request, payload: Bytes, until: u64) -> Result[WireReply, http_client.Error] waits {
+    let owned = http_client.dial(w.network, w.address, host_name, w.time, req, until)?
+    let mut conn = take owned
+    http_client.write(mut conn, payload)?
+    http_client.finish_request(mut conn, 65536)?
+    let (status, fields) = {
+        let head = http_client.head(conn)
+        let mut headers: Map[String, String] = map.new()
+        for i in 0u64 .. http_client.field_count(head) {
+            let (name, value) = option.unwrap(http_client.field_at(head, i))
+            let mut lower = result.unwrap(string.from_utf8(clone(name)))
+            string.make_ascii_lower(mut lower)
+            map.insert(mut headers, take lower, result.unwrap(string.from_utf8(clone(value))))
+        }
+        (http_client.status(head), take headers)
+    }
+    let mut data: Bytes = list.with_capacity(65537)
+    while http_client.read(mut conn, mut data)? != 0 {}
+    Ok(WireReply(status: status, fields: take fields, data: take data))
+}
+
+fn sequence(tape: String) -> List[u64] {
+    let raw = string.as_bytes(tape)
+    let mut out: List[u64] = list.with_capacity(list.len(raw))
+    for i in 0u64 .. list.len(raw) {
+        list.push(mut out, int.widen(raw[i] - b'0'))
+    }
+    take out
+}
+
+// Python hashlib/hmac oracle for the published AWS example key and scope.
+// The signed Content-SHA256 covers the payload without relying on the mock.
+// expect: run signed_put_round_trip(tasks) = true
+fn signed_put_round_trip(tasks: Tasks) -> bool waits {
+    let (client, server, driver) = fixture(tasks, 31, sequence("0000"), 412)
+    let digest = "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
+    let tag = "28c9b4ca9ca564ce22d0066566ea8d04c33ca6e7053d740f7fef1b943fdf1d79"
+    let req = wire_request("PUT", "/signed", 7, list.new(), digest, tag)
+    let rejected = result.unwrap(fetch_wire(client, req, string.as_bytes("Payload"), 1000))
+    let accepted = result.unwrap(fetch_wire(client, req, string.as_bytes("payload"), 1000))
+    let read = wire_request("HEAD", "/signed", 0, list.new(), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "8c16dd84c91293ff063fec00b0d33f66eb539b757bf73041fac4fe05e586f5c2")
+    let head = result.unwrap(fetch_wire(client, read, string.as_bytes(""), 1000))
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    let object = map.get(observed.objects, "signed")
+    if let Some(saved) = object {
+        return rejected.status == 403 && accepted.status == 200 && head.status == 200 && list.len(head.data) == 0 && observed.writes == 1 && saved.data == string.as_bytes("payload")
+    }
+    false
+}

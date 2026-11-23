@@ -1825,7 +1825,6 @@ fn link_objects(
                 std::os::fd::AsRawFd::as_raw_fd(file)
             ))
         }));
-        let mut runtime_sources = sources.clone();
         // Each input is named by the key its bytes are a function of: the
         // unit by its key, an object by its identity and read check.
         let keys: Vec<_> = unit
@@ -1833,8 +1832,8 @@ fn link_objects(
             .map(|(key, _)| (*key, 0))
             .chain(separate.iter().map(|o| (o.identity, o.check)))
             .collect();
-        let spawns_units =
-            crate::native_entry::retain_referenced(&mut runtime_sources, &inputs[1..], &keys)?;
+        let (runtime_sources, spawns_units) =
+            crate::native_entry::runtime_sources(&sources, &inputs[1..], &keys)?;
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<(), NativeStop> {
             let bytes = entry_plan
                 .emit(

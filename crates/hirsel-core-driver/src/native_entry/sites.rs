@@ -5,7 +5,7 @@ use object::{Object as _, ObjectSymbol as _};
 use hirsel_core_ir::source::{site_item_symbol, site_symbol};
 use object::ObjectSection as _;
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::File,
     path::PathBuf,
 };
@@ -18,46 +18,69 @@ fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
 /// Keep the runtime binders used by the actual link inputs and report whether
 /// those inputs call the unit spawn ABI. The separate DWARF object is already
 /// bound against the complete source map.
-pub(crate) fn retain_referenced(
-    sources: &mut SourceMap,
+pub(crate) fn runtime_sources(
+    sources: &SourceMap,
     inputs: &[PathBuf],
     keys: &[(hirsel_core_ids::ContentHash, u64)],
-) -> std::io::Result<bool> {
-    let mut names = HashSet::new();
-    let mut spawns_units = false;
-    for (input, key) in inputs.iter().zip(keys) {
-        let scanned = crate::resident::REFERENCED.get_or(Some(*key), || referenced(input))?;
-        spawns_units |= scanned.spawns_units;
-        names.extend(scanned.items.iter().cloned());
-    }
+) -> std::io::Result<(SourceMap, bool)> {
+    let scans = inputs
+        .iter()
+        .zip(keys)
+        .map(|(input, key)| crate::resident::REFERENCED.get_or(Some(*key), || referenced(input)))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let spawns_units = scans.iter().any(|scan| scan.spawns_units);
     if sources.items.is_empty() {
-        return Ok(spawns_units);
+        return Ok((sources.clone(), spawns_units));
     }
-    // A release site's symbol is named by its item's owner.
-    sources.items.retain(|item, _| {
-        names.contains(site_symbol(item).as_bytes())
-            || (hirsel_core_ir::source::numbers_unit_sites(item)
-                && names.contains(
-                    site_symbol(&hirsel_core_ir::source::release_site_owner(item)).as_bytes(),
-                ))
+    let names: HashSet<&[u8]> = scans
+        .iter()
+        .flat_map(|scan| scan.items.iter().map(Vec::as_slice))
+        .collect();
+    let mut last_owner = None;
+    let retained = sources.items.iter().filter(|(item, _)| {
+        let item = *item;
+        if names.contains(site_symbol(item).as_bytes()) {
+            return true;
+        }
+        if !hirsel_core_ir::source::numbers_unit_sites(item) {
+            return false;
+        }
+        // Numbered items of the same unit share one owner symbol and are
+        // adjacent in the source map's item order.
+        let owner = (&item.0.package, item.0.modules.as_slice());
+        if let Some((prior, used)) = last_owner
+            && owner == prior
+        {
+            return used;
+        }
+        let used = names
+            .contains(site_symbol(&hirsel_core_ir::source::release_site_owner(item)).as_bytes());
+        last_owner = Some((owner, used));
+        used
     });
+    let mut items: BTreeMap<_, _> = retained.map(|(item, at)| (item.clone(), *at)).collect();
     let mut file_numbers = vec![None; sources.files.len()];
-    for item in sources.items.values() {
+    for item in items.values() {
         file_numbers[item.file as usize] = Some(0);
     }
-    for (file, mapped) in std::mem::take(&mut sources.files)
-        .into_iter()
-        .zip(&mut file_numbers)
-    {
+    let mut files = Vec::new();
+    for (file, mapped) in sources.files.iter().zip(&mut file_numbers) {
         if mapped.is_some() {
-            *mapped = Some(sources.files.len() as u32);
-            sources.files.push(file);
+            *mapped = Some(files.len() as u32);
+            files.push(file.clone());
         }
     }
-    for item in sources.items.values_mut() {
+    for item in items.values_mut() {
         item.file = file_numbers[item.file as usize].expect("retained source file");
     }
-    Ok(spawns_units)
+    Ok((
+        SourceMap {
+            files,
+            items,
+            points: sources.points.clone(),
+        },
+        spawns_units,
+    ))
 }
 
 /// The site items an input object's allocated sections reference, and

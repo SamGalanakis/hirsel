@@ -126,15 +126,19 @@ fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
         return shape;
     }
     let tree = item.tree;
-    let mut bindings: Vec<usize> = tree
+    let mut bindings: Vec<(Symbol, usize)> = tree
         .children(item.root)
         .iter()
         .filter(|&&c| tree.node(c).kind == NodeKind::Parameters)
         .flat_map(|&c| tree.children(c))
         .filter_map(|&p| tree.node(p).token.map(|t| t.0 as usize))
+        .map(|i| (tree.tokens[i].symbol, i))
         .collect();
-    bindings.sort_unstable();
     if bindings.is_empty() {
+        return shape;
+    }
+    bindings.sort_unstable_by_key(|&(name, _)| name);
+    if bindings.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return shape;
     }
     // The header is the item's tokens before the body block (token spans are
@@ -146,26 +150,16 @@ fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
             .iter()
             .position(|t| t.span.start as usize >= end)
             .unwrap_or(item.range.tokens.end as usize - start);
-    let text = |i: usize| {
-        let t = &tree.tokens[i];
-        &item.text[t.span.start as usize..t.span.end as usize]
-    };
-    let mut names: Vec<&str> = bindings.iter().map(|&i| text(i)).collect();
-    names.sort_unstable();
-    let distinct = names.windows(2).all(|w| w[0] != w[1]);
-    // The lexer is context-free, so a token spelling a binding's name lexes
-    // to a binding's kind; tokens of any other kind spell none.
-    let mut kinds: Vec<TokenKind> = bindings.iter().map(|&i| tree.tokens[i].kind).collect();
-    kinds.dedup();
-    let spelled = (start..stop).any(|i| {
-        let t = &tree.tokens[i];
-        kinds.contains(&t.kind)
-            && bindings.binary_search(&i).is_err()
-            && names.binary_search(&text(i)).is_ok()
-    });
-    if !distinct || spelled {
-        return shape;
+    // Parameter names are identifiers, interned by spelling in this token stream.
+    for (i, token) in (start..stop).zip(&tree.tokens[start..stop]) {
+        if token.kind == TokenKind::Ident
+            && let Ok(binding) = bindings.binary_search_by_key(&token.symbol, |&(name, _)| name)
+            && bindings[binding].1 != i
+        {
+            return shape;
+        }
     }
+    bindings.sort_unstable_by_key(|&(_, i)| i);
     // The parsed tree's canonical stream frames each significant token as
     // `part_byte_slice(kind, spelling)` does (trivia adds no bytes), so the
     // header hashes as its stream with each binding's spelling left out.
@@ -175,7 +169,7 @@ fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
     };
     ContentHash::of_parts_stream("hirsel.signature-tokens.v1", |parts| {
         let mut from = start;
-        for &binding in &bindings {
+        for &(_, binding) in &bindings {
             parts.framed_parts(canonical(from, binding));
             parts.part_byte_slice(tree.tokens[binding].kind as u8, b"");
             from = binding + 1;

@@ -22,7 +22,7 @@ fn answered_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, releases:
             spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
         let model_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
         store.put(mut tx, h.effects, model_key, harness.Effect(cutoff: harness.Cutoff(head_pos: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64, tools_pos: None),
-            call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, reserve: 0u64))
+            call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, stream: true, reserve: 0u64))
     })
     match take filled { Ok(Committed(_)) => (), _ => fail("answered: fill did not commit") }
     take db

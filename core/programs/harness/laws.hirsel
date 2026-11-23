@@ -25,7 +25,7 @@ fn blob_grant(s: Services) -> Option[BlobFixture] {
     match s.blobs { Some(b) => Some(copy_blob_fixture(b)), None => None }
 }
 
-fn usage() -> harness.Usage { harness.Usage(input: 10u64, output: 5u64) }
+fn usage() -> harness.Usage { harness.Usage(input: 10u64, output: 5u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64) }
 
 // The script: with no tool result in the request, ask for one `bump` call;
 // after a tool result, answer in text.
@@ -81,12 +81,12 @@ fn make_grants(s: Services, take ctx: runner.TriggerContext) -> Result[Grants, C
     Ok(Grants(context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool), blobs: blob_grant(s)))
 }
 
-fn scripted_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut after_tool = false
     for e in r.messages { if let ToolResult(_, _) = e { after_tool = true } }
     let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
-    if let Error(_) = channel.send(g.model, Ask(after_tool, take reply)) { return Error(Unavailable) }
-    match channel.receive(replied) { Ok(take a) => Ok(take a), Error(_) => Error(Unavailable) }
+    if let Error(_) = channel.send(g.model, Ask(after_tool, take reply)) { return Error(Rejected("scripted model unavailable")) }
+    match channel.receive(replied) { Ok(take a) => Ok(take a), Error(_) => Error(Rejected("scripted model unavailable")) }
 }
 
 fn bump(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
@@ -441,7 +441,7 @@ pub fn law_fork_shares_prefix(parent: Dir, clock: Clock, random: Random, tasks: 
         let later = store.snapshot(db)
         let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
         let Some(e) = result.unwrap(store.get(later, store.shape(h.effects), key)) else { fail("fork: no model effect") }
-        let asked = result.unwrap(harness.request(later, h, key, e.cutoff))
+        let asked = result.unwrap(harness.request(later, h, key, e))
         let mut want: List[harness.Entry] = list.new()
         for p in 0u64..4u64 { list.push(mut want, clone(log[p])) }
         list.push(mut want, User("three"))
@@ -759,7 +759,7 @@ fn prepared(mut db: store.Db, a: harness.Agent[Grants], round: u64, take shows: 
     }
     let key = harness.EffectKey(run: 0u64, round: round, kind: harness.MODEL, ordinal: 0u64)
     let Some(e) = result.unwrap(store.get(snap, store.shape(h.effects), key)) else { fail("prepared: no model effect") }
-    let asked = result.unwrap(harness.request(snap, h, key, e.cutoff))
+    let asked = result.unwrap(harness.request(snap, h, key, e))
     Prepared(system: clone(asked.system), tools: clone(asked.tools), patches: take patches)
 }
 
@@ -1303,14 +1303,14 @@ fn check_blob(f: BlobFixture, reference: harness.BlobRef) -> bool waits {
     let Inline(raw) = view inline else { return false }
     if raw != blob_bytes(65536u64) || reference.len != BLOB_SIZE || reference.mime != BLOB_MIME { return false }
     let Ok(Blob(reused)) = harness.store_payload(mut client, blob_bytes(BLOB_SIZE), BLOB_MIME, until) else { return false }
-    if reused.digest != reference.digest { return false }
+    if reused.digest != reference.digest || reference.excerpt == None { return false }
     let body = result.unwrap(harness.read_blob(mut client, reference, BLOB_SIZE, until))
     if body != blob_bytes(BLOB_SIZE) { return false }
     let (written, _) = std.object.store(mut client, BAD_BLOB_KEY, take body, until)
     let _ = result.unwrap(take written)
     let mut zeros: Bytes = list.with_capacity(32u64)
     list.fill(mut zeros, 32u64, 0u8)
-    let wrong = harness.BlobRef(digest: take zeros, len: BLOB_SIZE, mime: BLOB_MIME)
+    let wrong = harness.BlobRef(digest: take zeros, len: BLOB_SIZE, mime: BLOB_MIME, excerpt: None)
     match harness.read_blob(mut client, wrong, BLOB_SIZE, until) {
         Error(Refused(_)) => true,
         _ => false,

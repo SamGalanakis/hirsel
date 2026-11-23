@@ -21,6 +21,8 @@ platform = { major = 1, path = "../platform" }
 "harness-project.hirsel" = "harness"
 "mcp.hirsel" = "mcp_tools"
 "provider.hirsel" = "provider"
+"provider_fault.hirsel" = "provider"
+"settle.hirsel" = "harness"
 "preview.hirsel" = "preview"
 "gateway.hirsel" = "gateway"
 "gateway_http.hirsel" = "gateway_http"

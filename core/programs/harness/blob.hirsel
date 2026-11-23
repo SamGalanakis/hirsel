@@ -10,6 +10,49 @@ fn blob_key(hash: Bytes) -> String {
     result.unwrap(string.from_utf8(take key))
 }
 
+const EXCERPT_BYTES: u64 = 4096u64
+
+pub fn truncate_middle(text: String, max: u64) -> String {
+    middle_excerpt(string.as_bytes(text), max)
+}
+
+fn elision(dropped: u64) -> String {
+    let mut marker = string.from("\n[")
+    string.push_u64(mut marker, dropped)
+    string.push(mut marker, " bytes omitted]\n")
+    take marker
+}
+
+// The marker counts bytes excluded after rounding each cut inwards to a
+// UTF-8 boundary. A budget too small for the marker yields an empty excerpt.
+fn middle_excerpt(source: Bytes, max: u64) -> String {
+    let n = list.len(source)
+    let mut out: Bytes = list.with_capacity(if max < n { max } else { n })
+    if n <= max {
+        list.append(mut out, source)
+    } else {
+        let mut marker = elision(n)
+        loop {
+            let size = string.byte_len(marker)
+            let keep = if max >= size { max - size } else { 0u64 }
+            let mut head = (keep + 1u64) / 2u64
+            let mut tail = n - keep / 2u64
+            while (source[head] & 192u8) == 128u8 { head -= 1u64 }
+            while tail < n && (source[tail] & 192u8) == 128u8 { tail += 1u64 }
+            marker = elision(tail - head)
+            if string.byte_len(marker) == size {
+                if size <= max {
+                    list.append(mut out, list.slice(source, 0u64, head))
+                    list.append(mut out, string.as_bytes(marker))
+                    list.append(mut out, list.slice(source, tail, n))
+                }
+                break
+            }
+        }
+    }
+    result.unwrap(string.from_utf8(take out))
+}
+
 // Read through the same bucket and prefix used for the write. The caller
 // supplies its byte budget before the length in the reference can allocate.
 pub fn read_blob(mut client: std.object.Client, reference: BlobRef, max_bytes: u64, deadline_ns: u64) -> Result[Bytes, Fault] waits {
@@ -36,7 +79,11 @@ pub fn store_payload(mut client: std.object.Client, take body: Bytes, take mime:
     if size <= INLINE_LIMIT {
         return Ok(Inline(take body))
     }
-    let reference = BlobRef(digest: digest(body), len: size, mime: take mime)
+    let excerpt = match std.utf8.validate(body) {
+        Ok(()) => Some(middle_excerpt(body, EXCERPT_BYTES)),
+        Error(_) => None,
+    }
+    let reference = BlobRef(digest: digest(body), len: size, mime: take mime, excerpt: take excerpt)
     let (written, _) = std.object.store_no_clobber(mut client, blob_key(reference.digest), take body, deadline_ns)
     match written {
         Ok(Created(_)) => (),
@@ -162,7 +209,7 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
         return Ok(Lost)
     }
     let receipt: Receipt = if key.kind == MODEL {
-        let Ok(take asked) = request(snap, h, key, e.cutoff) else {
+        let Ok(take asked) = request(snap, h, key, e) else {
             return Ok(Lost)
         }
         let mut sink = effect_preview(target, snap, h, ctx, key)
@@ -170,9 +217,7 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
         let answered = call(port, take asked, mut sink)
         match take answered {
             Ok(take answer) => Model(take answer),
-            // Unavailable after the send may have been charged: record doubt.
-            Error(Unavailable) => return Ok(doubt(ctx, settle_entry, key)),
-            Error(take fault) => ModelFailed(fault_text(take fault)),
+            Error(take fault) => ModelFailed(take fault),
         }
     } else {
         let progress = effect_preview(target, snap, h, ctx, key)

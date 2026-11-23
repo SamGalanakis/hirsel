@@ -5,7 +5,8 @@
 pub type BlobRef: codec + send {
     digest: Bytes,
     len: u64,
-    mime: String
+    mime: String,
+    excerpt: Option[String]
 }
 
 pub type Payload: codec + send = Inline(Bytes) | Blob(BlobRef)
@@ -20,7 +21,10 @@ pub type Call: codec + send {
 
 pub type Usage: codec + send {
     input: u64,
-    output: u64
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    reasoning: u64
 }
 
 // model.answer: the complete, validated provider outcome.
@@ -135,7 +139,12 @@ pub type Cutoff: codec + send {
 // up to n dispatches within the deadline.
 pub type Repeat: codec + send = Once | Repeatable(u64)
 
-pub type Receipt: codec + send = Model(Answer) | ModelFailed(String) | Tool(Outcome)
+// Retry delays in ModelFault are seconds. Store and runner clocks use milliseconds.
+pub const MAX_MODEL_BACKOFF_SECONDS: u64 = 60u64
+
+pub type ModelFault: codec + send = Throttled(String, u64) | Transient(String, u64) | ContextExceeded(String) | StreamDropped(String) | Rejected(String)
+
+pub type Receipt: codec + send = Model(Answer) | ModelFailed(ModelFault) | Tool(Outcome)
 
 // Held waits for an approval; Parked waits for `resume` after an Inside tool
 // returned Later.
@@ -149,6 +158,7 @@ pub type Effect: codec + send {
     phase: EffectPhase,
     trigger: Option[runner.triggers.Id],
     dispatches: u64,
+    stream: bool,
     reserve: u64,
 }
 
@@ -346,7 +356,8 @@ pub type Request: codec + send {
     system: List[String],
     tools: List[ToolDef],
     messages: List[Entry],
-    key: Bytes
+    key: Bytes,
+    stream: bool
 }
 
 // What an Inside tool is given: its call's key, which `resume` takes, and its
@@ -428,7 +439,7 @@ pub type Agent[G: send]: send {
     route: String,
     // The model gets a draft source when the effect has a preview target; it may
     // ignore it.
-    model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits],
+    model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits],
     model_repeat: Repeat,
     // The app supplies object authority when a result outgrows the journal.
     store_result: Option[StaticFn[fn(G, take Bytes) -> Result[BlobRef, Fault] waits]],
@@ -440,7 +451,7 @@ pub type Agent[G: send]: send {
     limits: Limits,
 }
 
-pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, Fault] waits]) -> Agent[G] {
+pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request, mut Option[preview.Source]) -> Result[Answer, ModelFault] waits]) -> Agent[G] {
     Agent(name: take name, route: take route, model: model, model_repeat: Once, store_result: None, tools: list.new(), mcp_peer: None, gates: list.new(), sections: list.new(), reactions: list.new(), limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
     // Gates and sections read rows; opening a table alone takes over
     // 10,000 steps.

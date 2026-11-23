@@ -147,7 +147,7 @@ fn cancel_effect(mut tx: store.Tx, h: Handles, key: EffectKey, mut spend: Spend)
             spend.unresolved += e.reserve;
             Doubted
         } else {
-            Settled(ModelFailed("run cancelled"))
+            Settled(ModelFailed(Rejected("run cancelled")))
         }
     } else {
         Settled(Tool(if dispatched {
@@ -539,7 +539,7 @@ fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s:
     let key = EffectKey(run: id, round: run.round, kind: MODEL, ordinal: 0u64)
     let deadline = now(mut tx) + a.limits.model_ms
     let cutoff = Cutoff(head_pos: s.head_pos, tail_pos: s.next_pos - 1u64, route: clone(a.route), policy: 0u64, tools_pos: clone(s.active_tools_pos))
-    let e = Effect(cutoff: take cutoff, call: None, repeat: clone(a.model_repeat), deadline: deadline, phase: Pending, trigger: None, dispatches: 0u64, reserve: a.limits.model_reserve)
+    let e = Effect(cutoff: take cutoff, call: None, repeat: clone(a.model_repeat), deadline: deadline, phase: Pending, trigger: None, dispatches: 0u64, stream: true, reserve: a.limits.model_reserve)
     seal(mut tx, h, w, key, take e)?
     run.spend.reserved += a.limits.model_reserve
     run.phase = AwaitingModel(run.round)
@@ -593,7 +593,7 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
                 },
             }
         }
-        let member = Effect(cutoff: clone(e.cutoff), call: Some(take call), repeat: Once, deadline: 0u64, phase: take phase, trigger: None, dispatches: 0u64, reserve: 0u64)
+        let member = Effect(cutoff: clone(e.cutoff), call: Some(take call), repeat: Once, deadline: 0u64, phase: take phase, trigger: None, dispatches: 0u64, stream: true, reserve: 0u64)
         kept(store.put(mut tx, h.effects, key, member))?
         ordinal += 1u64
     }
@@ -784,7 +784,7 @@ fn inspect(mut tx: store.Tx, h: Handles, key: EffectKey) -> Result[(), Refused] 
         if dispatched {
             Doubted
         } else {
-            Settled(ModelFailed("model deadline"))
+            Settled(ModelFailed(Rejected("model deadline")))
         }
     } else {
         Settled(Tool(if dispatched {
@@ -853,14 +853,14 @@ fn begin(mut tx: store.Tx, attempt: runner.triggers.Attempt, take key: EffectKey
     }
     let n = runner.triggers.number(attempt)
     match e.phase {
-        Sealed => (),
+        Sealed => if e.dispatches > 0u64 && now(mut tx) >= e.deadline { return Ok(Shut) },
         Dispatched(prev) => {
             if prev >= n {
                 return Ok(Shut)
             }
             let again = match e.repeat {
                 Once => false,
-                Repeatable(max) => e.dispatches < max && store.info(mut tx).at < e.deadline,
+                Repeatable(max) => e.stream && e.dispatches < max && now(mut tx) < e.deadline,
             }
             if !again {
                 return Ok(Doubt)
@@ -908,88 +908,4 @@ pub fn register_standard[G: send](mut r: runner.Registry[G, Handles], advance_en
     }
     let f: own[send] fn(mut store.Tx, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error] = take run
     runner.register_attempt(mut r, settle_entry, take f, n, steps)
-}
-
-pub type Settle: codec + send {
-    key: EffectKey,
-    receipt: Option[Receipt]
-}
-
-pub type Filed: codec + send = Recorded | Ignored
-
-// settle(E, receipt): first writer wins. A model answer commits as its entry
-// and schedules derivation; a tool receipt settles its member and advances.
-// None records the effect as in doubt. The app's settle entry is a fenced
-// attempt entry whose body calls this; a refusal rolls the transaction back.
-pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
-    let h = handles(store.tx_schema(tx))?
-    match settle_in(mut tx, h, a, w, attempt, take m) {
-        Ok(d) => Ok(d),
-        Error(Storage) => Error(Missing("harness: storage refused the settle")),
-        Error(_) => Error(Missing("harness: settle refused")),
-    }
-}
-
-fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
-    let Settle(key: key, receipt: take receipt) = take m
-    if !kept(active(tx, h, key.run))? {
-        return Ok(Ignored)
-    }
-    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
-        return Ok(Ignored)
-    }
-    let mut e = take found
-    let Some(t) = e.trigger else {
-        return Ok(Ignored)
-    }
-    if t != runner.triggers.run_id(attempt) {
-        return Ok(Ignored)
-    }
-    match e.phase {
-        Dispatched(_) => (),
-        _ => return Ok(Ignored)
-    }
-    match take receipt {
-        None => {
-            if key.kind == MODEL {
-                e.phase = Doubted
-                let reserve = e.reserve
-                kept(store.put(mut tx, h.effects, key, e))?
-                model_closed(mut tx, h, key, reserve, true)?
-            } else {
-                e.phase = Settled(Tool(InDoubt))
-                kept(store.put(mut tx, h.effects, key, e))?
-                advance(mut tx, h, a, w, Kick)?
-            }
-        },
-        Some(Model(take answer)) => {
-            let Some(take found_run) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else {
-                return Ok(Ignored)
-            }
-            let mut run = take found_run
-            run.spend.reserved -= e.reserve
-            run.spend.known += answer.usage.input + answer.usage.output
-            run.phase = AnswerReady(key.round)
-            let mut s = session_of(tx, h)?
-            let said: Answer = clone(answer)
-            let _ = append(mut tx, h, a, mut s, Assistant(take said))?
-            kept(store.put(mut tx, h.session, 0u64, s))?
-            kept(store.put(mut tx, h.runs, key.run, run))?
-            e.phase = Settled(Model(take answer))
-            kept(store.put(mut tx, h.effects, key, e))?
-            let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
-        },
-        Some(ModelFailed(take why)) => {
-            let reserve = e.reserve
-            e.phase = Settled(ModelFailed(take why))
-            kept(store.put(mut tx, h.effects, key, e))?
-            model_closed(mut tx, h, key, reserve, false)?
-        },
-        Some(Tool(take outcome)) => {
-            e.phase = Settled(Tool(take outcome))
-            kept(store.put(mut tx, h.effects, key, e))?
-            advance(mut tx, h, a, w, Kick)?
-        },
-    }
-    Ok(Recorded)
 }

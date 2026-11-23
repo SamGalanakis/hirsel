@@ -1,0 +1,111 @@
+pub type Settle: codec + send {
+    key: EffectKey,
+    receipt: Option[Receipt]
+}
+
+pub type Filed: codec + send = Recorded | Ignored
+
+// settle(E, receipt): first writer wins. A model answer commits as its entry
+// and schedules derivation; a tool receipt settles its member and advances.
+// None records the effect as in doubt. The app's settle entry is a fenced
+// attempt entry whose body calls this; a refusal rolls the transaction back.
+pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
+    let h = handles(store.tx_schema(tx))?
+    match settle_in(mut tx, h, a, w, attempt, take m) {
+        Ok(d) => Ok(d),
+        Error(Storage) => Error(Missing("harness: storage refused the settle")),
+        Error(_) => Error(Missing("harness: settle refused")),
+    }
+}
+
+fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: runner.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
+    let Settle(key: key, receipt: take receipt) = take m
+    if !kept(active(tx, h, key.run))? {
+        return Ok(Ignored)
+    }
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else {
+        return Ok(Ignored)
+    }
+    let mut e = take found
+    let Some(t) = e.trigger else {
+        return Ok(Ignored)
+    }
+    if t != runner.triggers.run_id(attempt) {
+        return Ok(Ignored)
+    }
+    match e.phase {
+        Dispatched(_) => (),
+        _ => return Ok(Ignored)
+    }
+    match take receipt {
+        None => {
+            if key.kind == MODEL {
+                e.phase = Doubted
+                let reserve = e.reserve
+                kept(store.put(mut tx, h.effects, key, e))?
+                model_closed(mut tx, h, key, reserve, true)?
+            } else {
+                e.phase = Settled(Tool(InDoubt))
+                kept(store.put(mut tx, h.effects, key, e))?
+                advance(mut tx, h, a, w, Kick)?
+            }
+        },
+        Some(Model(take answer)) => {
+            let Some(take found_run) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else {
+                return Ok(Ignored)
+            }
+            let mut run = take found_run
+            run.spend.reserved -= e.reserve
+            run.spend.known += answer.usage.input + answer.usage.output
+            run.phase = AnswerReady(key.round)
+            let mut s = session_of(tx, h)?
+            let said: Answer = clone(answer)
+            let _ = append(mut tx, h, a, mut s, Assistant(take said))?
+            kept(store.put(mut tx, h.session, 0u64, s))?
+            kept(store.put(mut tx, h.runs, key.run, run))?
+            e.phase = Settled(Model(take answer))
+            kept(store.put(mut tx, h.effects, key, e))?
+            let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+        },
+        Some(ModelFailed(take fault)) => settle_model_fault(mut tx, h, w, key, take e, take fault)?,
+        Some(Tool(take outcome)) => {
+            e.phase = Settled(Tool(take outcome))
+            kept(store.put(mut tx, h.effects, key, e))?
+            advance(mut tx, h, a, w, Kick)?
+        },
+    }
+    Ok(Recorded)
+}
+
+// The new trigger and the effect's next mode commit together. The old
+// attempt can no longer begin or settle this effect after the trigger moves.
+fn settle_model_fault(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, take saved: Effect, take fault: ModelFault) -> Result[(), Refused] {
+    let mut e = take saved
+    let dropped = match fault { StreamDropped(_) => true, _ => false }
+    let delay = match fault {
+        Throttled(_, seconds) => Some(seconds),
+        Transient(_, seconds) => Some(seconds),
+        StreamDropped(_) => Some(0u64),
+        _ => None,
+    }
+    if let Repeatable(max) = e.repeat {
+        if let Some(seconds) = delay {
+            let due = int.saturating_add(now(mut tx), order.min(seconds, MAX_MODEL_BACKOFF_SECONDS) * 1000u64)
+            if e.stream && e.dispatches < max && due < e.deadline {
+                if dropped {
+                    kept(resend_reserve(mut tx, h, key.run, e.reserve))?
+                    e.stream = false
+                }
+                let when: runner.triggers.Due = if dropped { AfterCommit } else { At(due) }
+                let trigger = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.effect, key, when))?
+                e.phase = Sealed
+                e.trigger = Some(trigger)
+                return kept(store.put(mut tx, h.effects, key, e))
+            }
+        }
+    }
+    let reserve = e.reserve
+    e.phase = Settled(ModelFailed(take fault))
+    kept(store.put(mut tx, h.effects, key, e))?
+    model_closed(mut tx, h, key, reserve, dropped)
+}

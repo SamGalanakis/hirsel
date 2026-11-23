@@ -35,7 +35,7 @@ type Grants: send {
 }
 
 fn usage() -> harness.Usage {
-    harness.Usage(input: 10u64, output: 5u64)
+    harness.Usage(input: 10u64, output: 5u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64)
 }
 
 fn call_of(take name: String) -> harness.Call {
@@ -72,7 +72,7 @@ fn ask_service(to: Sender[Sender[()]]) -> Result[(), harness.Fault] waits {
 
 // The script: once a tool has answered, end with "done"; before that, call the tool the
 // user's message names ("bump it", "tally it", "delegate it").
-fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     if g.s.chunks > 0u64 {
         return streaming_model(g, take r, mut sink)
     }
@@ -88,7 +88,7 @@ fn scripted_model(g: Grants, take r: harness.Request, mut sink: Option[harness.p
             _ => (),
         }
     }
-    ask_service(g.s.model)?
+    ask_service(g.s.model) ?=> |_| Rejected("scripted model unavailable")
     Ok(asking(string.from(tool)))
 }
 
@@ -100,16 +100,16 @@ fn preview_answer() -> harness.Answer {
     harness.Answer(text: take text, calls: list.new(), stop: "end", usage: usage())
 }
 
-fn streaming_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn streaming_model(g: Grants, take r: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let answer = preview_answer()
     let width = 10000u64 / g.s.chunks
-    ask_service(g.s.model)?
+    ask_service(g.s.model) ?=> |_| Rejected("scripted model unavailable")
     for i in 0u64 .. g.s.chunks {
         if let Some(mut p) = sink {
             harness.preview.delta(mut p, string.slice(answer.text, i * width, (i + 1u64) * width))
         }
         if i == 0u64 {
-            ask_service(g.s.model)?
+            ask_service(g.s.model) ?=> |_| Rejected("scripted model unavailable")
         }
     }
     Ok(take answer)

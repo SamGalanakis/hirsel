@@ -11,7 +11,7 @@ fn mcp_peer(g: Grants, id: String) -> Option[mcp_tools.Peer] {
         identity: mcp.rpc.Identity(name: "harness-law", version: "1")))
 }
 
-fn mcp_blob_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn mcp_blob_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let name = mcp_tools.offered_name("fixture", "echo")
     let mut offered = false
     for t in r.tools {
@@ -19,7 +19,7 @@ fn mcp_blob_model(g: Grants, take r: harness.Request, mut draft: Option[harness.
     }
     let mut answer = scripted_model(g, take r, mut draft)?
     if list.len(answer.calls) == 0u64 { return Ok(take answer) }
-    if !offered { return Error(Refused("missing MCP tool")) }
+    if !offered { return Error(Rejected("missing MCP tool")) }
     answer.calls[0u64].name = take name
     Ok(take answer)
 }

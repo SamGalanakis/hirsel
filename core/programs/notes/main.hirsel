@@ -272,7 +272,7 @@ fn summarize(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits 
 
 // ---- the parent agent ----
 fn usage() -> harness.Usage {
-    harness.Usage(input: 10u64, output: 5u64)
+    harness.Usage(input: 10u64, output: 5u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64)
 }
 
 fn call(take id: String, take name: String, take args: String) -> harness.Call {
@@ -293,7 +293,7 @@ fn returned(r: harness.Request, id: String) -> String {
 }
 
 // Three rounds, chosen by how many tool results the request carries.
-fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut results = 0u64
     let mut prompt = string.new()
     for e in r.messages {
@@ -338,7 +338,7 @@ fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, 
     let _ = channel.send(reply, harness.Answer(text: take words, calls: take calls, stop: stop, usage: usage()))
     match channel.receive(replied) {
         Ok(take a) => Ok(take a),
-        Error(_) => Error(Unavailable)
+        Error(_) => Error(Rejected("scripted model unavailable"))
     }
 }
 
@@ -374,7 +374,7 @@ fn scripted_release(r: harness.Request) -> Option[(bool, Option[String])] {
 }
 
 // The scripted answer, its text drafted in eight pieces over about a second.
-fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let answer = scripted_model(g, take request)?
     let n = string.byte_len(answer.text)
     if list.len(answer.calls) == 0u64 && n > 0u64 {
@@ -395,7 +395,7 @@ fn scripted_stream(g: Grants, take request: harness.Request, mut sink: Option[ha
 }
 
 // Live asks OpenRouter, stream drafts the script, otherwise the script answers.
-fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     if let Some(live) = view g.live {
         return live_model(g, live, take request, mut draft)
     }
@@ -405,46 +405,33 @@ fn model(g: Grants, take request: harness.Request, mut draft: Option[harness.pre
     scripted_model(g, take request)
 }
 
-fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
-    let m = harness.provider.Model(dialect: OpenAi, name: string.from(live.model), max_tokens: 512u64)
+fn live_model(g: Grants, live: Live, take request: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
+    let m = harness.provider.Model(dialect: OpenAi, name: string.from(live.model), max_tokens: 512u64, cache_control: Off)
     let endpoint = harness.provider.Endpoint(address: live.address, authority: OPENROUTER, prefix: "/api", security: Https(OPENROUTER, System))
     let p = harness.provider.Provider(model: take m, endpoint: take endpoint, key: secret.share(live.key), bounds: harness.provider.bounds(), deadline_ms: 45000u64)
     emit(live.out, "OpenRouter request attempted", "")
-    let response = harness.provider.ask_reported(live.net, g.clock, take p, take request, mut draft)
+    let response = harness.provider.ask_with_preview(live.net, g.clock, take p, take request, mut draft)
     match take response {
-        Ok(harness.provider.Reported(answer: take a, cached_input: cached)) => {
-            if let Some(hit) = cached {
-                if hit <= a.usage.input {
-                    let mut s = string.from("OpenRouter prompt tokens: hit ")
-                    string.push_u64(mut s, hit)
-                    string.push(mut s, ", miss ")
-                    string.push_u64(mut s, a.usage.input - hit)
-                    emit(live.out, take s, "")
-                }
+        Ok(take a) => {
+            let hit = a.usage.cache_read
+            if hit <= a.usage.input {
+                let mut s = string.from("OpenRouter prompt tokens: hit ")
+                string.push_u64(mut s, hit)
+                string.push(mut s, ", miss ")
+                string.push_u64(mut s, a.usage.input - hit)
+                emit(live.out, take s, "")
             }
             Ok(take a)
         },
-        Error(Http(status, message)) => {
-            let mut why = harness.provider.http_error(status, message)
-            if status == 400u16 || status == 404u16 {
-                string.push(mut why, ". Check OPENROUTER_MODEL against https://openrouter.ai/models and retry.")
-            } else if status < 500u16 {
-                string.push(mut why, ". Check this model's access, credits and rate limits in OpenRouter, then retry.")
+        Error(take fault) => {
+            let why = match fault {
+                Throttled(message, _) => string.from(message),
+                Transient(message, _) => string.from(message),
+                ContextExceeded(message) => string.from(message),
+                StreamDropped(message) => string.from(message),
+                Rejected(message) => string.from(message),
             }
             emit(live.out, "OpenRouter ", why)
-            Error(Refused(take why))
-        },
-        Error(Transport(take fault)) => {
-            match fault {
-                Refused(why) => {
-                    let mut line = string.from(why)
-                    string.push(mut line, ". Check your connection to openrouter.ai and retry.")
-                    emit(live.out, "OpenRouter ", line)
-                },
-                BadArgs(why) => emit(live.out, "OpenRouter request invalid. Check the request data. ", why),
-                Unavailable => emit(live.out, "OpenRouter response ended early. Check the run before retrying.", ""),
-                _ => (),
-            }
             Error(take fault)
         },
     }
@@ -529,7 +516,7 @@ fn helper_grants(s: (), take ctx: runner.TriggerContext) -> Result[HelperGrants,
 }
 
 // Answers with the first sentence of the newest user message.
-fn helper_model(g: HelperGrants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.Fault] waits {
+fn helper_model(g: HelperGrants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
     let mut last = string.new()
     for e in r.messages {
         if let User(t) = e {
@@ -548,10 +535,10 @@ fn helper_model(g: HelperGrants, take r: harness.Request, mut draft: Option[harn
         string.push(mut words, s)
     }
     let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
-    let _ = channel.send(reply, harness.Answer(text: take words, calls: list.new(), stop: "end", usage: harness.Usage(input: 4u64, output: 2u64)))
+    let _ = channel.send(reply, harness.Answer(text: take words, calls: list.new(), stop: "end", usage: harness.Usage(input: 4u64, output: 2u64, cache_read: 0u64, cache_write: 0u64, reasoning: 0u64)))
     match channel.receive(replied) {
         Ok(take a) => Ok(take a),
-        Error(_) => Error(Unavailable)
+        Error(_) => Error(Rejected("scripted model unavailable"))
     }
 }
 

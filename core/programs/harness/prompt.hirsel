@@ -144,7 +144,8 @@ fn plan[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], mut s: Session) -> R
 // The request for a model effect, built from immutable entries read through
 // the attempt's snapshot, so the advance transaction never carries the body.
 // System entries fold into `system` and `tools`; Notes are not sent.
-pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, cutoff: Cutoff) -> Result[Request, store.Error] {
+pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, e: Effect) -> Result[Request, store.Error] {
+    let cutoff = view e.cutoff
     let mut messages: List[Entry] = list.new()
     let mut system: List[Change] = list.new()
     let mut tools: List[ToolDef] = list.new()
@@ -167,7 +168,7 @@ pub fn request(snap: store.Snapshot, h: Handles, key: EffectKey, cutoff: Cutoff)
     let mut stable: Bytes = list.new()
     std.codec.put_u64(key.run, mut stable)
     std.codec.put_u64(key.round, mut stable)
-    Ok(Request(route: clone(cutoff.route), system: take texts, tools: take tools, messages: take messages, key: take stable))
+    Ok(Request(route: clone(cutoff.route), system: take texts, tools: take tools, messages: take messages, key: take stable, stream: e.stream))
 }
 
 fn fold(mut system: List[Change], mut tools: List[ToolDef], take p: Patch) {

@@ -1,16 +1,17 @@
-//! The release std: every plain instance of the library image a program is
-//! checked against, and every instance they reach, lowered as one unit from
-//! the image alone. Its roots are the image's non-generic functions the image
-//! checked whole, read from the image, never from a program's reach, so what
-//! the unit holds and how it is optimised is a function of the image and the
-//! generator. Every root is an export; a program calls it by its symbol and
-//! holds none of its bodies. Every optimised LLVM build takes one: a program
-//! lowers every other library instance it reaches itself, so its optimiser
-//! sees the closure and dictionary arguments it passes them, and the held
-//! roots with what they reach: those [`ALWAYS_IMPORT`] names, those that
-//! take code a caller can bind ([`callable_variants::takes_code`]), whose
-//! calls through it a program's private bodies make direct, and those that
-//! make an owned network wait, whose returnable variants a program builds.
+//! The release std: the plain library instances a program reaches, and every
+//! instance they reach, lowered as one unit apart from the program. Its roots
+//! are the plain library instances the program's closure holds, so what the
+//! unit holds and how it is optimised is a function of those instances and
+//! the generator: two programs that reach the same std roots take the same
+//! side, from the shared parts cache. Every root is an export; a program calls
+//! it by its symbol and holds none of its bodies. Every optimised LLVM build
+//! takes one: a program lowers every other library instance it reaches
+//! itself, so its optimiser sees the closure and dictionary arguments it
+//! passes them, and the held roots with what they reach: those
+//! [`ALWAYS_IMPORT`] names, those that take code a caller can bind
+//! ([`callable_variants::takes_code`]), whose calls through it a program's
+//! private bodies make direct, and those that make an owned network wait,
+//! whose returnable variants a program builds.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -37,11 +38,7 @@ use hirsel_core_ir::{FuncId, Identity};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 6;
-
-/// How many std sides each toolchain and variant's index names, most recent
-/// first. One that falls off is lowered again when a build needs it.
-const INDEX_LENGTH: usize = 8;
+const STD_SCHEMA: u32 = 7;
 
 /// The largest body, in LLVM instructions after the std's optimiser, the std
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
@@ -65,8 +62,8 @@ fn always_imported(definition: &DefPath) -> bool {
 /// A plain root a program lowers itself, with what it reaches: one
 /// [`ALWAYS_IMPORT`] names, one taking code a caller can bind, or one making
 /// an owned network wait, whose returnable variant (`returnable.rs`) only a
-/// program's unit can build. Both sides decide it from the root's own
-/// function alone.
+/// program's unit can build. It is decided from the root's own function
+/// alone.
 fn held_root(definition: &DefPath, module: &hirsel_core_ir::Module, root: FuncId) -> bool {
     always_imported(definition)
         || crate::callable_variants::takes_code(module, root)
@@ -87,9 +84,6 @@ fn library(definition: &DefPath) -> bool {
 #[derive(Serialize, Deserialize)]
 struct StdRecord {
     schema: u32,
-    /// Whether the side was lowered from a whole library image, so it holds
-    /// every plain root a program over that image reaches.
-    whole: bool,
     /// The plain roots the side was asked to lower, in identity order.
     requested: Vec<Identity>,
     /// The plain roots the side defines under their instance symbols, in
@@ -132,15 +126,13 @@ pub(crate) struct StdSide {
     pub(crate) parts: StdParts,
     /// The bodies the std lends a program's inliner, as bitcode.
     pub lent: Vec<u8>,
-    /// How many units this build lowered for the side: none when it was
-    /// read from a store. A build over a prebuilt std product that lowers
-    /// its std pays the whole side, and reports it here.
+    /// How many units this build lowered for the side: none when the shared
+    /// cache held it.
     pub lowered: u64,
 }
 
 /// The units a side lowers, each reached from its roots.
 struct SideUnits {
-    whole: bool,
     roots: Vec<Identity>,
     units: BTreeMap<Identity, Unit>,
 }
@@ -198,182 +190,24 @@ fn program_side(
 /// The suffix of the std's own hidden names.
 const STD_NAMESPACE: &str = hirsel_llvm_lazy::LENT_NAMESPACE;
 
-impl CheckProduct {
-    /// The library image's plain roots: a plain identity of each non-generic
-    /// function the image checked whole, in identity order.
-    fn std_plain_roots(&self) -> Result<Vec<Identity>, NativeStop> {
-        let image = self
-            .image
-            .as_ref()
-            .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
-        let directory = image.directory().map_err(NativeStop::Input)?;
-        let mut roots = Vec::new();
-        for definition in directory.definitions.keys() {
-            let product = self.demand_body(definition).map_err(NativeStop::Input)?;
-            if product.check.function.is_none() || product.check.template.is_some() {
-                continue;
-            }
-            roots.push(Identity::plain(definition.clone()));
-        }
-        roots.sort();
-        Ok(roots)
-    }
-
-    /// The units of the release std of this product's library image: every
-    /// plain root the image checked whole and what it reaches, prepared as a
-    /// recipe names them. Reads the library image only.
-    fn image_side(&self) -> Result<SideUnits, NativeStop> {
-        let plain = self.std_plain_roots()?;
-        let mut materialized = crate::instances::InstanceSet::default();
-        // A root whose walk stops is left out alone; a program reaching it
-        // lowers it itself and stops there as it does today.
-        let mut walks = Vec::new();
-        for root in plain {
-            if let Ok(walked) =
-                self.instances_into([root.clone()], SIDE_INSTANCE_LIMIT, &mut materialized)
-            {
-                walks.push((root, walked));
-            }
-        }
-        // What a held root reaches stays the program's to lower.
-        let mut held = BTreeSet::new();
-        for (root, walked) in &walks {
-            let instance = materialized.get(root);
-            if held_root(&root.definition, instance.ir()?, instance.function) {
-                held.extend(walked.iter().cloned());
-                held.insert(root.clone());
-            }
-        }
-        let mut reached = BTreeSet::new();
-        let mut roots = Vec::new();
-        for (root, walked) in walks {
-            if !held.contains(&root) {
-                reached.extend(walked);
-                roots.push(root);
-            }
-        }
-        let items = reached
-            .iter()
-            .map(|i| {
-                materialized
-                    .get(i)
-                    .ir()
-                    .map(hirsel_core_ir::source::anchored_items)
-            })
-            .collect::<io::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let sources = self.native_sources(&items)?;
-        let sources = sources.positions();
-        let mut units = BTreeMap::new();
-        for identity in reached {
-            let instance = materialized.get(&identity);
-            let unit =
-                super::recipe_build::prepare_unit(instance.ir()?, instance.function, &sources);
-            units.insert(identity, unit);
-        }
-        Ok(SideUnits {
-            whole: true,
-            roots,
-            units,
-        })
-    }
-
-    /// The release std of this product's library image for shipping release
-    /// builds on `target` against each runtime archive in `runtimes`, walked
-    /// and prepared from the image. [`ReleaseStdSide::lower`] publishes it
-    /// into the image's own store, which every build over the image reads
-    /// first; a runtime with a side already there keeps it. The side holds
-    /// its own units, so the caller can drop this product, and the bodies its
-    /// image decoded for the walk, before the side's optimiser runs.
-    pub(crate) fn release_std_side(
-        &self,
-        target: &str,
-        runtimes: &[ContentHash],
-    ) -> Result<ReleaseStdSide, NativeStop> {
-        let image = self
-            .image
-            .as_ref()
-            .ok_or_else(|| NativeStop::Entry("the release std is an image's".into()))?;
-        // The runtime names a side's kin but its code does not read it: one
-        // lowering serves every runtime archive.
-        let kins = runtimes
-            .iter()
-            .map(|&runtime| {
-                Generator {
-                    target,
-                    observe_charge: false,
-                    runtime,
-                }
-                .kin()
-            })
-            .collect::<io::Result<Vec<_>>>()?;
-        Ok(ReleaseStdSide {
-            target: target.to_owned(),
-            runtime: runtimes.first().copied(),
-            kins,
-            store: Store::new(&image.store_root().join(PREBUILT))?,
-            units: if runtimes.is_empty() {
-                None
-            } else {
-                Some(self.image_side()?)
-            },
-        })
-    }
-}
-
-/// A library image's release std side, prepared to lower for one target and
-/// the shipping codegen mode under the kin of each runtime archive.
-pub(crate) struct ReleaseStdSide {
-    target: String,
-    runtime: Option<ContentHash>,
-    kins: Vec<ContentHash>,
-    store: Store,
-    units: Option<SideUnits>,
-}
-
-impl ReleaseStdSide {
-    /// Lower the side once and publish it under every runtime's kin.
-    pub(crate) fn lower(self) -> Result<(), NativeStop> {
-        let (Some(runtime), Some(units)) = (self.runtime, self.units) else {
-            return Ok(());
-        };
-        let generator = Generator {
-            target: &self.target,
-            observe_charge: false,
-            runtime,
-        };
-        lower(&generator, &self.kins, units, &self.store)?;
-        Ok(())
-    }
-}
-
 /// The release std a program's publication assembles against under
-/// `options`' generator, linking the runtime whose identity is `runtime`. Of
-/// the sides stored in `library` (a library image's own store), then in the
-/// shared parts cache, most recent first, one each of whose units the program
-/// also holds is the program's own (equal owner): a whole library's first;
-/// for a program checked without a library image, one lowered for the plain
-/// roots it reaches next. Else one lowered from `product`'s library image, or
-/// without one from the program's own plain library units, and stored in the
-/// shared cache. A program checked without a library image that holds no
-/// plain library unit takes the empty side, which defines nothing.
+/// `options`' generator, linking the runtime whose identity is `runtime`: the
+/// plain library roots its `units` reach besides `entry`, with every unit
+/// they reach, lowered once into the shared parts cache, where every later
+/// build that reaches the same roots finds it. A program that holds no plain
+/// library unit takes the empty side, which defines nothing.
 pub(crate) fn std_side(
     units: &BTreeMap<Identity, Unit>,
     entry: &Identity,
-    product: Option<&CheckProduct>,
-    library: Option<&Path>,
     options: &NativeOptions,
     runtime: ContentHash,
 ) -> Result<StdSide, NativeStop> {
     let (roots, reached) = program_side(units, entry);
     let generator = Generator::of(options, runtime);
     let kin = generator.kin()?;
-    let image = product.filter(|product| product.image.is_some());
-    if roots.is_empty() && image.is_none() {
+    if roots.is_empty() {
         return Ok(StdSide {
-            key: side_key(kin, false, &[], &[])?,
+            key: side_key(kin, &[], &[])?,
             roots: BTreeSet::new(),
             summaries: BTreeMap::new(),
             points: BTreeMap::new(),
@@ -382,115 +216,40 @@ pub(crate) fn std_side(
             lowered: 0,
         });
     }
-    let owners = units
-        .iter()
-        .map(|(identity, unit)| Ok((identity, unit.owner()?)))
-        .collect::<io::Result<BTreeMap<_, _>>>()?;
-    let own = |record: &StdRecord| {
-        record
-            .units
-            .iter()
-            .all(|(identity, owner)| owners.get(identity).is_none_or(|own| own == owner))
-    };
-    let covers = |record: &StdRecord| {
-        roots
-            .iter()
-            .all(|root| record.requested.binary_search(root).is_ok())
+    let side_units = SideUnits {
+        roots,
+        units: reached
+            .into_iter()
+            .map(|identity| {
+                let unit = units[&identity].clone();
+                (identity, unit)
+            })
+            .collect(),
     };
     let shared = Store::new(&options.parts)?;
-    let prebuilt = library
-        .map(|root| root.join(PREBUILT))
-        .or_else(|| {
-            image
-                .and_then(|p| p.image.as_ref())
-                .map(|i| i.store_root().join(PREBUILT))
-        })
-        .filter(|path| path.is_dir())
-        .map(|path| Store::new(&path))
-        .transpose()?;
-    let mut candidates = Vec::new();
-    for store in prebuilt.iter().chain([&shared]) {
-        for key in read_index(store, kin)? {
-            if let Some(record) = load_record(store, key, kin)?
-                && own(&record)
-            {
-                candidates.push((store, key, record));
-            }
-        }
-    }
-    let chosen = match candidates.iter().position(|(_, _, record)| record.whole) {
-        Some(i) => Some(i),
-        None if image.is_none() => candidates.iter().position(|(_, _, record)| covers(record)),
-        None => None,
-    };
-    if let Some(i) = chosen {
-        let (store, key, record) = candidates.swap_remove(i);
-        return side(store, &shared, key, record, 0);
-    }
-    let lowered = match image {
-        Some(product) => product.image_side()?,
-        None => SideUnits {
-            whole: false,
-            roots,
-            units: reached
-                .into_iter()
-                .map(|identity| {
-                    let unit = units[&identity].clone();
-                    (identity, unit)
-                })
-                .collect(),
-        },
-    };
-    let (key, record, lowered) = lower(&generator, &[kin], lowered, &shared)?;
-    if !own(&record) {
-        return Err(NativeStop::Entry(
-            "the release std lowered for this program holds other bodies than it".into(),
-        ));
-    }
-    side(&shared, &shared, key, record, lowered)
+    let (key, record, lowered) = lower(&generator, kin, side_units, &shared)?;
+    side(&shared, key, record, lowered)
 }
 
-/// Join, specialize and lower a side's units once, publish its parts and
-/// record into `store` under the key its content derives in each of `kins`
-/// (kins whose generators differ only in the runtime they name), and name it
-/// first in each kin's index there. Returns the first kin's key and record,
-/// and how many units it lowered: none when `store` already holds the side
-/// in every kin.
+/// Join, specialize and lower a side's units, and publish its parts and
+/// record into `store` under the key its content derives. Also returns how
+/// many units it lowered: none when `store` already holds the side.
 fn lower(
     options: &Generator<'_>,
-    kins: &[ContentHash],
+    kin: ContentHash,
     side: SideUnits,
     store: &Store,
 ) -> Result<(ContentHash, StdRecord, u64), NativeStop> {
-    let SideUnits {
-        whole,
-        roots,
-        mut units,
-    } = side;
+    let SideUnits { roots, mut units } = side;
     let owners = units
         .iter()
         .map(|(identity, unit)| Ok((identity.clone(), unit.owner()?)))
         .collect::<io::Result<Vec<_>>>()?;
     let requested = roots.clone();
-    let keys = kins
-        .iter()
-        .map(|&kin| side_key(kin, whole, &requested, &owners))
-        .collect::<io::Result<Vec<_>>>()?;
-    let mut held = Vec::with_capacity(kins.len());
-    for (&kin, &key) in kins.iter().zip(&keys) {
-        match load_record(store, key, kin)? {
-            Some(record) => held.push(record),
-            None => break,
-        }
+    let key = side_key(kin, &requested, &owners)?;
+    if let Some(record) = load_record(store, key, kin)? {
+        return Ok((key, record, 0));
     }
-    if held.len() == kins.len() {
-        for (&kin, &key) in kins.iter().zip(&keys) {
-            write_index(store, kin, key)?;
-        }
-        let record = held.swap_remove(0);
-        return Ok((keys[0], record, 0));
-    }
-    drop(held);
     let reached: Vec<Identity> = units.keys().cloned().collect();
     let points =
         super::recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &BTreeMap::new(), false)?
@@ -519,7 +278,7 @@ fn lower(
     let first = roots
         .first()
         .cloned()
-        .ok_or_else(|| NativeStop::Entry("the image has no plain function".into()))?;
+        .ok_or_else(|| NativeStop::Entry("the release std has no root".into()))?;
     let (mut module, _) = release::join_modules(&first, &reached, &modules, |_| FuncId(0))?;
     // The joined module holds every body LLVM lowers; the per-unit modules
     // are not read again, so they leave before the optimiser runs.
@@ -584,46 +343,36 @@ fn lower(
             hirsel_llvm_lazy::Lend::Lend { limit: LEND_LIMIT },
         )
         .map_err(emit)?;
-    if program.deferred.is_empty() {
+    // Each part's object is generated when a program first links it: a
+    // program links few of the unit's parts.
+    let mut parts = Vec::with_capacity(program.deferred.len());
+    for (i, part) in program.deferred.into_iter().enumerate() {
+        store.put_keyed(code_name(key, i)?, &part.code)?;
+        parts.push(StdPart {
+            name: part.name,
+            strong: part.strong,
+        });
+    }
+    if parts.is_empty() {
         return Err(NativeStop::Entry("the release std has no part".into()));
     }
     if body_keys.is_empty() {
         return Err(NativeStop::Entry("the release std holds no body".into()));
     }
-    let summaries: Vec<(ContentHash, Summary)> = codes.into_iter().zip(summaries).collect();
-    let exports: BTreeSet<String> = exports.into_iter().collect();
-    let mut first = None;
-    // Each part's object is generated when a program first links it: a
-    // program links few of the unit's parts. Each kin names its own copy of
-    // the one lowering's parts.
-    for (&kin, &key) in kins.iter().zip(&keys) {
-        let mut parts = Vec::with_capacity(program.deferred.len());
-        for (i, part) in program.deferred.iter().enumerate() {
-            store.put_keyed(code_name(key, i)?, &part.code)?;
-            parts.push(StdPart {
-                name: part.name.clone(),
-                strong: part.strong,
-            });
-        }
-        let lent = lent_name(key)?;
-        store.put_keyed(lent, &program.lent)?;
-        let record = StdRecord {
-            schema: STD_SCHEMA,
-            whole,
-            requested: requested.clone(),
-            roots: roots.clone(),
-            units: owners.clone(),
-            summaries: summaries.clone(),
-            points: points.clone(),
-            exports: exports.clone(),
-            parts,
-            lent,
-        };
-        store.put_keyed(key, &encode(&record)?)?;
-        write_index(store, kin, key)?;
-        first.get_or_insert((key, record));
-    }
-    let (key, record) = first.expect("a side is lowered for at least one kin");
+    let lent = lent_name(key)?;
+    store.put_keyed(lent, &program.lent)?;
+    let record = StdRecord {
+        schema: STD_SCHEMA,
+        requested,
+        roots,
+        units: owners,
+        summaries: codes.into_iter().zip(summaries).collect(),
+        points,
+        exports: exports.into_iter().collect(),
+        parts,
+        lent,
+    };
+    store.put_keyed(key, &encode(&record)?)?;
     let lowered = record.units.len() as u64;
     Ok((key, record, lowered))
 }
@@ -670,50 +419,21 @@ impl<'a> Generator<'a> {
     }
 }
 
-/// A side's key: its kin's, and its own units' content.
+/// A side's key: its kin's, its roots', and its own units' content.
 fn side_key(
     kin: ContentHash,
-    whole: bool,
     roots: &[Identity],
     units: &[(Identity, ContentHash)],
 ) -> io::Result<ContentHash> {
-    crate::native::key("hirsel.core-std-side.v1", &(kin, whole, roots, units))
+    crate::native::key("hirsel.core-std-side.v2", &(kin, roots, units))
 }
 
-/// The keys of the sides of `kin` stored in `store`, most recent first.
-fn read_index(store: &Store, kin: ContentHash) -> io::Result<Vec<ContentHash>> {
-    let index = crate::native::key("hirsel.core-std-index.v1", &kin)?;
-    Ok(store
-        .get(index)?
-        .and_then(|bytes| decode::<Vec<ContentHash>>(&bytes))
-        .unwrap_or_default())
-}
-
-/// Name the side `key` first in `kin`'s index in `store`. Two builds that
-/// write at once each keep their own; the side the other named is lowered
-/// again when a build needs it.
-fn write_index(store: &Store, kin: ContentHash, key: ContentHash) -> io::Result<()> {
-    let mut keys = read_index(store, kin)?;
-    if keys.first() == Some(&key) {
-        return Ok(());
-    }
-    keys.retain(|k| *k != key);
-    keys.insert(0, key);
-    keys.truncate(INDEX_LENGTH);
-    let index = crate::native::key("hirsel.core-std-index.v1", &kin)?;
-    store.put_keyed(index, &encode(&keys)?)
-}
-
-/// Where the std product's prebuild publishes, inside the image's store.
-pub(crate) const PREBUILT: &str = "release-std";
-
-/// The std side `record`, stored in `store` under `key`, names: its lent
-/// bodies, checked under the name its own key derives, and its parts, whose
-/// objects `objects` (the shared cache) holds or gets. This build lowered
+/// The std side `record`, stored in the shared cache `store` under `key`,
+/// names: its lent bodies, checked under the name its own key derives, and
+/// its parts, whose objects `store` holds or gets. This build lowered
 /// `lowered` of its units.
 fn side(
     store: &Store,
-    objects: &Store,
     key: ContentHash,
     record: StdRecord,
     lowered: u64,
@@ -722,7 +442,7 @@ fn side(
         .roots
         .first()
         .cloned()
-        .ok_or_else(|| NativeStop::Entry("the image has no plain function".into()))?;
+        .ok_or_else(|| NativeStop::Entry("the release std has no root".into()))?;
     let lent = store
         .get(record.lent)?
         .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
@@ -736,8 +456,7 @@ fn side(
         parts: StdParts {
             key,
             instance: Some(instance),
-            codes: Some(store.clone()),
-            objects: Some(objects.clone()),
+            store: Some(store.clone()),
             exports: record.exports,
             parts: record.parts,
         },
@@ -751,10 +470,9 @@ pub(crate) struct StdParts {
     key: ContentHash,
     /// The root each part's object is recorded under.
     instance: Option<Identity>,
-    /// The store holding each part's bitcode.
-    codes: Option<Store>,
-    /// The shared cache holding each part's object once generated.
-    objects: Option<Store>,
+    /// The shared cache holding each part's bitcode, and its object once
+    /// generated.
+    store: Option<Store>,
     exports: BTreeSet<String>,
     parts: Vec<StdPart>,
 }
@@ -784,9 +502,7 @@ impl StdSide {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let parts = &self.parts;
-        let (Some(instance), Some(codes), Some(objects)) =
-            (&parts.instance, &parts.codes, &parts.objects)
-        else {
+        let (Some(instance), Some(store)) = (&parts.instance, &parts.store) else {
             return Ok(Vec::new());
         };
         let emit = |message: String| NativeStop::Emit {
@@ -840,7 +556,7 @@ impl StdSide {
             let mut named = Vec::new();
             let mut missed = Vec::new();
             for i in next {
-                match crate::native_object::load(objects, part_name(self.key, i)?)? {
+                match crate::native_object::load(store, part_name(self.key, i)?)? {
                     Some((bare, object, file)) => {
                         named.extend(
                             hirsel_llvm_lazy::core::undefined_symbols(&object.bytes)
@@ -855,7 +571,7 @@ impl StdSide {
                 let bitcode = missed
                     .iter()
                     .map(|&i| {
-                        codes.get(code_name(self.key, i)?)?.ok_or_else(|| {
+                        store.get(code_name(self.key, i)?)?.ok_or_else(|| {
                             NativeStop::Entry("a release std part's bitcode is missing".into())
                         })
                     })
@@ -874,7 +590,7 @@ impl StdSide {
                         hirsel_llvm_lazy::core::undefined_symbols(&object.bytes).map_err(emit)?,
                     );
                     let (bare, file) =
-                        crate::native_object::publish(objects, part_name(self.key, i)?, &object)?;
+                        crate::native_object::publish(store, part_name(self.key, i)?, &object)?;
                     linked.insert(i, (bare, object.debug, file));
                 }
             }
@@ -885,7 +601,7 @@ impl StdSide {
             .map(|(bare, debug, file)| ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
-                path: crate::native_object::path(objects, bare.address),
+                path: crate::native_object::path(store, bare.address),
                 identity: bare.address,
                 check: bare.check,
                 held: Some(file),
@@ -960,10 +676,10 @@ impl StdSide {
     #[cfg(test)]
     pub(crate) fn codes(&self) -> Vec<Vec<u8>> {
         let parts = &self.parts;
-        let codes = parts.codes.as_ref().expect("a std with parts");
+        let store = parts.store.as_ref().expect("a std with parts");
         (0..parts.parts.len())
             .map(|i| {
-                codes
+                store
                     .get(code_name(self.key, i).unwrap())
                     .unwrap()
                     .expect("a part's bitcode")
@@ -985,7 +701,7 @@ fn load_record(store: &Store, key: ContentHash, kin: ContentHash) -> io::Result<
     let sound = record.schema == STD_SCHEMA
         && !record.parts.is_empty()
         && record.lent == lent_name(key)?
-        && side_key(kin, record.whole, &record.requested, &record.units)? == key;
+        && side_key(kin, &record.requested, &record.units)? == key;
     Ok(sound.then_some(record))
 }
 

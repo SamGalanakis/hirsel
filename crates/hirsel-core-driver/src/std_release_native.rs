@@ -443,11 +443,10 @@ HirselCoreHostOutcome __wrap_hirsel_core_host_io(
 }
 
 fn std_of(
-    product: &CheckProduct,
     options: &NativeOptions,
     publication: &crate::native::recipe_build::Publication,
 ) -> Option<crate::native::std_release::StdSide> {
-    publication.std_side(options, Some(product), None).unwrap()
+    publication.std_side(options).unwrap()
 }
 
 /// What a run of a program shows: exit, stdout, stderr, charge report, tape.
@@ -482,9 +481,9 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
         .unwrap();
     let std = match build {
         StdBuild::Dev => None,
-        StdBuild::Parts => std_of(product, options, &publication)
+        StdBuild::Parts => std_of(options, &publication)
             .map(|std| crate::native::std_release::StdSide { lent: Vec::new(), ..std }),
-        StdBuild::Imported => std_of(product, options, &publication),
+        StdBuild::Imported => std_of(options, &publication),
     };
     let built = Publication::open(&code, publication.root, &crate::request::local_admission_limits())
         .unwrap()
@@ -514,43 +513,33 @@ fn std_run(product: &CheckProduct, options: &NativeOptions, build: StdBuild, dir
 
 #[test]
 #[ignore = "explicit native integration target"]
-fn a_separate_std_is_the_std_products_alone() {
+fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     use crate::native::recipe_build::Publication;
     let dir = tempfile::tempdir().unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
-    let mut parts = Vec::new();
-    // The first program's std comes from the std product's own prebuild in
-    // its image; the second's image holds none, so its build lowers the std.
-    for ((name, source), cache) in [(UNIT_PROGRAMS[1], "cache"), (UNIT_PROGRAMS[2], "cache-b")] {
+    let (name, source) = UNIT_PROGRAMS[2];
+    let mut options = native_options(Backend::Llvm, &dir.path().join(name));
+    options.optimize = true;
+    options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
+    options.grant_mask = if source.contains("out: Stdout") { 1 << 4 } else { 0 };
+    let mut sides = Vec::new();
+    // Two checks over separate image caches reach the same std roots: the
+    // first build lowers their side into the shared parts cache, and the
+    // second takes it from there.
+    for cache in ["cache", "cache-b"] {
         let product = std_checked(dir.path(), name, source, cache);
-        let mut options = native_options(Backend::Llvm, &dir.path().join(name));
-        options.optimize = true;
-        options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
-        options.grant_mask = if source.contains("out: Stdout") { 1 << 4 } else { 0 };
-        let image = product.image.as_ref().unwrap().store_root().join("release-std");
-        if cache == "cache" {
-            let runtime = crate::tool_inputs::runtime_identity(hirsel_core_ids::ContentHash::of_bytes(
-                &std::fs::read(&options.runtime).unwrap(),
-            ));
-            product.release_std_side(&options.target, &[runtime]).unwrap().lower().unwrap();
-        }
-        let code = crate::code_store::CodeStore::new(dir.path().join(name).join("code"));
+        let code = crate::code_store::CodeStore::new(dir.path().join(name).join(format!("code-{cache}")));
         let reached = product.reachable(&entry, options.instance_limit).unwrap();
         let publication =
             product.publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024).unwrap();
-        let std = std_of(&product, &options, &publication).expect("an optimised build's std");
-        let store = Store::new(if cache == "cache" { &image } else { &options.parts }).unwrap();
-        let record = store.get(std.key).unwrap().expect("the std record");
-        // A build over the prebuild lowers none of the std; one whose image
-        // holds none lowers the whole side itself, and says so.
+        let std = std_of(&options, &publication).expect("an optimised build's std");
         if cache == "cache" {
-            assert_eq!(std.lowered, 0, "a build over the prebuilt std lowers none of it");
-        } else {
             assert!(std.lowered > 0, "a build that lowers the std counts what it lowered");
+        } else {
+            assert_eq!(std.lowered, 0, "a build over the stored side lowers none of it");
         }
-        let bytes = std.codes();
         assert!(!std.lent.is_empty(), "the std lends bodies");
-        parts.push((std.key, record, bytes, std.lent));
+        sides.push((std.key, std.codes(), std.lent));
         if cache == "cache-b" {
             // The recipe outlives its inputs: with the program's source and
             // image gone, it assembles over the side its build stored.
@@ -568,10 +557,7 @@ fn a_separate_std_is_the_std_products_alone() {
             assert!(std::fs::read(&again.executable).unwrap() == first, "the recipe's executable");
         }
     }
-    assert_eq!(parts[0].0, parts[1].0, "the std key");
-    assert!(parts[0].1 == parts[1].1, "the std's record");
-    assert!(parts[0].2 == parts[1].2, "the std's parts");
-    assert!(parts[0].3 == parts[1].3, "the std's lent bodies");
+    assert!(sides[0] == sides[1], "the std side");
 
     // A std edit the program reaches only through other std roots misses:
     // with `list.find_byte` finding nothing, `string.split_once` finds no

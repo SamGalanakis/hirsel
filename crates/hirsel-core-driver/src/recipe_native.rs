@@ -1720,9 +1720,9 @@ impl Publication {
     /// [`Self::assemble`] of a program checked as `product`. An optimised
     /// LLVM build takes every library instance a separately lowered release
     /// std holds from it ([`std_side`]): the program holds none of their
-    /// bodies and calls each by its exported symbol. That std, and any other
-    /// build's prebuilt objects, are read first from `library` (a library
-    /// image's store), else from `product`'s image.
+    /// bodies and calls each by its exported symbol. Other builds' prebuilt
+    /// objects are read first from `library` (a library image's store), else
+    /// from `product`'s image.
     pub(crate) fn assemble_with(
         self,
         options: &NativeOptions,
@@ -1735,18 +1735,13 @@ impl Publication {
                 .and_then(|product| product.image.as_ref())
                 .map(|image| image.store_root().to_owned())
         });
-        let std = self.std_side(options, product, library.as_deref())?;
+        let std = self.std_side(options)?;
         self.assemble_over(options, counters, std, library.as_deref())
     }
 
     /// The separately lowered release std an optimised LLVM build of this
     /// publication under `options` takes ([`std_side`]); None for any other.
-    pub(crate) fn std_side(
-        &self,
-        options: &NativeOptions,
-        product: Option<&CheckProduct>,
-        library: Option<&Path>,
-    ) -> Result<Option<StdSide>, NativeStop> {
+    pub(crate) fn std_side(&self, options: &NativeOptions) -> Result<Option<StdSide>, NativeStop> {
         let (options, _) = self.launch(options)?;
         if !matches!(options.backend, Backend::Llvm) || !options.optimize {
             return Ok(None);
@@ -1759,15 +1754,7 @@ impl Publication {
                     .runtime
             }
         };
-        std_side(
-            &self.units,
-            &self.recipe.entry,
-            product,
-            library,
-            &options,
-            runtime,
-        )
-        .map(Some)
+        std_side(&self.units, &self.recipe.entry, &options, runtime).map(Some)
     }
 
     /// The options the recipe's launch fixes over `options`, and its entry's

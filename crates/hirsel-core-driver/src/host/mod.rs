@@ -442,13 +442,7 @@ impl Host {
         );
         native.optimize = launch.backend == hirsel_core_ir::release_recipe::Backend::Llvm;
         native.recording = self.recording.is_some();
-        let prebuilt = installed.product("std")?.map(|image| {
-            image
-                .store_root()
-                .join(crate::native::std_release::PREBUILT)
-        });
-        let product =
-            publication.assemble_with(&native, Default::default(), None, prebuilt.as_deref())?;
+        let product = publication.assemble_with(&native, Default::default(), None, None)?;
         let record = product.assembly.ok_or("assembly returned no record")?;
         self.records
             .put_assembly(&record, &fs::read(product.executable)?)?;

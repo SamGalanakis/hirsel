@@ -559,7 +559,7 @@ impl CheckProduct {
             .release_units(&root, &reached, &code, None, None)?
             .units;
         let runtime = inputs.toolchain.runtime;
-        let std = std_release::std_side(&units, &root, Some(self), None, options, runtime)?;
+        let std = std_release::std_side(&units, &root, options, runtime)?;
         units.retain(|identity, _| identity == &root || !std.roots.contains(identity));
         recipe_build::bind_annexes(&mut units, &BTreeMap::new(), &std.points, true)?;
         let store = Store::new(&options.store)?;

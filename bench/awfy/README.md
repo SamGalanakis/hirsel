@@ -159,10 +159,10 @@ The size row reuses verification of all 14 original workloads. The cold and edit
 LangArena suite against Cargo. The warm build changes Spectralnorm's checksum
 from 1051192944 to 1051192945. It must compile at least one Hirsel part and
 rebuild the Cargo benchmark crate. Both executables must pass the new checksum
-fixture. Each Hirsel build must take its release std from the std product's
-prebuild: the suite's inputs name the std package exactly as the product holds
-it, and a build that lowers std itself (`native.reach.std_lowered` above zero)
-fails its row as `std-lowered`. The checkbox rows compare the same wire load on a fresh private Hirsel
+fixture. The cold Hirsel build lowers the std roots the program reaches into
+the shared cache. The edit reaches the same roots, so an edit build that lowers
+std again (`native.reach.std_lowered` above zero) fails its row as
+`std-lowered`. The checkbox rows compare the same wire load on a fresh private Hirsel
 server and the Rust reference, using an ephemeral port.
 
 Use at least two measurement CPUs. The first runs AWFY, LangArena and the
@@ -308,12 +308,10 @@ Omit `--only` to sample every row in the selected suites.
 
 When std sources change, pass `--whole-std` to both release build adapters.
 Each arm builds an explicit whole-library image from its own source manifest.
-With automatic selection, the compiler uses a whole image when the sources
-match its embedded std and can lower only reachable std bodies otherwise.
-LLVM can inline differently in the two modes. A runtime comparison with
-changed std and one compiler requires matching explicit modes. For a
-source-only comparison, pass `--source-std` to both native build commands
-and give each arm a fresh cache.
+Every release build lowers only the std roots its program reaches, whether
+the std comes from an image or from sources. For a source-only comparison,
+pass `--source-std` to both native build commands and give each arm a fresh
+cache.
 
 ```sh
 python3 bench/awfy/receipt.py sample "$out/base-samples" --artifacts "$base_toolchain" \

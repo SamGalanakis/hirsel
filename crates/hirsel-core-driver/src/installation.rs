@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 const FILE: &str = "hirsel-core-toolchain.json";
 const VERSION: u32 = 3;
@@ -540,60 +539,7 @@ pub fn publish(
             prebuild(&installed, target, &archive, recipe, meter)?;
         }
     }
-    if std && let Some((bytes, target)) = &runtime {
-        // Preserve the prebuilt sides for the installed shipping and recording
-        // paths. Profiling lowers its separately keyed side on first use.
-        let recording = refs
-            .recording
-            .filter(|(_, archive_target)| archive_target == target)
-            .map(|(bytes, _)| bytes.as_slice());
-        prebuild_release(
-            &product.image,
-            target,
-            std::iter::once(bytes.as_slice()).chain(recording),
-            meter,
-        )?;
-    }
     Ok(product)
-}
-
-/// Lower the release std of a std product's image for a default release
-/// build on `target` for each installed archive. The image's store holds
-/// the prebuilt definitions. Every checked plain root is lowered.
-pub(crate) fn prebuild_release<'a>(
-    image: &Arc<CoreImage>,
-    target: &str,
-    archives: impl IntoIterator<Item = &'a [u8]>,
-    meter: &mut Meter,
-) -> io::Result<()> {
-    // The walk decodes every std body into the image it reads. An image of
-    // the prebuild's own leaves with the check, before the optimiser runs.
-    let image = CoreImage::open(&image.store_root())?
-        .ok_or_else(|| io::Error::other("the std product's image cannot be reopened"))?;
-    let scratch = tempfile::tempdir()?;
-    let request = crate::CheckRequest {
-        manifest: None,
-        inputs: crate::CorpusManifest {
-            core: image.directory()?.inputs.core.clone(),
-            packages: vec![],
-        },
-        store: scratch.path().join("request"),
-        library: crate::LibraryInput::Image(image),
-        entry: None,
-    };
-    let product = crate::Driver::default().check(request, meter)?;
-    let identity =
-        |bytes: &[u8]| crate::tool_inputs::runtime_identity(ContentHash::of_bytes(bytes));
-    // Installation prebuilds the shipping codegen mode for each archive.
-    let runtimes: Vec<_> = archives.into_iter().map(identity).collect();
-    let prebuild = |stop| io::Error::other(format!("prebuilding the release std: {stop}"));
-    let side = product
-        .release_std_side(target, &runtimes)
-        .map_err(prebuild)?;
-    drop(product);
-    side.lower().map_err(prebuild)?;
-    meter.finish("std product/release prebuild");
-    Ok(())
 }
 
 /// Prebuild the installed std image's plain instances for a development

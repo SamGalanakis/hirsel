@@ -537,8 +537,7 @@ def prepare_compile(out, artifacts, env):
 
 
 def publish_std(out, artifacts, env):
-    run([artifacts["compiler"], "std-product", "--store", out / "packages",
-         "--runtime", artifacts["runtime"]], env=env)
+    run([artifacts["compiler"], "std-product", "--store", out / "packages"], env=env)
 
 
 def prepare_hirsel_compile(out, artifacts, env, *, packages=None):
@@ -631,8 +630,9 @@ def compile_rows(board, out, prepared, fixture, tools):
                                                    path=target / "build.json")
                 record = receipt.build_record(report)
                 sample["compiled_parts"] = report["native"]["compiled"]
-                # prepare_hirsel_compile prebuilt the release std into the
-                # std product, so a build that lowers std itself missed it.
+                # The cold build lowers the std roots the program reaches
+                # into the shared cache; the edit reaches the same roots, so
+                # an edit build that lowers std again missed that side.
                 sample["std_lowered"] = report["native"]["reach"]["std_lowered"]
                 rebuilt = sample["compiled_parts"] > 0
             else:
@@ -646,7 +646,7 @@ def compile_rows(board, out, prepared, fixture, tools):
             sample["verified"] = measure.matches_output(verify, marker)
             if not sample["verified"]:
                 sample["status"] = "wrong-result"
-            elif sample.get("std_lowered"):
+            elif mode == "edit" and sample.get("std_lowered"):
                 sample["status"] = "std-lowered"
             elif sample["status"] == "ok" and not sample["seconds"]:
                 sample["status"] = "missing-duration"
@@ -874,8 +874,8 @@ def measure_comparison_compile(evidence, out, recipe, prepared, args, modes):
                     continue
                 if side == "hirsel":
                     sample.update(hirsel_build_evidence(target / "stdout", check, manifest, image, cwd))
-                    if recipe.endswith("-release") and sample["release_std_lowered"] != 0:
-                        sample["status"] = "release std was not prebuilt"
+                    if recipe.endswith("-release") and mode == "edit" and sample["release_std_lowered"] != 0:
+                        sample["status"] = "release std was lowered again"
                     if check:
                         if mode == "cold":
                             check_root = sample["check_root"]

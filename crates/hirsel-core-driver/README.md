@@ -135,9 +135,10 @@ core runtime. `run` builds and
 executes it, forwarding arguments after `--` and returning its process status.
 
 Every LLVM release build, `build`, `run` and `test` alike, is assembled from its
-published recipe over the release std: the core and std instances lowered once,
-apart from any program, keyed by their own content, and either prebuilt into the
-image (`release-std`) or held in the user's cache. The std side exports its plain
+published recipe over the release std: the plain core and std instances the
+program reaches, with what they reach, lowered apart from the program and keyed
+by those instances' content, in the user's cache, where every build reaching
+the same roots finds them. The std side exports its plain
 roots, each with its step summary, and lends bodies of at most `LEND_LIMIT`
 instructions `available_externally` for inlining. The release unit holds the
 program's own bodies and every other library instance it reaches, so its

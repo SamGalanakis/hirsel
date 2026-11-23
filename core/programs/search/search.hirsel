@@ -252,6 +252,82 @@ fn keep_hit(mut hits: List[Hit], k: u64, hit: Hit) {
 
 type Candidate = Rejected | Eligible(f64, f64)
 
+fn inverse_frequency(documents: u64, df: u64) -> f64 {
+    let found: f64 = float.from_int(df)
+    let absent: f64 = float.from_int(documents - df)
+    log_one_plus((absent + 0.5) / (found + 0.5))
+}
+
+fn contribution(params: Bm25, norm: f64, weight: f64, tf: u64) -> f64 {
+    let frequency: f64 = float.from_int(tf)
+    let scale = params.k1 + 1.0
+    weight * (frequency / (frequency / scale + (params.k1 / scale) * norm))
+}
+
+// Rank a small corpus without materializing an index. A hit's id is its input position.
+pub fn rank(texts: List[String], text: String) -> List[Hit] {
+    let analyzer = tokenizer(list.new())
+    let mut slots: Map[String, u64] = map.new()
+    for take term in tokenize(analyzer, text) {
+        if !map.contains(slots, term) {
+            let slot = map.len(slots)
+            map.insert(mut slots, take term, slot)
+        }
+    }
+    let terms = map.len(slots)
+    let mut hits: List[Hit] = list.new()
+    if terms == 0u64 || list.len(texts) == 0u64 {
+        return take hits
+    }
+    let mut docs: List[(u64, List[u64])] = list.new()
+    let mut frequencies: List[u64] = list.new()
+    list.fill(mut frequencies, terms, 0u64)
+    let mut total = 0u64
+    for body in texts {
+        let tokens = tokenize(analyzer, body)
+        let length = list.len(tokens)
+        let mut counts: List[u64] = list.new()
+        list.fill(mut counts, terms, 0u64)
+        for token in tokens {
+            if let Some(slot) = map.get(slots, token) {
+                if counts[slot] == 0u64 {
+                    frequencies[slot] += 1u64
+                }
+                counts[slot] += 1u64
+            }
+        }
+        list.push(mut docs, (length, take counts))
+        total += length
+    }
+    if total == 0u64 {
+        return take hits
+    }
+    let params = defaults()
+    let n: f64 = float.from_int(list.len(docs))
+    let sum: f64 = float.from_int(total)
+    let mean = sum / n
+    let mut weights: List[f64] = list.with_capacity(terms)
+    for df in frequencies {
+        list.push(mut weights, inverse_frequency(list.len(docs), df))
+    }
+    for id in 0u64 .. list.len(docs) {
+        let (length, counts) = view docs[id]
+        let size: f64 = float.from_int(length)
+        let norm = 1.0 - params.b + params.b * (size / mean)
+        let mut score: f64 = 0.0
+        for slot in 0u64 .. terms {
+            if counts[slot] != 0u64 {
+                score += contribution(params, norm, weights[slot], counts[slot])
+            }
+        }
+        if float.gt(score, 0.0f64) {
+            list.push(mut hits, Hit(id: id, score: score))
+        }
+    }
+    std.list.sort(mut hits, hit_order)
+    take hits
+}
+
 pub fn query[M: codec](snapshot: store.Snapshot, index: Index[M], text: String, k: u64, params: Bm25, allows: scoped fn(u64, M) -> bool) -> Result[List[Hit], store.Error] {
     let mut hits: List[Hit] = list.new()
     if k == 0 {
@@ -277,9 +353,7 @@ pub fn query[M: codec](snapshot: store.Snapshot, index: Index[M], text: String, 
             Some(df) => df,
             None => continue
         }
-        let df_f: f64 = float.from_int(df)
-        let absent: f64 = float.from_int(stats.documents - df)
-        let weight = log_one_plus((absent + 0.5) / (df_f + 0.5))
+        let weight = inverse_frequency(stats.documents, df)
         let low = PostingKey(term: clone(term), id: 0)
         let high = PostingKey(term: take term, id: 18446744073709551615)
         let mut rows = store.scan(snapshot, postings, Included(take low), Included(take high))?
@@ -295,12 +369,9 @@ pub fn query[M: codec](snapshot: store.Snapshot, index: Index[M], text: String, 
                 }
                 map.insert(mut candidates, id, candidate)
             }
-            let frequency: f64 = float.from_int(tf)
             let _ = map.update(mut candidates, id, scoped fn(mut candidate: Candidate) {
                 if let Eligible(norm, score) = candidate {
-                    let scale = params.k1 + 1.0
-                    let contribution = weight * (frequency / (frequency / scale + (params.k1 / scale) * norm))
-                    candidate = Eligible(norm, score + contribution)
+                    candidate = Eligible(norm, score + contribution(params, norm, weight, tf))
                 }
             })
         }

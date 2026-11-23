@@ -174,3 +174,232 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     if !matched || report.writes != 1u64 { return Error(5u64) }
     Ok(())
 }
+
+fn admission_catalog(mut db: store.Db, h: harness.Handles) waits {
+    let mut pages: List[String] = list.new()
+    list.push(mut pages, "{\"tools\":[{\"name\":\"echo\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"alpha\",\"description\":\"audit audit trail\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"beta\",\"description\":\"audit trail notes\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"gamma\",\"description\":\"weather\",\"inputSchema\":{\"type\":\"object\"}}]}")
+    let mut listing = result.unwrap(mcp_tools.listing("fixture", pages))
+    for name in ["alpha", "beta", "gamma"] {
+        if !mcp_tools.defer(mut listing, name) { fail("missing fixture tool") }
+    }
+    let changed = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        mcp_tools.replace(mut tx, h.mcp_catalog, listing)
+    })
+    match take changed { Ok(Committed(_)) => (), _ => fail("admission catalog fixture") }
+}
+
+fn admission_answer(mut db: store.Db, h: harness.Handles, a: harness.Agent[Grants], round: u64, hidden: Option[String]) waits {
+    let saved = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
+        let key = harness.EffectKey(run: 0u64, round: round, kind: harness.MODEL, ordinal: 0u64)
+        let mut e = option.unwrap(store.fetch(tx, store.shape(h.effects), key)?)
+        let mut s = option.unwrap(store.fetch(tx, store.shape(h.session), 0u64)?)
+        let mut r = option.unwrap(store.fetch(tx, store.shape(h.runs), 0u64)?)
+        let mut calls: List[harness.Call] = list.new()
+        list.push(mut calls, harness.Call(id: "search", name: "tool_search", args: Inline(string.into_bytes("{\"query\":\"audit\"}"))))
+        if let Some(name) = hidden {
+            list.push(mut calls, harness.Call(id: "unseen", name: clone(name), args: Inline(string.into_bytes("{}"))))
+        }
+        let answer = harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: usage())
+        store.put(mut tx, h.entries, s.next_pos, Assistant(clone(answer)))?
+        s.next_pos += 1u64
+        e.phase = Settled(Model(take answer))
+        r.phase = AnswerReady(round)
+        store.put(mut tx, h.effects, key, e)?
+        store.put(mut tx, h.session, 0u64, s)?
+        store.put(mut tx, h.runs, 0u64, r)
+    })
+    match take saved { Ok(Committed(_)) => (), _ => fail("admission answer fixture") }
+    kick(mut db, a)
+    kick(mut db, a)
+}
+
+fn admission_entry(snap: store.Snapshot, h: harness.Handles, pos: u64) -> harness.Entry {
+    option.unwrap(result.unwrap(store.get(snap, store.shape(h.entries), pos)))
+}
+
+fn admission_bytes(entry: harness.Entry) -> Bytes {
+    let codec: std.codec.Codec[harness.Entry] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, entry, mut raw))
+    take raw
+}
+
+@test
+fn test_wave2_catalog_admission_prefix(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut db = fresh(dir, clock, random, tasks)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let mut a = sectioned(false)
+    a.mcp_peer = Some(code.describe(unused_peer))
+    admission_catalog(mut db, h)
+    let first = prepared(mut db, a, 0u64, shows3(Show("instructions"), Hidden, Hidden), false)
+    let echo = mcp_tools.offered_name("fixture", "echo")
+    let alpha = mcp_tools.offered_name("fixture", "alpha")
+    let beta = mcp_tools.offered_name("fixture", "beta")
+    if list.len(first.tools) != 3u64 || first.tools[1u64].name != "tool_search" || first.tools[2u64].name != echo { return Error(1u64) }
+    let before = store.snapshot(db)
+    let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
+    let old = option.unwrap(result.unwrap(store.get(before, store.shape(h.effects), key)))
+    let provider_model = provider.Model(dialect: OpenAi, name: "scripted", max_tokens: 128u64, cache_control: Off)
+    let body = result.unwrap(provider.body(provider_model, result.unwrap(harness.request(before, h, key, old))))
+
+    admission_answer(mut db, h, a, 0u64, Some(clone(alpha)))
+    let after = store.snapshot(db)
+    let replay = result.unwrap(provider.body(provider_model, result.unwrap(harness.request(after, h, key, old))))
+    if replay != body { return Error(2u64) }
+    for i in 0u64 .. 2u64 {
+        if admission_bytes(admission_entry(before, h, i)) != admission_bytes(admission_entry(after, h, i)) { return Error(3u64) }
+    }
+    let ToolResult(search_id, Returned(Inline(output)), _) = admission_entry(after, h, 3u64) else { return Error(4u64) }
+    if search_id != "search" { return Error(4u64) }
+    // The two equally long descriptions have audit frequencies 2 and 1.
+    // Their BM25 weights and length norms agree, so alpha sorts before beta.
+    let expected = texts3(alpha, beta, "", 2u64)
+    if output != string.into_bytes(mcp.rpc.typed_json(expected)) { return Error(5u64) }
+    let ToolResult(unseen_id, Gone, _) = admission_entry(after, h, 4u64) else { return Error(6u64) }
+    if unseen_id != "unseen" { return Error(6u64) }
+    let System(patch) = admission_entry(after, h, 5u64) else { return Error(7u64) }
+    let Some(defs) = view patch.tools else { return Error(8u64) }
+    if patch.baseline || list.len(patch.changes) != 0u64 || list.len(defs) != 5u64 || defs[3u64].name != alpha || defs[4u64].name != beta { return Error(9u64) }
+    let next_key = harness.EffectKey(run: 0u64, round: 1u64, kind: harness.MODEL, ordinal: 0u64)
+    let next = option.unwrap(result.unwrap(store.get(after, store.shape(h.effects), next_key)))
+    let request = result.unwrap(harness.request(after, h, next_key, next))
+    if next.cutoff.tail_pos != 5u64 || next.cutoff.tools_pos != Some(5u64) || request.system != first.system { return Error(10u64) }
+
+    admission_answer(mut db, h, a, 1u64, None)
+    let again = store.snapshot(db)
+    let s = option.unwrap(result.unwrap(store.get(again, store.shape(h.session), 0u64)))
+    if s.admitted != expected || s.next_pos != 8u64 || s.active_tools_pos != Some(5u64) { return Error(11u64) }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(())
+}
+
+fn reconcile_model(g: Grants, take r: harness.Request, mut draft: Option[harness.preview.Source]) -> Result[harness.Answer, harness.ModelFault] waits {
+    let mut answer = scripted_model(g, take r, mut draft)?
+    if list.len(answer.calls) != 0u64 {
+        for id in ["c2", "c3"] {
+            list.push(mut answer.calls, harness.Call(id: clone(id), name: "bump", args: Inline(string.into_bytes("{}"))))
+        }
+    }
+    Ok(take answer)
+}
+
+fn other_receipt(key: harness.EffectKey) -> harness.Settle {
+    harness.Settle(key: key, receipt: Some(Tool(Failed("competing result"))))
+}
+
+fn competing_settle(ctx: runner.TriggerContext, key: harness.EffectKey) -> bool waits {
+    let arg: std.codec.Codec[harness.Settle] = std.codec.of()
+    let reply: std.codec.Codec[harness.Filed] = std.codec.of()
+    let Ok(take entry) = runner.attempt_key(code.describe(reconcile_settle), arg, reply) else { return false }
+    let mut input: Bytes = list.new()
+    if let Error(_) = std.codec.encode(arg, other_receipt(key), mut input) { return false }
+    let Ok(Returned(raw)) = runner.trigger_call(ctx, take entry, take input) else { return false }
+    match std.codec.decode(reply, raw) { Ok(Ignored) => true, _ => false }
+}
+
+fn reconcile_bump(g: Grants, key: harness.EffectKey) -> Result[Option[Bytes], harness.Fault] waits {
+    if key.run != 0u64 || key.round != 0u64 || key.kind != harness.TOOL { fail("unexpected reconciliation key") }
+    match key.ordinal {
+        0u64 => Ok(Some(string.into_bytes("recovered"))),
+        1u64 => {
+            let target = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
+            if !competing_settle(g.context, target) {
+                return Error(Refused("the other worker's settle was not ignored"))
+            }
+            Ok(None)
+        },
+        _ => Error(Unavailable),
+    }
+}
+
+fn reconcile_agent() -> harness.Agent[Grants] {
+    let mut a = harness.agent("reconcile", "scripted", code.describe(reconcile_model))
+    list.push(mut a.tools, harness.Tool(name: "bump", about: "adds one", input: "{}", rev: 1u64, repair: None,
+        run: Outside(code.describe(bump), Once, Some(code.describe(reconcile_bump)))))
+    take a
+}
+
+fn reconcile_wired() -> Result[harness.Wiring, harness.Refused] {
+    harness.wiring(code.describe(reconcile_advance), code.describe(reconcile_effect))
+}
+
+fn reconcile_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+    harness.advance(mut tx, h, reconcile_agent(), reconcile_wired()?, take wake)
+}
+
+fn reconcile_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
+    harness.effect(g.context, g, take key, reconcile_agent(), code.describe(reconcile_settle), None)
+}
+
+fn reconcile_settle(mut tx: store.Tx, attempt: runner.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    let w = reconcile_wired() ?=> |_| Missing("reconciliation wiring")
+    let a = reconcile_agent()
+    let key = m.key
+    let filed = harness.settle(mut tx, a, w, attempt, take m)?
+    if key.kind == harness.TOOL {
+        if let Recorded = filed {
+            let Ignored = harness.settle(mut tx, a, w, attempt, other_receipt(key))? else {
+                return Error(Missing("duplicate settle was recorded"))
+            }
+        }
+    }
+    Ok(filed)
+}
+
+fn reconcile_place(mut r: runner.Registry[Grants, harness.Handles]) -> Result[(), runner.RegisterError] {
+    harness.register_standard(mut r, code.describe(reconcile_advance), code.describe(reconcile_effect), code.describe(reconcile_settle), BYTES, BYTES)
+}
+
+@test
+fn test_wave2_catalog_reconcile_outside_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let w = result.unwrap(reconcile_wired())
+    seed_with(dir, clock, random, tasks, reconcile_agent(), w)
+    let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
+    let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
+    let (seen, saw): (Sender[()], Receiver[()]) = channel.new(3u64)
+    let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
+    let tools = task.spawn(tasks, bytes 65536u64, ToolSeed(inbox: take tool_in, seen: take seen, hold: 3u64), tool_service)
+    let services = Services(model: take model, tool: take tool, blobs: None)
+    let (first, stop, _) = launch(tasks, settings_of(code.describe(reconcile_place), harness.entries(w), dir, clock, random, tasks, net, copy_services(services), None))
+    for _ in 0u64 .. 3u64 { result.unwrap(channel.receive(saw)) }
+    result.unwrap(channel.send(stop, ()))
+    let _ = result.unwrap(result.unwrap(task.join(take first)))
+
+    let (second, _stop, _) = launch(tasks, settings_of(code.describe(reconcile_place), harness.entries(w), dir, clock, random, tasks, net, copy_services(services), Some(IDLE_MS)))
+    let _ = result.unwrap(result.unwrap(task.join(take second)))
+    let asked = model_asked(services)
+    let dispatched = tool_ran(services)
+    let db = result.unwrap(store.open(tasks, dir, clock, random, runner.triggers.law_options()))
+    let snap = store.snapshot(db)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let s = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
+    let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let finished = match run.phase { Finished(Answered) => true, _ => false }
+    let mut verified = 0u64
+    for ordinal in 0u64 .. 3u64 {
+        let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: ordinal)
+        let row = option.unwrap(result.unwrap(store.get(snap, store.shape(h.effects), key)))
+        let entry = result.unwrap(store.get(snap, store.shape(h.entries), 3u64 + ordinal))
+        let matched = match (ordinal, view row.phase, take entry) {
+            (0u64, Settled(Tool(Returned(Inline(a)))), Some(ToolResult(id, Returned(Inline(b)), _))) => id == "c1" && a == string.into_bytes("recovered") && a == b,
+            (1u64, Settled(Tool(Failed(a))), Some(ToolResult(id, Failed(b), _))) => id == "c2" && a == "not dispatched" && a == b,
+            (2u64, Settled(Tool(InDoubt)), Some(ToolResult(id, InDoubt, _))) => id == "c3",
+            _ => false,
+        }
+        if matched && row.dispatches == 1u64 { verified += 1u64 }
+    }
+    result.unwrap(store.close(take db))
+    drop(take services)
+    result.unwrap(task.join(take models))
+    result.unwrap(task.join(take tools))
+    result.unwrap(std.dir.remove_all(parent, name))
+    if asked != 2u64 || dispatched != 3u64 { return Error(1u64) }
+    if verified != 3u64 { return Error(2u64) }
+    if !finished || s.next_pos != 7u64 { return Error(3u64) }
+    Ok(())
+}

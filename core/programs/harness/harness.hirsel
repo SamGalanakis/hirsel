@@ -81,6 +81,7 @@ pub type SectionHash: codec + send {
 pub type Session: codec + send {
     model: String,
     tools_narrow: Narrow,
+    admitted: List[String],
     // The current agent frame's base; 0 is the root frame, which has no row.
     frame: u64,
     next_pos: u64,
@@ -464,7 +465,7 @@ pub type Invoke: codec + send {
 // place's reply), and the call stays parked until then.
 pub type Reply: codec + send = Now(Bytes) | Later
 
-pub type ToolRun[G: send]: send = Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat) | Inside(StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) | Mcp(Bytes)
+pub type ToolRun[G: send]: send = Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat, Option[StaticFn[fn(G, EffectKey) -> Result[Option[Bytes], Fault] waits]]) | Inside(StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) | Mcp(Bytes)
 
 // `rev` names the tool's behaviour in approval keys: raise it when the same
 // arguments would now do something else, so earlier approvals stop matching.
@@ -562,7 +563,7 @@ pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(
 }
 
 pub fn outside[G: send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G] {
-    Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Outside(f, repeat))
+    Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Outside(f, repeat, None))
 }
 
 pub fn inside[G: send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) -> Tool[G] {
@@ -620,7 +621,7 @@ pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narro
     if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? {
         return Ok(())
     }
-    let s = Session(model: take model, tools_narrow: take narrow, frame: 0u64, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
+    let s = Session(model: take model, tools_narrow: take narrow, admitted: list.new(), frame: 0u64, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
     kept(store.put(mut tx, h.session, 0u64, s))?
     kept(store.put(mut tx, h.views, 0u64, Status("idle")))
 }
@@ -716,7 +717,7 @@ pub fn adopt(mut tx: store.Tx, h: Handles, take p: Prefix) -> Result[(), Refused
     for f in frames {
         kept(store.put(mut tx, h.frames, f.base, clone(f.frame)))?
     }
-    let mut s = Session(model: take model, tools_narrow: take narrow, frame: frame, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
+    let mut s = Session(model: take model, tools_narrow: take narrow, admitted: list.new(), frame: frame, next_pos: 0u64, active_run: None, next_run: 0u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None)
     for e in log {
         let _ = put_entry(mut tx, h, mut s, e)?
     }

@@ -188,13 +188,29 @@ fn tool_result[G: send](port: G, a: Agent[G], take reply: Result[Bytes, Fault]) 
     }
 }
 
+fn reconcile_tool[G: send](port: G, a: Agent[G], key: EffectKey, e: Effect) -> Option[Receipt] waits {
+    let Some(c) = view e.call else {
+        return None
+    }
+    let Some(Outside(_, _, Some(reconcile))) = tool_named(a, c.name) else {
+        return None
+    }
+    let check = code.callable(reconcile)
+    match check(port, key) {
+        Ok(Some(take output)) => Some(Tool(tool_result(port, a, Ok(take output)))),
+        Ok(None) => Some(Tool(Failed("not dispatched"))),
+        Error(_) => None,
+    }
+}
+
 // The body of the app's granted effect entry: begin, read the sealed cutoff
 // through the fenced snapshot, make the one outside call, settle.
 // A target streams the model's draft and each tool's progress to the preview hub.
 pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F], target: Option[preview.Target]) -> Result[Worked, Capacity] waits {
     let permit: Option[Permit] = call_attempt(ctx, code.describe(begin), key)
-    match permit {
-        Some(Go(_)) => (),
+    let recover = match permit {
+        Some(Go(_)) => false,
+        Some(Doubt) if key.kind == TOOL => true,
         Some(Doubt) => return Ok(doubt(ctx, settle_entry, key)),
         Some(Shut) => return Ok(Skipped),
         None => return Ok(Lost),
@@ -208,7 +224,12 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
     let Ok(Some(take e)) = store.get(snap, store.shape(h.effects), key) else {
         return Ok(Lost)
     }
-    let receipt: Receipt = if key.kind == MODEL {
+    let receipt: Receipt = if recover {
+        let Some(take recovered) = reconcile_tool(port, a, key, e) else {
+            return Ok(doubt(ctx, settle_entry, key))
+        }
+        take recovered
+    } else if key.kind == MODEL {
         let Ok(take asked) = request(snap, h, key, e) else {
             return Ok(Lost)
         }
@@ -227,7 +248,7 @@ pub fn effect[G: send, F](ctx: runner.TriggerContext, port: G, take key: EffectK
         let outcome: Receipt = if mcp_tools.reserved(c.name) {
             Tool(remote_effect(snap, h, e, c, a, port))
         } else {
-            let Some(Outside(f, _)) = tool_named(a, c.name) else {
+            let Some(Outside(f, _, _)) = tool_named(a, c.name) else {
                 return Ok(Lost)
             }
             let Inline(raw) = view c.args else {

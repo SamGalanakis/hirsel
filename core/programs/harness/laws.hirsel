@@ -51,19 +51,19 @@ fn model_service(take inbox: Receiver[ModelAsk]) -> () waits {
     }
 }
 
-type ToolSeed: send { inbox: Receiver[ToolAsk], seen: Sender[()] }
+type ToolSeed: send { inbox: Receiver[ToolAsk], seen: Sender[()], hold: u64 }
 
 // The first call is seen and then held forever: its reply never comes, as
 // if the process died while the call was in flight.
 fn tool_service(take seed: ToolSeed) -> () waits {
-    let ToolSeed(inbox: take inbox, seen: take seen) = take seed
+    let ToolSeed(inbox: take inbox, seen: take seen, hold: hold) = take seed
     let mut ran = 0u64
     let mut held: List[Sender[Bytes]] = list.new()
     while let Ok(take request) = channel.receive(inbox) {
         match take request {
             Run(_, take reply) => {
                 ran += 1u64
-                if ran == 1u64 {
+                if ran <= hold {
                     list.push(mut held, take reply)
                     let _ = channel.send(seen, ())
                 } else {
@@ -221,7 +221,7 @@ pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
     let (seen, saw): (Sender[()], Receiver[()]) = channel.new(1u64)
     let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
-    let tools = task.spawn(tasks, bytes 65536u64, ToolSeed(inbox: take tool_in, seen: take seen), tool_service)
+    let tools = task.spawn(tasks, bytes 65536u64, ToolSeed(inbox: take tool_in, seen: take seen, hold: 1u64), tool_service)
     let services = Services(model: take model, tool: take tool, blobs: None)
     let (first, stop_first, _) = launch(tasks, settings(dir, clock, random, tasks, net, copy_services(services), None))
     if let Error(_) = channel.receive(saw) { fail("crash: the tool was never called") }
@@ -359,7 +359,7 @@ fn logged(dir: Dir, clock: Clock, random: Random, tasks: Tasks, log: List[harnes
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         for p in 0u64..list.len(log) { store.put(mut tx, h.entries, p, clone(log[p]))? }
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, frame: 0u64, next_pos: list.len(log),
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: list.len(log),
             active_run: None, next_run: 3u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
     })
     match take ran { Ok(Committed(_)) => (), _ => fail("logged: fill did not commit") }
@@ -720,7 +720,7 @@ fn fresh(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> store.Db waits
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let filled = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
         store.put(mut tx, h.entries, 0u64, User("go"))?
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, frame: 0u64, next_pos: 1u64,
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: 1u64,
             active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))
     })
     match take filled { Ok(Committed(_)) => (), _ => fail("fresh: fill did not commit") }
@@ -1952,7 +1952,7 @@ fn test_mcp_catalog_approval_and_patch(parent: Dir, clock: Clock, random: Random
     update_catalog(mut db, OLD_SCHEMA)
     let first = prepared(mut db, a, 0u64, shows3(Show("instructions"), Hidden, Hidden), false)
     let name = mcp_tools.offered_name("fixture", "echo")
-    if list.len(first.tools) != 2u64 || first.tools[1u64].name != name || first.tools[1u64].input != OLD_SCHEMA { return Error(1u64) }
+    if list.len(first.tools) != 3u64 || first.tools[2u64].name != name || first.tools[2u64].input != OLD_SCHEMA { return Error(1u64) }
     ready_catalog_call(mut db, 0u64, name)
     let old_approval = held_key(db, 0u64)
     update_catalog(mut db, NEW_SCHEMA)
@@ -1965,15 +1965,15 @@ fn test_mcp_catalog_approval_and_patch(parent: Dir, clock: Clock, random: Random
     let fresh_prompt = prepared(mut clean, a, 0u64, shows3(Show("instructions"), Hidden, Hidden), false)
     if !one_patch(patched, false, 0u64, true) || !one_patch(fresh_prompt, true, 1u64, true) { return Error(3u64) }
     if patched.system != texts3("instructions", "", "", 1u64) || patched.system != fresh_prompt.system { return Error(4u64) }
-    if list.len(patched.tools) != 2u64 || list.len(fresh_prompt.tools) != 2u64 { return Error(5u64) }
-    for i in 0u64..2u64 {
+    if list.len(patched.tools) != 3u64 || list.len(fresh_prompt.tools) != 3u64 { return Error(5u64) }
+    for i in 0u64..3u64 {
         let changed = patched.tools[i]
         let current = fresh_prompt.tools[i]
         if changed.name != current.name || changed.about != current.about || changed.input != current.input
             || changed.rev != current.rev || changed.catalog != current.catalog { return Error(6u64) }
     }
-    if patched.tools[1u64].name != name || patched.tools[1u64].input != NEW_SCHEMA
-        || patched.tools[1u64].catalog == first.tools[1u64].catalog { return Error(7u64) }
+    if patched.tools[2u64].name != name || patched.tools[2u64].input != NEW_SCHEMA
+        || patched.tools[2u64].catalog == first.tools[2u64].catalog { return Error(7u64) }
     ready_catalog_call(mut db, 1u64, name)
     let new_approval = held_key(db, 1u64)
     let stale = harness.Decision(run: 0u64, round: 1u64, ordinal: 0u64, key: take old_approval, allow: true)

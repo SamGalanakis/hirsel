@@ -142,7 +142,15 @@ fn cancel_trigger(mut tx: store.Tx, h: Handles, trigger: Option[runner.triggers.
     Ok(())
 }
 
+fn tool_search_enabled[G: send](a: Agent[G]) -> bool {
+    match a.mcp_peer { Some(_) => true, None => false }
+}
+
 fn tool_of[G: send](a: Agent[G], name: String) -> Option[Tool[G]] {
+    if name == TOOL_SEARCH && tool_search_enabled(a) {
+        let tool: Tool[G] = search_tool()
+        return Some(take tool)
+    }
     for t in a.tools {
         if t.name == name {
             return Some(clone(t))
@@ -431,6 +439,9 @@ pub fn resume[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key
 }
 
 fn tool_named[G: send](a: Agent[G], name: String) -> Option[ToolRun[G]] {
+    if name == TOOL_SEARCH && tool_search_enabled(a) {
+        return Some(Inside(code.describe(tool_search)))
+    }
     for t in a.tools {
         if t.name == name {
             return Some(clone(t.run))
@@ -652,9 +663,13 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
                         Parked
                     },
                 }
+                if call.name == TOOL_SEARCH && tool_search_enabled(a) {
+                    let Session(admitted: take admitted, ..) = session_of(tx, h)?
+                    s.admitted = take admitted
+                }
                 kept(store.put(mut tx, h.effects, key, e))?
             },
-            Outside(_, repeat) => {
+            Outside(_, repeat, _) => {
                 open = true
                 working = true
                 e.repeat = clone(repeat)

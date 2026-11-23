@@ -15,7 +15,7 @@ fn answered_with(dir: Dir, clock: Clock, random: Random, tasks: Tasks, releases:
         let answer = harness.Answer(text: "", calls: take calls, stop: "tool_use", usage: usage())
         store.put(mut tx, h.entries, 0u64, User("go"))?
         store.put(mut tx, h.entries, 1u64, Assistant(clone(answer)))?
-        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, frame: 0u64, next_pos: 2u64, active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))?
+        store.put(mut tx, h.session, 0u64, harness.Session(model: "scripted", tools_narrow: All, admitted: list.new(), frame: 0u64, next_pos: 2u64, active_run: Some(0u64), next_run: 1u64, next_seq: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new(), active_tools_pos: None))?
         store.put(mut tx, h.runs, 0u64, harness.Run(caller: alice(), phase: AnswerReady(0u64), round: 0u64, rounds_left: 4u64, stalled: 0u64, spend: harness.Spend(known: 15u64, reserved: 0u64, unresolved: 0u64)))?
         let model_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.MODEL, ordinal: 0u64)
         store.put(mut tx, h.effects, model_key, harness.Effect(cutoff: harness.Cutoff(frame: 0u64, tail_pos: 0u64, route: "scripted", policy: 0u64, tools_pos: None, omit: list.new()), call: None, repeat: Once, deadline: 0u64, phase: Settled(Model(take answer)), trigger: None, dispatches: 1u64, stream: true, reserve: 0u64))

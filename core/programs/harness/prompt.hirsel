@@ -29,24 +29,98 @@ fn hash_of(list: List[SectionHash], key: String) -> Option[Bytes] {
     None
 }
 
+const TOOL_SEARCH: String = "tool_search"
+
+fn search_tool[G: send]() -> Tool[G] {
+    inside(TOOL_SEARCH, "Search the MCP tool catalog and offer matching tools in the next request.", "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}", code.describe(tool_search))
+}
+
+fn tool_search(mut tx: store.Tx, inv: Invoke) -> Result[Reply, Fault] {
+    let Ok(args) = string.from_utf8(clone(inv.args)) else {
+        return Error(BadArgs("tool_search expects a query string"))
+    }
+    let Ok(fields) = mcp.rpc.object(args) else {
+        return Error(BadArgs("tool_search expects a query string"))
+    }
+    let Some(query) = mcp.rpc.field_text(fields, "query") else {
+        return Error(BadArgs("tool_search expects a query string"))
+    }
+    let h = handles(store.tx_schema(tx)) ?=> |_| Unavailable
+    let mut s = session_of(tx, h) ?=> |_| Unavailable
+    let mut names: List[String] = list.new()
+    let mut texts: List[String] = list.new()
+    {
+        let mut rows = store.range(tx, store.shape(h.mcp_catalog), Unbounded, Unbounded) ?=> |_| Unavailable
+        while let Some((take name, r)) = store.next_range(mut rows) ?=> |_| Unavailable {
+            if narrowed(s, name) {
+                list.push(mut names, take name)
+                list.push(mut texts, string.from(mcp_tools.about(r)))
+            }
+        }
+    }
+    let mut matches: List[String] = list.new()
+    let old_end = list.len(s.admitted)
+    let mut admitted: std.set.Set[String] = std.set.new()
+    for name in s.admitted {
+        let _ = std.set.insert(mut admitted, clone(name))
+    }
+    for hit in search.rank(texts, query) {
+        let name = view names[hit.id]
+        if std.set.insert(mut admitted, clone(name)) {
+            list.push(mut s.admitted, clone(name))
+        }
+        list.push(mut matches, clone(name))
+    }
+    let output = string.into_bytes(mcp.rpc.typed_json(matches))
+    if list.len(output) > INLINE_LIMIT {
+        return Error(TooLarge)
+    }
+    if list.len(s.admitted) != old_end {
+        store.put(mut tx, h.session, 0u64, s) ?=> |_| Unavailable
+    }
+    Ok(Now(take output))
+}
+
+fn local_definition[G: send](t: Tool[G]) -> ToolDef {
+    ToolDef(name: clone(t.name), about: clone(t.about), input: clone(t.input), rev: t.rev, catalog: None)
+}
+
+fn remote_definition(take name: String, r: mcp_tools.Remote) -> ToolDef {
+    ToolDef(name: take name, about: string.from(mcp_tools.about(r)), input: string.from(mcp_tools.input(r)), rev: 0u64, catalog: Some(clone(mcp_tools.fingerprint(r))))
+}
+
 fn offered[G: send](tx: store.Tx, h: Handles, a: Agent[G], s: Session) -> Result[List[ToolDef], Refused] {
     let mut defs: List[ToolDef] = list.new()
+    let has_catalog = tool_search_enabled(a)
     for t in a.tools {
-        if mcp_tools.reserved(t.name) {
+        if mcp_tools.reserved(t.name) || (has_catalog && t.name == TOOL_SEARCH) {
             return Error(Malformed("reserved MCP tool name"))
         }
         if narrowed(s, t.name) {
-            list.push(mut defs, ToolDef(name: clone(t.name), about: clone(t.about), input: clone(t.input), rev: t.rev, catalog: None))
+            list.push(mut defs, local_definition(t))
         }
     }
-    if let Some(_) = a.mcp_peer {
+    if has_catalog {
+        if narrowed(s, TOOL_SEARCH) {
+            let tool: Tool[G] = search_tool()
+            list.push(mut defs, local_definition(tool))
+        }
         let Ok(take cursor) = store.range(tx, store.shape(h.mcp_catalog), Unbounded, Unbounded) else {
             return Error(Storage)
         }
         let mut rows = take cursor
         while let Some((take name, r)) = kept(store.next_range(mut rows))? {
+            if !mcp_tools.deferred(r) && narrowed(s, name) {
+                list.push(mut defs, remote_definition(take name, r))
+            }
+        }
+        for name in s.admitted {
             if narrowed(s, name) {
-                list.push(mut defs, ToolDef(name: take name, about: string.from(mcp_tools.about(r)), input: string.from(mcp_tools.input(r)), rev: 0u64, catalog: Some(clone(mcp_tools.fingerprint(r)))))
+                if let Some(r) = kept(store.fetch(tx, store.shape(h.mcp_catalog), name))? {
+                    if mcp_tools.deferred(r) {
+                        list.push(mut defs, remote_definition(clone(name), r))
+                    }
+                }
             }
         }
     }

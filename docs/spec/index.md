@@ -39,8 +39,11 @@ These goals decide between designs. A rule that would break one of them is wrong
    authority, and a recording of such a run is only as intact as that user's files
    ([EXEC-1](exec.md#exec-1-an-exec-grant-confers-what-its-programs-can-do-and-hirsel-does-not-confine-them)).
 5. **Deterministic.** Given the same outside inputs and limits, every run that no run
-   stop ends, and that reaches no foreign code, behaves identically on every engine and build ([SEM-8](semantics.md#sem-8-determinism)),
-   including where it runs out of memory ([MEM-24](budgets.md#mem-24-logical-charges)).
+   stop ends, and that reaches no foreign code, behaves identically on every run of one
+   build, including its steps and where it runs out of memory, and the same on every engine
+   and build apart from steps and exact charges ([SEM-8](semantics.md#sem-8-determinism)). A
+   program that fits its logical charges fits on every engine
+   ([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)).
 6. **One meaning.** No flag, build mode, optimiser or engine changes what is accepted or
    what a program means ([PROG-6](programs.md#prog-6-one-meaning)).
 7. **One accurate rule and site per refusal.** Each refusal names the one rule the program
@@ -53,13 +56,13 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Syntax](syntax.md) | LANG-1 to LANG-5 |
 | [Language](language.md) | LANG-6 to LANG-21 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
-| [Memory](memory.md) | MEM-1 to MEM-18, MEM-29, MEM-31 to MEM-32 |
+| [Memory](memory.md) | MEM-1 to MEM-18, MEM-29; performance targets MEM-31 to MEM-32 |
 | [Budgets](budgets.md) | MEM-19 to MEM-28, MEM-30 |
 | [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-15, CONC-17 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-9 |
 | [Semantics](semantics.md) | SEM-1 to SEM-11 |
-| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 to PROG-11 |
+| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 to PROG-11 ([Map index](../internal/map-index.md) is an implementation document) |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [CLI](cli.md) | |
 | [Profiling](profiling.md) | |
@@ -74,7 +77,9 @@ These goals decide between designs. A rule that would break one of them is wrong
 ## Reading this specification
 
 Each rule is a `### ID: Title` heading followed by one normative statement and, where it
-refuses programs, the smallest accepted and refused programs. Rule IDs are numbered from
+refuses programs, the smallest accepted and refused programs. MEM-31 and MEM-32 keep rule
+headings but are non-normative performance targets
+([performance targets](memory.md#performance-targets)). Rule IDs are numbered from
 1 within each family without gaps, and each term is defined once, in bold, where it is
 introduced. A refusal comment `// refused: ID` names the rule a refusal cites. The
 [transition table](ownership.md#own-26-the-transition-table) is the single authority for

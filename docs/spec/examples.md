@@ -14,8 +14,8 @@ catch it with `isolate` ([FAIL-16](failure.md#fail-16-isolation)).
 
 A word is copied into a region inside a bound scope. With 64 bytes it fits: the `Text`
 copy of `"hello"` charges 16 (8 count + 5 bytes, rounded up to 8), and the `Word` record is
-an own value held inline in its slot, built in the caller's place
-([MEM-31](memory.md#mem-31-construction-in-place)), so it charges nothing. With 8 bytes the
+an own value held inline in its slot
+([MEM-13](memory.md#mem-13-own-layout)), so it charges nothing. With 8 bytes the
 `Text` copy is refused: it raises `Capacity`, the failure cleans the region and leaves the
 bound scope, and `isolate` returns its causes.
 

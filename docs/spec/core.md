@@ -312,11 +312,14 @@ operations it names; nothing else about them may be inferred from an implementat
   `list.sort_stable(mut xs, before)` permutes `xs` so that no element is followed by one
   that `before` orders `Less` than it, keeping the original order of elements it orders
   `Equal`; when `before` is not a total preorder the result is still a permutation of `xs`.
-  Lists of up to 20 elements need no scratch admission. For longer lists it admits one
-  scratch block as a `List[T]` ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any,
-  and refunds it before it returns. A refused scratch leaves `xs` unchanged. A failure
-  inside `before` leaves `xs` holding every element it had, in an unspecified order,
-  refunds the scratch and propagates. The number and order of calls to `before` is unspecified.
+  It may admit one scratch block of at most the list's length as a `List[T]`
+  ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any element, and refunds it
+  before it returns; whether it does and how large it is are the build's
+  ([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)). A refused scratch leaves `xs`
+  unchanged. A failure inside `before` leaves `xs` holding every element it had, in an
+  unspecified order, refunds the scratch and propagates. The number and order of calls to
+  `before`, and so the steps they take, are the build's: fixed for one build and one input,
+  and not the same across builds ([MEM-30](budgets.md#mem-30-step-bounds)).
 - **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
   `Deque[T]`, and `heap.push` adds to a `Heap[T]`; a refused growth leaves the collection
   unchanged and `x` untaken. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
@@ -585,7 +588,7 @@ Signing and key agreement are not provided: they need private-key custody, and t
   (`ECDSA_P256_SHA256_ASN1`), and its `r || s` path is `ECDSA_P256_SHA256_FIXED`.
 - **Charges.** Each call takes one step ([MEM-30](budgets.md#mem-30-step-bounds)) and admits
   no bytes, whatever the lengths of its arguments. The charge is 1 step per call plus
-  0 steps per message byte, on every engine, as `sha256.blocks` charges. The work is bounded
+  0 steps per message byte in the reference count, as `sha256.blocks` charges. The work is bounded
   by the length of `msg`, which a limit bounds. MEM-30's one per-unit exception,
   `secret.scram_sha256`, covers work that a peer chooses.
 - **Determinism.** The answer is a function of the three byte strings alone. Verification

@@ -12,17 +12,18 @@ spare existing code. In five lines:
 2. **`@compact(W) type` declares region data** ([MEM-2](#mem-2-region-data)): a document that
    dies together lives in one region and is freed at once, with no per-node walk. It is the one
    way to declare region data; there is no `stable` keyword and no `@twin`.
-3. **Construction in place where it keeps custody** ([MEM-31](#mem-31-construction-in-place)):
-   a fresh value returned to the caller or put into a container slot is built in that
-   destination when the destination is known at construction; otherwise it is built locally
-   and moved, and a move never copies out-of-line data.
+3. **Construction in place where it keeps custody** ([MEM-31](#mem-31-construction-in-place),
+   a performance target): a fresh value returned to the caller or put into a container slot
+   is built in that destination when the destination is known at construction; otherwise it
+   is built locally and moved, and a move never copies out-of-line data.
 4. **Servers get a per-request scratch region**, closed when the handler returns
    ([HTTP-6](http.md#http-6-the-anchored-request-and-the-read-buffer)).
-5. **Speed is the engine's, not the language's** ([MEM-32](#mem-32-engine-obligations)): a
-   per-task size-class allocator, a demand-sized first region chunk, per-type pools inside a
-   region, and no teardown walk for plain data. Charges stay logical and deterministic
-   ([MEM-24](budgets.md#mem-24-logical-charges)); an admission is refused at the same point
-   on every engine.
+5. **Speed is the engine's, not the language's** ([MEM-32](#mem-32-engine-obligations), a
+   performance target): a per-task size-class allocator, a demand-sized first region chunk,
+   per-type pools inside a region, and no teardown walk for plain data. Charges are logical
+   upper bounds, deterministic per build ([MEM-24](budgets.md#mem-24-logical-charges),
+   [MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)); a program that fits its logical
+   charges fits on every engine.
 
 Rejected, each for a reason that still holds:
 
@@ -45,7 +46,7 @@ Rejected, each for a reason that still holds:
 
 **Reopen condition.** Only a measurement reopens this: matched ports of the AWFY Json and
 Storage benchmarks to an explicit document pool, in Hirsel and in Goose, with the same input,
-output and checksums. If, with every obligation of MEM-32 implemented, Hirsel still runs above
+output and checksums. If, with every target of MEM-32 met, Hirsel still runs above
 1.5× Goose's instructions on either, the default is reopened. A new design opinion is not a
 reason to reopen it.
 
@@ -493,42 +494,6 @@ type Tree { label: String, kids: List[Tree] }
 type Chain = End | Link(u64, Chain)                       // refused: OWN-2, use Box[Chain]
 ```
 
-### MEM-31: Construction in place
-
-A value's **inline bytes** are the bytes MEM-13 holds in its owner: a record's fields, a
-variant's payload, and the pointer, length and capacity of a `Box`, `List`, `String` or `Map`,
-never the blocks they point to. An engine writes a fresh value's inline bytes directly into
-its destination, with no temporary of the value and no copy of it, in three cases:
-
-- **Results.** The operand of `return`, or a body's result reached through blocks and `if`
-  and `match` arms, is built in the caller's receiving place. So is a local that every exit
-  of the body that reaches it returns whole.
-- **Container slots.** The element or entry argument of a core operation that stores it into
-  a collection (`list.push`, `list.set`, `map.insert` and the like, [core](core.md)) is built
-  in its slot when that slot exists without a new admission: spare capacity, or the element
-  being set.
-- **Fields.** A literal's field operand that is itself fresh is built inside the literal's
-  own destination.
-
-Any other value is built in a local place and moved. A move copies only inline bytes: the
-blocks a value owns move with their pointer, are never copied, and are never re-admitted, so
-a move never allocates and never fails ([OWN-6](ownership.md#own-6-let-take-and-copy)). The destination's
-owner is the owner the value would have after that move, so building in place never changes
-custody: a result built in the caller's place and then sent from a path that does not return
-it is moved out like any other value.
-
-Nothing a program observes depends on which case applies. Fields are evaluated left to right
-into their owners as [T1.1](ownership.md#own-26-the-transition-table) says; every allocation is
-admitted where its row says; a collection admits its growth after its arguments are evaluated
-and before it commits, and nothing is admitted earlier or speculatively because the
-destination is known; an assignment does not overwrite its old value before its right side
-succeeds ([OWN-12](ownership.md#own-12-assignment)). A failure before completion leaves the
-destination as it was, each survivor with the owner
-[FAIL-7](failure.md#fail-7-one-owner-per-survivor) names, and a pending result is cleaned in
-[FAIL-9](failure.md#fail-9-pending-results)'s order whether or not it was built in place.
-Charges, refusal points, cleanup order and output are therefore the same on every engine;
-only the instructions and the bytes copied differ.
-
 ### MEM-14: Rc
 
 `rc.new(take x) -> Rc[T]` requires `T: shareable` and moves the
@@ -558,7 +523,8 @@ test and no CONC event because `Rc` is not `send`.
 `arc.new(take x) -> Arc[T]` requires `T: shareable + send`. An
 `Arc[T]`'s payload is immutable except through `arc.with_unique`, and an `Arc` is `send`.
 Its creation, every share, every release, every `try_unwrap` and every `with_unique` test
-is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)), so the
+is an event in its unit's event order ([CONC-10](tasks.md#conc-10-event-order)); an `Arc`
+never leaves its unit ([CONC-15](tasks.md#conc-15-units)), so the
 count each operation observes is the count that order gives.
 
 `arc.with_unique[T: shareable + send, R](mut h: Arc[T], f: scoped fn(mut T) -> R) ->
@@ -788,16 +754,62 @@ fn seen(take l: Log[u64]) -> List[u64] {
 }
 ```
 
-## Engine obligations
+## Performance targets
+
+This section is not normative. MEM-31 and MEM-32 are performance targets for native engines:
+they say what a fast engine does, and nothing a program observes depends on them. They keep
+their numbers so that benchmarks and engine notes can cite them.
+
+### MEM-31: Construction in place
+
+Target, not a rule. A value's **inline bytes** are the bytes MEM-13 holds in its owner: a record's fields, a
+variant's payload, and the pointer, length and capacity of a `Box`, `List`, `String` or `Map`,
+never the blocks they point to. A native engine aims to write a fresh value's inline bytes
+directly into its destination, with no temporary of the value and no copy of it, in three
+cases:
+
+- **Results.** The operand of `return`, or a body's result reached through blocks and `if`
+  and `match` arms, is built in the caller's receiving place. So is a local that every exit
+  of the body that reaches it returns whole.
+- **Container slots.** The element or entry argument of a core operation that stores it into
+  a collection (`list.push`, `list.set`, `map.insert` and the like, [core](core.md)) is built
+  in its slot when that slot exists without a new admission: spare capacity, or the element
+  being set.
+- **Fields.** A literal's field operand that is itself fresh is built inside the literal's
+  own destination.
+
+Any other value is built in a local place and moved. What follows in this paragraph and the
+next is not a target: it restates rules that bind every engine whether or not it builds in
+place. A move copies only inline bytes: the
+blocks a value owns move with their pointer, are never copied, and are never re-admitted, so
+a move never allocates and never fails ([OWN-6](ownership.md#own-6-let-take-and-copy)). The destination's
+owner is the owner the value would have after that move, so building in place never changes
+custody: a result built in the caller's place and then sent from a path that does not return
+it is moved out like any other value.
+
+Nothing a program observes depends on which case applies. Fields are evaluated left to right
+into their owners as [T1.1](ownership.md#own-26-the-transition-table) says; every allocation is
+admitted where its row says; a collection admits its growth after its arguments are evaluated
+and before it commits, and nothing is admitted earlier or speculatively because the
+destination is known; an assignment does not overwrite its old value before its right side
+succeeds ([OWN-12](ownership.md#own-12-assignment)). A failure before completion leaves the
+destination as it was, each survivor with the owner
+[FAIL-7](failure.md#fail-7-one-owner-per-survivor) names, and a pending result is cleaned in
+[FAIL-9](failure.md#fail-9-pending-results)'s order whether or not it was built in place.
+Charges, refusal points, cleanup order and output therefore do not depend on whether a value
+was built in place; only the instructions and the bytes copied differ. No conformance test
+checks which case an engine took: a missed case, such as a container slot built locally and
+moved in, is a performance bug.
 
 ### MEM-32: Engine obligations
 
-Charged bytes are semantic and identical on every engine, including the reference evaluator
-([MEM-24](budgets.md#mem-24-logical-charges)). The physical layout and work count obligations
-below bind native engines only. Everything [SEM-8](semantics.md#sem-8-determinism) makes
-observable agrees across engines, refunds as admissions see them, refusal points, finalizer
-order and output included. An admission is refused at the same operation on every engine. Each physical
-obligation is checked by counting the native engine's work, never by a program:
+Targets, not rules. They describe the native engines Hirsel aims for; the reference evaluator
+need not meet them, and no program can observe whether an engine does. Charges stay within
+their logical bounds whatever an engine's layout
+([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)), and everything
+[SEM-8](semantics.md#sem-8-determinism) makes observable is unaffected by them. Each target
+names the count a benchmark or an engine test can measure; missing one is a performance bug,
+not a conformance failure:
 
 - **A size-class allocator per task.** Own blocks (`Box` nodes, collection storage, counted
   nodes, closure environments) come from the allocating task's allocator, by size class, with

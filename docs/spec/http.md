@@ -307,7 +307,7 @@ Each phase, and each output unit, has one absolute deadline on the monotonic `Cl
 - The connection opens one region per request, inside the handler's `bound bytes` scope, and passes it to the handler as `scratch: Region` (MEM-1). Request-lifetime documents, such as a parsed JSON body, are built there.
 - It closes when the handler returns, on every exit edge (MEM-8): everything in it is freed and refunded at once, with no walk. Its allocations are charged to `handler_bytes` like any other, so no accounting row changes.
 - Nothing in it outlives the request: `Outcome` holds no region data (MEM-7), so a response that keeps request data copies it into own values first.
-- Closing returns the region's chunks to the connection task's allocator, and the next request's region reuses them, so request scratch is a rewind ([MEM-32](memory.md#mem-32-engine-obligations)).
+- Closing returns the region's chunks to the connection task's allocator, and the next request's region reuses them, so request scratch is a rewind (a [MEM-32](memory.md#mem-32-engine-obligations) performance target).
 
 **Compaction**
 - While `req` lives, the read buffer is frozen (OWN-10), and nothing writes it. The connection moves the pipelined tail to the front only between requests.

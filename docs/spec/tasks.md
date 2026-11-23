@@ -195,7 +195,9 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 
 ### CONC-10: Event order
 
-A run has one total order of **events**: spawn, task end, cancellation requests and their
+Each unit ([CONC-15](#conc-15-units)) has one total order of **events**, over the tasks of
+that unit; a program that never calls `task.spawn_unit` is one unit, so its run has one
+order. The events are: spawn, task end, cancellation requests and their
 observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every `try_receive` decision, the `Closed` outcome of a blocking `send` or `receive`, every
 change of a channel's sender count, `join`, channel close, every `latest.publish` and
 `latest.read` and every change of a `Latest` root's handle count (CONC-13), every slice end ([MEM-30](budgets.md#mem-30-step-bounds)), every refund or hand-over that
@@ -209,7 +211,13 @@ operation observes a state that no prefix of the order gives: no weaker ordering
 visible.
 The order is chosen by the scheduler provider at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); with the same inputs and the same
-recorded choices, every task behaves identically on every engine.
+recorded choices, every task of the unit behaves identically
+([SEM-8](semantics.md#sem-8-determinism)). One worker runs a unit's tasks at a time, so a
+unit's events need no sequencing across threads. There is no order across units: units share
+no mutable memory, each takes what reaches it from other units as its inputs (CONC-15), and
+parallel work inside a unit runs in flows, whose results do not depend on the schedule
+([CONC-14](#conc-14-flows)). Nothing observable depends on how the events of different units
+interleave.
 A wake of a waiting provider operation (its deadline reached, its provider readying it, or a
 cancellation request) takes effect at one point of the order, before its task runs again,
 and the operation's next step is decided there. A cancellation request ordered before a

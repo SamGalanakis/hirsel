@@ -34,7 +34,8 @@ that outlives it: a bound scope's result and anything moved outward, the cause c
 failure raised under it ([FAIL-10](failure.md#fail-10-cause-chain)), values in a queue, and a
 task's result. So the lexical end of a limit and the death of what it funded are separate,
 and the limit a block's record leads to is always live. Transferring or refunding across
-tasks is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)). An
+tasks is an event in the unit's event order ([CONC-10](tasks.md#conc-10-event-order)); one
+sent to another unit is an input of that unit ([CONC-15](tasks.md#conc-15-units)). An
 admission sees exactly the refunds from other tasks that the order puts before the
 admitting task's latest event; a refused admission is itself an event.
 
@@ -89,8 +90,10 @@ refused, and the room left in the limit the admission was tried against. A refus
 admission carries it, in its failure's cause `Capacity(c)` (MEM-21) or in its `Error(c)`. Charges are
 computed in exact arithmetic; one that exceeds `2^64 − 1` is refused with `requested`
 `2^64 − 1`. Constructing, copying and returning a `Capacity` admits nothing. Two runs of the
-same program with the same inputs and limits produce the same `Capacity` values at the
-same points ([SEM-8](semantics.md#sem-8-determinism)).
+same build with the same inputs and limits produce the same `Capacity` values at the
+same points ([SEM-8](semantics.md#sem-8-determinism)). Both fields are diagnostic: a build that
+charges less than the logical charge (MEM-28) reports what it charged, so another build can
+report other values or refuse at another point.
 
 ### MEM-23: Refund
 
@@ -108,13 +111,14 @@ its grant (MEM-27).
 
 ### MEM-24: Logical charges
 
-A charge is the logical size of what is allocated under the policy `charge-v1`:
+A **logical charge** is the logical size of what is allocated under the policy `charge-v1`. It
+is the most any build charges for the allocation (MEM-28):
 
 | allocation | charge |
 |---|---|
 | `Box[T]` node | the payload's size, rounded up to 8 |
 | `List[T]`, `Deque[T]`, `Heap[T]`, `String` storage | capacity × element size (`String`: 1), rounded up to 8 |
-| `list.sort_stable` scratch | zero for length ≤ 20; otherwise scratch capacity × element size, rounded up to 8, refunded before it returns. Scratch capacity is min(length, max(128, floor(length / 2))). |
+| `list.sort_stable` scratch | at most length × element size, rounded up to 8, refunded before it returns; how much scratch, if any, is the build's ([core](core.md)) |
 | `Map[K, V]` storage | capacity × (key size + value size + 16), rounded up to 8 |
 | counted node | payload size + 8, rounded up to 8 |
 | owning closure environment | the sum of its captures' sizes, rounded up to 8 |
@@ -180,7 +184,7 @@ and grant being charged once on its own block; a plain `fn` counts 8, and an `ow
 `scoped fn` and a reference to a region value count 16; a compact value held inline counts
 its encoding. Every built-in type's size is in [core](core.md#built-in-types). Words an
 engine adds of its own, such as alignment or an environment's drop recipe, are never
-charged. A charge is computed from the type by these rules and is the same on every target
+charged. A logical charge is computed from the type by these rules and is the same on every target
 and under every layout choice; the bytes a value occupies may be fewer: `Option[Box[T]]`
 charges 8 + 8 while an engine may hold it in 8 bytes.
 
@@ -253,12 +257,17 @@ is an event.
 resource type Log grant bytes 256 { sink: Sender[String] }
 ```
 
-### MEM-28: Optimisation keeps charges
+### MEM-28: Charges are an upper bound
 
-No optimisation changes which operations admit, how much they charge, which refunds an
-admission sees or which of them are refused
-([SEM-8](semantics.md#sem-8-determinism)). An engine that allocates less still charges the
-logical amount; an engine that elides a copy still charges for it.
+A build charges each allocation at most its logical charge (MEM-24) and at least the logical
+charge of the block it really makes. An allocation a build does not make charges 0: a
+`FrozenBytes` literal held in read-only static storage ([core](core.md)), a copy the build
+elides, a scratch block it does without. Charges are deterministic per build: every run of
+one build admits at the same operations, charges the same amounts, sees the same refunds and
+is refused at the same points ([SEM-8](semantics.md#sem-8-determinism)). Across builds they
+are a safety contract, not an observable to match: a body that fits under `bound bytes n` by
+its logical charges fits on every engine and at every optimisation level, and a build may
+admit what the logical charges would refuse.
 
 ### MEM-30: Step bounds
 
@@ -285,7 +294,8 @@ is core's plain record `{ steps: u64 }`.
   derivation, because an untrusted server chooses the work ([TLS-6](tls.md#tls-6-scram-sha-256)).
   `crc32c.update` and `crc64nvme.update` take one further step before each nonempty
   16 KiB chunk, including a final partial chunk. Code an engine adds for drop, clone and growth
-  takes no steps. The steps a run takes follow from its source and its values alone.
+  takes no steps. This is the **reference count**, the count the reference evaluator takes;
+  a build may count otherwise (Determinism, below).
 - **The current bound.** At each point exactly one step bound is current, or none: the
   innermost enclosing `bound steps` scope's, else the task's root step bound, else none.
   Every step taken while a bound is current uses one of it. Entering `bound steps n`
@@ -343,7 +353,7 @@ is core's plain record `{ steps: u64 }`.
   limits that bound the sizes core calls work on.
   A task spawned while a bound is current runs under its own root bound of what that bound has left at the
   spawn; the spawner's bound is not reduced, and no steps return. No two tasks share a bound, so where a
-  bound stops a task follows from that task's source and values alone. The steps a run takes under a bound
+  bound stops a task follows from that task's build, source and values alone. The steps a run takes under a bound
   of `n` are at most `n` for each task spawned under it, and the limits that admit those tasks bound how
   many there are. `main` and a task spawned with no bound current take steps under none.
   A flow stage ([CONC-14](tasks.md#conc-14-flows)) copies the owner's remaining steps at
@@ -354,13 +364,17 @@ is core's plain record `{ steps: u64 }`.
   run another task. A flow stage has no event at its slice end. A task's slice end observes
   no cancellation and changes nothing else, so code under a
   bound that computes for long does not keep the tasks it does not wait for from running.
-- **Determinism.** Which steps a run takes, where a bound stops it and where its slices end
-  depend only on its source and the values at its replay point
-  ([SEM-8](semantics.md#sem-8-determinism)): every engine, build and optimisation level
-  stops at the same step. No
-  optimisation adds, removes, merges or moves a step taken while a bound is current; an
-  engine may count several steps at once only where it then stops at the same step as
-  counting one at a time would. A step taken while no bound is current uses nothing and
+- **Determinism.** A step bound is a fuel and termination bound. Which steps a run takes,
+  where a bound stops it and where its slices end depend only on its build, its source and
+  the values at its replay point, so every run of one build stops at the same step
+  ([SEM-8](semantics.md#sem-8-determinism)). They are not the same across builds: an engine
+  or optimisation level may take fewer or more steps than the reference count, for example
+  by inlining a call or merging loop heads, so no program or test may rely on an exact count
+  across engines or optimisation levels. Every build takes at least one step for each
+  iteration of a loop and each level of recursion, and the extra steps of
+  `secret.scram_sha256`, `crc32c.update` and `crc64nvme.update` as the reference count
+  does, so code that computes without end exhausts every bound and work an untrusted input
+  chooses is bounded by it. A step taken while no bound is current uses nothing and
   ends no slice, so an engine need not count it, even in code that also runs under a bound.
 
 ```hirsel

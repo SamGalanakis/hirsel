@@ -102,11 +102,13 @@ the old value and then drops the incoming key; it admits nothing, so it is never
 ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)). Each `key`
 type has exactly one equality, the structural one of SEM-7, and one hash, fixed by the type;
 no program supplies or replaces them in v1 ([reserved](reserved.md), R11). The hash is keyed
-by a per-run seed that enters at the replay point
-([CAP-8](capabilities.md#cap-8-the-replay-point)); no operation reveals a hash and iteration
-is in insertion order, so no value depends on the seed
-([CAP-6](capabilities.md#cap-6-no-ambient-input)). The key also has no effect on cleanup
-order, admission, refunds or step charges. Lookups and insertions stay expected constant time
+by a per-run seed that the engine draws from host entropy at entry. The seed is not an input:
+it does not pass the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)), no
+recording holds it, and a replay draws a fresh one. No operation reveals a hash word and
+iteration is in insertion order, so no value depends on the seed
+([CAP-6](capabilities.md#cap-6-no-ambient-input)), and neither do cleanup order, admission,
+refunds or steps, so a replay under another seed behaves as the recorded run did (SEM-8).
+Lookups and insertions stay expected constant time
 for keys chosen without the seed, even keys chosen to collide: a Map whose cheap placement
 crowds rebuilds its index once under a keyed hash whose key is derived from the seed
 ([PROG-11](programs.md#prog-11-map-index)), and that rebuild is not observable either. A Map literal builds its index at run time.
@@ -210,7 +212,9 @@ Given the same program, the same values at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)), the same root limit and the same charge
 policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) and whose
 program reaches no foreign function ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)) behaves
-identically on every engine, build and optimisation level. Its **observables** are exactly:
+identically on every run of one **build**: the program as one engine compiled it, for one
+target, at one optimisation level. A recording build of it is the same build
+([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)). Its **observables** are exactly:
 
 - its values, its output and its outcome;
 - its steps and slice ends ([MEM-30](budgets.md#mem-30-step-bounds));
@@ -219,10 +223,10 @@ identically on every engine, build and optimisation level. Its **observables** a
 - its charges as limits see them: which operations admit, how much, which are refused
   and with what `Capacity` value, and which refunds each admission sees
   ([MEM-21](budgets.md#mem-21-admission) to [MEM-24](budgets.md#mem-24-logical-charges),
-  [MEM-28](budgets.md#mem-28-optimisation-keeps-charges));
+  [MEM-28](budgets.md#mem-28-charges-are-an-upper-bound));
 - its finalizer runs and their order ([FAIL-8](failure.md#fail-8-exit-edge-cleanup),
   [FAIL-11](failure.md#fail-11-resources));
-- its events and their order ([CONC-10](tasks.md#conc-10-event-order));
+- each unit's events and their order ([CONC-10](tasks.md#conc-10-event-order));
 - its host effects: each provider operation's issue, its arguments and its order
   ([CAP-5](capabilities.md#cap-5-provider-operations), [CAP-8](capabilities.md#cap-8-the-replay-point)).
 
@@ -230,12 +234,28 @@ A build with recording machinery is one of these builds: compiling recording in,
 switching it on, changes none of the observables
 ([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)).
 
+**Across builds.** Two of the observables are a build's own. Steps are fuel: each build
+counts them deterministically, but two engines or optimisation levels may take different
+steps for the same code, so where a step bound runs out and where slices end can differ
+between builds ([MEM-30](budgets.md#mem-30-step-bounds)). Charges are an upper-bound
+contract: a build charges at most the logical charge of
+[MEM-24](budgets.md#mem-24-logical-charges) and may charge less, so an admission that the
+logical charges admit is admitted by every build, and the amounts, the `Capacity` values
+and the refusals of an admission the logical charges refuse can differ between builds
+([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)). Every other observable, from
+values and output to events and host effects, is the same on every engine, build and
+optimisation level for every run in which no step bound runs out, no admission is refused,
+and every slice end resumes the task that reached it. No test may compare steps, slice ends
+or exact charges between builds; a test compares them between runs of one build, or
+checks a charge against its logical bound.
+
 **As if.** An engine may do anything whose effects on the observables are those this
 specification gives. Anything not listed is the engine's choice: layout, addresses (of
 blocks or of functions), allocators, parallelism, timing, and the order of steps that change
 no observable between them, such as freeing blocks whose refunds no admission sees apart.
 Nothing observable depends on addresses, on the order of declarations in a source, on
-timing, on the host or on unrecorded scheduling. The one value a compiler may change
+timing, on the host, on the Map hash seed ([SEM-5](#sem-5-maps)) or on unrecorded
+scheduling. The one value a compiler may change
 is a function's revision ([PROG-9](programs.md#prog-9-code-descriptors)), which names the
 checked IR its compiler made: it is still the same on every engine and optimisation level.
 
@@ -512,8 +532,8 @@ with the operating system's state for them enabled. It builds level k's version 
 exactly those features. The launcher and the code generator use the same level table.
 
 A version has no meaning of its own. By [SEM-8](#sem-8-determinism) every version gives the
-same values, failures and sites, steps and charges, so a run on a CPU with other levels
-behaves the same. Nothing a program can observe names a version, and every version has
+same values, failures and sites, and one build's versions take the same steps and charges, so a
+run on a CPU with other levels behaves the same. Nothing a program can observe names a version, and every version has
 the function's revision ([PROG-9](programs.md#prog-9-code-descriptors)).
 
 ```hirsel unbuilt

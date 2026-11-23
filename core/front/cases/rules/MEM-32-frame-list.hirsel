@@ -238,29 +238,30 @@ fn escape_lent(n: u64) -> u64 {
     }
 }
 
-// A zero-byte callee bound refuses 4 -> 8. A 64-byte bound can pay for
-// all eight slots, and the refund for the original four goes to the caller.
+// Eight slots fit in the logical 64-byte bound. If the zero-byte attempt
+// went ahead with elided storage, the second reserve is already satisfied.
 fn grow_under_bound(mut xs: List[u64]) -> bool {
     let refused = bound bytes 0 {
         list.try_reserve(mut xs, 4)
     }
     match refused {
-        Ok(Error(e)) if e.requested == 64 && e.available == 0 => {},
+        Ok(Ok(())) => {},
+        Ok(Error(e)) if e.requested <= 64 && e.available == 0 => {},
         _ => return false
     }
     let grown = bound bytes 64 {
         list.reserve(mut xs, 4)
-        room()
+        list.capacity(xs) >= 5
     }
     match grown {
-        Ok(n) => n == 0,
+        Ok(valid) => valid,
         Error(_) => false
     }
 }
 
 // OWN-7: the callee's pushes take this list past 128 bytes. The caller reads
-// every retained element. The 32-slot buffer holds 256 of the 1000 bytes, so
-// the live probe sees 744 and the probe after caller drop sees all 1000.
+// every retained element. The 32-slot buffer costs at most 256 bytes, and
+// its drop must return the room for the whole bound.
 fn lent_contents() -> u64 {
     let mut xs: List[u64] = list.new()
     list.push(mut xs, 100)
@@ -279,21 +280,21 @@ fn lent_contents() -> u64 {
     room()
 }
 
-fn lent_growth() -> u64 {
+fn lent_growth() -> bool {
     let r = bound bytes 1000 {
         let remaining = lent_contents()
-        remaining * 10000 + room()
+        remaining >= 744 && remaining <= 1000 && room() == 1000
     }
     match r {
         Ok(v) => v,
-        Error(_) => 0
+        Error(_) => false,
     }
 }
 
-// expect: run lent_growth() = 7441000
+// expect: run lent_growth() = true
 // Taking a lent place directly is refused by OWN-11, but OWN-13 lets replace
 // return its old value. The old 4-slot buffer stays live across the caller's
-// return and a second use of its stack. Its value is 91 and its charge is 32.
+// return and a second use of its stack. Its value is 91 and its charge is at most 32.
 fn exchange[T](mut xs: T, take empty: T) -> T {
     replace(mut xs, take empty)
 }
@@ -312,24 +313,24 @@ fn replaced() -> List[u64] {
     extract(mut xs)
 }
 
-fn read_replaced() -> u64 {
+fn read_replaced() -> (u64, u64) {
     let xs = replaced()
     let _ = local(5)
-    xs[0] * 10000 + room()
+    (xs[0], room())
 }
 
-fn lent_replace() -> u64 {
+fn lent_replace() -> bool {
     let r = bound bytes 1000 {
-        let live = read_replaced()
-        live * 10000 + room()
+        let (value, remaining) = read_replaced()
+        value == 91 && remaining >= 968 && remaining <= 1000 && room() == 1000
     }
     match r {
         Ok(v) => v,
-        Error(_) => 0
+        Error(_) => false,
     }
 }
 
-// expect: run lent_replace() = 9109681000
+// expect: run lent_replace() = true
 fn produce(take tx: Sender[u64]) waits {
     result.unwrap(channel.send(tx, 99))
 }

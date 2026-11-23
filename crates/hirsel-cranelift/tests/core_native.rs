@@ -43,7 +43,7 @@ fn map_placement_operations_match_prog_11() {
         &cases,
         false,
         "#define hirsel_core_test_context_new hirsel_core_test_context_new_map_vectors\n",
-        false,
+        NativeCheck::Exact,
     );
 }
 

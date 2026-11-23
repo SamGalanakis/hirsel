@@ -1,3 +1,5 @@
+// A plain list fits at its logical charge. Its drop returns the room
+// regardless of the backing storage the build chooses.
 fn checksum(n: u64) -> u64 {
     let mut items: List[u64] = list.with_capacity(n);
     let mut i = 0u64;

@@ -70,7 +70,15 @@ fn check_front_end_run_cases() {
                 runs.push((f, args));
                 count += 1;
             }
-            execute(&module, &runs, false);
+            execute_reports_checked(
+                &module,
+                &runs,
+                false,
+                1_000_000,
+                None,
+                None,
+                NativeCheck::Source,
+            );
             for (line, run) in pending {
                 let agrees = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     execute(&module, &[run], false)
@@ -193,7 +201,7 @@ fn check_growth_shadow_words() {
             &cases,
             false,
             include_str!("../../../hirsel-core-rt/testdata/moving_realloc.c"),
-            true,
+            NativeCheck::Memcheck,
         );
     }
 }

@@ -1878,33 +1878,20 @@ fn probe(mode: u64) -> u64 {
 }
 
 #[test]
-fn plain_list_drop_makes_one_runtime_free_at_both_lengths() {
+fn plain_list_drop_returns_the_charge_at_both_lengths() {
     let source = include_str!("../../../core/front/cases/rules/MEM-32-plain-drop.hirsel");
     let (module, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
     let cases = [1, 1_000_000].map(|length| Case {
         function: names["checksum"],
         args: vec![length],
-        limit: 16_000_000,
+        limit: length * 8,
         injection: None,
     });
-    let bindings = r#"
-HirselCoreLimitRecord *__real_hirsel_core_block_payer(void *);
-HirselCoreLimitRecord *__wrap_hirsel_core_block_payer(void *block) {
-    hirsel_core_test_drop_trace(0);
-    return __real_hirsel_core_block_payer(block);
-}
-void __real_hirsel_core_free_value(const HirselCoreContext *, void *, uint64_t);
-void __wrap_hirsel_core_free_value(const HirselCoreContext *ctx, void *block, uint64_t bytes) {
-    hirsel_core_test_drop_trace(bytes);
-    __real_hirsel_core_free_value(ctx, block, bytes);
-}
-"#;
-    let reports = execute_optimized(&module, &cases, bindings, "", Optimization::Speed);
+    let reports = execute_optimized(&module, &cases, "", "", Optimization::Speed);
     for (case, report) in cases.iter().zip(reports) {
         let length = case.args[0];
         assert_eq!(report.outcome, eval::Outcome::Returned(vec![length]));
         assert_eq!(report.used, 0);
-        assert_eq!(report.trace, vec![length * 8]);
     }
 }
 

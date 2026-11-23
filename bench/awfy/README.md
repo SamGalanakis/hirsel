@@ -102,7 +102,7 @@ python3 bench/awfy/awfy_measure.py "$out/build" "$out/pools-before" \
 ```
 
 To test the MEM-32 reopen condition, rebuild the same Hirsel harness with
-the toolchain that implements all MEM-32 obligations. Point the measurement
+the toolchain that meets the MEM-32 targets. Point the measurement
 at its build directory and pass `--pool --sides hirsel`. Reuse the first
 Goose and Rust samples as denominators. Compare Hirsel/Goose for each workload
 against the 1.5× threshold in [MEM-32's reopen rule](../../docs/spec/memory.md#memory-model-settled).

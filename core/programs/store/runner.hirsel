@@ -354,10 +354,17 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     let mut idle_alarm: Option[Task[()]] = None
     let mut head_idle = false
     let mut serve_idle = false
-    let mut idle_since: Option[u64] = None
+    let mut idle_deadline: Option[u64] = None
     let mut idle_checking = false
     let mut hold_serve: Option[Sender[()]] = None
     loop {
+        if online && !stopped && !retiring && head_idle && serve_idle && !idle_checking && none(idle_deadline) {
+            if let Some(ms) = idle {
+                let at = std.clock.deadline_after_ms(host.mono_ns(clock), ms)
+                idle_deadline = Some(at)
+                idle_alarm = Some(std.clock.alarm(tasks, clock, at, to, IdleDeadline(at)))
+            }
+        }
         if !expired && stopped && !latest.read(cut).started {
             if let Some(window) = drain_window(latest.read(drain)) {
                 if host.mono_ns(clock) >= window.deadline {
@@ -401,7 +408,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
             },
         }
         let (life_input, hold_head) = match take event {
-            HeadIdleChecked(Some(take held)) if !stopped && !retiring && head_idle && serve_idle && !none(idle_since) =>
+            HeadIdleChecked(Some(take held)) if !stopped && !retiring && head_idle && serve_idle && !none(idle_deadline) =>
                 (StopRequested, Some(take held)),
             take other => (take other, None),
         }
@@ -480,7 +487,6 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
             StoreAccepted => if !online && !stopped {
                 publish_phase(status, watch, mut current, Ready)?
                 online = true
-                if let Some(ms) = idle { idle_alarm = Some(idle_sweep(tasks, clock, ms, to)) }
                 let _ = channel.try_send(serve_to, ServeStart)
             },
             AdmissionClose => {
@@ -492,36 +498,33 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                     let _ = channel.try_send(serve_to, ServeWake)
                 }
             },
-            IdleSweep => if !stopped && !retiring {
-                let ms = option.unwrap(idle)
-                idle_alarm = Some(idle_sweep(tasks, clock, ms, to))
-                if head_idle && serve_idle && !idle_checking {
-                    let now = host.mono_ns(clock)
-                    match idle_since {
-                        None => { idle_since = Some(now) },
-                        Some(since) if now >= std.clock.deadline_after_ms(since, ms) => {
-                            if let Ok(()) = channel.try_send(serve_to, CheckServeIdle) { idle_checking = true }
-                        },
-                        _ => (),
-                    }
-                }
+            IdleDeadline(at) => if !stopped && !retiring && idle_deadline == Some(at) && !idle_checking {
+                let _ = replace(mut idle_alarm, None)
+                idle_checking = match channel.try_send(serve_to, CheckServeIdle) { Ok(()) => true, Error(_) => false }
+                if !idle_checking { idle_deadline = None }
             },
-            HeadIdle(value) => { head_idle = value; if !value { idle_since = None } },
-            ServeIdle(value) => { serve_idle = value; if !value { idle_since = None } },
+            HeadIdle(value) => {
+                head_idle = value
+                if !value { idle_deadline = None; let _ = replace(mut idle_alarm, None) }
+            },
+            ServeIdle(value) => {
+                serve_idle = value
+                if !value { idle_deadline = None; let _ = replace(mut idle_alarm, None) }
+            },
             ServeIdleChecked(take held) => {
-                if !stopped && !retiring && !none(held) && head_idle && !none(idle_since) {
+                if !stopped && !retiring && !none(held) && head_idle && !none(idle_deadline) {
                     if let Ok(()) = channel.try_send(head_to, CheckHeadIdle) {
                         hold_serve = take held
                         continue
                     }
                 }
                 idle_checking = false
-                idle_since = None
+                idle_deadline = None
             },
             HeadIdleChecked(_) => {
                 let _ = replace(mut hold_serve, None)
                 idle_checking = false
-                idle_since = None
+                idle_deadline = None
             },
             Settled => { settled = true },
             WritesPaused => if !stopped { publish_phase(status, watch, mut current, Paused)? },
@@ -535,6 +538,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
             },
             RetirePlace => {
                 retiring = true
+                let _ = replace(mut idle_alarm, None)
                 let _ = replace(mut hold_serve, None)
                 if let Error(_) = channel.send(serve_to, ServeRetire) { serve_done = Some(0u64) }
             },
@@ -2619,15 +2623,9 @@ fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Reg
 }
 
 type DrainWindow: shareable + send { admission: u64, deadline: u64 }
-
 type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64) | Published(Sender[PubIn]) | ServePrepared | StoreAccepted | Settled | HeadEnded(Result[Option[u64], StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
     | WritesPaused | WritesResumed | RetirePlace
-    | IdleSweep | HeadIdle(bool) | ServeIdle(bool) | HeadIdleChecked(Option[Sender[()]]) | ServeIdleChecked(Option[Sender[()]])
-
-fn idle_sweep(tasks: Tasks, clock: Clock, idle: u64, to: Sender[LifeEvent]) -> Task[()] {
-    let next = std.clock.deadline_after_ms(host.mono_ns(clock), std.order.max(idle / 2u64, 1u64))
-    std.clock.alarm(tasks, clock, next, to, IdleSweep)
-}
+    | IdleDeadline(u64) | HeadIdle(bool) | ServeIdle(bool) | HeadIdleChecked(Option[Sender[()]]) | ServeIdleChecked(Option[Sender[()]])
 
 // The owner parks while operate accepts or declines its idle vote. The sender
 // stays with operate until the drain window is published or the vote is refused.
@@ -8307,19 +8305,16 @@ resource type OwnerCompletion: send { to: Sender[ServeInput], id: u64, abandoned
     let _ = channel.try_send(completion.to, OwnerEnded(completion.id, completion.abandoned))
 }
 
-type Acceptor: send { listener: Listener, clock: Clock, to: Sender[ServeInput], permit: Receiver[()], idle: Option[u64] }
+type Acceptor: send { listener: Listener, clock: Clock, interrupt: Clock, to: Sender[ServeInput], permit: Receiver[u64] }
 
 fn accept_sockets(take seed: Acceptor) -> () waits {
-    let Acceptor(listener: take listener, clock: clock, to: take to, permit: take permit, idle: idle) = take seed
+    let Acceptor(listener: take listener, clock: clock, interrupt: interrupt, to: take to, permit: take permit) = take seed
     let mut bound_listener = take listener
-    while let Ok(()) = channel.receive(permit) {
-        let until: Until = match idle {
-            Some(ms) => At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), std.order.max(ms / 2u64, 1u64))),
-            None => Never,
-        }
+    while let Ok(at) = channel.receive(permit) {
+        let until: Until = if at == 0u64 { Never } else { At(interrupt, at) }
         match host.accept(mut bound_listener, until) {
             Ok((take socket, peer)) => if let Error(_) = channel.send(to, AcceptedSocket(take socket, peer.ip, host.mono_ns(clock))) { return },
-            Error(TimedOut) if !none(idle) => if let Error(_) = channel.send(to, AcceptIdle) { return },
+            Error(TimedOut) if at != 0u64 => if let Error(_) = channel.send(to, AcceptIdle) { return },
             Error(problem) => { let _ = channel.send(to, AcceptEnded(problem)); return },
         }
     }
@@ -8377,22 +8372,25 @@ fn supervise_serve[G: send, H: send, B: send](take seed: ServePlace[G, H, B]) ->
 }
 
 fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[ServeDrain], make: scoped[view] fn() -> Service[C]) -> Result[u64, std.wsock.Error] waits {
-    let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock,
+    let ServeTransport(listener: take listener, config: config, tasks: tasks, clock: time,
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to) = take seed
     let pool = std.wsock.pending(config.socket)?
-    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, clock, config.n_pool, 1024u64)
+    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(tasks, config, time, config.n_pool, 1024u64)
     let (allocation, allocation_task) = match take allocated {
         Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
     }
-    let (permit, permits): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let idle_ms = match lifecycle { Some(control) => control.idle, None => None }
-    let acceptor = Acceptor(listener: take listener, clock: clock, to: channel.sender(to), permit: take permits, idle: idle_ms)
+    let (permit, permits): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    // Advancing this clock interrupts a blocked accept only for an idle vote.
+    let (interrupt, interrupt_hand) = provide.clock(0u64, 0u64)
+    let mut accept_clock = take interrupt_hand
+    let mut accept_at = match lifecycle { Some(control) if !none(control.idle) => 1u64, _ => 0u64 }
+    let acceptor = Acceptor(listener: take listener, clock: time, interrupt: interrupt, to: channel.sender(to), permit: take permits)
     let mut accepting: Option[Task[()]] = Some(task.spawn(tasks, bytes 8192u64, take acceptor, accept_sockets))
     if let Some(control) = lifecycle {
         if let Error(_) = channel.send(control.events, ServePrepared) { return Ok(0u64) }
         if let Ok(ServeStart) = channel.receive(inbox) {} else { return Ok(0u64) }
     }
-    let _ = channel.try_send(permit, ())
+    let _ = channel.try_send(permit, accept_at)
     let mut owners: Map[u64, SessionTask] = map.new()
     let mut refusing: Map[u64, Task[()]] = map.new()
     let mut serial = 0u64
@@ -8401,7 +8399,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
     let mut idle = false
     let mut checking_idle = false
     loop {
-        if retiring || serve_closing(lifecycle, clock) {
+        if retiring || serve_closing(lifecycle, time) {
             if let Some(take accept_task) = replace(mut accepting, None) {
                 let mut counted = take accept_task
                 task.cancel(mut counted)
@@ -8439,6 +8437,8 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
             CheckServeIdle => if let Some(control) = lifecycle {
                 if idle && none(drain_window(latest.read(control.window))) {
                     checking_idle = true
+                    clock.advance_to(mut accept_clock, accept_at)
+                    accept_at += 1u64
                 } else {
                     idle_vote(control.events, false, false)
                 }
@@ -8450,13 +8450,13 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     checking_idle = false
                     idle_vote(control.events, false, idle && none(drain_window(latest.read(control.window))))
                 }
-                if !serve_closing(lifecycle, clock) { let _ = channel.try_send(permit, ()) }
+                if !serve_closing(lifecycle, time) { let _ = channel.try_send(permit, accept_at) }
             },
             ServeRetire => { retiring = true },
             ServeWake => for (_, owner_task) in owners { if let Some(wake) = owner_task.wake { let _ = channel.try_send(wake, wire_event(DrainWake)) } },
-            AcceptEnded(problem) => if !retiring && !serve_closing(lifecycle, clock) { return Error(Network(problem)) },
+            AcceptEnded(problem) => if !retiring && !serve_closing(lifecycle, time) { return Error(Network(problem)) },
             OwnerReady(id, take wake, take acknowledgement) => {
-                if !retiring && !serve_closing(lifecycle, clock) {
+                if !retiring && !serve_closing(lifecycle, time) {
                     if let Some(take owner_task) = map.remove(mut owners, id) {
                         let mut promoted = take owner_task
                         promoted.wake = Some(take wake)
@@ -8475,23 +8475,23 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     checking_idle = false
                     if let Some(control) = lifecycle { idle_vote(control.events, false, false) }
                 }
-                if retiring || serve_closing(lifecycle, clock) { continue }
+                if retiring || serve_closing(lifecycle, time) { continue }
                 if idle {
                     idle = false
                     if let Some(control) = lifecycle { let _ = channel.send(control.events, ServeIdle(false)) }
                 }
-                let _ = channel.try_send(permit, ())
+                let _ = channel.try_send(permit, accept_at)
                 let id = serial
                 serial += 1u64
                 let pending: Option[std.wsock.Pending] = if map.len(owners) >= limit { None } else { match std.wsock.acquire(pool) { Ok(take slot) => take slot, _ => None } }
                 let slot = match take pending {
                     Some(take slot) => take slot,
-                    None => { start_socket_refusal(tasks, take socket, clock, at, config, to, id, mut refusing); continue },
+                    None => { start_socket_refusal(tasks, take socket, time, at, config, to, id, mut refusing); continue },
                 }
                 let copied: List[std.wsock.Prefix] = clone(proxies)
                 let prefixes = take copied
                 let made = bound bytes config.n_service { make() }
-                let service = match take made { Ok(take instance) => take instance, Error(_) => { start_socket_refusal(tasks, take socket, clock, at, config, to, id, mut refusing); continue } }
+                let service = match take made { Ok(take instance) => take instance, Error(_) => { start_socket_refusal(tasks, take socket, time, at, config, to, id, mut refusing); continue } }
                 let boxed = box.new(take service)
                 let completion = match OwnerCompletion(to: channel.sender(to), id: id, abandoned: 0u64) { Ok(take completion) => take completion, Error(_) => continue }
                 let control: Option[OwnerControl] = match lifecycle {
@@ -8499,7 +8499,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 }
                 let job = WireAccept(socket: take socket, peer: peer, accepted: at, slot: take slot, proxies: take prefixes,
                     service: take boxed, publisher: channel.sender(pub_to), c: config,
-                    clock: clock, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation))
+                    clock: time, tasks: tasks, control: take control, completion: take completion, allocation: channel.sender(allocation))
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
                 let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - WIRE_OWNER_TASK_BYTES + config.n_granted), take job, run)
                 map.insert(mut owners, id, SessionTask(handle: take handle, wake: None))

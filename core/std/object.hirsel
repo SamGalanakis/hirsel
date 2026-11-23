@@ -62,7 +62,7 @@ pub fn key_text(key: Key) -> String {
     result.unwrap(string.from_utf8(take out))
 }
 
-type Operation: key = Fetch | FetchRange | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads
+type Operation: key = Fetch | FetchRange | FetchChanged | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads | GetBucketLocation | GetBucketEncryption
 
 type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
 
@@ -437,7 +437,7 @@ type Job: send {
     entries: List[Entry]
 }
 
-type Value: send = Object(Meta) | Existing | Listed(Page) | Initiated(String) | Pending(List[String], List[String], bool)
+type Value: send = Object(Meta) | Existing | NotModified | BucketSetting(String) | Listed(Page) | Initiated(String) | Pending(List[String], List[String], bool)
 
 type Reply: send {
     lane: u64,
@@ -452,6 +452,9 @@ fn method(op: Operation) -> String {
     match op {
         Fetch => "GET",
         FetchRange => "GET",
+        FetchChanged => "GET",
+        GetBucketLocation => "GET",
+        GetBucketEncryption => "GET",
         ListObjects => "GET",
         ListUploads => "GET",
         Head => "HEAD",
@@ -472,7 +475,7 @@ fn uploads_body(op: Operation) -> bool {
 }
 
 fn payload_read(op: Operation) -> bool {
-    op == Fetch || op == FetchRange
+    op == Fetch || op == FetchRange || op == FetchChanged
 }
 
 const HOST_FIELD: u64 = 0
@@ -602,6 +605,11 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
     }
     if op == PutConditional || op == CompleteConditional || (op == PutIf && tag.len == 0) {
         copy_header(mut headers, mut w.values, NO_CLOBBER_FIELD, string.as_bytes("*"))
+    }
+    if op == FetchChanged {
+        let mut field = value_buffer(mut w.values, NO_CLOBBER_FIELD)
+        let _ = bytebuf.append_inline(mut field, job.tag.octets, 0, job.tag.len)
+        set_header(mut headers, NO_CLOBBER_FIELD, take field)
     }
     if payload_read(op) && (op == FetchRange || from != 0) {
         string.clear(mut w.range_text)
@@ -1132,6 +1140,37 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
     Received(Object(take received))
 }
 
+fn location_setting(text: String) -> Result[String, Error] {
+    let Some(at) = string.find(text, 0, "<LocationConstraint") else {
+        return Error(Fatal(Malformed))
+    }
+    let suffix = at + string.byte_len("<LocationConstraint")
+    let Some(close) = string.find(text, suffix, ">") else {
+        return Error(Fatal(Malformed))
+    }
+    if suffix != close && !string.starts_with(string.slice(text, suffix, close), " ") {
+        return Error(Fatal(Malformed))
+    }
+    let Some(end) = string.find(text, close + 1, "</LocationConstraint>") else {
+        return Error(Fatal(Malformed))
+    }
+    xml_decoded(string.slice(text, close + 1, end))
+}
+
+fn encryption_setting(text: String) -> Result[String, Error] {
+    let Some(value) = xml_field(text, "SSEAlgorithm") else {
+        return Error(Fatal(Malformed))
+    }
+    if value == "" || string.find(text, 0, "<ServerSideEncryptionConfiguration") == None || string.find(text, 0, "</ServerSideEncryptionConfiguration>") == None {
+        return Error(Fatal(Malformed))
+    }
+    let begin = option.unwrap(string.find(text, 0, "<SSEAlgorithm>"))
+    if string.find(text, begin + 1, "<SSEAlgorithm>") != None {
+        return Error(Fatal(Malformed))
+    }
+    xml_decoded(value)
+}
+
 fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inline[u8, 16]], op: Operation, status: u16, prefix: String, mut entries: List[Entry], mut buffer: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     if op == ListObjects && status == 200 {
         return listing(mut c, prefix, mut entries, mut buffer, mut probe, mut scratch)
@@ -1140,8 +1179,31 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
     if let Error(e) = collect(mut c, mut buffer, mut probe) {
         return receive_failure(e)
     }
+    if op == FetchChanged && status == 304 {
+        return Received(NotModified)
+    }
     if status < 200 || status >= 300 || fragment(buffer, 0, string.as_bytes("<Error")) != None {
+        if op == GetBucketEncryption && status == 404 {
+            let response = status_failure(status, buffer)
+            if response.code == string.as_bytes("ServerSideEncryptionConfigurationNotFoundError") {
+                return Received(BucketSetting(string.new()))
+            }
+        }
         return interpret_error(op, status, buffer)
+    }
+    if op == GetBucketLocation || op == GetBucketEncryption {
+        let Ok(take text) = xml_text(buffer) else {
+            return Invalid(Fatal(Malformed))
+        }
+        let setting = if op == GetBucketLocation {
+            location_setting(text)
+        } else {
+            encryption_setting(text)
+        }
+        return match take setting {
+            Ok(take value) => Received(BucketSetting(take value)),
+            Error(take problem) => Invalid(take problem),
+        }
     }
     if op == ListUploads {
         return parse_pending(buffer, prefix)
@@ -1833,7 +1895,12 @@ fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolu
 
 fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
     let original_entries = list.len(job.entries)
-    let mut progress = ReadProgress(initial: list.len(job.data), size: None, tag: job.tag)
+    let initial_tag = if job.op == FetchChanged {
+        empty_tag()
+    } else {
+        job.tag
+    }
+    let mut progress = ReadProgress(initial: list.len(job.data), size: None, tag: initial_tag)
     let crc = if job.op == Put || job.op == PutConditional || job.op == PutIf || job.op == Part {
         Some(crc32c.update(0, job.data))
     } else {
@@ -2016,23 +2083,36 @@ fn lane_loop(take setup: Lane) waits {
     let _ = task.cancel_join(take timer)
 }
 
-type Worker {
-    task: Task[()],
-    input: Sender[LaneMessage]
-}
-
-pub opaque type Client {
+pub opaque type Requests: send {
     bucket: Bucket,
     simulated: bool,
-    lanes: List[Worker],
+    lanes: List[Sender[LaneMessage]],
     output: Receiver[LaneEvent],
-    resolver: Task[()],
-    renewal: Option[Task[()]],
     next: u64,
     random: Random,
     entropy: Bytes,
     path: String,
     clock: Clock
+}
+
+pub opaque type Workers {
+    lanes: List[Task[()]],
+    resolver: Task[()],
+    renewal: Option[Task[()]]
+}
+
+pub opaque type Client {
+    requests: Requests,
+    workers: Option[Workers]
+}
+
+pub fn split(take c: Client) -> (Requests, Option[Workers]) {
+    let Client(requests: take request_owner, workers: take lifetime) = take c
+    (take request_owner, take lifetime)
+}
+
+pub fn attach(take requests: Requests) -> Client {
+    Client(requests: take requests, workers: None)
 }
 
 type PartReceipt: send {
@@ -2064,7 +2144,8 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     if let Error(e) = resolve_peers(n, c, server.name, deadline, mut peers) {
         return Error(Retriable(Net(e)))
     }
-    let mut workers: List[Worker] = list.with_capacity(lanes)
+    let mut inputs: List[Sender[LaneMessage]] = list.with_capacity(lanes)
+    let mut workers: List[Task[()]] = list.with_capacity(lanes)
     let mut replies: List[Sender[PoolReply]] = list.with_capacity(lanes + 1)
     let mut send_credentials: List[Sender[cred.Credentials]] = list.with_capacity(if !has_source(source) {
         0
@@ -2093,7 +2174,8 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
         }
         let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), prefix: clone(bucket.prefix), auth: take auth, source, refresh: take refresh, region_name: clone(bucket.aws_region), bucket_path: clone(bucket_path), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), list_parsing: list_scratch(), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
         let worker = task.spawn(tasks, bytes lane_bytes, take setup, lane_loop)
-        list.push(mut workers, Worker(task: take worker, input: take input))
+        list.push(mut workers, take worker)
+        list.push(mut inputs, take input)
     }
     let renewal: Option[Task[()]] = if let Some(grant) = source {
         let (lease_tx, lease): (Sender[PoolReply], Receiver[PoolReply]) = channel.new(1)
@@ -2106,44 +2188,46 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     }
     let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
     let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
-    Ok(Client(bucket: take bucket, simulated: false, lanes: take workers, output: take output, resolver: take resolver, renewal: take renewal, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c))
+    let requests = Requests(bucket: take bucket, simulated: false, lanes: take inputs, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c)
+    let lifetime = Workers(lanes: take workers, resolver: take resolver, renewal: take renewal)
+    Ok(Client(requests: take requests, workers: Some(take lifetime)))
 }
 
 /// Starts a client whose provider port belongs to the S3 simulator.
 pub fn start_simulated(n: sim.s3.Endpoint, tasks: Tasks, take bucket: Bucket, take credentials_set: cred.Credentials, c: Clock, random: Random, requested_lanes: u64, lane_bytes: u64, deadline: u64) -> Result[Client, Error] waits {
     let mut client = start(sim.s3.endpoint_network(n), tasks, take bucket, take credentials_set, None, System, c, random, requested_lanes, lane_bytes, deadline)?
-    client.simulated = true
+    client.requests.simulated = true
     Ok(take client)
 }
 
 pub fn simulated(c: Client) -> bool {
-    c.simulated
+    c.requests.simulated
 }
 
 pub fn bucket_config(c: Client) -> Bucket {
-    clone(c.bucket)
+    clone(c.requests.bucket)
 }
 
 pub fn endpoint_host(c: Client) -> String {
-    let parsed = result.unwrap(uri.parse(c.bucket.endpoint))
+    let parsed = result.unwrap(uri.parse(c.requests.bucket.endpoint))
     let Name(host) = option.unwrap(parsed.host) else {
         fail("object client lost its configured hostname")
     }
-    let mut name = string.from(string.slice(c.bucket.endpoint, host.start, host.end))
+    let mut name = string.from(string.slice(c.requests.bucket.endpoint, host.start, host.end))
     string.make_ascii_lower(mut name)
     take name
 }
 
 pub fn endpoint_secure(c: Client) -> bool {
-    string.starts_with(c.bucket.endpoint, "https://")
+    string.starts_with(c.requests.bucket.endpoint, "https://")
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
     Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, deadline, entries: list.new())
 }
 
-fn submit(worker: Worker, index: u64, take request: Job) -> Option[Reply] waits {
-    match channel.send(worker.input, Work(take request)) {
+fn submit(input: Sender[LaneMessage], index: u64, take request: Job) -> Option[Reply] waits {
+    match channel.send(input, Work(take request)) {
         Ok(()) => None,
         Error(Closed(Work(take returned))) => {
             let Job(ticket, path: take path, data: take data, entries: take entries, ..) = take returned
@@ -2161,19 +2245,19 @@ fn receive(output: Receiver[LaneEvent]) -> Reply waits {
 }
 
 fn run(mut c: Client, take request: Job) -> Reply waits {
-    let index = c.next
-    c.next = (index + 1) % list.len(c.lanes)
-    let mut reply = match submit(c.lanes[index], index, take request) {
+    let index = c.requests.next
+    c.requests.next = (index + 1) % list.len(c.requests.lanes)
+    let mut reply = match submit(c.requests.lanes[index], index, take request) {
         Some(take result) => take result,
-        None => receive(c.output),
+        None => receive(c.requests.output),
     }
-    c.path = replace(mut reply.path, string.from(""))
+    c.requests.path = replace(mut reply.path, string.from(""))
     take reply
 }
 
 fn object_job(mut c: Client, op: Operation, key: String, take data: Bytes, deadline: u64) -> Job {
-    make_path(mut c.path, c.bucket, key, false)
-    let path = replace(mut c.path, string.from(""))
+    make_path(mut c.requests.path, c.requests.bucket, key, false)
+    let path = replace(mut c.requests.path, string.from(""))
     new_job(op, take path, take data, deadline)
 }
 
@@ -2203,13 +2287,51 @@ fn as_unit(take result: Result[Value, Error]) -> Result[(), Error] {
 
 /// The deadline `ms` milliseconds from now on the clock the client was started with.
 pub fn deadline_after_ms(c: Client, ms: u64) -> u64 {
-    clock.deadline_after_ms(host.mono_ns(c.clock), ms)
+    clock.deadline_after_ms(host.mono_ns(c.requests.clock), ms)
 }
 
 pub fn fetch(mut c: Client, key: String, take into: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
     let request = object_job(mut c, Fetch, key, take into, deadline_ns)
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_meta(take result), take data)
+}
+
+/// A conditional GET. None means the service returned 304 without a body.
+pub fn fetch_if_changed(mut c: Client, key: String, unchanged: ETag, take into: Bytes, deadline_ns: u64) -> (Result[Option[Meta], Error], Bytes) waits {
+    if !strong_tag(unchanged) {
+        return (Error(Precondition), take into)
+    }
+    let mut request = object_job(mut c, FetchChanged, key, take into, deadline_ns)
+    request.tag = unchanged
+    let Reply(result: take received, data: take data, ..) = run(mut c, take request)
+    let extracted: Result[Option[Meta], Error] = match take received {
+        Ok(Object(take meta)) => Ok(Some(take meta)),
+        Ok(NotModified) => Ok(None),
+        Error(take problem) => Error(take problem),
+        _ => Error(Fatal(Malformed)),
+    }
+    (take extracted, take data)
+}
+
+fn read_bucket_setting(mut c: Client, op: Operation, query: String, deadline_ns: u64) -> Result[String, Error] waits {
+    make_path(mut c.requests.path, c.requests.bucket, "", true)
+    let path = replace(mut c.requests.path, string.new())
+    let mut request = new_job(op, take path, list.new(), deadline_ns)
+    request.query = string.from(query)
+    let Reply(result: take received, ..) = run(mut c, take request)
+    match take received {
+        Ok(BucketSetting(take value)) => Ok(take value),
+        Error(take problem) => Error(take problem),
+        _ => Error(Fatal(Malformed)),
+    }
+}
+
+pub fn bucket_location(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits {
+    read_bucket_setting(mut c, GetBucketLocation, "location=", deadline_ns)
+}
+
+pub fn bucket_encryption(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits {
+    read_bucket_setting(mut c, GetBucketEncryption, "encryption=", deadline_ns)
 }
 
 /// A nonempty byte interval, inclusive at lo and exclusive at hi.
@@ -2226,14 +2348,14 @@ pub fn fetch_range(mut c: Client, key: String, lo: u64, hi: u64, take into: Byte
 
 pub fn store(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
     let mut request = object_job(mut c, Put, key, take body, deadline_ns)
-    request.id = Some(fresh_id(c.random, mut c.entropy))
+    request.id = Some(fresh_id(c.requests.random, mut c.requests.entropy))
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_meta(take result), take data)
 }
 
 pub fn store_no_clobber(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Created, Error], Bytes) waits {
     let mut request = object_job(mut c, PutConditional, key, take body, deadline_ns)
-    request.id = Some(fresh_id(c.random, mut c.entropy))
+    request.id = Some(fresh_id(c.requests.random, mut c.requests.entropy))
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_created(take result), take data)
 }
@@ -2273,16 +2395,16 @@ pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry],
     if room == 0 {
         return Error(TooLarge)
     }
-    let path = request_path(c.bucket, "", true)
+    let path = request_path(c.requests.bucket, "", true)
     let mut request = new_job(ListObjects, take path, list.new(), deadline_ns)
     let mut query = string.from("list-type=2&max-keys=")
     string.push_u64(mut query, room)
     string.push(mut query, "&prefix=")
-    encode(mut query, string.as_bytes(c.bucket.prefix), false)
+    encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
     encode(mut query, string.as_bytes(prefix), false)
     if after != "" {
         string.push(mut query, "&start-after=")
-        encode(mut query, string.as_bytes(c.bucket.prefix), false)
+        encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
         encode(mut query, string.as_bytes(after), false)
     }
     request.query = take query
@@ -2297,9 +2419,9 @@ pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry],
 }
 
 pub fn upload(mut c: Client, key: String, mode: Mode, deadline_ns: u64) -> Result[Upload, Error] waits {
-    let path = request_path(c.bucket, key, false)
+    let path = request_path(c.requests.bucket, key, false)
     let mut request = new_job(Upload, clone(path), list.new(), deadline_ns)
-    let id = fresh_id(c.random, mut c.entropy)
+    let id = fresh_id(c.requests.random, mut c.requests.entropy)
     request.id = Some(id)
     request.query = string.from("uploads=")
     let Reply(result: take result, ..) = run(mut c, take request)
@@ -2316,12 +2438,12 @@ const PENDING_PAGE: u64 = 16
 /// prefix, for `abort`. The result is true when more remain: abort these
 /// and list again.
 pub fn pending_uploads(mut c: Client, prefix: String, mut into: List[Upload], deadline_ns: u64) -> Result[bool, Error] waits {
-    let path = request_path(c.bucket, "", true)
+    let path = request_path(c.requests.bucket, "", true)
     let mut request = new_job(ListUploads, take path, list.new(), deadline_ns)
     let mut query = string.from("max-uploads=")
     string.push_u64(mut query, PENDING_PAGE)
     string.push(mut query, "&prefix=")
-    encode(mut query, string.as_bytes(c.bucket.prefix), false)
+    encode(mut query, string.as_bytes(c.requests.bucket.prefix), false)
     encode(mut query, string.as_bytes(prefix), false)
     string.push(mut query, "&uploads=")
     request.query = take query
@@ -2330,8 +2452,8 @@ pub fn pending_uploads(mut c: Client, prefix: String, mut into: List[Upload], de
         Ok(Pending(take keys, take ids, more)) => {
             let mut k = 0u64
             for take id in take ids {
-                let target = request_path(c.bucket, keys[k], false)
-                let put_id = fresh_id(c.random, mut c.entropy)
+                let target = request_path(c.requests.bucket, keys[k], false)
+                let put_id = fresh_id(c.requests.random, mut c.requests.entropy)
                 list.push(mut into, Upload(path: take target, upload_id: take id, put_id, mode: Overwrite, parts: list.new()))
                 k += 1
             }
@@ -2369,7 +2491,7 @@ fn dispatch_next(c: Client, lane_index: u64, mut jobs: List[Option[Job]], mut re
         }
         let mut request = take pending
         request.ticket = ticket
-        let returned = submit(c.lanes[lane_index], lane_index, take request)
+        let returned = submit(c.requests.lanes[lane_index], lane_index, take request)
         if let Some(take reply) = take returned {
             let _ = list.set(mut replies, ticket, Some(take reply))
         } else {
@@ -2387,13 +2509,13 @@ fn run_batch(c: Client, take queued: List[Option[Job]]) -> List[Option[Reply]] w
     }
     let mut next = 0u64
     let mut active = 0u64
-    for lane_index in 0u64 .. order.min(list.len(c.lanes), list.len(jobs)) {
+    for lane_index in 0u64 .. order.min(list.len(c.requests.lanes), list.len(jobs)) {
         if dispatch_next(c, lane_index, mut jobs, mut replies, mut next) {
             active += 1
         }
     }
     while active > 0 {
-        let reply = receive(c.output)
+        let reply = receive(c.requests.output)
         let lane_index = reply.lane
         let ticket = reply.ticket
         let _ = list.set(mut replies, ticket, Some(take reply))
@@ -2501,7 +2623,7 @@ pub fn abort(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[(), Erro
 
 pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], deadline_ns: u64) -> (Result[Meta, Error], List[Bytes]) waits {
     let mut buffers = take buffers_in
-    let path = request_path(c.bucket, key, false)
+    let path = request_path(c.requests.bucket, key, false)
     let Reply(result: take result, ..) = run(mut c, new_job(Head, clone(path), list.new(), deadline_ns))
     let info = match as_meta(take result) {
         Ok(take meta) => take meta,

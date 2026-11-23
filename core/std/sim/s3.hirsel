@@ -456,7 +456,11 @@ fn conditional(config: Config, req: Request, objects: Map[String, Object]) -> Op
     if let Some(tag) = map.get(req.fields, "if-none-match") {
         if let Some(present) = old {
             if tag == "*" || tag == present.etag {
-                return Some(config.exists_status)
+                return if req.method == "GET" || req.method == "HEAD" {
+                    Some(304)
+                } else {
+                    Some(config.exists_status)
+                }
             }
         }
     }
@@ -771,6 +775,12 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
         return begin(mut bucket, req)
     }
     if req.method == "GET" && req.target.key == "" {
+        if map.contains(req.target.query, "location") {
+            return reply(200, "<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">global</LocationConstraint>")
+        }
+        if map.contains(req.target.query, "encryption") {
+            return reply(200, "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>")
+        }
         if map.get(req.target.query, "uploads") != None {
             return list_uploads(bucket.uploads, req.target.query)
         }

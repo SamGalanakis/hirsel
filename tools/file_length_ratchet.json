@@ -65,8 +65,8 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 2556,
-    "raise_revision": 2,
+    "lines": 2678,
+    "raise_revision": 3,
     "reason": "m2-authority-1980"
   },
   "core/std/omap.hirsel": {
@@ -83,8 +83,8 @@
     "lines": 28360
   },
   "core/std/sim/s3.hirsel": {
-    "lines": 1164,
-    "raise_revision": 1,
+    "lines": 1174,
+    "raise_revision": 2,
     "reason": "m2-authority-1980"
   },
   "core/std/string.hirsel": {

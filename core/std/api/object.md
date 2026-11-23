@@ -29,6 +29,10 @@ endpoint settings. `endpoint_host` is the lower-case configured host before
 virtual-host addressing adds the bucket name. `endpoint_secure` reports
 whether the configured scheme is HTTPS.
 
+`split` moves the request state and the worker lifetime out of a client.
+`Requests` can move to another task, where `attach` makes it a client again.
+The original task keeps `Workers` until the request task has stopped.
+
 `Meta` carries the object size, an inline ETag, optional CRC64/NVME and an
 optional 16-byte put-id. An ETag holds up to 64 octets and its length. A
 longer ETag is malformed. Writes return `Created(meta)` or `Exists` where
@@ -37,6 +41,9 @@ the operation uses a no-clobber precondition.
 | Operation | Result |
 | --- | --- |
 | `fetch(key, take into, deadline_ns)` | Appends the object and returns metadata plus the original buffer. A known body that exceeds spare capacity gives `TooLarge` before reading it. |
+| `fetch_if_changed(key, unchanged, take into, deadline_ns)` | Uses `If-None-Match`. Returns `None` on HTTP 304, or the new metadata and body on success. |
+| `bucket_location(deadline_ns)` | Reads the location constraint of the configured bucket. |
+| `bucket_encryption(deadline_ns)` | Reads the default encryption algorithm. The service's explicit absence reply yields an empty string. |
 | `fetch_range(key, lo, hi, take into, deadline_ns)` | Appends the requested half-open interval. Metadata includes the full object's size. |
 | `fetch_parts(key, take buffers, deadline_ns)` | Reads the object as 8 MiB ranges with an ETag pinned across the lanes. The last range can be shorter. Returns the original list and keeps the ranges in separate buffers. Any unused buffers are left as supplied. |
 | `store(key, take body, deadline_ns)` | Overwrites a key and returns metadata and the caller's buffer. |

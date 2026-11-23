@@ -1,55 +1,55 @@
 // Module gateway (package harness): the Directory/Gateway. It keeps a catalog of
-// sessions and runs each session's place in a place directory (RUNNER-SPEC §13) that
-// never unloads by its own sweep, so a place unloads only by its own idle stop (§14.4),
-// which never cuts active work, and an unloaded session holds no memory. A route wakes
-// its session on demand. Only a clean stop marks a session Clean; a stop with a trigger
-// due arms a wall alarm that wakes it then, and every other end leaves it Dirty and wakes
-// it again. A restarted gateway wakes every Dirty or due session.
+// sessions, each a key and an id, and runs each session's place as a group of an
+// in-process platform host (RUNNER-SPEC §14.9). The host owns the wake: a route wakes a
+// session on demand, a place unloads only by its own idle stop (§14.4), which never cuts
+// active work, and an unloaded session holds no memory. Only a clean stop writes Clean;
+// a trigger due later wakes the session then, and every other end leaves it Dirty and
+// starts it again (§14.4, §14.5).
+//
+// Two durable stores hold a session: the catalog and the host's group. A create seeds the
+// session's store, adds the group and then commits the catalog row; a delete removes the
+// row and then the group. A restarted gateway removes every group with no row and adds a
+// group for every row without one.
 
-// What the gateway's own task spends beyond its places: the catalog store, the
-// directory's actor and a session store opened to seed it.
+// What the gateway's own task spends beyond its host (`store.local.host_bytes`): the catalog
+// store and a session store opened to seed it.
 const GATEWAY_BYTES: u64 = 67108864u64
 const NEXT_ID: u64 = 0u64
 
-pub type Wake: codec + send = Dirty | Clean(Option[u64])
-type Row: codec + send { key: Bytes, wake: Wake }
-
 // How a new session's store starts: an empty session, or a fork's exported prefix.
 pub type Seeding: send = Fresh(String, harness.Narrow) | Adopt(harness.Prefix)
-pub type Refused: send = Unknown | Full | Busy | Asleep | Storage | Seed(harness.Refused) | Place(store.places.Refused) | Stopping
+pub type Refused: send = Unknown | Full | Asleep | Storage | Seed(harness.Refused) | Place(store.local.Refused) | Stopping
 
 // What the gateway has seen of a session since it started: its place's starts and ends,
 // and the nudges a front sent after it changed the session.
 pub type Marks: codec + send { ups: u64, downs: u64, nudges: u64 }
 
-// `place_bytes` is the budget every loaded session's place shares, as in the directory.
+// `place_bytes` is the budget every live session's place shares, and `idle_ms` the idle
+// time each place stops after (the host's Config, §14.2, §14.4).
 pub type GatewayConfig[T: send]: send {
     root: Dir, options: store.Options, migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
-    factory: fn() -> Result[store.places.Factory[T], Capacity], max_sessions: u64, place_bytes: u64,
-    tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[store.places.Change]], seed: T,
+    factory: store.local.Factory[T], max_sessions: u64, idle_ms: u64, place_bytes: u64,
+    tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[store.local.Change]], seed: T,
 }
 
-type GwIn[T: send]: send =
+type GwIn: send =
     Create(Bytes, Seeding, Sender[Result[u64, Refused]])
     | Delete(u64, Sender[Result[(), Refused]])
     | Listing(Sender[List[u64]])
-    | Route(u64, Sender[Result[store.places.Opener[T], Refused]])
-    | Changed(store.places.Change)
-    | Due(u64)
-    | Unload(u64, Sender[Result[store.places.Unloaded, Refused]])
+    | Reach(u64, Sender[Result[store.local.Door, Refused]])
+    | Changed(store.local.Change)
     | Downs(u64, Sender[u64])
     | AwaitDown(u64, u64, Sender[Result[u64, Refused]])
     | Nudge(u64)
     | Marked(u64, Sender[Marks])
-    | Peek(u64, Sender[Result[store.places.Opener[T], Refused]])
-    | Halt(Sender[List[store.places.Unloaded]])
+    | Halt(Sender[List[store.local.Unloaded]])
 
-pub opaque type Gateway[T: send] { to: Sender[GwIn[T]], actor: Task[()] }
-pub opaque type Door[T: send]: send { to: Sender[GwIn[T]] }
+pub opaque type Gateway[T: send] { to: Sender[GwIn], actor: Task[()] }
+pub opaque type Door[T: send]: send { to: Sender[GwIn] }
 
 // ---- the catalog ----
 
-type Catalog: send { sessions: store.Table[u64, Row], keys: store.Table[Bytes, u64], meta: store.Table[u64, u64] }
+type Catalog: send { sessions: store.Table[u64, Bytes], keys: store.Table[Bytes, u64], meta: store.Table[u64, u64] }
 
 fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
     match take r {
@@ -59,17 +59,17 @@ fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
 }
 
 fn catalog_migrate(mut phase: store.Migration) -> Result[(), store.Error] {
-    let c_row: std.codec.Codec[Row] = std.codec.of()
+    let c_key: std.codec.Codec[Bytes] = std.codec.of()
     let c_id: std.codec.Codec[u64] = std.codec.of()
-    created(store.migration_create_table(mut phase, store.spec("gateway.sessions", std.codec.key_u64(), c_row)))?
+    created(store.migration_create_table(mut phase, store.spec("gateway.sessions", std.codec.key_u64(), c_key)))?
     created(store.migration_create_table(mut phase, store.spec("gateway.keys", std.codec.key_bytes(), c_id)))?
     created(store.migration_create_table(mut phase, store.spec("gateway.meta", std.codec.key_u64(), c_id)))
 }
 
 fn catalog_handles(schema: store.Schema) -> Result[Catalog, store.Error] {
-    let c_row: std.codec.Codec[Row] = std.codec.of()
+    let c_key: std.codec.Codec[Bytes] = std.codec.of()
     let c_id: std.codec.Codec[u64] = std.codec.of()
-    Ok(Catalog(sessions: store.schema_table(schema, "gateway.sessions", std.codec.key_u64(), c_row)?,
+    Ok(Catalog(sessions: store.schema_table(schema, "gateway.sessions", std.codec.key_u64(), c_key)?,
         keys: store.schema_table(schema, "gateway.keys", std.codec.key_bytes(), c_id)?,
         meta: store.schema_table(schema, "gateway.meta", std.codec.key_u64(), c_id)?))
 }
@@ -89,100 +89,31 @@ fn id_of(name: String) -> Option[u64] {
 
 // ---- the actor ----
 
-type Begin[T: send]: send { config: GatewayConfig[T], inbox: Receiver[GwIn[T]], me: Sender[GwIn[T]], ready: Sender[Result[(), Refused]] }
-type Forward[T: send]: send { from: Receiver[store.places.Change], to: Sender[GwIn[T]] }
-type Waking[T: send]: send { opener: store.places.Opener[T], name: String }
+type Begin[T: send]: send { config: GatewayConfig[T], inbox: Receiver[GwIn], me: Sender[GwIn], ready: Sender[Result[(), Refused]] }
+type Forward: send { from: Receiver[store.local.Change], to: Sender[GwIn] }
+type Removing: send { hd: store.local.Door, name: String, reply: Option[Sender[Result[(), Refused]]] }
 
-type Actor[T: send] {
+type Actor {
     db: store.Db, catalog: Catalog, root: Dir, options: store.Options,
-    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits],
-    factory: fn() -> Result[store.places.Factory[T], Capacity], max_sessions: u64, count: u64,
-    directory: store.places.Directory[T], tasks: Tasks, clock: Clock, random: Random, me: Sender[GwIn[T]],
-    watch: Option[Sender[store.places.Change]], alarms: List[(u64, Task[()])], wakers: List[(u64, Task[()])],
+    migrate: StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits], max_sessions: u64, count: u64,
+    host: store.local.Local, tasks: Tasks, clock: Clock, random: Random,
+    watch: Option[Sender[store.local.Change]], removers: List[Task[()]],
     // Each session's marks since the gateway started, and who waits for its next end.
-    closers: List[Task[()]], marks: List[(u64, Marks)], waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
+    marks: List[(u64, Marks)], waiters: List[(u64, u64, Sender[Result[u64, Refused]])],
 }
 
-fn forward_changes[T: send](take f: Forward[T]) -> () waits {
+fn forward_changes(take f: Forward) -> () waits {
     while let Ok(take c) = channel.receive(f.from) {
         if let Error(_) = channel.send(f.to, Changed(take c)) { return }
     }
 }
 
-// Opens a session and lets go of it: the place runs what is due and stops itself when idle.
-fn wake_once[T: send](take w: Waking[T]) -> () waits {
-    let _ = store.places.open(w.opener, w.name)
+fn has_row(a: Actor, id: u64) -> bool {
+    let snap = store.snapshot(a.db)
+    match store.get(snap, store.shape(a.catalog.sessions), id) { Ok(Some(_)) => true, _ => false }
 }
 
-fn write_row(mut db: store.Db, id: u64, take row: Row) -> Result[(), Refused] waits {
-    let Ok(catalog) = store.with_schema(db, code.describe(catalog_handles)) else { return Error(Storage) }
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, catalog.sessions, id, clone(row))
-    })
-    let Ok(Committed(done)) = take ran else { return Error(Storage) }
-    if let Error(_) = store.durable(mut db, done.ticket) { return Error(Storage) }
-    Ok(())
-}
-
-fn read_row(db: store.Db, id: u64) -> Option[Row] {
-    let Ok(catalog) = store.with_schema(db, code.describe(catalog_handles)) else { return None }
-    let snap = store.snapshot(db)
-    match store.get(snap, store.shape(catalog.sessions), id) { Ok(Some(row)) => Some(clone(row)), _ => None }
-}
-
-fn put_row[T: send](mut a: Actor[T], id: u64, take row: Row) -> Result[(), Refused] waits { write_row(mut a.db, id, take row) }
-
-fn row_of[T: send](a: Actor[T], id: u64) -> Option[Row] { read_row(a.db, id) }
-
-// Records how a place ended as its row's wake.
-fn record_end(mut db: store.Db, u: store.places.Unloaded) -> () waits {
-    let Some(id) = id_of(u.name) else { return }
-    let Some(row) = read_row(db, id) else { return }
-    let _ = write_row(mut db, id, Row(key: clone(row.key), wake: ended_wake(u.ended)))
-}
-
-fn mark[T: send](mut a: Actor[T], id: u64, take wake: Wake) -> Result[(), Refused] waits {
-    let Some(row) = row_of(a, id) else { return Error(Unknown) }
-    put_row(mut a, id, Row(key: clone(row.key), wake: take wake))
-}
-
-fn arm[T: send](mut a: Actor[T], id: u64, at_ms: u64) -> () waits {
-    disarm(mut a, id)
-    let alarm = std.clock.wall_alarm(a.tasks, a.clock, at_ms, a.me, Due(id))
-    list.push(mut a.alarms, (id, take alarm))
-}
-
-fn disarm[T: send](mut a: Actor[T], id: u64) -> () waits {
-    let mut kept: List[(u64, Task[()])] = list.new()
-    while let Some((at, take alarm)) = list.pop(mut a.alarms) {
-        if at == id { let _ = task.cancel_join(take alarm) } else { list.push(mut kept, (at, take alarm)) }
-    }
-    a.alarms = take kept
-}
-
-// Writes Dirty before the start, so a gateway that dies while the place runs wakes it again.
-fn wake_now[T: send](mut a: Actor[T], id: u64) -> () waits {
-    if let Error(_) = mark(mut a, id, Dirty) { return }
-    disarm(mut a, id)
-    let mut kept: List[(u64, Task[()])] = list.new()
-    while let Some((at, take waker)) = list.pop(mut a.wakers) {
-        if at == id { let _ = task.join(take waker) } else { list.push(mut kept, (at, take waker)) }
-    }
-    a.wakers = take kept
-    let job = Waking(opener: store.places.opener(a.directory), name: name_of(id))
-    let run: fn(take Waking[T]) -> () waits = wake_once
-    let waker = task.spawn(a.tasks, bytes 65536u64, take job, run)
-    list.push(mut a.wakers, (id, take waker))
-}
-
-fn listed[T: send](a: Actor[T], id: u64) -> Result[store.places.Listed[T], Refused] waits {
-    let name = name_of(id)
-    let Ok(dir) = std.dir.narrow(a.root, name) else { return Error(Storage) }
-    let Ok(take factory) = (a.factory)() else { return Error(Full) }
-    Ok(store.places.Listed(name: take name, factory: take factory, backing: Disk(dir, clone(a.options)), selection: Reopen))
-}
-
-fn seed_store[T: send](a: Actor[T], dir: Dir, seeding: Seeding) -> Result[(), Refused] waits {
+fn seed_store(a: Actor, dir: Dir, seeding: Seeding) -> Result[(), Refused] waits {
     let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) { Ok(take v) => take v, Error(_) => return Error(Storage) }
     if let Error(_) = store.run_migration(mut db, a.tasks, a.migrate) { let _ = store.close(take db); return Error(Storage) }
     let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { let _ = store.close(take db); return Error(Storage) }
@@ -201,10 +132,11 @@ fn seed_store[T: send](a: Actor[T], dir: Dir, seeding: Seeding) -> Result[(), Re
     seeded
 }
 
-// A create is idempotent by its key. The store is seeded before the row commits and the
-// id is taken by that commit, so a create that dies first leaves only a directory the
-// next create of that id clears; an id is never reused once committed.
-fn on_create[T: send](mut a: Actor[T], take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
+// A create is idempotent by its key. The store is seeded and the group added before the
+// row commits, and the id is taken by that commit, so a create that dies first leaves a
+// directory and a group no row names: the next create of that id clears the directory
+// and finds the group, and a restart removes it. An id is never reused once committed.
+fn on_create(mut a: Actor, take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
     let snap = store.snapshot(a.db)
     match store.get(snap, store.shape(a.catalog.keys), key) {
         Ok(Some(id)) => return Ok(id),
@@ -218,55 +150,71 @@ fn on_create[T: send](mut a: Actor[T], take key: Bytes, take seeding: Seeding) -
     if let Error(_) = std.dir.create_dir(a.root, name) { return Error(Storage) }
     let Ok(dir) = std.dir.narrow(a.root, name) else { return Error(Storage) }
     seed_store(a, dir, seeding)?
+    match store.local.add(store.local.door(a.host), name) {
+        Ok(()) => (),
+        // A group left by a create of this id that died before its row: it never ran,
+        // since only a row's session is routed.
+        Error(Exists) => (),
+        Error(take why) => return Error(Place(take why)),
+    }
     let Ok(catalog) = store.with_schema(a.db, code.describe(catalog_handles)) else { return Error(Storage) }
     let ran = store.run(mut a.db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        store.put(mut tx, catalog.sessions, id, Row(key: clone(key), wake: Clean(None)))?
+        store.put(mut tx, catalog.sessions, id, clone(key))?
         store.put(mut tx, catalog.keys, clone(key), id)?
         store.put(mut tx, catalog.meta, NEXT_ID, id + 1u64)
     })
     let Ok(Committed(done)) = take ran else { return Error(Storage) }
     if let Error(_) = store.durable(mut a.db, done.ticket) { return Error(Storage) }
     a.count += 1u64
-    let l = listed(a, id)?
-    match store.places.add(store.places.opener(a.directory), take l) { Ok(()) => Ok(id), Error(_) => Error(Full) }
+    Ok(id)
 }
 
-fn on_delete[T: send](mut a: Actor[T], id: u64) -> Result[(), Refused] waits {
-    let Some(row) = row_of(a, id) else { return Error(Unknown) }
-    let name = name_of(id)
-    match store.places.close(store.places.opener(a.directory), name) {
-        Ok(_) => (),
-        Error(NotLoaded) => (),
-        Error(Leased) => return Error(Busy),
-        Error(Unknown) => (),
-        Error(Stopping) => return Error(Stopping),
+// Removing a group waits for its place to drain, and a place's own effects may need the
+// gateway meanwhile (a subagent tool), so a remover task waits, not the actor.
+fn remove_once(take job: Removing) -> () waits {
+    let Removing(hd: take hd, name: take name, reply: take reply) = take job
+    let answer: Result[(), Refused] = match store.local.remove(hd, name) {
+        Ok(()) => Ok(()),
+        Error(Unknown) => Ok(()),
+        Error(Stopping) => Error(Stopping),
+        Error(take why) => Error(Place(take why)),
     }
-    match store.places.remove(store.places.opener(a.directory), name) {
-        Ok(()) => (),
-        Error(Unknown) => (),
-        Error(Loaded) => return Error(Busy),
-        Error(Stopping) => return Error(Stopping),
+    if let Some(r) = take reply { let _ = channel.send(r, take answer) }
+}
+
+fn start_remove(mut a: Actor, take name: String, take reply: Option[Sender[Result[(), Refused]]]) -> () {
+    let job = Removing(hd: store.local.door(a.host), name: take name, reply: take reply)
+    let run: fn(take Removing) -> () waits = remove_once
+    list.push(mut a.removers, task.spawn(a.tasks, bytes 65536u64, take job, run))
+}
+
+// Deletes the row first: a gateway that dies before the group is removed removes it at
+// its next start, and a deleted session is never routed again.
+fn on_delete(mut a: Actor, id: u64, take reply: Sender[Result[(), Refused]]) -> () waits {
+    let snap = store.snapshot(a.db)
+    let key: Bytes = match store.get(snap, store.shape(a.catalog.sessions), id) {
+        Ok(Some(k)) => clone(k),
+        Ok(None) => { let _ = channel.send(reply, Error(Unknown)); return },
+        Error(_) => { let _ = channel.send(reply, Error(Storage)); return },
     }
-    disarm(mut a, id)
-    let Ok(catalog) = store.with_schema(a.db, code.describe(catalog_handles)) else { return Error(Storage) }
+    let Ok(catalog) = store.with_schema(a.db, code.describe(catalog_handles)) else { let _ = channel.send(reply, Error(Storage)); return }
     let ran = store.run(mut a.db, None, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] {
-        let _ = store.delete(mut tx, catalog.keys, clone(row.key))?
+        let _ = store.delete(mut tx, catalog.keys, clone(key))?
         let _ = store.delete(mut tx, catalog.sessions, id)?
         Ok(())
     })
-    let Ok(Committed(done)) = take ran else { return Error(Storage) }
-    if let Error(_) = store.durable(mut a.db, done.ticket) { return Error(Storage) }
+    let Ok(Committed(done)) = take ran else { let _ = channel.send(reply, Error(Storage)); return }
+    if let Error(_) = store.durable(mut a.db, done.ticket) { let _ = channel.send(reply, Error(Storage)); return }
     a.count -= 1u64
     let mut waiting: List[(u64, u64, Sender[Result[u64, Refused]])] = list.new()
-    while let Some((at, after, take reply)) = list.pop(mut a.waiters) {
-        if at == id { let _ = channel.send(reply, Error(Unknown)) } else { list.push(mut waiting, (at, after, take reply)) }
+    while let Some((at, after, take r)) = list.pop(mut a.waiters) {
+        if at == id { let _ = channel.send(r, Error(Unknown)) } else { list.push(mut waiting, (at, after, take r)) }
     }
     a.waiters = take waiting
-    let _ = std.dir.remove_all(a.root, name)
-    Ok(())
+    start_remove(mut a, name_of(id), Some(take reply))
 }
 
-fn on_listing[T: send](a: Actor[T]) -> List[u64] {
+fn on_listing(a: Actor) -> List[u64] {
     let mut ids: List[u64] = list.new()
     let snap = store.snapshot(a.db)
     let Ok(take rows) = store.scan(snap, store.shape(a.catalog.sessions), Unbounded, Unbounded) else { return ids }
@@ -275,52 +223,37 @@ fn on_listing[T: send](a: Actor[T]) -> List[u64] {
     ids
 }
 
-fn on_route[T: send](mut a: Actor[T], id: u64) -> Result[store.places.Opener[T], Refused] waits {
-    let Some(row) = row_of(a, id) else { return Error(Unknown) }
-    if let Clean(_) = row.wake {
-        put_row(mut a, id, Row(key: clone(row.key), wake: Dirty))?
-        disarm(mut a, id)
-    }
-    Ok(store.places.opener(a.directory))
+// The host's door for a session in the catalog; the caller routes, peeks or unloads
+// through it, outside the actor.
+fn on_reach(a: Actor, id: u64) -> Result[store.local.Door, Refused] {
+    if has_row(a, id) { Ok(store.local.door(a.host)) } else { Error(Unknown) }
 }
 
-fn ended_wake(ended: Result[store.runner.Ended, store.runner.StartError]) -> Wake {
-    match ended { Ok(Stopped(next)) => Clean(next), _ => Dirty }
-}
-
-fn marks_of[T: send](a: Actor[T], id: u64) -> Marks {
+fn marks_of(a: Actor, id: u64) -> Marks {
     for m in a.marks { if m.0 == id { return Marks(ups: m.1.ups, downs: m.1.downs, nudges: m.1.nudges) } }
     Marks(ups: 0u64, downs: 0u64, nudges: 0u64)
 }
 
-fn downs_of[T: send](a: Actor[T], id: u64) -> u64 { marks_of(a, id).downs }
+fn downs_of(a: Actor, id: u64) -> u64 { marks_of(a, id).downs }
 
-fn put_marks[T: send](mut a: Actor[T], id: u64, take m: Marks) -> () {
+fn put_marks(mut a: Actor, id: u64, take m: Marks) -> () {
     let mut kept: List[(u64, Marks)] = list.new()
     while let Some((at, take old)) = list.pop(mut a.marks) { if at != id { list.push(mut kept, (at, take old)) } }
     list.push(mut kept, (id, take m))
     a.marks = take kept
 }
 
-fn count_up[T: send](mut a: Actor[T], id: u64) -> () {
+fn count_up(mut a: Actor, id: u64) -> () {
     let m = marks_of(a, id)
     put_marks(mut a, id, Marks(ups: m.ups + 1u64, downs: m.downs, nudges: m.nudges))
 }
 
-fn on_nudge[T: send](mut a: Actor[T], id: u64) -> () {
+fn on_nudge(mut a: Actor, id: u64) -> () {
     let m = marks_of(a, id)
     put_marks(mut a, id, Marks(ups: m.ups, downs: m.downs, nudges: m.nudges + 1u64))
 }
 
-// A session's opener only while its place runs, as far as the gateway has seen: a
-// peek never starts a place.
-fn on_peek[T: send](a: Actor[T], id: u64) -> Result[store.places.Opener[T], Refused] {
-    let Some(_) = row_of(a, id) else { return Error(Unknown) }
-    let m = marks_of(a, id)
-    if m.ups > m.downs { Ok(store.places.opener(a.directory)) } else { Error(Asleep) }
-}
-
-fn count_down[T: send](mut a: Actor[T], id: u64) -> u64 waits {
+fn count_down(mut a: Actor, id: u64) -> () waits {
     let m = marks_of(a, id)
     let n = m.downs + 1u64
     put_marks(mut a, id, Marks(ups: m.ups, downs: n, nudges: m.nudges))
@@ -329,89 +262,43 @@ fn count_down[T: send](mut a: Actor[T], id: u64) -> u64 waits {
         if at == id && n > after { let _ = channel.send(reply, Ok(n)) } else { list.push(mut waiting, (at, after, take reply)) }
     }
     a.waiters = take waiting
-    n
 }
 
-fn on_await[T: send](mut a: Actor[T], id: u64, after: u64, take reply: Sender[Result[u64, Refused]]) -> () {
+fn on_await(mut a: Actor, id: u64, after: u64, take reply: Sender[Result[u64, Refused]]) -> () {
     let n = downs_of(a, id)
     if n > after { let _ = channel.try_send(reply, Ok(n)); return }
-    match row_of(a, id) {
-        Some(_) => list.push(mut a.waiters, (id, after, take reply)),
-        None => { let _ = channel.try_send(reply, Error(Unknown)) },
-    }
+    if has_row(a, id) { list.push(mut a.waiters, (id, after, take reply)) } else { let _ = channel.try_send(reply, Error(Unknown)) }
 }
 
-// Records how a place ended, then wakes it again or arms its due time. A run that was
-// cut (Forced, Unstarted) is woken at once; a place that could not start is left Dirty
-// for the next route or gateway start, with no backoff.
-fn on_down[T: send](mut a: Actor[T], u: store.places.Unloaded) -> () waits {
-    let Some(id) = id_of(u.name) else { return }
-    let _ = count_down(mut a, id)
-    let wake_to = ended_wake(u.ended)
-    let again = match u.ended { Ok(Forced(_)) => true, Ok(Unstarted) => true, _ => false }
-    let due: Option[u64] = match wake_to { Clean(Some(t)) => Some(t), _ => None }
-    if let Error(_) = mark(mut a, id, take wake_to) { return }
-    if again { wake_now(mut a, id) } else if let Some(t) = due { arm(mut a, id, t) }
-}
-
-fn on_changed[T: send](mut a: Actor[T], take c: store.places.Change) -> () waits {
+fn on_changed(mut a: Actor, take c: store.local.Change) -> () waits {
     match c {
-        // The directory sends a name's Down before it starts it again, so a start's Up
-        // marks Dirty after its predecessor's Down marked Clean.
-        Up(name) => if let Some(id) = id_of(name) {
-            count_up(mut a, id)
-            if let Some(row) = row_of(a, id) {
-                if let Clean(_) = row.wake { let _ = put_row(mut a, id, Row(key: clone(row.key), wake: Dirty)) }
-            }
-        },
-        Down(u) => on_down(mut a, u),
+        Up(name) => if let Some(id) = id_of(name) { count_up(mut a, id) },
+        Down(u) => if let Some(id) = id_of(u.name) { count_down(mut a, id) },
     }
     if let Some(w) = a.watch { let _ = channel.try_send(w, take c) }
 }
 
-type Closing[T: send]: send { opener: store.places.Opener[T], name: String, reply: Sender[Result[store.places.Unloaded, Refused]] }
-
-// Closing waits for the place's stop, and a place's own effects may need the gateway
-// meanwhile (a subagent tool), so a closer task waits, not the actor.
-fn close_once[T: send](take job: Closing[T]) -> () waits {
-    let Closing(opener: take opener, name: take name, reply: take reply) = take job
-    let answer: Result[store.places.Unloaded, Refused] = match store.places.close(opener, name) {
-        Ok(take u) => Ok(take u),
-        Error(Leased) => Error(Busy),
-        Error(Stopping) => Error(Stopping),
-        Error(_) => Error(Unknown),
-    }
-    let _ = channel.send(reply, take answer)
-}
-
-fn on_unload[T: send](mut a: Actor[T], id: u64, take reply: Sender[Result[store.places.Unloaded, Refused]]) -> () waits {
-    let Some(_) = row_of(a, id) else { let _ = channel.send(reply, Error(Unknown)); return }
-    let job = Closing(opener: store.places.opener(a.directory), name: name_of(id), reply: take reply)
-    let run: fn(take Closing[T]) -> () waits = close_once
-    list.push(mut a.closers, task.spawn(a.tasks, bytes 65536u64, take job, run))
-}
-
-fn on_due[T: send](mut a: Actor[T], id: u64) -> () waits {
-    let Some(row) = row_of(a, id) else { return }
-    if let Clean(Some(t)) = row.wake {
-        if t <= host.wall_ms(a.clock) { wake_now(mut a, id) } else { arm(mut a, id, t) }
-    }
-}
-
-// Lists every session and wakes each one that is Dirty or due.
-fn recover[T: send](mut a: Actor[T]) -> Result[(), Refused] waits {
+// Brings the host's groups to the catalog: a group no row names is removed (a create or
+// a delete died between its two commits) and a row with no group gets one.
+fn recover(mut a: Actor) -> Result[(), Refused] waits {
     let ids = on_listing(a)
-    let now = host.wall_ms(a.clock)
-    for id in ids {
-        let l = listed(a, id)?
-        if let Error(_) = store.places.add(store.places.opener(a.directory), take l) { return Error(Full) }
-        a.count += 1u64
-        let Some(row) = row_of(a, id) else { return Error(Storage) }
-        match row.wake {
-            Dirty => wake_now(mut a, id),
-            Clean(Some(t)) => if t <= now { wake_now(mut a, id) } else { arm(mut a, id, t) },
-            Clean(None) => (),
+    let names = store.local.groups(store.local.door(a.host))
+    for name in names {
+        let named = match id_of(name) { Some(id) => list.contains(ids, id), None => false }
+        if !named {
+            match store.local.remove(store.local.door(a.host), name) {
+                Ok(()) => (),
+                Error(Unknown) => (),
+                Error(take why) => return Error(Place(take why)),
+            }
         }
+    }
+    for id in ids {
+        let name = name_of(id)
+        if !list.contains(names, name) {
+            if let Error(take why) = store.local.add(store.local.door(a.host), name) { return Error(Place(take why)) }
+        }
+        a.count += 1u64
     }
     Ok(())
 }
@@ -427,58 +314,52 @@ fn open_catalog(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: 
 
 fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
     let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
-    let GatewayConfig(root: root, options: take options, migrate: migrate, factory: factory, max_sessions: max_sessions, place_bytes: place_bytes,
+    let GatewayConfig(root: root, options: take options, migrate: migrate, factory: take making, max_sessions: max_sessions, idle_ms: idle_ms, place_bytes: place_bytes,
         tasks: tasks, clock: clock, random: random, net: net, watch: take watch, seed: take seed) = take config
     let (db, catalog) = match open_catalog(tasks, root, clock, random, options) {
         Ok(take opened) => take opened,
         Error(take why) => { let _ = channel.send(ready, Error(take why)); return },
     }
-    let (dir_watch, changes): (Sender[store.places.Change], Receiver[store.places.Change]) = channel.new(256u64)
-    let dconfig = store.places.DirectoryConfig(idle_ms: None, max_places: max_sessions, max_names: max_sessions, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, watch: Some(take dir_watch))
-    let none_listed: List[store.places.Listed[T]] = list.new()
-    let directory = match store.places.directory(take none_listed, take dconfig, take seed) {
+    let (host_watch, changes): (Sender[store.local.Change], Receiver[store.local.Change]) = channel.new(256u64)
+    let lconfig = store.local.Config(root: root, options: clone(options), factory: take making, seed: take seed, max_places: max_sessions, idle_ms: idle_ms,
+        place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take host_watch))
+    let local_host = match store.local.local(take lconfig) {
         Ok(take made) => take made,
-        Error(_) => { let _ = store.close(take db); let _ = channel.send(ready, Error(Full)); return },
+        Error(take why) => { let _ = store.close(take db); let _ = channel.send(ready, Error(Place(take why))); return },
     }
-    let forward: fn(take Forward[T]) -> () waits = forward_changes
+    let forward: fn(take Forward) -> () waits = forward_changes
     let forwarding = task.spawn(tasks, bytes 65536u64, Forward(from: take changes, to: channel.sender(me)), forward)
-    let mut a = Actor(db: take db, catalog: take catalog, root: root, options: take options, migrate: migrate, factory: factory,
-        max_sessions: max_sessions, count: 0u64, directory: take directory, tasks: tasks, clock: clock, random: random,
-        me: take me, watch: take watch, alarms: list.new(), wakers: list.new(), closers: list.new(), marks: list.new(), waiters: list.new())
+    let mut a = Actor(db: take db, catalog: take catalog, root: root, options: take options, migrate: migrate, max_sessions: max_sessions, count: 0u64,
+        host: take local_host, tasks: tasks, clock: clock, random: random, watch: take watch, removers: list.new(), marks: list.new(), waiters: list.new())
+    let _ = take me
     let recovered = recover(mut a)
     let failed = match recovered { Ok(()) => false, Error(_) => true }
     let _ = channel.send(ready, take recovered)
-    let mut halted: Option[Sender[List[store.places.Unloaded]]] = None
+    let mut halted: Option[Sender[List[store.local.Unloaded]]] = None
     if !failed {
         while let Ok(take m) = channel.receive(inbox) {
             match take m {
                 Create(take key, take seeding, reply) => { let _ = channel.send(reply, on_create(mut a, take key, take seeding)) },
-                Delete(id, reply) => { let _ = channel.send(reply, on_delete(mut a, id)) },
+                Delete(id, take reply) => on_delete(mut a, id, take reply),
                 Listing(reply) => { let _ = channel.send(reply, on_listing(a)) },
-                Route(id, reply) => { let _ = channel.send(reply, on_route(mut a, id)) },
+                Reach(id, reply) => { let _ = channel.send(reply, on_reach(a, id)) },
                 Changed(take c) => on_changed(mut a, take c),
-                Due(id) => on_due(mut a, id),
-                Unload(id, take reply) => on_unload(mut a, id, take reply),
                 Downs(id, reply) => { let _ = channel.send(reply, downs_of(a, id)) },
                 AwaitDown(id, after, take reply) => on_await(mut a, id, after, take reply),
                 Nudge(id) => on_nudge(mut a, id),
                 Marked(id, reply) => { let _ = channel.send(reply, marks_of(a, id)) },
-                Peek(id, reply) => { let _ = channel.send(reply, on_peek(a, id)) },
                 Halt(take reply) => { halted = Some(take reply)
                     break },
             }
         }
     }
-    while let Some((_, take alarm)) = list.pop(mut a.alarms) { let _ = task.cancel_join(take alarm) }
-    while let Some((_, take waker)) = list.pop(mut a.wakers) { let _ = task.join(take waker) }
-    let Actor(db: take catalog_db, directory: take held, closers: take closers, ..) = take a
-    let unloaded = store.places.stop(take held)
-    let mut closing = take closers
-    while let Some(take closer) = list.pop(mut closing) { let _ = task.join(take closer) }
-    let mut db_left = take catalog_db
-    for u in unloaded { record_end(mut db_left, u) }
-    let _ = store.close(take db_left)
+    let Actor(db: take catalog_db, host: take held, removers: take removers, waiters: take waiters, ..) = take a
+    let unloaded = store.local.stop(take held)
+    let mut removing = take removers
+    while let Some(take remover) = list.pop(mut removing) { let _ = task.join(take remover) }
+    let mut left = take waiters
+    while let Some((_, _, take r)) = list.pop(mut left) { let _ = channel.send(r, Error(Stopping)) }
+    let _ = store.close(take catalog_db)
     let _ = take inbox
     let _ = task.join(take forwarding)
     if let Some(reply) = take halted { let _ = channel.send(reply, take unloaded) }
@@ -488,10 +369,10 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
 
 // A gateway's inbox, made before the gateway so that its seed can hold a door to it
 // (a session's subagent tool starts its child through that door).
-pub type Doorway[T: send]: send { to: Sender[GwIn[T]], inbox: Receiver[GwIn[T]] }
+pub type Doorway[T: send]: send { to: Sender[GwIn], inbox: Receiver[GwIn] }
 
 pub fn doorway[T: send]() -> Doorway[T] {
-    let (to, inbox): (Sender[GwIn[T]], Receiver[GwIn[T]]) = channel.new(256u64)
+    let (to, inbox): (Sender[GwIn], Receiver[GwIn]) = channel.new(256u64)
     Doorway(to: take to, inbox: take inbox)
 }
 
@@ -500,9 +381,9 @@ pub fn door_of[T: send](w: Doorway[T]) -> Door[T] { Door(to: channel.sender(w.to
 pub fn copy_door[T: send](d: Door[T]) -> Door[T] { Door(to: channel.sender(d.to)) }
 
 pub fn gateway[T: send](take way: Doorway[T], take config: GatewayConfig[T]) -> Result[Gateway[T], Refused] waits {
-    if config.max_sessions == 0u64 || config.place_bytes == 0u64 { return Error(Full) }
+    if config.max_sessions == 0u64 || config.place_bytes == 0u64 || config.idle_ms == 0u64 { return Error(Full) }
     let tasks = config.tasks
-    let need = int.saturating_add(config.place_bytes, GATEWAY_BYTES)
+    let need = int.saturating_add(store.local.host_bytes(config.options, config.place_bytes), GATEWAY_BYTES)
     let Doorway(to: take to, inbox: take inbox) = take way
     let (ready, started): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     let begin = Begin(config: take config, inbox: take inbox, me: channel.sender(to), ready: take ready)
@@ -526,7 +407,7 @@ pub fn create[T: send](d: Door[T], take key: Bytes, take seeding: Seeding) -> Re
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 
-// Unloads a session, unlists it and deletes its store. A leased session is Busy.
+// Unlists a session, then drains its place and deletes its store.
 pub fn delete[T: send](d: Door[T], id: u64) -> Result[(), Refused] waits {
     let (reply, answer): (Sender[Result[(), Refused]], Receiver[Result[(), Refused]]) = channel.new(1u64)
     if let Error(_) = channel.send(d.to, Delete(id, take reply)) { return Error(Stopping) }
@@ -539,21 +420,27 @@ pub fn listing[T: send](d: Door[T]) -> List[u64] waits {
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => list.new() }
 }
 
-// Routes to a session, starting its place if it is unloaded. The lease's status holds
-// the place's address; while the lease lives the directory does not close the place.
-pub fn route[T: send](d: Door[T], id: u64) -> Result[store.places.Lease, Refused] waits {
-    let (reply, answer): (Sender[Result[store.places.Opener[T], Refused]], Receiver[Result[store.places.Opener[T], Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Route(id, take reply)) { return Error(Stopping) }
-    let opener = match channel.receive(answer) { Ok(Ok(take o)) => take o, Ok(Error(take why)) => return Error(take why), Error(_) => return Error(Stopping) }
-    match store.places.open(opener, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
+fn reach[T: send](d: Door[T], id: u64) -> Result[store.local.Door, Refused] waits {
+    let (reply, answer): (Sender[Result[store.local.Door, Refused]], Receiver[Result[store.local.Door, Refused]]) = channel.new(1u64)
+    if let Error(_) = channel.send(d.to, Reach(id, take reply)) { return Error(Stopping) }
+    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 
-// Like `route`, but only to a session whose place runs; it never starts one.
-pub fn peek[T: send](d: Door[T], id: u64) -> Result[store.places.Lease, Refused] waits {
-    let (reply, answer): (Sender[Result[store.places.Opener[T], Refused]], Receiver[Result[store.places.Opener[T], Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Peek(id, take reply)) { return Error(Stopping) }
-    let opener = match channel.receive(answer) { Ok(Ok(take o)) => take o, Ok(Error(take why)) => return Error(take why), Error(_) => return Error(Stopping) }
-    match store.places.open(opener, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
+// Routes to a session, waking its place if it is unloaded. The lease's status holds the
+// place's address. A lease does not hold the place: a client's session does (§14.9).
+pub fn route[T: send](d: Door[T], id: u64) -> Result[store.local.Lease, Refused] waits {
+    let hd = reach(d, id)?
+    match store.local.route(hd, name_of(id)) { Ok(take lease) => Ok(take lease), Error(take why) => Error(Place(take why)) }
+}
+
+// Like `route`, but only to a session whose place serves; it never starts one.
+pub fn peek[T: send](d: Door[T], id: u64) -> Result[store.local.Lease, Refused] waits {
+    let hd = reach(d, id)?
+    match store.local.peek(hd, name_of(id)) {
+        Ok(take lease) => Ok(take lease),
+        Error(Busy) => Error(Asleep),
+        Error(take why) => Error(Place(take why)),
+    }
 }
 
 // Tells the gateway that a front changed a session, so streams that follow it look again.
@@ -565,21 +452,21 @@ pub fn marks[T: send](d: Door[T], id: u64) -> Marks waits {
     match channel.receive(answer) { Ok(m) => m, Error(_) => Marks(ups: 0u64, downs: 0u64, nudges: 0u64) }
 }
 
-// Stops every loaded session through its graceful stop and records how each ended.
-pub fn stop[T: send](take g: Gateway[T]) -> List[store.places.Unloaded] waits {
+// Stops every live session through its graceful stop and answers how each ended.
+pub fn stop[T: send](take g: Gateway[T]) -> List[store.local.Unloaded] waits {
     let Gateway(to: take to, actor: take actor) = take g
-    let (reply, answer): (Sender[List[store.places.Unloaded]], Receiver[List[store.places.Unloaded]]) = channel.new(1u64)
+    let (reply, answer): (Sender[List[store.local.Unloaded]], Receiver[List[store.local.Unloaded]]) = channel.new(1u64)
     let _ = channel.send(to, Halt(take reply))
     let ended = match channel.receive(answer) { Ok(take done) => take done, Error(_) => list.new() }
     let _ = task.join(take actor)
     take ended
 }
 
-// Closes a session's place now, as an operator would; a cut run is woken again at once.
-pub fn unload[T: send](d: Door[T], id: u64) -> Result[store.places.Unloaded, Refused] waits {
-    let (reply, answer): (Sender[Result[store.places.Unloaded, Refused]], Receiver[Result[store.places.Unloaded, Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Unload(id, take reply)) { return Error(Stopping) }
-    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
+// Stops a session's place now, as an operator would (§14.4 "Unload"); a cut run is
+// started again by the host.
+pub fn unload[T: send](d: Door[T], id: u64) -> Result[store.local.Unloaded, Refused] waits {
+    let hd = reach(d, id)?
+    match store.local.unload(hd, name_of(id)) { Ok(take u) => Ok(take u), Error(take why) => Error(Place(take why)) }
 }
 
 // How many times the session's place has ended since the gateway started.
@@ -636,7 +523,7 @@ type Seen: send = Busy(String, u64) | Ended(String, String)
 // of its transcript query.
 fn look[T: send](d: Door[T], id: u64, c: Child, credential: Bytes, take submit: Option[harness.Submit]) -> Result[Seen, harness.Fault] waits {
     let Ok(lease) = route(d, id) else { return Error(Unavailable) }
-    let Some(address) = latest.read(store.places.status(lease)).addr else { return Error(Unavailable) }
+    let Some(address) = latest.read(store.local.status(lease)).addr else { return Error(Unavailable) }
     let Ok(take opened) = store.fixture.client_at(c.tasks, c.net, c.clock, c.random, c.keys, c.socket, address, Some(clone(credential)), 0u64, c.within_ms) else { return Error(Unavailable) }
     let _ = take lease
     let mut client = take opened

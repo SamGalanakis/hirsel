@@ -32,6 +32,7 @@ The harness gateway runs one place per conversation in its own process, and §14
 | 2 | Unload on request | **NEW: `platform.unload`** | §14.4 "Unload". An operator can ask a live group's serving child to stop by the idle stop's drain; the row then goes `Clean` or `Dirty` by the clean-report rule, so an unload never loses a wake. | the gateway closes a session |
 | 3 | The store's identity in `Status` | **NEW: `Status.store_id`, `Status.retain_from`** | §12.1. `operate` publishes the store's identity and retention start at activation, so an in-process launcher can report `PlaceOpened` as a process child does through its control socket. | §14.9 |
 | 4 | Directory laws | **PORTED: PD1 to PD4 as `local_*`** | §14.9 laws. Same properties, stated against host groups. | §14.8 row 9 |
+| 5 | The harness gateway | **MOVED: sessions are host groups** | The gateway (programs/harness) runs each session as a `local` group. Its catalog keeps only key and id; the wake row, due wakes and retries are the host's. A create seeds the store, adds the group and then commits the row; a delete removes the row and then the group; a start removes groups no row names and adds a group for each row without one. | v2.30 row 6 |
 
 Reversible: additive. `local` and `platform.unload` have no caller outside the host's own harness and the gateway.
 

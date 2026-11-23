@@ -947,7 +947,7 @@ const LIVE_GRANT_BYTES: u64 = 4194304u64
 
 const HTTP_MS: u64 = 5000u64
 
-fn live_place(take supplied: store.places.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
+fn live_place(take supplied: store.local.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
     let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, Services(helper: channel.sender(s.helper), clock: s.clock, live: match s.live {
         Some(l) => Some(copy_live(l, supplied.name)),
         None => None,
@@ -956,8 +956,8 @@ fn live_place(take supplied: store.places.Supplied, s: Services) -> Result[store
     Ok(take config)
 }
 
-fn live_factory() -> Result[store.places.Factory[Services], Capacity] {
-    store.places.seeded_factory(live_place)
+fn live_factory() -> store.local.Factory[Services] {
+    store.local.seeded_factory(live_place)
 }
 
 fn json[A: codec](a: A) -> Bytes {
@@ -1310,7 +1310,7 @@ pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: T
     let live = Live(net: network, address: upstream, key: secret.share(api_key), out: out, preview: harness.preview.door(hub), group: "")
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let d = harness.gateway.door_of(way)
-    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: live_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live), stream: None))
+    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: live_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: network, watch: None, seed: Services(helper: take helper, clock: clock, live: Some(take live), stream: None))
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
         return quit(out, "could not start the gateway")
     }
@@ -1336,7 +1336,7 @@ pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: T
 }
 
 // ---- the scripted gateway that the TypeScript client is tested against ----
-fn scripted_place(take supplied: store.places.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
+fn scripted_place(take supplied: store.local.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
     let mut config = settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: copy_stream(s.stream, supplied.name)))
     config.wire = Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64))
     // A following stream holds one wire session while the session is busy, so a page or
@@ -1345,8 +1345,8 @@ fn scripted_place(take supplied: store.places.Supplied, s: Services) -> Result[s
     Ok(take config)
 }
 
-fn scripted_factory() -> Result[store.places.Factory[Services], Capacity] {
-    store.places.seeded_factory(scripted_place)
+fn scripted_factory() -> store.local.Factory[Services] {
+    store.local.seeded_factory(scripted_place)
 }
 
 // Serves the scripted notes agent over HTTP until it is killed. It prints `port N` once
@@ -1362,7 +1362,7 @@ pub fn serve_scripted(out: Stdout, data: Dir, clock: Clock, random: Random, task
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let d = harness.gateway.door_of(way)
     let seed = Services(helper: channel.sender(ask), clock: clock, live: None, stream: Some(Stream(door: harness.preview.door(hub), group: "")))
-    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: scripted_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: data, options: options(), migrate: code.describe(migrate), factory: scripted_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
         return quit(out, "could not start the gateway")
     }

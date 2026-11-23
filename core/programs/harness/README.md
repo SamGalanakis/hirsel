@@ -273,27 +273,29 @@ each response chunk to `provider.feed` and asks `provider.answer` at the end.
 
 ## The gateway
 
-`harness.gateway` keeps a catalog of sessions and runs each session's place in a
-place directory (RUNNER-SPEC §13) with `idle_ms: None`, so a place unloads only
-by its own idle stop (§14.4), which never cuts active work: an idle session
-holds no memory. An app gives it the factory that builds a session's place
-(`store.places.seeded_factory`, whose `make` sees the gateway's seed, the
-services every session's grants are made from), its migration and its store
-options.
+`harness.gateway` keeps a catalog of sessions and runs each session's place as a
+group of an in-process platform host (`store.local`, RUNNER-SPEC §14.9). A place
+unloads only by its own idle stop (§14.4), which never cuts active work: an idle
+session holds no memory. An app gives it the factory that builds a session's
+place (`store.local.seeded_factory`, whose `make` sees the gateway's seed, the
+services every session's grants are made from), its migration, its store
+options and the idle time.
 
 - `create(door, key, Fresh(model, narrow) | Adopt(prefix))` seeds a new
-  session's store, then commits its catalog row; a repeated key returns the
-  same id, and an id is never reused. `Adopt` takes a fork's exported prefix.
-- `route(door, id)` writes Dirty, then opens the session, starting its place
-  if it is unloaded, and returns a lease whose status holds its address. Wire
-  calls go to the place itself. A binding is needed for a caller that
-  reconnects, and its request positions continue across connections.
-- `delete`, `listing` and `stop` do what they say; `delete` refuses a leased
-  session.
-- **Wake.** Each row is `Dirty | Clean(Option[next_due])`. Only a clean stop
-  writes Clean; with a trigger due, a wall alarm wakes the session then. Any
-  other end leaves Dirty and wakes it again, and a restarted gateway wakes
-  every Dirty or due session.
+  session's store, adds its group, then commits its catalog row; a repeated key
+  returns the same id, and an id is never reused. `Adopt` takes a fork's
+  exported prefix.
+- `route(door, id)` wakes the session, starting its place if it is unloaded,
+  and returns a lease whose status holds its address. The lease does not hold
+  the place; a client's session does. Wire calls go to the place itself. A
+  binding is needed for a caller that reconnects, and its request positions
+  continue across connections.
+- `delete` unlists the session, then drains its place and deletes its store.
+  `listing` and `stop` do what they say.
+- **Wake.** The host keeps the wake row (§14.1). Only a clean stop writes
+  Clean; a trigger due later wakes the session then. Any other end leaves
+  Dirty and starts it again, and a restarted gateway's host starts every Dirty
+  or due session.
 - **Status.** A session's `Status` view reads "calling tools" while a member
   of its round can still move by itself, and "waiting" when every open call
   waits on an approval or a resume, so a client holding the session can let

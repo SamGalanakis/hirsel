@@ -237,16 +237,16 @@ fn wire() -> store.runner.WireConfig {
     w
 }
 
-// The directory replaces the backing and selection with the listed ones. The binding maps
+// The host replaces the backing, selection and idle time with its own (§14.9). The binding maps
 // one credential to one Caller across connections, as a browser's login would.
-fn session_place(take supplied: store.places.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
+fn session_place(take supplied: store.local.Supplied, s: Services) -> Result[store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
     let w = result.unwrap(wired())
     let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: services_of(s, string.from(supplied.name)), grant: make_grants, grant_bytes: EFFECT_GRANT)
     Ok(store.runner.PlaceConfig(backing: Memory, selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(store.runner.wire_bind((), code.describe(store.ingress.caller), 4096u64, 65536u64)), triggers: Some(take config), idle: Some(IDLE_MS)))
 }
 
-fn session_factory() -> Result[store.places.Factory[Services], Capacity] {
-    store.places.seeded_factory(session_place)
+fn session_factory() -> store.local.Factory[Services] {
+    store.local.seeded_factory(session_place)
 }
 
 // ---- driving a session through the gateway ----
@@ -264,7 +264,7 @@ fn call_routed[A: codec, R: codec](door: harness.gateway.Door[Services], id: u64
         Error(Place(_)) => return Error(101u64),
         Error(_) => return Error(100u64)
     }
-    let Some(address) = latest.read(store.places.status(lease)).addr else {
+    let Some(address) = latest.read(store.local.status(lease)).addr else {
         return Error(102u64)
     }
     let Ok(keys) = store.fixture.entry_keys(code.describe(place)) else {
@@ -287,7 +287,7 @@ fn call_routed[A: codec, R: codec](door: harness.gateway.Door[Services], id: u64
 }
 
 // Waits for the session's place to stop by itself.
-fn stopped(changes: Receiver[store.places.Change]) -> bool waits {
+fn stopped(changes: Receiver[store.local.Change]) -> bool waits {
     while let Ok(c) = channel.receive(changes) {
         if let Down(u) = c {
             return match u.ended {
@@ -352,11 +352,11 @@ pub fn law_wake_resumes_transcript(parent: Dir, clock: Clock, random: Random, ta
     let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let (tallies, _held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let (watch, changes): (Sender[store.places.Change], Receiver[store.places.Change]) = channel.new(64u64)
+    let (watch, changes): (Sender[store.local.Change], Receiver[store.local.Change]) = channel.new(64u64)
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take made) => take made,
         Error(_) => return 1u64
@@ -439,7 +439,7 @@ fn same(got: List[Bytes], want: List[Bytes]) -> bool {
 }
 
 // Waits until both sessions' places have stopped by themselves.
-fn both_stopped(changes: Receiver[store.places.Change]) -> bool waits {
+fn both_stopped(changes: Receiver[store.local.Change]) -> bool waits {
     let mut parent_done = false
     let mut child_done = false
     while let Ok(c) = channel.receive(changes) {
@@ -459,7 +459,7 @@ fn both_stopped(changes: Receiver[store.places.Change]) -> bool waits {
     false
 }
 
-fn unload_task(take job: (harness.gateway.Door[Services], u64, Sender[Result[store.places.Unloaded, harness.gateway.Refused]])) -> () waits {
+fn unload_task(take job: (harness.gateway.Door[Services], u64, Sender[Result[store.local.Unloaded, harness.gateway.Refused]])) -> () waits {
     let (door, id, reply) = take job
     let _ = channel.send(reply, harness.gateway.unload(door, id))
 }
@@ -477,11 +477,11 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
     let (asks, inbox): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
     let modelling = task.spawn(tasks, bytes 1048576u64, take inbox, model_service)
     let (tallies, held): (Sender[Sender[()]], Receiver[Sender[()]]) = channel.new(4u64)
-    let (watch, changes): (Sender[store.places.Change], Receiver[store.places.Change]) = channel.new(256u64)
+    let (watch, changes): (Sender[store.local.Change], Receiver[store.local.Change]) = channel.new(256u64)
     let way: harness.gateway.Doorway[Services] = harness.gateway.doorway()
     let door = harness.gateway.door_of(way)
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: None, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory, max_sessions: 2u64, place_bytes: 134217728u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 2u64, idle_ms: IDLE_MS, place_bytes: 134217728u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch), seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take made) => take made,
         Error(_) => return 1u64
@@ -521,7 +521,7 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
         Ok(take l) => take l,
         Error(_) => return 14u64
     }
-    let Some(address) = latest.read(store.places.status(lease)).addr else {
+    let Some(address) = latest.read(store.local.status(lease)).addr else {
         return 15u64
     }
     let Ok(keys) = store.fixture.entry_keys(code.describe(place)) else {
@@ -531,9 +531,9 @@ pub fn law_subagent_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks
         return 17u64
     }
     let _ = take lease
-    let (unloaded, unload_answer): (Sender[Result[store.places.Unloaded, harness.gateway.Refused]], Receiver[Result[store.places.Unloaded, harness.gateway.Refused]]) = channel.new(1u64)
+    let (unloaded, unload_answer): (Sender[Result[store.local.Unloaded, harness.gateway.Refused]], Receiver[Result[store.local.Unloaded, harness.gateway.Refused]]) = channel.new(1u64)
     let unloading = task.spawn(tasks, bytes 1048576u64, (harness.gateway.copy_door(door), cut, take unloaded), unload_task)
-    let mut ended: Option[Result[store.places.Unloaded, harness.gateway.Refused]] = None
+    let mut ended: Option[Result[store.local.Unloaded, harness.gateway.Refused]] = None
     for i in 0u64 .. 50u64 {
         if let Ok(take got) = channel.try_receive(unload_answer) {
             ended = Some(take got);
@@ -790,7 +790,7 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         None
     }
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: take worker_port, chunks: 0u64)
-    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let g = match harness.gateway.gateway(take way, take config) {
         Ok(take made) => take made,
         Error(_) => return 1u64
@@ -1126,7 +1126,7 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         None
     }
     let seed = Services(model: take asks, tallies: take tallies, door: harness.gateway.door_of(way), name: "", tasks: tasks, clock: clock, random: random, net: net, preview: take worker_port, chunks: chunks)
-    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory, max_sessions: 1u64, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
+    let config = harness.gateway.GatewayConfig(root: root, options: store.triggers.law_options(), migrate: code.describe(harness.migrate), factory: session_factory(), max_sessions: 1u64, idle_ms: IDLE_MS, place_bytes: 67108864u64, tasks: tasks, clock: clock, random: random, net: net, watch: None, seed: take seed)
     let Ok(take g) = harness.gateway.gateway(take way, take config) else {
         return Error(10u64)
     }

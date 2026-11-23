@@ -104,7 +104,6 @@ fn deadline_ms(c: Clock, ms: u64) -> u64 {
 fn turned(why: harness.gateway.Refused) -> u16 {
     match why {
         Unknown => 404u16,
-        Busy => 409u16,
         Full => 503u16,
         Stopping => 503u16,
         _ => 500u16
@@ -113,32 +112,31 @@ fn turned(why: harness.gateway.Refused) -> u16 {
 
 // A wire client to the session's place under `credential`. `wake` routes to it, starting
 // it if it is unloaded; otherwise only a running place is reached. The lease is dropped
-// once the client is connected: the client's session keeps the place up. A place reaps
-// a finished wire session only when the next one arrives, and a busy session's stream
-// holds one, so a refused connect is retried until `within_ms`.
+// once the client is connected: the client's session keeps the place up. A place admits
+// one wire session and reaps a finished one only when the next arrives, so a connect just
+// after another front call closed may be turned away, and a place may stop by its idle
+// check between the route and the connect; either is retried, routing again, until
+// `within_ms`.
 fn reach[T: send](d: harness.gateway.Door[T], f: Front, id: u64, take credential: Bytes, first_p: u64, wake: bool) -> Result[store.fixture.Client, u16] waits {
-    let got_lease = if wake {
-        harness.gateway.route(d, id)
-    } else {
-        harness.gateway.peek(d, id)
-    }
-    let lease = match take got_lease {
-        Ok(take l) => take l,
-        Error(why) => return Error(turned(why))
-    }
-    let Some(address) = latest.read(store.places.status(lease)).addr else {
-        return Error(503u16)
-    }
     let until = deadline_ms(f.clock, f.within_ms)
     loop {
-        let opened = store.fixture.client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, Some(clone(credential)), first_p, f.within_ms)
-        match take opened {
-            Ok(take c) => {
+        let got_lease = if wake {
+            harness.gateway.route(d, id)
+        } else {
+            harness.gateway.peek(d, id)
+        }
+        let lease = match take got_lease {
+            Ok(take l) => take l,
+            Error(why) => return Error(turned(why))
+        }
+        if let Some(address) = latest.read(store.local.status(lease)).addr {
+            let opened = store.fixture.client_at(f.tasks, f.net, f.clock, f.random, f.keys, f.socket, address, Some(clone(credential)), first_p, f.within_ms)
+            if let Ok(take c) = take opened {
                 let _ = take lease;
                 return Ok(take c)
-            },
-            Error(_) => ()
+            }
         }
+        let _ = take lease;
         if host.mono_ns(f.clock) >= until {
             return Error(503u16)
         }

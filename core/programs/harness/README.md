@@ -109,8 +109,10 @@ Each derived call passes, in order:
    `bound steps limits.gate_steps`. A fault or an overrun fails the call.
    Everything after this step sees the repaired arguments, and the member
    row stores them.
-3. The agent's `gates`. Each gate returns `Pass`, `Hold(reason)` or
-   `Deny(reason)` under the same bounds. The verdict is the greatest one
+3. The agent's `gates`. A gate is `fn(store.Tx, Ask) -> Verdict`: it gets a
+   read-only transaction and `Ask{caller, call}`, where `caller` is the
+   submitter of the run, never the trigger's caller. Each returns `Pass`,
+   `Hold(reason)` or `Deny(reason)` under the same bounds. The verdict is the greatest one
    under `Pass < Hold < Deny`, so adding a gate can only make a call
    stricter, and gate order never matters. A gate that overruns denies.
 
@@ -119,7 +121,19 @@ A held call waits under the approval key
 or refuses it. Only the run's caller may decide, and only with the key the
 call is held under. A key for other arguments or another revision is refused
 `Conflict` and changes nothing, so an approval can never carry over to a
-call it was not shown.
+call it was not shown. The first decision wins: repeating it returns its
+`Ruling`, and the opposite decision conflicts. A hold expires
+`limits.hold_ms` after it is written. A timer then denies the call with
+"approval expired". A decision at or after expiry is `Lapsed` even if that
+timer has not run.
+
+An Inside tool is `fn(mut store.Tx, Invoke{key, args}) -> Result[Reply, Fault]`.
+`Reply` is `Now(bytes)` or `Later`. With `Later` the tool has written
+whatever row will wake it (a timer, a webhook row, another place's reply),
+and its call stays `Parked`. The app's entry for that wake calls
+`harness.resume(key, outcome)` after authorizing its caller. Only the first
+resume of a parked call in the active run counts. A parked call has no
+deadline yet.
 
 An Inside tool runs inside `advance`'s transaction under
 `bound bytes limits.inside_bytes`. If it returns an error or overruns, its
@@ -147,10 +161,12 @@ body that writes to the transaction (MEM-30).
 | --- | --- | --- |
 | C1 `test_once_tool_crash` | A place stopped while a Once tool is in flight reopens without resending the tool. The tool result is InDoubt at once, the model answer is not bought again, and the run ends Answered. | The scripted services' own call counts, which outlive the place, plus the transcript and spend derived by hand from the script. |
 | G1 `test_gates_fold_by_maximum` | Over every sequence of 0 to 3 gates, the verdict is the greatest gate verdict under Pass < Hold < Deny. | The maximum of each sequence's ranks, computed from the sequence itself. |
-| G2 `test_approval_bound_to_arguments` | A held call is approved only by its run's caller and only under the key of the tool, revision and repaired arguments. Keys for the unrepaired arguments or another revision conflict, and a stranger is refused; the call is sealed only after the matching approval. | Keys built by hand from the hand-repaired arguments, and the outcome each decision must have. |
+| G2 `test_approval_bound_to_arguments` | A held call is approved only by its run's caller and only under the key of the tool, revision and repaired arguments. Keys for the unrepaired arguments or another revision conflict, and a stranger is refused; the call is sealed only after the matching approval. A repeat approval returns Approved, and a later refusal conflicts. | Keys built by hand from the hand-repaired arguments, and the outcome each decision must have. |
 | I1 `test_inside_rolls_back_on_error` | An Inside tool's writes commit with its result, and a tool that returns an error leaves none of its writes while its failure commits. | The row each tool writes, by hand. |
 | P1 `test_system_patches_fold_to_sections` | Over ten prepares (shows, removals, a failed render, two reorders, a put-off baseline, a narrowing), the fold of the log's System entries is the agent's rendered sections in order, and each prepare appends exactly the smallest patch. | The section texts each step writes and the patch each step must append, by hand. |
 | R1 `test_reactions_commit_with_entry` | A reaction's row commits with the entry. A failing reaction leaves the entry, none of its own writes, and a Note naming it. | The rows each reaction writes, by hand. |
+| H1 `test_late_decisions_lapse` | A decision at or after a hold's expiry is Lapsed and the call is denied "approval expired", with or without the expiry timer having run. A timer that runs early changes nothing. | Hand-derived outcomes for hold times of 0 and 24 hours. |
+| K1 `test_parked_call_resumes_once` | An Inside tool that returns Later runs once and stays parked through further wakes. The first resume settles it with the given result and the round goes on; a second resume is ignored. | The tool's own run count and the bytes passed to resume. |
 | J1 `test_round_bytes_bounded` | The transaction that appends a user entry and prepares the model call writes the same bytes after 10 earlier entries as after 1,000, within 64 bytes. | `store.changes` between the snapshots around the transaction. A request body copied into any row or trigger argument would add about 198,000 bytes. |
 
 Open: a `std.sim.fs` crash cut at the same boundary as C1.

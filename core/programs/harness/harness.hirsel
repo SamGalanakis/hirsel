@@ -66,7 +66,9 @@ pub type Cutoff: codec + send { head_pos: u64, tail_pos: u64, route: String, pol
 // up to n dispatches within the deadline.
 pub type Repeat: codec + send = Once | Repeatable(u64)
 pub type Receipt: codec + send = Model(Answer) | ModelFailed(String) | Tool(Outcome)
-pub type EffectPhase: codec + send = Pending | Held | Sealed | Dispatched(u64) | Settled(Receipt) | Doubted
+// Held waits for an approval; Parked waits for `resume` after an Inside tool
+// returned Later.
+pub type EffectPhase: codec + send = Pending | Held | Parked | Sealed | Dispatched(u64) | Settled(Receipt) | Doubted
 pub type Effect: codec + send {
     cutoff: Cutoff,
     call: Option[Call],
@@ -79,7 +81,8 @@ pub type Effect: codec + send {
 }
 
 pub type WaitKey: codec + send { run: u64, slot: u64, kind: u8, generation: u64 }
-pub type Wait: codec + send = Open(Bytes) | Decided(Bytes, bool) | Expired | Revoked
+// An open approval holds its key and the wall-clock ms at which it expires.
+pub type Wait: codec + send = Open(Bytes, u64) | Decided(Bytes, bool) | Expired | Revoked
 
 // The public Cover projection. Key 0 is the status row; key p + 1 is the
 // visible line of entry p.
@@ -225,9 +228,17 @@ pub type Fault: codec + send = BadArgs(String) | Refused(String) | Unavailable |
 // the agent's current code.
 pub type Request: codec + send { route: String, system: List[String], tools: List[ToolDef], messages: List[Entry], key: Bytes }
 
+// What an Inside tool is given: its call's key, which `resume` takes, and its
+// arguments.
+pub type Invoke: codec + send { key: EffectKey, args: Bytes }
+// An Inside tool answers now, or Later: it has written whatever row will
+// eventually call `resume` for its key (a timer, a webhook row, another
+// place's reply), and the call stays parked until then.
+pub type Reply: codec + send = Now(Bytes) | Later
+
 pub type ToolRun[G: send]: send =
     Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat)
-    | Inside(StaticFn[fn(mut store.Tx, Bytes) -> Result[Bytes, Fault]])
+    | Inside(StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]])
 
 // `rev` names the tool's behaviour in approval keys: raise it when the same
 // arguments would now do something else, so earlier approvals stop matching.
@@ -238,7 +249,10 @@ pub type Tool[G: send]: send { name: String, about: String, input: String, rev: 
 // a gate can only make a call less allowed, and the order of gates does not
 // change the result.
 pub type Verdict: codec + send = Pass | Hold(String) | Deny(String)
-pub type Gate: send { name: String, check: StaticFn[fn(Call) -> Verdict] }
+// A gate sees a read-only transaction and the call with the caller of the
+// submission that started the run, never the caller of the trigger it runs in.
+pub type Ask: codec + send { caller: store.Caller, call: Call }
+pub type Gate: send { name: String, check: StaticFn[fn(store.Tx, Ask) -> Verdict] }
 
 // A keyed system-prompt section, rendered from rows each time a request is
 // prepared. List order is prompt order. `None` removes it; a render that
@@ -252,7 +266,7 @@ pub type After: send { name: String, run: StaticFn[fn(mut store.Tx, u64, Entry) 
 
 pub type Limits: send {
     rounds: u64, calls: u64, model_ms: u64, tool_ms: u64, model_reserve: u64,
-    inside_bytes: u64, gate_bytes: u64, gate_steps: u64, section_bytes: u64, section_steps: u64,
+    inside_bytes: u64, gate_bytes: u64, gate_steps: u64, section_bytes: u64, section_steps: u64, hold_ms: u64,
 }
 
 pub type Agent[G: send]: send {
@@ -271,22 +285,23 @@ pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(
     Agent(name: take name, route: take route, model: model, model_repeat: Once, tools: list.new(), gates: list.new(),
         sections: list.new(), reactions: list.new(),
         limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
-            inside_bytes: 65536u64, gate_bytes: 16384u64, gate_steps: 10000u64,
-            // A section reads rows; opening a table alone takes over 10,000 steps.
-            section_bytes: 16384u64, section_steps: 100000u64))
+                        // Gates and sections read rows; opening a table alone takes over
+            // 10,000 steps.
+            inside_bytes: 65536u64, gate_bytes: 16384u64, gate_steps: 100000u64,
+            section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64))
 }
 
 pub fn outside[G: send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G] {
     Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Outside(f, repeat))
 }
 
-pub fn inside[G: send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Bytes) -> Result[Bytes, Fault]]) -> Tool[G] {
+pub fn inside[G: send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]]) -> Tool[G] {
     Tool(name: take name, about: take about, input: take input, rev: 1u64, repair: None, run: Inside(f))
 }
 
 // ---- wiring: the app's trigger targets, rebuilt in each transaction ----
 
-pub type Wake: codec + send = Kick | Deadline(EffectKey)
+pub type Wake: codec + send = Kick | Deadline(EffectKey) | Expire(WaitKey)
 pub type Refused: codec + send = NotAllowed | Conflict | TooLarge | Malformed(String) | Storage
 
 pub opaque type Wiring { entries: store.triggers.Entries, advance: store.triggers.Entry[Wake], effect: store.triggers.Entry[EffectKey] }
@@ -445,11 +460,11 @@ fn rank(v: Verdict) -> u8 { match v { Pass => 0u8, Hold(_) => 1u8, Deny(_) => 2u
 
 // The fold of every gate's verdict by maximum. A gate that overruns its
 // bounds denies: a gate fails closed.
-pub fn verdict[G: send](a: Agent[G], call: Call) -> Verdict {
+pub fn verdict[G: send](tx: store.Tx, a: Agent[G], ask: Ask) -> Verdict {
     let mut out: Verdict = Pass
     for g in a.gates {
         let go = code.callable(g.check)
-        let ran = bound bytes a.limits.gate_bytes { bound steps a.limits.gate_steps { go(call) } }
+        let ran = bound bytes a.limits.gate_bytes { bound steps a.limits.gate_steps { go(tx, ask) } }
         let v: Verdict = match take ran {
             Ok(Ok(take v)) => take v,
             _ => Deny(clone(g.name)),
@@ -476,25 +491,78 @@ pub fn approval_key(name: String, rev: u64, args: Payload) -> Bytes {
 }
 
 pub type Decision: codec + send { run: u64, round: u64, ordinal: u64, key: Bytes, allow: bool }
+// What a decision did. A decision at or after the hold's expiry is Lapsed
+// even when the expiry timer has not run yet.
+pub type Ruling: codec + send = Approved | Declined | Lapsed
+
+fn ruled(allow: bool) -> Ruling { if allow { Approved } else { Declined } }
 
 // Decides a held call. Only the run's caller may decide, and only with the
 // key the call is held under; a key for any other tool, revision or
-// arguments conflicts and changes nothing.
-pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take d: Decision) -> Result[(), Refused] {
+// arguments conflicts and changes nothing. The first decision wins: a repeat
+// of it returns its ruling, and a different one conflicts.
+pub fn decide[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take d: Decision) -> Result[Ruling, Refused] {
     let Some(run) = kept(store.fetch(tx, store.shape(h.runs), d.run))? else { return Error(Malformed("no such run")) }
     if run.caller.issuer != caller.issuer || run.caller.subject != caller.subject { return Error(NotAllowed) }
     let wait = WaitKey(run: d.run, slot: d.ordinal, kind: APPROVAL, generation: d.round)
-    let Some(found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else { return Error(Malformed("no such hold")) }
-    let Open(held) = view found else { return Error(Conflict) }
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else { return Error(Malformed("no such hold")) }
+    let (held, expires) = match take found {
+        Open(take k, x) => (take k, x),
+        Decided(take k, allow) => return if k == d.key && allow == d.allow { Ok(ruled(allow)) } else { Error(Conflict) },
+        Expired => return Ok(Lapsed),
+        Revoked => return Error(Conflict),
+    }
     if held != d.key { return Error(Conflict) }
     let member_key = EffectKey(run: d.run, round: d.round, kind: TOOL, ordinal: d.ordinal)
     let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else { return Error(Malformed("no such call")) }
     let mut member = take m
     match member.phase { Held => (), _ => return Error(Conflict) }
+    if now(mut tx) >= expires {
+        lapse(mut tx, h, wait, member_key)?
+        advance(mut tx, h, a, w, Kick)?
+        return Ok(Lapsed)
+    }
     member.phase = if d.allow { Pending } else { Settled(Tool(Denied("not approved"))) }
     kept(store.put(mut tx, h.effects, member_key, member))?
     kept(store.put(mut tx, h.waits, wait, Decided(clone(d.key), d.allow)))?
-    advance(mut tx, h, a, w, Kick)
+    advance(mut tx, h, a, w, Kick)?
+    Ok(ruled(d.allow))
+}
+
+fn lapse(mut tx: store.Tx, h: Handles, wait: WaitKey, member_key: EffectKey) -> Result[(), Refused] {
+    let Some(take m) = kept(store.fetch(tx, store.shape(h.effects), member_key))? else { return Error(Malformed("no such call")) }
+    let mut member = take m
+    member.phase = Settled(Tool(Denied("approval expired")))
+    kept(store.put(mut tx, h.effects, member_key, member))?
+    kept(store.put(mut tx, h.waits, wait, Expired))
+}
+
+// The expiry timer of a hold. A hold that is still open at its expiry lapses;
+// a decided one, or a timer that runs early, changes nothing.
+fn expire(mut tx: store.Tx, h: Handles, wait: WaitKey) -> Result[(), Refused] {
+    let Some(found) = kept(store.fetch(tx, store.shape(h.waits), wait))? else { return Ok(()) }
+    let Open(_, expires) = view found else { return Ok(()) }
+    if now(mut tx) < expires { return Ok(()) }
+    lapse(mut tx, h, wait, EffectKey(run: wait.run, round: wait.generation, kind: TOOL, ordinal: wait.slot))
+}
+
+// Settles a parked Inside call. The app's own entry calls it from whatever
+// wakes the park, after authorizing its caller. Only the first resume of a
+// parked call in the active run counts.
+pub fn resume[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, key: EffectKey, take outcome: Outcome) -> Result[Filed, Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Ok(Ignored) }
+    let mut e = take found
+    match e.phase { Parked => (), _ => return Ok(Ignored) }
+    let s = session_of(tx, h)?
+    if s.active_run != Some(key.run) { return Ok(Ignored) }
+    let shown = match take outcome {
+        Returned(Inline(take b)) => if list.len(b) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take b)) },
+        take other => take other,
+    }
+    e.phase = Settled(Tool(take shown))
+    kept(store.put(mut tx, h.effects, key, e))?
+    advance(mut tx, h, a, w, Kick)?
+    Ok(Recorded)
 }
 
 fn tool_named[G: send](a: Agent[G], name: String) -> Option[ToolRun[G]] {
@@ -530,11 +598,13 @@ fn now(mut tx: store.Tx) -> u64 { store.info(mut tx).at }
 pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take wake: Wake) -> Result[(), Refused] {
     let mut s = session_of(tx, h)?
     let Some(id) = s.active_run else { return Ok(()) }
-    if let Deadline(key) = wake {
-        if key.run == id { inspect(mut tx, h, key)? }
-        s = session_of(tx, h)?
-        if s.active_run != Some(id) { return Ok(()) }
+    match wake {
+        Deadline(key) => if key.run == id { inspect(mut tx, h, key)? },
+        Expire(wait) => if wait.run == id { expire(mut tx, h, wait)? },
+        Kick => (),
     }
+    s = session_of(tx, h)?
+    if s.active_run != Some(id) { return Ok(()) }
     let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else { return Error(Malformed("active run")) }
     let run = take found
     match run.phase {
@@ -662,12 +732,14 @@ fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: 
                     None => Settled(Tool(Gone)),
                     Some(t) => match repaired(t, a.limits, mut call) {
                         Error(take why) => Settled(Tool(Failed(take why))),
-                        Ok(()) => match verdict(a, call) {
+                        Ok(()) => match verdict(tx, a, Ask(caller: clone(run.caller), call: clone(call))) {
                             Pass => Pending,
                             Deny(take why) => Settled(Tool(Denied(take why))),
                             Hold(_) => {
                                 let wait = WaitKey(run: id, slot: ordinal, kind: APPROVAL, generation: round)
-                                kept(store.put(mut tx, h.waits, wait, Open(approval_key(t.name, t.rev, call.args))))?
+                                let expires = now(mut tx) + a.limits.hold_ms
+                                kept(store.put(mut tx, h.waits, wait, Open(approval_key(t.name, t.rev, call.args), expires)))?
+                                let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Expire(wait), At(expires)))?
                                 Held
                             },
                         },
@@ -705,8 +777,10 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
                     return Ok(())
                 }
                 ran_inside = true
-                let outcome = run_inside(mut tx, f, call.args, a.limits)
-                e.phase = Settled(Tool(take outcome))
+                e.phase = match run_inside(mut tx, f, key, call.args, a.limits) {
+                    Gave(take outcome) => Settled(Tool(take outcome)),
+                    Parks => { open = true; Parked },
+                }
                 kept(store.put(mut tx, h.effects, key, e))?
             },
             Outside(_, repeat) => {
@@ -722,21 +796,25 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
 }
 
 // Runs an Inside tool in the advance transaction under its byte bound. A tool that fails or overruns leaves none of its writes.
-fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Bytes) -> Result[Bytes, Fault]], args: Payload, l: Limits) -> Outcome {
-    let Inline(raw) = view args else { return Failed("blob arguments are not supported yet") }
+type Ran = Gave(Outcome) | Parks
+
+fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]], key: EffectKey, args: Payload, l: Limits) -> Ran {
+    let Inline(raw) = view args else { return Gave(Failed("blob arguments are not supported yet")) }
     let go = code.callable(f)
-    let ran = store.rollback_writes_on_error(mut tx, scoped fn(mut t: store.Tx) -> Result[Bytes, Fault] {
+    let given = Invoke(key: key, args: clone(raw))
+    let ran = store.rollback_writes_on_error(mut tx, scoped fn(mut t: store.Tx) -> Result[Reply, Fault] {
         // A step bound cannot wrap a body that writes the transaction
         // (MEM-30); the entry's own step reserve bounds it instead.
-        let bounded = bound bytes l.inside_bytes { go(mut t, raw) }
+        let bounded = bound bytes l.inside_bytes { go(mut t, given) }
         match take bounded {
             Ok(take r) => take r,
             Error(_) => Error(Refused("inside tool exceeded its bytes")),
         }
     })
     match take ran {
-        Ok(take out) => if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) },
-        Error(take fault) => Failed(fault_text(take fault)),
+        Ok(Now(take out)) => Gave(if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) }),
+        Ok(Later) => Parks,
+        Error(take fault) => Gave(Failed(fault_text(take fault))),
     }
 }
 

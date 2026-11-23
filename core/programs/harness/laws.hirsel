@@ -308,9 +308,14 @@ fn test_round_bytes_bounded(parent: Dir, clock: Clock, random: Random, tasks: Ta
 
 // ---- gates, approvals and inside tools ----
 
-fn pass_gate(c: harness.Call) -> harness.Verdict { Pass }
-fn hold_gate(c: harness.Call) -> harness.Verdict { Hold("ask") }
-fn deny_gate(c: harness.Call) -> harness.Verdict { Deny("no") }
+fn pass_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict { Pass }
+// Holds only after reading the session row, so a gate bound too tight to read
+// the store shows up as a denial.
+fn hold_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Deny("schema") }
+    match store.fetch(tx, store.shape(h.session), 0u64) { Ok(Some(_)) => Hold("ask"), _ => Deny("no session") }
+}
+fn deny_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict { Deny("no") }
 
 fn gate_named(n: u8) -> harness.Gate {
     if n == 0u8 { harness.Gate(name: "pass", check: code.describe(pass_gate)) }
@@ -331,7 +336,18 @@ fn rank_of(v: harness.Verdict) -> u8 { match v { Pass => 0u8, Hold(_) => 1u8, De
 // Law G1 (Fable: monotonic gates): the verdict of a gate list is its
 // greatest verdict under Pass < Hold < Deny, whatever the order. Oracle: the
 // maximum of each list's ranks, computed by hand here from the list itself.
-pub fn law_gates_fold_by_maximum() -> bool {
+pub fn law_gates_fold_by_maximum(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut db = fresh(dir, clock, random, tasks)
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[bool, store.Error] { Ok(folds_by_maximum(tx)) })
+    let ok = match take ran { Ok(Committed(store.Done(value: v, ..))) => v, _ => false }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    ok
+}
+
+fn folds_by_maximum(tx: store.Tx) -> bool {
     // Every sequence of 0 to 3 gates (0 pass, 1 hold, 2 deny): 40 orders.
     let mut len = 0u64
     while len <= 3u64 {
@@ -345,7 +361,8 @@ pub fn law_gates_fold_by_maximum() -> bool {
           rest = rest / 3u64 }
         let mut want = 0u8
         for n in order { if n > want { want = n } }
-        if rank_of(harness.verdict(gated(clone(order)), bump_call("{}"))) != want { return false }
+        let ask = harness.Ask(caller: alice(), call: bump_call("{}"))
+        if rank_of(harness.verdict(tx, gated(clone(order)), ask)) != want { return false }
       }
       len = len + 1u64
     }
@@ -353,8 +370,8 @@ pub fn law_gates_fold_by_maximum() -> bool {
 }
 
 @test
-fn test_gates_fold_by_maximum() -> Result[(), ()] {
-    if law_gates_fold_by_maximum() { Ok(()) } else { Error(()) }
+fn test_gates_fold_by_maximum(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_gates_fold_by_maximum(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }
 
 // Strips ASCII spaces: the arguments the gates and approvals see.
@@ -364,13 +381,13 @@ fn strip_spaces(raw: Bytes) -> Result[Bytes, harness.Fault] {
     Ok(take out)
 }
 
-fn scribble_ok(mut tx: store.Tx, args: Bytes) -> Result[Bytes, harness.Fault] {
+fn scribble_ok(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
     let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
-    Ok(string.into_bytes("ok"))
+    Ok(Now(string.into_bytes("ok")))
 }
 
-fn scribble_bad(mut tx: store.Tx, args: Bytes) -> Result[Bytes, harness.Fault] {
+fn scribble_bad(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
     let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
     let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
     Error(BadArgs("bad"))
@@ -409,12 +426,19 @@ fn kick(mut db: store.Db, a: harness.Agent[Grants]) -> () waits {
     match take ran { Ok(Committed(_)) => (), _ => fail("kick: advance did not commit") }
 }
 
-fn deciding(mut db: store.Db, a: harness.Agent[Grants], who: store.Caller, take d: harness.Decision) -> Result[(), harness.Refused] waits {
+fn waking(mut db: store.Db, a: harness.Agent[Grants], take wake: harness.Wake) -> () waits {
     let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
     let w = result.unwrap(wired())
-    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.decide(mut tx, h, a, w, who, clone(d)) })
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[(), harness.Refused] { harness.advance(mut tx, h, a, w, clone(wake)) })
+    match take ran { Ok(Committed(_)) => (), _ => fail("waking: advance did not commit") }
+}
+
+fn deciding(mut db: store.Db, a: harness.Agent[Grants], who: store.Caller, take d: harness.Decision) -> Result[harness.Ruling, harness.Refused] waits {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Ruling, harness.Refused] { harness.decide(mut tx, h, a, w, who, clone(d)) })
     match take ran {
-        Ok(Committed(_)) => Ok(()),
+        Ok(Committed(store.Done(value: take ruling, ..))) => Ok(take ruling),
         Ok(Aborted(store.Undone(value: take why, ..))) => Error(take why),
         _ => fail("decide: transaction failed"),
     }
@@ -452,11 +476,16 @@ pub fn law_approval_bound_to_arguments(parent: Dir, clock: Clock, random: Random
     let revised = match deciding(mut db, a, alice(), decision(take rev_key, true)) { Error(Conflict) => true, _ => false }
     let stranger = match deciding(mut db, a, store.Caller(issuer: 1u8, subject: string.into_bytes("mallory")), decision(clone(right), true)) { Error(NotAllowed) => true, _ => false }
     let still_held = match member(db) { Held => true, _ => false }
-    let approved = match deciding(mut db, a, alice(), decision(take right, true)) { Ok(()) => true, _ => false }
+    let approved = match deciding(mut db, a, alice(), decision(clone(right), true)) { Ok(Approved) => true, _ => false }
     let sealed = match member(db) { Sealed => true, _ => false }
+    // The first decision wins: repeating it returns its ruling, and the
+    // opposite decision conflicts.
+    let repeated = match deciding(mut db, a, alice(), decision(clone(right), true)) { Ok(Approved) => true, _ => false }
+    let reversed = match deciding(mut db, a, alice(), decision(take right, false)) { Error(Conflict) => true, _ => false }
+    let still_sealed = match member(db) { Sealed => true, _ => false }
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
-    held && unrepaired && revised && stranger && still_held && approved && sealed
+    held && unrepaired && revised && stranger && still_held && approved && sealed && repeated && reversed && still_sealed
 }
 
 @test
@@ -707,4 +736,102 @@ pub fn law_reactions_commit_with_entry(parent: Dir, clock: Clock, random: Random
 @test
 fn test_reactions_commit_with_entry(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_reactions_commit_with_entry(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}
+
+fn denied_expired(p: harness.EffectPhase) -> bool { match p { Settled(Tool(Denied(why))) => why == "approval expired", _ => false } }
+
+fn wait_zero() -> harness.WaitKey { harness.WaitKey(run: 0u64, slot: 0u64, kind: harness.APPROVAL, generation: 0u64) }
+
+// One held call with the given hold time; `timer` fires its expiry wake
+// before the decision. Answers (lapsed by then, ruling of the decision).
+fn hold_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, hold_ms: u64, timer: bool) -> (bool, Result[harness.Ruling, harness.Refused], harness.EffectPhase) waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut hold_only: List[u8] = list.new()
+    list.push(mut hold_only, 1u8)
+    let mut a = gated(take hold_only)
+    a.limits.hold_ms = hold_ms
+    let mut db = answered(dir, clock, random, tasks, bump_call("{}"))
+    kick(mut db, a)
+    if timer { waking(mut db, a, Expire(wait_zero())) }
+    let lapsed = denied_expired(member(db))
+    let right = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
+    let ruling = deciding(mut db, a, alice(), decision(take right, true))
+    let after = member(db)
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    (lapsed, take ruling, take after)
+}
+
+// Law H1 (astra: approval expiry): a decision at or after a hold's expiry is
+// Lapsed and the call is denied "approval expired", whether or not the expiry
+// timer has run; an expiry timer that runs before the expiry changes nothing.
+// Oracle: hand-derived outcomes with hold times of 0 and 24 hours.
+pub fn law_late_decisions_lapse(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let (before_1, ruling_1, after_1) = hold_case(parent, clock, random, tasks, 0u64, false)
+    let late = !before_1 && match ruling_1 { Ok(Lapsed) => true, _ => false } && denied_expired(after_1)
+    let (before_2, ruling_2, after_2) = hold_case(parent, clock, random, tasks, 0u64, true)
+    let timed = before_2 && match ruling_2 { Ok(Lapsed) => true, _ => false } && denied_expired(after_2)
+    let (before_3, ruling_3, after_3) = hold_case(parent, clock, random, tasks, 86400000u64, true)
+    let early = !before_3 && match ruling_3 { Ok(Approved) => true, _ => false } && match after_3 { Sealed => true, _ => false }
+    late && timed && early
+}
+
+@test
+fn test_late_decisions_lapse(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_late_decisions_lapse(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}
+
+// Counts its runs in views row 4000 and parks.
+fn park(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+    let runs = match store.fetch(tx, store.shape(h.views), 4000u64) { Ok(Some(Status(n))) => string.byte_len(n), _ => 0u64 }
+    let Ok(()) = store.put(mut tx, h.views, 4000u64, Status(string.repeat("x", runs + 1u64))) else { return Error(Unavailable) }
+    Ok(Later)
+}
+
+fn resuming(mut db: store.Db, a: harness.Agent[Grants], take out: String) -> harness.Filed waits {
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    let key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 0u64)
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Filed, harness.Refused] {
+        harness.resume(mut tx, h, a, w, key, Returned(Inline(string.into_bytes(clone(out)))))
+    })
+    match take ran { Ok(Committed(store.Done(value: take f, ..))) => take f, _ => fail("resume: transaction failed") }
+}
+
+// Law K1 (Fable: a park is an Inside tool that returns Later): the tool runs
+// once, its call stays parked through further wakes, the first resume
+// settles it with the given result and the round continues, and a second
+// resume is ignored. Oracle: the tool's own run count and the result passed
+// to resume.
+pub fn law_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let mut a = crash_agent()
+    list.push(mut a.tools, harness.inside("park", "waits for a wake", "{}", code.describe(park)))
+    let mut db = answered(dir, clock, random, tasks, harness.Call(id: "c1", name: "park", args: Inline(string.into_bytes("{}"))))
+    kick(mut db, a)
+    kick(mut db, a)
+    kick(mut db, a)
+    let parked = match member(db) { Parked => true, _ => false }
+    let first = match resuming(mut db, a, "woke") { Recorded => true, _ => false }
+    let second = match resuming(mut db, a, "again") { Ignored => true, _ => false }
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let snap = store.snapshot(db)
+    let once = match result.unwrap(store.get(snap, store.shape(h.views), 4000u64)) { Some(Status(n)) => n == "x", _ => false }
+    let shown = match result.unwrap(store.get(snap, store.shape(h.entries), 2u64)) {
+        Some(ToolResult(id, Returned(Inline(b)))) => id == "c1" && b == string.into_bytes("woke"),
+        _ => false,
+    }
+    let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let next = match run.phase { AwaitingModel(1u64) => true, _ => false }
+    result.unwrap(store.close(take db))
+    result.unwrap(std.dir.remove_all(parent, name))
+    parked && first && second && once && shown && next
+}
+
+@test
+fn test_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_parked_call_resumes_once(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }

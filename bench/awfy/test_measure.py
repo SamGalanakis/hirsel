@@ -1,5 +1,6 @@
 from argparse import Namespace
 from contextlib import redirect_stdout
+from copy import deepcopy
 import fcntl
 import gzip
 import io
@@ -13,15 +14,15 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from board import EXPECTED, Board, measure, measurement_slot, receipt
+from board import EXPECTED, Board, measure, measurement_slot, rebaseline, receipt
 import bench_cpus
 import build
-import cold_phases
-from cold_phases import pass_costs
 
 
 class PassCostAccounting(unittest.TestCase):
     def test_rejects_double_counted_nested_passes(self):
+        from cold_phases import pass_costs
+
         with tempfile.TemporaryDirectory() as temp:
             trace = Path(temp) / "passes.jsonl.gz"
             rows = [
@@ -112,37 +113,7 @@ class BoardCompletion(unittest.TestCase):
                 (False, "ok", 0),
             ):
                 with self.subTest(omit_edit=omit_edit, sample_status=sample_status):
-                    board = Board(out, "abcd1234")
-                    board.report["size_measurement"] = {
-                        "strip_version": "GNU strip 2.42", "strip_flags": ["--strip-all"],
-                        "verified_workloads": sorted(measure.EXPECTED["AWFY original"]),
-                        "pins": board.report["pins"],
-                    }
-                    suites = {goal: suite for suite, goal in measure.SUITES.items()}
-                    for goal, names in EXPECTED.items():
-                        for name in names:
-                            if name == "LangArena edit" and omit_edit:
-                                continue
-                            sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else measure.SIDES
-                            fields, values = self.sample(goal, name)
-                            samples = {side: {"status": "ok", **values} for side in sides}
-                            if name == "LangArena edit":
-                                samples["rust"]["status"] = sample_status
-                            if goal in suites:
-                                suite = suites[goal]
-                                mode = name.split()[-1] if suite == "compile" else "release"
-                                board.report["instruction_receipt"]["rows"].append({
-                                    "key": f"{suite}/{name}", "suite": suite, "mode": mode,
-                                    "flags": ["--release"], "argv": ["./sample"],
-                                    "affinity": [10], "compiler_sha256": "a" * 64,
-                                    "runtime_archive_sha256": "b" * 64, "fixture_sha256": "c" * 64,
-                                    "std_sha256": "d" * 64, "workload_sources_sha256": "e" * 64,
-                                    "image_sha256": "f" * 64,
-                                    "fixture_files": {"fixture.json": "c" * 64},
-                                    "marker": "verified\n", "stdout": "verified\n",
-                                    "sample": samples["hirsel"],
-                                })
-                            board.row(goal, name, samples, fields)
+                    board = self.board_fixture(out, omit_edit, sample_status)
                     self.assertEqual(board.finish(), exit_code)
                     report = json.loads((out / "board.json").read_text())
                     self.assertEqual(report["complete"], exit_code == 0)
@@ -150,6 +121,102 @@ class BoardCompletion(unittest.TestCase):
                                 if (row["goal"], row["row"]) == ("Compile", "LangArena edit"))
                     status = "missing" if omit_edit else "failed" if exit_code else "ok"
                     self.assertEqual(edit["status"], status)
+
+    def test_rebaseline_accepts_identity_only_refusals(self):
+        with tempfile.TemporaryDirectory() as temp, redirect_stdout(io.StringIO()) as output:
+            run = Path(temp) / "runs/candidate"
+            path = run / "board/board.json"
+            path.parent.mkdir(parents=True)
+            base = Path(temp) / ".local/share/hirsel-board"
+            base.mkdir(parents=True)
+            previous = base / "last-complete.json"
+            previous.symlink_to(base / "previous.json")
+            hold = base / "baseline-refused"
+            hold.write_text(str(run) + "\n")
+            report = self.board_fixture(path.parent).report | {
+                "complete": True,
+                "exit_status": 2,
+                "instruction_comparison": {"status": "Refused", "details": [
+                    "awfy/Bounce REFUSED (identity differs: awfy/Bounce: flags, affinity)",
+                    "awfy/CD REFUSED (identity differs: awfy/CD: flags, argv, affinity)",
+                    "awfy/Json 1,000 -> 1,002 (+0.200%)",
+                ]},
+                "size_comparison": ["hirsel 2,048 -> 2,048 B (+0 B)"],
+                "checkbox_comparison": ["memory-subscribed, 64 clients/hirsel 64.00 -> 64.00 B/session (+0.000%)"],
+            }
+
+            with patch.object(Path, "home", return_value=Path(temp)):
+                for defect in ("incomplete", "failed measurement", "other instruction refusal",
+                               "instruction regression", "size regression", "size refusal", "checkbox refusal"):
+                    with self.subTest(defect=defect):
+                        bad = deepcopy(report)
+                        if defect == "incomplete":
+                            bad["complete"] = False
+                        elif defect == "failed measurement":
+                            bad["rows"][0]["status"] = "failed"
+                        elif defect == "other instruction refusal":
+                            bad["instruction_comparison"]["details"].append("awfy/Json REFUSED (inactive-counter)")
+                        elif defect == "instruction regression":
+                            bad["instruction_comparison"]["details"][-1] = "awfy/Json 1,000 -> 1,030 (+3.000%) FAIL"
+                        elif defect == "size regression":
+                            bad["size_comparison"] = ["hirsel 2,048 -> 4,096 B (+2,048 B) FAIL"]
+                        elif defect == "size refusal":
+                            bad["size_comparison"] = ["REFUSED (hirsel lacks a verified size sample)"]
+                        elif defect == "checkbox refusal":
+                            bad["checkbox_comparison"].append("REFUSED (incomplete checkbox sample)")
+                        path.write_text(json.dumps(bad))
+                        with self.assertRaises(ValueError):
+                            rebaseline(run)
+                        self.assertEqual(previous.readlink(), base / "previous.json")
+                        self.assertTrue(hold.exists())
+
+                path.write_text(json.dumps(report))
+                self.assertEqual(rebaseline(run), 0)
+                self.assertEqual(previous.readlink(), path)
+                self.assertFalse(hold.exists())
+                self.assertIn("measurement identity changed: affinity, argv, flags", output.getvalue())
+
+                report["instruction_comparison"] = {"status": "Within +2% on every row", "details": [
+                    "awfy/Json 1,000 -> 1,002 (+0.200%)",
+                ]}
+                report["size_comparison"] = ["REFUSED (size identity differs: strip_flags)"]
+                path.write_text(json.dumps(report))
+                self.assertEqual(rebaseline(run), 0)
+                self.assertIn("measurement identity changed: strip_flags", output.getvalue())
+
+    def board_fixture(self, out, omit_edit=False, sample_status="ok"):
+        board = Board(out, "abcd1234")
+        board.report["size_measurement"] = {
+            "strip_version": "GNU strip 2.42", "strip_flags": ["--strip-all"],
+            "verified_workloads": sorted(measure.EXPECTED["AWFY original"]),
+            "pins": board.report["pins"],
+        }
+        suites = {goal: suite for suite, goal in measure.SUITES.items()}
+        for goal, names in EXPECTED.items():
+            for name in names:
+                if name == "LangArena edit" and omit_edit:
+                    continue
+                sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else measure.SIDES
+                fields, values = self.sample(goal, name)
+                samples = {side: {"status": "ok", **values} for side in sides}
+                if name == "LangArena edit":
+                    samples["rust"]["status"] = sample_status
+                if goal in suites:
+                    suite = suites[goal]
+                    mode = name.split()[-1] if suite == "compile" else "release"
+                    board.report["instruction_receipt"]["rows"].append({
+                        "key": f"{suite}/{name}", "suite": suite, "mode": mode,
+                        "flags": ["--release"], "argv": ["./sample"],
+                        "affinity": [10], "compiler_sha256": "a" * 64,
+                        "runtime_archive_sha256": "b" * 64, "fixture_sha256": "c" * 64,
+                        "std_sha256": "d" * 64, "workload_sources_sha256": "e" * 64,
+                        "image_sha256": "f" * 64,
+                        "fixture_files": {"fixture.json": "c" * 64},
+                        "marker": "verified\n", "stdout": "verified\n",
+                        "sample": samples["hirsel"],
+                    })
+                board.row(goal, name, samples, fields)
+        return board
 
     @staticmethod
     def sample(goal, name):
@@ -275,6 +342,8 @@ class ComparisonReceipts(unittest.TestCase):
 
 class SiblingActivity(unittest.TestCase):
     def test_cold_phases_reuses_the_lane_cpu_set(self):
+        import cold_phases
+
         original = os.sched_getaffinity(0)
         cpus = sorted(original)[:2]
         self.addCleanup(os.sched_setaffinity, 0, original)

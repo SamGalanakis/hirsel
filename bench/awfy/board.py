@@ -49,6 +49,7 @@ EXPECTED = {**measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.v
 INSTRUCTION_LIMIT = Decimal(2)
 SIZE_LIMIT = 2048
 SIZE_ROW = "AWFY original-14 harness"
+SIZE_IDENTITY = ("strip_version", "strip_flags", "verified_workloads", "pins")
 CHECKBOX_METRICS = {
     "converge": "toggles_per_second",
     "memory-subscribed": "server_rss_bytes",
@@ -157,7 +158,7 @@ def inactive_counters(report):
 def size_changes(reference, candidate):
     previous_measurement = reference.get("size_measurement", {})
     current_measurement = candidate.get("size_measurement", {})
-    for field in ("strip_version", "strip_flags", "verified_workloads", "pins"):
+    for field in SIZE_IDENTITY:
         previous = previous_measurement.get(field)
         if not previous or previous != current_measurement.get(field):
             raise ValueError(f"size identity differs: {field}")
@@ -1380,14 +1381,49 @@ def validate_baseline(path, report):
         list(checkbox_changes(row, row, metric))
 
 
+def refused_identity_fields(report):
+    instruction = report["instruction_comparison"]
+    size, checkbox = report["size_comparison"], report["checkbox_comparison"]
+    if (instruction["status"] not in ("Within +2% on every row", "Refused")
+            or any(line.endswith(" FAIL") for line in (*instruction["details"], *size, *checkbox))
+            or any("REFUSED" in line for line in checkbox)):
+        return set()
+
+    changed = set()
+    keys = set(instruction_keys())
+    for line in instruction["details"]:
+        if "REFUSED" not in line:
+            continue
+        match = re.fullmatch(r"(.+) REFUSED \(identity differs: \1: (.+)\)", line)
+        if not match or match[1] not in keys:
+            return set()
+        fields = set(match[2].split(", "))
+        if not fields.issubset((*receipt.WORKLOAD_IDENTITY, "marker", "stdout")):
+            return set()
+        changed.update(fields)
+    if bool(changed) != (instruction["status"] == "Refused"):
+        return set()
+
+    for line in size:
+        if "REFUSED" not in line:
+            continue
+        match = re.fullmatch(r"REFUSED \(size identity differs: (\w+)\)", line)
+        if not match or match[1] not in SIZE_IDENTITY:
+            return set()
+        changed.add(match[1])
+    return changed
+
+
 def rebaseline(run):
     path = run / "board.json"
     if not path.is_file():
         path = run / "board/board.json"
     path = path.resolve()
     report = receipt.read(path)
-    if report["complete"] is not True or report["exit_status"] != 0:
-        raise ValueError(f"{path}: rebaseline requires a complete, clean run (exit 0)")
+    exit_status = report["exit_status"]
+    changed = refused_identity_fields(report) if exit_status == receipt.REFUSED and report["complete"] else set()
+    if report["complete"] is not True or report["failures"] or (exit_status != 0 and not changed):
+        raise ValueError(f"{path}: rebaseline requires a complete run with clean gates or identity-only refusals")
     validate_baseline(path, report)
     base = Path.home() / ".local/share/hirsel-board"
     base.mkdir(parents=True, exist_ok=True)
@@ -1399,7 +1435,8 @@ def rebaseline(run):
             link.symlink_to(path)
             link.replace(base / "last-complete.json")
         refused.unlink(missing_ok=True)
-    print(f"Promoted {path} ({report['commit']}) because it is a complete, clean board.")
+    reason = f"measurement identity changed: {', '.join(sorted(changed))}" if changed else "it is a complete, clean board"
+    print(f"Promoted {path} ({report['commit']}) because {reason}.")
     if previous:
         print(f"Cleared the promotion hold from {previous}.")
     return 0
@@ -1427,7 +1464,7 @@ def main():
             return receipt.REFUSED
     if sys.argv[1:2] == ["rebaseline"]:
         parser = argparse.ArgumentParser(prog=f"{sys.argv[0]} rebaseline",
-                                         description="Promote a complete, clean board and clear a promotion hold")
+                                         description="Promote a complete board with clean gates or identity-only refusals")
         parser.add_argument("run", type=Path)
         args = parser.parse_args(sys.argv[2:])
         try:

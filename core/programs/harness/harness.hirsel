@@ -271,7 +271,7 @@ pub type After: send { name: String, run: StaticFn[fn(mut store.Tx, u64, Entry) 
 
 pub type Limits: send {
     rounds: u64, calls: u64, model_ms: u64, tool_ms: u64, model_reserve: u64,
-    inside_bytes: u64, gate_bytes: u64, gate_steps: u64, section_bytes: u64, section_steps: u64, hold_ms: u64,
+    inside_bytes: u64, inside_steps: u64, gate_bytes: u64, gate_steps: u64, section_bytes: u64, section_steps: u64, hold_ms: u64,
 }
 
 pub type Agent[G: send]: send {
@@ -293,7 +293,7 @@ pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(
         limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64,
                         // Gates and sections read rows; opening a table alone takes over
             // 10,000 steps.
-            inside_bytes: 65536u64, gate_bytes: 16384u64, gate_steps: 100000u64,
+            inside_bytes: 65536u64, inside_steps: 1000000u64, gate_bytes: 16384u64, gate_steps: 100000u64,
             section_bytes: 16384u64, section_steps: 100000u64, hold_ms: 86400000u64))
 }
 
@@ -434,15 +434,15 @@ fn put_entry(mut tx: store.Tx, h: Handles, mut s: Session, e: Entry) -> Result[u
     Ok(at)
 }
 
-// One reaction, under the Inside byte bound, with its writes rolled back if it
-// fails. A step bound cannot wrap a body that writes the transaction (MEM-30).
+// One reaction, under the Inside byte and step bounds, with its writes rolled
+// back if it fails or overruns.
 fn reacted(mut tx: store.Tx, r: After, at: u64, e: Entry, l: Limits) -> bool {
     let go = code.callable(r.run)
-    let ran = store.rollback_writes_on_error(mut tx, scoped fn(mut t: store.Tx) -> Result[(), Fault] {
+    let ran = store.rollback_writes_on_overrun(mut tx, l.inside_steps, scoped fn(mut t: store.Tx) -> Result[(), Fault] {
         let bounded = bound bytes l.inside_bytes { go(mut t, at, clone(e)) }
         match take bounded { Ok(take done) => take done, Error(_) => Error(TooLarge) }
     })
-    match ran { Ok(()) => true, Error(_) => false }
+    match ran { Ok(Ok(())) => true, _ => false }
 }
 
 fn status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused] {
@@ -931,16 +931,15 @@ fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut
     present(mut tx, h, a, w, mut s, id, take r, round, n)
 }
 
-// Runs an Inside tool in the advance transaction under its byte bound. A tool that fails or overruns leaves none of its writes.
+// Runs an Inside tool in the advance transaction under its byte and step
+// bounds. A tool that fails or overruns either bound leaves none of its writes.
 type Ran = Gave(Outcome) | Parks
 
 fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[Reply, Fault]], key: EffectKey, args: Payload, l: Limits) -> Ran {
     let Inline(raw) = view args else { return Gave(Failed("blob arguments are not supported yet")) }
     let go = code.callable(f)
     let given = Invoke(key: key, args: clone(raw))
-    let ran = store.rollback_writes_on_error(mut tx, scoped fn(mut t: store.Tx) -> Result[Reply, Fault] {
-        // A step bound cannot wrap a body that writes the transaction
-        // (MEM-30); the entry's own step reserve bounds it instead.
+    let ran = store.rollback_writes_on_overrun(mut tx, l.inside_steps, scoped fn(mut t: store.Tx) -> Result[Reply, Fault] {
         let bounded = bound bytes l.inside_bytes { go(mut t, given) }
         match take bounded {
             Ok(take r) => take r,
@@ -948,9 +947,10 @@ fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Invoke) -> Result[R
         }
     })
     match take ran {
-        Ok(Now(take out)) => Gave(if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) }),
-        Ok(Later) => Parks,
-        Error(take fault) => Gave(Failed(fault_text(take fault))),
+        Ok(Ok(Now(take out))) => Gave(if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) }),
+        Ok(Ok(Later)) => Parks,
+        Ok(Error(take fault)) => Gave(Failed(fault_text(take fault))),
+        Error(_) => Gave(Failed("inside tool exceeded its steps")),
     }
 }
 

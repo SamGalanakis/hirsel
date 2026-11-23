@@ -115,7 +115,7 @@ the agent's current code. Notes are not sent.
 
 `agent.reactions` is a list of `After{name, run}`. Every reaction runs in the
 transaction that appends an entry, with the entry and its position, under
-`bound bytes limits.inside_bytes`. It may write its own rows and triggers. It
+`bound bytes limits.inside_bytes` and `limits.inside_steps`. It may write its own rows and triggers. It
 cannot veto or edit the entry: a failing reaction has its writes rolled back,
 and a `Note("reaction failed", name)` is appended. Reactions do not run for
 that note. Appending entries from a reaction is not built yet.
@@ -158,10 +158,9 @@ resume of a parked call in the active run counts. A parked call has no
 deadline yet.
 
 An Inside tool runs inside `advance`'s transaction under
-`bound bytes limits.inside_bytes`. If it returns an error or overruns, its
-own writes are rolled back and the failure is committed. Its step use is
-bounded only by the entry's step reserve: `bound steps` cannot yet wrap a
-body that writes to the transaction (MEM-30).
+`bound bytes limits.inside_bytes` and a step bound of `limits.inside_steps`
+(`store.rollback_writes_on_overrun`). If it returns an error or overruns
+either bound, its own writes are rolled back and the failure is committed.
 
 ## Effects after a crash
 

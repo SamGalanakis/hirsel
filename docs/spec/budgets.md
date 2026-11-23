@@ -311,7 +311,13 @@ is core's plain record `{ steps: u64 }`.
   refused when it assigns, replaces or lends `mut` a place declared outside it, or invokes a
   scoped callback whose descriptor it cannot see. A place it moves from is maybe moved after
   the scope. So a stop leaves every place outside the scope as it was at entry, except
-  effects that do not install into a place (FAIL-16's list).
+  effects that do not install into a place (FAIL-16's list). To bound code that changes an
+  outer place, move a working value into the scope and return it with the result, and
+  keep in the place a copy made before entry: a return installs the working value, and a
+  stop drops it, cleaning it as every failure does, so the place holds the copy. The copy's
+  steps are taken before entry and count against the enclosing bound, not against `n`.
+  The store's `rollback_writes_on_overrun(mut tx, n, body)` does this for a transaction,
+  so an overrun leaves no write of `body` and the transaction goes on.
 - **Waits, bytes and tasks.** Waiting takes no steps: a step bound limits computation, not
   time, and a body that waits forever is ended by a deadline or a cancellation
   ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits
@@ -363,5 +369,18 @@ fn tries(n: u64) -> Result[u64, OutOfTime] {
 ```hirsel
 fn bump(mut n: u64) -> Result[(), OutOfTime] {
   bound steps 10 { n = n + 1 }         // refused: MEM-30, n is declared outside the scope
+}
+```
+```hirsel
+fn grow(mut xs: List[u64], k: u64) -> Result[(), OutOfTime] {
+  let kept: List[u64] = clone(xs)
+  let work = replace(mut xs, take kept)  // xs keeps a copy; work is moved into the scope
+  let grown = bound steps 100 {
+    let mut w = take work
+    for i in 0u64..k { list.push(mut w, i) }
+    w
+  }?                                     // a stop drops w: xs is as it was at entry
+  xs = grown
+  Ok(())
 }
 ```

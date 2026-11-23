@@ -1179,6 +1179,61 @@ pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) 
     take result
 }
 
+type Drafted[R, E] {
+    roots: Roots,
+    ids: u64,
+    resident: u64,
+    frame_tail: u64,
+    refusal: Option[Capacity],
+    frame_bytes: u64,
+    wrote: bool,
+    ops: DataOps,
+    stream_ops: DataOps,
+    extra_bytes: u64,
+    call: Option[CallSection],
+    result: Result[R, E]
+}
+
+// rollback_writes_on_error under a step bound of `steps` (MEM-30). The body
+// writes a working copy of `tx`, moved into the bound. A return installs the
+// copy, without its table writes when it is a typed Error, as above. An
+// overrun drops the copy, so `tx` is exactly as it was at entry; only the
+// reads and issued-id logs keep their appends (MEM-29).
+pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[Result[R, E], OutOfTime] {
+    // The copy's views anchor it to `tx`: its slot ends, and the bound returns
+    // the copy's owned parts, before `tx` is written.
+    let ran = {
+        let work = Tx(store: tx.store, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident,
+            retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal,
+            frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: clone(tx.ops), info: tx.info, stream_ops: clone(tx.stream_ops),
+            extra_bytes: tx.extra_bytes, call: clone(tx.call))
+        bound steps steps {
+            let mut draft = take work
+            let result = body(mut draft)
+            let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes,
+                wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, ..) = take draft
+            Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes,
+                wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, result: take result)
+        }
+    }
+    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes,
+        wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, result: take result) = (take ran)?
+    tx.ids = ids
+    tx.frame_tail = frame_tail
+    tx.refusal = refusal
+    tx.stream_ops = take stream_ops
+    tx.extra_bytes = extra_bytes
+    tx.call = take call
+    if let Ok(_) = result {
+        tx.roots = take roots
+        tx.ops = take ops
+        tx.resident = resident
+        tx.frame_bytes = frame_bytes
+        tx.wrote = wrote
+    }
+    Ok(take result)
+}
+
 pub fn run[R, A](mut db: Db, steps: Option[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let b = main_branch(db)
     run_on(mut db, b, steps, body)
@@ -1317,8 +1372,10 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
         }
     })
     let consumed = log.finish(take issued)
+    // An overrun under rollback_writes_on_overrun drops its stamps, so a later
+    // reservation may log a lower end: the watermark is the highest.
     for n in consumed {
-        db.next_node = n
+        db.next_node = order.max(db.next_node, n)
     }
     let seen = log.finish(take reads)
     match take caught {
@@ -1504,7 +1561,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             let CallDraft(finished: take result, reads: take reads, issued: take issued) = take draft
             let consumed = log.finish(take issued)
             for n in consumed {
-                next_id = n
+                next_id = order.max(next_id, n)
             }
             finish_stage(ci, take result, log.finish(take reads))
         },
@@ -5166,6 +5223,62 @@ fn typed_value(s: Snapshot, t: Shape[u64, u64], k: u64) -> u64 {
     match result.unwrap(get(s, t, k)) {
         None => 0,
         Some(v) => v
+    }
+}
+
+// One transaction writes row 1, nests a body that writes row 2 and spins
+// under a bound of N inside an outer bound of `outer`, then writes row 3.
+// Answers whether the spinning body ran, and the committed rows 1, 2 and 3.
+fn overrun_case(c: Clock, outer: u64) -> (u64, u64, u64, u64) waits {
+    let mut db = test_db(c, 1073741824)
+    result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
+    let t = result.unwrap(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))
+    let ran: Log[u64] = log.new()
+    let out = run(mut db, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        put(mut tx, t, 1, 10)?
+        let nested = rollback_writes_on_overrun(mut tx, outer, scoped fn(mut o: Tx) -> Result[Result[Result[(), Error], OutOfTime], Error] {
+            Ok(rollback_writes_on_overrun(mut o, 1000, scoped fn(mut i: Tx) -> Result[(), Error] {
+                log.append(ran, 1)
+                put(mut i, t, 2, 20)?
+                loop {}
+            }))
+        })
+        match nested {
+            Ok(Ok(Error(OutOfTime(steps: 1000)))) => (),
+            _ => return Error(Missing("overrun")),
+        }
+        put(mut tx, t, 3, 30)
+    })
+    match take out {
+        Ok(Committed(_)) => (),
+        _ => return (9, 0, 0, 0),
+    }
+    let s = snapshot(db)
+    let sh = shape(t)
+    (list.len(log.finish(take ran)), typed_value(s, sh, 1), typed_value(s, sh, 2), typed_value(s, sh, 3))
+}
+
+// MEM-30 with a rollback-able Tx. An overrun leaves none of the body's writes,
+// and the transaction goes on to write and commit. Oracle for the charge, by
+// hand from rollback_writes_on_overrun's source: the outer body's call (1),
+// the call of rollback_writes_on_overrun (1), share_roots (1 + 3 share_page_tree
+// + 4 arc.share: the collection map's root and empty child, the streams and
+// catalog roots) and three clones (3) come to 13 before the inner bound of N
+// is reserved, and the overrun returns at `?` with no step. So an outer bound
+// of N + 13 runs the body, and N + 12 refuses its entry.
+pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
+    let exact = overrun_case(c, 1013)
+    let short = overrun_case(c, 1012)
+    exact.0 == 1 && exact.1 == 10 && exact.2 == 0 && exact.3 == 30
+        && short.0 == 0 && short.1 == 10 && short.2 == 0 && short.3 == 30
+}
+
+@test
+fn test_rollback_on_overrun(c: Clock) -> Result[(), ()] waits {
+    if law_rollback_on_overrun(c) {
+        Ok(())
+    } else {
+        Error(())
     }
 }
 

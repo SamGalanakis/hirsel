@@ -539,6 +539,12 @@ fn scribble_bad(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, 
     Error(BadArgs("bad"))
 }
 
+fn scribble_spin(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let Ok(h) = harness.handles(store.tx_schema(tx)) else { return Error(Unavailable) }
+    let Ok(()) = store.put(mut tx, h.views, 999u64, Status("scribbled")) else { return Error(Unavailable) }
+    loop {}
+}
+
 fn alice() -> store.Caller { store.Caller(issuer: 1u8, subject: string.into_bytes("alice")) }
 
 // A session whose run 0 has its model answer (one call) committed and not yet
@@ -639,35 +645,42 @@ fn test_approval_bound_to_arguments(parent: Dir, clock: Clock, random: Random, t
     if law_approval_bound_to_arguments(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
 }
 
-fn inside_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, good: bool) -> (bool, harness.EffectPhase) waits {
+// Kinds: 0 returns, 1 returns an error, 2 spins past its step bound. Answers
+// (row 999 written, member phase), read again after the store is reopened.
+fn inside_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, kind: u8) -> (bool, harness.EffectPhase) waits {
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
     let mut a = crash_agent()
-    let f = if good { code.describe(scribble_ok) } else { code.describe(scribble_bad) }
+    let f = match kind { 0u8 => code.describe(scribble_ok), 1u8 => code.describe(scribble_bad), _ => code.describe(scribble_spin) }
     list.push(mut a.tools, harness.inside("scribble", "writes a row", "{}", f))
     let mut db = answered(dir, clock, random, tasks, harness.Call(id: "c1", name: "scribble", args: Inline(string.into_bytes("{}"))))
     kick(mut db, a)
     let phase_after_derive = member(db)
     let _ = phase_after_derive
     kick(mut db, a)
-    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
-    let wrote = match result.unwrap(store.get(store.snapshot(db), store.shape(h.views), 999u64)) { Some(_) => true, None => false }
-    let phase = member(db)
     result.unwrap(store.close(take db))
+    let reopened = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let h = result.unwrap(store.with_schema(reopened, code.describe(harness.handles)))
+    let wrote = match result.unwrap(store.get(store.snapshot(reopened), store.shape(h.views), 999u64)) { Some(_) => true, None => false }
+    let phase = member(reopened)
+    result.unwrap(store.close(take reopened))
     result.unwrap(std.dir.remove_all(parent, name))
     (wrote, take phase)
 }
 
 // Law I1 (Fable: Inside tools run once in advance's transaction): an Inside
-// tool's writes commit with its result, and a tool that returns an error
-// leaves none of its writes, while the advance itself still commits the
-// failure. Oracle: the row each tool writes, by hand.
+// tool's writes commit with its result, and a tool that returns an error or
+// overruns its step bound (MEM-30) leaves none of its writes, while the
+// advance itself still commits the failure. The outcome is read after the
+// store reopens from its journal. Oracle: the row each tool writes, by hand.
 pub fn law_inside_rolls_back_on_error(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> bool waits {
-    let (kept_row, ok_phase) = inside_case(parent, clock, random, tasks, true)
-    let (bad_row, bad_phase) = inside_case(parent, clock, random, tasks, false)
+    let (kept_row, ok_phase) = inside_case(parent, clock, random, tasks, 0u8)
+    let (bad_row, bad_phase) = inside_case(parent, clock, random, tasks, 1u8)
+    let (spun_row, spun_phase) = inside_case(parent, clock, random, tasks, 2u8)
     let ok_settled = match ok_phase { Settled(Tool(Returned(Inline(out)))) => out == string.into_bytes("ok"), _ => false }
     let bad_settled = match bad_phase { Settled(Tool(Failed(why))) => why == "bad", _ => false }
-    kept_row && ok_settled && !bad_row && bad_settled
+    let spun_settled = match spun_phase { Settled(Tool(Failed(why))) => why == "inside tool exceeded its steps", _ => false }
+    kept_row && ok_settled && !bad_row && bad_settled && !spun_row && spun_settled
 }
 
 @test

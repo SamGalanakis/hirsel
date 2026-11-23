@@ -5,6 +5,7 @@ use hirsel_core_resolve::{
 };
 use hirsel_core_syntax::Symbol;
 use hirsel_core_syntax::{Item, NodeKind, TokenKind};
+use std::ops::Range;
 
 /// A body record is reused exactly when its key is equal, so the key holds every
 /// program input the body's checking and lowering read. The rule: lowering reads
@@ -38,34 +39,6 @@ pub struct DefinitionKey {
     pub siblings: Option<ContentHash>,
 }
 
-fn token_identity(item: Item<'_>, end: usize, domain: &str) -> ContentHash {
-    if let Some(canonical) = item.tree.canonical_slice(item.range.tokens.clone(), end) {
-        return ContentHash::of_parts(domain, [canonical]);
-    }
-    // Syntax trees decoded from an older product have no runtime canonical
-    // stream. Keep the v2 fallback until that product is naturally rebuilt.
-    ContentHash::of_parts_stream(domain, |parts| {
-        for token in item
-            .tree
-            .tokens
-            .get(item.range.tokens.start as usize..item.range.tokens.end as usize)
-            .into_iter()
-            .flatten()
-        {
-            if token.kind.is_trivia()
-                || matches!(token.kind, TokenKind::Eof)
-                || token.span.start as usize >= end
-            {
-                continue;
-            }
-            let text = &item.text[token.span.start as usize..token.span.end as usize];
-            parts.part_byte_slice(token.kind as u8, text.as_bytes());
-        }
-        Ok(())
-    })
-    .expect("semantic token hash")
-}
-
 /// A body's identity is its item's source bytes from its first significant
 /// token to the end of its last one. The body's item-relative anchors (its
 /// refusal and flow sites, its IR instructions' `Anchor`s) are byte offsets
@@ -90,24 +63,39 @@ fn body_identity(item: Item<'_>) -> ContentHash {
     )
 }
 
-/// The header's end as a file offset: a function's body block start, else
-/// past every token of the item. Token spans are file offsets.
-fn header_file_end(item: Item<'_>) -> usize {
+/// The tokens before the function body, or the entire range for other items.
+fn header_tokens(item: Item<'_>, end: usize) -> Range<u32> {
+    let mut tokens = item.range.tokens.clone();
     if matches!(
         item.tree.node(item.root).kind,
         NodeKind::Function | NodeKind::CloneHook
     ) {
-        item.file_offset as usize + header_end(item)
-    } else {
-        usize::MAX
+        let end = item.file_offset as usize + end;
+        tokens.end = tokens.start
+            + item.tree.tokens[tokens.start as usize..tokens.end as usize]
+                .partition_point(|token| (token.span.start as usize) < end) as u32;
     }
+    tokens
 }
 
-/// The item's header tokens, the shape's part for this item: the declared
-/// tables a shape selects hold every header token's meaning, the parameter
-/// names included (`hirsel_core_front::layer`).
-fn header_identity(item: Item<'_>) -> ContentHash {
-    token_identity(item, header_file_end(item), "hirsel.header-tokens.v2")
+/// The item's full header, including bindings read by its own body.
+fn header_identity(item: Item<'_>, tokens: Range<u32>) -> ContentHash {
+    const DOMAIN: &str = "hirsel.header-tokens.v2";
+    if let Some(canonical) = item.tree.canonical_slice(tokens.clone(), usize::MAX) {
+        return ContentHash::of_parts(DOMAIN, [canonical]);
+    }
+    // A deserialized syntax tree has no runtime canonical stream.
+    ContentHash::of_parts_stream(DOMAIN, |parts| {
+        for token in &item.tree.tokens[tokens.start as usize..tokens.end as usize] {
+            if token.kind.is_trivia() || matches!(token.kind, TokenKind::Eof) {
+                continue;
+            }
+            let text = &item.text[token.span.start as usize..token.span.end as usize];
+            parts.part_byte_slice(token.kind as u8, text.as_bytes());
+        }
+        Ok(())
+    })
+    .expect("semantic token hash")
 }
 
 /// A signature's identity as its readers depend on it, the header row's
@@ -120,20 +108,31 @@ fn header_identity(item: Item<'_>) -> ContentHash {
 /// anchor, a default or an outlives clause naming a parameter keeps its
 /// spelling), the bindings hash as their token kind alone; their count, order,
 /// modes, types and `waits` stay. Any other header is `shape`, its full tokens.
-fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
+fn signature_identity(
+    item: Item<'_>,
+    tokens: Range<u32>,
+    shape: ContentHash,
+    bindings: &mut Vec<(Symbol, usize)>,
+) -> ContentHash {
     let root = item.tree.node(item.root);
     if item.range.has_errors || !matches!(root.kind, NodeKind::Function | NodeKind::CloneHook) {
         return shape;
     }
     let tree = item.tree;
-    let mut bindings: Vec<(Symbol, usize)> = tree
+    let Some(&parameters) = tree
         .children(item.root)
         .iter()
-        .filter(|&&c| tree.node(c).kind == NodeKind::Parameters)
-        .flat_map(|&c| tree.children(c))
-        .filter_map(|&p| tree.node(p).token.map(|t| t.0 as usize))
-        .map(|i| (tree.tokens[i].symbol, i))
-        .collect();
+        .find(|&&c| tree.node(c).kind == NodeKind::Parameters)
+    else {
+        return shape;
+    };
+    bindings.clear();
+    bindings.extend(
+        tree.children(parameters)
+            .iter()
+            .filter_map(|&p| tree.node(p).token.map(|t| t.0 as usize))
+            .map(|i| (tree.tokens[i].symbol, i)),
+    );
     if bindings.is_empty() {
         return shape;
     }
@@ -141,15 +140,7 @@ fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
     if bindings.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return shape;
     }
-    // The header is the item's tokens before the body block (token spans are
-    // file offsets and increase), as `header_identity` cuts it.
-    let start = item.range.tokens.start as usize;
-    let end = header_file_end(item);
-    let stop = start
-        + tree.tokens[start..item.range.tokens.end as usize]
-            .iter()
-            .position(|t| t.span.start as usize >= end)
-            .unwrap_or(item.range.tokens.end as usize - start);
+    let (start, stop) = (tokens.start as usize, tokens.end as usize);
     // Parameter names are identifiers, interned by spelling in this token stream.
     for (i, token) in (start..stop).zip(&tree.tokens[start..stop]) {
         if token.kind == TokenKind::Ident
@@ -168,10 +159,12 @@ fn signature_identity(item: Item<'_>, shape: ContentHash) -> ContentHash {
         &tree.canonical[offsets[from] as usize..offsets[to] as usize]
     };
     ContentHash::of_parts_stream("hirsel.signature-tokens.v1", |parts| {
+        // The frame holds a one-byte token kind and no spelling.
+        const BINDING: [u8; 9] = [1, 0, 0, 0, 0, 0, 0, 0, TokenKind::Ident as u8];
         let mut from = start;
-        for &(_, binding) in &bindings {
+        for &(_, binding) in bindings.iter() {
             parts.framed_parts(canonical(from, binding));
-            parts.part_byte_slice(tree.tokens[binding].kind as u8, b"");
+            parts.framed_parts(&BINDING);
             from = binding + 1;
         }
         parts.framed_parts(canonical(from, stop));
@@ -499,8 +492,8 @@ pub(crate) struct Shape {
     environment: ContentHash,
     items: ContentHash,
     modules: Demand<ContentHash>,
-    /// Each item's `signature_identity`, its header row's digest.
-    headers: Vec<Vec<ContentHash>>,
+    /// Each item's header end and signature digest.
+    headers: Vec<Vec<(usize, ContentHash)>>,
 }
 impl Shape {
     pub(crate) fn new(
@@ -510,6 +503,7 @@ impl Shape {
     ) -> io::Result<Self> {
         let identities = Demand::new(index.modules.base_len(), index.modules.len());
         let mut headers = Vec::with_capacity(modules.len());
+        let mut bindings = Vec::new();
         let items = ContentHash::of_parts_stream("hirsel.key-items.v1", |parts| {
             for m in modules {
                 let module = identities.get_or_try_init(m.id.0 as u64, || {
@@ -521,9 +515,11 @@ impl Shape {
                 parts.part_byte_slice(0, &module.0);
                 let mut row = Vec::with_capacity(m.syntax.items.len());
                 for item in m.syntax.items() {
-                    let digest = header_identity(item);
+                    let end = header_end(item);
+                    let tokens = header_tokens(item, end);
+                    let digest = header_identity(item, tokens.clone());
                     parts.part_byte_slice(1, &digest.0);
-                    row.push(signature_identity(item, digest));
+                    row.push((end, signature_identity(item, tokens, digest, &mut bindings)));
                 }
                 headers.push(row);
             }
@@ -568,10 +564,9 @@ impl Keys {
         let mut reads = Vec::new();
         let mut body_reads = Vec::new();
         for ((m, rows), digests) in modules.iter().zip(resolutions).zip(shape.headers) {
-            for (ordinal, ((item, resolution), digest)) in
+            for (ordinal, ((item, resolution), (end, digest))) in
                 m.syntax.items().zip(rows).zip(digests).enumerate()
             {
-                let end = header_end(item);
                 let Some(definition) = index.item_definition(m.id, m.source, ordinal as u32, item)
                 else {
                     let root = item.tree.node(item.root);
@@ -1321,11 +1316,12 @@ mod tests {
             commented.item(1),
             changed.item(1),
         );
-        assert_eq!(header_identity(o), header_identity(m));
+        let header = |item| header_identity(item, header_tokens(item, header_end(item)));
+        assert_eq!(header(o), header(m));
         assert_eq!(body_identity(o), body_identity(m));
-        assert_eq!(header_identity(o), header_identity(c));
+        assert_eq!(header(o), header(c));
         assert_eq!(body_identity(o), body_identity(c));
-        assert_eq!(header_identity(o), header_identity(x));
+        assert_eq!(header(o), header(x));
         assert_ne!(body_identity(o), body_identity(x));
     }
 

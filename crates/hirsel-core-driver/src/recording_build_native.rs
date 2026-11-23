@@ -1605,9 +1605,11 @@ fn cli_tls_replay(with_secret: bool) {
             .lines()
             .filter(|line| line.contains(&mac_op))
             .collect();
+        // Seven permitted MACs, then wrap, unwrap, the unwrapped MAC and
+        // sign; a Denied use issues no frame.
         assert_eq!(
             mac.len(),
-            7,
+            11,
             "MAC operations issued without the necessary use"
         );
         assert_eq!(

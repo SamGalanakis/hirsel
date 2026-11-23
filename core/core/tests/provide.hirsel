@@ -2064,3 +2064,215 @@ fn net_ready(tasks: Tasks) -> bool waits {
     let client = result.unwrap(task.join(take child))
     connected && ready && received && halves && client
 }
+
+// TLS-5 key operations. A blob is [1][len(policy) u32 LE][policy][salt 32]
+// [ciphertext][tag 16] (tls.md), so a 6-byte pencil bound to "mac" wraps to
+// 1 + 4 + 3 + 32 + 6 + 16 = 62 bytes.
+fn kek(uses: String) -> Secret {
+    result.unwrap(secret.seal(string.into_bytes(string.from("0123456789abcdef0123456789abcdef")), uses))
+}
+
+fn wrapped_pencil(uses: String, mut blob: Bytes) {
+    let n = result.unwrap(secret.wrap(kek(string.from("wrap")), sealed_pencil(uses), mut blob))
+    if n != list.len(blob) {
+        core.fail("wrap answers the bytes it appended")
+    }
+}
+
+fn mac_of(s: Secret) -> Bytes {
+    let tag = result.unwrap(secret.hmac_sha256(s, string.as_bytes("x")))
+    let mut output: Bytes = list.with_capacity(32)
+    if !bytebuf.append_inline(mut output, tag, 0, 32) {
+        core.fail("32-byte tag exceeds its buffer")
+    }
+    output
+}
+
+// The unwrapped Secret has the pencil's bytes: its MAC equals the sealed
+// pencil's. Unwrapping charges a seal of round_up_8(6 + 32) = 40 bytes and
+// its drop refunds them.
+// expect: run wrap_round_trip() = true
+fn wrap_round_trip() -> bool {
+    let mut blob: Bytes = list.with_capacity(62)
+    wrapped_pencil(string.from("mac"), mut blob)
+    let header = list.len(blob) == 62 && blob[0] == 1u8 && blob[1] == 3u8 && blob[2] == 0u8 && blob[5] == b'm' && blob[7] == b'c'
+    let k = kek(string.from("wrap"))
+    let checked = bound bytes 4392 {
+        let back = result.unwrap(secret.unwrap(k, blob, string.from("mac")))
+        let held = free_of_4392() == 4352
+        let same = mac_of(back) == mac_of(sealed_pencil(string.from("mac")))
+        let _ = take back
+        held && same && free_of_4392() == 4392
+    }
+    header && result.unwrap(checked)
+}
+
+fn unwrap_denied(blob: Bytes, uses: String) -> bool {
+    match secret.unwrap(kek(string.from("wrap")), blob, uses) {
+        Error(Denied) => true,
+        Ok(take s) => {
+            let _ = take s
+            false
+        },
+        Error(_) => false
+    }
+}
+
+// unwrap's uses must be within the policy the blob binds: a use the blob
+// lacks, or a wider tls_send, is Denied; a narrower name is permitted.
+// expect: run unwrap_widened_denied() = true
+fn unwrap_widened_denied() -> bool {
+    let mut blob: Bytes = list.with_capacity(128)
+    wrapped_pencil(string.from("tls_send(*.example.test) verify"), mut blob)
+    let use_widened = unwrap_denied(blob, string.from("tls_send(*.example.test) mac"))
+    let send_widened = unwrap_denied(blob, string.from("tls_send(*.test) verify"))
+    let narrower = match secret.unwrap(kek(string.from("wrap")), blob, string.from("tls_send(a.example.test) verify")) {
+        Ok(take s) => {
+            let _ = take s
+            true
+        },
+        Error(_) => false
+    }
+    let invalid = match secret.unwrap(kek(string.from("wrap")), blob, string.from("*bad")) {
+        Error(Invalid) => true,
+        Ok(take s) => {
+            let _ = take s
+            false
+        },
+        Error(_) => false
+    }
+    use_widened && send_widened && narrower && invalid
+}
+
+// Flipping any one byte of a blob, header included, is Tampered, and so is
+// a different KEK; neither says more.
+// expect: run unwrap_tampered() = true
+fn unwrap_tampered() -> bool {
+    let mut blob: Bytes = list.with_capacity(62)
+    wrapped_pencil(string.from("mac"), mut blob)
+    let mut all = true
+    for i in 0u64 .. 62 {
+        let mut t: Bytes = list.with_capacity(62)
+        list.append(mut t, blob)
+        let _ = list.set(mut t, i, blob[i] ^ 1u8)
+        all = all && match secret.unwrap(kek(string.from("wrap")), t, string.from("mac")) {
+            Error(Tampered) => true,
+            Ok(take s) => {
+                let _ = take s
+                false
+            },
+            Error(_) => false
+        }
+    }
+    let other = result.unwrap(secret.seal(string.into_bytes(string.from("0123456789abcdef0123456789abcdeF")), "wrap"))
+    let wrong_kek = match secret.unwrap(other, blob, string.from("mac")) {
+        Error(Tampered) => true,
+        Ok(take s) => {
+            let _ = take s
+            false
+        },
+        Error(_) => false
+    }
+    all && wrong_kek
+}
+
+// A KEK without the wrap use is Denied for both directions, even with the
+// right bytes, and appends nothing; a 31-byte KEK is Invalid; too little
+// spare is Capacity with the blob's length and the spare.
+// expect: run kek_without_wrap_denied() = true
+fn kek_without_wrap_denied() -> bool {
+    let mut blob: Bytes = list.with_capacity(62)
+    let wrap_denied = match secret.wrap(kek(string.from("mac")), sealed_pencil(string.from("mac")), mut blob) {
+        Error(Denied) => list.len(blob) == 0,
+        _ => false
+    }
+    wrapped_pencil(string.from("mac"), mut blob)
+    let open_denied = match secret.unwrap(kek(string.from("mac")), blob, string.from("mac")) {
+        Error(Denied) => true,
+        Ok(take s) => {
+            let _ = take s
+            false
+        },
+        Error(_) => false
+    }
+    let short = result.unwrap(secret.seal(string.into_bytes(string.from("0123456789abcdef0123456789abcde")), "wrap"))
+    let mut out: Bytes = list.with_capacity(62)
+    let invalid = match secret.wrap(short, sealed_pencil(string.from("mac")), mut out) {
+        Error(Invalid) => list.len(out) == 0,
+        _ => false
+    }
+    let mut small: Bytes = list.with_capacity(61)
+    let capacity = match secret.wrap(kek(string.from("wrap")), sealed_pencil(string.from("mac")), mut small) {
+        Error(Capacity(c)) => c.requested == 62 && c.available == 61 && list.len(small) == 0,
+        _ => false
+    }
+    wrap_denied && open_denied && invalid && capacity
+}
+
+fn nibble(c: u8) -> u8 {
+    if c >= b'a' {
+        c - b'a' + 10u8
+    } else {
+        c - b'0'
+    }
+}
+
+fn unhex(s: String) -> Bytes {
+    let h = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(h) / 2)
+    for i in 0u64 .. list.len(h) / 2 {
+        list.push(mut out, nibble(h[2 * i]) * 16u8 + nibble(h[2 * i + 1]))
+    }
+    out
+}
+
+fn sign_denied(key: Secret, alg: SignAlg) -> bool {
+    let mut sig: Bytes = list.with_capacity(512)
+    match secret.sign(key, alg, string.as_bytes("m"), mut sig) {
+        Error(Denied) => list.len(sig) == 0,
+        _ => false
+    }
+}
+
+// RFC 8032 section 7.1 TEST 1, its seed in a PKCS#8 envelope (RFC 8410):
+// the empty message signs to the RFC's signature. The key's sign(ed25519)
+// use Denies P256 and RS256, and a key with no sign use is Denied; the same
+// bytes under sign(p256) are not a P-256 PKCS#8 key, so Invalid.
+// expect: run sign_ed25519_rfc8032() = true
+fn sign_ed25519_rfc8032() -> bool {
+    let pkcs8 = string.from("302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+    let key = result.unwrap(secret.seal(unhex(pkcs8), "sign(ed25519)"))
+    let mut sig: Bytes = list.with_capacity(64)
+    let empty: Bytes = list.new()
+    let n = result.unwrap(secret.sign(key, Ed25519, empty, mut sig))
+    let expected = unhex(string.from("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"))
+    let exact = n == 64 && sig == expected
+    let wrong_alg = sign_denied(key, P256) && sign_denied(key, Rs256)
+    let no_use = sign_denied(sealed_pencil(string.from("mac")), Ed25519)
+    let as_p256 = result.unwrap(secret.seal(unhex(pkcs8), "sign(p256)"))
+    let mut out: Bytes = list.with_capacity(64)
+    let invalid = match secret.sign(as_p256, P256, empty, mut out) {
+        Error(Invalid) => list.len(out) == 0,
+        _ => false
+    }
+    exact && wrong_alg && no_use && invalid
+}
+
+// A program holds a sealed KEK's bytes and could open the blob itself, so
+// wrapping a granted Secret under it is Denied and appends nothing.
+// expect: run granted_wrap_denied(granted, tasks) = true
+fn granted_wrap_denied(token: Secret, _tasks: Tasks) -> bool {
+    let mut blob: Bytes = list.with_capacity(256)
+    let direct = match secret.wrap(kek(string.from("wrap")), token, mut blob) {
+        Error(Denied) => list.len(blob) == 0,
+        _ => false
+    }
+    // A key derived from a grant is opaque too (TLS-5): wrapping it under a
+    // sealed KEK would hand the program its bytes.
+    let child = result.unwrap(secret.derive_hmac_sha256(token, string.as_bytes(""), string.as_bytes("child"), "mac"))
+    let derived = match secret.wrap(kek(string.from("wrap")), child, mut blob) {
+        Error(Denied) => list.len(blob) == 0,
+        _ => false
+    }
+    direct && derived
+}

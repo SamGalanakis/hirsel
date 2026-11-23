@@ -4601,6 +4601,97 @@ impl Machine<'_> {
         }
     }
 
+    /// `secret.wrap`, `unwrap` and `sign` (native `secret.rs` key
+    /// operations): error tag 1 Denied, 2 Invalid, 3 Tampered, 4 Capacity.
+    /// Every evaluator Secret is sealed, so no KEK or secret is opaque.
+    fn secret_key(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
+        use hirsel_core_net::key_wrap::{self, KeyFailure, SignAlg};
+        let fail = |f: KeyFailure| {
+            let tag = match f {
+                KeyFailure::Denied => 1,
+                KeyFailure::Invalid => 2,
+                KeyFailure::Tampered => 3,
+            };
+            vec![0, tag, 0, 0]
+        };
+        let key = self.secret(a[0]).unwrap().clone();
+        let needed = match op {
+            HostOp::SecretSign => SignAlg::from_case(a[1]).expect("a SignAlg case").needed(),
+            _ => SecretUse::WRAP,
+        };
+        if !key.policy.uses.permits(needed) {
+            return fail(KeyFailure::Denied);
+        }
+        let (produced, out) = match op {
+            HostOp::SecretWrap => {
+                let s = self.secret(a[1]).unwrap();
+                let blob = key_wrap::wrap_with_salt(
+                    &key.bytes,
+                    &s.policy.text(),
+                    &s.bytes,
+                    key_wrap::salt(),
+                );
+                (blob, a[2])
+            }
+            HostOp::SecretSign => {
+                let alg = SignAlg::from_case(a[1]).unwrap();
+                (
+                    key_wrap::sign(alg, &key.bytes, self.carrier_bytes(a[2])),
+                    a[3],
+                )
+            }
+            _ => {
+                let Some(requested) = std::str::from_utf8(self.carrier_bytes(a[2]))
+                    .ok()
+                    .and_then(SecretPolicy::parse)
+                else {
+                    return fail(KeyFailure::Invalid);
+                };
+                let blob = self.carrier_bytes(a[1]).to_vec();
+                let len = key_wrap::unwrapped_len(&blob).unwrap_or(0) as u64;
+                let size = SecretGrant::logical_size(&requested.send, len);
+                let charge = size.unwrap_or(u64::MAX);
+                let payer = t.limits.last().unwrap().clone();
+                if let Err(available) = self.admit_charge(&payer, charge, size.is_none()) {
+                    return vec![charge, 4, 0, available];
+                }
+                let mut plain = Zeroizing::new(Vec::new());
+                if let Err(f) = key_wrap::unwrap_into(&key.bytes, &blob, &mut plain)
+                    .and_then(|bound| key_wrap::within(&requested, bound))
+                {
+                    self.refund(payer, charge);
+                    return fail(f);
+                }
+                let seal = Arc::new(());
+                self.world
+                    .seals
+                    .push((Arc::downgrade(&seal), payer.clone(), charge));
+                let key = self.designate(
+                    EvalSecret {
+                        policy: requested,
+                        bytes: Arc::new(plain),
+                        seal,
+                    },
+                    (payer, 0),
+                );
+                return vec![key, 0, 0, 0];
+            }
+        };
+        let bytes = match produced {
+            Ok(bytes) => bytes,
+            Err(f) => return fail(f),
+        };
+        let (_, data, len, cap) = self.carrier(out);
+        let spare = cap.saturating_sub(len);
+        let n = bytes.len() as u64;
+        if n > spare {
+            return vec![n, 4, 0, spare];
+        }
+        self.put(data + len, &bytes);
+        self.store(out + 8, 8, len + n);
+        vec![n, 0, 0, 0]
+    }
+
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
         let Some((name, spent, _)) = self.world.tls_writes.get(&(key & !3)) else {
@@ -4767,6 +4858,9 @@ impl Machine<'_> {
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
             HostOp::SecretDeriveHmac => return Ok(self.secret_derive(t, a)),
             HostOp::SecretHmac | HostOp::SecretVerifyHmac => return Ok(self.secret_mac(op, a)),
+            HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign => {
+                return Ok(self.secret_key(t, op, a));
+            }
             HostOp::EnvGet | HostOp::EnvLen | HostOp::EnvName | HostOp::EnvNarrow => {
                 return Ok(self.env(t, op, a));
             }
@@ -4822,6 +4916,9 @@ impl Machine<'_> {
             | HostOp::SecretDeriveHmac
             | HostOp::SecretHmac
             | HostOp::SecretVerifyHmac
+            | HostOp::SecretWrap
+            | HostOp::SecretUnwrap
+            | HostOp::SecretSign
             | HostOp::EnvGet
             | HostOp::EnvLen
             | HostOp::EnvName

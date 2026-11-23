@@ -940,7 +940,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Tasks', '--grant', grant])
                     case = dataclasses.replace(case, stderr=approval + case.stderr)
                 if '(granted, tasks)' in case.call:
-                    command.extend(['--grant', 'Tasks', '--grant', 'Secret:native_granted=env:HIRSEL_GRANTED_SECRET to alpha.test'])
+                    command.extend(['--grant', 'Tasks', '--grant', 'Secret:native_granted=env:HIRSEL_GRANTED_SECRET to alpha.test kdf'])
                     environment = {**os.environb, b'HIRSEL_GRANTED_SECRET': b'granted-token'}
                 if '(env)' in case.call:
                     command.extend(['--grant', 'Env=' + ','.join(name for name, _ in case.env_fixture)])

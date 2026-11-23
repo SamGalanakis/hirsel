@@ -304,6 +304,9 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::SecretHmac
                     | HostOp::SecretDeriveHmac
                     | HostOp::SecretVerifyHmac
+                    | HostOp::SecretWrap
+                    | HostOp::SecretUnwrap
+                    | HostOp::SecretSign
                     | HostOp::NetSplit
                     | HostOp::StdinRead
                     | HostOp::EnvGet
@@ -406,6 +409,9 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::SecretHmac
                     | HostOp::SecretDeriveHmac
                     | HostOp::SecretVerifyHmac
+                    | HostOp::SecretWrap
+                    | HostOp::SecretUnwrap
+                    | HostOp::SecretSign
                     | HostOp::NetSplit
                     | HostOp::StdinRead
                     | HostOp::EnvGet

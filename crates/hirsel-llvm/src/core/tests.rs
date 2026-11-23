@@ -2524,7 +2524,9 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::Rename | HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
                 &["u64", "ptr", "ptr"]
             }
-            HostOp::ReadAt | HostOp::WriteAt => &["u64", "u64", "ptr"],
+            HostOp::ReadAt | HostOp::WriteAt | HostOp::SecretWrap => &["u64", "u64", "ptr"],
+            HostOp::SecretUnwrap => &["u64", "ptr", "ptr"],
+            HostOp::SecretSign => &["u64", "u64", "ptr", "ptr"],
             HostOp::SleepUntil => &["u64", "u64"],
             HostOp::Sync | HostOp::SyncDir | HostOp::Entries | HostOp::StatFile => &["u64"],
             _ => &["u64", "ptr"],

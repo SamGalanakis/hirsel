@@ -163,7 +163,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
         let served = crate::provide::owns(&net::socket_provider(context, key));
         let secret = crate::secret::resolve(context, secret);
         // A served stream never satisfies a granted Secret (TLS-6).
-        if served && matches!(secret.origin, crate::secret::Origin::Granted(_)) {
+        if served && secret.origin.opaque() {
             return net::DENIED;
         }
         let (binding, spent) = match check_tls(files, key, Some(&secret)) {

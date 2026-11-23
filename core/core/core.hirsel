@@ -159,6 +159,10 @@ pub type SecretError = Invalid | Capacity(Capacity)
 
 pub type MacError = Denied()
 
+pub type KeyError = Denied | Invalid | Tampered | Capacity(Capacity)
+
+pub type SignAlg = Ed25519 | P256 | Rs256
+
 pub opaque resource type Socket
 
 pub opaque resource type ReadHalf

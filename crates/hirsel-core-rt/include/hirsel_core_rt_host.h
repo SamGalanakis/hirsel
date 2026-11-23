@@ -343,6 +343,11 @@ HirselCoreHostOutcome hirsel_core_scram_verify(HirselCoreContext *, uint64_t, co
 HirselCoreHostOutcome hirsel_core_secret_derive_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+/* Key operations: SECRET_MAC modes 2 wrap, 3 unwrap, 4 sign; error tag is the
+   KeyError case plus one (Denied 1, Invalid 2, Tampered 3, Capacity 4). */
+HirselCoreHostOutcome hirsel_core_secret_wrap(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_unwrap(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_sign(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_join(HirselCoreContext *, uint64_t, uint64_t, uint64_t);

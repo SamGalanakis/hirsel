@@ -474,6 +474,9 @@ tags!(HostOp {
     116 => SleepUntilWall,
     117 => RecvReady,
     118 => SecretDeriveHmac,
+    119 => SecretWrap,
+    120 => SecretUnwrap,
+    121 => SecretSign,
 });
 
 tags!(RaiseCause {

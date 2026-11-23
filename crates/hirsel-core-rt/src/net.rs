@@ -996,7 +996,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
         // satisfies a granted Secret (TLS-5, NOTES 6).
         let served = served_socket(context, key).is_some();
         let secret = crate::secret::resolve(context, s);
-        if served && matches!(secret.origin, crate::secret::Origin::Granted(_)) {
+        if served && secret.origin.opaque() {
             return DENIED;
         }
         let narrowed = {

@@ -1073,6 +1073,49 @@ unsafe fn socket_args(request: &Request) -> Args {
     }
 }
 
+/// A key operation's canonical arguments: each Secret's origin and policy,
+/// never its bytes, then the operation's public operands and the spare.
+unsafe fn key_args(r: &Request) -> Args {
+    use crate::secret::KeyOp;
+    // SAFETY: the key adapter pins its request for the issue.
+    let key = unsafe { &*r.path.cast::<crate::secret::KeyRequest<'_>>() };
+    let mut head = vec![r.mode];
+    let mut texts = Vec::new();
+    let mut secret = |head: &mut Vec<u8>, s: &crate::secret::Secret| {
+        let (kind, ordinal) = s.origin.wire();
+        head.push(kind);
+        put_varint(head, ordinal);
+        texts.push(s.policy.text().into_bytes());
+    };
+    secret(&mut head, key.key);
+    let operand: &[u8] = match &key.op {
+        KeyOp::Wrap(s) => {
+            secret(&mut head, s);
+            &[]
+        }
+        KeyOp::Unwrap { blob, uses, .. } => {
+            texts.push(uses.text().into_bytes());
+            blob
+        }
+        KeyOp::Sign { alg, msg } => {
+            head.push(alg.case());
+            msg
+        }
+    };
+    put_varint(
+        &mut head,
+        r.buffer.capacity.saturating_sub(r.buffer.len) as u64,
+    );
+    for text in &texts {
+        put_varint(&mut head, text.len() as u64);
+    }
+    put_varint(&mut head, operand.len() as u64);
+    let mut parts: Vec<&[u8]> = vec![&head];
+    parts.extend(texts.iter().map(Vec::as_slice));
+    parts.push(operand);
+    Args::of_parts(&parts)
+}
+
 /// The canonical argument bytes of an operation (REPLAY-SPEC 4.1; the
 /// per-operation choice is recorded in followups.md for section 5.4).
 unsafe fn canonical(r: &Request) -> Args {
@@ -1125,6 +1168,9 @@ unsafe fn canonical(r: &Request) -> Args {
                 kdf.prefix,
                 kdf.data,
             ]);
+        }
+        if r.operation == SECRET_MAC && r.mode >= crate::secret::KEY_WRAP {
+            return key_args(r);
         }
         if r.operation == SECRET_MAC {
             let mac = &*r.path.cast::<crate::secret::MacRequest<'_>>();
@@ -2456,6 +2502,34 @@ unsafe fn replay_out(
     } else if op == SECRET_KDF {
         if !ok || out.value != live.schedule.events {
             return Err(Fault::Corrupt);
+        }
+    } else if op == SECRET_MAC && r.mode >= crate::secret::KEY_WRAP {
+        // Key operations: a produced blob or signature is the payload, and
+        // unwrap records its outcome only; no key material is on the tape.
+        let produced = r.mode != crate::secret::KEY_UNWRAP;
+        let spare = r.buffer.capacity.saturating_sub(r.buffer.len);
+        if if ok {
+            !produced && (out.value != 0 || !out.payload.is_empty())
+                || produced && (out.value != out.payload.len() as u64 || out.payload.len() > spare)
+        } else {
+            !(1..=4).contains(&out.error.0) || !out.payload.is_empty()
+        } {
+            return Err(Fault::Corrupt);
+        }
+        if out.error.0 == 4 {
+            // A refused output's available bytes are its recorded spare.
+            o.written = spare as u64;
+        }
+        if ok && produced {
+            // SAFETY: the payload fits the carrier's spare capacity.
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    out.payload.as_ptr(),
+                    r.buffer.data.add(r.buffer.len),
+                    out.payload.len(),
+                );
+            }
+            r.buffer.len += out.payload.len();
         }
     } else if op == SECRET_MAC {
         if !ok

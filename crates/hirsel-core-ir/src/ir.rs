@@ -1112,6 +1112,9 @@ pub enum HostOp {
     SecretHmac = hirsel_core_ids::host_op::SECRET_MAC as isize,
     SecretVerifyHmac = 42,
     SecretDeriveHmac = hirsel_core_ids::host_op::SECRET_KDF as isize,
+    SecretWrap = 99,
+    SecretUnwrap = 100,
+    SecretSign = 101,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     NetNarrowResolve = 41,
     StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
@@ -1202,6 +1205,9 @@ impl HostOp {
         HostOp::SecretHmac,
         HostOp::SecretVerifyHmac,
         HostOp::SecretDeriveHmac,
+        HostOp::SecretWrap,
+        HostOp::SecretUnwrap,
+        HostOp::SecretSign,
         HostOp::RecvBounded,
         HostOp::RecvReady,
         HostOp::SendPair,
@@ -1323,6 +1329,9 @@ impl HostOp {
             HostOp::SecretHmac => "secret_hmac_sha256",
             HostOp::SecretDeriveHmac => "secret_derive_hmac_sha256",
             HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
+            HostOp::SecretWrap => "secret_wrap",
+            HostOp::SecretUnwrap => "secret_unwrap",
+            HostOp::SecretSign => "secret_sign",
             HostOp::NetSplit => "net_split",
             HostOp::NetJoin => "net_join",
             HostOp::ScramSha256 => "scram_sha256",
@@ -1389,6 +1398,9 @@ impl HostOp {
             Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
             Self::SecretDeriveHmac => "hirsel_core_secret_derive_hmac_sha256",
             Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
+            Self::SecretWrap => "hirsel_core_secret_wrap",
+            Self::SecretUnwrap => "hirsel_core_secret_unwrap",
+            Self::SecretSign => "hirsel_core_secret_sign",
             Self::NetSplit => "hirsel_core_net_split",
             Self::NetJoin => "hirsel_core_net_join",
             Self::ScramSha256 => "hirsel_core_scram_sha256",
@@ -1452,6 +1464,9 @@ impl HostOp {
                 | HostOp::SecretHmac
                 | HostOp::SecretDeriveHmac
                 | HostOp::SecretVerifyHmac
+                | HostOp::SecretWrap
+                | HostOp::SecretUnwrap
+                | HostOp::SecretSign
                 | HostOp::NetSplit
                 | HostOp::NetJoin
                 | HostOp::ScramFinalLen
@@ -1819,6 +1834,11 @@ impl RtOp {
                     HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
                         (vec![V(u64_), V(p), V(p)], outcome)
                     }
+                    // `out` is appended in its spare capacity; tag 4 (capacity)
+                    // carries the bytes needed and the spare.
+                    HostOp::SecretWrap => (vec![V(u64_), V(u64_), V(p)], outcome),
+                    HostOp::SecretUnwrap => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::SecretSign => (vec![V(u64_), V(u64_), V(p), V(p)], outcome),
                     HostOp::NetNarrowTls => (
                         vec![
                             V(u64_),

@@ -137,6 +137,7 @@ pub mod scram;
 pub mod tls;
 mod tls_rule;
 pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};
+pub mod key_wrap;
 mod secret_grant;
 pub use secret_grant::{
     SecretGrant, SecretPolicy, SecretSource, SecretUse, derive_hmac_sha256, hmac_sha256,

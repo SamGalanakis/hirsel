@@ -119,6 +119,15 @@ impl SecretPolicy {
         })
     }
 
+    /// Whether every name and use this policy permits, `bound` permits too.
+    pub fn within(&self, bound: &Self) -> bool {
+        bound.uses.permits(self.uses)
+            && self
+                .send
+                .iter()
+                .all(|p| bound.send.iter().any(|q| p.is_subset_of(q)))
+    }
+
     pub fn text(&self) -> String {
         let mut words = Vec::new();
         let send;

@@ -128,7 +128,7 @@ impl Pattern {
         }
     }
 
-    fn is_subset_of(&self, other: &Self) -> bool {
+    pub(crate) fn is_subset_of(&self, other: &Self) -> bool {
         match (self, other) {
             (_, Self::Any) => true,
             (Self::Any, _) => false,

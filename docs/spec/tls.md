@@ -276,6 +276,11 @@ pub fn share(s: Secret) -> Secret
 pub fn render(s: Secret) -> View[String] in s
 pub fn send_secret(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until: Until) -> Result[(), NetError] waits
 pub type SecretError = Invalid | Capacity(Capacity)
+pub fn wrap(kek: Secret, s: Secret, mut out: Bytes) -> Result[u64, KeyError]
+pub fn unwrap(kek: Secret, blob: Bytes, uses: String) -> Result[Secret, KeyError]
+pub fn sign(key: Secret, alg: SignAlg, msg: Bytes, mut out: Bytes) -> Result[u64, KeyError]
+pub type KeyError = Denied | Invalid | Tampered | Capacity(Capacity)
+pub type SignAlg = Ed25519 | P256 | Rs256
 ```
 
 **Uses.** A secret is opaque host material together with the typed set of uses it
@@ -288,8 +293,8 @@ most once:
 | `mac` | `secret.hmac_sha256` and `secret.verify_hmac_sha256` (the MAC sink, below) |
 | `verify` | `secret.verify_hmac_sha256` only |
 | `kdf` | `secret.derive_hmac_sha256` |
-| `sign(<alg>)` | signing with `<alg>`, one of `ed25519`, `p256` and `rs256` |
-| `wrap` | use as a key-encryption key |
+| `sign(<alg>)` | `secret.sign` with `<alg>`, one of `ed25519`, `p256` and `rs256` (key operations, below) |
+| `wrap` | `secret.wrap` and `secret.unwrap` with the secret as the key-encryption key (KEK) |
 | `mtls_client_id` | use as a TLS client identity |
 
 `mac` includes `verify`, so the two are not written together. A name is a destination
@@ -298,8 +303,8 @@ the host `mac` and permits no MAC. A policy with no use, a word given twice, an 
 word or a malformed pattern list is `Invalid`. The canonical text, which recordings and
 diagnostics print, writes `tls_send` first, then `mac` or `verify`, `kdf`, the `sign` uses in the
 order above, `wrap` and `mtls_client_id`, with each pattern as TLS-3 prints it. No
-operation yet reads `sign`, `wrap` or `mtls_client_id`: a policy may hold them and
-`narrow` intersects them, so the policy's shape is final.
+operation yet reads `mtls_client_id`: a policy may hold it and `narrow` intersects it, so
+the policy's shape is final.
 
 **Ingestion.** A secret's bytes enter the run in one of two ways:
 
@@ -370,8 +375,9 @@ stay with the helper's owner, as the charges of its open connections do
 
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and
-verdict, and the SCRAM sink's verdict, are the only values computed from them that reach the
-program. A derivation returns an opaque designation. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
+verdict, the SCRAM sink's verdict, `wrap`'s blob (ciphertext under the KEK) and `sign`'s
+signature are the only values computed from them that reach the program. A derivation
+returns an opaque designation. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
 store or JSON codec encodes one. `secret.render` returns the fixed marker
 `[secret]` for every secret. Every std function that renders, logs or describes a value
 holding a secret writes this marker in the secret's place. This includes the HTTP
@@ -402,8 +408,9 @@ memory or a buffer that the program can see.
 
 **Virtual streams.** A TLS half of a `Net` made by `provide.net` ([core](core.md#provide))
 was verified by its server, not by a trust rule the run was granted, so it never satisfies
-a granted secret: `send_secret` on it gives `Denied` before issue for a `Secret` from an
-entry grant, whatever its patterns, and the server sees nothing. A `Secret` made by
+a granted secret: `send_secret` on it gives `Denied` before issue for an opaque `Secret`
+(from an entry grant, or derived or unwrapped from one; key operations, below), whatever its
+patterns, and the server sees nothing. A `Secret` made by
 `secret.seal` passes the two checks above as usual. Its server receives the operation as
 `SendSecret` with the `Secret` itself, narrowed to the stream's verified name, and never its
 bytes (`provide.secret`). A server that forwards it to a real `tls.send_secret` passes that
@@ -426,8 +433,84 @@ memory. The tag, or the constant-time verdict for exactly 32 tag bytes, is a del
 that passes the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)), and the
 key never does. `hmac_sha256` needs the `mac` use, and `verify_hmac_sha256` needs `mac`
 or `verify`. Without the use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
-signing oracle wherever it is sent, which is why the use must be granted. A signature
-sink with another algorithm follows the same rule.
+signing oracle wherever it is sent, which is why the use must be granted. The key
+operations below follow the same rule.
+
+**Key operations.** `secret.wrap`, `secret.unwrap` and `secret.sign` use a secret as a key
+without revealing it. A connector stores an OAuth refresh token as `wrap`'s blob in a
+`store` row, so the token commits atomically with its account row, and opens it with
+`unwrap` when it needs it. The runtime computes from run-owned memory with ring's
+primitives; Hirsel has no cryptographic code of its own.
+
+A secret is **opaque** when the program never held its bytes: one from an entry grant, one
+derived (`derive_hmac_sha256`) from an opaque parent, or one unwrapped under an opaque KEK.
+A sealed secret, and one derived from or unwrapped under one that is not opaque, is not. The program holds a sealed KEK's bytes and could open the blob itself, so
+wrapping an opaque secret under a KEK that is not opaque is `Denied`.
+
+`wrap(kek, s, out)` appends to the spare capacity of `out` the blob
+
+```text
+[1] [len(policy) u32 LE] [policy] [salt 32] [ciphertext len(s)] [tag 16]
+```
+
+and answers its length, `1 + 4 + len(policy) + 32 + len(s) + 16`. `policy` is the
+canonical text of `s`'s policy. The construction is ChaCha20-Poly1305 (RFC 8439) under a
+key derived per blob: HKDF-SHA256 (RFC 5869) with the 32 random salt bytes as salt, the KEK
+as input keying material and `hirsel secret.wrap 1 chacha20-poly1305` as info. The nonce
+is twelve zero bytes. The reason is the nonce: ring offers AES-GCM and ChaCha20-Poly1305,
+neither with a nonce long enough to draw at random for every wrap under one long-lived
+KEK, and neither XChaCha20 nor AES-GCM-SIV. A fresh 256-bit salt gives every blob its own
+key, so each key seals one message and its fixed nonce is never reused; two salts
+collide with negligible probability. ChaCha20-Poly1305 rather than AES-GCM, because it is
+constant time without AES instructions. The associated data is the bytes
+`hirsel secret.wrap 1` and a zero byte, then the header up to the ciphertext: the
+version, the policy and the salt. So the policy is authenticated with the bytes and
+cannot be swapped, and the version names the construction.
+
+`unwrap(kek, blob, uses)` opens a blob under `kek` and answers a new designation with one
+holder, policy `uses` and the opened bytes. `uses` must be within the policy the blob
+binds: each use of `uses` is permitted by the bound uses, and each of its `tls_send`
+patterns is covered by one bound pattern (TLS-3 subset), so an unwrap can narrow but never
+widen. The check runs after the tag is verified, on the authenticated policy. Unwrapping
+admits `round_up_8(pattern_bytes + len + 32)` before issue, as `seal` does, where `len` is
+the plaintext length the blob's header implies (0 for a blob too short for one). A failure
+refunds it. On success it is the new secret's seal charge: it is refunded when the last
+designation of the unwrapped bytes is released, and the bytes are zeroed then.
+
+`sign(key, alg, msg)` appends the signature of `msg` to the spare of `out` and answers its
+length. The key's bytes are a PKCS#8 private key (RFC 5958), given by the grant or the
+seal, and `sign(<alg>)` in its policy fixes the algorithm:
+
+| `alg` | scheme | key | signature |
+| --- | --- | --- | --- |
+| `Ed25519` | Ed25519 (RFC 8032) | PKCS#8 v1 or v2 with the RFC 8410 OID | 64 bytes |
+| `P256` | ECDSA over P-256 with SHA-256 (JWS `ES256`), with a fresh random nonce | PKCS#8 with an RFC 5915 EC key | 64 bytes, `r ‖ s` |
+| `Rs256` | RSASSA-PKCS1-v1_5 with SHA-256 (RFC 8017 §8.2, JWS `RS256`) | PKCS#8 RSA key of 2048 to 4096 bits | the modulus length |
+
+The results, decided in this order:
+
+- `Denied` before issue, with no effect: the key lacks `wrap` (for `wrap` and `unwrap`) or
+  the `sign(<alg>)` for `alg`, or `wrap` would put an opaque secret under a KEK that is
+  not.
+- `Invalid` before issue: `uses` is not a policy.
+- `Capacity(c)` before issue: `unwrap`'s admission is refused, with the requested charge
+  and the space available.
+- `Invalid`: a KEK shorter than 32 bytes, or a signing key that is not PKCS#8 for `alg`.
+- `Tampered`: the blob is not one this KEK wrapped, unaltered. A bad version, header or
+  tag, a different KEK and any changed byte give the same answer, and nothing more.
+- `Denied`: `unwrap`'s `uses` is not within the bound policy.
+- `Capacity(c)`: the blob or signature does not fit the spare of `out`, with its length
+  as `requested` and the spare as `available`; nothing is appended.
+
+The last four are deliveries. The blob, the signature and the opened designation pass the
+replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)); the key's bytes and the
+opened bytes never do. A recording keeps the blob and the signature as outputs and never
+key material, and a replay delivers them from the tape
+([recording](../recording.md#credentials)). An unwrapped secret is designated by the order
+of its unwrap among the run's unwraps; on replay it has no bytes, like a grant, and every
+use of it replays from the recording. Its charge follows CONC-15 as a seal's does: it is
+paid by the limit current at the unwrap, and when that unit ends while the secret is
+held, in it or in another unit, the charge stays with the unit's owner until the release.
 
 **The HMAC derivation sink.**
 

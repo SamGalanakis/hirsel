@@ -320,6 +320,9 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretHmac
                     | HostOp::SecretDeriveHmac
                     | HostOp::SecretVerifyHmac
+                    | HostOp::SecretWrap
+                    | HostOp::SecretUnwrap
+                    | HostOp::SecretSign
                     | HostOp::StdinRead
                     | HostOp::StreamTerminal
                     | HostOp::EnvGet

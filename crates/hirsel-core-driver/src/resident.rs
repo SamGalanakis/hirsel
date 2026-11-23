@@ -80,6 +80,25 @@ impl<K: std::hash::Hash + Eq, V: Clone> Memo<K, V> {
             .insert(key, (value.clone(), request));
         Ok(value)
     }
+    /// The value under `key` if remembered; a server's request that reads
+    /// it uses it.
+    pub(crate) fn get(&self, key: &K) -> Option<V> {
+        if !serving() {
+            return None;
+        }
+        let request = REQUEST.load(Ordering::Relaxed);
+        let mut entries = self.entries.lock().unwrap();
+        let (value, used) = entries.get_mut(key)?;
+        *used = request;
+        Some(value.clone())
+    }
+    /// Remember `value` under `key`, in a server.
+    pub(crate) fn insert(&self, key: K, value: V) {
+        if serving() {
+            let request = REQUEST.load(Ordering::Relaxed);
+            self.entries.lock().unwrap().insert(key, (value, request));
+        }
+    }
     fn sweep(&self, request: u64) {
         self.entries
             .lock()
@@ -118,6 +137,17 @@ pub(crate) static RUNTIME_SOURCES: Memo<
         Vec<hirsel_core_ids::ContentHash>,
     ),
     (Arc<hirsel_core_ir::source::SourceMap>, bool),
+> = Memo::new();
+
+/// Where each location of a shared product's debug rows lands in a source
+/// map (`native_debug::side`), by the map's key and the rows' address; the
+/// entry holds the rows, so that address names them while it is remembered.
+pub(crate) static DEBUG_POSITIONS: Memo<
+    (ContentHash, usize),
+    (
+        Arc<hirsel_core_ir::source::NativeDebug>,
+        crate::native_debug::Locations,
+    ),
 > = Memo::new();
 
 /// Each stored object record's key-determined parts, by store and key.
@@ -226,6 +256,7 @@ fn sweep(request: u64) {
     MATERIALISED.sweep(request);
     REFERENCED.sweep(request);
     OBJECT_RECORDS.sweep(request);
+    DEBUG_POSITIONS.sweep(request);
     SOURCE_MAPS.sweep(request);
     RUNTIME_SOURCES.sweep(request);
     SOURCE_HASHES.sweep(request);

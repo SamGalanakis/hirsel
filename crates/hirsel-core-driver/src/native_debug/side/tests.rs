@@ -270,24 +270,15 @@ fn indexed_scalar_positions_match_the_source_map() {
         LineString::String(b"Hirsel".to_vec()),
         None,
     );
-    let mut sources = Sources {
-        map: &map,
-        files: FxHashMap::default(),
-        release: FxHashMap::default(),
-    };
+    let mut sources = Sources::new(&map, &[]);
     let positions = map.positions();
     for byte in text.char_indices().map(|(i, _)| i).chain([text.len()]) {
-        let position = sources
-            .position(
-                &product.items,
-                &mut vec![None; product.items.len()],
-                Some(NativeLocation {
-                    item: 0,
-                    start: byte as u32,
-                }),
-                &mut lines,
-            )
-            .unwrap();
+        let location = Some(NativeLocation {
+            item: 0,
+            start: byte as u32,
+        });
+        let located = sources.locate(&product.items, &mut [None], location);
+        let position = sources.position(located, &mut lines).unwrap();
         let (_, line, column) = positions.position(&product.items[0], byte as u32).unwrap();
         assert_eq!(
             (position.line, position.column),

@@ -47,17 +47,29 @@ impl FileIndex {
     }
 }
 
-/// A file some position names: its line-program entry, added on first use,
-/// and its annex points or, failing those, its line index once needed.
+/// A file some position names: its annex points or, failing those, its line
+/// index once needed.
 struct File<'a> {
-    id: FileId,
     points: Option<&'a [(u32, u32)]>,
     index: Option<FileIndex>,
 }
 
+/// Where one location of a product's rows lands: the map's file, when
+/// resolving the location reached one, and the line and column there.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Located {
+    file: Option<u32>,
+    at: Option<(u64, u64)>,
+}
+
+/// A product's locations in first-lookup order, each with where it lands
+/// (`crate::resident::DEBUG_POSITIONS`).
+pub(crate) type Locations = std::sync::Arc<[(Option<NativeLocation>, Located)]>;
+
 struct Sources<'a> {
     map: &'a SourceMap,
     files: FxHashMap<u32, File<'a>>,
+    ids: FxHashMap<u32, FileId>,
     release: FxHashMap<DefPath, Vec<Option<(ItemSource, u32)>>>,
 }
 impl<'a> Sources<'a> {
@@ -65,6 +77,7 @@ impl<'a> Sources<'a> {
         let mut sources = Self {
             map,
             files: FxHashMap::default(),
+            ids: FxHashMap::default(),
             release: FxHashMap::default(),
         };
         for binding in release {
@@ -91,29 +104,78 @@ impl<'a> Sources<'a> {
         }
     }
 
-    /// The position of `location` in a product whose items are `items`;
-    /// `owners` remembers each item's map entry across the product's lookups.
-    fn position(
+    /// Where `location` lands in a product whose items are `items`; `owners`
+    /// remembers each item's map entry across the product's lookups.
+    fn locate(
         &mut self,
         items: &[DefPath],
         owners: &mut [Option<Option<ItemSource>>],
         location: Option<NativeLocation>,
-        lines: &mut LineProgram,
-    ) -> Option<Position> {
-        let location = location?;
-        let index = location.item as usize;
-        let map = self.map;
-        let (item, start) =
+    ) -> Located {
+        let resolved = location.and_then(|location| {
+            let index = location.item as usize;
+            let map = self.map;
             match *owners[index].get_or_insert_with(|| map.items.get(&items[index]).copied()) {
-                Some(item) => (item, location.start),
+                Some(item) => Some((item, location.start)),
                 None => self
                     .release
                     .get(&items[index])?
                     .get(location.start as usize)
                     .copied()
-                    .flatten()?,
-            };
-        self.position_at(item, start, lines)
+                    .flatten(),
+            }
+        });
+        match resolved {
+            Some((item, start)) => Located {
+                file: Some(item.file),
+                at: self.coordinates(item, start),
+            },
+            None => Located {
+                file: None,
+                at: None,
+            },
+        }
+    }
+
+    fn coordinates(&mut self, item: ItemSource, start: u32) -> Option<(u64, u64)> {
+        let map = self.map;
+        let source = &map.files[item.file as usize];
+        let file = self.files.entry(item.file).or_insert_with(|| File {
+            points: map.points.get(&source.path).map(Vec::as_slice),
+            index: None,
+        });
+        let offset = item.file_offset as usize + start as usize;
+        match file.points {
+            Some(points) => {
+                let &(line, column) = points.get(offset)?;
+                Some((u64::from(line), u64::from(column)))
+            }
+            None => Some(
+                file.index
+                    .get_or_insert_with(|| FileIndex::new(&source.text))
+                    .position(offset),
+            ),
+        }
+    }
+
+    /// The line program's entry for a located position, its file added at
+    /// the first position to name it.
+    fn position(&mut self, located: Located, lines: &mut LineProgram) -> Option<Position> {
+        let file = located.file?;
+        let map = self.map;
+        let id = *self.ids.entry(file).or_insert_with(|| {
+            lines.add_file(
+                LineString::String(map.files[file as usize].path.as_bytes().to_vec()),
+                lines.default_directory(),
+                None,
+            )
+        });
+        let (line, column) = located.at?;
+        Some(Position {
+            file: id,
+            line,
+            column,
+        })
     }
 
     fn position_at(
@@ -122,33 +184,11 @@ impl<'a> Sources<'a> {
         start: u32,
         lines: &mut LineProgram,
     ) -> Option<Position> {
-        let map = self.map;
-        let source = &map.files[item.file as usize];
-        let file = self.files.entry(item.file).or_insert_with(|| File {
-            id: lines.add_file(
-                LineString::String(source.path.as_bytes().to_vec()),
-                lines.default_directory(),
-                None,
-            ),
-            points: map.points.get(&source.path).map(Vec::as_slice),
-            index: None,
-        });
-        let offset = item.file_offset as usize + start as usize;
-        let (line, column) = match file.points {
-            Some(points) => {
-                let &(line, column) = points.get(offset)?;
-                (u64::from(line), u64::from(column))
-            }
-            None => file
-                .index
-                .get_or_insert_with(|| FileIndex::new(&source.text))
-                .position(offset),
+        let located = Located {
+            file: Some(item.file),
+            at: self.coordinates(item, start),
         };
-        Some(Position {
-            file: file.id,
-            line,
-            column,
-        })
+        self.position(located, lines)
     }
 }
 
@@ -275,7 +315,8 @@ pub(crate) fn bind<'a>(
     };
     let mut object = debug_object(architecture);
     let mut symbols = Vec::new();
-    let mut dwarf = unit(products, sources, release, |section| {
+    let products = products.into_iter().map(|product| (product, None));
+    let mut dwarf = unit(products, sources, None, release, |section| {
         let index = symbols.len();
         symbols.push(object.add_symbol(object::write::Symbol {
             name: section.symbol.as_bytes().to_vec(),
@@ -313,9 +354,13 @@ fn debug_object(architecture: object::Architecture) -> object::write::Object<'st
     )
 }
 
+/// The detached debug object of a linked image. A resident compiler
+/// remembers where each shared product's locations land in the source map
+/// keyed `sources_key`.
 pub(crate) fn bind_linked<'a>(
-    products: impl IntoIterator<Item = &'a NativeDebug>,
+    products: impl IntoIterator<Item = &'a std::sync::Arc<NativeDebug>>,
     sources: &SourceMap,
+    sources_key: Option<hirsel_core_ids::ContentHash>,
     release: &[ReleaseSite],
     remarks: &[CodegenRemark],
     image: &[u8],
@@ -330,7 +375,10 @@ pub(crate) fn bind_linked<'a>(
                 .then_some((name, symbol.address()))
         })
         .collect::<FxHashMap<_, _>>();
-    let mut dwarf = unit(products, sources, release, |section| {
+    let products = products
+        .into_iter()
+        .map(|product| (&**product, Some(product)));
+    let mut dwarf = unit(products, sources, sources_key, release, |section| {
         symbols
             .get(section.symbol.as_str())
             .copied()
@@ -364,8 +412,9 @@ pub(crate) fn bind_linked<'a>(
 }
 
 fn unit<'a>(
-    products: impl IntoIterator<Item = &'a NativeDebug>,
+    products: impl IntoIterator<Item = (&'a NativeDebug, Option<&'a std::sync::Arc<NativeDebug>>)>,
     sources: &SourceMap,
+    sources_key: Option<hirsel_core_ids::ContentHash>,
     release: &[ReleaseSite],
     mut section_address: impl FnMut(&CodeSection) -> Option<Address>,
 ) -> write::DwarfUnit {
@@ -395,7 +444,10 @@ fn unit<'a>(
     let mut sources = Sources::new(sources, release);
     let mut unit_ranges = Vec::new();
     let mut abstracts = FxHashMap::default();
-    for product in products {
+    // A release binding resolves through the sites the entry plan names,
+    // which the map's key does not cover.
+    let sources_key = sources_key.filter(|_| release.is_empty());
+    for (product, shared) in products {
         let addresses = product
             .sections
             .iter()
@@ -416,12 +468,35 @@ fn unit<'a>(
                 addend: addend + r.begin as i64,
             }),
         };
+        // The key holds the rows' address; the entry holds the rows, so no
+        // other rows take that address while it is remembered.
+        let key = sources_key
+            .zip(shared)
+            .map(|(map, shared)| (map, std::sync::Arc::as_ptr(shared) as usize));
+        let remembered = key.and_then(|key| crate::resident::DEBUG_POSITIONS.get(&key));
+        let mut replay = remembered.as_ref().map(|(_, locations)| locations.iter());
+        let mut located = Vec::new();
         let mut owners = vec![None; product.items.len()];
         let mut positions = FxHashMap::default();
         let mut position = |loc: Option<NativeLocation>, lines: &mut LineProgram| {
-            *positions
-                .entry(loc)
-                .or_insert_with(|| sources.position(&product.items, &mut owners, loc, lines))
+            if let Some(&p) = positions.get(&loc) {
+                return p;
+            }
+            let at = match replay.as_mut() {
+                Some(replay) => {
+                    let &(at_loc, at) = replay.next().expect("a remembered location");
+                    debug_assert_eq!(at_loc, loc);
+                    at
+                }
+                None => {
+                    let at = sources.locate(&product.items, &mut owners, loc);
+                    located.push((loc, at));
+                    at
+                }
+            };
+            let p = sources.position(at, lines);
+            positions.insert(loc, p);
+            p
         };
         for sequence in &product.sequences {
             let r = sequence.range;
@@ -495,6 +570,10 @@ fn unit<'a>(
                     AttributeValue::UnitRef(scopes[origin as usize]),
                 );
             }
+        }
+        if let (Some(key), Some(shared), None) = (key, shared, remembered) {
+            crate::resident::DEBUG_POSITIONS
+                .insert(key, (std::sync::Arc::clone(shared), located.into()));
         }
     }
     if !unit_ranges.is_empty() {

@@ -10,7 +10,7 @@ pub(crate) use detached::{NativeImage, add_source_note};
 pub use detached::{SymbolSource, resolve_symbols};
 use elf::error;
 pub(crate) use side::bind as bind_side_products;
-pub(crate) use side::bind_linked as bind_detached;
+pub(crate) use side::{Locations, bind_linked as bind_detached};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

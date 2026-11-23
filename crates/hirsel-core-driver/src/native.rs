@@ -1752,10 +1752,10 @@ fn link_objects(
             let mut refused = Vec::new();
             for object in objects {
                 match (&object.debug, &object.debug_record) {
-                    (Some(debug), _) => rows.push(Cow::Borrowed(&**debug)),
+                    (Some(debug), _) => rows.push(std::sync::Arc::clone(debug)),
                     (None, Some((store, address))) => {
                         match crate::native_object::load_debug(store, *address)? {
-                            Some(debug) => rows.push(Cow::Owned(debug)),
+                            Some(debug) => rows.push(std::sync::Arc::new(debug)),
                             None => refused.push(object.instance.clone()),
                         }
                     }
@@ -1940,8 +1940,9 @@ fn link_objects(
         let bytes = std::fs::read(output)?;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         let debug = crate::native_debug::bind_detached(
-            debug_rows(),
+            &rows,
             &sources,
+            sources_key,
             entry_plan.release_debug_sites,
             entry_plan.remarks,
             &bytes,

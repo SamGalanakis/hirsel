@@ -181,3 +181,122 @@ fn bucket_test_m2_binding(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error
     let _ = bucket_law_finish(take sim)
     outcome
 }
+fn object_conflict_sim(tasks: Tasks, c: Clock, seed: u64, tape: Inline[std.sim.s3.Fault, 16]) -> BucketSim {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(16)
+    let mut words: List[u64] = list.with_capacity(32)
+    for i in 0u64 .. 16 {
+        list.push(mut faults, tape[i])
+        list.push(mut words, i << 60)
+        list.push(mut words, seed)
+    }
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take words)
+    let plan = std.sim.world.plan_from(std.sim.world.Script(tail_seed: seed, streams: take streams), 0)
+    bucket_law_sim_plan(tasks, c, seed, None, take faults, take plan)
+}
+
+fn object_conflict_race(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] waits {
+    let mut first = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let mut second = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(first), level: "bucket"))?
+    let mut a_buf = history_buffers(1024)?
+    let mut b_buf = history_buffers(1024)?
+    let due = std.object.deadline_after_ms(first, BUCKET_LAW_OP_MS)
+    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), metadata, mut a_buf, due)?
+    history_claim_packet(mut a_buf.packet, a.head)?
+    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buf, due)? else {
+        fail("the genesis claim did not advance")
+    }
+    let seen = history_fetch(mut second, "head", mut b_buf.witness, due)?
+    let captured = history_decode_head(b_buf.witness)?
+    let mut b = HistoryRegister(head: captured.head, tag: seen.etag, terminal: None)
+    bucket_m2_law_commit_packet(mut a_buf.packet, a.head, 1)?
+    bucket_m2_law_commit_packet(mut b_buf.packet, b.head, 2)?
+
+    // Both candidates use generation 2's tag. A sees 409, then loses the
+    // reply to the applied resend. B sees 409, then 412 on its stale resend.
+    let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buf, due)? else {
+        fail("L54: the writer whose exact bytes landed did not advance")
+    }
+    if let Error(Fenced(1)) = history_register_advance(mut second, mut b, metadata, mut b_buf, due) {} else {
+        fail("L53: the losing writer did not fence after its 409 and 412")
+    }
+    if a_buf.witness != a_buf.body || b_buf.witness != a_buf.body || b_buf.body == a_buf.body || b.head.entry.seq != 2 {
+        fail("L54: the witness did not distinguish the two proposed heads")
+    }
+    Ok(clone(a_buf.body))
+}
+
+fn object_conflict_single_advance(seq: u64, writes: u64) -> bool {
+    seq == 3 && writes == 8
+}
+
+fn object_conflict_budget(tasks: Tasks, sim: BucketSim) -> Result[Bytes, Error] waits {
+    let mut client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(client), level: "bucket"))?
+    let mut scratch = history_buffers(1024)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let genesis = history_publish_genesis(mut client, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), metadata, mut scratch, due)?
+    let original: Bytes = clone(scratch.body)
+    let mut candidate = genesis.head
+    history_claim_packet(mut scratch.packet, genesis.head)?
+    candidate.entry = history_new_ref(2, 1, scratch.packet)
+    history_encode_head(mut scratch.body, candidate, metadata)?
+    let proposed: Bytes = clone(scratch.body)
+    let start = host.mono_ns(sim.time)
+    let refused = history_write_head(mut client, Match(genesis.tag), mut scratch.body, mut scratch.witness, due)
+    if let HistoryRefused(Retriable(Status(409, code))) = refused {
+        if code != string.as_bytes("ConditionalRequestConflict") {
+            fail("Q5: 409 carried the wrong S3 error code")
+        }
+    } else {
+        fail("Q5: exhausting the 409 budget did not return a typed retry error")
+    }
+    if host.mono_ns(sim.time) - start < 150000000 || scratch.body != proposed {
+        fail("Q5: 409 retries skipped backoff or changed the submitted body")
+    }
+    // One ambiguous error must share the budget and survive later 409s.
+    if let HistoryUndecided = history_write_head(mut client, Match(genesis.tag), mut scratch.body, mut scratch.witness, due) {} else {
+        fail("Q5: the mixed 503 and 409 budget did not preserve uncertainty")
+    }
+    Ok(take original)
+}
+
+fn object_conflict_budget_held(attempts: u64, writes: u64) -> bool {
+    attempts == 13 && writes == 3
+}
+
+@test
+fn bucket_test_m2_head_conflict(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 39)
+    let clean: std.sim.s3.Fault = Clean
+    let conflict: std.sim.s3.Fault = Conflict
+    let lost: std.sim.s3.Fault = ResetAfterBody
+    let slow: std.sim.s3.Fault = SlowDown
+    let race_tape = [clean, clean, clean, clean, clean, clean, clean, conflict, lost, clean, clean, clean, conflict, clean, clean, clean]
+    let race = object_conflict_sim(tasks, c, seed, race_tape)
+    let winner = object_conflict_race(tasks, race)
+    let raced = bucket_law_finish(take race)
+    let expected = winner?
+    let stored = option.unwrap(map.get(raced.objects, "head"))
+    let captured = history_decode_head(stored.data)?
+    // L54 negative control: replaying with a fresh tag after the lost reply
+    // adds a ninth write even when the final bytes happen to agree.
+    if object_conflict_single_advance(3, 9) || !object_conflict_single_advance(captured.head.entry.seq, raced.writes) || stored.data != expected || raced.attempts != 15 {
+        fail("L54: the bucket did not record exactly one generation-3 advance")
+    }
+
+    // Genesis, five conflicts, then another five attempts with a 503 mixed
+    // in. A clean sixth attempt in the mixed run would publish the candidate.
+    let budget_tape = [clean, clean, clean, conflict, conflict, conflict, conflict, conflict, conflict, slow, conflict, conflict, conflict, clean, clean, clean]
+    let budget = object_conflict_sim(tasks, c, seed, budget_tape)
+    let unchanged = object_conflict_budget(tasks, budget)
+    let exhausted = bucket_law_finish(take budget)
+    let original = unchanged?
+    let after = option.unwrap(map.get(exhausted.objects, "head"))
+    // Q5 negative control: a separate budget for 503 admits a sixth attempt.
+    if object_conflict_budget_held(14, 3) || !object_conflict_budget_held(exhausted.attempts, exhausted.writes) || after.data != original {
+        fail("Q5: mixed retries exceeded five attempts or changed the head")
+    }
+    Ok(())
+}

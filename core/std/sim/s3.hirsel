@@ -1,5 +1,6 @@
 /// One fault per connection, selected before any request octets arrive.
-pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | MalformedComplete | CutResponse(u64) | RequireResume(u64)
+/// Conflict interrupts an If-Match write. DeleteConflict interposes a delete on If-None-Match.
+pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | MalformedComplete | CutResponse(u64) | RequireResume(u64) | Conflict | DeleteConflict
 
 /// Kills the writer's connections at a wire cut. Requests to `address` are
 /// numbered from 1. The first `after` are served. Request `after + 1` is
@@ -442,26 +443,29 @@ fn etag(data: Bytes) -> String {
     take out
 }
 
-fn conditional(config: Config, req: Request, objects: Map[String, Object]) -> Option[u16] {
+fn conditional_failure(config: Config, req: Request, mut objects: Map[String, Object], fault: Fault, writing: bool) -> Option[Response] {
+    match (fault, writing) {
+        (Conflict, true) if map.contains(req.fields, "if-match") => return Some(error(409, "ConditionalRequestConflict")),
+        (DeleteConflict, true) if map.contains(req.fields, "if-none-match") && map.contains(objects, req.target.key) => {
+            let _ = map.remove(mut objects, req.target.key)
+            return Some(error(409, "ConditionalRequestConflict"))
+        },
+        _ => (),
+    }
     let old = map.get(objects, req.target.key)
     if let Some(tag) = map.get(req.fields, "if-match") {
-        if let Some(present) = old {
-            if tag != "*" && tag != present.etag {
-                return Some(412)
-            }
-        } else {
-            return Some(412)
+        match old {
+            Some(present) if tag == "*" || tag == present.etag => (),
+            _ => return Some(error(412, "PreconditionFailed")),
         }
     }
-    if let Some(tag) = map.get(req.fields, "if-none-match") {
-        if let Some(present) = old {
-            if tag == "*" || tag == present.etag {
-                return if req.method == "GET" || req.method == "HEAD" {
-                    Some(304)
-                } else {
-                    Some(config.exists_status)
-                }
-            }
+    if let (Some(tag), Some(present)) = (map.get(req.fields, "if-none-match"), old) {
+        if tag == "*" || tag == present.etag {
+            return Some(error(if req.method == "GET" || req.method == "HEAD" {
+                304u16
+            } else {
+                config.exists_status
+            }, "PreconditionFailed"))
         }
     }
     None
@@ -735,12 +739,8 @@ fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take 
             error(200, "InternalError")
         } else if let MalformedComplete = fault {
             reply(200, "<Error/>")
-        } else if let Some(status) = conditional(config, req, bucket.objects) {
-            error(status, if status == 409 {
-                "ConditionalRequestConflict"
-            } else {
-                "PreconditionFailed"
-            })
+        } else if let Some(take failed) = conditional_failure(config, req, mut bucket.objects, fault, true) {
+            take failed
         } else {
             match gather(current, body, config.max_body) {
                 Error(code) => error(400, code),
@@ -832,12 +832,8 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
     if req.target.key == "" {
         return error(400, "InvalidArgument")
     }
-    if let Some(status) = conditional(config, req, bucket.objects) {
-        return error(status, if status == 409 {
-            "ConditionalRequestConflict"
-        } else {
-            "PreconditionFailed"
-        })
+    if let Some(take failed) = conditional_failure(config, req, mut bucket.objects, fault, req.method == "PUT") {
+        return take failed
     }
     if req.method == "PUT" {
         let tag = put(mut bucket, req.target.key, take body, metadata(req.fields))

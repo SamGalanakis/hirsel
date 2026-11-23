@@ -4177,7 +4177,7 @@ Which slots of a snapshot are Hot is fixed when the snapshot is captured. No lat
 - `writer_pin_bytes` (default 67,108,864, at least 2 × VALUE_LIMIT + 1,048,576, else `Missing("writer_pin_bytes")`) for the Db task's calls;
 - the rest, `shared_bytes`, is shared by unpinned frames, overlap and Reader pins.
 
-`reader(db, pin_bytes)` reserves `pin_bytes` from `shared_bytes` when the Reader is created, and dropping the Reader returns them. `pin_bytes` below VALUE_LIMIT + 1,048,576, which is one largest blob (its payload and 16-byte frame head included) plus a path of pages, is `Missing("pin_bytes")`. Every pin is charged its payload length plus the 16-byte frame head, so the charge is the physical frame (v2.59, astra 1990 #10). Partitions are fixed. Nothing waits for another partition to drain, and pins never move between partitions.
+`reader(db, pin_bytes)` reserves `pin_bytes` from `shared_bytes` when the Reader is created, and dropping the Reader returns them. On a store with no Tiered collection no frame is Cold, so `reader` reserves nothing and succeeds whatever `pin_bytes` is (v2.59). `pin_bytes` below VALUE_LIMIT + 1,048,576, which is one largest blob (its payload and 16-byte frame head included) plus a path of pages, is `Missing("pin_bytes")`. Every pin is charged its payload length plus the 16-byte frame head, so the charge is the physical frame (v2.59, astra 1990 #10). Partitions are fixed. Nothing waits for another partition to drain, and pins never move between partitions.
 
 ### 13.3 Execution: the touched-page counter and abort-and-rerun
 

@@ -398,7 +398,8 @@ one snapshot and commits the record with the reply, so neither commits alone. It
 returns a receipt for the first delivery. Replay reads the Caller back from the
 recorded stream key or claim key, and a concluded run's base, time and seed from
 its record. A run concluded after a refusal for room replays as
-`Unknown(AdmissionRefused)`. Its recorded-code mode requires an equal replay
+`Unknown(AdmissionRefused)`. A run whose step stop differs from the record's
+replays as `Unknown(Residency)`. Its recorded-code mode requires an equal replay
 identity (the launch digest with the selected constructors, derived by
 `place_head`); otherwise its verdict is `Unknown(RevisionUnknown)`. A chosen
 candidate always runs (RUNNER-SPEC v2.19).
@@ -452,7 +453,7 @@ snapshot or `triggers.fetch_outcome` in a transaction.
 A grant callback receives the attempt’s `TriggerContext`. The run uses `trigger_call` to
 invoke a fenced transaction and `trigger_boundary` to check its attempt and
 any committed cancel request before an outside step. `trigger_snapshot` returns a
-read-only store snapshot for the current attempt, so the run can read rows off
+read-only store snapshot for the current attempt, with a `store.Reader` to read it through, so the run can read rows off
 the write lock; a stale or cancelled attempt gets an error instead. `trigger_hold` commits a
 request fingerprint hold. An operator or activation entry uses
 `triggers.request_cancel` or `triggers.release` in a transaction. Passing a

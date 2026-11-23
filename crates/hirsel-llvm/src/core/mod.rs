@@ -573,6 +573,7 @@ fn emit_module(
     }
     let mut next_scope = alias::private_steps(sink);
     let failures = failure::Failures::new(module);
+    let called_in_loop = empty::called_in_loop(module);
     let step_neutral = steps::neutral_functions(module, provided.neutral);
     let neutral_functions = step_neutral.as_slice();
     let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
@@ -808,10 +809,9 @@ fn emit_module(
                 | "std@1/regex/compile_new" => Inline::Never,
                 // Keep lazy DFA misses off the cached transition path.
                 "std@1/regex/dfa_transition" => Inline::Never,
-                // Small mutable loops, and two a hot loop enters per step, carry their scopes in.
+                // Small mutable loops, and larger ones a caller runs in a loop, carry their scopes in.
                 _ if source.batch_steps
-                    && (body.insts.len() <= 256
-                        || matches!(definition.as_str(), "std@1/regex/dfa_search" | "core@1/heap/pop"))
+                    && (body.insts.len() <= 256 || (body.insts.len() <= 4096 && called_in_loop[i]))
                     && sig.params.iter().any(|p| {
                         matches!(p, Param::Address { place, loan: Loan::Mut }
                             if matches!(place, PlaceTy::Value(Ty::Scalar(_)))

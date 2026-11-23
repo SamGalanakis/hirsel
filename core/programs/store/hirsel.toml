@@ -32,6 +32,7 @@ std = { major = 1 }
 "launcher.hirsel" = "launcher"
 "platform.hirsel" = "platform"
 "platform-preview.hirsel" = "platform"
+"platform-groups.hirsel" = "platform"
 "platform_main.hirsel" = "platform_main"
 "platform_crash.hirsel" = "platform_crash"
 "operator.hirsel" = "operator"

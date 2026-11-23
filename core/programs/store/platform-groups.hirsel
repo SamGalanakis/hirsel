@@ -1,0 +1,105 @@
+// Module platform: adding and removing groups (§14.1 "A new group", §14.5 "Removing a
+// group"). A caller that keeps its own rows in the host's store commits them in the same
+// transaction as the group's.
+
+// Adds a group: `Clean(None)` at gen 0 under a new incarnation (§14.1 "A new group"),
+// then the launcher binds its listener.
+pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], Refused] waits {
+    add_group_with(mut h, spec, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] { Ok(()) })
+}
+
+// Adds a group and commits `also`'s writes in the same transaction, so a catalog the
+// caller keeps in the host's store names exactly the groups the host has.
+pub fn add_group_with(mut h: Host, spec: NewGroup, also: scoped[view] fn(mut store.Tx) -> Result[(), store.Error]) -> Result[List[launcher.Request], Refused] waits {
+    let r = add_group_turn(mut h, spec, also)
+    turned_result(mut h, take r)
+}
+
+fn add_group_turn(mut h: Host, spec: NewGroup, also: scoped[view] fn(mut store.Tx) -> Result[(), store.Error]) -> Result[List[launcher.Request], Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[GroupRow, Refused] {
+            if let Some(_) = st(store.fetch(tx, store.shape(t.groups), spec.name))? {
+                return Error(Exists)
+            }
+            let mut u = usage_of(tx, t, spec.tenant)?
+            if let Some(q) = quota_of(tx, t, spec.tenant)? {
+                if u.groups >= q.groups {
+                    return Error(Full(Groups(string.from(spec.tenant), q.groups)))
+                }
+            }
+            let mut meta = meta_of(tx, t)?
+            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), store_id: None, incarnation: meta.next_incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+            meta.next_incarnation += 1u64
+            st(store.put(mut tx, t.meta, 0u64, meta))?
+            st(store.put(mut tx, t.groups, spec.name, g))?
+            st(store.put(mut tx, t.wake, spec.name, WakeRow(wake: Clean(None), gen: 0u64)))?
+            u.groups += 1u64
+            st(store.put(mut tx, t.usage, spec.tenant, u))?
+            st(also(mut tx))?
+            Ok(g)
+        })
+    }
+    let g = decided(mut h, take made)?
+    let mut out: List[launcher.Request] = list.new()
+    list.push(mut out, bind_request(spec.name, g))
+    Ok(take out)
+}
+
+// Removes a group (§14.5 "Removing a group"): a Clean one at once; a Dirty one, failing or
+// not, is retired: a durable mark, then `Retire`, then one transaction at `Retired`.
+pub fn remove(mut h: Host, name: String, disposition: Disposition) -> Result[List[launcher.Request], Refused] waits {
+    remove_with(mut h, name, disposition, scoped fn(mut tx: store.Tx) -> Result[(), store.Error] { Ok(()) })
+}
+
+// Removes a group and commits `also`'s writes in the transaction that removes or retires it.
+pub fn remove_with(mut h: Host, name: String, disposition: Disposition, also: scoped[view] fn(mut store.Tx) -> Result[(), store.Error]) -> Result[List[launcher.Request], Refused] waits {
+    let r = remove_turn(mut h, name, disposition, also)
+    turned_result(mut h, take r)
+}
+
+fn remove_turn(mut h: Host, name: String, disposition: Disposition, also: scoped[view] fn(mut store.Tx) -> Result[(), store.Error]) -> Result[List[launcher.Request], Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, bool), Refused] {
+            let Some(found_g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+                return Error(Unknown)
+            }
+            let mut g = found_g
+            if let Some(_) = g.retiring {
+                return Error(Retiring)
+            }
+            let Some(w) = st(store.fetch(tx, store.shape(t.wake), name))? else {
+                return Error(Unknown)
+            }
+            st(also(mut tx))?
+            match w.wake {
+                Clean(due) => {
+                    drop_rows(mut tx, t, name, g, due, false, disposition)?
+                    Ok((g, true))
+                },
+                Dirty(_) => {
+                    g.retiring = Some(disposition)
+                    st(store.put(mut tx, t.groups, name, g))?
+                    Ok((g, false))
+                },
+            }
+        })
+    }
+    let (g, gone) = decided(mut h, take made)?
+    dequeue(mut h, name)
+    let mut out: List[launcher.Request] = list.new()
+    let mut v = vol_read(h, name)
+    if let Some(a) = running_admission(v) {
+        list.push(mut out, Release(a))
+        v.admit = None
+        vol_put(mut h, name, take v)
+    }
+    if gone {
+        let _ = map.remove(mut h.vol, name)
+        list.push(mut out, Close(group_of(name, g.incarnation)))
+    } else {
+        list.push(mut out, Retire(group_of(name, g.incarnation)))
+    }
+    Ok(take out)
+}

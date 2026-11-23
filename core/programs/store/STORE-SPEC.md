@@ -1150,11 +1150,10 @@ All integers are little-endian unless marked BE. "str" means a u16 length follow
 - Copy-forward (§3.5) recomputes the check of each node it moves.
 
 **Why xxh3-64** (E1, ruled 2026-11-16):
-- R9 measured it at 2.25 instructions per byte, against 6.51 for table-driven CRC-32C, in Hirsel on main (`int.mul_wide` gives the 64×64→128 multiply).
+- xxh3-64 is fast on short inputs. The frame check hashes the file identity, role, sequence, and frame offset with the header and payload so it detects misplaced frames.
 - It is 64 bits.
 - It is the checksum of the compiler store and the tape, so the project has one checksum.
 - Detection is probabilistic: about 2⁻⁶⁴ per damaged frame (E4).
-- No hardware CRC is available to Hirsel code.
 - It is library code: `std.check` (E7), not a core operation.
 
 ### 2.2 Files and their roles

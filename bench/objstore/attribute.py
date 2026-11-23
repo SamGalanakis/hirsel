@@ -8,7 +8,8 @@ from pathlib import Path
 import re
 import subprocess
 
-SAMPLE = re.compile(r"^\s*(\S+)\s+([0-9]+) cycles:\s*$")
+SAMPLE = re.compile(r"^\s*([UK])\s+([0-9]+)\s+cycles:\s*$")
+LEAF = re.compile(r"^\s*([UK])\s+([0-9]+)\s+cycles:(\s+.*)$")
 FRAME = re.compile(r"^\s+[0-9a-f]+\s+(.*?)\s+\((.*?)(?:\+0x([0-9a-f]+))?\)$")
 PROTOCOL = re.compile(r"^std@\d+/(?:http|http1|http_client|object|sigv4)/")
 CRC = re.compile(r"crc32c|crc32_[a-z]|crc32::", re.I)
@@ -21,26 +22,31 @@ BUCKETS = ("kernel_tcp_copy", "protocol", "crc32c", "scheduler_reactor", "other"
 
 
 def perf_samples(path):
-    process = subprocess.run([
-        "perf", "script", "-i", path, "--show-lost-events",
-        "-F", "misc,period,event,ip,sym,dso,dsoff",
-    ], text=True, capture_output=True, check=True)
+    command = ["perf", "script", "-i", path, "-F", "misc,period,event,ip,sym,dso,dsoff"]
+    graphs = subprocess.check_output([*command, "--show-lost-events"], text=True)
+    leaves = subprocess.check_output([*command, "-G"], text=True).splitlines()
+
+    def frame(line):
+        if not (matched := FRAME.fullmatch(line)):
+            raise ValueError(f"{path}: unexpected perf frame {line!r}")
+        name, dso, offset = matched.groups()
+        return name, dso, int(offset, 16) if offset is not None else None
+
+    if "PERF_RECORD_LOST" in graphs:
+        raise ValueError(f"{path}: perf lost samples")
     samples = []
-    for block in process.stdout.strip().split("\n\n"):
+    for block, leaf_line in zip(graphs.strip().split("\n\n"), leaves, strict=True):
         head, *stack = block.splitlines()
-        if "PERF_RECORD_LOST" in block:
-            raise ValueError(f"{path}: perf lost samples")
-        if not (sample := SAMPLE.fullmatch(head)) or not stack:
+        sample = SAMPLE.fullmatch(head)
+        leaf = LEAF.fullmatch(leaf_line)
+        if not sample or not leaf or sample.groups() != leaf.groups()[:2]:
             raise ValueError(f"{path}: unexpected perf sample {head!r}")
-        frames = []
-        for line in stack:
-            if not (frame := FRAME.fullmatch(line)):
-                raise ValueError(f"{path}: unexpected perf frame {line!r}")
-            name, dso, offset = frame.groups()
-            frames.append((name, dso, int(offset, 16) if offset is not None else None))
         mode, period = sample.groups()
-        if mode not in ("U", "K"):
-            raise ValueError(f"{path}: unexpected perf CPU mode {mode!r}")
+        sampled = frame(leaf[3])
+        frames = [frame(line) for line in stack]
+        # perf can print an empty callchain even when the sampled IP resolves.
+        if not frames or frames[0] != sampled:
+            frames.insert(0, sampled)
         samples.append((mode, int(period), frames))
     return samples
 

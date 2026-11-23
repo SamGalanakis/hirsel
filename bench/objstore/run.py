@@ -229,7 +229,7 @@ def acknowledge_put(peer):
             break
         head.extend(chunk)
     if head != PUT_START:
-        raise RuntimeError("peer did not receive the PUT header and first payload byte")
+        raise RuntimeError(f"peer received {len(head)}/{len(PUT_START)} bytes before PUT acknowledgement")
     peer.sendall(b"x")
     # Leave the connection open without reading any more of the body.
 
@@ -270,8 +270,9 @@ def abort_trials(args, work, results):
                             raise RuntimeError(f"{reactor} abort client exited {process.returncode}")
                     except (OSError, RuntimeError) as exc:
                         listener.close()
+                        status = process.wait()
                         error.seek(0)
-                        raise RuntimeError(f"{reactor} abort probe: {exc}\n{error.read()}") from exc
+                        raise RuntimeError(f"{reactor} abort probe: {exc} (client exit {status})\n{error.read()}") from exc
 
 
 def main():
@@ -294,6 +295,8 @@ def main():
     probe = args.stage in ("profile", "abort")
     if args.check and args.stage != "abort":
         parser.error("--check is only available for the abort scenario")
+    if args.stage == "abort" and args.requests is not None:
+        parser.error("abort uses --samples to select its trial count")
     timed = args.stage == "time" or (probe and not args.check)
     default_samples = {"time": 60, "abort": 1 if args.check else 200, "profile": 4}
     default_requests = {"smoke": 1, "profile": 1024}

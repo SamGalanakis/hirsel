@@ -29,7 +29,7 @@ Text only, not yet built. The v2.48 delta check (m2-v248-astra-1950 #1) found th
 | Rule | v2.36 | Where |
 |---|---|---|
 | OLD's pair | On objects@1 `PlaceImported` carries OLD's (epoch, holder) (`store.claim_of`), and the pending row records it with OLD's and NEW's `Describe` digests | §14.3 "Preparing" |
-| The probe's read | A probe of an Undecided deploy names the attempt's `v` apart from its selection. Refused `NotCurrent` on objects@1, it takes STORE §12.7's follower read of one capture and reports it in `PlaceCurrent`: store ID, activation, image, pair and `releases[v]` | §14.3, §14.8 "Ends" |
+| The probe's read | A probe of an Undecided deploy names the attempt's `v` apart from its selection. Refused `NotCurrent` on objects@1, it takes STORE §12.7's follower read of one capture and reports it in `PlaceCurrent`: store ID, activation, image, pair and `releases[v]` | §14.3, §14.9 "Ends" |
 | Outcome apart from selection | Row `v` decides the attempt even when the head is past `v`; an absent row under OLD's pair stays Undecided. What serves follows the head's activation and image, matched to OLD's or NEW's `Describe`; no match leaves the group failing with that cause. Installed at `v` never rolls a group back from a later activation | §14.3, §14.5 "Genesis" |
 | Roots | The selected assembly is current; the other is retained when the deploy installed or NEW was selected; a failed deploy's NEW is no root only when OLD serves | §14.3 "Across sessions", launch.md "Collect" |
 

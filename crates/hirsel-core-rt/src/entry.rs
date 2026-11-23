@@ -463,6 +463,7 @@ impl OsProcess {
             let mut preview_mode = false;
             let mut wake = false;
             let mut idle_ms = None;
+            let mut store_id = None;
             let mut prefix = 0;
             let mut exec_approvals = Vec::new();
             for argument in argv.clone() {
@@ -491,6 +492,22 @@ impl OsProcess {
                         .filter(|idle| *idle != 0)
                         .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
                     idle_ms = Some(idle);
+                } else if let Some(value) = argument.strip_prefix(b"--hirsel-store-id=") {
+                    let parsed = std::str::from_utf8(value).ok().and_then(|value| {
+                        if value.len() != 32 || !value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+                        {
+                            return None;
+                        }
+                        let (hi, lo) = value.split_at(16);
+                        Some((
+                            u64::from_str_radix(hi, 16).ok()?,
+                            u64::from_str_radix(lo, 16).ok()?,
+                        ))
+                    });
+                    if store_id.is_some() || parsed.is_none() {
+                        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+                    }
+                    store_id = parsed;
                 } else if let Some(value) = argument.strip_prefix(b"--hirsel-n-place=") {
                     n_place = std::str::from_utf8(value)
                         .ok()
@@ -514,7 +531,9 @@ impl OsProcess {
             } else {
                 None
             };
-            if (wake && (describe_mode || prepare_path.is_some())) || (!wake && idle_ms.is_some()) {
+            if (wake && (describe_mode || prepare_path.is_some()))
+                || (!wake && (idle_ms.is_some() || store_id.is_some()))
+            {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
             let digest = receive_launch_image()?;
@@ -542,7 +561,9 @@ impl OsProcess {
                 None => launch_metadata(target, n_place, describe_mode),
             };
             if wake {
-                launch = launch.with_wake(idle_ms.unwrap_or_default());
+                launch = launch
+                    .with_wake(idle_ms.unwrap_or_default())
+                    .with_store_id(store_id);
             }
             if prepare_path.is_some() {
                 launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);

@@ -351,7 +351,8 @@ def l10_holds(values):
 CRASHES = ('runner-cross', 'runner-order')
 POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
-HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused')
+HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused',
+             'missing_store_mount')
 
 
 def host_law(args, root, work, engine, name):
@@ -386,8 +387,10 @@ def host_law(args, root, work, engine, name):
         return checked(command, engine=engine, case=f'{name}:publish-{n_place}').stdout.strip()
 
     old_n_place, new_n_place = 1048576, 2097152
-    old_recipe, new_recipe = publish(old_n_place), publish(new_n_place)
-    assert old_recipe != new_recipe, 'the two allowances must produce distinct recipes'
+    old_recipe = publish(old_n_place)
+    new_recipe = old_recipe if name == 'missing_store_mount' else publish(new_n_place)
+    if name != 'missing_store_mount':
+        assert old_recipe != new_recipe, 'the two allowances must produce distinct recipes'
 
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
@@ -453,7 +456,7 @@ def host_law(args, root, work, engine, name):
                 if not listening():
                     log.seek(0)
                     raise RuntimeError(f'the host did not listen on {operator}: {log.read()}')
-                yield host
+                yield host, log
             except Exception as error:
                 log.seek(0)
                 detail = log.read().strip()
@@ -486,6 +489,53 @@ def host_law(args, root, work, engine, name):
         check = xxh3(checked_bytes, len(checked_bytes))
         copy.write_bytes(head + bytes(payload) + check.to_bytes(8, 'little'))
         return copy
+
+    if name == 'missing_store_mount':
+        live = launch_store / 'live'
+        register[register.index('--store') + 1] = str(live)
+
+        def store_id(directory):
+            # STORE-SPEC §2.2 puts the two little-endian words at bytes 32 and 40.
+            header = (directory / 'MANIFEST').read_bytes()
+            assert header[16:24] == b'HIRSTORE'
+            return ''.join(f'{int.from_bytes(header[offset:offset + 8], "little"):016x}' for offset in (32, 40))
+
+        with running_host():
+            outcome(register, f'{name}:register')
+            original = ready()
+            expected = store_id(live)
+
+        saved = launch_store / 'unmounted'
+        live.rename(saved)
+        live.mkdir()
+        with running_host() as (_, log):
+            # The new launcher has the same catalog and the same directory path. A GET
+            # wakes a cold group too. The refused place must never answer it.
+            with socket.create_connection(('127.0.0.1', int(address.split(':')[1])), timeout=5) as peer:
+                peer.sendall(f'GET /hirsel/status HTTP/1.1\r\nHost: {address}\r\n\r\n'.encode())
+                deadline = time.monotonic() + 15
+                while True:
+                    detail = os.pread(log.fileno(), 1 << 20, 0).decode()
+                    if 'store identity mismatch' in detail:
+                        break
+                    assert time.monotonic() < deadline, f'no store identity refusal: {detail}'
+                    time.sleep(0.05)
+                actual = store_id(live)
+                assert actual != expected
+                assert f'store identity mismatch (expected {expected}, found {actual})' in detail, detail
+                peer.settimeout(0.25)
+                try:
+                    assert not peer.recv(1), 'a place served a request from the replacement store'
+                except TimeoutError:
+                    pass
+
+        live.rename(launch_store / 'replacement')
+        saved.rename(live)
+        with running_host():
+            restored = ready()
+            assert restored['digest'] == original['digest']
+            assert store_id(live) == expected
+        return
 
     if name == 'foreign_recording_refused':
         def framed_hash(domain, payload):

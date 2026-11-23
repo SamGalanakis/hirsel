@@ -111,6 +111,7 @@ fn serve(activation: u64, candidate: Option<u64>) -> Serve {
         activation,
         idle: 250,
         candidate,
+        store_id: None,
     }
 }
 

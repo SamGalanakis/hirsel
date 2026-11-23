@@ -62,6 +62,7 @@ pub struct Metadata {
     describe: bool,
     wake: bool,
     idle_ms: u64,
+    store_id: Option<(u64, u64)>,
     preview: Option<Vec<u8>>,
     preparing: Option<([u8; 16], [u8; 32])>,
 }
@@ -93,6 +94,7 @@ impl Metadata {
             describe,
             wake: false,
             idle_ms: 0,
+            store_id: None,
             preview: None,
             preparing: None,
         }
@@ -157,6 +159,11 @@ impl Metadata {
         self
     }
 
+    pub fn with_store_id(mut self, store_id: Option<(u64, u64)>) -> Self {
+        self.store_id = store_id;
+        self
+    }
+
     pub fn with_preview(mut self, old: Vec<u8>) -> Self {
         self.preview = Some(old);
         self
@@ -196,6 +203,12 @@ impl Metadata {
                 .map_or(0, |(_, digest)| byte(digest)),
             12 => u64::from(self.wake),
             13 => self.idle_ms,
+            14 => match (self.store_id, index) {
+                (Some(_), 0) => 1,
+                (Some((hi, _)), 1) => hi,
+                (Some((_, lo)), 2) => lo,
+                _ => 0,
+            },
             _ => 0,
         }
     }

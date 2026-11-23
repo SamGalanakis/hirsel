@@ -298,6 +298,8 @@ struct Process {
     child: Option<Running>,
     /// A serving child's private endpoint (descriptor 4).
     endpoint: Option<Conn>,
+    /// A serving open awaiting the host's durable acceptance. Replay it after Hello.
+    opened: Option<HostReply>,
     /// A serving child's wake report (descriptor 5), the launcher's read end.
     report: Option<File>,
     /// A describe or preview child's standard output, with its bound.
@@ -1062,6 +1064,12 @@ impl<I: Images> Launcher<I> {
         }
         let cutovers = self.cutovers.keys().cloned().collect();
         self.emit(Event::Inventory(children, cold, cutovers));
+        for entry in &self.children {
+            if let Some(reply) = entry.process.as_ref().and_then(|p| p.opened.as_ref()) {
+                self.out
+                    .push(Event::Placed(entry.state.child.clone(), reply.clone()));
+            }
+        }
     }
 
     fn bind(
@@ -1207,6 +1215,9 @@ impl<I: Images> Launcher<I> {
                 command.arg("--hirsel-wake");
                 if serve.idle != 0 {
                     command.arg(format!("--hirsel-idle={}", serve.idle));
+                }
+                if let Some((hi, lo)) = serve.store_id {
+                    command.arg(format!("--hirsel-store-id={hi:016x}{lo:016x}"));
                 }
                 command
                     .args(&image.prefix)
@@ -1367,6 +1378,7 @@ impl<I: Images> Launcher<I> {
             watch: Some(watch),
             child: Some(child),
             endpoint,
+            opened: None,
             report,
             answer,
         })
@@ -1456,10 +1468,16 @@ impl<I: Images> Launcher<I> {
             }
             return;
         }
-        let endpoint = self
+        let process = self
             .child(&child)
-            .and_then(|i| self.children[i].process.as_mut())
-            .and_then(|p| p.endpoint.as_mut());
+            .and_then(|i| self.children[i].process.as_mut());
+        let accepting = *command == HostCommand::StoreAccepted;
+        let endpoint = process.and_then(|p| {
+            if accepting {
+                p.opened.take()?;
+            }
+            p.endpoint.as_mut()
+        });
         match endpoint {
             Some(conn) => {
                 conn.queue(command);
@@ -1474,6 +1492,7 @@ impl<I: Images> Launcher<I> {
                     );
                 }
             }
+            None if accepting => (),
             None => self.emit(Event::Placed(
                 child,
                 HostReply::Refused("the child has no live endpoint".into()),
@@ -1544,13 +1563,26 @@ impl<I: Images> Launcher<I> {
         }
         let child = self.children[i].state.child.clone();
         for reply in replies {
+            if matches!(reply, HostReply::Opened(_))
+                && let Some(process) = self.children[i].process.as_mut()
+            {
+                process.opened = Some(reply.clone());
+            }
+            if let HostReply::StoreMismatch(ehi, elo, ahi, alo) = reply {
+                eprintln!(
+                    "hirsel host: group {}: store identity mismatch (expected {ehi:016x}{elo:016x}, found {ahi:016x}{alo:016x})",
+                    child.group.name
+                );
+            }
             // OLD's next answer after a forwarded cutover is that cutover's; a held-write
             // acknowledgement is a notice.
-            if !matches!(reply, HostReply::WriteAck(_))
-                && let Some(((c, a), forwarded)) = self
-                    .cutovers
-                    .iter_mut()
-                    .find(|((c, _), f)| *c == child && f.reply.is_none())
+            if !matches!(
+                reply,
+                HostReply::Opened(_) | HostReply::WriteAck(_) | HostReply::StoreMismatch(..)
+            ) && let Some(((c, a), forwarded)) = self
+                .cutovers
+                .iter_mut()
+                .find(|((c, _), f)| *c == child && f.reply.is_none())
             {
                 forwarded.reply = Some(reply.clone());
                 self.out.push(Event::CutoverResult(c.clone(), *a, reply));

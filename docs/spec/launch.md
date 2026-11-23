@@ -409,12 +409,15 @@ The platform host records the attempt as `Preparing` before its describe, previe
 prepare children and OLD's export. A `Preparing` row proves no cutover was sent, so after a host
 loss it is aborted: OLD, if it still runs, is sent `HostAbort`, and the failure is recorded on
 OLD's answer or end, never before (RUNNER-SPEC §14.3 "Preparing"). An open that proves NEW's
-install must also report the release that the preview reported for NEW. The catalog records no store
-ID to match against the open's: a group's store is the one directory its registration bound,
-which no other group may register; activation `v` comes from OLD's export of that store; and the
-runner's write pause already checks that the prepared file came from its own store. A store ID
-would add only the case of an operator swapping two groups' directories out of band, where the
-group serves the swapped data whatever the host records.
+install must also report the release that the preview reported for NEW and the store ID
+recorded for the group. The first accepted `PlaceOpened` binds the group incarnation to
+its store ID in the catalog before the host lets the runner serve. A first open at genesis
+also records the activation the runner installed, replacing the empty-store selection 0.
+Later serving starts, including probes and candidates, reopen
+the selected store under its lock and check that ID before activating or serving. If the
+registered directory is empty because its mount is missing, the fresh store has a different
+ID. The launcher logs both IDs and the place refuses to serve. Restoring the original store
+allows the group to start again.
 The platform host's catalog keeps the attempt's pending row from before the candidate's start
 to the cutover's decision, with the exact cutover command it sent; a new session sends that
 command again and the launcher answers it from what it kept, so a host lost at any point in

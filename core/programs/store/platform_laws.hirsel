@@ -1232,7 +1232,7 @@ fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
                 for i in lo .. upto {
                     let mut name = string.from("bulk-")
                     string.push_uint(mut name, i, 10u32, 6u64, '0')
-                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
+                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: unlimited(), assembly: image(), activation: 1u64, retained: list.new(), store_id: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
                     st(store.put(mut tx, t.groups, name, g))?
                     let at: Option[u64] = if i < due {
                         Some(T0 + 10u64)

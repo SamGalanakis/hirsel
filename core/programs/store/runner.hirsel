@@ -54,7 +54,7 @@ pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes)
 // `Reopen` opens the store at its current activation, or runs genesis on an empty
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
 pub type Selection: send = Current(u64) | Reopen | Install
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | PublisherStopped
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining | Paused
@@ -280,7 +280,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     publish_phase(status, watch, mut current, Starting(Recovering))?
     let (to, inbox): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
     let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
-    let hosting = start_host_control(tasks, clock, n_place, head_to)?
+    let hosting = start_host_control(tasks, clock, n_place, head_to, to)?
     let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let serving_total = match serving_bytes(session_config, limit) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
     let serve_slots = serve_inbox_capacity(limit)
@@ -386,7 +386,22 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 (StopRequested, Some(take held)),
             take other => (take other, None),
         }
-        match take life_input {
+        let accepted_input = match take life_input {
+            ServePrepared if !stopped => {
+                let _ = channel.try_send(head_to, HeadContinue)
+                if let Some(control) = hosting {
+                    let ready_ns = host.mono_ns(clock)
+                    let release: Bytes = clone(current.release)
+                    if let Error(_) = channel.send(control.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: store_id.0, store_lo: store_id.1, release: take release, retain_from: retain_from, ready_ns: ready_ns))) {
+                        return Error(Missing("host control"))
+                    }
+                    continue
+                }
+                StoreAccepted
+            },
+            take other => take other,
+        }
+        match take accepted_input {
             StopRequested => {
                 if stopped { continue }
                 if latest.read(cut).started {
@@ -438,21 +453,14 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                 }
             },
             ServePrepared => {
-                if stopped {
-                    let _ = channel.try_send(serve_to, ServeWake)
-                    let _ = channel.try_send(head_to, HeadClose)
-                } else {
-                    publish_phase(status, watch, mut current, Ready)?
-                    online = true
-                    if let Some(ms) = idle { idle_alarm = Some(idle_sweep(tasks, clock, ms, to)) }
-                    let _ = channel.try_send(head_to, HeadContinue)
-                    if let Some(control) = hosting {
-                        let ready_ns = host.mono_ns(clock)
-                        let release: Bytes = clone(current.release)
-                        let _ = channel.try_send(control.answer, PlaceOpened(PlaceReady(version: current.activation, store_hi: store_id.0, store_lo: store_id.1, release: take release, retain_from: retain_from, ready_ns: ready_ns)))
-                    }
-                    let _ = channel.try_send(serve_to, ServeStart)
-                }
+                let _ = channel.try_send(serve_to, ServeWake)
+                let _ = channel.try_send(head_to, HeadClose)
+            },
+            StoreAccepted => if !online && !stopped {
+                publish_phase(status, watch, mut current, Ready)?
+                online = true
+                if let Some(ms) = idle { idle_alarm = Some(idle_sweep(tasks, clock, ms, to)) }
+                let _ = channel.try_send(serve_to, ServeStart)
             },
             AdmissionClose => {
                 if let Some(_) = serving { let _ = channel.try_send(head_to, HeadClose); let _ = channel.try_send(serve_to, ServeWake) }
@@ -540,6 +548,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
                                 Open(Store(Io(_))) => PlaceRefused("Io"),
                                 Open(Place(_)) => PlaceRefused("Place"),
                                 Open(IdentityUnknown) => PlaceRefused("Identity"),
+                                Open(StoreMismatch((ehi, elo), (ahi, alo))) => PlaceStoreMismatch(ehi, elo, ahi, alo),
                                 Open(PublisherStopped) => PlaceRefused("PublisherStopped"),
                                 _ => PlaceRefused("Open"),
                             }
@@ -1101,6 +1110,7 @@ pub fn start_text(problem: StartError) -> String {
             string.push(mut line, "; start the build that wrote it, or stop it and start this build once with --hirsel-install to migrate the store to it")
         },
         Open(IdentityUnknown) => string.push(mut line, "image identity is unavailable"),
+        Open(StoreMismatch(expected, actual)) => string.push(mut line, store_mismatch(expected, actual)),
         Open(PublisherStopped) => string.push(mut line, "publisher stopped"),
     }
     take line
@@ -2532,7 +2542,7 @@ fn start_publisher[G: send, H: send](owned: store.Db, place: StaticFn[fn(mut Reg
 
 type DrainWindow: shareable + send { admission: u64, deadline: u64 }
 
-type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64) | Published(Sender[PubIn]) | ServePrepared | Settled | HeadEnded(Result[Option[u64], StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
+type LifeEvent: send = StopRequested | Recovered | Activated(Bytes, u64, (u64, u64), u64) | Published(Sender[PubIn]) | ServePrepared | StoreAccepted | Settled | HeadEnded(Result[Option[u64], StartError]) | AdmissionClose | DrainExpired | ServeEnded(Result[u64, StartError])
     | WritesPaused | WritesResumed | RetirePlace
     | IdleSweep | HeadIdle(bool) | ServeIdle(bool) | HeadIdleChecked(Option[Sender[()]]) | ServeIdleChecked(Option[Sender[()]])
 
@@ -2566,28 +2576,40 @@ pub type ReserveImport: send { checked: store.ValidatedImport, answer: Sender[Re
 pub type KeepImport: send { built: store.Imported, answer: Sender[Result[Inline[u8, 32], store.DeployError]] }
 
 pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes)
-    | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes)
+    | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes) | HostStoreAccepted
 pub type PlaceReady: codec + send { version: u64, store_hi: u64, store_lo: u64, release: Bytes, retain_from: u64, ready_ns: u64 }
 pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String)
     | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64)
+    | PlaceStoreMismatch(u64, u64, u64, u64)
+
+pub fn store_mismatch(expected: (u64, u64), actual: (u64, u64)) -> String {
+    let mut msg = string.from("store identity mismatch (expected ")
+    string.push_uint(mut msg, expected.0, 16u32, 16u64, '0')
+    string.push_uint(mut msg, expected.1, 16u32, 16u64, '0')
+    string.push(mut msg, ", found ")
+    string.push_uint(mut msg, actual.0, 16u32, 16u64, '0')
+    string.push_uint(mut msg, actual.1, 16u32, 16u64, '0')
+    string.push(mut msg, ")")
+    take msg
+}
 
 type HostControl {
     answer: Sender[HostReply], sent: Receiver[()], reading: Task[()], writing: Task[()],
     ack: Sender[u64], acknowledging: Task[()],
 }
 type HostReader: send {
-    input: ReadHalf, to_head: Sender[HeadInput], answer: Sender[HostReply], scratch: Dir, clock: Clock, maximum: u64,
+    input: ReadHalf, to_head: Sender[HeadInput], life: Sender[LifeEvent], answer: Sender[HostReply], scratch: Dir, clock: Clock, maximum: u64,
 }
 type HostWriter: send { output: WriteHalf, responses: Receiver[HostReply], sent: Sender[()] }
 
-fn start_host_control(tasks: Tasks, clock: Clock, n_place: u64, to_head: Sender[HeadInput]) -> Result[Option[HostControl], StartError] {
+fn start_host_control(tasks: Tasks, clock: Clock, n_place: u64, to_head: Sender[HeadInput], life: Sender[LifeEvent]) -> Result[Option[HostControl], StartError] {
     let Some(take control) = launch_socket() else { return Ok(None) }
     let Some(scratch) = launch_scratch() else { return Error(Missing("scratch")) }
     let (take input, take output) = net.split(take control)
     let (answer, responses): (Sender[HostReply], Receiver[HostReply]) = channel.new(2u64)
     let (notice, sent): (Sender[()], Receiver[()]) = channel.new(1u64)
     let writer = task.spawn(tasks, bytes 16384u64, HostWriter(output: take output, responses: take responses, sent: take notice), host_writer)
-    let reader = task.spawn(tasks, bytes n_place, HostReader(input: take input, to_head: channel.sender(to_head), answer: channel.sender(answer), scratch: scratch, clock: clock, maximum: n_place), host_reader)
+    let reader = task.spawn(tasks, bytes n_place, HostReader(input: take input, to_head: channel.sender(to_head), life: channel.sender(life), answer: channel.sender(answer), scratch: scratch, clock: clock, maximum: n_place), host_reader)
     let (ack, take first_write): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     let request = (take first_write, channel.sender(answer))
     let acknowledging = task.spawn(tasks, bytes 4096u64, take request, forward_first_write)
@@ -2722,7 +2744,7 @@ fn host_cutover(head: Sender[HeadInput], attempt: Bytes, digest: Bytes, deadline
 }
 
 fn host_reader(take reader: HostReader) -> () waits {
-    let HostReader(input: take socket, to_head: take head, answer: take answer, scratch: scratch, clock: clock, maximum: maximum) = take reader
+    let HostReader(input: take socket, to_head: take head, life: take life, answer: take answer, scratch: scratch, clock: clock, maximum: maximum) = take reader
     let mut input = take socket
     let mut exported: Option[store.Exported] = None
     while let Some(take request) = read_control(mut input, maximum) {
@@ -2751,6 +2773,10 @@ fn host_reader(take reader: HostReader) -> () waits {
                 let deadline = if retry { 0u64 } else { std.clock.deadline_after_ms(host.mono_ns(clock), max_pause_ms) }
                 let _ = replace(mut exported, None)
                 host_cutover(head, attempt, digest, deadline)
+            },
+            HostStoreAccepted => {
+                let _ = channel.send(life, StoreAccepted)
+                continue
             },
             HostAbort(take attempt) => {
                 let _ = replace(mut exported, None)
@@ -2814,6 +2840,14 @@ fn managed_head[G: send, H: send, S: send](take job: ManagedHead[G, H, S]) -> Re
         },
     }
     let mut db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
+    if launch_word(14u64, 0u64) != 0u64 {
+        let expected = (launch_word(14u64, 1u64), launch_word(14u64, 2u64))
+        let actual = store.identity_words(db)
+        if expected != actual {
+            let _ = close_store(take db)
+            return Error(Open(StoreMismatch(expected, actual)))
+        }
+    }
     if !head_advance(to, inbox, Recovered) { return head_closed(take db) }
     let prepared = head_prepare(mut db, selection, persistent, place, migrate, handles, n_place, tasks)
     let (reg, local, publisher_handles, release, replay_identity) = match take prepared {

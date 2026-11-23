@@ -63,6 +63,7 @@ pub(crate) struct Serve {
     pub(crate) activation: u64,
     pub(crate) idle: u64,
     pub(crate) candidate: Option<u64>,
+    pub(crate) store_id: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +121,7 @@ pub(crate) enum HostCommand {
     Import(Vec<u8>, Vec<u8>, Vec<u8>),
     Cutover(Vec<u8>, Vec<u8>, u64, bool),
     Abort(Vec<u8>),
+    StoreAccepted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,6 +147,7 @@ pub(crate) enum HostReply {
     Aborted,
     Uncertain,
     WriteAck(u64),
+    StoreMismatch(u64, u64, u64, u64),
 }
 
 /// A group's containment label (launch.md "Containment (R27)").
@@ -492,6 +495,10 @@ impl Wire for Mode {
                 w.u64(serve.activation);
                 w.u64(serve.idle);
                 w.option(&serve.candidate, |w, &c| w.u64(c));
+                w.option(&serve.store_id, |w, &(hi, lo)| {
+                    w.u64(hi);
+                    w.u64(lo);
+                });
             }
             Self::Describe(a) => (w.u32(2), a.put(w)).1,
             Self::Preview(a, old) => {
@@ -522,6 +529,7 @@ impl Wire for Mode {
                     activation: r.u64()?,
                     idle: r.u64()?,
                     candidate: r.option(Reader::u64)?,
+                    store_id: r.option(|r| Ok((r.u64()?, r.u64()?)))?,
                 },
             ),
             2 => Self::Describe(Attempt::get(r)?),
@@ -587,6 +595,7 @@ impl Wire for HostCommand {
                 w.bool(*retry);
             }
             Self::Abort(a) => (w.u32(3), w.bytes(a)).1,
+            Self::StoreAccepted => w.u32(4),
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -595,6 +604,7 @@ impl Wire for HostCommand {
             1 => Self::Import(r.bytes()?, r.bytes()?, r.bytes()?),
             2 => Self::Cutover(r.bytes()?, r.bytes()?, r.u64()?, r.bool()?),
             3 => Self::Abort(r.bytes()?),
+            4 => Self::StoreAccepted,
             _ => return Err(malformed("host command tag")),
         })
     }
@@ -633,6 +643,13 @@ impl Wire for HostReply {
             Self::Aborted => w.u32(7),
             Self::Uncertain => w.u32(8),
             Self::WriteAck(at) => (w.u32(9), w.u64(*at)).1,
+            Self::StoreMismatch(ehi, elo, ahi, alo) => {
+                w.u32(10);
+                w.u64(*ehi);
+                w.u64(*elo);
+                w.u64(*ahi);
+                w.u64(*alo);
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -654,6 +671,7 @@ impl Wire for HostReply {
             7 => Self::Aborted,
             8 => Self::Uncertain,
             9 => Self::WriteAck(r.u64()?),
+            10 => Self::StoreMismatch(r.u64()?, r.u64()?, r.u64()?, r.u64()?),
             _ => return Err(malformed("host reply tag")),
         })
     }
@@ -1143,9 +1161,10 @@ mod tests {
                         activation: 5,
                         idle: 250,
                         candidate: Some(6),
+                        store_id: Some((1, 2)),
                     },
                 )),
-                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000001000000060000000000000000000000".into(),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa00000000000000010000000600000000000000010000000100000000000000020000000000000000000000".into(),
             ),
             (
                 launch(Mode::Describe(attempt())),
@@ -1204,6 +1223,7 @@ mod tests {
                             activation: 5,
                             idle: 250,
                             candidate: None,
+                            store_id: None,
                         },
                     ),
                     recording: Some(Recording {
@@ -1211,7 +1231,7 @@ mod tests {
                         destination: "/rec".into(),
                     }),
                 }),
-                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000000000000010000001000000021212121212121212121212121212121040000002f726563".into(),
+                "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa000000000000000000000000000000010000001000000021212121212121212121212121212121040000002f726563".into(),
             ),
             (
                 Request::Admit(
@@ -1328,6 +1348,10 @@ mod tests {
                     }),
                 ),
                 "090000000100000067030000000000000001000000070000000000000000000000040000000000000001000000000000000200000000000000010000000501000000000000006300000000000000",
+            ),
+            (
+                Event::Placed(serving(), HostReply::StoreMismatch(1, 2, 3, 4)),
+                "09000000010000006703000000000000000100000007000000000000000a0000000100000000000000020000000000000003000000000000000400000000000000",
             ),
             (
                 Event::Answered(preparing(), vec![1, 2]),

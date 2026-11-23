@@ -1776,6 +1776,15 @@ So an idle stop never cuts a run or a lease that started before it was decided, 
 
 ### 14.5 Crashes, restarts and probes
 
+The host durably records the store ID from the first accepted `PlaceOpened` for each group
+incarnation. A hosted runner waits for `HostStoreAccepted` before serving. The launcher
+repeats an unaccepted `PlaceOpened` after the next session's inventory. Subsequent serving starts carry that expected ID in their private launch
+metadata. After opening the store under LOCK, the runner compares the ID before it
+prepares the activation, opens application handles, or serves. On a mismatch it sends
+`PlaceStoreMismatch(expected_hi, expected_lo, actual_hi, actual_lo)` and exits. The
+launcher logs the group and both IDs. The host rejects a `PlaceOpened` with a different
+store ID as recovery evidence.
+
 **The control session (v2.27).** The host talks to the launcher over one control session at a time, on the launcher's control socket (launch.md "One control socket").
 - A session starts with the host's `Hello`. The launcher first ends any earlier session: it stops reading the old connection, and each request of it that it had not acted on is discarded, never acted on later. Only then does it answer.
 - Its answer is the **inventory**, taken in the one loop in which the launcher changes its state: every child it has, by identity (§14.1) and with its state (accepted and not yet started, started, or ended with an end the host has not acknowledged, with the end's report); every cold listener that is readable; and no collection fence (a new session drops it, launch.md "Collect").

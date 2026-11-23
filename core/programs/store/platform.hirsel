@@ -28,6 +28,7 @@ pub type GroupRow: codec + send {
     assembly: Bytes,
     activation: u64,
     retained: List[Bytes],
+    store_id: Option[(u64, u64)],
     incarnation: u64,
     retiring: Option[Disposition],
     // The program's arguments, passed to every serving start of the group.
@@ -467,7 +468,7 @@ fn bind_request(name: String, g: GroupRow) -> launcher.Request {
 }
 
 fn serving_launch(name: String, g: GroupRow, gen: u64, activation: u64, assembly: Bytes, idle: u64, candidate: Option[u64]) -> launcher.Request {
-    let mode: launcher.Mode = ServingMode(gen, launcher.Serve(activation: activation, idle: idle, candidate: candidate))
+    let mode: launcher.Mode = ServingMode(gen, launcher.Serve(activation: activation, idle: idle, candidate: candidate, store_id: g.store_id))
     let recording: Option[launcher.Recording] = match g.record {
         Some(r) => {
             let id = recording_id(g.incarnation, gen)
@@ -1258,6 +1259,31 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
         return
     }
     let name = string.from(c.group.name)
+    if let PlaceOpened(ready) = reply {
+        let is_current = run_gen(h, name) == Some(gen)
+        let candidate = cut_of(h, name)
+        let is_candidate = match candidate {
+            Some(cut) => cut.candidate == gen && cut.activation == ready.version && cut.release == ready.release,
+            None => false,
+        }
+        if !is_current && !is_candidate {
+            return
+        }
+        let actual = (ready.store_hi, ready.store_lo)
+        if let Some(expected) = g.store_id {
+            if expected != actual {
+                if is_current {
+                    unsuccessful(mut h, name, runner.store_mismatch(expected, actual), false, now, mut out)
+                }
+                list.push(mut out, Kill(clone(c)))
+                return
+            }
+        } else if let Error(_) = record_store(mut h, name, g.incarnation, ready, is_current) {
+            list.push(mut out, Kill(clone(c)))
+            return
+        }
+        list.push(mut out, Command(clone(c), HostStoreAccepted))
+    }
     let preparing = prep_of(h, name)
     if let Some(take p) = take preparing {
         if p.old == gen {
@@ -1325,12 +1351,35 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                         set_run(mut h, name, Some(Run(gen: gen, phase: Ready(now.mono_ns))))
                         settle_probe(mut h, name, ready.version, ready.release, true)
                     },
+                    PlaceStoreMismatch(ehi, elo, ahi, alo) => unsuccessful(mut h, name, runner.store_mismatch((ehi, elo), (ahi, alo)), false, now, mut out),
                     PlaceCurrent(version, _) => settle_probe(mut h, name, version, list.new(), false),
                     _ => (),
                 }
             }
         },
     }
+}
+
+// Record the first accepted PlaceOpened before any decision that depends on the store.
+fn record_store(mut h: Host, name: String, incarnation: u64, ready: runner.PlaceReady, authoritative: bool) -> Result[(), Refused] waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+                return Error(Unknown)
+            }
+            if found.incarnation != incarnation {
+                return Error(Unknown)
+            }
+            let mut g = found
+            g.store_id = Some((ready.store_hi, ready.store_lo))
+            if authoritative && g.activation == 0u64 {
+                g.activation = ready.version
+            }
+            st(store.put(mut tx, t.groups, name, g))
+        })
+    }
+    decided(mut h.db, take made)
 }
 
 // The probe of an Undecided deploy answered (launch.md "When the host starts"). Only an
@@ -1794,7 +1843,7 @@ pub fn add_group(mut h: Host, spec: NewGroup) -> Result[List[launcher.Request], 
                 }
             }
             let mut meta = meta_of(tx, t)?
-            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), incarnation: meta.next_incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+            let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: clone(spec.assembly), activation: spec.activation, retained: list.new(), store_id: None, incarnation: meta.next_incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
             meta.next_incarnation += 1u64
             st(store.put(mut tx, t.meta, 0u64, meta))?
             st(store.put(mut tx, t.groups, spec.name, g))?
@@ -2890,7 +2939,7 @@ fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
     } else {
         Untrusted
     }
-    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), store_id: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
 }
 
 // Whether a catalog group already holds store directory `path`.

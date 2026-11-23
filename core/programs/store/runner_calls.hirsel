@@ -448,6 +448,7 @@ fn served_on(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r: Random, mu
 fn opened_text(e: runner.OpenError) -> String {
     string.from(match e {
         Store(_) => "calls: place_head: store error",
+        StoreMismatch(_, _) => "calls: place_head: store mismatch",
         Place(_) => "calls: place_head: place registration failed",
         Migrate(_) => "calls: place_head: migration failed",
         NotCurrent(_) => "calls: place_head: activation is not current",

@@ -814,6 +814,19 @@ fn journal_law_segment_boundaries(d: Dir) -> bool waits {
     if middle_end != 114 || middle_bytes != 42 || list.len(middle) != 1 {
         return false
     }
+    // D3: the segment length survives, but every byte past the durable frame is zero.
+    let mut zeroed = result.unwrap(copied(list.slice(raw, 0, 114)))
+    list.fill(mut zeroed, 42, 0u8)
+    let (zeroed_end, zeroed_bytes, take zeroed_events) = result.unwrap(journal_scan_fixture(d, id, zeroed, Some(114), true))
+    if zeroed_end != 114 || zeroed_bytes != 42 || list.len(zeroed_events) != 1 {
+        return false
+    }
+    let Commit(first_commit) = zeroed_events[0] else {
+        return false
+    }
+    if first_commit.version != 1 || first_commit.at != 101 {
+        return false
+    }
     for n in 114u64 .. 156 {
         let tail = list.slice(raw, 0, n)
         let (partial_end, partial_bytes, take partial) = result.unwrap(journal_scan_fixture(d, id, tail, Some(114), true))

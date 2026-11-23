@@ -174,13 +174,28 @@ pub(crate) unsafe fn free_on_page(
     charge: u64,
     context: Option<&Context>,
 ) {
-    // SAFETY: the payer remains pinned until settlement. The live slot
-    // keeps the page after settlement and through physical return.
+    // SAFETY: the caller owns the live slot and pins its allocation page.
     unsafe {
         if task_heap::Page::kind(page) == SPLIT_BYTES {
             crate::split_bytes::free(page, payload, charge, context);
-            return;
+        } else {
+            free_unsplit_on_page(page, payload, charge, context);
         }
+    }
+}
+
+/// # Safety
+/// As `free_on_page`, with an unsplit allocation.
+#[inline(always)]
+unsafe fn free_unsplit_on_page(
+    page: NonNull<task_heap::Page>,
+    payload: NonNull<u8>,
+    charge: u64,
+    context: Option<&Context>,
+) {
+    // SAFETY: the payer remains pinned until settlement. The live slot
+    // keeps the page after settlement and through physical return.
+    unsafe {
         if charge != 0 {
             let payer = task_heap::Page::funding(page, payload);
             if let Some(context) = context {
@@ -195,11 +210,12 @@ pub(crate) unsafe fn free_on_page(
     }
 }
 /// # Safety
-/// The worklist owns a cleaned node, its exact charge and a live task context.
+/// The caller owns a cleaned fixed node or graph buffer, its exact charge and
+/// a live task context. Split byte ranges are terminal and never enter the drain.
 #[inline(always)]
 pub(crate) unsafe fn free_dead_in(context: &Context, payload: NonNull<u8>, charge: u64) {
-    // SAFETY: caller transfers exclusive storage; the original payer stays pinned.
-    unsafe { free_with(payload, charge, Some(context)) }
+    // SAFETY: the exclusive slot is unsplit and pins its page and payer.
+    unsafe { free_unsplit_on_page(task_heap::page_of(payload), payload, charge, Some(context)) }
 }
 /// Raw-byte Rust owner. Native layout operands correspond to emitter constants
 /// or storage lengths; payload cleanup belongs to the emitter.

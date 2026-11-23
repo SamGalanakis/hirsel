@@ -1211,7 +1211,7 @@ mod destination_tests {
 
 /// Enqueue owned sequence storage while its descriptor remains in its parent.
 /// # Safety
-/// Buffer is exclusively owned. The borrowed payload is in the live parent
+/// The GRAPH buffer is exclusively owned. The borrowed payload is in the live parent
 /// worklist frame and remains alive through this child's depth-first cleanup.
 /// Recipe follows the ordinary resumable mechanical recipe contract. The
 /// carrier capacity is nonzero; a static capacity-zero pointer is not a block.

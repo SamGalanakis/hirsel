@@ -171,6 +171,9 @@ type Cut {
     old_ended: bool,
     opened: bool,
     candidate_end: Option[launcher.End],
+    // The launcher holds OLD's answer to this attempt's cutover (§14.5): until it returns
+    // it, ends are recorded and not acknowledged, and they decide nothing.
+    held: bool,
 }
 
 type Vol {
@@ -815,6 +818,16 @@ fn ended(mut h: Host, c: launcher.Child, e: launcher.End, now: Now, mut out: Lis
     match take found {
         Some(take outstanding) => {
             let mut cut = take outstanding
+            if cut.held && (gen == cut.candidate || gen == cut.old) {
+                if gen == cut.candidate {
+                    cut.candidate_end = Some(e)
+                } else {
+                    cut.old_end = Some(e)
+                    cut.old_ended = true
+                }
+                set_cut(mut h, name, Some(take cut))
+                return
+            }
             if gen == cut.candidate {
                 cut.candidate_end = Some(e)
                 if cut.old_ended {
@@ -972,6 +985,14 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                     }
                 }
             } else if gen == cut.old {
+                let deferred = cut.held
+                cut.held = false
+                let old_done = cut.old_ended
+                let new_done = match cut.candidate_end {
+                    Some(_) => true,
+                    None => false
+                }
+                let (inc, old_gen, new_gen) = (cut.incarnation, cut.old, cut.candidate)
                 match reply {
                     PlaceInstalled(v, _) => if v == cut.activation {
                         commit_cut(mut h, name, take cut, now, mut out)
@@ -989,7 +1010,15 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                             set_cut(mut h, name, Some(take cut))
                         }
                     },
-                    _ => (),
+                    _ => set_cut(mut h, name, Some(take cut)),
+                }
+                if deferred {
+                    if old_done {
+                        list.push(mut out, Acknowledge(child_of(name, inc, old_gen)))
+                    }
+                    if new_done {
+                        list.push(mut out, Acknowledge(child_of(name, inc, new_gen)))
+                    }
                 }
             }
         },
@@ -1118,7 +1147,14 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
             let Some(d) = pending else {
                 continue
             }
-            let cut = Cut(attempt: d.attempt, incarnation: c.group.incarnation, old: d.old, candidate: gen, activation: d.activation, old_end: None, old_ended: false, opened: false, candidate_end: None)
+            let old_child = child_of(name, c.group.incarnation, d.old)
+            let mut kept = false
+            for k in held {
+                if launcher.same_child(k.old, old_child) && k.attempt.hi == d.attempt.hi && k.attempt.lo == d.attempt.lo {
+                    kept = true
+                }
+            }
+            let cut = Cut(attempt: d.attempt, incarnation: c.group.incarnation, old: d.old, candidate: gen, activation: d.activation, old_end: None, old_ended: false, opened: false, candidate_end: None, held: kept)
             set_cut(mut h, name, Some(cut))
         } else {
             stop_or_ack(c, s.phase, mut out);
@@ -1185,7 +1221,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
             let Ok(cfg) = host_config(h) else {
                 continue
             }
-            let cut = Cut(attempt: d.attempt, incarnation: g.incarnation, old: d.old, candidate: d.candidate, activation: d.activation, old_end: None, old_ended: false, opened: false, candidate_end: None)
+            let cut = Cut(attempt: d.attempt, incarnation: g.incarnation, old: d.old, candidate: d.candidate, activation: d.activation, old_end: None, old_ended: false, opened: false, candidate_end: None, held: false)
             set_cut(mut h, name, Some(cut))
             list.push(mut out, serving_launch(name, g, d.candidate, d.activation, d.assembly, cfg.idle_ms, Some(d.old)))
             list.push(mut out, cutover_command(name, g.incarnation, d.old, d.attempt, d.digest))
@@ -1463,7 +1499,7 @@ pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, assembly: By
     }
     let c = decided(mut h.db, take made)?
     let cfg = host_config(h)?
-    let cut = Cut(attempt: attempt, incarnation: g.incarnation, old: old, candidate: c, activation: activation, old_end: None, old_ended: false, opened: false, candidate_end: None)
+    let cut = Cut(attempt: attempt, incarnation: g.incarnation, old: old, candidate: c, activation: activation, old_end: None, old_ended: false, opened: false, candidate_end: None, held: false)
     set_cut(mut h, name, Some(cut))
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, serving_launch(name, g, c, activation, assembly, cfg.idle_ms, Some(old)))

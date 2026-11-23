@@ -497,7 +497,7 @@ fn committed_once(r: Rig) -> bool {
         Ok(Some(g)) => g.assembly == image_two() && list.len(g.retained) == 1u64 && g.retained[0u64] == image(),
         _ => false
     }
-    launcher.forwards(r.f) == 1u64 && is_dirty(r, "g", 2u64) && installed && rooted && launcher.held(r.f) == 0u64
+    launcher.forwards(r.f) == 1u64 && installed && rooted && launcher.held(r.f) == 0u64
 }
 
 // L43 `wake_generation_fence` (§14.3, §14.5): a report carries its child's identity, so a
@@ -600,7 +600,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut a = restart(take r0, 4u64)
     expect(gens(a, "g") == one(2u64) && launcher.forwards(a.f) == 1u64, "L44: before Start, the candidate or the cutover was not sent again")
     answer(mut a, old, PlaceInstalled(2u64, true))
-    expect(committed_once(a), "L44 before Start: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(is_dirty(a, "g", 2u64) && committed_once(a), "L44 before Start: not one install committed to NEW's root with OLD retained and the hold released")
     // Before forwarding: the Start reached the launcher, the cutover did not.
     let (r1, old1, go1) = cut_case(c, rnd)
     let mut b = take r1
@@ -610,7 +610,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut b2 = restart(take b, 4u64)
     expect(list.len(gens(b2, "g")) == 0u64 && launcher.forwards(b2.f) == 1u64, "L44: before forwarding, the candidate started again or the cutover was not sent once")
     answer(mut b2, old1, PlaceInstalled(2u64, true))
-    expect(committed_once(b2), "L44 before forwarding: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(is_dirty(b2, "g", 2u64) && committed_once(b2), "L44 before forwarding: not one install committed to NEW's root with OLD retained and the hold released")
     // During the install: OLD holds the command when the host is lost.
     let (r2, old2, go2) = cut_case(c, rnd)
     let mut d = take r2
@@ -618,7 +618,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut d2 = restart(take d, 4u64)
     expect(launcher.forwards(d2.f) == 1u64 && is_dirty(d2, "g", 1u64), "L44: during the install, the re-send reached OLD again or the row moved")
     answer(mut d2, old2, PlaceInstalled(2u64, true))
-    expect(committed_once(d2), "L44 during the install: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(is_dirty(d2, "g", 2u64) && committed_once(d2), "L44 during the install: not one install committed to NEW's root with OLD retained and the hold released")
     // After OLD's answer, before the commit: the launcher returns the kept answer.
     let (r3, old3, go3) = cut_case(c, rnd)
     let mut e = take r3
@@ -626,7 +626,31 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let _ = launcher.cutover_reply(mut e.f, old3, PlaceInstalled(2u64, true))
     expect(is_dirty(e, "g", 1u64), "L44: the host saw an answer it was not sent")
     let e2 = restart(take e, 4u64)
-    expect(committed_once(e2), "L44 after the answer: not one install committed to NEW's root with OLD retained and the hold released")
+    expect(is_dirty(e2, "g", 2u64) && committed_once(e2), "L44 after the answer: not one install committed to NEW's root with OLD retained and the hold released")
+    // Both children ended while no host watched, after OLD's answer: their ends wait for
+    // the kept answer, which commits, and NEW's clean stop then writes Clean.
+    let (r5, old5, go5) = cut_case(c, rnd)
+    let mut q = take r5
+    pump(mut q, take go5)
+    let new5 = last(q, "g")
+    let _ = launcher.cutover_reply(mut q.f, old5, PlaceInstalled(2u64, true))
+    let _ = launcher.end(mut q.f, old5, Code(0i32), Some(None))
+    let _ = launcher.end(mut q.f, new5, Code(0i32), Some(None))
+    let q2 = restart(take q, 4u64)
+    expect(is_clean(q2, "g") && committed_once(q2), "L44 ends before the answer: the kept Installed did not commit before the ends applied")
+    // OLD ended unanswered while no host watched: the kept Uncertain is OLD's end, and the
+    // candidate's open at v commits.
+    let (r6, old6, go6) = cut_case(c, rnd)
+    let mut u = take r6
+    pump(mut u, take go6)
+    let new6 = last(u, "g")
+    let _ = launcher.end(mut u.f, old6, Code(1i32), None)
+    let mut u2 = restart(take u, 4u64)
+    expect(is_dirty(u2, "g", 1u64) && launcher.held(u2.f) == 1u64, "L44 Uncertain: decided before the candidate opened")
+    let mut opened: List[launcher.Event] = list.new()
+    list.push(mut opened, Placed(clone(new6), PlaceOpened(runner.PlaceReady(version: 2u64, store_hi: 0u64, store_lo: 0u64, release: image_two(), retain_from: 0u64, ready_ns: 0u64))))
+    feed(mut u2, take opened)
+    expect(is_dirty(u2, "g", 2u64) && committed_once(u2), "L44 Uncertain: the candidate's open at v did not commit")
     // Launcher lost after OLD installed: no child and no held answer survive.
     let (r4, old4, go4) = cut_case(c, rnd)
     let mut l = take r4

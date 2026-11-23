@@ -482,10 +482,6 @@ fn shown(tx: store.Tx, h: harness.Handles, take u: ()) -> Result[store.runner.Co
     harness.transcript(h)
 }
 
-fn window(tx: store.Tx, h: harness.Handles, take w: harness.Window) -> Result[store.runner.Cover, Capacity] {
-    harness.window(tx, h, w)
-}
-
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
     store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
     store.runner.granted(mut r, code.describe(effect), BYTES, store.runner.DEFAULT_STEPS)?
@@ -497,7 +493,7 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
     let views: std.codec.Codec[harness.View] = std.codec.of()
     store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query(mut r, code.describe(window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)
+    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)
 }
 
 // ---- the helper agent: a second place, one session of its own ----
@@ -1244,7 +1240,7 @@ fn live_result(out: Stdout, dir: Dir, b: Browser, tasks: Tasks, random: Random) 
 }
 
 fn live_turns(out: Stdout, root: Dir, d: harness.gateway.Door[Services], b: Browser, tasks: Tasks, random: Random) -> Result[(), String] waits {
-    post(b, "/sessions", list.new(), string.into_bytes("notes smoke"), 201u16, b"0")?
+    post(b, "/sessions", browser_headers(b.credential, 0u64), string.into_bytes("notes smoke"), 201u16, b"0")?
     let Ok(dir) = std.dir.narrow(root, "s0") else {
         return Error("missing HTTP-created session directory")
     }
@@ -1317,10 +1313,9 @@ pub fn live_smoke(out: Stdout, data: Dir, clock: Clock, random: Random, tasks: T
     let Ok((take listener, address)) = host.listen(network, loopback(), 16u16) else {
         return quit(out, "could not listen for HTTP")
     }
-    let views: std.codec.Codec[harness.View] = std.codec.of()
     let mut tools: List[String] = list.new()
     list.push(mut tools, "note_add")
-    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), shown: store.fixture.query_entry(code.describe(window), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: LIVE_MODEL, narrow: Only(take tools), preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: network, tail_lines: 64u64, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: 8388608u64, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: LIVE_MODEL, narrow: Only(take tools), preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: network, tail_lines: 64u64, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: 8388608u64, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(d, take front, take listener)
     let ran = live_turns(out, data, d, Browser(net: network, clock: clock, address: address, credential: store.ingress.credential(random)), tasks, random)
     harness.gateway_http.halt(take served)
@@ -1366,8 +1361,7 @@ pub fn serve_scripted(out: Stdout, data: Dir, clock: Clock, random: Random, task
     let Ok((take listener, address)) = host.listen(net, loopback(), 16u16) else {
         return quit(out, "could not listen for HTTP")
     }
-    let views: std.codec.Codec[harness.View] = std.codec.of()
-    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), shown: store.fixture.query_entry(code.describe(window), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: net, tail_lines: 4u64, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 200u64, conn_bytes: 8388608u64, conns_max: 8u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: Some(harness.preview.door(hub)), tasks: tasks, clock: clock, random: random, net: net, tail_lines: 4u64, within_ms: HTTP_MS, poll_ms: 10u64, beat_ms: 200u64, conn_bytes: 8388608u64, conns_max: 8u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(d, take front, take listener)
     count(out, "port ", int.widen(address.port))
     let mut downs = 0u64

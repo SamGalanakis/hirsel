@@ -38,7 +38,7 @@ pub type GatewayConfig[T: send]: send {
 }
 
 type GwIn: send =
-    Create(Bytes, Seeding, Sender[Result[u64, Refused]])
+    Create(Bytes, Seeding, Option[store.Caller], Sender[Result[u64, Refused]])
     | Delete(u64, Sender[Result[(), Refused]])
     | Listing(Sender[List[u64]])
     | Reach(u64, Sender[Result[store.local.Door, Refused]])
@@ -118,7 +118,7 @@ fn has_row(a: Actor, id: u64) -> bool {
     match store.get(snap, store.shape(a.catalog.sessions), id) { Ok(Some(_)) => true, _ => false }
 }
 
-fn seed_store(a: Actor, dir: Dir, seeding: Seeding) -> Result[(), Refused] waits {
+fn seed_store(a: Actor, dir: Dir, seeding: Seeding, reader: Option[store.Caller]) -> Result[(), Refused] waits {
     let mut db = match store.open(a.tasks, dir, a.clock, a.random, clone(a.options)) { Ok(take v) => take v, Error(_) => return Error(Storage) }
     if let Error(_) = store.run_migration(mut db, a.tasks, a.migrate) { let _ = store.close(take db); return Error(Storage) }
     let Ok(h) = store.with_schema(db, code.describe(harness.handles)) else { let _ = store.close(take db); return Error(Storage) }
@@ -126,7 +126,9 @@ fn seed_store(a: Actor, dir: Dir, seeding: Seeding) -> Result[(), Refused] waits
         match seeding {
             Fresh(model, narrow) => harness.open_session(mut tx, h, clone(model), clone(narrow)),
             Adopt(prefix) => harness.adopt(mut tx, h, clone(prefix)),
-        }
+        }?
+        if let Some(caller) = reader { harness.set_reader(mut tx, h, caller, true)? }
+        Ok(())
     })
     let seeded: Result[(), Refused] = match take ran {
         Ok(Committed(done)) => match store.durable(mut db, done.ticket) { Ok(()) => Ok(()), Error(_) => Error(Storage) },
@@ -141,7 +143,7 @@ fn seed_store(a: Actor, dir: Dir, seeding: Seeding) -> Result[(), Refused] waits
 // row commits, and the id is taken by that commit, so a create that dies first leaves a
 // directory and a group no row names: the next create of that id clears the directory
 // and finds the group, and a restart removes it. An id is never reused once committed.
-fn on_create(mut a: Actor, take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
+fn on_create(mut a: Actor, take key: Bytes, take seeding: Seeding, reader: Option[store.Caller]) -> Result[u64, Refused] waits {
     let snap = store.snapshot(a.db)
     match store.get(snap, store.shape(a.catalog.keys), key) {
         Ok(Some(id)) => return Ok(id),
@@ -154,7 +156,7 @@ fn on_create(mut a: Actor, take key: Bytes, take seeding: Seeding) -> Result[u64
     let _ = std.dir.remove_all(a.root, name)
     if let Error(_) = std.dir.create_dir(a.root, name) { return Error(Storage) }
     let Ok(dir) = std.dir.narrow(a.root, name) else { return Error(Storage) }
-    seed_store(a, dir, seeding)?
+    seed_store(a, dir, seeding, reader)?
     match store.local.add(store.local.door(a.host), name) {
         Ok(()) => (),
         // A group left by a create of this id that died before its row: it never ran,
@@ -344,7 +346,7 @@ fn run_gateway[T: send](take begin: Begin[T]) -> () waits {
     if !failed {
         while let Ok(take m) = channel.receive(inbox) {
             match take m {
-                Create(take key, take seeding, reply) => { let _ = channel.send(reply, on_create(mut a, take key, take seeding)) },
+                Create(take key, take seeding, reader, reply) => { let _ = channel.send(reply, on_create(mut a, take key, take seeding, reader)) },
                 Delete(id, take reply) => on_delete(mut a, id, take reply),
                 Listing(reply) => { let _ = channel.send(reply, on_listing(a)) },
                 Reach(id, reply) => { let _ = channel.send(reply, on_reach(a, id)) },
@@ -407,8 +409,20 @@ pub fn gateway[T: send](take way: Doorway[T], take config: GatewayConfig[T]) -> 
 pub fn door[T: send](g: Gateway[T]) -> Door[T] { Door(to: channel.sender(g.to)) }
 
 pub fn create[T: send](d: Door[T], take key: Bytes, take seeding: Seeding) -> Result[u64, Refused] waits {
+    create_seeded(d, take key, take seeding, None)
+}
+
+// Seeds a private session and its initial reader before publishing the catalog row.
+pub fn create_visible[T: send](d: Door[T], key: Bytes, take seeding: Seeding, take caller: store.Caller) -> Result[u64, Refused] waits {
+    let mut scoped_key: Bytes = list.new()
+    if let Error(_) = store.runner.caller_key(caller, mut scoped_key) { return Error(Seed(Malformed("reader identity"))) }
+    list.append(mut scoped_key, key)
+    create_seeded(d, take scoped_key, take seeding, Some(take caller))
+}
+
+fn create_seeded[T: send](d: Door[T], take key: Bytes, take seeding: Seeding, take reader: Option[store.Caller]) -> Result[u64, Refused] waits {
     let (reply, answer): (Sender[Result[u64, Refused]], Receiver[Result[u64, Refused]]) = channel.new(1u64)
-    if let Error(_) = channel.send(d.to, Create(take key, take seeding, take reply)) { return Error(Stopping) }
+    if let Error(_) = channel.send(d.to, Create(take key, take seeding, take reader, take reply)) { return Error(Stopping) }
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 

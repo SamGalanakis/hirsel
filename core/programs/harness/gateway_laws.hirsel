@@ -202,8 +202,8 @@ fn shown(tx: store.Tx, h: harness.Handles, take u: ()) -> Result[store.runner.Co
     harness.transcript(h)
 }
 
-fn window(tx: store.Tx, h: harness.Handles, take w: harness.Window) -> Result[store.runner.Cover, Capacity] {
-    harness.window(tx, h, w)
+fn revoke_reader(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take unused: ()) -> Result[(), harness.Refused] {
+    harness.set_reader(mut tx, h, caller, false)
 }
 
 fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
@@ -216,8 +216,9 @@ fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), st
     store.runner.transact(mut r, code.describe(decide_entry), BYTES, store.runner.DEFAULT_STEPS)?
     let views: std.codec.Codec[harness.View] = std.codec.of()
     store.runner.query(mut r, code.describe(shown), std.codec.key_u64(), views, BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(revoke_reader), BYTES, store.runner.DEFAULT_STEPS)?
     let windows: std.codec.Codec[harness.View] = std.codec.of()
-    store.runner.query(mut r, code.describe(window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)
+    store.runner.query_as(mut r, code.describe(harness.window), std.codec.key_u64(), windows, BYTES, store.runner.DEFAULT_STEPS)
 }
 
 fn services_of(s: Services, take name: String) -> Services {
@@ -796,29 +797,23 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         Error(_) => return 1u64
     }
     let (listener, at) = result.unwrap(host.listen(net, local(0u16), 16u16))
-    let views: std.codec.Codec[harness.View] = std.codec.of()
     let front_port = if enabled {
         Some(harness.preview.door(hub))
     } else {
         None
     }
-    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), shown: store.fixture.query_entry(code.describe(window), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 20u64, beat_ms: 200u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 20u64, beat_ms: 200u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
-    let (created, made) = http(net, clock, port, "POST", "/sessions", list.new(), string.into_bytes("first"))
+    let me = store.ingress.credential(random)
+    let (created, made) = http(net, clock, port, "POST", "/sessions", person(me, 0u64), string.into_bytes("first"))
     if created != 201u16 {
         return 1u64
     }
     if made != b"0" {
         return 2u64
     }
-    let me = store.ingress.credential(random)
-    let headers = if enabled {
-        person(me, 0u64)
-    } else {
-        list.new()
-    }
-    let events = std.http_client.Request(method: "GET", target: "/sessions/0/events", headers: take headers, body: Fixed(0u64))
+    let events = std.http_client.Request(method: "GET", target: "/sessions/0/events", headers: person(me, 0u64), body: Fixed(0u64))
     let Ok(take opened) = std.http_client.dial(net, local(port), "127.0.0.1", clock, events, std.clock.deadline_after_ms(host.mono_ns(clock), 30000u64)) else {
         return 3u64
     }
@@ -1118,7 +1113,7 @@ fn committed_version(dir: Dir) -> u64 waits {
     store.read_only_version(reader)
 }
 
-fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, chunks: u64, enabled: bool) -> Result[u64, u64] waits {
+fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, chunks: u64, enabled: bool, revoke: bool) -> Result[u64, u64] waits {
     let mut name = string.with_capacity(32u64)
     let root = result.unwrap(host.mkdtemp(parent, mut name))
     let hub = harness.preview.start(tasks, 1048576u64, 4096u64)
@@ -1137,22 +1132,21 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         return Error(10u64)
     }
     let (listener, at) = result.unwrap(host.listen(net, local(0u16), 16u16))
-    let views: std.codec.Codec[harness.View] = std.codec.of()
     let front_port = if enabled {
         Some(harness.preview.door(hub))
     } else {
         None
     }
-    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), shown: store.fixture.query_entry(code.describe(window), std.codec.key_u64(), views), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
+    let front = harness.gateway_http.Front(submit: store.fixture.transact_entry(code.describe(submit_entry)), decide: store.fixture.transact_entry(code.describe(decide_entry)), keys: result.unwrap(store.fixture.entry_keys(code.describe(place))), socket: wire().socket, agent: "scripted", narrow: All, preview: take front_port, tasks: tasks, clock: clock, random: random, net: net, tail_lines: 64u64, within_ms: WITHIN_MS, poll_ms: 10u64, beat_ms: 50u64, conn_bytes: EFFECT_GRANT, conns_max: 4u64, head_max: 8192u64, body_max: 65536u64)
     let served = harness.gateway_http.serve(door, take front, take listener)
     let port = at.port
-    let (created, _) = http(net, clock, port, "POST", "/sessions", list.new(), string.into_bytes("preview"))
+    let me = store.ingress.credential(random)
+    let (created, _) = http(net, clock, port, "POST", "/sessions", person(me, 0u64), string.into_bytes("preview"))
     if created != 201u16 {
         return Error(11u64)
     }
     let dir = result.unwrap(std.dir.narrow(root, "s0"))
     let before = committed_version(dir)
-    let me = store.ingress.credential(random)
     let (posted, _) = http(net, clock, port, "POST", "/sessions/0/messages", person(me, 0u64), json(harness.Submit(client_key: "p1", text: "preview it")))
     if posted != 202u16 {
         return Error(12u64)
@@ -1176,6 +1170,40 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
             return Error(16u64)
         }
         shown_key = Some(p.key)
+    }
+    if revoke {
+        let outsider = store.ingress.credential(random)
+        let mut stranger = browser(net, clock, port, outsider)?
+        if !ended_without_rows(mut stranger) || !empty_history(net, clock, port, outsider) {
+            return Error(40u64)
+        }
+        let (status, page) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(me, 0u64), list.new())
+        let mut expected: List[harness.gateway_http.Shown] = list.new()
+        list.push(mut expected, harness.gateway_http.Shown(at: 1u64, line: Line("user", "preview it")))
+        if status != 200u16 || page != json(harness.gateway_http.Page(from: 1u64, rows: take expected)) {
+            return Error(41u64)
+        }
+
+        let change = store.fixture.transact_entry(code.describe(revoke_reader))
+        let Ok(Ok(())) = call_routed(door, 0u64, me, 1u64, change, (), tasks, clock, random, net) else {
+            return Error(42u64)
+        }
+        if !ended_without_rows(mut tab) || !empty_history(net, clock, port, me) {
+            return Error(43u64)
+        }
+        let mut returned = browser(net, clock, port, me)?
+        if !ended_without_rows(mut returned) {
+            return Error(44u64)
+        }
+
+        let Ok(rest) = channel.receive(inbox) else { return Error(45u64) }
+        let _ = channel.send(rest, ())
+        let Some(_) = down_within(door, 0u64, clock) else { return Error(46u64) }
+        harness.gateway_http.halt(take served)
+        let _ = harness.gateway.stop(take g)
+        harness.preview.stop(take hub)
+        result.unwrap(std.dir.remove_all(parent, name))
+        return Ok(0u64)
     }
     // Close the original connection while the worker still waits. Reopen only
     // after all work and the trigger's terminal journal commit are durable.
@@ -1265,14 +1293,44 @@ fn preview_run(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
     Ok(committed)
 }
 
+// No status, transcript or preview bytes reach a denied Caller. The live run
+// is held after its first draft so the ACL commit alone must end its stream.
+fn ended_without_rows(mut c: std.http_client.Connection) -> bool waits {
+    let mut chunk: Bytes = list.with_capacity(8192u64)
+    let mut dec = std.sse.decoder(65536u64)
+    loop {
+        match std.http_client.read(mut c, mut chunk) {
+            Ok(0u64) => return true,
+            Ok(_) => (),
+            Error(_) => return false,
+        }
+        if let Error(_) = std.sse.feed(mut dec, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[()] { Fail(()) }) {
+            return false
+        }
+        list.clear(mut chunk)
+    }
+}
+
+fn empty_history(net: Net, clock: Clock, port: u16, who: Bytes) -> bool waits {
+    let (status, page) = http(net, clock, port, "GET", "/sessions/0/history?before=2&lines=1", person(who, 0u64), list.new())
+    let empty: List[harness.gateway_http.Shown] = list.new()
+    status == 200u16 && page == json(harness.gateway_http.Page(from: 1u64, rows: take empty))
+}
+
+@test
+fn test_front_reader_acl(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
+    let _ = preview_run(parent, clock, random, tasks, net, 10u64, true, true)?
+    Ok(())
+}
+
 // The cold no-tool turn commits place activation, keyed admission, submit,
 // granted start, begin, settle, advance on the receipt, and the granted
 // trigger's terminal record. Its deadline stays in the future.
 @test
 fn test_preview_journal_and_reconnect(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
-    let disabled = preview_run(parent, clock, random, tasks, net, 10u64, false)?
-    let short = preview_run(parent, clock, random, tasks, net, 10u64, true)?
-    let long = preview_run(parent, clock, random, tasks, net, 10000u64, true)?
+    let disabled = preview_run(parent, clock, random, tasks, net, 10u64, false, false)?
+    let short = preview_run(parent, clock, random, tasks, net, 10u64, true, false)?
+    let long = preview_run(parent, clock, random, tasks, net, 10000u64, true, false)?
     if disabled != 8u64 {
         return Error(100u64 + disabled)
     }

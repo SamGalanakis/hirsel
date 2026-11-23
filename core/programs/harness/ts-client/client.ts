@@ -130,7 +130,14 @@ export class Client {
         }
       } catch { /* the connection ended; reconnect */ }
       clearInterval(stale);
-      if (generation === this.generation) { this.live = false; this.changed(); }
+      if (generation === this.generation) {
+        this.generation += 1;
+        this.rows.clear();
+        this.draft = null;
+        this.live = false;
+        this.older = false;
+        this.changed();
+      }
       if (!this.stopped) await new Promise((ok) => setTimeout(ok, wait));
     }
   }

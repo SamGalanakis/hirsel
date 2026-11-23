@@ -174,6 +174,7 @@ pub type Handles: send {
     effects: store.Table[EffectKey, Effect],
     waits: store.Table[WaitKey, Wait],
     views: store.Table[u64, View],
+    readers: store.Table[Bytes, bool],
     mcp_catalog: store.Table[String, mcp_tools.Remote],
     triggers: store.triggers.Tables,
 }
@@ -303,7 +304,9 @@ pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
     created(store.migration_create_table(mut phase, store.spec(runs_name(), std.codec.key_u64(), c_run)))?
     created(store.migration_create_table(mut phase, store.spec(effects_name(), effect_key(), c_effect)))?
     created(store.migration_create_table(mut phase, store.spec(waits_name(), wait_key(), c_wait)))?
-    created(store.migration_create_table(mut phase, store.spec(views_name(), std.codec.key_u64(), c_shown)))
+    created(store.migration_create_table(mut phase, store.spec(views_name(), std.codec.key_u64(), c_shown)))?
+    let c_reader: std.codec.Codec[bool] = std.codec.of()
+    created(store.migration_create_table(mut phase, store.spec("harness.readers", std.codec.key_bytes(), c_reader)))
 }
 
 pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
@@ -314,6 +317,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
     let c_effect: std.codec.Codec[Effect] = std.codec.of()
     let c_wait: std.codec.Codec[Wait] = std.codec.of()
     let c_shown: std.codec.Codec[View] = std.codec.of()
+    let c_reader: std.codec.Codec[bool] = std.codec.of()
     Ok(Handles(
         session: store.schema_table(schema, session_name(), std.codec.key_u64(), c_session)?,
         entries: store.schema_table(schema, entries_name(), std.codec.key_u64(), c_entry)?,
@@ -322,6 +326,7 @@ pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
         effects: store.schema_table(schema, effects_name(), effect_key(), c_effect)?,
         waits: store.schema_table(schema, waits_name(), wait_key(), c_wait)?,
         views: store.schema_table(schema, views_name(), std.codec.key_u64(), c_shown)?,
+        readers: store.schema_table(schema, "harness.readers", std.codec.key_bytes(), c_reader)?,
         mcp_catalog: mcp_tools.catalog(schema)?,
         triggers: store.triggers.tables(schema)?,
     ))
@@ -2036,6 +2041,25 @@ fn effect_preview(target: Option[preview.Target], snap: store.Snapshot, h: Handl
 }
 
 // ---- reads ----
+
+// Trusted application code changes membership in the same store the window reads.
+pub fn set_reader(mut tx: store.Tx, h: Handles, caller: store.Caller, allowed: bool) -> Result[(), Refused] {
+    let Ok(take key) = reader_key(caller) else {
+        return Error(Malformed("reader identity"))
+    }
+    if allowed {
+        kept(store.put(mut tx, h.readers, take key, true))
+    } else {
+        let _ = kept(store.delete(mut tx, h.readers, take key))?
+        Ok(())
+    }
+}
+
+fn reader_key(caller: store.Caller) -> Result[Bytes, Capacity] {
+    let mut key: Bytes = list.new()
+    store.runner.caller_key(caller, mut key)?
+    Ok(take key)
+}
 pub fn transcript(h: Handles) -> Result[store.runner.Cover, Capacity] {
     store.runner.cover(store.shape(h.views), Unbounded, Unbounded)
 }
@@ -2057,8 +2081,17 @@ pub fn page_from(before: u64, lines: u64) -> u64 {
     }
 }
 
-// A query over the rows `w` names. Register it with `query_as` to check the reader's Caller on every page.
-pub fn window(tx: store.Tx, h: Handles, w: Window) -> Result[store.runner.Cover, Capacity] {
+// Register with query_as so the membership read is tracked for this Caller.
+pub fn window(tx: store.Tx, h: Handles, caller: store.Caller, take w: Window) -> Result[store.runner.Cover, Capacity] {
+    let t = store.shape(h.views)
+    let key = reader_key(caller)?
+    if let Ok(Some(true)) = store.fetch(tx, store.shape(h.readers), take key) {
+        return visible_window(tx, h, w)
+    }
+    store.runner.cover(t, Included(0u64), Excluded(0u64))
+}
+
+fn visible_window(tx: store.Tx, h: Handles, w: Window) -> Result[store.runner.Cover, Capacity] {
     let t = store.shape(h.views)
     match w {
         Status => store.runner.cover(t, Included(0u64), Included(0u64)),

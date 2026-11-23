@@ -27,8 +27,20 @@
   const credential = saved?.credential ?? btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(16))));
   const remember = (c) => { try { localStorage.setItem("harness", JSON.stringify({ credential, position: c.position })); } catch {} };
   const $ = (id) => document.getElementById(id);
+  const requested = new URLSearchParams(location.search).get("session");
+  let session = Number(requested);
+  if (requested === null) {
+    const created = await fetch("/sessions", {
+      method: "POST", body: "example", headers: { Authorization: `Bearer ${credential}` },
+    });
+    if (!created.ok) {
+      $("status").textContent = `Could not open a session (HTTP ${created.status})`;
+      throw new Error("session creation failed");
+    }
+    session = await created.json();
+  }
   const client = new Client({
-    base: location.origin, session: Number(new URLSearchParams(location.search).get("session") ?? 0),
+    base: location.origin, session,
     credential, position: saved?.position ?? 0,
     onChange(s) {
       $("status").textContent = s.live ? s.status || "idle" : "reconnecting…";
@@ -54,6 +66,7 @@
     remember(client);
     if (answer.status !== 202) $("status").textContent = `not sent (HTTP ${answer.status})`;
   };
+  remember(client);
   client.start();
 </script>
 </body>

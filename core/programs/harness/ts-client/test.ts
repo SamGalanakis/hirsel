@@ -54,25 +54,14 @@ const server = http.createServer((req, res) => {
 await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
 const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 if (process.argv[3] === "serve") {
-  await fetch(`${base}/sessions`, { method: "POST", body: "k0" });
   console.log(`open ${base}/`);
   await new Promise(() => {});
 }
 
 // ---- the oracle: a fresh reader, parsed by hand ----
 const credential = () => randomBytes(16).toString("base64");
-async function fresh(): Promise<Map<number, string>> {
-  const auth = { Authorization: `Bearer ${credential()}` };
-  const rows = new Map<number, string>();
-  const abort = new AbortController();
-  const r = await fetch(`${base}/sessions/0/events`, { headers: auth, signal: abort.signal });
-  const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
-  for (let text = ""; !/event: batch\n/.test(text);) text += (await reader.read()).value ?? "";
-  abort.abort();
-  return rows;
-}
 async function transcript(): Promise<Map<number, string>> {
-  const auth = { Authorization: `Bearer ${credential()}` };
+  const auth = { Authorization: `Bearer ${me}` };
   const abort = new AbortController();
   const r = await fetch(`${base}/sessions/0/events`, { headers: auth, signal: abort.signal });
   const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
@@ -117,7 +106,7 @@ const users = (rows: Map<number, string>) => [...rows.values()].filter((l) => l.
 const close = () => { client.stop(); server.close(); for (const s of streams) s.destroy(); gateway.kill(); };
 
 try {
-  check("session created", (await (await fetch(`${base}/sessions`, { method: "POST", body: "k0" })).json()) === 0);
+  check("session created", (await (await fetch(`${base}/sessions`, { method: "POST", body: "k0", headers: { Authorization: `Bearer ${me}` } })).json()) === 0);
   client.start();
   await until("the first image", () => state?.live === true);
 

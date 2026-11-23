@@ -34,7 +34,8 @@
     "lines": 1056
   },
   "core/programs/store/platform.hirsel": {
-    "lines": 3897
+    "lines": 3916,
+    "reason": "source-publish-1901"
   },
   "core/programs/store/platform_laws.hirsel": {
     "lines": 1984
@@ -148,7 +149,8 @@
     "lines": 1846
   },
   "crates/hirsel-core-driver/src/launcher/session.rs": {
-    "lines": 1488
+    "lines": 1497,
+    "reason": "source-publish-1901"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
     "lines": 1634

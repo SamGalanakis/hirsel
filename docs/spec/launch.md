@@ -535,7 +535,7 @@ store. Grants are approved per group at each deploy.
 - **What an untrusted author submits.** An author whom the operator has not named a trusted
   publisher submits source only. The platform publishes that source itself with the normal
   checker, under its own compiler caches and package images and the limits of "Authority"
-  above. It never accepts a raw R, a code object or an image from such an author, because
+  above (the launcher's `Source` input, "Publish and assemble" below). It never accepts a raw R, a code object or an image from such an author, because
   admission does not check types or ownership again (step 8 above). Foreign code, an
   `Exec` grant and a recording build are refused for a group whose author is untrusted
   (FFI-1, EXEC-1).
@@ -663,7 +663,7 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, added, foreign, exec) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(bytes). `added` approves an added grant. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. Source publishing is unbuilt and refused `Unsupported`. |
+| 0 Begin(D, G, input, added, foreign, exec) | `input` is `launcher.Input`: 0 Attested(bytes), 1 Publication(H), 2 Source(tree). `added` approves an added grant. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. A source that is not a tree within 4 MiB is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
 | 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
@@ -678,7 +678,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
-| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Unsupported, 11 NotInstalledAfterRecovery. Failed uses the same classes. An exchange error never changes another request's outcome. |
+| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Failed uses the same classes. An exchange error never changes another request's outcome. |
 | 5 GroupInfo(G) | A group lookup's result. |
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
@@ -798,8 +798,19 @@ child endpoints, pidfds and cgroup population changes.
   per deploy attempt, at most four at once:
   1. `Admit(group, attempt, input, approvals)` opens it. The input is `Attested(root)`,
      whose recipe and objects the host relays from its client, or `Publication(root)`,
-     whose objects the launcher reads from its own code store. `Source` input (publishing
-     source for an untrusted author) is refused: it is not built.
+     whose objects the launcher reads from its own code store, or `Source(tree)`. A tree
+     is the codec bytes of `launcher.Tree`: a package path, the grants and `--dir`
+     bindings to publish with, and the files (at most 4 MiB in all, plain relative paths,
+     no repeats). The launcher writes the files to fresh scratch and runs its own
+     `hirsel publish PACKAGE --frozen` there as a child, under the launcher's compiler
+     store, package store and code store and the toolchain's memory limit, which it
+     inherits. The tree therefore carries its `hirsel.lock`, and its dependencies come
+     only from packages the host already holds. A clean exit is a publication H in the
+     launcher's code store, which the attempt then admits as `Publication(H)`: admission
+     sees only publications. A refused check is `Uncompiled` with the checker's
+     diagnostics (at most 64 KiB); a compiler out of memory is `Exhausted`. Neither
+     records a recipe. The same tree always gives the same H as `hirsel publish` of the
+     same files.
   2. For an attested input the host sends the exchange bytes of "Admission" above (the
      request frame, then object frames) in bounded `AdmitData` chunks and closes them
      with `AdmitEnd`. The launcher feeds them to the verifier unchanged and answers each

@@ -418,8 +418,9 @@ fn class_name(class: Class) -> &'static str {
         Class::Invalid => "invalid",
         Class::Unassembled => "unassembled",
         Class::Store => "store",
-        Class::Unsupported => "unsupported",
+        Class::Uncompiled => "uncompiled",
         Class::NotInstalledAfterRecovery => "not installed after recovery",
+        Class::Exhausted => "exhausted",
     }
 }
 

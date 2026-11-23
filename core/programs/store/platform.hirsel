@@ -2086,17 +2086,32 @@ fn admission_refusal(h: Host, name: String, g: GroupRow, d: Bytes, input: launch
     if !sorted_unique(foreign) || !sorted_unique(exec) {
         return Some((InvalidClass, "Foreign and Exec lines are sorted and without duplicates"))
     }
-    let source = match input {
-        Source(_) => true,
-        _ => false,
+    // Submitted source is checked here, before the launcher compiles it: its grants are
+    // part of the recipe it publishes (launch.md "What an untrusted author submits").
+    let tree: Option[launcher.Tree] = match input {
+        Source(b) => {
+            let Some(t) = launcher.tree_of(b) else {
+                return Some((InvalidClass, "the source is not a tree within its byte limit"))
+            }
+            Some(take t)
+        },
+        _ => None,
     }
     if let Untrusted = g.author {
-        if !source || list.len(foreign) > 0u64 || list.len(exec) > 0u64 {
+        let Some(t) = tree else {
             return Some((DeniedClass, "an untrusted author publishes source only, without Foreign or Exec grants"))
         }
-    }
-    if source {
-        return Some((UnsupportedClass, "publishing source is not built"))
+        if list.len(foreign) > 0u64 || list.len(exec) > 0u64 {
+            return Some((DeniedClass, "an untrusted author publishes source only, without Foreign or Exec grants"))
+        }
+        for grant in t.grants {
+            if launcher.foreign_or_exec(grant) {
+                return Some((DeniedClass, "an untrusted author's source binds no Foreign or Exec grant"))
+            }
+        }
+        if let Some(_) = g.record {
+            return Some((DeniedClass, "an untrusted author's group has no recording build"))
+        }
     }
     let v = vol_read(h, name)
     if !is_none(v.cut) || !is_none(v.prep) {
@@ -3034,6 +3049,8 @@ fn failure_class(why: launcher.Failure) -> operator.Class {
         Denied(_) => DeniedClass,
         Invalid(_) => InvalidClass,
         Unassembled(_) => UnassembledClass,
+        Uncompiled(_) => UncompiledClass,
+        Exhausted(_) => ExhaustedClass,
     }
 }
 
@@ -3042,6 +3059,8 @@ fn failure_text(why: launcher.Failure) -> String {
         Denied(w) => string.from(w),
         Invalid(w) => string.from(w),
         Unassembled(w) => string.from(w),
+        Uncompiled(w) => string.from(w),
+        Exhausted(w) => string.from(w),
     }
 }
 

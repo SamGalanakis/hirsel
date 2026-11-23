@@ -15,6 +15,8 @@ mod laws;
 pub(crate) mod objects;
 mod ready;
 pub(crate) mod session;
+#[cfg(test)]
+mod source_laws;
 mod spawn;
 mod stores;
 
@@ -39,7 +41,7 @@ use std::process::{Command, ExitStatus};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-pub(crate) use admit::{Admission, deploy_foreign_lines, limits, read_recipe};
+pub(crate) use admit::{Admission, Compiler, deploy_foreign_lines, limits, read_recipe};
 use stores::Stores;
 
 /// Create `path` as a directory only its owner can enter, or check that it is one.
@@ -878,15 +880,13 @@ impl<I: Images> Launcher<I> {
                 .ok()
                 .map(hirsel_core_ids::ContentHash)
         };
-        let source = match &input {
-            Input::Attested(r) => root(r).map(admit::Source::Attested),
-            Input::Publication(r) => root(r).map(admit::Source::Publication),
-            Input::Source(_) => {
-                return self.emit(Event::AdmissionFailed(
-                    attempt,
-                    Failure::Invalid("source admission is not built".into()),
-                ));
-            }
+        let source = match input {
+            Input::Attested(r) => root(&r).map(admit::Source::Attested),
+            Input::Publication(r) => root(&r).map(admit::Source::Publication),
+            Input::Source(bytes) => match admit::tree(&bytes) {
+                Ok(tree) => Some(admit::Source::Tree(tree)),
+                Err(why) => return self.emit(Event::AdmissionFailed(attempt, why)),
+            },
         };
         let Some(source) = source else {
             return self.emit(Event::AdmissionFailed(

@@ -1,0 +1,51 @@
+// L53 `untrusted_source_admission` (launch.md "What an untrusted author submits", "Publish
+// and assemble" step 1): an untrusted author's source is checked by the host before any
+// compile. A tree granting Foreign or Exec, and any source for a recording group, is
+// Denied without an Admit; bytes that are no tree are Invalid; a plain tree goes to Admit,
+// and a refused compile fails the request Uncompiled with the checker's diagnostics.
+@test
+fn untrusted_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = admission_case(c, rnd, None, Untrusted)
+    let foreign = begin_with(mut r, request_id(41u64), source_of("Foreign=app@1/main/I"), false)
+    expect(errored(r, foreign, DeniedClass) && admits(r) == 0u64, "untrusted: a source granting Foreign was sent to Admit")
+    let exec = begin_with(mut r, request_id(42u64), source_of("Exec=tools.toml build"), false)
+    expect(errored(r, exec, DeniedClass) && admits(r) == 0u64, "untrusted: a source granting Exec was sent to Admit")
+    let junk = begin_with(mut r, request_id(43u64), Source(list.new()), false)
+    expect(errored(r, junk, InvalidClass) && admits(r) == 0u64, "untrusted: bytes that are no tree were not Invalid")
+    let _ = begin_with(mut r, request_id(44u64), source_of("Stderr"), false)
+    expect(admits(r) == 1u64, "untrusted: a plain source was not sent to Admit")
+    let mut uncompiled: List[launcher.Event] = list.new()
+    list.push(mut uncompiled, AdmissionFailed(r.a, Uncompiled("main.hirsel:1:37-41: LANG-11 found `u64`")))
+    feed(mut r, take uncompiled)
+    let compiled: Bytes = request_id(44u64)
+    expect(phase_failed(status_of(mut r, compiled), UncompiledClass, "main.hirsel:1:37-41: LANG-11 found `u64`"), "untrusted: a refused compile did not fail the request Uncompiled with its diagnostics")
+    // A recording group's source is refused before any compile.
+    let mut rec = rig(c, rnd, 4u64)
+    let spec = NewGroup(name: "g", tenant: "t", workdir: "g", author: Untrusted, label: Uncontained, listen: "127.0.0.1:0", bindings: uncontained(), limits: launcher.Limits(memory: None, cpu: None, pids: None), assembly: image(), activation: 1u64, args: list.new(), record: Some(operator.Record(dir: "rec", retention_s: 60u64)))
+    let reqs = must(add_group(mut rec.h, spec), "add_group")
+    pump(mut rec, take reqs)
+    op_wake(mut rec, "g")
+    let recorded = begin_with(mut rec, request_id(45u64), source_of("Stderr"), false)
+    expect(errored(rec, recorded, DeniedClass) && admits(rec) == 0u64, "untrusted: a recording group's source was sent to Admit")
+    unplug(mut rec)
+    unplug(mut r)
+    Ok(())
+}
+
+// A source input: a tree of no files publishing with `grant`.
+fn source_of(grant: String) -> launcher.Input {
+    let mut grants: List[String] = list.new()
+    list.push(mut grants, string.from(grant))
+    let tree = launcher.Tree(package: ".", grants: take grants, dirs: list.new(), files: list.new())
+    let codec: std.codec.Codec[launcher.Tree] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(codec, tree, mut out)
+    Source(take out)
+}
+
+fn phase_failed(p: Option[operator.Phase], class: operator.Class, detail: String) -> bool {
+    match p {
+        Some(FailedPhase(c, d, _)) => class_bytes(c) == class_bytes(class) && d == detail,
+        _ => false
+    }
+}

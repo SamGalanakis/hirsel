@@ -66,8 +66,46 @@ pub type Launch: codec + send {
 }
 
 // What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
-// publication R already in the launcher's code store; or source, which is not built.
+// publication R already in the launcher's code store; or source, a `Tree`'s codec bytes,
+// which the launcher publishes with the normal checker and then admits as a publication
+// (launch.md "Publish and assemble").
 pub type Input: codec + send = Attested(Bytes) | Publication(Bytes) | Source(Bytes)
+
+// Submitted source: the files of a workspace whose root holds its `hirsel.toml` and
+// `hirsel.lock`, the package directory to publish within it, and the `--grant` and `--dir`
+// values its recipe binds. Paths are relative, `/`-separated and plain.
+pub type Tree: codec + send {
+    package: String,
+    grants: List[String],
+    dirs: List[String],
+    files: List[SourceFile]
+}
+
+pub type SourceFile: codec + send {
+    path: String,
+    content: Bytes
+}
+
+// The most codec bytes a `Tree` may take. The host keeps a request's input twice in its
+// row (the Begin and the input), so two trees fit one stored value.
+pub const TREE_BYTES: u64 = 4194304u64
+
+// The tree `b` encodes, if it encodes one within `TREE_BYTES`.
+pub fn tree_of(b: Bytes) -> Option[Tree] {
+    if list.len(b) > TREE_BYTES {
+        return None
+    }
+    let c: std.codec.Codec[Tree] = std.codec.of()
+    match std.codec.decode(c, b) {
+        Ok(take t) => Some(take t),
+        _ => None,
+    }
+}
+
+// Whether a `--grant` value is one an untrusted author may not bind (FFI-1, EXEC-1).
+pub fn foreign_or_exec(grant: String) -> bool {
+    string.starts_with(grant, "Foreign") || string.starts_with(grant, "Exec")
+}
 
 // The host's policy for one admission: whether the image records, the approved Foreign
 // grants and Exec requests, the group's working directory, and the assembly a deploy
@@ -95,8 +133,9 @@ pub type Summary: codec + send {
 }
 
 // Why an admission ended: a policy refusal printed as is, an invalid input or release,
-// or a failed assembly.
-pub type Failure: codec + send = Denied(String) | Invalid(String) | Unassembled(String)
+// a failed assembly, submitted source the checker refused (its diagnostics), or a compile
+// of submitted source that reached the toolchain's memory limit.
+pub type Failure: codec + send = Denied(String) | Invalid(String) | Unassembled(String) | Uncompiled(String) | Exhausted(String)
 
 // A cutover the launcher forwarded to OLD and still holds, by (OLD, attempt).
 pub type CutoverKey: codec + send {

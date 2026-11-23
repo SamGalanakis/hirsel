@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 /// Stand-in images: an assembly name's first byte picks a script. Objects are files named
 /// by the hex of a 32-byte name.
-struct Scripts {
+pub(super) struct Scripts {
     scripts: Vec<PathBuf>,
     objects: PathBuf,
 }
@@ -74,9 +74,9 @@ fn images(dir: &Path, scripts: &[&str]) -> Scripts {
     Scripts { scripts, objects }
 }
 
-struct Rig<I = Scripts> {
-    dir: tempfile::TempDir,
-    launcher: Launcher<I>,
+pub(super) struct Rig<I = Scripts> {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) launcher: Launcher<I>,
 }
 
 /// A rig whose image `i` is the shell script body `scripts[i]`.
@@ -95,14 +95,14 @@ const SLEEP: &str = "trap 'exit 0' TERM\nwhile :; do sleep 0.02; done";
 /// still holds the group's listener (an uncontained child's descendants can).
 const SINGLE: &str = "exec sleep 30";
 
-fn group() -> Group {
+pub(super) fn group() -> Group {
     Group {
         name: "g".into(),
         incarnation: 1,
     }
 }
 
-fn attempt(n: u64) -> Attempt {
+pub(super) fn attempt(n: u64) -> Attempt {
     Attempt { hi: n, lo: n }
 }
 
@@ -153,12 +153,12 @@ impl<I: Images> Rig<I> {
         self.dir.path().to_owned()
     }
 
-    fn ask(&mut self, request: Request) -> Vec<Event> {
+    pub(super) fn ask(&mut self, request: Request) -> Vec<Event> {
         self.launcher.handle(request);
         self.launcher.take_events()
     }
 
-    fn bind(&mut self) -> std::net::SocketAddr {
+    pub(super) fn bind(&mut self) -> std::net::SocketAddr {
         let bind = Request::Bind(
             group(),
             "127.0.0.1:0".into(),

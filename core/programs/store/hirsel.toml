@@ -50,6 +50,7 @@ dirs = ["."]
 "launcher_wire.hirsel" = "launcher"
 "operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
+"platform_source_laws.hirsel" = "platform"
 "bucket_laws.hirsel" = "store"
 
 [tests.runs."store@1/runner_calls/test_local_genesis_recovers"]

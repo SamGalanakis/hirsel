@@ -85,11 +85,12 @@ pub(crate) enum Class {
     Invalid,
     Unassembled,
     Store,
-    Unsupported,
+    Uncompiled,
     NotInstalledAfterRecovery,
+    Exhausted,
 }
 
-const CLASSES: [Class; 12] = [
+const CLASSES: [Class; 13] = [
     Class::Protocol,
     Class::Denied,
     Class::UnknownRequest,
@@ -100,8 +101,9 @@ const CLASSES: [Class; 12] = [
     Class::Invalid,
     Class::Unassembled,
     Class::Store,
-    Class::Unsupported,
+    Class::Uncompiled,
     Class::NotInstalledAfterRecovery,
+    Class::Exhausted,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]

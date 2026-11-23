@@ -2,9 +2,11 @@
 //! attempt runs the code-admission verifier on a worker thread over a socket pair, so the
 //! state loop keeps serving child ends and fences while an upload or an assembly runs.
 //! The verifier, its reservations and the assembly path are those of local admission; only
-//! the byte transport is the session's `AdmitData` chunks.
+//! the byte transport is the session's `AdmitData` chunks. Submitted source is first
+//! published by `hirsel publish` in a child process under the host's caches, and then
+//! admitted as that publication.
 use super::objects::Records;
-use super::session::{Approvals, Attempt, Failure, Summary};
+use super::session::{Approvals, Attempt, Failure, Reader, Summary, Wire, Writer};
 use super::{Conn, Epoll};
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
@@ -21,6 +23,8 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -81,6 +85,18 @@ pub(crate) fn deploy_foreign_lines(recipe: &Recipe, root: ContentHash) -> String
     output
 }
 
+/// How the launcher starts the compiler for submitted source: a `hirsel` command with the
+/// given arguments. The launcher runs its own executable, which is `hirsel`.
+pub(crate) type Compiler = Arc<dyn Fn(&[String]) -> io::Result<Command> + Send + Sync>;
+
+fn own_compiler() -> Compiler {
+    Arc::new(|args| {
+        let mut command = Command::new(std::env::current_exe()?);
+        command.args(args);
+        Ok(command)
+    })
+}
+
 /// The admission side of the launcher's stores: the code store with its staging, and the
 /// assembly records the image store shares with launches.
 pub(crate) struct Admission {
@@ -89,6 +105,7 @@ pub(crate) struct Admission {
     records: Arc<Records>,
     state: PathBuf,
     limits: AdmissionLimits,
+    compiler: Compiler,
     /// Held while a worker writes an assembly record and tells the loop, and while the
     /// loop collects: a collection never removes a record whose `Assembled` it has not seen.
     pub(super) publish: Mutex<()>,
@@ -101,10 +118,13 @@ impl Admission {
         limits: AdmissionLimits,
         staging: u64,
     ) -> io::Result<Self> {
-        let assemble = state.join("assemble");
-        match fs::remove_dir_all(&assemble) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-            _ => fs::create_dir(&assemble)?,
+        // Scratch of attempts a lost launcher left behind.
+        for scratch in ["assemble", "source"] {
+            let dir = state.join(scratch);
+            match fs::remove_dir_all(&dir) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => fs::create_dir(&dir)?,
+            }
         }
         let code = state.join("code");
         Ok(Self {
@@ -113,8 +133,16 @@ impl Admission {
             records,
             state: state.to_owned(),
             limits,
+            compiler: own_compiler(),
             publish: Mutex::new(()),
         })
+    }
+
+    /// This admission, compiling submitted source with `compiler`.
+    #[cfg(test)]
+    pub(crate) fn compile_with(mut self, compiler: Compiler) -> Self {
+        self.compiler = compiler;
+        self
     }
 
     /// Run `action` under the admission store's collection lock, with the code objects
@@ -161,6 +189,53 @@ pub(super) enum Source {
     Attested(ContentHash),
     /// The launcher's own code store sends it.
     Publication(ContentHash),
+    /// The worker publishes this source into the code store, which then sends it.
+    Tree(Tree),
+}
+
+/// Most files in one submitted tree.
+const TREE_FILES: usize = 65_536;
+
+/// The submitted tree `bytes` encode, with every path plain and relative: no empty, `.`
+/// or `..` component, no repeat, and no file that is also another file's directory.
+pub(super) fn tree(bytes: &[u8]) -> Result<Tree, Failure> {
+    let invalid = |why: &str| Failure::Invalid(format!("source tree: {why}"));
+    if bytes.len() > TREE_BYTES {
+        return Err(invalid("over its byte limit"));
+    }
+    let tree = Tree::decode(bytes).map_err(|_| invalid("malformed"))?;
+    let plain = |path: &str| {
+        !path.is_empty()
+            && path
+                .split('/')
+                .all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains('\0'))
+    };
+    if tree.package != "." && !plain(&tree.package) {
+        return Err(invalid(
+            "the package directory is not a plain relative path",
+        ));
+    }
+    if tree.files.len() > TREE_FILES {
+        return Err(invalid("too many files"));
+    }
+    let mut paths = BTreeSet::new();
+    for (path, _) in &tree.files {
+        if !plain(path) {
+            return Err(invalid("a file path is not a plain relative path"));
+        }
+        if !paths.insert(path.as_str()) {
+            return Err(invalid("a file path repeats"));
+        }
+    }
+    // In sorted order a file's descendants follow it, before any later sibling.
+    let mut earlier: Option<&str> = None;
+    for path in &paths {
+        if earlier.is_some_and(|e| path.strip_prefix(e).is_some_and(|r| r.starts_with('/'))) {
+            return Err(invalid("a file path is also a directory"));
+        }
+        earlier = Some(path);
+    }
+    Ok(tree)
 }
 
 /// The loop's handle on one admitting attempt. Dropping it cancels the attempt: the worker
@@ -175,6 +250,14 @@ pub(super) struct Worker {
     pub(super) admitted: bool,
     need: NeedReader,
     go: Option<mpsc::Sender<()>>,
+    /// Set when the loop drops the attempt; a running compile is killed.
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 /// The worker's single Need on the exchange: a u64 count, then that many 33-byte keys.
@@ -202,17 +285,25 @@ impl Worker {
     ) -> io::Result<Self> {
         let (ours, theirs) = UnixStream::pair()?;
         let (go, gone) = mpsc::channel();
-        let (conn, publication) = match source {
-            Source::Attested(_) => (Some(Conn::new(epoll, ours)?), None),
-            Source::Publication(root) => (None, Some((root, ours))),
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (conn, attested, local) = match source {
+            Source::Attested(root) => (Some(Conn::new(epoll, ours)?), Some(root), None),
+            Source::Publication(root) => (None, None, Some((Ok(root), ours))),
+            Source::Tree(tree) => (None, None, Some((Err(tree), ours))),
         };
-        let attested = match source {
-            Source::Attested(root) => Some(root),
-            Source::Publication(_) => None,
-        };
+        let cancelled = cancel.clone();
         std::thread::Builder::new()
             .name("hirsel-admit".into())
             .spawn(move || {
+                let publication = match local {
+                    None => None,
+                    Some((Ok(root), ours)) => Some((root, ours)),
+                    Some((Err(tree), ours)) => match publish(&admission, &tree, &cancelled) {
+                        None => return,
+                        Some(Ok(root)) => Some((root, ours)),
+                        Some(Err(why)) => return tell(Note::Failed(id, attempt, why)),
+                    },
+                };
                 let note = work(
                     &admission,
                     id,
@@ -237,6 +328,7 @@ impl Worker {
             admitted: false,
             need: NeedReader::default(),
             go: Some(go),
+            cancel,
         })
     }
 
@@ -312,6 +404,162 @@ fn failure(error: AdmissionError) -> Failure {
         }
         error => Failure::Invalid(error.to_string()),
     }
+}
+
+/// Submitted source (`launcher.Tree`): a workspace's files, the package directory to
+/// publish within it, and the `--grant` and `--dir` values its recipe binds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tree {
+    pub(crate) package: String,
+    pub(crate) grants: Vec<String>,
+    pub(crate) dirs: Vec<String>,
+    pub(crate) files: Vec<(String, Vec<u8>)>,
+}
+
+/// The most codec bytes a tree may take (`launcher.TREE_BYTES`).
+pub(crate) const TREE_BYTES: usize = 4 << 20;
+
+impl Wire for Tree {
+    fn put(&self, w: &mut Writer) {
+        w.bytes(self.package.as_bytes());
+        w.strings(&self.grants);
+        w.strings(&self.dirs);
+        w.len(self.files.len());
+        for (path, bytes) in &self.files {
+            w.bytes(path.as_bytes());
+            w.bytes(bytes);
+        }
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        let package = r.string()?;
+        let grants = r.strings()?;
+        let dirs = r.strings()?;
+        let files = (0..r.count(8)?)
+            .map(|_| Ok((r.string()?, r.bytes()?)))
+            .collect::<io::Result<_>>()?;
+        Ok(Self {
+            package,
+            grants,
+            dirs,
+            files,
+        })
+    }
+}
+
+/// The most diagnostic bytes a refused compile reports; the rest is cut and marked.
+const DIAGNOSTIC_BYTES: usize = 64 << 10;
+
+/// Publish `tree` into the launcher's code store with `hirsel publish`, run on a fresh copy
+/// of the tree under the host's compiler and package stores, and return its recipe root.
+/// The child inherits the launcher's environment, so the toolchain's memory limit
+/// (`HIRSEL_MEMORY_LIMIT`) bounds it. `None` is a cancel, which kills the child.
+fn publish(
+    ad: &Admission,
+    tree: &Tree,
+    cancel: &AtomicBool,
+) -> Option<Result<ContentHash, Failure>> {
+    let unrun =
+        |e: &dyn std::fmt::Display| Some(Err(Failure::Invalid(format!("publish source: {e}"))));
+    let dir = match tempfile::tempdir_in(ad.state.join("source")) {
+        Ok(dir) => dir,
+        Err(e) => return unrun(&e),
+    };
+    for (path, bytes) in &tree.files {
+        let path = dir.path().join(path);
+        let written = fs::create_dir_all(path.parent().expect("a file under the tree"))
+            .and_then(|()| fs::File::create_new(&path))
+            .and_then(|mut file| file.write_all(bytes));
+        if let Err(e) = written {
+            return unrun(&e);
+        }
+    }
+    let path = |name: &str| ad.state.join(name).to_string_lossy().into_owned();
+    let mut args: Vec<String> = vec![
+        "publish".into(),
+        tree.package.clone(),
+        "--frozen".into(),
+        "--store".into(),
+        path("compiler"),
+        "--package-store".into(),
+        path("packages"),
+        "--code-store".into(),
+        path("code"),
+    ];
+    for grant in &tree.grants {
+        args.extend(["--grant".into(), grant.clone()]);
+    }
+    for directory in &tree.dirs {
+        args.extend(["--dir".into(), directory.clone()]);
+    }
+    let mut command = match (ad.compiler)(&args) {
+        Ok(command) => command,
+        Err(e) => return unrun(&e),
+    };
+    command
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => return unrun(&e),
+    };
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let mut chunk = [0; 8192];
+                let mut cut = false;
+                while let Ok(n @ 1..) = pipe.read(&mut chunk) {
+                    let room = DIAGNOSTIC_BYTES.saturating_sub(kept.len());
+                    kept.extend_from_slice(&chunk[..n.min(room)]);
+                    cut |= n > room;
+                }
+                if cut {
+                    kept.extend_from_slice(b"\n[diagnostics cut at 64 KiB]\n");
+                }
+            }
+            kept
+        })
+    };
+    let stdout = read(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr = read(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let status = loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(e) => return unrun(&e),
+        }
+    };
+    let stdout = String::from_utf8_lossy(&stdout.join().unwrap_or_default()).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr.join().unwrap_or_default()).into_owned();
+    Some(match status.code() {
+        Some(0) => stdout
+            .split_whitespace()
+            .last()
+            .and_then(|root| crate::native::recipe_build::parse_root(root).ok())
+            .ok_or_else(|| Failure::Invalid(format!("publish source printed no recipe: {stdout}"))),
+        Some(hirsel_guard::EXIT_STATUS) => Err(Failure::Exhausted(stderr)),
+        Some(_) => Err(Failure::Uncompiled(stderr)),
+        None => Err(Failure::Uncompiled(format!(
+            "the compiler ended by {status}\n{stderr}"
+        ))),
+    })
 }
 
 fn nanos(since: Instant) -> u64 {

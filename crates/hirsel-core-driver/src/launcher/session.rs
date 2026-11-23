@@ -186,7 +186,8 @@ pub(crate) struct Limits {
 }
 
 /// What an admission verifies: a recipe R the host attests, streamed in `AdmitData`; a
-/// publication R already in the launcher's code store; or source, which is not built.
+/// publication R already in the launcher's code store; or source, a `launcher.Tree`'s
+/// codec bytes, which the launcher publishes and admits as a publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Input {
     Attested(Vec<u8>),
@@ -224,6 +225,10 @@ pub(crate) enum Failure {
     Denied(String),
     Invalid(String),
     Unassembled(String),
+    /// The checker refused submitted source; its diagnostics.
+    Uncompiled(String),
+    /// Compiling submitted source reached the toolchain's memory limit.
+    Exhausted(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1102,6 +1107,8 @@ session_wire!(Event, "event tag", w, r;
             Failure::Denied(why) => (0, why),
             Failure::Invalid(why) => (1, why),
             Failure::Unassembled(why) => (2, why),
+            Failure::Uncompiled(why) => (3, why),
+            Failure::Exhausted(why) => (4, why),
         };
         w.u32(tag);
         w.bytes(why.as_bytes());
@@ -1111,6 +1118,8 @@ session_wire!(Event, "event tag", w, r;
             0 => Failure::Denied(r.string()?),
             1 => Failure::Invalid(r.string()?),
             2 => Failure::Unassembled(r.string()?),
+            3 => Failure::Uncompiled(r.string()?),
+            4 => Failure::Exhausted(r.string()?),
             _ => return Err(malformed("admission failure tag")),
         },
     ),

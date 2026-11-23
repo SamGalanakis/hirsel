@@ -2164,7 +2164,7 @@ fn request_sequences_build_as_an_empty_store() {
 // checked-definitions count. Each step also says whether the request
 // record must answer it, read from its `--metrics` stages, so a case cannot
 // pass by never hitting.
-mod process {
+pub(crate) mod process {
 use super::*;
 
 /// What a step's request is: its command, its app sources, the checkout it
@@ -2206,7 +2206,7 @@ struct Ran {
     /// The output file's bytes' hash, when the request names one and it exists.
     output: Option<ContentHash>,
 }
-pub(super) const CHILD_MARK: &str = "\u{1}request-child\n";
+pub(crate) const CHILD_MARK: &str = "\u{1}request-child\n";
 /// The child: run the request in `REQUEST_CHILD_ARGS` as `hirsel` does.
 #[test]
 #[ignore = "explicit native integration target"]
@@ -2225,7 +2225,7 @@ pub(super) fn tape_request_command(args: &[String], directory: &Path) -> std::pr
     request_command_at(&std::env::current_exe().unwrap(), args, directory)
 }
 
-pub(super) fn request_command_at(
+pub(crate) fn request_command_at(
     executable: &Path,
     args: &[String],
     directory: &Path,

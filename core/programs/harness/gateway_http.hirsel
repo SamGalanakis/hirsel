@@ -49,11 +49,6 @@ const RECONNECT_MS: u64 = 20u64
 // The most a history page may ask for.
 const PAGE_LINES_MAX: u64 = 256u64
 
-// Deltas wait until this much text or this old before they are sent.
-const PREVIEW_FLUSH_BYTES: u64 = 2048u64
-
-const PREVIEW_FLUSH_MS: u64 = 100u64
-
 // What the front needs from a session's place: its submit and decide entries and a query
 // over `harness.window`, and how to reach it. A new session starts as `agent` with
 // `narrow`. Each connection's task spends `conn_bytes`, which must hold a wire client.
@@ -342,8 +337,6 @@ fn send_rows(mut w: WriteHalf, f: Front, image: store.fixture.Seen, mut sent: Li
     true
 }
 
-// `sent` names the draft the browser holds and the offset of its end; `pending_ns` is
-// when the oldest text not yet sent was published.
 // A query row's key carries the table's prefix before the u64 key.
 fn position(r: store.runner.Row) -> Option[u64] {
     let width = list.len(r.key)
@@ -359,8 +352,8 @@ fn position(r: store.runner.Row) -> Option[u64] {
 
 type PreviewWatch {
     observer: Option[preview.Observer],
-    sent: Option[(preview.Key, u64)],
-    pending_ns: Option[u64]
+    // The draft the browser holds and the byte offset of its end.
+    sent: Option[(preview.Key, u64)]
 }
 
 fn watching(watch: PreviewWatch) -> bool {
@@ -377,7 +370,6 @@ fn unwatch(mut watch: PreviewWatch) -> () waits {
 }
 
 fn clear_preview(mut w: WriteHalf, f: Front, mut watch: PreviewWatch) -> bool waits {
-    watch.pending_ns = None
     if let Some(_) = replace(mut watch.sent, None) {
         return send_out(mut w, f, string.into_bytes("event: preview-clear\ndata: null\n\n"))
     }
@@ -405,20 +397,13 @@ fn send_preview(mut w: WriteHalf, f: Front, sent: List[(u64, Bytes)], mut watch:
             if held == end {
                 return true
             }
-            let since = match watch.pending_ns {
-                Some(ns) => ns,
-                None => draft.produced_ns
-            }
-            watch.pending_ns = Some(since)
-            if end - held < PREVIEW_FLUSH_BYTES && host.mono_ns(f.clock) - since < PREVIEW_FLUSH_MS * 1000000u64 {
-                return true
-            }
+            // Send on the first poll with new bytes. A blocked write keeps this
+            // task from polling, so the hub coalesces further bytes within its cap.
             let more = PreviewDelta(seq: draft.seq, at: held, text: string.from(string.slice(draft.text, held - draft.offset, end - draft.offset)))
             let Some(take event) = event_of(more, Some("preview-delta")) else {
                 return false
             }
             watch.sent = Some((draft.key, end))
-            watch.pending_ns = None
             return send_out(mut w, f, take event)
         }
     }
@@ -426,7 +411,6 @@ fn send_preview(mut w: WriteHalf, f: Front, sent: List[(u64, Bytes)], mut watch:
         return false
     }
     watch.sent = Some((draft.key, end))
-    watch.pending_ns = None
     send_out(mut w, f, take event)
 }
 
@@ -452,7 +436,7 @@ fn halted(quit: Receiver[()]) -> bool {
 // stream no wake, and an open stream never holds the place up. Opening the stream wakes
 // the session once, to send its transcript.
 fn follow[T: send](d: harness.gateway.Door[T], f: Front, id: u64, mut w: WriteHalf, quit: Receiver[()], credential: Bytes, tail: u64) -> () waits {
-    let mut watch = PreviewWatch(observer: None, sent: None, pending_ns: None)
+    let mut watch = PreviewWatch(observer: None, sent: None)
     follow_loop(d, f, id, mut w, quit, credential, tail, mut watch)
     unwatch(mut watch)
 }

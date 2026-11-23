@@ -626,8 +626,8 @@ it only to the host. The host alone accepts on it, and before it decodes a byte 
 peer's effective UID against the configured operator UID (Linux `SO_PEERCRED`). A
 peer-supplied name, PID, tenant or request ID conveys no authority. No tenant receives either
 endpoint or its directory. (The host's handling is the `operator` module and
-`platform.asked`/`platform.detach`; the accept task over the inherited listener is not yet
-built.)
+`platform.asked`/`platform.detach`; `platform_main` runs the accept task over the inherited
+listener.)
 
 One connection carries one exchange. Each frame is a little-endian u32 byte length followed
 by exactly one value-codec sum; the length excludes itself and is at most 16 MiB. Tags are
@@ -645,7 +645,8 @@ answered `Error(Protocol)` and closes only that exchange.
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
 | 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
-| 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`. |
+| 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
+| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, label, listen, bindings, limits). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
 
 | Host → operator | Payload and rule |
 |---|---|
@@ -682,6 +683,28 @@ connection: EOF only detaches the observer, and a later Begin or Status reads th
 new launcher session (`Hello`) cancels every running admission; its owner is told
 `Error(Busy)` and resends the same Begin. Admission refusals (overlap memory, an unapproved
 added grant) and `AdmissionFailed` are D's durable `Failed`.
+
+**Registering a group.** A Register is a Begin for a group that does not exist yet, under
+the same durable identity: a known D attaches or is a Conflict exactly as a Begin's. For a new
+D, one transaction records the group's catalog row under a new incarnation, with no assembly
+and **no wake row**, charges the tenant's group quota, and writes D's request and active rows
+with a fresh A. The host then sends `Bind` for the group's listener and only after it the
+`Admit` of the first release, whose approvals have no OLD (the summary's old root limit is 0
+and every grant is new). The phases are a Begin's: Need, Data, EndInput, Display, Confirm and
+Assembling. A group without a wake row is *registering*: no arrival, due wake or dirty scan
+reaches it, LookupGroup and Begin answer `UnknownGroup`, and collection names no root for
+it. When its release is assembled, one transaction makes it the group's assembly at
+activation 0, gives the group its wake row and records D `Installed(0, assembly, report)`.
+The host then sends `Release(A)` and wakes the group, whose first serving start at
+activation 0 on its empty store is its genesis ("Place activation"). A registration that
+fails (an admission failure, a refused confirmation, a lost deadline, or a listener the
+launcher cannot bind) records D `Failed` and removes the group row and its quota charge in
+the same transaction, then sends `Close` for its listener, so the name can be registered
+again. A name already in the catalog is `Error(Conflict)`, unless its registration is still
+running, which is `Error(Busy)`; a registration whose input outlived its deadline fails there
+and frees the name. A second group naming a store directory another group already holds is
+`Error(Conflict)`. A Register before the host has reconciled with the launcher is
+`Error(Busy)`.
 
 ### The launcher
 

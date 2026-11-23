@@ -1,6 +1,7 @@
 // Module operator (package store): the operator wire on STATE/operator.sock (docs/spec/
 // launch.md "The operator socket"). One connection carries one exchange: a Begin and the
-// deploy it subscribes to, or one Status, ResolvePin or LookupGroup and its one reply.
+// deploy it subscribes to, a Register and the genesis it subscribes to, or one Status,
+// ResolvePin or LookupGroup and its one reply.
 //
 // Each frame is a u32 little-endian length (at most 16 MiB, `MAX_FRAME`), then one
 // value-codec `Ask` (operator to host) or `Answer` (host to operator). Declared variant
@@ -12,8 +13,22 @@
 // hash H is 32 bytes. A known D names the same group and input for its whole life.
 pub const MAX_FRAME: u64 = 16777216u64
 
+// A group the operator registers (launch.md "Registering a group"): its catalog name, the
+// tenant it is charged to, its working directory, whether its author is a trusted publisher,
+// its containment label, listener address, approved store, Dir and Net bindings and limits.
+pub type Registration: codec + send {
+    name: String,
+    tenant: String,
+    workdir: String,
+    trusted: bool,
+    label: launcher.Label,
+    listen: String,
+    bindings: launcher.Bindings,
+    limits: launcher.Limits
+}
+
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,
-// 5 ResolvePin, 6 LookupGroup.
+// 5 ResolvePin, 6 LookupGroup, 7 Register.
 pub type Ask: codec + send =
 // Begin(D, group, input, grant_added, foreign, exec): deploy `input` to the group's current
 // incarnation, approving an added grant and exactly these sorted Foreign and Exec lines.
@@ -30,6 +45,10 @@ BeginAsk(Bytes, launcher.Group, launcher.Input, bool, List[String], List[String]
     | ResolveAsk(Bytes)
 // The registered incarnation of a group name.
     | LookupAsk(String)
+// Register(D, group, input, foreign, exec): add the group under a new incarnation and run
+// `input` as its first release, approving exactly these sorted Foreign and Exec lines. Its
+// upload and confirmation are a Begin's; it ends Installed at activation 0, its genesis.
+    | RegisterAsk(Bytes, Registration, launcher.Input, List[String], List[String])
 
 // What a pin lookup finds: the assembly a recording ran, or Gone for an absent, expired
 // or removed pin. A store error is an error, never Gone.

@@ -257,6 +257,8 @@ type Admitting {
     summary: Option[launcher.Summary],
     // The input is complete: a publication from the start, an attested input at EndInput.
     ended: bool,
+    // The admission is a registering group's first release, with no OLD.
+    genesis: bool,
 }
 
 type Vol {
@@ -293,6 +295,9 @@ pub opaque type Host {
     owners: Map[Bytes, u64],
     shown: Map[Bytes, Bytes],
     outbox: List[Sent],
+    // Requests decided where no request list is at hand (a failed registration's Close and
+    // Release), sent after the input that decided them.
+    later: List[launcher.Request],
 }
 
 const READY_RESET_NS: u64 = 300000000000u64
@@ -417,7 +422,7 @@ pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher
     decided(mut db, take made)?
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Hello)
-    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new()), take out))
+    Ok((Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new()), take out))
 }
 
 // The host's store, for a restart: the process ends and only the store survives.
@@ -1517,11 +1522,23 @@ fn launched(mut h: Host, c: launcher.Child) {
     }
 }
 
-fn bind_failed(mut h: Host, g: launcher.Group, why: String) {
+fn bind_failed(mut h: Host, g: launcher.Group, why: String) waits {
     let mut v = vol_read(h, g.name)
     v.failing = true
     v.last = string.from(why)
+    // A registering group's listener is its registration's: without it the request fails.
+    let genesis = match replace(mut v.admit, None) {
+        Some(adm) if adm.genesis => Some(adm),
+        other => {
+            v.admit = other
+            None
+        },
+    }
     vol_put(mut h, g.name, take v)
+    if let Some(adm) = genesis {
+        list.push(mut h.later, Release(adm.attempt))
+        fail_request(mut h, adm.request, InvalidClass, joined("the listener could not be bound: ", why))
+    }
 }
 
 // Applies one launcher event in stream order, and returns the requests it decided.
@@ -1549,7 +1566,7 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
         Answered(c, said) => answered(mut h, c, said, mut out),
         Need(a, keys, done) => needed(mut h, a, keys, done),
         Admitted(a, root, summary, display) => admitted(mut h, a, root, summary, display, mut out),
-        Assembled(a, key, digest, fetch, asm) => assembled(mut h, a, key, digest, fetch, asm, mut out),
+        Assembled(a, key, digest, fetch, asm) => assembled(mut h, a, key, digest, fetch, asm, now, mut out),
         AdmissionFailed(a, why) => unadmitted(mut h, a, why),
         Fenced => fenced(mut h, now, mut out),
         Collected(_) => {
@@ -1559,7 +1576,14 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
         },
     }
     notify(mut h)
+    drain_later(mut h, mut out)
     take out
+}
+
+fn drain_later(mut h: Host, mut out: List[launcher.Request]) {
+    for take q in replace(mut h.later, list.new()) {
+        list.push(mut out, take q)
+    }
 }
 
 // Due times and backoff retries that have come.
@@ -1577,6 +1601,7 @@ pub fn tick(mut h: Host, now: Now) -> List[launcher.Request] waits {
         let _ = launch_dirty(mut h, name, false, mut out)
     }
     due_wakes(mut h, now, mut out)
+    drain_later(mut h, mut out)
     take out
 }
 
@@ -1754,15 +1779,20 @@ const ADMISSION_MS: u64 = 600000u64
 // Opens the launcher's admission of request d's input under attempt `a` (launch.md "Publish
 // and assemble"), with the group's working directory, OLD's assembly and the operator's
 // Foreign and Exec lines. A publication's input is complete at once.
-fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], grant_added: bool, mut out: List[launcher.Request]) {
+fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], grant_added: bool, genesis: bool, mut out: List[launcher.Request]) {
     let complete = match input {
         Attested(_) => false,
         _ => true,
     }
-    let approvals = launcher.Approvals(recording: false, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: Some(clone(g.assembly)))
+    let old: Option[Bytes] = if genesis {
+        None
+    } else {
+        Some(clone(g.assembly))
+    }
+    let approvals = launcher.Approvals(recording: false, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old)
     list.push(mut out, Admit(group_of(name, g.incarnation), a, clone(input), take approvals))
     let mut w = vol_read(h, name)
-    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, grant_added: grant_added, stage: Uploading(list.new(), false), summary: None, ended: complete))
+    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, grant_added: grant_added, stage: Uploading(list.new(), false), summary: None, ended: complete, genesis: genesis))
     vol_put(mut h, name, take w)
 }
 
@@ -1997,20 +2027,44 @@ fn put_deploy(mut tx: store.Tx, t: Tables, name: String, row: DeployRow, class: 
 }
 
 // Fails request d durably before it reached a deploy row.
+// A failed registration also removes its group, which never had a wake row, in the same
+// transaction, and the group's listener is closed.
 fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits {
     let made = {
         let t = view h.t
-        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[Option[launcher.Group], Refused] {
             let Some(r) = st(store.fetch(tx, store.shape(t.requests), d))? else {
-                return Ok(())
+                return Ok(None)
             }
             if let Some(_) = r.done {
-                return Ok(())
+                return Ok(None)
             }
-            finish_request(mut tx, t, r.group.name, d, FailedPhase(class, string.from(why), operator.no_report()))
+            finish_request(mut tx, t, r.group.name, d, FailedPhase(class, string.from(why), operator.no_report()))?
+            let Some(RegisterAsk(_, _, _, _, _)) = operator.decode_ask(r.begin) else {
+                return Ok(None)
+            }
+            if let Some(_) = st(store.fetch(tx, store.shape(t.wake), r.group.name))? {
+                return Ok(None)
+            }
+            let Some(g) = st(store.fetch(tx, store.shape(t.groups), r.group.name))? else {
+                return Ok(None)
+            }
+            if g.incarnation != r.group.incarnation {
+                return Ok(None)
+            }
+            let _ = st(store.delete(mut tx, t.groups, r.group.name))?
+            let mut u = usage_of(tx, t, g.tenant)?
+            u.groups -= 1u64
+            st(store.put(mut tx, t.usage, g.tenant, u))?
+            Ok(Some(clone(r.group)))
         })
     }
-    let _ = decided(mut h.db, take made)
+    if let Ok(Some(grp)) = decided(mut h.db, take made) {
+        let mut v = vol_read(h, grp.name)
+        v.admit = None
+        vol_put(mut h, grp.name, take v)
+        list.push(mut h.later, Close(grp))
+    }
 }
 
 // Whether the group's active request, other than d, still holds the group: running, or
@@ -2070,6 +2124,10 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
             return
         },
     }
+    if registering(h, g.name) {
+        refuse(mut h, conn, UnknownGroupClass, "the group is still registering")
+        return
+    }
     if let Some((class, why)) = admission_refusal(h, g.name, row, d, input, foreign, exec) {
         refuse(mut h, conn, class, why)
         return
@@ -2106,13 +2164,32 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
 
 // Wakes a cold group, then opens request d's admission; a wake that cannot start fails d.
 fn admit_request(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, input: launcher.Input, foreign: List[String], exec: List[String], added: bool, now: Now, mut out: List[launcher.Request]) waits {
-    if is_none(run_gen(h, name)) {
+    // A registering group has no place to wake: its admission has no OLD.
+    let genesis = registering(h, name)
+    if !genesis && is_none(run_gen(h, name)) {
         if let Error(e) = wake_cause(mut h, name, Operator, now, mut out) {
             fail_request(mut h, d, class_of(e), refused_text(e))
             return
         }
     }
-    start_admission(mut h, name, g, d, a, input, foreign, exec, added, mut out)
+    start_admission(mut h, name, g, d, a, input, foreign, exec, added, genesis, mut out)
+}
+
+// A group registers until its first release is assembled: its catalog row exists and its
+// listener is bound, but it has no wake row, so nothing wakes it (launch.md "Registering a
+// group").
+fn registering(h: Host, name: String) -> bool {
+    is_none(wake_row(h, name))
+}
+
+// The input and approvals a recorded Begin or Register admits: input, added grant, Foreign
+// and Exec lines.
+fn admission_ask(body: Bytes) -> Option[(launcher.Input, bool, List[String], List[String])] {
+    match operator.decode_ask(body) {
+        Some(BeginAsk(_, _, input, added, foreign, exec)) => Some((clone(input), added, clone(foreign), clone(exec))),
+        Some(RegisterAsk(_, _, input, foreign, exec)) => Some((clone(input), false, clone(foreign), clone(exec))),
+        _ => None,
+    }
 }
 
 // An identical Begin for a known D. While another connection owns it, this one gets the
@@ -2147,8 +2224,8 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             return
         },
     }
-    let Some(BeginAsk(_, _, input, added, foreign, exec)) = operator.decode_ask(r.begin) else {
-        fail_request(mut h, d, StoreClass, "the recorded Begin does not decode")
+    let Some((input, added, foreign, exec)) = admission_ask(r.begin) else {
+        fail_request(mut h, d, StoreClass, "the recorded request does not decode")
         return
     }
     if let Some((class, why)) = admission_refusal(h, name, g, d, input, foreign, exec) {
@@ -2261,12 +2338,16 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
             }
         },
         LookupAsk(name) => match group_row(h, name) {
+            Ok(Some(_)) if registering(h, name) => refuse(mut h, conn, UnknownGroupClass, "the group is still registering"),
             Ok(Some(g)) => say(mut h, conn, GroupAnswer(group_of(name, g.incarnation)), true),
             Ok(None) => refuse(mut h, conn, UnknownGroupClass, "no group has this name"),
             Error(_) => refuse(mut h, conn, StoreClass, "the catalog could not be read"),
         },
+        RegisterAsk(_, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        RegisterAsk(d, spec, input, foreign, exec) => register(mut h, conn, ask, d, spec, input, foreign, exec, now, mut out),
     }
     notify(mut h)
+    drain_later(mut h, mut out)
     out
 }
 
@@ -2491,7 +2572,7 @@ fn admitted(mut h: Host, a: launcher.Attempt, root: Bytes, summary: launcher.Sum
 }
 
 // NEW is assembled and its reservation held: the deploy goes on to Preparing.
-fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_ns: u64, assemble_ns: u64, mut out: List[launcher.Request]) waits {
+fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_ns: u64, assemble_ns: u64, now: Now, mut out: List[launcher.Request]) waits {
     let Some(name) = admitting_group(h, a) else {
         return
     }
@@ -2511,6 +2592,10 @@ fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_
     let mut v = vol_read(h, name)
     v.admit = None
     vol_put(mut h, name, take v)
+    if d.genesis {
+        install_first(mut h, name, d, key, fetch_ns, assemble_ns, now, mut out)
+        return
+    }
     match prepare(mut h, name, d.request, a, key, digest, summary.target, summary.n_place, fetch_ns, assemble_ns) {
         Ok(more) => {
             for q in more {
@@ -2519,11 +2604,157 @@ fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_
         },
         Error(e) => {
             let mut w = vol_read(h, name)
-            w.admit = Some(Admitting(request: clone(d.request), attempt: a, incarnation: d.incarnation, grant_added: d.grant_added, stage: Rejected(refused_text(e)), summary: Some(clone(summary)), ended: true))
+            w.admit = Some(Admitting(request: clone(d.request), attempt: a, incarnation: d.incarnation, grant_added: d.grant_added, stage: Rejected(refused_text(e)), summary: Some(clone(summary)), ended: true, genesis: false))
             vol_put(mut h, name, take w)
             list.push(mut out, Release(a))
             fail_request(mut h, d.request, class_of(e), refused_text(e))
         },
+    }
+}
+
+// A registering group's first release is assembled. One transaction makes it the group's
+// current assembly at activation 0, gives the group its wake row and records the request
+// Installed; then the attempt's reservation ends and the group is woken, which starts its
+// genesis on the empty store (RUNNER-SPEC §14.1). A host too full to start it leaves the
+// group cold, for its first connection to wake.
+fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: u64, assemble_ns: u64, now: Now, mut out: List[launcher.Request]) waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+            let Some(found) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+                return Error(Unknown)
+            }
+            if found.incarnation != d.incarnation {
+                return Error(Unknown)
+            }
+            if let Some(_) = st(store.fetch(tx, store.shape(t.wake), name))? {
+                return Error(Exists)
+            }
+            let mut g = found
+            g.assembly = clone(key)
+            g.activation = 0u64
+            st(store.put(mut tx, t.groups, name, g))?
+            st(store.put(mut tx, t.wake, name, WakeRow(wake: Clean(None), gen: 0u64)))?
+            let report = operator.Report(fetch_ns: Some(fetch_ns), assemble_ns: Some(assemble_ns), pause: NotStarted, preview: list.new())
+            finish_request(mut tx, t, name, d.request, InstalledPhase(0u64, clone(key), report))
+        })
+    }
+    list.push(mut out, Release(d.attempt))
+    match decided(mut h.db, take made) {
+        Ok(()) => {
+            let _ = wake_cause(mut h, name, Operator, now, mut out)
+        },
+        Error(e) => fail_request(mut h, d.request, class_of(e), refused_text(e)),
+    }
+}
+
+// A Register (launch.md "Registering a group"). A known D attaches as a Begin's does. A new
+// D records, in one transaction, the group under a new incarnation with no wake row, its
+// usage, the request and its attempt; the host then binds the group's listener and opens the
+// admission of its first release, with no OLD. Nothing wakes the group until that release
+// is assembled. No two groups share a store.
+fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.Registration, input: launcher.Input, foreign: List[String], exec: List[String], now: Now, mut out: List[launcher.Request]) waits {
+    if list.len(d) != 16u64 {
+        refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
+        return
+    }
+    let canonical = operator.ask_bytes(ask)
+    let found = match request_row(h, d) {
+        Ok(f) => f,
+        Error(_) => {
+            refuse(mut h, conn, StoreClass, "the catalog could not be read")
+            return
+        },
+    }
+    if let Some(r) = found {
+        if r.begin != canonical {
+            refuse(mut h, conn, ConflictClass, "this request ID names another request")
+            return
+        }
+        reattach(mut h, conn, d, r, now, mut out)
+        return
+    }
+    if spec.name == "" || spec.tenant == "" || spec.listen == "" || spec.bindings.store == "" {
+        refuse(mut h, conn, InvalidClass, "a registration names its group, tenant, listener and store")
+        return
+    }
+    if let Some((class, why)) = admission_refusal(h, spec.name, registered_row(spec, 0u64), d, input, foreign, exec) {
+        refuse(mut h, conn, class, why)
+        return
+    }
+    // An earlier registration of this name that lost its input past its deadline fails
+    // here and removes its group; one still running holds the name.
+    if let Ok(Some(_)) = group_row(h, spec.name) {
+        if registering(h, spec.name) && active_holds(mut h, spec.name, d, now) {
+            refuse(mut h, conn, BusyClass, "the group is still registering")
+            return
+        }
+    }
+    if store_owned(h, spec.bindings.store) {
+        refuse(mut h, conn, ConflictClass, "another group owns this store")
+        return
+    }
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, launcher.Attempt), Refused] {
+            if let Some(_) = st(store.fetch(tx, store.shape(t.groups), spec.name))? {
+                return Error(Exists)
+            }
+            let mut u = usage_of(tx, t, spec.tenant)?
+            if let Some(q) = quota_of(tx, t, spec.tenant)? {
+                if u.groups >= q.groups {
+                    return Error(Full(Groups(string.from(spec.tenant), q.groups)))
+                }
+            }
+            let mut meta = meta_of(tx, t)?
+            let g = registered_row(spec, meta.next_incarnation)
+            meta.next_incarnation += 1u64
+            st(store.put(mut tx, t.meta, 0u64, meta))?
+            st(store.put(mut tx, t.groups, spec.name, g))?
+            u.groups += 1u64
+            st(store.put(mut tx, t.usage, spec.tenant, u))?
+            let a = fresh_attempt(mut tx, t)?
+            st(store.put(mut tx, t.requests, d, RequestRow(begin: clone(canonical), group: group_of(spec.name, g.incarnation), input: clone(input), attempt: a, deadline_ms: now.wall_ms + ADMISSION_MS, done: None)))?
+            st(store.put(mut tx, t.active, spec.name, d))?
+            Ok((g, a))
+        })
+    }
+    let (g, a) = match decided(mut h.db, take made) {
+        Ok(pair) => pair,
+        Error(e) => {
+            refuse(mut h, conn, class_of(e), refused_text(e))
+            return
+        },
+    }
+    map.insert(mut h.owners, clone(d), conn)
+    list.push(mut out, bind_request(spec.name, g))
+    start_admission(mut h, spec.name, g, d, a, input, foreign, exec, false, true, mut out)
+}
+
+// A registering group's catalog row: no assembly yet, activation 0.
+fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
+    let author: Author = if spec.trusted {
+        Trusted
+    } else {
+        Untrusted
+    }
+    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), incarnation: incarnation, retiring: None)
+}
+
+// Whether a catalog group already holds store directory `path`.
+fn store_owned(h: Host, path: String) -> bool {
+    let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.groups), Unbounded, Unbounded) else {
+        return true
+    }
+    let mut rows = take scanned
+    loop {
+        match store.next(mut rows) {
+            Ok(Some((_, g))) => if g.bindings.store == path {
+                return true
+            },
+            Ok(None) => return false,
+            Error(_) => return true,
+        }
     }
 }
 
@@ -2613,7 +2844,10 @@ fn catalog_roots(h: Host, now_s: u64) -> Result[List[Bytes], String] {
         loop {
             match store.next(mut rows) {
                 Ok(Some((_, g))) => {
-                    list.push(mut roots, clone(g.assembly))
+                    // A registering group has no assembly yet.
+                    if list.len(g.assembly) > 0u64 {
+                        list.push(mut roots, clone(g.assembly))
+                    }
                     for kept in g.retained {
                         list.push(mut roots, clone(kept))
                     }

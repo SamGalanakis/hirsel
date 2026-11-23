@@ -10,7 +10,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let (acks, delivered): (Sender[Ack], Receiver[Ack]) = channel.new(4)
     let (notices, _observed): (Sender[WriteNotice], Receiver[WriteNotice]) = channel.new(1)
     let (synced, _woken): (Sender[()], Receiver[()]) = channel.new(1)
-    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None)
+    let actor_input = ObjectJournalTask(ready: take ready, receive: take receive, acks: take acks, notices: take notices, synced: take synced, group_bytes: 1024, group_commits: 2, idle: None, health_signal: None)
     let actor = task.spawn(tasks, bytes 1048576, take actor_input, object_journal_worker)
     let mut expected_bytes = 0u64
     for n in 1u64 .. 3 {
@@ -104,6 +104,43 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
 fn bucket_test_m2_object_writer(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let sim = bucket_law_sim(tasks, c, 422, None, list.new())
     let outcome = object_writer_law(c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}
+
+fn object_fresh_holder_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let first = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut writer = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let (notify, notifications): (Sender[u64], Receiver[u64]) = channel.new(1)
+    on_unhealthy(mut writer, take notify, 17u64)?
+    let deadline = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    let initial = fresh_snapshot(mut writer, deadline)?
+    if version(initial) != 0 { fail("304 altered the holder's durable snapshot") }
+    if let Ok(0) = health(writer) {} else { fail("unchanged HEAD altered writer health") }
+    let successor_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let successor = open_authority(tasks, object_authority(take successor_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    if let Error(Fenced(1)) = fresh_snapshot(mut writer, deadline) {} else {
+        fail("fresh holder query accepted a new claim")
+    }
+    let notice = result.unwrap(channel.receive(notifications))
+    if notice != 17 { fail("the terminal health notice changed its payload") }
+    if let Fenced(1) = health(writer) {} else { fail("the notified fence was not published") }
+    if let Error(Fenced(1)) = close(take writer) {} else {
+        fail("holder close lost the fresh query fence")
+    }
+    if let Error(Closed) = channel.try_receive(notifications) {} else {
+        fail("terminal health subscription sent twice or stayed open")
+    }
+    close(take successor)
+}
+
+@test
+fn bucket_test_m2_fresh_holder(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 77, None, list.new())
+    let outcome = object_fresh_holder_law(c, r, tasks, sim)
     let _ = bucket_law_finish(take sim)
     outcome
 }

@@ -1,4 +1,4 @@
-type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart])
+type JournalMsg: send = Frame(Bytes, u64) | Rotate(HostFile, HostFile) | Barrier | IdleCheck | ObjectPause(Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) | ObjectFresh(Sender[Result[(), Error]], u64)
 
 type WriteNotice: send = Written | WriteFailed(IoError)
 
@@ -201,6 +201,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                     break
                 },
                 Some(ObjectPause(..)) => fail("log journal received an object cut"),
+                Some(ObjectFresh(..)) => fail("log journal received an object head probe"),
                 Some(IdleCheck) => {
                     if frames == 0 && idle_at == Some(written) {
                         buffer = list.new()

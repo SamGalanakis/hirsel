@@ -1,5 +1,10 @@
 type ObjectWriterState {
     workers: Option[std.object.Workers],
+    tasks: Tasks,
+    health: Latest[Health],
+    unhealthy: Option[Receiver[()]],
+    watch: Option[Task[()]],
+    terminal: Sender[()],
     locator: HistoryLocator,
     level_name: String,
     pair: HistoryPair,
@@ -18,6 +23,8 @@ fn object_writer_healthy(db: Db) -> Result[(), Error] {
             if let Some(problem) = object_writer.failed {
                 return Error(clone(problem))
             }
+            let observed = latest.read(object_writer.health)
+            return health_result(observed)
         }
     }
     Ok(())
@@ -71,13 +78,16 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     })?
     let (start, starting): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive, ..) = take channels
+    let initial_health: Health = Ok(0)
+    let health_state = latest.new(arc.new(take initial_health))
+    let (health_tx, health_rx): (Sender[()], Receiver[()]) = channel.new(1)
     let idle_ns = int.saturating_mul(options.head_poll_ms, 1000000)
     let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: idle_ns)
     let timer = match task.try_spawn(tasks, bytes 4096, take timer_input, journal_idle_timer) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
-    let actor = ObjectJournalTask(ready: take starting, receive: take queued, acks: take journal_acks, notices: channel.sender(written_send), synced: take synced_send, group_bytes: group_room, group_commits: int.widen(options.group_commits), idle: Some(take idle_send))
+    let actor = ObjectJournalTask(ready: take starting, receive: take queued, acks: take journal_acks, notices: channel.sender(written_send), synced: take synced_send, group_bytes: group_room, group_commits: int.widen(options.group_commits), idle: Some(take idle_send), health_signal: Some(ObjectHealthSignal(value: latest.handle(health_state), terminal: channel.sender(health_tx))))
     let worker_room = 4 * group_room + 524288
     let work = match task.try_spawn(tasks, bytes worker_room, take actor, object_journal_worker) {
         Ok(take running) => take running,
@@ -113,7 +123,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.fence = fence
     db.file_seq = head.entry.seq
     db.page_resident = resident_location_charge(pages.locations)
-    let object = ObjectWriterState(workers: take workers, locator: take locator, level_name: take level_name, pair: head.pair, entries: head.entry.seq - head.checkpoint.seq, failed: None)
+    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, unhealthy: Some(take health_rx), watch: None, terminal: take health_tx, locator: take locator, level_name: take level_name, pair: head.pair, entries: head.entry.seq - head.checkpoint.seq, failed: None)
     db.disk = Some(DiskState(lock: None, d: None, open: head.pair.epoch, options: take held_options, lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: head.checkpoint.seq, recorded_after: recorded_after,
         pages: take pages, bucket: None, object: Some(take object),
         acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0,
@@ -251,4 +261,29 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     db.settled = db.changes
     install_holder_delta(mut db, take delta)
     Ok(Ticket(store: old.store, open: old.pair.epoch, mark: Cut(generation)))
+}
+
+pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] waits {
+    journal_poll(mut db)?
+    let receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, receipt)?
+    if object_writer_open(db) {
+        let (destination, pending): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
+        let closed = match channel.send(disk_state(db).journal, ObjectFresh(take destination, deadline_ns)) {
+            Ok(()) => false,
+            Error(_) => true,
+        }
+        if closed {
+            journal_poll(mut db)?
+            return Error(Io(Closed))
+        }
+        match channel.receive(pending) {
+            Ok(take result) => result?,
+            Error(_) => {
+                journal_poll(mut db)?
+                return Error(Io(Closed))
+            },
+        }
+    }
+    Ok(snapshot(db))
 }

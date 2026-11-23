@@ -1,0 +1,1 @@
+pub type Health: shareable + send = Ok(u32) | Fenced(u64) | Undecided | Poisoned(IoError) | Remote(std.object.Error)

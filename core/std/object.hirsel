@@ -34,9 +34,9 @@ pub type Conditional: send = Applied(Meta) | Mismatch
 
 pub type Precondition: send = Match(ETag) | Absent
 
-pub type Reason: send = Status(u16, Bytes) | Net(NetError) | Http(http_client.Error) | Malformed | Deadline | Cancelled
+pub type Reason: shareable + send = Status(u16, Bytes) | Net(NetError) | Http(http_client.Error) | Malformed | Deadline | Cancelled
 
-pub type Error: send = Fatal(Reason) | Retriable(Reason) | Uncertain(Reason) | TooLarge | NotFound | Precondition
+pub type Error: shareable + send = Fatal(Reason) | Retriable(Reason) | Uncertain(Reason) | TooLarge | NotFound | Precondition
 
 pub type Mode: key = Overwrite | NoClobber
 

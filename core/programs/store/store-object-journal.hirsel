@@ -14,7 +14,8 @@ type ObjectJournalTask: send {
     synced: Sender[()],
     group_bytes: u64,
     group_commits: u64,
-    idle: Option[Sender[()]]
+    idle: Option[Sender[()]],
+    health_signal: Option[ObjectHealthSignal]
 }
 
 fn history_group_context(head: HistoryHead) -> Result[DiskContext, Error] {
@@ -29,21 +30,17 @@ fn history_group_append(mut packet: Bytes, ctx: DiskContext, frame: Bytes) -> Re
     capacity(history_seal(mut packet, ctx, at, kind))
 }
 
-fn history_poll_writer(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[bool, Error] waits {
-    let probed = history_probe_head(mut client, register.tag, mut workspace.witness, deadline)
-    match take probed {
-        Ok(Some((take capture, _))) => {
-            check_expected_store(Some(register.head.store), capture.head.store)?
-            if !history_pair_matches(capture.head.pair, register.head.pair) {
-                let fenced = Fenced(register.head.pair.epoch)
-                register.terminal = Some(HistoryFault(clone(fenced)))
-                return Error(fenced)
-            }
-            Ok(true)
-        },
-        Ok(None) => Ok(true),
-        Error(_) => Ok(false)
+fn history_probe_writer(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+    let result = history_probe_head(mut client, register.tag, mut workspace.witness, deadline)?
+    if let Some((capture, _)) = result {
+        check_expected_store(Some(register.head.store), capture.head.store)?
+        if !history_pair_matches(capture.head.pair, register.head.pair) {
+            let fenced: Error = Fenced(register.head.pair.epoch)
+            register.terminal = Some(HistoryFault(clone(fenced)))
+            return Error(fenced)
+        }
     }
+    Ok(())
 }
 
 type ObjectJournalSession {
@@ -86,16 +83,16 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut lane = object_journal_begin(take initial)
     let mut written = 0u64
     let mut deferred: Option[JournalMsg] = None
-    let mut timer_armed = false
+    let mut idle_position: Option[u64] = None
     loop {
         let selected = match replace(mut deferred, None) {
             Some(take pending) => take pending,
             None => match channel.try_receive(input.receive) {
                 Ok(take queued) => take queued,
                 Error(Empty) => {
-                    if !timer_armed {
+                    if idle_position == None {
                         if let Some(timer) = input.idle {
-                            if let Ok(()) = channel.try_send(timer, ()) { timer_armed = true }
+                            if let Ok(()) = channel.try_send(timer, ()) { idle_position = Some(written) }
                         }
                     }
                     match channel.receive(input.receive) {
@@ -140,15 +137,35 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     return Ok(())
                 }
                 let _ = channel.try_send(input.synced, ())
+                if lane.failed_polls != 0 {
+                    lane.failed_polls = 0
+                    if let Some(signal) = input.health_signal { emit_health(signal, Ok(0)) }
+                }
             },
             Barrier => {
                 let _ = channel.try_send(input.notices, Written)
             },
             IdleCheck => {
-                timer_armed = false
+                let armed_at = replace(mut idle_position, None)
+                if armed_at != None && armed_at != Some(written) { continue }
                 let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-                let observed = history_poll_writer(mut lane.client, mut lane.register, mut lane.buffers, due)?
-                lane.failed_polls = if observed { 0 } else { int.saturating_add(lane.failed_polls, 1) }
+                let observed = history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
+                let previous = lane.failed_polls
+                match take observed {
+                    Ok(()) => { lane.failed_polls = 0 },
+                    Error(Fenced(e)) => return Error(Fenced(e)),
+                    Error(_) => { lane.failed_polls = int.saturating_add(lane.failed_polls, 1) },
+                }
+                if previous != lane.failed_polls {
+                    if let Some(signal) = input.health_signal { emit_health(signal, Ok(lane.failed_polls)) }
+                }
+            },
+            ObjectFresh(take destination, deadline) => {
+                let due = order.min(deadline, std.object.deadline_after_ms(lane.client, lane.op_ms))
+                let observed = history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
+                let terminal = match observed { Error(Fenced(e)) => Some(e), _ => None }
+                let _ = channel.send(destination, take observed)
+                if let Some(e) = terminal { return Error(Fenced(e)) }
             },
             ObjectPause(take pause_response, take resuming) => {
                 let owner = object_journal_pause(take lane)
@@ -170,10 +187,15 @@ fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] wai
         Ok(take ready) => take ready,
         Error(_) => return Ok(()),
     }
+    let signals = match input.health_signal {
+        Some(signal) => Some(ObjectHealthSignal(value: latest.handle(signal.value), terminal: channel.sender(signal.terminal))),
+        None => None,
+    }
     let acks = channel.sender(input.acks)
     let synced = channel.sender(input.synced)
     let failure = object_journal_loop(take input, take initial)
     if let Error(problem) = failure {
+        if let Some(signal) = signals { emit_health(signal, health_failure(problem)) }
         let _ = channel.send(acks, ObjectBroken(clone(problem)))
         let _ = channel.try_send(synced, ())
     }

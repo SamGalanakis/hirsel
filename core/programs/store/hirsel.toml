@@ -33,6 +33,8 @@ std = { major = 1 }
 "store-object-journal.hirsel" = "store"
 "store-object-writer.hirsel" = "store"
 "store-levels.hirsel" = "store"
+"store-health.hirsel" = "store"
+"store-health-types.hirsel" = "status"
 "store-followers.hirsel" = "store"
 "store-object-follower.hirsel" = "store"
 "store-layout.hirsel" = "store"

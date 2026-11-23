@@ -1,0 +1,119 @@
+type HistoryRetention {
+    floor: u64,
+    earlier: List[HistoryRef]
+}
+
+fn history_retain(previous: HistoryMark, prior: HistoryRef, current_seq: u64, retain: u8) -> Result[HistoryRetention, Error] {
+    if retain == 0 {
+        return Error(Missing("retain"))
+    }
+    if retain == 1 {
+        return Ok(HistoryRetention(floor: current_seq, earlier: list.new()))
+    }
+    let preceding = list.len(previous.retained)
+    let room: u64 = int.widen(retain - 1)
+    let kept = order.min(room, preceding + 1)
+    disk_allocation(scoped fn() -> Result[HistoryRetention, Error] {
+        let mut earlier: List[HistoryRef] = list.with_capacity(kept)
+        for i in preceding + 1 - kept .. preceding {
+            list.push(mut earlier, previous.retained[i])
+        }
+        list.push(mut earlier, prior)
+        let floor = earlier[0].seq
+        Ok(HistoryRetention(floor, earlier: take earlier))
+    })
+}
+
+type HistoryName {
+    kind: u8,
+    seq: u64,
+    epoch: u64,
+    digest: u64
+}
+
+fn history_parse_name(key: String) -> Option[HistoryName] {
+    let raw = string.as_bytes(key)
+    if list.len(raw) != 60 || raw[1] != b'-' || raw[22] != b'-' || raw[43] != b'-' {
+        return None
+    }
+    let kind = raw[0]
+    if kind != b'e' && kind != b'm' && kind != b'p' && kind != b'l' {
+        return None
+    }
+    let Ok(seq) = int.parse_decimal_span(raw, 2, 22, 18446744073709551615u64) else {
+        return None
+    }
+    let Ok(epoch) = int.parse_decimal_span(raw, 23, 43, 18446744073709551615u64) else {
+        return None
+    }
+    if epoch == 0 || seq == 0 {
+        return None
+    }
+    let mut digest = 0u64
+    for i in 44u64 .. 60 {
+        let digit = raw[i]
+        if digit >= b'0' && digit <= b'9' {
+            digest = (digest << 4) | int.widen(digit - b'0')
+        } else if digit >= b'a' && digit <= b'f' {
+            digest = (digest << 4) | int.widen(10 + digit - b'a')
+        } else {
+            return None
+        }
+    }
+    Some(HistoryName(kind, seq, epoch, digest))
+}
+
+type ReclaimPass {
+    epoch: u64,
+    recovered_checkpoint: u64,
+    position: u64,
+    checkpoint: u64,
+    floor: u64,
+    generation: u64,
+    next_pack: u64,
+    chain: List[HistoryLink],
+    live: Map[String, ()],
+    leased: Map[String, ()]
+}
+
+fn history_dead_key(pass: ReclaimPass, key: String) -> bool {
+    let Some(name) = history_parse_name(key) else {
+        return false
+    }
+    if name.epoch > pass.epoch || map.contains(pass.leased, key) {
+        return false
+    }
+    if name.kind == b'e' {
+        if name.seq > pass.position {
+            return false
+        }
+        if name.seq < pass.floor {
+            return true
+        }
+        if name.seq <= pass.recovered_checkpoint {
+            return false
+        }
+        let offset = name.seq - pass.recovered_checkpoint - 1
+        let expected = pass.chain[offset]
+        return expected.epoch != name.epoch || expected.digest != name.digest
+    }
+    if map.contains(pass.live, key) {
+        return false
+    }
+    if name.epoch < pass.epoch {
+        return true
+    }
+    match name.kind {
+        b'm' => name.seq < pass.generation,
+        b'p' => name.seq < pass.next_pack,
+        b'l' => name.seq < pass.checkpoint,
+        _ => false,
+    }
+}
+
+fn history_dead_upload(pass: ReclaimPass, key: String) -> bool {
+    let Some(name) = history_parse_name(key) else {
+        return false
+    }
+    name.kind == b'p' && name.epoch < pass.epoch
+}

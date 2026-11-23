@@ -1,6 +1,6 @@
 //! One native growth boundary shared by all emitted sequence sites. Physical
 //! reuse changes neither full-new admission nor install-before-original-refund.
-use crate::{Capacity, Context, block, task_heap};
+use crate::{Capacity, Context, block, limit::Payer, task_heap};
 use std::ptr::NonNull;
 
 /// # Safety
@@ -57,9 +57,6 @@ pub(crate) unsafe fn replace(
     let old = unsafe { NonNull::new_unchecked(carrier.cast::<*mut u8>().read()) };
     let payer = context.payer();
     block::admit_storage(payer, (!overflow).then_some(charge))?;
-    // SAFETY: the caller owns the only live carrier. In-place storage remains
-    // billed to the same payer, with the old charge refunded after installation.
-    let heap = context.heap.get_or_init(std::sync::Arc::default);
     let frame_payer = context.frame_lists.remove(old);
     // Memcheck tracks requested extents and lacks per-slot resize metadata.
     #[cfg(not(feature = "memcheck"))]
@@ -67,19 +64,59 @@ pub(crate) unsafe fn replace(
         && bytes <= crate::abi_layout::GROW_SLAB_MAX_PAYLOAD_BYTES as usize
         && frame_payer.is_none()
         && let Some(original) =
-            unsafe { task_heap::try_reassign_slab(old, payer, bytes, align, kind) }
+            unsafe { task_heap::try_reassign_plain_slab(old, payer, bytes, align) }
     {
         unsafe { carrier.add(16).cast::<u64>().write(capacity) };
         original.settle_in(context, refund);
         return Ok(old);
     }
+    // SAFETY: the caller owns the carrier and the full charge was admitted.
+    Ok(unsafe {
+        replace_backing(
+            context,
+            carrier,
+            old,
+            payer,
+            frame_payer,
+            bytes,
+            align,
+            capacity,
+            moved,
+            refund,
+            kind,
+            reuse,
+        )
+    })
+}
+
+/// # Safety
+/// As for `replace`, after admission and removal of any frame allocation record.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+unsafe fn replace_backing(
+    context: &Context,
+    carrier: *mut u8,
+    old: NonNull<u8>,
+    payer: Payer,
+    frame_payer: Option<Payer>,
+    bytes: usize,
+    align: usize,
+    capacity: u64,
+    moved: usize,
+    refund: u64,
+    kind: u8,
+    reuse: bool,
+) -> NonNull<u8> {
     if reuse
         && frame_payer.is_none()
-        && unsafe { task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind) }
+        && unsafe {
+            let heap = context.heap.get_or_init(std::sync::Arc::default);
+            task_heap::try_grow_in_place(heap, old, payer, bytes, align, kind)
+        }
     {
         unsafe { carrier.add(16).cast::<u64>().write(capacity) };
         payer.settle_in(context, refund);
-        return Ok(old);
+        return old;
     }
     let replacement = task_heap::Heap::allocate(context, payer, bytes, align, kind, reuse);
     // SAFETY: the new slot is disjoint and large enough for the retained
@@ -94,5 +131,5 @@ pub(crate) unsafe fn replace(
             block::free_in(context, old, refund);
         }
     }
-    Ok(replacement)
+    replacement
 }

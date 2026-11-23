@@ -1332,12 +1332,11 @@ pub(crate) unsafe fn kind(payload: NonNull<u8>) -> u8 {
 /// new charge. On success the caller must install the new logical capacity
 /// and settle the returned payer with the old charge.
 #[cfg(not(feature = "memcheck"))]
-pub(crate) unsafe fn try_reassign_slab(
+pub(crate) unsafe fn try_reassign_plain_slab(
     payload: NonNull<u8>,
     payer: Payer,
     bytes: usize,
     align: usize,
-    kind: u8,
 ) -> Option<Payer> {
     if payload.addr().get() & (SLAB - 1) == 0 {
         return None;
@@ -1345,7 +1344,13 @@ pub(crate) unsafe fn try_reassign_slab(
     // SAFETY: the unique live slot pins its slab and owns its payer word.
     unsafe {
         let class = Page::class(page_of(payload));
-        if class.kind != kind || class.align < align || bytes > class.stride - class.offset() {
+        // A plain slab slot has only one word of prefix for its payer.
+        // Its alignment is at least that large, so padding the prefix to
+        // the slot's alignment makes the payload start at that alignment.
+        if class.kind != crate::block::PLAIN
+            || class.align < align
+            || bytes > class.stride - class.align
+        {
             return None;
         }
         let tag = Page::payer_tag(payload, class.payer_offset);

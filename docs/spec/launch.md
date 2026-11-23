@@ -385,6 +385,10 @@ does: if the recovered activation is the attempt's (a cut after install but befo
 acknowledgement), it writes and syncs the index entry for that activation, then removes the
 pending record; otherwise the attempt was abandoned and its pending record is removed once the
 recovered activation's own roots are durable. Old and new roots are both kept until then.
+The platform host's catalog keeps the attempt's pending row from before the candidate's start
+to the cutover's decision, with the exact cutover command it sent; a new session sends that
+command again and the launcher answers it from what it kept, so a host lost at any point in
+the cutover installs NEW at most once (RUNNER-SPEC §14.3 "Across sessions").
 
 **Hot deploy.** `hirsel deploy R --code-store DIR` admits R, fetches what is missing, assembles
 with the host's installed toolchain for the recipe's backend and target, and publishes the

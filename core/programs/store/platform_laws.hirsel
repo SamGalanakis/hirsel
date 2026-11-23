@@ -464,10 +464,40 @@ fn an_attempt() -> launcher.Attempt {
     launcher.Attempt(hi: 1u64, lo: 2u64)
 }
 
+// OLD answers the cutover the launcher forwarded to it.
 fn answer(mut r: Rig, ch: launcher.Child, take said: runner.HostReply) waits {
-    let mut events: List[launcher.Event] = list.new()
-    list.push(mut events, Placed(clone(ch), take said))
+    let events = launcher.cutover_reply(mut r.f, ch, take said)
     feed(mut r, take events)
+}
+
+// Ends the host process and the launcher: only the catalog survives.
+fn restart_bare(take r: Rig, max_places: u64) -> Rig waits {
+    let Rig(h: take h, f: _, now: now, starts: _, d: _) = take r
+    rig_on(close(take h), launcher.fake(), max_places, now)
+}
+
+// A group serving at gen 1 and a deploy decided but not yet sent: its Start and cutover.
+fn cut_case(c: Clock, rnd: Random) -> (Rig, launcher.Child, List[launcher.Request]) waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    let old = last(r, "g")
+    let go = must(deploy(mut r.h, "g", an_attempt(), image_two(), 2u64, image_two()), "deploy")
+    (take r, old, take go)
+}
+
+// The deploy committed once: OLD got one cutover, the row is Dirty(2) with NEW's assembly
+// as the group's root and OLD's kept, the outcome is Installed and nothing is held.
+fn committed_once(r: Rig) -> bool {
+    let installed = match deploy_outcome(r.h, "g") {
+        Some(Installed) => true,
+        _ => false
+    }
+    let rooted = match group_row(r.h, "g") {
+        Ok(Some(g)) => g.assembly == image_two() && list.len(g.retained) == 1u64 && g.retained[0u64] == image(),
+        _ => false
+    }
+    launcher.forwards(r.f) == 1u64 && is_dirty(r, "g", 2u64) && installed && rooted && launcher.held(r.f) == 0u64
 }
 
 // L43 `wake_generation_fence` (§14.3, §14.5): a report carries its child's identity, so a
@@ -554,6 +584,60 @@ fn wake_generation_fence(c: Clock, rnd: Random) -> Result[(), ()] waits {
     list.push(mut late, Ended(clone(first), launcher.End(status: Code(0i32), report: Some(None), readable: false)))
     feed(mut re, take late)
     expect(is_dirty(re, "g", 1u64), "L43: the old incarnation's late report cleared the re-added group")
+    Ok(())
+}
+
+// L44 `cutover_survives_host_loss` (§14.5): the Pending row is durable before the
+// candidate's Start and the cutover, so a host lost at any point resumes the attempt with
+// the identical command and OLD installs once: lost before Start, before forwarding, during
+// the install, and after OLD's answer but before the commit. A launcher lost after OLD
+// installed leaves nothing that proves the install: the row is Undecided and probed.
+@test
+fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    // Before Start: nothing reached the launcher.
+    let (r0, old, go) = cut_case(c, rnd)
+    let _ = take go
+    let mut a = restart(take r0, 4u64)
+    expect(gens(a, "g") == one(2u64) && launcher.forwards(a.f) == 1u64, "L44: before Start, the candidate or the cutover was not sent again")
+    answer(mut a, old, PlaceInstalled(2u64, true))
+    expect(committed_once(a), "L44 before Start: not one install committed to NEW's root with OLD retained and the hold released")
+    // Before forwarding: the Start reached the launcher, the cutover did not.
+    let (r1, old1, go1) = cut_case(c, rnd)
+    let mut b = take r1
+    let mut first: List[launcher.Request] = list.new()
+    list.push(mut first, clone(go1[0u64]))
+    pump(mut b, take first)
+    let mut b2 = restart(take b, 4u64)
+    expect(list.len(gens(b2, "g")) == 0u64 && launcher.forwards(b2.f) == 1u64, "L44: before forwarding, the candidate started again or the cutover was not sent once")
+    answer(mut b2, old1, PlaceInstalled(2u64, true))
+    expect(committed_once(b2), "L44 before forwarding: not one install committed to NEW's root with OLD retained and the hold released")
+    // During the install: OLD holds the command when the host is lost.
+    let (r2, old2, go2) = cut_case(c, rnd)
+    let mut d = take r2
+    pump(mut d, take go2)
+    let mut d2 = restart(take d, 4u64)
+    expect(launcher.forwards(d2.f) == 1u64 && is_dirty(d2, "g", 1u64), "L44: during the install, the re-send reached OLD again or the row moved")
+    answer(mut d2, old2, PlaceInstalled(2u64, true))
+    expect(committed_once(d2), "L44 during the install: not one install committed to NEW's root with OLD retained and the hold released")
+    // After OLD's answer, before the commit: the launcher returns the kept answer.
+    let (r3, old3, go3) = cut_case(c, rnd)
+    let mut e = take r3
+    pump(mut e, take go3)
+    let _ = launcher.cutover_reply(mut e.f, old3, PlaceInstalled(2u64, true))
+    expect(is_dirty(e, "g", 1u64), "L44: the host saw an answer it was not sent")
+    let e2 = restart(take e, 4u64)
+    expect(committed_once(e2), "L44 after the answer: not one install committed to NEW's root with OLD retained and the hold released")
+    // Launcher lost after OLD installed: no child and no held answer survive.
+    let (r4, old4, go4) = cut_case(c, rnd)
+    let mut l = take r4
+    pump(mut l, take go4)
+    let _ = launcher.cutover_reply(mut l.f, old4, PlaceInstalled(2u64, true))
+    let l2 = restart_bare(take l, 4u64)
+    match deploy_outcome(l2.h, "g") {
+        Some(Undecided) => (),
+        _ => fail("L44: after launcher loss the outcome is not Undecided")
+    }
+    expect(launcher.forwards(l2.f) == 0u64 && gens(l2, "g") == one(3u64) && is_dirty(l2, "g", 3u64), "L44: after launcher loss the group was not probed once at a new gen without a cutover")
     Ok(())
 }
 

@@ -243,14 +243,121 @@ type Listener {
     retiring: bool
 }
 
+// A cutover forwarded to OLD, kept until `CutoverAck`: the command as first sent and
+// OLD's answer once it gave one.
+type Held {
+    key: CutoverKey,
+    command: Bytes,
+    reply: Option[runner.HostReply]
+}
+
 pub opaque type Fake {
     children: List[Kept],
     listeners: List[Listener],
+    cutovers: List[Held],
+    forwards: u64,
     fenced: bool
 }
 
 pub fn fake() -> Fake {
-    Fake(children: list.new(), listeners: list.new(), fenced: false)
+    Fake(children: list.new(), listeners: list.new(), cutovers: list.new(), forwards: 0u64, fenced: false)
+}
+
+fn find_held(f: Fake, old: Child) -> Option[u64] {
+    for i in 0u64 .. list.len(f.cutovers) {
+        if same_child(f.cutovers[i].key.old, old) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn find_key(f: Fake, old: Child, a: Attempt) -> Option[u64] {
+    for i in 0u64 .. list.len(f.cutovers) {
+        let k = f.cutovers[i].key
+        if same_child(k.old, old) && k.attempt.hi == a.hi && k.attempt.lo == a.lo {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn attempt_of(b: Bytes) -> Option[Attempt] {
+    let mut at = 0u64
+    let Ok(hi) = std.codec.take_u64(b, mut at) else {
+        return None
+    }
+    let Ok(lo) = std.codec.take_u64(b, mut at) else {
+        return None
+    }
+    if at != list.len(b) {
+        return None
+    }
+    Some(Attempt(hi: hi, lo: lo))
+}
+
+// A cutover command for OLD: forwarded once while OLD runs; an identical re-send returns
+// OLD's saved answer, or nothing while OLD holds it; a different command for the same
+// attempt, or one for an OLD with no endpoint, is refused.
+fn cutover(mut f: Fake, take old: Child, take command: runner.HostCommand, mut out: List[Event]) {
+    let ab = match command {
+        HostCutover(b, _, _, _) => {
+            let got: Bytes = clone(b);
+            got
+        },
+        _ => return
+    }
+    let codec: std.codec.Codec[runner.HostCommand] = std.codec.of()
+    let mut sent: Bytes = list.new()
+    if let Error(_) = std.codec.encode(codec, command, mut sent) {
+        return
+    }
+    let Some(a) = attempt_of(ab) else {
+        push_event(mut out, Placed(take old, PlaceRefused("a malformed attempt")));
+        return
+    }
+    if let Some(i) = find_key(f, old, a) {
+        if f.cutovers[i].command != sent {
+            push_event(mut out, Placed(take old, PlaceRefused("a different cutover for this attempt")))
+        } else if let Some(r) = f.cutovers[i].reply {
+            push_event(mut out, CutoverResult(take old, a, clone(r)))
+        }
+        return
+    }
+    let running = match find_child(f, old) {
+        Some(i) => live(f.children[i].state.phase),
+        None => false
+    }
+    if !running {
+        push_event(mut out, Placed(take old, PlaceRefused("no endpoint")));
+        return
+    }
+    f.forwards += 1u64
+    list.push(mut f.cutovers, Held(key: CutoverKey(old: take old, attempt: a), command: take sent, reply: None))
+}
+
+// OLD answers the cutover it holds.
+pub fn cutover_reply(mut f: Fake, old: Child, take reply: runner.HostReply) -> List[Event] {
+    let mut out: List[Event] = list.new()
+    let Some(i) = find_held(f, old) else {
+        return take out
+    }
+    if let Some(_) = f.cutovers[i].reply {
+        return take out
+    }
+    f.cutovers[i].reply = Some(clone(reply))
+    push_event(mut out, CutoverResult(clone(old), f.cutovers[i].key.attempt, take reply))
+    take out
+}
+
+// How many cutover commands reached a serving child.
+pub fn forwards(f: Fake) -> u64 {
+    f.forwards
+}
+
+// The cutovers the fake still holds.
+pub fn held(f: Fake) -> u64 {
+    list.len(f.cutovers)
 }
 
 fn find_listener(f: Fake, g: Group) -> Option[u64] {
@@ -357,7 +464,11 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
                     f.listeners[i].reported = true
                 }
             }
-            push_event(mut out, Inventory(take states, take readable, list.new()))
+            let mut keys: List[CutoverKey] = list.new()
+            for i in 0u64 .. list.len(f.cutovers) {
+                list.push(mut keys, clone(f.cutovers[i].key))
+            }
+            push_event(mut out, Inventory(take states, take readable, take keys))
         },
         Bind(take g, _, Contained, _, _) => push_event(mut out, BindFailed(take g, "contained: the fake has no containment host")),
         Bind(take g, _, Uncontained, _, _) => {
@@ -407,7 +518,7 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
                 }
             }
         },
-        Command(_, _) => (),
+        Command(take c, take command) => cutover(mut f, take c, take command, mut out),
         Retire(take g) => {
             if let Some(i) = find_listener(f, g) {
                 f.listeners[i].retiring = true
@@ -429,7 +540,13 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
         AdmitData(_, _) => (),
         AdmitEnd(_) => (),
         Assemble(take a) => push_event(mut out, AdmissionFailed(take a, Invalid("the fake has no admission"))),
-        CutoverAck(_, _) => (),
+        CutoverAck(take c, a) => {
+            if let Some(i) = find_key(f, c, a) {
+                let last = list.len(f.cutovers) - 1u64
+                list.swap(mut f.cutovers, i, last)
+                let _ = list.pop(mut f.cutovers)
+            }
+        },
     }
     take out
 }
@@ -454,6 +571,16 @@ pub fn end(mut f: Fake, c: Child, status: Status, report: Option[Option[u64]]) -
     let ended = End(status: status, report: report, readable: readable)
     f.children[i].state.phase = Exited(clone(ended))
     push_event(mut out, Ended(clone(c), take ended))
+    if let Some(k) = find_held(f, c) {
+        let unanswered = match f.cutovers[k].reply {
+            None => true,
+            Some(_) => false
+        }
+        if unanswered {
+            f.cutovers[k].reply = Some(PlaceUncertain)
+            push_event(mut out, CutoverResult(clone(c), f.cutovers[k].key.attempt, PlaceUncertain))
+        }
+    }
     if retiring && !group_live(f, c.group) {
         push_event(mut out, Retired(clone(c.group)))
     }

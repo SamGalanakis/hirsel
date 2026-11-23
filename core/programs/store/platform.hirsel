@@ -34,11 +34,14 @@ pub type GroupRow: codec + send {
 
 pub type DeployOutcome: codec + send = Pending | Installed | Failed(String) | Undecided
 
-// A deploy attempt's pending record: NEW's assembly and activation, OLD's gen and the
-// candidate's (§14.3 "Cutover commit and abort").
+// A deploy attempt's pending record: NEW's assembly and activation, the image digest its
+// cutover command names, OLD's gen and the candidate's (§14.3 "Cutover commit and abort").
+// It is durable before the candidate's Start and the cutover command, so a new session
+// re-sends exactly that command (§14.5).
 pub type DeployRow: codec + send {
     attempt: launcher.Attempt,
     assembly: Bytes,
+    digest: Bytes,
     activation: u64,
     old: u64,
     candidate: u64,
@@ -340,6 +343,16 @@ fn serving_launch(name: String, g: GroupRow, gen: u64, activation: u64, assembly
 
 fn child_of(name: String, incarnation: u64, gen: u64) -> launcher.Child {
     launcher.Child(group: group_of(name, incarnation), role: Serving(gen))
+}
+
+// The one cutover command an attempt sends to OLD, first and on every re-send.
+fn cutover_command(name: String, incarnation: u64, old: u64, attempt: launcher.Attempt, digest: Bytes) -> launcher.Request {
+    Command(child_of(name, incarnation, old), HostCutover(attempt_bytes(attempt), clone(digest), CUTOVER_PAUSE_MS, false))
+}
+
+// The decision on the attempt is durable: the launcher forgets OLD's saved answer.
+fn cutover_ack(name: String, cut: Cut) -> launcher.Request {
+    CutoverAck(child_of(name, cut.incarnation, cut.old), cut.attempt)
 }
 
 fn attempt_bytes(a: launcher.Attempt) -> Bytes {
@@ -863,6 +876,7 @@ fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[
     if let Error(_) = decided(mut h.db, take made) {
         return
     }
+    list.push(mut out, cutover_ack(name, cut))
     let phase = if cut.opened {
         Ready(now.mono_ns)
     } else {
@@ -897,6 +911,7 @@ fn abort_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, why: String,
     if let Error(_) = decided(mut h.db, take made) {
         return
     }
+    list.push(mut out, cutover_ack(name, cut))
     list.push(mut out, Command(child_of(name, g.incarnation, cut.old), HostAbort(attempt_bytes(cut.attempt))))
     if let None = cut.candidate_end {
         list.push(mut out, Stop(child_of(name, g.incarnation, cut.candidate)))
@@ -925,6 +940,7 @@ fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Re
     if let Error(_) = decided(mut h.db, take made) {
         return
     }
+    list.push(mut out, cutover_ack(name, cut))
     let mut v = vol_read(h, name)
     v.cut = None
     v.run = None
@@ -962,6 +978,17 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                     },
                     PlaceDrift => abort_cut(mut h, name, g, take cut, "drift", now, mut out),
                     PlaceRefused(why) => abort_cut(mut h, name, g, take cut, why, now, mut out),
+                    // OLD ended before it answered (§14.5): as its end, without the report.
+                    PlaceUncertain => {
+                        cut.old_ended = true
+                        if cut.opened {
+                            commit_cut(mut h, name, take cut, now, mut out)
+                        } else if let Some(_) = cut.candidate_end {
+                            undecided(mut h, name, take cut, mut out)
+                        } else {
+                            set_cut(mut h, name, Some(take cut))
+                        }
+                    },
                     _ => (),
                 }
             }
@@ -1031,7 +1058,7 @@ fn binds(h: Host, mut out: List[launcher.Request]) {
 // Restart and reconnect (§14.5): adopt the authoritative children and pending-deploy
 // candidates the inventory names, stop the rest, probe each Dirty row left without a child,
 // and wake each readable listener and each passed due time.
-fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[launcher.Group], now: Now, mut out: List[launcher.Request]) waits {
+fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[launcher.Group], held: List[launcher.CutoverKey], now: Now, mut out: List[launcher.Request]) waits {
     if !h.binds_sent {
         binds(h, mut out)
         h.binds_sent = true
@@ -1104,6 +1131,7 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
     for (c, e) in ends {
         ended(mut h, c, e, now, mut out)
     }
+    resume_cuts(mut h, held, mut out)
     for name in dirty_names(h) {
         let Ok(Some(g)) = group_row(h, name) else {
             continue
@@ -1125,6 +1153,70 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
         let _ = wake_cause(mut h, g.name, Arrival, now, mut out)
     }
     due_wakes(mut h, now, mut out)
+}
+
+// A new session resumes each Pending deploy row (§14.5). With the candidate known, the
+// identical cutover command is sent again: the launcher forwards it if it never did, stays
+// silent while OLD holds it, and otherwise returns OLD's saved answer or Uncertain. With
+// OLD running and no candidate, the candidate's Start goes out again first. With neither,
+// nothing proves the install: the row is Undecided and the group is probed. A cutover the
+// launcher holds for no Pending row is acknowledged.
+fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launcher.Request]) waits {
+    let mut rows: List[(String, DeployRow)] = list.new()
+    {
+        let Ok(take scanned) = store.scan(store.snapshot(h.db), store.shape(h.t.deploys), Unbounded, Unbounded) else {
+            return
+        }
+        let mut found = take scanned
+        while let Ok(Some((name, d))) = store.next(mut found) {
+            if let Pending = d.outcome {
+                list.push(mut rows, (string.from(name), clone(d)))
+            }
+        }
+    }
+    let mut resumed: List[launcher.CutoverKey] = list.new()
+    for (name, d) in rows {
+        let Ok(Some(g)) = group_row(h, name) else {
+            continue
+        }
+        if let Some(_) = cut_of(h, name) {
+            list.push(mut out, cutover_command(name, g.incarnation, d.old, d.attempt, d.digest))
+        } else if run_gen(h, name) == Some(d.old) {
+            let Ok(cfg) = host_config(h) else {
+                continue
+            }
+            let cut = Cut(attempt: d.attempt, incarnation: g.incarnation, old: d.old, candidate: d.candidate, activation: d.activation, old_end: None, old_ended: false, opened: false, candidate_end: None)
+            set_cut(mut h, name, Some(cut))
+            list.push(mut out, serving_launch(name, g, d.candidate, d.activation, d.assembly, cfg.idle_ms, Some(d.old)))
+            list.push(mut out, cutover_command(name, g.incarnation, d.old, d.attempt, d.digest))
+        } else {
+            let made = {
+                let t = view h.t
+                store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(), Refused] {
+                    let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+                        return Error(Missing("deploy"))
+                    }
+                    let mut row = found_d
+                    row.outcome = Undecided
+                    st(store.put(mut tx, t.deploys, name, row))
+                })
+            }
+            let _ = decided(mut h.db, take made)
+            continue
+        }
+        list.push(mut resumed, launcher.CutoverKey(old: child_of(name, g.incarnation, d.old), attempt: d.attempt))
+    }
+    for k in held {
+        let mut live = false
+        for r in resumed {
+            if launcher.same_child(r.old, k.old) && r.attempt.hi == k.attempt.hi && r.attempt.lo == k.attempt.lo {
+                live = true
+            }
+        }
+        if !live {
+            list.push(mut out, CutoverAck(clone(k.old), k.attempt))
+        }
+    }
 }
 
 // Wakes every Clean row whose due time has passed, in due order.
@@ -1177,7 +1269,7 @@ fn bind_failed(mut h: Host, g: launcher.Group, why: String) {
 pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Request] waits {
     let mut out: List[launcher.Request] = list.new()
     match take e {
-        Inventory(children, readable, _) => reconcile(mut h, children, readable, now, mut out),
+        Inventory(children, readable, held) => reconcile(mut h, children, readable, held, now, mut out),
         Launched(c, Started) => launched(mut h, c),
         Launched(c, Exited(fin)) => ended(mut h, c, fin, now, mut out),
         Refused(c, why) => refused(mut h, c, why, now, mut out),
@@ -1365,7 +1457,7 @@ pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, assembly: By
             }
             let c = w.gen + 1u64
             st(store.put(mut tx, t.wake, name, WakeRow(wake: Dirty(a), gen: c)))?
-            st(store.put(mut tx, t.deploys, name, DeployRow(attempt: attempt, assembly: clone(assembly), activation: activation, old: old, candidate: c, outcome: Pending)))?
+            st(store.put(mut tx, t.deploys, name, DeployRow(attempt: attempt, assembly: clone(assembly), digest: clone(digest), activation: activation, old: old, candidate: c, outcome: Pending)))?
             Ok(c)
         })
     }
@@ -1375,7 +1467,7 @@ pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, assembly: By
     set_cut(mut h, name, Some(cut))
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, serving_launch(name, g, c, activation, assembly, cfg.idle_ms, Some(old)))
-    list.push(mut out, Command(child_of(name, g.incarnation, old), HostCutover(attempt_bytes(attempt), clone(digest), CUTOVER_PAUSE_MS, false)))
+    list.push(mut out, cutover_command(name, g.incarnation, old, attempt, digest))
     Ok(take out)
 }
 

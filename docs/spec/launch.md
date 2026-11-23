@@ -253,8 +253,7 @@ launch and never of the recipe. `hirsel run` and `hirsel build --manifest` launc
 caller's working directory. The launcher starts every child of a group (describe, preview,
 prepare and serving) in that group's working directory, set by `hirsel register --workdir DIR`
 when the group is added to the host. A recipe that moves to another host therefore resolves its relative paths
-against that host's place directory, and the deploy preview prints each `Dir` binding with the
-absolute path it resolves to there.
+against that host's place directory.
 
 **Authority.** A host takes a recipe only when an authorised deploy request names its R. That
 is a request on the host's operator socket ("The operator socket" below), whose directory
@@ -266,9 +265,9 @@ selects a publication the host has recorded, by its R, or submits source, which 
 publishes itself with the normal checker, using the host's own compiler caches and package
 images and the bounds below. Its caches may be a resident compiler's memory
 ([cli](cli.md#resident-compiler)); a publication is the same R whether a resident or a
-one-shot compiler produced it. The operator still approves the grant bindings each deploy would
-give, as the preview shows them. A recipe that grants `Foreign=D` is deployed only when the
-request passes `--grant Foreign=D` itself, and the deploy's output shows, before any child runs,
+one-shot compiler produced it. The operator approves the grant bindings for each deploy.
+A recipe that grants `Foreign=D` is deployed only when the request passes `--grant Foreign=D`
+itself, and the deploy's output shows, before any child runs,
 the interface, target, selected archive digest and recipe of each such grant
 ([FFI-4](foreign.md#ffi-4-the-foreign-capability)). A recipe that grants `Exec=FILE NAME`
 (unbuilt) is deployed only when the request passes that grant itself. The host then loads the
@@ -516,8 +515,7 @@ An **authority group** is the unit a platform runs. One group is one program, on
 recipe R, one set of grant bindings, one store, and while it is live, one process that holds
 that store. The group's name is its key in the platform catalog. It never changes, and no
 two groups share a store directory. A deploy replaces a group's recipe and keeps its name and
-store. Grants are approved per group, at each deploy, as the deploy preview shows them
-(above).
+store. Grants are approved per group at each deploy.
 
 - **One process while live.** At most one process holds the group's store (STORE's `LOCK`).
   A hot deploy's prepare child opens only the export and the staged migration, never the
@@ -681,7 +679,8 @@ answered `Error(Protocol)` and closes only that exchange.
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
 A report is (fetchNs, assembleNs, pause, preview): two `Option[u64]`, a pause (0 NotStarted,
-1 AwaitWrite, 2 Measured(ns), 3 MeasurementLost, 4 StartFailed(detail)) and `List[String]`.
+1 AwaitWrite, 2 Measured(ns), 3 MeasurementLost, 4 StartFailed(detail)) and an empty
+`List[String]`.
 
 **Durable identity.** The catalog keeps one `requests` row per D: its canonical Begin bytes,
 G, input, current attempt, admission deadline and, once decided, its terminal phase, and one
@@ -987,14 +986,11 @@ descriptors reach it. The successor uses the same subtree and empties every cont
 predecessor left before it answers `Hello`. A serving start with a `Net` binding is refused
 until the container can enforce NET-6.
 
-### Deploy preview of pending triggers
+### Preparing the pending trigger report
 
-The deploy preview (above) adds one more report: what NEW will do with the triggers already
-pending in the group's store. Only the prepare child can compute it, because only it has
-NEW's registry and the store's rows as NEW's migration leaves them. So the scan runs in the
-prepare child, after `migrate` is staged and both handle sets are open, and before
-`PREPARED` is synced. It writes the report as its own file, `TRIGGERS`, beside `PREPARED`
-in the export directory. The `PREPARED` format does not change.
+The prepare child scans the triggers in the staged store after `migrate` and after opening
+both handle sets. It writes `TRIGGERS` beside `PREPARED` in the export directory before
+syncing `PREPARED`.
 
 For each pending trigger row of the staged catalog (`store.triggers.pending`, branch 0), the
 child classifies it against NEW exactly as NEW's head will at dispatch (RUNNER-SPEC §14.6).
@@ -1022,14 +1018,10 @@ takes the first that applies:
    NEW's code when it comes due.
 5. **`unchanged`**: every other row.
 
-The report is one row per (class, kind, entry path, argument schema): the count of
-triggers and the earliest due time. These are exact. A report that does not fit the prepare
-child's bound fails the preview with `Limit(triggers)`. It is never truncated. The deploy
-output prints the rows, `held` and `gone` first. Like the rest of the preview, it gates
-nothing. The image-digest guard on started granted runs stays as it is: `Exported.revision`
-does not cover a change of `handles` (a table name, a binding, a key codec), and the image
-digest does, so a revision-keyed guard would let a started run continue against changed
-handles.
+The report gives the exact count and earliest due time for each (class, kind, entry path,
+argument schema). A report above the prepare child's bound fails
+prepare with `Limit(triggers)`. The guard on started granted runs uses the image digest,
+which covers changes in `handles` such as table names, bindings and key codecs.
 
 Laws. Built for the launcher (crates/hirsel-core-driver/src/launcher/laws.rs), with the
 host's half unbuilt: `group_one_head`, where a cutover's NEW head opens the store only after

@@ -380,11 +380,21 @@ the pin, refuses a recipe with a foreign leaf before reading any record of the t
 arguments and launch metadata from the recording.
 
 When the host starts, before any collection, it reconciles every attempt. Staging with no
-pending record is removed. For each pending record it probes the place as hot deploy's recovery
-does: if the recovered activation is the attempt's (a cut after install but before its
-acknowledgement), it writes and syncs the index entry for that activation, then removes the
-pending record; otherwise the attempt was abandoned and its pending record is removed once the
-recovered activation's own roots are durable. Old and new roots are both kept until then.
+pending record is removed. A pending record that no surviving child or held answer can decide
+is **Undecided**: a durable state that keeps both OLD's and NEW's roots, under which no install
+command, ordinary wake, second deploy or retirement may change the group's roots. The host
+decides it only by what the store reports under its `LOCK`, through a recovery probe. The probe is a
+serving launch with no predecessor at a fresh generation. Its pair is saved in the
+pending record as probe intent, never as the group's current pair. The first probe opens NEW's
+assembly at the attempt's activation `v`. An open of NEW at `v` proves the install: the host
+makes NEW the current assembly and activation, keeps OLD's as retained, and records the
+deploy `Installed`, in one durable transaction, and the probe goes on serving. A refusal
+`PlaceCurrent` naming OLD's recorded activation proves nothing yet: it selects OLD's pair, and
+once that probe has ended the next probe opens OLD's assembly at OLD's activation. Only that
+open proves `v` was never installed, and then the deploy is recorded failed (`not installed
+after recovery`) with OLD's roots kept. Any other answer (`Held`, a missing image, an unknown
+activation, an I/O failure) decides nothing: both roots stay, and the probe is retried under the
+ordinary backoff. Neither a timer nor a retry count decides a root.
 The platform host's catalog keeps the attempt's pending row from before the candidate's start
 to the cutover's decision, with the exact cutover command it sent; a new session sends that
 command again and the launcher answers it from what it kept, so a host lost at any point in

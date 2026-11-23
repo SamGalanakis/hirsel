@@ -25,6 +25,8 @@ type Rig {
     f: launcher.Fake,
     now: Now,
     starts: List[launcher.Child],
+    // Every Start the host sent, as sent.
+    sent: List[launcher.Launch],
     d: Option[Driver]
 }
 
@@ -62,6 +64,7 @@ fn pump(mut r: Rig, take reqs: List[launcher.Request]) waits {
         i += 1u64
         if let Start(l) = req {
             list.push(mut r.starts, launcher.Child(group: clone(l.group), role: launcher.role_of(l.mode)))
+            list.push(mut r.sent, clone(l))
         }
         let events = launcher.handle(mut r.f, take req)
         for e in events {
@@ -118,7 +121,7 @@ fn feed(mut r: Rig, take events: List[launcher.Event]) waits {
 
 fn rig_on(take db: store.Db, f: launcher.Fake, max_places: u64, now: Now) -> Rig waits {
     let (h, hello) = must(open(take db, Config(max_places: max_places, idle_ms: 1000u64)), "open")
-    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new(), d: None)
+    let mut r = Rig(h: take h, f: clone(f), now: now, starts: list.new(), sent: list.new(), d: None)
     pump(mut r, take hello)
     r
 }
@@ -129,7 +132,7 @@ fn rig(c: Clock, rnd: Random, max_places: u64) -> Rig waits {
 
 // Ends the host process: only its store and the launcher survive.
 fn restart(take r: Rig, max_places: u64) -> Rig waits {
-    let Rig(h: take h, f: take f, now: now, starts: _, d: _) = take r
+    let Rig(h: take h, f: take f, now: now, starts: _, sent: _, d: _) = take r
     rig_on(close(take h), f, max_places, now)
 }
 
@@ -472,7 +475,7 @@ fn answer(mut r: Rig, ch: launcher.Child, take said: runner.HostReply) waits {
 
 // Ends the host process and the launcher: only the catalog survives.
 fn restart_bare(take r: Rig, max_places: u64) -> Rig waits {
-    let Rig(h: take h, f: _, now: now, starts: _, d: _) = take r
+    let Rig(h: take h, f: _, now: now, starts: _, sent: _, d: _) = take r
     rig_on(close(take h), launcher.fake(), max_places, now)
 }
 
@@ -658,11 +661,113 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let _ = launcher.cutover_reply(mut l.f, old4, PlaceInstalled(2u64, true))
     let l2 = restart_bare(take l, 4u64)
     match deploy_outcome(l2.h, "g") {
-        Some(Undecided) => (),
+        Some(Undecided(_)) => (),
         _ => fail("L44: after launcher loss the outcome is not Undecided")
     }
     expect(launcher.forwards(l2.f) == 0u64 && gens(l2, "g") == one(3u64) && is_dirty(l2, "g", 3u64), "L44: after launcher loss the group was not probed once at a new gen without a cutover")
+    // The store installed v = 2: the probe opens NEW's pair, and that open installs NEW.
+    let mut at_new = take l2
+    expect(starts_are(at_new, one_pair(3u64, 2u64, image_two())), "L44 launcher loss, store at NEW: the probe did not start NEW's assembly at v")
+    expect(rooted_at(at_new, image(), 1u64) && launcher.forwards(at_new.f) == 0u64, "L44 launcher loss, store at NEW: the root moved before the probe opened")
+    place_answers(mut at_new, 2u64)
+    expect(installed_new(at_new, 2u64) && is_dirty(at_new, "g", 3u64) && starts_are(at_new, one_pair(3u64, 2u64, image_two())) && launcher.forwards(at_new.f) == 0u64, "L44 launcher loss, store at NEW: the probe's open did not install NEW once at Dirty(3)")
+    // The launcher was lost with the cutover forwarded and not yet installed: the store is at
+    // OLD's 1. NEW's probe is told so, OLD's pair is probed next, and its open abandons v.
+    let (r7, _, go7) = cut_case(c, rnd)
+    let mut n = take r7
+    pump(mut n, take go7)
+    let mut at_old = restart_bare(take n, 4u64)
+    place_answers(mut at_old, 1u64)
+    expect(rooted_at(at_old, image(), 1u64) && is_dirty(at_old, "g", 3u64), "L44 launcher loss, store at OLD: NEW's refused probe moved the root or the row")
+    let probe = last(at_old, "g")
+    finish(mut at_old, probe, Code(1i32), None)
+    expect(starts_are(at_old, two_pairs(3u64, 2u64, image_two(), 4u64, 1u64, image())), "L44 launcher loss, store at OLD: OLD's pair was not probed next")
+    place_answers(mut at_old, 1u64)
+    let abandoned = match deploy_outcome(at_old.h, "g") {
+        Some(Failed(why)) => why == "not installed after recovery",
+        _ => false
+    }
+    expect(abandoned && rooted_at(at_old, image(), 1u64) && is_dirty(at_old, "g", 4u64) && list.len(status(at_old.h).failing) == 0u64, "L44 launcher loss, store at OLD: OLD's open did not abandon the deploy with OLD's root kept")
     Ok(())
+}
+
+type Pair {
+    gen: u64,
+    activation: u64,
+    assembly: Bytes
+}
+
+fn one_pair(gen: u64, activation: u64, assembly: Bytes) -> List[Pair] {
+    let mut out: List[Pair] = list.new()
+    list.push(mut out, Pair(gen: gen, activation: activation, assembly: clone(assembly)))
+    out
+}
+
+fn two_pairs(g1: u64, a1: u64, s1: Bytes, g2: u64, a2: u64, s2: Bytes) -> List[Pair] {
+    let mut out = one_pair(g1, a1, s1)
+    list.push(mut out, Pair(gen: g2, activation: a2, assembly: clone(s2)))
+    out
+}
+
+// The serving Starts sent since the rig began, as (gen, activation, assembly).
+fn starts_are(r: Rig, want: List[Pair]) -> bool {
+    let mut got: List[Pair] = list.new()
+    for l in r.sent {
+        if let ServingMode(gen, serve) = l.mode {
+            list.push(mut got, Pair(gen: gen, activation: serve.activation, assembly: clone(l.assembly)))
+        }
+    }
+    if list.len(got) != list.len(want) {
+        return false
+    }
+    for i in 0u64 .. list.len(got) {
+        if got[i].gen != want[i].gen || got[i].activation != want[i].activation || got[i].assembly != want[i].assembly {
+            return false
+        }
+    }
+    true
+}
+
+fn rooted_at(r: Rig, assembly: Bytes, activation: u64) -> bool {
+    match group_row(r.h, "g") {
+        Ok(Some(g)) => g.assembly == assembly && g.activation == activation,
+        _ => false
+    }
+}
+
+fn installed_new(r: Rig, activation: u64) -> bool {
+    let done = match deploy_outcome(r.h, "g") {
+        Some(Installed) => true,
+        _ => false
+    }
+    let rooted = match group_row(r.h, "g") {
+        Ok(Some(g)) => g.assembly == image_two() && g.activation == activation && list.len(g.retained) == 1u64 && g.retained[0u64] == image(),
+        _ => false
+    }
+    done && rooted
+}
+
+// The place's answer to its last serving Start under STORE's LOCK, with the store at
+// `store_at` (RUNNER-SPEC §6, runner `head_prepare`): it opens when the selection names that
+// version, and otherwise answers PlaceCurrent with the store's version.
+fn place_answers(mut r: Rig, store_at: u64) waits {
+    let mut chosen: Option[(launcher.Child, u64)] = None
+    for l in r.sent {
+        if let ServingMode(gen, serve) = l.mode {
+            chosen = Some((launcher.Child(group: clone(l.group), role: Serving(gen)), serve.activation))
+        }
+    }
+    let Some((ch, selected)) = chosen else {
+        fail("no serving start to answer")
+    }
+    let reply: runner.HostReply = if selected == store_at {
+        PlaceOpened(runner.PlaceReady(version: store_at, store_hi: 0u64, store_lo: 0u64, release: list.new(), retain_from: 0u64, ready_ns: 0u64))
+    } else {
+        PlaceCurrent(store_at, list.new())
+    }
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Placed(take ch, take reply))
+    feed(mut r, take events)
 }
 
 // Writes `n` Clean groups straight into the catalog, `due` of them overdue.

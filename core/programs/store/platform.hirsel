@@ -32,7 +32,12 @@ pub type GroupRow: codec + send {
     retiring: Option[Disposition],
 }
 
-pub type DeployOutcome: codec + send = Pending | Installed | Failed(String) | Undecided
+// Which of an Undecided deploy's two recorded pairs the group's next probe opens: NEW's
+// assembly at the deploy's activation first, OLD's after NEW was answered `PlaceCurrent`
+// naming OLD's activation (launch.md "When the host starts").
+pub type Probe: codec + send = ProbeNew | ProbeOld
+
+pub type DeployOutcome: codec + send = Pending | Installed | Failed(String) | Undecided(Probe)
 
 // A deploy attempt's pending record: NEW's assembly and activation, the image digest its
 // cutover command names, OLD's gen and the candidate's (§14.3 "Cutover commit and abort").
@@ -182,7 +187,10 @@ type Vol {
     count: u64,
     retry_at: Option[u64],
     failing: bool,
-    last: String
+    last: String,
+    // The probe was answered with the other pair's activation: its end starts the next
+    // probe at once, outside backoff.
+    reprobe: bool
 }
 
 pub opaque type Host {
@@ -384,7 +392,7 @@ pub fn wake_row(h: Host, name: String) -> Option[WakeRow] {
 }
 
 fn empty_vol() -> Vol {
-    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new())
+    Vol(run: None, cut: None, count: 0u64, retry_at: None, failing: false, last: string.new(), reprobe: false)
 }
 
 // The volatile state of one group, by value: read it, change it, put it back.
@@ -522,6 +530,17 @@ fn mark_dirty(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u6
 
 // A new serving launch for a row that is already Dirty (a probe, a relaunch after a
 // readable end, a backoff retry): no check, because `dirty` does not change.
+// The pair a serving launch of an already Dirty row opens: the group's recorded assembly
+// and activation, or while its deploy is Undecided, the pair that deploy's probe selects.
+fn probe_pair(tx: store.Tx, t: Tables, name: String, g: GroupRow) -> Result[(Bytes, u64), Refused] {
+    if let Some(d) = st(store.fetch(tx, store.shape(t.deploys), name))? {
+        if let Undecided(ProbeNew) = d.outcome {
+            return Ok((clone(d.assembly), d.activation))
+        }
+    }
+    Ok((clone(g.assembly), g.activation))
+}
+
 fn remark(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u64), Refused] {
     let Some(g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
         return Error(Unknown)
@@ -572,17 +591,20 @@ fn mark_clean(mut tx: store.Tx, t: Tables, name: String, g: u64, next_due: Optio
 fn launch_dirty(mut h: Host, name: String, probe: bool, mut out: List[launcher.Request]) -> Result[(), Refused] waits {
     let made = {
         let t = view h.t
-        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, u64), Refused] {
-            remark(mut tx, t, name)
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[(GroupRow, u64, Bytes, u64), Refused] {
+            let (g, gen) = remark(mut tx, t, name)?
+            let (assembly, activation) = probe_pair(tx, t, name, g)?
+            Ok((g, gen, assembly, activation))
         })
     }
-    let (g, gen) = decided(mut h.db, take made)?
+    let (g, gen, assembly, activation) = decided(mut h.db, take made)?
     let c = host_config(h)?
-    list.push(mut out, serving_launch(name, g, gen, g.activation, g.assembly, c.idle_ms, None))
+    list.push(mut out, serving_launch(name, g, gen, activation, assembly, c.idle_ms, None))
     let mut v = vol_read(h, name)
     v.run = Some(Run(gen: gen, phase: Requested))
     v.retry_at = None
     v.failing = false
+    v.reprobe = false
     vol_put(mut h, name, take v)
     if probe {
         h.probes += 1u64
@@ -760,6 +782,11 @@ fn apply_end(mut h: Host, name: String, g: GroupRow, gen: u64, e: launcher.End, 
         vol_put(mut h, name, take v);
         return
     }
+    if v.reprobe {
+        vol_put(mut h, name, take v)
+        let _ = launch_dirty(mut h, name, true, mut out)
+        return
+    }
     match clean_report(e) {
         Some(next_due) => {
             v.count = 0u64
@@ -856,6 +883,19 @@ fn ended(mut h: Host, c: launcher.Child, e: launcher.End, now: Now, mut out: Lis
     list.push(mut out, Acknowledge(clone(c)))
 }
 
+// The store installed the deploy's activation: NEW's assembly becomes the group's root,
+// OLD's is retained, and the deploy is Installed.
+fn install_new(mut tx: store.Tx, t: Tables, name: String, take g: GroupRow, take d: DeployRow) -> Result[(), Refused] {
+    let mut grp = take g
+    let mut row = take d
+    list.push(mut grp.retained, clone(grp.assembly))
+    grp.assembly = clone(row.assembly)
+    grp.activation = row.activation
+    st(store.put(mut tx, t.groups, name, grp))?
+    row.outcome = Installed
+    st(store.put(mut tx, t.deploys, name, row))
+}
+
 // §14.3 "Commit": OLD answered Installed(v), or the candidate opened the store at v and OLD
 // has ended. The row moves to `Dirty(c)` with the deploy outcome in one transaction.
 fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[launcher.Request]) waits {
@@ -867,23 +907,16 @@ fn commit_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[
                 return Error(Unknown)
             }
             let mut w = found_w
-            let Some(found_grp) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+            let Some(grp) = st(store.fetch(tx, store.shape(t.groups), name))? else {
                 return Error(Unknown)
             }
-            let mut grp = found_grp
-            let Some(found_d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+            let Some(d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
                 return Error(Missing("deploy"))
             }
-            let mut d = found_d
             w.wake = Dirty(candidate)
             st(store.put(mut tx, t.wake, name, w))?
             st(store.put(mut tx, t.dirty, name, candidate))?
-            list.push(mut grp.retained, clone(grp.assembly))
-            grp.assembly = clone(d.assembly)
-            grp.activation = d.activation
-            st(store.put(mut tx, t.groups, name, grp))?
-            d.outcome = Installed
-            st(store.put(mut tx, t.deploys, name, d))
+            install_new(mut tx, t, name, take grp, take d)
         })
     }
     if let Error(_) = decided(mut h.db, take made) {
@@ -936,8 +969,8 @@ fn abort_cut(mut h: Host, name: String, g: GroupRow, take cut: Cut, why: String,
 }
 
 // §14.3 "Undecided": neither OLD's answer nor the candidate's open proves the install.
-// Both ends are discarded and the group is probed at a new generation with its recorded
-// activation.
+// Both ends are discarded and the group is probed at a new generation, first with NEW's
+// assembly at the deploy's activation (`probe_pair`).
 fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Request]) waits {
     let made = {
         let t = view h.t
@@ -946,7 +979,7 @@ fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Re
                 return Error(Missing("deploy"))
             }
             let mut d = found_d
-            d.outcome = Undecided
+            d.outcome = Undecided(ProbeNew)
             st(store.put(mut tx, t.deploys, name, d))
         })
     }
@@ -1024,11 +1057,69 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
         },
         None => {
             if run_gen(h, name) == Some(gen) {
-                if let PlaceOpened(_) = reply {
-                    set_run(mut h, name, Some(Run(gen: gen, phase: Ready(now.mono_ns))))
+                match reply {
+                    PlaceOpened(ready) => {
+                        set_run(mut h, name, Some(Run(gen: gen, phase: Ready(now.mono_ns))))
+                        settle_probe(mut h, name, ready.version, true)
+                    },
+                    PlaceCurrent(version, _) => settle_probe(mut h, name, version, false),
+                    _ => (),
                 }
             }
         },
+    }
+}
+
+// The probe of an Undecided deploy answered (launch.md "When the host starts"). Only an
+// open of the selected pair decides: NEW's at the deploy's activation installs it, OLD's at
+// the group's recorded activation abandons it. An answer that the store is at the other
+// pair's activation selects that pair for the next probe, which starts when this one ends.
+// Any other answer decides nothing, and the row keeps both roots.
+fn settle_probe(mut h: Host, name: String, version: u64, opened: bool) waits {
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, scoped fn(mut tx: store.Tx) -> Result[bool, Refused] {
+            let Some(d) = st(store.fetch(tx, store.shape(t.deploys), name))? else {
+                return Ok(false)
+            }
+            let probe = match d.outcome {
+                Undecided(ProbeNew) => ProbeNew,
+                Undecided(ProbeOld) => ProbeOld,
+                _ => return Ok(false),
+            }
+            let Some(g) = st(store.fetch(tx, store.shape(t.groups), name))? else {
+                return Ok(false)
+            }
+            let (new_at, old_at) = (d.activation, g.activation)
+            let mut row = d
+            match (probe, opened) {
+                (ProbeNew, true) if version == new_at => {
+                    install_new(mut tx, t, name, take g, take row)?;
+                    Ok(false)
+                },
+                (ProbeOld, true) if version == old_at => {
+                    row.outcome = Failed("not installed after recovery");
+                    st(store.put(mut tx, t.deploys, name, row))?;
+                    Ok(false)
+                },
+                (ProbeNew, false) if version == old_at => {
+                    row.outcome = Undecided(ProbeOld);
+                    st(store.put(mut tx, t.deploys, name, row))?;
+                    Ok(true)
+                },
+                (ProbeOld, false) if version == new_at => {
+                    row.outcome = Undecided(ProbeNew);
+                    st(store.put(mut tx, t.deploys, name, row))?;
+                    Ok(true)
+                },
+                _ => Ok(false),
+            }
+        })
+    }
+    if let Ok(true) = decided(mut h.db, take made) {
+        let mut v = vol_read(h, name)
+        v.reprobe = true
+        vol_put(mut h, name, take v)
     }
 }
 
@@ -1233,7 +1324,7 @@ fn resume_cuts(mut h: Host, held: List[launcher.CutoverKey], mut out: List[launc
                         return Error(Missing("deploy"))
                     }
                     let mut row = found_d
-                    row.outcome = Undecided
+                    row.outcome = Undecided(ProbeNew)
                     st(store.put(mut tx, t.deploys, name, row))
                 })
             }
@@ -1490,6 +1581,14 @@ pub fn deploy(mut h: Host, name: String, attempt: launcher.Attempt, assembly: By
             }
             if a != old {
                 return Error(Busy(a))
+            }
+            // An unresolved deploy's row is the only record of its NEW root.
+            if let Some(prior) = st(store.fetch(tx, store.shape(t.deploys), name))? {
+                match prior.outcome {
+                    Pending => return Error(Busy(a)),
+                    Undecided(_) => return Error(Busy(a)),
+                    _ => (),
+                }
             }
             let c = w.gen + 1u64
             st(store.put(mut tx, t.wake, name, WakeRow(wake: Dirty(a), gen: c)))?

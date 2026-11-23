@@ -733,16 +733,71 @@ fn char_property(mut f: impl FnMut(char) -> bool) -> Vec<(char, char)> {
 }
 
 fn alias_table(out: &mut String, rows: impl IntoIterator<Item = (u64, &'static str, u64)>) {
-    let mut aliases = Vec::new();
+    let mut aliases = String::new();
     let mut words = Vec::new();
     for (property, alias, value) in rows {
         assert!(alias.len() <= 64);
         words.extend([property, aliases.len() as u64, alias.len() as u64, value]);
-        aliases.extend(alias.bytes().map(u64::from));
+        aliases.push_str(alias);
     }
-    inline(out, "ALIAS_TEXT", "u8", &aliases);
+    writeln!(out, "const ALIAS_TEXT: String = {}\n", literal(&aliases)).unwrap();
     inline(out, "ALIASES", "u32", &words);
     writeln!(out, "const ALIAS_COUNT: u64 = {}\n", words.len() / 4).unwrap();
+}
+
+fn fold_runs(pairs: &[(u32, u32)]) -> Vec<u64> {
+    let mut runs: Vec<(u32, u32, u32, i64)> = Vec::new();
+    for &(from, to) in pairs {
+        let delta = i64::from(to) - i64::from(from);
+        if let Some((first, last, stride, previous)) = runs.last_mut() {
+            let gap = from - *last;
+            if delta == *previous && (gap == *stride || *first == *last && gap == 2) {
+                *last = from;
+                *stride = gap;
+                continue;
+            }
+        }
+        runs.push((from, from, 1, delta));
+    }
+    // Store both endpoints for binary search. The low 21 bits are a biased delta.
+    let words: Vec<_> = runs
+        .into_iter()
+        .map(|(first, last, stride, delta)| {
+            assert!((-(1 << 20)..(1 << 20)).contains(&delta));
+            (u64::from(first) << 43)
+                | (u64::from(last) << 22)
+                | (u64::from(stride - 1) << 21)
+                | ((delta + (1 << 20)) as u64)
+        })
+        .collect();
+    let decoded: Vec<_> = words
+        .iter()
+        .flat_map(|&word| {
+            let first = (word >> 43) as u32;
+            let last = ((word >> 22) & 0x1fffff) as u32;
+            let stride = ((word >> 21) & 1) as usize + 1;
+            let delta = (word & 0x1fffff) as i64 - (1 << 20);
+            (first..=last)
+                .step_by(stride)
+                .map(move |from| (from, (i64::from(from) + delta) as u32))
+        })
+        .collect();
+    assert_eq!(pairs, decoded);
+    words
+}
+
+fn case_fold_table(out: &mut String) {
+    let (up, down): (Vec<_>, Vec<_>) = folds::CASE_FOLDING_SIMPLE
+        .iter()
+        .flat_map(|&(from, targets)| targets.iter().map(move |&to| (from as u32, to as u32)))
+        .partition(|&(from, to)| from < to);
+    // Alternating pairs need separate runs for their two directions.
+    let mut runs = fold_runs(&up);
+    let split = runs.len();
+    runs.extend(fold_runs(&down));
+    inline(out, "CASE_FOLD_RUNS", "u64", &runs);
+    writeln!(out, "const FOLD_SPLIT: u64 = {split}").unwrap();
+    writeln!(out, "const FOLD_COUNT: u64 = {}\n", runs.len()).unwrap();
 }
 
 fn tables() -> String {
@@ -775,13 +830,7 @@ fn tables() -> String {
         writeln!(out, "const {name}_HI: u64 = {}\n", ranges.len() / 2).unwrap();
     }
     inline(&mut out, "UNICODE_RANGES", "u32", &ranges);
-    let words: Vec<_> = folds::CASE_FOLDING_SIMPLE
-        .iter()
-        .flat_map(|&(from, targets)| targets.iter().map(move |&to| [from as u64, to as u64]))
-        .flatten()
-        .collect();
-    inline(&mut out, "CASE_FOLD", "u32", &words);
-    writeln!(out, "const FOLD_COUNT: u64 = {}\n", words.len() / 2).unwrap();
+    case_fold_table(&mut out);
     let properties: BTreeSet<_> = names::PROPERTY_NAMES
         .iter()
         .map(|&(_, name)| name)

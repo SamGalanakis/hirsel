@@ -316,8 +316,16 @@ is core's plain record `{ steps: u64 }`.
   keep in the place a copy made before entry: a return installs the working value, and a
   stop drops it, cleaning it as every failure does, so the place holds the copy. The copy's
   steps are taken before entry and count against the enclosing bound, not against `n`.
-  The store's `rollback_writes_on_overrun(mut tx, n, body)` does this for a transaction,
-  so an overrun leaves no write of `body` and the transaction goes on.
+  The store's `rollback_writes_on_overrun(mut tx, n, body)` does this for a transaction:
+  an overrun rolls back the transaction's owned state and the writes `body` staged, and
+  the transaction goes on. Its reads and log appends stay (MEM-29, FAIL-16's list). Its
+  accounting starts at its call, after the arguments are evaluated: the call and the copy
+  take 12 steps, then `n` is reserved. A caller with at least 12 and fewer than `n + 12` steps left gets
+  `Error(OutOfTime(steps: n))` without running `body` (an admission refusal) and keeps
+  what it had less the 12. A caller with exactly `n + 12` runs `body`, and when `body`
+  exhausts `n`, the caller's bound is exhausted too: no step is refunded, so a following
+  `bound steps 1` is refused. A body that calls it from inside a bound counts one more
+  step for its own entry, so there the threshold is `n + 13`.
 - **Waits, bytes and tasks.** Waiting takes no steps: a step bound limits computation, not
   time, and a body that waits forever is ended by a deadline or a cancellation
   ([CONC-7](tasks.md#conc-7-cancellation-points)), not by its bound. Step bounds and limits

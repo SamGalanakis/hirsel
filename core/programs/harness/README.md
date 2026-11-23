@@ -184,7 +184,8 @@ returns its recorded outcome.
 An Inside tool runs inside `advance`'s transaction under
 `bound bytes limits.inside_bytes` and a step bound of `limits.inside_steps`
 (`store.rollback_writes_on_overrun`). If it returns an error or overruns
-either bound, its own writes are rolled back and the failure is committed.
+either bound, its staged writes are rolled back and the failure is
+committed. Its reads still count in the transaction's read set.
 
 ## Effects after a crash
 

@@ -1292,6 +1292,13 @@ pub(super) struct EntryParameter {
     pub(super) ty: String,
     pub(super) name: String,
 }
+impl EntryParameter {
+    pub(super) fn foreign_interface(&self) -> Option<&str> {
+        self.ty
+            .strip_prefix("core@1/core/Foreign[")
+            .and_then(|ty| ty.strip_suffix(']'))
+    }
+}
 pub(crate) type EntryBinding = (DefPath, Result<EntryDecl, String>);
 /// A Cranelift development entry record (`hirsel.core-entry.v1`): the ABI
 /// read from the entry body's module, and the identity of its result cleanup.
@@ -2598,14 +2605,6 @@ fn f5 = n5 g5 extern
         options.grant_mask = 1 << grant_kind("Stdout").unwrap();
         let granted = product.build(&entry, &options).unwrap();
         run_clean(&granted.executable, 7);
-        options.grant_mask |= 1 << grant_kind("Stderr").unwrap();
-        let changed_grants = product.build(&entry, &options).unwrap();
-        assert_eq!(changed_grants.compiled, 0);
-        assert!(
-            changed_grants.linked,
-            "grant configuration is part of the executable key"
-        );
-        run_clean(&changed_grants.executable, 7);
         let source = "pub fn main(out: Stdout, d: Dir, a: Args, other: Dir, net: Net, clock: Clock, random: Random, err: Stderr, input: Stdin, env: Env, process: Process, tasks: Tasks) -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
         let product = driver
             .check(source_request(source, dir.path()), &mut Meter::new(false))
@@ -2622,6 +2621,15 @@ fn f5 = n5 g5 extern
         ];
         let built = product.build(&entry, &options).unwrap();
         run_clean(&built.executable, 7);
+        options.directories.swap(0, 1);
+        let changed_grants = product.build(&entry, &options).unwrap();
+        assert_eq!(changed_grants.compiled, 0);
+        assert!(
+            changed_grants.linked,
+            "grant configuration is part of the executable key"
+        );
+        run_clean(&changed_grants.executable, 7);
+        options.directories.swap(0, 1);
         // Two Dir parameters require two explicit directories, in ordinal order.
         options.directories.pop();
         let refused = product.build(&entry, &options).unwrap();

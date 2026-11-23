@@ -174,6 +174,7 @@ fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
     options.exec_grants.truncate(exec);
     if taken & (1 << named("Net")) == 0 {
         options.net_rules.clear();
+        options.unix_roots.clear();
     }
     if taken & (1 << named("Env")) == 0 {
         options.env_patterns = None;

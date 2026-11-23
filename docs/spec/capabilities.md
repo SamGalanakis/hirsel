@@ -79,7 +79,7 @@ whose configuration does not grant one of them, or whose provider cannot give on
 host (a `Dir`'s minimum host, [core](core.md#contracts-the-signatures-do-not-state)), does not start: it runs no
 program code and has no host effect, and reports as
 [PROG-3](programs.md#prog-3-entry) says. Nothing else in a program receives authority from
-the host.
+the host. A configuration is refused if it supplies a grant with no matching entry parameter.
 
 At native Unix launch, a standard stream may be absent. `EBADF` while acquiring its
 corresponding inherited descriptor (0 for `Stdin`, 1 for `Stdout`, 2 for `Stderr`)

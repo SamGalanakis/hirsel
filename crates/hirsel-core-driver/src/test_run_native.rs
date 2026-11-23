@@ -863,10 +863,32 @@ fn build_names_unmatched_grant_and_entry() {
     let law = PackageLaw::new();
     law.app("app", "");
     PackageLaw::pass(law.run(&["lock", "app"]));
-    let (status, stdout, stderr) = law.run(&["build", "app", "--grant", "Stderr"]);
-    assert_eq!(status, Some(2), "{stdout}\n{stderr}");
-    assert_eq!(stderr, "entry: --grant Stderr has no matching parameter of app@1/main/main\n");
-    assert!(stdout.is_empty(), "{stdout}");
+    for mode in [
+        &["run", "app", "--backend", "cranelift"][..],
+        &["build", "app", "--release"][..],
+    ] {
+        for (option, value, grant) in [
+            ("--grant", "Stderr", "--grant Stderr"),
+            ("--grant", "Env=FOO", "--grant Env"),
+            ("--grant", "Net=Connect 127.0.0.1/32 0-65535", "--grant Net"),
+            (
+                "--grant",
+                "Secret:unused=env:HIRSEL_UNUSED_SECRET mac",
+                "--grant Secret:unused",
+            ),
+            ("--dir", ".", "--dir \".\""),
+        ] {
+            let mut args = mode.to_vec();
+            args.extend([option, value]);
+            let (status, stdout, stderr) = law.run(&args);
+            assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+            assert_eq!(
+                stderr,
+                format!("entry: {grant} has no matching parameter of app@1/main/main\n")
+            );
+            assert!(stdout.is_empty(), "{stdout}");
+        }
+    }
 }
 
 #[test]

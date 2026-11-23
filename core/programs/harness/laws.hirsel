@@ -127,11 +127,11 @@ fn live(take life: Life) -> Result[store.runner.Ended, store.runner.StartError] 
 type Registered = StaticFn[fn(mut store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError]]
 
 fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
-    settings_of(code.describe(place), result.unwrap(wired()), dir, clock, random, tasks, net, take s, idle)
+    settings_of(code.describe(place), harness.entries(result.unwrap(wired())), dir, clock, random, tasks, net, take s, idle)
 }
 
-fn settings_of(registered: Registered, w: harness.Wiring, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
-    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()),
+fn settings_of(registered: Registered, take allowed: store.triggers.Entries, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+    let config = store.runner.TriggerConfig(entries: take allowed, author: store.Caller(issuer: 0u8, subject: list.new()),
         grants: take s, grant: make_grants, grant_bytes: 65536u64)
     let mut wire = store.runner.wire_defaults(65536u64, PLACE_BYTES)
     wire.n_pool = 4194304u64
@@ -996,6 +996,131 @@ fn test_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, task
 
 // ---- the crash matrix ----
 
+type MatrixScenario: key + send = ToolAndAnswer | ApprovalAndPark
+type MatrixAction: codec + send = Approve | WakePark(harness.EffectKey)
+
+fn matrix_gate(tx: store.Tx, ask: harness.Ask) -> harness.Verdict {
+    if ask.call.name == "bump" { Hold("approve bump") } else { Pass }
+}
+
+// The first answer adds a section for the next request. The text is also
+// a counter, so replaying this reaction twice is visible in the patch.
+fn matrix_reaction(mut tx: store.Tx, at: u64, e: harness.Entry) -> Result[(), harness.Fault] {
+    let Assistant(reply) = view e else { return Ok(()) }
+    if list.len(reply.calls) == 0u64 { return Ok(()) }
+    let h = harness.handles(store.tx_schema(tx)) ?=> |_| Unavailable
+    let seen = match store.fetch(tx, store.shape(h.views), 1000u64) ?=> |_| Unavailable {
+        Some(Status(text)) => string.byte_len(text),
+        _ => 0u64,
+    }
+    store.put(mut tx, h.views, 1000u64, Status(string.repeat("x", seen + 1u64))) ?=> |_| Unavailable
+    Ok(())
+}
+
+fn matrix_park(mut tx: store.Tx, inv: harness.Invoke) -> Result[harness.Reply, harness.Fault] {
+    let h = harness.handles(store.tx_schema(tx)) ?=> |_| Unavailable
+    let reply = park(mut tx, inv)?
+    matrix_queue(mut tx, h, WakePark(inv.key)) ?=> |_| Unavailable
+    Ok(take reply)
+}
+
+fn matrix_agent() -> harness.Agent[Grants] {
+    let mut a = crash_agent()
+    list.push(mut a.tools, harness.inside("park", "waits for a wake", "{}", code.describe(matrix_park)))
+    list.push(mut a.gates, harness.Gate(name: "bump approval", check: code.describe(matrix_gate)))
+    list.push(mut a.sections, harness.Section(key: "a", render: code.describe(section_a)))
+    list.push(mut a.reactions, harness.After(name: "mark answer", run: code.describe(matrix_reaction)))
+    a
+}
+
+fn matrix_wired() -> Result[harness.Wiring, harness.Refused] {
+    harness.wiring(code.describe(matrix_advance), code.describe(matrix_effect))
+}
+
+fn add_matrix_action(mut allowed: store.triggers.Entries) -> Result[store.triggers.Entry[MatrixAction], harness.Refused] {
+    let entry = store.triggers.transact(code.describe(matrix_action)) ?=> |_| Storage
+    store.triggers.allow(mut allowed, entry) ?=> |_| Storage
+    Ok(take entry)
+}
+
+fn matrix_queue(mut tx: store.Tx, h: harness.Handles, action: MatrixAction) -> Result[(), harness.Refused] {
+    let mut allowed = store.triggers.empty_entries()
+    let entry = add_matrix_action(mut allowed)?
+    let _ = store.triggers.write(mut tx, h.triggers, allowed, entry, action, AfterCommit) ?=> |_| Storage
+    Ok(())
+}
+
+fn matrix_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+    let previously = store.fetch(tx, store.shape(h.waits), wait_zero()) ?=> |_| Storage
+    harness.advance(mut tx, h, matrix_agent(), matrix_wired()?, take wake)?
+    if let None = previously {
+        if let Some(Open(_, _)) = store.fetch(tx, store.shape(h.waits), wait_zero()) ?=> |_| Storage {
+            matrix_queue(mut tx, h, Approve)?
+        }
+    }
+    Ok(())
+}
+
+fn matrix_action(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take action: MatrixAction) -> Result[(), harness.Refused] {
+    let w = matrix_wired()?
+    match action {
+        Approve => {
+            let d = decision(harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}"))), true)
+            let who = store.Caller(issuer: 1u8, subject: list.new())
+            let _ = harness.decide(mut tx, h, matrix_agent(), w, who, take d)?
+        },
+        WakePark(key) => {
+            let _ = harness.resume(mut tx, h, matrix_agent(), w, key, Returned(Inline(string.into_bytes("woke"))))?
+        },
+    }
+    Ok(())
+}
+
+fn matrix_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
+    harness.effect(g.context, g, take key, matrix_agent(), code.describe(matrix_settle))
+}
+
+fn matrix_settle(mut tx: store.Tx, attempt: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    let Ok(w) = matrix_wired() else { return Error(Missing("harness: wiring")) }
+    harness.settle(mut tx, matrix_agent(), w, attempt, take m)
+}
+
+fn matrix_place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut r, code.describe(matrix_advance), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.transact(mut r, code.describe(matrix_action), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.granted(mut r, code.describe(matrix_effect), BYTES, store.runner.DEFAULT_STEPS)?
+    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = matrix_settle
+    store.runner.register_attempt(mut r, code.describe(matrix_settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+}
+
+fn matrix_settings(scenario: MatrixScenario, dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+    if scenario == ToolAndAnswer { return settings(dir, clock, random, tasks, net, take s, Some(MATRIX_IDLE_MS)) }
+    let mut allowed = harness.entries(result.unwrap(matrix_wired()))
+    let _ = result.unwrap(add_matrix_action(mut allowed))
+    settings_of(code.describe(matrix_place), take allowed, dir, clock, random, tasks, net, take s, Some(MATRIX_IDLE_MS))
+}
+
+type MatrixModel: send { inbox: Receiver[ModelAsk], scenario: MatrixScenario }
+
+fn matrix_model(take seed: MatrixModel) -> () waits {
+    let MatrixModel(inbox: take inbox, scenario) = take seed
+    let mut asked = 0u64
+    while let Ok(take request) = channel.receive(inbox) {
+        match take request {
+            Ask(after_tool, to) => {
+                asked += 1u64
+                let mut reply = scripted_answer(after_tool)
+                if !after_tool && scenario == ApprovalAndPark {
+                    list.push(mut reply.calls, harness.Call(id: "c2", name: "park", args: Inline(string.into_bytes("{}"))))
+                }
+                let _ = channel.send(to, take reply)
+            },
+            Asked(to) => { let _ = channel.send(to, asked) },
+        }
+    }
+}
+
 // A tool that always answers, so the first life reaches every later boundary.
 fn answering_tools(take inbox: Receiver[ToolAsk]) -> () waits {
     let mut ran = 0u64
@@ -1020,9 +1145,8 @@ fn mounted(take m: Mount) -> (std.sim.fs.Fs, std.sim.world.Plan) waits {
     (take fs, take plan)
 }
 
-// A port's room is held until the test run ends (docs/spec/core.md, Served
-// ports): four mounts a case at 64 KiB is about 54 MiB over 217 cases. The
-// store's page writes need more than 4 KiB of it.
+// The four mounts per cut each hold 64 KiB until the test ends (docs/spec/core.md,
+// Served ports). The store's page writes need more than 4 KiB per mount.
 fn mount(tasks: Tasks, clock: Clock, take fs: std.sim.fs.Fs, take plan: std.sim.world.Plan) -> (Dir, Task[(std.sim.fs.Fs, std.sim.world.Plan)]) {
     let (d, port) = provide.dir(bytes 65536u64)
     let server = task.spawn(tasks, bytes 16777216u64, Mount(fs: take fs, plan: take plan, port: take port, clock: clock), mounted)
@@ -1034,27 +1158,36 @@ fn unmount(take d: Dir, take server: Task[(std.sim.fs.Fs, std.sim.world.Plan)]) 
     result.unwrap(task.join(take server))
 }
 
-type Tally { users: u64, systems: u64, answers: u64, calls: u64, results: u64, returned: u64, doubted: u64, ordered: bool }
+type Tally { users: u64, systems: u64, answers: u64, calls: u64, results: u64, returned: u64, resumed: u64, ordered: bool }
 
 fn tally(snap: store.Snapshot, h: harness.Handles, n: u64) -> Tally {
-    let mut t = Tally(users: 0u64, systems: 0u64, answers: 0u64, calls: 0u64, results: 0u64, returned: 0u64, doubted: 0u64, ordered: true)
+    let mut t = Tally(users: 0u64, systems: 0u64, answers: 0u64, calls: 0u64, results: 0u64, returned: 0u64, resumed: 0u64, ordered: true)
+    let bump_bytes = string.into_bytes("1")
+    let resume_bytes = string.into_bytes("woke")
     for pos in 0u64 .. n {
         match result.unwrap(store.get(snap, store.shape(h.entries), pos)) {
             Some(User(_)) => {
                 t.users += 1u64
                 if pos != 0u64 { t.ordered = false }
             },
-            Some(System(_)) => { t.systems += 1u64 },
+            Some(System(p)) => {
+                if t.systems == 0u64 && (pos != 1u64 || !p.baseline) { t.ordered = false }
+                t.systems += 1u64
+            },
             Some(Assistant(a)) => {
+                if t.answers == 0u64 && pos != 2u64 { t.ordered = false }
+                if t.answers == 1u64 && (pos + 1u64 != n || a.text != "done") { t.ordered = false }
                 t.answers += 1u64
                 t.calls += list.len(a.calls)
             },
             Some(ToolResult(id, outcome)) => {
                 t.results += 1u64
-                if id != "c1" || t.answers != 1u64 { t.ordered = false }
+                let expected = if t.results == 1u64 { "c1" } else { "c2" }
+                if id != expected || t.answers != 1u64 { t.ordered = false }
                 match outcome {
-                    Returned(_) => { t.returned += 1u64 },
-                    InDoubt => { t.doubted += 1u64 },
+                    Returned(Inline(out)) if id == "c1" && out == bump_bytes => { t.returned += 1u64 },
+                    Returned(Inline(out)) if id == "c2" && out == resume_bytes => { t.resumed += 1u64 },
+                    InDoubt if id == "c1" => (),
                     _ => { t.ordered = false },
                 }
             },
@@ -1068,6 +1201,30 @@ type Cut: send = Reached(bool, bool) | Beyond
 
 const MATRIX_IDLE_MS: u64 = 100u64
 
+fn approval_rows(snap: store.Snapshot, h: harness.Handles, answers: u64) -> bool {
+    let wait = result.unwrap(store.get(snap, store.shape(h.waits), wait_zero()))
+    let reaction = result.unwrap(store.get(snap, store.shape(h.views), 1000u64))
+    let runs = result.unwrap(store.get(snap, store.shape(h.views), 4000u64))
+    let patch = result.unwrap(store.get(snap, store.shape(h.entries), 5u64))
+    if answers == 0u64 {
+        return match (take wait, take reaction, take runs, take patch) { (None, None, None, None) => true, _ => false }
+    }
+    let approved = match wait { Some(Decided(_, true)) => true, _ => false }
+    let reacted_once = match reaction { Some(Status(text)) => text == "x", _ => false }
+    let parked_once = match runs { Some(Status(text)) => text == "x", _ => false }
+    let parked_key = harness.EffectKey(run: 0u64, round: 0u64, kind: harness.TOOL, ordinal: 1u64)
+    let armed_deadline = match result.unwrap(store.get(snap, store.shape(h.effects), parked_key)) {
+        Some(e) => e.deadline > 0u64,
+        None => false,
+    }
+    let patched = match patch {
+        Some(System(p)) => !p.baseline && list.len(p.changes) == 1u64 && p.changes[0].key == "a"
+            && match p.changes[0].text { Some(text) => text == "x", None => false },
+        _ => false,
+    }
+    approved && reacted_once && parked_once && armed_deadline && patched
+}
+
 // Law M1 (astra crash matrix over every filesystem operation): the first
 // life fails its k-th filesystem operation with EIO and ends; the image is
 // then cut at a seeded point that keeps every synced write; a second life
@@ -1078,20 +1235,22 @@ const MATRIX_IDLE_MS: u64 = 100u64
 // doubt that ends the run, never a second ask; known spend is 15 per
 // durable answer, nothing stays reserved, and a doubted ask leaves exactly
 // its 4096 reserve unresolved; the run finishes and the session is idle; an
-// Answered run has exactly user, system, call, result, "done".
-fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, site: u64) -> Cut waits {
+// Answered run has the complete transcript in order. The approval and park
+// scenario adds one approval, one resumed tool, and a patch from the reaction.
+fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: MatrixScenario, site: u64) -> Cut waits {
     let (seed_dir, seed_server) = mount(tasks, clock, std.sim.fs.new(), std.sim.world.plan(0u64))
-    seed_session(seed_dir, clock, random, tasks)
+    if scenario == ToolAndAnswer { seed_session(seed_dir, clock, random, tasks) }
+    else { seed_with(seed_dir, clock, random, tasks, matrix_agent(), result.unwrap(matrix_wired())) }
     let (seeded, _) = unmount(take seed_dir, take seed_server)
     let mut faults = std.sim.world.plan(site)
     std.sim.world.script(mut faults, site, Eio)
     let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
     let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
-    let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
+    let models = task.spawn(tasks, bytes 65536u64, MatrixModel(inbox: take model_in, scenario: scenario), matrix_model)
     let tools = task.spawn(tasks, bytes 65536u64, take tool_in, answering_tools)
     let services = Services(model: take model, tool: take tool)
     let (first_dir, first_server) = mount(tasks, clock, take seeded, take faults)
-    let (first, _stop_first, status) = launch(tasks, settings(first_dir, clock, random, tasks, net, copy_services(services), Some(MATRIX_IDLE_MS)))
+    let (first, _stop_first, status) = launch(tasks, matrix_settings(scenario, first_dir, clock, random, tasks, net, copy_services(services)))
     let (first_ended, poisoned) = match task.join(take first) {
         Ok(Error(Open(Store(Poisoned(Other(5)))))) => (true, match latest.read(status).phase { Ready => true, _ => false }),
         Ok(Error(_)) => (true, false),
@@ -1112,7 +1271,7 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, site: u64) 
     let mut cutting = std.sim.world.plan(site + 1u64)
     std.sim.fs.crash(mut cut, mut cutting)
     let (second_dir, second_server) = mount(tasks, clock, take cut, std.sim.world.plan(0u64))
-    let (second, _stop_second, _) = launch(tasks, settings(second_dir, clock, random, tasks, net, copy_services(services), Some(MATRIX_IDLE_MS)))
+    let (second, _stop_second, _) = launch(tasks, matrix_settings(scenario, second_dir, clock, random, tasks, net, copy_services(services)))
     let second_ended = match task.join(take second) { Ok(Ok(Stopped(_))) => true, _ => false }
     let asked = model_asked(services)
     let ran = tool_ran(services)
@@ -1124,9 +1283,11 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, site: u64) 
     let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
     let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
     let t = tally(snap, h, session.next_pos)
+    let extra = scenario == ApprovalAndPark
+    let approvals = !extra || approval_rows(snap, h, t.answers)
     let (finished, done_ok, doubt) = match run.phase {
         Finished(Answered) => (true, true, false),
-        Finished(Stopped(why)) => (true, false, why == "model call in doubt"),
+        Finished(Stopped(why)) if why == "model call in doubt" => (true, false, true),
         _ => (false, false, false),
     }
     result.unwrap(store.close(take db))
@@ -1137,34 +1298,48 @@ fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, site: u64) 
     let _ = task.join(take models)
     let _ = task.join(take tools)
     let doubts = if doubt { 1u64 } else { 0u64 }
-    let once = ran <= 1u64 && t.results <= 1u64 && (t.returned == 0u64 || ran == 1u64)
+    let calls = if extra { 2u64 } else { 1u64 }
+    let once = ran <= 1u64 && (t.returned == 0u64 || ran == 1u64)
     let model_once = asked <= 2u64 && asked >= t.answers && asked <= t.answers + doubts
     let spend = run.spend.known == 15u64 * t.answers && run.spend.reserved == 0u64 && run.spend.unresolved == 4096u64 * doubts
     let idle = match session.active_run { None => true, Some(_) => false }
-    let shape = t.ordered && t.users == 1u64 && (!done_ok || (session.next_pos == 5u64 && t.answers == 2u64 && t.results == 1u64))
-    Reached(first_ended && second_ended && finished && once && model_once && spend && idle && shape, poisoned)
+    let shape = t.ordered && t.users == 1u64
+        && if t.answers == 0u64 {
+            ran == 0u64 && session.next_pos == 2u64 && t.results == 0u64
+        } else {
+            let systems = if extra { 2u64 } else { 1u64 }
+            let resumes = if extra { 1u64 } else { 0u64 }
+            t.systems == systems && t.results == calls && t.calls == calls && t.resumed == resumes
+                && session.next_pos == 1u64 + systems + t.answers + t.results
+                && (!done_ok || t.answers == 2u64)
+        }
+    Reached(first_ended && second_ended && finished && once && model_once && spend && idle && shape && approvals, poisoned)
 }
 
-@test
-fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+fn check_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net, scenario: MatrixScenario) -> () waits {
     let mut site = 0u64
     let mut poisoned = 0u64
     loop {
-        match matrix_case(clock, random, tasks, net, site) {
+        match matrix_case(clock, random, tasks, net, scenario, site) {
             Beyond => break,
             Reached(true, saw_poison) => if saw_poison { poisoned += 1u64 },
             Reached(false, _) => {
-                let mut why = string.from("crash matrix: a law broke at filesystem operation ")
+                let mut why = string.from(if scenario == ToolAndAnswer { "tool crash matrix: filesystem operation " } else { "approval and park crash matrix: filesystem operation " })
                 string.push_u64(mut why, site)
                 fail(take why)
             },
         }
         site += 1u64
     }
-    // The run takes 217 operations today; fewer than 20 means the fault
-    // plan no longer reaches the place's own writes.
+    // Fewer than 20 sites means the fault plan never reached the place's writes.
     if site < 20u64 { fail("crash matrix: the faults never reached the run's writes") }
     if poisoned == 0u64 { fail("crash matrix: no EIO exited an online head with a poison error") }
+}
+
+@test
+fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    check_matrix(clock, random, tasks, net, ToolAndAnswer)
+    check_matrix(clock, random, tasks, net, ApprovalAndPark)
     Ok(())
 }
 
@@ -1259,7 +1434,7 @@ fn race_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, 
     let models = task.spawn(tasks, bytes 65536u64, LateModelSeed(inbox: take model_in, clock: clock, hold_ms: model_hold), late_model_service)
     let tools = task.spawn(tasks, bytes 65536u64, LateToolSeed(inbox: take tool_in, clock: clock, hold_ms: tool_hold), late_tool_service)
     let services = Services(model: take model, tool: take tool)
-    let config = settings_of(code.describe(race_place), result.unwrap(race_wired()), dir, clock, random, tasks, net, copy_services(services), Some(IDLE_MS))
+    let config = settings_of(code.describe(race_place), harness.entries(result.unwrap(race_wired())), dir, clock, random, tasks, net, copy_services(services), Some(IDLE_MS))
     let (life, _stop, _) = launch(tasks, take config)
     let ended = task.join(take life)
     if let Ok(Ok(Stopped(_))) = ended { } else { fail("race: the place did not stop") }

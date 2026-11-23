@@ -10,8 +10,8 @@ use test_provider::crash::{FileSystem, Op, Snapshot};
 const ORPHAN_END_SYNC_FAILURE: u8 = 6;
 /// runner_crash.c's poison-segment: fail the second armed segment sync.
 const SECOND_SEGMENT_SYNC_FAILURE: u8 = 7;
-const SECOND_SEGMENT_SHORT_WRITE: u8 = 9;
 const OPEN_MANIFEST_SYNC_FAILURE: u8 = 8;
+const SECOND_SEGMENT_SHORT_WRITE: u8 = 9;
 
 #[repr(C)]
 #[derive(Default)]
@@ -284,41 +284,42 @@ impl Bridge {
                     self.crashed = true;
                     return Self::error(5);
                 }
-                if self.phase == 1
+                let short = self.phase == 1
                     && self.armed
                     && self.sync_failure == SECOND_SEGMENT_SHORT_WRITE
                     && is_segment(&name)
-                    && self.segment_syncs == 1
-                {
+                    && self.segment_syncs == 1;
+                let written = if short {
                     self.failed_syncs += 1;
                     assert_eq!(self.failed_syncs, 1, "store retried a short write");
-                    assert!(file.mode == 2 && len > 7);
-                    assert!(self.apply(Op::Append(&name, &data[..7])));
-                    self.files.get_mut(&handle).unwrap().cursor += 7;
-                    return Outcome {
-                        written: 7,
-                        ..Self::error(5)
-                    };
-                }
+                    assert!(len > 7);
+                    7
+                } else {
+                    len
+                };
                 if self.phase == 1 && self.armed && self.sync_failure == 5 && is_segment(&name) {
                     self.split_at = cursor;
                 }
                 let append = file.mode == 2;
                 let applied = if append {
-                    self.apply(Op::Append(&name, &data[..len]))
+                    self.apply(Op::Append(&name, &data[..written]))
                 } else {
                     let mut bytes = self.fs.read(&name).unwrap_or(&[]).to_vec();
-                    bytes.resize(bytes.len().max(cursor + len), 0);
-                    bytes[cursor..cursor + len].copy_from_slice(&data[..len]);
+                    bytes.resize(bytes.len().max(cursor + written), 0);
+                    bytes[cursor..cursor + written].copy_from_slice(&data[..written]);
                     self.apply(Op::Write(&name, &bytes))
                 };
                 if !applied {
                     return Self::error(5);
                 }
-                self.files.get_mut(&handle).unwrap().cursor += len;
+                self.files.get_mut(&handle).unwrap().cursor += written;
                 Outcome {
-                    written: len as u64,
-                    ..Outcome::default()
+                    written: written as u64,
+                    ..if short {
+                        Self::error(5)
+                    } else {
+                        Outcome::default()
+                    }
                 }
             }
             4 => {
@@ -702,10 +703,10 @@ pub unsafe extern "C" fn store_crash_floor(p: *mut c_void) -> u64 {
 /// # Safety
 /// `p` is live and quiescent. `kind` is 0 (off), 1 (segment), 2 (END),
 /// 3 (pack), 4 (segment write), 5 (byte split), 6 (orphan END recovery), or
-/// 7 (second segment sync), 8 (O1 open barrier).
+/// 7 (second segment sync), 8 (O1 open barrier), or 9 (second segment short write).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn store_crash_sync_failure(p: *mut c_void, kind: u8) {
-    assert!(kind <= OPEN_MANIFEST_SYNC_FAILURE);
+    assert!(kind <= SECOND_SEGMENT_SHORT_WRITE);
     // SAFETY: the C wrapper configures the bridge before starting a run.
     unsafe { (*p.cast::<Bridge>()).sync_failure = kind };
 }

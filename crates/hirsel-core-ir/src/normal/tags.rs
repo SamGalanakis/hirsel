@@ -487,6 +487,8 @@ tags!(HostOp {
     120 => SecretUnwrap,
     121 => SecretSign,
     122 => CredFetch,
+    123 => LocalAddr,
+    124 => PeerAddr,
 });
 
 tags!(RaiseCause {

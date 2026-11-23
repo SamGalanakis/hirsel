@@ -71,6 +71,15 @@ impl Rule {
         })
     }
     pub fn permits(self, dir: u8, family: u8, hi: u64, lo: u64, port: u16) -> bool {
+        self.covers_address(dir, family, hi, lo)
+            && if dir == 1 && port == 0 {
+                self.first <= 1 && self.last == u16::MAX
+            } else {
+                (self.first..=self.last).contains(&port)
+            }
+    }
+
+    fn covers_address(self, dir: u8, family: u8, hi: u64, lo: u64) -> bool {
         if family > 1 || self.dir != dir || self.family != family {
             return false;
         }
@@ -81,10 +90,7 @@ impl Rule {
         if ip == 0 && (dir == 0 || self.bits != 0) {
             return false;
         }
-        if dir == 1 && port == 0 && (self.first != 0 || self.last != u16::MAX) {
-            return false;
-        }
-        ip & self.mask() == self.prefix() && (self.first..=self.last).contains(&port)
+        ip & self.mask() == self.prefix()
     }
     pub fn parse(text: &str) -> Result<Self, String> {
         let error = || format!("expected --grant {RULE_SYNTAX}: {text}");
@@ -120,6 +126,44 @@ impl Rule {
             return Err(error());
         }
         Ok(rule)
+    }
+}
+
+/// Refusal specific to an ephemeral listen whose matching rules leave a port uncovered.
+pub const EPHEMERAL_OUTSIDE_NET_GRANT: u8 = 11;
+
+/// A kernel-selected port can be any nonzero port, including when the host's
+/// ephemeral range is changed concurrently. Matching rules together must
+/// cover that interval before a port-zero bind can be issued.
+pub fn address_denial(
+    mut rules: impl Iterator<Item = Rule> + Clone,
+    dir: u8,
+    family: u8,
+    hi: u64,
+    lo: u64,
+    port: u16,
+) -> Option<u8> {
+    if dir != 1 || port != 0 {
+        return (!rules.any(|rule| rule.permits(dir, family, hi, lo, port))).then_some(1);
+    }
+    let matching = rules.filter(|rule| rule.covers_address(dir, family, hi, lo));
+    if matching.clone().next().is_none() {
+        return Some(1);
+    }
+    let mut next = 1;
+    loop {
+        let Some(last) = matching
+            .clone()
+            .filter(|rule| rule.first <= next && rule.last >= next)
+            .map(|rule| rule.last)
+            .max()
+        else {
+            return Some(EPHEMERAL_OUTSIDE_NET_GRANT);
+        };
+        if last == u16::MAX {
+            return None;
+        }
+        next = last + 1;
     }
 }
 

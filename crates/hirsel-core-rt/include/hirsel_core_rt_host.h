@@ -245,6 +245,8 @@ typedef struct {
     uint16_t port;
 } HirselCoreAddressOutcome;
 HirselCoreHostOutcome hirsel_core_host_connect(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreAddressOutcome hirsel_core_net_local_addr(HirselCoreContext *, uint64_t, uint64_t);
+HirselCoreAddressOutcome hirsel_core_net_peer_addr(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_listen(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint16_t, uint16_t, uint64_t);
 HirselCoreAddressOutcome hirsel_core_host_accept(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
 /* RECV_BOUNDED (27): max_receive clips the request buffer's writable spare

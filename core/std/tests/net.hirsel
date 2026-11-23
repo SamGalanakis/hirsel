@@ -147,12 +147,25 @@ fn serve_crossed_socket(take ready: Client[Client[Socket]]) waits {
 }
 
 // expect: run socket_served_by_receiving_unit(network) = true
-fn socket_served_by_receiving_unit(n: Net, _clock: Clock, tasks: Tasks) -> bool waits {
+fn socket_served_by_receiving_unit(n: Net, clock: Clock, tasks: Tasks) -> bool waits {
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let owner = result.unwrap(task.spawn_unit(tasks, bytes 4096, take listening, return_listener))
     let mut listener = result.unwrap(task.join(take owner))
-    let client = result.unwrap(host.connect(n, addr, Never))
-    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let loopback = V4(2130706433)
+    let narrower = result.unwrap(net.narrow(n, Rule(dir: Listen, prefix: loopback, bits: 32, ports: (80u16, 80u16))))
+    match host.listen(narrower, Addr(ip: loopback, port: 0), 8) {
+        Error(EphemeralOutsideNetGrant) => {},
+        _ => return false
+    }
+    let until = At(clock, host.mono_ns(clock) + 5000000000u64)
+    let stray = result.unwrap(host.connect(n, addr, until))
+    let client = result.unwrap(host.connect(n, addr, until))
+    let expected = result.unwrap(net.local_addr(client))
+    let socket = result.unwrap(net.accept_from(mut listener, expected, until))
+    if addr.port == 0 || result.unwrap(net.listener_addr(listener)) != addr || result.unwrap(net.peer_addr(client)) != addr || result.unwrap(net.local_addr(socket)) != addr || result.unwrap(net.peer_addr(socket)) != expected || result.unwrap(net.local_addr(stray)) == expected {
+        return false
+    }
+    let _ = take stray
     let (ready, inbox): (Client[Client[Socket]], Inbox[Client[Socket]]) = result.unwrap(conn.new(1, bytes 0))
     let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, take ready, serve_crossed_socket))
     let sockets = result.unwrap(conn.receive(inbox))
@@ -173,7 +186,7 @@ fn inbox_seal_closes_socket(n: Net, _clock: Clock, _tasks: Tasks) -> bool waits 
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let mut listener = take listening
     let client = result.unwrap(host.connect(n, addr, Never))
-    let (socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let socket = result.unwrap(net.accept_from(mut listener, result.unwrap(net.local_addr(client)), Never))
     let (sockets, inbox): (Client[Socket], Inbox[Socket]) = result.unwrap(conn.new(1, bytes 0))
     result.unwrap(conn.send(sockets, take socket))
     let _ = take inbox

@@ -23,13 +23,12 @@ pub fn law_pool_holds_writer_bytes(tasks: Tasks, clock: Clock) -> bool waits {
 }
 
 type PoolCallPeer: send {
-    net: Net, address: Addr, clock: Clock, random: Random, socket: std.wsock.Config, payload: Bytes,
+    stream: Socket, clock: Clock, random: Random, socket: std.wsock.Config, payload: Bytes,
 }
 
 fn pool_call_peer(take peer: PoolCallPeer) -> () waits {
-    let PoolCallPeer(net: net, address: address, clock: clock, random: random, socket: config, payload: take payload) = take peer
+    let PoolCallPeer(stream: take socket, clock: clock, random: random, socket: config, payload: take payload) = take peer
     let end: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
-    let socket = result.unwrap(host.connect(net, address, end))
     let mut name: Bytes = list.new()
     list.append(mut name, string.as_bytes("127.0.0.1"))
     let std.wsock.Connected(reader: take reader, writer: take initial, outgoing: take outgoing, timers: _) =
@@ -82,16 +81,18 @@ fn pool_call_owner(take owner: PoolCallOwner) -> () waits {
     let _ = take lease
 }
 
-fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, net: Net, config: WireConfig,
+fn pool_call_queued(tasks: Tasks, clock: Clock, random: Random, network: Net, config: WireConfig,
     pool: Sender[WireAllocation[()]], pending: std.wsock.PendingPool, take payload: Bytes,
     probe: scoped fn() -> bool waits) -> bool waits {
     let slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
-    let (take listening, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
+    let (take listening, address) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take listening
-    let peer = PoolCallPeer(net: net, address: address, clock: clock, random: random, socket: config.socket, payload: take payload)
-    let sending = task.spawn(tasks, bytes 65536u64, take peer, pool_call_peer)
     let deadline: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
-    let (take socket, addr) = result.unwrap(host.accept(mut listener, deadline))
+    let stream = result.unwrap(host.connect(network, address, deadline))
+    let addr = result.unwrap(net.local_addr(stream))
+    let peer = PoolCallPeer(stream: take stream, clock: clock, random: random, socket: config.socket, payload: take payload)
+    let sending = task.spawn(tasks, bytes 65536u64, take peer, pool_call_peer)
+    let socket = result.unwrap(std.net.accept_from(mut listener, addr, deadline))
     let upgraded = result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config.socket, clock, host.mono_ns(clock)))
     let (ready, heard): (Sender[bool], Receiver[bool]) = channel.new(1u64)
     let (go, proceed): (Sender[()], Receiver[()]) = channel.new(1u64)
@@ -302,12 +303,10 @@ pub fn law_session_records(tasks: Tasks) -> bool waits {
 
 // v2.44 (§3 Session): the owner writes without waiting and starts a writer child only when a
 // send would block. The rig is a loopback session whose client reads nothing until told.
-type WritePeer: send { net: Net, address: Addr, clock: Clock, random: Random, socket: std.wsock.Config, go: Receiver[u64], heard: Sender[u64] }
+type WritePeer: send { stream: Socket, clock: Clock, random: Random, socket: std.wsock.Config, go: Receiver[u64], heard: Sender[u64] }
 
 fn write_peer(take peer: WritePeer) -> () waits {
-    let WritePeer(net: net, address: address, clock: clock, random: random, socket: config, go: take go, heard: take heard) = take peer
-    let end: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
-    let socket = result.unwrap(host.connect(net, address, end))
+    let WritePeer(stream: take socket, clock: clock, random: random, socket: config, go: take go, heard: take heard) = take peer
     let mut name: Bytes = list.new()
     list.append(mut name, string.as_bytes("127.0.0.1"))
     let std.wsock.Connected(reader: take input, writer: take writer, outgoing: _, timers: _) =
@@ -325,17 +324,19 @@ fn write_peer(take peer: WritePeer) -> () waits {
 
 type WriteRig { writer: Box[std.wsock.Writer], reader: std.wsock.Reader, peer: Task[()], go: Sender[u64], heard: Receiver[u64] }
 
-fn write_rig(tasks: Tasks, clock: Clock, random: Random, net: Net, config: std.wsock.Config) -> WriteRig waits {
+fn write_rig(tasks: Tasks, clock: Clock, random: Random, network: Net, config: std.wsock.Config) -> WriteRig waits {
     let pending = result.unwrap(std.wsock.pending(config))
     let slot = option.unwrap(result.unwrap(std.wsock.acquire(pending)))
-    let (take listening, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
+    let (take listening, address) = result.unwrap(host.listen(network, Addr(ip: V4(0x7f000001u32), port: 0u16), 1u16))
     let mut listener = take listening
     let (go, go_from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     let (heard_to, heard): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    let peer = WritePeer(net: net, address: address, clock: clock, random: random, socket: config, go: take go_from, heard: take heard_to)
-    let running = task.spawn(tasks, bytes 2097152u64, take peer, write_peer)
     let deadline: Until = At(clock, int.saturating_add(host.mono_ns(clock), 5000000000u64))
-    let (take socket, addr) = result.unwrap(host.accept(mut listener, deadline))
+    let stream = result.unwrap(host.connect(network, address, deadline))
+    let addr = result.unwrap(net.local_addr(stream))
+    let peer = WritePeer(stream: take stream, clock: clock, random: random, socket: config, go: take go_from, heard: take heard_to)
+    let running = task.spawn(tasks, bytes 2097152u64, take peer, write_peer)
+    let socket = result.unwrap(std.net.accept_from(mut listener, addr, deadline))
     let std.wsock.Upgraded(reader: take reader, writer: take writer, source: _, timers: _, pending: _) =
         result.unwrap(std.wsock.server(take socket, take slot, addr.ip, list.new(), config, clock, host.mono_ns(clock)))
     WriteRig(writer: box.new(take writer), reader: take reader, peer: take running, go: take go, heard: take heard)

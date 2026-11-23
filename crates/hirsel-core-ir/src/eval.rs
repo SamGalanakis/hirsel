@@ -18,6 +18,8 @@ pub use map::run_map_hash;
 #[cfg(feature = "map-observation")]
 pub use map::run_map_observed;
 
+mod net;
+
 use crate::*;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
@@ -253,6 +255,8 @@ const NET_DATAGRAM_SEND: u64 = 15;
 const NET_DATAGRAM_SEND_TO: u64 = 16;
 const NET_DATAGRAM_RECV: u64 = 17;
 const NET_READY: u64 = 18;
+const NET_LOCAL_ADDR: u64 = 19;
+const NET_PEER_ADDR: u64 = 20;
 const PORT_SOCKET: u8 = 3;
 const PORT_UNIX_SOCKET: u8 = 5;
 const PORT_UNIX_LISTENER: u8 = 6;
@@ -422,7 +426,7 @@ fn port_closed(vocab: Vocab, op: u64) -> [u64; 5] {
 fn port_outcome(vocab: Vocab, op: u64, v: [u64; 5]) -> Vec<u64> {
     match (vocab, op) {
         (Vocab::Dir, 3 | 14) => v.to_vec(),
-        (Vocab::Net, 2 | 3 | 6) => [&v[..4], &[0; 4]].concat(),
+        (Vocab::Net, 2 | 3 | 6 | NET_LOCAL_ADDR | NET_PEER_ADDR) => [&v[..4], &[0; 4]].concat(),
         (Vocab::Exec, exec::SPAWN) => [&v[..4], &[0; 3]].concat(),
         _ => v[..4].to_vec(),
     }
@@ -2805,6 +2809,7 @@ impl Machine<'_> {
             || match op {
                 0 | 3 => tag == 9,
                 2 => tag == 10,
+                NET_LOCAL_ADDR | NET_PEER_ADDR => tag == 16,
                 1 | 4 | 5 => tag == 3,
                 6 => tag == 11,
                 7 | NET_DATAGRAM_CONNECT | NET_DATAGRAM_SEND | NET_DATAGRAM_SEND_TO | NET_READY => {
@@ -2836,7 +2841,10 @@ impl Machine<'_> {
             }
             1 => {
                 let max = if op == NET_UNIX_LISTEN { 10 } else { 9 };
-                (1..=max).contains(&w[0]).then_some(())?;
+                let ephemeral = (op, call.words[4]) == (2, 0)
+                    && w[0] == u64::from(hirsel_core_net::EPHEMERAL_OUTSIDE_NET_GRANT)
+                    && w[1] == 0;
+                ((1..=max).contains(&w[0]) || ephemeral).then_some(())?;
                 ([0, w[0], w[1] & 0xffff_ffff, 0, 0], None)
             }
             3 => {
@@ -2872,10 +2880,17 @@ impl Machine<'_> {
             }
             _ => {
                 let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
-                if w[0] == 0 || handles.contains_key(&w[0]) || !(v4 || w[1] == 1) || w[4] > 0xffff {
+                if !(v4 || w[1] == 1) || w[4] > 0xffff {
                     return None;
                 }
-                ([w[0], 0, 0, 0, 0], Some(if tag == 9 { 3 } else { 4 }))
+                if tag == 16 {
+                    ([0; 5], None)
+                } else {
+                    if w[0] == 0 || handles.contains_key(&w[0]) {
+                        return None;
+                    }
+                    ([w[0], 0, 0, 0, 0], Some(if tag == 9 { 3 } else { 4 }))
+                }
             }
         })
     }
@@ -3020,7 +3035,10 @@ impl Machine<'_> {
         if (vocab, op) == (Vocab::Exec, exec::SPAWN) {
             row[4..7].copy_from_slice(&pipes);
         }
-        if vocab == Vocab::Net && matches!(op, 2 | 3) && row[1] == 0 {
+        if vocab == Vocab::Net
+            && matches!(op, 2 | 3 | NET_LOCAL_ADDR | NET_PEER_ADDR)
+            && row[1] == 0
+        {
             // A listener's bound address, an accepted socket's peer.
             row[4..8].copy_from_slice(&a[4..8]);
         }
@@ -3786,6 +3804,8 @@ impl Machine<'_> {
             HostOp::Connect => (vec![0, a[1], a[2], a[3], a[4]], vec![], None),
             HostOp::Listen => (vec![2, a[1], a[2], a[3], a[4], a[5]], vec![], None),
             HostOp::Accept => (vec![3, id], vec![], None),
+            HostOp::LocalAddr => (vec![NET_LOCAL_ADDR, id], vec![], None),
+            HostOp::PeerAddr => (vec![NET_PEER_ADDR, id], vec![], None),
             HostOp::Resolve => {
                 // The name as written and room for the caller's spare Ip
                 // slots as address records (NOTES 34).
@@ -4049,72 +4069,6 @@ impl Machine<'_> {
         self.world.exec_grants.push((c, rules));
         self.world.grant_charges.push((payer.clone(), charge));
         vec![key, 0, 0, 0]
-    }
-
-    fn network_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
-        match op {
-            HostOp::Connect | HostOp::Listen => {
-                let grants = self.world.network.grants.get(&a[0]);
-                let allowed = grants.is_some_and(|rules| {
-                    rules.iter().any(|rule| {
-                        matches!(
-                            rule,
-                            hirsel_core_net::GrantRule::Address(rule) if rule.permits(
-                                u8::from(op == HostOp::Listen),
-                                a[1] as u8,
-                                a[2],
-                                a[3],
-                                a[4] as u16,
-                            )
-                        )
-                    })
-                });
-                if allowed && let Some(&c) = self.world.net_ports.get(&a[0]) {
-                    return self.net_call(t, op, c, 0, true, a);
-                }
-            }
-            HostOp::Accept | HostOp::RecvBounded | HostOp::RecvReady | HostOp::SendPair => {
-                let stream = op != HostOp::Accept;
-                let kind = if stream { PORT_SOCKET } else { 4 };
-                let original = self.port_socket(a[0], kind);
-                let socket = if stream && original.is_some_and(|(_, _, live)| !live) {
-                    self.port_socket(a[0], PORT_UNIX_SOCKET)
-                } else {
-                    original
-                };
-                if let Some((c, id, mut live)) = socket {
-                    if stream
-                        && matches!(
-                            self.world.cells[c],
-                            VirtualCell::Port {
-                                vocab: Vocab::Exec,
-                                ..
-                            }
-                        )
-                    {
-                        let kind = if op == HostOp::SendPair {
-                            PORT_PIPE_WRITE
-                        } else {
-                            PORT_PIPE_READ
-                        };
-                        (_, _, live) = self.port_socket(a[0], kind).unwrap();
-                        if op == HostOp::RecvReady {
-                            // ExecOp has no readiness call: a served pipe is
-                            // ready at once and its receive waits (NET-1).
-                            self.check_cancel(t)?;
-                            return Ok(vec![0, 0, 0, 0]);
-                        }
-                    }
-                    return self.net_call(t, op, c, id, live, a);
-                }
-            }
-            _ => unreachable!(),
-        }
-        let mut denied = vec![0, 1, 0, 0];
-        if matches!(op, HostOp::Listen | HostOp::Accept) {
-            denied.extend([0; 4]);
-        }
-        Ok(denied)
     }
 
     fn unix_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
@@ -4887,6 +4841,8 @@ impl Machine<'_> {
             HostOp::Connect
             | HostOp::Listen
             | HostOp::Accept
+            | HostOp::LocalAddr
+            | HostOp::PeerAddr
             | HostOp::RecvBounded
             | HostOp::RecvReady
             | HostOp::SendPair => {

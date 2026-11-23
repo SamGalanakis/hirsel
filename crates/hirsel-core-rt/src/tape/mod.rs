@@ -30,6 +30,7 @@ mod schedule_cases;
 #[cfg(test)]
 mod tests;
 
+use crate::net::{address_bytes, denial};
 use crate::{
     provider::*,
     retention::{RETENTION, Retained},
@@ -843,6 +844,8 @@ fn socket_op(op: u8) -> bool {
         CONNECT
             | LISTEN
             | ACCEPT
+            | LOCAL_ADDR
+            | PEER_ADDR
             | RECV_BOUNDED
             | RECV_READY
             | SEND_PAIR
@@ -879,15 +882,6 @@ fn waiting_io_status(error: u8) -> u8 {
         7 => ABORTED,
         _ => ERROR,
     }
-}
-
-fn address_bytes(address: crate::net::Address) -> [u8; 19] {
-    let mut bytes = [0; 19];
-    bytes[0] = address.family;
-    bytes[1..9].copy_from_slice(&address.hi.to_le_bytes());
-    bytes[9..17].copy_from_slice(&address.lo.to_le_bytes());
-    bytes[17..].copy_from_slice(&address.port.to_le_bytes());
-    bytes
 }
 
 unsafe fn buffer_bytes(buffer: &Buffer) -> &[u8] {
@@ -1713,12 +1707,6 @@ unsafe fn source_handle(request: &Request, inner: Inner) -> u64 {
     inner.handle | u64::from(direction)
 }
 
-unsafe fn denied(request: &Request) -> bool {
-    // SAFETY: the network adapter supplies this operand for address operations.
-    matches!(request.operation, CONNECT | LISTEN)
-        && unsafe { (*request.path.cast::<crate::net::NetworkRequest>()).denied }
-}
-
 /// A first non-ready answer opens W explicitly. Subsequent callbacks keep
 /// that WAIT open until the scheduler records WAKE, or cancellation closes W.
 unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
@@ -1787,7 +1775,7 @@ unsafe extern "C" fn wait(state: *mut u8, r: *mut Request, token: u64) -> Wait {
     // SAFETY: forward with the source's handle and restore the pinned request.
     let w = unsafe {
         (*r).handle = source_handle(&*r, inner);
-        let w = if denied(&*r) {
+        let w = if denial(&*r).is_some() {
             Wait::default()
         } else {
             (inner.provider.wait)(inner.provider.state, r, token)
@@ -1887,9 +1875,9 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let before = r.buffer.len;
     drop(s);
     // SAFETY: address operations pin their permission result through delivery.
-    let denied = unsafe { denied(r) };
-    let step = if denied {
-        done(crate::net::DENIED)
+    let denied = unsafe { denial(r) };
+    let step = if let Some(tag) = denied {
+        done(crate::os_net::signal(tag))
     } else {
         r.handle = unsafe { source_handle(r, inner) };
         // SAFETY: source callback, in the task, with its own handle.
@@ -1948,7 +1936,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     };
     let _ = live.recorder.as_mut().unwrap().frame(&frame);
     live.schedule.events += 1;
-    if !denied {
+    if denied.is_none() {
         s.delivering.insert(key, delivery);
     }
     done(answer)
@@ -2061,7 +2049,7 @@ unsafe fn record_out(
             .unwrap_or(0);
         out.value = zz(o.value.wrapping_sub(prev) as i64);
     }
-    if ok && matches!(r.operation, LISTEN | ACCEPT) {
+    if ok && matches!(r.operation, LISTEN | ACCEPT | LOCAL_ADDR | PEER_ADDR) {
         // SAFETY: the source wrote the address into the pinned network operand.
         let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
         out.payload = address_bytes(network.address).to_vec();
@@ -2388,7 +2376,7 @@ unsafe fn replay_out(
         }
         return Ok(o);
     }
-    if matches!(op, LISTEN | ACCEPT) {
+    if matches!(op, LISTEN | ACCEPT | LOCAL_ADDR | PEER_ADDR) {
         if ok {
             // SAFETY: this request pins the writable address through delivery.
             let network = unsafe { &mut *r.path.cast_mut().cast::<crate::net::NetworkRequest>() };

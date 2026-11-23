@@ -81,11 +81,16 @@ static HirselCoreHostOutcome cancel(void *s,HirselCoreHostRequest *r,uint64_t to
 static HirselCoreHostOutcome deliver(void *s,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
     (void)s;(void)r;return out;
 }
-static Child launch(const HirselCoreOsConfig *input,const HirselCoreSourceTable *sources,HirselCoreEntry entry,const char **args,size_t argc,int inherited) {
+static Child launch(const HirselCoreOsConfig *input,const HirselCoreSourceTable *sources,HirselCoreEntry entry,const char **args,size_t argc,int inherited,int peer_in,int peer_out) {
     int pair[2];if(socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,pair)) abort();
     pid_t pid=fork();if(pid<0) abort();
     if(!pid) {
         close(pair[0]);if(inherited>=0) close(inherited);rpc=pair[1];
+        close(peer_out);
+        if(peer_in>=0 && peer_in!=STDIN_FILENO) {
+            if(dup2(peer_in,STDIN_FILENO)<0) abort();
+            close(peer_in);
+        }
         HirselCoreProvider provider={NULL,ready,issue,resume,cancel,deliver};
         HirselCoreOpenProcess open=hirsel_core_os_process_new(input);
         if(!open.process) _exit(103);
@@ -129,7 +134,7 @@ static void stop(Child *child) {
     } else if(ended!=child->pid) abort();
     child->finished=1;if(child->fd>=0) close(child->fd);child->fd=-1;
 }
-static void service(void *state,Child *child,int server,int phase,int stop_case) {
+static void service(void *state,Child *child,int server,int phase,int stop_case,int peer_out) {
     Request q;ssize_t first=read(child->fd,&q,sizeof q);
     if(first<0 && errno==EINTR) return;
     if(first==0 || (first<0 && errno==ECONNRESET)) { close(child->fd);child->fd=-1;return; }
@@ -146,6 +151,16 @@ static void service(void *state,Child *child,int server,int phase,int stop_case)
             signal_child(child,SIGTERM);
         if(q.len>5 && !memcmp(data,"PORT ",5)) {
             char text[32]={0};if(q.len-5>=sizeof text) abort();memcpy(text,data+5,q.len-5);port=(unsigned)strtoul(text,NULL,10);
+        } else if(!server && q.len>5 && !memcmp(data,"PEER ",5)) {
+            char text[16]={0},*end;
+            if(q.len-5>=sizeof text) abort();
+            memcpy(text,data+5,q.len-5);
+            unsigned long peer=strtoul(text,&end,10);
+            if(*end || peer==0 || peer>65535) abort();
+            uint8_t bytes[]={peer&255,peer>>8};
+            ssize_t sent;
+            do { sent=send(peer_out,bytes,sizeof bytes,MSG_NOSIGNAL); } while(sent<0 && errno==EINTR);
+            if(sent!=(ssize_t)sizeof bytes && !(sent<0 && (errno==EPIPE || errno==ECONNRESET))) abort();
         } else if(q.len==38 && !memcmp(data,"TOKEN ",6)) {
             memcpy(saved_token,data+6,32);saved_token[32]=0;
         }
@@ -169,7 +184,11 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
     int twice=!strcmp(scenario,"runner-stop-twice");
     int deadline_case=!strcmp(scenario,"runner-deadline");
     int stop_case=deadline_case || twice || !strcmp(scenario,"runner-stop-early");
-    Child server=launch(input,sources,entry,server_args,stop_case?5:4,-1),client={.fd=-1,.finished=1};
+    int peers[2];
+    if(socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,peers)) abort();
+    Child server=launch(input,sources,entry,server_args,stop_case?5:4,-1,peers[0],peers[1]);
+    close(peers[0]);
+    Child client={.fd=-1,.finished=1};
     struct timespec start;
     if(deadline_case && clock_gettime(CLOCK_MONOTONIC,&start)) abort();
     while(!server.finished || !client.finished) {
@@ -178,6 +197,7 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
             if(clock_gettime(CLOCK_MONOTONIC,&now)) abort();
             if(now.tv_sec-start.tv_sec>=8) {
                 stop(&server);
+                close(peers[1]);
                 store_crash_signal_exit(state);
                 fprintf(stderr,"%s: teardown did not finish\n",scenario);
                 return 120;
@@ -186,7 +206,7 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
         if(port && client.pid==0) {
             char address[16];snprintf(address,sizeof address,"%u",port);
             const char *client_args[]={"client",scenario,modes[number],address,saved_token};
-            client=launch(input,sources,entry,client_args,5,server.fd);
+            client=launch(input,sources,entry,client_args,5,server.fd,-1,peers[1]);
         }
         Child *children[]={&server,&client};
         for(size_t i=0;i<2;i++) {
@@ -195,14 +215,15 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
             if(ended==c->pid) {c->finished=1;if(c->fd>=0) close(c->fd);c->fd=-1;}
             else if(ended<0) abort();
         }
-        if(client.pid && client.finished && client.status) {stop(&server);return 120;}
+        if(client.pid && client.finished && client.status) {stop(&server);close(peers[1]);return 120;}
         if(server.finished && client.pid==0) break;
         struct pollfd fds[2]={{server.fd,POLLIN,0},{client.fd,POLLIN,0}};
         if(server.finished && client.finished) break;
         int count=poll(fds,2,100);if(count<0 && errno==EINTR) continue;if(count<0) abort();
-        if(fds[0].revents) service(state,&server,1,number,stop_case);
-        if(fds[1].revents) service(state,&client,0,number,stop_case);
+        if(fds[0].revents) service(state,&server,1,number,stop_case,peers[1]);
+        if(fds[1].revents) service(state,&client,0,number,stop_case,peers[1]);
     }
+    close(peers[1]);
     if(store_crash_crashed(state)) store_crash_process_exit(state);
     if(twice && number==1) {
         if(WIFSIGNALED(server.status) && WTERMSIG(server.status)==SIGTERM) {

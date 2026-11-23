@@ -290,6 +290,8 @@ fn every_host_row_preserves_c_fields_and_status() {
                 HostOp::Connect
                     | HostOp::Listen
                     | HostOp::Accept
+                    | HostOp::LocalAddr
+                    | HostOp::PeerAddr
                     | HostOp::RecvBounded
                     | HostOp::RecvReady
                     | HostOp::SendPair
@@ -396,6 +398,8 @@ fn every_host_row_preserves_c_fields_and_status() {
                 HostOp::Connect
                     | HostOp::Listen
                     | HostOp::Accept
+                    | HostOp::LocalAddr
+                    | HostOp::PeerAddr
                     | HostOp::RecvBounded
                     | HostOp::RecvReady
                     | HostOp::SendPair

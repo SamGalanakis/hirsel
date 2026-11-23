@@ -1,4 +1,10 @@
 //! Network operand adapters. Authority checks precede issue; buffers stay caller-owned.
+mod addr;
+#[cfg(feature = "record")]
+pub(crate) use addr::{address_bytes, denial};
+pub(crate) use addr::{authorize, permits_address};
+pub use addr::{hirsel_core_net_local_addr, hirsel_core_net_peer_addr};
+
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
@@ -184,7 +190,7 @@ pub(crate) struct NetworkRequest {
     pub until: Option<(Provider, u64, u64)>,
     pub backlog: u16,
     pub connecting: Option<u64>,
-    pub denied: bool,
+    pub denial: Option<u8>,
     pub direction: u8,
     pub os: &'static crate::os_net::Operations,
     pub tls: *mut crate::host_file::TlsSessions,
@@ -286,55 +292,6 @@ pub(crate) const DENIED: Outcome = Outcome {
     kind: 0,
 };
 
-/// Check an address before issue. A tape records the denial for its inner grant
-/// and delivers it at its ordinary provider boundary.
-pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> bool {
-    if unix_operation(request.operation) {
-        // SAFETY: the adapter pins this extension through the provider call.
-        return unsafe { (*request.path.cast::<crate::unix_net::UnixRequest>()).authorized };
-    }
-    if request.operation == RESOLVE {
-        // SAFETY: the resolve adapter pins its request and the Net grant.
-        return unsafe { crate::resolve::authorize(provider, request) };
-    }
-    if !matches!(request.operation, CONNECT | LISTEN) {
-        return true;
-    }
-    // SAFETY: CONNECT and LISTEN carry the Net adapter's pinned extension.
-    unsafe {
-        #[cfg(feature = "record")]
-        if crate::tape::owns(provider) {
-            if let Some((_, handle)) = crate::tape::source(provider, request.handle) {
-                let denied = !permitted(request, handle);
-                (*request.path.cast_mut().cast::<NetworkRequest>()).denied = denied;
-            }
-            return true;
-        }
-        #[cfg(not(feature = "record"))]
-        let _ = provider;
-        permitted(request, request.handle)
-    }
-}
-
-unsafe fn permitted(request: &Request, handle: u64) -> bool {
-    // SAFETY: network adapters pin the scalar address and the grant's Rules.
-    unsafe {
-        let address = &(*request.path.cast::<NetworkRequest>()).address;
-        permits_address(handle, address, u8::from(request.operation == LISTEN))
-    }
-}
-
-/// SAFETY: handle is the live Net grant's immutable rule slice.
-pub(crate) unsafe fn permits_address(handle: u64, address: &Address, dir: u8) -> bool {
-    unsafe {
-        let rules = &*(handle as *const Rules);
-        rules.permits(|r| {
-            r.address
-                .permits(dir, address.family, address.hi, address.lo, address.port)
-        })
-    }
-}
-
 pub(crate) fn empty_buffer() -> Buffer {
     Buffer {
         data: ptr::null_mut(),
@@ -426,7 +383,7 @@ unsafe fn address_op(
             until: deadline(context, until_kind, clock, deadline_ns),
             backlog,
             connecting: None,
-            denied: false,
+            denial: None,
             direction: 0,
             os: &crate::os_net::OPERATIONS,
             tls: &raw mut (*files).tls_sessions,
@@ -527,7 +484,7 @@ impl OwnedNet {
                 until: deadline(context, until_kind, clock, deadline_ns),
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: (key & 3) as u8,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,
@@ -1080,7 +1037,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 until: deadline(context, until_kind, clock, deadline_ns),
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: 2,
                 os: &crate::os_net::OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,

@@ -1,4 +1,13 @@
 // Socket ownership and Net authority (NET-6, NET-7).
+/// The local IP address and port of a connected TCP socket.
+pub fn local_addr(s: Socket) -> Result[Addr, NetError] waits
+
+/// The remote IP address and port of a connected TCP socket.
+pub fn peer_addr(s: Socket) -> Result[Addr, NetError] waits
+
+/// The bound local IP address and port of a TCP listener.
+pub fn listener_addr(l: Listener) -> Result[Addr, NetError] waits
+
 pub fn narrow(n: Net, r: Rule) -> Result[Net, RuleError]
 
 pub fn split(take s: Socket) -> (ReadHalf, WriteHalf)

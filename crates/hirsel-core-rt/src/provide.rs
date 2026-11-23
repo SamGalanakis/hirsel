@@ -10,6 +10,8 @@
 //! Each cell admits `charge::PROVIDE_CELL` from the constructing payer, held
 //! until teardown with the cell, as a narrowed grant's rule storage (MEM-24):
 //! a capability is plain and copyable, so nothing earlier proves it gone.
+mod net;
+
 use crate::exec_runtime::{Call, ProcCall, SpawnCall};
 use crate::unix_net::{
     SERVED_DATAGRAM_RECV, SERVED_UNIX_LISTEN, UnixField, UnixHandle, UnixOperation, UnixReply,
@@ -154,6 +156,8 @@ const NET_SEND_SECRET: u64 = 7;
 const NET_RELEASED: u64 = 8;
 /// After the Unix variants (9 to 17).
 const NET_READY: u64 = 18;
+const NET_LOCAL_ADDR: u64 = 19;
+const NET_PEER_ADDR: u64 = 20;
 /// DirReply and StreamReply variants as `Reply[Op]` tags.
 const R_DONE: u64 = 0;
 const R_FAILED: u64 = 1;
@@ -172,6 +176,7 @@ const R_UNIX_SOCKET: u64 = 12;
 const R_UNIX_LISTENING: u64 = 13;
 const R_DATAGRAM: u64 = 14;
 const R_PACKET: u64 = 15;
+const R_ADDRESS: u64 = 16;
 
 fn unix_reply(reply: UnixReply) -> (u64, Option<Kind>) {
     match reply {
@@ -355,104 +360,6 @@ impl Port {
     }
     /// A Net call's words: an address operation on the port's Net (its rules
     /// already permitted the address), or an operation on a live key.
-    fn net_words(&self, request: &Request) -> Option<[u64; 9]> {
-        if let Some(op) = UnixOperation::describe(request.operation) {
-            // SAFETY: the Unix adapter pins this extension through delivery.
-            let n = unsafe { &*request.path.cast::<UnixRequest>() };
-            let mut w = [0; 9];
-            w[0] = op.served;
-            let b = request.buffer;
-            for (word, field) in w[1..].iter_mut().zip(op.fields) {
-                *word = match field {
-                    UnixField::Listener => self.socket(request.handle, Kind::UnixListener)?,
-                    UnixField::Datagram => self.socket(request.handle, Kind::Datagram)?,
-                    UnixField::Root(_) => n.root.len() as u64,
-                    UnixField::Path => n.path.len() as u64,
-                    UnixField::Backlog => u64::from(n.backlog),
-                    UnixField::Bytes => b.len as u64,
-                    UnixField::Room => b.capacity.saturating_sub(b.len) as u64,
-                };
-            }
-            return Some(w);
-        }
-        // SAFETY: every Net adapter pins its NetworkRequest in `path`.
-        let n = unsafe { &*request.path.cast::<crate::net::NetworkRequest>() };
-        let a = n.address;
-        let b = request.buffer;
-        let spare = (b.capacity.saturating_sub(b.len)) as u64;
-        let address = [u64::from(a.family), a.hi, a.lo, u64::from(a.port)];
-        let mut w = [0; 9];
-        match request.operation {
-            CONNECT => {
-                w[0] = NET_CONNECT;
-                w[1..5].copy_from_slice(&address);
-            }
-            RESOLVE => {
-                // The name as the caller wrote it, which its rules covered,
-                // and room for that many address records (NOTES 34).
-                // SAFETY: RESOLVE pins its ResolveRequest in `path`.
-                let name = unsafe {
-                    (*request.path.cast::<crate::resolve::ResolveRequest>())
-                        .raw_name
-                        .len
-                };
-                let room = spare.saturating_mul(hirsel_core_net::IP_RECORD_LEN as u64);
-                w[..3].copy_from_slice(&[NET_RESOLVE, name as u64, room]);
-            }
-            LISTEN => {
-                w[0] = NET_LISTEN;
-                w[1..5].copy_from_slice(&address);
-                w[5] = u64::from(n.backlog);
-            }
-            ACCEPT => {
-                let id = self.socket(request.handle, Kind::Listener)?;
-                w[..2].copy_from_slice(&[NET_ACCEPT, id]);
-            }
-            RECV_BOUNDED => {
-                let id = self.socket(request.handle, Kind::Socket)?;
-                w[..4].copy_from_slice(&[NET_RECV, id, spare, n.max_receive]);
-            }
-            RECV_READY => {
-                let id = self.socket(request.handle, Kind::Socket)?;
-                w[..2].copy_from_slice(&[NET_READY, id]);
-            }
-            SEND_PAIR => {
-                let id = self.socket(request.handle, Kind::Socket)?;
-                // SAFETY: SEND_PAIR pins its tail carrier through delivery.
-                let tail = unsafe { (*n.send_tail).len } as u64;
-                w[..4].copy_from_slice(&[NET_SEND, id, b.len as u64, tail]);
-            }
-            SEND_SECRET => {
-                // A TLS write half; the Secrets themselves go to the call.
-                let id = self.socket(request.handle, Kind::Socket)?;
-                // SAFETY: SEND_SECRET pins its SendRequest and its marks'
-                // bytes through delivery.
-                let (secrets, marks) = unsafe {
-                    let send = &*request.path.cast::<crate::secret::SendRequest>();
-                    (
-                        send.designations.len() as u64,
-                        (*n.send_tail).len as u64 / 8,
-                    )
-                };
-                w[..5].copy_from_slice(&[NET_SEND_SECRET, id, b.len as u64, secrets, marks]);
-            }
-            TLS_CONNECT => {
-                // The Socket is whole: `tls.connect` takes it before any split.
-                let id = self.socket(request.handle, Kind::Socket)?;
-                // SAFETY: TLS_CONNECT pins its TlsRequest in `path`.
-                let tls = unsafe { &*request.path.cast::<crate::tls::TlsRequest>() };
-                w[..5].copy_from_slice(&[
-                    NET_HANDSHAKE,
-                    id,
-                    tls.name.len as u64,
-                    tls.alpn.len as u64,
-                    u64::from(tls.trust == 0),
-                ]);
-            }
-            _ => return None,
-        }
-        Some(w)
-    }
     fn exec_words(&self, request: &Request) -> Option<[u64; 9]> {
         let mut words = [0; 9];
         let b = request.buffer;
@@ -667,6 +574,7 @@ fn answers(vocab: Vocab, op: u64, reply: u64) -> bool {
                     NET_RESOLVE | NET_RECV | NET_SEND => reply == R_COUNT,
                     NET_HANDSHAKE => reply == R_SECURED,
                     NET_SEND_SECRET | NET_READY => reply == R_DONE,
+                    NET_LOCAL_ADDR | NET_PEER_ADDR => reply == R_ADDRESS,
                     _ => false,
                 }
         }
@@ -1927,19 +1835,7 @@ fn answer(p: &Port, call: &PortCall, unix: Option<u64>, tag: u64, w: [u64; 6]) -
     ) {
         return None;
     }
-    // An IoError's tags are 1 to 5, a NetError's 1 to 9; the code is the
-    // reply word's low 32 bits.
-    let tags = match (p.vocab, op) {
-        (Vocab::Net, SERVED_UNIX_LISTEN) => 10,
-        (Vocab::Net, _) => 9,
-        _ => 5,
-    };
-    let io = |t: u64, code: u64| {
-        (1..=tags).contains(&t).then_some(IoError {
-            tag: t as u8,
-            code: code as u32,
-        })
-    };
+    let io = |tag, code| net::reply_error(p.vocab, call, tag, code);
     let mut out = Outcome::default();
     match tag {
         R_DONE => {
@@ -1987,13 +1883,17 @@ fn answer(p: &Port, call: &PortCall, unix: Option<u64>, tag: u64, w: [u64; 6]) -
             }
             out.value = w[0];
         }
-        R_SOCKET | R_LISTENER => {
-            // A new socket or listener, at a well-formed address.
+        R_SOCKET | R_LISTENER | R_ADDRESS => {
             let v4 = w[1] == 0 && w[2] == 0 && w[3] <= u64::from(u32::MAX);
-            if w[0] == 0 || p.handles.contains_key(&w[0]) || !(v4 || w[1] == 1) || w[4] > 0xffff {
+            if !(v4 || w[1] == 1) || w[4] > 0xffff {
                 return None;
             }
-            out.value = w[0];
+            if tag != R_ADDRESS {
+                if w[0] == 0 || p.handles.contains_key(&w[0]) {
+                    return None;
+                }
+                out.value = w[0];
+            }
         }
         R_SECURED => {
             // Some(i) names one of the offered protocols; None is (0, 0).
@@ -2141,20 +2041,20 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
             // bound one, an accepted socket's peer.
             outcome.value = p.issue_key(w[0]);
         }
-        if matches!(kind, Kind::Socket | Kind::Listener) && matches!(tag, R_SOCKET | R_LISTENER) {
-            // SAFETY: the unsettled IP operation pins its address output.
-            unsafe {
-                let n = (*p.calls[&id].request)
-                    .path
-                    .cast_mut()
-                    .cast::<crate::net::NetworkRequest>();
-                (*n).address = crate::net::Address {
-                    family: w[1] as u8,
-                    hi: w[2],
-                    lo: w[3],
-                    port: w[4] as u16,
-                };
-            }
+    }
+    if p.vocab == Vocab::Net && matches!(tag, R_SOCKET | R_LISTENER | R_ADDRESS) {
+        // SAFETY: the unsettled IP operation pins its address output.
+        unsafe {
+            let n = (*p.calls[&id].request)
+                .path
+                .cast_mut()
+                .cast::<crate::net::NetworkRequest>();
+            (*n).address = crate::net::Address {
+                family: w[1] as u8,
+                hi: w[2],
+                lo: w[3],
+                port: w[4] as u16,
+            };
         }
     }
     if (p.vocab, tag) == (Vocab::Exec, exec::STARTED) {

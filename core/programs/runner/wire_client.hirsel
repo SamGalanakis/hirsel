@@ -112,6 +112,12 @@ pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, ke
 pub fn open(n: Net, address: Addr, authority: Bytes, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64) -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller), std.wsock.Error] waits {
     let until = within(c, within_ms)
     let socket = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
+    open_socket(take socket, authority, c, random, keys, take token, config, until)
+}
+
+fn open_socket(take socket: Socket, authority: Bytes, c: Clock, random: Random, keys: List[Bytes],
+    take token: Option[Bytes], config: std.wsock.Config, until: Until)
+    -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller), std.wsock.Error] waits {
     let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = std.wsock.client(take socket, authority, config, c, random)?
     let mut r = take input
     let mut w = take output
@@ -127,7 +133,14 @@ pub fn open(n: Net, address: Addr, authority: Bytes, c: Clock, random: Random, k
 }
 
 pub fn connect_for(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
-    let (take r, take w, take out, take who) = open(n, address, string.as_bytes("127.0.0.1"), c, random, keys, take token, config, within_ms)?
+    let until = within(c, within_ms)
+    let socket = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
+    connect_socket(tasks, take socket, c, random, keys, take token, config, until, idle_ms)
+}
+
+pub fn connect_socket(tasks: Tasks, take socket: Socket, c: Clock, random: Random, keys: List[Bytes],
+    take token: Option[Bytes], config: std.wsock.Config, until: Until, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
+    let (take r, take w, take out, take who) = open_socket(take socket, string.as_bytes("127.0.0.1"), c, random, keys, take token, config, until)?
     let (to, commands): (Sender[Command], Receiver[Command]) = channel.new(64u64)
     let (frames, from): (Sender[Incoming], Receiver[Incoming]) = channel.new(64u64)
     let wake = channel.sender(frames)
@@ -156,15 +169,15 @@ pub fn close(take cn: Conn) -> bool waits {
 // A one-connection fixture listener. Each connection has an ephemeral loopback
 // port; all listeners in one fixture share the head and publisher.
 type Server[G: send, H: send, B: send]: send {
-    listener: Listener, tasks: Tasks, clock: Clock, random: Random, wire: Option[runner.Wire[G, B]],
+    listener: Listener, peer: Addr, tasks: Tasks, clock: Clock, random: Random, wire: Option[runner.Wire[G, B]],
     head: Sender[runner.HeadInput], post: Sender[runner.PubIn], config: runner.WireConfig,
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]
 }
 
 fn server[G: send, H: send, B: send](take seed: Server[G, H, B]) -> Result[(), std.wsock.Error] waits {
-    let Server(listener: take listener, tasks: tasks, clock: c, random: random, wire: take session_wire, head: take head, post: take post, config: config, place: place) = take seed
+    let Server(listener: take listener, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, head: take head, post: take post, config: config, place: place) = take seed
     let mut l = take listener
-    let (socket, peer) = match host.accept(mut l, deadline(c)) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
+    let socket = match std.net.accept_from(mut l, peer, deadline(c)) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
     let pending = std.wsock.pending(config.socket)?
     let lease = option.unwrap(std.wsock.acquire(pending)?)
     let up = std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c))?
@@ -195,10 +208,13 @@ pub fn pair_config[G: send, H: send, B: send](tasks: Tasks, n: Net, c: Clock, ra
     keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64)
     -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
     let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
-    let seed = Server(listener: take l, tasks: tasks, clock: c, random: random, wire: take session_wire, head: channel.sender(head), post: channel.sender(post), config: config, place: place)
+    let until = deadline(c)
+    let client = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
+    let peer = match net.local_addr(client) { Ok(a) => a, Error(e) => return Error(Network(e)) }
+    let seed = Server(listener: take l, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, head: channel.sender(head), post: channel.sender(post), config: config, place: place)
     let run: fn(take Server[G, H, B]) -> Result[(), std.wsock.Error] waits = server
     let mut h = task.spawn(tasks, bytes n_session, take seed, run)
-    match connect(tasks, n, address, c, random, keys, take token, config.socket) {
+    match connect_socket(tasks, take client, c, random, keys, take token, config.socket, until, 5000u64) {
         Ok(take cn) => Ok((take cn, take h)),
         Error(e) => { task.cancel(mut h); let _ = task.join(take h); Error(e) },
     }

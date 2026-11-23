@@ -769,7 +769,7 @@ fn socket_deadline_final_receive_records_its_success() {
                 until: None,
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: 1,
                 os: &crate::os_net::OPERATIONS,
                 tls: ptr::null_mut(),

@@ -424,10 +424,10 @@ fn keyed(take done: List[runner.Done]) -> List[runner.KeyedDone] {
     out
 }
 
-type Accept: send { listener: Listener, tasks: Tasks, clock: Clock, random: Random, head: Sender[runner.HeadInput], post: Sender[runner.PubIn], sessions: u64 }
+type Accept: send { listener: Listener, input: Stdin, tasks: Tasks, clock: Clock, random: Random, head: Sender[runner.HeadInput], post: Sender[runner.PubIn], sessions: u64 }
 
 fn accept(take seed: Accept) -> () waits {
-    let Accept(listener: take listener, tasks: tasks, clock: c, random: random, head: take head, post: take post, sessions: sessions) = take seed
+    let Accept(listener: take listener, input: input, tasks: tasks, clock: c, random: random, head: take head, post: take post, sessions: sessions) = take seed
     let mut l = take listener
     let mut config = runner.wire_defaults(65536u64, N_PLACE)
     // The replay sends up to three calls per owner. Reserve those outcomes
@@ -437,7 +437,14 @@ fn accept(take seed: Accept) -> () waits {
     let pool = result.unwrap(std.wsock.pending(config.socket))
     let mut owners: List[Task[Result[(), std.wsock.Error]]] = list.new()
     for _ in 0u64 .. sessions {
-        let (socket, peer) = result.unwrap(host.accept(mut l, Never))
+        let mut port: Bytes = list.with_capacity(2u64)
+        while list.len(port) < 2u64 {
+            want(result.unwrap(stdin.read(input, mut port, Never)) != 0, "runner_crash: missing client port")
+        }
+        let low: u16 = int.widen(port[0])
+        let high: u16 = int.widen(port[1])
+        let peer = Addr(ip: V4(0x7f000001u32), port: low | (high << 8))
+        let socket = result.unwrap(std.net.accept_from(mut l, peer, Never))
         let lease = option.unwrap(result.unwrap(std.wsock.acquire(pool)))
         let up = result.unwrap(std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c)))
         let service = runner.wire_target_service(random, Some(runner.ingress.binding()), head, c, tasks, config, "crash fixture")
@@ -447,14 +454,14 @@ fn accept(take seed: Accept) -> () waits {
     for take owner in owners { let _ = task.join(take owner) }
 }
 
-fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
+fn served(take db: store.Db, selection: runner.Selection, c: Clock, r: Random, tasks: Tasks, n: Net, input: Stdin, out: Stdout, sessions: u64) -> Result[(), runner.OpenError] waits {
     let (listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16))
     let mut port = string.from("PORT ")
     string.push_u64(mut port, int.widen(address.port))
     result.unwrap(stdout.write(out, port))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(4u64))
-    let seed = Accept(listener: take listener, tasks: tasks, clock: c, random: r, head: take head, post: runner.post(mail), sessions: sessions)
+    let seed = Accept(listener: take listener, input: input, tasks: tasks, clock: c, random: r, head: take head, post: runner.post(mail), sessions: sessions)
     let mut driving = task.spawn(tasks, bytes 33554432u64, take seed, accept)
     let opened = runner.place_head_selected(take db, selection, code.describe(place), N_PLACE, code.describe(migrate), code.describe(handles), take inbox, take mail, tasks, 1048576u64)
     if let Error(_) = opened { task.cancel(mut driving) }
@@ -492,7 +499,14 @@ fn drive(c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, port: u16, sess
     for _ in 0u64 .. sessions {
         let mut keys: List[Bytes] = list.new()
         for body in 0u64 .. 3u64 { list.push(mut keys, body_key(body)) }
-        let cn = result.unwrap(runner.wire_client.connect(tasks, n, Addr(ip: V4(0x7f000001u32), port: port), c, r, keys, Some(clone(credential)), std.wsock.defaults()))
+        let until: Until = At(c, int.saturating_add(host.mono_ns(c), 5000000000u64))
+        let socket = result.unwrap(host.connect(n, Addr(ip: V4(0x7f000001u32), port: port), until))
+        let source = result.unwrap(net.local_addr(socket))
+        let mut message = string.from("PEER ")
+        string.push_u64(mut message, int.widen(source.port))
+        result.unwrap(stdout.write(out, message))
+        let cn = result.unwrap(runner.wire_client.connect_socket(tasks, take socket, c, r, keys,
+            Some(clone(credential)), std.wsock.defaults(), until, 5000u64))
         remember(out, credential)
         list.push(mut connections, take cn)
     }
@@ -787,7 +801,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
     Ok(())
 }
 
-pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net) -> Result[(), Exit] waits {
+pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net, input: Stdin) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0u64))
     let scenario = option.unwrap(args.get(argv, 1u64))
     if scenario == "runner-activation" || scenario == "runner-activation-genesis" {
@@ -819,7 +833,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
         let cv: std.codec.Codec[u64] = std.codec.of()
         result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), cv)))
-        let opened = served(take db, Current(0u64), c, r, tasks, n, out, 1u64)
+        let opened = served(take db, Current(0u64), c, r, tasks, n, input, out, 1u64)
         want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the first head failed")
         return Ok(())
     }
@@ -834,7 +848,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
         if scenario == "poison-segment" { o.group_commits = 1u32 }
         let db = match store.open(tasks, d, c, r, o) { Ok(take x) => take x, Error(_) => return Ok(()) }
         // The data table is version 1 and the initial activation is version 2.
-        let opened = served(take db, Current(2u64), c, r, tasks, n, out, 2u64)
+        let opened = served(take db, Current(2u64), c, r, tasks, n, input, out, 2u64)
         match opened {
             Ok(()) => want(scenario != "poison-segment", "runner_crash: a failed journal sync did not stop the head"),
             Error(_) => (),
@@ -848,7 +862,7 @@ pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, 
     let mut o = options()
     o.create = false
     let db = result.unwrap(store.open(tasks, d, c, r, o))
-    let opened = served(take db, Current(2u64), c, r, tasks, n, out, 1u64)
+    let opened = served(take db, Current(2u64), c, r, tasks, n, input, out, 1u64)
     want(match opened { Ok(()) => true, Error(_) => false }, "runner_crash: the re-send head failed")
     let (_, total) = resends(scenario)
     let (after, value) = count(d, c, r, tasks)

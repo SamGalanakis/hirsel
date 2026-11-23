@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'tools'))
 from loopback_peer import accept_from
 
-LOOPBACK_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535', 'Tls *.test 0-65535 System')
+LOOPBACK_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 1-65535', 'Tls *.test 0-65535 System')
 
 
 def simulation_support(module):

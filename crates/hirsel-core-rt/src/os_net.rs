@@ -1,5 +1,9 @@
 //! Linux try-first socket attempts. Go's SO_ERROR + getpeername sequence rejects
 //! spurious writable connect events; combined interests live in core-net.
+mod addr;
+pub(crate) use addr::is_operation;
+use addr::{address, decoded, query_address};
+
 use crate::{
     entry::SocketActivation,
     net::{Address, NetworkRequest, RulesStorage},
@@ -130,52 +134,6 @@ pub(crate) fn signal(tag: u8) -> Outcome {
     Outcome {
         error: IoError { tag, code: 0 },
         ..Outcome::default()
-    }
-}
-unsafe fn address(a: Address) -> (libc::sockaddr_storage, libc::socklen_t) {
-    // SAFETY: zero is a valid initial representation of these C address structs.
-    unsafe {
-        let mut storage: libc::sockaddr_storage = zeroed();
-        let len = if a.family == 0 {
-            let v4 = storage_as_mut::<libc::sockaddr_in>(&mut storage);
-            v4.sin_family = libc::AF_INET as u16;
-            v4.sin_port = a.port.to_be();
-            v4.sin_addr.s_addr = (a.lo as u32).to_be();
-            size_of::<libc::sockaddr_in>()
-        } else {
-            let v6 = storage_as_mut::<libc::sockaddr_in6>(&mut storage);
-            v6.sin6_family = libc::AF_INET6 as u16;
-            v6.sin6_port = a.port.to_be();
-            v6.sin6_addr.s6_addr = ((u128::from(a.hi) << 64) | u128::from(a.lo)).to_be_bytes();
-            size_of::<libc::sockaddr_in6>()
-        };
-        (storage, len as libc::socklen_t)
-    }
-}
-unsafe fn storage_as_mut<T>(storage: &mut libc::sockaddr_storage) -> &mut T {
-    // SAFETY: callers select the family-specific C struct that fits storage.
-    unsafe { &mut *(storage as *mut libc::sockaddr_storage).cast::<T>() }
-}
-unsafe fn decoded(storage: &mut libc::sockaddr_storage) -> Address {
-    unsafe {
-        if storage.ss_family as i32 == libc::AF_INET {
-            let a = storage_as_mut::<libc::sockaddr_in>(storage);
-            Address {
-                family: 0,
-                hi: 0,
-                lo: u64::from(u32::from_be(a.sin_addr.s_addr)),
-                port: u16::from_be(a.sin_port),
-            }
-        } else {
-            let a = storage_as_mut::<libc::sockaddr_in6>(storage);
-            let ip = u128::from_be_bytes(a.sin6_addr.s6_addr);
-            Address {
-                family: 1,
-                hi: (ip >> 64) as u64,
-                lo: ip as u64,
-                port: u16::from_be(a.sin6_port),
-            }
-        }
     }
 }
 fn socket_option(fd: BorrowedFd<'_>, level: i32, name: i32) -> Result<i32, i32> {
@@ -388,6 +346,9 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
             sockets.resume_send(key);
         }
         let result = match request.operation {
+            LOCAL_ADDR | PEER_ADDR => {
+                query_address(sockets.fd(key), request.operation, &mut n.address)
+            }
             LISTEN => {
                 let key = match socket(n, true) {
                     Ok(k) => k,

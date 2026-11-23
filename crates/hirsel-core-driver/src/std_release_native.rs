@@ -128,9 +128,9 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let mut listener = take listening
     let free_client = result.unwrap(host.connect(n, addr, Never))
-    let (free_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let free_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(free_client)), Never))
     let bounded_client = result.unwrap(host.connect(n, addr, Never))
-    let (bounded_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let bounded_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(bounded_client)), Never))
     let free = task.spawn(tasks, bytes 65536, SpinJob(socket: take free_socket), spin)
     let spawned = bound steps 100 {
         task.spawn(tasks, bytes 65536, SpinJob(socket: take bounded_socket), spin)
@@ -358,9 +358,9 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let (listening, addr) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 8))
     let mut listener = take listening
     let drain_client = result.unwrap(host.connect(n, addr, Never))
-    let (drain_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let drain_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(drain_client)), Never))
     let stuck_client = result.unwrap(host.connect(n, addr, Never))
-    let (stuck_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let stuck_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(stuck_client)), Never))
     let (to, from): (Sender[String], Receiver[String]) = channel.new(1)
     let (acks, acked): (Sender[()], Receiver[()]) = channel.new(1)
     let drained = task.spawn(tasks, bytes 65536, Drain(socket: take drain_socket, from: take from, acks: take acks), drain)
@@ -393,7 +393,7 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let _ = take held
     result.unwrap(stdout.write(out, stopped));
     let phase_client = result.unwrap(host.connect(n, addr, Never))
-    let (phase_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let phase_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(phase_client)), Never))
     let (phase_to, phase_from): (Sender[String], Receiver[String]) = channel.new(1)
     let (marks, marked): (Sender[u64], Receiver[u64]) = channel.new(4)
     let phased = task.spawn(tasks, bytes 65536, Phase(socket: take phase_socket, from: take phase_from, marks: take marks), phase)
@@ -416,7 +416,7 @@ pub fn main(n: Net, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     }
     result.unwrap(stdout.write(out, shown));
     let live_client = result.unwrap(host.connect(n, addr, Never))
-    let (live_socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let live_socket = result.unwrap(std.net.accept_from(mut listener, result.unwrap(net.local_addr(live_client)), Never))
     let (live_to, live_from): (Sender[String], Receiver[String]) = channel.new(1)
     let lived = task.spawn(tasks, bytes 65536, Lively(socket: take live_socket, from: take live_from), lively)
     wake(take live_client)

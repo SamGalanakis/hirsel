@@ -527,6 +527,32 @@ fn attempt(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock,
             None
         },
         Accept(listener: id) => accept(mut state, id, mut port, take c),
+        LocalAddr(id: id) => {
+            let found = match map.get(state.listeners, id) {
+                Some(l) => Some(l.addr),
+                None => match endpoint(state, id) {
+                    Some(e) => Some(e.addr),
+                    None => None
+                }
+            }
+            match found {
+                Some(address) => {
+                    let _ = answer(mut port, take c, Address(address));
+                    None
+                },
+                None => reject(mut port, take c, Reset)
+            }
+        },
+        PeerAddr(socket: id) => {
+            let Some(local) = endpoint(state, id) else {
+                return reject(mut port, take c, Reset)
+            }
+            let Some(remote) = endpoint(state, local.peer) else {
+                return reject(mut port, take c, Reset)
+            }
+            let _ = answer(mut port, take c, Address(remote.addr))
+            None
+        },
         Recv(socket: id, room: room, ..) => receive(n, mut state, mut plan, id, room, host.mono_ns(clock), mut port, take c),
         Ready(socket: id) => ready(n, state, id, host.mono_ns(clock), mut port, take c),
         Send(socket: id, prefix: prefix, tail: tail) => transmit(n, mut state, mut plan, clock, id, prefix, tail, mut port, take c),

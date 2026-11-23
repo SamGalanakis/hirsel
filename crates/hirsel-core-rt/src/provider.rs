@@ -226,7 +226,7 @@ pub(crate) unsafe fn drive(
     issued: Option<&mut Option<Outcome>>,
 ) -> Outcome {
     // SAFETY: forwarded, for operations that need no Net authorization.
-    unsafe { drive_with(context, provider, request, issued, |_, _| true) }
+    unsafe { drive_with(context, provider, request, issued, |_, _| None) }
 }
 
 #[inline(always)]
@@ -235,7 +235,7 @@ pub(crate) unsafe fn drive_with(
     provider: *const Provider,
     request: *mut Request,
     issued: Option<&mut Option<Outcome>>,
-    authorize: impl FnOnce(&Provider, &mut Request) -> bool,
+    authorize: impl FnOnce(&Provider, &mut Request) -> Option<Outcome>,
 ) -> Outcome {
     // SAFETY: forwarded; the stackful form always ends with an outcome.
     unsafe {
@@ -266,7 +266,7 @@ unsafe fn admit<const RETURNABLE: bool>(
     provider: *const Provider,
     request: *mut Request,
     issued: Option<&mut Option<Outcome>>,
-    authorize: impl FnOnce(&Provider, &mut Request) -> bool,
+    authorize: impl FnOnce(&Provider, &mut Request) -> Option<Outcome>,
 ) -> Option<Outcome> {
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
@@ -301,8 +301,8 @@ unsafe fn admit<const RETURNABLE: bool>(
                 ..Outcome::default()
             });
         }
-        if !authorize(&*provider, &mut *request) {
-            return Some(crate::net::DENIED);
+        if let Some(refusal) = authorize(&*provider, &mut *request) {
+            return Some(refusal);
         }
         if RETURNABLE {
             crate::tasks::provider_operation_returnable(context, &*provider, request)

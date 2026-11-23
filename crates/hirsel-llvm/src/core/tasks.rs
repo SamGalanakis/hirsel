@@ -114,7 +114,7 @@ impl FunctionEmitter<'_> {
         if matches!(op, HostOp::EnvGet | HostOp::EnvName) {
             results[0] = Ty::Ptr;
         }
-        if matches!(op, HostOp::Listen | HostOp::Accept) {
+        if op.address_outcome() {
             results.extend([K, U, U, Ty::Scalar(Scalar::U16)]);
         } else if op == HostOp::TlsConnect {
             results.extend([U; 4]);
@@ -128,6 +128,8 @@ impl FunctionEmitter<'_> {
             HostOp::Connect
             | HostOp::Listen
             | HostOp::Accept
+            | HostOp::LocalAddr
+            | HostOp::PeerAddr
             | HostOp::RecvBounded
             | HostOp::RecvReady
             | HostOp::SendPair

@@ -6,6 +6,9 @@
 //! block's xxh3-64 check, which covers the tape id, the block's flags, magic,
 //! sequence number and length, so a block from another tape or another place
 //! fails. Discovery is sequential from offset 0 and never resynchronises.
+mod payload;
+pub use payload::{carries_payload, tls_connect_payload};
+
 use hirsel_core_net::{
     EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, TlsRule, TlsTrust, UnixDirection,
     UnixRule,
@@ -907,44 +910,6 @@ pub fn writes(op: u8) -> bool {
     )
 }
 
-pub fn carries_payload(op: u8) -> bool {
-    use crate::op::*;
-    matches!(
-        op,
-        READ | READ_AT
-            | MKDTEMP
-            | RANDOM
-            | LISTEN
-            | ACCEPT
-            | RECV_BOUNDED
-            | TLS_CONNECT
-            | SECRET_MAC
-            | CRED_FETCH
-            | RESOLVE
-            | STDIN_READ
-            | NEXT_ENTRIES
-            | STAT
-            | STAT_FILE
-            | EXEC_SPAWN
-            | DATAGRAM_RECV
-    )
-}
-
-/// A successful TLS_CONNECT carries a length-prefixed ALPN, the fixed peer
-/// digest and a length-prefixed channel binding (zero length when absent).
-pub fn tls_connect_payload(bytes: &[u8]) -> Result<(&[u8], &[u8; 32], &[u8]), Corrupt> {
-    let (&alpn_len, rest) = bytes.split_first().ok_or(Corrupt)?;
-    let (alpn, rest) = rest
-        .split_at_checked(usize::from(alpn_len))
-        .ok_or(Corrupt)?;
-    let (peer, rest) = rest.split_first_chunk::<32>().ok_or(Corrupt)?;
-    let (&binding_len, binding) = rest.split_first().ok_or(Corrupt)?;
-    if !matches!(binding_len, 0 | 32 | 48 | 64) || usize::from(binding_len) != binding.len() {
-        return Err(Corrupt);
-    }
-    Ok((alpn, peer, binding))
-}
-
 /// An outcome as the tape stores it. `value` is stored as given: the recorder
 /// passes a clock reading as its zig-zag delta and a new handle as its ordinal.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1000,7 +965,9 @@ impl Out {
         {
             return Err(Corrupt);
         }
-        if error.0 == 10 && op != op::UNIX_LISTEN {
+        if (error.0 == 10 && op != op::UNIX_LISTEN)
+            || (error.0 == 11 && (op != op::LISTEN || error.1 != 0))
+        {
             return Err(Corrupt);
         }
         let written = if writes(op) || (matches!(op, op::SEND_SECRET | op::SCRAM) && status != OK) {
@@ -1013,7 +980,7 @@ impl Out {
             if b.len() > PAYLOAD_CHUNK {
                 return Err(Corrupt);
             }
-            if matches!(op, op::LISTEN | op::ACCEPT) {
+            if matches!(op, op::LISTEN | op::ACCEPT | op::LOCAL_ADDR | op::PEER_ADDR) {
                 if status == OK {
                     let [family, rest @ ..] = b else {
                         return Err(Corrupt);

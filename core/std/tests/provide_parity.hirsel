@@ -198,9 +198,8 @@ fn dial_client(take d: Dial) -> u64 waits {
                 let (take listener, at) = take pair
                 let mut l = take listener
                 let rest: u64 = match host.connect(n, at, Never) {
-                    Ok(take dialed) => match host.accept(mut l, Never) {
-                        Ok(take accepted) => {
-                            let (take far, _) = take accepted
+                    Ok(take dialed) => match net.accept_from(mut l, result.unwrap(net.local_addr(dialed)), Never) {
+                        Ok(take far) => {
                             let (dr, dw) = net.split(take dialed)
                             let (ar, aw) = net.split(take far)
                             let mut w = take dw
@@ -252,11 +251,8 @@ fn dial_client(take d: Dial) -> u64 waits {
     }
 }
 
-// A loopback behind a port: Listen binds port 4000, Connect and Accept
-// issue fresh sockets, Send keeps its payload (only the last, since a
-// client stopped between its send and its receive leaves one behind) and
-// Recv fills it back; it
-// serves until quiescence and counts the calls it answered.
+// Listen binds port 4000 and Connect and Accept issue fresh sockets.
+// Send keeps the latest payload for Recv. The server counts answered calls.
 fn loopback(take s: Served[NetOp]) -> u64 waits {
     let mut served = take s
     let mut data: Bytes = list.with_capacity(64)
@@ -282,6 +278,8 @@ fn loopback(take s: Served[NetOp]) -> u64 waits {
                         id = id + 4
                         Some(Socket(id, Addr(ip: V4(2130706433), port: 5000)))
                     },
+                    LocalAddr(_) => Some(Address(Addr(ip: V4(2130706433), port: 5000))),
+                    PeerAddr(_) => Some(Address(Addr(ip: V4(2130706433), port: 5000))),
                     Send(socket, prefix, tail) => {
                         list.clear(mut data)
                         provide.payload(c, 1, mut data)
@@ -616,7 +614,8 @@ fn sim_read_withdrawal(tasks: Tasks, cancel: bool, seed: u64) -> bool waits {
     let (listener, address) = result.unwrap(host.listen(network, Addr(ip: V4(2130706433), port: 0), 1))
     let mut l = take listener
     let client = result.unwrap(host.connect(network, address, Never))
-    let (accepted, peer) = result.unwrap(host.accept(mut l, Never))
+    let peer = result.unwrap(net.local_addr(client))
+    let accepted = result.unwrap(net.accept_from(mut l, peer, Never))
     let peer_is_local = match peer.ip {
         V4(2130706433) => true,
         _ => false

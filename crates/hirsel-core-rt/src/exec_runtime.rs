@@ -335,18 +335,18 @@ pub unsafe extern "C" fn hirsel_core_exec_spawn(
         let mut outcome = drive_with(context, &provider, &mut r, None, |provider, r| {
             let launch = &(*r.path.cast::<Call<SpawnCall>>()).data.launch;
             if !launch_permitted(provider, r.handle, launch) {
-                return false;
+                return Some(crate::net::DENIED);
             }
             let amount =
                 EXEC_HANDLE * (1 + launch.piped.into_iter().filter(|&pipe| pipe).count() as u64);
             match payer.admit(Some(amount)) {
                 Ok(()) => {
                     charged = amount;
-                    true
+                    None
                 }
                 Err(capacity) => {
                     refusal = Some(capacity);
-                    false
+                    Some(crate::net::DENIED)
                 }
             }
         });

@@ -201,7 +201,7 @@ unsafe fn connect(
                 until: net::deadline(context, until_kind, clock, deadline_ns),
                 backlog: 0,
                 connecting: None,
-                denied: false,
+                denial: None,
                 direction: 0,
                 os: &crate::os_net::TLS_OPERATIONS,
                 tls: &raw mut (*files).tls_sessions,

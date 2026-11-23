@@ -39,10 +39,18 @@ stream has an error. On a pipe served by an Exec port, which has no readiness ca
 ready at once and the next receive waits.
 
 An address argument outside the grant returns `Denied` before issue.
-`listen` has a backlog, with no `Until` parameter.
-`NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32)`.
+An ephemeral listen whose matching rules leave a nonzero port uncovered returns
+`EphemeralOutsideNetGrant` before issue. `listen` has a backlog, with no
+`Until` parameter.
+`NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32) | EphemeralOutsideNetGrant`.
 [TLS-1](tls.md#tls-1-client-handshake) defines `Tls`. On a TLS stream, receive and send
 move plaintext ([TLS-2](tls.md#tls-2-plaintext-on-a-tls-stream)).
+
+`net.local_addr(s: Socket)` and `net.peer_addr(s: Socket)` return the local and
+remote TCP endpoints. `net.listener_addr(l: Listener)` returns the bound TCP
+endpoint. The queries borrow the resource and return `Result[Addr, NetError]`.
+They `waits` because a served Net can supply the answer. A native TCP query
+reads the socket's address without waiting for network I/O.
 
 ### NET-7: Owned connections
 
@@ -159,8 +167,10 @@ written `Tls <pattern>[,<pattern>] <lo>-<hi> <trust>`, and a `Resolve` rule
 for example `Connect 0.0.0.0/0 0-65535`; it is never implicit.
 
 A rule permits its direction, prefix and inclusive port interval only. A wildcard
-listen requires a `/0` rule of the same family. Listen port 0 requires the whole
-`0-65535` interval. IPv4-mapped IPv6 and unscoped `fe80::/10` are denied.
+listen requires a `/0` rule of the same family. Listen port 0 lets the kernel
+choose a port. The matching Listen rules must together cover every nonzero port
+(`1-65535`) so the kernel cannot bind outside the grant. IPv4-mapped IPv6 and
+unscoped `fe80::/10` are denied.
 The unspecified address is denied as a connect target. Accepted peers inherit
 the listener's authority; there is no peer rule check. Handles cannot become Net
 values or widen authority.

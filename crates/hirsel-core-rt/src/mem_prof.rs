@@ -1,8 +1,11 @@
-//! Bounded observations of the serial replay runtime.
+//! Bounded observations of the serial replay runtime, and per-worker sampled
+//! backing lifetimes for a live run.
 use crate::mem_sampler::Sampler;
 use crate::prof::{self, Kind};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const TOP_SCOPES: usize = 20;
 const DEFAULT_ENTRIES: usize = 65_536;
@@ -119,11 +122,11 @@ thread_local! {
 }
 
 pub(crate) fn enabled() -> bool {
-    RUN.with_borrow(Option::is_some)
+    LIVE.get().is_some() || RUN.with_borrow(Option::is_some)
 }
 
 pub(crate) struct Settings {
-    sampled: bool,
+    pub(crate) sampled: bool,
     capacity: usize,
 }
 
@@ -173,6 +176,14 @@ pub(crate) fn start(Settings { sampled, capacity }: Settings) {
 }
 
 pub(crate) fn finish() {
+    if let Some(live) = LIVE.get() {
+        prof::append(
+            Kind::MemoryMeta,
+            &[METRIC_VERSION, live.lost.load(Ordering::Relaxed)],
+            &[],
+        );
+        return;
+    }
     RUN.with_borrow_mut(|slot| {
         let Some(mut run) = slot.take() else { return };
         prof::append(Kind::MemoryMeta, &[METRIC_VERSION, run.state_drops], &[]);
@@ -350,10 +361,16 @@ pub(crate) fn forward(old: usize, new: usize) {
 }
 
 pub(crate) fn alloc(pointer: *const u8, bytes: usize, backing: Backing) {
+    if let Some(live) = LIVE.get() {
+        return live.allocate(pointer.addr(), bytes as u64, backing);
+    }
     with_run(|run| run.allocation(pointer.addr(), bytes as u64, backing));
 }
 
 pub(crate) fn resize(pointer: *const u8, old_bytes: usize, bytes: usize) {
+    if let Some(live) = LIVE.get() {
+        return live.resize(pointer.addr(), bytes as u64);
+    }
     with_run(|run| {
         let bytes = bytes as u64;
         if run.sampler.is_none() {
@@ -369,6 +386,9 @@ pub(crate) fn resize(pointer: *const u8, old_bytes: usize, bytes: usize) {
 }
 
 pub(crate) fn free(pointer: *const u8, bytes: usize) {
+    if let Some(live) = LIVE.get() {
+        return live.free(pointer.addr(), bytes as u64);
+    }
     with_run(|run| run.free(pointer.addr(), bytes as u64));
 }
 
@@ -412,6 +432,9 @@ impl Drop for BorrowedRegion {
 }
 
 pub(crate) fn region_refill(region: &crate::region::Region, pointer: *const u8, bytes: usize) {
+    if let Some(live) = LIVE.get() {
+        return live.allocate(pointer.addr(), bytes as u64, Backing::Region);
+    }
     with_run(|run| {
         run.allocation(pointer.addr(), bytes as u64, Backing::Region);
         observe_slack(run, Some(region));
@@ -575,4 +598,162 @@ pub(crate) fn scope_exit(kind: u64) {
             run.keep(scope);
         }
     });
+}
+
+/// A live run samples on every worker with no shared order. Each worker draws
+/// its own geometric byte gaps. Frees can run on another worker, so sampled
+/// addresses live in one lock-free open-addressed table.
+static LIVE: OnceLock<Live> = OnceLock::new();
+const EMPTY: usize = 0;
+const VACATED: usize = 1;
+/// Inserts and lookups probe the same bounded window, so a resident address is
+/// always found. A full window is reported as state loss.
+const PROBES: usize = 128;
+const WORKER_SHIFT: u32 = 40;
+
+struct Live {
+    addresses: Box<[AtomicUsize]>,
+    ids: Box<[AtomicU64]>,
+    mask: usize,
+    /// Sampled allocations the table could not hold, and frees of sampled
+    /// allocations on a thread with no runtime stream.
+    lost: AtomicU64,
+    workers: AtomicU64,
+}
+
+struct LiveWorker {
+    sampler: Sampler,
+    prefix: u64,
+    next: u64,
+}
+
+thread_local! {
+    static LIVE_WORKER: RefCell<Option<LiveWorker>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn start_live(Settings { capacity, .. }: Settings) {
+    let slots = (capacity * 2).next_power_of_two().max(PROBES);
+    let live = Live {
+        addresses: (0..slots).map(|_| AtomicUsize::new(EMPTY)).collect(),
+        ids: (0..slots).map(|_| AtomicU64::new(0)).collect(),
+        mask: slots - 1,
+        lost: AtomicU64::new(0),
+        workers: AtomicU64::new(1),
+    };
+    assert!(
+        LIVE.set(live).is_ok(),
+        "one live memory profile per process"
+    );
+}
+
+impl Live {
+    fn home(&self, address: usize) -> usize {
+        (address >> 4).wrapping_mul(0x9e37_79b9_7f4a_7c15_u64 as usize) & self.mask
+    }
+
+    fn slots(&self, address: usize) -> impl Iterator<Item = usize> + '_ {
+        let home = self.home(address);
+        (0..PROBES).map(move |step| (home + step) & self.mask)
+    }
+
+    fn find(&self, address: usize) -> Option<usize> {
+        for slot in self.slots(address) {
+            match self.addresses[slot].load(Ordering::Acquire) {
+                found if found == address => return Some(slot),
+                EMPTY => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn allocate(&self, address: usize, bytes: u64, backing: Backing) {
+        if !prof::enabled() {
+            return;
+        }
+        let Some((probability, id)) = LIVE_WORKER.with_borrow_mut(|worker| {
+            let worker = worker.get_or_insert_with(|| self.worker());
+            let probability = worker.sampler.include(bytes)?;
+            worker.next += 1;
+            Some((probability, worker.prefix | worker.next))
+        }) else {
+            return;
+        };
+        // The address's previous owner freed it without an observed free.
+        // Close that sample so the slot holds one live allocation.
+        if let Some(slot) = self.find(address) {
+            let old = self.ids[slot].load(Ordering::Relaxed);
+            prof::append(Kind::Alloc, &[1, old, 0, 0, 0, prof::now_ns()], &[]);
+            self.ids[slot].store(id, Ordering::Relaxed);
+        } else if !self.claim(address, id) {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        super::prof_stack::capture(
+            Kind::Alloc,
+            &[
+                0,
+                id,
+                bytes,
+                backing as u64,
+                probability.to_bits(),
+                prof::now_ns(),
+            ],
+        );
+    }
+
+    fn claim(&self, address: usize, id: u64) -> bool {
+        for slot in self.slots(address) {
+            let entry = &self.addresses[slot];
+            let mut current = entry.load(Ordering::Relaxed);
+            while matches!(current, EMPTY | VACATED) {
+                match entry.compare_exchange_weak(
+                    current,
+                    address,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // Only this address's free reads the id, and it is
+                        // ordered after this allocation returns.
+                        self.ids[slot].store(id, Ordering::Relaxed);
+                        return true;
+                    }
+                    Err(actual) => current = actual,
+                }
+            }
+        }
+        false
+    }
+
+    fn worker(&self) -> LiveWorker {
+        // SAFETY: gettid has no operands.
+        let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u64;
+        super::prof_stack::prepare();
+        LiveWorker {
+            sampler: Sampler::new(prof::now_ns() ^ tid.wrapping_mul(0xff51_afd7_ed55_8ccd)),
+            prefix: self.workers.fetch_add(1, Ordering::Relaxed) << WORKER_SHIFT,
+            next: 0,
+        }
+    }
+
+    fn resize(&self, address: usize, bytes: u64) {
+        if let Some(slot) = self.find(address) {
+            let id = self.ids[slot].load(Ordering::Relaxed);
+            prof::append(Kind::Alloc, &[2, id, bytes, 0, 0, prof::now_ns()], &[]);
+        }
+    }
+
+    fn free(&self, address: usize, bytes: u64) {
+        let Some(slot) = self.find(address) else {
+            return;
+        };
+        let id = self.ids[slot].load(Ordering::Relaxed);
+        self.addresses[slot].store(VACATED, Ordering::Release);
+        if prof::enabled() {
+            prof::append(Kind::Alloc, &[1, id, bytes, 0, 0, prof::now_ns()], &[]);
+        } else {
+            self.lost.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }

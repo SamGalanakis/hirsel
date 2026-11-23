@@ -683,3 +683,185 @@ pub fn main() -> Result[(), Exit] {
     ).unwrap();
     assert_eq!(task_bytes, 0, "the root Task and both stores close");
 }
+
+#[test]
+fn live_memory_profile_weights_held_bytes_and_closes_churn_across_workers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        r#"
+const MIB: u64 = 1048576
+const HELD: u64 = 64
+const CHURN_BYTES: u64 = 131072
+const CHURN_ROUNDS: u64 = 2048
+
+// An inbox does not cross, so the holder sends its release client back.
+type Holder: cross {
+    hello: Client[Client[u64]],
+    held: Client[u64]
+}
+
+fn filled(seed: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(MIB)
+    for i in 0 .. MIB {
+        list.push(mut b, int.truncate(i + seed))
+    }
+    b
+}
+
+fn hold(take h: Holder) -> u64 waits {
+    let Holder(hello: hello, held: held) = take h
+    let (c, release): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(hello, take c))
+    let mut kept: List[Bytes] = list.with_capacity(HELD)
+    for i in 0 .. HELD {
+        list.push(mut kept, filled(i))
+    }
+    result.unwrap(conn.send(held, list.len(kept)))
+    let _ = result.unwrap(conn.receive(release))
+    list.len(kept)
+}
+
+type Churn: cross {
+    rounds: u64
+}
+
+fn churn(take c: Churn) -> u64 {
+    let Churn(rounds: rounds) = take c
+    let mut total = 0u64
+    for i in 0 .. rounds {
+        let mut b: Bytes = list.with_capacity(CHURN_BYTES)
+        list.push(mut b, int.truncate(i))
+        total = total + list.capacity(b)
+    }
+    total
+}
+
+pub fn main(tasks: Tasks, c: Clock) -> Result[(), Exit] waits {
+    let (hello, hello_in): (Client[Client[u64]], Inbox[Client[u64]]) = result.unwrap(conn.new(1, bytes 0))
+    let (held, held_in): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 80 * MIB, Holder(hello: take hello, held: conn.client(held)), hold))
+    let release = result.unwrap(conn.receive(hello_in))
+    let w = result.unwrap(task.spawn_unit(tasks, bytes 4 * MIB, Churn(rounds: CHURN_ROUNDS), churn))
+    if result.unwrap(conn.receive(held_in)) != HELD { return Error(Exit(status: 2)) }
+    if result.unwrap(task.join(take w)) != CHURN_ROUNDS * CHURN_BYTES { return Error(Exit(status: 3)) }
+    // The profiler reads RSS every 10 ms; keep the held bytes resident across reads.
+    clock.sleep_ns(c, 200000000)
+    result.unwrap(conn.send(release, 1))
+    if result.unwrap(task.join(take h)) != HELD { return Error(Exit(status: 4)) }
+    Ok(())
+}
+"#,
+    )
+    .unwrap();
+
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let profiling = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_ARCHIVE").unwrap());
+    let profile = dir.path().join("live.hprof");
+    let args = [
+        "prof",
+        "run",
+        app.to_str().unwrap(),
+        "--backend",
+        "cranelift",
+        "--source-core",
+        "--libraries",
+        root.join("core").to_str().unwrap(),
+        "--cc",
+        llvm.join("bin/clang").to_str().unwrap(),
+        "--runtime",
+        profiling.to_str().unwrap(),
+        "--store",
+        dir.path().join("store").to_str().unwrap(),
+        "--grant",
+        "Tasks",
+        "--grant",
+        "Clock",
+        "--limit",
+        "268435456",
+        "--mem",
+        "--out",
+        profile.to_str().unwrap(),
+    ]
+    .map(str::to_owned);
+    let out = process::tape_request_command(&args, dir.path())
+        .env("HIRSEL_UNTIED", "4")
+        .env("HIRSEL_PROFILE_CHUNK_BYTES", "4194304")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "prof run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let report = hirsel_prof::query(&profile, hirsel_prof::Query::PeakMem, 20).unwrap();
+    assert_eq!(report.quality["mem_mode"], "sampled");
+    assert_eq!(report.quality["mem_records_lost"], 0);
+    assert_eq!(report.quality["mem_state_lost"], 0);
+    assert_eq!(
+        report.quality["mem_absent_metrics"],
+        "charged_bytes,slack_bytes,budget_near_misses"
+    );
+    assert!(report.result["budgets"].is_null());
+    let profile = hirsel_prof::Profile::open(&profile).unwrap();
+    let db = profile.connection();
+    // Bytes attributed to callsites whose chain passes through `function`.
+    let through = |table: &str, column: &str, function: &str| -> f64 {
+        let snapshot = if table == "peak_callsite" {
+            "AND m.snapshot_id = (SELECT r.id FROM peak_snapshot r WHERE r.metric='retained_bytes'
+                 AND r.ts_ns = (SELECT value FROM run_meta WHERE key='rss_peak_ns'))"
+        } else {
+            ""
+        };
+        db.query_row(
+            &format!(
+                "WITH RECURSIVE chain(leaf, id) AS (
+                     SELECT id, id FROM callsite
+                     UNION ALL
+                     SELECT leaf, c.parent_id FROM chain JOIN callsite c ON c.id=chain.id
+                     WHERE c.parent_id IS NOT NULL
+                 ),
+                 hit AS (
+                     SELECT DISTINCT leaf FROM chain JOIN callsite c ON c.id=chain.id
+                     JOIN frame fr ON fr.id=c.frame_id JOIN function f ON f.id=fr.function_id
+                     WHERE f.def_path LIKE '%/' || ?1
+                 )
+                 SELECT coalesce(sum(CAST(m.{column} AS REAL)), 0) FROM {table} m
+                 WHERE m.callsite_id IN (SELECT leaf FROM hit) {snapshot}"
+            ),
+            [function],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    // Horvitz-Thompson: n allocations of s bytes, each kept with probability
+    // p = 1 - (1 - 1/524288)^s and weighted 1/p, have variance n s^2 (1-p)/p.
+    let bound = |n: f64, s: f64| {
+        let p = 1.0 - (1.0 - 1.0 / 524288.0f64).powf(s);
+        4.0 * (n * s * s * (1.0 - p) / p).sqrt()
+    };
+    let mib = 1048576.0;
+    let held = through("peak_callsite", "live_bytes", "filled");
+    assert!(
+        (held - 64.0 * mib).abs() <= bound(64.0, mib),
+        "held {held} of {}",
+        64.0 * mib
+    );
+    let churned = through("mem_alloc_agg", "estimated_bytes", "churn");
+    let churn_total = 2048.0 * 131072.0;
+    assert!(
+        (churned - churn_total).abs() <= bound(2048.0, 131072.0),
+        "churned {churned} of {churn_total}"
+    );
+    // At most one churn buffer is live at any instant, and its weight is s/p.
+    let p = 1.0 - (1.0 - 1.0 / 524288.0f64).powf(131072.0);
+    let churn_live = through("peak_callsite", "live_bytes", "churn");
+    assert!(churn_live <= 131072.0 / p + 1.0, "churn retained {churn_live}");
+}

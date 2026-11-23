@@ -10,7 +10,7 @@ use super::perf::{Kind, Mapping, Record, Sample};
 use super::procfs::{self, Identity, KernelSymbols};
 use super::unwind::{Registers, Stack, Step};
 use crate::MemMode;
-use crate::memory::MemoryImport;
+use crate::memory::{MemoryImport, Rss};
 use crate::observation::{Observation, RecordKind};
 use crate::profile::{Result, Timestamp, Unsigned};
 
@@ -115,14 +115,20 @@ impl<'a> Import<'a> {
         Ok(())
     }
 
-    pub(crate) fn store_memory(&mut self, observations: &Observation, mode: MemMode) -> Result<()> {
+    /// A live capture passes its RSS reads and keeps the perf mappings.
+    pub(crate) fn store_memory(
+        &mut self,
+        observations: &Observation,
+        mode: MemMode,
+        live: Option<&[Rss]>,
+    ) -> Result<()> {
         let mut memory = MemoryImport::default();
         let unknown = self.unknown_callsite()?;
         let mut records = observations.records.iter().peekable();
         let mut maps = Vec::new();
         while let Some(record) = records.next() {
             match &record.kind {
-                RecordKind::Mapping(line) => {
+                RecordKind::Mapping(line) if live.is_none() => {
                     maps.extend_from_slice(line);
                     maps.push(b'\n');
                     if !records.peek().is_some_and(|next| {
@@ -152,6 +158,7 @@ impl<'a> Import<'a> {
             observations.lost,
             observations.complete,
             unknown,
+            live,
         )
     }
 

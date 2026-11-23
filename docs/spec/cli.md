@@ -68,7 +68,7 @@ stops the store's server.
 ## CPU profiles
 
 ```text
-hirsel prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
+hirsel prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]
 hirsel prof replay [package-dir] --tape TAPE [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]
 hirsel prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]
 hirsel prof summary <FILE.hprof> [--json]
@@ -111,11 +111,12 @@ has no embedded DWARF.
 
 For `prof replay`, use `--mem=exact` for exact peak counters and backing
 lifetimes, or `--mem=sampled` for weighted allocation estimates. A bare
-`--mem` selects sampled mode. `prof peak-mem` reads the memory results and
-budget scopes from a profile. Both `prof run --mem` and `prof attach --mem`
-ask you to record a tape and use `prof replay --mem`. Live workers can change
-region tails and payer balances concurrently. Serializing a live run would
-change its scheduling.
+`--mem` selects sampled mode. `prof run --mem` samples every live worker and
+reports weighted retained bytes and allocation rates by callsite. Live
+memory is sampled only: `prof run --mem=exact` refuses and names replay.
+`prof attach --mem` refuses, because attaching cannot sample allocations
+made before it. `prof peak-mem` reads the memory results and budget scopes
+from a profile.
 
 Start with `prof summary` for data quality and the five hottest functions
 per event. Use `prof schema` for tables and columns, and `prof sql` for

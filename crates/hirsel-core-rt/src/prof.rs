@@ -257,7 +257,13 @@ impl Run {
     fn start_with(replay: bool) -> Option<Self> {
         let path = std::env::var_os("HIRSEL_PROFILE")?;
         let size = std::env::var_os("HIRSEL_PROFILE_CHUNK_BYTES");
-        let memory = replay.then(crate::mem_prof::read_settings).flatten();
+        let memory = crate::mem_prof::read_settings();
+        if !replay && memory.as_ref().is_some_and(|settings| !settings.sampled) {
+            eprintln!(
+                "hirsel: a live memory profile is sampled; record a tape and use 'hirsel prof replay --mem=exact'"
+            );
+            return None;
+        }
         let tasks = std::env::var_os("HIRSEL_PROFILE_TASKS").is_none_or(|value| value != "0");
         // SAFETY: the generated executable calls this at process entry.
         unsafe {
@@ -280,8 +286,10 @@ impl Run {
         };
         match Self::open(path, size, tasks) {
             Ok(run) => {
-                if let Some(settings) = memory {
-                    crate::mem_prof::start(settings);
+                match memory {
+                    Some(settings) if replay => crate::mem_prof::start(settings),
+                    Some(settings) => crate::mem_prof::start_live(settings),
+                    None => {}
                 }
                 Some(run)
             }

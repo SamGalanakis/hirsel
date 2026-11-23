@@ -252,10 +252,11 @@ fn peak_mem(db: &Connection, quality: &Value, limit: usize) -> Result<Value> {
     let limit_sql = bounded_limit(limit)?;
     let peaks = select_result(
         db,
-        "SELECT id,metric,ts_ns,total_bytes FROM peak_snapshot WHERE scope_id IS NULL ORDER BY metric",
+        "SELECT id,metric,ts_ns,total_bytes FROM peak_snapshot WHERE scope_id IS NULL ORDER BY metric,ts_ns",
         [],
         3,
     )?;
+    let live = !quality["mem_absent_metrics"].is_null();
     let scopes = select_result(
         db,
         "SELECT id,scope_id,metric,ts_ns,total_bytes FROM peak_snapshot WHERE scope_id IS NOT NULL
@@ -273,17 +274,23 @@ fn peak_mem(db: &Connection, quality: &Value, limit: usize) -> Result<Value> {
          [limit_sql], limit)?;
     let allocations = select_result(db,
         "SELECT a.callsite_id,a.allocation_kind,a.observed_count,a.observed_bytes,
-                a.estimated_count,a.estimated_bytes,a.freed_count,a.lifetime_ns,f.def_path,fr.file,fr.line
+                a.estimated_count,a.estimated_bytes,a.freed_count,a.lifetime_ns,
+                a.estimated_bytes*1e9/(SELECT CAST(value AS REAL) FROM run_meta WHERE key='duration_ns') AS bytes_per_s,
+                f.def_path,fr.file,fr.line
          FROM mem_alloc_agg a JOIN callsite s ON s.id=a.callsite_id JOIN frame fr ON fr.id=s.frame_id
          LEFT JOIN function f ON f.id=fr.function_id
          ORDER BY a.estimated_bytes DESC,a.callsite_id,a.allocation_kind LIMIT ?1", [limit_sql], limit)?;
-    let budgets = select_result(db,
+    let budgets = if live {
+        Value::Null
+    } else {
+        select_result(db,
         "SELECT scope_id,parent_id,scope_kind,task_id,callsite_id,enter_ts,exit_ts,limit_val,peak_val,refused
          FROM budget_scope_summary ORDER BY refused DESC,
-             CAST(peak_val AS REAL)/NULLIF(CAST(limit_val AS REAL),0) DESC,scope_id LIMIT ?1", [limit_sql], limit)?;
+             CAST(peak_val AS REAL)/NULLIF(CAST(limit_val AS REAL),0) DESC,scope_id LIMIT ?1", [limit_sql], limit)?
+    };
     Ok(
         json!({"mode":mode,"metric_version":quality["metric_version"],"inline_debit_caveat":INLINE_DEBITS,
-        "callsites_exact":quality["mem_callsites_exact"],
+        "callsites_exact":quality["mem_callsites_exact"],"absent_metrics":quality["mem_absent_metrics"],
         "peaks":peaks,"scope_peaks":scopes,"peak_callsites":callsites,"allocations":allocations,"budgets":budgets}),
     )
 }

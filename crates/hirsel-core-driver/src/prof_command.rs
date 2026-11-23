@@ -124,7 +124,7 @@ impl Run {
     }
 
     pub(crate) fn observes(&self) -> bool {
-        self.tasks || self.replay
+        self.tasks || self.replay || self.mem.is_some()
     }
 
     pub(crate) fn capture(

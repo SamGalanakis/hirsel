@@ -241,9 +241,9 @@ pub unsafe extern "C" fn hirsel_core_region_close(region: *mut crate::region::Re
         crate::peak::region_close(region);
         #[cfg(feature = "prof")]
         crate::mem_prof::region_close(region);
-        Box::from_raw(region).close();
         #[cfg(feature = "prof")]
         crate::mem_prof::free(region.cast(), size_of::<crate::region::Region>());
+        Box::from_raw(region).close();
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::deallocated(region.cast());
     }

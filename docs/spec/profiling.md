@@ -153,7 +153,7 @@ The profiler opens per-CPU events until the CPU count times the target's
 thread count plus one reaches 1000, when it uses one set of events per thread
 that follows the thread across CPUs.
 
-## Replay memory and budgets
+## Memory and budgets
 
 `prof replay --mem` observes a serial replay using the recorded tape's
 divergence check. `--mem=sampled` samples backing allocations with a 512 KiB
@@ -193,10 +193,34 @@ can raise that limit up to 1048576. State loss is reported separately.
 Dropping allocation or free events marks callsite aggregation inexact.
 The final runtime peak counters are independent of those transport losses.
 
-The memory observer depends on one replay worker owning region tails and
-observing the order of payer credits. Live workers can change both
+Charges, slack and budgets depend on one replay worker owning region tails
+and observing the order of payer credits. Live workers can change both
 concurrently, and forcing them to run serially would change scheduling.
-`prof run --mem` and `prof attach --mem` ask for a tape and a replay capture.
+
+`prof run --mem` profiles a live process with sampling only; `--mem=exact`
+refuses and names replay. Each worker has its own sampler with the same
+512 KiB mean byte interval and records stack snapshots in its own chunks. No
+order is imposed between workers. A free on any worker closes the sampled
+allocation at that address, using a lock-free table of sampled addresses
+sized from `HIRSEL_PROFILE_MEM_ENTRIES`, at twice that many entries. A
+sampled allocation that does not fit within its probe window, or a free on a
+thread without a runtime stream, counts toward `mem_state_lost`.
+
+The profiler reads the process RSS every 10 ms. `run_meta` records the
+highest read as `rss_peak_ns` and `rss_peak_bytes`, and the last read before
+exit as `rss_last_ns` and `rss_last_bytes`. A `retained_bytes` snapshot is
+taken at each of those two instants. Its
+callsite members are the sampled allocations live at that instant, each
+weighted by the inverse of its inclusion probability. The instants do not
+depend on the sampler. `mem_alloc_agg` gives weighted allocated bytes, and
+`prof peak-mem` divides them by the run time to report `bytes_per_s`.
+`run_meta` lists `charged_bytes`, `slack_bytes` and `budget_near_misses` in
+`mem_absent_metrics`. Those metrics are absent from a live profile, not zero,
+and `prof peak-mem` reports null budgets.
+
+`prof attach --mem` refuses. Retained bytes can only be attributed to
+allocations that were sampled when they were made, so an attached capture
+would miss everything the process allocated before it.
 
 ## Query results
 

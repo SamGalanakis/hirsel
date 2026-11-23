@@ -153,7 +153,7 @@ commands! {
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
-    "prof run", "prof run [package-dir] [build-opts] [--tasks] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
+    "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "prof replay", "prof replay [package-dir | --inputs MANIFEST] --tape TAPE [--entry DEFINITION] [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
     "prof attach", "prof attach <PID> [--duration SECS] [--freq 997] [--pmu LIST] [--debug PATH] [--out FILE.hprof]", "Snapshot mappings, then sample a running Linux process without stopping it.";
     "prof tail", "prof tail <FILE.hprof> [--limit 20] [--json]", "Report completed and censored task latencies and the observed causal edges.";
@@ -650,8 +650,8 @@ static OPTIONS: &[OptionSpec] = &[
         ProfMem,
         ["--mem"],
         Some("[exact|sampled]"),
-        ["prof replay"],
-        "Capture memory and budgets. A bare --mem selects sampled mode."
+        ["prof run", "prof replay"],
+        "Capture memory; replay also captures budgets. A bare --mem selects sampled mode, the only live mode."
     ),
     option!(
         ProfOut,
@@ -1227,14 +1227,14 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         arguments: Vec::new(),
     };
     while let Some(argument) = arguments.next() {
-        if matches!(name.as_str(), "prof run" | "prof attach")
-            && (argument == "--mem" || argument.starts_with("--mem="))
-        {
+        if name == "prof attach" && (argument == "--mem" || argument.starts_with("--mem=")) {
             return Err(
-                "record a tape and use 'hirsel prof replay --mem' to profile memory".into(),
+                "attach cannot see earlier allocations; use 'hirsel prof run --mem'".into(),
             );
         }
-        if name == "prof replay" && (argument == "--mem" || argument.starts_with("--mem=")) {
+        if matches!(name.as_str(), "prof run" | "prof replay")
+            && (argument == "--mem" || argument.starts_with("--mem="))
+        {
             let value = if let Some((_, value)) = argument.split_once('=') {
                 value.to_owned()
             } else if arguments

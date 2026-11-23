@@ -31,6 +31,18 @@ struct Allocation {
     end: Option<u64>,
 }
 
+/// Metrics a live capture cannot observe without one payer order.
+const LIVE_ABSENT: &str = "charged_bytes,slack_bytes,budget_near_misses";
+
+/// A resident set size the profiler read from a live process.
+#[derive(Clone, Copy)]
+pub(crate) struct Rss {
+    /// `peak` for the highest read, `last` for the last read before exit.
+    pub(crate) label: &'static str,
+    pub(crate) ts: u64,
+    pub(crate) bytes: u64,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct Snapshot {
     metric: &'static str,
@@ -256,10 +268,20 @@ impl MemoryImport {
         drops: u64,
         trace_complete: bool,
         unknown: i64,
+        live: Option<&[Rss]>,
     ) -> Result<()> {
         self.allocations(db)?;
-        self.budgets(db, unknown)?;
-        let complete = self.peaks(db, unknown)?;
+        let complete = if let Some(instants) = live {
+            self.live_snapshots(db, instants, unknown)?;
+            db.execute(
+                "INSERT INTO run_meta VALUES ('mem_absent_metrics', ?1)",
+                [LIVE_ABSENT],
+            )?;
+            false
+        } else {
+            self.budgets(db, unknown)?;
+            self.peaks(db, unknown)?
+        };
         let (version, state_loss) = self.meta.unwrap_or_default();
         let exact = mode == "exact"
             && trace_complete
@@ -322,6 +344,66 @@ impl MemoryImport {
                 Unsigned(total.freed),
                 Unsigned(total.lifetime),
             ))?;
+        }
+        Ok(())
+    }
+
+    /// Weighted live bytes per callsite at each instant the profiler read the
+    /// process RSS. The instants are independent of the samples. Each worker
+    /// stamps its changes with the monotonic clock in place of a replay epoch.
+    fn live_snapshots(&mut self, db: &Connection, instants: &[Rss], unknown: i64) -> Result<()> {
+        self.changes.sort_unstable_by_key(|change| change.0);
+        let mut changes = self.changes.iter().peekable();
+        let mut live = HashMap::new();
+        let mut snapshot_row = db.prepare(
+            "INSERT INTO peak_snapshot(metric,scope_id,ts_ns,total_bytes) VALUES (?1,NULL,?2,?3)",
+        )?;
+        let mut member_row = db.prepare("INSERT INTO peak_callsite VALUES (?1,?2,?3,?4)")?;
+        let mut instants = instants.to_vec();
+        instants.sort_unstable_by_key(|rss| rss.ts);
+        for rss in instants {
+            db.execute(
+                "INSERT INTO run_meta VALUES (?1,?2),(?3,?4)",
+                (
+                    format!("rss_{}_ns", rss.label),
+                    Timestamp(rss.ts),
+                    format!("rss_{}_bytes", rss.label),
+                    Unsigned(rss.bytes),
+                ),
+            )?;
+            while changes.peek().is_some_and(|change| change.0 <= rss.ts) {
+                let &(_, id, bytes) = changes.next().unwrap();
+                if let Some(bytes) = bytes {
+                    live.insert(id, bytes);
+                } else {
+                    live.remove(&id);
+                }
+            }
+            let mut members = BTreeMap::<i64, (f64, f64)>::new();
+            for (id, &bytes) in &live {
+                let (site, probability) = self
+                    .allocations
+                    .get(id)
+                    .map_or((unknown, 1.0), |a| (a.site, a.probability));
+                let member = members.entry(site).or_default();
+                member.0 += bytes as f64 / probability;
+                member.1 += 1.0 / probability;
+            }
+            let total = members.values().map(|member| member.0).sum::<f64>();
+            snapshot_row.execute((
+                "retained_bytes",
+                Timestamp(rss.ts),
+                Unsigned(total.round() as u64),
+            ))?;
+            let id = db.last_insert_rowid();
+            for (site, (bytes, count)) in members {
+                member_row.execute((
+                    id,
+                    site,
+                    Unsigned(bytes.round() as u64),
+                    Unsigned(count.round() as u64),
+                ))?;
+            }
         }
         Ok(())
     }
@@ -447,7 +529,7 @@ mod tests {
         record(7, PEAK, &[1, 0, 3, 124, 2], None);
         record(7, PEAK, &[2, 0, 2, 92, 1], None);
         record(7, META, &[2, 0], None);
-        memory.finish(&db, "exact", 0, true, 1).unwrap();
+        memory.finish(&db, "exact", 0, true, 1, None).unwrap();
 
         let peaks = db
             .prepare(

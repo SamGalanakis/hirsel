@@ -4921,10 +4921,10 @@ Its size is at most 2t plus the overlap's differences. Its cost (v2.61, astra 19
 | `bounds`, `log_bounds`, `tail_window` | O(map height) | none |
 | apply of a trim | reads ≤ 2h − 1 pages and touches ≤ 4h, h the pre-trim height (§14.5, v2.61) | the writer, preallocated (AP10); the dropped list in `dirty_bytes` (Tiered) |
 | apply of an append | O(height) page edits, amortized O(1) splits | the writer, preallocated (AP10) |
-| `changes` per Log | the logical pages of the two trees the diff visits: O(1) for the span and bounds item, plus the pages holding the k changed rows and their paths, at most k × height | the result; the caller |
-| `window_changes` | the logical pages of the window rows it visits on both sides, at most map height + (rows + 1) × height per side | the result; the caller |
+| `changes` per Log | O(1) for the span and bounds item, plus the unshared pages the descent visits, the keys it compares and the value bytes it reads (§14.8); on one branch O(height + k log n) | the result; the caller |
+| `window_changes` | O(map height), plus O(height) and the value bytes per inserted row, plus across branches the overlap descent charged as `changes` (§14.9) | the result; the caller |
 
-These are counts of **logical page visits per attempt** (v2.61, astra 1998 #14). A rerun is a new attempt under §13.3 and pays again; a miss's restart pays again. No bound depends on cache hits: a page that is resident costs the same visit as one fetched. A reverse diff (b older than a) pays its own visits, never a cached forward result. No bound depends on the number of rows a trim drops or on how a tree was loaded. Freeing dropped pages is the Db task's (Memory) or the checkpoint task's (Tiered).
+These are counts of **logical page visits per attempt**, plus the value bytes read or decoded (v2.61, astra 1998 #14). A rerun is a new attempt under §13.3 and pays again; a miss's restart pays again. No bound depends on cache hits: a page that is resident costs the same visit as one fetched. A reverse diff (b older than a) pays its own visits, never a cached forward result. No bound depends on the number of rows a trim drops or on how a tree was loaded. Freeing dropped pages is the Db task's (Memory) or the checkpoint task's (Tiered).
 
 ### 14.13 Laws L77–L83
 

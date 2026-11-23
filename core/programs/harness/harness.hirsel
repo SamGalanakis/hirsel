@@ -1,0 +1,769 @@
+// A Hirsel LLM harness: one Place holds one session. The turn is rows and
+// short transactions; no code runs between effects. See README.md.
+
+// ---- payloads, entries and receipts ----
+
+// Payloads larger than INLINE_LIMIT will be stored as a BlobRef once
+// std.object lands. Until then an oversized payload is refused at admission.
+pub type BlobRef: codec + send { digest: Bytes, len: u64, mime: String }
+pub type Payload: codec + send = Inline(Bytes) | Blob(BlobRef)
+pub const INLINE_LIMIT: u64 = 65536u64
+
+pub type Call: codec + send { id: String, name: String, args: Payload }
+pub type Usage: codec + send { input: u64, output: u64 }
+// model.answer: the complete, validated provider outcome.
+pub type Answer: codec + send { text: String, calls: List[Call], stop: String, usage: Usage }
+pub type Outcome: codec + send = Returned(Payload) | Failed(String) | Denied(String) | InDoubt | Gone
+pub type Change: codec + send { key: String, text: Option[String] }
+pub type Patch: codec + send { baseline: bool, changes: List[Change], tools: Option[List[String]] }
+pub type Entry: codec + send =
+    User(String)
+    | Inform(String)
+    | Assistant(Answer)
+    | ToolResult(String, Outcome)
+    | System(Patch)
+    | Reset(String)
+    | Note(String, Bytes)
+
+// ---- the seven tables ----
+
+pub type Narrow: codec + send = All | Only(List[String])
+pub type SectionHash: codec + send { key: String, hash: Bytes }
+pub type Session: codec + send {
+    model: String,
+    tools_narrow: Narrow,
+    head_pos: u64,
+    next_pos: u64,
+    active_run: Option[u64],
+    next_run: u64,
+    active_sections_hashes: List[SectionHash],
+    active_tools_hash: Bytes,
+}
+
+pub type InboxKey: codec + send { caller: store.Caller, client_key: String }
+pub type Disposition: codec + send = Placed(u64) | Busy
+pub type Received: codec + send { digest: Bytes, disposition: Disposition }
+
+pub type Finish: codec + send = Answered | OutOfRounds | Stopped(String)
+pub type Phase: codec + send = Preparing | AwaitingModel(u64) | AnswerReady(u64) | AwaitingRound(u64, u64) | Finished(Finish)
+// Known spend is settled usage; reserved is the bound held for calls that may
+// still be charged; unresolved is a reservation whose call is in doubt.
+pub type Spend: codec + send { known: u64, reserved: u64, unresolved: u64 }
+pub type Run: codec + send { caller: store.Caller, phase: Phase, round: u64, rounds_left: u64, spend: Spend }
+
+pub const MODEL: u8 = 0u8
+pub const TOOL: u8 = 1u8
+pub type EffectKey: codec + send { run: u64, round: u64, kind: u8, ordinal: u64 }
+// The immutable logical cutoff of a model request. The worker builds the body
+// from entries[head_pos..=tail_pos] through a snapshot, off the write lock.
+pub type Cutoff: codec + send { head_pos: u64, tail_pos: u64, route: String, policy: u64 }
+// Once dispatches at most one body. Repeatable(n) resends with the same key
+// up to n dispatches within the deadline.
+pub type Repeat: codec + send = Once | Repeatable(u64)
+pub type Receipt: codec + send = Model(Answer) | ModelFailed(String) | Tool(Outcome)
+pub type EffectPhase: codec + send = Pending | Sealed | Dispatched(u64) | Settled(Receipt) | Doubted
+pub type Effect: codec + send {
+    cutoff: Cutoff,
+    call: Option[Call],
+    repeat: Repeat,
+    deadline: u64,
+    phase: EffectPhase,
+    trigger: Option[store.triggers.Id],
+    dispatches: u64,
+    reserve: u64,
+}
+
+pub type WaitKey: codec + send { run: u64, slot: u64, kind: u8, generation: u64 }
+pub type Wait: codec + send = Open(Bytes) | Decided(Bytes, bool) | Expired | Revoked
+
+// The public Cover projection. Key 0 is the status row; key p + 1 is the
+// visible line of entry p.
+pub type View: codec + send = Status(String) | Line(String, String)
+
+pub type Handles: send {
+    session: store.Table[u64, Session],
+    entries: store.Table[u64, Entry],
+    inbox: store.Table[InboxKey, Received],
+    runs: store.Table[u64, Run],
+    effects: store.Table[EffectKey, Effect],
+    waits: store.Table[WaitKey, Wait],
+    views: store.Table[u64, View],
+    triggers: store.triggers.Tables,
+}
+
+fn session_name() -> String { "harness.session" }
+fn entries_name() -> String { "harness.entries" }
+fn inbox_name() -> String { "harness.inbox" }
+fn runs_name() -> String { "harness.runs" }
+fn effects_name() -> String { "harness.effects" }
+fn waits_name() -> String { "harness.waits" }
+fn views_name() -> String { "harness.views" }
+
+fn put_inbox_key(k: InboxKey, mut out: Bytes) {
+    std.codec.put_key_u8(k.caller.issuer, mut out)
+    std.codec.put_key_bytes(k.caller.subject, mut out)
+    std.codec.put_key_string(k.client_key, mut out)
+}
+
+fn take_inbox_key(raw: Bytes, mut at: u64) -> Result[InboxKey, std.codec.DecodeError] {
+    let issuer = std.codec.take_key_u8(raw, mut at)?
+    let subject = std.codec.take_key_bytes(raw, mut at)?
+    let client_key = std.codec.take_key_string(raw, mut at)?
+    Ok(InboxKey(caller: store.Caller(issuer: issuer, subject: take subject), client_key: take client_key))
+}
+
+fn inbox_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_tuple(mut s, 3u64)?
+    std.codec.schema_u8(mut s)
+    std.codec.schema_key(mut s, std.codec.key_bytes())?
+    std.codec.schema_string(mut s)
+    Ok(())
+}
+
+fn inbox_key() -> std.codec.Key[InboxKey] { std.codec.key_make(put_inbox_key, take_inbox_key, inbox_schema) }
+
+fn put_effect_key(k: EffectKey, mut out: Bytes) {
+    std.codec.put_key_u64(k.run, mut out)
+    std.codec.put_key_u64(k.round, mut out)
+    std.codec.put_key_u8(k.kind, mut out)
+    std.codec.put_key_u64(k.ordinal, mut out)
+}
+
+fn take_effect_key(raw: Bytes, mut at: u64) -> Result[EffectKey, std.codec.DecodeError] {
+    let run = std.codec.take_key_u64(raw, mut at)?
+    let round = std.codec.take_key_u64(raw, mut at)?
+    let kind = std.codec.take_key_u8(raw, mut at)?
+    let ordinal = std.codec.take_key_u64(raw, mut at)?
+    Ok(EffectKey(run: run, round: round, kind: kind, ordinal: ordinal))
+}
+
+fn quad_schema(mut s: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_tuple(mut s, 4u64)?
+    std.codec.schema_u64(mut s)
+    std.codec.schema_u64(mut s)
+    std.codec.schema_u8(mut s)
+    std.codec.schema_u64(mut s)
+    Ok(())
+}
+
+fn effect_key() -> std.codec.Key[EffectKey] { std.codec.key_make(put_effect_key, take_effect_key, quad_schema) }
+
+fn put_wait_key(k: WaitKey, mut out: Bytes) {
+    std.codec.put_key_u64(k.run, mut out)
+    std.codec.put_key_u64(k.slot, mut out)
+    std.codec.put_key_u8(k.kind, mut out)
+    std.codec.put_key_u64(k.generation, mut out)
+}
+
+fn take_wait_key(raw: Bytes, mut at: u64) -> Result[WaitKey, std.codec.DecodeError] {
+    let run = std.codec.take_key_u64(raw, mut at)?
+    let slot = std.codec.take_key_u64(raw, mut at)?
+    let kind = std.codec.take_key_u8(raw, mut at)?
+    let generation = std.codec.take_key_u64(raw, mut at)?
+    Ok(WaitKey(run: run, slot: slot, kind: kind, generation: generation))
+}
+
+fn wait_key() -> std.codec.Key[WaitKey] { std.codec.key_make(put_wait_key, take_wait_key, quad_schema) }
+
+// Re-running the migration on a migrated store is a no-op, as for the
+// trigger tables, so a place reopens a store a host seeded.
+fn created(take r: Result[(), store.Error]) -> Result[(), store.Error] {
+    match take r {
+        Error(Exists(_)) => Ok(()),
+        other => take other,
+    }
+}
+
+pub fn migrate(mut phase: store.Migration) -> Result[(), store.Error] {
+    store.triggers.migrate(mut phase)?
+    let c_session: std.codec.Codec[Session] = std.codec.of()
+    let c_entry: std.codec.Codec[Entry] = std.codec.of()
+    let c_received: std.codec.Codec[Received] = std.codec.of()
+    let c_run: std.codec.Codec[Run] = std.codec.of()
+    let c_effect: std.codec.Codec[Effect] = std.codec.of()
+    let c_wait: std.codec.Codec[Wait] = std.codec.of()
+    let c_shown: std.codec.Codec[View] = std.codec.of()
+    created(store.migration_create_table(mut phase, store.spec(session_name(), std.codec.key_u64(), c_session)))?
+    created(store.migration_create_table(mut phase, store.spec(entries_name(), std.codec.key_u64(), c_entry)))?
+    created(store.migration_create_table(mut phase, store.spec(inbox_name(), inbox_key(), c_received)))?
+    created(store.migration_create_table(mut phase, store.spec(runs_name(), std.codec.key_u64(), c_run)))?
+    created(store.migration_create_table(mut phase, store.spec(effects_name(), effect_key(), c_effect)))?
+    created(store.migration_create_table(mut phase, store.spec(waits_name(), wait_key(), c_wait)))?
+    created(store.migration_create_table(mut phase, store.spec(views_name(), std.codec.key_u64(), c_shown)))
+}
+
+pub fn handles(schema: store.Schema) -> Result[Handles, store.Error] {
+    let c_session: std.codec.Codec[Session] = std.codec.of()
+    let c_entry: std.codec.Codec[Entry] = std.codec.of()
+    let c_received: std.codec.Codec[Received] = std.codec.of()
+    let c_run: std.codec.Codec[Run] = std.codec.of()
+    let c_effect: std.codec.Codec[Effect] = std.codec.of()
+    let c_wait: std.codec.Codec[Wait] = std.codec.of()
+    let c_shown: std.codec.Codec[View] = std.codec.of()
+    Ok(Handles(
+        session: store.schema_table(schema, session_name(), std.codec.key_u64(), c_session)?,
+        entries: store.schema_table(schema, entries_name(), std.codec.key_u64(), c_entry)?,
+        inbox: store.schema_table(schema, inbox_name(), inbox_key(), c_received)?,
+        runs: store.schema_table(schema, runs_name(), std.codec.key_u64(), c_run)?,
+        effects: store.schema_table(schema, effects_name(), effect_key(), c_effect)?,
+        waits: store.schema_table(schema, waits_name(), wait_key(), c_wait)?,
+        views: store.schema_table(schema, views_name(), std.codec.key_u64(), c_shown)?,
+        triggers: store.triggers.tables(schema)?,
+    ))
+}
+
+// ---- the composition ----
+
+pub type Fault: codec + send = BadArgs(String) | Refused(String) | Unavailable | TooLarge
+pub type Request: codec + send { route: String, system: List[String], tools: List[String], messages: List[Entry], key: Bytes }
+
+pub type ToolRun[G: send]: send =
+    Outside(StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits], Repeat)
+    | Inside(StaticFn[fn(mut store.Tx, Bytes) -> Result[Bytes, Fault]])
+
+pub type Tool[G: send]: send { name: String, about: String, input: String, run: ToolRun[G] }
+
+pub type Limits: send { rounds: u64, calls: u64, model_ms: u64, tool_ms: u64, model_reserve: u64, inside_bytes: u64 }
+
+pub type Agent[G: send]: send {
+    name: String,
+    route: String,
+    model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits],
+    model_repeat: Repeat,
+    tools: List[Tool[G]],
+    limits: Limits,
+}
+
+pub fn agent[G: send](take name: String, take route: String, model: StaticFn[fn(G, take Request) -> Result[Answer, Fault] waits]) -> Agent[G] {
+    Agent(name: take name, route: take route, model: model, model_repeat: Once, tools: list.new(),
+        limits: Limits(rounds: 8u64, calls: 8u64, model_ms: 120000u64, tool_ms: 60000u64, model_reserve: 4096u64, inside_bytes: 65536u64))
+}
+
+pub fn outside[G: send](take name: String, take about: String, take input: String, repeat: Repeat, f: StaticFn[fn(G, take Bytes) -> Result[Bytes, Fault] waits]) -> Tool[G] {
+    Tool(name: take name, about: take about, input: take input, run: Outside(f, repeat))
+}
+
+pub fn inside[G: send](take name: String, take about: String, take input: String, f: StaticFn[fn(mut store.Tx, Bytes) -> Result[Bytes, Fault]]) -> Tool[G] {
+    Tool(name: take name, about: take about, input: take input, run: Inside(f))
+}
+
+// ---- wiring: the app's trigger targets, rebuilt in each transaction ----
+
+pub type Wake: codec + send = Kick | Deadline(EffectKey)
+pub type Refused: codec + send = NotAllowed | Conflict | TooLarge | Malformed(String) | Storage
+
+pub opaque type Wiring { entries: store.triggers.Entries, advance: store.triggers.Entry[Wake], effect: store.triggers.Entry[EffectKey] }
+
+pub fn wiring[H, G, R, E, W](advance_fn: StaticFn[fn(mut store.Tx, H, store.Caller, take Wake) -> Result[R, E]], effect_fn: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[W, Capacity] waits]) -> Result[Wiring, Refused] {
+    let a = store.triggers.transact(advance_fn) ?=> |_| Malformed("advance target")
+    let e = store.triggers.granted(effect_fn) ?=> |_| Malformed("effect target")
+    let mut allowed = store.triggers.empty_entries()
+    store.triggers.allow(mut allowed, a) ?=> |_| Malformed("advance target")
+    store.triggers.allow(mut allowed, e) ?=> |_| Malformed("effect target")
+    Ok(Wiring(entries: take allowed, advance: take a, effect: take e))
+}
+
+// The trigger allowlist the place's TriggerConfig carries.
+pub fn entries(w: Wiring) -> store.triggers.Entries { clone(w.entries) }
+
+fn kept[T](take r: Result[T, store.Error]) -> Result[T, Refused] {
+    match take r { Ok(take v) => Ok(take v), Error(_) => Error(Storage) }
+}
+
+fn armed(take r: Result[store.triggers.Id, store.triggers.Error]) -> Result[store.triggers.Id, Refused] {
+    match take r { Ok(id) => Ok(id), Error(_) => Error(Storage) }
+}
+
+fn session_of(tx: store.Tx, h: Handles) -> Result[Session, Refused] {
+    match kept(store.fetch(tx, store.shape(h.session), 0u64))? {
+        Some(take s) => Ok(take s),
+        None => Error(Malformed("no session")),
+    }
+}
+
+// Opens the singleton session. Idempotent: an existing session is kept.
+pub fn open_session(mut tx: store.Tx, h: Handles, take model: String, take narrow: Narrow) -> Result[(), Refused] {
+    if let Some(_) = kept(store.fetch(tx, store.shape(h.session), 0u64))? { return Ok(()) }
+    let s = Session(model: take model, tools_narrow: take narrow, head_pos: 0u64, next_pos: 0u64, active_run: None,
+        next_run: 0u64, active_sections_hashes: list.new(), active_tools_hash: list.new())
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    kept(store.put(mut tx, h.views, 0u64, Status("idle")))
+}
+
+fn digest(raw: Bytes) -> Bytes {
+    let d = std.sha256.hash(raw)
+    let mut out: Bytes = list.with_capacity(32u64)
+    for i in 0u64..32u64 { list.push(mut out, d[i]) }
+    take out
+}
+
+fn line(e: Entry) -> Option[View] {
+    match e {
+        User(text) => Some(Line("user", clone(text))),
+        Inform(text) => Some(Line("info", clone(text))),
+        Assistant(answer) => Some(Line("assistant", clone(answer.text))),
+        ToolResult(id, _) => Some(Line("tool", clone(id))),
+        _ => None,
+    }
+}
+
+// Appends one entry at the session tail and its visible line in the same
+// transaction. The caller writes the session row.
+fn append(mut tx: store.Tx, h: Handles, mut s: Session, take e: Entry) -> Result[u64, Refused] {
+    let at = s.next_pos
+    if let Some(take v) = line(e) { kept(store.put(mut tx, h.views, at + 1u64, v))? }
+    kept(store.put(mut tx, h.entries, at, e))?
+    s.next_pos = at + 1u64
+    Ok(at)
+}
+
+fn status(mut tx: store.Tx, h: Handles, take text: String) -> Result[(), Refused] {
+    kept(store.put(mut tx, h.views, 0u64, Status(take text)))
+}
+
+pub type Submit: codec + send { client_key: String, text: String }
+
+// Admits a submission. A repeated key with identical bytes returns its
+// recorded disposition; different bytes conflict. A submission that arrives
+// while a run is active is answered Busy and leaves no row, so the same key
+// may be sent again once the run ends.
+pub fn submit[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, caller: store.Caller, take m: Submit) -> Result[Disposition, Refused] {
+    if string.byte_len(m.text) > INLINE_LIMIT { return Error(TooLarge) }
+    let Submit(client_key: take client_key, text: take text) = take m
+    let key = InboxKey(caller: clone(caller), client_key: take client_key)
+    let d = digest(string.as_bytes(text))
+    if let Some(seen) = kept(store.fetch(tx, store.shape(h.inbox), key))? {
+        if seen.digest != d { return Error(Conflict) }
+        return Ok(clone(seen.disposition))
+    }
+    let mut s = session_of(tx, h)?
+    if let Some(_) = s.active_run { return Ok(Busy) }
+    let _ = append(mut tx, h, mut s, User(take text))?
+    let id = s.next_run
+    s.next_run = id + 1u64
+    s.active_run = Some(id)
+    let run = Run(caller: clone(caller), phase: Preparing, round: 0u64, rounds_left: a.limits.rounds,
+        spend: Spend(known: 0u64, reserved: 0u64, unresolved: 0u64))
+    kept(store.put(mut tx, h.runs, id, run))?
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    kept(store.put(mut tx, h.inbox, key, Received(digest: take d, disposition: Placed(id))))?
+    advance(mut tx, h, a, w, Kick)?
+    Ok(Placed(id))
+}
+
+fn finish(mut tx: store.Tx, h: Handles, mut s: Session, id: u64, take r: Run, take why: Finish) -> Result[(), Refused] {
+    let mut run = take r
+    let shown = match why { Answered => "answered", OutOfRounds => "out of rounds", Stopped(_) => "stopped" }
+    run.phase = Finished(take why)
+    kept(store.put(mut tx, h.runs, id, run))?
+    s.active_run = None
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    status(mut tx, h, take shown)
+}
+
+fn tool_named[G: send](a: Agent[G], name: String) -> Option[ToolRun[G]] {
+    for t in a.tools { if t.name == name { return Some(clone(t.run)) } }
+    None
+}
+
+fn narrowed(s: Session, name: String) -> bool {
+    match s.tools_narrow {
+        All => true,
+        Only(names) => {
+            for n in names { if n == name { return true } }
+            false
+        },
+    }
+}
+
+fn seal(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, take e: Effect) -> Result[(), Refused] {
+    let mut sealed = take e
+    let id = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.effect, key, AfterCommit))?
+    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(sealed.deadline)))?
+    sealed.trigger = Some(id)
+    sealed.phase = Sealed
+    kept(store.put(mut tx, h.effects, key, sealed))
+}
+
+fn now(mut tx: store.Tx) -> u64 { store.info(mut tx).at }
+
+// The one decision function. It reads the session row, the active run and at
+// most `limits.calls` effect rows of the current round, so its cost does not
+// depend on the length of the conversation. It runs at most one Inside tool
+// and schedules itself AfterCommit when more remain.
+pub fn advance[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, take wake: Wake) -> Result[(), Refused] {
+    let mut s = session_of(tx, h)?
+    let Some(id) = s.active_run else { return Ok(()) }
+    if let Deadline(key) = wake {
+        if key.run == id { inspect(mut tx, h, key)? }
+        s = session_of(tx, h)?
+        if s.active_run != Some(id) { return Ok(()) }
+    }
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), id))? else { return Error(Malformed("active run")) }
+    let run = take found
+    match run.phase {
+        Preparing => prepare(mut tx, h, a, w, mut s, id, take run),
+        AwaitingModel(_) => Ok(()),
+        AnswerReady(round) => derive(mut tx, h, a, w, mut s, id, take run, round),
+        AwaitingRound(round, n) => step_round(mut tx, h, a, w, mut s, id, take run, round, n),
+        Finished(_) => Ok(()),
+    }
+}
+
+fn prepare[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run) -> Result[(), Refused] {
+    let mut run = take r
+    if run.rounds_left == 0u64 { return finish(mut tx, h, mut s, id, take run, OutOfRounds) }
+    let key = EffectKey(run: id, round: run.round, kind: MODEL, ordinal: 0u64)
+    let deadline = now(mut tx) + a.limits.model_ms
+    let cutoff = Cutoff(head_pos: s.head_pos, tail_pos: s.next_pos - 1u64, route: clone(a.route), policy: 0u64)
+    let e = Effect(cutoff: take cutoff, call: None, repeat: clone(a.model_repeat), deadline: deadline, phase: Pending,
+        trigger: None, dispatches: 0u64, reserve: a.limits.model_reserve)
+    seal(mut tx, h, w, key, take e)?
+    run.spend.reserved += a.limits.model_reserve
+    run.phase = AwaitingModel(run.round)
+    kept(store.put(mut tx, h.runs, id, run))?
+    status(mut tx, h, "thinking")
+}
+
+// After model.answer committed: one member row per returned call, in model
+// order. Calls beyond the limit, unknown tools and narrowed-away tools are
+// settled at once with a typed outcome and never dispatched.
+fn derive[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64) -> Result[(), Refused] {
+    let mut run = take r
+    let model_key = EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64)
+    let Some(e) = kept(store.fetch(tx, store.shape(h.effects), model_key))? else { return Error(Malformed("model effect")) }
+    let Settled(Model(answer)) = view e.phase else { return Error(Malformed("model answer")) }
+    if list.len(answer.calls) == 0u64 { return finish(mut tx, h, mut s, id, take run, Answered) }
+    let mut ordinal = 0u64
+    for call in answer.calls {
+        let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: ordinal)
+        let phase: EffectPhase =
+            if ordinal >= a.limits.calls { Settled(Tool(Failed("too many calls in one answer"))) }
+            else if !narrowed(s, call.name) { Settled(Tool(Gone)) }
+            else { match tool_named(a, call.name) { Some(_) => Pending, None => Settled(Tool(Gone)) } }
+        let member = Effect(cutoff: clone(e.cutoff), call: Some(clone(call)), repeat: Once, deadline: 0u64, phase: take phase,
+            trigger: None, dispatches: 0u64, reserve: 0u64)
+        kept(store.put(mut tx, h.effects, key, member))?
+        ordinal += 1u64
+    }
+    run.phase = AwaitingRound(round, ordinal)
+    kept(store.put(mut tx, h.runs, id, run))?
+    status(mut tx, h, "calling tools")?
+    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+    Ok(())
+}
+
+fn step_round[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
+    let mut open = false
+    let mut ran_inside = false
+    for i in 0u64..n {
+        let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
+        let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Error(Malformed("member")) }
+        let mut e = take found
+        let pending = match e.phase { Pending => true, Settled(_) => false, Doubted => false, _ => { open = true; false } }
+        if !pending { continue }
+        let call: Call = match e.call { Some(c) => clone(c), None => return Error(Malformed("member call")) }
+        let Some(run) = tool_named(a, call.name) else { return Error(Malformed("member tool")) }
+        match run {
+            Inside(f) => {
+                if ran_inside {
+                    let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+                    return Ok(())
+                }
+                ran_inside = true
+                let outcome = run_inside(mut tx, f, call.args, a.limits.inside_bytes)
+                e.phase = Settled(Tool(take outcome))
+                kept(store.put(mut tx, h.effects, key, e))?
+            },
+            Outside(_, repeat) => {
+                open = true
+                e.repeat = clone(repeat)
+                e.deadline = now(mut tx) + a.limits.tool_ms
+                seal(mut tx, h, w, key, take e)?
+            },
+        }
+    }
+    if open { return Ok(()) }
+    present(mut tx, h, a, w, mut s, id, take r, round, n)
+}
+
+fn run_inside(mut tx: store.Tx, f: StaticFn[fn(mut store.Tx, Bytes) -> Result[Bytes, Fault]], args: Payload, n: u64) -> Outcome {
+    let Inline(raw) = view args else { return Failed("blob arguments are not supported yet") }
+    let go = code.callable(f)
+    let ran = bound bytes n { go(mut tx, raw) }
+    match take ran {
+        Ok(Ok(take out)) => if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) },
+        Ok(Error(take fault)) => Failed(fault_text(take fault)),
+        Error(_) => Failed("inside tool exceeded its bytes"),
+    }
+}
+
+fn fault_text(take f: Fault) -> String {
+    match take f {
+        BadArgs(take why) => take why,
+        Refused(take why) => take why,
+        Unavailable => "unavailable",
+        TooLarge => "too large",
+    }
+}
+
+// All members settled: append their results in model order, then prepare the
+// next request in the same transaction.
+fn present[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, mut s: Session, id: u64, take r: Run, round: u64, n: u64) -> Result[(), Refused] {
+    let mut run = take r
+    for i in 0u64..n {
+        let key = EffectKey(run: id, round: round, kind: TOOL, ordinal: i)
+        let Some(take e) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Error(Malformed("member")) }
+        let Effect(call: take call, phase: take phase, ..) = take e
+        let Some(take c) = take call else { return Error(Malformed("member call")) }
+        let outcome = match take phase { Settled(Tool(take o)) => take o, _ => InDoubt }
+        let _ = append(mut tx, h, mut s, ToolResult(clone(c.id), take outcome))?
+    }
+    kept(store.put(mut tx, h.session, 0u64, s))?
+    run.round = round + 1u64
+    run.rounds_left -= 1u64
+    run.phase = Preparing
+    prepare(mut tx, h, a, w, mut s, id, take run)
+}
+
+// A deadline fired for one effect. A settled effect is left alone. Otherwise
+// the effect's run is asked to cancel and the effect is recorded as in doubt
+// if it was dispatched: a deadline is not a clean timeout.
+fn inspect(mut tx: store.Tx, h: Handles, key: EffectKey) -> Result[(), Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Ok(()) }
+    let mut e = take found
+    let dispatched = match e.phase {
+        Settled(_) => return Ok(()),
+        Doubted => return Ok(()),
+        Dispatched(_) => true,
+        _ => false,
+    }
+    if let Some(t) = e.trigger { let _ = store.triggers.request_cancel(mut tx, h.triggers, t) }
+    e.phase = if key.kind == MODEL {
+        if dispatched { Doubted } else { Settled(ModelFailed("model deadline")) }
+    } else {
+        Settled(Tool(if dispatched { InDoubt } else { Failed("tool deadline") }))
+    }
+    let reserve = e.reserve
+    kept(store.put(mut tx, h.effects, key, e))?
+    if key.kind == MODEL { model_closed(mut tx, h, key, reserve, dispatched)? }
+    Ok(())
+}
+
+// A model effect closed without an answer ends its run.
+fn model_closed(mut tx: store.Tx, h: Handles, key: EffectKey, reserve: u64, doubted: bool) -> Result[(), Refused] {
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else { return Ok(()) }
+    let mut run = take found
+    run.spend.reserved -= reserve
+    if doubted { run.spend.unresolved += reserve }
+    let mut s = session_of(tx, h)?
+    let why = if doubted { "model call in doubt" } else { "model failed" }
+    finish(mut tx, h, mut s, key.run, take run, Stopped(why))
+}
+
+// ---- the effect protocol: begin and settle are fenced attempt entries ----
+
+pub type Permit: codec + send = Go(u64) | Doubt | Shut
+
+fn active(tx: store.Tx, h: Handles, run: u64) -> Result[bool, store.Error] {
+    let Some(s) = store.fetch(tx, store.shape(h.session), 0u64)? else { return Ok(false) }
+    Ok(match s.active_run { Some(r) => r == run, None => false })
+}
+
+// begin(E) records the dispatch before the worker may send. A Once effect
+// whose earlier attempt began and never settled is in doubt at once; it never
+// waits for its deadline and never sends again.
+fn begin(mut tx: store.Tx, attempt: store.triggers.Attempt, take key: EffectKey) -> Result[Permit, store.Error] {
+    let h = handles(store.tx_schema(tx))?
+    let Some(take found) = store.fetch(tx, store.shape(h.effects), key)? else { return Ok(Shut) }
+    let mut e = take found
+    let Some(t) = e.trigger else { return Ok(Shut) }
+    if t != store.triggers.run_id(attempt) { return Ok(Shut) }
+    if !active(tx, h, key.run)? { return Ok(Shut) }
+    let n = store.triggers.number(attempt)
+    match e.phase {
+        Sealed => (),
+        Dispatched(prev) => {
+            if prev >= n { return Ok(Shut) }
+            let again = match e.repeat {
+                Once => false,
+                Repeatable(max) => e.dispatches < max && store.info(mut tx).at < e.deadline,
+            }
+            if !again { return Ok(Doubt) }
+            if key.kind == MODEL { resend_reserve(mut tx, h, key.run, e.reserve)? }
+        },
+        _ => return Ok(Shut),
+    }
+    e.phase = Dispatched(n)
+    e.dispatches += 1u64
+    store.put(mut tx, h.effects, key, e)?
+    Ok(Go(n))
+}
+
+// A resend: the earlier dispatch may have been charged and will never be
+// settled, so its reservation becomes unresolved; the reserved bound stays
+// held for the new dispatch.
+fn resend_reserve(mut tx: store.Tx, h: Handles, id: u64, reserve: u64) -> Result[(), store.Error] {
+    let Some(take found) = store.fetch(tx, store.shape(h.runs), id)? else { return Ok(()) }
+    let mut run = take found
+    run.spend.unresolved += reserve
+    store.put(mut tx, h.runs, id, run)
+}
+
+pub fn register[G: send, H: send](mut r: store.runner.Registry[G, H], n: u64, steps: u64) -> Result[(), store.runner.RegisterError] {
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take EffectKey) -> Result[Permit, store.Error] = begin
+    store.runner.register_attempt(mut r, code.describe(begin), take f, n, steps)
+}
+
+pub type Settle: codec + send { key: EffectKey, receipt: Option[Receipt] }
+pub type Filed: codec + send = Recorded | Ignored
+
+// settle(E, receipt): first writer wins. A model answer commits as its entry
+// and schedules derivation; a tool receipt settles its member and advances.
+// None records the effect as in doubt. The app's settle entry is a fenced
+// attempt entry whose body calls this; a refusal rolls the transaction back.
+pub fn settle[G: send](mut tx: store.Tx, a: Agent[G], w: Wiring, attempt: store.triggers.Attempt, take m: Settle) -> Result[Filed, store.Error] {
+    let h = handles(store.tx_schema(tx))?
+    match settle_in(mut tx, h, a, w, attempt, take m) {
+        Ok(d) => Ok(d),
+        Error(Storage) => Error(Missing("harness: storage refused the settle")),
+        Error(_) => Error(Missing("harness: settle refused")),
+    }
+}
+
+fn settle_in[G: send](mut tx: store.Tx, h: Handles, a: Agent[G], w: Wiring, attempt: store.triggers.Attempt, take m: Settle) -> Result[Filed, Refused] {
+    let Settle(key: key, receipt: take receipt) = take m
+    let Some(take found) = kept(store.fetch(tx, store.shape(h.effects), key))? else { return Ok(Ignored) }
+    let mut e = take found
+    let Some(t) = e.trigger else { return Ok(Ignored) }
+    if t != store.triggers.run_id(attempt) { return Ok(Ignored) }
+    match e.phase { Dispatched(_) => (), _ => return Ok(Ignored) }
+    match take receipt {
+        None => {
+            if key.kind == MODEL {
+                e.phase = Doubted
+                let reserve = e.reserve
+                kept(store.put(mut tx, h.effects, key, e))?
+                model_closed(mut tx, h, key, reserve, true)?
+            } else {
+                e.phase = Settled(Tool(InDoubt))
+                kept(store.put(mut tx, h.effects, key, e))?
+                advance(mut tx, h, a, w, Kick)?
+            }
+        },
+        Some(Model(take answer)) => {
+            let Some(take found_run) = kept(store.fetch(tx, store.shape(h.runs), key.run))? else { return Ok(Ignored) }
+            let mut run = take found_run
+            run.spend.reserved -= e.reserve
+            run.spend.known += answer.usage.input + answer.usage.output
+            run.phase = AnswerReady(key.round)
+            let mut s = session_of(tx, h)?
+            let said: Answer = clone(answer)
+            let _ = append(mut tx, h, mut s, Assistant(take said))?
+            kept(store.put(mut tx, h.session, 0u64, s))?
+            kept(store.put(mut tx, h.runs, key.run, run))?
+            e.phase = Settled(Model(take answer))
+            kept(store.put(mut tx, h.effects, key, e))?
+            let _ = armed(store.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+        },
+        Some(ModelFailed(take why)) => {
+            let reserve = e.reserve
+            e.phase = Settled(ModelFailed(take why))
+            kept(store.put(mut tx, h.effects, key, e))?
+            model_closed(mut tx, h, key, reserve, false)?
+        },
+        Some(Tool(take outcome)) => {
+            e.phase = Settled(Tool(take outcome))
+            kept(store.put(mut tx, h.effects, key, e))?
+            advance(mut tx, h, a, w, Kick)?
+        },
+    }
+    Ok(Recorded)
+}
+
+// ---- the granted worker ----
+
+pub type Worked: codec + send = Sent | Doubted | Skipped | Lost
+
+fn encoded[A: codec](a: A) -> Option[Bytes] {
+    let codec: std.codec.Codec[A] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    match std.codec.encode(codec, a, mut raw) { Ok(_) => Some(take raw), Error(_) => None }
+}
+
+fn call_attempt[F, A: codec, R: codec](ctx: store.runner.TriggerContext, f: StaticFn[F], a: A) -> Option[R] waits {
+    let ca: std.codec.Codec[A] = std.codec.of()
+    let cr: std.codec.Codec[R] = std.codec.of()
+    let Ok(take key) = store.runner.attempt_key(f, ca, cr) else { return None }
+    let Some(take arg) = encoded(a) else { return None }
+    let Ok(Returned(raw)) = store.runner.trigger_call(ctx, take key, take arg) else { return None }
+    match std.codec.decode(cr, raw) { Ok(take r) => Some(take r), Error(_) => None }
+}
+
+// The request for a model effect, built from immutable entries read through
+// the attempt's snapshot, so the advance transaction never carries the body.
+fn request_of[G: send](snap: store.Snapshot, h: Handles, a: Agent[G], key: EffectKey, cutoff: Cutoff) -> Result[Request, store.Error] {
+    let mut messages: List[Entry] = list.new()
+    let mut p = cutoff.head_pos
+    while p <= cutoff.tail_pos {
+        match store.get(snap, store.shape(h.entries), p)? {
+            Some(take entry) => list.push(mut messages, take entry),
+            None => return Error(Missing("entry")),
+        }
+        p += 1u64
+    }
+    let mut tools: List[String] = list.new()
+    for t in a.tools { list.push(mut tools, clone(t.name)) }
+    let mut stable: Bytes = list.new()
+    std.codec.put_u64(key.run, mut stable)
+    std.codec.put_u64(key.round, mut stable)
+    Ok(Request(route: clone(cutoff.route), system: list.new(), tools: take tools, messages: take messages, key: take stable))
+}
+
+fn doubt[F](ctx: store.runner.TriggerContext, settle_entry: StaticFn[F], key: EffectKey) -> Worked waits {
+    let done: Option[Filed] = call_attempt(ctx, settle_entry, Settle(key: key, receipt: None))
+    match done { Some(_) => Doubted, None => Lost }
+}
+
+// The body of the app's granted effect entry: begin, read the sealed cutoff
+// through the fenced snapshot, make the one outside call, settle.
+pub fn effect[G: send, F](ctx: store.runner.TriggerContext, port: G, take key: EffectKey, a: Agent[G], settle_entry: StaticFn[F]) -> Result[Worked, Capacity] waits {
+    let permit: Option[Permit] = call_attempt(ctx, code.describe(begin), key)
+    match permit {
+        Some(Go(_)) => (),
+        Some(Doubt) => return Ok(doubt(ctx, settle_entry, key)),
+        Some(Shut) => return Ok(Skipped),
+        None => return Ok(Lost),
+    }
+    let Ok(snap) = store.runner.trigger_snapshot(ctx) else { return Ok(Lost) }
+    let Ok(h) = handles(store.snapshot_schema(snap)) else { return Ok(Lost) }
+    let Ok(Some(take e)) = store.get(snap, store.shape(h.effects), key) else { return Ok(Lost) }
+    let receipt: Receipt = if key.kind == MODEL {
+        let Ok(take request) = request_of(snap, h, a, key, e.cutoff) else { return Ok(Lost) }
+        let call = code.callable(a.model)
+        match call(port, take request) {
+            Ok(take answer) => Model(take answer),
+            // Unavailable after the send may have been charged: record doubt.
+            Error(Unavailable) => return Ok(doubt(ctx, settle_entry, key)),
+            Error(take fault) => ModelFailed(fault_text(take fault)),
+        }
+    } else {
+        let Some(c) = view e.call else { return Ok(Lost) }
+        let Some(Outside(f, _)) = tool_named(a, c.name) else { return Ok(Lost) }
+        let Inline(raw) = view c.args else { return Ok(Lost) }
+        let go = code.callable(f)
+        Tool(match go(port, clone(raw)) {
+            Ok(take out) => if list.len(out) > INLINE_LIMIT { Failed("result too large") } else { Returned(Inline(take out)) },
+            Error(Unavailable) => InDoubt,
+            Error(take fault) => Failed(fault_text(take fault)),
+        })
+    }
+    let done: Option[Filed] = call_attempt(ctx, settle_entry, Settle(key: key, receipt: Some(take receipt)))
+    match done { Some(_) => Ok(Sent), None => Ok(Lost) }
+}
+
+// ---- reads ----
+
+pub fn transcript(h: Handles) -> Result[store.runner.Cover, Capacity] {
+    store.runner.cover(store.shape(h.views), Unbounded, Unbounded)
+}

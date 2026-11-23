@@ -1,0 +1,233 @@
+// Offline laws for the harness. Each law runs a real place on a Disk backing
+// against scripted, test-owned services, so what the services saw survives
+// the place. See README.md for the list and each law's oracle.
+
+const BYTES: u64 = 131072u64
+const PLACE_BYTES: u64 = 1048576u64
+const IDLE_MS: u64 = 300u64
+
+// ---- scripted services ----
+
+type ModelAsk: send = Ask(bool, Sender[harness.Answer]) | Asked(Sender[u64])
+type ToolAsk: send = Run(Bytes, Sender[Bytes]) | Ran(Sender[u64])
+type Services: send { model: Sender[ModelAsk], tool: Sender[ToolAsk] }
+type Grants: send { context: store.runner.TriggerContext, model: Sender[ModelAsk], tool: Sender[ToolAsk] }
+
+fn usage() -> harness.Usage { harness.Usage(input: 10u64, output: 5u64) }
+
+// The script: with no tool result in the request, ask for one `bump` call;
+// after a tool result, answer in text.
+fn model_service(take inbox: Receiver[ModelAsk]) -> () waits {
+    let mut asked = 0u64
+    while let Ok(take request) = channel.receive(inbox) {
+        match take request {
+            Ask(after_tool, reply) => {
+                asked += 1u64
+                let mut calls: List[harness.Call] = list.new()
+                if !after_tool {
+                    list.push(mut calls, harness.Call(id: "c1", name: "bump", args: Inline(string.into_bytes("{}"))))
+                }
+                let text = if after_tool { "done" } else { "" }
+                let _ = channel.send(reply, harness.Answer(text: text, calls: take calls, stop: "end", usage: usage()))
+            },
+            Asked(reply) => { let _ = channel.send(reply, asked) },
+        }
+    }
+}
+
+type ToolSeed: send { inbox: Receiver[ToolAsk], seen: Sender[()] }
+
+// The first call is seen and then held forever: its reply never comes, as
+// if the process died while the call was in flight.
+fn tool_service(take seed: ToolSeed) -> () waits {
+    let ToolSeed(inbox: take inbox, seen: take seen) = take seed
+    let mut ran = 0u64
+    let mut held: List[Sender[Bytes]] = list.new()
+    while let Ok(take request) = channel.receive(inbox) {
+        match take request {
+            Run(_, take reply) => {
+                ran += 1u64
+                if ran == 1u64 {
+                    list.push(mut held, take reply)
+                    let _ = channel.send(seen, ())
+                } else {
+                    let _ = channel.send(reply, string.into_bytes("1"))
+                }
+            },
+            Ran(reply) => { let _ = channel.send(reply, ran) },
+        }
+    }
+}
+
+fn copy_services(s: Services) -> Services { Services(model: channel.sender(s.model), tool: channel.sender(s.tool)) }
+
+fn make_grants(s: Services, take ctx: store.runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(context: take ctx, model: channel.sender(s.model), tool: channel.sender(s.tool)))
+}
+
+fn scripted_model(g: Grants, take r: harness.Request) -> Result[harness.Answer, harness.Fault] waits {
+    let mut after_tool = false
+    for e in r.messages { if let ToolResult(_, _) = e { after_tool = true } }
+    let (reply, replied): (Sender[harness.Answer], Receiver[harness.Answer]) = channel.new(1u64)
+    if let Error(_) = channel.send(g.model, Ask(after_tool, take reply)) { return Error(Unavailable) }
+    match channel.receive(replied) { Ok(take a) => Ok(take a), Error(_) => Error(Unavailable) }
+}
+
+fn bump(g: Grants, take args: Bytes) -> Result[Bytes, harness.Fault] waits {
+    let (reply, replied): (Sender[Bytes], Receiver[Bytes]) = channel.new(1u64)
+    if let Error(_) = channel.send(g.tool, Run(take args, take reply)) { return Error(Unavailable) }
+    match channel.receive(replied) { Ok(take out) => Ok(take out), Error(_) => Error(Unavailable) }
+}
+
+// ---- the agent and its four forwarding entries ----
+
+fn crash_agent() -> harness.Agent[Grants] {
+    let mut a = harness.agent("crash", "scripted", code.describe(scripted_model))
+    list.push(mut a.tools, harness.outside("bump", "adds one", "{}", Once, code.describe(bump)))
+    a
+}
+
+fn wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(advance), code.describe(effect)) }
+
+fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+    let w = wired()?
+    harness.advance(mut tx, h, crash_agent(), w, take wake)
+}
+
+fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
+    harness.effect(g.context, g, take key, crash_agent(), code.describe(settle))
+}
+
+fn settle(mut tx: store.Tx, a: store.triggers.Attempt, take m: harness.Settle) -> Result[harness.Filed, store.Error] {
+    let Ok(w) = wired() else { return Error(Missing("harness: wiring")) }
+    harness.settle(mut tx, crash_agent(), w, a, take m)
+}
+
+fn place(mut r: store.runner.Registry[Grants, harness.Handles]) -> Result[(), store.runner.RegisterError] {
+    store.runner.transact(mut r, code.describe(advance), BYTES, store.runner.DEFAULT_STEPS)?
+    store.runner.granted(mut r, code.describe(effect), BYTES, store.runner.DEFAULT_STEPS)?
+    harness.register(mut r, BYTES, store.runner.DEFAULT_STEPS)?
+    let f: own[send] fn(mut store.Tx, store.triggers.Attempt, take harness.Settle) -> Result[harness.Filed, store.Error] = settle
+    store.runner.register_attempt(mut r, code.describe(settle), take f, BYTES, store.runner.DEFAULT_STEPS)
+}
+
+// ---- running a place ----
+
+type Life: send { config: store.runner.PlaceConfig[Grants, harness.Handles, Services, ()], stop: Receiver[()], status: Latest[store.runner.Status] }
+
+fn live(take life: Life) -> Result[store.runner.Ended, store.runner.StartError] waits {
+    let Life(config: take config, stop: take stop, status: take status) = take life
+    store.runner.operate(take config, take stop, status, None)
+}
+
+fn settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, take s: Services, idle: Option[u64]) -> store.runner.PlaceConfig[Grants, harness.Handles, Services, ()] {
+    let w = result.unwrap(wired())
+    let config = store.runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()),
+        grants: take s, grant: make_grants, grant_bytes: 65536u64)
+    let mut wire = store.runner.wire_defaults(65536u64, PLACE_BYTES)
+    wire.n_pool = 4194304u64
+    store.runner.PlaceConfig(backing: Disk(dir, store.triggers.law_options()), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES,
+        migrate: code.describe(harness.migrate), handles: code.describe(harness.handles), session: wire, max_sessions: 1u64,
+        proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
+        net: net, tasks: tasks, clock: clock, random: random, stop: store.runner.Stop(lag_ms: 0u64, grace_ms: 200u64),
+        wire: None, triggers: Some(take config), idle: idle)
+}
+
+fn launch(tasks: Tasks, take config: store.runner.PlaceConfig[Grants, harness.Handles, Services, ()]) -> (Task[Result[store.runner.Ended, store.runner.StartError]], Sender[()], Latest[store.runner.Status]) {
+    let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let status = result.unwrap(store.runner.status_root())
+    let life = Life(config: take config, stop: take stop_from, status: latest.handle(status))
+    let running = task.spawn(tasks, bytes 50331648u64, take life, live)
+    (take running, take stop_to, take status)
+}
+
+// One user message, committed before any place runs.
+fn seed_session(dir: Dir, clock: Clock, random: Random, tasks: Tasks) -> () waits {
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(harness.migrate)))
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let w = result.unwrap(wired())
+    let ran = store.run(mut db, None, scoped fn(mut tx: store.Tx) -> Result[harness.Disposition, harness.Refused] {
+        harness.open_session(mut tx, h, "scripted", All)?
+        harness.submit(mut tx, h, crash_agent(), w, store.Caller(issuer: 1u8, subject: list.new()), harness.Submit(client_key: "k1", text: "bump it"))
+    })
+    let done = match take ran { Ok(Committed(row)) => row, _ => fail("seed: submit did not commit") }
+    result.unwrap(store.durable(mut db, done.ticket))
+    result.unwrap(store.close(take db))
+}
+
+fn model_asked(s: Services) -> u64 waits {
+    let (reply, replied): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    result.unwrap(channel.send(s.model, Asked(take reply)))
+    result.unwrap(channel.receive(replied))
+}
+
+fn tool_ran(s: Services) -> u64 waits {
+    let (reply, replied): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    result.unwrap(channel.send(s.tool, Ran(take reply)))
+    result.unwrap(channel.receive(replied))
+}
+
+fn is_user(e: Option[harness.Entry]) -> bool { match e { Some(User(_)) => true, _ => false } }
+fn asks_tool(e: Option[harness.Entry]) -> bool { match e { Some(Assistant(a)) => list.len(a.calls) == 1u64, _ => false } }
+fn doubted(e: Option[harness.Entry]) -> bool { match e { Some(ToolResult(id, InDoubt)) => id == "c1", _ => false } }
+fn says_done(e: Option[harness.Entry]) -> bool { match e { Some(Assistant(a)) => list.len(a.calls) == 0u64 && a.text == "done", _ => false } }
+
+// Law C1 (astra crash matrix: Once tool, place ends after begin): the place
+// is stopped while a Once tool's only dispatch is in flight and its reply
+// never comes. After reopening, the tool is never sent again, its result is
+// InDoubt at once (no deadline wait), the answer that asked for it is not
+// re-bought, and the run ends Answered. begin's Dispatched row is durable
+// before the worker may send, because a fenced call is answered only after
+// its commit is durable (RUNNER-SPEC §12.1, runner.trigger_call). This case
+// stops the place; a std.sim.fs crash cut at the same boundary is open.
+// Oracle: the services' own counts (tool 1, model 2: one per round) and the
+// transcript and spend derived by hand from the script.
+pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    seed_session(dir, clock, random, tasks)
+    let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
+    let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
+    let (seen, saw): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
+    let tools = task.spawn(tasks, bytes 65536u64, ToolSeed(inbox: take tool_in, seen: take seen), tool_service)
+    let services = Services(model: take model, tool: take tool)
+    let (first, stop_first, _) = launch(tasks, settings(dir, clock, random, tasks, net, copy_services(services), None))
+    if let Error(_) = channel.receive(saw) { fail("crash: the tool was never called") }
+    result.unwrap(channel.send(stop_first, ()))
+    let first_join = task.join(take first)
+    let first_ended = match first_join { Ok(Ok(_)) => true, _ => false }
+    let (second, _stop_second, _) = launch(tasks, settings(dir, clock, random, tasks, net, copy_services(services), Some(IDLE_MS)))
+    let second_join = task.join(take second)
+    let second_ended = match second_join { Ok(Ok(Stopped(_))) => true, _ => false }
+    let asked = model_asked(services)
+    let ran = tool_ran(services)
+    let db = result.unwrap(store.open(tasks, dir, clock, random, store.triggers.law_options()))
+    let snap = store.snapshot(db)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
+    let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let finished = match run.phase { Finished(Answered) => true, _ => false }
+    let spent = run.spend.known == 30u64 && run.spend.reserved == 0u64 && run.spend.unresolved == 0u64
+    let transcript = session.next_pos == 4u64
+        && is_user(result.unwrap(store.get(snap, store.shape(h.entries), 0u64)))
+        && asks_tool(result.unwrap(store.get(snap, store.shape(h.entries), 1u64)))
+        && doubted(result.unwrap(store.get(snap, store.shape(h.entries), 2u64)))
+        && says_done(result.unwrap(store.get(snap, store.shape(h.entries), 3u64)))
+    let idle = match session.active_run { None => true, Some(_) => false }
+    result.unwrap(store.close(take db))
+    let Services(model: take m, tool: take t) = take services
+    let _ = take m
+    let _ = take t
+    let _ = task.join(take models)
+    let _ = task.join(take tools)
+    result.unwrap(std.dir.remove_all(parent, name))
+    first_ended && second_ended && asked == 2u64 && ran == 1u64 && finished && spent && transcript && idle
+}
+
+@test
+fn test_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_once_tool_crash(parent, clock, random, tasks, net) { Ok(()) } else { Error(()) }
+}
+

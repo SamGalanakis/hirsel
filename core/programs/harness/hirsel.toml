@@ -1,0 +1,19 @@
+[package]
+name = "harness"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1, path = "../store" }
+
+[sources]
+"harness.hirsel" = "harness"
+
+[tests]
+limit = 268435456
+grants = ["Clock", "Random", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+dirs = ["."]
+
+[tests.sources]
+"laws.hirsel" = "laws"

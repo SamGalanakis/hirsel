@@ -232,6 +232,8 @@ void hirsel_core_os_process_free(HirselCoreOsProcess *);
    counts appended elements; the request buffer counts elements rather than bytes. */
 HirselCoreHostOutcome hirsel_core_host_resolve(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_resolve(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
+#define HIRSEL_CORE_CRED_FETCH 80
+HirselCoreHostOutcome hirsel_core_cred_fetch(HirselCoreContext *, uint64_t, HirselCoreBuffer *, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 /* Until is lowered to kind (0 Never, 1 At), Clock capability, absolute ns.
    Listen/accept append normalized address scalars. Split has no replay point. */
 typedef struct {

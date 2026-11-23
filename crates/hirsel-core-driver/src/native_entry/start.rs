@@ -158,6 +158,11 @@ pub(super) fn emit(
             f.constant(plan.secret_grants.len() as u64),
         ),
         (abi::OS_CONFIG_SECRET_OPS, secret_ops),
+        (abi::OS_CONFIG_CRED_GRANTS, f.address(data.cred_grants)),
+        (
+            abi::OS_CONFIG_CRED_GRANTS_LEN,
+            f.constant(plan.cred_grants.len() as u64),
+        ),
         (abi::OS_CONFIG_ENV_PATTERNS, f.address(data.env_patterns)),
         (
             abi::OS_CONFIG_ENV_PATTERNS_LEN,

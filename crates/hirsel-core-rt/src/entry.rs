@@ -34,6 +34,7 @@ pub const ARGS: u8 = 10;
 pub const SECRET: u8 = 11;
 pub const FOREIGN: u8 = 12;
 pub const EXEC: u8 = 13;
+pub const CRED: u8 = 14;
 /// Host metadata. Its index + 1 is the numeric provider handle. Source code
 /// cannot construct or inspect this metadata; copying a handle copies designation.
 #[repr(C)]
@@ -211,6 +212,9 @@ pub struct OsConfig {
     pub exec_bindings: *const crate::exec::Binding,
     pub exec_bindings_len: usize,
     pub exec_ops: *const crate::exec::Operations,
+    /// One `[parameter, source, policy]` record per Cred parameter (TLS-7).
+    pub cred_grants: *const [View; 3],
+    pub cred_grants_len: usize,
 }
 impl OsConfig {
     pub(crate) fn with_default_operations(&self) -> Self {
@@ -234,6 +238,7 @@ pub struct OsProcess {
     _metadata: Box<[Grant]>,
     _net_rules: Option<crate::net::RulesStorage>,
     secrets: Vec<crate::secret::Granted>,
+    _creds: Vec<crate::cred::Granted>,
     _env: Option<Box<crate::env::Env>>,
     _exec: Option<crate::exec::Launch>,
     stdin: Option<Box<crate::stdin::Stream>>,
@@ -686,6 +691,7 @@ impl OsProcess {
             };
             let mut metadata = Vec::new();
             let mut secrets = Vec::new();
+            let mut creds = Vec::new();
             if !describe_mode {
                 for i in 0..input.parameters_len {
                     let requirement = &*input.parameters.add(i);
@@ -702,12 +708,29 @@ impl OsProcess {
                             )
                         };
                         secrets.push(read().ok_or(StartupError::MissingSecret(i))?);
+                    } else if requirement.kind == CRED {
+                        // The launcher checked each record; nothing is read
+                        // from a credential source before a fetch.
+                        let read = || {
+                            if requirement.index >= input.cred_grants_len {
+                                return None;
+                            }
+                            let views = *input.cred_grants.add(requirement.index);
+                            crate::cred::Granted::read(views.map(|view| bytes(view)))
+                        };
+                        creds.push(read().ok_or(StartupError::MissingGrant(i))?);
                     }
                 }
                 metadata.extend(secrets.iter().map(|secret| Grant {
                     kind: SECRET,
                     provider: provider_pointer,
                     handle: (secret as *const crate::secret::Granted) as u64,
+                    terminal: false,
+                }));
+                metadata.extend(creds.iter().map(|cred| Grant {
+                    kind: CRED,
+                    provider: provider_pointer,
+                    handle: (cred as *const crate::cred::Granted) as u64,
                     terminal: false,
                 }));
             }
@@ -824,6 +847,7 @@ impl OsProcess {
                 _metadata: metadata,
                 _net_rules: net_rules,
                 secrets,
+                _creds: creds,
                 _env: env,
                 _exec: exec,
                 stdin,

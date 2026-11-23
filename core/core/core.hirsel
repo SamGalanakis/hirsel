@@ -124,6 +124,10 @@ pub opaque type Foreign[I]
 
 pub opaque type Exec
 
+pub opaque type Cred
+
+pub type CredError = Room(key_id: u64, token: u64) | Net(NetError) | Token(IoError) | Status(u16) | Malformed
+
 pub opaque resource type Proc
 
 pub type ExecOp = Spawn(program: u64, args: u64, env: u64, dir: u64, path: u64, stdin: Stdio, stdout: Stdio, stderr: Stdio) | Await(proc: u64) | Signal(proc: u64, signal: Signal) | Recv(pipe: u64, room: u64, max: u64) | Send(pipe: u64, prefix: u64, tail: u64) | Released(id: u64, part: Part)

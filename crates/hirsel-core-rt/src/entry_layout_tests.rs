@@ -33,6 +33,11 @@ fn published_entry_layout_matches_c_abi() {
             OS_CONFIG_EXEC_BINDINGS_LEN,
         ),
         (offset_of!(OsConfig, exec_ops), OS_CONFIG_EXEC_OPS),
+        (offset_of!(OsConfig, cred_grants), OS_CONFIG_CRED_GRANTS),
+        (
+            offset_of!(OsConfig, cred_grants_len),
+            OS_CONFIG_CRED_GRANTS_LEN,
+        ),
         (
             offset_of!(OsConfig, parameters_len),
             OS_CONFIG_PARAMETERS_LEN,

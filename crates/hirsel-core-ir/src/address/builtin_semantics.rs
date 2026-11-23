@@ -47,6 +47,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("crc32c", "update", 1),
     ("crc64nvme", "combine", 1),
     ("crc64nvme", "update", 1),
+    ("cred", "fetch", 1),
     ("deque", "slots_empty", 1),
     ("deque", "slots_forget_ring", 1),
     ("deque", "slots_free", 1),

@@ -146,6 +146,7 @@ impl FunctionEmitter<'_> {
             | HostOp::DatagramRecv
             | HostOp::NetNarrowUnix
             | HostOp::Resolve
+            | HostOp::CredFetch
             | HostOp::TlsConnect
             | HostOp::SendSecret
             | HostOp::ScramSha256

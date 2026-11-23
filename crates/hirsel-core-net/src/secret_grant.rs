@@ -147,7 +147,7 @@ impl SecretPolicy {
 
     /// The CLI's policy text: canonical, or `to <patterns>` (one token) for
     /// `tls_send(<patterns>)`, then any other uses.
-    fn cli(text: &str) -> Option<Self> {
+    pub(crate) fn cli(text: &str) -> Option<Self> {
         match text.strip_prefix("to ") {
             Some(rest) => {
                 let (patterns, more) = rest

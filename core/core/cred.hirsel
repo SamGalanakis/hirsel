@@ -1,0 +1,2 @@
+// Credential grants (TLS-7): the provider seals the fetched secret key itself.
+pub fn fetch(c: Cred, mut key_id: String, mut token: String, until: Until) -> Result[(Secret, u64), CredError] waits

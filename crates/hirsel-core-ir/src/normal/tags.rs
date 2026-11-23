@@ -477,6 +477,7 @@ tags!(HostOp {
     119 => SecretWrap,
     120 => SecretUnwrap,
     121 => SecretSign,
+    122 => CredFetch,
 });
 
 tags!(RaiseCause {

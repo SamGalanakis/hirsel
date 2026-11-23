@@ -29,6 +29,8 @@ pub const SEND_SECRET: u8 = 23;
 pub const RECV_BOUNDED: u8 = 27;
 /// A wait until a read half has bytes, end of stream or an error to report (NET-1).
 pub const RECV_READY: u8 = 78;
+/// TLS-7 credential fetch: the provider seals the secret key itself.
+pub const CRED_FETCH: u8 = 80;
 pub const SEND_PAIR: u8 = 26;
 pub const STOPPED: u8 = 28;
 pub const STDIN_READ: u8 = 32;

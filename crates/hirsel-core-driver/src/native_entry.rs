@@ -58,6 +58,7 @@ pub(crate) struct Plan<'a> {
     unix_roots: &'a std::collections::BTreeMap<String, String>,
     env_patterns: Option<String>,
     secret_grants: Vec<Option<&'a hirsel_core_net::SecretGrant>>,
+    cred_grants: Vec<Option<&'a hirsel_core_net::CredGrant>>,
     directories: &'a [String],
     charge_report: Option<Vec<u8>>,
     recording: bool,
@@ -82,7 +83,10 @@ pub(crate) fn policy(
         &[hirsel_core_net::GrantRule],
         &std::collections::BTreeMap<String, String>,
     ),
-    &[hirsel_core_net::SecretGrant],
+    (
+        &[hirsel_core_net::SecretGrant],
+        &[hirsel_core_net::CredGrant],
+    ),
     Option<&hirsel_core_net::EnvPatterns>,
     &[String],
     &std::collections::BTreeSet<String>,
@@ -95,7 +99,7 @@ pub(crate) fn policy(
         options.root_limit,
         options.grant_mask,
         (&options.net_rules, &options.unix_roots),
-        &options.secret_grants,
+        (&options.secret_grants, &options.cred_grants),
         options.env_patterns.as_ref(),
         &options.directories,
         &options.foreign_grants,
@@ -125,7 +129,7 @@ impl<'a> Plan<'a> {
             &binding.parameters,
             options,
         )?;
-        let mut ordinals = [0u64; 14];
+        let mut ordinals = [0u64; 15];
         let mut grant_mask = options.grant_mask;
         let parameters = binding
             .parameters
@@ -165,6 +169,22 @@ impl<'a> Plan<'a> {
         if secret_grants.iter().flatten().count() != options.secret_grants.len() {
             return Err(NativeStop::Entry(
                 "Secret grants must name distinct Secret parameters".into(),
+            ));
+        }
+        let cred_kind = grant_kind("Cred").unwrap();
+        let cred_grants: Vec<_> = parameters
+            .iter()
+            .filter(|p| p.kind == cred_kind)
+            .map(|p| options.cred_grants.iter().find(|g| g.parameter == p.name))
+            .collect();
+        if cred_grants.iter().flatten().count() != options.cred_grants.len() {
+            return Err(NativeStop::Entry(
+                "Cred grants must name distinct Cred parameters".into(),
+            ));
+        }
+        if !options.cred_grants.is_empty() && (options.recording || options.replay.is_some()) {
+            return Err(NativeStop::Entry(
+                "a run with a Cred grant cannot be recorded or replayed yet".into(),
             ));
         }
         if !options.exec_grants.is_empty() && options.replay.is_some() {
@@ -208,6 +228,7 @@ impl<'a> Plan<'a> {
                 .as_ref()
                 .map(hirsel_core_net::EnvPatterns::text),
             secret_grants,
+            cred_grants,
             directories: &options.directories,
             recording: options.recording,
             replay: options.replay.as_ref(),

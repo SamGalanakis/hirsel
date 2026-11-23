@@ -77,6 +77,8 @@ fn run(sources: *const SourceTable, entry: Entry, explicit_owner: bool) -> (u8, 
         exec_bindings: std::ptr::null(),
         exec_bindings_len: 0,
         exec_ops: std::ptr::null(),
+        cred_grants: std::ptr::null(),
+        cred_grants_len: 0,
         target: crate::process::View {
             data: std::ptr::null(),
             len: 0,

@@ -310,6 +310,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::DatagramRecv
                     | HostOp::NetNarrowUnix
                     | HostOp::Resolve
+                    | HostOp::CredFetch
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
                     | HostOp::ScramSha256

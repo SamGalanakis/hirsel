@@ -373,6 +373,7 @@ operations! {
     ("stderr", "write_bytes", Lane::Runtime(Kernel::Stream(HostOp::Stderr)), "B", "core-ops-914", false),
     ("host", "connect", Lane::Runtime(Kernel::Net(HostOp::Connect)), "B", "wire-w1a-1063", false),
     ("host", "resolve", Lane::Runtime(Kernel::Net(HostOp::Resolve)), "B", "dns-resolve-1503", false),
+    ("cred", "fetch", Lane::Runtime(Kernel::Net(HostOp::CredFetch)), "B", "credential-grant-1818", false),
     ("host", "listen", Lane::Runtime(Kernel::Net(HostOp::Listen)), "B", "wire-w1a-1063", false),
     ("host", "accept", Lane::Runtime(Kernel::Net(HostOp::Accept)), "B", "wire-w1a-1063", false),
     ("host", "recv_bounded", Lane::Runtime(Kernel::Net(HostOp::RecvBounded)), "B", "wire-w1a-1063", false),
@@ -3691,6 +3692,131 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(join);
     }
 
+    /// `cred.fetch` (TLS-7). The outcome's error is 0 for the pair (`value` the
+    /// Secret's designation, `written` the expiry), else the `CredError` case
+    /// plus one: `Room(value, written)`, `Net` and `Token` with the inner tag in
+    /// `written` and its code in `code`, `Status(value)` and `Malformed`. Error 6
+    /// is the designation's refused admission, which raises (MEM-21).
+    fn runtime_cred_fetch(
+        &mut self,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let byte = Ty::Scalar(Scalar::U8);
+        let mut operands = vec![vals[0]?, vals[1]?, vals[2]?];
+        operands.extend(self.net_until(self.p.fns[f].params[3].ty, vals[3]?, n)?);
+        let args: Vec<_> = operands.into_iter().map(Arg::Value).collect();
+        let [value, error, code, written] =
+            self.runtime_outputs::<4>(RtOp::Host(HostOp::CredFetch), &args, n)?;
+        let malformed = self.konst(byte, 5, n)?;
+        let decided = self.test(CompareOp::Le, error, malformed, n);
+        self.raise_unless(decided, value, written, n);
+        let ok = self.runtime_compare(byte, error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if let Some(pair) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                {
+                    if let Some((_, secret)) = cx.net_field(ty, pair, 0, n) {
+                        cx.runtime_store(secret, &[], u, value, n);
+                    }
+                    cx.runtime_store(pair, &[Step::Field(1)], u, written, n);
+                }
+            },
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    cx.runtime_cred_error(at, ty, [error, code, value, written], n);
+                }
+            },
+        )
+    }
+
+    fn runtime_cred_error(
+        &mut self,
+        to: AddressId,
+        ty: TyId,
+        [error, code, value, written]: [ValueId; 4],
+        n: NodeId,
+    ) {
+        let u = Ty::Scalar(Scalar::U64);
+        let byte = Ty::Scalar(Scalar::U8);
+        let join = self.new_block(&[]);
+        for case in 0..4 {
+            let Some(on) = self.runtime_compare(byte, error, u64::from(case + 1), n) else {
+                return;
+            };
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            match case {
+                0 => {
+                    let room = |field| Step::CaseField { case: 0, field };
+                    self.runtime_store(to, &[room(0)], u, value, n);
+                    self.runtime_store(to, &[room(1)], u, written, n);
+                }
+                1 | 2 => {
+                    let tag = self.value(byte);
+                    self.inst(
+                        Inst::Convert {
+                            result: tag,
+                            flag: None,
+                            operand: written,
+                            mode: ConvertMode::Truncate,
+                        },
+                        n,
+                    );
+                    if let Some((inner, at)) = self.net_case_field(ty, to, case, 0, n) {
+                        if case == 1 {
+                            self.runtime_net_error(at, inner, tag, code, n);
+                        } else {
+                            self.runtime_io_error(at, tag, code, n);
+                        }
+                    }
+                }
+                _ => {
+                    let status = self.value(Ty::Scalar(Scalar::U16));
+                    self.inst(
+                        Inst::Convert {
+                            result: status,
+                            flag: None,
+                            operand: value,
+                            mode: ConvertMode::Truncate,
+                        },
+                        n,
+                    );
+                    self.runtime_store(
+                        to,
+                        &[Step::CaseField { case: 3, field: 0 }],
+                        Ty::Scalar(Scalar::U16),
+                        status,
+                        n,
+                    );
+                }
+            }
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 4,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+
     fn runtime_net(
         &mut self,
         op: HostOp,
@@ -3722,6 +3848,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             HostOp::ScramSha256 | HostOp::ScramFinalLen | HostOp::ScramVerify
         ) {
             return self.runtime_scram(op, f, vals, result, n);
+        }
+        if op == HostOp::CredFetch {
+            return self.runtime_cred_fetch(f, vals, result, n);
         }
         let u = Ty::Scalar(Scalar::U64);
         let key = if matches!(

@@ -2714,6 +2714,166 @@ fn run_tape_replays_granted_terminal_bits() {
     assert!(!bits.exists());
 }
 
+/// TLS-7 CR1: a fetched secret access key is never in program memory. A fake
+/// IMDSv2 server on loopback serves a known key; while the program is parked
+/// after the fetch, the whole readable address space holds exactly one copy
+/// of it, the sealed store. The control serves the key as the session token
+/// too, which the program receives as a String, and the scan must see it.
+#[test]
+fn cr1_fetched_secret_key_is_only_in_the_sealed_store() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::os::unix::fs::FileExt;
+    use std::process::Stdio;
+
+    const KEY: &[u8] = b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    // Python: hmac.new(KEY, b"x", hashlib.sha256).hexdigest()
+    const MAC_OF_X: &str = "6601539f5439dea50305982bb16cb241bfde747c9db741797a9b913aa4c318d8";
+    let source = r#"
+pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    let (key, expires) = result.unwrap(cred.fetch(c, mut key_id, mut token, Never))
+    if expires != 1767225600000000000u64 {
+        return Error(Exit(status: 4))
+    }
+    result.unwrap(stdout.write(out, key_id))
+    result.unwrap(stdout.write(out, " "))
+    result.unwrap(stdout.write(out, token))
+    result.unwrap(stdout.write(out, "\n"))
+    let mut go: Bytes = list.with_capacity(1)
+    result.unwrap(stdin.read(i, mut go, Never))
+    let tag = result.unwrap(secret.hmac_sha256(key, string.as_bytes("x")))
+    let mut tag_data: Bytes = list.with_capacity(32)
+    if !bytebuf.append_inline(mut tag_data, tag, 0, 32) {
+        return Error(Exit(status: 5))
+    }
+    result.unwrap(stdout.write_bytes(out, tag_data))
+    Ok(())
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+
+    let run = |token: &'static [u8]| -> (usize, Vec<u8>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut body = |request: &str| -> Vec<u8> {
+                let (line, headers) = request.split_once("\r\n").unwrap();
+                match line {
+                    "PUT /latest/api/token HTTP/1.1" => {
+                        assert!(headers.contains("X-aws-ec2-metadata-token-ttl-seconds: 21600\r\n"));
+                        b"SESSION-1".to_vec()
+                    }
+                    "GET /latest/meta-data/iam/security-credentials/ HTTP/1.1" => {
+                        assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
+                        b"app-role\n".to_vec()
+                    }
+                    "GET /latest/meta-data/iam/security-credentials/app-role HTTP/1.1" => {
+                        assert!(headers.contains("X-aws-ec2-metadata-token: SESSION-1\r\n"));
+                        [
+                            &br#"{"Code":"Success","Type":"AWS-HMAC","AccessKeyId":"ASIAEXAMPLE","SecretAccessKey":""#[..],
+                            KEY,
+                            br#"","Token":""#,
+                            token,
+                            br#"","Expiration":"2026-01-01T00:00:00Z"}"#,
+                        ]
+                        .concat()
+                    }
+                    other => panic!("unexpected request {other:?}"),
+                }
+            };
+            for _ in 0..3 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    socket.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let reply = body(std::str::from_utf8(&request).unwrap());
+                socket
+                    .write_all(
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", reply.len())
+                            .as_bytes(),
+                    )
+                    .unwrap();
+                socket.write_all(&reply).unwrap();
+            }
+        });
+        let mut options = native_options(Backend::Cranelift, dir.path());
+        options.grant_mask =
+            (1 << grant_kind("Stdout").unwrap()) | (1 << grant_kind("Stdin").unwrap());
+        options.cred_grants = vec![
+            hirsel_core_net::CredGrant::new("c", &format!("imds:127.0.0.1:{port}"), "mac").unwrap(),
+        ];
+        let build = product.build(&entry, &options).unwrap();
+        let mut child = Command::new(build.executable)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let mut line = Vec::new();
+        stdout.read_until(b'\n', &mut line).unwrap();
+        server.join().unwrap();
+        assert_eq!(line, [b"ASIAEXAMPLE ", token, b"\n"].concat());
+
+        // The program is parked on stdin: scan its readable mappings.
+        let maps = std::fs::read_to_string(format!("/proc/{}/maps", child.id())).unwrap();
+        let mem = std::fs::File::open(format!("/proc/{}/mem", child.id()))
+            .expect("the test must be able to read its child's memory (ptrace)");
+        let mut hits = 0;
+        let mut scanned = 0;
+        for map in maps.lines() {
+            let mut fields = map.split_whitespace();
+            let (range, perms) = (fields.next().unwrap(), fields.next().unwrap());
+            if !perms.starts_with('r') {
+                continue;
+            }
+            let (start, end) = range.split_once('-').unwrap();
+            let start = u64::from_str_radix(start, 16).unwrap();
+            let end = u64::from_str_radix(end, 16).unwrap();
+            let mut region = vec![0; (end - start) as usize];
+            // [vvar] and similar special mappings refuse reads.
+            if mem.read_exact_at(&mut region, start).is_err() {
+                continue;
+            }
+            scanned += region.len();
+            hits += region.windows(KEY.len()).filter(|w| *w == KEY).count();
+        }
+        assert!(scanned > 1 << 20, "scanned only {scanned} bytes");
+        child.stdin.take().unwrap().write_all(b"g").unwrap();
+        let mut mac = Vec::new();
+        stdout.read_to_end(&mut mac).unwrap();
+        let status = child.wait().unwrap();
+        let mut stderr = String::new();
+        child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+        assert!(status.success(), "{status} {stderr}");
+        (hits, mac)
+    };
+
+    let (hits, mac) = run(b"IQoJb3JpZ2luX2VjEXAMPLETOKEN");
+    assert_eq!(hits, 1, "the fetched key outside its sealed store");
+    assert_eq!(crate::call::hex(&mac), MAC_OF_X);
+    let (hits, _) = run(KEY);
+    assert!(hits >= 2, "the scan missed a key in a program String: {hits}");
+}
+
 #[test]
 fn run_tape_records_scram_outcome_without_key_material() {
     use hirsel_core_net::{GrantRule, SecretGrant};

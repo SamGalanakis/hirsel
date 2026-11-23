@@ -69,10 +69,11 @@ pub enum GrantKind {
     Secret = 11,
     Foreign = 12,
     Exec = 13,
+    Cred = 14,
 }
 
 impl GrantKind {
-    const KINDS: [Self; 14] = [
+    const KINDS: [Self; 15] = [
         Self::Dir,
         Self::Net,
         Self::Clock,
@@ -87,6 +88,7 @@ impl GrantKind {
         Self::Secret,
         Self::Foreign,
         Self::Exec,
+        Self::Cred,
     ];
 
     pub fn from_tag(tag: u8) -> Option<Self> {

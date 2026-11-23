@@ -4944,6 +4944,8 @@ impl Machine<'_> {
             | HostOp::StreamTerminal => {
                 unreachable!()
             }
+            // The model world grants no Cred (TLS-7), so no call reaches here.
+            HostOp::CredFetch => unreachable!("a model world has no Cred"),
             HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal => {
                 return self.exec_call(t, op, a);
             }

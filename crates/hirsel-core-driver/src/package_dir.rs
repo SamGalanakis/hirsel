@@ -37,6 +37,7 @@ pub(crate) struct Grants {
     pub net_rules: Vec<GrantRule>,
     pub unix_roots: BTreeMap<String, String>,
     pub secrets: Vec<SecretGrant>,
+    pub creds: Vec<hirsel_core_net::CredGrant>,
     pub foreign: std::collections::BTreeSet<String>,
     pub exec: Vec<crate::exec_launch::Binding>,
     pub env: Option<EnvPatterns>,
@@ -70,6 +71,16 @@ impl Grants {
                 return Err("a Secret parameter can be granted only once".into());
             }
             self.secrets.push(grant);
+        } else if value == "Cred" || value.starts_with("Cred:") {
+            let grant = hirsel_core_net::CredGrant::parse(value)?;
+            if self
+                .creds
+                .iter()
+                .any(|old| old.parameter == grant.parameter)
+            {
+                return Err("a Cred parameter can be granted only once".into());
+            }
+            self.creds.push(grant);
         } else if value == "Net" {
             return Err(format!("Net requires --grant {RULE_SYNTAX}").into());
         } else if let Some(rules) = value.strip_prefix("Net=") {
@@ -106,6 +117,7 @@ impl Grants {
         self.directories.is_empty()
             && self.mask == 0
             && self.secrets.is_empty()
+            && self.creds.is_empty()
             && self.foreign.is_empty()
             && self.exec.is_empty()
     }
@@ -116,6 +128,7 @@ impl Grants {
         options.net_rules.clone_from(&self.net_rules);
         options.unix_roots.clone_from(&self.unix_roots);
         options.secret_grants.clone_from(&self.secrets);
+        options.cred_grants.clone_from(&self.creds);
         options.foreign_grants.clone_from(&self.foreign);
         options.exec_grants.clone_from(&self.exec);
         options.env_patterns.clone_from(&self.env);

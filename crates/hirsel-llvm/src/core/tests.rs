@@ -2489,7 +2489,7 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             HostOp::DatagramSendTo => &["u64", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::DatagramRecv => &["u64", "ptr", "u8", "u64", "u64"],
             HostOp::NetNarrowUnix => &["u64", "u8", "ptr", "ptr"],
-            HostOp::Resolve => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
+            HostOp::Resolve | HostOp::CredFetch => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::SendSecret => &["u64", "ptr", "u64", "ptr", "u8", "u64", "u64"],
             HostOp::ScramSha256 => &["u64", "u64", "ptr", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
             HostOp::ScramFinalLen => &["u64", "ptr", "ptr"],

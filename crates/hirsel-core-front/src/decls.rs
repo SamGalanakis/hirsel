@@ -260,7 +260,7 @@ impl Role {
             "Into" | "Port" | "Sink" => Role::FlowEndpoint,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" | "Foreign" | "Exec" => Role::Capability,
+            | "Process" | "Tasks" | "Foreign" | "Exec" | "Cred" => Role::Capability,
             "Secret" => Role::Secret,
             _ => return None,
         })

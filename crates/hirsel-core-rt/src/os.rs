@@ -714,6 +714,7 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
                 | SEND_SECRET
                 | SCRAM
                 | RESOLVE
+                | CRED_FETCH
         )
     } {
         // SAFETY: socket adapters pin the request, and state is this run's

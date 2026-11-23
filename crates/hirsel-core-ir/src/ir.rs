@@ -1116,6 +1116,7 @@ pub enum HostOp {
     SecretUnwrap = 100,
     SecretSign = 101,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
+    CredFetch = hirsel_core_ids::host_op::CRED_FETCH as isize,
     NetNarrowResolve = 41,
     StdinRead = hirsel_core_ids::host_op::STDIN_READ as isize,
     EnvGet = 33,
@@ -1223,6 +1224,7 @@ impl HostOp {
         HostOp::ReadAt,
         HostOp::WriteAt,
         HostOp::Resolve,
+        HostOp::CredFetch,
         HostOp::NetNarrowResolve,
         HostOp::UnixConnect,
         HostOp::UnixListen,
@@ -1303,6 +1305,7 @@ impl HostOp {
             HostOp::Random => "host_random",
             HostOp::Connect => "host_connect",
             HostOp::Resolve => "host_resolve",
+            HostOp::CredFetch => "cred_fetch",
             HostOp::Listen => "host_listen",
             HostOp::Accept => "host_accept",
             HostOp::RecvBounded => "host_recv_bounded",
@@ -1372,6 +1375,7 @@ impl HostOp {
         match self {
             Self::Connect => "hirsel_core_host_connect",
             Self::Resolve => "hirsel_core_host_resolve",
+            Self::CredFetch => "hirsel_core_cred_fetch",
             Self::Listen => "hirsel_core_host_listen",
             Self::Accept => "hirsel_core_host_accept",
             Self::RecvBounded => "hirsel_core_host_recv_bounded",
@@ -1735,7 +1739,7 @@ impl RtOp {
                         vec![V(u64_), V(p), V(u64_), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
-                    HostOp::Resolve => {
+                    HostOp::Resolve | HostOp::CredFetch => {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
                     HostOp::NetNarrowResolve => (vec![V(u64_), V(p)], outcome),

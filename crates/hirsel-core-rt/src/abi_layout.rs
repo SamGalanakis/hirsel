@@ -2,7 +2,9 @@
 // native emitters include these constants without linking runtime semantics.
 pub const CONTEXT_CURRENT_LIMIT: usize = 0;
 // The process C ABI is identical on the two supported 64-bit targets.
-pub const OS_CONFIG_BYTES: u32 = 200;
+pub const OS_CONFIG_BYTES: u32 = 216;
+pub const OS_CONFIG_CRED_GRANTS: i32 = 200;
+pub const OS_CONFIG_CRED_GRANTS_LEN: i32 = 208;
 pub const OS_CONFIG_EXEC_BINDINGS: i32 = 176;
 pub const OS_CONFIG_EXEC_BINDINGS_LEN: i32 = 184;
 pub const OS_CONFIG_EXEC_OPS: i32 = 192;

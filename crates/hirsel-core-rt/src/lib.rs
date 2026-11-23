@@ -18,6 +18,7 @@ pub mod channel;
 pub mod counted;
 mod crc;
 mod crc32c;
+pub mod cred;
 mod destination;
 pub mod entry;
 mod env;

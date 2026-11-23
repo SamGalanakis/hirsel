@@ -197,9 +197,9 @@ pub struct Publication {
     link_archives: LinkArchives,
 }
 
-const GRANT_NAMES: [&str; 14] = [
+const GRANT_NAMES: [&str; 15] = [
     "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
-    "Args", "Secret", "Foreign", "Exec",
+    "Args", "Secret", "Foreign", "Exec", "Cred",
 ];
 
 pub(super) fn kind(name: &str) -> Option<u8> {
@@ -872,6 +872,17 @@ pub(crate) fn refuse_unmatched_grants(
                         .any(|p| p.name == grant.parameter && p.ty == "core@1/core/Secret")
                 })
                 .map(|grant| format!("--grant Secret:{}", grant.parameter))
+        })
+        .or_else(|| {
+            options
+                .cred_grants
+                .iter()
+                .find(|grant| {
+                    !parameters
+                        .iter()
+                        .any(|p| p.name == grant.parameter && p.ty == "core@1/core/Cred")
+                })
+                .map(|grant| format!("--grant Cred:{}", grant.parameter))
         });
     if let Some(grant) = unmatched {
         return Err(NativeStop::Entry(format!(
@@ -956,6 +967,13 @@ fn bindings(
                 .map_or_else(Vec::new, |grant| {
                     vec![grant.source.clone(), grant.policy.clone()]
                 }),
+            GrantKind::Cred => options
+                .cred_grants
+                .iter()
+                .find(|grant| grant.parameter == param.name)
+                .map_or_else(Vec::new, |grant| {
+                    vec![grant.source.clone(), grant.policy.clone()]
+                }),
             GrantKind::Args => vec![grant_name(kind).to_owned()],
             _ if index == 0 && options.grant_mask & (1 << tag) != 0 => {
                 vec![grant_name(kind).to_owned()]
@@ -989,6 +1007,11 @@ pub(crate) fn display_grants(recipe: &Recipe) -> Vec<String> {
                     .map(|v| format!("{}={v}", grant_name(grant.kind))),
             ),
             GrantKind::Secret if !grant.values.is_empty() => grants.push("Secret".into()),
+            GrantKind::Cred => {
+                if let [source, _] = grant.values.as_slice() {
+                    grants.push(format!("Cred={source}"));
+                }
+            }
             GrantKind::Args => {}
             _ => grants.extend(grant.values.iter().cloned()),
         }
@@ -1075,6 +1098,7 @@ fn launch_options(
     options.net_rules.clear();
     options.unix_roots.clear();
     options.secret_grants.clear();
+    options.cred_grants.clear();
     options.foreign_grants.clear();
     let configured_exec = std::mem::take(&mut options.exec_grants);
     options.env_patterns = None;
@@ -1155,6 +1179,13 @@ fn launch_options(
                 [source, patterns] => options.secret_grants.push(
                     hirsel_core_net::SecretGrant::new(name, source, patterns)
                         .ok_or_else(invalid)?,
+                ),
+                _ => return Err(invalid()),
+            },
+            GrantKind::Cred => match values.as_slice() {
+                [] => {}
+                [source, policy] => options.cred_grants.push(
+                    hirsel_core_net::CredGrant::new(name, source, policy).map_err(|_| invalid())?,
                 ),
                 _ => return Err(invalid()),
             },

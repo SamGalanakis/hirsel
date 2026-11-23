@@ -695,8 +695,8 @@ owner, created at a fresh path, and exported only with `--include-credentials`.
 
 ### TLS-7: Credential grants
 
-```hirsel unbuilt
-pub type CredError = Room(key_id: u64, token: u64) | Net(NetError) | Token(IoError) | Status(u16) | Malformed | Capacity(Capacity)
+```hirsel core
+pub type CredError = Room(key_id: u64, token: u64) | Net(NetError) | Token(IoError) | Status(u16) | Malformed
 pub fn fetch(c: Cred, mut key_id: String, mut token: String, until: Until) -> Result[(Secret, u64), CredError] waits
 ```
 
@@ -785,14 +785,14 @@ epoch. So `2026-11-23T12:00:00Z` gives `1795435200000000000`, which a program co
 - `Status(code)`: a reply whose HTTP status is not 200.
 - `Malformed`: a reply over 64 KiB, a missing member or element, a value with an escape, an
   expiry in another form, or an IMDS `Code` other than `Success`.
-- `Capacity(c)`: the designation's admission (below) was refused.
 
 Each call makes a fresh exchange. The provider caches nothing, and when to refresh is the
 program's choice (std credentials, below).
 
 **The secret key.** A successful fetch makes a new designation with one holder, with the
 grant's policy. It admits `round_up_8(pattern_bytes + 32)` from the current limit, as
-`narrow` does (TLS-5). The key bytes are run-owned host memory and are never charged, as a
+`narrow` does (TLS-5), and a refused admission raises
+([MEM-21](budgets.md#mem-21-admission)), so the result type does not mention it. The key bytes are run-owned host memory and are never charged, as a
 granted secret's are, so the key's length never reaches the program, even through a
 refusal. Holders and release follow TLS-5. When the last designation of the key is
 released, the runtime zeroes the bytes. A fetched secret is treated as a granted one wherever

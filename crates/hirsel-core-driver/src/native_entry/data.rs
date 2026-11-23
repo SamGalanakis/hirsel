@@ -13,6 +13,7 @@ pub(super) struct Tables {
     pub directories: DataId,
     pub net_rules: DataId,
     pub secret_grants: DataId,
+    pub cred_grants: DataId,
     pub env_patterns: DataId,
     pub exec_bindings: DataId,
     pub sources: DataId,
@@ -159,6 +160,12 @@ pub(super) fn write(
             .iter()
             .flat_map(|grant| grant.map_or([""; 3], |g| [&g.parameter, &g.source, &g.policy])),
     )?;
+    let cred_grants = views(
+        object,
+        plan.cred_grants
+            .iter()
+            .flat_map(|grant| grant.map_or([""; 3], |g| [&g.parameter, &g.source, &g.policy])),
+    )?;
     let env_patterns = bytes(
         object,
         None,
@@ -223,6 +230,7 @@ pub(super) fn write(
         directories,
         net_rules,
         secret_grants,
+        cred_grants,
         env_patterns,
         exec_bindings,
         sources,

@@ -30,6 +30,8 @@ pub(crate) enum Origin {
         ordinal: u64,
         opaque: bool,
     },
+    /// The run's nth credential fetch (TLS-7), whose bytes the host sealed.
+    Fetched(u64),
 }
 
 impl Origin {
@@ -37,7 +39,7 @@ impl Origin {
     /// derived or unwrapped from one (TLS-5).
     pub(crate) fn opaque(self) -> bool {
         match self {
-            Self::Granted(_) => true,
+            Self::Granted(_) | Self::Fetched(_) => true,
             Self::Sealed(_) => false,
             Self::Derived { opaque, .. } | Self::Unwrapped { opaque, .. } => opaque,
         }
@@ -51,6 +53,7 @@ impl Origin {
             Self::Sealed(ordinal) => (1, ordinal),
             Self::Derived { ordinal, .. } => (2, ordinal),
             Self::Unwrapped { ordinal, .. } => (3, ordinal),
+            Self::Fetched(ordinal) => (4, ordinal),
         }
     }
 }
@@ -188,9 +191,15 @@ pub(crate) struct Secrets {
     free: Vec<usize>,
     seals: u64,
     unwraps: u64,
+    fetches: u64,
 }
 
 impl Secrets {
+    pub(crate) fn next_fetch(&mut self) -> u64 {
+        self.fetches += 1;
+        self.fetches - 1
+    }
+
     pub(crate) fn register(&mut self, secret: Secret) -> u64 {
         self.insert(Entry {
             secret,

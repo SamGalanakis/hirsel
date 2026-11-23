@@ -985,9 +985,9 @@ impl Program<'_> {
             }
             _ => None,
         };
-        const GRANTS: [&str; 14] = [
+        const GRANTS: [&str; 15] = [
             "Args", "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process",
-            "Tasks", "Secret", "Foreign", "Exec",
+            "Tasks", "Secret", "Foreign", "Exec", "Cred",
         ];
         for param in &fd.params {
             if param.ty != ERROR && (param.mode != Mode::View || core(param.ty, &GRANTS).is_none())

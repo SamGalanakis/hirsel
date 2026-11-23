@@ -297,6 +297,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve
                     | HostOp::Resolve
+                    | HostOp::CredFetch
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
                     | HostOp::SecretSeal
@@ -402,6 +403,7 @@ fn every_host_row_preserves_c_fields_and_status() {
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve
                     | HostOp::Resolve
+                    | HostOp::CredFetch
                     | HostOp::TlsConnect
                     | HostOp::SendSecret
                     | HostOp::SecretSeal

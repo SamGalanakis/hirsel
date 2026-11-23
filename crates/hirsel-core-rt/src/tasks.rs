@@ -2092,6 +2092,7 @@ impl Scheduler {
                                         | host::SEND_SECRET
                                         | host::SCRAM
                                         | host::RESOLVE
+                                        | host::CRED_FETCH
                                 )) =>
                     {
                         WakeSource::Net

@@ -177,9 +177,9 @@ query streams rows rather than returning one outcome.
 **Arguments.** Every flag is typed against the argument schema before the Frame
 probe or any connection runs:
 
-- If the argument type is a record, each field is one `--NAME VALUE` flag, and
-  every field except a unit field is required.
-- Otherwise the whole argument is `--arg VALUE`.
+- If the argument type is a record, pass `-- ENTRY --NAME VALUE ...`, with
+  one flag for each non-unit field.
+- Otherwise pass the whole argument as `-- ENTRY --arg VALUE`.
 - A unit argument takes no flags.
 
 Unknown, repeated and missing flags are refused, and so is a value that does not

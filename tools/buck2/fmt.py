@@ -4,8 +4,8 @@
 `--check` reports files that are not formatted and fails, as `cargo fmt --check`.
 rustfmt starts from each target's root file and follows its modules.
 Changed new-language sources are checked, never rewritten, and the primer's copies
-(tools/site_sync.py --check) must match docs/PRIMER.md. The std operation index
-must match the current compiler's interface. The editor parser checks the core
+(tools/site_sync.py --check) must match docs/PRIMER.md. Documentation references
+and the std operation index must match the code. The editor parser checks the core
 and spec corpus. Explicit expectation comments exclude refusal/gap fixtures
 from formatting to preserve diagnostic coordinates.
 """
@@ -108,7 +108,8 @@ def main():
     if synced.returncode:
         return synced.returncode
     try:
-        return check_std_index() or check_cases(changed_cases())
+        docs = subprocess.run([sys.executable, str(ROOT / 'tools/check_doc_refs.py')], cwd=ROOT)
+        return docs.returncode or check_std_index() or check_cases(changed_cases())
     except subprocess.CalledProcessError as error:
         return error.returncode
 

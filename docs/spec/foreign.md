@@ -11,7 +11,7 @@ is parked. A program that can reach native code has no recording, no replay and 
 test pass.
 
 The rules are FFI-1 to FFI-9. The [`sqlite` package](#the-sqlite-package) is the acceptance
-consumer. The fences remain marked `hirsel unbuilt` because they cannot carry a foreign
+consumer. The fences remain marked `` ```hirsel unbuilt `` because they cannot carry a foreign
 manifest. The laws' refusal cases check the examples.
 
 ## Trust
@@ -974,7 +974,7 @@ defines:
 
 A **refusal case** is a multi-package case in the program tests' case harness
 (`crates/hirsel-core-program-tests/src/cases.rs`, under `core/front/cases/ffi/`), with a real
-foreign manifest, and its diagnostic is checked at the stated site. The `hirsel unbuilt`
+foreign manifest, and its diagnostic is checked at the stated site. The `` ```hirsel unbuilt ``
 fences of this chapter stay documentation.
 
 | law | bug | oracle and setup |

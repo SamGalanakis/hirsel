@@ -31,7 +31,7 @@ runtime archive identities by target.
 request would use; `--json` prints the same as JSON and `--target` selects another
 target's runtime.
 
-`hirsel help` lists the commands and `hirsel help COMMAND`, `COMMAND --help` or
+`hirsel help` lists the commands and `hirsel help <command>`, `COMMAND --help` or
 `COMMAND -h` prints one command's options. A command name that is not in that list
 exits 2 with `hirsel: unknown command`.
 

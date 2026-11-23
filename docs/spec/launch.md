@@ -109,8 +109,8 @@ and reports `PlaceTimedOut`; no generated output is written. The deadline
 covers entry through `main`, registration, encoding and child exit. Capacity,
 duplicate registration and timeout errors leave the output destination alone.
 
-The native launcher consumes the private prefix `--hirsel-describe` and
-`--hirsel-n-place=<bytes>` before constructing user `Args`. The allowance defaults
+The native launcher consumes the private prefix `--hirsel-describe`<!-- doc-ref: external --> and
+`--hirsel-n-place=<bytes>`<!-- doc-ref: external --> before constructing user `Args`. The allowance defaults
 to 16 MiB. A place launched by the platform host or launcher runs at the
 allowance that option selects. A standalone place runs at its own
 `PlaceConfig.n_place` and ignores the option: its wire configuration must repeat
@@ -127,29 +127,29 @@ no mismatch diagnostic when the image is unreadable or evaluation is source-only
 ## Place activation
 
 A place passes the result of `runner.launch_selection(Args)` to its runner. The
-ordinary place option `--hirsel-activation=<version>` selects the activation
+ordinary place option `--hirsel-activation=<version>`<!-- doc-ref: external --> selects the activation
 version that must match the current image under STORE's LOCK; version zero
 expects an empty store. Omitting the option selects `Reopen`: genesis on an
 empty store, and otherwise the store's current activation, so a plain restart
-of the same executable reopens its store. `--hirsel-install` requests a
+of the same executable reopens its store. `--hirsel-install`<!-- doc-ref: external --> requests a
 standalone install and is mutually exclusive with an activation version. Use it
 after `--` with `hirsel run`. The install runs `place` and `migrate`, validates
 both handle sets, commits the activation under the store lock, closes the store
 and exits. Start the executable again to serve. Both options are run arguments,
 which a recording holds like every entry argument. The launcher passes
-`--hirsel-activation` to serving children.
+`--hirsel-activation`<!-- doc-ref: external --> to serving children.
 
 A store is bound to the image that activated it (RUNNER-SPEC §6, "Restart and
 rebuild"). Another executable, the same source rebuilt in another mode
 included, is refused `NotCurrent` with the store's version and image and this
 launch's image. To move a store to a new build, stop the old process and start
-the new build once with `--hirsel-install`, or deploy it with `hirsel deploy`.
+the new build once with `--hirsel-install`<!-- doc-ref: external -->, or deploy it with `hirsel deploy`.
 
 A refused selection returns `NotCurrent(found)` before handles run. A disk
 genesis or standalone install requires a known executable identity and returns
 `IdentityUnknown` if it is unavailable.
 
-A prepare launch takes `--hirsel-prepare <absolute-export-dir> <attempt> <image-digest>`
+A prepare launch takes `--hirsel-prepare <absolute-export-dir> <attempt> <image-digest>`<!-- doc-ref: external -->
 as its place arguments. The attempt and image digest use lowercase hex for 16 and
 32 bytes. The native launcher binds directory designations to that export
 directory. The child receives no network rules, listener or private endpoint. The place
@@ -170,7 +170,7 @@ ordinary value codec. Its type, `ReleaseManifest`, is declared with `Describe` a
 
 - `describe` is the preview child's `Describe`: digest, target, `n_place` and
   the exported entries in registration order. `n_place` is the allowance the
-  child ran with. A hosted launch that selects another `--hirsel-n-place`
+  child ran with. A hosted launch that selects another `--hirsel-n-place`<!-- doc-ref: external -->
   is a different release identity, and Welcome and the status route report it.
 - `release` is the preview child's `release`, which it computes with
   `runner.release_digest`: SHA-256 over `u8 17 ‖ "hirsel.release.v1" ‖` the
@@ -286,17 +286,17 @@ the operator still decides whether to deploy it.
 this order and refuses with the first failure. Steps 1-3 come before the host answers with the
 objects it lacks.
 
-1. The request comes through the control socket and names R. The recipe's bytes are within
-   `--max-recipe-bytes`, they hash to R, and they decode completely and canonically (PROG-10's
+1. The request comes through the control socket and names R. The recipe fits the launcher's
+   recipe byte limit, hashes to R, and decodes completely and canonically (PROG-10's
    rule for one encoding per value): every list in strictly ascending order with no repeat, no
-   bytes left over, and a version and normal-form version the host supports. Counts are within
-   `--max-closure` objects. A failure is `Unsupported`, `Hash` or `Malformed`.
+   bytes left over, and a version and normal-form version the host supports. The closure must
+   fit the launcher's object count limit. A failure is `Unsupported`, `Hash`, `Malformed`, or `Limit(which)`.
 2. The host takes the collection lock and reserves every object the recipe lists that the code
    store already holds, so collection cannot remove it, and only then computes what it lacks.
 3. It reserves staging space for the lacking objects' listed lengths against its host-wide
-   `--staging-bytes`, within the attempt's limits on total bytes, on memory for decoded
-   objects, on members, slots and nesting, on outstanding objects and on elapsed time
-   (`--admit-timeout`). A request over a limit, or one the host cannot reserve now, is
+   staging limit, within the attempt's limits on total bytes, on memory for decoded
+   objects, on members, slots and nesting, on outstanding objects and on elapsed time.
+   A request over a limit, or one the host cannot reserve now, is
    `Limit(which)`.
 4. The host answers with the hashes it lacks, in one round. Each received object is charged
    against its listed length and the attempt's limits while its bytes stream in, partial frames
@@ -469,14 +469,14 @@ nothing migrates.
 
 ## Preview launch
 
-*(Note: `hirsel build --manifest` and `hirsel manifest show` are built; the standalone `hirsel preview` and `hirsel confirm` CLI verbs below remain unbuilt.)*
+*(Note: `hirsel build --manifest` and `hirsel manifest show` are built; the standalone `hirsel preview`<!-- doc-ref: planned --> and `hirsel confirm`<!-- doc-ref: planned --> CLI verbs below remain unbuilt.)*
 
-`hirsel preview --exe NEW NEW.manifest OLD.manifest` compares two releases
+`hirsel preview --exe NEW NEW.manifest OLD.manifest`<!-- doc-ref: planned --> compares two releases
 without a store, a listener or a write grant. It refuses with exit 2 when NEW's
 launch digest differs from NEW.manifest's, or either is unavailable. It then
 runs NEW as a child in preview mode, with the same deadline, kill and reap as
-describe. The child's arguments are the private prefix `--hirsel-preview` and
-`--hirsel-n-place=<bytes>`. It reads OLD's `List[Exported]` on stdin, bounded
+describe. The child's arguments are the private prefix `--hirsel-preview`<!-- doc-ref: external --> and
+`--hirsel-n-place=<bytes>`<!-- doc-ref: external -->. It reads OLD's `List[Exported]` on stdin, bounded
 by the allowance. It runs `place` under `n_place` and answers each old entry,
 in OLD's order, with the session's own answer to a Hello `Want`, `answer_want`
 (RUNNER-SPEC §12.2). It writes one `Preview{describe: Describe, release: Bytes,
@@ -491,8 +491,8 @@ or `n_place`; and last `schema: unknown`. The preview cannot read the target
 store's catalog, so it never reports schema readiness as known. It gates
 nothing: it exits 0 whatever the differences are.
 
-`hirsel confirm MANIFEST ADDR` reads `GET /hirsel/status` at ADDR under an
-absolute deadline, 10 seconds by default (`--confirm-timeout`), and prints
+`hirsel confirm MANIFEST ADDR`<!-- doc-ref: planned --> reads `GET /hirsel/status` at ADDR under an
+absolute deadline, 10 seconds by default (`--confirm-timeout`<!-- doc-ref: planned -->), and prints
 `confirmed`, `not ready: <phase>` (a 503), `not listening`, `different:
 <fields>` or `unknown` (an empty digest on either side, with the other fields
 equal). It exits 0 only for `confirmed` (RUNNER-SPEC §12.2).

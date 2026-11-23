@@ -30,7 +30,8 @@ pub(crate) enum Origin {
         ordinal: u64,
         opaque: bool,
     },
-    /// The run's nth credential fetch (TLS-7), whose bytes the host sealed.
+    /// A credential fetch (TLS-7), whose bytes the host sealed, designated
+    /// by its delivery position under a tape (0 otherwise).
     Fetched(u64),
 }
 
@@ -191,15 +192,9 @@ pub(crate) struct Secrets {
     free: Vec<usize>,
     seals: u64,
     unwraps: u64,
-    fetches: u64,
 }
 
 impl Secrets {
-    pub(crate) fn next_fetch(&mut self) -> u64 {
-        self.fetches += 1;
-        self.fetches - 1
-    }
-
     pub(crate) fn register(&mut self, secret: Secret) -> u64 {
         self.insert(Entry {
             secret,

@@ -22,19 +22,31 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// A `Cred` grant as the run holds it: its parsed source and policy.
+/// A `Cred` grant as the run holds it: its record, parsed source and policy,
+/// and the provider handle its fetches carry (a tape's grant handle, or 0).
 pub(crate) struct Granted {
+    pub(crate) record: CredGrant,
     source: CredSource,
     policy: SecretPolicy,
+    handle: u64,
 }
 
 impl Granted {
     pub(crate) fn read([name, source, policy]: [&[u8]; 3]) -> Option<Self> {
         let text = |view| std::str::from_utf8(view).ok();
-        let record = CredGrant::new(text(name)?, text(source)?, text(policy)?).ok()?;
+        Self::bound(
+            CredGrant::new(text(name)?, text(source)?, text(policy)?).ok()?,
+            0,
+        )
+    }
+
+    /// The grant behind a tape handle. Parsing reads nothing from the source.
+    pub(crate) fn bound(record: CredGrant, handle: u64) -> Option<Self> {
         Some(Self {
             source: CredSource::parse(&record.source).ok()?,
             policy: SecretPolicy::parse(&record.policy)?,
+            record,
+            handle,
         })
     }
 }
@@ -61,16 +73,19 @@ const REPLY_MAX: usize = 64 * 1024;
 pub(crate) struct CredRequest {
     pub network: NetworkRequest,
     source: CredSource,
+    /// The spare capacities of `key_id` and `token` at issue, for the tape.
+    pub(crate) spares: [u64; 2],
     job: Option<Job>,
     /// A delivered success, until the adapter takes it.
-    fetched: Option<Fetched>,
+    pub(crate) fetched: Option<Fetched>,
 }
 
 pub(crate) struct Fetched {
-    key_id: Zeroizing<Vec<u8>>,
-    token: Zeroizing<Vec<u8>>,
-    secret: Arc<Zeroizing<Vec<u8>>>,
-    expires_ns: u64,
+    pub(crate) key_id: Zeroizing<Vec<u8>>,
+    pub(crate) token: Zeroizing<Vec<u8>>,
+    /// Absent on replay: the designation has no bytes behind it.
+    pub(crate) secret: Option<Arc<Zeroizing<Vec<u8>>>>,
+    pub(crate) expires_ns: u64,
 }
 
 pub(crate) static OPERATIONS: Operations = Operations {
@@ -377,7 +392,7 @@ fn imds(at: SocketAddrV4, deadline: Option<u64>) -> Answer {
         key_id: exact(member(json, b"AccessKeyId")?),
         token: exact(member(json, b"Token")?),
         expires_ns: expiry(member(json, b"Expiration")?)?,
-        secret: Arc::new(exact(secret)),
+        secret: Some(Arc::new(exact(secret))),
     };
     Ok(fetched)
 }
@@ -488,7 +503,10 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
 ) -> Outcome {
     // SAFETY: the source pins the request and both carriers through delivery.
     unsafe {
-        let grant = &*(hirsel_core_capability_handle(context, cred) as *const Granted);
+        // A describe run's inert designation has no grant behind it; its
+        // provider denies the request before any source is used.
+        let grant = (hirsel_core_capability_handle(context, cred) as *const Granted).as_ref();
+        let (key_id, token) = (&mut *key_id, &mut *token);
         let mut fetch = CredRequest {
             network: NetworkRequest {
                 send_tail: ptr::null(),
@@ -504,14 +522,17 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
                 tls_send_pending: false,
                 max_receive: 0,
             },
-            source: grant.source,
+            source: grant.map_or(CredSource::Imds(SocketAddrV4::new(0.into(), 0)), |g| {
+                g.source
+            }),
+            spares: [spare(key_id) as u64, spare(token) as u64],
             job: None,
             fetched: None,
         };
         let mut request = Request {
             operation: CRED_FETCH,
             mode: 0,
-            handle: hirsel_core_capability_handle(context, cred),
+            handle: grant.map_or(0, |g| g.handle),
             path: (&raw mut fetch).cast(),
             path_len: size_of::<CredRequest>(),
             buffer: Buffer {
@@ -526,10 +547,9 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
         if outcome.status != 0 || outcome.error != IoError::OK {
             return outcome;
         }
-        let Some(fetched) = fetch.fetched.take() else {
+        let (Some(fetched), Some(grant)) = (fetch.fetched.take(), grant) else {
             crate::process::stop(b"CredFetch")
         };
-        let (key_id, token) = (&mut *key_id, &mut *token);
         if spare(key_id) < fetched.key_id.len() || spare(token) < fetched.token.len() {
             return failure(
                 ROOM,
@@ -538,20 +558,15 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
                 fetched.token.len() as u64,
             );
         }
-        let mut secrets = (*(*context).host_files)
-            .registry
-            .run_grants()
-            .secrets
-            .lock()
-            .unwrap();
-        let origin = Origin::Fetched(secrets.next_fetch());
-        drop(secrets);
+        // A tape designates the key by its delivery position, so concurrent
+        // fetches keep their origins on replay; without one it is 0.
+        let origin = Origin::Fetched(outcome.value);
         let designated = crate::secret::designate(
             context,
             Secret {
                 origin,
                 policy: grant.policy.clone(),
-                bytes: Some(fetched.secret),
+                bytes: fetched.secret,
                 seal: None,
             },
         );

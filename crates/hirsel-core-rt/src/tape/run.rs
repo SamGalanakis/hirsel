@@ -34,6 +34,8 @@ struct Run {
     stop: Option<u8>,
     record_truncated: Option<(u64, IoError)>,
     grants: Vec<u64>,
+    /// The Cred grants the run's capabilities designate, at stable addresses.
+    creds: Vec<Box<crate::cred::Granted>>,
     replay: Option<ReplayInput>,
     sink: Box<crate::os::OsProvider>,
     launch: Box<Metadata>,
@@ -341,13 +343,19 @@ unsafe fn record_header(
             }
         }
         let mut secret_grants = Vec::new();
+        let mut cred_grants = Vec::new();
         if !(*(*config).launch).is_describe() {
             for i in 0..run.requirements_len {
                 let req = &*run.requirements.add(i);
-                if req.kind == entry::SECRET {
+                if matches!(req.kind, entry::SECRET | entry::CRED) {
                     let source = entry::hirsel_core_entry_grant(config, req.kind, req.index);
                     let handle = entry::hirsel_core_capability_handle(context, source);
-                    secret_grants.push((*(handle as *const crate::secret::Granted)).record.clone());
+                    if req.kind == entry::SECRET {
+                        secret_grants
+                            .push((*(handle as *const crate::secret::Granted)).record.clone());
+                    } else {
+                        cred_grants.push((*(handle as *const crate::cred::Granted)).record.clone());
+                    }
                 }
             }
         }
@@ -372,6 +380,7 @@ unsafe fn record_header(
             arg,
             net_rules,
             secret_grants,
+            cred_grants,
             env,
             map_hash_key: format::MapHashKey((*context).map_hash_key.to_bytes()),
         })
@@ -471,6 +480,7 @@ unsafe extern "C" fn invoke(
         let files = (*context).host_files;
         (*files).secret_mac_tape = Some(tape.secret_mac());
         let mut secret_grants = startup.secret_grants.into_iter();
+        let mut cred_grants = startup.cred_grants.into_iter();
         for i in 0..run.requirements_len {
             let req = &*run.requirements.add(i);
             let source = entry::hirsel_core_entry_grant(config, req.kind, req.index);
@@ -556,6 +566,28 @@ unsafe extern "C" fn invoke(
                                 .lock()
                                 .unwrap()
                                 .register(secret)
+                        } else if req.kind == entry::CRED && !run.launch.is_describe() {
+                            let record = if run.mode == 0 {
+                                (*(handle as *const crate::cred::Granted)).record.clone()
+                            } else {
+                                let Some(record) = cred_grants.next() else {
+                                    return stopped(run, Fault::Corrupt);
+                                };
+                                let name = crate::tls::view_bytes(&*run.names.add(i));
+                                if record.parameter.as_bytes() != name {
+                                    return stopped(run, Fault::Corrupt);
+                                }
+                                record
+                            };
+                            // Fetches carry the tape's handle, so the tape
+                            // records them, and replay reaches no source.
+                            let Some(granted) = crate::cred::Granted::bound(record, h) else {
+                                return stopped(run, Fault::Corrupt);
+                            };
+                            let granted = Box::new(granted);
+                            let pointer = &*granted as *const crate::cred::Granted as u64;
+                            run.creds.push(granted);
+                            (*files).registry.grant(p, pointer)
                         } else if req.kind == entry::ENV {
                             let handle = if run.launch.is_describe() || run.mode == 0 {
                                 handle
@@ -575,7 +607,7 @@ unsafe extern "C" fn invoke(
             };
             run.grants.push(value);
         }
-        if secret_grants.next().is_some() {
+        if secret_grants.next().is_some() || cred_grants.next().is_some() {
             return stopped(run, Fault::Corrupt);
         }
         if managed
@@ -794,6 +826,7 @@ unsafe fn run_taped(
             stop: None,
             record_truncated: None,
             grants: vec![],
+            creds: vec![],
             sink,
             launch: Box::new(Metadata::source(
                 "",

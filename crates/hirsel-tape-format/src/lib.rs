@@ -13,7 +13,7 @@ use hirsel_core_net::{
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 10;
+pub const FORMAT: u16 = 11;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -255,6 +255,8 @@ pub struct Header {
     /// Inert snapshot of the Run's configured Net rules. Empty for a Call.
     pub net_rules: Vec<GrantRule>,
     pub secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    /// TLS-7 `Cred` grants, after the Secret grants.
+    pub cred_grants: Vec<hirsel_core_net::CredGrant>,
     pub env: Option<EnvSnapshot>,
     pub map_hash_key: MapHashKey,
 }
@@ -271,6 +273,7 @@ pub const fn is_stream_grant(kind: u8) -> bool {
 const ENV_KIND: u8 = 7;
 const SECRET_KIND: u8 = 11;
 const EXEC_KIND: u8 = 13;
+const CRED_KIND: u8 = 14;
 const NET_RULE_LEN: usize = 23;
 
 fn read_net_rule(bytes: &[u8]) -> Rule {
@@ -441,10 +444,8 @@ fn read_env(c: &mut Cursor<'_>) -> Result<EnvSnapshot, Corrupt> {
 
 fn read_secret_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::SecretGrant>, Corrupt> {
     let mut grants = Vec::new();
-    while !c.done() {
-        if c.u8()? != SECRET_KIND {
-            return Err(Corrupt);
-        }
+    while c.bytes.get(c.at) == Some(&SECRET_KIND) {
+        c.u8()?;
         let mut field = || std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt);
         let grant =
             hirsel_core_net::SecretGrant::new(field()?, field()?, field()?).ok_or(Corrupt)?;
@@ -452,6 +453,23 @@ fn read_secret_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::SecretG
             .iter()
             .any(|old: &hirsel_core_net::SecretGrant| old.parameter == grant.parameter)
         {
+            return Err(Corrupt);
+        }
+        grants.push(grant);
+    }
+    Ok(grants)
+}
+
+fn read_cred_grants(c: &mut Cursor<'_>) -> Result<Vec<hirsel_core_net::CredGrant>, Corrupt> {
+    let mut grants = Vec::<hirsel_core_net::CredGrant>::new();
+    while !c.done() {
+        if c.u8()? != CRED_KIND {
+            return Err(Corrupt);
+        }
+        let mut field = || std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt);
+        let grant =
+            hirsel_core_net::CredGrant::new(field()?, field()?, field()?).map_err(|_| Corrupt)?;
+        if grants.iter().any(|old| old.parameter == grant.parameter) {
             return Err(Corrupt);
         }
         grants.push(grant);
@@ -503,6 +521,15 @@ impl Header {
         }
         for grant in &self.secret_grants {
             grants.push(SECRET_KIND);
+            for field in [&grant.parameter, &grant.source, &grant.policy] {
+                if grants.len().saturating_add(field.len()) > MAX_LEN {
+                    return Err(HeaderTooLarge);
+                }
+                put_bytes(&mut grants, field.as_bytes());
+            }
+        }
+        for grant in &self.cred_grants {
+            grants.push(CRED_KIND);
             for field in [&grant.parameter, &grant.source, &grant.policy] {
                 if grants.len().saturating_add(field.len()) > MAX_LEN {
                     return Err(HeaderTooLarge);
@@ -566,6 +593,7 @@ impl Header {
             None
         };
         let secret_grants = read_secret_grants(&mut grants)?;
+        let cred_grants = read_cred_grants(&mut grants)?;
         if let Some(env) = &env
             && secret_grants.iter().any(|grant| {
                 matches!(
@@ -588,6 +616,7 @@ impl Header {
             arg: arg.to_vec(),
             net_rules,
             secret_grants,
+            cred_grants,
             env,
             map_hash_key,
         })
@@ -901,6 +930,7 @@ pub fn carries_payload(op: u8) -> bool {
             | RECV_BOUNDED
             | TLS_CONNECT
             | SECRET_MAC
+            | CRED_FETCH
             | RESOLVE
             | STDIN_READ
             | NEXT_ENTRIES
@@ -1395,7 +1425,7 @@ impl Decoder {
                 F_GRANT => {
                     let gap = c.varint()?;
                     let kind = c.u8()?;
-                    if kind > SECRET_KIND && kind != EXEC_KIND {
+                    if kind > SECRET_KIND && !matches!(kind, EXEC_KIND | CRED_KIND) {
                         return Err(Corrupt);
                     }
                     if kind == EXEC_KIND {

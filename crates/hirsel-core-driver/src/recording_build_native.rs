@@ -2895,6 +2895,106 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
     assert!(hits >= 2, "the scan missed a key in a program String: {hits}");
 }
 
+/// TLS-7 CR2: a recorded fetch keeps the key id and session token, never
+/// the key, and its replay contacts no source. The recorded run prints the
+/// key's MAC of "x"; replayed with the server gone, it prints the same tag.
+/// Oracles: Python's `hmac.new(KEY, b"x", "sha256")` and the served fields.
+#[test]
+fn cr2_replay_without_the_endpoint() {
+    const KEY: &[u8] = b"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const TOKEN: &[u8] = b"IQoJb3JpZ2luX2VjEXAMPLETOKEN";
+    const MAC_OF_X: &str = "6601539f5439dea50305982bb16cb241bfde747c9db741797a9b913aa4c318d8";
+    let source = r#"
+pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    let (key, expires) = result.unwrap(cred.fetch(c, mut key_id, mut token, Never))
+    if expires != 1767225600000000000u64 {
+        return Error(Exit(status: 4))
+    }
+    result.unwrap(stdout.write(out, key_id))
+    result.unwrap(stdout.write(out, " "))
+    result.unwrap(stdout.write(out, token))
+    result.unwrap(stdout.write(out, " "))
+    let tag = result.unwrap(secret.hmac_sha256(key, string.as_bytes("x")))
+    let mut tag_data: Bytes = list.with_capacity(32)
+    if !bytebuf.append_inline(mut tag_data, tag, 0, 32) {
+        return Error(Exit(status: 5))
+    }
+    result.unwrap(stdout.write_bytes(out, tag_data))
+    Ok(())
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root, package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let (port, server) = fake_imds(KEY, TOKEN.to_vec(), 1);
+    let mut options = native_options(Backend::Cranelift, dir.path());
+    options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.cred_grants =
+        vec![hirsel_core_net::CredGrant::new("c", &format!("imds:127.0.0.1:{port}"), "mac").unwrap()];
+    let tape = dir.path().join("cred.tape");
+    let record = product.build(&entry, &options).unwrap();
+    let output = Command::new(&record.executable)
+        .env("HIRSEL_RECORD", &tape)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let mut tag = [0; 32];
+    for (i, byte) in tag.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&MAC_OF_X[2 * i..2 * i + 2], 16).unwrap();
+    }
+    let printed = [&b"ASIAEXAMPLE "[..], TOKEN, b" ", &tag].concat();
+    assert_eq!(output.stdout, printed);
+
+    let recorded = std::fs::read(&tape).unwrap();
+    let holds = |needle: &[u8]| recorded.windows(needle.len()).any(|w| w == needle);
+    assert!(holds(b"ASIAEXAMPLE") && holds(TOKEN), "the delivery keeps the public fields");
+    for form in [
+        KEY,
+        crate::call::hex(KEY).as_bytes(),
+        crate::call::base64(KEY).as_bytes(),
+    ] {
+        assert!(!holds(form), "the tape holds the key as {:?}", String::from_utf8_lossy(form));
+    }
+
+    // The server is gone: a fetch that reached the source would be refused.
+    options.cred_grants.clear();
+    options.replay = Some(crate::ReplayPlan {
+        path: tape.to_str().unwrap().into(),
+        diagnose: false,
+    });
+    let replay = product.build(&entry, &options).unwrap();
+    let output = Command::new(replay.executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Replay emits nothing; it checked every write against the recorded one.
+    assert!(output.stdout.is_empty());
+}
+
 /// TLS-7 std credentials: a session token longer than the 4096 bytes
 /// `credentials` reserves arrives whole after exactly one more fetch, with
 /// the lengths `Room` reported. The oracle is the server's own token.

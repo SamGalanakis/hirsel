@@ -444,6 +444,7 @@ pub(super) fn header(build: [u8; 32]) -> Header {
         arg: b"arg".to_vec(),
         net_rules: vec![],
         secret_grants: vec![],
+        cred_grants: vec![],
         env: None,
         map_hash_key: Default::default(),
     }
@@ -580,6 +581,7 @@ fn the_encoder_writes_the_format_5_model_tape_byte_for_byte() {
         arg: b"arg-7".to_vec(),
         net_rules: vec![],
         secret_grants: vec![],
+        cred_grants: vec![],
         env: None,
         map_hash_key: Default::default(),
     };

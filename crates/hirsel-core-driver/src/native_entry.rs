@@ -182,9 +182,9 @@ impl<'a> Plan<'a> {
                 "Cred grants must name distinct Cred parameters".into(),
             ));
         }
-        if !options.cred_grants.is_empty() && (options.recording || options.replay.is_some()) {
+        if !options.cred_grants.is_empty() && options.replay.is_some() {
             return Err(NativeStop::Entry(
-                "a run with a Cred grant cannot be recorded or replayed yet".into(),
+                "replay takes Cred grants from its tape".into(),
             ));
         }
         if !options.exec_grants.is_empty() && options.replay.is_some() {

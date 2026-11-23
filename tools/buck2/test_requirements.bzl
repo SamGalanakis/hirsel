@@ -58,6 +58,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::run_tape_replays_stdin_and_env_without_host_sources",
         "native::tests::run_tape_replays_granted_terminal_bits",
         "native::tests::run_tape_records_scram_outcome_without_key_material",
+        "native::tests::cr2_replay_without_the_endpoint",
         "native::tests::tape_code_revision_is_the_entry_revision",
         "native::tests::tape_http_replays_both_native_engines",
         "native::tests::rl3_replays_tls_offline",

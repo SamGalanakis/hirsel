@@ -402,6 +402,7 @@ struct Startup {
     arg: Vec<u8>,
     net_rules: Vec<hirsel_core_net::GrantRule>,
     secret_grants: Vec<hirsel_core_net::SecretGrant>,
+    cred_grants: Vec<hirsel_core_net::CredGrant>,
     env: Option<hirsel_core_net::EnvSnapshot>,
 }
 
@@ -1157,6 +1158,20 @@ unsafe fn canonical(r: &Request) -> Args {
         if r.operation == SCRAM_VERIFY {
             return Args::of(buffer_bytes(&r.buffer));
         }
+        if r.operation == CRED_FETCH {
+            // The grant is the frame's object; never the source or its replies.
+            let cred = &*r.path.cast::<crate::cred::CredRequest>();
+            let mut args = Vec::with_capacity(32);
+            args.extend_from_slice(&cred.spares[0].to_le_bytes());
+            args.extend_from_slice(&cred.spares[1].to_le_bytes());
+            if let Some((_, clock, at)) = cred.network.until {
+                put_varint(&mut args, ordinal_of(clock) as u64);
+                args.extend_from_slice(&at.to_le_bytes());
+            } else {
+                args.push(0);
+            }
+            return Args::of(&args);
+        }
         if r.operation == SECRET_KDF {
             let kdf = &*r.path.cast::<crate::secret::KdfRequest<'_>>();
             let (kind, ordinal) = kdf.secret.origin.wire();
@@ -1350,6 +1365,7 @@ impl Tape {
                         arg: header.arg.clone(),
                         net_rules: vec![],
                         secret_grants: vec![],
+                        cred_grants: vec![],
                         env: None,
                     },
                 )
@@ -1411,6 +1427,7 @@ impl Tape {
                         arg: stored.arg,
                         net_rules: stored.net_rules,
                         secret_grants: stored.secret_grants,
+                        cred_grants: stored.cred_grants,
                         env: stored.env,
                     },
                 )
@@ -2039,10 +2056,14 @@ unsafe fn record_out(
     r: &Request,
     before: usize,
     inner: Inner,
-    o: Outcome,
+    mut o: Outcome,
 ) -> (Out, Outcome, Delivery) {
     let ordinal = ordinal_of(r.handle);
     let ok = o.status == 0 && o.error == IoError::OK;
+    if ok && r.operation == CRED_FETCH {
+        // The fetched key is designated by this delivery's tape position.
+        o.value = live.schedule.events + 1;
+    }
     let mut out = Out {
         status: if r.operation == EXEC_WAIT {
             match o.error.tag {
@@ -2156,6 +2177,21 @@ unsafe fn record_out(
             out.payload
                 .extend_from_slice(&hirsel_core_net::ip_record(std::net::IpAddr::from(ip)));
         }
+    } else if ok && r.operation == CRED_FETCH {
+        // Received plaintext only: the key id and token. The key stays sealed.
+        // SAFETY: the provider set the pinned extension's success.
+        let fetched = unsafe {
+            (*r.path.cast::<crate::cred::CredRequest>())
+                .fetched
+                .as_ref()
+        };
+        let fetched = fetched.unwrap();
+        put_varint(&mut out.payload, fetched.key_id.len() as u64);
+        out.payload.extend_from_slice(&fetched.key_id);
+        put_varint(&mut out.payload, fetched.token.len() as u64);
+        out.payload.extend_from_slice(&fetched.token);
+        out.payload
+            .extend_from_slice(&fetched.expires_ns.to_le_bytes());
     } else if ok && r.operation == TLS_CONNECT {
         // SAFETY: the handshake pins both outputs through delivery.
         unsafe {
@@ -2274,7 +2310,10 @@ unsafe fn replay(
         // nothing else runs before its completion. Ready it only when its
         // recorded Done comes next, as `complete` will accept; any other
         // frame is the divergence `complete` would report.
-        if (matches!(op, SYNC | SYNC_DIR | RESOLVE | STDIN_READ | EXEC_WAIT) || unix::can_park(op))
+        if (matches!(
+            op,
+            SYNC | SYNC_DIR | RESOLVE | CRED_FETCH | STDIN_READ | EXEC_WAIT
+        ) || unix::can_park(op))
             && !crate::tasks::has_provider_task()
         {
             if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
@@ -2509,6 +2548,25 @@ unsafe fn replay_out(
         if !ok || out.value != live.schedule.events {
             return Err(Fault::Corrupt);
         }
+    } else if op == CRED_FETCH && ok {
+        if out.value != live.schedule.events {
+            return Err(Fault::Corrupt);
+        }
+        let mut c = Cursor::new(&out.payload);
+        let key_id = c.bytes().map_err(|_| Fault::Corrupt)?.to_vec();
+        let token = c.bytes().map_err(|_| Fault::Corrupt)?.to_vec();
+        let expires_ns = u64::from_le_bytes(c.fixed().map_err(|_| Fault::Corrupt)?);
+        if !c.done() {
+            return Err(Fault::Corrupt);
+        }
+        // SAFETY: CRED_FETCH pins its adapter extension through delivery.
+        let cred = unsafe { &mut *r.path.cast_mut().cast::<crate::cred::CredRequest>() };
+        cred.fetched = Some(crate::cred::Fetched {
+            key_id: key_id.into(),
+            token: token.into(),
+            secret: None,
+            expires_ns,
+        });
     } else if op == SECRET_MAC && r.mode >= crate::secret::KEY_WRAP {
         // Key operations: a produced blob or signature is the payload, and
         // unwrap records its outcome only; no key material is on the tape.

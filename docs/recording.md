@@ -270,12 +270,13 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape** in format 10, which `crates/hirsel-tape-format` owns. Format 7
+A recording file is a **tape** in format 11, which `crates/hirsel-tape-format` owns. Format 7
 added the run's Map hash key to the header. Format 8 adds the terminal byte to stream grants
 and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256). Format 9
 writes each Secret grant's policy as its canonical set of uses
 ([TLS-5](spec/tls.md#tls-5-secrets)). Format 10 gives `SEND_SECRET` the list of
-designations, the `wire` and the `marks` of one message.
+designations, the `wire` and the `marks` of one message. Format 11 adds the `Cred` grant
+record and the credential fetch frames ([TLS-7](spec/tls.md#tls-7-credential-grants)).
 The format is not part of the language and a replay reads only tapes its own build admits,
 and its pinned executable reads that layout. The host uses the checked block-zero prefix
 through the launch arguments to find and verify the pin.
@@ -290,6 +291,13 @@ through the launch arguments to find and verify the pin.
   each a length byte followed by its bytes.
 - A `Secret` grant record holds the parameter name, the source label and the canonical
   policy text ([TLS-5](spec/tls.md#tls-5-secrets)), all length-prefixed.
+- A `Cred` grant record, after the `Secret` grant records, holds the parameter name, the
+  source text and the canonical policy text
+  ([TLS-7](spec/tls.md#tls-7-credential-grants)), all length-prefixed. A fetch's issue holds
+  the spare capacities of `key_id` and `token` as two little-endian `u64`s, then its
+  deadline. A successful delivery holds its own tape position as `value` (the designation
+  the key gets) and, as the payload, the key id and the session token, each
+  length-prefixed, then the expiry as a little-endian `u64`. The key is never in a frame.
 - The `GRANT` frame of a `Stdin`, `Stdout` or `Stderr` grant holds its terminal byte.
 - The `GRANT` frame of an `Exec` grant holds the total profile snapshot length, then its
   first payload chunk. `DATA` frames carry the remaining bytes.

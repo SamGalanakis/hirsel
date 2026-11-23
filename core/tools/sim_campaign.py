@@ -25,7 +25,7 @@ FLOOD_SEEDS = {
 }
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',
-    'startup_ready_deadline', 'fatal_error_during_sync',
+    'startup_ready_deadline', 'fatal_error_during_sync', 'comma_host_refused',
 )
 DIRECT = {
     'exec:output_drains_past_limits',

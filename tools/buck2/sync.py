@@ -480,6 +480,12 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-prof-record-archives',
                               library=f'//:{name}-standalone-prof-record',
                               archive_name=f"lib{attrs['crate']}.a")
+                + '\n' + call('hirsel_library', name=f'{name}-standalone-observed-record',
+                              deps=declared_deps(package, packages),
+                              **{**attrs, 'features': ['standalone', 'charge-observation', 'record']})
+                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-observed-record-archives',
+                              library=f'//:{name}-standalone-observed-record',
+                              archive_name=f"lib{attrs['crate']}.a")
                 + '\n' + call('hirsel_library', name=f'{name}-test-pool',
                               deps=declared_deps(package, packages),
                               **{**attrs, 'features': ['standalone', 'testing']})
@@ -577,6 +583,7 @@ def first_party(meta: dict) -> str:
                           else {
                               "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                               "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
+                              "HIRSEL_CORE_RT_OBSERVED_RECORD_ARCHIVE": "//:hirsel-core-rt-observed-record-archives[x86_64]",
                               "HIRSEL_CORE_RT_PROF_ARCHIVE": "//:hirsel-core-rt-prof-archives[x86_64]",
                               "HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE": "//:hirsel-core-rt-prof-record-archives[x86_64]",
                               "HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE": "//:core-scripted-record-runtime-pic",

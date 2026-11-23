@@ -485,8 +485,10 @@ pub fn main() -> Result[(), Exit] {
 
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     let recording = root.join(std::env::var_os("HIRSEL_CORE_RT_RECORD_ARCHIVE").unwrap());
-    let observe = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE").unwrap());
+    let observed = root.join(std::env::var_os("HIRSEL_CORE_RT_OBSERVED_RECORD_ARCHIVE").unwrap());
+    let profiling = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE").unwrap());
     let tape = dir.path().join("run.tape");
+    let charges = dir.path().join("charges.json");
     let profile = dir.path().join("memory.hprof");
     let args = |command: &[&str], runtime: &Path, options: &[&str]| {
         command
@@ -516,10 +518,26 @@ pub fn main() -> Result[(), Exit] {
     );
     assert_eq!(code, Some(0), "record: {err}");
     let before = std::fs::read(&tape).unwrap();
+    let (code, _, err) = process::tape_request(
+        &args(
+            &["replay"],
+            &observed,
+            &[
+                "--tape",
+                tape.to_str().unwrap(),
+                "--logical-charge-report",
+                charges.to_str().unwrap(),
+            ],
+        ),
+        dir.path(),
+    );
+    assert_eq!(code, Some(0), "runtime metrics replay: {err}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(charges).unwrap()).unwrap();
     let out = process::tape_request_command(
         &args(
             &["prof", "replay"],
-            &observe,
+            &profiling,
             &[
                 "--tape",
                 tape.to_str().unwrap(),
@@ -566,20 +584,22 @@ pub fn main() -> Result[(), Exit] {
     // Charged: root startup (256 + 32) plus the full 160-byte scope.
     // Retained at the region allocation: startup slot, cause cell, inputs,
     // main result, root Task, Region header and one 4 KiB backing request.
-    // The root Task is 672 bytes plus its warm-list links (two pointers) and
-    // its owned Context's grouped-Map keys: a [u64; 2] salt and a 32-byte
-    // PreparedKey.
-    let task = 672 + 16 + 16 + 32;
+    // The root Task is 672 bytes plus 16 for its warm-list links, 48 for its
+    // owned Context's grouped-Map keys, and 24 for its tail-transfer fields.
+    let task = 672 + 16 + 48 + 24;
     let retained = 16 + 56 + 16 + 24 + task + 272 + 4096;
     // The Stamp takes one 24-byte native slot in the first chunk.
-    assert_eq!(
-        peaks,
-        [
-            ("charged_bytes".into(), 448, 448),
-            ("retained_bytes".into(), retained, retained),
-            ("slack_bytes".into(), 4096 - 24, 4096 - 24),
-        ]
-    );
+    let runtime_peaks = [
+        ("charged_bytes", 448),
+        ("retained_bytes", retained),
+        ("slack_bytes", 4096 - 24),
+    ]
+    .map(|(metric, expected)| {
+        let measured = report[format!("peak_{metric}")].as_i64().unwrap();
+        assert_eq!(measured, expected, "runtime peak {metric}");
+        (metric.to_owned(), measured, measured)
+    });
+    assert_eq!(peaks, runtime_peaks);
     let budgets = db
         .prepare(
             "SELECT limit_val,peak_val,refused,exit_ts IS NULL FROM budget_scope_summary

@@ -799,6 +799,7 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
         "HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE": "//:hirsel-core-rt-prof-record-archives[x86_64]",
     }
     if case_filter == "native::tests::":
+        files_env["HIRSEL_CORE_RT_OBSERVED_RECORD_ARCHIVE"] = "//:hirsel-core-rt-observed-record-archives[x86_64]"
         files_env["HIRSEL_CORE_RT_SCRIPTED_ARCHIVE"] = "//:core-scripted-runtime-pic"
         files_env["HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE"] = "//:core-scripted-record-runtime-pic"
         files_env["HIRSEL_TEST_TAIL_CONTEXT"] = "//crates/hirsel-llvm-lazy/bridge:tail-context-test"

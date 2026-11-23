@@ -116,14 +116,18 @@ fn serve_connection(
     while let Some((end, filled)) = head(wire, &mut header)? {
         let request = &header[..end];
         let tail = &header[end..filled];
-        if request.starts_with(b"PUT /object HTTP/1.1\r\n")
+        if (request.starts_with(b"PUT /object HTTP/1.1\r\n")
+            || request.starts_with(b"PUT /bench/object HTTP/1.1\r\n"))
             && request
                 .windows(25)
                 .any(|w| w.eq_ignore_ascii_case(b"Content-Length: 8388608\r\n"))
         {
             read_body(wire, &mut buf.rx, tail, BODY, verify)?;
             wire.write_all(STORED)?;
-        } else if request.starts_with(b"GET /object HTTP/1.1\r\n") && tail.is_empty() {
+        } else if (request.starts_with(b"GET /object HTTP/1.1\r\n")
+            || request.starts_with(b"GET /bench/object HTTP/1.1\r\n"))
+            && tail.is_empty()
+        {
             wire.write_all(OBJECT)?;
             write_body(wire, &buf.tx)?;
         } else {

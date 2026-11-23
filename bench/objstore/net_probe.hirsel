@@ -1,0 +1,156 @@
+const BODY: u64 = 8388608
+
+fn transfer(mut client: std.object.Client, take buf: Bytes, put: bool) -> Bytes waits {
+    let until = std.object.deadline_after_ms(client, 10000)
+    let (received, data) = if put {
+        std.object.store(mut client, "object", take buf, until)
+    } else {
+        std.object.fetch(mut client, "object", take buf, until)
+    }
+    let meta = result.unwrap(take received)
+    if meta.size != BODY || list.len(data) != BODY {
+        fail("incomplete object transfer")
+    }
+    take data
+}
+
+fn gate(input: Stdin, mut byte: Bytes) waits {
+    list.clear(mut byte)
+    if result.unwrap(stdin.read(input, mut byte, Never)) != 1 {
+        fail("missing measurement gate byte")
+    }
+}
+
+fn publish(out: Stdout, mark: String, ns: u64) waits {
+    let mut line = string.from(mark)
+    string.push_u64(mut line, ns)
+    string.push_char(mut line, '\n')
+    result.unwrap(stdout.write(out, line))
+}
+
+fn profile(net: Net, time: Clock, tasks: Tasks, random: Random, input: Stdin, out: Stdout, port: u16, count: u64, put: bool) waits {
+    let mut url = string.from("http://localhost:")
+    string.push_u64(mut url, int.widen(port))
+    let bucket = std.object.Bucket(endpoint: take url, aws_region: string.from("us-east-1"), bucket: string.from("bench"), prefix: string.new(), style: Path)
+    let mut key: Bytes = list.with_capacity(32)
+    list.fill(mut key, 32, 165u8)
+    let secret_key = result.unwrap(secret.seal(take key, "kdf"))
+    let credentials = std.cred.from_secret(string.from("bench"), take secret_key, string.new())
+    let mut client = result.unwrap(std.object.start(net, tasks, take bucket, take credentials, None, System, time, random, 1, 4194304, clock.deadline_after_ms(host.mono_ns(time), 10000)))
+    let mut buf: Bytes = list.with_capacity(BODY)
+    if put {
+        list.fill(mut buf, BODY, 165u8)
+    }
+    let warm = transfer(mut client, take buf, put)
+    buf = take warm
+    let mut byte: Bytes = list.with_capacity(1)
+    result.unwrap(stdout.write(out, "READY\n"))
+    gate(input, mut byte)
+    let start = host.mono_ns(time)
+    for _ in 0u64 .. count {
+        if !put {
+            list.clear(mut buf)
+        }
+        let next = transfer(mut client, take buf, put)
+        buf = take next
+    }
+    publish(out, "DONE ", host.mono_ns(time) - start)
+    gate(input, mut byte)
+}
+
+type Upload: send {
+    write: WriteHalf,
+    body: Bytes,
+    time: Clock,
+    blocked: Sender[()]
+}
+
+fn stalled_upload(take upload: Upload) -> (u64, Bytes) waits {
+    let Upload(write: take half, body: take body, time, blocked: take blocked) = take upload
+    let mut write = take half
+    let end = cancelled_send(mut write, body, time, blocked)
+    (end, take body)
+}
+
+fn cancelled_send(mut write: WriteHalf, body: Bytes, time: Clock, blocked: Sender[()]) -> u64 waits {
+    let empty = string.as_bytes("")
+    let mut sent = 0u64
+    while sent < BODY - 1 {
+        // A deadline result certifies the socket could not accept any bytes.
+        let until = At(time, clock.deadline_after_ms(host.mono_ns(time), 2))
+        match host.send_pair(mut write, list.slice(body, sent, BODY - 1), empty, until) {
+            Ok(n) => { sent += n },
+            Error(TimedOut) => {
+                result.unwrap(channel.send(blocked, ()))
+                let ret = host.send_pair(mut write, list.slice(body, sent, BODY - 1), empty, Never)
+                let end = host.mono_ns(time)
+                if let Error(Aborted) = ret {
+                    return end
+                }
+                fail("blocked PUT did not return Aborted")
+            },
+            Error(_) => fail("PUT failed while filling the TCP send queue"),
+        }
+    }
+    fail("peer received or buffered the entire PUT")
+}
+
+fn abort_put(network: Net, time: Clock, tasks: Tasks, out: Stdout, port: u16, count: u64, measure: bool) waits {
+    let put_start: Bytes = b"PUT /object HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8388608\r\n\r\n\xa5"
+    let mut body: Bytes = list.with_capacity(BODY)
+    list.fill(mut body, BODY, 165u8)
+    let mut ack: Bytes = list.with_capacity(1)
+    let addr = Addr(ip: V4(2130706433), port)
+    for _ in 0u64 .. count {
+        let until = At(time, clock.deadline_after_ms(host.mono_ns(time), 10000))
+        let socket = result.unwrap(host.connect(network, addr, until))
+        let (reader, sender) = net.split(take socket)
+        let mut read = take reader
+        let mut write = take sender
+        let mut sent = 0u64
+        while sent < list.len(put_start) {
+            sent += result.unwrap(host.send_pair(mut write, list.slice(put_start, sent, list.len(put_start)), string.as_bytes(""), until))
+        }
+        list.clear(mut ack)
+        if result.unwrap(host.recv_bounded(mut read, mut ack, 1, until)) != 1 || ack[0] != b'x' {
+            fail("peer did not stop reading")
+        }
+        let (signal, blocked): (Sender[()], Receiver[()]) = channel.new(1)
+        let mut writer = task.spawn(tasks, bytes 16777216, Upload(write: take write, body: take body, time, blocked: take signal), stalled_upload)
+        result.unwrap(channel.receive(blocked))
+        // Give the child a scheduling turn to enter the untimed send.
+        host.sleep_until(time, clock.deadline_after_ms(host.mono_ns(time), 1))
+        let start = host.mono_ns(time)
+        task.cancel(mut writer)
+        let (end, returned) = result.unwrap(task.join(take writer))
+        body = take returned
+        let _ = take read
+        if measure {
+            publish(out, "ABORT ", end - start)
+        } else {
+            result.unwrap(stdout.write(out, "ABORTED\n"))
+        }
+    }
+}
+
+pub fn main(net: Net, time: Clock, tasks: Tasks, random: Random, input: Stdin, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(method) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(port_text) = args.get(argv, 1) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(count_text) = args.get(argv, 2) else {
+        return Error(Exit(status: 2))
+    }
+    let port: u16 = result.unwrap(int.parse(port_text))
+    let count: u64 = result.unwrap(int.parse(count_text))
+    if method == "abort" || method == "check-abort" {
+        abort_put(net, time, tasks, out, port, count, method == "abort")
+    } else if method == "put" || method == "get" {
+        profile(net, time, tasks, random, input, out, port, count, method == "put")
+    } else {
+        return Error(Exit(status: 2))
+    }
+    Ok(())
+}

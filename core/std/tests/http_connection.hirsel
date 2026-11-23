@@ -1407,8 +1407,12 @@ fn http_client_direct_response_body(tasks: Tasks) -> bool waits {
     passed
 }
 
-// TLS-2 and TL10. The loopback fixture checks both HTTP heads and the
-// upload bytes. It returns a chunked "world", then conflicting body framing.
+// TLS-2, TL10, TL11 and TL17. The loopback fixture checks every HTTP head and
+// upload byte. It returns a chunked "world", "ok" to a form body whose
+// Content-Length counts two form-encoded secrets (the second ends the body),
+// "ok" to a chunk whose size counts one, then conflicting body framing. On a
+// second connection a body secret sealed to beta.test, after a protected
+// header granted to alpha.test, is Denied with no byte sent.
 // expect: stdout "GET /reject\nAuthorization: Bearer [secret]\nX-Trace: enabled\nX-Second: [secret]\n"
 // expect: stderr "BodyFraming\nGET /reject\nAuthorization: Bearer [secret]\nX-Trace: enabled\nX-Second: [secret]\n"
 // expect: run http_client_https_round_trip(https) = true
@@ -1418,6 +1422,31 @@ fn http_client_https_round_trip(n: Net, c: Clock, address: Addr, token: Secret, 
     let mut client = result.unwrap(http_client.https(n, address, "alpha.test", "alpha.test", System, c, upload, end))
     result.unwrap(http_client.write(mut client, string.as_bytes("hello")))
     if !post_echo(mut client, "world") {
+        return false
+    }
+    // Every byte form-urlencoding changes: a+b%2Bc%26d%3De%25f%FF.
+    let mut odd = string.into_bytes("a b+c&d=e%f")
+    list.push(mut odd, 255u8)
+    let client_secret = result.unwrap(secret.seal(take odd, "tls_send(alpha.test)"))
+    let mut form: List[http_client.Segment] = list.new()
+    list.push(mut form, Plain(string.into_bytes("grant_type=refresh_token&refresh_token=")))
+    list.push(mut form, Sealed(secret.share(token), Form))
+    list.push(mut form, Plain(string.into_bytes("&client_secret=")))
+    list.push(mut form, Sealed(secret.share(client_secret), Form))
+    let mut form_fields: List[http_client.Header] = list.new()
+    list.push(mut form_fields, http_client.Header(name: "Content-Type", value: Public(string.into_bytes("application/x-www-form-urlencoded"))))
+    let refresh = http_client.Request(method: "POST", target: "/token", headers: take form_fields, body: Segments(take form))
+    result.unwrap(http_client.start(mut client, refresh, end))
+    if !post_echo(mut client, "ok") {
+        return false
+    }
+    let chunked = http_client.Request(method: "POST", target: "/chunk", headers: list.new(), body: Chunked)
+    result.unwrap(http_client.start(mut client, chunked, end))
+    let mut chunk: List[http_client.Segment] = list.new()
+    list.push(mut chunk, Plain(string.into_bytes("v=")))
+    list.push(mut chunk, Sealed(secret.share(client_secret), Form))
+    result.unwrap(http_client.write_segments(mut client, chunk))
+    if !post_echo(mut client, "ok") {
         return false
     }
     let mut fields: List[http_client.Header] = list.new()
@@ -1443,7 +1472,22 @@ fn http_client_https_round_trip(n: Net, c: Clock, address: Addr, token: Secret, 
     let entries = log.finish(take events)
     result.unwrap(stderr.write(err, entries[0]))
     http_client.close(take client)
-    list.len(entries) == 1
+    let other = result.unwrap(secret.seal(string.into_bytes("other"), "tls_send(beta.test)"))
+    let mut refused_fields: List[http_client.Header] = list.new()
+    list.push(mut refused_fields, http_client.Header(name: "Authorization", value: Protected(string.into_bytes("Bearer "), secret.share(token))))
+    let mut refused_body: List[http_client.Segment] = list.new()
+    list.push(mut refused_body, Plain(string.into_bytes("k=")))
+    list.push(mut refused_body, Sealed(secret.share(other), Raw))
+    let refused = http_client.Request(method: "POST", target: "/token", headers: take refused_fields, body: Segments(take refused_body))
+    let denied = match http_client.https(n, address, "alpha.test", "alpha.test", System, c, refused, end) {
+        Error(Write(Denied)) => true,
+        Ok(take connection) => {
+            http_client.close(take connection)
+            false
+        },
+        Error(_) => false,
+    }
+    list.len(entries) == 1 && denied
 }
 
 fn listen_with_budget(n: Net, c: Clock, tasks: Tasks, take cfg: http.Config, budget: u64) -> (Task[()], Addr) waits {

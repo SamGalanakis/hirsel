@@ -1032,10 +1032,11 @@ unsafe fn socket_args(request: &Request) -> Args {
         }
         if request.operation == SCRAM {
             let scram = &*request.path.cast::<crate::scram::ScramRequest<'_>>();
-            let (kind, ordinal) = scram.send.origin.wire();
+            let (origin, patterns) = &scram.send.designations[0];
+            let (kind, ordinal) = origin.wire();
             args.push(kind);
             put_varint(&mut args, ordinal);
-            let patterns = hirsel_core_net::Pattern::list_text(&scram.send.patterns);
+            let patterns = hirsel_core_net::Pattern::list_text(patterns);
             let pieces = [
                 patterns.as_bytes(),
                 scram.client_first,
@@ -1050,13 +1051,18 @@ unsafe fn socket_args(request: &Request) -> Args {
         }
         if matches!(request.operation, SEND_PAIR | SEND_SECRET) {
             if request.operation == SEND_SECRET {
+                // Each secret's designation in `secrets` order; the wire and
+                // the marks follow as the buffer and the tail.
                 let send = &*request.path.cast::<crate::secret::SendRequest>();
-                let (kind, ordinal) = send.origin.wire();
-                args.push(kind);
-                put_varint(&mut args, ordinal);
-                let patterns = hirsel_core_net::Pattern::list_text(&send.patterns);
-                put_varint(&mut args, patterns.len() as u64);
-                args.extend_from_slice(patterns.as_bytes());
+                put_varint(&mut args, send.designations.len() as u64);
+                for (origin, patterns) in &send.designations {
+                    let (kind, ordinal) = origin.wire();
+                    args.push(kind);
+                    put_varint(&mut args, ordinal);
+                    let patterns = hirsel_core_net::Pattern::list_text(patterns);
+                    put_varint(&mut args, patterns.len() as u64);
+                    args.extend_from_slice(patterns.as_bytes());
+                }
             }
             let tail = &*n.send_tail;
             let mut tail_len = Vec::new();

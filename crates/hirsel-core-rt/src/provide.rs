@@ -207,8 +207,8 @@ struct PortCall {
     finished: bool,
     /// Reply bytes `fill` staged in the room.
     staged: Vec<u8>,
-    /// A SendSecret's Secret, narrowed to the stream's name at issue.
-    secret: Option<crate::secret::Secret>,
+    /// A SendSecret's Secrets, narrowed to the stream's name at issue.
+    secret: Option<Vec<crate::secret::Secret>>,
 }
 
 enum Queued {
@@ -423,11 +423,18 @@ impl Port {
                 w[..4].copy_from_slice(&[NET_SEND, id, b.len as u64, tail]);
             }
             SEND_SECRET => {
-                // A TLS write half; the Secret itself goes to the call.
+                // A TLS write half; the Secrets themselves go to the call.
                 let id = self.socket(request.handle, Kind::Socket)?;
-                // SAFETY: SEND_SECRET pins its `after` carrier through delivery.
-                let after = unsafe { (*n.send_tail).len } as u64;
-                w[..4].copy_from_slice(&[NET_SEND_SECRET, id, b.len as u64, after]);
+                // SAFETY: SEND_SECRET pins its SendRequest and its marks'
+                // bytes through delivery.
+                let (secrets, marks) = unsafe {
+                    let send = &*request.path.cast::<crate::secret::SendRequest>();
+                    (
+                        send.designations.len() as u64,
+                        (*n.send_tail).len as u64 / 8,
+                    )
+                };
+                w[..5].copy_from_slice(&[NET_SEND_SECRET, id, b.len as u64, secrets, marks]);
             }
             TLS_CONNECT => {
                 // The Socket is whole: `tls.connect` takes it before any split.
@@ -1764,21 +1771,26 @@ pub unsafe extern "C" fn hirsel_core_call_word(
     }
 }
 
-/// `provide.secret(c)`: a SendSecret call's Secret, narrowed to the stream's
-/// name, as a new designation charged to the server's limit (error tag 2 and
-/// the room, from which it raises Capacity). Any other call fails the server.
+/// `provide.secret(c, i)`: a SendSecret call's Secret at index `i`, narrowed
+/// to the stream's name, as a new designation charged to the server's limit
+/// (error tag 2 and the room, from which it raises Capacity). Any other call,
+/// or an index past the call's secrets, fails the server.
 /// # Safety
 /// Context is running and `call` is a live `Call` key.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_call_secret(
     context: *mut Context,
     call: u64,
+    i: u64,
     site: u64,
 ) -> Outcome {
     // SAFETY: forwarded.
     unsafe {
         let (port, id) = call_of(context, call);
-        let secret = lock(port).calls[&id].secret.clone();
+        let secret = lock(port).calls[&id]
+            .secret
+            .as_ref()
+            .and_then(|secrets| secrets.get(i as usize).cloned());
         let Some(secret) = secret else {
             causes::record(&mut *context, causes::Cause::fail(Default::default(), site));
             return CANCELLED;

@@ -26,10 +26,11 @@ pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
 
-// A SendSecret call's Secret, narrowed to the stream's verified name: a new
-// designation charged as `secret.narrow` (TLS-5). Never its bytes; any other
-// call fails the server.
-pub fn secret(c: Call[NetOp]) -> Secret
+// A SendSecret call's Secret at index `i` of its `secrets`, narrowed to the
+// stream's verified name: a new designation charged as `secret.narrow`
+// (TLS-5). Never its bytes; any other call, or an index past `secrets`,
+// fails the server.
+pub fn secret(c: Call[NetOp], i: u64) -> Secret
 
 // Stage the first bytes of `b` in the room for the reply, at most what the
 // call's `room` still offers; returns how many it took.
@@ -147,7 +148,7 @@ pub fn net_op(c: Call[NetOp]) -> NetOp {
     } else if t == 6 {
         Handshake(socket: a, name: b, alpn: d, system: e == 1)
     } else if t == 7 {
-        SendSecret(socket: a, before: b, after: d)
+        SendSecret(socket: a, wire: b, secrets: d, marks: e)
     } else if t == 8 {
         Released(id: a, part: part(b))
     } else if t == 9 {

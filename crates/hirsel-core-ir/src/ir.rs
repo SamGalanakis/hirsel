@@ -1851,7 +1851,7 @@ impl RtOp {
                         ],
                     ),
                     HostOp::SendSecret => (
-                        vec![V(u64_), V(p), V(u64_), V(p), V(u8_), V(u64_), V(u64_)],
+                        vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
                     HostOp::ScramSha256 => (
@@ -1898,7 +1898,6 @@ impl RtOp {
                     | HostOp::EnvLen
                     | HostOp::ProvideRandom
                     | HostOp::ClockIdle
-                    | HostOp::CallSecret
                     | HostOp::ProcessTrigger => (vec![V(u64_)], outcome),
                     HostOp::ProvideProcess => (vec![], outcome),
                     HostOp::ProvideDir
@@ -1909,7 +1908,9 @@ impl RtOp {
                         (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
                     }
                     HostOp::StreamTerminal => (vec![V(u64_), V(u8_)], outcome),
-                    HostOp::CallWord | HostOp::NetJoin => (vec![V(u64_), V(u64_)], outcome),
+                    HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => {
+                        (vec![V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::PortReply => (vec![V(u64_); 9], outcome),
                     HostOp::PortFill => (vec![V(u64_), V(u64_), V(p)], outcome),

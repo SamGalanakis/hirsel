@@ -274,7 +274,7 @@ pub fn seal(take b: Bytes, uses: String) -> Result[Secret, (SecretError, Bytes)]
 pub fn narrow(s: Secret, uses: String) -> Result[Secret, SecretError]
 pub fn share(s: Secret) -> Secret
 pub fn render(s: Secret) -> View[String] in s
-pub fn send_secret(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until: Until) -> Result[(), NetError] waits
+pub fn send_secret(mut w: WriteHalf, wire: Bytes, secrets: List[Secret], marks: List[u64], until: Until) -> Result[(), NetError] waits
 pub type SecretError = Invalid | Capacity(Capacity)
 pub fn wrap(kek: Secret, s: Secret, mut out: Bytes) -> Result[u64, KeyError]
 pub fn unwrap(kek: Secret, blob: Bytes, uses: String) -> Result[Secret, KeyError]
@@ -396,34 +396,73 @@ Received plaintext is outside the TL10 guarantee because an
 authorized peer can return any bytes, and a recording keeps its replies exactly
 ([recording](../recording.md#credentials)).
 
-**The sink.** `tls.send_secret` sends `before ‖ secret ‖ after` on `w`. Every byte is
-sent, or the operation fails. These checks run before issue, each with no effect:
+**The sink.** `tls.send_secret` sends one message built from `wire`, the plain bytes,
+by inserting the secrets and the lengths that `marks` names. The runtime builds the message;
+the program never sees it. `marks` is a sequence of groups of four words `[at, kind, a, b]`.
+`at` is an offset into `wire`, and the message is `wire` with each group's insertion
+placed before `wire[at]` (at `at = len(wire)`, after the last byte). Groups are in
+nondecreasing `at` order, and insertions at the same offset are placed in list order.
+
+| kind | inserts | `a` | `b` |
+| --- | --- | --- | --- |
+| 0 | the bytes of `secrets[a]` | index | 0 |
+| 1 | `secrets[a]` form-urlencoded (below) | index | 0 |
+| 2 | the decimal digits of the length of the range `a..b` | start | end |
+| 3 | the lowercase hexadecimal digits of the length of the range `a..b` | start | end |
+
+**Lengths.** The length of the range `a..b` (`a <= b <= len(wire)`) is the number of
+message bytes made from `wire[a..b]` together with the secret insertions whose `at` lies
+in `a..=b`, so a secret at either end of the range counts. Digits have no leading zero;
+a length of zero is `0`. A length range may not hold the `at` of a length group. So an
+HTTP head can carry `Content-Length` for a body that holds secrets: the group sits where
+the value goes, and its range is the body. The program never learns the number.
+
+**Form-urlencoding** is the `application/x-www-form-urlencoded` byte serializer (WHATWG
+URL §5.2). The bytes `*`, `-`, `.`, `_`, `0`–`9`, `A`–`Z` and `a`–`z` stay as they are.
+A space becomes `+`. Every other byte becomes `%` followed by two uppercase hexadecimal
+digits. The runtime encodes the secret's bytes; they never pass through program memory.
+
+`marks` is well formed when its length is a multiple of four, every `at` and range lies in
+`wire`, the offsets are in order, every index names an element of `secrets`, `b` is 0 for
+kinds 0 and 1, and no range holds a length group. Each kind is checked from the arguments
+alone, never from a secret's bytes. A `marks` that is not well formed fails the calling
+task with a `Bounds` cause, as an out-of-bounds index does; it is a fault of the program,
+not a refusal by the host. A `secrets` element that no group names is still checked below.
+
+These checks run before issue, each with no effect:
 
 1. If `w` is not a TLS half, the result is `Denied`.
-2. If no `tls_send` pattern of `s` covers the verified name of `w`'s stream, the result is
-   `Denied`.
+2. If, for any element of `secrets`, no `tls_send` pattern covers the verified name of
+   `w`'s stream, the result is `Denied`. Every element is checked before any byte is sent,
+   so a refusal sends none of the message.
 
-The provider receives the bytes from run-owned memory. They never pass through program
+Every byte of the message is sent, or the operation fails. The provider receives the
+secrets' bytes from run-owned memory, and the runtime builds the encodings and the length
+digits in run-owned memory, which it zeroes after the send and never charges to a limit:
+a refusal for capacity would tell the program the length. They never pass through program
 memory or a buffer that the program can see.
 
 **Virtual streams.** A TLS half of a `Net` made by `provide.net` ([core](core.md#provide))
 was verified by its server, not by a trust rule the run was granted, so it never satisfies
-a granted secret: `send_secret` on it gives `Denied` before issue for an opaque `Secret`
-(from an entry grant, or derived or unwrapped from one; key operations, below), whatever its
-patterns, and the server sees nothing. A `Secret` made by
+a granted secret: `send_secret` on it gives `Denied` before issue when any element of
+`secrets` is opaque (from an entry grant, or derived or unwrapped from one; key operations,
+below), whatever its patterns, and the server sees nothing. A `Secret` made by
 `secret.seal` passes the two checks above as usual. Its server receives the operation as
-`SendSecret` with the `Secret` itself, narrowed to the stream's verified name, and never its
-bytes (`provide.secret`). A server that forwards it to a real `tls.send_secret` passes that
-real stream's checks again.
+`SendSecret` with `wire` and `marks` as payload fields 1 and 2 and each element of `secrets`
+itself, narrowed to the stream's verified name, and never its bytes
+(`provide.secret(c, i)`). A server that forwards the call to a real `tls.send_secret`, with
+the same `wire`, the same `marks` and the narrowed secrets in order, passes that real
+stream's checks again.
 
 Failure after a partial send is different from `send_pair`. On `TimedOut`, `Aborted` or
 a transport error after some bytes were committed, the half is **spent**: every later
 send on it gives `Reset`. The reason is that the caller cannot resume in the middle of
 bytes it cannot read. A failure before any byte was committed leaves the half usable.
 
-The HTTP client writes a header whose value is a `Secret` by calling `send_secret`. The
-`before` argument carries the head up to the value, and `after` carries the rest of that
-line, with any following head bytes up to the next secret value. On a plain-TCP
+The HTTP client sends a request that holds a `Secret`, in a header or in its body, with
+one `send_secret` call: `wire` is the head and any body bytes given with it, kind 0 marks
+place header values, kind 0 or 1 marks place body segments, and a kind 2 mark writes
+`Content-Length` ([http](http.md#http-17-client-request-bodies)). On a plain-TCP
 connection, such a request fails `Denied` before any byte is sent.
 
 **The MAC sink.** `secret.hmac_sha256(s, data)` and `secret.verify_hmac_sha256(s, data,
@@ -857,8 +896,9 @@ computes.
 | **TL8** ALPN | the wrong protocol reported, or a server choice outside the offer accepted | Offer `[h2, http/1.1]` to a server that lists `[http/1.1]`: the result is `Some(1)`. Against a server that lists only `[x]`: `Tls(Protocol(120))`. An entry of 0 bytes, an entry of 256 bytes, or a repeated entry: `Tls(Alpn)` before issue. The oracle is RFC 7301 §3.2. |
 | **TL9** TLS 1.3 resumption | no ticket reuse, or skipping verification on a full handshake after a ticket offer | Connect twice to the same loopback server with the same name, trust and ALPN. The server reports a full then a resumed handshake and the client sees the same peer digest and ALPN. At the same endpoint, replace the server with one that has no prior session and presents a leaf for a different name. The client gives `Tls(Certificate(NameMismatch))`. |
 | **TL10** a secret never renders | the bytes reaching a render, log line or diagnostic | The grant `env:` source is 32 random bytes encoded as hex. The program makes an HTTPS request with it as `Authorization: Bearer`, renders the request, triggers and renders an HTTP error, and writes a `Log`. Search stdout, stderr and the run's diagnostics for the value, its base64 and its raw bytes: there are no hits. The loopback server's received header equals the environment value, and the server does not echo it. |
-| **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Two cases: `send_secret` on a stream verified as `beta.test` with a secret granted `tls_send(alpha.test)`, and `send_secret` on a plain-TCP half. Both give `Denied`, and the server receives zero bytes after the handshake. |
-| **TL13** spent half | a resumed send that splits a secret | Make `send_secret` time out after it has committed a prefix (the scripted peer stops reading). The next `send_pair` on that half gives `Reset`. The scripted peer's received bytes are a prefix of `before ‖ secret ‖ after` and contain nothing after it. |
+| **TL11** a secret reaches only its names | exfiltration to a host the grant did not name | Three cases: `send_secret` on a stream verified as `beta.test` with a secret granted `tls_send(alpha.test)`, the same with that secret as the second of two secrets after one granted `tls_send(beta.test)`, and `send_secret` on a plain-TCP half. Each gives `Denied`, and the server receives zero bytes after the handshake. |
+| **TL17** body segments | a wrong form encoding, a length that misses a secret at a range end, or digits the program could see | An HTTPS POST whose `Content-Length` is a kind 2 mark over a form body `grant_type=refresh_token&refresh_token=<s1>&client_secret=<s2>`, where `s2` ends the body and holds a space, `+`, `&`, `=`, `%` and byte `0xFF`. The server receives the bytes and the length worked out by hand from WHATWG URL §5.2. |
+| **TL13** spent half | a resumed send that splits a secret | Make `send_secret` time out after it has committed a prefix (the scripted peer stops reading). The next `send_pair` on that half gives `Reset`. The scripted peer's received bytes are a prefix of the message and contain nothing after it. |
 | **TL14** STARTTLS in place | `join` shutting down, rebuffering or losing the connection, or `tls.connect` refusing a joined socket | A loopback fixture server reads 8 bytes and checks they equal `00 00 00 08 04 D2 16 2F` (PostgreSQL's `SSLRequest`, from the protocol documentation's code 80877103). It answers `S`, then runs TLS as `alpha.test`. NET-7's `pg_starttls` succeeds, `Handshake.peer` equals the `openssl` digest of the alpha leaf, and `hello` sent on the TLS half reaches the server as plaintext. When the server answers `N`, the result is `Declined` with byte `0x4E`, and `hello` sent on the returned half reaches the server unencrypted. |
 | **TL15** injected plaintext before TLS | bytes after the go-ahead read as the server's (CVE-2021-23222) | The fixture server writes `S` followed by `R\x00\x00\x00\x08\x00\x00\x00\x00` (a fake `AuthenticationOk`) in one write, then waits. The client reads one byte, joins, and `tls.connect` gives `Tls(Protocol(0))`. The server receives no byte after the 8-byte request, and the open descriptor count is back to its value before `connect` (TL7's check). The oracle is TLS-1's peek rule and RFC 8446 §4.1.2, under which the client speaks first. |
 | **TL16** join refusals | halves of different sockets merged, or a refusal that loses a half | Using a counting provider: halves of two different loopback sockets, the halves of a TLS stream, and the halves of an accepted socket each give `Unjoined` with zero provider calls. Afterwards, one byte sent on each returned write half reaches that half's own peer, and no other. |

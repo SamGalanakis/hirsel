@@ -155,7 +155,7 @@ environment.
 | `TLS_CONNECT` | socket ordinal; canonical args = `name`, trust (`System`, or the SHA-256 of the roots bundle), the ALPN entries in order, `until` | the outcome. On success the new stream ordinal, the negotiated protocol, the 32-byte peer digest and the binding value with its length (0 when absent). |
 | `RECV_BOUNDED` on a TLS half | as for a socket | the decrypted plaintext, in its original fragments |
 | `SEND_PAIR` on a TLS half | as for a socket: both offered plaintext buffers and the deadline | the committed count |
-| `SEND_SECRET` | half ordinal; canonical args = `before`, the secret's designation, `after`, `until` | the outcome, and the committed count on failure |
+| `SEND_SECRET` | half ordinal; canonical args = `until`, each secret's designation in `secrets` order, `wire`, `marks` | the outcome, and the committed count on failure |
 | `SECRET_MAC` | run-owned sink at object 0; canonical args = mode, secret designation, `data` (and `tag` for verify) | the 32-byte tag or the verdict |
 | `SECRET_KDF` | run-owned sink at object 0; canonical args = parent designation, child policy, `key_prefix`, `data` | the delivery position, with no key bytes |
 | `SECRET_MAC` key operations ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 2 `wrap`, 3 `unwrap`, 4 `sign`; canonical args = mode, the key's designation and policy, then for `wrap` the wrapped secret's designation and policy, for `unwrap` the `uses` text and the blob, for `sign` the algorithm and `msg`, and the spare of `out` | the outcome; for `wrap` and `sign` on success the blob or signature. `Capacity`'s available bytes are the recorded spare. |
@@ -265,16 +265,17 @@ A replay gets the same results without a secret's bytes. The launcher does not r
 secret's source; the replaying run gets a designation with no bytes behind it. No operation
 reads a secret's bytes, so the program computes the same values, and the deliveries that
 depend on the secret, the server's replies, come from the recording. `SEND_SECRET` on
-replay checks the designation and the digests of `before` and `after`, and delivers the
+replay checks each designation and the digests of `wire` and `marks`, and delivers the
 recorded outcome.
 
 ## Format
 
-A recording file is a **tape** in format 9, which `crates/hirsel-tape-format` owns. Format 7
+A recording file is a **tape** in format 10, which `crates/hirsel-tape-format` owns. Format 7
 added the run's Map hash key to the header. Format 8 adds the terminal byte to stream grants
 and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256). Format 9
 writes each Secret grant's policy as its canonical set of uses
-([TLS-5](spec/tls.md#tls-5-secrets)).
+([TLS-5](spec/tls.md#tls-5-secrets)). Format 10 gives `SEND_SECRET` the list of
+designations, the `wire` and the `marks` of one message.
 The format is not part of the language and a replay reads only tapes its own build admits,
 and its pinned executable reads that layout. The host uses the checked block-zero prefix
 through the launch arguments to find and verify the pin.

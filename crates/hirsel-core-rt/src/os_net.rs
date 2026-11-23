@@ -525,7 +525,15 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 let committed = &mut (*send).committed;
                 let fd = sockets.fd(key);
                 let mut skip = *committed;
-                for part in [&request.buffer, &(*send).secret, &*n.send_tail] {
+                // SEND_SECRET's message is whole in `secret`; its buffer and
+                // tail are the wire and marks it was built from.
+                let none = crate::net::empty_buffer();
+                let parts = if request.operation == SCRAM {
+                    [&request.buffer, &(*send).secret, &*n.send_tail]
+                } else {
+                    [&none, &(*send).secret, &none]
+                };
+                for part in parts {
                     let part = crate::tls::bytes(part);
                     if skip >= part.len() {
                         skip -= part.len();

@@ -370,7 +370,7 @@ def host_parameter(case):
 
 @contextlib.contextmanager
 def https_fixture(root):
-    """TLS-2 and TL10 use one real peer and literal HTTP/1.1 wire oracles."""
+    """TLS-2, TL10, TL11 and TL17 use one real peer and literal HTTP/1.1 wire oracles."""
     certs = root / 'crates/hirsel-core-rt/testdata/tls'
     config = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     config.load_cert_chain(certs / 'alpha.pem', certs / 'alpha.key.pem')
@@ -387,18 +387,40 @@ def https_fixture(root):
             remaining = remaining[len(data):]
         stream.sendall(response)
 
+    def refuse(listener):
+        # TL11: a refused body secret sends nothing after the handshake.
+        connection, _ = listener.accept()
+        with connection, config.wrap_socket(connection, server_side=True) as stream:
+            with contextlib.suppress(ssl.SSLError, OSError):
+                if stream.recv(1):
+                    raise ValueError('a refused request sent bytes')
+
     def serve(listener):
         connection, _ = listener.accept()
+        # The second connection must not wait for this one's teardown.
+        refused = ThreadPoolExecutor(max_workers=1)
+        second = refused.submit(refuse, listener)
+        refused.shutdown(wait=False)
         with connection, config.wrap_socket(connection, server_side=True) as stream:
             if stream.selected_alpn_protocol() != 'http/1.1':
                 raise ValueError('HTTPS client did not negotiate HTTP/1.1')
             exchange(stream, b'POST /upload HTTP/1.1\r\nHost: alpha.test\r\nContent-Length: 5\r\n\r\nhello',
                      b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nworld\r\n0\r\n\r\n')
+            # WHATWG URL 5.2 by hand: the sealed "a b+c&d=e%f" and 0xFF is
+            # a+b%2Bc%26d%3De%25f%FF (22 bytes); the hex token is unchanged.
+            # Content-Length: 39 + 64 + 15 + 22 = 140; the chunk is 2 + 22 = 0x18.
+            ok = b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok'
+            exchange(stream, b'POST /token HTTP/1.1\r\nHost: alpha.test\r\nContent-Type: application/x-www-form-urlencoded'
+                     b'\r\nContent-Length: 140\r\n\r\ngrant_type=refresh_token&refresh_token=' + token
+                     + b'&client_secret=a+b%2Bc%26d%3De%25f%FF', ok)
+            exchange(stream, b'POST /chunk HTTP/1.1\r\nHost: alpha.test\r\nTransfer-Encoding: chunked\r\n\r\n'
+                     b'18\r\nv=a+b%2Bc%26d%3De%25f%FF\r\n0\r\n\r\n', ok)
             exchange(stream, b'GET /reject HTTP/1.1\r\nHost: alpha.test\r\nAuthorization: Bearer ' + token
                      + b'\r\nX-Trace: enabled\r\nX-Second: ' + token + b'\r\nContent-Length: 0\r\n\r\n',
                      b'HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n')
             with contextlib.suppress(OSError):
                 stream.unwrap().close()
+        second.result()
 
     with socket.socket() as listener, ThreadPoolExecutor(max_workers=1) as executor:
         listener.bind(('127.0.0.1', 0))

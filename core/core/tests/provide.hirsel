@@ -1251,7 +1251,8 @@ fn unit_seal_refunds_in_parent(tasks: Tasks) -> bool waits {
 }
 
 // Sends "Auth " ‖ pencil ‖ "\r\n" on a served alpha.test stream; a pencil
-// sealed to beta.test is Denied there for both sinks, and a plain half
+// sealed to beta.test is Denied there for both sinks, also as the second of
+// two secrets after an alpha.test one, and a plain half
 // Denies both for the alpha.test one. The plain socket's halves drop first.
 fn secret_client(take n: Net) -> bool waits {
     let at = Addr(ip: V4(2130706433), port: 443)
@@ -1266,11 +1267,27 @@ fn secret_client(take n: Net) -> bool waits {
         Ok(take stream) => {
             let (take r, take w, _) = take stream
             let mut wh = take w
-            let sent = match tls.send_secret(mut wh, string.as_bytes("Auth "), alpha, string.as_bytes("\r\n"), Never) {
+            let sent = match send_between(mut wh, string.as_bytes("Auth "), alpha, string.as_bytes("\r\n"), Never) {
                 Ok(_) => true,
                 Error(_) => false
             }
-            let other_name = match tls.send_secret(mut wh, string.as_bytes("Auth "), beta, empty, Never) {
+            let other_name = match send_between(mut wh, string.as_bytes("Auth "), beta, empty, Never) {
+                Error(Denied) => true,
+                _ => false
+            }
+            let mut pair: List[Secret] = list.with_capacity(2)
+            list.push(mut pair, secret.share(alpha))
+            list.push(mut pair, secret.share(beta))
+            let mut both: List[u64] = list.with_capacity(8)
+            list.push(mut both, 0)
+            list.push(mut both, 0)
+            list.push(mut both, 0)
+            list.push(mut both, 0)
+            list.push(mut both, 0)
+            list.push(mut both, 0)
+            list.push(mut both, 1)
+            list.push(mut both, 0)
+            let second = match tls.send_secret(mut wh, empty, pair, both, Never) {
                 Error(Denied) => true,
                 _ => false
             }
@@ -1287,7 +1304,7 @@ fn secret_client(take n: Net) -> bool waits {
             let plain = result.unwrap(host.connect(n, at, Never))
             let (pr, pw) = net.split(take plain)
             let mut ph = take pw
-            let plain_send = match tls.send_secret(mut ph, empty, alpha, empty, Never) {
+            let plain_send = match send_between(mut ph, empty, alpha, empty, Never) {
                 Error(Denied) => true,
                 _ => false
             }
@@ -1305,7 +1322,7 @@ fn secret_client(take n: Net) -> bool waits {
             let _ = take ph
             let _ = take r
             let _ = take wh
-            sent && other_name && other_scram && plain_send && plain_scram
+            sent && other_name && second && other_scram && plain_send && plain_scram
         },
         Error(_) => false
     }
@@ -1395,8 +1412,9 @@ fn served_scram(tasks: Tasks) -> bool waits {
 }
 
 // TLS-5, virtual streams (NOTES 6): send_secret on a served stream with a
-// sealed Secret is a SendSecret call (the socket, `before`'s and `after`'s
-// lengths as payload fields 1 and 2), and provide.secret hands the server the
+// sealed Secret is a SendSecret call (the socket, the wire's length, one
+// secret and one mark group; the wire and the marks' bytes as payload fields
+// 1 and 2), and provide.secret hands the server the
 // Secret narrowed to alpha.test: narrowing it to beta.test is Invalid, and
 // forwarded as an onward stream's SCRAM password its proof and the server's
 // verdict are RFC 7677's for "pencil". A Secret sealed to beta.test, and any
@@ -1413,17 +1431,24 @@ fn net_secret(tasks: Tasks) -> bool waits {
     let relayed = match provide.next(mut served) {
         Some(take call) => {
             let op = match provide.net_op(call) {
-                SendSecret(socket, before, after) => socket == 8 && before == 5 && after == 2,
+                SendSecret(socket, wire, secrets, marks) => socket == 8 && wire == 7 && secrets == 1 && marks == 4,
                 _ => false
             }
             let mut p: Bytes = list.with_capacity(8)
             provide.payload(call, 1, mut p)
-            provide.payload(call, 2, mut p)
-            let data = match string.from_utf8(take p) {
+            let mut m: Bytes = list.with_capacity(32)
+            provide.payload(call, 2, mut m)
+            // The one group [5, 0, 0, 0]: the secret after "Auth ".
+            let mut placed = list.len(m) == 32 && m[0] == 5u8
+            for i in 1u64 .. list.len(m) {
+                placed = placed && m[i] == 0u8
+            }
+            let text = match string.from_utf8(take p) {
                 Ok(text) => text == "Auth \r\n",
                 Error(_) => false
             }
-            let given = provide.secret(call)
+            let data = placed && text
+            let given = provide.secret(call, 0)
             let narrowed = match secret.narrow(given, string.from("tls_send(beta.test)")) {
                 Ok(_) => false,
                 Error(_) => true
@@ -1477,7 +1502,7 @@ fn granted_denied(token: Secret, tasks: Tasks) -> bool waits {
             let (take r, take w, _) = take stream
             let mut wh = take w
             let empty: Bytes = list.new()
-            let sent = match tls.send_secret(mut wh, empty, token, empty, Never) {
+            let sent = match send_between(mut wh, empty, token, empty, Never) {
                 Error(Denied) => true,
                 _ => false
             }
@@ -1893,11 +1918,11 @@ fn timeout_then_spent(take timed: Timed) -> bool waits {
     let mut writer = take w
     let token = sealed_pencil("tls_send(alpha.test)")
     let empty: Bytes = list.new()
-    let expired = match tls.send_secret(mut writer, string.as_bytes("not queued"), token, empty, At(v, host.mono_ns(v))) {
+    let expired = match send_between(mut writer, string.as_bytes("not queued"), token, empty, At(v, host.mono_ns(v))) {
         Error(TimedOut) => true,
         _ => false
     }
-    let issued = match tls.send_secret(mut writer, string.as_bytes("A"), token, string.as_bytes("E"), Never) {
+    let issued = match send_between(mut writer, string.as_bytes("A"), token, string.as_bytes("E"), Never) {
         Error(Refused) => true,
         _ => false
     }
@@ -1905,7 +1930,7 @@ fn timeout_then_spent(take timed: Timed) -> bool waits {
         Error(Reset) => true,
         _ => false
     }
-    let spent_secret = match tls.send_secret(mut writer, empty, token, empty, Never) {
+    let spent_secret = match send_between(mut writer, empty, token, empty, Never) {
         Error(Reset) => true,
         _ => false
     }
@@ -1936,14 +1961,13 @@ fn net_secret_spends_after_issue(tasks: Tasks) -> bool waits {
         return false
     }
     let shape = match provide.net_op(call) {
-        SendSecret(socket, before, after) => socket == 11 && before == 1 && after == 1,
+        SendSecret(socket, wire, secrets, marks) => socket == 11 && wire == 2 && secrets == 1 && marks == 4,
         _ => false
     }
     let mut p: Bytes = list.with_capacity(16)
     provide.payload(call, 0, mut p)
-    let hidden = list.len(p) == 0 && secret.render(provide.secret(call)) == "[secret]"
+    let hidden = list.len(p) == 0 && secret.render(provide.secret(call, 0)) == "[secret]"
     provide.payload(call, 1, mut p)
-    provide.payload(call, 2, mut p)
     let envelope = list.len(p) == 2 && p[0] == b'A' && p[1] == b'E'
     let failed = net_answer(mut port, take call, Failed(Refused))
     let read = net_released(mut port, 11, 1)
@@ -2302,4 +2326,19 @@ fn granted_wrap_denied(token: Secret, _tasks: Tasks) -> bool {
         _ => false
     }
     direct && derived
+}
+
+/// One secret sent between a public prefix and suffix.
+fn send_between(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until: Until) -> Result[(), NetError] waits {
+    let mut wire: Bytes = list.with_capacity(list.len(before) + list.len(after))
+    list.append(mut wire, before)
+    list.append(mut wire, after)
+    let mut secrets: List[Secret] = list.with_capacity(1)
+    list.push(mut secrets, secret.share(s))
+    let mut marks: List[u64] = list.with_capacity(4)
+    list.push(mut marks, list.len(before))
+    list.push(mut marks, 0)
+    list.push(mut marks, 0)
+    list.push(mut marks, 0)
+    tls.send_secret(mut w, wire, secrets, marks, until)
 }

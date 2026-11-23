@@ -3940,8 +3940,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     operands.extend(self.net_until(self.p.fns[f].params[2].ty, vals[2]?, n)?);
                 }
                 HostOp::SendSecret => {
-                    let secret = self.runtime_key(vals[2]?, n);
-                    operands.extend([vals[1]?, secret, vals[3]?]);
+                    // The wire, the secrets' keys and the marks, as carriers.
+                    operands.extend([vals[1]?, vals[2]?, vals[3]?]);
                     operands.extend(self.net_until(self.p.fns[f].params[4].ty, vals[4]?, n)?);
                 }
                 HostOp::SecretNarrow | HostOp::EnvNarrow => operands.push(vals[1]?),

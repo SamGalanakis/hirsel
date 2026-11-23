@@ -971,16 +971,16 @@ pub(crate) unsafe fn socket_provider(context: *mut Context, key: u64) -> Provide
 }
 
 /// # Safety
-/// The write half is exclusively borrowed. The two language carriers and
+/// The write half is exclusively borrowed. The three language carriers and
 /// their initialized prefixes are pinned through delivery.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_host_send_secret(
     context: *mut Context,
     key: u64,
-    before: *const Buffer,
-    s: u64,
-    after: *const Buffer,
+    wire: *const Buffer,
+    secrets: *const Buffer,
+    marks: *const Buffer,
     until_kind: u8,
     clock: u64,
     deadline_ns: u64,
@@ -989,11 +989,30 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
+        let words = |b: &Buffer| -> &[u64] {
+            if b.len == 0 {
+                &[]
+            } else {
+                std::slice::from_raw_parts(b.data.cast::<u64>(), b.len)
+            }
+        };
+        let (handles, mark_words) = (words(&*secrets), words(&*marks));
+        if !hirsel_core_net::marks::well_formed(mark_words, (*wire).len, handles.len()) {
+            // A fault of the program, as an out-of-bounds index (TLS-5).
+            crate::causes::record(
+                &mut *context,
+                crate::causes::Cause::new(crate::causes::BOUNDS, site),
+            );
+            return CANCELLED;
+        }
         // A served Net's stream was verified by its server, so it never
         // satisfies a granted Secret (TLS-5, NOTES 6).
         let served = served_socket(context, key).is_some();
-        let secret = crate::secret::resolve(context, s);
-        if served && secret.origin.opaque() {
+        let resolved: Vec<_> = handles
+            .iter()
+            .map(|&handle| crate::secret::resolve(context, handle))
+            .collect();
+        if served && resolved.iter().any(|secret| secret.origin.opaque()) {
             return DENIED;
         }
         let narrowed = {
@@ -1007,30 +1026,52 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             if write.spent {
                 return RESET;
             }
-            if !secret
-                .policy
-                .send
-                .iter()
-                .any(|pattern| pattern.covers(&write.name))
-            {
+            // Every secret is checked before any byte is sent.
+            if !resolved.iter().all(|secret| {
+                secret
+                    .policy
+                    .send
+                    .iter()
+                    .any(|pattern| pattern.covers(&write.name))
+            }) {
                 return DENIED;
             }
-            // Its server receives the Secret narrowed to the stream's name,
+            // Its server receives each Secret narrowed to the stream's name,
             // never its bytes (`provide.secret`).
-            served.then(|| crate::secret::Secret {
-                origin: secret.origin,
-                policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
-                bytes: secret.bytes.clone(),
-                seal: secret.seal.clone(),
+            served.then(|| {
+                resolved
+                    .iter()
+                    .map(|secret| crate::secret::Secret {
+                        origin: secret.origin,
+                        policy: hirsel_core_net::SecretPolicy::exactly(&write.name),
+                        bytes: secret.bytes.clone(),
+                        seal: secret.seal.clone(),
+                    })
+                    .collect()
             })
         };
-        let bytes = match (&narrowed, &secret.bytes) {
-            (None, Some(bytes)) => bytes.as_slice(),
-            _ => &[][..],
+        // The message lives in run-owned memory, uncharged, and is zeroed after
+        // the send. On replay or a served stream there are no bytes to send.
+        let parts: Option<Vec<&[u8]>> = resolved
+            .iter()
+            .map(|secret| secret.bytes.as_deref().map(|bytes| bytes.as_slice()))
+            .collect();
+        let mut message = zeroize::Zeroizing::new(Vec::new());
+        if let (None, Some(parts)) = (&narrowed, &parts) {
+            let wire = crate::tls::bytes(&*wire);
+            message.reserve_exact(hirsel_core_net::marks::message_len(wire, parts, mark_words));
+            hirsel_core_net::marks::compose(wire, parts, mark_words, &mut message);
+        }
+        // The marks' words, as bytes: the served payload's field 2 and the
+        // tape's canonical arguments.
+        let marks_bytes = Buffer {
+            data: (*marks).data,
+            len: mark_words.len() * 8,
+            capacity: 0,
         };
         let mut send = crate::secret::SendRequest {
             network: NetworkRequest {
-                send_tail: after,
+                send_tail: &raw const marks_bytes,
                 address: Address::default(),
                 sockets: &raw mut (*files).sockets,
                 until: deadline(context, until_kind, clock, deadline_ns),
@@ -1044,12 +1085,14 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
                 max_receive: 0,
             },
             secret: Buffer {
-                data: bytes.as_ptr().cast_mut(),
-                len: bytes.len(),
+                data: message.as_mut_ptr(),
+                len: message.len(),
                 capacity: 0,
             },
-            origin: secret.origin,
-            patterns: secret.policy.send,
+            designations: resolved
+                .iter()
+                .map(|secret| (secret.origin, secret.policy.send.clone()))
+                .collect(),
             committed: 0,
             narrowed,
         };
@@ -1059,7 +1102,7 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             handle: key,
             path: (&raw mut send).cast(),
             path_len: size_of::<crate::secret::SendRequest>(),
-            buffer: *before,
+            buffer: *wire,
             site,
         };
         send_sink(context, request)

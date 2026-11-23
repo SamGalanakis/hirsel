@@ -541,6 +541,72 @@ The caller's storage retains its existing payer and charge (MEM-19 and
 MEM-20). Body reads require no new admission or growth. The connection
 keeps its fixed 8192-byte wire buffer and 8192-byte final-head storage.
 
+### HTTP-17: Client request bodies
+
+The std HTTP client (`http_client`, [api](../../core/std/api/http_client.md)) sends a
+request body in one of three modes:
+
+```hirsel
+pub type Coding: key + send = Raw | Form
+pub type Segment: send = Plain(Bytes) | Sealed(Secret, Coding)
+pub type RequestBody: send = Fixed(u64) | Chunked | Segments(List[Segment])
+pub fn write_segments(mut c: Connection, segments: List[Segment]) -> Result[(), Error] waits
+```
+
+- **`Fixed(n)`** declares `Content-Length: n`, and `write` sends exactly `n` plain bytes.
+- **`Chunked`** declares `Transfer-Encoding: chunked`. `write` sends one chunk of plain
+  bytes, and `write_segments` sends one chunk made of a sequence of segments.
+- **`Segments(list)`** is a whole body given with the request. `start` sends the head and
+  the body together, and `finish_request` follows with no `write`.
+
+A body is a sequence of **plain** and **protected** segments. `Plain(bytes)` is sent as
+it is. `Sealed(s, coding)` is the bytes of the `Secret` `s`, written by the runtime in
+`coding`: `Raw` sends them unchanged, and `Form` form-urlencodes them (TLS-5's serializer,
+WHATWG URL §5.2: `*-._`, digits and letters unchanged, a space as `+`, every other byte as
+`%` and two uppercase hex digits). `Form` is for a value inside an
+`application/x-www-form-urlencoded` body, so an OAuth refresh is
+
+```text
+Segments([Plain("grant_type=refresh_token&refresh_token="), Sealed(token, Form)])
+```
+
+with the caller's `Content-Type: application/x-www-form-urlencoded` header. The program
+writes the names, `=` and `&` itself, and encodes plain values itself.
+
+**Content-Length.** For `Segments`, `Content-Length` is the sum of the plain segments'
+lengths and the encoded lengths of the protected ones. The program cannot compute it,
+because no operation tells it a secret's length (TLS-5). When the body holds no protected
+segment, the client writes the sum itself and sends the request over any stream. When it
+holds one, the head, the body and every protected header go out in one `tls.send_secret`
+call. The `Content-Length` value is a kind 2 mark whose range is the whole body, so the
+runtime writes the digits, and a protected segment that ends the body counts. The number
+never reaches program memory, a render or an error.
+
+**Chunked bodies.** `write_segments` on a `Chunked` upload sends one chunk: the chunk size
+is a kind 3 mark over the chunk's data, so the runtime writes it in hex. A chunk whose
+segments hold no plain byte is refused with `InvalidRequest` before any byte is sent,
+because its encoded length could be zero, and a zero size line would end the body. Each
+call sends one chunk, so a stream of protected values is several calls.
+
+**Authority.** Every protected segment, in a header or in the body, passes TLS-5's sink
+checks exactly as a protected header does: all of them are checked before the first byte
+of the request is sent, a `Secret` whose `tls_send` patterns do not cover the stream's
+verified name gives `Write(Denied)` with nothing sent, and on plain TCP any protected
+segment gives `Write(Denied)` before any byte. A refused `start` or `write_segments`
+leaves the connection unusable, as any write failure does.
+
+**Bounds.** The head, any `Segments` body's plain bytes and a chunk's plain bytes share the
+8192-byte encoding buffer when the request carries a secret, so a larger plain part gives
+`TooLarge` before any byte is sent. A protected segment's bytes are not counted: they never
+enter the buffer, and a bound on them would reveal their length. A `Segments` body with no
+protected segment is sent from the caller's bytes and has no such bound.
+
+**Renders.** `render_request` and `render_error` print the method, target and fields, with
+`[secret]` for each protected value. They do not print a body.
+
+**Fixed uploads.** `write_segments` on a `Fixed(n)` upload gives `InvalidRequest`, because
+`n` cannot count a protected segment. `write` on a `Segments` upload gives `State`.
+
 ## 2. Stream ownership
 
 A `Stream` (HTTP-10) runs as one task group, spawned by the supervisor. It follows RUNNER-SPEC §3's session group: an owner that waits only on its inbox, and children that report to it.

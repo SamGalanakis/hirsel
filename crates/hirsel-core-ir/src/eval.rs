@@ -189,8 +189,8 @@ struct PortCall {
     held: bool,
     answer: Option<Vec<u64>>,
     finished: bool,
-    /// A SendSecret's Secret, narrowed to the stream's name at issue.
-    secret: Option<EvalSecret>,
+    /// A SendSecret's Secrets, narrowed to the stream's name at issue.
+    secret: Option<Vec<EvalSecret>>,
 }
 /// A served object's state (native `provide::State`).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2340,7 +2340,7 @@ impl Machine<'_> {
         fields: Vec<Vec<u8>>,
         out: Option<u64>,
         live: bool,
-        secret: &mut Option<EvalSecret>,
+        secret: &mut Option<Vec<EvalSecret>>,
         deadline: Option<Due>,
     ) -> X<Vec<u64>> {
         let VirtualCell::Port { vocab, sealed, .. } = &self.world.cells[c] else {
@@ -3246,7 +3246,11 @@ impl Machine<'_> {
                 // a SendSecret fails the server (native `call_secret`).
                 let (c, id) = Self::call_of(a[0]);
                 let (calls, ..) = self.world.cells[c].port();
-                let Some(secret) = calls[&id].secret.clone() else {
+                let Some(secret) = calls[&id]
+                    .secret
+                    .as_ref()
+                    .and_then(|secrets| secrets.get(a[1] as usize).cloned())
+                else {
                     return Some(Err(Stop::Cause("Fail")));
                 };
                 let size = SecretGrant::logical_size(&secret.policy.send, 0);
@@ -4694,39 +4698,58 @@ impl Machine<'_> {
 
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
+        let words = |this: &Self, carrier: u64| -> Vec<u64> {
+            let (data, len) = (this.load(carrier, 8), this.load(carrier + 8, 8));
+            (0..len).map(|i| this.load(data + 8 * i, 8)).collect()
+        };
+        let wire = self.carrier_bytes(a[1]).to_vec();
+        let (handles, marks) = (words(self, a[2]), words(self, a[3]));
+        // A fault of the program, as an out-of-bounds index (TLS-5).
+        if !hirsel_core_net::marks::well_formed(&marks, wire.len(), handles.len()) {
+            return Err(Stop::Cause("Bounds"));
+        }
         let Some((name, spent, _)) = self.world.tls_writes.get(&(key & !3)) else {
             return Ok(vec![0, 1, 0, 0]);
         };
         if *spent {
             return Ok(vec![0, 5, 0, 0]);
         }
-        let Some(secret) = self.secret(a[2]) else {
-            return Ok(vec![0, 1, 0, 0]);
-        };
-        if !secret
-            .policy
-            .send
-            .iter()
-            .any(|pattern| pattern.covers(name))
-        {
-            return Ok(vec![0, 1, 0, 0]);
+        // Every secret is checked before any byte is sent; every evaluator
+        // Secret is sealed, with no entry grants (TLS-5).
+        let mut narrowed = Vec::with_capacity(handles.len());
+        for &handle in &handles {
+            let Some(secret) = self.secret(handle) else {
+                return Ok(vec![0, 1, 0, 0]);
+            };
+            if !secret
+                .policy
+                .send
+                .iter()
+                .any(|pattern| pattern.covers(name))
+            {
+                return Ok(vec![0, 1, 0, 0]);
+            }
+            narrowed.push(EvalSecret {
+                policy: SecretPolicy::exactly(name),
+                bytes: secret.bytes.clone(),
+                seal: secret.seal.clone(),
+            });
         }
-        // Every evaluator Secret is sealed: it has no entry grants (TLS-5).
-        let narrowed = EvalSecret {
-            policy: SecretPolicy::exactly(name),
-            bytes: secret.bytes.clone(),
-            seal: secret.seal.clone(),
-        };
-        let before = self.carrier_bytes(a[1]).to_vec();
-        let after = self.carrier_bytes(a[3]).to_vec();
         if let Some((c, id, live)) = self.port_socket(key, 3) {
-            // Its server receives the Secret, never its bytes (NOTES 6).
+            // Its server receives the Secrets, never their bytes (NOTES 6).
             if key & 3 != 2 {
                 return Ok(vec![0, 1, 0, 0]);
             }
             let mut w = [0; 9];
-            w[..4].copy_from_slice(&[7, id, before.len() as u64, after.len() as u64]);
-            let fields = vec![vec![], before, after];
+            w[..5].copy_from_slice(&[
+                7,
+                id,
+                wire.len() as u64,
+                handles.len() as u64,
+                marks.len() as u64,
+            ]);
+            let marks = marks.iter().flat_map(|word| word.to_le_bytes()).collect();
+            let fields = vec![vec![], wire, marks];
             self.check_cancel(t)?;
             let deadline = self.until(a, 4);
             let mut secret = Some(narrowed);

@@ -489,13 +489,16 @@ pub unsafe extern "C" fn hirsel_core_secret_narrow(
 #[repr(C)]
 pub struct SendRequest {
     pub(crate) network: crate::net::NetworkRequest,
+    /// SEND_SECRET: the whole message, built from the request's `wire`
+    /// buffer and the marks in `send_tail`. SCRAM: the proof, sent between
+    /// the request's buffer and its tail.
     pub secret: Buffer,
-    pub(crate) origin: Origin,
-    pub(crate) patterns: Arc<[Pattern]>,
+    /// Each secret's origin and `tls_send` patterns, in `secrets` order.
+    pub(crate) designations: Vec<(Origin, Arc<[Pattern]>)>,
     pub(crate) committed: usize,
-    /// On a served stream: the Secret its server receives, narrowed to the
+    /// On a served stream: the Secrets its server receives, narrowed to the
     /// stream's name (`provide.secret`), and `secret` is empty.
-    pub(crate) narrowed: Option<Secret>,
+    pub(crate) narrowed: Option<Vec<Secret>>,
 }
 
 #[cfg(feature = "record")]

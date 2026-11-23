@@ -14,9 +14,14 @@ Use ordinary `host.recv_bounded` and `host.send_pair` on the returned halves.
 A receive of zero bytes means the peer closed TLS cleanly. Transport EOF
 without a TLS close notification gives `Tls(Truncated)`.
 
-`tls.send_secret` writes a public prefix, a `Secret` and a public suffix.
-The secret must cover the stream's verified name. A plain TCP half or a name
-outside the secret's patterns gives `Denied` before sending any bytes.
+`tls.send_secret(w, wire, secrets, marks, until)` writes one message: the
+public `wire` bytes with insertions that `marks` places, in groups of four
+words `[at, kind, a, b]`. Kind 0 inserts `secrets[a]`, kind 1 inserts it
+form-urlencoded, and kinds 2 and 3 insert the decimal or hexadecimal length of
+the message bytes made from `wire[a..b]`, so a `Content-Length` can count a
+secret ([TLS-5](../../../docs/spec/tls.md#tls-5-secrets)). Malformed marks raise
+`Bounds`. Every secret must cover the stream's verified name. A plain TCP half
+or a name outside any secret's patterns gives `Denied` before sending any bytes.
 Failure after a partial commit spends the write half. Later sends on it give
 `Reset`.
 

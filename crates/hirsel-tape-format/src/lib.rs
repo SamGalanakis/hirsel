@@ -13,7 +13,7 @@ use hirsel_core_net::{
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 9;
+pub const FORMAT: u16 = 10;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;

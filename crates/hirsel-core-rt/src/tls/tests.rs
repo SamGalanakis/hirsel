@@ -1596,13 +1596,19 @@ fn expired_secret_send_issues_no_host_tls_bytes() {
     let upgrade = run.upgrade(key, b"alpha.test", Some(CA), &[]);
     assert_eq!(upgrade.outcome.error, IoError::OK);
     let deadline = run.now();
+    let (secrets, marks) = ([sealed], [1u64, 0, 0, 0]);
+    let words = |words: &[u64]| Buffer {
+        data: words.as_ptr().cast_mut().cast(),
+        len: words.len(),
+        capacity: 0,
+    };
     let expired = unsafe {
         hirsel_core_host_send_secret(
             &raw mut *run.context,
             key | 2,
-            &input(b"A"),
-            sealed,
-            &input(b"E"),
+            &input(b"AE"),
+            &words(&secrets),
+            &words(&marks),
             1,
             run.clock,
             deadline,

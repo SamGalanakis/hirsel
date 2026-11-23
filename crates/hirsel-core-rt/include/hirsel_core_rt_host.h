@@ -292,7 +292,7 @@ HirselCoreHostOutcome hirsel_core_provide_stdout(HirselCoreContext *, uint64_t n
 HirselCoreHostOutcome hirsel_core_provide_stderr(HirselCoreContext *, uint64_t n, bool terminal, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_next(HirselCoreContext *, uint64_t served, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_word(HirselCoreContext *, uint64_t call, uint64_t i, uint64_t);
-HirselCoreHostOutcome hirsel_core_call_secret(HirselCoreContext *, uint64_t call, uint64_t);
+HirselCoreHostOutcome hirsel_core_call_secret(HirselCoreContext *, uint64_t call, uint64_t index, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_payload(HirselCoreContext *, uint64_t call, uint64_t field, HirselCoreBuffer *out, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_reply(HirselCoreContext *, uint64_t served, uint64_t call, uint64_t tag, uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w3, uint64_t w4, uint64_t w5, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_fill(HirselCoreContext *, uint64_t served, uint64_t call, const HirselCoreBuffer *bytes, uint64_t);
@@ -332,7 +332,7 @@ typedef struct {
     uint64_t network[21];
     HirselCoreBuffer secret;
 } HirselCoreSendSecretRequest;
-HirselCoreHostOutcome hirsel_core_host_send_secret(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_host_send_secret(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_seal(HirselCoreContext *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_narrow(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 #define HIRSEL_CORE_SCRAM 68

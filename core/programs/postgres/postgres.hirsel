@@ -1337,7 +1337,15 @@ pub fn cancel(net: Net, take token: CancelToken, clock: Clock, deadline: u64) ->
     list.put_word_be(mut prefix, 16u32)
     list.put_word_be(mut prefix, 80877102u32)
     list.put_word_be(mut prefix, pid)
-    match tls.send_secret(mut output, prefix, key, b"", until) {
+    // The key follows the 12-byte prefix.
+    let mut keys: List[Secret] = list.with_capacity(1)
+    list.push(mut keys, secret.share(key))
+    let mut marks: List[u64] = list.with_capacity(4)
+    list.push(mut marks, 12)
+    list.push(mut marks, 0)
+    list.push(mut marks, 0)
+    list.push(mut marks, 0)
+    match tls.send_secret(mut output, prefix, keys, marks, until) {
         Ok(()) => {},
         Error(e) => return Error(transport(e)),
     }

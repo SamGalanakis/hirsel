@@ -32,7 +32,7 @@ the operation uses a no-clobber precondition.
 | `fetch_parts(key, take buffers, deadline_ns)` | Reads the object as 8 MiB ranges with an ETag pinned across the lanes. The last range can be shorter. Returns the original list and keeps the ranges in separate buffers. Any unused buffers are left as supplied. |
 | `store(key, take body, deadline_ns)` | Overwrites a key and returns metadata and the caller's buffer. |
 | `store_no_clobber(key, take body, deadline_ns)` | Conditionally creates the key and returns `Created` or `Exists` with the caller's buffer. |
-| `list(prefix, after, mut into, deadline_ns)` | Appends one lexical page to a bounded list. `Page.after` is the last returned key. Use it to get the next page if `Page.truncated` is true. |
+| `list(prefix, after, mut into, deadline_ns)` | Appends one lexical page to a bounded list. `Page.after` is the last returned key. Pass `key_text(Page.after)` to get the next page if `Page.truncated` is true. |
 | `erase(key, deadline_ns)` | Deletes a key. An absent key is success. |
 | `upload(key, mode, deadline_ns)` | Begins a multipart upload and assigns the put-id. |
 | `parts(mut upload, take bodies, deadline_ns)` | Uploads a batch concurrently, numbers parts in input order across calls, and returns the buffers. If a batch fails, its part numbers can be reused by retrying it. |

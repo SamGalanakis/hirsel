@@ -496,7 +496,7 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     sim.net.resolve_as(mut net_model, string.from("bucket.s3.test"), take ips)
     let key = signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
-    let mut faults: List[sim.s3.Fault] = list.with_capacity(8)
+    let mut faults: List[sim.s3.Fault] = list.with_capacity(16)
     list.push(mut faults, Clean)
     list.push(mut faults, ResetBeforeBody)
     list.push(mut faults, ResetAfterBody)
@@ -505,9 +505,13 @@ fn object_fixture(tasks: Tasks, seed: u64, tape: String, dialect: u16) -> (objec
     list.push(mut faults, CompleteError)
     list.push(mut faults, CutResponse(2))
     list.push(mut faults, RequireResume(2))
+    list.push(mut faults, MalformedComplete)
+    while list.len(faults) < 16 {
+        list.push(mut faults, Clean)
+    }
     let mut words: List[u64] = list.with_capacity(2 * string.byte_len(tape))
     for choice in sequence(tape) {
-        list.push(mut words, choice << 61)
+        list.push(mut words, choice << 60)
         list.push(mut words, seed)
     }
     let mut scripts: List[List[u64]] = list.with_capacity(1)
@@ -552,7 +556,7 @@ const OBJECT_END: u64 = 10000000000
 fn object_l1(tasks: Tasks) -> bool waits {
     // Lose the conditional PUT reply. The first Complete returns HTTP 200
     // with an error body. Lose the reply to the successful retry as well.
-    let (client, _, server, driver) = object_fixture(tasks, 11, "2000050200", 412)
+    let (client, _, server, driver) = object_fixture(tasks, 11, "200005080200", 412)
     let mut c = take client
     let (one, _) = object.store_no_clobber(mut c, "one", string.into_bytes(string.from("one")), OBJECT_END)
     let mut uploaded = result.unwrap(object.upload(mut c, "multi", NoClobber, OBJECT_END))
@@ -655,7 +659,7 @@ fn object_ranges(tasks: Tasks) -> bool waits {
     let _ = take c
     let seen = result.unwrap(task.join(take server))
     result.unwrap(task.join(take driver))
-    seen.writes == 1 && seen.attempts == 5 && list.len(entries) == 1 && entries[0].key == "one" && !page.truncated
+    seen.writes == 1 && seen.attempts == 5 && list.len(entries) == 1 && object.key_text(entries[0].key) == "one" && !page.truncated
 }
 
 // expect: run s3_client_laws(tasks) = true

@@ -1,5 +1,5 @@
 /// One fault per connection, selected before any request octets arrive.
-pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | CutResponse(u64) | RequireResume(u64)
+pub type Fault: send = Clean | ResetBeforeBody | ResetAfterBody | Stall(u64) | InternalError | SlowDown | CompleteError | MalformedComplete | CutResponse(u64) | RequireResume(u64)
 
 pub type Config: send {
     address: Addr,
@@ -601,6 +601,8 @@ fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take 
     } else if req.method == "POST" {
         if let CompleteError = fault {
             error(200, "InternalError")
+        } else if let MalformedComplete = fault {
+            reply(200, "<Error/>")
         } else if let Some(status) = conditional(config, req, bucket.objects) {
             error(status, if status == 409 {
                 "ConditionalRequestConflict"

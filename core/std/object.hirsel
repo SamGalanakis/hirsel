@@ -34,15 +34,26 @@ pub type Error: send = Fatal(Reason) | Retriable(Reason) | Uncertain(Reason) | T
 
 pub type Mode: key = Overwrite | NoClobber
 
+pub opaque type Key: key {
+    octets: Inline[u8, 1024],
+    len: u64
+}
+
 pub type Entry: send {
-    key: String,
+    key: Key,
     size: u64,
     etag: ETag
 }
 
 pub type Page: send {
     truncated: bool,
-    after: String
+    after: Key
+}
+
+pub fn key_text(key: Key) -> String {
+    let mut out: Bytes = list.with_capacity(key.len)
+    let _ = bytebuf.append_inline(mut out, key.octets, 0, key.len)
+    result.unwrap(string.from_utf8(take out))
 }
 
 type Operation: key = Fetch | FetchRange | Put | PutConditional | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head
@@ -51,7 +62,7 @@ type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
 
 type Decision: key = Accept | Retry | Throttle | Resolve | AlreadyExists | Missing | Changed | Refresh | CorrectSkew | Reject
 
-fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bool) -> Decision {
+fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bool, pinned: bool) -> Decision {
     let conditional = op == PutConditional || op == CompleteConditional
     let uncertain = conditional || op == Complete
     if phase == BeforeRequest {
@@ -63,13 +74,13 @@ fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bo
         }
         return Retry
     }
-    if status == 400 && code == string.as_bytes("RequestTimeout") {
+    if (status == 400 || status == 200) && code == string.as_bytes("RequestTimeout") {
         return Retry
     }
-    if status == 400 && code == string.as_bytes("RequestTimeTooSkewed") {
+    if (status == 400 || status == 200) && code == string.as_bytes("RequestTimeTooSkewed") {
         return CorrectSkew
     }
-    if status == 403 && code == string.as_bytes("ExpiredToken") {
+    if (status == 403 || status == 200) && code == string.as_bytes("ExpiredToken") {
         return Refresh
     }
     if status == 304 || status == 412 {
@@ -89,7 +100,7 @@ fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bo
             Missing
         }
     }
-    if status == 409 && op == FetchRange {
+    if status == 409 && pinned && payload_read(op) {
         return Retry
     }
     if status == 429 || status == 503 || code == string.as_bytes("SlowDown") {
@@ -661,6 +672,10 @@ fn xml_field(data: String, tag: String) -> Option[View[String]] in data {
     let mut closing = string.from("</")
     string.push(mut closing, tag)
     string.push_char(mut closing, '>')
+    xml_content(data, opening, closing)
+}
+
+fn xml_content(data: String, opening: String, closing: String) -> Option[View[String]] in data {
     let Some(first) = string.find(data, 0, opening) else {
         return None
     }
@@ -672,12 +687,18 @@ fn xml_field(data: String, tag: String) -> Option[View[String]] in data {
 }
 
 fn xml_decoded(data: String) -> Result[String, Error] {
-    let mut out = string.from("")
+    let mut out = string.with_capacity(string.byte_len(data))
+    decode_xml(mut out, data)?
+    Ok(take out)
+}
+
+fn decode_xml(mut out: String, data: String) -> Result[(), Error] {
+    string.clear(mut out)
     let mut at = 0u64
     loop {
         let Some(amp) = string.find(data, at, "&") else {
             string.push(mut out, string.slice(data, at, string.byte_len(data)))
-            return Ok(take out)
+            return Ok(())
         }
         string.push(mut out, string.slice(data, at, amp))
         let Some(end) = string.find(data, amp + 1, ";") else {
@@ -743,24 +764,59 @@ fn xml_text(b: Bytes) -> Result[String, Error] {
     }
 }
 
-fn parse_entry(body: String, prefix: String) -> Result[Entry, Error] {
-    let Some(raw_key) = xml_field(body, "Key") else {
+fn empty_key() -> Key {
+    Key(octets:[0; 1024], len: 0)
+}
+
+fn parse_listing_fields(body: String, prefix: String, mut decoded: String) -> Result[Entry, Error] {
+    let Some(raw_key) = xml_content(body, "<Key>", "</Key>") else {
         return Error(Fatal(Malformed))
     }
-    let key = xml_decoded(raw_key)?
-    if !string.starts_with(key, prefix) {
+    decode_xml(mut decoded, raw_key)?
+    if !string.starts_with(decoded, prefix) || string.byte_len(decoded) > 1024 {
         return Error(Fatal(Malformed))
     }
-    let Some(raw_size) = xml_field(body, "Size") else {
+    let offset = string.byte_len(prefix)
+    let mut name = empty_key()
+    name.len = string.byte_len(decoded) - offset
+    for i in 0u64 .. name.len {
+        name.octets[i] = string.as_bytes(decoded)[offset + i]
+    }
+    let Some(raw_size) = xml_content(body, "<Size>", "</Size>") else {
         return Error(Fatal(Malformed))
     }
-    let Some(raw_etag) = xml_field(body, "ETag") else {
+    let Some(raw_etag) = xml_content(body, "<ETag>", "</ETag>") else {
         return Error(Fatal(Malformed))
     }
-    let decoded = xml_decoded(raw_etag)?
+    decode_xml(mut decoded, raw_etag)?
     let size = decimal(string.as_bytes(raw_size), 0, string.byte_len(raw_size))?
-    let relative = string.from(string.slice(key, string.byte_len(prefix), string.byte_len(key)))
-    Ok(Entry(key: take relative, size, etag: etag(string.as_bytes(decoded))?))
+    Ok(Entry(key: name, size, etag: etag(string.as_bytes(decoded))?))
+}
+
+type ListScratch: send {
+    text: Bytes,
+    decoded: String
+}
+
+fn list_scratch() -> ListScratch {
+    ListScratch(text: list.with_capacity(32768), decoded: string.with_capacity(32768))
+}
+
+fn parse_entry(body: Bytes, prefix: String, mut scratch: ListScratch) -> Result[Entry, Error] {
+    list.clear(mut scratch.text)
+    list.append(mut scratch.text, body)
+    let raw = replace(mut scratch.text, list.new())
+    match string.from_utf8(take raw) {
+        Ok(take text) => {
+            let parsed = parse_listing_fields(text, prefix, mut scratch.decoded)
+            scratch.text = string.into_bytes(take text)
+            take parsed
+        },
+        Error(take rejected) => {
+            scratch.text = take rejected
+            Error(Fatal(Malformed))
+        },
+    }
 }
 
 fn consume(mut buffer: Bytes, n: u64) {
@@ -789,8 +845,9 @@ fn collect(mut c: http_client.Connection, mut into: Bytes, mut overflow: Bytes) 
     }
 }
 
-fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entry], mut buffer: Bytes) -> Exchange waits {
+fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entry], mut buffer: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     list.clear(mut buffer)
+    let original = list.len(entries)
     let mut truncated: Option[bool] = None
     let mut closed = false
     let mut at = 0u64
@@ -816,9 +873,15 @@ fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entr
                 Error(e) => return receive_failure(e),
             }
         }
-        let (entry, page, final_tag) = {
+        let (entry, page, final_tag, embedded_error) = {
             let tag = list.slice(buffer, begin_at, stop + 1)
-            (tag == string.as_bytes("<Contents>"), tag == string.as_bytes("<IsTruncated>"), tag == string.as_bytes("</ListBucketResult>"))
+            (tag == string.as_bytes("<Contents>"), tag == string.as_bytes("<IsTruncated>"), tag == string.as_bytes("</ListBucketResult>"), tag == string.as_bytes("<Error>") || tag == string.as_bytes("<Error/>"))
+        }
+        if embedded_error && !closed {
+            if let Error(e) = collect(mut c, mut buffer, mut probe) {
+                return receive_failure(e)
+            }
+            return interpret_error(ListObjects, 200, buffer)
         }
         if final_tag {
             closed = true
@@ -846,13 +909,8 @@ fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entr
                 if list.len(entries) == list.capacity(entries) {
                     return Invalid(TooLarge)
                 }
-                match xml_text(body) {
-                    Ok(text) => {
-                        match parse_entry(text, prefix) {
-                            Ok(take parsed) => list.push(mut entries, take parsed),
-                            Error(take e) => return Invalid(take e),
-                        }
-                    },
+                match parse_entry(body, prefix, mut scratch) {
+                    Ok(take parsed) => list.push(mut entries, take parsed),
                     Error(take e) => return Invalid(take e),
                 }
             } else {
@@ -875,12 +933,12 @@ fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entr
     if !closed {
         return Invalid(Fatal(Malformed))
     }
-    let after = if list.len(entries) == 0 {
-        string.from("")
+    let after = if list.len(entries) == original {
+        empty_key()
     } else {
-        clone(entries[list.len(entries) - 1].key)
+        entries[list.len(entries) - 1].key
     }
-    Received(Listed(Page(truncated: more, after: take after)))
+    Received(Listed(Page(truncated: more, after)))
 }
 
 fn status_failure(status: u16, body: Bytes) -> Failure {
@@ -901,6 +959,21 @@ fn status_failure(status: u16, body: Bytes) -> Failure {
         }
     }
     Failure(phase: ResponseHead, reason: Status(status, clone(code)), status, code: take code, server_time)
+}
+
+fn bad_success(op: Operation) -> Exchange {
+    if op == PutConditional || op == Complete || op == CompleteConditional {
+        return Refused(Failure(phase: ResponseBody, reason: Malformed, status: 0, code: list.new(), server_time: None))
+    }
+    Invalid(Fatal(Malformed))
+}
+
+fn interpret_error(op: Operation, status: u16, body: Bytes) -> Exchange {
+    let response = status_failure(status, body)
+    if status >= 200 && status < 300 && list.len(response.code) == 0 {
+        return bad_success(op)
+    }
+    Refused(take response)
 }
 
 type ReadProgress: send {
@@ -978,16 +1051,16 @@ fn receive_object(mut c: http_client.Connection, mut into: Bytes, mut progress: 
     Received(Object(take received))
 }
 
-fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inline[u8, 16]], op: Operation, status: u16, prefix: String, mut entries: List[Entry], mut buffer: Bytes, mut probe: Bytes) -> Exchange waits {
+fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inline[u8, 16]], op: Operation, status: u16, prefix: String, mut entries: List[Entry], mut buffer: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     if op == ListObjects && status == 200 {
-        return listing(mut c, prefix, mut entries, mut buffer)
+        return listing(mut c, prefix, mut entries, mut buffer, mut probe, mut scratch)
     }
     list.clear(mut buffer)
     if let Error(e) = collect(mut c, mut buffer, mut probe) {
         return receive_failure(e)
     }
     if status < 200 || status >= 300 || fragment(buffer, 0, string.as_bytes("<Error")) != None {
-        return Refused(status_failure(status, buffer))
+        return interpret_error(op, status, buffer)
     }
     if op == Upload {
         let Ok(text) = xml_text(buffer) else {
@@ -1012,17 +1085,17 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
     }
     if op == Complete || op == CompleteConditional {
         let Ok(text) = xml_text(buffer) else {
-            return Invalid(Fatal(Malformed))
+            return bad_success(op)
         }
         let Some(tag) = xml_field(text, "ETag") else {
-            return Invalid(Fatal(Malformed))
+            return bad_success(op)
         }
         let Ok(decoded) = xml_decoded(tag) else {
-            return Invalid(Fatal(Malformed))
+            return bad_success(op)
         }
         info.etag = match etag(string.as_bytes(decoded)) {
             Ok(value) => value,
-            Error(take e) => return Invalid(take e),
+            Error(_) => return bad_success(op),
         }
     }
     if (op == Put || op == PutConditional || op == Complete || op == CompleteConditional) {
@@ -1045,7 +1118,7 @@ type Held: send {
     idle_at: u64
 }
 
-type PoolMessage: send = Acquire(u64) | Release(Addr, bool) | Measured(u64, Addr, u64) | ResolveNow
+type PoolMessage: send = Acquire(u64) | Release(Addr, bool) | Measured(u64, Addr, u64) | Resolved(List[Ip])
 
 type PoolReply: send = Address(Option[Addr]) | Rotate(bool)
 
@@ -1087,15 +1160,22 @@ fn peer_index(peers: List[Peer], ip: Ip) -> Option[u64] {
     None
 }
 
-fn resolve_peers(n: Net, c: Clock, name: String, deadline: u64, mut peers: List[Peer]) -> Result[(), NetError] waits {
-    let mut ips: List[Ip] = list.with_capacity(16)
-    let count = match host.resolve(n, name, mut ips, At(c, deadline)) {
-        Ok(resolved) => resolved,
-        Error(e) => return Error(e),
+fn resolve_ips(n: Net, c: Clock, name: String, deadline: u64) -> Result[List[Ip], NetError] waits {
+    let mut count = 16u64
+    loop {
+        let mut ips: List[Ip] = list.with_capacity(count)
+        let resolved = host.resolve(n, name, mut ips, At(c, deadline))?
+        if resolved == 0 {
+            return Error(Reset)
+        }
+        if resolved < count {
+            return Ok(take ips)
+        }
+        count *= 2
     }
-    if count == 0 {
-        return Error(Reset)
-    }
+}
+
+fn update_peers(mut peers: List[Peer], ips: List[Ip]) {
     for i in 0u64 .. list.len(peers) {
         peers[i].listed = false
     }
@@ -1109,7 +1189,35 @@ fn resolve_peers(n: Net, c: Clock, name: String, deadline: u64, mut peers: List[
     list.retain(mut peers, fn(p: Peer) -> bool {
         p.listed || p.open != 0
     })
+}
+
+fn resolve_peers(n: Net, c: Clock, name: String, deadline: u64, mut peers: List[Peer]) -> Result[(), NetError] waits {
+    let ips = resolve_ips(n, c, name, deadline)?
+    update_peers(mut peers, ips)
     Ok(())
+}
+
+type Dns: send {
+    network: Net,
+    clock: Clock,
+    name: String,
+    output: Sender[PoolMessage]
+}
+
+fn dns_loop(take dns: Dns) waits {
+    let mut next = int.saturating_add(host.mono_ns(dns.clock), RESOLVE_NS)
+    loop {
+        host.sleep_until(dns.clock, next)
+        let now = host.mono_ns(dns.clock)
+        if let Ok(take ips) = resolve_ips(dns.network, dns.clock, dns.name, int.saturating_add(now, FRESH_NS)) {
+            if let Error(_) = channel.send(dns.output, Resolved(take ips)) {
+                return
+            }
+        }
+        let current = host.mono_ns(dns.clock)
+        let skipped = (current - next) / RESOLVE_NS + 1
+        next = int.saturating_add(next, int.saturating_mul(skipped, RESOLVE_NS))
+    }
 }
 
 fn rate(p: Peer) -> u64 {
@@ -1176,10 +1284,10 @@ fn acquire(mut pool: Pool) -> Option[Addr] {
 
 fn pool_loop(take setup: Pool) waits {
     let mut pool = take setup
-    let mut next = int.saturating_add(host.mono_ns(pool.clock), RESOLVE_NS)
-    let mut timer = clock.alarm(pool.tasks, pool.clock, next, pool.timer_tx, ResolveNow)
-    while let Ok(message) = channel.receive(pool.input) {
-        match message {
+    let dns = Dns(network: pool.network, clock: pool.clock, name: clone(pool.server.name), output: channel.sender(pool.timer_tx))
+    let resolver = task.spawn(pool.tasks, bytes 65536, take dns, dns_loop)
+    while let Ok(take message) = channel.receive(pool.input) {
+        match take message {
             Acquire(lane) => {
                 let address = acquire(mut pool)
                 let _ = channel.try_send(pool.replies[lane], Address(address))
@@ -1209,18 +1317,10 @@ fn pool_loop(take setup: Pool) waits {
                 }
                 let _ = channel.try_send(pool.replies[lane], Rotate(rotate))
             },
-            ResolveNow => {
-                let _ = task.join(take timer)
-                let now = host.mono_ns(pool.clock)
-                let _ = resolve_peers(pool.network, pool.clock, pool.server.name, int.saturating_add(now, FRESH_NS), mut pool.peers)
-                let current = host.mono_ns(pool.clock)
-                let skipped = (current - next) / RESOLVE_NS + 1
-                next = int.saturating_add(next, int.saturating_mul(skipped, RESOLVE_NS))
-                timer = clock.alarm(pool.tasks, pool.clock, next, pool.timer_tx, ResolveNow)
-            },
+            Resolved(ips) => update_peers(mut pool.peers, ips),
         }
     }
-    let _ = task.cancel_join(take timer)
+    let _ = task.cancel_join(take resolver)
 }
 
 type LaneMessage: send = Work(Job) | Reap
@@ -1253,6 +1353,7 @@ type Lane: send {
     held: Option[Held],
     wire: WireBuffers,
     control: Bytes,
+    list_parsing: ListScratch,
     probe: Bytes,
     jitter: Bytes,
     skew: i64
@@ -1336,7 +1437,7 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     let result = match take req {
         Error(take e) => Invalid(take e),
         Ok(take wire) => {
-            let response = transact(mut h.connection, wire, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe)
+            let response = transact(mut h.connection, wire, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe, mut lane.list_parsing)
             reclaim_request(mut lane.wire, take wire)
             take response
         },
@@ -1374,7 +1475,7 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     take result
 }
 
-fn transact(mut c: http_client.Connection, wire: http_client.Request, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes) -> Exchange waits {
+fn transact(mut c: http_client.Connection, wire: http_client.Request, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     if let Error(e) = http_client.start(mut c, wire, job.deadline) {
         return failure(if http_client.request_started(c) {
             RequestSent
@@ -1396,7 +1497,7 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, mut job: J
     }
     let octets = list.len(job.data)
     let id = job.id
-    receive_control(mut c, octets, id, op, status, prefix, mut job.entries, mut control, mut probe)
+    receive_control(mut c, octets, id, op, status, prefix, mut job.entries, mut control, mut probe, mut scratch)
 }
 
 fn wait_retry(mut lane: Lane, attempt: u64, throttle: bool, deadline: u64) waits {
@@ -1431,7 +1532,7 @@ fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolu
             }
         },
         Refused(f) => {
-            match classify(Head, f.phase, f.status, f.code, false) {
+            match classify(Head, f.phase, f.status, f.code, false, false) {
                 Missing => Reissue,
                 Retry => Undecided,
                 Throttle => Undecided,
@@ -1484,7 +1585,7 @@ fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
                             Error(Retriable(take reason))
                         }
                     }
-                    let decision = classify(op, phase, status, code, ambiguous)
+                    let decision = classify(op, phase, status, code, ambiguous, progress.tag.len != 0)
                     last = take reason
                     match decision {
                         Accept => return Ok(Object(new_meta())),
@@ -1666,7 +1767,7 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take signer: sigv4.Signe
             Ok(take output_handle) => take output_handle,
             Error(_) => return Error(TooLarge),
         }
-        let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), prefix: clone(bucket.prefix), signer: sigv4.share_signer(daily_signer), signer_day: day, access_key: string.from(access_key), token: string.from(token), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
+        let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), prefix: clone(bucket.prefix), signer: sigv4.share_signer(daily_signer), signer_day: day, access_key: string.from(access_key), token: string.from(token), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), list_parsing: list_scratch(), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
         let worker = task.spawn(tasks, bytes lane_bytes, take setup, lane_loop)
         list.push(mut workers, Worker(task: take worker, input: take input))
     }

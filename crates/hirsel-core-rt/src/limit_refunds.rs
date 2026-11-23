@@ -180,15 +180,15 @@ impl Remote {
     pub(super) fn queued_slots(&self) -> usize {
         self.queued
     }
-    /// The record's queue. SAFETY: the caller owns the domain mutex (or the
-    /// sequencer turn every Remote method runs in), and the record is live.
+    /// The record's queue. SAFETY: the caller owns the domain mutex, and the
+    /// record is live.
     #[allow(clippy::mut_from_ref)]
     unsafe fn queue_of<'a>(record: NonNull<Slot>) -> &'a mut Queue {
         unsafe { &mut *record.as_ref().queue.get() }
     }
     /// The live inbox of a union-find root.
     fn live_inbox(root: NonNull<Slot>) -> NonNull<Inbox> {
-        // SAFETY: the sequencer owns routing; a queued root is pinned.
+        // SAFETY: the domain mutex owns routing; a queued root is pinned.
         unsafe { (*root.as_ref().links.get()).live.inbox }
     }
     fn link(root: NonNull<Slot>, inbox: NonNull<Inbox>) {

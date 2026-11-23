@@ -154,7 +154,7 @@ impl Hooks for TapeHooks {
         inner: Option<u64>,
         rules: hirsel_core_net::exec::ExecRules,
     ) -> u64 {
-        let _commit = crate::tasks::before_commit();
+        crate::tasks::before_commit();
         let mut state = cell.state.lock().unwrap();
         let generation = state.generation;
         let live = state.live.as_mut().unwrap();
@@ -177,7 +177,7 @@ impl Hooks for TapeHooks {
     }
 
     fn narrow_net(&self, cell: &'static Cell, parent: u64, rules: u64) -> (u64, Group) {
-        let _commit = crate::tasks::before_commit();
+        crate::tasks::before_commit();
         let mut state = cell.state.lock().unwrap();
         let generation = state.generation;
         let live = state.live.as_mut().unwrap();

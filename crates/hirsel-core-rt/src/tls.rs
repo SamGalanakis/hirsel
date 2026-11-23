@@ -153,10 +153,7 @@ unsafe fn connect(
     unsafe {
         crate::process::deny_describe_capability(context);
         let files = (*context).host_files;
-        let prepared = {
-            let _commit = crate::sequencer::enter();
-            prepare(context, files, n, key, name, trust, &roots, alpn, bad_alpn)
-        };
+        let prepared = { prepare(context, files, n, key, name, trust, &roots, alpn, bad_alpn) };
         let (address, provider, mut state) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -180,10 +177,7 @@ unsafe fn connect(
                 net::hirsel_core_socket_drop(context, key);
                 return CANCELLED;
             }
-            let cache = {
-                let _commit = crate::sequencer::enter();
-                (*state.cache).get().system.clone()
-            };
+            let cache = { (*state.cache).get().system.clone() };
             // The first System call can read files. Load them on the caller's
             // stack, outside the scheduler's socket callback and registry lock.
             state.roots = Some(cache.get_or_init(crate::os_tls::system_roots).clone());
@@ -242,7 +236,6 @@ unsafe fn connect(
         #[cfg_attr(not(feature = "record"), allow(unused_mut))]
         let mut outcome = hirsel_core_host(context, &provider, &mut request);
         if outcome.status == 0 && outcome.error == IoError::OK {
-            let _commit = crate::sequencer::enter();
             #[cfg(feature = "record")]
             if let Some(tape) = tape {
                 outcome = tape.carrier(outcome);
@@ -261,7 +254,6 @@ unsafe fn connect(
                 },
             );
         } else if state.consumed && !served {
-            let _commit = crate::sequencer::enter();
             (*files).connected.remove(&key);
         } else {
             net::hirsel_core_socket_drop(context, key);

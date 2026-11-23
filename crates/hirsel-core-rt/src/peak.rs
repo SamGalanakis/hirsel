@@ -1,6 +1,5 @@
 //! Optional MEM-19 balances and native backing observations. Shipping builds
-//! omit the module and all hooks. The observer is worker-local and takes the
-//! sequencer only outside the task-heap lock.
+//! omit the module and all hooks. The observer is worker-local.
 use crate::{Context, limit::Funding};
 use std::{
     cell::{Cell, RefCell},

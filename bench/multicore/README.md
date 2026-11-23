@@ -130,72 +130,11 @@ shared suite for cross-language comparisons at identical inputs.
 | `ping_pong` | S0 round trip, S3 event overhead, S5 bounded-channel instructions, S6/S8 regressions, S9 runtime comparison |
 | `spawn_chain`, `fan_in` | S8/S9 scheduler and shared-queue scaling. These extend the single-operation rows to 16 active lanes. |
 | `yield_many` | S8/S9 peer scheduler scaling reference until Hirsel exposes a cooperative yield. |
-| `mandelbrot`, `spectralnorm`, `fannkuchredux`, `knucleotide`, `binarytrees` | S8 test-pool and S9 cutover scaling, with independent work and reductions. The data rows extend the existing Matmul scaling gate. |
+| `mandelbrot`, `spectralnorm`, `fannkuchredux`, `knucleotide`, `binarytrees` | S9 cutover scaling, with independent work and reductions. The data rows extend the existing Matmul scaling gate. |
 
 For S1's current-thread Tokio threshold, use the existing current-thread
 reference. Arc, Matmul, runner throughput and replay use their dedicated
 measurements. The shipping archive uses one worker.
-
-## S8 test pool
-
-Build the release driver and `//:hirsel-core-rt-test-pool-archives`. Pass
-the archive for your architecture to `build.py --s0 --runtime` and use
-`run.py --test-pool` to select the runtime width. The runner retains raw
-counters in each sample's stderr. For example, measure 200,000 transfers
-from 16 producers and the nested spawn workload at width 16.
-
-```sh
-./bench/multicore/run.py --test-pool \
-  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
-  --bins "$benchmark_bins" --out "$new_evidence_directory" \
-  --case fan_in fan_in_cap1 ping_pong ping_pong_burst spawn_chain \
-  --workers 16 --languages Hirsel Tokio
-```
-
-The sequencer reports time holding its token and time from publication to
-acquisition on queued hand-offs. It also counts the queued hand-offs whose predecessor
-released on another L3 cache and their time. Divide their sums by token acquisitions
-for cost per acquisition, and by twice the fan-in item count for cost per
-channel commit including scheduler work. Channel wakes count waiting fibers
-made runnable by sends and receives. The pool reports stolen queue entries
-and vacant-slot transfers. Each worker reports its peak cached vacancies
-and the number it returns at exit. Add `--s0` with `matmul_t16` or
-`arc_pair` for the Rust comparisons. Matmul reports first dispatch count and
-total submit-to-dispatch time per worker in both runtimes.
-
-## S8u search fixtures
-
-Build the release driver with `//:hirsel-core-rt-test-pool-archives` and pass
-the test-pool archive for the host architecture. The runner sets the
-runtime width and takes one capped sample for each side at widths 1 and 16.
-
-```sh
-taskset -c 0-11,16-27 python3 bench/multicore/build.py --s8u --out "$benchmark_bins" \
-  --hirsel "$release_driver" --runtime "$test_pool_archive"
-python3 bench/multicore/s8u.py \
-  --build-cpus "$build_cpus" --measure-cpus "$measure_cpus" \
-  --bins "$benchmark_bins" --out "$new_evidence_directory"
-```
-
-Knapsack splits at depth five and visits up to 2,048 nodes per live stage in
-each round. The 60 seeded weights are in increasing order, with each value
-equal to its weight plus 300. This gives density order for the fractional
-upper bound. The portfolio uses four seeded single-bit searches with random
-restarts on a 64-site chain. Each live stage searches up to 16,384 iterations
-per round. The Hirsel owner submits to all live stages before reading each
-capacity-one reply in lane order. The Rust region model keeps that round
-structure and publishes updates inside a round via atomics. It uses Rayon
-to model dispatch, private state and ordered collection. The Rust twins use
-Rayon without rounds for knapsack and scoped threads for the portfolio.
-The one-worker portfolio twin visits all four seeds in round-robin quanta.
-
-The runner checks each returned witness against an independent
-dynamic-programming optimum and reports explored work, relative speedups,
-and cancellation lag. Knapsack reports the interval from discovery of the
-final incumbent to the last search stopping. Hirsel stage clocks are
-unavailable, so its owner timestamps bound the lag. The output receipt
-records elapsed nanoseconds, work, quality, witness, lower and upper lag
-bounds in nanoseconds, and rounds in that order.
 
 ## Scheduler grain sweep
 

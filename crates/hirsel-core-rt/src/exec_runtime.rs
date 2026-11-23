@@ -360,7 +360,6 @@ pub unsafe extern "C" fn hirsel_core_exec_spawn(
         }
         if outcome.error == IoError::OK && outcome.status == 0 {
             {
-                let _commit = crate::sequencer::enter();
                 let files = (*context).host_files;
                 let served = crate::provide::owns(&provider);
                 for key in call.data.pipes.into_iter().filter(|&key| key != 0) {
@@ -464,7 +463,7 @@ pub unsafe extern "C" fn hirsel_core_exec_wait(
         let proc = &mut *((key & !PROC_BIT) as *mut ProcessHandle);
         if let Some(value) = proc.cached {
             crate::process::deny_describe_capability(context);
-            let _commit = crate::tasks::before_provider_entry();
+            crate::tasks::before_provider_entry();
             if crate::tasks::check_cancel(context, site) != 0 {
                 return CANCELLED;
             }
@@ -502,7 +501,7 @@ pub unsafe extern "C" fn hirsel_core_exec_signal(
         let proc = &mut *((key & !PROC_BIT) as *mut ProcessHandle);
         if proc.cached.is_some() {
             crate::process::deny_describe_capability(context);
-            let _commit = crate::tasks::before_provider_entry();
+            crate::tasks::before_provider_entry();
             if crate::tasks::check_cancel(context, site) != 0 {
                 return CANCELLED;
             }

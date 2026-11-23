@@ -26,7 +26,6 @@ pub(super) unsafe fn install(
         let control = match host {
             Some(host) => {
                 let fd = host.control.lock().unwrap().take().ok_or(Fault::Corrupt)?;
-                let _commit = crate::sequencer::enter();
                 crate::os_net::adopt_socket(&raw mut (*files).sockets, fd).map_err(|error| {
                     Fault::Io(crate::provider::IoError::from_errno(
                         error.raw_os_error().unwrap_or(libc::EIO),

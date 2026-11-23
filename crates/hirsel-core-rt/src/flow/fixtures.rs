@@ -1,6 +1,6 @@
 use super::*;
 use crate::schedule_script::{FlowStep, PausePoint, ScheduleScript, StepBoundary};
-use crate::tasks::{self, SchedulerProvider, hirsel_core_check_cancel, run_root, with_workers};
+use crate::tasks::{self, SchedulerProvider, hirsel_core_check_cancel, run_root};
 use std::{
     ptr,
     sync::{Arc, Condvar, Mutex},
@@ -189,50 +189,11 @@ enum Law {
     CancelDrop,
 }
 
-struct Gate {
-    observed: Mutex<(bool, bool)>,
-    changed: Condvar,
-}
-
-impl Gate {
-    fn new() -> Self {
-        Self {
-            observed: Mutex::new((false, false)),
-            changed: Condvar::new(),
-        }
-    }
-
-    fn worker_boundary(&self) {
-        let mut seen = self.observed.lock().unwrap();
-        seen.0 = true;
-        self.changed.notify_all();
-        drop(self.changed.wait_while(seen, |seen| !seen.1).unwrap());
-    }
-
-    fn wait_for_worker(&self) -> std::sync::MutexGuard<'_, (bool, bool)> {
-        self.changed
-            .wait_while(self.observed.lock().unwrap(), |seen| !seen.0)
-            .unwrap()
-    }
-
-    fn owner_boundary(&self) {
-        let mut seen = self.wait_for_worker();
-        seen.1 = true;
-        self.changed.notify_all();
-    }
-}
-
 #[test]
-fn parallel_owner_cuts_match_the_reference_during_stage_handoffs() {
-    #[derive(Clone, Copy)]
-    struct Case<'a> {
-        law: Law,
-        gate: &'a Gate,
-    }
-
+fn owner_cuts_keep_the_flow_laws_and_refund_on_cancel() {
     unsafe extern "C" fn owner(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
-        // SAFETY: the root copies a single Case and owns its flow context.
-        let Case { law, gate } = unsafe { input.cast::<Case<'_>>().read() };
+        // SAFETY: the root copies a single Law and owns its flow context.
+        let law = unsafe { input.cast::<Law>().read() };
         let start = unsafe { (*context).available() };
         let flow = unsafe { FlowFixture::new(context) };
         let sink = flow.sink();
@@ -268,16 +229,11 @@ fn parallel_owner_cuts_match_the_reference_during_stage_handoffs() {
                 let stage = flow.stage(sink, check_cancel_until_out_of_time);
                 let port = flow.port(stage);
                 flow.push(port, 1, 1);
-                if !tasks::parallel() {
-                    tasks::request_flow_fixture_cancel();
-                }
+                tasks::request_flow_fixture_cancel();
                 if law == Law::CancelFinish {
                     assert_eq!(flow.next(sink), Pull::Dropped(0, 1));
                     assert_eq!(flow.finish(), Err((0, 1, Halt::OutOfTime as u64)));
                 } else {
-                    if tasks::parallel() {
-                        drop(gate.wait_for_worker());
-                    }
                     drop(flow);
                 }
                 assert_eq!(unsafe { (*context).available() }, start);
@@ -300,75 +256,22 @@ fn parallel_owner_cuts_match_the_reference_during_stage_handoffs() {
         Law::CancelFinish,
         Law::CancelDrop,
     ] {
-        for workers in [1, 16] {
-            let gate = Arc::new(Gate::new());
-            let hook = if workers == 1 {
-                ScheduleScript::new(0)
-            } else {
-                let gate = gate.clone();
-                ScheduleScript::new(0).with_pause_hook(move |point| {
-                    let (stage, step, boundary) = match law {
-                        Law::Handoff => (0, FlowStep::Item, StepBoundary::Before),
-                        Law::Mark => (0, FlowStep::Mark, StepBoundary::Before),
-                        Law::Terminal => (0, FlowStep::Terminal, StepBoundary::Before),
-                        Law::CancelFinish | Law::CancelDrop => {
-                            (0, FlowStep::Item, StepBoundary::Before)
-                        }
-                    };
-                    match point {
-                        PausePoint::Flow {
-                            stage: 1,
-                            step: FlowStep::Item,
-                            boundary: StepBoundary::After,
-                            ..
-                        } if law == Law::Handoff => gate.worker_boundary(),
-                        PausePoint::FlowCall { .. }
-                            if matches!(law, Law::CancelFinish | Law::CancelDrop) =>
-                        {
-                            gate.worker_boundary();
-                        }
-                        PausePoint::Flow {
-                            stage: s,
-                            step: k,
-                            boundary: b,
-                            ..
-                        } if (s, k, b) == (stage, step, boundary)
-                            && !matches!(law, Law::CancelFinish | Law::CancelDrop) =>
-                        {
-                            gate.worker_boundary();
-                        }
-                        PausePoint::FlowWait { .. } => {
-                            if matches!(law, Law::CancelFinish | Law::CancelDrop) {
-                                tasks::request_flow_fixture_cancel();
-                            }
-                            gate.owner_boundary();
-                        }
-                        _ => {}
-                    }
-                })
-            };
-            let mut context = Context::new(1 << 20);
-            causes::task_start(&mut context).unwrap();
-            let mut case = Case { law, gate: &gate };
-            with_workers(workers, || {
-                Arc::new(hook).install(|| unsafe {
-                    assert_eq!(
-                        run_root(
-                            &mut context,
-                            owner,
-                            (&raw mut case).cast(),
-                            ptr::null_mut(),
-                            size_of::<Case<'_>>(),
-                            0,
-                            SchedulerProvider::default(),
-                        ),
-                        0
-                    );
-                })
-            });
-            if workers > 1 {
-                assert_eq!(*gate.observed.lock().unwrap(), (true, true), "{law:?}");
-            }
-        }
+        let mut context = Context::new(1 << 20);
+        causes::task_start(&mut context).unwrap();
+        let mut law = law;
+        Arc::new(ScheduleScript::new(0)).install(|| unsafe {
+            assert_eq!(
+                run_root(
+                    &mut context,
+                    owner,
+                    (&raw mut law).cast(),
+                    ptr::null_mut(),
+                    size_of::<Law>(),
+                    0,
+                    SchedulerProvider::default(),
+                ),
+                0
+            );
+        });
     }
 }

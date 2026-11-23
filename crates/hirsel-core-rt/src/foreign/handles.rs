@@ -102,12 +102,6 @@ impl Operands {
             } else {
                 unsafe { std::slice::from_raw_parts(self.parameters, self.count) }
             };
-            // A host root lookup reads the OS provider under the same commit
-            // token as its directory operations. Drop it before any release wait.
-            let _commit = params
-                .iter()
-                .any(|parameter| parameter.dir)
-                .then(crate::sequencer::enter);
             let mut state = table.0.lock().unwrap();
             // SAFETY: descriptor and args are the caller's pinned operands.
             match unsafe { state.preflight(context, self, params) } {
@@ -439,7 +433,7 @@ unsafe fn wait_for_use(context: *mut Context, operands: Operands, site: u64) -> 
         abort,
         deliver: provider::DELIVER,
     };
-    let _commit = tasks::before_provider_entry();
+    tasks::before_provider_entry();
     let mut request = super::helpers::request(RELEASE_WAIT_OP, site);
     // SAFETY: the frame and task stay pinned while waiting for this release.
     unsafe { tasks::provider_operation(context, &provider, &mut request, None).status }

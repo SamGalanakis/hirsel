@@ -641,14 +641,9 @@ pub(crate) fn running() -> Option<&'static Unit> {
     // SAFETY: a live unit record (records are never freed).
     (!u.is_null()).then(|| unsafe { &*u })
 }
-/// Attach a root context while its unit is running serially. The concurrent
-/// testing pool keeps each context's heap under its own custody.
+/// Attach a root context to its running unit's heap.
 pub(crate) fn heap_for_context() -> Option<Arc<crate::task_heap::Heap>> {
     let unit = running()?;
-    #[cfg(any(test, feature = "testing"))]
-    if crate::tasks::worker_count() > 1 {
-        return None;
-    }
     // SAFETY: the caller is inside the unit, whose dispatcher is exclusive.
     let heap = unsafe { &*unit.heap.get() };
     Some(heap.get_or_init(Arc::default).clone())
@@ -1777,7 +1772,7 @@ pub(crate) fn launch(
         #[cfg(not(feature = "record"))]
         let tape_stats = "";
         eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} token_acquires={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_uring={}{tape_stats}",
+            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_uring={}{tape_stats}",
             w,
             g(S_CREATED),
             g(S_RESUMES),
@@ -1792,7 +1787,6 @@ pub(crate) fn launch(
             g(S_NOTIFIED_REQUEUE),
             g(S_CREATE_NS) / g(S_CREATED).max(1),
             g(S_READY_TO_PARK_NS) / g(S_CREATED).max(1),
-            crate::sequencer::ACQUIRES.load(Ordering::Relaxed),
             hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
             g(S_LIFO),
             g(S_HANDOFFS),
@@ -1801,10 +1795,6 @@ pub(crate) fn launch(
             g(S_HANDOFF_AGE_NS) / g(S_HANDOFFS).max(1),
             u8::from(p.uring),
         );
-    }
-    if crate::sequencer::ACQUIRES.load(Ordering::Relaxed) != 0 {
-        eprintln!("untied: law 4 violated: the cross-worker ordering token was taken");
-        return 101;
     }
     WORST.load(Ordering::Relaxed)
 }

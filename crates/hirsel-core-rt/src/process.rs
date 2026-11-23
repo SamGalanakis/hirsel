@@ -145,8 +145,7 @@ pub(crate) fn arm_host_parent() -> std::io::Result<()> {
 pub unsafe extern "C" fn hirsel_core_launch_handle(context: *mut Context, field: u64) -> u64 {
     #[cfg(feature = "record")]
     {
-        let _commit = crate::sequencer::enter();
-        // SAFETY: the run pins Files and the sequencer serializes handle transfers.
+        // SAFETY: the run pins Files, and its one worker serializes handle transfers.
         let managed = unsafe { &mut (*(*context).host_files).managed_control };
         if managed.1 != 0 {
             return match field {
@@ -161,7 +160,6 @@ pub unsafe extern "C" fn hirsel_core_launch_handle(context: *mut Context, field:
     };
     match field {
         0 => {
-            let _commit = crate::sequencer::enter();
             let control = host.control.lock().unwrap().take();
             control
                 .and_then(|fd| unsafe {

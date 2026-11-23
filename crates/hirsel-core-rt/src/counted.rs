@@ -145,8 +145,7 @@ pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
     // SAFETY: node has fresh aligned storage for one count word.
     unsafe {
         if atomic {
-            let _commit = crate::tasks::before_commit();
-            let _commit = crate::tasks::before_arc_commit();
+            crate::tasks::before_commit();
             node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
             crate::tasks::event(crate::tasks::ARC_NEW, 0, 1);
         } else {
@@ -163,7 +162,6 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
     // SAFETY: a live holder keeps the initialized count word alive.
     unsafe {
         if atomic {
-            let _commit = crate::tasks::before_arc_commit();
             // One add, as native code shares: a wrap stops the run before any
             // holder reads the wrapped word.
             let old = node
@@ -192,7 +190,6 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
     // SAFETY: the caller's holder pins the initialized count word.
     unsafe {
         if atomic {
-            let _commit = crate::tasks::before_arc_commit();
             let unique = node.cast::<AtomicU64>().as_ref().load(Ordering::Acquire) == 1;
             crate::tasks::event_committed(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
             unique
@@ -210,7 +207,6 @@ pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
     // SAFETY: the transferred holder keeps this node's initialized count alive.
     unsafe {
         if atomic {
-            let _commit = crate::tasks::before_arc_commit();
             let last = arc_decrement(node);
             if last {
                 fence(Ordering::Acquire);

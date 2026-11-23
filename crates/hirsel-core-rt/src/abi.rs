@@ -339,7 +339,6 @@ pub unsafe extern "C" fn hirsel_core_resource_free(resource: NonNull<u8>, storag
 /// the emitter immediately abandons this body and propagates after cleanup.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_raise(context: *mut Context, cause: Cause) {
-    crate::sequencer::end_receive_run();
     // SAFETY: compiler failure paths use their obligation cell exactly once.
     unsafe {
         causes::record(&mut *context, cause);
@@ -787,7 +786,6 @@ pub unsafe extern "C" fn hirsel_core_free(pointer: NonNull<u8>, charge: u64) {
 /// Context is live and exclusively used by its task.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_limit_enter(context: *mut Context, bytes: u64) -> Allocation {
-    let _commit = crate::sequencer::enter();
     // SAFETY: caller owns this context; no operation between selecting and
     // consuming the free-list head can suspend or invoke a provider.
     unsafe {

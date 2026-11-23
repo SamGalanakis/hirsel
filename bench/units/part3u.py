@@ -52,11 +52,6 @@ def side_cmd(side, par, rec, k=None):
     env = {"HIRSEL_SYNC_HELPERS": str(SYNCS)}
     exe = f"{BIN}/session_rec" if rec else f"{BIN}/session"
     base = [str(PORT), str(SESSIONS), str(PARTITIONS), str(par), str(TOOL_PORT)]
-    if side.startswith("S1"):
-        w = int(side.split("w")[1])
-        env["HIRSEL_S8_WORKERS"] = str(w)
-        cpus = SERVER if w <= 8 else "0-3,8-11,16-19,24-27"
-        return [exe] + base + ["0"], env, cpus, 1
     if side.startswith("S3"):
         # S3kK: K session units plus the service unit, each its own thread,
         # free to move within the server CPUs. S3kKpin pins unit i to one CPU.
@@ -209,9 +204,6 @@ def one_run(side, cell, rate, seed):
             pcmd = base_cmd + ["stat", "-e", "task-clock,context-switches,cpu-migrations,syscalls:sys_enter_write,syscalls:sys_enter_epoll_wait,syscalls:sys_enter_futex",
                                "-o", tag + ".txt", "-p", str(srv.pid), "--", "sleep", "3"]
         subprocess.run(pcmd, capture_output=True)
-    if side.startswith("S1"):
-        time.sleep(RUN["dur"] / 2 + 1.5)
-        seen_masks = masks(srv.pid)
     try:
         out, lerr = lgp.communicate(timeout=120)
     except subprocess.TimeoutExpired:

@@ -202,11 +202,6 @@ fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
 }
 
 #[test]
-fn two_worker_try_receive_pollers_leave_the_socket_driver_a_turn() {
-    isolated("active_poll_multicore");
-}
-
-#[test]
 fn net_socket_provider_laws() {
     for law in [
         "loopback_io",
@@ -1039,10 +1034,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 }
             }
             "cancel_beats_ready" | "active_poll" => {
-                scheduler_socket_law(context, law == "cancel_beats_ready", false)
-            }
-            "active_poll_multicore" => {
-                crate::tasks::with_workers(2, || scheduler_socket_law(context, false, true))
+                scheduler_socket_law(context, law == "cancel_beats_ready")
             }
             _ => panic!("unknown socket law {law}"),
         }
@@ -1059,8 +1051,6 @@ struct SocketScenario {
     peer: i32,
     cancel: bool,
     publish: [*mut Channel; 2],
-    parallel: bool,
-    polled: AtomicBool,
     done: bool,
     error: u8,
     appended: usize,
@@ -1092,19 +1082,14 @@ unsafe extern "C" fn socket_reader(context: *mut Context, _: *mut u8, input: *mu
     0
 }
 
-unsafe fn poll_channel(receiver: *mut Channel, parallel: bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(2);
+unsafe fn poll_channel(receiver: *mut Channel) -> bool {
     // SAFETY: this fiber owns the receiver and its item is ().
     unsafe {
         for turn in 0.. {
             if hirsel_core_try_receive(receiver, ptr::NonNull::dangling().as_ptr()) == 0 {
                 return true;
             }
-            if if parallel {
-                Instant::now() >= deadline
-            } else {
-                turn == 255
-            } {
+            if turn == 255 {
                 return false;
             }
         }
@@ -1122,14 +1107,11 @@ unsafe extern "C" fn socket_poller(context: *mut Context, out: *mut u8, input: *
     // SAFETY: the parent pins the fixture and moved the receiver to this fiber.
     unsafe {
         let input = input.cast::<PollInput>().read();
-        let parallel = (*input.scenario).parallel;
-        // Mark the worker only once it has actually polled the empty channel.
         assert_eq!(
             hirsel_core_try_receive(input.receiver, ptr::NonNull::dangling().as_ptr()),
             1
         );
-        (*input.scenario).polled.store(true, Ordering::Release);
-        out.write(u8::from(poll_channel(input.receiver, parallel)));
+        out.write(u8::from(poll_channel(input.receiver)));
         hirsel_core_receiver_drop(context, input.receiver);
     }
     0
@@ -1174,15 +1156,6 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
             )
             .task;
             assert!(!poller.is_null());
-            if (*scenario).parallel {
-                // The supervisor does not suspend here, so the poller must
-                // start on the other worker. Both remain on their first worker.
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while !(*scenario).polled.load(Ordering::Acquire) {
-                    assert!(Instant::now() < deadline, "poller did not run on the peer");
-                    std::thread::yield_now();
-                }
-            }
         }
         let child = hirsel_core_spawn(
             context,
@@ -1197,18 +1170,7 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
             1,
         );
         assert!(!child.task.is_null());
-        if (*scenario).parallel {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while !task_waits_for_provider(child.task) {
-                assert_eq!(
-                    hirsel_core_try_receive(second_receiver, ptr::NonNull::dangling().as_ptr()),
-                    1
-                );
-                assert!(Instant::now() < deadline, "reader did not park");
-            }
-        } else {
-            checkpoint();
-        }
+        checkpoint();
         let byte = 42u8;
         assert_eq!(
             libc::send(
@@ -1224,7 +1186,7 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
         } else {
             // The root and its peer keep polling while the reader is parked.
             // Only the nonblocking driver turn can make the reader publish.
-            assert!(poll_channel(second_receiver, (*scenario).parallel));
+            assert!(poll_channel(second_receiver));
             hirsel_core_receiver_drop(context, second_receiver);
             let mut delivered = 0u8;
             let joined = hirsel_core_join(context, poller, &mut delivered, 2);
@@ -1235,7 +1197,7 @@ unsafe extern "C" fn socket_parent(context: *mut Context, _: *mut u8, input: *mu
     }
     0
 }
-unsafe fn scheduler_socket_law(context: *mut Context, cancel: bool, parallel: bool) {
+unsafe fn scheduler_socket_law(context: *mut Context, cancel: bool) {
     use std::{
         net::{TcpListener, TcpStream},
         os::fd::AsRawFd,
@@ -1256,8 +1218,6 @@ unsafe fn scheduler_socket_law(context: *mut Context, cancel: bool, parallel: bo
             peer: peer.as_raw_fd(),
             cancel,
             publish: [ptr::null_mut(); 2],
-            parallel,
-            polled: AtomicBool::new(false),
             done: false,
             error: 0,
             appended: 0,

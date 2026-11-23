@@ -126,7 +126,7 @@ impl Function<'_, '_, '_> {
         }
         Ok(storage)
     }
-    pub fn runtime_call(&mut self, op: RtOp, call: &CallSite, fused_receive: bool) -> Result<()> {
+    pub fn runtime_call(&mut self, op: RtOp, call: &CallSite) -> Result<()> {
         let mut args = [Value::from_u32(0); 9];
         for (i, arg) in call
             .args
@@ -871,8 +871,6 @@ impl Function<'_, '_, '_> {
             RtOp::Send { .. } | RtOp::Receive { .. } => {
                 let name = if matches!(op, RtOp::Send { .. }) {
                     "hirsel_core_send"
-                } else if fused_receive {
-                    "hirsel_core_receive_in_loop"
                 } else {
                     "hirsel_core_receive"
                 };

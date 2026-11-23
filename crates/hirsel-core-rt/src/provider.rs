@@ -188,7 +188,7 @@ pub(crate) unsafe fn clock(
             return drive(context, provider, request, None);
         }
         crate::process::deny_describe_capability(context);
-        let _commit = crate::tasks::before_provider_entry();
+        crate::tasks::before_provider_entry();
         #[cfg(test)]
         crate::os::probe::note_outside(crate::os::probe::WAIT, request, 0);
         let outcome = crate::os::clock((*provider).state, request);
@@ -271,7 +271,7 @@ unsafe fn admit<const RETURNABLE: bool>(
     // SAFETY: exclusively borrowed task context/request for this operation.
     unsafe {
         crate::process::deny_describe_capability(context);
-        let _commit = crate::tasks::before_provider_entry();
+        crate::tasks::before_provider_entry();
         let site = (*request).site;
         let operation = (*request).operation;
         if cancellation_point(operation) {

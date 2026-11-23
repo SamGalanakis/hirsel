@@ -65,7 +65,6 @@ mod retention;
 pub mod schedule_script;
 mod scram;
 pub mod secret;
-mod sequencer;
 mod sha1;
 mod sha256;
 mod signature;

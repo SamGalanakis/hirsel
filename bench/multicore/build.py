@@ -112,15 +112,13 @@ def time_rust_kernel(text, case):
 ''' + after)
 
 
-def build_rust(out, game, standard, s0=False, s8u=False, regimes=False, *,
+def build_rust(out, game, standard, s0=False, regimes=False, *,
                prefix=(ROOT / "tools/capped",), jobs=2):
     path = out / "rust"
     path.mkdir(exist_ok=True)
     crate = BENCH / "rust"
     if regimes:
         binaries = ["--bin", "regimes"]
-    elif s8u:
-        binaries = ["--bin", "s8u"]
     elif s0:
         binaries = ["--bin", "runtime", "--bin", "s0"]
     else:
@@ -142,9 +140,9 @@ def build_rust(out, game, standard, s0=False, s8u=False, regimes=False, *,
                     externs[target] = file
             if target == "runtime" and artifact["executable"]:
                 shutil.copy2(artifact["executable"], out / "tokio")
-            if target in {"s0", "s8u", "regimes"} and artifact["executable"]:
+            if target in {"s0", "regimes"} and artifact["executable"]:
                 shutil.copy2(artifact["executable"], path / target)
-    if s0 or s8u or regimes:
+    if s0 or regimes:
         return
     rustc = subprocess.check_output(
         ["rustup", "which", "--toolchain", "1.99.0", "rustc"], text=True
@@ -211,7 +209,7 @@ def hirsel_inputs(src):
     ]}
 
 
-def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=False, *,
+def build_hirsel(out, compiler, runtime, engine, s0=False, regimes=False, *,
                  prefix=(ROOT / "tools/capped",), jobs=1):
     path = out / "hirsel"
     path.mkdir(exist_ok=True)
@@ -224,8 +222,6 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
     for src in sorted((BENCH / "hirsel").glob("*.hirsel")):
         case = src.stem
         if (case == "regimes") != regimes:
-            continue
-        if case.startswith("s8u_") != s8u:
             continue
         if s0 and case not in {"runtime", "matmul_t16"}:
             continue
@@ -248,8 +244,6 @@ def build_hirsel(out, compiler, runtime, engine, s0=False, s8u=False, regimes=Fa
             grants += ["--dir", out]
         if case == "mandelbrot" or regimes:
             grants += ["--grant", "Clock", "--grant", "Stderr"]
-        elif s8u:
-            grants += ["--grant", "Clock"]
         if regimes:
             grants += ["--grant", "Net=Listen 127.0.0.1/32 0-65535"]
         command = [
@@ -328,14 +322,11 @@ def main():
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=["rust", "go", "hirsel", "goose"])
     selection.add_argument("--regimes", action="store_true", help="build the scheduler grain fixtures")
-    selection.add_argument("--s8u", action="store_true", help="build only the S8u search fixtures")
     selection.add_argument("--s0", action="store_true", help="build only the S0 Hirsel, Tokio and Rust fixtures")
     selection.add_argument("--standard-rust", action="store_true", help="build published Rust data inputs and phase timings")
     options = parser.parse_args()
     if options.regimes:
         languages = ["rust", "go", "hirsel"]
-    elif options.s8u:
-        languages = ["rust", "hirsel"]
     elif options.s0:
         languages = ["rust", "hirsel"]
     else:
@@ -344,7 +335,7 @@ def main():
     if out.is_relative_to(ROOT):
         parser.error("--out must be outside the repository")
     for needed, for_languages in [
-        ("game", set() if options.s0 or options.s8u or options.regimes else {"rust", "go"}), ("goose", {"goose"}),
+        ("game", set() if options.s0 or options.regimes else {"rust", "go"}), ("goose", {"goose"}),
         ("hirsel", {"hirsel"}), ("runtime", {"hirsel"}),
     ]:
         if for_languages.intersection(languages) and getattr(options, needed) is None:
@@ -353,13 +344,13 @@ def main():
     succeeded = True
     for language in dict.fromkeys(languages):
         if language == "rust":
-            build_rust(out, options.game, options.standard_rust, options.s0, options.s8u, options.regimes)
+            build_rust(out, options.game, options.standard_rust, options.s0, options.regimes)
         elif language == "go":
             build_go(out, options.game.resolve() if options.game else None, options.go)
         elif language == "hirsel":
             succeeded = build_hirsel(
                 out, options.hirsel.resolve(), options.runtime.resolve(), options.engine,
-                options.s0, options.s8u, options.regimes,
+                options.s0, options.regimes,
             )
         elif language == "goose":
             build_goose(out, options.goose.resolve())

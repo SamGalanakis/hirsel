@@ -23,7 +23,7 @@ pub(crate) unsafe fn denied(context: *mut Context, site: u64) -> Outcome {
     // SAFETY: the caller owns this task's entry and context.
     unsafe {
         crate::process::deny_describe_capability(context);
-        let _commit = crate::tasks::before_provider_entry();
+        crate::tasks::before_provider_entry();
         if crate::tasks::check_cancel(context, site) != 0 {
             return CANCELLED;
         }

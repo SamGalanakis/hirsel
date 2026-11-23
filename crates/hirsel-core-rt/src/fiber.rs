@@ -11,7 +11,6 @@
 //! The word at the stack's top records its lowest writable address.
 use crate::retention::{Budget, RETENTION, Retained};
 use std::{
-    cell::Cell,
     ptr::NonNull,
     sync::{
         OnceLock,
@@ -350,20 +349,6 @@ pub(crate) fn surplus() -> bool {
     SURPLUS.load(Relaxed) != 0
 }
 
-/// Worker stock moves this many idle stacks to or from the pool's spare stock.
-const SPARE_BATCH: usize = 16;
-
-/// Idle stacks shared by a pool's workers. A fiber that ends on a thief
-/// returns its stack here, so the spawning worker refills instead of mapping.
-#[derive(Default)]
-pub(crate) struct Spare(std::sync::Mutex<Stock>);
-
-impl Spare {
-    pub(crate) fn release(&self) {
-        self.0.lock().unwrap().release();
-    }
-}
-
 // SAFETY: an idle stack holds no live frame or thread-local address; only its
 // mapping moves between workers.
 unsafe impl Send for Stack {}
@@ -377,10 +362,6 @@ impl Stock {
             surplus: Vec::new(),
             recent: None,
         }
-    }
-
-    fn len(&self) -> usize {
-        self.kept.len() + self.surplus.len()
     }
 
     pub(crate) fn take(&mut self) -> Stack {
@@ -439,30 +420,6 @@ impl Stock {
                 unsafe { stack.discard_below(stack.top() - page) };
             }
             self.cooled = self.kept.len();
-        }
-    }
-
-    /// Move up to `count` idle stacks, surplus first, to `to`.
-    fn hand(&mut self, to: &mut Self, count: usize) {
-        let surplus = count.min(self.surplus.len());
-        to.surplus
-            .extend(self.surplus.drain(self.surplus.len() - surplus..));
-        let kept = (count - surplus).min(self.kept.len());
-        to.cooled = to.cooled.min(to.kept.len());
-        to.kept.extend(self.kept.drain(self.kept.len() - kept..));
-    }
-
-    pub(crate) fn take_shared(&mut self, spare: &Spare) -> Stack {
-        if self.len() == 0 {
-            spare.0.lock().unwrap().hand(self, SPARE_BATCH);
-        }
-        self.take()
-    }
-
-    pub(crate) fn recycle_shared(&mut self, stack: Stack, spare: &Spare) {
-        self.recycle(stack);
-        if self.len() > 2 * SPARE_BATCH {
-            self.hand(&mut spare.0.lock().unwrap(), SPARE_BATCH);
         }
     }
 }

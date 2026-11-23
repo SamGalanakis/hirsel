@@ -707,7 +707,7 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             Ok(held) => held,
             Err(e) => return refused(e.available),
         };
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let u = unit();
         let owners = (*item).owners();
         let (inbox, client) = u
@@ -751,7 +751,7 @@ pub unsafe extern "C" fn hirsel_core_client_drop(_context: *mut Context, client:
     // SAFETY: the caller transfers the handle.
     unsafe {
         let h = Box::from_raw(client);
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         unit().drop_client(h.client);
     }
 }
@@ -844,12 +844,10 @@ unsafe fn conn_send<const REC: bool>(
         // The returnable form's state is in the record; the fast path that
         // never waits leaves it untouched.
         let mut state: *mut SendRec = local.as_mut_ptr();
-        let mut commit = if REC && resumed {
+        if REC && resumed {
             state = tasks::held_wait();
-            // As the stackful form's commit after `park_for`.
-            crate::sequencer::enter()
         } else {
-            let commit = tasks::before_commit_for(task);
+            tasks::before_commit_for(task);
             if wait && tasks::check_cancel_for(context, site, task) != 0 {
                 return failed;
             }
@@ -898,8 +896,7 @@ unsafe fn conn_send<const REC: bool>(
             let unit = tasks::lang_unit_for(task);
             (*unit).sends.insert(id, &raw mut (*state).frame);
             (*unit).waits += 1;
-            commit
-        };
+        }
         let unit = tasks::lang_unit_for(task);
         let st = &mut *state;
         loop {
@@ -935,14 +932,13 @@ unsafe fn conn_send<const REC: bool>(
                 }
                 continue;
             }
-            drop(commit);
             if tasks::park_unit_alone(task, || {
                 (*unit)
                     .ctx
                     .port
                     .spin_before_park(Some(client.receiver_port()))
             }) {
-                commit = tasks::before_commit_for(task);
+                tasks::before_commit_for(task);
                 continue;
             }
             if REC {
@@ -954,7 +950,7 @@ unsafe fn conn_send<const REC: bool>(
                 );
                 return None;
             }
-            commit = tasks::park_for(
+            tasks::park_for(
                 task,
                 &raw mut st.frame.waiters,
                 #[cfg(feature = "prof")]
@@ -1037,12 +1033,9 @@ unsafe fn conn_receive<const REC: bool>(
         let c = &input.0;
         let task = tasks::current_task();
         let waited_before = REC && resumed;
-        let mut commit = if waited_before {
-            // As the stackful form's commit after `park_for`.
-            crate::sequencer::enter()
-        } else {
-            tasks::before_commit_for(task)
-        };
+        if !waited_before {
+            tasks::before_commit_for(task);
+        }
         let unit = tasks::lang_unit_for(task);
         let mut waited = waited_before;
         loop {
@@ -1101,9 +1094,8 @@ unsafe fn conn_receive<const REC: bool>(
                 waited = true;
                 u.waits += 1;
             }
-            drop(commit);
             if tasks::park_unit_alone(task, || (*unit).ctx.port.spin_before_park(None)) {
-                commit = tasks::before_commit_for(task);
+                tasks::before_commit_for(task);
                 continue;
             }
             if REC {
@@ -1115,7 +1107,7 @@ unsafe fn conn_receive<const REC: bool>(
                 );
                 return None;
             }
-            commit = tasks::park_for(
+            tasks::park_for(
                 task,
                 &raw mut (*inbox).waiters,
                 #[cfg(feature = "prof")]
@@ -1134,7 +1126,7 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
     // SAFETY: the caller transfers the handle; it stays pinned while it waits.
     unsafe {
         let h = &mut *inbox;
-        let mut commit = tasks::before_commit();
+        tasks::before_commit();
         (*context).cancel_shield += 1;
         let u = unit();
         u.ctx.seal(&h.inbox);
@@ -1144,12 +1136,11 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
             if h.inbox.0.side().seal_taken {
                 break;
             }
-            drop(commit);
             if tasks::park_unit_alone(tasks::current_task(), || false) {
-                commit = tasks::before_commit();
+                tasks::before_commit();
                 continue;
             }
-            commit = tasks::park(
+            tasks::park(
                 &raw mut h.waiters,
                 #[cfg(feature = "prof")]
                 (crate::prof::Reason::Join, 0),
@@ -1181,7 +1172,6 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
             u.on_released(took);
         }
         pump(u);
-        drop(commit);
         0
     }
 }
@@ -1360,7 +1350,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             drop(held);
             return refused(xs, n);
         }
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let u = unit();
         let (k, hctx) = u.ctx.spawn_unit();
         let data = pack(input, x.bytes, x.owners());
@@ -1618,12 +1608,9 @@ unsafe fn wait_end<const REC: bool>(
 ) -> Option<bool> {
     // SAFETY: the handle is pinned by its owner through the wait.
     unsafe {
-        let mut commit = if REC && resumed {
-            // As the stackful form's commit after `park`.
-            crate::sequencer::enter()
-        } else {
-            tasks::before_commit()
-        };
+        if !(REC && resumed) {
+            tasks::before_commit();
+        }
         loop {
             if !shielded && tasks::check_cancel(context, site) != 0 {
                 return Some(false);
@@ -1635,7 +1622,6 @@ unsafe fn wait_end<const REC: bool>(
             if (*h).ended {
                 return Some(true);
             }
-            drop(commit);
             if REC {
                 tasks::park_returning(
                     tasks::current_task(),
@@ -1645,7 +1631,7 @@ unsafe fn wait_end<const REC: bool>(
                 );
                 return None;
             }
-            commit = tasks::park(
+            tasks::park(
                 &raw mut (*h).waiters,
                 #[cfg(feature = "prof")]
                 (crate::prof::Reason::Join, 0),
@@ -1730,7 +1716,7 @@ pub(crate) unsafe fn join<const REC: bool>(
                 status: 1,
             });
         }
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         let (failed, chain) = consume(context, h, Some(result));
         let cancelled = chain
             .iter()
@@ -1763,7 +1749,7 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
     unsafe {
         cancel(task);
         wait_end::<false>(context, helper_of(task), 0, true, false);
-        let _commit = tasks::before_commit();
+        tasks::before_commit();
         consume(context, helper_of(task), None);
         0
     }

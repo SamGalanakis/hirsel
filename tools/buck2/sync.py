@@ -485,18 +485,6 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
                               **{**attrs, 'features': ['standalone', 'charge-observation', 'record']})
                 + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-observed-record-archives',
                               library=f'//:{name}-standalone-observed-record',
-                              archive_name=f"lib{attrs['crate']}.a")
-                + '\n' + call('hirsel_library', name=f'{name}-test-pool',
-                              deps=declared_deps(package, packages),
-                              **{**attrs, 'features': ['standalone', 'testing']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-test-pool-archives',
-                              library=f'//:{name}-test-pool',
-                              archive_name=f"lib{attrs['crate']}.a")
-                + '\n' + call('hirsel_library', name=f'{name}-test-pool-record',
-                              deps=declared_deps(package, packages),
-                              **{**attrs, 'features': ['standalone', 'testing', 'record']})
-                + '\n' + call('hirsel_core_runtime_archives', name=f'{name}-test-pool-record-archives',
-                              library=f'//:{name}-test-pool-record',
                               archive_name=f"lib{attrs['crate']}.a"))
     return call('hirsel_core_runtime_archives', name=f'{name}-archives',
                 library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")

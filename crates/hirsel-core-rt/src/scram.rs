@@ -98,7 +98,6 @@ unsafe fn check_tls(
     key: u64,
     secret: Option<&Secret>,
 ) -> Result<(Binding, bool), Outcome> {
-    let _commit = crate::sequencer::enter();
     unsafe {
         let write = (*files).tls_writes.get(&(key & !3)).ok_or(net::DENIED)?;
         if let Some(secret) = secret

@@ -9,7 +9,7 @@ use crate::Capacity;
 mod refunds;
 use refunds::{Inbox, Queue, Remote};
 use std::{
-    cell::{Cell, RefCell, UnsafeCell},
+    cell::{Cell, UnsafeCell},
     ptr::NonNull,
     sync::{
         Mutex,
@@ -201,8 +201,8 @@ impl Forest {
 
     #[inline(always)]
     fn record(&self, payer: Payer) -> &Links {
-        // SAFETY: the payer is pinned and the caller owns routing through the
-        // sequencer or retired mailbox.
+        // SAFETY: the payer is pinned and the caller owns routing as the
+        // running owner or through the retired mailbox.
         unsafe { &*payer.links() }
     }
     #[inline(always)]
@@ -272,7 +272,7 @@ impl Forest {
 
     fn pop_vacant(&mut self) -> Option<NonNull<Slot>> {
         let slot = self.free?;
-        // SAFETY: sequencer custody uniquely owns each vacant slot.
+        // SAFETY: the running owner uniquely owns each vacant slot.
         self.free = unsafe { (*slot.as_ref().links.get()).next_free };
         Some(slot)
     }
@@ -285,20 +285,7 @@ impl Forest {
 
     #[inline(always)]
     fn take(&mut self, domain: NonNull<Domain>, live: Live) -> Payer {
-        let slot = VACANT
-            .with_borrow_mut(|cached| {
-                cached
-                    .as_mut()
-                    .filter(|cache| cache.domain == domain)
-                    .and_then(|cache| {
-                        if cache.slots.is_empty() {
-                            cache.refill(self);
-                        }
-                        cache.slots.pop()
-                    })
-            })
-            .or_else(|| self.pop_vacant())
-            .unwrap_or_else(|| self.fresh(domain));
+        let slot = self.pop_vacant().unwrap_or_else(|| self.fresh(domain));
         Self::initialize(slot, live)
     }
     #[inline(always)]
@@ -443,72 +430,8 @@ struct Binding {
     inbox: NonNull<Inbox>,
 }
 
-const SLOT_BATCH: usize = 16;
-const SLOT_CACHE: usize = 2 * SLOT_BATCH;
-
-#[derive(Clone, Copy)]
-pub(crate) struct CacheDomain(NonNull<Domain>);
-// SAFETY: the parent retains the domain through scoped worker teardown. The
-// worker only changes vacant slots under the domain sequencer.
-unsafe impl Send for CacheDomain {}
-unsafe impl Sync for CacheDomain {}
-
-impl CacheDomain {
-    pub(crate) fn lease_vacant(self) {
-        VACANT.set(Some(VacantSlots {
-            domain: self.0,
-            slots: Vec::with_capacity(SLOT_CACHE),
-            stats: SlotStats::default(),
-        }));
-    }
-}
-
-struct VacantSlots {
-    domain: NonNull<Domain>,
-    slots: Vec<NonNull<Slot>>,
-    stats: SlotStats,
-}
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct SlotStats {
-    pub transfers: usize,
-    pub leased: usize,
-    pub returned: usize,
-    pub peak: usize,
-    pub at_exit: usize,
-}
-
-impl VacantSlots {
-    fn refill(&mut self, forest: &mut Forest) {
-        // Lease only records already returned to the forest. A cache miss
-        // with no vacancies creates just the requested record.
-        while self.slots.len() < SLOT_BATCH
-            && let Some(slot) = forest.pop_vacant()
-        {
-            self.slots.push(slot);
-        }
-        let count = self.slots.len();
-        if count != 0 {
-            self.stats.transfers += 1;
-            self.stats.leased += count;
-            self.stats.peak = self.stats.peak.max(count);
-        }
-    }
-
-    fn return_batch(&mut self, forest: &mut Forest, count: usize) {
-        if count != 0 {
-            self.stats.transfers += 1;
-            self.stats.returned += count;
-            for slot in self.slots.drain(self.slots.len() - count..) {
-                forest.return_vacant(slot);
-            }
-        }
-    }
-}
-
 thread_local! {
     static THREAD: u8 = const { 0 };
-    static VACANT: RefCell<Option<VacantSlots>> = const { RefCell::new(None) };
 }
 
 crate::units::moved_tls! { static BOUND: Option<Binding> = None; }
@@ -535,7 +458,7 @@ fn thread() -> usize {
 }
 #[inline(always)]
 pub(crate) fn check_unbound() {
-    if BOUND.get_here().is_some() || VACANT.with_borrow(Option::is_some) {
+    if BOUND.get_here().is_some() {
         crate::process::stop(b"UntiedParkBound");
     }
 }
@@ -583,7 +506,6 @@ impl Payer {
     }
     #[inline(always)]
     pub(crate) fn canonical(self) -> Self {
-        let _commit = crate::sequencer::enter();
         // SAFETY: local task exclusively owns the local record fields.
         if unsafe { (*self.links()).parent.is_none() } {
             self
@@ -640,14 +562,12 @@ impl Payer {
 
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn injected(self) -> bool {
-        let _commit = crate::sequencer::enter();
         let f = self.forest();
         f.attempts += 1;
         f.fail
             .is_some_and(|(n, later)| f.attempts == n || later && f.attempts >= n)
     }
     pub(crate) fn pin_zero(self) {
-        let _commit = crate::sequencer::enter();
         let f = self.forest();
         f.retain(self);
         f.zeros += 1;
@@ -703,7 +623,6 @@ impl Payer {
     /// A record's (used, capacity): what its live limit has handed out.
     pub(crate) fn usage(self) -> (u64, u64) {
         let p = self.canonical();
-        let _commit = crate::sequencer::enter();
         // SAFETY: the caller's handle or outstanding bytes pin this record.
         unsafe {
             let capacity = (*p.links()).live.capacity;
@@ -712,8 +631,7 @@ impl Payer {
     }
     /// Connection charges settle in their owning unit at the release or take.
     pub(crate) fn settle_at_unit(self, bytes: u64) {
-        let _commit = crate::sequencer::enter();
-        if !crate::tasks::parallel() && self.domain().owner == Some(thread()) {
+        if self.domain().owner == Some(thread()) {
             self.forest().refund(self, bytes);
         } else {
             self.settle(bytes);
@@ -722,18 +640,17 @@ impl Payer {
 
     #[inline]
     pub(crate) fn settle(self, bytes: u64) {
-        let _commit = crate::sequencer::enter();
         let d = self.domain();
         let local = BOUND
             .get()
             .is_some_and(|binding| binding.domain == self.slot().domain)
-            || (!crate::tasks::parallel() && d.owner == Some(thread()));
+            || d.owner == Some(thread());
         if local && d.handles.get() != 0 {
             let mut root = self.root();
             // SAFETY: scheduler execution serializes reads of live routing.
             let mut live = unsafe { (*root.links()).live };
             if bytes != 0 && live.owner != crate::tasks::current_id() {
-                let _commit = crate::tasks::before_commit();
+                crate::tasks::before_commit();
                 root = self.root();
                 // SAFETY: an outstanding charge pins the current route.
                 live = unsafe { (*root.links()).live };
@@ -787,7 +704,6 @@ impl Payer {
     }
 
     pub(crate) fn prepaid(self, bytes: u64) -> Funding {
-        let _commit = crate::sequencer::enter();
         let parent = self.canonical();
         let f = self.forest();
         // SAFETY: this reservation draws from the payer's current owner.
@@ -815,7 +731,6 @@ impl Payer {
     /// bytes (MEM-20), whichever task drops the cell: never to the inbox of the
     /// task that reserved it, which may have ended.
     pub(crate) fn finish_reserved(self, charge: u64) {
-        let _commit = crate::sequencer::enter();
         // SAFETY: the cell owns this unmerged record; no other handle charges it.
         unsafe {
             let r = &mut *self.local();
@@ -849,7 +764,6 @@ impl Funding {
     /// scope (a caught failure's replacement cell lives until the task's
     /// Context drops), and the merge releases that edge when the cell finishes.
     pub(crate) fn isolate_reserve(&mut self, bytes: u64) -> Result<Payer, Capacity> {
-        let _commit = crate::sequencer::enter();
         let live = self.reserve_scope(bytes)?;
         let domain = unsafe { self.payer.get().0.as_ref().domain };
         let forest = unsafe { &mut *domain.as_ref().forest.get() };
@@ -921,7 +835,6 @@ impl Funding {
     }
     #[inline(always)]
     pub(crate) fn bind(&self) {
-        let _commit = crate::sequencer::enter();
         let payer = self.payer.get().canonical();
         let domain = payer.slot().domain;
         // SAFETY: the live record pins its inbox through this dispatch binding.
@@ -939,31 +852,11 @@ impl Funding {
         }
     }
     pub(crate) fn unbind() {
-        let _commit = crate::sequencer::enter();
         if let Some(binding) = BOUND.take() {
             // SAFETY: the task that owns this binding remains pinned until unbind.
             unsafe { binding.inbox.as_ref().release(binding.domain.as_ref()) };
         }
     }
-    /// Pin a bounded vacant-slot cache to the root funding domain for this
-    /// worker's lifetime. The run joins all workers before dropping the root.
-    pub(crate) fn cache_domain(&self) -> CacheDomain {
-        CacheDomain(self.payer.get().slot().domain)
-    }
-
-    pub(crate) fn return_vacant() -> SlotStats {
-        let _commit = crate::sequencer::enter();
-        let Some(mut cache) = VACANT.take() else {
-            return SlotStats::default();
-        };
-        // SAFETY: run startup pins the domain through every worker's return.
-        let forest = unsafe { &mut *cache.domain.as_ref().forest.get() };
-        let count = cache.slots.len();
-        cache.stats.at_exit = count;
-        cache.return_batch(forest, count);
-        cache.stats
-    }
-
     /// The word `drain` tests on this thread, for a commit served by another
     /// worker on this owner's behalf.
     #[inline(always)]
@@ -1002,7 +895,6 @@ impl Funding {
     }
     #[cold]
     fn drain_pending(&self) {
-        let _commit = crate::sequencer::enter();
         let domain = self.payer.get().domain();
         let mut remote = domain.remote.lock().unwrap();
         self.drain_locked(&mut remote, false);
@@ -1047,13 +939,11 @@ impl Funding {
     }
     #[cfg(any(test, feature = "charge-observation"))]
     pub(crate) fn observation_capacity(&self) -> u64 {
-        let _commit = crate::sequencer::enter();
         // SAFETY: the run's root handle pins its canonical live limit record.
         unsafe { (*self.payer.get().canonical().links()).live.capacity }
     }
     #[cfg(feature = "testing")]
     pub(crate) fn set_test_available(&self, bytes: u64) {
-        let _commit = crate::sequencer::enter();
         // SAFETY: the process fixture exclusively owns its live root record.
         let payer = self.payer.get().canonical();
         let record = unsafe { &mut *payer.local() };
@@ -1097,12 +987,10 @@ impl Funding {
         Ok(self.payer.get().prepaid(bytes))
     }
     pub(crate) fn owner(&self) -> u64 {
-        let _commit = crate::sequencer::enter();
         let payer = self.payer.get();
         payer.forest().record(payer).live.owner
     }
     pub(crate) fn task_owner(&self, owner: u64) {
-        let _commit = crate::sequencer::enter();
         let payer = self.payer.get().canonical();
         let old = payer.forest().record(payer).live;
         if old.owner != owner {
@@ -1131,9 +1019,10 @@ impl Funding {
 
     /// Close an unused grant or a cause cell's private reservation.
     pub fn end(&self) {
-        let _commit = crate::sequencer::enter();
         let (_, owner) = self.handover_destination();
-        let _turn = (owner != crate::tasks::current_id()).then(crate::tasks::before_commit);
+        if owner != crate::tasks::current_id() {
+            crate::tasks::before_commit();
+        }
         let (_, owner) = self.handover_destination();
         if owner == crate::tasks::current_id() {
             self.merge_with_parent();
@@ -1147,10 +1036,11 @@ impl Funding {
     /// later refunds immediately. Only the recipient completes the ranked union
     /// and applies the unused reservation, at its next event.
     pub(crate) fn handover(&mut self, creator: u64) {
-        let _commit = crate::sequencer::enter();
         let active = self.owner();
         let (_, owner) = self.handover_destination();
-        let _turn = (owner != active || creator != active).then(crate::tasks::before_commit);
+        if owner != active || creator != active {
+            crate::tasks::before_commit();
+        }
         self.drain();
         let child = self.payer.get();
         let live = child.forest().record(child).live;
@@ -1198,7 +1088,6 @@ impl Funding {
     /// Move a retained forwarding handle to its canonical record at a context switch.
     #[inline(always)]
     pub(crate) fn normalize(&self) {
-        let _commit = crate::sequencer::enter();
         // SAFETY: Funding handles contain untagged slot pointers, unlike block words.
         if unsafe { (*self.payer.get().links()).parent.is_some() } {
             self.normalize_merged();
@@ -1218,7 +1107,6 @@ impl Funding {
     }
     #[inline(always)]
     fn reserve_scope(&self, bytes: u64) -> Result<Live, Capacity> {
-        let _commit = crate::sequencer::enter();
         // Active contexts always hold a canonical record. A reservation moves
         // available bytes, not outstanding charges, and transfers the parent's pin.
         let parent = self.payer.get();
@@ -1252,7 +1140,6 @@ impl Funding {
     }
     #[inline(always)]
     pub(crate) fn enter(&mut self, bytes: u64) -> Result<(), Capacity> {
-        let _commit = crate::sequencer::enter();
         let live = self.reserve_scope(bytes)?;
         // SAFETY: an active Funding handle is untagged and task-exclusive.
         let domain = unsafe { self.payer.get().0.as_ref().domain };
@@ -1264,41 +1151,20 @@ impl Funding {
     #[inline(always)]
     pub(crate) fn reusable_slot(&self) -> Option<NonNull<Slot>> {
         let domain = self.payer.get().slot().domain;
-        VACANT
-            .with_borrow(|cached| {
-                cached
-                    .as_ref()
-                    .filter(|cache| cache.domain == domain)
-                    .map(|cache| cache.slots.last().copied())
-            })
-            .unwrap_or_else(|| {
-                // SAFETY: the caller retains the sequencer through selection and use.
-                unsafe { (*domain.as_ref().forest.get()).free }
-            })
+        // SAFETY: the running owner has custody of its domain's free list.
+        unsafe { (*domain.as_ref().forest.get()).free }
     }
     #[inline(always)]
     pub(crate) fn enter_reused(&mut self, bytes: u64, slot: NonNull<Slot>) -> Result<(), Capacity> {
-        let _commit = crate::sequencer::enter();
         let live = self.reserve_scope(bytes)?;
         let domain = self.payer.get().slot().domain;
-        let cached = VACANT.with_borrow_mut(|cached| {
-            cached
-                .as_mut()
-                .filter(|cache| cache.domain == domain)
-                .and_then(|cache| cache.slots.pop())
-        });
-        if cached.is_none() {
-            // SAFETY: the caller retains the sequencer through selection and use.
-            unsafe {
-                (*domain.as_ref().forest.get()).free = (*slot.as_ref().links.get()).next_free
-            };
-        }
+        // SAFETY: the running owner has custody of its domain's free list.
+        unsafe { (*domain.as_ref().forest.get()).free = (*slot.as_ref().links.get()).next_free };
         self.payer.set(Forest::initialize(slot, live));
         Ok(())
     }
     #[inline(always)]
     pub(crate) fn exit(&mut self) {
-        let _commit = crate::sequencer::enter();
         // SAFETY: the active context pins its canonical record exclusively.
         let payer = self.payer.get();
         let links = unsafe { &*payer.links() };
@@ -1388,23 +1254,7 @@ impl Funding {
             {
                 r.occupied = false;
             }
-            let cached = VACANT.with_borrow_mut(|cached| {
-                let domain = old.slot().domain;
-                cached
-                    .as_mut()
-                    .filter(|cache| cache.domain == domain)
-                    .map(|cache| {
-                        if cache.slots.len() == SLOT_CACHE {
-                            cache.return_batch(f, SLOT_BATCH);
-                        }
-                        cache.slots.push(old.0);
-                        cache.stats.peak = cache.stats.peak.max(cache.slots.len());
-                    })
-                    .is_some()
-            });
-            if !cached {
-                f.return_vacant(old.0);
-            }
+            f.return_vacant(old.0);
             self.payer.set(parent);
             unused
         }
@@ -1441,19 +1291,16 @@ impl Funding {
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {
-        let _commit = crate::sequencer::enter();
         let f = self.payer.get().forest();
         f.attempts = 0;
         f.fail = Some((n, later));
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn attempts(&self) -> usize {
-        let _commit = crate::sequencer::enter();
         self.payer.get().forest().attempts
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn records(&self) -> usize {
-        let _commit = crate::sequencer::enter();
         let f = self.payer.get().forest();
         f.slots()
             .filter(|slot| unsafe { (*slot.links.get()).occupied })
@@ -1462,7 +1309,6 @@ impl Funding {
 
     #[cfg(test)]
     pub(crate) fn scope_debug(&self) -> (usize, usize, usize, usize, u64) {
-        let _commit = crate::sequencer::enter();
         let f = self.payer.get().forest();
         let mut occupied = 0;
         let mut forwarding = 0;
@@ -1487,7 +1333,6 @@ impl Funding {
 }
 impl Clone for Funding {
     fn clone(&self) -> Self {
-        let _commit = crate::sequencer::enter();
         let d = self.payer.get().domain();
         d.handles.set(d.handles.get() + 1);
         self.payer.get().forest().retain(self.payer.get());
@@ -1498,7 +1343,6 @@ impl Clone for Funding {
 }
 impl Drop for Funding {
     fn drop(&mut self) {
-        let _commit = crate::sequencer::enter();
         let domain = self.payer.get().slot().domain;
         let d = self.payer.get().domain();
         d.handles.set(d.handles.get() - 1);

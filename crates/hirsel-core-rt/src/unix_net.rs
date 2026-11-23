@@ -146,7 +146,6 @@ unsafe fn call(
         let (rules, provider, key, state_ok) = match target {
             Some(UnixField::Listener) => (0, net::socket_provider(context, handle), handle, true),
             Some(UnixField::Datagram) => {
-                let _commit = crate::sequencer::enter();
                 let state = (&(*files).datagrams)[&handle];
                 let state_ok = (operation != DATAGRAM_RECV || state.bound)
                     && (operation != DATAGRAM_SEND || state.connected);
@@ -215,7 +214,6 @@ unsafe fn call(
             if new_handle && let Some(tape) = (*files).net_tape.filter(|_| !served) {
                 outcome = tape.carrier(outcome);
             }
-            let _commit = crate::sequencer::enter();
             if description.reply == UnixReply::Created(UnixHandle::Datagram) {
                 (*files).datagrams.insert(
                     outcome.value,

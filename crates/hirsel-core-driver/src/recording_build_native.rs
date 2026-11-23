@@ -815,7 +815,6 @@ fn recording_schedule_replays_across_engines() {
         let built = product.build(&entry, &options).unwrap();
         let output = Command::new(&built.executable)
             .env("HIRSEL_RECORD", &tape)
-            .env("HIRSEL_S8_WORKERS", "1")
             .output()
             .unwrap();
         assert!(output.status.success(), "{backend:?}: {output:?}");

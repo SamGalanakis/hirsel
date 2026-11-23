@@ -1194,10 +1194,6 @@ impl Tape {
             provider: dir.0,
             handle: dir.1,
         };
-        let _commit = crate::sequencer::enter();
-        if mode == Mode::Replay && crate::tasks::parallel() {
-            crate::process::stop(b"ReplayWorkers");
-        }
         let input = match mode {
             Mode::Record => TapeInput::Record { dir, name, header },
             Mode::Replay => TapeInput::Replay(unsafe { ReplayInput::open(dir, name)? }),
@@ -1211,7 +1207,6 @@ impl Tape {
         input: TapeInput<'_>,
         expect: &Expect,
     ) -> Result<(Tape, Startup), OpenError> {
-        let _commit = crate::sequencer::enter();
         let mut differs = false;
         let (live, startup) = match input {
             TapeInput::Record { dir, name, header } => {
@@ -1285,9 +1280,6 @@ impl Tape {
                 )
             }
             TapeInput::Replay(replay) => {
-                if crate::tasks::parallel() {
-                    crate::process::stop(b"ReplayWorkers");
-                }
                 let ReplayInput {
                     source,
                     blocks,
@@ -1449,7 +1441,7 @@ impl Tape {
         args: Option<Vec<u8>>,
         source: Option<(Provider, u64)>,
     ) -> Result<(Provider, u64, Vec<u8>), Fault> {
-        let _commit = crate::tasks::before_tape_frame(self.group(), false);
+        crate::tasks::before_tape_frame(self.group(), false);
         let mut s = self.cell.state.lock().unwrap();
         if s.generation != self.generation {
             return Err(refuse(Fault::Ended));
@@ -1518,7 +1510,7 @@ impl Tape {
     /// `Diverged(Outcome)` at the END frame), and nothing after it. Either
     /// way the tape's handles end here.
     pub fn end(self, ending: &Ending) -> Result<(), Fault> {
-        let _commit = crate::tasks::before_tape_frame(self.group(), true);
+        crate::tasks::before_tape_frame(self.group(), true);
         let result = self.finish(Seal::Explicit(ending));
         std::mem::forget(self);
         match result {
@@ -1531,7 +1523,7 @@ impl Tape {
         self,
         ending: &Ending,
     ) -> Result<Option<(u64, IoError)>, Fault> {
-        let _commit = crate::tasks::before_tape_frame(self.group(), true);
+        crate::tasks::before_tape_frame(self.group(), true);
         let result = self.finish(Seal::Explicit(ending));
         std::mem::forget(self);
         result
@@ -1834,7 +1826,7 @@ fn pending() -> Step {
 unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let h = r.handle;
     if schedule::member(cell, generation_of(h)) {
-        let _commit = crate::tasks::before_commit();
+        crate::tasks::before_commit();
     }
     let key = r as *mut Request as usize;
     let mut s = cell.state.lock().unwrap();

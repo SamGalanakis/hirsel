@@ -39,8 +39,6 @@ HirselCoreTransfer hirsel_core_send(HirselCoreContext *, HirselCoreChannel *, vo
    The decision is fixed before scheduling, including if a peer drains it. */
 uint8_t hirsel_core_try_send(HirselCoreChannel *, void *input);
 HirselCoreTransfer hirsel_core_receive(HirselCoreContext *, HirselCoreChannel *, void *destination, uint64_t site);
-HirselCoreTransfer hirsel_core_receive_in_loop(HirselCoreContext *, HirselCoreChannel *, void *destination, uint64_t site);
-void hirsel_core_receive_loop_end(void);
 /* Empty is a poll (scheduler choice, no cancellation); Closed is terminal. */
 uint8_t hirsel_core_try_receive(HirselCoreChannel *, void *destination);
 void hirsel_core_sender_drop(HirselCoreChannel *);

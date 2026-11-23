@@ -749,7 +749,6 @@ fn emit_module(
                 failures: &failures,
                 constants: &failures.constants[i],
                 observe_charge,
-                receive_loops: hirsel_core_ir::receive_loops::ReceiveLoops::new(body),
                 facts,
                 empty_bounds: if observe_charge {
                     empty::EmptyBounds::default()
@@ -985,9 +984,6 @@ fn emit_module(
             for (i, b) in body.blocks.iter().enumerate() {
                 e.block(Label::block(i));
                 e.enter_block(i);
-                if e.receive_loops.exit(i) {
-                    e.native_call("hirsel_core_receive_loop_end", &[], &[]);
-                }
                 if let Some((number, plan)) = step_loops
                     .iter()
                     .enumerate()
@@ -1587,7 +1583,6 @@ struct FunctionEmitter<'a> {
     constants: &'a [Option<u64>],
     empty_bounds: empty::EmptyBounds,
     observe_charge: bool,
-    receive_loops: hirsel_core_ir::receive_loops::ReceiveLoops,
     facts: bool,
     aliases: Option<alias::Scopes>,
     pointer_origins: Box<[Option<storage::PointerOrigin>]>,
@@ -2340,10 +2335,7 @@ impl FunctionEmitter<'_> {
                 self.neutral_step_call = self.step_neutral.is_some_and(|neutral| {
                     steps::neutral_inst(self.module, self.body, inst, neutral)
                 });
-                let result = self.call_site(
-                    &self.body.calls[call.index()],
-                    self.receive_loops.call(call),
-                );
+                let result = self.call_site(&self.body.calls[call.index()]);
                 self.neutral_step_call = false;
                 result?;
             }

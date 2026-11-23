@@ -71,7 +71,7 @@ def sqlite_laws(args, root, backend):
             '--store', str(Path(store) / 'build'), '-o', str(Path(store) / 'tests'),
             '--grant', 'Foreign=sqlite@1/sqlite/Sqlite', '--test-timeout', '20', '--json',
         ]
-        env = os.environ | {'XDG_CACHE_HOME': str(Path(store) / 'cache'), 'HIRSEL_S8_WORKERS': '1'}
+        env = os.environ | {'XDG_CACHE_HOME': str(Path(store) / 'cache')}
 
         def request(extra):
             output = subprocess.run(command + extra, cwd=fixture, env=env,

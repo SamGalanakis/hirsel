@@ -445,7 +445,6 @@ unsafe fn address_op(
         let provider = hirsel_core_capability_provider(context, n);
         #[cfg_attr(not(feature = "record"), allow(unused_mut))]
         let mut outcome = hirsel_core_host(context, provider, &mut request);
-        let _commit = crate::sequencer::enter();
         // A served Net's keys are its own, never a tape's carriers.
         let served = crate::provide::owns(&*provider);
         #[cfg(feature = "record")]
@@ -604,7 +603,6 @@ impl OwnedNet {
                 && outcome.status == 0
                 && outcome.error == IoError::OK
             {
-                let _commit = crate::sequencer::enter();
                 (*files)
                     .connected
                     .insert(outcome.value, ((*this).network.address, provider));
@@ -926,7 +924,6 @@ pub(crate) const RESET: Outcome = Outcome {
 };
 
 unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*files)
             .tls_writes
@@ -937,7 +934,6 @@ unsafe fn write_spent(files: *mut crate::host_file::Files, key: u64) -> bool {
 
 /// Whether `key` is part of a TLS stream.
 unsafe fn tls_stream(context: *mut Context, key: u64) -> bool {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
             .tls_writes
@@ -947,7 +943,6 @@ unsafe fn tls_stream(context: *mut Context, key: u64) -> bool {
 
 /// A served Net's socket, half or listener: its port's provider.
 pub(crate) unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Provider> {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
             .unix_served
@@ -964,7 +959,6 @@ pub(crate) unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Pr
 }
 
 pub(crate) unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
-    let _commit = crate::sequencer::enter();
     unsafe {
         (*(*context).host_files)
             .connected
@@ -1026,7 +1020,6 @@ pub unsafe extern "C" fn hirsel_core_host_send_secret(
             return DENIED;
         }
         let narrowed = {
-            let _commit = crate::sequencer::enter();
             let Some(write) = (*files).tls_writes.get(&(key & !3)) else {
                 return DENIED;
             };
@@ -1148,7 +1141,6 @@ pub(crate) unsafe fn send_sink(context: *mut Context, mut request: Request) -> O
 }
 
 pub(crate) unsafe fn spend_write(files: *mut crate::host_file::Files, key: u64) {
-    let _commit = crate::sequencer::enter();
     unsafe { (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true };
 }
 
@@ -1169,7 +1161,6 @@ pub unsafe extern "C" fn hirsel_core_net_split(
                 ..Outcome::default()
             };
         }
-        let _commit = crate::sequencer::enter();
         let files = (*context).host_files;
         #[cfg(feature = "record")]
         let (read, write) = if let Some(tape) = (*files).net_tape {
@@ -1299,7 +1290,6 @@ pub unsafe extern "C" fn hirsel_core_net_join(
         // A served socket's halves rejoin at its port; a TLS stream's never.
         if let Some(provider) = served_socket(context, read) {
             let unix = {
-                let _commit = crate::sequencer::enter();
                 (*(*context).host_files)
                     .unix_served
                     .contains_key(&(read & !3))
@@ -1318,7 +1308,6 @@ pub unsafe extern "C" fn hirsel_core_net_join(
             };
         }
     }
-    let _commit = crate::sequencer::enter();
     unsafe {
         let files = (*context).host_files;
         let key = read & !3;
@@ -1365,7 +1354,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
         {
             if answer.status == 0 && answer.error == IoError::OK {
                 let charge = {
-                    let _commit = crate::sequencer::enter();
                     if answer.value != 0 {
                         (*files).datagrams.remove(&key);
                         (*files).connected.remove(&(key & !3));
@@ -1376,16 +1364,12 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             }
             return;
         }
-        let charge = {
-            let _commit = crate::sequencer::enter();
-            (*files).exec_pipes.remove(&key)
-        };
+        let charge = { (*files).exec_pipes.remove(&key) };
         drop(charge);
         if let Some(provider) = served {
             // The port queues the Released; its server is readied outside
             // the run's commit section.
             let gone = crate::provide::release_socket(&provider, key);
-            let _commit = crate::sequencer::enter();
             if key & 3 == 2 {
                 (*files).tls_writes.remove(&(key & !3));
             }
@@ -1396,7 +1380,6 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             }
             return;
         }
-        let _commit = crate::sequencer::enter();
         (*files).datagrams.remove(&key);
         if key & 3 == 2 {
             (*files).tls_writes.remove(&(key & !3));

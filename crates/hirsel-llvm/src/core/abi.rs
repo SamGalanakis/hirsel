@@ -643,9 +643,9 @@ impl FunctionEmitter<'_> {
         }
         self.ret(&abi_ty, &r);
     }
-    pub(super) fn call_site(&mut self, site: &CallSite, fused_receive: bool) -> Result<()> {
+    pub(super) fn call_site(&mut self, site: &CallSite) -> Result<()> {
         if let Callee::Runtime(op) = site.callee {
-            return self.runtime_call(op, site, fused_receive);
+            return self.runtime_call(op, site);
         }
         let sig = &self.module.signatures[site.signature.index()];
         let layouts = self.call_layouts.unwrap();

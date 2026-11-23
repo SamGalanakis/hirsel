@@ -46,7 +46,6 @@ SIZES = {
     "yield_many": 12500,
     "fan_in": 12500,
 }
-S8_SIZES = {"fan_in_cap1": 12500, "ping_pong_burst": 100000}
 S0_SIZES = {
     "matmul_t16": 4,
     "spawn_join": 10000,
@@ -86,7 +85,7 @@ def expected(case, fasta, standard=False):
                 if hashlib.file_digest(file, "sha256").hexdigest() != STANDARD_FASTA_SHA:
                     raise ValueError(f"{fasta} does not match the standard FASTA input")
         return STANDARD_OUTPUT[case]
-    n = (SIZES | S8_SIZES)[case]
+    n = SIZES[case]
     if case == "mandelbrot":
         return STANDARD_OUTPUT[case]
     if case == "spectralnorm":
@@ -184,7 +183,7 @@ def sample_stdin(bins, case, language):
 def applicable(case, s0=False):
     if case in {"matmul_t16", "arc_pair"}:
         return ("Hirsel", "Rust")
-    if s0 or case in S8_SIZES:
+    if s0:
         return ("Hirsel", "Tokio")
     if case == "yield_many":
         return ("Tokio", "Go")
@@ -193,7 +192,7 @@ def applicable(case, s0=False):
     return ("Hirsel", "Tokio", "Go", "Goose")
 
 
-def sample_env(width, language, test_pool, *, shipping_units=False):
+def sample_env(width, language, *, shipping_units=False):
     env = os.environ | {
         "LC_ALL": "C",
         "HIRSEL_MEMORY_LIMIT": "2G",
@@ -202,11 +201,7 @@ def sample_env(width, language, test_pool, *, shipping_units=False):
         "RAYON_NUM_THREADS": str(width),
     }
     if shipping_units and language == "Hirsel":
-        env = {key: value for key, value in env.items() if not key.startswith("HIRSEL_S8_")}
         env.update(HIRSEL_UNTIED=str(width), HIRSEL_XSTATS="1")
-    if test_pool and language == "Hirsel":
-        env["HIRSEL_S8_STATS"] = "1"
-        env["HIRSEL_S8_WORKERS"] = str(width)
     return env
 
 
@@ -224,7 +219,7 @@ def measured_command(directory, cpus, command, profile=False, cycles=False):
 
 
 def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False,
-            test_pool=False, *, command=None, profile=False, allow_smt=False, cycles=False,
+            *, command=None, profile=False, allow_smt=False, cycles=False,
             shipping_units=False, launch_measurement=None):
     width = len(cpus)
     siblings = sibling_cpus(cpus, allow_smt=allow_smt)
@@ -234,7 +229,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
     directory = out / f"{case}-{language.lower()}-{width}"
     directory.mkdir()
     launch = (launch_measurement or measured_command)(directory, cpus, command, profile, cycles)
-    env = sample_env(width, language, test_pool, shipping_units=shipping_units)
+    env = sample_env(width, language, shipping_units=shipping_units)
     stdin = sample_stdin(bins, case, language)
     if lock_path:
         wait_load()
@@ -252,11 +247,6 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
             (directory / "stdout").unlink(missing_ok=True)
         row["status"] = f"exit:{result.returncode}"
         return row
-    if test_pool and language == "Hirsel" and width > 1:
-        receipt = f"pool workers={width} "
-        if not any(line.startswith(receipt) for line in (directory / "stderr").read_text().splitlines()):
-            row["status"] = "missing-test-pool-receipt"
-            return row
     if profile:
         return row | {"status": "ok" if (directory / "stdout").read_bytes() == wanted else "wrong-output"}
     return validate_sample(directory, case, wanted, cpu_list, kernel) | {"smt_busy_percent": busy}
@@ -438,7 +428,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
     work = regimes.WORKLOADS[case]
     directory.mkdir()
     pidfile = directory / "server.pid"
-    server_env = sample_env(width, language, False, shipping_units=True)
+    server_env = sample_env(width, language, shipping_units=True)
     if checkbox:
         board = bins / "checkbox"
         port = int((board / "port").read_text())
@@ -481,7 +471,7 @@ def observe_service(bins, directory, case, language, cpus, load_cpus, size, roun
                   (directory / "load.stderr").open("wb") as load_err):
                 start = time.monotonic()
                 result = subprocess.run(list(map(str, command)), cwd=ROOT, stdout=reply, stderr=load_err,
-                                        env=sample_env(len(load_cpus), "Tokio", False))
+                                        env=sample_env(len(load_cpus), "Tokio"))
                 data["client_seconds"] = time.monotonic() - start
             data["load_status"] = result.returncode
         except RuntimeError as error:
@@ -646,13 +636,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bins", type=Path, help="binaries and FASTA from build.py")
     parser.add_argument("--out", type=Path, help="new evidence directory outside the repository")
-    parser.add_argument("--case", nargs="+", choices=SIZES | S0_SIZES | S8_SIZES | regimes.WORKLOADS)
+    parser.add_argument("--case", nargs="+", choices=SIZES | S0_SIZES | regimes.WORKLOADS)
     parser.add_argument("--workers", nargs="+", type=int, choices=WIDTHS)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--languages", nargs="+", choices=LANGUAGES)
     selection.add_argument("--standard-rust", action="store_true", help="measure published Rust data inputs")
     parser.add_argument("--s0", action="store_true", help="validate both fields and measure only the S0 fixtures")
-    parser.add_argument("--test-pool", action="store_true", help="select workers and collect counters from an S8 test-pool archive")
     parser.add_argument("--read", nargs="+", type=Path, help="render existing sample JSON files")
     parser.add_argument("--regimes", action="store_true", help="run the scheduler grain sweep")
     parser.add_argument("--grain-ns", nargs="+", type=int, default=regimes.GRAINS)
@@ -689,7 +678,7 @@ def main():
             parser.error("--out must be a new directory outside the repository")
         workers = args.workers or ([1] if args.s0 else (1, 2, 4, 8, 16) if args.regimes else WIDTHS)
         if args.regimes:
-            if args.s0 or args.standard_rust or args.test_pool or set(workers) - {1, 2, 4, 8, 16}:
+            if args.s0 or args.standard_rust or set(workers) - {1, 2, 4, 8, 16}:
                 parser.error("use the grain sweep by itself at widths 1, 2, 4, 8 or 16")
             if args.languages and set(args.languages) - {"Hirsel", "Tokio", "Go"}:
                 parser.error("the grain sweep supports Hirsel, Tokio and Go")
@@ -711,8 +700,6 @@ def main():
         os.sched_setaffinity(0, args.build_cpus)
         sizes = S0_SIZES if args.s0 else STANDARD_RUST_SIZES if args.standard_rust else SIZES
         languages = ("Rust",) if args.standard_rust else args.languages or LANGUAGES
-        if args.test_pool and not (args.s0 or args.standard_rust):
-            sizes = sizes | S8_SIZES
         cases = tuple(dict.fromkeys(args.case or sizes))
         if any(case not in sizes for case in cases):
             parser.error("the requested workload is outside the selected suite")
@@ -729,7 +716,7 @@ def main():
                         continue
                     try:
                         result = observe(bins, out, case, language, args.measure_cpus[:width], size,
-                                         oracles[case], kernel, args.lock, args.s0, args.test_pool)
+                                         oracles[case], kernel, args.lock, args.s0)
                     except ValueError as error:
                         parser.error(str(error))
                     rows.append(result | {"case": case, "language": language, "width": width, "size": size})

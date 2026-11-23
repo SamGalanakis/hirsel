@@ -271,7 +271,7 @@ pub(crate) unsafe fn adopt_socket(
     sockets: *mut hirsel_core_net::Sockets,
     owned: OwnedFd,
 ) -> io::Result<u64> {
-    // SAFETY: callers hold the sequencer and the run pins the socket registry.
+    // SAFETY: the run's one worker calls this, and the run pins the socket registry.
     unsafe {
         let poller = (*sockets).poller()?;
         crate::tasks::attach_net(sockets, poller);

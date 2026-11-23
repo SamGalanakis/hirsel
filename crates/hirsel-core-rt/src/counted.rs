@@ -163,6 +163,9 @@ pub unsafe fn share(node: NonNull<u8>, arc: bool) {
     // SAFETY: a live holder keeps the initialized count word alive, and only
     // the thread running its unit touches it (CONC-2: an Arc is not cross).
     unsafe {
+        if arc {
+            crate::tasks::before_commit();
+        }
         let count = &mut *node.cast::<u64>().as_ptr();
         // A wrap stops the run before any holder reads the wrapped word.
         *count = count
@@ -182,6 +185,9 @@ pub unsafe fn share(node: NonNull<u8>, arc: bool) {
 pub unsafe fn try_unwrap(node: NonNull<u8>, arc: bool) -> bool {
     // SAFETY: the caller's holder pins the initialized count word.
     unsafe {
+        if arc {
+            crate::tasks::before_commit();
+        }
         let unique = node.cast::<u64>().as_ptr().read() == 1;
         if arc {
             crate::tasks::event_committed(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
@@ -197,6 +203,9 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, arc: bool) -> bool {
 pub unsafe fn decrement(node: NonNull<u8>, arc: bool) -> bool {
     // SAFETY: the transferred holder keeps this node's initialized count alive.
     unsafe {
+        if arc {
+            crate::tasks::before_commit();
+        }
         let count = &mut *node.cast::<u64>().as_ptr();
         *count = count.wrapping_sub(1);
         let last = *count == 0;

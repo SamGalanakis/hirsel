@@ -2381,8 +2381,8 @@ fn site_fixture(target: Target) {
     for (opt, composed, debug_lines, bytes) in fixtures {
         let file = object::File::parse(bytes.as_slice()).unwrap();
         assert!(
-            file.section_by_name(".eh_frame").is_none(),
-            "generated object has unwind tables: {target:?} {opt:?}, composed={composed}, debug_lines={debug_lines}"
+            file.section_by_name(".eh_frame").is_some(),
+            "generated object lacks unwind tables: {target:?} {opt:?}, composed={composed}, debug_lines={debug_lines}"
         );
         let mut site_relocations = 0;
         for section in file.sections() {

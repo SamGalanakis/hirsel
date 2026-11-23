@@ -418,10 +418,10 @@ fn conditional(config: Config, req: Request, objects: Map[String, Object]) -> Op
     if let Some(tag) = map.get(req.fields, "if-match") {
         if let Some(present) = old {
             if tag != "*" && tag != present.etag {
-                return Some(409)
+                return Some(412)
             }
         } else {
-            return Some(409)
+            return Some(412)
         }
     }
     if let Some(tag) = map.get(req.fields, "if-none-match") {

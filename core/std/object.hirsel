@@ -30,6 +30,10 @@ pub type Meta: send {
 
 pub type Created: send = Created(Meta) | Exists
 
+pub type Conditional: send = Applied(Meta) | Mismatch
+
+pub type Precondition: send = Match(ETag) | Absent
+
 pub type Reason: send = Status(u16, Bytes) | Net(NetError) | Http(http_client.Error) | Malformed | Deadline | Cancelled
 
 pub type Error: send = Fatal(Reason) | Retriable(Reason) | Uncertain(Reason) | TooLarge | NotFound | Precondition
@@ -58,13 +62,25 @@ pub fn key_text(key: Key) -> String {
     result.unwrap(string.from_utf8(take out))
 }
 
-type Operation: key = Fetch | FetchRange | Put | PutConditional | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads
+type Operation: key = Fetch | FetchRange | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads
 
 type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
 
 type Decision: key = Accept | Retry | Throttle | Resolve | AlreadyExists | Missing | Changed | Refresh | CorrectSkew | Reject
 
 fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bool, pinned: bool) -> Decision {
+    if op == PutIf {
+        if phase == BeforeRequest || status == 409 || (status == 400 && code == string.as_bytes("RequestTimeout")) {
+            return Retry
+        }
+        if status == 412 {
+            return AlreadyExists
+        }
+        if status == 0 || status == 429 || (status >= 500 && status < 600) {
+            return Resolve
+        }
+        return Reject
+    }
     let conditional = op == PutConditional || op == CompleteConditional
     let uncertain = conditional || op == Complete
     if phase == BeforeRequest {
@@ -257,6 +273,19 @@ fn etag(data: Bytes) -> Result[ETag, Error] {
     Ok(result)
 }
 
+fn strong_tag(tag: ETag) -> bool {
+    if tag.len < 2 || tag.len > 64 || tag.octets[0] != b'"' || tag.octets[tag.len - 1] != b'"' {
+        return false
+    }
+    for i in 1u64 .. tag.len - 1 {
+        let b = tag.octets[i]
+        if b < 33 || b == b'"' || b == 127 {
+            return false
+        }
+    }
+    true
+}
+
 fn tag_bytes(tag: ETag) -> Bytes {
     let mut out: Bytes = list.with_capacity(tag.len)
     let _ = bytebuf.append_inline(mut out, tag.octets, 0, tag.len)
@@ -428,6 +457,7 @@ fn method(op: Operation) -> String {
         Head => "HEAD",
         Put => "PUT",
         PutConditional => "PUT",
+        PutIf => "PUT",
         Part => "PUT",
         Erase => "DELETE",
         Abort => "DELETE",
@@ -438,7 +468,7 @@ fn method(op: Operation) -> String {
 }
 
 fn uploads_body(op: Operation) -> bool {
-    op == Put || op == PutConditional || op == Part || op == Complete || op == CompleteConditional
+    op == Put || op == PutConditional || op == PutIf || op == Part || op == Complete || op == CompleteConditional
 }
 
 fn payload_read(op: Operation) -> bool {
@@ -565,12 +595,12 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
         return Error(Fatal(Malformed))
     }
     copy_header(mut headers, mut w.values, HOST_FIELD, string.as_bytes(server.authority))
-    if payload_read(op) && tag.len != 0 {
+    if (payload_read(op) || op == PutIf) && tag.len != 0 {
         let mut field = value_buffer(mut w.values, MATCH_FIELD)
         let _ = bytebuf.append_inline(mut field, tag.octets, 0, tag.len)
         set_header(mut headers, MATCH_FIELD, take field)
     }
-    if op == PutConditional || op == CompleteConditional {
+    if op == PutConditional || op == CompleteConditional || (op == PutIf && tag.len == 0) {
         copy_header(mut headers, mut w.values, NO_CLOBBER_FIELD, string.as_bytes("*"))
     }
     if payload_read(op) && (op == FetchRange || from != 0) {
@@ -1013,7 +1043,7 @@ fn status_failure(status: u16, body: Bytes) -> Failure {
 }
 
 fn bad_success(op: Operation) -> Exchange {
-    if op == PutConditional || op == Complete || op == CompleteConditional {
+    if op == PutConditional || op == PutIf || op == Complete || op == CompleteConditional {
         return Refused(Failure(phase: ResponseBody, reason: Malformed, status: 0, code: list.new(), server_time: None))
     }
     Invalid(Fatal(Malformed))
@@ -1135,7 +1165,15 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
         octets
     }) {
         Ok(take value) => take value,
-        Error(take e) => return Invalid(take e),
+        Error(take e) => {
+            if op == PutIf {
+                return bad_success(op)
+            }
+            return Invalid(take e)
+        },
+    }
+    if op == PutIf && !strong_tag(info.etag) {
+        return bad_success(op)
     }
     if op == Complete || op == CompleteConditional {
         let Ok(text) = xml_text(buffer) else {
@@ -1653,7 +1691,7 @@ fn release(mut lane: Lane) waits {
 
 fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgress, crc: Option[u32]) -> Exchange waits {
     let at = host.mono_ns(lane.clock)
-    let idle_limit = if op == PutConditional || op == Complete || op == CompleteConditional {
+    let idle_limit = if op == PutConditional || op == PutIf || op == Complete || op == CompleteConditional {
         FRESH_NS
     } else {
         IDLE_NS
@@ -1796,7 +1834,7 @@ fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolu
 fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
     let original_entries = list.len(job.entries)
     let mut progress = ReadProgress(initial: list.len(job.data), size: None, tag: job.tag)
-    let crc = if job.op == Put || job.op == PutConditional || job.op == Part {
+    let crc = if job.op == Put || job.op == PutConditional || job.op == PutIf || job.op == Part {
         Some(crc32c.update(0, job.data))
     } else {
         None
@@ -1837,7 +1875,7 @@ fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
                     let Failure(phase, reason: take reason, status, code: take code, server_time) = take response
                     if let Cancelled = reason {
                         list.truncate(mut job.entries, original_entries)
-                        return if phase != BeforeRequest && (op == PutConditional || op == Complete || op == CompleteConditional) {
+                        return if phase != BeforeRequest && (op == PutConditional || op == PutIf || op == Complete || op == CompleteConditional) {
                             Error(Uncertain(take reason))
                         } else {
                             Error(Retriable(take reason))
@@ -1865,6 +1903,9 @@ fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
                             continue
                         },
                         Resolve => {
+                            if op == PutIf {
+                                return Error(Uncertain(take last))
+                            }
                             pending = true
                             ambiguous = true
                         },
@@ -2165,6 +2206,30 @@ pub fn store_no_clobber(mut c: Client, key: String, take body: Bytes, deadline_n
     request.id = Some(fresh_id(c.random, mut c.entropy))
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_created(take result), take data)
+}
+
+/// Conditional PUT. The caller resolves an Uncertain outcome using its own
+/// protocol. The client returns the unmodified body so it can resend it.
+pub fn store_if(mut c: Client, key: String, pre: Precondition, take body: Bytes, deadline_ns: u64) -> (Result[Conditional, Error], Bytes) waits {
+    let tag = match pre {
+        Match(value) => {
+            if !strong_tag(value) {
+                return (Error(Precondition), take body)
+            }
+            value
+        },
+        Absent => empty_tag(),
+    }
+    let mut request = object_job(mut c, PutIf, key, take body, deadline_ns)
+    request.tag = tag
+    let Reply(result: take result, data: take data, ..) = run(mut c, take request)
+    let outcome: Result[Conditional, Error] = match take result {
+        Ok(Object(take meta)) => Ok(Applied(take meta)),
+        Ok(Existing) => Ok(Mismatch),
+        Error(take e) => Error(take e),
+        _ => Error(Fatal(Malformed)),
+    }
+    (take outcome, take data)
 }
 
 pub fn erase(mut c: Client, key: String, deadline_ns: u64) -> Result[(), Error] waits {

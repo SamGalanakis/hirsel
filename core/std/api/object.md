@@ -34,6 +34,7 @@ the operation uses a no-clobber precondition.
 | `fetch_parts(key, take buffers, deadline_ns)` | Reads the object as 8 MiB ranges with an ETag pinned across the lanes. The last range can be shorter. Returns the original list and keeps the ranges in separate buffers. Any unused buffers are left as supplied. |
 | `store(key, take body, deadline_ns)` | Overwrites a key and returns metadata and the caller's buffer. |
 | `store_no_clobber(key, take body, deadline_ns)` | Conditionally creates the key and returns `Created` or `Exists` with the caller's buffer. |
+| `store_if(key, pre, take body, deadline_ns)` | Sends `If-Match` for `Match(etag)` or `If-None-Match: *` for `Absent`. Returns `Applied(meta)` or `Mismatch` with the original body. |
 | `list(prefix, after, mut into, deadline_ns)` | Appends one lexical page to a bounded list. `Page.after` is the last returned key. Pass `key_text(Page.after)` to get the next page if `Page.truncated` is true. |
 | `erase(key, deadline_ns)` | Deletes a key. An absent key is success. |
 | `upload(key, mode, deadline_ns)` | Begins a multipart upload and assigns the put-id. |
@@ -78,7 +79,12 @@ missing object and `Precondition` means a pinned version changed.
 | HTTP 200 with an S3 XML error body, except GET object data | Classify by its error code. |
 | GET interrupted after bytes arrive | Preserve the bytes and resume with `Range` and `If-Match` using the original ETag. |
 
-PUT and multipart initiation send the operation's 128-bit random put-id
+`store_if` retries before request delivery, on HTTP 409 and on HTTP 400
+`RequestTimeout`. HTTP 412 returns `Mismatch`. A lost reply after delivery
+may have started, HTTP 429 and HTTP 5xx return `Uncertain` for the caller to
+resolve. `Match` requires a strong ETag.
+
+Plain PUT, no-clobber PUT and multipart initiation send the operation's 128-bit random put-id
 as `x-amz-meta-hirsel-put-id`. When resolving a write, HEAD returns
 `Created` for the same put-id and `Exists` for a different or missing
 put-id on the identified object. A missing object permits another attempt.

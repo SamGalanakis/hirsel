@@ -259,7 +259,7 @@ fn wire_semantics(tasks: Tasks) -> bool waits {
     let after_abort = plain(w, "POST", path, body)
     let observed = result.unwrap(task.join(take server))
     result.unwrap(task.join(take driver))
-    first == 1 && second == 1 && old && new_address && tls_failed && written.status == 200 && stale.status == 409 && valid.status == 200 && before_delete.data == string.as_bytes("new") && deleted.status == 204 && absent.status == 404 && aborted.status == 204 && after_abort.status == 404 && observed.writes == 2 && map.len(observed.objects) == 0
+    first == 1 && second == 1 && old && new_address && tls_failed && written.status == 200 && stale.status == 412 && valid.status == 200 && before_delete.data == string.as_bytes("new") && deleted.status == 204 && absent.status == 404 && aborted.status == 204 && after_abort.status == 404 && observed.writes == 2 && map.len(observed.objects) == 0
 }
 
 fn add(mut fields: List[Field], name: String, value: String) {
@@ -683,4 +683,34 @@ fn s3_client_laws(tasks: Tasks) -> bool waits {
         fail("L5 seeded retry schedule")
     }
     true
+}
+
+// The caller gets the bytes back on a lost reply. Repeating the original
+// precondition reports the mismatch so the caller can inspect the register.
+// expect: run conditional_head_put(tasks) = true
+fn conditional_head_put(tasks: Tasks) -> bool waits {
+    let (client, _, server, driver) = object_fixture(tasks, 11, "02000000", 412)
+    let mut c = take client
+    let (initial, _) = object.store_if(mut c, "head", Absent, string.into_bytes(string.from("first")), OBJECT_END)
+    let Ok(Applied(first)) = initial else {
+        fail("head create was refused")
+    }
+    let second = string.as_bytes("second")
+    let (lost, take returned) = object.store_if(mut c, "head", Match(first.etag), clone(second), OBJECT_END)
+    let intact = returned == second
+    let (repeated, _) = object.store_if(mut c, "head", Match(first.etag), take returned, OBJECT_END)
+    let (fetched, take current) = object.fetch(mut c, "head", list.with_capacity(16), OBJECT_END)
+    let meta = result.unwrap(take fetched)
+    let (duplicate, _) = object.store_if(mut c, "head", Absent, string.into_bytes(string.from("duplicate")), OBJECT_END)
+    let (stale, _) = object.store_if(mut c, "head", Match(first.etag), string.into_bytes(string.from("stale")), OBJECT_END)
+    let (last, _) = object.store_if(mut c, "head", Match(meta.etag), string.into_bytes(string.from("third")), OBJECT_END)
+    let _ = take c
+    let observed = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    match (lost, repeated, duplicate, stale, last) {
+        (Error(Uncertain(_)), Ok(Mismatch), Ok(Mismatch), Ok(Mismatch), Ok(Applied(_))) => {
+            intact && current == second && observed.writes == 3 && has_saved(observed, "head", "third")
+        },
+        _ => false,
+    }
 }

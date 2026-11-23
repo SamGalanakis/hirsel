@@ -519,28 +519,57 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let (name, source) = UNIT_PROGRAMS[2];
     let source = format!(
-        "fn find_right(s: String) -> Option[u64] {{ string.find(s, 0, \"right\") }}\n{}",
+        r#"fn find_right(s: String) -> Option[u64] {{
+    let mut entries: Map[String, u64] = map.new()
+    map.insert(mut entries, "right", 1)
+    if let Some(_) = map.get(entries, "right") {{
+        string.find(s, 0, "right")
+    }} else {{
+        None
+    }}
+}}
+{}"#,
         source.replace("string.find(s, 0, \"right\")", "find_right(s)")
     );
     let find = hirsel_core_ir::Identity::plain(DefPath::from_full("std@1/string/find").unwrap());
-    let split = hirsel_core_ir::Identity::plain(DefPath::from_full("std@1/string/split_once").unwrap());
+    let split =
+        hirsel_core_ir::Identity::plain(DefPath::from_full("std@1/string/split_once").unwrap());
+    let first_lane =
+        hirsel_core_ir::Identity::plain(DefPath::from_full("core@1/map/first_lane").unwrap());
     let mut options = native_options(Backend::Llvm, &dir.path().join(name));
     options.optimize = true;
     options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
-    options.grant_mask = if source.contains("out: Stdout") { 1 << 4 } else { 0 };
+    options.grant_mask = if source.contains("out: Stdout") {
+        1 << 4
+    } else {
+        0
+    };
     let mut sides = Vec::new();
     // Two checks over separate image caches reach the same std roots: the
     // first build lowers their side into the shared parts cache, and the
     // second takes it from there.
     for cache in ["cache", "cache-b"] {
         let product = std_checked(dir.path(), name, &source, cache);
-        let code = crate::code_store::CodeStore::new(dir.path().join(name).join(format!("code-{cache}")));
+        let code =
+            crate::code_store::CodeStore::new(dir.path().join(name).join(format!("code-{cache}")));
         let reached = product.reachable(&entry, options.instance_limit).unwrap();
-        let publication =
-            product.publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024).unwrap();
+        assert!(
+            reached.instances.as_ref().unwrap().contains(&first_lane),
+            "the map probe reaches its plain helper"
+        );
+        let publication = product
+            .publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024)
+            .unwrap();
         let std = std_of(&options, &publication).expect("an optimised build's std");
         assert!(std.roots.contains(&split), "the entry's call uses the side");
-        assert!(!std.roots.contains(&find), "the helper's call stays in the program");
+        assert!(
+            !std.roots.contains(&find),
+            "the helper's call stays in the program"
+        );
+        assert!(
+            !std.roots.contains(&first_lane),
+            "the specialised probe keeps its plain helper"
+        );
         if cache == "cache" {
             assert!(std.lowered > 0, "a build that lowers the std counts what it lowered");
         } else {
@@ -553,6 +582,8 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             // image gone, it assembles over the side its build stored.
             let root = publication.root();
             let built = publication.assemble_with(&options, reached.counters, Some(&product), None).unwrap();
+            let run = Command::new(&built.executable).output().unwrap();
+            assert_eq!((run.status.code(), run.stdout), (Some(0), b"right".to_vec()));
             let first = std::fs::read(&built.executable).unwrap();
             drop(product);
             std::fs::remove_dir_all(dir.path().join(cache)).unwrap();

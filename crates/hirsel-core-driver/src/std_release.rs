@@ -10,8 +10,9 @@
 //! passes them, and the held roots with what they reach: those
 //! [`ALWAYS_IMPORT`] names, those that take code a caller can bind
 //! ([`callable_variants::takes_code`]), those that make an owned network wait,
-//! whose returnable variants a program builds, and the plain roots its own
-//! helper bodies call directly, so their call chains can optimise together.
+//! whose returnable variants a program builds, and the plain roots called
+//! by program helpers and specialised library instances, so their call
+//! chains can optimise together.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -176,11 +177,12 @@ fn program_side(
         .map(|(i, _)| i.clone())
         .collect();
     for (identity, unit) in units {
-        if identity != entry && library(&identity.definition) {
+        if plain(identity) {
             continue;
         }
-        // The entry can call the side directly. Keep library calls from its
-        // helpers and closures in the program, along with what they call.
+        // Specialised library instances already lower in the program unit.
+        // Keep their plain callees there too, as for program helpers and
+        // closures. The entry can still call the side directly.
         let first_helper = usize::from(identity == entry);
         for function in &unit.module.functions[first_helper..] {
             let Some(body) = &function.body else { continue };

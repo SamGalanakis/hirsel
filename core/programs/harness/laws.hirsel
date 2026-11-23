@@ -187,7 +187,7 @@ fn says_done(e: Option[harness.Entry]) -> bool { match e { Some(Assistant(a)) =>
 // re-bought, and the run ends Answered. begin's Dispatched row is durable
 // before the worker may send, because a fenced call is answered only after
 // its commit is durable (RUNNER-SPEC §12.1, runner.trigger_call). This case
-// stops the place; a std.sim.fs crash cut at the same boundary is open.
+// stops the place; law M1 cuts the image at this boundary and every other.
 // Oracle: the services' own counts (tool 1, model 2: one per round) and the
 // transcript and spend derived by hand from the script.
 pub fn law_once_tool_crash(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
@@ -834,4 +834,193 @@ pub fn law_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, t
 @test
 fn test_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), ()] waits {
     if law_parked_call_resumes_once(parent, clock, random, tasks) { Ok(()) } else { Error(()) }
+}
+
+
+// ---- the crash matrix ----
+
+// A tool that always answers, so the first life reaches every later boundary.
+fn answering_tools(take inbox: Receiver[ToolAsk]) -> () waits {
+    let mut ran = 0u64
+    while let Ok(take request) = channel.receive(inbox) {
+        match take request {
+            Run(_, take reply) => {
+                ran += 1u64
+                let _ = channel.send(reply, string.into_bytes("1"))
+            },
+            Ran(reply) => { let _ = channel.send(reply, ran) },
+        }
+    }
+}
+
+type Mount: send { fs: std.sim.fs.Fs, plan: std.sim.world.Plan, port: Served[DirOp], clock: Clock }
+
+fn mounted(take m: Mount) -> (std.sim.fs.Fs, std.sim.world.Plan) waits {
+    let Mount(fs: take image, plan: take scripted, port: take port, clock) = take m
+    let mut fs = take image
+    let mut plan = take scripted
+    std.sim.fs.serve(mut fs, mut plan, clock, take port)
+    (take fs, take plan)
+}
+
+// A port's room is held until the test run ends (docs/spec/core.md, Served
+// ports): four mounts a case at 64 KiB is about 54 MiB over 217 cases. The
+// store's page writes need more than 4 KiB of it.
+fn mount(tasks: Tasks, clock: Clock, take fs: std.sim.fs.Fs, take plan: std.sim.world.Plan) -> (Dir, Task[(std.sim.fs.Fs, std.sim.world.Plan)]) {
+    let (d, port) = provide.dir(bytes 65536u64)
+    let server = task.spawn(tasks, bytes 16777216u64, Mount(fs: take fs, plan: take plan, port: take port, clock: clock), mounted)
+    (d, take server)
+}
+
+fn unmount(take d: Dir, take server: Task[(std.sim.fs.Fs, std.sim.world.Plan)]) -> (std.sim.fs.Fs, std.sim.world.Plan) waits {
+    drop(take d)
+    result.unwrap(task.join(take server))
+}
+
+type Tally { users: u64, systems: u64, answers: u64, calls: u64, results: u64, returned: u64, doubted: u64, ordered: bool }
+
+fn tally(snap: store.Snapshot, h: harness.Handles, n: u64) -> Tally {
+    let mut t = Tally(users: 0u64, systems: 0u64, answers: 0u64, calls: 0u64, results: 0u64, returned: 0u64, doubted: 0u64, ordered: true)
+    for pos in 0u64 .. n {
+        match result.unwrap(store.get(snap, store.shape(h.entries), pos)) {
+            Some(User(_)) => {
+                t.users += 1u64
+                if pos != 0u64 { t.ordered = false }
+            },
+            Some(System(_)) => { t.systems += 1u64 },
+            Some(Assistant(a)) => {
+                t.answers += 1u64
+                t.calls += list.len(a.calls)
+            },
+            Some(ToolResult(id, outcome)) => {
+                t.results += 1u64
+                if id != "c1" || t.answers != 1u64 { t.ordered = false }
+                match outcome {
+                    Returned(_) => { t.returned += 1u64 },
+                    InDoubt => { t.doubted += 1u64 },
+                    _ => { t.ordered = false },
+                }
+            },
+            _ => { t.ordered = false },
+        }
+    }
+    t
+}
+
+type Cut: send = Reached(bool) | Beyond
+
+// A life that neither stops nor goes idle after its fault is stopped after
+// WATCH_MS, as an operator would; the cut that follows is the crash. In 92
+// of the 217 cases the runner needs this stop: an I/O error leaves the
+// place blocked instead of ending it (REPORT, friction F10).
+const WATCH_MS: u64 = 1000u64
+const MATRIX_IDLE_MS: u64 = 100u64
+type Watch: send { clock: Clock, stop: Sender[()], ended: Receiver[()] }
+fn watchdog(take w: Watch) -> bool waits {
+    let Watch(clock, stop: take stop, ended: take ended) = take w
+    for _ in 0u64 .. WATCH_MS / 50u64 {
+        if let Ok(_) = channel.try_receive(ended) { return false }
+        std.clock.sleep_ns(clock, 50000000u64)
+    }
+    let _ = channel.send(stop, ())
+    true
+}
+
+// Law M1 (astra crash matrix over every filesystem operation): the first
+// life fails its k-th filesystem operation with EIO and ends; the image is
+// then cut at a seeded point that keeps every synced write; a second life
+// reopens it and runs until idle. Oracle, derived by hand from the script
+// (two rounds, 10+5 tokens each, one Once `bump`, a Once model):
+// the tool runs at most once and a Returned result means it ran; the model
+// is asked at most once per round, and an ask with no durable answer is a
+// doubt that ends the run, never a second ask; known spend is 15 per
+// durable answer, nothing stays reserved, and a doubted ask leaves exactly
+// its 4096 reserve unresolved; the run finishes and the session is idle; an
+// Answered run has exactly user, system, call, result, "done".
+fn matrix_case(clock: Clock, random: Random, tasks: Tasks, net: Net, site: u64) -> Cut waits {
+    let (seed_dir, seed_server) = mount(tasks, clock, std.sim.fs.new(), std.sim.world.plan(0u64))
+    seed_session(seed_dir, clock, random, tasks)
+    let (seeded, _) = unmount(take seed_dir, take seed_server)
+    let mut faults = std.sim.world.plan(site)
+    std.sim.world.script(mut faults, site, Eio)
+    let (model, model_in): (Sender[ModelAsk], Receiver[ModelAsk]) = channel.new(4u64)
+    let (tool, tool_in): (Sender[ToolAsk], Receiver[ToolAsk]) = channel.new(4u64)
+    let models = task.spawn(tasks, bytes 65536u64, take model_in, model_service)
+    let tools = task.spawn(tasks, bytes 65536u64, take tool_in, answering_tools)
+    let services = Services(model: take model, tool: take tool)
+    let (first_dir, first_server) = mount(tasks, clock, take seeded, take faults)
+    let (first, stop_first, _) = launch(tasks, settings(first_dir, clock, random, tasks, net, copy_services(services), Some(MATRIX_IDLE_MS)))
+    let (ended_to, ended) : (Sender[()], Receiver[()]) = channel.new(1u64)
+    let dog = task.spawn(tasks, bytes 65536u64, Watch(clock: clock, stop: take stop_first, ended: take ended), watchdog)
+    let first_out = task.join(take first)
+    let _ = channel.send(ended_to, ())
+    let _ = result.unwrap(task.join(take dog))
+    // A Forced end would mean a client outlived the drain; there is none.
+    if let Ok(Ok(Forced(_))) = first_out { fail("crash matrix: the first life was forced") }
+    let (image, after) = unmount(take first_dir, take first_server)
+    let mut left = take after
+    if let Some(_) = std.sim.world.take_fault(mut left, site) {
+        let Services(model: take m, tool: take t) = take services
+        let _ = take m
+        let _ = take t
+        let _ = task.join(take models)
+        let _ = task.join(take tools)
+        return Beyond
+    }
+    let mut cut = take image
+    let mut cutting = std.sim.world.plan(site + 1u64)
+    std.sim.fs.crash(mut cut, mut cutting)
+    let (second_dir, second_server) = mount(tasks, clock, take cut, std.sim.world.plan(0u64))
+    let (second, _stop_second, _) = launch(tasks, settings(second_dir, clock, random, tasks, net, copy_services(services), Some(MATRIX_IDLE_MS)))
+    let second_ended = match task.join(take second) { Ok(Ok(Stopped(_))) => true, _ => false }
+    let asked = model_asked(services)
+    let ran = tool_ran(services)
+    let (finished_image, _) = unmount(take second_dir, take second_server)
+    let (check_dir, check_server) = mount(tasks, clock, take finished_image, std.sim.world.plan(0u64))
+    let db = result.unwrap(store.open(tasks, check_dir, clock, random, store.triggers.law_options()))
+    let snap = store.snapshot(db)
+    let h = result.unwrap(store.with_schema(db, code.describe(harness.handles)))
+    let session = option.unwrap(result.unwrap(store.get(snap, store.shape(h.session), 0u64)))
+    let run = option.unwrap(result.unwrap(store.get(snap, store.shape(h.runs), 0u64)))
+    let t = tally(snap, h, session.next_pos)
+    let (finished, done_ok, doubt) = match run.phase {
+        Finished(Answered) => (true, true, false),
+        Finished(Stopped(why)) => (true, false, why == "model call in doubt"),
+        _ => (false, false, false),
+    }
+    result.unwrap(store.close(take db))
+    let _ = unmount(take check_dir, take check_server)
+    let Services(model: take m, tool: take t2) = take services
+    let _ = take m
+    let _ = take t2
+    let _ = task.join(take models)
+    let _ = task.join(take tools)
+    let doubts = if doubt { 1u64 } else { 0u64 }
+    let once = ran <= 1u64 && t.results <= 1u64 && (t.returned == 0u64 || ran == 1u64)
+    let model_once = asked <= 2u64 && asked >= t.answers && asked <= t.answers + doubts
+    let spend = run.spend.known == 15u64 * t.answers && run.spend.reserved == 0u64 && run.spend.unresolved == 4096u64 * doubts
+    let idle = match session.active_run { None => true, Some(_) => false }
+    let shape = t.ordered && t.users == 1u64 && (!done_ok || (session.next_pos == 5u64 && t.answers == 2u64 && t.results == 1u64))
+    Reached(second_ended && finished && once && model_once && spend && idle && shape)
+}
+
+@test
+fn test_crash_matrix(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let mut site = 0u64
+    loop {
+        match matrix_case(clock, random, tasks, net, site) {
+            Beyond => break,
+            Reached(true) => (),
+            Reached(false) => {
+                let mut why = string.from("crash matrix: a law broke at filesystem operation ")
+                string.push_u64(mut why, site)
+                fail(take why)
+            },
+        }
+        site += 1u64
+    }
+    // The run takes 217 operations today; fewer than 20 means the fault
+    // plan no longer reaches the place's own writes.
+    if site < 20u64 { fail("crash matrix: the faults never reached the run's writes") }
+    Ok(())
 }

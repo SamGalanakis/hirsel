@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 
-from wire_process import stop_process
+from wire_process import accept_from, stop_process
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
             listener.settimeout(5)
             process = subprocess.Popen([str(args.probe.resolve())], stderr=subprocess.PIPE)
             try:
-                peer, _ = listener.accept()
+                peer = accept_from(listener, process.pid)
                 with peer:
                     peer.settimeout(5)
                     # EOF is output shutdown; the client still owns the read half.

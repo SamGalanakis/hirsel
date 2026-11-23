@@ -17,7 +17,7 @@ fn main() {
         .block_on(async {
             let listener = TcpListener::bind(("127.0.0.1", config.port)).await.unwrap();
             workload::announce(listener.local_addr().unwrap());
-            let (stream, _) = listener.accept().await.unwrap();
+            let stream = workload::accept_client(&listener).await;
             stream.set_nodelay(true).unwrap();
             let served = Rc::new(Cell::new(0));
             let count = served.clone();

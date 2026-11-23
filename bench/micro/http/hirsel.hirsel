@@ -1,7 +1,7 @@
 // B1 selects this entry in a source view of std.http so it measures the
 // production connection task with exactly one accepted socket.
 fn b1_handler(request: Request, scratch: Region, mut body: Responder, state: ()) -> Result[Outcome, HandlerError] {
-    let payload = b"Hello, world"
+    let payload: FrozenBytes = b"Hello, world"
     let mut reply = response_frozen(200, take payload, false)?
     content_type(mut reply, TextPlain)?
     Ok(Reply(take reply))
@@ -14,16 +14,27 @@ fn b1_emit(out: Stdout, prefix: String, value: u64) waits {
     result.unwrap(stdout.write(out, line))
 }
 
-pub fn b1_main(n: Net, c: Clock, out: Stdout) -> Result[(), Exit] waits {
+fn b1_accept(mut listener: Listener, err: Stderr) -> (Socket, Addr) waits {
+    loop {
+        let (socket, peer) = result.unwrap(host.accept(mut listener, Never))
+        if let V4(ip) = peer.ip {
+            if ip == 0x7f000002u32 { return (take socket, peer) }
+        }
+        let _ = take socket
+        result.unwrap(stderr.write(err, "skipped unexpected loopback connection\n"))
+    }
+}
+
+pub fn b1_main(n: Net, c: Clock, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
     let cfg = Config(ingress: list.new(), sockets_max: 1, http_max: 1, upgrades_max: 0, conns_max: 1, ip_sockets_max: 1, refuse_max: 0, refuse_ms: 1000, inbox_cap: 1, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 16384, body_max: 1048576, out_cap: 8192, handler_bytes: 262144, first_head_ms: 5000, idle_ms: 60000, head_ms: 10000, body_ms: 30000, handler_ms: 30000, write_ms: 30000, drain_ms: 2000, linger_ms: 2000, drain_max: 65536, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
     let addr = Addr(ip: V4(0x7f000001u32), port: 0)
     let (listener, bound_addr) = result.unwrap(host.listen(n, addr, 1))
     let port: u64 = int.widen(bound_addr.port)
     b1_emit(out, "LISTEN 127.0.0.1:", port)
     let mut accepting = take listener
-    let (socket, peer) = result.unwrap(host.accept(mut accepting, Never))
+    let (socket, peer) = b1_accept(mut accepting, err)
     let at = host.mono_ns(c)
-    let (tx, rx) = result.unwrap((channel.new(1) : Result[(Sender[ConnectionSignal], Receiver[ConnectionSignal]), Capacity]))
+    let (tx, rx): (Sender[ConnectionSignal], Receiver[ConnectionSignal]) = channel.new(1)
     let mut routes: router.Builder[()] = router.builder()
     result.unwrap(router.add(mut routes, "GET", "/", router.raw(b1_handler)))
     let routing = result.unwrap(router.build(take routes))

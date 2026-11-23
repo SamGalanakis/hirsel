@@ -10,15 +10,18 @@ type PlaceJob: send {
     random: Random,
     tasks: Tasks,
     listener: Listener,
-    ready: Sender[()]
+    ready: Sender[()],
+    err: Stderr
 }
 
 type CounterSource {
     listener: Listener,
     clock: Clock,
+    err: Stderr,
     table: store.Table[u64, u64],
     shape: store.Shape[u64, u64],
-    buffer: Bytes
+    buffer: Bytes,
+    pending: List[(ReadHalf, WriteHalf)]
 }
 
 fn put_counter(mut db: store.Db, table: store.Table[u64, u64], value: u64) waits {
@@ -42,10 +45,36 @@ fn get_counter(db: store.Db, shape: store.Shape[u64, u64]) -> u64 {
 }
 
 fn receive_counter(db: store.Db, mut source: CounterSource, wait: bool) -> Option[(Socket, u64)] waits {
-    let until = if wait { Never } else { At(source.clock, host.mono_ns(source.clock)) }
-    match host.accept(mut source.listener, until) {
-        Ok((take socket, _)) => Some((take socket, get_counter(db, source.shape) + 1)),
-        Error(_) => None
+    loop {
+        let (take reader, take writer) = match list.pop(mut source.pending) {
+            Some(take pair) => take pair,
+            None => {
+                let until = if wait { Never } else { At(source.clock, host.mono_ns(source.clock)) }
+                match host.accept(mut source.listener, until) {
+                    Ok((take socket, _)) => net.split(take socket),
+                    Error(_) => return None
+                }
+            }
+        }
+        let mut input = take reader
+        list.clear(mut source.buffer)
+        let now = host.mono_ns(source.clock)
+        let end = if wait { int.saturating_add(now, 5000000000u64) } else { now }
+        match host.recv_bounded(mut input, mut source.buffer, 1, At(source.clock, end)) {
+            Ok(1) if source.buffer[0] == 0xa3 => {
+                let socket = result.unwrap(net.join(take input, take writer))
+                return Some((take socket, get_counter(db, source.shape) + 1))
+            },
+            Error(TimedOut) if !wait => {
+                list.push(mut source.pending, (take input, take writer))
+                return None
+            },
+            _ => {
+                let _ = take input
+                let _ = take writer
+                result.unwrap(stderr.write(source.err, "skipped unexpected loopback connection\n"))
+            }
+        }
     }
 }
 
@@ -80,7 +109,7 @@ fn deliver_counter(mut source: CounterSource, take request: (Socket, u64), take 
 }
 
 fn place_writer(take job: PlaceJob) waits {
-    let PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take listener, ready: take ready) = take job
+    let PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take listener, ready: take ready, err: err) = take job
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, store.defaults()))
     let codec: std.codec.Codec[u64] = std.codec.of()
     let ticket = result.unwrap(store.create_table(mut db, store.spec("counter", std.codec.key_u64(), codec)))
@@ -88,7 +117,7 @@ fn place_writer(take job: PlaceJob) waits {
     let table = result.unwrap(store.table(mut db, "counter", std.codec.key_u64(), codec))
     let shape = store.shape(table)
     put_counter(mut db, table, 0)
-    let mut source = CounterSource(listener: take listener, clock: clock, table: table, shape: shape, buffer: list.with_capacity(8))
+    let mut source = CounterSource(listener: take listener, clock: clock, err: err, table: table, shape: shape, buffer: list.with_capacity(8), pending: list.with_capacity(1))
     result.unwrap(channel.send(ready, ()))
     let written = store.write_place(mut db, mut source, receive_counter, increment_counter, deliver_counter)
     let closed = store.close(take db)
@@ -104,6 +133,12 @@ fn place_increment(place: PlaceEndpoint, deadline: u64) -> Result[Option[Bytes],
     }
     let (reader, writer) = net.split(take socket)
     let mut input = take reader
+    let mut output = take writer
+    let hello = b"\xa3"
+    match host.send_pair(mut output, hello, b"", At(place.clock, deadline)) {
+        Ok(1) => {},
+        _ => return Ok(None)
+    }
     let mut payload: Bytes = list.with_capacity(8)
     while list.len(payload) < 8 {
         match host.recv_bounded(mut input, mut payload, 8, At(place.clock, deadline)) {
@@ -141,7 +176,6 @@ fn message_json(scratch: Region) -> Result[Bytes, std.http.ResponseError] {
     })
     let document = match take built {
         Ok(take b) => finish(take b),
-        Error(Capacity(c)) => return Error(Allocation(c)),
         Error(Overflow) => fail("message document exceeds its encoding"),
     }
     let mut body = string.new()
@@ -172,10 +206,10 @@ fn stored_counter(request: std.http.Request, scratch: Region, mut out: std.http.
     }
 }
 
-pub fn main(net: Net, clock: Clock, tasks: Tasks, out: Stdout, dir: Dir, random: Random) -> Result[(), Exit] waits {
+pub fn main(net: Net, clock: Clock, tasks: Tasks, out: Stdout, err: Stderr, dir: Dir, random: Random) -> Result[(), Exit] waits {
     let (place_listener, place_address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0), 128))
     let (ready, opened): (Sender[()], Receiver[()]) = channel.new(1)
-    let job = PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take place_listener, ready: take ready)
+    let job = PlaceJob(dir: dir, clock: clock, random: random, tasks: tasks, listener: take place_listener, ready: take ready, err: err)
     let mut place = task.spawn(tasks, bytes 805306368u64, take job, place_writer)
     result.unwrap(channel.receive(opened))
     let state = PlaceEndpoint(net: net, clock: clock, address: place_address)

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -56,11 +57,12 @@ def manifest_for(fixture, source, service=False):
         return base
     core, std = (item["package"] for item in base["packages"])
     store = {"name": "store", "version": "1"}
+    store_root = ROOT / "core/programs/store"
+    store_sources = tomllib.loads((store_root / "hirsel.toml").read_text())["sources"]
     base["packages"].extend([
         {"package": store, "dependencies": [core, std],
-         "sources": [{"file": str(ROOT / f"core/programs/store/{name}.hirsel"),
-                      "modules": [name], "signatures": False}
-                     for name in ("store", "runner", "ingress")]},
+         "sources": [{"file": str(store_root / file), "modules": [module], "signatures": False}
+                     for file, module in store_sources.items()]},
         {"package": {"name": "bench", "version": "1"}, "dependencies": [core, std, store],
          "sources": [{"file": str(fixture), "modules": ["service"], "signatures": False}]},
     ])
@@ -81,13 +83,14 @@ def native(tools, paths, output, entry, document, service=False):
         directory.mkdir()
         try:
             command += ["--dir", directory, "--limit", "1073741824",
-                        "--grant", "Tasks", "--grant", "Random",
+                        "--grant", "Tasks", "--grant", "Random", "--grant", "Stderr",
                         "--grant", "Net=Connect 127.0.0.1/32 1-65535;Listen 127.0.0.1/32 0-65535"]
             run(command, extra_env=private_homes)
         finally:
             directory.rmdir()
     else:
-        run([*command, "--debug-lines", "on", "--grant", "Net=Listen 127.0.0.1/32 0-65535"],
+        run([*command, "--debug-lines", "on", "--grant", "Stderr",
+             "--grant", "Net=Listen 127.0.0.1/32 0-65535"],
             extra_env=private_homes)
     return output
 

@@ -89,7 +89,8 @@ def exchange(name, command, perf, cpu, requests, warmup):
             os.close(ack_write)
         try:
             port = ready_line(process.stdout)
-            with socket.create_connection(("127.0.0.1", port), timeout=30) as client:
+            with socket.create_connection(("127.0.0.1", port), timeout=30,
+                                          source_address=("127.0.0.2", 0)) as client:
                 client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 with client.makefile("rb") as replies:
                     for _ in range(warmup):

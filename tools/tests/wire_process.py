@@ -1,6 +1,10 @@
 """Stop only a direct endpoint child started by these wire qualification scripts."""
 from pathlib import Path
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from loopback_peer import accept_from as accept_from
 
 
 def stop_process(process):

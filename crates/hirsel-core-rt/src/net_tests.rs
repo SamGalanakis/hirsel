@@ -431,10 +431,14 @@ fn net_inherited_listener_keeps_queued_connection() {
         old.wait().unwrap().success(),
         "old process failed to close its listener"
     );
-    let _queued = result
+    let queued = result
         .unwrap()
         .expect("old process never held the listener");
     let output = inherited_child(&listener, "inherited_accept")
+        .env(
+            "HIRSEL_TEST_CLIENT_PORT",
+            queued.local_addr().unwrap().port().to_string(),
+        )
         .output()
         .unwrap();
     assert!(
@@ -466,6 +470,29 @@ fn carrier(bytes: &mut [u8], len: usize) -> Buffer {
         capacity: bytes.len(),
     }
 }
+
+pub(crate) unsafe fn accept_from_port(
+    context: *mut Context,
+    listener: u64,
+    port: u16,
+    site: u64,
+) -> AddressOutcome {
+    loop {
+        // SAFETY: the context and listener are live throughout the fixture.
+        let accepted = unsafe { hirsel_core_host_accept(context, listener, 0, 0, 0, site) };
+        assert_eq!(accepted.error, IoError::OK);
+        if accepted.port == port {
+            return accepted;
+        }
+        eprintln!(
+            "skipped unexpected loopback connection from port {}",
+            accepted.port
+        );
+        // SAFETY: this fixture owns the just-accepted socket.
+        unsafe { hirsel_core_socket_drop(context, accepted.value) };
+    }
+}
+
 unsafe fn connected(context: *mut Context, n: u64, family: u8) -> (u64, u64, u64) {
     unsafe {
         let ip = if family == 0 { 0x7f000001 } else { 1 };
@@ -475,8 +502,12 @@ unsafe fn connected(context: *mut Context, n: u64, family: u8) -> (u64, u64, u64
         assert_ne!(l.port, 0);
         let c = hirsel_core_host_connect(context, n, family, 0, ip, l.port, 0, 0, 0, 2);
         assert_eq!(c.error, IoError::OK);
-        let a = hirsel_core_host_accept(context, l.value, 0, 0, 0, 3);
-        assert_eq!(a.error, IoError::OK);
+        let fd = (*(*context).host_files).sockets.fd(c.value);
+        let client_fd = std::os::fd::BorrowedFd::borrow_raw(fd)
+            .try_clone_to_owned()
+            .unwrap();
+        let client = std::net::TcpStream::from(client_fd);
+        let a = accept_from_port(context, l.value, client.local_addr().unwrap().port(), 3);
         assert_eq!((a.family, a.hi, a.lo), (family, 0, ip));
         (l.value, c.value, a.value)
     }
@@ -568,8 +599,11 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     std::io::stdout().flush().unwrap();
                     std::io::stdin().read_exact(&mut [0]).unwrap();
                 } else {
-                    let accepted = hirsel_core_host_accept(context, listener.value, 0, 0, 0, 2);
-                    assert_eq!(accepted.error, IoError::OK);
+                    let port = std::env::var("HIRSEL_TEST_CLIENT_PORT")
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    let accepted = accept_from_port(context, listener.value, port, 2);
                     let pair = hirsel_core_net_split(context, accepted.value, 3);
                     let mut buf = [0; 6];
                     let mut input = carrier(&mut buf, 0);
@@ -748,7 +782,9 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
             "partial_send" => {
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
                 let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-                let (mut peer, _) = listener.accept().unwrap();
+                let mut peer =
+                    crate::loopback::accept_from_address(&listener, socket.local_addr().unwrap())
+                        .unwrap();
                 socket.set_nonblocking(true).unwrap();
                 // Fixture-only send capacity forces a prefix without changing product defaults.
                 let size = 4096i32;
@@ -795,7 +831,9 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
             "reset_after_queued" => {
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
                 let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-                let (mut peer, _) = listener.accept().unwrap();
+                let mut peer =
+                    crate::loopback::accept_from_address(&listener, socket.local_addr().unwrap())
+                        .unwrap();
                 socket.set_nonblocking(true).unwrap();
                 let key = (*(*context).host_files)
                     .sockets
@@ -927,7 +965,9 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
             "directional_waiters" | "spurious_connect" => {
                 let listener = TcpListener::bind("127.0.0.1:0").unwrap();
                 let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-                let (mut peer, _) = listener.accept().unwrap();
+                let mut peer =
+                    crate::loopback::accept_from_address(&listener, socket.local_addr().unwrap())
+                        .unwrap();
                 socket.set_nonblocking(true).unwrap();
                 let key = (*(*context).host_files)
                     .sockets
@@ -1203,7 +1243,8 @@ unsafe fn scheduler_socket_law(context: *mut Context, cancel: bool, parallel: bo
     unsafe {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (peer, _) = listener.accept().unwrap();
+        let peer =
+            crate::loopback::accept_from_address(&listener, socket.local_addr().unwrap()).unwrap();
         socket.set_nonblocking(true).unwrap();
         let key = (*(*context).host_files)
             .sockets

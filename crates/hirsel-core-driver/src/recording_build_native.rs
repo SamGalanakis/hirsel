@@ -1245,7 +1245,12 @@ fn tape_http_replays_both_native_engines() {
             b"",
         ));
         drop(slow);
-        drop(connect(stop));
+        connect(stop).write_all(b"s").unwrap();
+        for line in output.lines() {
+            let line = line.unwrap();
+            assert_eq!(line, "skipped unexpected loopback stop connection");
+            eprintln!("{line}");
+        }
 
         let recorded = child.wait_with_output().unwrap();
         let stderr = String::from_utf8(recorded.stderr).unwrap();
@@ -1359,12 +1364,12 @@ fn cli_tls_replay(with_secret: bool) {
     let response = if with_secret { "accepted\n" } else { RESPONSE };
     let peer = std::thread::spawn(move || {
         if with_secret {
-            let (mut plain, _) = listener.accept().unwrap();
+            let mut plain = crate::loopback::accept_local(&listener).unwrap();
             plain.write_all(b"!").unwrap();
             let mut refused = Vec::new();
             plain.read_to_end(&mut refused).unwrap();
             assert!(refused.is_empty(), "plaintext reached plain TCP");
-            let (socket, _) = listener.accept().unwrap();
+            let socket = crate::loopback::accept_local(&listener).unwrap();
             let mut beta = StreamOwned::new(
                 ServerConnection::new(server(BETA, BETA_KEY, false)).unwrap(),
                 socket,
@@ -1372,7 +1377,7 @@ fn cli_tls_replay(with_secret: bool) {
             beta.read_to_end(&mut refused).unwrap();
             assert!(refused.is_empty(), "plaintext reached beta.test");
         }
-        let (socket, _) = listener.accept().unwrap();
+        let socket = crate::loopback::accept_local(&listener).unwrap();
         let mut stream = StreamOwned::new(
             ServerConnection::new(server(LEAF, KEY, !with_secret)).unwrap(),
             socket,
@@ -2301,7 +2306,7 @@ fn host_ready_wait_replays_exactly() {
     let record = product.build(&entry, &options).unwrap();
 
     let peer = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = crate::loopback::accept_local(&listener).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
         socket.write_all(b"hi").unwrap();
         let mut rest = Vec::new();
@@ -2761,7 +2766,7 @@ fn imds_script(rounds: Vec<ImdsRound>) -> (u16, std::thread::JoinHandle<()>) {
     let port = listener.local_addr().unwrap().port();
     let server = std::thread::spawn(move || {
         let accept = || {
-            let (mut socket, _) = listener.accept().unwrap();
+            let mut socket = crate::loopback::accept_local(&listener).unwrap();
             let mut request = Vec::new();
             let mut byte = [0];
             while !request.ends_with(b"\r\n\r\n") {
@@ -3229,7 +3234,7 @@ fn fake_sts(
         };
         let mut seen = Vec::new();
         for round in 0..versions.len() {
-            let (socket, _) = listener.accept().unwrap();
+            let socket = crate::loopback::accept_local(&listener).unwrap();
             let connection = ServerConnection::new(config.clone()).unwrap();
             let mut stream = StreamOwned::new(connection, socket);
             let mut head = Vec::new();
@@ -3553,7 +3558,7 @@ pub fn main(n: Net, password: Secret, out: Stdout) -> Result[(), Exit] waits {
     let record = product.build(&entry, &options).unwrap();
 
     let peer = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
+        let socket = crate::loopback::accept_local(&listener).unwrap();
         let mut peer = StreamOwned::new(ServerConnection::new(Arc::new(config)).unwrap(), socket);
         let mut proof = [0; 106];
         peer.read_exact(&mut proof).unwrap();
@@ -3893,7 +3898,7 @@ fn postgres_scripted_peer_laws() {
     fn cancel_race(listener: &TcpListener, config: &ServerConfig, original: &mut Peer) {
         // The new stream carries 16, (1234 << 16) | 5678, then exactly
         // the four-byte PID and four-byte key in BackendKeyData (protocol 3.0).
-        let (socket, _) = listener.accept().unwrap();
+        let socket = crate::loopback::accept_local(listener).unwrap();
         let mut tls = config.clone();
         tls.alpn_protocols = vec![b"postgresql".to_vec()];
         let mut cancel = StreamOwned::new(ServerConnection::new(Arc::new(tls)).unwrap(), socket);
@@ -3991,7 +3996,7 @@ fn postgres_scripted_peer_laws() {
     ];
     let peer = std::thread::spawn(move || {
         for name in cases {
-            let (mut socket, _) = listener.accept().unwrap();
+            let mut socket = crate::loopback::accept_local(&listener).unwrap();
             if matches!(name, "ssl-refused" | "ssl-extra") {
                 // SSLRequest has length 8 and request code (1234 << 16) | 5679.
                 let mut request = [0; 8];

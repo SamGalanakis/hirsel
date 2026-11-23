@@ -76,7 +76,7 @@ class Case:
                   file=sys.stderr, flush=True)
 
     def run(self, command, *, capture_output=False, stdout=None, stderr=None,
-            text=False, check=False, **options):
+            text=False, check=False, on_start=None, **options):
         if capture_output:
             stdout = stderr = subprocess.PIPE
         captured = {}
@@ -103,7 +103,12 @@ class Case:
                     worker = threading.Thread(target=self.collect, args=(reader, captured[name].extend))
                 worker.start()
                 readers.callback(worker.join)
-            result = subprocess.run(command, text=text, **options)
+            if on_start is None:
+                result = subprocess.run(command, text=text, **options)
+            else:
+                with subprocess.Popen(command, text=text, **options) as process:
+                    on_start(process.pid)
+                    result = subprocess.CompletedProcess(command, process.wait())
         for name, data in captured.items():
             setattr(result, name, io.TextIOWrapper(io.BytesIO(data)).read() if text else bytes(data))
         if check:

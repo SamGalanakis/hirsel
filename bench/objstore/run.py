@@ -15,6 +15,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tools'))
+from loopback_peer import accept_from
+
 BODY = 8 * 1024 * 1024
 PUT_START = b"PUT /object HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8388608\r\n\r\n\xa5"
 REACTORS = ("epoll", "io_uring")
@@ -144,6 +147,7 @@ def lock_timing(stack):
 def server(binary, cert, cpu, tls, measure):
     with subprocess.Popen(
         command("taskset", "-c", cpu, binary, "serve", "tls" if tls else "plain", cert, measure),
+        env=dict(os.environ, HIRSEL_OBJSTORE_PEER_ROOT=str(os.getpid())),
         stdout=subprocess.PIPE, text=True,
     ) as process:
         try:
@@ -220,42 +224,6 @@ def profile(args, work, results):
                     print(json.dumps(dict(reactor=reactor, method=method, run=repetition,
                                           requests=args.requests, bytes=BODY * args.requests,
                                           ns=ns, profile=str(path.resolve()))), file=results, flush=True)
-
-
-def owned_by(pid, peer):
-    """Whether the client end of the accepted loopback connection `peer` is a
-    socket held by process `pid`."""
-    remote, local = peer.getpeername(), peer.getsockname()
-    ends = [f"{struct.unpack('<I', socket.inet_aton(host))[0]:08X}:{port:04X}" for host, port in (remote, local)]
-    with open("/proc/net/tcp") as table:
-        inode = next((row[9] for row in map(str.split, table) if row[1:3] == ends), None)
-    if inode is None:
-        return False
-    target = f"socket:[{inode}]"
-    for fd in os.listdir(f"/proc/{pid}/fd"):
-        try:
-            if os.readlink(f"/proc/{pid}/fd/{fd}") == target:
-                return True
-        except FileNotFoundError:
-            pass
-    return False
-
-
-def accept_from(listener, pid):
-    """The next connection the process `pid` made. Any other local process may
-    connect to a fresh loopback listener (some agents probe every one they
-    see); such a connection is logged and closed, never read as the client's."""
-    while True:
-        peer, address = listener.accept()
-        if owned_by(pid, peer):
-            return peer
-        with peer:
-            peer.settimeout(0.1)
-            try:
-                head = peer.recv(80)
-            except OSError:
-                head = b""
-        print(f"skipped a connection from {address} not made by the client: {head!r}", file=sys.stderr, flush=True)
 
 
 def acknowledge_put(peer):

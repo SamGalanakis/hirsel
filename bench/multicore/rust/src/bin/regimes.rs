@@ -1,13 +1,14 @@
-use std::{env, sync::Arc, time::Instant};
+use std::{env, net::Ipv4Addr, sync::Arc, time::Instant};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket},
     sync::mpsc::{Receiver, Sender, channel},
     task::{JoinHandle, spawn},
     time::{Duration, sleep_until},
 };
 
 const LANES: u64 = 16;
+const LOAD_IP: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 
 #[inline(never)]
 fn kernel(mut x: u64, rounds: u64) -> u64 {
@@ -287,8 +288,12 @@ async fn socket_server(port: u16, connections: u64, count: u64, grain: u64) -> (
     let listener = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
     eprintln!("listening={}", listener.local_addr().unwrap().port());
     let mut jobs = Vec::new();
-    for _ in 0..connections {
-        let (mut socket, _) = listener.accept().await.unwrap();
+    while jobs.len() < connections as usize {
+        let (mut socket, address) = listener.accept().await.unwrap();
+        if address.ip() != LOAD_IP {
+            eprintln!("skipped unexpected loopback connection from {address}");
+            continue;
+        }
         socket.set_nodelay(true).unwrap();
         jobs.push(spawn(async move {
             let mut sum = 0u64;
@@ -308,7 +313,12 @@ async fn socket_load(port: u16, connections: u64, count: u64) -> (u64, u64) {
     // Connect before releasing the request loops so each socket can contend.
     let barrier = Arc::new(tokio::sync::Barrier::new(connections as usize + 1));
     for lane in 0..connections {
-        let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let connector = TcpSocket::new_v4().unwrap();
+        connector.bind((LOAD_IP, 0).into()).unwrap();
+        let mut socket = connector
+            .connect((Ipv4Addr::LOCALHOST, port).into())
+            .await
+            .unwrap();
         socket.set_nodelay(true).unwrap();
         let barrier = Arc::clone(&barrier);
         jobs.push(spawn(async move {

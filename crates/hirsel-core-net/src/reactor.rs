@@ -1568,7 +1568,8 @@ mod tests {
         use std::net::{TcpListener, TcpStream};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (peer, _) = listener.accept().unwrap();
+        let peer =
+            crate::loopback::accept_from_address(&listener, client.local_addr().unwrap()).unwrap();
         for (socket, option) in [(&client, libc::SO_SNDBUF), (&peer, libc::SO_RCVBUF)] {
             let size = 16384i32;
             // SAFETY: a live socket; an initialized option value.

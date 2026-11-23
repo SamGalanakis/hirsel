@@ -3,7 +3,9 @@
 import http.client
 import http.server
 from pathlib import Path
+import secrets
 import subprocess
+import sys
 import threading
 import time
 
@@ -12,9 +14,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main():
     observed = []
+    probe = secrets.token_hex(16)
 
     class Listener(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.headers.get('X-Hirsel-Test-Peer') != probe:
+                print(f'skipped unexpected loopback connection from {self.client_address}',
+                      file=sys.stderr, flush=True)
+                self.close_connection = True
+                return
             observed.append(self.headers.get_all('X-Forwarded-For'))
             self.send_response(200)
             self.end_headers()
@@ -39,7 +47,8 @@ def main():
                 for _ in range(100):
                     try:
                         connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=1)
-                        connection.request('GET', '/hirsel', headers={'X-Forwarded-For': '9.9.9.9'})
+                        connection.request('GET', '/hirsel', headers={
+                            'X-Forwarded-For': '9.9.9.9', 'X-Hirsel-Test-Peer': probe})
                         response = connection.getresponse()
                         response.read()
                         assert response.status == 200

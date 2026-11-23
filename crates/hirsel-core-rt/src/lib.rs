@@ -2,6 +2,10 @@
 //! Logical capacity refusal is recoverable; host exhaustion is a run stop.
 
 #[cfg(test)]
+#[path = "../../../tools/test_support/loopback.rs"]
+#[allow(dead_code)]
+mod loopback;
+#[cfg(test)]
 hirsel_guard::install!();
 
 pub mod abi;

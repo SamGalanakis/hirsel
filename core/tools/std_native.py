@@ -8,7 +8,7 @@ import argparse
 import base64
 import contextlib
 import dataclasses
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -29,6 +29,9 @@ import tomllib
 from case_progress import Case
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools'))
+from loopback_peer import accept_from
+
 LOOPBACK_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 0-65535', 'Tls *.test 0-65535 System')
 
 
@@ -377,6 +380,7 @@ def https_fixture(root):
     config.set_alpn_protocols(['http/1.1'])
     raw = os.urandom(32)
     token = raw.hex().encode()
+    client = Future()
 
     def exchange(stream, request, response):
         remaining = memoryview(request)
@@ -389,14 +393,14 @@ def https_fixture(root):
 
     def refuse(listener):
         # TL11: a refused body secret sends nothing after the handshake.
-        connection, _ = listener.accept()
+        connection = accept_from(listener, client.result(), descendants=True)
         with connection, config.wrap_socket(connection, server_side=True) as stream:
             with contextlib.suppress(ssl.SSLError, OSError):
                 if stream.recv(1):
                     raise ValueError('a refused request sent bytes')
 
     def serve(listener):
-        connection, _ = listener.accept()
+        connection = accept_from(listener, client.result(), descendants=True)
         # The second connection must not wait for this one's teardown.
         refused = ThreadPoolExecutor(max_workers=1)
         second = refused.submit(refuse, listener)
@@ -427,8 +431,9 @@ def https_fixture(root):
         listener.listen()
         peer = executor.submit(serve, listener)
         try:
-            yield listener.getsockname()[1], (certs / 'ca.pem').resolve(), raw, token, peer
+            yield listener.getsockname()[1], (certs / 'ca.pem').resolve(), raw, token, peer, client
         finally:
+            client.cancel()
             listener.shutdown(socket.SHUT_RDWR)
 
 
@@ -870,7 +875,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                             raise ValueError('TypeScript differential must supply exactly one corpus')
                 https = '(https)' in case.call
                 if https:
-                    port, roots, raw, token, peer = active.enter_context(https_fixture(root))
+                    port, roots, raw, token, peer, client = active.enter_context(https_fixture(root))
                 simulated = simulated_network_case(case, evaluating)
                 if simulated:
                     source_rows, entry = simulated_case(root, case, source, adapted, scratch)
@@ -1011,7 +1016,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])
-                result = progress.run(command, cwd=host, capture_output=True, env=environment)
+                result = progress.run(command, cwd=host, capture_output=True, env=environment,
+                                      on_start=client.set_result if https else None)
                 if https:
                     row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
                 else:

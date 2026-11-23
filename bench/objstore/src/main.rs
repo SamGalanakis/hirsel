@@ -1,3 +1,6 @@
+#[path = "../../../tools/test_support/loopback.rs"]
+#[allow(dead_code)]
+mod loopback;
 mod socket;
 mod tls;
 
@@ -139,9 +142,16 @@ fn serve_connection(
 
 fn serve(listener: TcpListener, config: Option<Arc<ServerConfig>>, verify: bool) -> AnyResult<()> {
     let mut buf = Buffers::new();
+    let client = std::env::var("HIRSEL_OBJSTORE_PEER_ROOT")
+        .ok()
+        .map(|pid| pid.parse())
+        .transpose()?;
     println!("{}", listener.local_addr()?.port());
-    for stream in listener.incoming() {
-        let mut stream = stream?;
+    loop {
+        let mut stream = match client {
+            Some(pid) => loopback::accept_from_process(&listener, pid)?,
+            None => listener.accept()?.0,
+        };
         stream.set_nodelay(true)?;
         let result = if let Some(ref config) = config {
             let mut session = ServerConnection::new(config.clone())?;
@@ -157,7 +167,6 @@ fn serve(listener: TcpListener, config: Option<Arc<ServerConfig>>, verify: bool)
             eprintln!("server connection: {e}");
         }
     }
-    Ok(())
 }
 
 fn request(

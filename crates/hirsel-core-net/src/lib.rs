@@ -1,5 +1,9 @@
 //! NET-6 authority and NET-7 ownership, shared by both execution engines.
 #[cfg(test)]
+#[path = "../../../tools/test_support/loopback.rs"]
+#[allow(dead_code)]
+mod loopback;
+#[cfg(test)]
 hirsel_guard::install!();
 
 use std::net::IpAddr;

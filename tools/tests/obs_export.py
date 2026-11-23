@@ -14,6 +14,9 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools'))
+from loopback_peer import log_stray, owned_by
+
 SPEC = importlib.util.spec_from_file_location('exporter', ROOT / 'tools/obs_export.py')
 exporter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(exporter)
@@ -112,7 +115,13 @@ class Collector:
                 self.wfile.write(payload)
             def log_message(self, *args):
                 pass
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        class Server(ThreadingHTTPServer):
+            def verify_request(self, request, address):
+                if owned_by(os.getpid(), request, descendants=True):
+                    return True
+                log_stray(address)
+                return False
+        self.server = Server(('127.0.0.1', 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.endpoint = f'http://127.0.0.1:{self.server.server_port}'
         self.error = None

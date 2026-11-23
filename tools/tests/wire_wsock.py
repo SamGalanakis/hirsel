@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-from wire_process import stop_process
+from wire_process import accept_from, stop_process
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -332,7 +332,7 @@ def main():
             listener.settimeout(8)
             client = subprocess.Popen([str(args.client.resolve())], stderr=subprocess.PIPE)
             try:
-                peer, _ = listener.accept()
+                peer = accept_from(listener, client.pid)
                 with peer:
                     peer.settimeout(8)
                     request = head(peer)

@@ -15,7 +15,7 @@ fn main() {
         .block_on(async {
             let listener = TcpListener::bind(("127.0.0.1", config.port)).await.unwrap();
             workload::announce(listener.local_addr().unwrap());
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut stream = workload::accept_client(&listener).await;
             stream.set_nodelay(true).unwrap();
             let mut buf = Vec::with_capacity(4096);
             for _ in 0..config.requests {

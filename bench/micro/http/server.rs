@@ -6,7 +6,14 @@ use std::net::TcpListener;
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:18476").unwrap();
-    let (mut stream, _) = listener.accept().unwrap();
+    // The load process binds its client socket to 127.0.0.2.
+    let mut stream = loop {
+        let (socket, address) = listener.accept().unwrap();
+        if address.ip() == std::net::Ipv4Addr::new(127, 0, 0, 2) {
+            break socket;
+        }
+        eprintln!("skipped unexpected loopback connection from {address}");
+    };
     stream.set_nodelay(true).unwrap();
     let mut pending = Vec::new();
     let mut buffer = [0u8; 16384];

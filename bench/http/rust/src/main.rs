@@ -48,7 +48,14 @@ fn increment(db: &mut Connection) -> rusqlite::Result<i64> {
 
 async fn serve_store(listener: TcpListener, mut db: Connection) -> io::Result<()> {
     loop {
-        let (mut stream, _) = listener.accept().await?;
+        let (mut stream, address) = listener.accept().await?;
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(5), stream.read_u8()).await,
+            Ok(Ok(0xa3))
+        ) {
+            eprintln!("skipped unexpected loopback connection from {address}");
+            continue;
+        }
         match increment(&mut db) {
             Ok(value) => {
                 let _ = tokio::time::timeout(
@@ -67,6 +74,7 @@ async fn store(
 ) -> Result<impl axum::response::IntoResponse, StatusCode> {
     let value = tokio::time::timeout(Duration::from_secs(5), async {
         let mut stream = TcpStream::connect(address).await?;
+        stream.write_u8(0xa3).await?;
         stream.read_u64_le().await
     })
     .await

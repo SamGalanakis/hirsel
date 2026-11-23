@@ -50,6 +50,13 @@ func serveStore(listener net.Listener, db *sql.DB) {
 		if err != nil {
 			log.Fatal(err)
 		}
+		var hello [1]byte
+		client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(client, hello[:]); err != nil || hello[0] != 0xa3 {
+			log.Printf("skipped unexpected loopback connection from %s", client.RemoteAddr())
+			client.Close()
+			continue
+		}
 		value, err := increment(db)
 		if err != nil {
 			log.Println(err)
@@ -70,6 +77,12 @@ func storeValue(address string) (uint64, error) {
 		return 0, err
 	}
 	defer conn.Close()
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		return 0, err
+	}
+	if _, err := conn.Write([]byte{0xa3}); err != nil {
+		return 0, err
+	}
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		return 0, err
 	}

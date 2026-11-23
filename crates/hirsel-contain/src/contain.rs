@@ -12,7 +12,7 @@
 use super::*;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -193,6 +193,7 @@ impl Group {
         mode: Mode,
         mark: &str,
         hold: bool,
+        peer: Option<SocketAddr>,
     ) -> (Contained, BufReader<File>) {
         let export = (mode == Mode::Prepare).then_some(self.export.as_path());
         let authority = Authority::of(mode, &self.bindings, export).unwrap();
@@ -217,8 +218,8 @@ impl Group {
             fds.push((3, OwnedFd::from(self.listener.try_clone().unwrap())));
         }
         let mut env = self.env(mark, hold);
-        if mode == Mode::Serving {
-            env.push(("HC_ACCEPT".into(), "1".into()));
+        if let Some(peer) = peer {
+            env.push(("HC_ACCEPT".into(), peer.to_string().into()));
         }
         let program = std::env::current_exe().unwrap();
         let contained = host
@@ -314,6 +315,13 @@ fn name_of(path: &Path, group: &Group) -> &'static str {
 fn normalize(lines: Vec<String>, group: &Group) -> Vec<String> {
     let mut out: Vec<String> = lines
         .into_iter()
+        .filter(|line| {
+            if line.starts_with(crate::loopback::STRAY_PREFIX) {
+                eprintln!("{line}");
+                return false;
+            }
+            true
+        })
         .map(|line| {
             let parts: Vec<&str> = line.splitn(4, ' ').collect();
             match parts.as_slice() {
@@ -348,9 +356,11 @@ fn contained_all_children() {
         .expect("contain laws require a host that supports containment");
     for mode in Mode::ALL {
         let mark = format!("all-{}", mode.tag());
-        let (contained, mut out) = group.launch(&host, mode, &mark, true);
-        if mode == Mode::Serving {
-            let mut stream = TcpStream::connect(group.listener.local_addr().unwrap()).unwrap();
+        let client = (mode == Mode::Serving)
+            .then(|| TcpStream::connect(group.listener.local_addr().unwrap()).unwrap());
+        let peer = client.as_ref().map(|client| client.local_addr().unwrap());
+        let (contained, mut out) = group.launch(&host, mode, &mark, true, peer);
+        if let Some(mut stream) = client {
             let mut hi = [0; 2];
             std::io::Read::read_exact(&mut stream, &mut hi).unwrap();
             assert_eq!(&hi, b"hi");
@@ -429,7 +439,7 @@ fn child_mode_authority() {
         }
     }
     // A prepare child writes only its export directory and holds no listener.
-    let (contained, mut out) = group.launch(&host, Mode::Prepare, "authority-prepare", false);
+    let (contained, mut out) = group.launch(&host, Mode::Prepare, "authority-prepare", false, None);
     let (contained, lines) = report(contained, &mut out);
     assert_eq!(normalize(lines, &group), expected(Mode::Prepare, &group));
     assert!(matches!(contained.wait().unwrap(), End::Exited(s) if s.success()));
@@ -443,7 +453,7 @@ fn contained_launcher_restart() {
         let group = Group::new();
         let host = Host::open(&spec.join("root"), &spec.join("state"))
             .expect("contain laws require a host that supports containment");
-        let (contained, mut out) = group.launch(&host, Mode::Install, "restart", true);
+        let (contained, mut out) = group.launch(&host, Mode::Install, "restart", true, None);
         let (contained, _) = report(contained, &mut out);
         println!("launched {}", contained.cgroup().display());
         std::io::stdout().flush().unwrap();
@@ -619,9 +629,9 @@ fn contained_helper() {
         }
     }
     respawn("daemon", Stdio::null());
-    if var("HC_ACCEPT") == "1" {
+    if let Ok(peer) = var("HC_ACCEPT").parse::<SocketAddr>() {
         let listener = unsafe { TcpListener::from_raw_fd(3) };
-        let (mut stream, _) = listener.accept().unwrap();
+        let mut stream = crate::loopback::accept_from_address(&listener, peer).unwrap();
         stream.write_all(b"hi").unwrap();
         writeln!(out, "main accept ok").unwrap();
     }

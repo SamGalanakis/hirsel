@@ -263,7 +263,7 @@ fn serve<T: Send + 'static>(
 ) -> (u16, thread::JoinHandle<T>) {
     let port = listener.local_addr().unwrap().port();
     let peer = thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
+        let socket = crate::loopback::accept_local(&listener).unwrap();
         let server = ServerConnection::new(Arc::new(config)).unwrap();
         handle(StreamOwned::new(server, socket))
     });
@@ -284,7 +284,7 @@ fn resumption(run: &mut Run) {
     let config = Arc::new(certificate_config(&[PROTOCOL]));
     let peer = thread::spawn(move || {
         let kinds = std::array::from_fn::<_, 2, _>(|_| {
-            let (socket, _) = listener.accept().unwrap();
+            let socket = crate::loopback::accept_local(&listener).unwrap();
             let mut server =
                 StreamOwned::new(ServerConnection::new(config.clone()).unwrap(), socket);
             server_handshake(&mut server).unwrap();
@@ -297,7 +297,7 @@ fn resumption(run: &mut Run) {
             &[PROTOCOL],
         );
         // A replacement server has no corresponding session and must present its leaf.
-        let (socket, _) = listener.accept().unwrap();
+        let socket = crate::loopback::accept_local(&listener).unwrap();
         let mut server = StreamOwned::new(ServerConnection::new(Arc::new(wrong)).unwrap(), socket);
         assert!(server_handshake(&mut server).is_err());
         kinds
@@ -405,7 +405,7 @@ fn before_issue(run: &mut Run) {
     for name in [b"a.test".as_slice(), b"xa.test"] {
         run.net = original;
         let key = run.connect(port);
-        let (tcp, _) = listener.accept().unwrap();
+        let tcp = crate::loopback::accept_local(&listener).unwrap();
         let before = fds();
         run.net = pinned;
         validate_no_issue(run, key, name, Some(CA), &[], DENIED);
@@ -418,7 +418,7 @@ fn before_issue(run: &mut Run) {
     ] {
         run.net = original;
         let key = run.connect(port);
-        let _tcp = listener.accept().unwrap();
+        let _tcp = crate::loopback::accept_local(&listener).unwrap();
         run.net = pinned;
         validate_no_issue(run, key, name, roots, &[], DENIED);
     }
@@ -429,7 +429,7 @@ fn before_issue(run: &mut Run) {
     ));
     run.net = original;
     let key = run.connect(port);
-    let _tcp = listener.accept().unwrap();
+    let _tcp = crate::loopback::accept_local(&listener).unwrap();
     run.net = wrong_port;
     validate_no_issue(run, key, b"y.x.a.test", Some(CA), &[], DENIED);
     run.net = original;
@@ -437,9 +437,15 @@ fn before_issue(run: &mut Run) {
         hirsel_core_host_listen(&raw mut *run.context, original, 0, 0, 0x7f000001, 0, 8, 1)
     };
     assert_eq!(socket.error, IoError::OK);
-    let _peer = TcpStream::connect((Ipv4Addr::LOCALHOST, socket.port)).unwrap();
-    let accepted =
-        unsafe { hirsel_core_host_accept(&raw mut *run.context, socket.value, 0, 0, 0, 1) };
+    let peer = TcpStream::connect((Ipv4Addr::LOCALHOST, socket.port)).unwrap();
+    let accepted = unsafe {
+        crate::net_tests::accept_from_port(
+            &raw mut *run.context,
+            socket.value,
+            peer.local_addr().unwrap().port(),
+            1,
+        )
+    };
     assert_eq!(accepted.error, IoError::OK);
     validate_no_issue(run, accepted.value, b"alpha.test", Some(CA), &[], DENIED);
     run.release(socket.value);
@@ -449,7 +455,7 @@ fn before_issue(run: &mut Run) {
         b"-----BEGIN CERTIFICATE-----\n!!\n-----END CERTIFICATE-----",
     ] {
         let key = run.connect(port);
-        let _tcp = listener.accept().unwrap();
+        let _tcp = crate::loopback::accept_local(&listener).unwrap();
         validate_no_issue(
             run,
             key,
@@ -466,7 +472,7 @@ fn before_issue(run: &mut Run) {
         vec![b"h2".as_slice(), b"h2"],
     ] {
         let key = run.connect(port);
-        let _tcp = listener.accept().unwrap();
+        let _tcp = crate::loopback::accept_local(&listener).unwrap();
         validate_no_issue(run, key, b"alpha.test", Some(CA), &alpn, tls_failure(2, 0));
     }
 }
@@ -686,7 +692,7 @@ fn release_on_exit(run: &mut Run) {
     let port = listener.local_addr().unwrap().port();
     let before = fds();
     let key = run.connect(port);
-    let (peer, _) = listener.accept().unwrap();
+    let peer = crate::loopback::accept_local(&listener).unwrap();
     let at = run.now() + 2_000_000;
     let timed = unsafe {
         upgrade(
@@ -706,7 +712,7 @@ fn release_on_exit(run: &mut Run) {
     assert_eq!(fds(), before);
 
     let key = run.connect(port);
-    let (peer, _) = listener.accept().unwrap();
+    let peer = crate::loopback::accept_local(&listener).unwrap();
     let mut scenario = Cancel {
         net: run.net,
         key,
@@ -1249,7 +1255,7 @@ fn starttls_loopback_laws() {
         let listener = listener();
         let port = listener.local_addr().unwrap().port();
         let peer = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
+            let mut socket = crate::loopback::accept_local(&listener).unwrap();
             let mut request = [0; 8];
             socket.read_exact(&mut request).unwrap();
             assert_eq!(request, REQUEST);
@@ -1535,7 +1541,7 @@ fn scram_checks(run: &mut Run) {
 
     let listener = listener();
     let socket = run.connect(listener.local_addr().unwrap().port());
-    let (mut peer, _) = listener.accept().unwrap();
+    let mut peer = crate::loopback::accept_local(&listener).unwrap();
     let halves = unsafe { hirsel_core_net_split(&raw mut *run.context, socket, 1) };
     assert_eq!(
         run.scram_send(halves.written, secret, CLIENT_FIRST, SERVER_FIRST)

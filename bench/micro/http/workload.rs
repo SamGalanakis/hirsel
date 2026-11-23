@@ -29,3 +29,13 @@ pub fn announce(address: std::net::SocketAddr) {
     println!("LISTEN {address}");
     std::io::stdout().flush().unwrap();
 }
+
+pub async fn accept_client(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+    loop {
+        let (socket, address) = listener.accept().await.unwrap();
+        if address.ip() == std::net::Ipv4Addr::new(127, 0, 0, 2) {
+            return socket;
+        }
+        eprintln!("skipped unexpected loopback connection from {address}");
+    }
+}

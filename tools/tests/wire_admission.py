@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 import time
 import traceback
 
-from wire_process import stop_process
+from wire_process import accept_from, stop_process
 from wire_wsock import GUID, REQUEST, connect, frame, head, read_frame, wait_ready
 
 
@@ -379,7 +379,7 @@ def cli_call_fingerprint_mismatch():
         listener.settimeout(120)
         process = hirsel_call(f'ws://127.0.0.1:{listener.getsockname()[1]}/hirsel', 'shape', '--arg', '1')
         try:
-            s, _ = listener.accept()
+            s = accept_from(listener, process.pid, descendants=True)
             with s:
                 s.settimeout(30)
                 key = next(line.split(b':', 1)[1].strip() for line in head(s).split(b'\r\n')

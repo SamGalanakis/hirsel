@@ -17,6 +17,10 @@ mod image_unit;
 mod inspect;
 pub mod installation;
 pub(crate) mod launcher;
+#[cfg(test)]
+#[path = "../../../tools/test_support/loopback.rs"]
+#[allow(dead_code)]
+mod loopback;
 mod operator;
 mod operator_cli;
 mod product;

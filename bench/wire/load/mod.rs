@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until};
@@ -507,6 +507,19 @@ async fn collect(mut events: mpsc::Receiver<Event>) -> Result<Value> {
     )
 }
 
+async fn accept_echo_client(
+    listener: TcpListener,
+    expected: std::net::SocketAddr,
+) -> std::io::Result<TcpStream> {
+    loop {
+        let (socket, address) = listener.accept().await?;
+        if address == expected {
+            return Ok(socket);
+        }
+        eprintln!("skipped unexpected loopback connection from {address}");
+    }
+}
+
 /// WebSocket echo includes framing, sockets, scheduling and this clock. It excludes
 /// the WAL and broadcast, giving the generator's loopback timing floor.
 pub async fn echo(samples: usize) -> Result<Value> {
@@ -515,8 +528,11 @@ pub async fn echo(samples: usize) -> Result<Value> {
     }
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
+    let client = TcpStream::connect(addr).await?;
+    let expected = client.local_addr()?;
+    client.set_nodelay(true)?;
     let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await?;
+        let socket = accept_echo_client(listener, expected).await?;
         socket.set_nodelay(true)?;
         let mut ws =
             tokio_tungstenite::accept_async_with_config(socket, Some(crate::websocket_config()))
@@ -530,15 +546,12 @@ pub async fn echo(samples: usize) -> Result<Value> {
         }
         Ok::<_, crate::Error>(())
     });
-    let (mut ws, _) = tokio_tungstenite::connect_async_with_config(
+    let (mut ws, _) = tokio_tungstenite::client_async_with_config(
         format!("ws://{addr}/echo"),
+        client,
         Some(crate::websocket_config()),
-        true,
     )
     .await?;
-    if let tokio_tungstenite::MaybeTlsStream::Plain(socket) = ws.get_ref() {
-        socket.set_nodelay(true)?;
-    }
     let payload = codec::encode(&Frame::Call(0, 1, 0, 30_000, 0u32.to_le_bytes().to_vec()));
     let start = Instant::now();
     let cpu = cpu_seconds()?;
@@ -569,8 +582,10 @@ mod tests {
     async fn idle_socket_answers_ping_and_reports_close() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
+        let client = TcpStream::connect(address).await?;
+        let expected = client.local_addr()?;
         let peer = tokio::spawn(async move {
-            let (tcp, _) = listener.accept().await?;
+            let tcp = accept_echo_client(listener, expected).await?;
             let mut socket = tokio_tungstenite::accept_async(tcp).await?;
             let payload = vec![1, 2, 3];
             socket.send(Message::Ping(payload.clone().into())).await?;
@@ -579,7 +594,8 @@ mod tests {
             socket.close(None).await?;
             Ok::<(), crate::Error>(())
         });
-        let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}")).await?;
+        let (socket, _) =
+            tokio_tungstenite::client_async(format!("ws://{address}"), client).await?;
         let ended = tokio::time::timeout(Duration::from_secs(2), hold_idle(socket)).await?;
         peer.await??;
         assert!(ended.starts_with("idle socket closed"));

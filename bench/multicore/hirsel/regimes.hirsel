@@ -469,10 +469,16 @@ fn sockets(tasks: Tasks, net: Net, err: Stderr, port: u16, connections: u64, cou
     result.unwrap(stderr.write(err, line))
     let mut input = take listener
     let mut jobs: List[Task[u64]] = list.new()
-    for _ in 0 .. connections {
-        let (take socket, _) = result.unwrap(host.accept(mut input, Never))
-        let job = Connection(socket: take socket, count: count, grain: grain)
-        list.push(mut jobs, result.unwrap(task.spawn_unit(tasks, bytes TASK_BYTES, take job, serve)))
+    while list.len(jobs) < connections {
+        let (take socket, peer) = result.unwrap(host.accept(mut input, Never))
+        let expected = match peer.ip { V4(ip) => ip == 0x7f000002u32, _ => false }
+        if expected {
+            let job = Connection(socket: take socket, count: count, grain: grain)
+            list.push(mut jobs, result.unwrap(task.spawn_unit(tasks, bytes TASK_BYTES, take job, serve)))
+        } else {
+            let _ = take socket
+            result.unwrap(stderr.write(err, "skipped unexpected loopback connection\n"))
+        }
     }
     let mut sum = 0u64
     while let Some(take h) = list.pop(mut jobs) {

@@ -6,14 +6,26 @@ fn reply(req: std.http.Request, scratch: Region, mut out: std.http.Responder, st
 type Stop: send {
     clock: Clock,
     listener: Listener,
-    send: Sender[u64]
+    send: Sender[u64],
+    diagnostics: Stdout
 }
 
 fn stop_server(take stop: Stop) waits {
-    let Stop(clock: c, listener: take control, send: take send) = take stop
+    let Stop(clock: c, listener: take control, send: take send, diagnostics: diagnostics) = take stop
     let end = int.saturating_add(host.mono_ns(c), 15000000000u64)
     let mut listener = take control
-    let _ = host.accept(mut listener, At(c, end))
+    let until = At(c, end)
+    let mut hello: Bytes = list.with_capacity(1)
+    while let Ok((take socket, _)) = host.accept(mut listener, until) {
+        let (take input, _) = net.split(take socket)
+        let mut reader = take input
+        list.clear(mut hello)
+        if let Ok(1) = host.recv_bounded(mut reader, mut hello, 1, until) {
+            if hello == b"s" { break }
+        }
+        let _ = take reader
+        let _ = stdout.write(diagnostics, "skipped unexpected loopback stop connection\n")
+    }
     let at = int.saturating_add(host.mono_ns(c), 500000000u64)
     let _ = channel.send(send, at)
 }
@@ -58,7 +70,7 @@ pub fn main(n: Net, c: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] wai
     let routes = result.unwrap(std.router.build(take builder))
     let cfg = std.http.Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
     let (send, receive): (Sender[u64], Receiver[u64]) = channel.new(1)
-    let stopper = task.spawn(tasks, bytes 4096, Stop(clock: c, listener: take control, send: take send), stop_server)
+    let stopper = task.spawn(tasks, bytes 4096, Stop(clock: c, listener: take control, send: take send, diagnostics: out), stop_server)
     let mut line = string.new()
     string.push_u64(mut line, int.widen(addr.port))
     string.push_char(mut line, ' ')

@@ -41,6 +41,10 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitStatus;
 
 #[cfg(test)]
+#[path = "../../../tools/test_support/loopback.rs"]
+#[allow(dead_code)]
+mod loopback;
+#[cfg(test)]
 hirsel_guard::install!();
 
 /// A child's mode: a row of launch.md "Child modes".

@@ -17,13 +17,17 @@ import shlex
 import socketserver
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from concurrent.futures import Future
 from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'tools'))
+from loopback_peer import log_stray, owned_by
 
 SHIM = r"""
 #define _GNU_SOURCE
@@ -212,9 +216,14 @@ class StoreNoSync(unittest.TestCase):
             recipe_linker.chmod(0o755)
             env = dict(os.environ, XDG_CACHE_HOME=str(root / "cache"))
 
-            def cli(*args):
-                return subprocess.run([self.compiler, *args], cwd=work, env=env,
-                                      capture_output=True, text=True)
+            def cli(*args, on_start=None):
+                command = [self.compiler, *args]
+                with subprocess.Popen(command, cwd=work, env=env, text=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                    if on_start is not None:
+                        on_start(process.pid)
+                    out, err = process.communicate()
+                    return subprocess.CompletedProcess(command, process.returncode, out, err)
 
             with self.subTest(command="build --recipe"):
                 app = work / "published"
@@ -243,11 +252,20 @@ class StoreNoSync(unittest.TestCase):
         # The recording gets its exit status from the peer. The tape observer
         # counts calls to replay's refuse-all provider.
         received = []
+        client = Future()
 
         class Peer(socketserver.BaseRequestHandler):
             def handle(self):
                 self.request.sendall(b"\x2a")
                 received.append(self.client_address)
+
+        class Server(socketserver.TCPServer):
+            def verify_request(self, request, address):
+                pid = client.result()
+                if pid is not None and owned_by(pid, request, descendants=True):
+                    return True
+                log_stray(address)
+                return False
 
         observer = root / "provider.o"
         subprocess.run([cc, "-c", ROOT / "crates/hirsel-core-driver/src/tape_tls_observe.c",
@@ -263,7 +281,7 @@ class StoreNoSync(unittest.TestCase):
         tape = root / "run.tape"
         common = [app, "--libraries", ROOT / "core", "--backend", "cranelift",
                   "--cc", linker, "--runtime", recording]
-        with socketserver.TCPServer(("127.0.0.1", 0), Peer) as server:
+        with Server(("127.0.0.1", 0), Peer) as server:
             port = server.server_address[1]
             (app / "main.hirsel").write_text(f"""pub fn main(n: Net, out: Stdout) -> Result[(), Exit] waits {{
     let peer = Addr(ip: V4(2130706433u32), port: {port}u16)
@@ -286,8 +304,10 @@ class StoreNoSync(unittest.TestCase):
                 recorded = cli("run", *common, "--store", root / "record-store",
                                "-o", root / "record-program", "--record", tape,
                                "--grant", f"Net=Connect 127.0.0.1/32 {port}-{port}",
-                               "--grant", "Stdout")
+                               "--grant", "Stdout", on_start=client.set_result)
             finally:
+                if not client.done():
+                    client.set_result(None)
                 server.shutdown()
                 serve.join()
         # `hirsel run` reports a nonzero status (docs/building.md).

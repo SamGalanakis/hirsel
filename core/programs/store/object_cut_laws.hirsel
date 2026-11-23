@@ -113,7 +113,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     }
     let recovered = history_paged_capture(mut source, held.head, 1048576)?
     let tip = view recovered.state.tips[0]
-    let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: share_roots(tip.roots))
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: tip.head, roots: share_roots(tip.roots), watermark: stamp_after(recovered.next_node)?)
     if get(snap, shape(rows), 7)? != Some(value) {
         fail("pack objects created by the cut lost the imported row")
     }

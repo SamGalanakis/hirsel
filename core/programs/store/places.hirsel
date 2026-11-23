@@ -1,4 +1,4 @@
-// Module places (package store): a directory of prelinked places by name (RUNNER-SPEC v2.21 §13).
+// Module places (package store): a directory of prelinked places by name (RUNNER-SPEC v2.30 §13).
 // One task, the directory, owns every name's state. Every start and every stop of a place
 // goes through runner.operate: a place's task runs operate, and the directory only sends
 // on its stop channel and waits for its last message.
@@ -11,8 +11,10 @@ pub opaque type Factory: send { start: own[send] fn(take Launch) -> Result[Start
 
 pub type Listed: send { name: String, factory: Factory, backing: runner.Backing, selection: runner.Selection }
 
+// idle_ms None: the directory never unloads a place; a place unloads only by its own
+// idle stop (§14.4). max_names bounds the listed names, the initial and the added ones.
 pub type DirectoryConfig: send {
-    idle_ms: u64, max_places: u64, place_bytes: u64,
+    idle_ms: Option[u64], max_places: u64, max_names: u64, place_bytes: u64,
     tasks: Tasks, clock: Clock, random: Random, net: Net,
     watch: Option[Sender[Change]],
 }
@@ -23,8 +25,10 @@ pub type Limit: send = Count(u64) | Reserve(runner.Room)
 pub type Refused: send = Unknown | Full(Limit) | Start(runner.StartError) | Stopping
 pub type CloseRefused: send = Unknown | NotLoaded | Leased | Stopping
 pub type DirectoryError: send = Missing(String) | Duplicate(String) | Full(Capacity)
+pub type AddRefused: send = Duplicate | Full(u64) | Stopping
+pub type RemoveRefused: send = Unknown | Loaded | Stopping
 
-pub opaque type Directory { to: Sender[DirIn], actor: Task[List[Unloaded]], ticker: Task[()] }
+pub opaque type Directory { to: Sender[DirIn], actor: Task[List[Unloaded]], ticker: Option[Task[()]] }
 pub opaque type Opener: send { to: Sender[DirIn] }
 // A lease pins its instance: the directory never unloads a place while a lease on it lives.
 pub opaque type Lease: send { status: Latest[runner.Status], pin: Arc[Pin] }
@@ -43,7 +47,9 @@ type Launch: send {
 }
 type Started { task: Task[()], charge: u64 }
 
-type DirIn: send = Open(String, Sender[Result[Lease, Refused]]) | Close(String, Sender[Result[Unloaded, CloseRefused]]) | Up(u64) | Down(u64, Result[runner.Ended, runner.StartError]) | Tick | Shutdown
+type DirIn: send = Open(String, Sender[Result[Lease, Refused]]) | Close(String, Sender[Result[Unloaded, CloseRefused]])
+    | Add(Listed, Sender[Result[(), AddRefused]]) | Remove(String, Sender[Result[(), RemoveRefused]])
+    | Up(u64) | Down(u64, Result[runner.Ended, runner.StartError]) | Tick | Shutdown
 
 type Pin: shareable + send { slot: u64 }
 
@@ -54,13 +60,15 @@ type Closers = List[Sender[Result[Unloaded, CloseRefused]]]
 // Running: the instance is Ready; the time it was first seen unleased, if it is.
 // Closing: the instance drains; these opens start a fresh instance after it ends.
 type State = Absent | Starting(Live, Waiters) | Running(Live, Option[u64]) | Closing(Live, Waiters, Closers)
-type Slot { name: String, factory: Factory, backing: runner.Backing, selection: runner.Selection, volatile: bool, state: State }
+// A removed name leaves its slot unlisted, so the slot numbers live place tasks report under
+// never shift; an add reuses an unlisted slot first.
+type Slot { name: String, factory: Factory, backing: runner.Backing, selection: runner.Selection, volatile: bool, listed: bool, state: State }
 // What the directory task starts from; it builds its slots, which hold task handles, itself.
-type Seed: send { listed: List[Listed], inbox: Receiver[DirIn], to: Sender[DirIn], idle_ms: u64, max_places: u64, place_bytes: u64,
+type Seed: send { listed: List[Listed], inbox: Receiver[DirIn], to: Sender[DirIn], idle_ms: Option[u64], max_places: u64, max_names: u64, place_bytes: u64,
     tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]] }
 
 type Actor {
-    slots: List[Slot], inbox: Receiver[DirIn], to: Sender[DirIn], idle_ms: u64, max_places: u64, place_bytes: u64,
+    slots: List[Slot], inbox: Receiver[DirIn], to: Sender[DirIn], idle_ms: Option[u64], max_places: u64, max_names: u64, place_bytes: u64,
     tasks: Tasks, clock: Clock, random: Random, net: Net, watch: Option[Sender[Change]],
     used: u64, live: u64, stopping: bool, unloaded: List[Unloaded],
 }
@@ -136,8 +144,9 @@ fn copy_backing(backing: runner.Backing) -> runner.Backing {
 }
 
 pub fn directory(take places: List[Listed], take config: DirectoryConfig) -> Result[Directory, DirectoryError] {
-    if config.idle_ms == 0u64 { return Error(Missing("idle_ms")) }
+    if config.idle_ms == Some(0u64) { return Error(Missing("idle_ms")) }
     if config.max_places == 0u64 { return Error(Missing("max_places")) }
+    if config.max_names == 0u64 || list.len(places) > config.max_names { return Error(Missing("max_names")) }
     if config.place_bytes == 0u64 { return Error(Missing("place_bytes")) }
     let count = list.len(places)
     for i in 0u64 .. count {
@@ -148,16 +157,21 @@ pub fn directory(take places: List[Listed], take config: DirectoryConfig) -> Res
             }
         }
     }
-    let DirectoryConfig(idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net,
-        watch: take watch) = take config
+    let DirectoryConfig(idle_ms: idle_ms, max_places: max_places, max_names: max_names, place_bytes: place_bytes, tasks: tasks, clock: clock,
+        random: random, net: net, watch: take watch) = take config
     let (to, inbox): (Sender[DirIn], Receiver[DirIn]) = channel.new(64u64)
-    let seed = Seed(listed: take places, inbox: take inbox, to: channel.sender(to), idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
-    let own = int.saturating_add(DIRECTORY_BYTES, int.saturating_mul(count, DIRECTORY_SLOT_BYTES))
+    let seed = Seed(listed: take places, inbox: take inbox, to: channel.sender(to), idle_ms: idle_ms, max_places: max_places, max_names: max_names,
+        place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net, watch: take watch)
+    let own = int.saturating_add(DIRECTORY_BYTES, int.saturating_mul(max_names, DIRECTORY_SLOT_BYTES))
     let running = task.spawn(tasks, bytes int.saturating_add(place_bytes, own), take seed, run_directory)
-    let every = if idle_ms < 2u64 { 1u64 } else { idle_ms / 2u64 }
-    let ticking = Ticker(to: channel.sender(to), clock: clock, every_ms: every)
-    let ticker = task.spawn(tasks, bytes 4096u64, take ticking, tick)
+    let ticker = match idle_ms {
+        Some(ms) => {
+            let every = if ms < 2u64 { 1u64 } else { ms / 2u64 }
+            let ticking = Ticker(to: channel.sender(to), clock: clock, every_ms: every)
+            Some(task.spawn(tasks, bytes 4096u64, take ticking, tick))
+        },
+        None => None,
+    }
     Ok(Directory(to: take to, actor: take running, ticker: take ticker))
 }
 
@@ -179,6 +193,21 @@ pub fn open(o: Opener, name: String) -> Result[Lease, Refused] waits {
     match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
 }
 
+// Lists one more name. A listed name, even an unloaded one, is a duplicate.
+pub fn add(o: Opener, take l: Listed) -> Result[(), AddRefused] waits {
+    let (reply, answer): (Sender[Result[(), AddRefused]], Receiver[Result[(), AddRefused]]) = channel.new(1u64)
+    if let Error(_) = channel.send(o.to, Add(take l, take reply)) { return Error(Stopping) }
+    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
+}
+
+// Unlists a name with no instance; a loaded one must be closed first.
+pub fn remove(o: Opener, name: String) -> Result[(), RemoveRefused] waits {
+    let owned = string.from(name)
+    let (reply, answer): (Sender[Result[(), RemoveRefused]], Receiver[Result[(), RemoveRefused]]) = channel.new(1u64)
+    if let Error(_) = channel.send(o.to, Remove(take owned, take reply)) { return Error(Stopping) }
+    match channel.receive(answer) { Ok(take answered) => take answered, Error(_) => Error(Stopping) }
+}
+
 pub fn close(o: Opener, name: String) -> Result[Unloaded, CloseRefused] waits {
     let owned = string.from(name)
     let (reply, answer): (Sender[Result[Unloaded, CloseRefused]], Receiver[Result[Unloaded, CloseRefused]]) = channel.new(1u64)
@@ -191,13 +220,13 @@ pub fn stop(take d: Directory) -> List[Unloaded] waits {
     let Directory(to: take to, actor: take actor, ticker: take ticker) = take d
     let _ = channel.send(to, Shutdown)
     let ended = match task.join(take actor) { Ok(take done) => take done, Error(_) => no_unloaded() }
-    let _ = task.cancel_join(take ticker)
+    if let Some(take t) = take ticker { let _ = task.cancel_join(take t) }
     take ended
 }
 
 fn find(slots: List[Slot], name: String) -> Option[u64] {
     for i in 0u64 .. list.len(slots) {
-        if slots[i].name == name { return Some(i) }
+        if slots[i].listed && slots[i].name == name { return Some(i) }
     }
     None
 }
@@ -274,18 +303,18 @@ fn begin_close(take live: Live) -> Live {
 }
 
 fn run_directory(take seed: Seed) -> List[Unloaded] waits {
-    let Seed(listed: take listed, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
-        tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take seed
+    let Seed(listed: take listed, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, max_names: max_names,
+        place_bytes: place_bytes, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take seed
     let mut slots: List[Slot] = list.with_capacity(list.len(listed))
     let mut left = take listed
     while let Some(take entry) = list.pop(mut left) {
         let Listed(name: take name, factory: take factory, backing: take backing, selection: selection) = take entry
         let changes = volatile(backing)
-        let slot = Slot(name: take name, factory: take factory, backing: take backing, selection: selection, volatile: changes, state: Absent)
+        let slot = Slot(name: take name, factory: take factory, backing: take backing, selection: selection, volatile: changes, listed: true, state: Absent)
         list.push(mut slots, take slot)
     }
     list.reverse(mut slots)
-    let mut a = Actor(slots: take slots, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, place_bytes: place_bytes,
+    let mut a = Actor(slots: take slots, inbox: take inbox, to: take to, idle_ms: idle_ms, max_places: max_places, max_names: max_names, place_bytes: place_bytes,
         tasks: tasks, clock: clock, random: random, net: net, watch: take watch,
         used: 0u64, live: 0u64, stopping: false, unloaded: no_unloaded())
     loop {
@@ -294,6 +323,8 @@ fn run_directory(take seed: Seed) -> List[Unloaded] waits {
         match take message {
             Open(take name, take reply) => on_open(mut a, name, take reply),
             Close(take name, take reply) => on_close(mut a, name, take reply),
+            Add(take l, take reply) => on_add(mut a, take l, take reply),
+            Remove(take name, take reply) => on_remove(mut a, name, take reply),
             Up(index) => on_up(mut a, index),
             Down(index, take ended) => ended_place(mut a, index, take ended),
             Tick => if !a.stopping { idle_sweep(mut a) },
@@ -323,6 +354,36 @@ fn on_open(mut a: Actor, name: String, take reply: Sender[Result[Lease, Refused]
         },
     }
 }
+
+fn on_add(mut a: Actor, take l: Listed, take reply: Sender[Result[(), AddRefused]]) {
+    if a.stopping { let _ = channel.try_send(reply, Error(Stopping)); return }
+    if let Some(_) = find(a.slots, l.name) { let _ = channel.try_send(reply, Error(Duplicate)); return }
+    let mut free: Option[u64] = None
+    let mut names = 0u64
+    for i in 0u64 .. list.len(a.slots) {
+        if a.slots[i].listed { names += 1u64 } else if none(free) { free = Some(i) }
+    }
+    if names >= a.max_names { let _ = channel.try_send(reply, Error(Full(a.max_names))); return }
+    let Listed(name: take name, factory: take factory, backing: take backing, selection: selection) = take l
+    let changes = volatile(backing)
+    let slot = Slot(name: take name, factory: take factory, backing: take backing, selection: selection, volatile: changes, listed: true, state: Absent)
+    match free {
+        Some(i) => { a.slots[i] = take slot },
+        None => list.push(mut a.slots, take slot),
+    }
+    let _ = channel.try_send(reply, Ok(()))
+}
+
+fn on_remove(mut a: Actor, name: String, take reply: Sender[Result[(), RemoveRefused]]) {
+    if a.stopping { let _ = channel.try_send(reply, Error(Stopping)); return }
+    let Some(index) = find(a.slots, name) else { let _ = channel.try_send(reply, Error(Unknown)); return }
+    let absent = match a.slots[index].state { Absent => true, _ => false }
+    if !absent { let _ = channel.try_send(reply, Error(Loaded)); return }
+    a.slots[index].listed = false
+    let _ = channel.try_send(reply, Ok(()))
+}
+
+fn none[T](o: Option[T]) -> bool { match o { None => true, Some(_) => false } }
 
 fn on_close(mut a: Actor, name: String, take reply: Sender[Result[Unloaded, CloseRefused]]) {
     if a.stopping { let _ = channel.try_send(reply, Error(Stopping)); return }
@@ -390,6 +451,7 @@ fn on_shutdown(mut a: Actor) {
 // A place unloads only after it has been seen unleased for idle_ms; a volatile place never
 // does (§13.3).
 fn idle_sweep(mut a: Actor) {
+    let Some(idle_ms) = a.idle_ms else { return }
     let now = host.mono_ns(a.clock) / 1000000u64
     for index in 0u64 .. list.len(a.slots) {
         if a.slots[index].volatile { continue }
@@ -401,7 +463,7 @@ fn idle_sweep(mut a: Actor) {
                 } else {
                     match since {
                         None => { a.slots[index].state = Running(take held, Some(now)) },
-                        Some(first) => if now - first >= a.idle_ms {
+                        Some(first) => if now - first >= idle_ms {
                             a.slots[index].state = Closing(begin_close(take held), no_waiters(), no_closers())
                         } else {
                             a.slots[index].state = Running(take held, Some(first))

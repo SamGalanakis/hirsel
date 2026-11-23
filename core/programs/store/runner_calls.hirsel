@@ -2685,7 +2685,7 @@ fn start_directory(parent: Dir, make: fn(take places.Supplied) -> Result[runner.
     let mut listed: List[places.Listed] = list.new()
     list.push(mut listed, places.Listed(name: string.from("a"), factory: result.unwrap(places.place_factory(make)),
         backing: Disk(dir, disk_options()), selection: Current(0u64)))
-    let config = places.DirectoryConfig(idle_ms: idle_ms, max_places: 1u64, place_bytes: DIRECTORY_BUDGET, tasks: tasks, clock: clock, random: random, net: net,
+    let config = places.DirectoryConfig(idle_ms: Some(idle_ms), max_places: 1u64, max_names: 1u64, place_bytes: DIRECTORY_BUDGET, tasks: tasks, clock: clock, random: random, net: net,
         watch: Some(take watch))
     let directory = match places.directory(take listed, take config) { Ok(take made) => take made, Error(_) => fail("directory: refused a valid configuration") }
     let opener = places.opener(directory)

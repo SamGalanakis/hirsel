@@ -87,13 +87,13 @@ impl Memo {
 }
 
 /// The units a publication took from its memos: each one's memo key and memo.
-type Hits = BTreeMap<Identity, (ContentHash, Memo)>;
+type Hits = BTreeMap<Identity, (ContentHash, Arc<Memo>)>;
 
 /// A store's unit index for one entry: each unit memo by its key.
 #[derive(Default, PartialEq, Serialize, Deserialize)]
 struct UnitIndex {
     schema: u32,
-    units: BTreeMap<ContentHash, Memo>,
+    units: BTreeMap<ContentHash, Arc<Memo>>,
 }
 const UNIT_INDEX_SCHEMA: u32 = 1;
 
@@ -320,7 +320,7 @@ impl CheckProduct {
                             .path(ObjectKind::Annex, memo.annex.0)
                             .try_exists()?
                     {
-                        memos.insert(identity.clone(), (key, memo.clone()));
+                        memos.insert(identity.clone(), (key, Arc::clone(memo)));
                         continue;
                     }
                     Some(key)
@@ -1457,18 +1457,37 @@ pub(super) fn bind_annexes(
             bound.insert(identity.clone(), Bound::of(&unit.annex, added));
         }
     }
+    if memos.is_empty() {
+        return Ok((sources, bound));
+    }
+    // Bind memo coordinates by their file and ordinal. Looking up a
+    // synthetic DefPath for every coordinate would allocate it again.
+    let files: HashMap<_, _> = sources
+        .files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| {
+            (
+                file.path.as_str(),
+                (index as u32, &sources.points[&file.path]),
+            )
+        })
+        .collect();
     for (identity, (_, memo)) in memos {
         let symbol = hirsel_core_ir::symbol(identity.digest());
         for &(index, point) in &memo.anchored {
             let (file, line, column) = &memo.points[point as usize];
-            let binding = sources.items[&site_item(&Site {
-                file: file.clone(),
-                line: *line,
-                column: *column,
-            })];
-            sources
-                .items
-                .insert(unit_item(&symbol, ItemId(index)), binding);
+            let (file, points) = files[file.as_str()];
+            let file_offset = points
+                .binary_search(&(*line, *column))
+                .expect("the unit's points were added to the source map");
+            sources.items.insert(
+                unit_item(&symbol, ItemId(index)),
+                ItemSource {
+                    file,
+                    file_offset: file_offset as u32,
+                },
+            );
         }
     }
     Ok((sources, bound))
@@ -1912,14 +1931,14 @@ impl Publication {
                             let object = |object: ObjectRef| (object.hash, object.len);
                             kept.insert(
                                 memo,
-                                Memo {
+                                Arc::new(Memo {
                                     body: object(unit.code.body),
                                     annex: object(unit.code.annex),
                                     builtins: unit.builtins.clone(),
                                     points: bound.points,
                                     anchored: bound.anchored,
                                     object: (emitter, object_key),
-                                },
+                                }),
                             );
                         }
                     }
@@ -1948,13 +1967,15 @@ impl Publication {
                                     .map(Cow::Owned),
                             },
                         )?);
-                        kept.insert(
-                            *memo_key,
-                            Memo {
+                        let memo = if memo.object.0 == emitter {
+                            Arc::clone(memo)
+                        } else {
+                            Arc::new(Memo {
                                 object: (emitter, object_key),
-                                ..memo.clone()
-                            },
-                        );
+                                ..(**memo).clone()
+                            })
+                        };
+                        kept.insert(*memo_key, memo);
                     }
                 }
             }

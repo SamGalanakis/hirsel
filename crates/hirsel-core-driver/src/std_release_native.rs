@@ -355,6 +355,93 @@ fn std_checked(dir: &Path, project: &str, source: &str, cache: &str) -> Arc<Chec
     product
 }
 
+#[test]
+#[ignore = "explicit native integration target"]
+fn idle_websocket_readers_return_their_stacks() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("std@1/tests/websocket_upgrade/idle_reader_stacks").unwrap();
+    let mut request =
+        CheckRequest::libraries(&root.join("core"), &dir.path().join("check")).unwrap();
+    let std = request
+        .inputs
+        .packages
+        .iter_mut()
+        .find(|p| p.package == package("std"))
+        .unwrap();
+    std.sources.push(hirsel_core_resolve::ModuleSource {
+        file: root.join("core/std/tests/websocket_upgrade.hirsel"),
+        modules: vec!["tests".into(), "websocket_upgrade".into()],
+        signatures: false,
+        foreign: false,
+        captured: None,
+    });
+    request.entry = Some(entry.clone());
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+
+    let probe = dir.path().join("reader-backing.c");
+    let object = dir.path().join("reader-backing.o");
+    std::fs::write(
+        &probe,
+        r#"
+#include "hirsel_core_rt_host.h"
+#include <stdio.h>
+
+typedef struct { size_t readers, stacks, frames; } ReadyWaitBacking;
+extern ReadyWaitBacking hirsel_core_test_ready_wait_backing(void);
+extern HirselCoreHostOutcome __real_hirsel_core_host_io(
+    HirselCoreContext *, uint8_t, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t);
+
+HirselCoreHostOutcome __wrap_hirsel_core_host_io(
+    HirselCoreContext *ctx, uint8_t op, uint64_t handle, HirselCoreBuffer *buffer,
+    uint8_t mode, uint64_t site) {
+    ReadyWaitBacking backing = hirsel_core_test_ready_wait_backing();
+    dprintf(1, "%zu readers, %zu stacks, %zu frames\n",
+            backing.readers, backing.stacks, backing.frames);
+    return __real_hirsel_core_host_io(ctx, op, handle, buffer, mode, site);
+}
+"#,
+    )
+    .unwrap();
+    let mut options = native_options(Backend::Llvm, dir.path());
+    command(
+        Command::new(options.link.driver())
+            .args(["-c", "-fPIC", "-I"])
+            .arg(root.join("crates/hirsel-core-rt/include"))
+            .arg(probe)
+            .arg("-o")
+            .arg(&object),
+    )
+    .unwrap();
+    options.link = Link::Driver(appending_driver(
+        dir.path(),
+        "cc",
+        &format!("'{}' -Wl,--wrap=hirsel_core_host_io", object.display()),
+    ));
+    options.runtime = root.join(std::env::var_os("HIRSEL_CORE_RT_SCRIPTED_ARCHIVE").unwrap());
+    options.optimize = true;
+    options.instance_limit = DEFAULT_INSTANCE_LIMIT;
+    options.root_limit = 16 << 20;
+    options.grant_mask = ["Stdout", "Tasks"]
+        .into_iter()
+        .fold(0, |mask, kind| mask | 1 << grant_kind(kind).unwrap());
+    let built = product.build(&entry, &options).unwrap();
+    let run = Command::new(built.executable).output().unwrap();
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap(),
+        "64 readers, 0 stacks, 64 frames\nidle\n"
+    );
+}
+
 fn std_of(
     product: &CheckProduct,
     options: &NativeOptions,

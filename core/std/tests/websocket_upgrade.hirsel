@@ -213,15 +213,17 @@ type ServedReader: send {
     c: Clock
 }
 
-// Upgrades a served socket from request_bytes() and reads one event: true
-// when it is the binary message "hi".
-fn served_reader(take a: ServedReader) -> bool waits {
+fn served_upgraded(take a: ServedReader) -> wsock.Upgraded waits {
     let ServedReader(n: take n, c: c) = take a
     let config = wsock.defaults()
     let pool = result.unwrap(wsock.pending(config))
     let slot = option.unwrap(result.unwrap(wsock.acquire(pool)))
     let socket = result.unwrap(host.connect(n, Addr(ip: V4(2130706433), port: 80), Never))
-    let upgraded = result.unwrap(wsock.server(take socket, take slot, V4(2130706433), list.new(), config, c, host.mono_ns(c)))
+    result.unwrap(wsock.server(take socket, take slot, V4(2130706433), list.new(), config, c, host.mono_ns(c)))
+}
+
+fn served_reader(take a: ServedReader) -> bool waits {
+    let upgraded = served_upgraded(take a)
     let wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease) = take upgraded
     let mut r = take input
     let got = match wsock.read(mut r, Never) {
@@ -278,11 +280,14 @@ fn served_ready(mut s: Served[NetOp], r: NetReply) -> bool waits {
     let Some(take call) = provide.next(mut s) else {
         return false
     }
-    let op = match provide.net_op(call) {
+    matches_ready(call) && answered(mut s, take call, r)
+}
+
+fn matches_ready(call: Call[NetOp]) -> bool {
+    match provide.net_op(call) {
         Ready(socket) => socket == 8,
         _ => false
     }
-    op && answered(mut s, take call, r)
 }
 
 // Takes the next call: true when it is Recv(8) with an 8192-byte loan, and
@@ -351,4 +356,58 @@ fn stale_readiness_waits_again(tasks: Tasks) -> bool waits {
     let read = result.unwrap(task.join(take child))
     let _ = take hand
     upgraded && stale && fresh && drained && read
+}
+
+type IdleSession {
+    port: Served[NetOp],
+    ready: Call[NetOp],
+    reader: Task[bool],
+    writer: wsock.Writer
+}
+
+fn refill_reader(take input: wsock.Reader) -> bool waits {
+    let mut r = take input
+    match wsock.refill(mut r, Never) {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+// The native stack law intercepts the write after all 64 readers have
+// issued Ready and before any of those calls receive a reply.
+pub fn idle_reader_stacks(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (c, hand) = provide.clock(0, 0)
+    let mut sessions: List[IdleSession] = list.with_capacity(64)
+    for _ in 0u64 .. 64u64 {
+        let (n, served) = provide.net(bytes 256)
+        let mut port = take served
+        let upgrading = task.spawn(tasks, bytes 65536, ServedReader(n: n, c: c), served_upgraded)
+        if !served_upgrade(mut port) {
+            fail("WebSocket upgrade failed")
+        }
+        let upgraded = result.unwrap(task.join(take upgrading))
+        let wsock.Upgraded(reader: take input, writer: take writer, source: _, timers: _, pending: take lease) = take upgraded
+        wsock.hello_accepted(take lease)
+        let reader = task.spawn(tasks, bytes 65536, take input, refill_reader)
+        let Some(take ready) = provide.next(mut port) else {
+            fail("reader did not wait for readiness")
+        }
+        if !matches_ready(ready) {
+            fail("reader issued a call other than Ready")
+        }
+        list.push(mut sessions, IdleSession(port: take port, ready: take ready, reader: take reader, writer: take writer))
+    }
+    result.unwrap(stdout.write(out, "idle\n"));
+    while let Some(IdleSession(port: take served, ready: take ready, reader: take reader, writer: take writer)) = list.pop(mut sessions) {
+        let mut port = take served
+        if !answered(mut port, take ready, Done) || !served_recv(mut port, b"\x82\x82\x00\x00\x00\x00hi", Count(8)) {
+            fail("could not deliver the frame")
+        }
+        let _ = take writer
+        if !served_drain(mut port) || !result.unwrap(task.join(take reader)) {
+            fail("idle reader did not resume")
+        }
+    }
+    let _ = take hand
+    Ok(())
 }

@@ -1339,6 +1339,46 @@ pub(crate) unsafe fn task_waits_for_provider(task: *const Task) -> bool {
     unsafe { (*task).state == State::Provider }
 }
 
+#[cfg(feature = "testing")]
+#[repr(C)]
+pub struct ReadyWaitBacking {
+    readers: usize,
+    stacks: usize,
+    frames: usize,
+}
+
+/// Inspect the mounted stacks and frame records of readers parked in
+/// recv_ready. The native fixture calls this from its serial scheduler.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_test_ready_wait_backing() -> ReadyWaitBacking {
+    let current = CURRENT.get();
+    // SAFETY: CURRENT pins this scheduler. The serial dispatcher cannot
+    // change any task or operation while the caller is running.
+    unsafe {
+        assert!(!current.is_null());
+        let run = &*(*current).run;
+        assert!(run.pool.is_none());
+        let mut backing = ReadyWaitBacking {
+            readers: 0,
+            stacks: 0,
+            frames: 0,
+        };
+        let mut task = run.all;
+        while let Some(reader) = task.as_ref() {
+            if reader.state == State::Provider
+                && (*(*reader.operation).request).operation == crate::provider::RECV_READY
+            {
+                backing.readers += 1;
+                backing.stacks += usize::from(reader.stack.is_some());
+                backing.frames += usize::from(reader.frame.is_some());
+            }
+            task = reader.all;
+        }
+        backing
+    }
+}
+
 #[cfg(test)]
 pub(crate) unsafe fn task_waits_for_join(task: *const Task) -> bool {
     let _commit = crate::sequencer::enter();

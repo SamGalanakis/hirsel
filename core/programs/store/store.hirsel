@@ -2995,19 +2995,38 @@ fn encode_commit(ci: CallInfo, ops: DataRows, seq: u64, offset: u64) -> Result[B
     encode_sections(ci, ops, streams, None, seq, offset)
 }
 
-fn data_order(ops: DataRows) -> Result[List[u64], Capacity] {
-    let mut slots: List[u64] = list.new()
+type DataOrder = InOrder | ReversePair | SortedSlots(List[u64])
+
+fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
     let n = ops.count
-    if n > 1 {
-        list.try_reserve(mut slots, n)?
-        for position in 0u64 .. n {
-            list.push(mut slots, position)
-        }
-        list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
-            list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
+    if n < 2 {
+        return Ok(InOrder)
+    }
+    if n == 2 {
+        return Ok(if list.compare_bytes(data_row(ops, 0).key, data_row(ops, 1).key) == Greater {
+            ReversePair
+        } else {
+            InOrder
         })
     }
-    Ok(take slots)
+    let mut slots: List[u64] = list.new()
+    list.try_reserve(mut slots, n)?
+    for position in 0u64 .. n {
+        list.push(mut slots, position)
+    }
+    list.sort(mut slots, scoped fn(a: u64, b: u64) -> Order {
+        list.compare_bytes(data_row(ops, a).key, data_row(ops, b).key)
+    })
+    Ok(SortedSlots(take slots))
+}
+
+fn ordered_row(ops: DataRows, order: DataOrder, position: u64) -> View[DataOp] in ops {
+    let slot = match order {
+        InOrder => position,
+        ReversePair => 1 - position,
+        SortedSlots(slots) => slots[position],
+    }
+    data_row(ops, slot)
 }
 
 @test
@@ -3028,7 +3047,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     let ordered = bound bytes room {
         data_order(ops)
     }
-    let Ok(Ok(take slots)) = take ordered else {
+    let Ok(Ok(SortedSlots(take slots))) = take ordered else {
         return Error(())
     }
     if list.len(slots) != n || list.capacity(slots) < n || 8 * list.capacity(slots) != room {
@@ -3042,16 +3061,12 @@ fn journal_test_order_workspace() -> Result[(), ()] {
     Ok(())
 }
 
-fn encode_data_ops(mut payload: Bytes, ops: DataRows, slots: List[u64]) -> Result[(), Capacity] {
+fn encode_data_ops(mut payload: Bytes, ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
     le(mut payload, 0, 1)?
-    let n = ops.count
-    le(mut payload, n, 4)?
-    if n == 1 {
-        encode_data_op(mut payload, data_row(ops, 0u64).key, data_row(ops, 0u64).value)?
-    } else {
-        for slot in slots {
-            encode_data_op(mut payload, data_row(ops, slot).key, data_row(ops, slot).value)?
-        }
+    le(mut payload, ops.count, 4)?
+    for position in 0u64 .. ops.count {
+        let op = ordered_row(ops, order, position)
+        encode_data_op(mut payload, op.key, op.value)?
     }
     Ok(())
 }
@@ -3084,15 +3099,10 @@ fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[Cal
 
 fn encode_stream_ops(mut payload: Bytes, ops: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
     le(mut payload, 1, 1)?
-    let op_count = ops.count
-    le(mut payload, op_count, 4)?
-    if op_count == 1 {
-        encode_stream_op(mut payload, data_row(ops, 0u64), call, settlement)?
-    } else {
-        let ordered = data_order(ops)?
-        for slot in ordered {
-            encode_stream_op(mut payload, data_row(ops, slot), call, settlement)?
-        }
+    le(mut payload, ops.count, 4)?
+    let order = data_order(ops)?
+    for position in 0u64 .. ops.count {
+        encode_stream_op(mut payload, ordered_row(ops, order, position), call, settlement)?
     }
     Ok(())
 }
@@ -3161,7 +3171,7 @@ fn encode_frame(ci: CallInfo, ops: DataRows, streams: DataRows, call: Option[Vie
             }
         }
     }
-    let slots = data_order(ops)?
+    let order = data_order(ops)?
     let mut out: Bytes = list.with_capacity(16 + size + BINDING_BYTES)
     le(mut out, 0x0011, 2)?
     le(mut out, 1, 2)?
@@ -3172,7 +3182,7 @@ fn encode_frame(ci: CallInfo, ops: DataRows, streams: DataRows, call: Option[Vie
     le(mut out, ci.at, 8)?
     le(mut out, sections, 1)?
     if data {
-        encode_data_ops(mut out, ops, slots)?
+        encode_data_ops(mut out, ops, order)?
     }
     if stream {
         encode_stream_ops(mut out, streams, call, settlement)?

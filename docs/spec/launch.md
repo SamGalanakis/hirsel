@@ -125,11 +125,20 @@ no mismatch diagnostic when the image is unreadable or evaluation is source-only
 
 A place passes the result of `runner.launch_selection(Args)` to its runner. The
 ordinary place option `--hirsel-activation=<version>` selects the activation
-version that must match the current image under STORE's LOCK. Omitting the
-option selects version zero for empty activation. `--hirsel-install` requests a
+version that must match the current image under STORE's LOCK; version zero
+expects an empty store. Omitting the option selects `Reopen`: genesis on an
+empty store, and otherwise the store's current activation, so a plain restart
+of the same executable reopens its store. `--hirsel-install` requests a
 standalone install and is mutually exclusive with an activation version. Use it
 after `--` with `hirsel run`. Both options are run arguments, which a recording
-holds like every entry argument.
+holds like every entry argument. The platform host and launcher always pass
+`--hirsel-activation`.
+
+A store is bound to the image that activated it (RUNNER-SPEC §6, "Restart and
+rebuild"). Another executable, the same source rebuilt in another mode
+included, is refused `NotCurrent` with the store's version and image and this
+launch's image. To move a store to a new build, stop the old process and start
+the new build once with `--hirsel-install`, or deploy it with `hirsel deploy`.
 
 A refused selection returns `NotCurrent(found)` before handles run. A disk
 genesis or standalone install requires a known executable identity and returns

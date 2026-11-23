@@ -51,7 +51,9 @@ pub fn stream_key(c: Caller, number: u32) -> Result[Bytes, Capacity] {
 }
 
 pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes)
-pub type Selection: send = Current(u64) | Install
+// `Reopen` opens the store at its current activation, or runs genesis on an empty
+// store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
+pub type Selection: send = Current(u64) | Reopen | Install
 pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | PublisherStopped
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
@@ -81,7 +83,10 @@ pub opaque type TriggerContext: send {
     to: Sender[HeadInput]
 }
 
-pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Full(Capacity)
+// `Exceeds` names a PlaceConfig or WireConfig setting, its value and the most this
+// place accepts for it (RUNNER-SPEC §12.1, runner.md "Sizing a place").
+pub type Bound: send { name: String, value: u64, limit: u64 }
+pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Full(Capacity)
 pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)
 
 // Private runtime-supplied launch metadata. The body is a declaration placeholder;
@@ -253,7 +258,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     let launch_idle = launch_word(13u64, 0u64)
     if p.idle == Some(0u64) { return Error(Missing("idle")) }
     if p.stop.grace_ms == 0u64 { return Error(Missing("grace_ms")) }
-    if p.max_sessions == 0u64 || !wire_configuration(p.session) { return Error(Missing("session")) }
+    if let Some(take problem) = session_problem(p.session, p.max_sessions) { return Error(take problem) }
     let PlaceConfig(backing: take backing, selection: selection, place: place, migrate: migrate, handles: handles, n_place: configured, n_publisher: n_publisher,
         session: wire_config, max_sessions: limit, proxies: take proxies,
         listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle) = take p
@@ -261,7 +266,7 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
     let n_place = if !none(launch_scratch()) { launch_word(0u64, 0u64) } else { configured }
     let mut session_config = wire_config
     session_config.n_place = n_place
-    if limit == 0u64 || limit > WIRE_OWNER_LIMIT || !wire_configuration(session_config) { return Error(Missing("socket")) }
+    if let Some(take problem) = session_problem(session_config, limit) { return Error(take problem) }
     let watch = status_watch(take watching)?
     let mut current = copy_status(latest.read(status))
     publish_phase(status, watch, mut current, Starting(Recovering))?
@@ -296,7 +301,12 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
         head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, idle: idle)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
-    let mut heading: Option[Task[()]] = Some(task.spawn(tasks, bytes allowance, take head_job, head_run))
+    // The head is the place's largest task; a root limit too small for it is a resource
+    // failure that names the bytes, not a fault at this line.
+    let mut heading: Option[Task[()]] = match task.try_spawn(tasks, bytes allowance, take head_job, head_run) {
+        Ok(take running) => Some(take running),
+        Error((cap, _)) => return Error(Full(cap)),
+    }
     let mut serving: Option[Task[()]] = None
     let mut drain_waiter: Option[Task[()]] = None
     let mut ready: Option[(Listener, Sender[PubIn])] = None
@@ -929,7 +939,7 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
         if let Some(_) = selected { return Error(Exit(status: 1u8)) }
         selected = Some(choice)
     }
-    Ok(match selected { Some(choice) => choice, None => Current(0u64) })
+    Ok(match selected { Some(choice) => choice, None => Reopen })
 }
 
 fn prepare_activation[G: send, H: send](r: Registry[G, H], n_place: u64) -> Result[(Bytes, ReleaseRecord), RegisterError] {
@@ -978,6 +988,101 @@ fn wait_for_host_stop(take stop: HostStop) -> () waits {
 
 pub type MainError: send = Usage(Exit) | Start(StartError)
 
+fn push_hex_prefix(mut line: String, digest: Bytes) {
+    let short = if list.len(digest) > 6u64 { list.slice(digest, 0u64, 6u64) } else { list.slice(digest, 0u64, list.len(digest)) }
+    match status_hex(copied_bytes(short)) {
+        Ok(take hex) => string.push(mut line, hex),
+        Error(_) => string.push(mut line, "?"),
+    }
+}
+
+fn copied_bytes(raw: View[Bytes]) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(raw))
+    for byte in raw { list.push(mut out, byte) }
+    take out
+}
+
+fn push_store_error(mut line: String, problem: store.Error) {
+    match problem {
+        Held => string.push(mut line, "the store directory is held by another process (its LOCK)"),
+        NotFound => string.push(mut line, "the store directory has no store"),
+        Corrupt(fault) => { string.push(mut line, "the store is corrupt at "); string.push(mut line, fault.file); string.push(mut line, " offset "); string.push_u64(mut line, fault.offset) },
+        Unsupported(version) => { string.push(mut line, "the store's format version "); string.push_u64(mut line, version); string.push(mut line, " is not this build's") },
+        Io(_) => string.push(mut line, "an I/O error in the store directory"),
+        Poisoned(_) => string.push(mut line, "an earlier write failed, so the store refuses further writes"),
+        Full(Journal(cap)) => { string.push(mut line, "the journal options do not fit: "); push_capacity(mut line, cap) },
+        Full(Resident(cap)) => { string.push(mut line, "the store's resident bound is full: "); push_capacity(mut line, cap) },
+        Full(Allocation(cap)) => { string.push(mut line, "out of memory opening the store: "); push_capacity(mut line, cap) },
+        Limit(_) => string.push(mut line, "a store limit was exceeded"),
+        Schema(_) => string.push(mut line, "a table's stored schema differs from this build's handles"),
+        Stale(_) => string.push(mut line, "a stale table handle"),
+        Decode(_) => string.push(mut line, "a stored value does not decode with this build's codec"),
+        Exists(name) => { string.push(mut line, "already exists: "); string.push(mut line, name) },
+        Missing(name) => { string.push(mut line, "missing: "); string.push(mut line, name) },
+        Diverged(_) => string.push(mut line, "the store diverged"),
+        Foreign => string.push(mut line, "a handle from another store"),
+        MigrationFault => string.push(mut line, "the migration faulted"),
+        ExportDirectory => string.push(mut line, "an export directory, not a place store"),
+    }
+}
+
+fn push_capacity(mut line: String, cap: Capacity) {
+    string.push_u64(mut line, cap.requested)
+    string.push(mut line, " bytes requested, ")
+    string.push_u64(mut line, cap.available)
+    string.push(mut line, " available")
+}
+
+// One line naming why a place did not start and what to change (RUNNER-SPEC §12.1).
+pub fn start_text(problem: StartError) -> String {
+    let mut line = string.from("place: ")
+    match problem {
+        Missing(name) => { string.push(mut line, "missing or invalid "); string.push(mut line, name) },
+        Exceeds(over) => {
+            string.push(mut line, over.name)
+            string.push(mut line, " is ")
+            string.push_u64(mut line, over.value)
+            string.push(mut line, ", above the most this place accepts, ")
+            string.push_u64(mut line, over.limit)
+            if over.name == "n_place" { string.push(mut line, " (a wire session holds n_place twice within its 16 MiB ceiling; lower n_place or n_service)") }
+        },
+        Full(cap) => {
+            string.push(mut line, "the executable's root limit cannot hold this place: ")
+            push_capacity(mut line, cap)
+            string.push(mut line, "; rebuild with a larger --limit (runner.operate_bytes(config) is what operate spends)")
+        },
+        Listen(_) => string.push(mut line, "could not listen"),
+        Open(Store(e)) => { string.push(mut line, "store: "); push_store_error(mut line, e) },
+        Open(Place(_)) => string.push(mut line, "place registration failed"),
+        Open(Migrate(e)) => { string.push(mut line, "migration failed: "); push_store_error(mut line, e) },
+        Open(NotCurrent(Empty)) => string.push(mut line, "the store is empty, but --hirsel-activation named a version; start without --hirsel-activation for genesis"),
+        Open(NotCurrent(Legacy)) => string.push(mut line, "the store holds data without an activation; start it once with --hirsel-install"),
+        Open(NotCurrent(Active(version, description))) => {
+            string.push(mut line, "the store is at activation ")
+            string.push_u64(mut line, version)
+            let codec: std.codec.Codec[Describe] = std.codec.of()
+            match std.codec.decode(codec, description) {
+                Ok(take stored) => {
+                    string.push(mut line, " of image ")
+                    push_hex_prefix(mut line, stored.digest)
+                    string.push(mut line, " with n_place ")
+                    string.push_u64(mut line, stored.n_place)
+                },
+                Error(_) => (),
+            }
+            string.push(mut line, ", and this launch is image ")
+            match launch_digest() {
+                Ok(take digest) => push_hex_prefix(mut line, digest),
+                Error(_) => string.push(mut line, "?"),
+            }
+            string.push(mut line, "; start the build that wrote it, or stop it and start this build once with --hirsel-install to migrate the store to it")
+        },
+        Open(IdentityUnknown) => string.push(mut line, "image identity is unavailable"),
+        Open(PublisherStopped) => string.push(mut line, "publisher stopped"),
+    }
+    take line
+}
+
 pub fn main[G: send, H: send](a: Args, process: Process, errors: Stderr, tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn(take Receiver[()]) -> Result[Ended, MainError] waits) -> Result[(), Exit] waits {
     let serving = scoped fn() -> Result[(), Exit] waits {
         let full = Exit(status: 1u8)
@@ -1006,19 +1111,7 @@ pub fn main[G: send, H: send](a: Args, process: Process, errors: Stderr, tasks: 
                 Error(full)
             },
             Error(Start(problem)) => {
-                let mut line = string.from("place: ")
-                match problem {
-                    Missing(name) => { string.push(mut line, "missing or invalid "); string.push(mut line, name) },
-                    Full(_) => string.push(mut line, "out of capacity"),
-                    Listen(_) => string.push(mut line, "could not listen"),
-                    Open(Store(Held)) => string.push(mut line, "store is held"),
-                    Open(Store(_)) => string.push(mut line, "store error"),
-                    Open(Place(_)) => string.push(mut line, "place registration failed"),
-                    Open(Migrate(_)) => string.push(mut line, "migration failed"),
-                    Open(NotCurrent(_)) => string.push(mut line, "activation is not current"),
-                    Open(IdentityUnknown) => string.push(mut line, "image identity is unavailable"),
-                    Open(PublisherStopped) => string.push(mut line, "publisher stopped"),
-                }
+                let mut line = start_text(problem)
                 string.push(mut line, "\n")
                 let _ = stderr.write(errors, line)
                 Error(full)
@@ -2747,6 +2840,13 @@ fn head_prepare[G: send, H: send](mut db: store.Db, selection: Selection, persis
     let current = activation_result(current_description(db))?
     let selected: Option[u64] = match selection {
         Install => None,
+        Reopen => match current {
+            None => None,
+            Some(_) => {
+                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
+                Some(activation_result(activation_version(db))?)
+            },
+        },
         Current(expected) => match current {
             None => {
                 if expected != 0u64 { return Error(NotCurrent(Empty)) }
@@ -6920,16 +7020,47 @@ fn wire_variable_peak(c: WireConfig) -> u64 {
     input + transport + retained + wire_service_job_bytes(c) + 32768u64
 }
 
-fn wire_configuration(c: WireConfig) -> bool {
-    if c.q > 4u64 || c.socket.max_frame > 262144u64 || c.socket.pending_max > 1024u64 || c.budget > 1048576u64 || c.max_subs == 0u64
-        || c.n_pool == 0u64 || c.n_pool > WIRE_POOL_BYTES || c.n_service > WIRE_SESSION_CEILING || c.n_place > WIRE_SESSION_CEILING { return false }
-    if c.n_granted > WIRE_SESSION_CEILING || wire_variable_peak(c) + c.n_granted > WIRE_SESSION_CEILING { return false }
+fn wire_configuration(c: WireConfig) -> bool { none(wire_problem(c)) }
+
+fn exceeds(name: String, value: u64, limit: u64) -> Option[StartError] {
+    Some(Exceeds(Bound(name: clone(name), value: value, limit: limit)))
+}
+
+fn session_problem(c: WireConfig, max_sessions: u64) -> Option[StartError] {
+    if max_sessions == 0u64 { return Some(Missing("max_sessions")) }
+    if max_sessions > WIRE_OWNER_LIMIT { return exceeds("max_sessions", max_sessions, WIRE_OWNER_LIMIT) }
+    wire_problem(c)
+}
+
+// The first WireConfig setting a session cannot run with. A session's variable peak
+// counts n_place twice (retained state and the service job), so the largest n_place
+// that fits is half of what the ceiling leaves after every other term.
+fn wire_problem(c: WireConfig) -> Option[StartError] {
+    if c.q > 4u64 { return exceeds("q", c.q, 4u64) }
+    if c.socket.max_frame > 262144u64 { return exceeds("socket.max_frame", c.socket.max_frame, 262144u64) }
+    if c.socket.pending_max > 1024u64 { return exceeds("socket.pending_max", c.socket.pending_max, 1024u64) }
+    if c.budget > 1048576u64 { return exceeds("budget", c.budget, 1048576u64) }
+    if c.max_subs == 0u64 { return Some(Missing("max_subs")) }
+    if c.n_pool == 0u64 { return Some(Missing("n_pool")) }
+    if c.n_pool > WIRE_POOL_BYTES { return exceeds("n_pool", c.n_pool, WIRE_POOL_BYTES) }
+    if c.n_service > WIRE_SESSION_CEILING { return exceeds("n_service", c.n_service, WIRE_SESSION_CEILING) }
+    if c.n_place > WIRE_SESSION_CEILING { return exceeds("n_place", c.n_place, WIRE_SESSION_CEILING) }
+    if c.n_granted > WIRE_SESSION_CEILING { return exceeds("n_granted", c.n_granted, WIRE_SESSION_CEILING) }
+    let peak = wire_variable_peak(c) + c.n_granted
+    if peak > WIRE_SESSION_CEILING {
+        let rest = peak - 2u64 * c.n_place
+        let fits = int.saturating_sub(WIRE_SESSION_CEILING, rest) / 2u64
+        if fits > 0u64 { return exceeds("n_place", c.n_place, fits) }
+        return exceeds("session peak", peak, WIRE_SESSION_CEILING)
+    }
     // Welcome carries one issuer byte, at most SUBJECT_MAX subject bytes and a 32-byte digest.
     // The launch target belongs to this run, so its size is known at serve.
     let welcome = 69u64 + SUBJECT_MAX + launch_word(3u64, 0u64)
     let mandatory = if welcome > 125u64 { welcome } else { 125u64 }
-    c.socket.max_frame >= mandatory && c.budget >= wire_round(mandatory + 14u64)
-        && c.socket.max_frame >= wire_outcome_reserve(c) + 28u64
+    let floor = std.order.max(mandatory, wire_outcome_reserve(c) + 28u64)
+    if c.socket.max_frame < floor { return Some(Missing("socket.max_frame (below the Welcome and outcome frames)")) }
+    if c.budget < wire_round(mandatory + 14u64) { return Some(Missing("budget (below one Welcome frame)")) }
+    None
 }
 
 fn wire_decode(b: Bytes) -> Result[Frame, u16] {

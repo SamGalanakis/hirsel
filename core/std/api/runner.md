@@ -40,6 +40,45 @@ The first [process stop](process.md) closes the channel and starts the drain
 specified in RUNNER-SPEC §12.4. Describe mode runs `place` before the serve
 callback or the stop task starts.
 
+**Restart and upgrade (RUNNER-SPEC §6).** Pass `runner.launch_selection(args)` as
+`PlaceConfig.selection`. A launch without options selects `Reopen`: the first start
+on an empty store runs genesis, and every later start of the same executable reopens
+the store at its current activation. A store is bound to the image that activated
+it, so another executable, the same source rebuilt in another mode included, is
+refused `Open(NotCurrent(Active(version, current)))`. To move a store to a new
+build, stop the old process and start the new build once with `--hirsel-install`,
+which runs `migrate` over the existing data; later starts are plain again. A hosted
+place upgrades with `hirsel deploy`. `--hirsel-activation=v` expects version `v`
+exactly; the host passes it and an application does not need it.
+
+**Why a place did not start.** `runner.start_text(problem)` is one line naming a
+`StartError` and what to change; `runner.main` prints it on stderr. `Exceeds(bound)`
+names a setting, its value and the most this place accepts, and `Missing(name)` a
+setting that is zero or too small.
+
+**`PlaceConfig.wire`.** `None` serves anonymous sessions: each Hello gets a fresh
+anonymous Caller and a granted entry is `Refused(NotAllowed)`. `Some(runner.wire(grant,
+bind, bind_bytes, bind_steps))` gives granted entries a copy of `grant`, and with
+`bind = Some(f)` maps the client's credential to a Caller; a refused binding closes
+the Hello with 1008, so its clients must pass `credential`. `Some(runner.wire_bind(seed,
+bind, ..))` binds the same way and carries no grant, so granted entries stay
+`Refused(NotAllowed)`.
+
+**Sizing `n_place`.** One wire session must fit in 16 MiB, and its peak holds
+`n_place` twice (its registry state and its service job) next to `n_service`,
+`budget` and `socket.max_frame`. With `wire_defaults(65536, n_place)`, an `n_place` of
+1 MiB fits and 4 MiB does not; a place that does not fit is refused
+`Exceeds(n_place, value, most)`, where `most` is the largest `n_place` this
+configuration fits. `PlaceConfig.n_place` bounds `place` in the head, and launches
+that report a launch identity (`hirsel sdk ts --n-place`, `--hirsel-n-place`) must
+use the same value.
+
+**Sizing `--limit`.** `runner.operate_bytes(config)` is what `operate` spends: the
+head (`n_place`, `n_publisher` and the store's journal reserve), every session's
+reserve up to `max_sessions`, and operate's own 256 KiB. The executable's root
+limit (`hirsel build --limit`) must exceed it plus what `main` keeps; a smaller one is
+refused `Full(capacity)` with the requested and available bytes.
+
 The wire types are `Kind`, `Refusal`, `Fault`, `Outcome` and `Described`, all
 `codec + send`. `Room` and `Bad` carry Capacity and DecodeError, because those types
 are not codec. `Bad.kind` and `Raised(u32)` (the first cause's kind) are fixed wire

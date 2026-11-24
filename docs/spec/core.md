@@ -492,7 +492,22 @@ operations it names; nothing else about them may be inferred from an implementat
   bytes or names survive a crash is not known, and a later success of the same barrier
   says nothing about them. Each is a cancellation point at its issue only, and the host
   provider completes it at its issue ([CONC-7](tasks.md#conc-7-cancellation-points)), so
-  cancellation never interrupts one. `host.wall_ms` is milliseconds since 1970 and
+  cancellation never interrupts one. *Std Group 2 (specified 2026-11-24, not yet
+  implemented) changes two directory primitives.* `host.mkstemp(d, mut name) ->
+  Result[HostFile, IoError] waits` is `host.mkdtemp` for a regular file: the same 32-byte
+  spare-capacity check (`Bounds` before issue), the same prefix rules and fresh suffix, one
+  exclusive create that never opens an existing file, and a result open for writing as
+  `CreateNew` opens one. It is a cancellation point at issue only, and a cancellation
+  observed at delivery closes the handle and leaves the file created. `host.entries(d, at:
+  Option[String])` lists `d`'s root for `None`, and for `Some(p)` the existing directory
+  `p` below `d`, with `host.open_dir`'s confinement and refusals. The listing owns its
+  descriptor, so listing a subdirectory leaves nothing open after the `HostEntries` is
+  dropped, where a narrowed `Dir` stays open until the run ends. Provider operations:
+  `DirOp` gains `Mkstemp(dir: u64, prefix: u64, room: u64)`, answered `File(u64)` with the
+  suffix staged by `provide.fill`, and `Entries(dir: u64)` becomes `Entries(dir: u64, path:
+  u64)`, where a path length of 0 means `None`
+  ([file](../../core/std/api/file.md#replace), [dir](../../core/std/api/dir.md#listing-below-a-path)).
+  `host.wall_ms` is milliseconds since 1970 and
   `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
   `host.mono_ns(c) >= deadline_ns`, at once for a deadline already reached; it is a
   cancellation point at its entry and while it waits

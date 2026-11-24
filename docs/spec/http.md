@@ -633,6 +633,121 @@ protected segment is sent from the caller's bytes and has no such bound.
 **Fixed uploads.** `write_segments` on a `Fixed(n)` upload gives `InvalidRequest`, because
 `n` cannot count a protected segment. `write` on a `Segments` upload gives `State`.
 
+### HTTP-18: Client fetch, redirects, decoding and reuse
+
+*Specified 2026-11-24 (std Group 2), not yet implemented.* `std.http_client.fetch`
+([api](../../core/std/api/http_client.md#fetch)) runs one request through these rules. Each
+**hop** is one request and its final response head on one connection. The **origin** of a
+URL is its scheme, its host with ASCII letters lowercased, and its port, or 80 for `http`
+and 443 for `https` when none is written.
+
+**A hop.** `fetch` parses the URL and takes an idle connection for its origin from the
+client's pool, or opens one. A host that is a name is resolved with `host.resolve` under
+the client's `Net`. The addresses are tried in the order returned, one at a time, until
+one connects. An `https` origin's TLS name is its host. The request is written with
+`start`, and its head is read with `finish_request`.
+
+**Redirects.** When `redirects` is `Follow(n)` and a hop's status is 301, 302, 303, 307 or
+308 with exactly one `Location` field, the next hop's URL is that field resolved against
+the current URL (`uri.resolve`, RFC 9110 §10.2.2). It must be a URL `fetch` accepts, or the
+fetch ends with `Location`. A 3xx with no `Location` is returned as the final response,
+and so are 300, 304, 305 and 306 (RFC 9110 §15.4). The (n+1)th redirect ends the fetch
+with `TooManyRedirects`, which also ends a loop. `Return` follows none. Per status:
+
+| Status | Next method | Body |
+|---|---|---|
+| 301, 302 | GET when the method was POST, otherwise unchanged | dropped when the method changed, else sent again |
+| 303 | GET, except HEAD stays HEAD | dropped |
+| 307, 308 | unchanged | sent again |
+
+When the body is dropped, the next hop also drops the caller's `Content-Encoding`,
+`Content-Language`, `Content-Location`, `Content-Type`, `Digest` and `Last-Modified`
+fields (RFC 9110 §15.4, item 5). The client writes framing fields itself. Before the next
+hop, the redirect's body is read and discarded up to 2048 bytes. If it ends within them
+and the connection is reusable, the connection goes back to the pool. Otherwise it is
+closed.
+
+**Credentials across origins.** When a hop's origin differs from the previous hop's, the
+next hop drops every `Protected` header and every `Authorization`, `Proxy-Authorization`
+and `Cookie` field (names compared case-insensitively). They do not come back on a later
+hop, even one that returns to the first origin. A 307 or 308 to another origin whose body
+holds a `Sealed` segment is not followed. The fetch ends with `CrossOriginSecret`, because
+following it would either send the secret to the new origin or change the request.
+`https` to `http` is a change of origin, so it strips too. TLS-5 would also refuse a
+protected value on plain TCP.
+
+**Content codings.** When `decode` is true, the request has no caller-supplied
+`Accept-Encoding` or `Range` field, and the method is not HEAD, every hop sends
+`Accept-Encoding: gzip, deflate, zstd`. The final response's `Content-Encoding` then
+decides:
+
+- absent or `identity`: the body is returned as it is;
+- `gzip` or `x-gzip` (RFC 9110 §8.4.1.3): gzip members are decoded one after another (RFC
+  1952 §2.2). Bytes after the last member that do not start a member are
+  `Coding(Flate(TrailingData(offset)))`;
+- `deflate`: exactly the zlib format (RFC 9110 §8.4.1.2). Raw deflate without the zlib
+  wrapper, which some servers send, is `Coding(Flate(Header))`. It is not sniffed;
+- `zstd`: one or more frames (RFC 8878), with skippable frames skipped, each window at most
+  `max_window` (`Coding(Zstd(WindowTooLarge(asked)))`);
+- anything else, including a list of codings: `Coding(Unsupported)`, because the client
+  asked for decoded bytes.
+
+A caller that sets its own `Accept-Encoding` gets the body as sent, and `fetch_coding` is
+`None`. HEAD, 204 and 304 responses have no body to decode.
+
+**Body bounds.** Three bounds cover a decoded body, so no response makes the client hold
+or compute more than the caller states:
+
+- **Decoded bytes** at most `body_max`. One more is `Http(TooLarge)`, as for an unencoded
+  body.
+- **Encoded bytes** at most `body_max + 5 × ⌈body_max / 65535⌉ + 131072`, passed to the
+  connection as its wire body bound, so one more is `Http(TooLarge)`. Derivation: no valid
+  encoding of n bytes need be larger than stored deflate blocks, which add 5 bytes per
+  65,535 bytes (RFC 1951 §3.2.4). zstd raw blocks add 3 bytes per 128 KiB, which is less.
+  Fixed framing adds at most 18 bytes (gzip), 6 (zlib) or 22 (a zstd frame header and its
+  checksum). The 131,072-byte allowance covers that framing plus gzip's optional header
+  fields: FEXTRA is at most 65,537 bytes, and FNAME and FCOMMENT together get the rest. This
+  bound is also what ends a stream that consumes input and produces nothing, such as
+  endless skippable frames or empty stored blocks.
+- **Decoder memory** at most `max_window` plus fixed tables, admitted under the current
+  limit.
+
+**Storage.** This rule amends HTTP-16 for decoded bodies. The connection receives encoded
+payload into the response's own 8192-byte input buffer, and the decoder writes decoded
+bytes directly into the caller's spare capacity. The decoder and the input buffer are
+admitted when the response is returned and refunded when it is done or dropped. An
+undecoded body keeps HTTP-16's path exactly.
+
+**Reuse.** An idle connection is keyed by origin. `fetch_done` returns a connection to the
+pool only when its body reached its end, `reusable` holds, and the pool has fewer than
+`idle_per_origin` connections for that origin and fewer than `idle_max` in all. Otherwise
+it closes the connection. `fetch` takes the most recently returned connection for the
+origin, and closes, without using them, those idle for `idle_ns` or longer on the client's
+Clock. No task runs in the background, so an expired connection holds its socket until
+the next fetch for its origin or until the client is dropped, which closes every idle
+connection.
+
+**Retry.** A hop on a connection from the pool that fails with `Write(_)` or `Receive(_)`
+before the connection received any byte of a response is sent once more on a new
+connection when either `request_started` is false, or the method is GET, HEAD, OPTIONS or
+TRACE (RFC 9110 §9.2.1's safe methods). A hop on a new connection is never retried, so a
+server that always hangs up cannot cause a loop.
+
+**Deadline.** The one absolute deadline covers every hop's resolve, connect, handshake,
+request and head, the redirect drains, and every `fetch_read` of the final body.
+Cancellation (CONC-7) is observed at each of those waits.
+
+**Laws.** FE1 redirect method table: for each status and method, the next hop's method and
+body match the table above (oracle: RFC 9110 §15.4.2-15.4.9 text). FE2 credential
+stripping: a cross-origin hop carries no `Protected`, `Authorization`, `Proxy-Authorization`
+or `Cookie` field, and a same-origin hop carries all of them (oracle: the rule; bug caught:
+comparing host without port or scheme, the case reqwest's `remove_sensitive_headers`
+covers). FE3 bomb bounds: a gzip body of `body_max + 1` zero bytes gives `TooLarge` after
+exactly `body_max` bytes, and a zstd frame asking for a window of `max_window + 1` gives
+`WindowTooLarge` before any output (oracle: the bounds above). FE4 decoding differential:
+bodies encoded by `gzip`, `zlib-flate` and `zstd` command-line tools decode to their
+inputs (oracle: the reference tools).
+
 ## 2. Stream ownership
 
 A `Stream` (HTTP-10) runs as one task group, spawned by the supervisor. It follows RUNNER-SPEC §3's session group: an owner that waits only on its inbox, and children that report to it.

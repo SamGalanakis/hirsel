@@ -49,10 +49,76 @@ Validation walks components with `string.next_split(p, at, "/")`.
   §1 "Small") is why components are walked with `string.next_split` and there is no
   `components` iterator here (ADOPTED).
 
+## Patterns
+
+*Specified 2026-11-24 (std Group 2), not yet implemented.*
+
+```
+pub type PatternError = Syntax(u64)
+pub fn path.matches(pattern: String, p: String) -> Result[bool, PatternError]
+```
+
+`matches` reports whether the path `p` matches `pattern`. It is pure, like the rest of this
+module. [`dir.glob`](dir.md#glob) applies it to a walk.
+
+**Grammar.** A pattern is components joined by `/`, as a valid path is. Within a
+component:
+
+| Pattern | Matches |
+|---|---|
+| `*` | any run of bytes, possibly empty, within one component |
+| `?` | exactly one Unicode scalar, never `/` |
+| `[abc]`, `[a-z]` | one scalar in the class. Ranges compare scalar values. |
+| `[!abc]`, `[^abc]` | one scalar not in the class |
+| `\c` | the character `c` itself, including `*`, `?`, `[`, `]` and `\` |
+| any other character | itself |
+
+A component that is exactly `**` matches zero or more whole components, so `a/**/b`
+matches `a/b` and `a/x/y/b`, and `**` alone matches every path. Metacharacters match a
+leading `.` like any other byte, as in Go and Rust `glob`'s default.
+
+`Syntax(i)` gives the byte offset where the pattern stops being valid:
+
+- an empty, `.` or `..` component, or a NUL, because no valid path could match it;
+- `**` that is not a whole component (`a**`, `**b`);
+- an unclosed `[`, a range whose end is below its start, or a `/` inside a class. A `]`
+  right after `[`, `[!` or `[^` is a member, not the end, as POSIX has it and as Go's
+  matcher does (`match.go:148`), so `[]a]` is valid and no class is empty;
+- a `\` at the end of the pattern.
+
+The whole pattern is checked before any matching, so a bad pattern is an error whatever
+the path, as Go's `path.Match` also ensures (`match.go:78`). `matches` does not check `p`. It matches bytes component by component, so a `p` that is
+not a valid path matches only as its bytes do.
+
+**Algorithm and cost.** Components are matched by a position-set simulation (Thompson's
+construction, as `std.regex` runs), with no backtracking. Within a component, the set of
+live pattern positions advances once per scalar of the path. Across components, the set of
+live pattern components advances once per path component, and `**` keeps its position
+live. Each byte of `p` is therefore met at most once per pattern position, and steps are
+O(len(pattern) × len(p)) whatever the arrangement of `*` and `**`. The usual worst case for
+a backtracking matcher, such as `a*a*a*a*b` against `aaaa…`, stays linear in each factor.
+`matches` admits two position sets of O(len(pattern)) bytes under the current limit and
+refunds them before it returns.
+
+**Prior art.** Go `path.Match` (`/tmp/ref-go`, go 8eaf19e, `src/path/match.go:37`,
+`ErrBadPattern` at `match.go:14`) is the base grammar: `*`, `?`, classes with `^`, and `\`
+escapes. ADOPTED. Python's `fnmatch` (`/tmp/ref-cpython`, cpython 32b51e3,
+`Lib/fnmatch.py`) negates with `!`. ADAPTED: both `!` and `^` negate, so a shell user's and
+a Go user's patterns both work. Rust `glob` (`/tmp/ref-rustglob`, glob 057cef2,
+`src/lib.rs:532`) gives `**` its whole-component meaning and refuses `**` inside a
+component (`lib.rs:603-604`). ADOPTED. Python `glob(..., include_hidden=False)`
+(`Lib/glob.py:16-17`) hides dot files from wildcards. NOT TAKEN: Go and Rust match them,
+and a rule about leading dots belongs to `.gitignore`-style packages. Go's `path.Match`
+takes the leftmost match of each chunk after a `*` and never revisits it. That is
+correct within one component, but `**` across components needs alternatives kept open,
+and a backtracking matcher for them can be exponential. REPLACED by the simulation above
+for both levels.
+
 ## Left out
 
 Absolute paths, `..` resolution, normalization (`clean`), Windows separators and prefixes,
-globbing, `is_hidden`, `with_extension` (`stem` and two `string.push`es), and any OS-path
+`.gitignore` semantics (negation, anchoring, directory-only rules), brace expansion
+(`{a,b}`), `is_hidden`, `with_extension` (`stem` and two `string.push`es), and any OS-path
 conversion. A path to a file outside every `Dir` is not a value a program can use.
 
 ## Laws

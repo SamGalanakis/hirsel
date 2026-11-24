@@ -86,8 +86,9 @@ distinguish zero from a partly committed send.
 The transport-free `Reader` accepts bounded fragments with `feed` and an
 EOF signal with `end_input`. `parse_head` reports when a final head is
 available. `read_buffered` reports `NeedInput`, `Data(n)` or `End` and
-preserves the next message's bytes. The client leaves DNS, redirects, cookies
-and pooling to callers.
+preserves the next message's bytes. The connection-level operations above leave DNS,
+redirects, decoding and pooling to callers. [Fetch](#fetch) below adds them in one
+call. Cookies stay with callers.
 
 The writer sends a request with protected fields or protected body segments
 as one [`tls.send_secret`](tls.md) message, so the runtime writes the
@@ -106,3 +107,146 @@ of credential bytes.
 
 For an event-stream response, feed the decoded body bytes to the
 [server-sent events decoder](sse.md).
+
+## Fetch
+
+*Specified 2026-11-24 (std Group 2), not yet implemented. The normative rules are
+[HTTP-18](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse).*
+
+`fetch` sends one request to an `http` or `https` URL. It resolves the name, reuses an idle
+connection or opens one, follows redirects, decodes a gzip, deflate or zstd body, and
+returns the final response. It is built from the connection operations above, which stay
+the tool for streaming uploads, `Upgrade` and anything else `fetch` does not do.
+
+```
+pub type Redirects: key + send = Follow(u8) | Return
+pub type Limits: send {
+    redirects: Redirects,
+    body_max: u64,            // decoded body bytes
+    max_window: u64,          // zstd window a response may demand
+    idle_max: u16,            // idle connections kept, in total
+    idle_per_origin: u16,     // idle connections kept, per origin
+    idle_ns: u64,             // how long an idle connection may be reused
+    decode: bool              // offer and remove gzip, deflate and zstd
+}
+pub fn limits(body_max: u64) -> Limits
+pub opaque type Client: send
+pub fn client(n: Net, c: Clock, trust: Trust, limits: Limits) -> Client
+pub type Fetch: send { method: String, url: String, headers: List[Header], body: List[Segment] }
+pub type ContentCoding: key + send = Gzip | Deflate | Zstd
+pub type CodingError: send = Unsupported | Flate(flate.FlateError) | Zstd(zstd.ZstdError)
+pub type FetchError: send = Http(Error) | Url(uri.Error) | Scheme | UserInfo | Resolve(NetError) | NoAddress | Location | TooManyRedirects | CrossOriginSecret | Coding(CodingError)
+pub opaque type Response: send
+pub fn fetch(mut cl: Client, req: Fetch, deadline_ns: u64) -> Result[Response, FetchError] waits
+pub fn fetch_head(r: Response) -> View[ResponseHead] in r
+pub fn fetch_url(r: Response) -> View[String] in r
+pub fn fetch_coding(r: Response) -> Option[ContentCoding]
+pub fn fetch_read(mut r: Response, mut into: Bytes) -> Result[u64, FetchError] waits
+pub fn fetch_done(mut cl: Client, take r: Response)
+```
+
+```hirsel
+let mut cl = std.http_client.client(n, c, System, std.http_client.limits(1 << 20))
+let req = Fetch(method: "GET", url: "https://api.example.com/v1/items", headers: [Header(name: "Authorization", value: Protected(string.as_bytes("Bearer "), token))], body: list.new())
+let mut r = std.http_client.fetch(mut cl, req, host.mono_ns(c) + 10_000_000_000)?
+let mut buf: Bytes = list.with_capacity(65536)
+while std.http_client.fetch_read(mut r, mut buf)? != 0 { if list.len(buf) == list.capacity(buf) { list.reserve(mut buf, list.capacity(buf)) } }
+std.http_client.fetch_done(mut cl, take r)
+```
+
+**Limits.** `limits(body_max)` gives the derived defaults and the caller's body bound,
+which has no universal value:
+
+| Field | Default | Derivation |
+|---|---|---|
+| `redirects` | `Follow(10)` | Go (`stopped after 10 redirects`), reqwest (`Policy::limited(10)`) and Python (`max_redirections = 10`) all stop at 10. RFC 9110 §15.4 asks only that a client detect loops, and 10 is the common bound. |
+| `max_window` | 8,388,608 (2^23) | RFC 9659 §3: for the zstd content coding, decoders MUST support windows up to 8 MB and encoders MUST NOT exceed it. 2^23 covers 8 MB under either reading, so no conforming response is refused. |
+| `idle_max` | 100 | Go's `DefaultTransport.MaxIdleConns`. |
+| `idle_per_origin` | 2 | Go's `DefaultMaxIdleConnsPerHost`. |
+| `idle_ns` | 90 s | Go's `IdleConnTimeout` and reqwest's `pool_idle_timeout`. |
+| `decode` | `true` | |
+
+**Requests.** `url` is an absolute RFC 3986 URI ([uri](uri.md)) with scheme `http` or
+`https` (`Scheme` otherwise) and no userinfo (`UserInfo`). Credentials go in `Protected`
+headers, never in a URL that a redirect, a render or a log could copy. The fragment is
+not sent. The target is the path (`/` when empty) and the query. `body` is the whole body
+as segments ([HTTP-17](../../../docs/spec/http.md#http-17-client-request-bodies)), so
+`fetch` can send it again on a 307 or 308 redirect or a retry. An empty body sends no body
+for GET, HEAD, DELETE, OPTIONS and TRACE, and `Content-Length: 0` for any other method
+(RFC 9110 §8.6). The header rules are `start`'s.
+
+**Reading.** `fetch` returns once the final response head is read. `fetch_head` borrows it,
+with the wire's fields unchanged, including `Content-Encoding` when a coding was removed.
+`fetch_coding` says which coding was removed. `fetch_url` is the URL of the last hop.
+`fetch_read` is `read`'s contract (spare capacity, `NoSpace`, `Ok(0)` at the end) over the
+decoded body. `fetch_done` returns the connection to the pool when the body was read to
+its end and the connection is reusable, and closes it otherwise. Dropping a `Response`
+closes its connection.
+
+- **Authority.** `n` with a `Resolve` rule covering every host name the request and its
+  redirects reach, and a `Connect` rule covering every address and port
+  ([net.md](../../../docs/spec/net.md)). A redirect to a host the grant does not cover is
+  `Resolve(Denied)`, or `Http(Connect(Denied))` for an address. `c` reads deadlines and
+  idle ages. `trust` verifies every `https` hop. A `Protected` header or `Sealed` segment
+  still passes TLS-5's sink check on each hop's verified name.
+- **Failures.** Each `FetchError` names one cause. `Http(e)` is the connection's own error
+  on any hop, including `TooLarge` for either body bound and `Deadline`. `NoAddress` means
+  the name resolved to no address. `Location` is a redirect whose `Location` field is
+  missing, repeated, not a URI reference, or resolves to a URL `fetch` refuses.
+  `TooManyRedirects` and `CrossOriginSecret` are HTTP-18's. `Coding(e)` is a body that
+  cannot be decoded. A refused allocation raises `Capacity`. Cancellation and the
+  deadline end the fetch as on a connection, and the response's connection is closed.
+- **Charging.** `client` admits nothing. A fetch admits, under the limit current at the
+  call: the hop URL and header list it rebuilds per hop, the connection's fixed 16 KiB
+  (8192 wire and 8192 head bytes) when it opens one, and, when a coding is removed, the
+  decoder (flate's 32 KiB window and tables, or zstd's window of at most `max_window` and
+  its 128 KiB block buffer, RFC 8878 §3.1.1.2.4) and an 8192-byte encoded-input buffer. A
+  pooled connection keeps the payer it was admitted under. The pool holds at most
+  `idle_max` connections. Steps: a hop takes O(header bytes + URL bytes) of its own, plus
+  one step per host call. Decoding takes O(encoded input + decoded output), flate's and
+  zstd's rule. The body bounds of HTTP-18 bound both.
+- **Replay.** `fetch` passes no replay point of its own. Each resolve, connect, send,
+  receive and Clock read passes its own, and decoding is recomputed. Pool choices depend
+  only on those values, so a replay reuses the same connections.
+
+### Prior art
+
+- Go `net/http` (`/tmp/ref-go`, go 8eaf19e): `redirectBehavior`
+  (`src/net/http/client.go:496`), the stop after 10 (`client.go:839`), dropping content
+  headers when the body is dropped (`client.go:822-823`), draining at most `2 << 10` bytes
+  of a redirect body (`client.go:717`), sensitive headers kept for subdomains
+  (`shouldCopyHeaderOnRedirect`, `client.go:1009`), pool defaults
+  (`src/net/http/transport.go:54-55,62`), gzip only and never for HEAD or ranges
+  (`transport.go:2395-2406`), and retry of replayable requests on a reused connection
+  (`transport.go:847-852`, `isReplayable` at `src/net/http/request.go:1562`).
+  ADOPTED: the limit of 10, the drain bound, the pool defaults, the HEAD and range
+  exceptions, and the retry rule. REPLACED: Go turns every non-GET/HEAD method into GET on
+  301 and 302. Here only POST changes, as RFC 9110 §15.4 describes. REPLACED: Go forwards
+  `Authorization` and `Cookie` to subdomains. Here any change of origin strips them.
+- reqwest (`/tmp/ref-reqwest`, reqwest 11ea959): `Policy::limited(10)`
+  (`src/redirect.rs:163`), `remove_sensitive_headers` on a change of host, port or scheme
+  (`redirect.rs:239-252`), `pool_idle_timeout` 90 s (`src/async_impl/client.rs:306`), and
+  gzip, zstd and deflate decoding behind features (`async_impl/client.rs:64-67`).
+  ADOPTED: the exact-origin rule and the three codings. ADAPTED: reqwest strips a fixed
+  list. Here every `Protected` header is stripped too, because its type says it holds a
+  credential.
+- Python `urllib.request` (`/tmp/ref-cpython`, cpython 32b51e3,
+  `Lib/urllib/request.py:621-624`): `max_repeats = 4` and `max_redirections = 10`, and
+  content headers dropped on a redirect (`request.py:652`). NOT TAKEN: the per-URL repeat
+  count, since the hop limit already ends a loop.
+- Goose (`/tmp/ref-goose`, goose d5ae5bb) has no HTTP client.
+
+### Open
+
+- **One owner per client.** `Client` is `send` and used through `mut`, so one task owns a
+  pool. A server whose many tasks fetch either gives each task a client or runs a client
+  task behind a channel. A shared pool would need a core primitive, and that decision
+  belongs to the concurrency spec.
+- **Payer of a pooled connection.** A connection keeps the payer it was admitted under
+  (MEM-20). A fetch inside a `bound bytes` scope that returns its connection to a client
+  owned outside the scope leaves storage charged to a scope that has ended. The rule may
+  need to close, rather than pool, a connection whose payer is not the client's. Check
+  this against MEM-19 and MEM-20 before implementing.
+- **Encoded-bytes allowance.** The fixed 131,072-byte framing allowance (HTTP-18) refuses a
+  gzip response with larger optional header fields, or with many tiny members. No server
+  in common use sends one. Raising the allowance is reversible.

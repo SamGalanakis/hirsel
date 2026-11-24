@@ -71,10 +71,10 @@ pub fn log(mut l: Logger, c: Clock, err: Stderr, level: Level, ctx: Option[Conte
 ```
 
 ```hirsel
-let mut lg = trace.logger(c, level)
-let mut fields: List[trace.Attribute] = list.new()
-list.push(mut fields, trace.Attribute(key: "bytes", value: Int(n)))
-trace.log(mut lg, c, err, Info, Some(trace.ids(span)), "fetched", take fields)?
+let mut lg = std.trace.logger(c, level)
+let mut fields: List[std.trace.Attribute] = list.new()
+list.push(mut fields, std.trace.Attribute(key: "bytes", value: Int(n)))
+std.trace.log(mut lg, c, err, Info, Some(std.trace.ids(span)), "fetched", take fields)?
 ```
 
 - **Levels.** `Debug < Info < Warn < Error`, in increasing severity.

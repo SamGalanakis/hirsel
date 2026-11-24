@@ -152,12 +152,17 @@ pub fn fetch_read(mut r: Response, mut into: Bytes) -> Result[u64, FetchError] w
 ```
 
 ```hirsel
-let p = std.http_client.pool(n, c, tasks, System, std.http_client.limits(1 << 20))?
+let p = result.unwrap(std.http_client.pool(n, c, tasks, System, std.http_client.limits(1 << 20)))
 let cl = std.http_client.handle(p)
-let req = Fetch(method: "GET", url: "https://api.example.com/v1/items", headers: [Header(name: "Authorization", value: Protected(string.as_bytes("Bearer "), token))], body: list.new())
+let mut headers: List[std.http_client.Header] = list.new()
+list.push(mut headers, std.http_client.Header(name: "Authorization", value: Protected(string.into_bytes("Bearer "), secret.share(token))))
+let req = std.http_client.Fetch(method: "GET", url: "https://api.example.com/v1/items", headers: take headers, body: list.new())
 let mut r = std.http_client.fetch(cl, req, host.mono_ns(c) + 10_000_000_000)?
 let mut buf: Bytes = list.with_capacity(65536)
-while std.http_client.fetch_read(mut r, mut buf)? != 0 { if list.len(buf) == list.capacity(buf) { list.reserve(mut buf, list.capacity(buf)) } }
+while std.http_client.fetch_read(mut r, mut buf)? != 0 {
+    let capacity = list.capacity(buf)
+    if list.len(buf) == capacity { list.reserve(mut buf, capacity) }
+}
 ```
 
 A server makes one `Pool` at startup and gives each connection handler its own `Client`

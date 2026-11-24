@@ -139,7 +139,10 @@ pub fn dir.skip(mut w: Walker)
 let mut w = std.dir.walk(d, Some("src"))
 loop {
     match std.dir.next(mut w) {
-        Ok(Some(e)) => if e.kind == Directory && std.path.name(e.name) == ".git" { std.dir.skip(mut w) } else { visit(e) },
+        Ok(Some(e)) => match e.kind {
+            Directory => if std.path.name(e.name) == ".git" { std.dir.skip(mut w) } else { visit(e) },
+            _ => visit(e),
+        },
         Ok(None) => break,
         Error(problem) => report(problem),
     }

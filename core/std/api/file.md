@@ -72,8 +72,8 @@ the write-to-temp, sync, rename, sync-directory sequence that every program writ
 config, state or cache file otherwise hand-rolls, often without one of the two syncs.
 
 ```hirsel
-let state_dir = std.dir.narrow(d, "state")?        // once, at startup
-std.file.replace(state_dir, "cursor.json", bytes)?   // each save
+let state_dir = std.dir.narrow(d, "state") ?=> NotReplaced   // once, at startup
+std.file.replace(state_dir, "cursor.json", payload)?         // each save
 ```
 
 `name` is one component, so the file is directly in `d`'s root. A program that saves into

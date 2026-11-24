@@ -62,6 +62,7 @@ else:
         self.write('editors/tree-sitter-hirsel/check-local', '')
         self.write('core/std/API-INDEX.md', 'current')
         self.write('core/tools/law_board.py', '')
+        self.write('core/tools/check_std_api_recipes.py', '')
         self.write('core/tools/std_api_index.py', '''import os, subprocess, sys
 from pathlib import Path
 

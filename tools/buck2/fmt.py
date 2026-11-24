@@ -107,7 +107,12 @@ def check_compiler_metadata():
     with tempfile.TemporaryDirectory(prefix='hirsel-api-index-') as work:
         index = subprocess.run([sys.executable, str(ROOT / 'core/tools/std_api_index.py'), '--check'],
                                cwd=work, env=dict(os.environ, HIRSEL=str(compiler)))
-    return index.returncode or subprocess.run(
+    if index.returncode:
+        return index.returncode
+    recipes = subprocess.run(
+        [sys.executable, str(ROOT / 'core/tools/check_std_api_recipes.py'), '--compiler', str(compiler)],
+        cwd=ROOT)
+    return recipes.returncode or subprocess.run(
         [sys.executable, str(ROOT / 'core/tools/law_board.py'), 'check', '--compiler', str(compiler)],
         cwd=ROOT).returncode
 

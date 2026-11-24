@@ -248,19 +248,19 @@ fn format3_end() -> Bytes {
 }
 
 // Wire vectors derived from the spec tables with libxxhash.
-fn format6_manifest() -> Bytes {
+fn format7_manifest() -> Bytes {
     let words: Inline[u64, 86] =[
         0x0000003800010001,
-        0x564e0135196906fe,
+        0x54948937a11c7520,
         0x45524f5453524948,
-        0x0000000100000006,
+        0x0000000100000007,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
         0x0000000000000001,
         0x0000000000000000,
         0x0000025200010031,
-        0xb4e01dc82f4723bf,
+        0xf183e438fe39d308,
         0x0000000000000001,
         0x0000100000001000,
         0x0100004000000400,
@@ -318,8 +318,8 @@ fn format6_manifest() -> Bytes {
         0x0000000000000000,
         0x0000000000000000,
         0x0000000000000000,
-        0x0100000001000000,
-        0x0009000000007000,
+        0x0200000001000000,
+        0x0009000000007001,
         0x0000000000000000,
         0x0000000000000000,
         0x0000000000000000,
@@ -640,18 +640,30 @@ fn format4_manifest_law() -> Result[(), Error] {
     m.archive_drop = 77
     m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
     let roots: LocatedRoots = clone(m.branches[0].roots)
-    list.push(mut m.pins, LocatedPin(name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
-    let oracle = format6_manifest()
+    list.push(mut m.pins, LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
+    let oracle = format7_manifest()
     if disk_page_manifest_bytes(id, m)? != oracle {
         return Error(Foreign)
     }
     let (_, take parsed) = disk_read_page_manifest(path, oracle)?
-    if manifest_account(parsed) != 120 || parsed.account_memory != 37 || parsed.account_tiered != 83 || parsed.lineage != m.lineage || parsed.deferred_frees != m.deferred_frees || parsed.deferred_next != 55 || parsed.archive_on != 66 || parsed.archive != m.archive || parsed.archive_drop != 77 || parsed.sweep.position != 88 || parsed.sweep.epoch != 99 || parsed.sweep.digest != 101 || parsed.pins[0].watermark != 92 || disk_page_manifest_bytes(id, parsed)? != oracle {
+    if manifest_account(parsed) != 120 || parsed.account_memory != 37 || parsed.account_tiered != 83 || parsed.lineage != m.lineage || parsed.deferred_frees != m.deferred_frees || parsed.deferred_next != 55 || parsed.archive_on != 66 || parsed.archive != m.archive || parsed.archive_drop != 77 || parsed.sweep.position != 88 || parsed.sweep.epoch != 99 || parsed.sweep.digest != 101 || parsed.pins[0].owner != ProjectorPin || parsed.pins[0].watermark != 92 || disk_page_manifest_bytes(id, parsed)? != oracle {
         return Error(Foreign)
     }
     let payload = list.slice(oracle, 88, list.len(oracle))
     if !disk_corrupt(decode_page_manifest(path, list.slice(payload, 0, list.len(payload) - 1), 1)) {
         return Error(Foreign)
+    }
+    let mut invalid_owner = copied(payload)?
+    invalid_owner[463] = 0
+    if !disk_corrupt(decode_page_manifest(path, invalid_owner, 1)) {
+        return Error(Foreign)
+    }
+    let mut old_header = copied(list.slice(oracle, 0, 72))?
+    list.set_word_le(mut old_header, 24, 6u32)
+    list.set_word_le(mut old_header, 8, 0x564e0135196906feu64)
+    match disk_read_header(path, old_header, 1, Some(1), Some(id)) {
+        Error(Unsupported(6)) => (),
+        _ => return Error(Foreign),
     }
     let mut overflow = copied(payload)?
     list.set_word_le(mut overflow, 64, 18446744073709551615u64)

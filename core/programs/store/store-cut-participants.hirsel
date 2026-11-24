@@ -53,7 +53,7 @@ fn visit_cut_pins[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped fn
         let held = view db.pins[slot]
         if !inserted {
             if let AddPin(added) = delta {
-                if added.name < held.name {
+                if pin_order(added.name, added.owner, held.name, held.owner) == Less {
                     visit(mut output, added)?
                     inserted = true
                 }
@@ -130,7 +130,7 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
     capacity(le(mut raw, pin_count, 4))?
     visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
         slot += 1
-        append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, published[slot - 1]), held.watermark)
+        append_page_manifest_pin(mut buffer, held.owner, held.name, held.branch, held.version, published_page_roots(layout.locations, published[slot - 1]), held.watermark)
     })?
     for order_slot in 0u64 .. list.len(published) {
         let keyed = view published[order_slot].keyed

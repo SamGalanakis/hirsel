@@ -142,7 +142,7 @@ fn borrowed_projection_base[K, V](mut p: Projector[K, V], db: Db, b: Binding, im
         if same_project_snapshot(held, b, image.position) { return Ok(Some(clone(held))) }
     }
     let selected = match p.from {
-        Local => pinned(db, projector_pin_name(p.decl.name, image.slot)),
+        Local => owned_pin(db, ProjectorPin, projector_pin_name(p.decl.name, image.slot)),
         Follower(mut remote) => exact_follower_checkpoint(mut remote, image.position)?,
     }
     match take selected {
@@ -423,12 +423,62 @@ pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error
     }
 }
 
+type PinOwner: key + shareable + send = ApplicationPin | ProjectorPin
+
+type Pin: shareable + send {
+    owner: PinOwner,
+    name: String,
+    branch: u32,
+    version: u64,
+    serial: u64,
+    roots: Roots,
+    watermark: u64
+}
+
+fn share_pin(p: Pin) -> Result[Pin, Capacity] {
+    Ok(Pin(owner: p.owner, name: string.from(p.name), branch: p.branch, version: p.version, serial: p.serial, roots: share_roots(p.roots), watermark: p.watermark))
+}
+
+fn pin_owner_tag(owner: PinOwner) -> u64 {
+    match owner {
+        ApplicationPin => 1,
+        ProjectorPin => 2,
+    }
+}
+
+fn pin_order(a: String, a_owner: PinOwner, b: String, b_owner: PinOwner) -> Order {
+    let names = order.compare(a, b)
+    if names == Equal { order.compare(pin_owner_tag(a_owner), pin_owner_tag(b_owner)) } else { names }
+}
+
+fn pin_index(db: Db, owner: PinOwner, name: String) -> u64 {
+    for k in 0u64 .. list.len(db.pins) {
+        if db.pins[k].owner == owner && same_name(db.pins[k].name, name) {
+            return k
+        }
+    }
+    list.len(db.pins)
+}
+
+pub fn pinned(db: Db, name: String) -> Option[Snapshot] {
+    owned_pin(db, ApplicationPin, name)
+}
+
+fn owned_pin(db: Db, owner: PinOwner, name: String) -> Option[Snapshot] {
+    let k = pin_index(db, owner, name)
+    if k == list.len(db.pins) {
+        return None
+    }
+    let p = db.pins[k]
+    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots), watermark: p.watermark))
+}
+
 pub fn pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
-    change_pin(mut db, name, s, false)
+    change_pin(mut db, ApplicationPin, name, s)
 }
 
 fn replace_projector_pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
-    change_pin(mut db, name, s, true)
+    change_pin(mut db, ProjectorPin, name, s)
 }
 
 fn capture_matches_head(from: Snapshot, head: Head) -> bool {
@@ -443,15 +493,15 @@ fn capture_matches_head(from: Snapshot, head: Head) -> bool {
     true
 }
 
-fn change_pin(mut db: Db, name: String, s: Snapshot, overwrite: bool) -> Result[Ticket, Error] waits {
+fn change_pin(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[Ticket, Error] waits {
     journal_poll(mut db)?
     healthy(db)?
     this_open(db, s)?
     let owned = checked_name(name)?
-    let slot = pin_index(db, name)
+    let slot = pin_index(db, owner, name)
     let replacing = slot != list.len(db.pins)
     if replacing {
-        if !overwrite { return Error(Exists(take owned)) }
+        if owner == ApplicationPin { return Error(Exists(take owned)) }
         check_manifest_addition(db, int.saturating_sub(keyed_root_record_bytes(s.roots.keyed), keyed_root_record_bytes(db.pins[slot].roots.keyed)))?
     } else {
         check_manifest_addition(db, pin_root_bytes(name, s.roots))?
@@ -464,15 +514,19 @@ fn change_pin(mut db: Db, name: String, s: Snapshot, overwrite: bool) -> Result[
         Ok(head_slot) if capture_matches_head(s, db.heads[head_slot]) => share_roots(db.heads[head_slot].roots),
         _ => share_roots(s.roots),
     }
-    let kept = Pin(name: take owned, branch: s.branch, version: s.head, serial: serial, roots: take roots, watermark: s.watermark)
+    let kept = Pin(owner: owner, name: take owned, branch: s.branch, version: s.head, serial: serial, roots: take roots, watermark: s.watermark)
     if replacing { return cut_install(mut db, ReplacePin(slot, take kept)) }
     cut_install(mut db, AddPin(take kept))
 }
 
 pub fn unpin(mut db: Db, name: String) -> Result[Ticket, Error] waits {
+    remove_pin(mut db, ApplicationPin, name)
+}
+
+fn remove_pin(mut db: Db, owner: PinOwner, name: String) -> Result[Ticket, Error] waits {
     journal_poll(mut db)?
     healthy(db)?
-    let k = pin_index(db, name)
+    let k = pin_index(db, owner, name)
     if k == list.len(db.pins) {
         return Error(Missing(named(name)?))
     }

@@ -24,6 +24,7 @@ type LocatedBranch: shareable + send {
 }
 
 type LocatedPin: shareable + send {
+    owner: PinOwner,
     name: String,
     branch: u32,
     version: u64,
@@ -142,8 +143,10 @@ fn append_page_manifest_branch(mut raw: Bytes, id: u32, name: String, parent: u3
     capacity(le(mut raw, 0, 1))
 }
 
-fn append_page_manifest_pin(mut raw: Bytes, name: String, branch_id: u32, held_at: u64, roots: LocatedRoots, watermark: u64) -> Result[(), Error] {
-    capacity(disk_put_name(mut raw, name))?
+fn append_page_manifest_pin(mut raw: Bytes, owner: PinOwner, name: String, branch_id: u32, held_at: u64, roots: LocatedRoots, watermark: u64) -> Result[(), Error] {
+    capacity(le(mut raw, pin_owner_tag(owner), 1))?
+    capacity(le(mut raw, string.byte_len(name), 1))?
+    list.append(mut raw, string.as_bytes(name))
     capacity(le(mut raw, int.widen(branch_id), 4))?
     capacity(le(mut raw, held_at, 8))?
     put_located_roots(mut raw, roots)
@@ -166,7 +169,7 @@ fn append_page_manifest(mut raw: Bytes, m: PageManifest) -> Result[(), Error] {
     }
     capacity(le(mut raw, list.len(m.pins), 4))?
     for held in m.pins {
-        append_page_manifest_pin(mut raw, held.name, held.branch, held.version, held.roots, held.watermark)?
+        append_page_manifest_pin(mut raw, held.owner, held.name, held.branch, held.version, held.roots, held.watermark)?
     }
     for slot in 0u64 .. list.len(m.branches) {
         append_keyed_roots(mut raw, slot, m.branches[slot].roots)?
@@ -289,15 +292,21 @@ fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageMan
     let pin_count = disk_count(file, raw, mut at, 130)?
     let mut pins: List[LocatedPin] = list.with_capacity(pin_count)
     for i in 0u64 .. pin_count {
-        let name = disk_name(file, raw, mut at)?
-        if i != 0 && pins[i - 1].name >= name {
+        let owner = match disk_number(file, raw, mut at, 1)? {
+            1 => ApplicationPin,
+            2 => ProjectorPin,
+            _ => return Error(disk_fault(file, at - 1, Malformed)),
+        }
+        let size = disk_number(file, raw, mut at, 1)?
+        let name = disk_name_bytes(file, raw, mut at, size)?
+        if i != 0 && pin_order(pins[i - 1].name, pins[i - 1].owner, name, owner) != Less {
             return Error(disk_fault(file, at, Order))
         }
         let branch_id: u32 = int.truncate(disk_number(file, raw, mut at, 4)?)
         let head = disk_number(file, raw, mut at, 8)?
         let roots = read_located_roots(file, raw, mut at)?
         let watermark = disk_number(file, raw, mut at, 8)?
-        list.push(mut pins, LocatedPin(name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
+        list.push(mut pins, LocatedPin(owner: owner, name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
     }
     read_keyed_roots(file, raw, mut at, mut branches, mut pins)?
     Ok(PageManifest(generation: generation, fence: 0, inline: inline, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, archive_on: archive_on, archive: archive, archive_drop: archive_drop, sweep: sweep, pack_root: pack_root, retirement_root: retirement_root, branches: take branches, pins: take pins))

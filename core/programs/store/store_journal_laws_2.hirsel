@@ -60,10 +60,10 @@ fn fork_limit_manifest() -> PageManifest {
     let padding = string.repeat("x", 249)
     for i in 0u64 .. 43575 {
         let name = result.unwrap(disk_path("", 100000 + i, padding))
-        list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: clone(roots), watermark: 1))
+        list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: take name, branch: 0, version: 0, roots: clone(roots), watermark: 1))
     }
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 143), branch: 0, version: 0, roots: clone(roots), watermark: 1))
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 144), branch: 0, version: 0, roots: clone(roots), watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: string.repeat("b", 143), branch: 0, version: 0, roots: clone(roots), watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(owner: ApplicationPin, name: string.repeat("c", 144), branch: 0, version: 0, roots: clone(roots), watermark: 1))
     take manifest
 }
 

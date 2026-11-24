@@ -393,7 +393,8 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
     let mut live_bytes = 0u64
     let mut checked_pack = pack_scan(2, next_stamp)
     while at < input.size {
-        let frame = read_pack_frame(mut input, path, header.context, mut checked_pack, at, false)?
+        let mut spent = 0u64
+        let frame = read_pack_frame(mut input, path, header.context, mut checked_pack, at, false, mut spent)?
         let end = at + 16 + frame.size
         if frame.stamp != None && slot_order < list.len(reached) && reached[slot_order] == at {
             slot_order += 1

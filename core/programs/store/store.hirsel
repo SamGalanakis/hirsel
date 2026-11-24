@@ -104,15 +104,6 @@ type Head {
     following: Option[Latest[Snapshot]]
 }
 
-type Pin: shareable + send {
-    name: String,
-    branch: u32,
-    version: u64,
-    serial: u64,
-    roots: Roots,
-    watermark: u64
-}
-
 fn main_head(take roots: Roots, head: u64, at: u64) -> Head {
     Head(id: 0, name: "main", parent: 0, forked_at: 0, roots: take roots, head: head, at: at, following: None)
 }
@@ -157,10 +148,6 @@ fn main_state(take roots: Roots, head: u64, at: u64) -> Result[State, Capacity] 
     let mut tips: List[Tip] = list.new()
     list.push(mut tips, Tip(id: 0, name: "main", parent: 0, forked_at: 0, roots: take roots, head: head, at: at))
     Ok(State(tips: take tips, pins: list.new(), next_branch: 1, next_table: 1))
-}
-
-fn share_pin(p: Pin) -> Result[Pin, Capacity] {
-    Ok(Pin(name: string.from(p.name), branch: p.branch, version: p.version, serial: p.serial, roots: share_roots(p.roots), watermark: p.watermark))
 }
 
 fn tip_of(h: Head) -> Tip {
@@ -211,7 +198,7 @@ fn state_with_delta(db: Db, delta: HolderDelta) -> Result[State, Capacity] {
     if let AddPin(added) = delta {
         list.push(mut kept, share_pin(added)?)
         list.sort(mut kept, fn(a: Pin, b: Pin) -> Order {
-            order.compare(a.name, b.name)
+            pin_order(a.name, a.owner, b.name, b.owner)
         })
     }
     Ok(State(tips: take tips, pins: take kept, next_branch: db.next_branch, next_table: tables))
@@ -252,7 +239,7 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
         AddPin(take added) => {
             db.record_bytes += pin_root_bytes(added.name, added.roots)
             let mut slot = 0u64
-            while slot < list.len(db.pins) && db.pins[slot].name < added.name {
+            while slot < list.len(db.pins) && pin_order(db.pins[slot].name, db.pins[slot].owner, added.name, added.owner) == Less {
                 slot += 1
             }
             list.insert(mut db.pins, slot, take added)
@@ -703,24 +690,6 @@ pub fn branch(db: Db, name: String) -> Option[Branch] {
         Some(id) => Some(Branch(store: db.store, id: id)),
         None => None,
     }
-}
-
-fn pin_index(db: Db, name: String) -> u64 {
-    for k in 0u64 .. list.len(db.pins) {
-        if same_name(db.pins[k].name, name) {
-            return k
-        }
-    }
-    list.len(db.pins)
-}
-
-pub fn pinned(db: Db, name: String) -> Option[Snapshot] {
-    let k = pin_index(db, name)
-    if k == list.len(db.pins) {
-        return None
-    }
-    let p = db.pins[k]
-    Some(Snapshot(store: db.store, open: open_number(db), branch: p.branch, head: p.version, roots: share_roots(p.roots), watermark: p.watermark))
 }
 
 // Section 1.9 and 1.12: fork and pin take only a Snapshot of this open, whose
@@ -3085,8 +3054,8 @@ fn catalog_recharge(live_bytes: u64, roots: Roots, key: Bytes, value: Bytes, ret
     int.saturating_add(int.saturating_sub(live_bytes, old_charge), entry(key, value))
 }
 
-// Format-3 disk framing. STORE-SPEC §11.
-const DISK_FORMAT: u64 = 6
+// Store disk format. STORE-SPEC §2.3 and §11.10.
+const DISK_FORMAT: u64 = 7
 
 type DiskContext {
     store: StoreId,
@@ -3337,6 +3306,10 @@ fn disk_count(file: String, raw: Bytes, mut at: u64, least: u64) -> Result[u64, 
 
 fn disk_name(file: String, raw: Bytes, mut at: u64) -> Result[String, Error] {
     let size = disk_number(file, raw, mut at, 2)?
+    disk_name_bytes(file, raw, mut at, size)
+}
+
+fn disk_name_bytes(file: String, raw: Bytes, mut at: u64, size: u64) -> Result[String, Error] {
     if size > 255 || size > list.len(raw) - at {
         return Error(disk_fault(file, at, Malformed))
     }
@@ -4376,7 +4349,7 @@ fn manifest_state(m: PageManifest, all: List[Roots]) -> Result[State, Capacity] 
     let mut pins: List[Pin] = list.with_capacity(list.len(m.pins))
     for held in m.pins {
         let serial = list.len(pins)
-        list.push(mut pins, Pin(name: string.from(held.name), branch: held.branch, version: held.version, serial: serial, roots: share_roots(all[k]), watermark: held.watermark))
+        list.push(mut pins, Pin(owner: held.owner, name: string.from(held.name), branch: held.branch, version: held.version, serial: serial, roots: share_roots(all[k]), watermark: held.watermark))
         k += 1
     }
     Ok(State(tips: take tips, pins: take pins, next_branch: m.next_branch, next_table: m.next_table))
@@ -5294,6 +5267,11 @@ fn journal_prefix(mut input: JournalInput, path: String, offset: u64, width: u64
     if offset > input.size || width > input.size - offset {
         return Error(disk_fault(path, offset, Truncated))
     }
+    let mut spent = 0u64
+    journal_read_prefix(mut input, path, offset, width, mut spent)
+}
+
+fn journal_read_prefix(mut input: JournalInput, path: String, offset: u64, width: u64, mut spent: u64) -> Result[Bytes, Error] waits {
     let mut raw = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(width))
     })?
@@ -5301,6 +5279,7 @@ fn journal_prefix(mut input: JournalInput, path: String, offset: u64, width: u64
         let start = journal_chunk(mut input, path, offset + list.len(raw))?
         let part = order.min(width - list.len(raw), list.len(input.chunk) - start)
         list.append(mut raw, list.slice(input.chunk, start, start + part))
+        spent = int.saturating_add(spent, part)
     }
     Ok(take raw)
 }
@@ -5330,6 +5309,11 @@ fn journal_read_frame(mut input: JournalInput, path: String, context: DiskContex
 }
 
 fn disk_stream_payload(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, keep: u64) -> Result[Bytes, Error] waits {
+    let mut spent = 0u64
+    disk_stream_payload_counted(mut input, path, context, offset, head, frame, keep, mut spent)
+}
+
+fn disk_stream_payload_counted(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, keep: u64, mut spent: u64) -> Result[Bytes, Error] waits {
     if frame.size > input.size - offset - 16 {
         return Error(disk_fault(path, offset, Truncated))
     }
@@ -5350,6 +5334,7 @@ fn disk_stream_payload(mut input: JournalInput, path: String, context: DiskConte
             list.append(mut payload, list.slice(input.chunk, start, start + capture))
         }
         at += part
+        spent = int.saturating_add(spent, part)
     }
     if std.check.finish(check) != frame.checksum {
         return Error(disk_fault(path, offset, Checksum))

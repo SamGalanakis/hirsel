@@ -81,10 +81,8 @@ pub fn scrub_step(mut tour: Scrub, budget: u64) -> Result[ScrubReport, Error] wa
     let mut faults: List[Fault] = list.new()
     let mut spent = 0u64
     while tour.position < list.len(tour.packs) && (spent == 0 || spent < budget) {
-        match scrub_next(mut tour) {
-            Ok(width) => {
-                spent += width
-            },
+        match scrub_next(mut tour, mut spent) {
+            Ok(()) => (),
             Error(Corrupt(take fault)) => {
                 capacity(list.try_reserve(mut faults, 1))?
                 list.push(mut faults, take fault)
@@ -134,8 +132,8 @@ fn scrub_pack_pointers(known: PageLocations, seq: u64) -> Result[List[std.page.P
 }
 
 // Checks one unit of the current pack: its HEADER, one frame, or its end
-// against the pack's record. Returns the bytes read.
-fn scrub_next(mut tour: Scrub) -> Result[u64, Error] waits {
+// against the pack's record. Charges bytes as they are examined.
+fn scrub_next(mut tour: Scrub, mut spent: u64) -> Result[(), Error] waits {
     let seq = tour.packs[tour.position].seq
     let class = tour.packs[tour.position].class
     let unopened = match tour.open {
@@ -147,33 +145,38 @@ fn scrub_next(mut tour: Scrub) -> Result[u64, Error] waits {
         let expected = scrub_pack_pointers(tour.known, seq)?
         let opened = disk_io(host.open(tour.d, path, Read))?
         let mut input = journal_input(take opened, false)?
-        let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 3, Some(seq), Some(tour.store))?
+        let header = disk_read_header(path, scrub_prefix(mut input, path, 0, 72, mut spent)?, 3, Some(seq), Some(tour.store))?
         tour.open = Some(ScrubInput(input: take input, path: take path, context: header.context, checked_pack: pack_scan(class, tour.next_stamp), expected: take expected, slot: 0))
         tour.at = 72
-        return Ok(72)
+        return Ok(())
     }
     let at = tour.at
     let frames = tour.packs[tour.position].frames
     let payload_bytes = tour.packs[tour.position].payload_bytes
     let checked = match tour.open {
-        Some(mut reading) => scrub_frame(mut reading, frames, payload_bytes, at),
+        Some(mut reading) => scrub_frame(mut reading, frames, payload_bytes, at, mut spent),
         None => fail("store: scrub has no open pack"),
     }
-    match checked? {
-        Some(end) => {
-            tour.at = end
-            Ok(end - at)
-        },
-        None => {
-            scrub_finish_pack(mut tour)?
-            Ok(0)
-        },
+    if let Some(end) = checked? {
+        tour.at = end
+        Ok(())
+    } else {
+        scrub_finish_pack(mut tour)
     }
+}
+
+fn scrub_prefix(mut input: JournalInput, path: String, offset: u64, width: u64, mut spent: u64) -> Result[Bytes, Error] waits {
+    let available = order.min(width, input.size - offset)
+    let raw = journal_read_prefix(mut input, path, offset, available, mut spent)?
+    if available < width {
+        return Error(disk_fault(path, offset, Truncated))
+    }
+    Ok(take raw)
 }
 
 // None is the pack's end, after its frame count and payload bytes match the
 // record the generation listed.
-fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at: u64) -> Result[Option[u64], Error] waits {
+fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at: u64, mut spent: u64) -> Result[Option[u64], Error] waits {
     let has_pointer = reading.slot < list.len(reading.expected)
     if at >= reading.input.size {
         if has_pointer {
@@ -185,7 +188,7 @@ fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at: u64
         return Ok(None)
     }
     let check_pointer = has_pointer && reading.expected[reading.slot].offset == at
-    let frame = read_pack_frame(mut reading.input, reading.path, reading.context, mut reading.checked_pack, at, check_pointer)?
+    let frame = read_pack_frame(mut reading.input, reading.path, reading.context, mut reading.checked_pack, at, check_pointer, mut spent)?
     if check_pointer {
         let pointer = reading.expected[reading.slot]
         let width: u64 = int.widen(pointer.len)
@@ -203,16 +206,16 @@ fn scrub_frame(mut reading: ScrubInput, frames: u64, payload_bytes: u64, at: u64
 
 type ScannedPackFrame { stamp: Option[u64], size: u64, checksum: u64 }
 
-fn read_pack_frame(mut input: JournalInput, path: String, context: DiskContext, mut checked_pack: PackScan, at: u64, check_pointer: bool) -> Result[ScannedPackFrame, Error] waits {
-    let head = journal_prefix(mut input, path, at, 16)?
+fn read_pack_frame(mut input: JournalInput, path: String, context: DiskContext, mut checked_pack: PackScan, at: u64, check_pointer: bool, mut spent: u64) -> Result[ScannedPackFrame, Error] waits {
+    let head = scrub_prefix(mut input, path, at, 16, mut spent)?
     let frame = disk_read_frame_head(path, head, at)?
     let keep = if frame.kind == checked_pack.kind { order.min(checked_pack.stamp_at + 8, frame.size) } else { 0 }
     let (take stamp_bytes, checksum) = if check_pointer && frame.kind == checked_pack.kind {
         let mut captured = disk_allocation(scoped fn() -> Result[Bytes, Error] { Ok(list.with_capacity(keep)) })?
-        let plain = scrub_payload(mut input, path, context, at, head, frame, 8 - checked_pack.stamp_at, mut captured)?
+        let plain = scrub_payload(mut input, path, context, at, head, frame, 8 - checked_pack.stamp_at, mut captured, mut spent)?
         (take captured, plain)
     } else {
-        (disk_stream_payload(mut input, path, context, at, head, frame, keep)?, 0u64)
+        (disk_stream_payload_counted(mut input, path, context, at, head, frame, keep, mut spent)?, 0u64)
     }
     let stamp = scan_pack_frame(mut checked_pack, path, at, frame.kind, frame.flags, frame.size, stamp_bytes)?
     Ok(ScannedPackFrame(stamp, size: frame.size, checksum))
@@ -222,7 +225,7 @@ fn read_pack_frame(mut input: JournalInput, path: String, context: DiskContext, 
 // that a located pointer carries, over the payload from skip on (a PAGE's
 // whole payload, a BLOB's body after its stamp). keep bytes of the payload
 // go to captured.
-fn scrub_payload(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, skip: u64, mut captured: Bytes) -> Result[u64, Error] waits {
+fn scrub_payload(mut input: JournalInput, path: String, context: DiskContext, offset: u64, head: Bytes, frame: DiskFrameHead, skip: u64, mut captured: Bytes, mut spent: u64) -> Result[u64, Error] waits {
     if frame.size > input.size - offset - 16 {
         return Error(disk_fault(path, offset, Truncated))
     }
@@ -252,6 +255,7 @@ fn scrub_payload(mut input: JournalInput, path: String, context: DiskContext, of
             list.append(mut captured, list.slice(input.chunk, start, start + capture))
         }
         at += part
+        spent = int.saturating_add(spent, part)
     }
     if std.check.finish(check) != frame.checksum {
         return Error(disk_fault(path, offset, Checksum))

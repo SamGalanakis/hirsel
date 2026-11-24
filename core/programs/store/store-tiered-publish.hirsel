@@ -306,7 +306,7 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
         }
         if !inserted {
             if let AddPin(mut added) = delta {
-                if added.name < db.pins[slot].name {
+                if pin_order(added.name, added.owner, db.pins[slot].name, db.pins[slot].owner) == Less {
                     added.roots.collections = take_sealed(mut sealed_roots, mut at)
                     inserted = true
                 }

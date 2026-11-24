@@ -716,6 +716,50 @@ fn test_local_projector_laws(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     law_projector_disk(d, c, r, tasks)
 }
 
+@test
+fn test_local_projector_pin_ownership(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let limits = Limits(rows: 8, byte_limit: 4096)
+    let name = "hirsel.projector.fixture.0"
+    let (app_version, projector_version) = {
+        let mut db = open(tasks, directory, c, r, options)?
+        let fixture = projector_fixture(mut db, Migrate)?
+        let app = snapshot(db)
+        let _ = pin(mut db, name, app)?
+        if !typed_put(mut db, fixture.source_table, 3, 30) { return Error(MigrationFault) }
+        let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+        if let Reloaded = project_step_law(mut worker, mut db, fixture, limits)? {} else { return Error(MigrationFault) }
+        let target = version(snapshot(db))
+        project_until_idle(mut worker, mut db, fixture, limits)?
+        let _ = close(take db)?
+        (version(app), target)
+    }
+    let mut db = open(tasks, directory, c, r, options)?
+    let fixture = projector_fixture(mut db, Open)?
+    let Some(app) = pinned(db, name) else { fail("the application pin must survive projector publication and reopen") }
+    if version(app) != app_version || get(reader(db, 0)?, app, fixture.source_table, 3)? != None {
+        fail("projector publication replaced the application pin")
+    }
+    let _ = unpin(mut db, name)?
+    let mut worker = projector(fixture.decl, fixture.source_table, Local, reader(db, 0)?)
+    let source = binding(fixture.source_table, main_branch(db))
+    let row = read_projection(db, fixture.decl)?
+    let Some(image) = row.image else { return Error(MigrationFault) }
+    let Some(base) = borrowed_projection_base(mut worker, db, source, image)? else { fail("application unpin removed the projector base") }
+    if version(base) != projector_version || get(reader(db, 0)?, base, fixture.source_table, 3)? != Some(30u64) {
+        fail("the projector pin must retain the published source root")
+    }
+    let _ = pin(mut db, name, base)?
+    let _ = remove_pin(mut db, ProjectorPin, name)?
+    let Some(retained) = pinned(db, name) else { fail("projector unpin removed the application pin") }
+    if version(retained) != projector_version || get(reader(db, 0)?, retained, fixture.source_table, 3)? != Some(30u64) {
+        fail("the application pin must retain the shared root after projector unpin")
+    }
+    let _ = close(take db)?
+    Ok(())
+}
+
 fn followed_rows(f: Follower) -> Result[Table[u64, u64], Error] {
     let mut schema = declare_follower(f)
     let declared = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?

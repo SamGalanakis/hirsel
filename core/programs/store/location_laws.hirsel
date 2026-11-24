@@ -1,7 +1,7 @@
 // L41 and L51(l). Read AP3, AP8, AP14 and AP20 directly from the files.
 // The physical index is keyed by pack and offset: dead frames in a listed
 // pack may repeat a live stamp and still count toward that pack's totals.
-type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(String, u8) | LawList(u8)
+type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(PinOwner, String, u8) | LawList(u8)
 
 type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRetired | LawRows
 
@@ -228,7 +228,12 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     let pins = read_le(raw, at, 4)
     at += 4
     for _ in 0u64 .. pins {
-        let name_bytes = read_le(raw, at, 2)
+        let owner = match raw[at] {
+            1 => ApplicationPin,
+            2 => ProjectorPin,
+            _ => fail("location law: pin owner"),
+        }
+        let name_bytes: u64 = int.widen(raw[at + 1])
         let name = result.unwrap(string.from_utf8(copied(list.slice(raw, at + 2, at + 2 + name_bytes))?))
         let roots = at + 14 + name_bytes
         for tree in 0u8 .. 3 {
@@ -238,7 +243,7 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
                 LawCollections
             } else {
                 LawData
-            }, LawPin(clone(name), tree))?
+            }, LawPin(owner, clone(name), tree))?
         }
         at = roots + 116
     }
@@ -275,14 +280,15 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
     if disk_index_len(known.frames) != map.len(oracle.frames) || disk_index_len(known.packs) != map.len(oracle.packs) {
         fail("location law: inventory size")
     }
-    let mut pin_names: Map[u64, String] = map.new()
-    let mut seen_names: Map[String, ()] = map.new()
+    let mut pin_names: Map[u64, (PinOwner, String)] = map.new()
+    let mut seen_names: Map[(PinOwner, String), ()] = map.new()
     for held in db.pins {
-        if map.contains(pin_names, held.serial) || map.contains(seen_names, held.name) {
+        let key: (PinOwner, String) = (held.owner, clone(held.name))
+        if map.contains(pin_names, held.serial) || map.contains(seen_names, key) {
             fail("location law: pin names and serials must be one-to-one")
         }
-        map.insert(mut pin_names, held.serial, clone(held.name))
-        map.insert(mut seen_names, clone(held.name), ())
+        map.insert(mut pin_names, held.serial, clone(key))
+        map.insert(mut seen_names, take key, ())
     }
     let mut incoming: Map[(u64, LawLocationSource), u64] = map.new()
     for (stamp, frame) in oracle.frames {
@@ -296,7 +302,10 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
             let source = match owner {
                 PageSource(parent) => LawPage(parent),
                 HolderSource(0, id, tree) => LawBranch(id, tree),
-                HolderSource(1, serial, tree) => LawPin(clone(option.unwrap(map.get(pin_names, serial))), tree),
+                HolderSource(1, serial, tree) => {
+                    let (pin_owner, name) = option.unwrap(map.get(pin_names, serial))
+                    LawPin(pin_owner, clone(name), tree)
+                },
                 ListSource(which) => LawList(which),
                 _ => fail("location law: unknown installed holder"),
             }
@@ -392,7 +401,7 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let _ = law_compare_locations(db)?
     let _ = pin(mut db, "a-old", saved)?
     let initial = law_compare_locations(db)?
-    let parent = law_location_collection(initial, LawPin("z-old", 0))
+    let parent = law_location_collection(initial, LawPin(ApplicationPin, "z-old", 0))
     let page = option.unwrap(map.get(initial.frames, parent))
     if list.len(page.outgoing) != 2 {
         fail("location law: expected two surviving blobs")
@@ -436,7 +445,7 @@ fn check_location_relocations(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     }
     let _ = unpin(mut db, "z-old")?
     let remaining = law_compare_locations(db)?
-    if law_location_collection(remaining, LawPin("a-old", 0)) != parent {
+    if law_location_collection(remaining, LawPin(ApplicationPin, "a-old", 0)) != parent {
         fail("location law: remaining pin must retain its ancestor")
     }
     let _ = unpin(mut db, "a-old")?

@@ -1,4 +1,6 @@
-# STORE-SPEC v2.99: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.100: the M4 store library (lane store-spec-1001)
+
+v2.100 (store-scrub-pins-2308) charges bytes examined by a scrub even when validation fails (§11.17). Format 7 gives application and local projector pins distinct durable owners (§1.9, §1.14, §11.10).
 
 v2.99 (store-list-collections-2287) adds read-only enumeration of the staged migration catalog (§1.2). The catalog format stays the same.
 
@@ -2029,6 +2031,7 @@ pub fn pinned(db: Db, name: String) -> Option[Snapshot]
 ```
 
 **Pins and forks are manifest state.**
+- Application pins and local projector pins have independent identities. The MANIFEST retains both when their names match. Public `pin`, `pinned` and `unpin` address only application pins. A local projector addresses only projector pins, including when it replaces a slot or looks up its base after reopening.
 - `pin`, `unpin`, `fork`, `delete_branch` and `adopt` each make a checkpoint cut, and their ticket is that cut's generation.
 - Reason: a pinned or forked version older than the last checkpoint may have nodes that no pack holds. Writing them at the cut is the only way the pin survives a crash, and the incremental checkpoint writes only those nodes.
 - `fork` and `pin` take only a Snapshot of this open (`Foreign` otherwise). A Snapshot of an earlier open may hold node ids that this open has handed out again, because ids past the manifest's `next_node` are reissued after a reopen.
@@ -2182,16 +2185,18 @@ pub fn live(row: Projection, b: Binding) -> Option[u32]
 
 **The published image and `live` (#4).** `image` is the one complete image: derived rows of `image.generation` equal the fold of the source at version `image.position`. `live(row, b)` is `image.generation` when the row's binding is b, else None; it is None until the first image is published, through any number of early rebuilds. A reader holds the `ProjectionDecl` and the source Table in its inert env, computes b with `binding`, and reads the row and the derived rows in **one** snapshot of `db`, so it sees one whole image.
 
+The local pin ownership law reopens a Directory with two owners for the same pin name. Each owner can remove its pin while the other still retains and reads its own capture.
+
 **The base: exact or none (#1).** A diff is taken only from a Snapshot of the bound source at exactly `image.position`:
 - the base Snapshot the handle holds from its last publish, if its version is `image.position`; else
-- `Local`: `pinned(db, "hirsel.projector.<name>.<image.slot>")` if its version is `image.position`;
+- `Local`: the projector-owned pin `hirsel.projector.<name>.<image.slot>` if its version is `image.position`;
 - `Follower(f)`: `follower_floor(f, image.position)` if its version is `image.position`.
 Otherwise there is no base, and the image can advance only by a rebuild. A pin of an older image or generation, a checkpoint below the position, a `Reclaimed` or a re-base domain mismatch (§13.5) during any page are never a base; they end the pass (`Reclaimed` and a domain mismatch) or are ignored (an older pin). Corruption and foreign input are `Store(e)`.
 
 **A step**, in this order:
 1. **Rebind** if the binding differs (above), one commit per step.
 2. **An open pass** takes its next page (below).
-3. **Source changes.** With no image, or with an image and no base, the step opens a rebuild at the target T. With an image, a base and a target T (`snapshot(db)` for Local, `fresh(f)` for Follower): if `version(T)` = `image.position`, or the source's root at T is the base's in the same stamp domain, or `changes_page(base, T, lo, hi, limits)` over the source's id range [lo, hi) returns no change and `next` = None, the step goes on to 4 with **no transaction and no pin** (#6). If the page holds every change (`next` = None), the step **updates in place**: for `Local` it first pins T as `hirsel.projector.<name>.<1 − image.slot>`, then in **one** `run` it calls `apply` for each change in key order with `generation` = `image.generation` and `at` = `version(T)`, and sets `image.position` = `version(T)` (and, for Local, `image.slot` to the new slot) in the same commit. It returns `Updated(n)`. If the page does not hold every change, the step applies none of it and opens a rebuild (below) at T.
+3. **Source changes.** With no image, or with an image and no base, the step opens a rebuild at the target T. With an image, a base and a target T (`snapshot(db)` for Local, `fresh(f)` for Follower): if `version(T)` = `image.position`, or the source's root at T is the base's in the same stamp domain, or `changes_page(base, T, lo, hi, limits)` over the source's id range [lo, hi) returns no change and `next` = None, the step goes on to 4 with **no transaction and no pin** (#6). If the page holds every change (`next` = None), the step **updates in place**: for `Local` it first writes the projector-owned pin `hirsel.projector.<name>.<1 − image.slot>` for T, then in **one** `run` it calls `apply` for each change in key order with `generation` = `image.generation` and `at` = `version(T)`, and sets `image.position` = `version(T)` (and, for Local, `image.slot` to the new slot) in the same commit. It returns `Updated(n)`. If the page does not hold every change, the step applies none of it and opens a rebuild (below) at T.
 4. **A requested rebuild** (`again`) opens a rebuild at T.
 5. **Retirement** (`retiring` = Some(g)) runs one `run` that calls `drop(tx, env, g, limits)` and, when it returns `false`, clears `retiring` in the same commit. Returns `Dropped(g)`.
 6. Otherwise `Idle`. Repeated `Idle` steps make no commit and no cut (L72).
@@ -2279,7 +2284,7 @@ objects@1 has its own names (§12.2): entries (role 2), MANIFESTs (role 1), pack
 | Off | Size | Field | Rule |
 |---|---|---|---|
 | 0 | 8 | magic | `HIRSTORE`, else `Header` |
-| 8 | 4 | format u32 | 2 (v2.30 AN2); any other value is `Unsupported(format)` |
+| 8 | 4 | format u32 | 7 (v2.100); any other value is `Unsupported(format)` |
 | 12 | 1 | role u8 | 1 manifest, 2 journal segment (and an objects@1 entry), 3 pack, 4 end file, 7 the objects@1 `head` (v2.46), 8 an objects@1 locator chunk (v2.47); must match the file's or object's name |
 | 13 | 1 | authority u8 | 0 = log (unchanged for every existing directory store), 1 = objects, 2 = sim (§12.1), the same in every file of the store; a memory store writes no file. 3–255 are `Unsupported` |
 | 14 | 2 | zero | |
@@ -2296,7 +2301,7 @@ objects@1 has its own names (§12.2): entries (role 2), MANIFESTs (role 1), pack
 
 Keyed claims reserve journal bytes as specified by [HTTP K-7](../../../docs/spec/http.md#k-7-cardinality-and-bytes). For a proposed append, the available journal bytes equal `journal_limit` minus the sum of the terminal frame bounds of the claims left Admitted by that append. An admission adds its own frame bound to the sum. A terminal commit removes exactly its own. Refusal leaves both the journal and its credit unchanged. Credit is rebuilt from the checkpoint and replayed `claim_open` tree before writable open. It is bounded by the sum of the claims' resident terminal reserves.
 
-**Format 6.** The header word is 6. Sections 0 and 1 use the format-5 data and stream operation grammars. Section 2 is a control section with one put and an empty key. The value is `streams_max u64 LE ‖ streams_count u64 LE ‖ expiry_floor Option[u64 LE]`. The option starts with one tag byte. Section 1 carries the typed stream keys and Caller metadata from §1.8. Checkpoints carry the control value at the reserved empty key alongside the stream rows. Readers accept format 6.
+**COMMIT grammar from format 6.** Sections 0 and 1 use the format-5 data and stream operation grammars. Section 2 is a control section with one put and an empty key. The value is `streams_max u64 LE ‖ streams_count u64 LE ‖ expiry_floor Option[u64 LE]`. The option starts with one tag byte. Section 1 carries the typed stream keys and Caller metadata from §1.8. Checkpoints carry the control value at the reserved empty key alongside the stream rows.
 
 **COMMIT (kind 0x0011, MUST)**, payload:
 
@@ -4078,6 +4083,8 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
 | branches | u32 count; each: id u32, name str (0–255 bytes), parent u32, forked_at u64, version u64, at u64, collections PagePtr, streams PagePtr, catalog PagePtr, base (below). Ascending by id; main is id 0 and always present. 143 + n bytes each, with n the name's length. |
 | pins | u32 count; each: name str, branch u32, version u64, collections PagePtr, streams PagePtr, catalog PagePtr. Ascending by name. 122 + n bytes each. |
 
+**Format 7.** A MANIFEST pin starts with `owner u8 ‖ name_len u8 ‖ name UTF-8`. Owner 1 is application and owner 2 is local projector. Any other owner is `Corrupt(Malformed)`. The remaining fields are branch, version, the three root pointers and watermark (§13.1). The record remains 130 + name_len bytes. Order is ascending by name bytes, then owner tag. A duplicate (name, owner) or an out-of-order record is `Corrupt(Order)`.
+
 - `next_branch`, `next_table`, `next_pack`, `first_live`, `prev_first`, the meaning of `retired` and the list order rules (`Order`) are as §2.6. List rows ascend by seq within a page and across pages by AP3's separators, and no seq is in both lists (`Corrupt(Malformed)`).
 - `next_stamp` replaces `next_node`.
 - A pack-list row gains `class`, `live` and `bytes` beside §2.6's fields. `live` and `bytes` count the same thing, PAGE or BLOB payload bytes, with frame heads, the pack's HEADER and frames of other kinds excluded from both, so a pack's live ratio is `live / bytes` in one unit (M8). The `account` field is new.
@@ -4610,7 +4617,7 @@ Open checks every listed pack once. After that, the Store answers from resident 
 - At the pack's end, the frame count and payload bytes must equal the generation's pack record.
 
 **Report.** `ScrubReport { generation, checked, next, faults }`:
-- `checked` is the bytes the tour has read so far.
+- `checked` is the cumulative logical bytes examined, including bytes examined in a unit that reports damage. A step charges the available part of a truncated header and the whole payload when its checksum fails. It charges only the frame head when its length already proves truncation, and zero bytes for a pack-end inventory check. Chunk read-ahead counts only as it is examined.
 - `next` is the oldest pack not yet finished, or `None` when the tour is done.
 - `faults` holds the faults this step found, each a `Fault { file, offset, why }`.
 - A fault ends that pack's tour, because the next frame boundary past a bad head is unknown. A pack therefore reports at most one fault.
@@ -4623,7 +4630,8 @@ Open checks every listed pack once. After that, the Store answers from resident 
 
 A later version may add these, and a periodic tour with an I/O budget, without a format change.
 
-**Laws** (`store-scrub.hirsel`):
+**Laws** (`store_scrub_laws.hirsel`):
+- **Damage spends the step budget.** A checksum failure in the first pack spends its HEADER and the first frame’s envelope and payload. With that budget the step stops at the next pack, whose seven-byte truncated HEADER spends the next step’s seven-byte budget.
 - **Misdirected write, seen from both sides.** In TigerBeetle's fault model, pack A's first frame lands at offset 72 of pack B, and A's slot keeps its old sector (zeros). A tour over the damaged generation reports exactly (A, 72, `Kind(0)`) and (B, 72, `Checksum`). B's frame has a well-formed head, but its check binds A's sequence. The Db still answers reads.
 - **Stale frame at its own place.** A frame resealed for pack C at 72, with its last byte changed, gives (C, 72, `Checksum`), from the pointer check alone.
 - **Clean control.** Before the damage, the same generation reads with no fault, and `checked` equals the sum of the listed packs' file sizes.

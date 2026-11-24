@@ -884,7 +884,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         .or_else(|| install_root.as_ref().map(|root| root.join("core-packages")))
         .or_else(|| test_store.as_ref().map(|scratch| scratch.path().to_owned()))
         .unwrap_or_else(|| directory.join(".hirsel-core"));
-    let code_store = CodeStore::for_request(command, code_store, &store);
+    let code_store = CodeStore::for_request(command, code_store, &store)?;
     let select_link = |cc: Option<PathBuf>| -> Result<Link, Box<dyn std::error::Error>> {
         match (cc, &installed) {
             (Some(cc), _) => Ok(Link::Driver(crate::link_driver(&cc)?)),

@@ -415,7 +415,9 @@ a fresh request store and checks
 the Spectralnorm result. The receipt carries the compiler's stage metrics
 and a separate breakdown of process-tree PMU instruction stack samples.
 Entries in `other` have no recognized phase frame. The samples estimate
-where instruction work occurs.
+where instruction work occurs. The innermost recognized frame names the
+phase, so the pre-LLVM phases (`std-load`, `code-store`, `request-store`,
+`tool-inputs`) take their hashing and copying away from `reach` and `other`.
 
 Add `--pass-trace --top 10` to count a fresh-store build with the LLVM
 trace off and another with it on. Both builds use the same prebuilt std

@@ -584,7 +584,7 @@ impl CheckProduct {
         reached.require_native(self, entry, options)?;
         let inputs = reached.native.as_ref().expect("a build's reachable set");
         let root = Identity::plain(entry.clone());
-        let code = crate::code_store::CodeStore::new(options.store.join("code"));
+        let code = crate::code_store::CodeStore::cache(&options.store, "code")?;
         let mut units = self
             .release_units(&root, &reached, &code, None, None)?
             .units;
@@ -873,7 +873,7 @@ impl CheckProduct {
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             self.preflight_foreign_link(reached, options)?;
             reached.require_native(self, entry, options)?;
-            let code = crate::code_store::CodeStore::new(options.store.join("code"));
+            let code = crate::code_store::CodeStore::cache(&options.store, "code")?;
             return self
                 .publish_release(
                     entry,

@@ -372,6 +372,11 @@ impl Store {
             self.locked(|path| fs::create_dir(path), |path, ()| File::open(path))?;
         Ok(Scratch { path, _lock: lock })
     }
+    /// `publish` to a `path` outside the records, on this store's
+    /// filesystem: a cache code store's pack (`code_store::pack`).
+    pub(crate) fn publish_to(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.publish(path, bytes)
+    }
     /// Write `bytes` to a temporary and rename it to `path`. Nothing is
     /// synced (module documentation).
     fn publish(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {

@@ -1,16 +1,25 @@
-//! Immutable code objects. Native action results use a separate local cache.
+//! Immutable code objects, named by kind and SHA-256.
+//!
+//! A store holds loose objects, `<kind directory>/<name>`, and packs,
+//! `packs/*.pack` (`pack`). Every store reads both. A durable store (`new`)
+//! writes loose objects, each synced and named atomically ("Durable
+//! publication" in docs/spec/launch.md): host, publish and supplied stores.
+//! A cache store (`cache`) is a build's own, inside its driver store: it
+//! holds what `put` gives it until `commit` writes one unsynced pack, and a
+//! lost or damaged object is a miss that the next build writes again.
 
+use crate::store::Store;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::release_recipe::ObjectRef;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions, Permissions},
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
-mod watch;
-pub(crate) use watch::{Presence, Watch};
+mod pack;
 
 /// A launcher publish writes its recipe here until the compiling process exits.
 pub(crate) const PUBLISH_RECIPE_STAGE: &str = "HIRSEL_PUBLISH_RECIPE_STAGE";
@@ -32,6 +41,17 @@ impl ObjectKind {
             Self::Group => "groups",
             Self::Recipe => "recipes",
             Self::ForeignArchive => "archives",
+        }
+    }
+
+    /// The kind's code in a pack index.
+    fn code(self) -> u8 {
+        match self {
+            Self::Body => 0,
+            Self::Annex => 1,
+            Self::Group => 2,
+            Self::Recipe => 3,
+            Self::ForeignArchive => 4,
         }
     }
 
@@ -68,71 +88,154 @@ impl ObjectKind {
     }
 }
 
+/// One object's bytes as a store holds them: a loose file, or a pack row
+/// already checked.
+pub struct Object {
+    len: u64,
+    source: Source,
+}
+
+enum Source {
+    File(File),
+    Packed(io::Cursor<Vec<u8>>),
+}
+
+impl Object {
+    /// A regular file's object.
+    pub(crate) fn file(file: File) -> io::Result<Self> {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "code object is not a regular file",
+            ));
+        }
+        Ok(Self {
+            len: metadata.len(),
+            source: Source::File(file),
+        })
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+impl Read for Object {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match &mut self.source {
+            Source::File(file) => file.read(buf),
+            Source::Packed(bytes) => bytes.read(buf),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CodeStore {
     root: PathBuf,
-    local_build: bool,
+    packs: Arc<Mutex<pack::Packs>>,
+    /// The driver store whose temporaries a cache store's packs are written
+    /// through; `None` for a durable store.
+    cache: Option<Store>,
     recipe_stage: Option<PathBuf>,
 }
 
 impl CodeStore {
+    /// A durable store at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
         Self {
-            root: root.into(),
-            local_build: false,
-            recipe_stage: None,
-        }
-    }
-
-    /// Default code cache of a CLI build. Collection leases and publication
-    /// freshness apply to a supplied code store, whose objects are shared
-    /// with admission.
-    pub(crate) fn for_build(root: PathBuf) -> Self {
-        Self {
+            packs: Arc::new(Mutex::new(pack::Packs::new(&root))),
             root,
-            local_build: true,
+            cache: None,
             recipe_stage: None,
         }
     }
 
-    pub(crate) fn for_request(command: &str, path: Option<PathBuf>, compiler: &Path) -> Self {
+    /// The cache store `name` inside driver store `store`.
+    pub(crate) fn cache(store: &Path, name: &str) -> io::Result<Self> {
+        Ok(Self {
+            cache: Some(Store::new(store)?),
+            ..Self::new(store.join(name))
+        })
+    }
+
+    pub(crate) fn for_request(
+        command: &str,
+        path: Option<PathBuf>,
+        compiler: &Path,
+    ) -> io::Result<Self> {
         let mut code = match path {
             Some(path) => Self::new(path),
-            None if command == "build" => Self::for_build(compiler.join("code-store")),
+            None if command == "build" => Self::cache(compiler, "code-store")?,
             None => Self::new(compiler.join("code-store")),
         };
         if command == "publish" {
             code.recipe_stage = std::env::var_os(PUBLISH_RECIPE_STAGE).map(PathBuf::from);
         }
-        code
+        Ok(code)
     }
 
-    pub(crate) fn local_build(&self) -> bool {
-        self.local_build
+    /// Whether this is a build's own cache store.
+    pub(crate) fn is_cache(&self) -> bool {
+        self.cache.is_some()
     }
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
+    /// A loose object's path.
     pub fn path(&self, kind: ObjectKind, hash: ContentHash) -> PathBuf {
         self.root
             .join(kind.directory())
             .join(crate::native::selection(hash))
     }
 
-    pub fn open(&self, kind: ObjectKind, hash: ContentHash) -> io::Result<File> {
-        let file = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(self.path(kind, hash))?;
-        if !file.metadata()?.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "code object is not a regular file",
-            ));
+    /// The `kind` object named `hash`: a pack's whole row, else, in a durable
+    /// store, the loose file. A damaged row is not found.
+    pub fn open(&self, kind: ObjectKind, hash: ContentHash) -> io::Result<Object> {
+        if let Some(bytes) = self.packs.lock().unwrap().read(kind, hash)? {
+            return Ok(Object {
+                len: bytes.len() as u64,
+                source: Source::Packed(io::Cursor::new(bytes)),
+            });
         }
-        Ok(file)
+        if self.cache.is_some() {
+            return Err(io::ErrorKind::NotFound.into());
+        }
+        Object::file(
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(self.path(kind, hash))?,
+        )
+    }
+
+    /// Whether the store holds `object`: a whole pack row of its length, or,
+    /// in a durable store, a loose file of its name.
+    pub(crate) fn contains(&self, kind: ObjectKind, object: ObjectRef) -> io::Result<bool> {
+        if self
+            .packs
+            .lock()
+            .unwrap()
+            .contains(kind, object.hash, object.len)?
+        {
+            return Ok(true);
+        }
+        if self.cache.is_some() {
+            return Ok(false);
+        }
+        self.path(kind, object.hash).try_exists()
+    }
+
+    /// Write a cache store's pending objects as one pack. A durable store's
+    /// objects are written by `put`.
+    pub(crate) fn commit(&self) -> io::Result<()> {
+        match &self.cache {
+            Some(store) => self.packs.lock().unwrap().commit(store),
+            None => Ok(()),
+        }
     }
 
     /// Make a private, already verified admission file durable and visible.
@@ -198,7 +301,8 @@ impl CodeStore {
         Ok(removed)
     }
 
-    /// Publish one checked object, with an atomic, non-replacing name.
+    /// Publish one checked object: a durable store's with an atomic,
+    /// non-replacing name, a cache store's at its next commit.
     pub fn put(&self, kind: ObjectKind, bytes: &[u8]) -> io::Result<ObjectRef> {
         let object = ObjectRef {
             hash: kind.hash(bytes),
@@ -212,12 +316,19 @@ impl CodeStore {
         self.put_addressed(kind, object, bytes)
     }
 
-    fn put_addressed(
+    /// `put` of an object whose name the caller computed.
+    pub(crate) fn put_addressed(
         &self,
         kind: ObjectKind,
         object: ObjectRef,
         bytes: &[u8],
     ) -> io::Result<ObjectRef> {
+        if self.cache.is_some() {
+            if !self.contains(kind, object)? {
+                self.packs.lock().unwrap().put(kind, object.hash, bytes);
+            }
+            return Ok(object);
+        }
         let path = self.path(kind, object.hash);
         if path.try_exists()? {
             // Published again: refresh it, so collection keeps it as long as a new object.
@@ -249,4 +360,121 @@ impl CodeStore {
 
 fn sync_dir(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How a power loss may leave a renamed pack.
+    #[derive(Clone, Copy, Debug)]
+    enum Damage {
+        /// Cut short at a record boundary.
+        Cut(usize),
+        /// Zero-filled from a record boundary to its end.
+        Zeroed(usize),
+        /// One payload's bytes zero-filled.
+        Payload(usize),
+    }
+
+    /// A cache store's committed pack, damaged as a power loss may leave it
+    /// at each record boundary and in each payload: every object reads back
+    /// as the bytes put or is absent (`open` and `contains` agree), never
+    /// other bytes; putting every object again and committing makes each
+    /// one read back whole in a new process. The undamaged pack serves every
+    /// object. Oracle: the bytes put.
+    #[test]
+    fn a_damaged_pack_is_a_miss_and_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects: Vec<(ObjectKind, Vec<u8>)> = vec![
+            (ObjectKind::Body, b"body one".to_vec()),
+            (ObjectKind::Body, vec![7; 5000]),
+            (ObjectKind::Annex, b"annex".to_vec()),
+            (ObjectKind::Group, (0..=255).collect()),
+            (ObjectKind::Recipe, b"recipe".to_vec()),
+            (ObjectKind::ForeignArchive, b"!<arch>\n".to_vec()),
+        ];
+        let put_all = |store: &CodeStore| {
+            let refs = objects
+                .iter()
+                .map(|(kind, bytes)| store.put(*kind, bytes).unwrap())
+                .collect::<Vec<_>>();
+            store.commit().unwrap();
+            refs
+        };
+        let written = CodeStore::cache(&dir.path().join("written"), "code").unwrap();
+        let refs = put_all(&written);
+        let packs = dir.path().join("written/code/packs");
+        let [pack] = fs::read_dir(&packs)
+            .unwrap()
+            .map(|row| row.unwrap().path())
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap();
+        let bytes = fs::read(&pack).unwrap();
+        let cuts = pack::tests::boundaries(&bytes);
+        let payloads = refs
+            .iter()
+            .zip(&objects)
+            .map(|(object, (_, content))| {
+                let at = bytes
+                    .windows(content.len())
+                    .position(|w| w == content.as_slice())
+                    .unwrap();
+                assert_eq!(object.len, content.len() as u64);
+                at..at + content.len()
+            })
+            .collect::<Vec<_>>();
+        let damages = cuts
+            .iter()
+            .flat_map(|&cut| [Damage::Cut(cut), Damage::Zeroed(cut)])
+            .chain((0..payloads.len()).map(Damage::Payload));
+        for (case, damage) in damages.enumerate() {
+            let mut damaged = bytes.clone();
+            match damage {
+                Damage::Cut(cut) => damaged.truncate(cut),
+                Damage::Zeroed(cut) => damaged[cut..].fill(0),
+                Damage::Payload(at) => damaged[payloads[at].clone()].fill(0),
+            }
+            let driver = dir.path().join(format!("case-{case}"));
+            fs::create_dir_all(driver.join("code/packs")).unwrap();
+            fs::write(
+                driver.join("code/packs").join(pack.file_name().unwrap()),
+                &damaged,
+            )
+            .unwrap();
+            let store = CodeStore::cache(&driver, "code").unwrap();
+            let mut served = 0;
+            for ((kind, content), object) in objects.iter().zip(&refs) {
+                let held = store.contains(*kind, *object).unwrap();
+                match store.open(*kind, object.hash) {
+                    Ok(mut read) => {
+                        let mut got = Vec::new();
+                        read.read_to_end(&mut got).unwrap();
+                        assert_eq!(&got, content, "{damage:?}: {kind:?} served other bytes");
+                        assert!(held, "{damage:?}: {kind:?} read but not held");
+                        served += 1;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        assert!(!held, "{damage:?}: {kind:?} held but not read");
+                    }
+                    Err(error) => panic!("{damage:?}: {kind:?}: {error}"),
+                }
+            }
+            if damaged == bytes {
+                assert_eq!(served, objects.len(), "{damage:?}: the whole pack");
+            }
+            assert_eq!(put_all(&store), refs);
+            let rebuilt = CodeStore::cache(&driver, "code").unwrap();
+            for ((kind, content), object) in objects.iter().zip(&refs) {
+                let mut got = Vec::new();
+                rebuilt
+                    .open(*kind, object.hash)
+                    .unwrap_or_else(|error| panic!("{damage:?}: {kind:?} after rebuild: {error}"))
+                    .read_to_end(&mut got)
+                    .unwrap();
+                assert_eq!(&got, content, "{damage:?}: {kind:?} after rebuild");
+            }
+        }
+    }
 }

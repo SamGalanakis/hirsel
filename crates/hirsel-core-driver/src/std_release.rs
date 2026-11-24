@@ -48,7 +48,7 @@ use hirsel_core_ir::{Callee, FuncId, Identity, Param};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
-const STD_SCHEMA: u32 = 10;
+const STD_SCHEMA: u32 = 11;
 
 /// The largest body, in LLVM instructions after the std's optimiser, the std
 /// lends a program's inliner. LLVM's inline cost decides each call site; this
@@ -593,11 +593,8 @@ fn lower(
         points.sort_unstable();
         points.dedup();
     }
-    if prebuilt {
-        write_compressed(store, lent_key, &lent)?;
-    } else {
-        store.put_keyed(lent_key, &lent)?;
-    }
+    // Every program reads the lent bodies whole, so they stay uncompressed.
+    store.put_keyed(lent_key, &lent)?;
     store.put_keyed(key, &encode(&record)?)?;
     let lowered = record.units.len() as u64;
     Ok((key, record, lowered))
@@ -835,12 +832,9 @@ fn side(
         .first()
         .cloned()
         .ok_or_else(|| NativeStop::Entry("the release std has no root".into()))?;
-    let lent = if record.prebuilt {
-        read_compressed(store, record.lent)?
-    } else {
-        store.get(record.lent)?
-    }
-    .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
+    let lent = store
+        .get(record.lent)?
+        .ok_or_else(|| NativeStop::Entry("the release std's lent bodies are missing".into()))?;
     Ok(StdSide {
         key,
         lent,
@@ -1102,7 +1096,8 @@ impl StdSide {
     }
 }
 
-/// The installed store keeps the original byte length and one zlib frame.
+/// A prebuilt part keeps its original byte length and one zlib frame: a
+/// program reads only the parts it reaches.
 fn write_compressed(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<()> {
     let compressed = hirsel_llvm_lazy::compress_std_record(bytes).map_err(io::Error::other)?;
     let mut payload = Vec::with_capacity(8 + compressed.len());

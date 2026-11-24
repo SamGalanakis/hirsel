@@ -8,8 +8,8 @@ mod exchange;
 mod operation_tags;
 mod reservation;
 
-use crate::code_store::CodeStore;
 pub use crate::code_store::ObjectKind;
+use crate::code_store::{CodeStore, Object};
 pub use exchange::{ControlConnection, send_release};
 pub use reservation::AdmissionStore;
 
@@ -669,7 +669,7 @@ fn read_recipe(
     budget: &Debit<'_>,
 ) -> Result<Vec<u8>, AdmissionError> {
     let file = open_object(store, ObjectKind::Recipe, root)?;
-    let len = file.metadata().map_err(AdmissionError::Io)?.len();
+    let len = file.len();
     if len > max_bytes as u64 {
         return Err(AdmissionError::Limit(Limit::RecipeBytes));
     }
@@ -685,7 +685,7 @@ fn open_object(
     store: &CodeStore,
     kind: ObjectKind,
     hash: ContentHash,
-) -> Result<std::fs::File, AdmissionError> {
+) -> Result<Object, AdmissionError> {
     store
         .open(kind, hash)
         .map_err(|error| object_error(hash, error))
@@ -699,12 +699,12 @@ fn object_error(hash: ContentHash, error: io::Error) -> AdmissionError {
 }
 
 fn read_verified(
-    mut file: std::fs::File,
+    mut file: Object,
     kind: ObjectKind,
     object: &ObjectRef,
     budget: &Debit<'_>,
 ) -> Result<Vec<u8>, AdmissionError> {
-    if file.metadata().map_err(AdmissionError::Io)?.len() != object.len {
+    if file.len() != object.len {
         return Err(AdmissionError::Hash(object.hash));
     }
     let length =

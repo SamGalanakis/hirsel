@@ -25,6 +25,11 @@ STAGES = (
     ("ir-emit", r"hirsel_llvm::core::.*(emit_module|emit_body|native_module)|native::emit_unit"),
     ("reach", r"reachable_for|build_reachable|reach::|instances::"),
     ("check/lower", r"check_lower|hirsel_core_front|hirsel_core_check|hirsel_core_resolve"),
+    # Pre-LLVM driver work outside the phases above.
+    ("std-load", r"hirsel_core_driver::(native::)?std_release::|decompress_std_record|llvm::compression::"),
+    ("code-store", r"hirsel_core_driver::(code_store|code_admission)::|CheckProduct>::(release_units|publish_release)"),
+    ("request-store", r"hirsel_core_driver::(store|request_record)::"),
+    ("tool-inputs", r"hirsel_core_driver::tool_inputs::"),
 )
 RULES = [(stage, re.compile(pattern)) for stage, pattern in STAGES]
 PERIOD = 20_000_003

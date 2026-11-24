@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Cold and warm checks and an unchanged build issue no sync calls.
 
-The driver's build cache (store.rs) never syncs. A torn or missing cache
-record is a miss. Every sync in a fresh build belongs to a new code object:
-one successful file fsync per object, followed by fsyncs of its kind directory
-and the code-store root. Host admission owes staged objects the same barriers.
-See "Durable publication" in docs/spec/launch.md.
+The driver's build cache (store.rs) and a build's own code cache (one
+unsynced pack per publication) never sync. A torn or missing cache record or
+pack row is a miss. Host admission syncs each received code object once,
+followed by fsyncs of its kind directory and the code-store root. See "Durable
+publication" in docs/spec/launch.md.
 
 The preload shim traces fsync, fdatasync, syncfs, sync and sync_file_range in
 the compiler and its subprocesses.
 """
 
 import argparse
+import json
 import os
 import shlex
 import socketserver
@@ -444,21 +445,31 @@ class StoreNoSync(unittest.TestCase):
                 store,
                 "-o",
                 binary,
+                "--json",
             ]
             run, calls = syncs(build, shim, scratch / "build.log")
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            published = self.assert_publication_syncs(calls, code)
+            self.assertEqual(calls, [], "cold build")
+            recipe = bytes(json.loads(run.stdout)["native"]["recipe"]).hex()
 
             run, calls = syncs(build, shim, scratch / "build.log")
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertEqual(calls, [], "unchanged build")
             self.assertEqual(subprocess.run([binary], check=False).returncode, 7)
 
+            # A supplied code store reads the build's packs.
+            replayed = scratch / "recipe-program"
+            run = subprocess.run(
+                [self.compiler, "build", "--recipe", recipe, "--code-store", code,
+                 "--cc", cc, "--runtime", archive, "--store", scratch / "recipe-store",
+                 "-o", replayed],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(subprocess.run([replayed], check=False).returncode, 7)
+
             # The uninstalled compiler admits and publishes the initial release,
             # then stops when host assembly requires an installed toolchain.
-            (recipe,) = [
-                path.name for path in published if path.parent == code / "recipes"
-            ]
             state = scratch / "host"
             host_code = state / "code"
             host = [
@@ -490,9 +501,9 @@ class StoreNoSync(unittest.TestCase):
             received = self.assert_publication_syncs(
                 publication, host_code, staging=host_code / "staging"
             )
-            self.assertEqual(
+            self.assertIn(
+                Path("recipes") / recipe,
                 {path.relative_to(host_code) for path in received},
-                {path.relative_to(code) for path in published},
             )
 
 

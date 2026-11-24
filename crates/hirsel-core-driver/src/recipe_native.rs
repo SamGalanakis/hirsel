@@ -5,7 +5,7 @@ use super::*;
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
-use crate::code_store::{CodeStore, ObjectKind, Presence};
+use crate::code_store::{CodeStore, ObjectKind};
 use crate::foreign_archive::LinkArchives;
 use hirsel_core_ir::{
     FuncId, ItemId,
@@ -269,6 +269,7 @@ impl CheckProduct {
             launch,
         };
         let root = store.put(ObjectKind::Recipe, &recipe.encode())?.hash;
+        store.commit()?;
         Ok(Publication {
             root,
             recipe,
@@ -302,16 +303,7 @@ impl CheckProduct {
         let map = self.native_sources(&items)?;
         let sources = map.positions();
         let files = index.map(|_| file_digests(&map)).transpose()?;
-        let local = index.filter(|_| store.local_build() && crate::resident::serving());
-        let watch = match local.and_then(|_| std::path::absolute(store.root()).ok()) {
-            Some(path) => Some(
-                crate::resident::RECIPE_FILES
-                    .get_or(Some(path), || Ok::<_, io::Error>(Arc::default()))?,
-            ),
-            None => None,
-        };
-        let mut watch = watch.as_ref().map(|watch| watch.lock().unwrap());
-        let mut presence = Presence::new(store, watch.as_deref_mut(), local.is_some());
+        let local = index.filter(|_| store.is_cache() && crate::resident::serving());
         let mut units = BTreeMap::new();
         let mut memos = BTreeMap::new();
         for (identity, anchored) in instances.iter().zip(&anchored) {
@@ -320,8 +312,8 @@ impl CheckProduct {
                 (Some(index), Some(files)) if identity != entry => {
                     let key = memo_key(identity, instance, anchored, &map, files)?;
                     if let Some(memo) = index.read.units.get(&key)
-                        && presence.contains(ObjectKind::Body, memo.code().body)?
-                        && presence.contains(ObjectKind::Annex, memo.code().annex)?
+                        && store.contains(ObjectKind::Body, memo.code().body)?
+                        && store.contains(ObjectKind::Annex, memo.code().annex)?
                     {
                         memos.insert(identity.clone(), (key, Arc::clone(memo)));
                         continue;
@@ -343,8 +335,8 @@ impl CheckProduct {
                 .filter_map(|identity| builtin_semantics_number(&identity.definition))
                 .collect();
             let code = BodyRef {
-                body: presence.put(ObjectKind::Body, &instance.code)?,
-                annex: presence.put(ObjectKind::Annex, &annex.encode())?,
+                body: store.put(ObjectKind::Body, &instance.code)?,
+                annex: store.put(ObjectKind::Annex, &annex.encode())?,
             };
             units.insert(
                 identity.clone(),
@@ -379,7 +371,7 @@ impl CheckProduct {
                         hash,
                         len: bytes.len() as u64,
                     };
-                    presence.put_addressed(ObjectKind::Group, object, bytes)
+                    store.put_addressed(ObjectKind::Group, object, bytes)
                 })
                 .collect::<io::Result<Vec<_>>>()?;
             (groups, plan.addresses())
@@ -404,7 +396,6 @@ impl CheckProduct {
         groups.sort_unstable_by_key(|group| group.hash);
         units.retain(|identity, _| addresses.contains_key(identity));
         memos.retain(|identity, _| addresses.contains_key(identity));
-        presence.complete()?;
         Ok(Released {
             units,
             memos,
@@ -1252,7 +1243,7 @@ fn read_object(
 ) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let mut file = store.open(kind, expected.hash)?;
-    if file.metadata()?.len() != expected.len {
+    if file.len() != expected.len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "code object length mismatch",

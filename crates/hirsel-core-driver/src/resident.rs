@@ -122,12 +122,6 @@ pub(crate) static RECIPE_REACH: Memo<
     Arc<std::sync::Mutex<Option<crate::reachability::RecipeGraph>>>,
 > = Memo::new();
 
-/// Code object names checked in the last publication into a local build store.
-pub(crate) static RECIPE_FILES: Memo<
-    PathBuf,
-    Arc<std::sync::Mutex<Option<crate::code_store::Watch>>>,
-> = Memo::new();
-
 /// Address plans for entries of a local build.
 pub(crate) static RECIPE_GROUPS: Memo<
     ContentHash,
@@ -267,7 +261,6 @@ pub(crate) static RESOLVED: Memo<
 fn sweep(request: u64) {
     MATERIALISED.sweep(request);
     RECIPE_REACH.sweep(request);
-    RECIPE_FILES.sweep(request);
     RECIPE_GROUPS.sweep(request);
     REFERENCED.sweep(request);
     OBJECT_RECORDS.sweep(request);

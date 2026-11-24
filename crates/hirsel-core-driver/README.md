@@ -290,7 +290,11 @@ gap to be closed later.
 - **The store is never synced.** Writers rename a locked temporary from
   `<store>/tmp` into place; opening a store removes each temporary no writer
   holds. After a power loss a torn, short, zero-filled or missing record fails
-  its check or is absent, so it is a miss and is rebuilt. This contract covers the
+  its check or is absent, so it is a miss and is rebuilt. A build's own code
+  cache (`<store>/code-store`, `<store>/code`) follows the same rule: each
+  publication appends one unsynced pack (payloads, an index of xxh3-64-checked
+  rows, a checked trailer), and a pack whose trailer or index fails its check is
+  ignored and a row whose payload fails its check is a miss. This contract covers the
   driver's build cache only. A host's code store, image store and assembly records
   back retained releases, are synced in the order
   [launch.md](../../docs/spec/launch.md#release-recipe-and-host-assembly) gives, and

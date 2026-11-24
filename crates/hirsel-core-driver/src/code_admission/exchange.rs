@@ -318,7 +318,7 @@ fn send_object(
 ) -> Result<(), AdmissionError> {
     let file = open_object(store, key.kind, key.hash)?;
     let mut remaining = length;
-    if file.metadata().map_err(AdmissionError::Io)?.len() != length {
+    if file.len() != length {
         return Err(AdmissionError::Hash(key.hash));
     }
     let mut file = file.take(length);

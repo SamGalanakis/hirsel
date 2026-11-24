@@ -1,0 +1,399 @@
+pub type MuxTrack {
+    id: u32,
+    timescale: u32,
+    media: Media,
+    matrix: Inline[u32, 9],
+    movie_duration: u64,
+    sample_entry: Bytes,
+    edits: List[Edit],
+    samples: List[VodSample]
+}
+
+pub type MuxLimits {
+    metadata_bytes: u64,
+    sample_count: u64
+}
+
+pub type VodHeaders {
+    prefix: Bytes,
+    suffix: Bytes
+}
+
+type MuxChunk {
+    offset: u64,
+    samples: u32
+}
+
+type MuxFacts {
+    chunks: List[MuxChunk],
+    duration: u64,
+    fixed_size: u32,
+    all_sync: bool,
+    composition: bool,
+    signed_composition: bool
+}
+
+fn check_mux_track(track: MuxTrack, payload_size: u64) -> Result[MuxFacts, VodError] {
+    if track.id == 0 || track.id == 0xffffffff || track.timescale == 0 {
+        return Error(BadMovie)
+    }
+    let n = list.len(track.sample_entry)
+    let entry = vod_box(track.sample_entry, 0, n)?
+    if entry.next != n || entry.body != 8 || n < 16 {
+        return Error(BadMovie)
+    }
+    let reference: u16 = list.word_be(track.sample_entry, 14)
+    if reference != 1 {
+        return Error(UnsupportedVod)
+    }
+    let mut chunks: List[MuxChunk] = list.new()
+    let mut ticks = 0u64
+    let mut last_end = 0u64
+    let mut fixed_size = 0u32
+    let mut all_sync = true
+    let mut composition = false
+    let mut signed = false
+    let mut largest = 0i64
+    let mut chunk = MuxChunk(offset: 0, samples: 0)
+    for i in 0u64 .. list.len(track.samples) {
+        let sample = track.samples[i]
+        let size: u64 = int.widen(sample.size)
+        if sample.offset < last_end || sample.offset >= payload_size || size > payload_size - sample.offset || ticks != sample.decode_time {
+            return Error(BadTable)
+        }
+        if i == 0 {
+            fixed_size = sample.size
+            chunk.offset = sample.offset
+        } else if fixed_size != sample.size {
+            fixed_size = 0
+        }
+        if i != 0 && sample.offset != last_end {
+            list.push(mut chunks, chunk)
+            chunk = MuxChunk(offset: sample.offset, samples: 0)
+        }
+        chunk.samples += 1
+        let step: u64 = int.widen(sample.duration)
+        ticks += step
+        last_end = sample.offset + size
+        all_sync = all_sync && sample.sync
+        let cto = sample.composition_offset
+        if cto < -2147483648 || cto > 0xffffffff {
+            return Error(BadTable)
+        }
+        composition = composition || cto != 0
+        signed = signed || cto < 0
+        if cto > largest {
+            largest = cto
+        }
+    }
+    if signed && largest > 2147483647 {
+        return Error(BadTable)
+    }
+    if chunk.samples != 0 {
+        list.push(mut chunks, chunk)
+    }
+    Ok(MuxFacts(chunks: take chunks, duration: ticks, fixed_size: fixed_size, all_sync: all_sync, composition: composition, signed_composition: signed))
+}
+
+fn write_run_table(mut out: Bytes, samples: List[VodSample], timing: bool, signed: bool) {
+    let kind = if timing {
+        0x73747473u32
+    } else {
+        0x63747473u32
+    }
+    let start = full_box(mut out, kind, if signed {
+        0x01000000
+    } else {
+        0
+    })
+    let count_at = list.len(out)
+    list.put_word_be(mut out, 0u32)
+    let mut run_count = 0u32
+    let mut run_length = 0u32
+    let mut value = 0u32
+    for sample in samples {
+        let word: u32 = if timing {
+            sample.duration
+        } else {
+            int.truncate(sample.composition_offset)
+        }
+        if run_length != 0 && word != value {
+            list.put_word_be(mut out, run_length)
+            list.put_word_be(mut out, value)
+            run_count += 1
+            run_length = 0
+        }
+        value = word
+        run_length += 1
+    }
+    if run_length != 0 {
+        list.put_word_be(mut out, run_length)
+        list.put_word_be(mut out, value)
+        run_count += 1
+    }
+    list.set_word_be(mut out, count_at, run_count)
+    close_box(mut out, start)
+}
+
+fn write_sync_table(mut out: Bytes, samples: List[VodSample]) {
+    let start = full_box(mut out, 0x73747373, 0)
+    let count_at = list.len(out)
+    list.put_word_be(mut out, 0u32)
+    let mut count = 0u32
+    for i in 0u64 .. list.len(samples) {
+        if samples[i].sync {
+            let number: u32 = int.narrow(i + 1)
+            list.put_word_be(mut out, number)
+            count += 1
+        }
+    }
+    list.set_word_be(mut out, count_at, count)
+    close_box(mut out, start)
+}
+
+fn write_chunk_tables(mut out: Bytes, chunks: List[MuxChunk], payload_at: u64, wide: bool) {
+    let stsc = full_box(mut out, 0x73747363, 0)
+    let count_at = list.len(out)
+    list.put_word_be(mut out, 0u32)
+    let mut count = 0u32
+    let mut previous = 0u32
+    for i in 0u64 .. list.len(chunks) {
+        let n = chunks[i].samples
+        if n != previous {
+            let first: u32 = int.narrow(i + 1)
+            list.put_word_be(mut out, first)
+            list.put_word_be(mut out, n)
+            list.put_word_be(mut out, 1u32)
+            count += 1
+            previous = n
+        }
+    }
+    list.set_word_be(mut out, count_at, count)
+    close_box(mut out, stsc)
+    let offsets = full_box(mut out, if wide {
+        0x636f3634
+    } else {
+        0x7374636f
+    }, 0)
+    let n: u32 = int.narrow(list.len(chunks))
+    list.put_word_be(mut out, n)
+    for chunk in chunks {
+        let absolute = payload_at + chunk.offset
+        if wide {
+            list.put_word_be(mut out, absolute)
+        } else {
+            let short: u32 = int.narrow(absolute)
+            list.put_word_be(mut out, short)
+        }
+    }
+    close_box(mut out, offsets)
+}
+
+fn write_vod_tables(mut out: Bytes, track: MuxTrack, facts: MuxFacts, payload_at: u64, wide: bool) {
+    let stbl = start_box(mut out, 0x7374626c)
+    let stsd = full_box(mut out, 0x73747364, 0)
+    list.put_word_be(mut out, 1u32)
+    list.append(mut out, track.sample_entry)
+    close_box(mut out, stsd)
+    write_run_table(mut out, track.samples, true, false)
+    if facts.composition {
+        write_run_table(mut out, track.samples, false, facts.signed_composition)
+    }
+    if !facts.all_sync {
+        write_sync_table(mut out, track.samples)
+    }
+    write_chunk_tables(mut out, facts.chunks, payload_at, wide)
+    let stsz = full_box(mut out, 0x7374737a, 0)
+    list.put_word_be(mut out, facts.fixed_size)
+    let count: u32 = int.narrow(list.len(track.samples))
+    list.put_word_be(mut out, count)
+    if facts.fixed_size == 0 {
+        for sample in track.samples {
+            list.put_word_be(mut out, sample.size)
+        }
+    }
+    close_box(mut out, stsz)
+    close_box(mut out, stbl)
+}
+
+fn write_edits(mut out: Bytes, edits: List[Edit]) {
+    if list.len(edits) == 0 {
+        return
+    }
+    let edts = start_box(mut out, 0x65647473)
+    let elst = full_box(mut out, 0x656c7374, 0x01000000)
+    let count: u32 = int.narrow(list.len(edits))
+    list.put_word_be(mut out, count)
+    for edit in edits {
+        list.put_word_be(mut out, edit.duration)
+        let media_time: u64 = int.truncate(edit.media_time)
+        let rate_integer: u16 = int.truncate(edit.rate_integer)
+        let rate_fraction: u16 = int.truncate(edit.rate_fraction)
+        list.put_word_be(mut out, media_time)
+        list.put_word_be(mut out, rate_integer)
+        list.put_word_be(mut out, rate_fraction)
+    }
+    close_box(mut out, elst)
+    close_box(mut out, edts)
+}
+
+fn write_clock(mut out: Bytes, timescale: u32, duration: u64) {
+    list.fill(mut out, 16, 0)
+    list.put_word_be(mut out, timescale)
+    list.put_word_be(mut out, duration)
+}
+
+fn write_data_reference(mut out: Bytes) {
+    let dinf = start_box(mut out, 0x64696e66)
+    let dref = full_box(mut out, 0x64726566, 0)
+    list.put_word_be(mut out, 1u32)
+    let loc = full_box(mut out, 0x75726c20, 1)
+    close_box(mut out, loc)
+    close_box(mut out, dref)
+    close_box(mut out, dinf)
+}
+
+fn write_vod_track(mut out: Bytes, track: MuxTrack, info: MuxFacts, payload_at: u64, wide: bool) {
+    let (handler, volume, width, height) = match track.media {
+        Audio => (0x736f756eu32, 0x0100u16, 0u32, 0u32),
+        Video(w, h) => {
+            let x: u32 = int.widen(w)
+            let y: u32 = int.widen(h)
+            (0x76696465u32, 0u16, x << 16, y << 16)
+        },
+    }
+    let trak = start_box(mut out, 0x7472616b)
+    let tkhd = full_box(mut out, 0x746b6864, 0x01000007)
+    list.fill(mut out, 16, 0)
+    list.put_word_be(mut out, track.id)
+    list.put_word_be(mut out, 0u32)
+    list.put_word_be(mut out, track.movie_duration)
+    list.fill(mut out, 12, 0)
+    list.put_word_be(mut out, volume)
+    list.put_word_be(mut out, 0u16)
+    for i in 0u64 .. 9 {
+        list.put_word_be(mut out, track.matrix[i])
+    }
+    list.put_word_be(mut out, width)
+    list.put_word_be(mut out, height)
+    close_box(mut out, tkhd)
+    write_edits(mut out, track.edits)
+    let mdia = start_box(mut out, 0x6d646961)
+    let mdhd = full_box(mut out, 0x6d646864, 0x01000000)
+    write_clock(mut out, track.timescale, info.duration)
+    list.put_word_be(mut out, 0x55c4u16)
+    list.put_word_be(mut out, 0u16)
+    close_box(mut out, mdhd)
+    let hdlr = full_box(mut out, 0x68646c72, 0)
+    list.put_word_be(mut out, 0u32)
+    list.put_word_be(mut out, handler)
+    list.fill(mut out, 13, 0)
+    close_box(mut out, hdlr)
+    let minf = start_box(mut out, 0x6d696e66)
+    match track.media {
+        Audio => {
+            let smhd = full_box(mut out, 0x736d6864, 0)
+            list.put_word_be(mut out, 0u32)
+            close_box(mut out, smhd)
+        },
+        Video(_, _) => {
+            let vmhd = full_box(mut out, 0x766d6864, 1)
+            list.put_word_be(mut out, 0u64)
+            close_box(mut out, vmhd)
+        },
+    }
+    write_data_reference(mut out)
+    write_vod_tables(mut out, track, info, payload_at, wide)
+    close_box(mut out, minf)
+    close_box(mut out, mdia)
+    close_box(mut out, trak)
+}
+
+fn write_movie_headers(timescale: u32, duration: u64, tracks: List[MuxTrack], payload_size: u64) -> Result[VodHeaders, VodError] {
+    let mut prefix: Bytes = list.with_capacity(44)
+    let ftyp = start_box(mut prefix, FTYP)
+    list.append(mut prefix, b"iso6\x00\x00\x00\x00iso6mp41isom")
+    close_box(mut prefix, ftyp)
+    let long_mdat = payload_size > 0xffffffff - 8
+    if long_mdat {
+        let Some(size) = int.checked_add(payload_size, 16) else {
+            return Error(BadMovie)
+        }
+        list.put_word_be(mut prefix, 1u32)
+        list.put_word_be(mut prefix, MDAT)
+        list.put_word_be(mut prefix, size)
+    } else {
+        let size: u32 = int.narrow(payload_size + 8)
+        list.put_word_be(mut prefix, size)
+        list.put_word_be(mut prefix, MDAT)
+    }
+    let payload_at = list.len(prefix)
+    let Some(media_end) = int.checked_add(payload_at, payload_size) else {
+        return Error(BadMovie)
+    }
+    let wide = media_end > 0xffffffff
+    let mut ids: Map[u32, bool] = map.new()
+    let mut next_id = 1u32
+    let mut moov: Bytes = list.new()
+    let start = start_box(mut moov, MOOV)
+    let mvhd = full_box(mut moov, 0x6d766864, 0x01000000)
+    write_clock(mut moov, timescale, duration)
+    list.put_word_be(mut moov, 0x00010000u32)
+    list.put_word_be(mut moov, 0x0100u16)
+    list.fill(mut moov, 10, 0)
+    unity_matrix(mut moov)
+    list.fill(mut moov, 24, 0)
+    let next_id_at = list.len(moov)
+    list.put_word_be(mut moov, 0u32)
+    close_box(mut moov, mvhd)
+    for i in 0u64 .. list.len(tracks) {
+        let track = view tracks[i]
+        let facts = check_mux_track(track, payload_size)?
+        if let Some(_) = map.get(ids, track.id) {
+            return Error(BadMovie)
+        }
+        map.insert(mut ids, track.id, true)
+        if track.id >= next_id {
+            next_id = track.id + 1
+        }
+        if track.movie_duration > duration {
+            return Error(BadMovie)
+        }
+        write_vod_track(mut moov, track, facts, payload_at, wide)
+    }
+    list.set_word_be(mut moov, next_id_at, next_id)
+    close_box(mut moov, start)
+    let Some(_) = int.checked_add(media_end, list.len(moov)) else {
+        return Error(BadMovie)
+    }
+    Ok(VodHeaders(prefix: take prefix, suffix: take moov))
+}
+
+// Each sample offset is relative to the payload supplied between prefix and
+// suffix. The writer groups adjacent samples of each track into chunks.
+pub fn write_vod(timescale: u32, duration: u64, tracks: List[MuxTrack], payload_size: u64, limits: MuxLimits) -> Result[VodHeaders, VodError] {
+    if timescale == 0 || list.len(tracks) == 0 {
+        return Error(BadMovie)
+    }
+    let mut samples_left = limits.sample_count
+    for i in 0u64 .. list.len(tracks) {
+        let track = view tracks[i]
+        let count = list.len(track.samples)
+        if count > 0xffffffff || count > samples_left || list.len(track.edits) > 0xffffffff || list.len(track.sample_entry) > 0xffffffff {
+            return Error(ResourceLimit)
+        }
+        samples_left -= count
+    }
+    let cap = if limits.metadata_bytes < 0xffffffff {
+        limits.metadata_bytes
+    } else {
+        0xffffffffu64
+    }
+    let result: Result[Result[VodHeaders, VodError], Capacity] = bound bytes cap {
+        write_movie_headers(timescale, duration, tracks, payload_size)
+    }
+    match take result {
+        Ok(take headers) => take headers,
+        Error(_) => Error(ResourceLimit),
+    }
+}

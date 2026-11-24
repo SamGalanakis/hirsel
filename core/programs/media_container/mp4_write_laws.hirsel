@@ -1,0 +1,61 @@
+fn mux_test_track(base: u64) -> mp4.MuxTrack {
+    let mut entry: Bytes = list.with_capacity(135)
+    list.append(mut entry, b"\x00\x00\x00\x87\x61\x76\x63\x31\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x30\x01\x40\x00\x48\x00\x00\x00\x48\x00\x00\x00\x00\x00\x00")
+    list.append(mut entry, b"\x00\x01\x0a\x41\x56\x43\x20\x43\x6f\x64\x69\x6e\x67\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x18\xff\xff\x00\x00\x00\x31\x61\x76\x63\x43\x01\x42")
+    list.append(mut entry, b"\xc0\x1e\xfd\xe1\x00\x1a\x67\x42\xc0\x1e\xda\x02\x30\xa6\xc0\x5a\x80\x80\x80\xa0\x00\x00\x03\x00\x20\x00\x57\xe4\x01\xe2\xc5\xd4\x01\x00\x04\x68\xce\x06\xf2")
+    let mut samples: List[mp4.VodSample] = list.with_capacity(3)
+    list.push(mut samples, mp4.VodSample(offset: base, size: 4, decode_time: 0, duration: 512, composition_offset: 0, sync: true))
+    list.push(mut samples, mp4.VodSample(offset: base + 4, size: 2, decode_time: 512, duration: 512, composition_offset: -32, sync: false))
+    list.push(mut samples, mp4.VodSample(offset: base + 7, size: 3, decode_time: 1024, duration: 512, composition_offset: 32, sync: false))
+    let matrix: Inline[u32, 9] =[0, 0xffff0000, 0, 0x00010000, 0, 0, 0, 0, 0x40000000]
+    mp4.MuxTrack(id: 1, timescale: 12288, media: Video(320, 240), matrix: matrix, movie_duration: 125, sample_entry: take entry, edits: list.new(), samples: take samples)
+}
+
+fn written_vod(payload: u64, base: u64, expected_header: u64) waits {
+    let mut tracks: List[mp4.MuxTrack] = list.with_capacity(1)
+    list.push(mut tracks, mux_test_track(base))
+    let headers = result.unwrap(mp4.write_vod(1000, 125, tracks, payload, mp4.MuxLimits(metadata_bytes: 65536, sample_count: 3)))
+    if list.len(headers.prefix) != expected_header {
+        fail("mdat header width")
+    }
+    let moov_at = expected_header + payload
+    let limit = moov_at + list.len(headers.suffix)
+    let movie = result.unwrap(mp4.video_probe(limit, mp4.VodLimits(metadata_bytes: 65536, top_boxes: 3, tracks: 1), scoped fn(at: u64, count: u64) -> Result[Bytes, mp4.VodError] {
+        let mut raw: Bytes = list.with_capacity(count)
+        if at + count <= expected_header {
+            list.append(mut raw, list.slice(headers.prefix, at, at + count))
+        } else if at == moov_at && count <= list.len(headers.suffix) {
+            list.append(mut raw, list.slice(headers.suffix, 0, count))
+        } else {
+            fail("expected framing only")
+        }
+        Ok(take raw)
+    }))
+    let (track, _) = result.unwrap(mp4.vod_track(movie, 0))
+    if track.sample_count != 3 || track.decode_duration != 1536 || track.rotation != Some(90) {
+        fail("muxed track timing or display matrix")
+    }
+    let offsets: Inline[u64, 3] =[0, 4, 7]
+    let sizes: Inline[u32, 3] =[4, 2, 3]
+    let composition: Inline[i64, 3] =[0, -32, 32]
+    let mut seen = 0u64
+    result.unwrap(mp4.vod_samples(movie, 0, 3, scoped fn(sample: mp4.VodSample) -> Result[(), mp4.VodError] {
+        if seen >= 3 || sample.offset != expected_header + base + offsets[seen] || sample.size != sizes[seen] || sample.decode_time != 512 * seen || sample.composition_offset != composition[seen] || sample.sync != (seen == 0) {
+            fail("muxed sample table")
+        }
+        seen += 1
+        Ok(())
+    }))
+    if seen != 3 {
+        fail("written sample count")
+    }
+}
+
+/// bug: Use the wrong chunk position, truncate co64, or lose negative ctts and the display matrix.
+/// oracle: ISO/IEC 14496-12 sample-table arithmetic and the avc1 entry in Mozilla's avc-2bytes-nalu.mp4.
+@test
+fn write_vod_sample_tables() -> Result[(), ()] waits {
+    written_vod(10, 0, 36)
+    written_vod(4294967306, 4294967296, 44)
+    Ok(())
+}

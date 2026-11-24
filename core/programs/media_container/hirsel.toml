@@ -15,6 +15,7 @@ media_bits = { major = 1, path = "../media_bits" }
 "mp4_vod.hirsel" = "mp4"
 "mp4_tables.hirsel" = "mp4"
 "mp4_formats.hirsel" = "mp4"
+"mp4_vod_write.hirsel" = "mp4"
 "webm.hirsel" = "webm"
 "webm_init.hirsel" = "webm"
 "webm_probe.hirsel" = "webm"
@@ -28,4 +29,5 @@ grants = []
 "ogg_laws.hirsel" = "tests"
 "mp4_laws.hirsel" = "tests"
 "mp4_vod_laws.hirsel" = "tests"
+"mp4_write_laws.hirsel" = "tests"
 "webm_laws.hirsel" = "tests"

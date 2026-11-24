@@ -235,6 +235,23 @@ pub struct Exported {
     pub args_fp: u64,
     pub result_fp: u64,
     pub revision: Vec<u8>,
+    pub slots: Vec<ExportedSlot>,
+    pub value: Vec<u8>,
+}
+
+#[derive(serde::Serialize)]
+pub struct DeclaredCollection {
+    pub name: String,
+    pub id: u32,
+    pub owner: u32,
+    pub kind: u8,
+}
+
+pub struct ExportedSlot {
+    pub name: String,
+    pub kind: u32,
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
 }
 
 pub(crate) struct QuerySchemas {
@@ -267,35 +284,29 @@ pub(crate) struct QuerySlot {
 
 impl Exported {
     pub(crate) fn query_schemas(&self) -> Result<QuerySchemas, Error> {
-        let mut input = Reader {
-            bytes: &self.result,
-            at: 0,
-        };
-        let take_schema = |input: &mut Reader<'_>| {
-            let size = input.count()?;
-            Schema::read(input.take(size)?)
-        };
-        let value = take_schema(&mut input)?;
+        let value = Schema::read(&self.value)?;
         if value.key {
             return Err("Malformed: query result needs a value schema".into());
         }
-        let count = input.count()?;
         let mut slots = Vec::new();
-        for _ in 0..count {
-            let name = input.name()?;
-            if input.count()? != 0 {
-                return Err("Malformed: query slot kind".into());
-            }
-            let key = take_schema(&mut input)?;
-            let row = take_schema(&mut input)?;
+        for slot in &self.slots {
+            let key = match slot.kind {
+                0 | 2 => Schema::read(&slot.key)?,
+                1 if slot.key.is_empty() => Schema::read(&[4, 0, 0, 0, 0, 0])?,
+                _ => return Err("Malformed: query slot kind or key schema".into()),
+            };
+            let row = Schema::read(&slot.value)?;
             if !key.key || row.key {
                 return Err(
-                    "Malformed: table slot needs an ordered key schema and a value schema".into(),
+                    "Malformed: slot needs an ordered key schema and a value schema".into(),
                 );
             }
-            slots.push(QuerySlot { name, key, row });
+            slots.push(QuerySlot {
+                name: slot.name.clone(),
+                key,
+                row,
+            });
         }
-        input.done()?;
         Ok(QuerySchemas { value, slots })
     }
 }
@@ -305,6 +316,7 @@ pub struct Describe {
     pub n_place: u64,
     pub revision: Vec<u8>,
     pub exported: Vec<Exported>,
+    pub tables: Vec<DeclaredCollection>,
 }
 impl Describe {
     pub fn read(bytes: &[u8]) -> Result<Self, Error> {
@@ -326,7 +338,7 @@ impl Describe {
             if kind > 3 {
                 return Err("Malformed: entry kind".into());
             }
-            exported.push(Exported {
+            let mut entry = Exported {
                 kind,
                 identity: r.bytes()?,
                 args: r.bytes()?,
@@ -334,6 +346,30 @@ impl Describe {
                 args_fp: r.word()?,
                 result_fp: r.word()?,
                 revision: r.bytes()?,
+                slots: Vec::new(),
+                value: Vec::new(),
+            };
+            for _ in 0..r.count()? {
+                entry.slots.push(ExportedSlot {
+                    name: r.name()?,
+                    kind: r.count()? as u32,
+                    key: r.bytes()?,
+                    value: r.bytes()?,
+                });
+            }
+            entry.value = r.bytes()?;
+            if kind != 2 && (!entry.slots.is_empty() || !entry.value.is_empty()) {
+                return Err("Malformed: call entry carries query schemas".into());
+            }
+            exported.push(entry);
+        }
+        let mut tables = Vec::new();
+        for _ in 0..r.count()? {
+            tables.push(DeclaredCollection {
+                name: r.name()?,
+                id: r.count()? as u32,
+                owner: r.count()? as u32,
+                kind: r.byte()?,
             });
         }
         Ok(Self {
@@ -342,6 +378,7 @@ impl Describe {
             n_place,
             revision,
             exported,
+            tables,
         })
     }
 }
@@ -402,6 +439,10 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     let mut dts = DECLARATIONS.to_owned();
     let mut entries = "import * as codec from './codec.js';\n".to_owned();
     entries.push_str(&format!("export const identity = Object.freeze({{digest:Uint8Array.from({}),target:{},n_place:{}n}});\n",json!(describe.digest),json!(describe.target),describe.n_place));
+    entries.push_str(&format!(
+        "export const tables = Object.freeze({});\n",
+        json!(describe.tables)
+    ));
     entries.push_str("export const want = [\n");
     for entry in &describe.exported {
         entries.push_str(&format!(
@@ -423,23 +464,41 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         let name = json!(stub_name(&entry.identity)?);
         if entry.kind == 2 {
             let query = entry.query_schemas()?;
-            entries.push_str(&format!("subscribe[{name}] = (args,onRows,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onRows,onEnd);\n"));
+            entries.push_str(&format!("subscribe[{name}] = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd);\n"));
             subscriptions.push(format!(
-                "{name}: (args: codec.{arg_name}, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+                "{name}: (args: codec.{arg_name}, onChange: (sub: Subscription) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
             ));
-            // The current Batch has no slot numbers. A single slot has an unambiguous decoder.
-            if let [slot] = query.slots.as_slice() {
-                let key_name = format!("Key{i}");
-                let row_name = format!("RowValue{i}");
-                js.push_str(&slot.key.javascript(&key_name));
-                js.push_str(&slot.row.javascript(&row_name));
-                dts.push_str(&slot.key.declarations(&key_name));
-                dts.push_str(&slot.row.declarations(&row_name));
-                entries.push_str(&format!("subscribeDecoded[{name}] = (args,onRows,onEnd) => subscribe[{name}](args,rows => onRows(rows.map(row => decodeRow(row,codec.{key_name},codec.{row_name}))),onEnd);\n"));
-                decoded.push(format!(
-                    "{name}: (args: codec.{arg_name}, onRows: (rows: DecodedRow<codec.{key_name}, codec.{row_name}>[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+            let value = format!("Value{i}");
+            js.push_str(&query.value.javascript(&value));
+            dts.push_str(&query.value.declarations(&value));
+            let mut names = Vec::new();
+            let mut key_codecs = Vec::new();
+            let mut row_codecs = Vec::new();
+            let mut slot_types = Vec::new();
+            for (s, slot) in query.slots.iter().enumerate() {
+                let key = format!("Key{i}_{s}");
+                let row = format!("RowValue{i}_{s}");
+                js.push_str(&slot.key.javascript(&key));
+                js.push_str(&slot.row.javascript(&row));
+                dts.push_str(&slot.key.declarations(&key));
+                dts.push_str(&slot.row.declarations(&row));
+                let slot_name = json!(slot.name);
+                slot_types.push(format!(
+                    "{slot_name}: DecodedRow<{slot_name}, codec.{key}, codec.{row}>"
                 ));
+                names.push(slot_name);
+                key_codecs.push(format!("codec.{key}"));
+                row_codecs.push(format!("codec.{row}"));
             }
+            entries.push_str(&format!(
+                "subscribeDecoded[{name}] = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd,queryCodec(codec.{value}, {}, [{}], [{}]));\n",
+                json!(names), key_codecs.join(","), row_codecs.join(",")
+            ));
+            let sub = format!(
+                "Subscription<codec.{value}, {{ {} }}>",
+                slot_types.join("; ")
+            );
+            decoded.push(format!("{name}: (args: codec.{arg_name}, onChange: (sub: {sub}) => void, onEnd?: (reason: SubscriptionEnd) => void) => {sub}"));
         } else {
             let result = Schema::read(&entry.result)?;
             let result_name = format!("Result{i}");
@@ -453,15 +512,25 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     }
     entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
     if !decoded.is_empty() {
-        entries.push_str("function decodeRow(row,key,value) {\n\
-            if (row.key.length < 4) throw new codec.Malformed('truncated table key');\n\
-            const table = new DataView(row.key.buffer,row.key.byteOffset,4).getUint32(0);\n\
-            return {sub:row.sub,table,key:key.decode(row.key.subarray(4)),\n\
-                value:row.value.tag === 'Some' ? {tag:'Some',value:value.decode(row.value.value)} : row.value};\n\
-            }\n");
+        entries.push_str(r#"function queryCodec(value,names,keys,rows) {
+    const slot = position => {
+        if (names[position] === undefined) throw new codec.Malformed('unknown row slot');
+        return names[position];
+    };
+    return {
+        value: value.decode, slot,
+        row(row) {
+            if (row.key.length < 4) throw new codec.Malformed('truncated collection key');
+            const i = row.slot;
+            return {slot:slot(i),key:keys[i].decode(row.key.subarray(4)),
+                value:row.value.tag === 'Some' ? {tag:'Some',value:rows[i].decode(row.value.value)} : row.value};
+        },
+    };
+}
+"#);
     }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Option, Outcome, Row, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport type DecodedRow<K, V> = {{sub: number; table: number; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }}; subscribeDecoded: {{ {} }} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{Option, Outcome, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }}; subscribeDecoded: {{ {} }} }};\n",
         calls.join("; "),
         subscriptions.join("; "),
         decoded.join("; ")
@@ -552,6 +621,8 @@ mod tests {
             args_fp: u64::MAX,
             result_fp: 7,
             revision: vec![1; 32],
+            slots: vec![],
+            value: vec![],
         }
     }
     #[test]
@@ -605,6 +676,7 @@ mod tests {
             n_place: 16,
             revision: vec![],
             exported: vec![entry("a", "toggle"), entry("b", "toggle")],
+            tables: vec![],
         };
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("absent");
@@ -657,23 +729,31 @@ mod tests {
     fn sdk_generation_preserves_identity_fingerprints_and_entry_kinds() {
         let mut query = entry("m", "rows");
         query.kind = 2;
-        query.result = [
-            6, 0, 0, 0, 3, 0, 0, 0, 0, 0, // Unit value schema
-            1, 0, 0, 0, // One slot
-            4, 0, 0, 0, b'd', b'a', b't', b'a', 0, 0, 0, 0, // Table slot named data
-            6, 0, 0, 0, 4, 0, 0, 0, 0, 6, // Ordered u64 key schema
-            6, 0, 0, 0, 3, 0, 0, 0, 0, 13, // String row schema
-        ]
-        .to_vec();
+        query.value = scalar(0);
+        query.slots = vec![
+            ExportedSlot {
+                name: "data".into(),
+                kind: 0,
+                key: vec![4, 0, 0, 0, 0, 6],
+                value: scalar(13),
+            },
+            ExportedSlot {
+                name: "other".into(),
+                kind: 1,
+                key: vec![],
+                value: scalar(5),
+            },
+        ];
         let mut computed = entry("m", "total");
         computed.kind = 2;
-        computed.result = vec![6, 0, 0, 0, 3, 0, 0, 0, 0, 6, 0, 0, 0, 0];
+        computed.value = scalar(6);
         let d = Describe {
             digest: vec![1, 2],
             target: "x86_64-unknown-linux-gnu".into(),
             n_place: u64::MAX,
             revision: vec![],
             exported: vec![entry("m", "toggle"), query, computed],
+            tables: vec![],
         };
         let files = generate(&d).unwrap();
         assert!(files["entries.js"].contains("n_place:18446744073709551615n"));
@@ -682,10 +762,12 @@ mod tests {
         assert!(files["entries.js"].contains("subscribe[\"rows\"]"));
         assert!(files["entries.js"].contains("subscribeDecoded[\"rows\"]"));
         assert!(files["entries.js"].contains("subscribe[\"total\"]"));
-        assert!(!files["entries.js"].contains("subscribeDecoded[\"total\"]"));
+        assert!(files["entries.js"].contains("subscribeDecoded[\"total\"]"));
         assert!(files["codec.d.ts"].contains("export type Args0 = bigint"));
-        assert!(files["codec.d.ts"].contains("export type Key1 = bigint"));
-        assert!(files["codec.d.ts"].contains("export type RowValue1 = string"));
+        assert!(files["codec.d.ts"].contains("export type Key1_0 = bigint"));
+        assert!(files["codec.d.ts"].contains("export type RowValue1_0 = string"));
+        assert!(files["codec.d.ts"].contains("export type Value1 = undefined"));
+        assert!(files["codec.d.ts"].contains("export type RowValue1_1 = number"));
         assert!(!files["codec.js"].contains("require("));
         assert_eq!(
             serde_json::from_str::<Value>(&files["package.json"]).unwrap()["type"],
@@ -694,9 +776,10 @@ mod tests {
     }
     #[test]
     fn sdk_describe_and_nominal_schemas() {
-        // Describe {digest: [], target: "t", n_place: 17, revision: [], exported: []}.
+        // Describe {digest: [], target: "t", n_place: 17, revision: [], exported: [], tables: []}.
         let bytes = [
-            0, 0, 0, 0, 1, 0, 0, 0, b't', 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 1, 0, 0, 0, b't', 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0,
         ];
         let describe = Describe::read(&bytes).unwrap();
         assert_eq!(describe.target, "t");
@@ -763,6 +846,9 @@ mod tests {
         bytes.extend_from_slice(&e.args_fp.to_le_bytes());
         bytes.extend_from_slice(&e.result_fp.to_le_bytes());
         blob(&mut bytes, &e.revision);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        blob(&mut bytes, &[]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
         let description = Describe::read(&bytes).unwrap();
         assert_eq!(description.revision, [42; 32]);
         assert_eq!(description.exported[0].args_fp, u64::MAX);

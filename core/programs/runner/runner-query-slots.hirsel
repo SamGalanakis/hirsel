@@ -241,12 +241,19 @@ fn merge_covers(take collected: List[Cover]) -> List[Cover] {
     take merged
 }
 
-pub fn query_result_schema[H: send, R](value: std.codec.Codec[R], s: Slots[H]) -> Result[Bytes, std.codec.EncodeError] {
-    let fields = std.codec.schema(value)?
+fn slot_descriptions[H: send](s: Slots[H]) -> List[SlotSchema] {
     let mut descriptions: List[SlotSchema] = list.with_capacity(list.len(s.declared))
     for declaration in s.declared { list.push(mut descriptions, clone(declaration.description)) }
+    take descriptions
+}
+
+fn encode_query_schema(take value: Bytes, take descriptions: List[SlotSchema]) -> Result[Bytes, std.codec.EncodeError] {
     let codec: std.codec.Codec[(Bytes, List[SlotSchema])] = std.codec.of()
     let mut result: Bytes = list.new()
-    std.codec.encode(codec, (take fields, take descriptions), mut result)?
+    std.codec.encode(codec, (take value, take descriptions), mut result)?
     Ok(take result)
+}
+
+pub fn query_result_schema[H: send, R](value: std.codec.Codec[R], s: Slots[H]) -> Result[Bytes, std.codec.EncodeError] {
+    encode_query_schema(std.codec.schema(value)?, slot_descriptions(s))
 }

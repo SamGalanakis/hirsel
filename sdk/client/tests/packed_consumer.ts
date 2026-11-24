@@ -3,7 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {Client, type Socket} from '@hirsel/client';
 import {NodeStorage} from '@hirsel/client/node';
 import {Frame} from './generated/frame.js';
-import {bind, identity, want} from './generated/entries.js';
+import {bind, identity, tables, want} from './generated/entries.js';
 
 const produced = await readFile(new URL('./payload.bin', import.meta.url));
 const replyEnd = 4 + produced.readUInt32LE();
@@ -58,12 +58,20 @@ try {
     tag: 'Returned', value: {tag: 'Value', values: [{tag: 'Some', value: {tag: 'None'}}, 9007199254740993n]},
   };
   assert.deepEqual(await api.call.packed_reply(undefined), expected);
-  type ItemRow = {sub: number; table: number; key: bigint; value: {tag: 'None'} | {tag: 'Some'; value: {title: string; done: boolean}}};
+  assert.deepEqual(tables.map(({name, id, owner, kind}) => [name, id, owner, kind]),
+    [['items', 1, 0, 1], ['by_id', 2, 1, 2]]);
+  type ItemRow = {slot: 'items'; key: bigint; value: {tag: 'None'} | {tag: 'Some'; value: {title: string; done: boolean}}};
   const rows = await new Promise<ItemRow[]>((resolve, reject) => {
     diagnostic = reject;
-    api.subscribeDecoded.packed_rows(undefined, resolve, reject);
+    const sub = api.subscribeDecoded.packed_rows(undefined, current => {
+      assert.deepEqual(current.value(), {tag: 'Ready', value: undefined});
+      const rows = current.rows('items');
+      if (rows.tag === 'Ready') resolve(rows.value);
+      else reject(new Error('completion did not publish the rows'));
+    }, reject);
+    assert.deepEqual(sub.value(), {tag: 'Pending'});
   });
-  assert.deepEqual(rows, [{sub: 0, table: 1, key: 9007199254740993n,
+  assert.deepEqual(rows, [{slot: 'items', key: 9007199254740993n,
     value: {tag: 'Some', value: {title: 'crème', done: true}}}]);
 } finally {
   await client.close();

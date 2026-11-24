@@ -794,7 +794,7 @@ fn described_result[A](identity: View[Bytes], revision: Option[View[Bytes]], kin
     let mut rev: Bytes = list.new()
     if let Some(digest) = revision { list.append(mut rev, digest) }
     let d = Described(kind: kind, identity: take id, args: take args, result: take result)
-    Ok((take key, Exported(described: take d, args_fp: args_fp, result_fp: result_fp, revision: take rev)))
+    Ok((take key, Exported(described: take d, args_fp: args_fp, result_fp: result_fp, revision: take rev, slots: list.new(), value: list.new())))
 }
 
 // The one insertion: a key already present is refused and the registry is unchanged.
@@ -837,97 +837,6 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
         Ok(task.spawn(tasks, bytes n, take j, adapt_granted))
     }) }
     insert(mut r, take key, take d, Granted(made))
-}
-
-// The export list in registration order: the codec of List[Described].
-pub fn describe[G: send, H: shareable + inert + send](r: Registry[G, H], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
-    let c: std.codec.Codec[Described] = std.codec.of()
-    let count = list.len(r.exported)
-    if count > 0xffffffffu64 { return Error(CountOverflow(count)) }
-    std.codec.put_u32(int.truncate(count), mut out)
-    for entry in r.exported { std.codec.put_with(entry.described, c, mut out)? }
-    Ok(())
-}
-
-pub type Exported: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
-
-pub fn release_digest(exported: List[Exported]) -> Result[Bytes, std.codec.EncodeError] {
-    let codec: std.codec.Codec[List[Exported]] = std.codec.of_list()
-    let mut payload: Bytes = list.new()
-    std.codec.encode(codec, exported, mut payload)?
-    let mut hash = std.sha256.start()
-    let domain = string.as_bytes("hirsel.release.v1")
-    std.sha256.add_byte(mut hash, int.truncate(list.len(domain)))
-    std.sha256.add(mut hash, domain, 0u64, list.len(domain))
-    std.sha256.add(mut hash, payload, 0u64, list.len(payload))
-    let digest = std.sha256.finish(hash)
-    let mut out: Bytes = list.with_capacity(32u64)
-    for index in 0u64 .. 32u64 {
-        list.push(mut out, digest[index])
-    }
-    Ok(take out)
-}
-
-pub type Describe: codec + send { digest: Bytes, target: String, n_place: u64, revision: Bytes, exported: List[Exported] }
-
-pub type Preview: codec + send { describe: Describe, release: Bytes, answers: List[Entry] }
-
-pub type ReleaseManifest: codec + send {
-    describe: Describe,
-    release: Bytes,
-    grants: List[String],
-    root_limit: u64,
-    recipe: Bytes
-}
-
-fn preview_old_entries(old: LaunchBytes) -> Result[List[Exported], RegisterError] {
-    let payload = launch_bytes(old)
-    let codec: std.codec.Codec[List[Exported]] = std.codec.of_list()
-    match std.codec.decode(codec, payload) {
-        Ok(take entries) => Ok(take entries),
-        Error(_) => Error(Bounds),
-    }
-}
-
-fn preview_answers[G: send, H: shareable + inert + send](r: Registry[G, H], previous: LaunchBytes) -> Result[List[Entry], RegisterError] {
-    let old = preview_old_entries(previous)?
-    let mut answers: List[Entry] = list.with_capacity(list.len(old))
-    for i in 0u64 .. list.len(old) {
-        let row = view old[i]
-        let key = entry_key(view row.described.identity, row.args_fp, row.result_fp)
-        list.push(mut answers, answer_want(r, key, int.narrow(i)))
-    }
-    Ok(take answers)
-}
-
-fn encode_preview(take description: Describe, take answers: List[Entry]) -> Result[Bytes, RegisterError] {
-    let release = release_digest(description.exported) ?=> |_| Bounds
-    let preview = Preview(describe: take description, release: take release, answers: take answers)
-    let codec: std.codec.Codec[Preview] = std.codec.of()
-    let mut out: Bytes = list.new()
-    match std.codec.encode(codec, preview, mut out) {
-        Ok(()) => Ok(take out),
-        Error(_) => Error(Bounds),
-    }
-}
-
-pub type DescribeError: codec + send = PlaceCapacity(Room) | AlreadyRegistered(Bytes) | Bounds
-
-fn launch_emit(data: Bytes) -> bool { false }
-
-fn encode_describe(description: Describe) -> Result[Bytes, std.codec.EncodeError] {
-    let codec: std.codec.Codec[Describe] = std.codec.of()
-    let mut out: Bytes = list.new()
-    std.codec.encode(codec, description, mut out)?
-    Ok(take out)
-}
-
-fn describe_registered[G: send, H: shareable + inert + send](launch: LaunchEnv, take r: Registry[G, H]) -> Result[Bytes, RegisterError] {
-    let preview = match launch.preview { Some(old) => Some(preview_answers(r, old)?), None => None }
-    let Registry(exported: take exported, ..) = take r
-    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, revision: launch_bytes(launch.revision), exported: take exported)
-    if let Some(take answers) = take preview { return encode_preview(take description, take answers) }
-    Ok(encode_describe(description) ?=> |_| Bounds)
 }
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits {
@@ -978,32 +887,6 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
         selected = Some(choice)
     }
     Ok(match selected { Some(choice) => choice, None => Reopen })
-}
-
-fn describe_response[G: send, H: shareable + inert + send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]]) -> Result[Bytes, RegisterError] {
-    let run = code.callable(place)
-    // The isolate's cause cell belongs to the parent, outside n_place.
-    let ran = isolate(scoped fn() -> Result[Result[Bytes, RegisterError], Capacity] {
-        bound bytes launch.n_place {
-            let mut r: Registry[G, H] = registry()
-            match run(mut r) {
-                Ok(()) => describe_registered(launch, take r),
-                Error(take e) => Error(take e),
-            }
-        }
-    })
-    match take ran {
-        Ok(Ok(Ok(take answer))) => take answer,
-        Ok(Ok(Error(c))) => Error(Full(c)),
-        Ok(Error(causes)) => {
-            for cause in causes {
-                if let Capacity(c) = cause.kind { return Error(Full(c)) }
-                break
-            }
-            fail("runner: describe failed")
-        },
-        Error(c) => Error(Full(c)),
-    }
 }
 
 type HostStop: send { process: Process, to: Sender[()] }
@@ -1129,7 +1012,7 @@ pub fn start_text(problem: StartError) -> String {
     take line
 }
 
-pub fn main[G: send, H: shareable + inert + send](_a: Args, process: Process, errors: Stderr, tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn(take Receiver[()]) -> Result[Ended, MainError] waits) -> Result[(), Exit] waits {
+pub fn main[G: send, H: shareable + inert + send](_a: Args, process: Process, errors: Stderr, tasks: Tasks, clock: Clock, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], start_server: scoped fn(take Receiver[()]) -> Result[Ended, MainError] waits) -> Result[(), Exit] waits {
     let launch = launch_env()
     let serving = scoped fn() -> Result[(), Exit] waits {
         let full = Exit(status: 1u8)
@@ -1166,20 +1049,20 @@ pub fn main[G: send, H: shareable + inert + send](_a: Args, process: Process, er
             Error(Usage(exit)) => Error(exit),
         }
     }
-    launch_with(launch, place, serving)
+    launch_with(launch, place, clock, schema, serving)
 }
 
 // The first branch precedes the caller's ordinary serve callback, including its
 // store open, listener and every capability use. No n_place runtime argument.
-pub fn launch_server[G: send, H: shareable + inert + send](_a: Args, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
-    launch_with(launch_env(), place, start_server)
+pub fn launch_server[G: send, H: shareable + inert + send](_a: Args, clock: Clock, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+    launch_with(launch_env(), place, clock, schema, start_server)
 }
 
-fn launch_with[G: send, H: shareable + inert + send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
+fn launch_with[G: send, H: shareable + inert + send](launch: LaunchEnv, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], clock: Clock, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], start_server: scoped fn() -> Result[(), Exit] waits) -> Result[(), Exit] waits {
     if !launch.describe {
         return start_server()
     }
-    match describe_response(launch, place) {
+    match describe_response(launch, place, clock, schema) {
         Ok(take payload) => if launch_emit(payload) { Ok(()) } else { Error(Exit(status: 1u8)) },
         Error(take e) => {
             let error: DescribeError = match take e {

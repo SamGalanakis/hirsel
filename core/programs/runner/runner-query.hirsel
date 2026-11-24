@@ -128,12 +128,17 @@ fn register_query[G: send, H: shareable + inert + send, A: codec, R: codec](mut 
     body: QueryBody[H, A, R], take registered_slots: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let result = query_result_schema(cr, registered_slots) ?=> |_| Bounds
+    let value = std.codec.schema(cr) ?=> |_| Bounds
+    let schemas = slot_descriptions(registered_slots)
+    let result = encode_query_schema(clone(value), clone(schemas)) ?=> |_| Bounds
     let described_query = match body {
         Plain(f) => described_result(code.identity(f), code.revision(f), Query, ca, take result),
         As(f) => described_result(code.identity(f), code.revision(f), Query, ca, take result),
     }
-    let (take key, take d) = described_query ?=> |_| Bounds
+    let (take key, take described_entry) = described_query ?=> |_| Bounds
+    let mut d = take described_entry
+    d.slots = take schemas
+    d.value = take value
     register_check(mut r, key, ca, n, s)?
     let go = fn(declared: Slots[H], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: H, caller: Caller, arg: Bytes,
         newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {

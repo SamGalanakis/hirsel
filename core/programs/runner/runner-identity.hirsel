@@ -1,8 +1,18 @@
-pub type ReleaseIdentity: codec + send { revision: Bytes, n_place: u64, exported: List[Exported] }
+type ReleaseExport: codec + send { described: Described, args_fp: u64, result_fp: u64, revision: Bytes }
+type ReleaseIdentity: codec + send { revision: Bytes, n_place: u64, exported: List[ReleaseExport] }
+
+fn release_exports(exported: List[Exported]) -> List[ReleaseExport] {
+    let mut entries: List[ReleaseExport] = list.with_capacity(list.len(exported))
+    for entry in exported {
+        list.push(mut entries, ReleaseExport(described: clone(entry.described), args_fp: entry.args_fp,
+            result_fp: entry.result_fp, revision: clone(entry.revision)))
+    }
+    take entries
+}
 
 pub fn identity_digest(description: Describe) -> Result[Bytes, RegisterError] {
     if list.len(description.revision) != 32u64 { return Error(Bounds) }
-    let identity = ReleaseIdentity(revision: clone(description.revision), n_place: description.n_place, exported: clone(description.exported))
+    let identity = ReleaseIdentity(revision: clone(description.revision), n_place: description.n_place, exported: release_exports(description.exported))
     let codec: std.codec.Codec[ReleaseIdentity] = std.codec.of()
     let mut payload: Bytes = list.new()
     std.codec.encode(codec, identity, mut payload) ?=> |_| Bounds
@@ -105,7 +115,7 @@ fn prepare_activation[G: send, H: shareable + inert + send](r: Registry[G, H], n
     let launch = launch_env()
     let image = launch_bytes(launch.digest)
     let target = owned_launch_target(launch.target)
-    let description = Describe(digest: take image, target: take target, n_place: n_place, revision: launch_bytes(launch.revision), exported: clone(r.exported))
+    let description = Describe(digest: take image, target: take target, n_place: n_place, revision: launch_bytes(launch.revision), exported: clone(r.exported), tables: list.new())
     let binding: Bytes = if launch.revision.size == 0u64 { list.new() } else { identity_digest(description)? }
     let payload = encode_describe(description) ?=> |_| Bounds
     let Describe(digest: take digest, ..) = take description
@@ -116,6 +126,6 @@ fn trigger_stamp(exported: List[Exported], n_place: u64) -> Result[Bytes, store.
     let entry = launch_env().revision
     if entry.size == 0u64 { return Ok(list.new()) }
     let revision = launch_bytes(entry)
-    let identity = Describe(digest: list.new(), target: string.new(), n_place: n_place, revision: take revision, exported: clone(exported))
+    let identity = Describe(digest: list.new(), target: string.new(), n_place: n_place, revision: take revision, exported: clone(exported), tables: list.new())
     Ok(identity_digest(identity) ?=> |_| Limit(Value))
 }

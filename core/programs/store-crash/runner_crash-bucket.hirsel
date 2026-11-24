@@ -187,5 +187,5 @@ pub fn bucket_main(c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, proces
         let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
-    runner.main(argv, process, errors, tasks, code.describe(place), serve)
+    runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), serve)
 }

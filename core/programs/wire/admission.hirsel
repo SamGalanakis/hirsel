@@ -124,7 +124,7 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
 // launch_server answers --hirsel-describe before any grant is used, so hirsel call
 // can read this place's entries from the executable.
 pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
-    runner.launch_server(a, code.describe(place), scoped fn() -> Result[(), Exit] waits { serve_place(n, c, random, tasks, a) })
+    runner.launch_server(a, c, code.describe(place), code.describe(schema), scoped fn() -> Result[(), Exit] waits { serve_place(n, c, random, tasks, a) })
 }
 
 fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {

@@ -50,12 +50,12 @@ fn trigger_answer() -> Bytes {
 // One exported entry: Transact, `identity` and code revision `revision`.
 fn entry_of(identity: u8, revision: u8) -> runner.Exported {
     let described = runner.Described(kind: Transact, identity: bytes_of(32u64, identity), args: list.new(), result: list.new())
-    runner.Exported(described: described, args_fp: 0u64, result_fp: 0u64, revision: bytes_of(32u64, revision))
+    runner.Exported(described: described, args_fp: 0u64, result_fp: 0u64, revision: bytes_of(32u64, revision), slots: list.new(), value: list.new())
 }
 
 // A Describe of image `digest` exporting `entries`.
 fn describing(digest: Bytes, take entries: List[runner.Exported]) -> runner.Describe {
-    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, revision: clone(digest), exported: take entries)
+    runner.Describe(digest: clone(digest), target: "t", n_place: 1u64, revision: clone(digest), exported: take entries, tables: list.new())
 }
 
 // L54 `deploy_preview` (launch.md "Deploy preview"): the deploy's report shows what NEW

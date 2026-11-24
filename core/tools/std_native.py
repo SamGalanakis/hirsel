@@ -800,11 +800,11 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                             return n.to_bytes(4, 'little')
                         def blob(b):
                             return count(len(b)) + b
-                        def exported(kind, identity, args, result, args_fp, result_fp):
+                        def exported(kind, identity, args, result, args_fp, result_fp, schemas=b""):
                             result_schema = result if kind == 2 else bytes([3, 0, 0, 0, 0]) + result
                             return (count(kind) + blob(identity) + blob(bytes([3, 0, 0, 0, 0]) + args)
                                     + blob(result_schema)
-                                    + args_fp.to_bytes(8, 'little') + result_fp.to_bytes(8, 'little') + blob(bytes(32)))
+                                    + args_fp.to_bytes(8, 'little') + result_fp.to_bytes(8, 'little') + blob(bytes(32)) + (schemas or bytes(8)))
                         def record_definition(name, field, ty):
                             return (blob(name.encode()) + count(0) + bytes([0])
                                     + count(1) + bytes([0]) + blob(field.encode()) + ty)
@@ -814,13 +814,13 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                     + bytes([17, 19]) + count(0) + bytes([19]) + count(1))
                         transaction = (count(1) + blob(b'\x01fixture@1/main/commit(take u64)->core@1/core/Result[fixture@1/main/Reply,fixture@1/main/Problem]')
                                        + blob(bytes([3, 0, 0, 0, 0, 6])) + blob(returned)
-                                       + (5).to_bytes(8, 'little') + (9).to_bytes(8, 'little') + blob(bytes(32)))
-                        row_schemas = (blob(bytes([3, 0, 0, 0, 0, 0])) + count(1)
-                                       + blob(b"rows") + count(0) + blob(bytes([4, 0, 0, 0, 0, 6]))
-                                       + blob(bytes([3, 0, 0, 0, 0, 14, 3])))
+                                       + (5).to_bytes(8, 'little') + (9).to_bytes(8, 'little') + blob(bytes(32)) + bytes(8))
+                        unit = blob(bytes([3, 0, 0, 0, 0, 0]))
+                        slots = (count(1) + blob(b"rows") + count(0) + blob(bytes([4, 0, 0, 0, 0, 6]))
+                                 + blob(bytes([3, 0, 0, 0, 0, 14, 3])))
                         description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + blob(bytes(32)) + count(3)
                                        + exported(0, b'\x01fixture@1/main/toggle(take u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
-                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', row_schemas, 2, 3) + transaction)
+                                       + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', unit + slots, 2, 3, slots + unit) + transaction + count(0))
                         description_file.write_bytes(description)
                         (work / 'package.json').write_text('{"type":"commonjs"}\n')
                         generated = output.with_name(output.stem + '-sdk') if output else work / 'sdk'

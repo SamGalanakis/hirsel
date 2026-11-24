@@ -438,7 +438,7 @@ fn trigger_scan_image(d: Dir, c: Clock, r: Random, tasks: Tasks, options: store.
     let Registry(exported: take exported, ..) = take old_reg
     let release = result.unwrap(release_digest(exported))
     let old_description = Describe(digest: clone(old_digest), target: "", n_place: n_place,
-        revision: launch_bytes(launch_env().revision), exported: take exported)
+        revision: launch_bytes(launch_env().revision), exported: take exported, tables: list.new())
     let old_binding = result.unwrap(identity_digest(old_description))
     let old_desc = result.unwrap(encode_describe(old_description))
     let mut staged = result.unwrap(store.stage_migration(db, tasks, code.describe(trigger_law_migrate)))

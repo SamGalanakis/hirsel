@@ -54,10 +54,10 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
                 raise ValueError(f'@hirsel/client export {subpath!r} has a missing types target: {declaration}')
 
         inputs = work / 'inputs.json'
-        inputs.write_text(json.dumps(source_manifest(root, 'store', ['packed_consumer'], fixture)))
+        inputs.write_text(json.dumps(source_manifest(root, 'runner', ['packed_consumer'], fixture)))
         executable = work / 'fixture'
-        subprocess.run([compiler, 'build', '--source-core', '--inputs', inputs, '--runtime', runtime,
-                        '--entry', 'store@1/packed_consumer/main', '--grant', 'Stdout',
+        subprocess.run([compiler, 'build', '--source-core', '--source-std', '--inputs', inputs, '--runtime', runtime,
+                        '--entry', 'runner@1/packed_consumer/main', '--grant', 'Stdout',
                         '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                         '--store', work / 'store', '-o', executable], cwd=work, check=True)
         subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated'],

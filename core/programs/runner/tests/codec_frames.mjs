@@ -23,12 +23,13 @@ export async function vectors(c,frame,entries) {
       const payload = committed ? '000000000900000000000000' : '0100000003000000626164';
       return Promise.resolve({tag:'Returned',value:decode(bytes(payload))});
     },
-    subscribe(want,args,onRows,onEnd) {
+    subscribe(want,args,onChange,onEnd) {
       assert.strictEqual(want,entries.want[1]);
       assert.equal(Buffer.from(args).toString('hex'),'03000000');
-      onRows([]);
+      const subscription = {rows: () => ({tag:'Ready',value:[]}), unsubscribe() { unsubscribed = true; }};
+      onChange(subscription);
       onEnd({tag:'Refused',value:{tag:'Deadline'}});
-      return {unsubscribe() { unsubscribed = true; }};
+      return subscription;
     }
   });
   assert.deepEqual(await client.call.toggle(7n),{tag:'Returned',value:8n});
@@ -36,7 +37,7 @@ export async function vectors(c,frame,entries) {
   assert.deepEqual(await client.call.commit(0n),{tag:'Returned',value:{tag:'Error',value:{message:'bad'}}});
   let delivered = false;
   let reason;
-  client.subscribe.rows(3, rows => { assert.deepEqual(rows,[]); delivered = true; }, end => { reason = end; }).unsubscribe();
+  client.subscribe.rows(3, sub => { assert.deepEqual(sub.rows(0),{tag:'Ready',value:[]}); delivered = true; }, end => { reason = end; }).unsubscribe();
   assert.equal(delivered,true); assert.equal(unsubscribed,true);
   assert.deepEqual(reason,{tag:'Refused',value:{tag:'Deadline'}});
   let cases = 0;

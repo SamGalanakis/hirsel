@@ -25,10 +25,24 @@ export type Frame = {tag: 'Hello'; values: [Option<Uint8Array>, Want[]]}
   | {tag: 'Reset'; values: [bigint, Done[]]};
 export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Array): Frame }
 export type SubscriptionEnd = Extract<Frame, {tag: 'Ended'}>['values'][1];
-export interface Subscription { unsubscribe(): void }
+export type Access<T> = {tag: 'Pending' | 'Ended'} | {tag: 'Ready'; value: T};
+export interface SubscriptionControl { unsubscribe(): void }
+export interface Subscription<V = Uint8Array, Slots extends object = Record<number, SlotRow>> extends SubscriptionControl {
+  value(): Access<V>;
+  rows<S extends keyof Slots>(slot: S): Access<Slots[S][]>;
+}
+export interface SubscriptionCodec<V, Slots extends object> {
+  value(bytes: Uint8Array): V;
+  slot(position: number): keyof Slots;
+  row(row: SlotRow): Slots[keyof Slots];
+}
 export interface Transport {
-  call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R): Promise<Outcome<R>>;
-  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void): Subscription;
+  call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, prediction?: unknown): Promise<Outcome<R>>;
+  subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription) => void,
+    onEnd?: (reason: SubscriptionEnd) => void): Subscription;
+  subscribe<V, Slots extends object>(want: Want, args: Uint8Array,
+    onChange: (sub: Subscription<V, Slots>) => void, onEnd: ((reason: SubscriptionEnd) => void) | undefined,
+    decode: SubscriptionCodec<V, Slots>): Subscription<V, Slots>;
 }
 export interface Pending {
   generation: bigint; stream: number; p: bigint; want: Want; args: Uint8Array;
@@ -53,7 +67,7 @@ export interface Socket {
   binaryType: string;
   onopen: ((event?: unknown) => void) | null;
   onmessage: ((event: {data: unknown}) => void) | null;
-  onclose: ((event: {code: number}) => void) | null;
+  onclose: ((event: {code: number; reason?: string}) => void) | null;
   onerror: ((event?: unknown) => void) | null;
   send(data: Uint8Array): void; close(code?: number, reason?: string): void;
 }
@@ -89,13 +103,24 @@ const fresh = (generation: bigint): Installation => ({version: RECOVERY_VERSION,
 export class ClientError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ClientError'; }
 }
-type RowDelivery = {onEnd?: (reason: SubscriptionEnd) => void} & (
-  {onRows: (rows: Row[]) => void; cache: Map<string, Row>}
-  | {onChanges: (rows: Row[], replace: boolean) => void});
-interface Sub {
-  want: Want; args: Uint8Array; delivery: RowDelivery; id?: number;
-  complete: boolean; active: boolean;
+interface Image {
+  value: unknown;
+  slots: Map<PropertyKey, Map<string, unknown>>;
 }
+interface RowEdit { slot: PropertyKey; key: string; row?: unknown }
+interface Sub {
+  want: Want; args: Uint8Array; id?: number; active: boolean; complete: boolean;
+  codec?: SubscriptionCodec<unknown, Record<string | number, unknown>>;
+  image?: Image;
+  notify: (group: Group, replace: boolean) => void;
+  onEnd?: (reason: SubscriptionEnd) => void;
+}
+
+const rawSubscription: SubscriptionCodec<Uint8Array, Record<number, SlotRow>> = {
+  value: bytes => bytes.slice(),
+  slot: slot => slot,
+  row: row => structuredClone(row),
+};
 
 interface QueuedCall {
   want: Want; args: Uint8Array; slot: number; prediction?: unknown;
@@ -127,7 +152,7 @@ export class Client implements Transport {
   private version = 0n;
   private notifications?: Array<() => void>;
   private calls = new Set<QueuedCall>();
-  private resolveCall?: (outcome: Outcome<Uint8Array>) => void;
+  private activeCall?: Pick<QueuedCall, 'resolve' | 'reject'>;
   private readyResolve!: () => void;
   private readyReject!: (error: unknown) => void;
   private ready: Promise<void>;
@@ -229,7 +254,7 @@ export class Client implements Transport {
   private connect(): void {
     if (['Closed', 'Fenced', 'Retired', 'Incompatible', 'Unbound', 'StorageUnavailable'].includes(this.state)) return;
     this.setState('Connecting'); this.welcomed = false; this.placed = 0; this.sent = false;
-    for (const sub of this.subs) { sub.id = undefined; sub.complete = false; }
+    this.clearSubscriptions();
     const epoch = ++this.epoch;
     let socket: Socket;
     try { socket = (this.options.socket ?? ((url, protocol) => new WebSocket(url, protocol) as unknown as Socket))(this.options.url, 'hirsel.3'); }
@@ -253,17 +278,26 @@ export class Client implements Transport {
       await this.receive(frame);
       await this.startNextCall();
     }); };
-    socket.onclose = event => { void this.enqueue(async () => {
-      if (epoch !== this.epoch) return;
-      // Before Welcome, 1008 is the place's binding refusing this Hello's credential.
-      if (event.code === 1008 && !this.welcomed) await this.unbound();
-      else if ([1007, 1008, 1009].includes(event.code)) await this.incompatible(event.code);
-      else this.transient();
-    }); };
-    socket.onerror = () => { void this.enqueue(async () => { if (epoch === this.epoch) this.transient(); }); };
+    socket.onclose = event => {
+      if (epoch === this.epoch) this.clearSubscriptions();
+      void this.enqueue(async () => {
+        if (epoch !== this.epoch) return;
+        // Before Welcome, 1008 is the place's binding refusing this Hello's credential.
+        if (event.code === 1008 && !this.welcomed) await this.unbound();
+        else if (event.code === 1009) await this.incompatible(1009,
+          !this.welcomed && event.reason === 'hirsel.3' ? 'Reload' : 'ReplyTooLarge');
+        else if ([1007, 1008].includes(event.code)) await this.incompatible(event.code);
+        else this.transient();
+      });
+    };
+    socket.onerror = () => {
+      if (epoch === this.epoch) this.clearSubscriptions();
+      void this.enqueue(async () => { if (epoch === this.epoch) this.transient(); });
+    };
   }
   private disconnect(): void {
     ++this.epoch; const socket = this.socket; this.socket = undefined;
+    this.clearSubscriptions();
     socket?.close();
   }
   private cancelTimers(): void {
@@ -277,10 +311,18 @@ export class Client implements Transport {
     this.backoff = Math.min(10000, this.backoff * 2);
     this.timer = this.clock.set(() => { this.timer = undefined; void this.enqueue(async () => this.connect()); }, delay);
   }
-  private async incompatible(code: number): Promise<void> {
+  private async incompatible(code: number, problem = 'Incompatible'): Promise<void> {
     this.cancelTimers(); this.disconnect(); this.setState('Incompatible');
-    this.options.onDiagnostic?.(`Incompatible (${code}); reload bindings or reconnect explicitly`);
-    this.readyReject(new ClientError('Incompatible'));
+    const diagnostic = problem === 'Reload' ? 'Reload required before reconnecting to hirsel.3'
+      : problem === 'ReplyTooLarge' ? 'Stored reply exceeds the server message limit (1009)'
+      : `Incompatible (${code}); reload bindings or reconnect explicitly`;
+    this.options.onDiagnostic?.(diagnostic);
+    if (problem === 'ReplyTooLarge') {
+      this.activeCall?.reject(new ClientError(problem));
+      this.activeCall = undefined;
+      if (this.record.pending) this.dropPrediction(this.record.pending.p);
+    }
+    this.readyReject(new ClientError(problem));
   }
   private async unbound(): Promise<void> {
     this.cancelTimers(); this.disconnect(); this.setState('Unbound');
@@ -331,56 +373,58 @@ export class Client implements Transport {
     if (frame.tag === 'Batch') {
       const [version, complete, groups, outcomes] = frame.values;
       if (version < this.version) { await this.incompatible(1008); return; }
-      const changed = new Map<Sub, {rows: Row[]; replace: boolean}>();
-      for (const sub of this.subs) {
-        if (sub.id !== undefined && complete.includes(sub.id)) changed.set(sub, {rows: [], replace: true});
-      }
-      for (const group of groups) {
-        const sub = [...this.subs].find(s => s.active && s.id === group.sub);
-        if (!sub) continue;
-        let update = changed.get(sub);
-        if (!update) {
-          if (!sub.complete) { await this.incompatible(1008); return; }
-          update = {rows: [], replace: false};
-          changed.set(sub, update);
+      const byId = new Map(groups.map(group => [group.sub, group]));
+      const completing = new Set(complete);
+      const staged: Array<{sub: Sub; group: Group; replace: boolean; value: unknown; rows: RowEdit[]}> = [];
+      try {
+        for (const sub of this.subs) {
+          if (sub.id === undefined) continue;
+          const replace = completing.has(sub.id);
+          const group = byId.get(sub.id);
+          if (!group && !replace) continue;
+          if (!group || (!replace && !sub.complete)) { await this.incompatible(1008); return; }
+          const codec = sub.codec;
+          const value = codec && (replace || group.value.length > 0) ? codec.value(group.value) : sub.image?.value;
+          const rows = codec ? group.rows.map(row => {
+            const decoded = codec.row(row);
+            return {slot: codec.slot(row.slot), key: key(row.key), row: row.value.tag === 'Some' ? decoded : undefined};
+          }) : [];
+          staged.push({sub, group, replace, value, rows});
         }
-        for (const row of group.rows) update.rows.push({...row, sub: group.sub});
-      }
+      } catch { await this.incompatible(1007); return; }
       this.notifications = [];
       await this.outcomes(outcomes);
       this.version = version;
-      for (const [sub, update] of changed) {
+      for (const {sub, group, replace, value, rows} of staged) {
+        if (sub.id !== group.sub) continue;
         sub.complete = true;
-        const delivery = sub.delivery;
-        if ('cache' in delivery) {
-          if (update.replace) delivery.cache.clear();
-          for (const row of update.rows) {
-            const id = `${row.slot}:${key(row.key)}`;
-            if (row.value.tag === 'None') delivery.cache.delete(id);
-            else delivery.cache.set(id, structuredClone(row));
-          }
+        if (!sub.codec) continue;
+        const slots = replace ? new Map<PropertyKey, Map<string, unknown>>() : sub.image!.slots;
+        for (const edit of rows) {
+          let slot = slots.get(edit.slot);
+          if (!slot) { slot = new Map(); slots.set(edit.slot, slot); }
+          if (edit.row === undefined) slot.delete(edit.key); else slot.set(edit.key, edit.row);
         }
+        sub.image = {value, slots};
       }
       this.publish();
-      for (const [sub, update] of changed) {
-        const delivery = sub.delivery;
-        if ('onRows' in delivery) delivery.onRows([...delivery.cache.values()].map(row => structuredClone(row)));
-        else delivery.onChanges(update.rows, update.replace);
+      for (const {sub, group, replace} of staged) {
+        if (sub.id === group.sub) sub.notify(group, replace);
       }
       this.options.onBatch?.(version);
     } else if (frame.tag === 'Reset') {
       const [version, outcomes] = frame.values;
       if (version < this.version) { await this.incompatible(1008); return; }
+      this.clearSubscriptions();
       this.notifications = [];
       await this.outcomes(outcomes); this.version = version;
-      for (const sub of this.subs) { sub.id = undefined; sub.complete = false; }
       this.publish(); await this.subscribeAll();
     } else if (frame.tag === 'Ended') {
       const [id, reason] = frame.values;
       const sub = [...this.subs].find(s => s.id === id);
       if (sub) {
-        sub.active = false; sub.id = undefined; this.subs.delete(sub);
-        sub.delivery.onEnd?.(reason);
+        this.removeSubscription(sub);
+        sub.onEnd?.(reason);
       }
     } else await this.incompatible(1008);
   }
@@ -424,7 +468,7 @@ export class Client implements Transport {
           want: call.want, args: call.args, slot: call.slot, attempts: 0, possiblyAdmitted: false};
         record.pending = pending;
         await this.options.storage.write(state);
-        this.record = structuredClone(record); this.resolveCall = call.resolve;
+        this.record = structuredClone(record); this.activeCall = {resolve: call.resolve, reject: call.reject};
         if (call.prediction !== undefined) {
           this.predictions.set(pending.p, call.prediction);
           this.options.onPrediction?.(this.predictions);
@@ -503,8 +547,8 @@ export class Client implements Transport {
     this.sent = false;
     const p = this.record.pending?.p ?? this.record.terminal?.p;
     if (p !== undefined) this.dropPrediction(p);
-    const resolve = this.resolveCall; this.resolveCall = undefined;
-    this.notify(() => { if (resolve) resolve(outcome); else this.options.onRecovered?.(outcome); });
+    const call = this.activeCall; this.activeCall = undefined;
+    this.notify(() => { if (call) call.resolve(outcome); else this.options.onRecovered?.(outcome); });
   }
   private async stop(state: 'Fenced' | 'Retired' | 'Closed', outcome?: 'LocallyUnknown' | 'RequestMismatch'): Promise<void> {
     this.cancelTimers(); this.disconnect(); this.setState(state);
@@ -525,24 +569,52 @@ export class Client implements Transport {
       await this.stop('Fenced', outcome);
     });
   }
-  subscribe(want: Want, args: Uint8Array, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void): Subscription {
-    return this.addSubscription(want, args, {onRows, cache: new Map(), onEnd});
+  subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription) => void,
+    onEnd?: (reason: SubscriptionEnd) => void): Subscription;
+  subscribe<V, Slots extends object>(want: Want, args: Uint8Array,
+    onChange: (sub: Subscription<V, Slots>) => void, onEnd: ((reason: SubscriptionEnd) => void) | undefined,
+    decode: SubscriptionCodec<V, Slots>): Subscription<V, Slots>;
+  subscribe<V, Slots extends object>(want: Want, args: Uint8Array, onChange: (sub: Subscription<V, Slots>) => void,
+    onEnd?: (reason: SubscriptionEnd) => void, decode?: SubscriptionCodec<V, Slots>): Subscription<V, Slots> {
+    const codec = (decode ?? rawSubscription) as Sub['codec'];
+    const sub = this.addSubscription(want, args, () => onChange(handle), onEnd, codec);
+    const access = <T>(read: (value: Image) => T): Access<T> => {
+      if (!sub.active) return {tag: 'Ended'};
+      if (!sub.image) return {tag: 'Pending'};
+      return {tag: 'Ready', value: structuredClone(read(sub.image))};
+    };
+    const handle: Subscription<V, Slots> = {
+      value: () => access(image => image.value as V),
+      rows: slot => access(image => [...(image.slots.get(slot)?.values() ?? [])] as Slots[typeof slot][]),
+      unsubscribe: () => this.unsubscribe(sub),
+    };
+    return handle;
   }
-  subscribeChanges(want: Want, args: Uint8Array, onChanges: (rows: Row[], replace: boolean) => void, onEnd?: (reason: SubscriptionEnd) => void): Subscription {
-    return this.addSubscription(want, args, {onChanges, onEnd});
+  subscribeChanges(want: Want, args: Uint8Array, onChanges: (rows: Row[], replace: boolean) => void,
+    onEnd?: (reason: SubscriptionEnd) => void): SubscriptionControl {
+    const sub = this.addSubscription(want, args,
+      (group, replace) => onChanges(group.rows.map(row => ({...row, sub: group.sub})), replace), onEnd);
+    return {unsubscribe: () => this.unsubscribe(sub)};
   }
-  private addSubscription(want: Want, args: Uint8Array, delivery: RowDelivery): Subscription {
+  private addSubscription(want: Want, args: Uint8Array, notify: Sub['notify'], onEnd?: Sub['onEnd'], codec?: Sub['codec']): Sub {
     if (!this.wants.some(w => sameWant(w, want))) throw new ClientError('UnknownWant');
-    const sub: Sub = {want: copyWant(want), args: args.slice(), delivery, complete: false, active: true};
+    const sub: Sub = {want: copyWant(want), args: args.slice(), notify, onEnd, codec, complete: false, active: true};
     this.subs.add(sub);
     void this.enqueue(async () => this.subscribeAll());
-    return {unsubscribe: () => {
-      sub.active = false; this.subs.delete(sub);
-      void this.enqueue(async () => {
-        if (sub.id !== undefined && this.state === 'Ready') await this.send({tag: 'Unsubscribe', value: sub.id});
-        sub.id = undefined;
-      });
-    }};
+    return sub;
+  }
+  private clearSubscriptions(): void {
+    for (const sub of this.subs) { sub.id = undefined; sub.image = undefined; sub.complete = false; }
+  }
+  private removeSubscription(sub: Sub): void {
+    sub.active = false; sub.id = undefined; sub.image = undefined; this.subs.delete(sub);
+  }
+  private unsubscribe(sub: Sub): void {
+    const id = sub.id;
+    this.removeSubscription(sub);
+    void this.enqueue(async () => {
+      if (id !== undefined && this.state === 'Ready') await this.send({tag: 'Unsubscribe', value: id});
+    });
   }
   private async send(frame: Frame): Promise<void> {
     await this.installation(async () => {

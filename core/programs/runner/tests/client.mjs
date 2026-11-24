@@ -57,6 +57,7 @@ class Server {
       send:data=>{
         const f=this.codec.decode(data);this.sent.push(f);
         if(f.tag==='Hello') {
+          if(this.welcome===false)return;
           const identity=f.values[0].tag==='Some'?caller:{issuer:1,subject:bytes(...Array(16).fill(++this.anonymous))};
           this.emit(s,{tag:'Welcome',values:[identity,4,262144n,bytes(3),'test',1024n]});
           s.principal=identity.subject;this.onHello?.(s,f);
@@ -80,7 +81,7 @@ class Server {
   answer(socket,stream,p,outcome,tag='Batch'){
     this.emit(socket,tag==='Batch'?{tag,values:[1n,[],[],[{stream,p,outcome}]]}:{tag,values:[1n,[{stream,p,outcome}]]});
   }
-  close(socket,code){socket.closed=true;socket.onclose?.({code});}
+  close(socket,code,reason){socket.closed=true;socket.onclose?.({code,reason});}
   check(){if(this.errors.length)throw this.errors[0];}
 }
 
@@ -293,7 +294,7 @@ export async function laws(codec, only, mutant) {
   };
   tests.retry_and_reconnect_order=async()=>{
     const h=await setup();await ready(h);const caches=[];
-    h.client.subscribe(want,bytes(1),rows=>caches.push(rows));await settle();
+    h.client.subscribe(want,bytes(1),sub=>caches.push(sub.rows(0).value));await settle();
     const a=h.client.call(want,bytes(7),x=>x);await settle();
     h.server.close(h.server.sockets[0],1001);await settle();
     h.server.placed=false;await h.time.advance(50);
@@ -315,7 +316,7 @@ export async function laws(codec, only, mutant) {
   tests.batch_complete_and_predictions=async()=>{
     const h=await setup();await ready(h);const caches=[],predictions=[];
     h.opts.onPrediction=p=>predictions.push(new Map(p));
-    h.client.subscribe(want,bytes(1),rows=>caches.push(rows));await settle();
+    h.client.subscribe(want,bytes(1),sub=>caches.push(sub.rows(0).value));await settle();
     const a=h.client.call(want,bytes(7),x=>x,'overlay');await settle();assert.equal(h.client.predictions.size,1);
     h.server.emit(h.server.sockets[0],{tag:'Batch',values:[1n,[0],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'Some',value:bytes(2)}}]}],[{stream:0,p:0n,outcome:returned(7)}]]});await settle();await a;
     assert.equal(h.client.predictions.size,0);assert.equal(caches[0][0].value.value[0],2);
@@ -326,6 +327,69 @@ export async function laws(codec, only, mutant) {
     h.server.emit(h.server.sockets[0],{tag:'Reset',values:[3n,[]]});await settle();
     h.server.emit(h.server.sockets[0],{tag:'Batch',values:[3n,[],[{sub:2,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'Some',value:bytes(3)}}]}],[]]});await settle();
     assert.equal(h.client.state,'Incompatible');assert.equal(caches.length,before);
+  };
+  tests.grouped_accessors=async()=>{
+    const h=await setup(); await ready(h);
+    let unitDecodes=0; const calls=[];
+    const access={
+      value(data){ if(data.length===0)unitDecodes++; return data[0]; },
+      slot(i){ return ['left','right'][i]; },
+      row(r){ return {...r,slot:this.slot(r.slot)}; },
+    };
+    const first=h.client.subscribe(want,bytes(1),sub=>calls.push([sub.value(),second.value()]),undefined,access);
+    const second=h.client.subscribe(want,bytes(2),()=>{},undefined,access);
+    const pending={tag:'Pending'};
+    assert.deepEqual(first.value(),pending);
+    assert.deepEqual(second.rows('left'),pending);
+    await settle();
+    const socket=h.server.sockets[0];
+    const sample={slot:0,key:bytes(8),value:{tag:'Some',value:bytes(12)}};
+    const batch=(version,complete,groups)=>h.server.emit(socket,{tag:'Batch',values:[version,complete,groups,[]]});
+    batch(1n,[0,1],[{sub:0,value:bytes(),rows:[sample]},{sub:1,value:bytes(9),rows:[]}]);
+    await settle();
+    assert.deepEqual(calls,[[{tag:'Ready',value:undefined},{tag:'Ready',value:9}]]);
+    assert.equal(unitDecodes,1);
+    assert.deepEqual(first.rows('left'),{tag:'Ready',value:[{...sample,slot:'left'}]});
+    assert.deepEqual(second.rows('right'),{tag:'Ready',value:[]});
+    batch(2n,[],[
+      {sub:0,value:bytes(),rows:[{...sample,value:{tag:'None'}},{...sample,slot:1}]},
+      {sub:1,value:bytes(11),rows:[]},
+    ]);
+    await settle();
+    assert.equal(unitDecodes,1);
+    assert.deepEqual(calls.at(-1),[{tag:'Ready',value:undefined},{tag:'Ready',value:11}]);
+    assert.deepEqual(first.rows('left'),{tag:'Ready',value:[]});
+    assert.deepEqual(first.rows('right'),{tag:'Ready',value:[{...sample,slot:'right'}]});
+
+    h.server.emit(socket,{tag:'Reset',values:[3n,[]]}); await settle();
+    assert.deepEqual(first.rows('right'),pending);
+    assert.deepEqual(second.value(),pending);
+    batch(3n,[],[{sub:0,value:bytes(42),rows:[]}]); await settle();
+    assert.equal(calls.length,2,'the retired id must be ignored');
+    batch(4n,[2],[{sub:2,value:bytes(4),rows:[]}]); await settle();
+    assert.deepEqual(first.value(),{tag:'Ready',value:4});
+    h.server.close(socket,1001);
+    assert.deepEqual(first.value(),pending);
+    first.unsubscribe();
+    assert.deepEqual(first.value(),{tag:'Ended'});
+    assert.deepEqual(first.rows('left'),{tag:'Ended'});
+  };
+  tests.protocol_reload_or_reply_error=async()=>{
+    const retired=await setup(undefined,{prepare:server=>{server.welcome=false;}});
+    const ready=retired.client.whenReady();
+    void ready.catch(()=>{});
+    retired.server.close(retired.server.sockets[0],1009,'hirsel.3');
+    await assert.rejects(ready,{code:'Reload'});
+    await retired.time.advance(60000);
+    assert.equal(retired.server.sockets.length,1);
+    assert.match(retired.diagnostics.at(-1),/Reload required/);
+    const current=await setup(); await current.client.whenReady();
+    const pending=current.client.call(want,bytes(3),data=>data);
+    void pending.catch(()=>{}); await settle();
+    current.server.close(current.server.sockets[0],1009,'hirsel.3');
+    await assert.rejects(pending,{code:'ReplyTooLarge'});
+    assert.equal(current.storage.raw.streams[0].pending.p,0n);
+    assert.match(current.diagnostics.at(-1),/Stored reply/);
   };
   tests.subscription_end_after_reset=async()=>{
     const h=await setup();await ready(h);
@@ -339,6 +403,7 @@ export async function laws(codec, only, mutant) {
     const reason={tag:'Refused',value:{tag:'Budget',value:{requested:9007199254740993n,available:4n}}};
     h.server.emit(socket,{tag:'Ended',values:[1,reason]});await settle();
     assert.deepEqual(reasons,[reason],'Ended delivers the decoded refusal');
+    assert.deepEqual(subscription.value(),{tag:'Ended'});
     h.server.emit(socket,{tag:'Ended',values:[1,reason]});
     h.server.emit(socket,{tag:'Reset',values:[3n,[]]});await settle();
     subscription.unsubscribe();await settle();

@@ -136,7 +136,7 @@ pub fn host_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, 
         let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
-    runner.main(argv, process, errors, tasks, code.describe(place), serve)
+    runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), serve)
 }
 
 // T1's executable uses a smaller configured allowance than its hosted recipe.
@@ -156,7 +156,7 @@ pub fn identity_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: N
         let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
-    runner.main(argv, process, errors, tasks, code.describe(place), serve)
+    runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), serve)
 }
 
 // A client verdict: empty when every call was answered as expected.
@@ -832,7 +832,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
             let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
             Ok(ended)
         }
-        return runner.main(argv, process, errors, tasks, code.describe(place), start)
+        return runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), start)
     }
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
@@ -845,7 +845,7 @@ pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Std
         let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
             Ok(freeze_until_stop(d, c, r, tasks, out, n, take stopping, twice))
         }
-        return runner.main(argv, process, errors, tasks, code.describe(place), start)
+        return runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), start)
     } else { deadline_reopen(d, c, r, tasks, argv) }
     Ok(())
 }

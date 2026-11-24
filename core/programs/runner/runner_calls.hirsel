@@ -35,8 +35,8 @@ fn digest_bytes(text: String) -> Bytes {
 pub fn law_release_digest() -> bool {
     let no_exports: List[runner.Exported] = list.new()
     if !digest_matches(no_exports, "eab2586620e88429ab011d50b6feaa03da24133743c844bbb7f35208df7c5c35") { return false }
-    let left = runner.Exported(described: runner.Described(kind: Compute, identity: digest_bytes("a"), args: digest_bytes("ab"), result: digest_bytes("c")), args_fp: 4u64, result_fp: 5u64, revision: digest_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))
-    let right = runner.Exported(described: runner.Described(kind: Query, identity: digest_bytes("b"), args: list.new(), result: digest_bytes("d")), args_fp: 7u64, result_fp: 8u64, revision: digest_bytes("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"))
+    let left = runner.Exported(described: runner.Described(kind: Compute, identity: digest_bytes("a"), args: digest_bytes("ab"), result: digest_bytes("c")), args_fp: 4u64, result_fp: 5u64, revision: digest_bytes("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), slots: list.new(), value: list.new())
+    let right = runner.Exported(described: runner.Described(kind: Query, identity: digest_bytes("b"), args: list.new(), result: digest_bytes("d")), args_fp: 7u64, result_fp: 8u64, revision: digest_bytes("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), slots: list.new(), value: list.new())
     let mut exported: List[runner.Exported] = list.with_capacity(2u64)
     list.push(mut exported, take left)
     list.push(mut exported, take right)
@@ -1938,7 +1938,7 @@ pub fn wake_report_main(a: Args, process: Process, err: Stderr, d: Dir, c: Clock
             _ => Error(Usage(Exit(status: 2u8))),
         }
     }
-    runner.main(a, process, err, tasks, code.describe(place), run)
+    runner.main(a, process, err, tasks, c, code.describe(place), code.describe(schema), run)
 }
 
 pub fn law_calls_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {

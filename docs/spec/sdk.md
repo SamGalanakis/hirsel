@@ -36,8 +36,11 @@ names cause `DuplicateStubName(a, b)` before any output is written.
 The transport implements `call(want, argsBytes, resultDecoder)`, returning
 `Promise<Outcome<R>>`, and `subscribe(want, argsBytes, onChange, onEnd?)`, returning a
 handle `sub` with `value()`, `rows(slot)` and `unsubscribe()` (RUNNER-SPEC v2.45).
-`sub.value()` is the query's computed value R and `sub.rows(slot)` the rows of
-one named slot, both as of the last applied Batch.
+`sub.value()` reads the query's computed value R. `sub.rows(slot)` reads the
+rows of one slot. Both return `{tag: "Ready", value: ...}` for the last applied
+Batch, `{tag: "Pending"}` before a complete image, or `{tag: "Ended"}` after
+retirement. Raw subscriptions use numeric slots. Decoded subscriptions use
+the slot names from Describe.
 
 The accessor contract (RUNNER-SPEC v2.46, astra 1995 #9):
 - A subscription is **pending** until its current instance completes. While
@@ -72,7 +75,11 @@ rows: `value()` is the decoded R, and each row of `rows(slot)` has the decoded
 For a query, `Described.result` is R's value schema followed by the slot list,
 each slot's name, ordered key schema and value schema, each schema encoded as
 `std.codec` Bytes. `result_fp` fingerprints the whole, so changing R, a slot's
-name, its table's schemas, or the slot order changes the Want.
+name, its table's schemas, or the slot order changes the Want. Describe also
+carries the explicit `value` and `slots` schemas for each query. Its
+`tables` diagnostics list declarations from a Migrate run over an empty
+memory store. The generator exports those diagnostics without using them as
+part of the release identity.
 
 Compute and Granted calls return `Promise<Outcome<R>>`. Transact calls return
 `Promise<Outcome<Result<R, E>>>`: the Returned payload contains the complete

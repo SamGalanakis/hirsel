@@ -207,13 +207,15 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_follower_steps"]
-limit = 134217728
+# Launch ceiling for the fixture's derived two-slot reservation.
+limit = 335544320
 
 [tests.runs."store@1/store/bucket_test_m2_object_writer"]
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_retention_witness"]
-limit = 134217728
+# Launch ceiling for the fixture's derived one-slot reservation.
+limit = 268435456
 
 [tests.runs."store@1/store/bucket_test_m2_standalone_import"]
 limit = 134217728
@@ -225,7 +227,8 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_replication"]
-limit = 167772160
+# Launch ceiling for the fixture's derived three-slot reservation.
+limit = 402653184
 
 [tests.runs."store@1/store/bucket_test_m2_follower_overlap"]
 limit = 134217728
@@ -240,10 +243,10 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_q5_matrix"]
-limit = 134217728
+limit = 268435456
 
 [tests.runs."store@1/store/bucket_test_m2_genesis_debris"]
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_sim_levels"]
-limit = 134217728
+limit = 268435456

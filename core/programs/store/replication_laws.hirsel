@@ -148,14 +148,13 @@ fn replication_follow(mut f: Follower, node: String, seed: u64, entry_version: u
     replication_check(node, seed, f.capture.state.tips[0], entry_version, expected)
 }
 
-fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64) -> Result[(), Error] waits {
+fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64, follow_plan: FollowerPlan) -> Result[(), Error] waits {
     let mut plan = std.sim.world.plan(seed)
     let r = provide.random(seed)
     let mut writer = replication_writer(tasks, r, sim, seed, None)?
     let store = writer.register.head.store
     let mut ids = followers()
-    let follow_plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(false))
-    let service = follower_law_service(tasks, follow_plan, 3)?
+    let service = bucket_law_start_followers(tasks, follow_plan, 3, "replication service")
     let owner = follower_owner(service)?
     let mut first = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
     let mut second = replication_open_follower(mut ids, tasks, owner, follow_plan, sim, "spare.test", seed, store, BUCKET_LAW_OP_MS)?
@@ -211,8 +210,12 @@ fn replication_run(tasks: Tasks, sim: BucketSim, seed: u64) -> Result[(), Error]
 @test
 fn bucket_test_m2_replication(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 711)
-    let sim = bucket_law_sim(tasks, c, seed, Some(bucket_law_wire_cut(0, false)), list.new())
-    let checked = replication_run(tasks, sim, seed)
-    let _ = bucket_law_finish(take sim)
-    checked
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(false))
+    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 3) {
+        let sim = bucket_law_sim(tasks, c, seed, Some(bucket_law_wire_cut(0, false)), list.new())
+        let checked = replication_run(tasks, sim, seed, plan)
+        let _ = bucket_law_finish(take sim)
+        result.unwrap(take checked)
+        Ok(())
+    }, "replication fixture")
 }

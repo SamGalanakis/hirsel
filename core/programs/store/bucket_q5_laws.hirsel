@@ -158,15 +158,13 @@ fn q5_races(fault: Q5Fault) -> bool {
     }
 }
 
-fn q5_reconcile(tasks: Tasks, sim: BucketSim, digest: Option[Inline[u8, 32]], applied_during_claim: bool) -> Result[(), DeployError] waits {
+fn q5_reconcile(tasks: Tasks, sim: BucketSim, digest: Option[Inline[u8, 32]], applied_during_claim: bool, plan: FollowerPlan) -> Result[(), DeployError] waits {
     let authority = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 23))?
     let mut ids = followers()
-    let opts = bucket_order_options(false)
-    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), opts)
-    let owner = deploy_result(follower_law_service(tasks, plan, 1))?
+    let owner = bucket_law_start_followers(tasks, plan, 1, "L54-M activation reconciliation service")
     let handle = deploy_result(follower_owner(owner))?
     let slot = deploy_result(follower_slot(handle, plan))?
-    let mirror = deploy_result(follower(mut ids, take slot, take authority, sim.time, opts.expect))?
+    let mirror = deploy_result(follower(mut ids, take slot, take authority, sim.time, None))?
     let captured = deploy_result(follower_head(mirror))?
     let image = deploy_result(snapshot_follower(mirror, Branch(store: captured.store, id: 0)))?
     let read = deploy_result(follower_reader(mirror, 0))?
@@ -244,7 +242,7 @@ fn q5_verify(operation: Q5Operation, fault: Q5Fault, observed: Q5Observation, re
     }
 }
 
-fn q5_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation: Q5Operation, site: Q5Site, fault: Q5Fault) -> Result[(), DeployError] waits {
+fn q5_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation: Q5Operation, site: Q5Site, fault: Q5Fault, plan: FollowerPlan) -> Result[(), DeployError] waits {
     let sim = q5_fixture(c, tasks, seed, site, fault)
     q5_incumbent(tasks, r, sim, operation)?
     let trial = Q5Actor(operation, dir: disk_test_directory(d), clock: sim.time, tasks, r, endpoint: sim.endpoint)
@@ -260,7 +258,7 @@ fn q5_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, operation: Q5Op
     if let Some(take successor) = take recovered {
         deploy_result(close(take successor))?
         if let ActivationWrite = operation {
-            q5_reconcile(tasks, sim, observed.digest, q5_applies(fault))?
+            q5_reconcile(tasks, sim, observed.digest, q5_applies(fault), plan)?
         }
     }
     let report = bucket_law_finish(take sim)

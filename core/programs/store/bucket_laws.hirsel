@@ -974,15 +974,18 @@ fn bucket_test_m2_claim_witness(c: Clock, r: Random, tasks: Tasks, seed_grant: E
 @test
 fn bucket_test_m2_q5_matrix(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
     let seed = bucket_law_seed(seed_grant, 541)
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
     let writes: Inline[Q5Operation, 3] = [GenesisWrite, ClaimWrite, ActivationWrite]
     let schedules: Inline[Q5Fault, 6] = [AfterBody, BeforeBody, OvertakeDrop, OvertakeApply, Retry500, ExhaustBeforeBody]
-    for operation in writes {
-        let site = q5_clean_site(d, c, r, tasks, seed, operation)?
-        for fault in schedules {
-            q5_case(d, c, r, tasks, seed, operation, site, fault)?
+    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
+        for operation in writes {
+            let site = result.unwrap(q5_clean_site(d, c, r, tasks, seed, operation))
+            for fault in schedules {
+                result.unwrap(q5_case(d, c, r, tasks, seed, operation, site, fault, plan))
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    }, "L54-M Q5 matrix fixture")
 }
 
 @test

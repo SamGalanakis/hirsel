@@ -315,16 +315,19 @@ fn bucket_test_m2_reclaim_uploads(c: Clock, r: Random, tasks: Tasks) -> Result[(
     Ok(())
 }
 
-fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
-    let connected = bucket_law_client_lanes(sim, tasks, "s3.test", 811, true, 1)?
+fn retention_witness_options() -> Options {
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
     options.group_bytes = 65536
     options.retain = 2
+    take options
+}
+
+fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim, options: Options, plan: FollowerPlan) -> Result[(), Error] waits {
+    let connected = bucket_law_client_lanes(sim, tasks, "s3.test", 811, true, 1)?
     let mut writer = open_authority(tasks, object_authority(take connected, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let rows = bucket_law_rows_table(mut writer)?
     let watching = bucket_law_client_lanes(sim, tasks, "s3.test", 812, true, 1)?
     let mut ids = followers()
-    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), options)
     let service = follower_law_service(tasks, plan, 1)?
     let mut follower_view = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, object_authority(take watching, "bucket", BUCKET_LAW_OP_MS), sim.time, options.expect)?
     let main_line = main_branch(writer)
@@ -381,18 +384,24 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim) -> Resu
 @test
 fn bucket_test_m2_retention_witness(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 598)
-    let sim = bucket_law_sim(tasks, c, seed, None, list.new())
-    let observed = object_retention_witness_law(r, tasks, sim)
-    let report = bucket_law_finish(take sim)
-    observed?
-    follower_heal_reads(report, "L59 evicted MANIFEST")
-    let directory = disk_test_directory(d)
-    bucket_m2_seed_checkpoint(directory, c, r, tasks)?
-    let cases: Inline[RetentionCase, 5] = [ReclaimedPack, RetainedPack, DeletedAfterCut, LostWitness, RetryCold]
-    for case in cases {
-        retention_case_run(directory, c, r, tasks, seed, case)?
-    }
-    Ok(())
+    let witness_options = retention_witness_options()
+    let witness_plan = follower_law_plan(Bucket(bucket_law_lanes(1)), witness_options)
+    let case_plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
+    let fixture_bytes = order.max(bucket_law_fixture_bytes(witness_plan, 1), bucket_law_fixture_bytes(case_plan, 1))
+    bucket_law_admitted(bound bytes fixture_bytes {
+        let sim = bucket_law_sim(tasks, c, seed, None, list.new())
+        let observed = object_retention_witness_law(r, tasks, sim, witness_options, witness_plan)
+        let report = bucket_law_finish(take sim)
+        observed?
+        follower_heal_reads(report, "L59 evicted MANIFEST")
+        let directory = disk_test_directory(d)
+        bucket_m2_seed_checkpoint(directory, c, r, tasks)?
+        let cases: Inline[RetentionCase, 5] = [ReclaimedPack, RetainedPack, DeletedAfterCut, LostWitness, RetryCold]
+        for case in cases {
+            retention_case_run(directory, c, r, tasks, seed, case, case_plan)?
+        }
+        Ok(())
+    }, "L59 retention_witness fixture")
 }
 
 type RetentionCase: send = ReclaimedPack | RetainedPack | DeletedAfterCut | LostWitness | RetryCold
@@ -496,6 +505,16 @@ type RetentionReader: send {
     healed: Receiver[()],
     wanted: Position,
     victim: String,
+}
+
+fn retention_reader_bytes(lanes: std.object.LaneConfig) -> u64 {
+    let task_bytes = option.unwrap(charge.task(bytes[()], lanes.lane_bytes))
+    let lane_tasks = option.unwrap(std.object.lane_reservation(std.object.LaneConfig(
+        requested_lanes: lanes.requested_lanes, lane_bytes: task_bytes)))
+    // The capture and heal marker each hold their own lane tasks and one
+    // resolver. Allow a lane grant per lane for their owner-side setup.
+    let setup = option.unwrap(std.object.lane_reservation(lanes))
+    2 * (lane_tasks + task_bytes + setup) + follower_starter_bytes()
 }
 
 fn retention_open(m: RetentionReader, mut ids: Followers, seed: u64) -> Result[Follower, Error] waits {
@@ -630,7 +649,7 @@ fn retention_join_reader(take trial: Task[Result[(), Error]]) -> Result[(), Erro
     }
 }
 
-fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case: RetentionCase) -> Result[(), Error] waits {
+fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case: RetentionCase, plan: FollowerPlan) -> Result[(), Error] waits {
     let (id, _) = read_page_manifest_file(d)?
     let base = retention_base(id)?
     let fixture = retention_fixture(d, base.head)?
@@ -645,18 +664,15 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
     if cold_first {
         tag = retention_writes(mut inspector, fixture, metadata, tag, due, true)?
     }
-    let mut opts = bucket_order_options(false)
-    opts.group_commits = 1
-    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), opts)
     let service = follower_law_service(tasks, plan, 1)?
     let owner = follower_owner(service)?
     let (from_reader, reader_ready): (Sender[()], Receiver[()]) = channel.new(1)
     let (go, advancing): (Sender[()], Receiver[()]) = channel.new(1)
     let (healed, after_heal): (Sender[()], Receiver[()]) = channel.new(1)
-    let actor = RetentionReader(case, endpoint: sim.endpoint, time: sim.time, tasks, owner: take owner, plan,
+    let actor = RetentionReader(case, endpoint: sim.endpoint, time: sim.time, tasks, owner: take owner, plan: clone(plan),
         ready: take from_reader, go: take advancing, healed: take after_heal,
         wanted: Position(store: id, branch: 0, version: 3), victim: clone(fixture.pack_name))
-    let trial = task.spawn(tasks, bytes 33554432, take actor, retention_reader)
+    let trial = task.spawn(tasks, bytes retention_reader_bytes(bucket_law_lanes(0)), take actor, retention_reader)
     if !cold_first {
         if let Error(_) = channel.receive(reader_ready) {
             retention_join_reader(take trial)?

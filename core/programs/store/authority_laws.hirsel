@@ -196,9 +196,7 @@ fn sim_law_open(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, declare_leve
     Ok(opened ?=> |Refusal(error: take problem, ..)| take problem)
 }
 
-fn sim_law_follower(mut writer: Db, wanted: Position, receipt: Ticket, tasks: Tasks, sim: BucketSim, mut world: LevelWorld) -> Result[(), Error] waits {
-    let opts = bucket_order_options(false)
-    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), opts)
+fn sim_law_follower(mut writer: Db, wanted: Position, receipt: Ticket, tasks: Tasks, sim: BucketSim, mut world: LevelWorld, plan: FollowerPlan) -> Result[(), Error] waits {
     let service = follower_law_service(tasks, plan, 1)?
     let client = bucket_law_client_with(sim, tasks, "s3.test", 605, true)?
     let no_declared_levels = SimLevels(weak: list.new(), strongest: "reader")
@@ -299,7 +297,7 @@ fn sim_law_declarations(tasks: Tasks, r: Random, sim: BucketSim, mut world: Leve
     sim_law_invalid_declarations(tasks, r, sim, mut world)
 }
 
-fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_last: bool) -> Result[(), Error] waits {
+fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_last: bool, plan: FollowerPlan) -> Result[(), Error] waits {
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
     // The held request consumes A's operation deadline. B's claim is the next PUT.
     let head_hold: std.sim.s3.Hold = if apply_last {
@@ -323,7 +321,7 @@ fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_las
     level_mark(mut marks, 1)?
     let recovered_version = if apply_last {
         let wanted = Position(store: identity(writer), branch: 0, version: 7)
-        sim_law_follower(mut writer, wanted, held_receipt, tasks, sim, mut world)?
+        sim_law_follower(mut writer, wanted, held_receipt, tasks, sim, mut world, plan)?
         7u64
     } else {
         if let Error(Undecided) = durable(mut writer, held_receipt) {} else {
@@ -502,8 +500,11 @@ fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_
 @test
 fn bucket_test_m2_sim_levels(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 553)
-    sim_law_weak_ahead(tasks, c, r, seed, false)?
-    sim_law_weak_ahead(tasks, c, r, seed, true)?
-    sim_law_ordered_levels(tasks, c, r, seed, false)?
-    sim_law_ordered_levels(tasks, c, r, seed, true)
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
+    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
+        sim_law_weak_ahead(tasks, c, r, seed, false, plan)?
+        sim_law_weak_ahead(tasks, c, r, seed, true, plan)?
+        sim_law_ordered_levels(tasks, c, r, seed, false)?
+        sim_law_ordered_levels(tasks, c, r, seed, true)
+    }, "L55 sim_levels fixture")
 }

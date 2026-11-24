@@ -10,12 +10,47 @@ fn follower_law_plan(kind: Kind, o: Options) -> FollowerPlan {
     result.unwrap(follower_plan(kind, effective))
 }
 
-fn follower_law_service(tasks: Tasks, plan: FollowerPlan, slots: u64) -> Result[FollowerService, Error] waits {
+fn follower_law_service_bytes(plan: FollowerPlan, slots: u64) -> u64 {
     let mut plans: List[FollowerPlan] = list.with_capacity(slots)
     for _ in 0u64 .. slots {
         list.push(mut plans, clone(plan))
     }
-    follower_service(tasks, option.unwrap(service_bytes(plans)))
+    option.unwrap(service_bytes(plans))
+}
+
+fn follower_law_service(tasks: Tasks, plan: FollowerPlan, slots: u64) -> Result[FollowerService, Error] waits {
+    follower_service(tasks, follower_law_service_bytes(plan, slots))
+}
+
+// Keep the original Bucket fixture allowance for the simulator, clients,
+// writers and test state. Reserve the simultaneous follower slots beside it.
+fn bucket_law_fixture_bytes(plan: FollowerPlan, slots: u64) -> u64 {
+    128 * MIB + follower_law_service_bytes(plan, slots) + follower_starter_bytes()
+}
+
+fn bucket_law_capacity(site: String, problem: Capacity) -> Never {
+    let mut message = string.from(site)
+    string.push(mut message, " requested ")
+    string.push_u64(mut message, problem.requested)
+    string.push(mut message, " bytes with ")
+    string.push_u64(mut message, problem.available)
+    string.push(mut message, " available")
+    fail(take message)
+}
+
+fn bucket_law_start_followers(tasks: Tasks, plan: FollowerPlan, slots: u64, site: String) -> FollowerService waits {
+    match follower_law_service(tasks, plan, slots) {
+        Ok(take started) => take started,
+        Error(Full(Allocation(problem))) => bucket_law_capacity(site, problem),
+        Error(_) => fail(string.from(site)),
+    }
+}
+
+fn bucket_law_admitted[T](take outcome: Result[T, Capacity], site: String) -> T {
+    match take outcome {
+        Ok(take value) => take value,
+        Error(problem) => bucket_law_capacity(site, problem),
+    }
 }
 
 fn bounded_follower_catch_up(take lagged: Follower, budget: u64, due: u64) -> Result[(Follower, Result[Position, Error]), OutOfTime] waits {
@@ -47,7 +82,7 @@ fn follower_steps_open(mut ids: Followers, owner: FollowerOwner, plan: FollowerP
     follower(mut ids, follower_slot(owner, plan)?, object_authority(take cold, "bucket", BUCKET_LAW_OP_MS), sim.time, None)
 }
 
-fn object_follower_steps_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[u64, Error] waits {
+fn object_follower_steps_law(r: Random, tasks: Tasks, sim: BucketSim, plan: FollowerPlan) -> Result[u64, Error] waits {
     let connected = bucket_law_client_lanes(sim, tasks, "s3.test", 901, true, 1)?
     let mut source = history_reader(take connected, 0)
     let mut scratch = history_buffers(1024)?
@@ -55,8 +90,7 @@ fn object_follower_steps_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[
     let declaration = history_config_bytes(object_history_config(std.object.bucket_config(source.client), "bucket"))?
     let (take opened, _) = history_open_register(mut source, sim.time, r, options, "bucket", mut scratch, BUCKET_LAW_OP_MS)?
     let mut held = take opened
-    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), options)
-    let service = follower_law_service(tasks, plan, 2)?
+    let service = bucket_law_start_followers(tasks, plan, 2, "L85 follower_steps service")
     let owner = follower_owner(service)?
     let mut ids = followers()
     let mut far = follower_steps_open(mut ids, owner, plan, tasks, sim, 902)?
@@ -184,10 +218,15 @@ fn follower_steps_log_floor(d: Dir, c: Clock, r: Random, tasks: Tasks, budget: u
 
 @test
 fn bucket_test_m2_follower_steps(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
-    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 258), None, list.new())
-    let observed = object_follower_steps_law(r, tasks, sim)
-    let _ = bucket_law_finish(take sim)
-    follower_steps_log_floor(d, c, r, tasks, observed?)
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), bucket_law_options(true))
+    bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 2) {
+        let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 258), None, list.new())
+        let observed = object_follower_steps_law(r, tasks, sim, plan)
+        let _ = bucket_law_finish(take sim)
+        let steps = result.unwrap(take observed)
+        result.unwrap(follower_steps_log_floor(d, c, r, tasks, steps))
+        Ok(())
+    }, "L85 follower_steps fixture")
 }
 
 fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {

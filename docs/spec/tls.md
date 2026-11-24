@@ -1505,8 +1505,10 @@ only within one cipher. A schedule enforces this for every key it holds:
   made, at the same time or one after the other.
 - **Registry lifetime.** An entry records the run's **share count** at its construction:
   how many shares `key_share` has issued so far. The entry retires, its fingerprint erased
-  and its 48 bytes refunded to the limit that admitted them, once every share counted by it
-  has been consumed or dropped. No later host share can reach the same agreed value. For
+  and its 48 bytes refunded to the limit that admitted them, after every counted share is
+  dropped or its consuming constructor has decided its verdict. A constructor holds that
+  share's protection from issue through validation and the atomic registry transition.
+  No later host share can reach the same agreed value. For
   an earlier share `x` against the chosen peer `P`, a host share `y` drawn afterwards would
   need the peer `(x / y)·P`, which only someone who knows `y`'s scalar, and `x`'s or `P`'s,
   can compute. That is the Diffie–Hellman assumption the agreement already rests on. A

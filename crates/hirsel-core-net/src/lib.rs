@@ -8,6 +8,7 @@ hirsel_guard::install!();
 
 use std::net::IpAddr;
 
+pub mod agreement_registry;
 mod env;
 pub mod exec;
 pub mod udp;

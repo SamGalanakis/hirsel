@@ -12,9 +12,7 @@ fn open_place_schema[H: shareable + inert + send](mut db: store.Db, schema: Stat
     Ok(take h)
 }
 
-fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
+fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
     head_prepare_registered(mut db, selection, persistent, place, on_migrate, schema, n_place, tasks, None)
 }
 
@@ -24,15 +22,16 @@ type HeadRegistration[G: send, H: shareable + inert + send] {
     record: ReleaseRecord
 }
 
-fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks, take pre_registered: Option[HeadRegistration[G, H]]) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
+fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks, take pre_registered: Option[HeadRegistration[G, H]]) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
     if !store.is_disk(db) {
-        let mut local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
+        let mut local_registry = match placed(place, n_place) {
+            Ok(take registered) => take registered,
+            Error(take problem) => return Error(Place(take problem))
+        }
         let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
         let installing = match selection {
-            Install => true,
-            InstallAt(_) => true,
+            Install(_) => true,
+            InstallAt(_, _) => true,
             _ => store.version(store.snapshot(db)) == 0u64,
         }
         let h = if installing {
@@ -47,18 +46,26 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         return Ok((take local_registry, take h, take release, take identity))
     }
     let explicit_install = match selection {
-        Install => true,
-        InstallAt(_) => true,
+        Install(_) => true,
+        InstallAt(_, _) => true,
         _ => false,
     }
-    if explicit_install { activation_result(store.activation_install_allowed(db))? }
-    if persistent && launch_env().revision.size == 0u64 { return Error(IdentityUnknown) }
+    if explicit_install {
+        activation_result(store.activation_install_allowed(db))?
+    }
+    if persistent && launch_env().revision.size == 0u64 {
+        return Error(IdentityUnknown)
+    }
     let current = activation_result(current_description(db))?
     let selected: Option[u64] = match selection {
-        Install => None,
-        InstallAt(target) => {
+        Install(_) => None,
+        InstallAt(target, _) => {
             let next = store.version(store.snapshot(db)) + 1u64
-            if next != (if target == 0u64 { 1u64 } else { target }) {
+            if next != (if target == 0u64 {
+                1u64
+            } else {
+                target
+            }) {
                 return Error(InstallVersion(next))
             }
             None
@@ -66,19 +73,27 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         Reopen => match current {
             None => None,
             Some(_) => {
-                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
+                if store.fence_level(db) == 0 && persistent {
+                    return Error(NotCurrent(Legacy))
+                }
                 Some(activation_result(activation_version(db))?)
             },
         },
         Current(expected) => match current {
             None => {
-                if expected != 0u64 { return Error(NotCurrent(Empty)) }
+                if expected != 0u64 {
+                    return Error(NotCurrent(Empty))
+                }
                 None
             },
             Some(_) => {
-                if store.fence_level(db) == 0 && persistent { return Error(NotCurrent(Legacy)) }
+                if store.fence_level(db) == 0 && persistent {
+                    return Error(NotCurrent(Legacy))
+                }
                 let version = activation_result(activation_version(db))?
-                if version != expected { return Error(not_current_activation(db, version, option.unwrap(take current))) }
+                if version != expected {
+                    return Error(not_current_activation(db, version, option.unwrap(take current)))
+                }
                 Some(version)
             },
         },
@@ -94,24 +109,36 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
     if let Some(version) = selected {
         let old = option.unwrap(take current)
         let prior = activation_result(release_record(db, version))?
-        let matches = match prior { Some(row) => row.binding == record.binding, None => false }
-        if !matches { return Error(not_current_activation(db, version, take old)) }
+        let matches = match prior {
+            Some(row) => row.binding == record.binding,
+            None => false
+        }
+        if !matches {
+            return Error(not_current_activation(db, version, take old))
+        }
         let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
         let h = open_place_schema(mut db, schema) ?=> Store
         let ReleaseRecord(release: take release, ..) = take record
         return Ok((take reg, take h, take release, take identity))
     }
-    if !explicit_install { activation_result(store.activation_install_allowed(db))? }
+    if !explicit_install {
+        activation_result(store.activation_install_allowed(db))?
+    }
     let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
     let mut declaration = migration_declaration(db, tasks, on_migrate) ?=> Migrate
     let h = (code.callable(schema))(mut declaration) ?=> Migrate
     let mut stage = store.finish_migration(db, take declaration) ?=> Migrate
+    settle_held(db, mut stage, selection, reg, h, current, n_place)?
     let version = store.version(store.snapshot(db)) + 1u64
     let release_codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
     activation_result(store.stage_activation(mut stage, version, current, description, release_codec, record))?
     if let Error(take problem) = store.install_bound_activation(mut db, take stage, version, record.binding) {
-        if let Tiered(Install) = problem { return Error(Store(take problem)) }
-        if let InstallAt(_) = selection { return Error(InstallUncertain(take problem)) }
+        if let Tiered(Install) = problem {
+            return Error(Store(take problem))
+        }
+        if let InstallAt(_, _) = selection {
+            return Error(InstallUncertain(take problem))
+        }
         return Error(Store(take problem))
     }
     let ReleaseRecord(release: take release, ..) = take record
@@ -138,7 +165,9 @@ fn activation_identity(place_id: Bytes, on_migrate: Option[StaticFn[fn(mut store
 
 fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, schema_id: Bytes) -> Result[Bytes, Capacity] {
     let launch = launch_digest()?
-    if list.len(launch) == 0 { return Ok(list.new()) }
+    if list.len(launch) == 0 {
+        return Ok(list.new())
+    }
     let mut raw = take launch
     be_word(mut raw, list.len(place_id), 4)?
     list.append(mut raw, place_id)
@@ -150,7 +179,9 @@ fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, schema_id: Bytes) -> R
     std.sha256.add(mut hash, raw, 0, list.len(raw))
     let digest = std.sha256.finish(hash)
     let mut identity: Bytes = list.with_capacity(32)
-    for byte in digest { list.push(mut identity, byte) }
+    for byte in digest {
+        list.push(mut identity, byte)
+    }
     Ok(take identity)
 }
 
@@ -161,5 +192,86 @@ fn push_undeclared_schema(mut line: String, name: String) {
 }
 
 fn close_store(take db: store.Db) -> Result[(), OpenError] waits {
-    match store.close(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Store(take problem)) }
+    match store.close(take db) {
+        Ok(()) => Ok(()),
+        Error(take problem) => Error(Store(take problem))
+    }
+}
+
+// The activation fate of a disk install (RUNNER-SPEC §14.6): every held row is
+// rewritten in the activation's own staging, or the install is refused
+// `Unsettled` before it stages any activation.
+fn settle_held[G: send, H: shareable + inert + send](db: store.Db, mut stage: store.StagedMigration, selection: Selection, reg: Registry[G, H], h: H, current: Option[Bytes], n_place: u64) -> Result[(), OpenError] waits {
+    let Some(tables) = (declared_triggers(reg, h, store.snapshot(db)) ?=> Store) else {
+        return Ok(())
+    }
+    let image = trigger_stamp(reg.exported, reg.bindings, n_place) ?=> Store
+    let mut registered: List[Bytes] = list.new()
+    for entry in reg.exported {
+        list.push(mut registered, triggers.identity_path(entry.described.identity))
+    }
+    if let Some(prior) = current {
+        let codec: std.codec.Codec[Describe] = std.codec.of()
+        let old = std.codec.decode(codec, prior) ?=> |problem| Store(Decode(problem))
+        for entry in old.exported {
+            list.push(mut registered, triggers.identity_path(entry.described.identity))
+        }
+    }
+    let chosen: fate.Fates = match selection {
+        Install(f) => clone(f),
+        InstallAt(_, f) => clone(f),
+        _ => fate.none(),
+    }
+    match fate.settle(db, mut stage, tables, image, registered, chosen) ?=> Store {
+        Some(take report) => Error(Unsettled(take report)),
+        None => Ok(()),
+    }
+}
+
+// Keep these options in Args so they are also present during Run tape replay.
+pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
+    let mut selected: Option[Selection] = None
+    let mut fates = fate.none()
+    let mut held = false
+    for i in 0u64 .. args.len(a) {
+        let name = option.unwrap(args.get(a, i))
+        match fate.parse_option(mut fates, name) {
+            Ok(true) => {
+                held = true
+                continue
+            },
+            Ok(false) => {},
+            Error(_) => return Error(Exit(status: 1u8)),
+        }
+        let choice = if name == "--hirsel-install" {
+            Install(fate.none())
+        } else if let Some(value) = std.string.strip_prefix(name, "--hirsel-activation=") {
+            let Ok(v) = (int.parse(value) : Result[u64, ParseError]) else {
+                return Error(Exit(status: 1u8))
+            }
+            Current(v)
+        } else {
+            continue
+        }
+        if let Some(_) = selected {
+            return Error(Exit(status: 1u8))
+        }
+        selected = Some(choice)
+    }
+    // Held fates are install options (RUNNER-SPEC §14.6 "Who supplies a fate").
+    Ok(match take selected {
+        Some(Install(_)) => Install(take fates),
+        Some(take choice) => {
+            if held {
+                return Error(Exit(status: 1u8))
+            }
+            take choice
+        },
+        None => {
+            if held {
+                return Error(Exit(status: 1u8))
+            }
+            Reopen
+        },
+    })
 }

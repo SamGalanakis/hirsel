@@ -74,9 +74,9 @@ pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
 
 // `Reopen` opens the store at its current activation, or runs genesis on an empty
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
-pub type Selection: send = Current(u64) | Reopen | Install | InstallAt(u64)
+pub type Selection: send = Current(u64) | Reopen | Install(fate.Fates) | InstallAt(u64, fate.Fates)
 
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoWire(Bytes)
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoWire(Bytes) | Unsettled(fate.HeldReport)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 
@@ -344,16 +344,17 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
         return operate_prepare(take p, take options, n_place, attempt, image)
     }
     if let Some(version) = launch.install {
-        let result = operate_install(take p, take options, InstallAt(version), n_place)
+        // A hosted install's fates arrive with F3's Begin `held`; until then it settles no held run.
+        let result = operate_install(take p, take options, InstallAt(version, fate.none()), n_place)
         return finish_install(take result)
     }
     let installing = match p.selection {
-        Install => true,
-        InstallAt(_) => true,
+        Install(_) => true,
+        InstallAt(_, _) => true,
         _ => false
     }
     if installing {
-        let selection = p.selection
+        let selection: Selection = clone(p.selection)
         let _ = operate_install(take p, take options, selection, n_place)?
         return Ok(Unstarted)
     }
@@ -762,7 +763,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
 fn operate_install[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
     let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
     let persistent = persistent_backing(backing)
-    if let InstallAt(_) = selection {
+    if let InstallAt(_, _) = selection {
         if !persistent {
             return Error(Missing("disk store"))
         }
@@ -1128,32 +1129,6 @@ pub fn activation_version(db: store.Db) -> Result[u64, store.Error] waits {
     Ok(version)
 }
 
-// Keep these options in Args so they are also present during Run tape replay.
-pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
-    let mut selected: Option[Selection] = None
-    for i in 0u64 .. args.len(a) {
-        let name = option.unwrap(args.get(a, i))
-        let choice = if name == "--hirsel-install" {
-            Install
-        } else if let Some(value) = std.string.strip_prefix(name, "--hirsel-activation=") {
-            let Ok(v) = (int.parse(value) : Result[u64, ParseError]) else {
-                return Error(Exit(status: 1u8))
-            }
-            Current(v)
-        } else {
-            continue
-        }
-        if let Some(_) = selected {
-            return Error(Exit(status: 1u8))
-        }
-        selected = Some(choice)
-    }
-    Ok(match selected {
-        Some(choice) => choice,
-        None => Reopen
-    })
-}
-
 type HostStop: send {
     process: Process,
     to: Sender[()]
@@ -1350,6 +1325,7 @@ pub fn start_text(problem: StartError) -> String {
             string.push(mut line, "the next install activation is ")
             string.push_u64(mut line, next)
         },
+        Open(Unsettled(report)) => fate.push_report(mut line, report),
     }
     take line
 }

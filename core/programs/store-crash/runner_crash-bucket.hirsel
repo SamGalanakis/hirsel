@@ -42,14 +42,12 @@ fn bucket_config(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: 
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let selection = runner.launch_selection(argv)?
-    let groups = if has_flag(argv, "--release-check") { Some(1u32) } else { None }
-    Ok(runner.PlaceConfig(
-        backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: groups, lock_wait_ms: None,
-            cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection, place: code.describe(bucket_place), n_place: 524288u64,
-        on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64,
-        proxies: list.new(), n_publisher: 3145728u64,
-        listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
-        stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None))
+    let groups = if has_flag(argv, "--release-check") {
+        Some(1u32)
+    } else {
+        None
+    }
+    Ok(runner.PlaceConfig(backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: groups, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: selection, place: code.describe(bucket_place), n_place: 524288u64, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None))
 }
 
 fn say(out: Stdout, take line: String) waits {
@@ -71,7 +69,9 @@ fn bucket_sim(key: Secret, c: Clock, n: Net, out: Stdout) -> Result[(), Exit] wa
 
 fn live_counter(cn: runner.wire_client.Conn, out: Stdout) -> u64 waits {
     runner.wire_client.send_frame(cn, Subscribe(1u32, 1u32, list.new(), None))
-    let Ok(Batch(_, complete, groups, outcomes)) = runner.wire_client.next(cn) else { fail("L61: missing initial Batch") }
+    let Ok(Batch(_, complete, groups, outcomes)) = runner.wire_client.next(cn) else {
+        fail("L61: missing initial Batch")
+    }
     want(list.len(complete) == 1u64 && complete[0u64] == 1u32 && list.len(outcomes) == 0u64, "L61: initial completion")
     want(list.len(groups) == 1u64 && groups[0u64].sub == 1u32 && list.len(groups[0u64].rows) == 0u64, "L61: initial value-only group")
     let number = result.unwrap(std.codec.decode(std.codec.of_u64(), groups[0u64].value))
@@ -89,11 +89,9 @@ fn bump_once(cn: runner.wire_client.Conn, p: u64, observed: Option[(Stdout, u64)
             Ok(Batch(at, complete, groups, done)) => {
                 if let Some((out, expected_count)) = observed {
                     if list.len(groups) != 0u64 {
-                        want(published == None && list.len(complete) == 0u64 && list.len(groups) == 1u64,
-                            "L61: expected one delta group")
+                        want(published == None && list.len(complete) == 0u64 && list.len(groups) == 1u64, "L61: expected one delta group")
                         let group = view groups[0u64]
-                        want(group.sub == 1u32 && list.len(group.rows) == 0u64 && group.value == u64_bytes(expected_count),
-                            "L61: counter group bytes")
+                        want(group.sub == 1u32 && list.len(group.rows) == 0u64 && group.value == u64_bytes(expected_count), "L61: counter group bytes")
                         published = Some(at)
                         let mut line = string.from("GROUP ")
                         string.push_u64(mut line, at)
@@ -111,8 +109,12 @@ fn bump_once(cn: runner.wire_client.Conn, p: u64, observed: Option[(Stdout, u64)
             Error(_) => return None,
         }
         if let Some((ok, at)) = replied {
-            if let None = observed { return Some((ok, at)) }
-            if published == Some(at) { return Some((ok, at)) }
+            if let None = observed {
+                return Some((ok, at))
+            }
+            if published == Some(at) {
+                return Some((ok, at))
+            }
         }
     }
 }
@@ -132,7 +134,9 @@ fn bucket_hold(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Ne
     let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let lanes = {
-        let Bucket(backing) = view config.backing else { fail("bucket T1: expected Bucket backing") }
+        let Bucket(backing) = view config.backing else {
+            fail("bucket T1: expected Bucket backing")
+        }
         backing.lanes
     }
     // Size the Store at 81 MiB, then add Runner's 1 MiB keep and a
@@ -173,14 +177,20 @@ fn bucket_hold(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Ne
         list.push(mut keys, runner.client.entry_key(counter))
     }
     let cn = result.unwrap(runner.wire_client.connect(tasks, n, option.unwrap(seen.addr), c, r, keys, Some(runner.ingress.credential(r)), std.wsock.defaults()))
-    let observed = if release_check { Some((out, live_counter(cn, out) + 1u64)) } else { None }
+    let observed = if release_check {
+        Some((out, live_counter(cn, out) + 1u64))
+    } else {
+        None
+    }
     let mut command: Bytes = list.with_capacity(16u64)
     while list.len(command) == 0 || command[list.len(command) - 1] != b'\n' {
         want(result.unwrap(stdin.read(input, mut command, Never)) != 0, "bucket T1: no command")
     }
     if list.slice(command, 0, 5) == string.as_bytes("fence") {
         // A deposed holder never answers a commit: its group fails on the claim.
-        if let Some((true, _)) = bump_once(cn, 0u64, observed) { fail("bucket T1: the deposed holder committed") }
+        if let Some((true, _)) = bump_once(cn, 0u64, observed) {
+            fail("bucket T1: the deposed holder committed")
+        }
         let _ = runner.wire_client.close(take cn)
         say_ended(out, take running)
         return Ok(())
@@ -206,7 +216,10 @@ fn bucket_hold(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Ne
     }
     let _ = runner.wire_client.close(take cn)
     result.unwrap(channel.send(stop, ()))
-    want(match task.join(take running) { Ok(Ok(Stopped(_))) => true, _ => false }, "bucket T1: the place did not stop")
+    want(match task.join(take running) {
+        Ok(Ok(Stopped(_))) => true,
+        _ => false
+    }, "bucket T1: the place did not stop")
     say(out, "STOPPED")
     Ok(())
 }
@@ -232,7 +245,10 @@ fn bucket_follow(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: 
     let handle = result.unwrap(schema(mut declaration))
     result.unwrap(store.seal_follower(mirror, take declaration))
     let rows = result.unwrap(store.follower_reader(mirror, 0u64))
-    let accumulated = match result.unwrap(store.get(rows, image, handle.t, 0u64)) { Some(value) => value, None => 0u64 }
+    let accumulated = match result.unwrap(store.get(rows, image, handle.t, 0u64)) {
+        Some(value) => value,
+        None => 0u64
+    }
     let mut line = string.from("FOLLOW ")
     string.push_u64(mut line, store.version(image))
     string.push_char(mut line, ' ')
@@ -260,4 +276,38 @@ pub fn bucket_main(c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, proces
         Ok(ended)
     }
     runner.main(argv, process, errors, tasks, c, code.describe(bucket_place), code.describe(schema), serve)
+}
+
+// §12.4 uses the live Process grant, including under the crash adapter's
+// substituted directory and stdout providers.
+pub fn stop_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0u64))
+    let scenario = option.unwrap(args.get(argv, 1u64))
+    if scenario == "runner-stop-early" {
+        result.unwrap(stdout.write(out, "EARLY"))
+        host.stopped(process)
+        let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+            let mut wire = runner.wire_defaults(131072u64)
+            wire.n_pool = 4194304u64
+            let config: runner.PlaceConfig[(), Hd, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+            let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
+            Ok(ended)
+        }
+        return runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), start)
+    }
+    if phase == "init" {
+        let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+        let created = result.unwrap(install_data(mut db))
+        result.unwrap(store.durable(mut db, created))
+        result.unwrap(store.close(take db))
+    } else if phase == "write" {
+        let twice = scenario == "runner-stop-twice"
+        let start = scoped fn(take stopping: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
+            Ok(freeze_until_stop(d, c, r, tasks, out, n, take stopping, twice))
+        }
+        return runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), start)
+    } else {
+        deadline_reopen(d, c, r, tasks, argv)
+    }
+    Ok(())
 }

@@ -1,0 +1,314 @@
+// RUNNER-SPEC L70 `activation_settles_held` (§14.6 "The activation fate"), cases
+// (a) to (c), on a disk store through the install's own `head_prepare`. Every
+// expected row comes from §14.6's rules: Release leaves a held row `Waiting`
+// with NEW's stamp, Cancel leaves it `Waiting` with `cancel` set and its old
+// stamp, and every other row is byte-identical.
+fn fate_law_run(ctx: TriggerContext, caller: Caller, take unused: u64) -> Result[u64, Capacity] waits {
+    match trigger_boundary(ctx) {
+        Ok(()) => Ok(triggers.number(trigger_attempt(ctx))),
+        _ => fail("L70: unexpected boundary result"),
+    }
+}
+
+fn fate_law_a(ctx: TriggerContext, caller: Caller, take v: u64) -> Result[u64, Capacity] waits {
+    fate_law_run(ctx, caller, v)
+}
+
+fn fate_law_b(ctx: TriggerContext, caller: Caller, take v: u64) -> Result[u64, Capacity] waits {
+    fate_law_run(ctx, caller, v)
+}
+
+fn fate_law_c(ctx: TriggerContext, caller: Caller, take v: u64) -> Result[u64, Capacity] waits {
+    fate_law_run(ctx, caller, v)
+}
+
+fn fate_law_d(ctx: TriggerContext, caller: Caller, take v: u64) -> Result[u64, Capacity] waits {
+    fate_law_run(ctx, caller, v)
+}
+
+fn fate_law_e(ctx: TriggerContext, caller: Caller, take v: u64) -> Result[u64, Capacity] waits {
+    fate_law_run(ctx, caller, v)
+}
+
+fn fate_law_f(ctx: TriggerContext, caller: Caller, take v: u64) -> Result[u64, Capacity] waits {
+    fate_law_run(ctx, caller, v)
+}
+
+// r2: the effect and entries A to E.
+fn fate_law_r2(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    use_trigger_tables(mut reg, fn(h: TriggerLawTables) -> triggers.Tables {
+        clone(h.triggers)
+    })
+    transact(mut reg, code.describe(trigger_law_body), 131072u64, DEFAULT_STEPS)?
+    granted(mut reg, code.describe(fate_law_a), 131072u64, DEFAULT_STEPS)?
+    granted(mut reg, code.describe(fate_law_b), 131072u64, DEFAULT_STEPS)?
+    granted(mut reg, code.describe(fate_law_c), 131072u64, DEFAULT_STEPS)?
+    granted(mut reg, code.describe(fate_law_d), 131072u64, DEFAULT_STEPS)?
+    granted(mut reg, code.describe(fate_law_e), 131072u64, DEFAULT_STEPS)
+}
+
+// r1: r2 and entry F.
+fn fate_law_r1(mut reg: Registry[TriggerContext, TriggerLawTables]) -> Result[(), RegisterError] {
+    fate_law_r2(mut reg)?
+    granted(mut reg, code.describe(fate_law_f), 131072u64, DEFAULT_STEPS)
+}
+
+type FateLawRows: send {
+    a: triggers.Id,
+    b: triggers.Id,
+    c: triggers.Id,
+    d: triggers.Id,
+    e: triggers.Id,
+    f: triggers.Id
+}
+
+fn fate_law_entries(with_f: bool) -> triggers.Entries {
+    let mut listed = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut listed, result.unwrap(triggers.granted(code.describe(fate_law_a)))))
+    result.unwrap(triggers.allow(mut listed, result.unwrap(triggers.granted(code.describe(fate_law_b)))))
+    result.unwrap(triggers.allow(mut listed, result.unwrap(triggers.granted(code.describe(fate_law_c)))))
+    result.unwrap(triggers.allow(mut listed, result.unwrap(triggers.granted(code.describe(fate_law_d)))))
+    result.unwrap(triggers.allow(mut listed, result.unwrap(triggers.granted(code.describe(fate_law_e)))))
+    if with_f {
+        result.unwrap(triggers.allow(mut listed, result.unwrap(triggers.granted(code.describe(fate_law_f)))))
+    }
+    take listed
+}
+
+fn fate_law_two(take a: String, take b: String) -> List[String] {
+    let mut out: List[String] = list.new()
+    list.push(mut out, take a)
+    list.push(mut out, take b)
+    take out
+}
+
+fn fate_law_flags(flags: List[String]) -> fate.Fates {
+    let mut f = fate.none()
+    for flag in flags {
+        if !result.unwrap(fate.parse_option(mut f, flag)) {
+            fail("L70: flag is not a held option")
+        }
+    }
+    take f
+}
+
+fn fate_law_row(db: store.Db, t: triggers.Tables, id: triggers.Id) -> triggers.Pending waits {
+    let Some(take row) = result.unwrap(triggers.pending_at(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), t, id)) else {
+        fail("L70: row is missing")
+    }
+    take row
+}
+
+fn fate_law_bytes(db: store.Db, t: triggers.Tables, rows: FateLawRows) -> List[Bytes] waits {
+    let mut out: List[Bytes] = list.new()
+    for id in[rows.a, rows.b, rows.c, rows.d, rows.e, rows.f] {
+        list.push(mut out, result.unwrap(triggers.row_value(fate_law_row(db, t, id))))
+    }
+    take out
+}
+
+fn fate_law_path(name: String) -> Bytes {
+    let mut qualified: String = clone("runner@1/runner/")
+    string.push(mut qualified, name)
+    clone(string.as_bytes(qualified))
+}
+
+// Builds A to F under r1 (stamps r0 and r1 as §14.7's L70 row describes), and
+// returns them with attempt 1 of A, whose step 0 has committed.
+fn fate_law_setup(mut db: store.Db, t: triggers.Tables, h: TriggerLawTables, reg: Registry[TriggerContext, TriggerLawTables], r1: Bytes) -> (FateLawRows, triggers.Attempt) waits {
+    let r0 = trigger_scan_law_bytes(32u64, 7u8)
+    let listed = fate_law_entries(true)
+    let written = store.run(mut db, None, (store.copy_env(t), store.copy_env(listed)), fn(mut tx, env) -> Result[FateLawRows, triggers.Error] {
+        let a = triggers.write(mut tx, env.0, env.1, triggers.granted(code.describe(fate_law_a)) ?=> |_| MissingEntry, 0u64, At(1u64))?
+        let b = triggers.write(mut tx, env.0, env.1, triggers.granted(code.describe(fate_law_b)) ?=> |_| MissingEntry, 0u64, At(2u64))?
+        let c = triggers.write(mut tx, env.0, env.1, triggers.granted(code.describe(fate_law_c)) ?=> |_| MissingEntry, 0u64, At(3u64))?
+        let d = triggers.write(mut tx, env.0, env.1, triggers.granted(code.describe(fate_law_d)) ?=> |_| MissingEntry, 0u64, At(4u64))?
+        let e = triggers.write(mut tx, env.0, env.1, triggers.granted(code.describe(fate_law_e)) ?=> |_| MissingEntry, 0u64, At(5u64))?
+        let f = triggers.write(mut tx, env.0, env.1, triggers.granted(code.describe(fate_law_f)) ?=> |_| MissingEntry, 0u64, At(6u64))?
+        Ok(FateLawRows(a: a, b: b, c: c, d: d, e: e, f: f))
+    })
+    let rows = result.unwrap(trigger_commit(take written)).value
+    let pa = fate_law_row(db, t, rows.a)
+    let pb = fate_law_row(db, t, rows.b)
+    let pc = fate_law_row(db, t, rows.c)
+    let pf = fate_law_row(db, t, rows.f)
+    let started = store.run(mut db, None, (store.copy_env(t), store.copy_env(r0), store.copy_env(r1), store.copy_env(pa), store.copy_env(pb), store.copy_env(pc), store.copy_env(pf), store.copy_env(rows.e)), fn(mut tx, env) -> Result[triggers.Attempt, triggers.Error] {
+        let Body(first) = triggers.start(mut tx, env.0, env.3, env.2)? else {
+            return Error(StaleAttempt)
+        }
+        let _ = triggers.start(mut tx, env.0, env.4, env.2)?
+        let Body(second) = triggers.start(mut tx, env.0, env.4, env.2)? else {
+            return Error(StaleAttempt)
+        }
+        triggers.hold(mut tx, env.0, second, 0u64, list.new(), list.new())?
+        let _ = triggers.start(mut tx, env.0, env.5, env.1)?
+        let Held = triggers.start(mut tx, env.0, env.5, env.2)? else {
+            return Error(StaleAttempt)
+        }
+        let _ = triggers.start(mut tx, env.0, env.6, env.2)?
+        triggers.request_cancel(mut tx, env.0, env.7)?
+        Ok(first)
+    })
+    let a1 = result.unwrap(trigger_commit(take started)).value
+    let key = result.unwrap(trigger_law_entry_key())
+    let arg = result.unwrap(trigger_law_argument(7u64))
+    match result.unwrap(apply_attempt(mut db, reg, h, t, store.Caller(issuer: 0u8, subject: list.new()), a1, key, arg)) {
+        Committed(_) => (),
+        _ => fail("L70: A's step 0 did not commit"),
+    }
+    (rows, a1)
+}
+
+fn fate_law_unsettled(mut db: store.Db, t: triggers.Tables, rows: FateLawRows, flags: List[String], before: List[Bytes], tasks: Tasks) -> fate.HeldReport waits {
+    let version = store.version(store.snapshot(db))
+    let activation = result.unwrap(current_description(db))
+    let refused = head_prepare(mut db, Install(fate_law_flags(flags)), false, code.describe(fate_law_r2), None, code.describe(trigger_law_schema), 1048576u64, tasks)
+    let Error(Unsettled(take report)) = take refused else {
+        fail("L70 (c): an unsettled install was not refused Unsettled")
+    }
+    if store.version(store.snapshot(db)) != version || result.unwrap(current_description(db)) != activation {
+        fail("L70 (c): the refused install published a cut")
+    }
+    if fate_law_bytes(db, t, rows) != before {
+        fail("L70 (c): the refused install changed a row")
+    }
+    take report
+}
+
+fn fate_law_group(g: fate.HeldGroup, name: String, hold: fate.HeldBy, chosen: Option[fate.HeldFate]) -> bool {
+    g.path == fate_law_path(name) && g.hold == hold && g.fate == chosen && g.count == 1u64
+}
+
+fn fate_law_report(report: fate.HeldReport, chosen: Option[fate.HeldFate], unmatched: List[Bytes]) {
+    let held = view report.held
+    if list.len(held) != 4u64 || report.unmatched != unmatched {
+        fail("L70 (c): wrong held groups or unmatched paths")
+    }
+    if !fate_law_group(held[0u64], "fate_law_a", Cut, chosen) || !fate_law_group(held[1u64], "fate_law_b", Request(false), chosen) || !fate_law_group(held[2u64], "fate_law_c", Revision(false), chosen) || !fate_law_group(held[3u64], "fate_law_f", Cut, chosen) {
+        fail("L70 (c): wrong held group")
+    }
+}
+
+fn fate_law_done(mut head: Head[TriggerContext, TriggerLawTables], inbox: Receiver[HeadInput], expected: u64) waits {
+    if !result.unwrap(advance_triggers(mut head)) {
+        fail("L70 (a): a due row did not advance")
+    }
+    let TriggerMessage(take check) = result.unwrap(channel.receive(inbox)) else {
+        fail("L70 (a): the body did not reach its boundary")
+    }
+    result.unwrap(trigger_message(mut head, take check, false))
+    let TriggerDone(a, take answer) = result.unwrap(channel.receive(inbox)) else {
+        fail("L70 (a): the body did not finish")
+    }
+    if triggers.number(a) != expected {
+        fail("L70 (a): wrong attempt on NEW")
+    }
+    result.unwrap(trigger_done(mut head, a, take answer, false))
+}
+
+fn fate_law_returned(head: Head[TriggerContext, TriggerLawTables], id: triggers.Id, expected: u64) -> bool waits {
+    let Some(Returned(raw)) = trigger_law_outcome(head, id) else {
+        return false
+    }
+    let mut offset = 0u64
+    result.unwrap(std.codec.take_u64(raw, mut offset)) == expected
+}
+
+@test
+fn activation_settles_held(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let dir = triggers.law_directory(d)
+    let n_place = 1048576u64
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, code.describe(fate_law_r1), None, code.describe(trigger_law_schema), n_place, tasks))
+    let t: triggers.Tables = clone(h.triggers)
+    let r1 = result.unwrap(trigger_stamp(reg1.exported, reg1.bindings, n_place))
+    let r2 = {
+        let reg2 = result.unwrap(placed(code.describe(fate_law_r2), n_place))
+        result.unwrap(trigger_stamp(reg2.exported, reg2.bindings, n_place))
+    }
+    if r1 == r2 {
+        fail("L70: r1 and r2 share an identity digest")
+    }
+    let (rows, a1) = fate_law_setup(mut db, t, h, reg1, r1)
+    let before = fate_law_bytes(db, t, rows)
+    // (c) No default: no fates, and a typo beside an `all` fate.
+    let bare = fate_law_unsettled(mut db, t, rows, list.new(), before, tasks)
+    fate_law_report(bare, None, list.new())
+    let typo = fate_law_unsettled(mut db, t, rows, fate_law_two(string.from("--hirsel-held=release"), string.from("--hirsel-held-entry=no.such=cancel")), before, tasks)
+    let mut typo_paths: List[Bytes] = list.new()
+    list.push(mut typo_paths, clone(string.as_bytes("no.such")))
+    fate_law_report(typo, Some(Release), typo_paths)
+    // (a) Release for all, Cancel for C, in the activation's own commit.
+    let mut entry_flag: String = clone("--hirsel-held-entry=")
+    string.push(mut entry_flag, "runner@1/runner/fate_law_c")
+    string.push(mut entry_flag, "=cancel")
+    let version = store.version(store.snapshot(db))
+    let (take reg2, take h2, _, _) = result.unwrap(head_prepare(mut db, Install(fate_law_flags(fate_law_two(string.from("--hirsel-held=release"), take entry_flag))), false, code.describe(fate_law_r2), None, code.describe(trigger_law_schema), n_place, tasks))
+    if store.version(store.snapshot(db)) != version + 1u64 {
+        fail("L70 (a): the settle is not the activation's one commit")
+    }
+    for (id, attempt) in[(rows.a, 1u64), (rows.b, 2u64), (rows.f, 1u64)] {
+        let row = fate_law_row(db, t, id)
+        if !triggers.waiting(row) || !triggers.stamped(row, r2) || triggers.attempts(row) != attempt || triggers.cancelling(row) {
+            fail("L70 (a): a released row is not Waiting at r2 with its attempt")
+        }
+    }
+    let cancelled = fate_law_row(db, t, rows.c)
+    if !triggers.waiting(cancelled) || !triggers.cancelling(cancelled) || triggers.stamped(cancelled, r1) || triggers.stamped(cancelled, r2) || triggers.attempts(cancelled) != 1u64 {
+        fail("L70 (a): C is not a Waiting cancel with its r0 stamp")
+    }
+    let after = fate_law_bytes(db, t, rows)
+    if after[3u64] != before[3u64] || after[4u64] != before[4u64] {
+        fail("L70 (a): an unheld row changed")
+    }
+    // (b) Fence: attempt 1 of A has no current attempt after the cut.
+    let (to, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let config = trigger_law_config(fate_law_entries(false))
+    let drive = result.unwrap(make_trigger_drive(clone(t), h2, c, tasks, take to, r2, take config))
+    let (out, published): (Sender[PubIn], Receiver[PubIn]) = channel.new(32u64)
+    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take reg2, replay_identity: list.new(), h: arc.new(take h2), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None)
+    let selected = option.unwrap(replace(mut head.trigger_drive, None))
+    let late = trigger_effect(mut head, selected.tables, selected.author, a1, result.unwrap(trigger_law_entry_key()), result.unwrap(trigger_law_argument(9u64)))
+    head.trigger_drive = Some(take selected)
+    match late {
+        Ok(Error(StaleAttempt)) => (),
+        _ => fail("L70 (b): attempt 1's late call was not refused StaleAttempt")
+    }
+    if trigger_law_value(head) != Some(7u64) {
+        fail("L70 (b): A's step 0 row changed")
+    }
+    // NEW's head: A at 2, B at 3, C Cancelled, D at 1, E Cancelled, F Gone.
+    fate_law_done(mut head, inbox, 2u64)
+    fate_law_done(mut head, inbox, 3u64)
+    if !result.unwrap(advance_triggers(mut head)) {
+        fail("L70 (a): C did not advance")
+    }
+    fate_law_done(mut head, inbox, 1u64)
+    for i in 0u64 .. 2u64 {
+        if !result.unwrap(advance_triggers(mut head)) {
+            fail("L70 (a): E or F did not advance")
+        }
+    }
+    if result.unwrap(advance_triggers(mut head)) {
+        fail("L70 (a): a row is left")
+    }
+    if !fate_law_returned(head, rows.a, 2u64) || !fate_law_returned(head, rows.b, 3u64) || !fate_law_returned(head, rows.d, 1u64) {
+        fail("L70 (a): wrong returned attempt")
+    }
+    if let Some(Cancelled) = trigger_law_outcome(head, rows.c) {} else {
+        fail("L70 (a): C did not end Cancelled")
+    }
+    if let Some(Cancelled) = trigger_law_outcome(head, rows.e) {} else {
+        fail("L70 (a): E did not end Cancelled")
+    }
+    if let Some(Gone) = trigger_law_outcome(head, rows.f) {} else {
+        fail("L70 (a): F did not end Gone")
+    }
+    if trigger_law_value(head) != Some(7u64) {
+        fail("L70 (a): a body ran a step on NEW")
+    }
+    let Head(db: take kept, trigger_drive: take active, ..) = take head
+    stop_triggers(option.unwrap(take active))
+    result.unwrap(store.close(take kept))
+    Ok(())
+}

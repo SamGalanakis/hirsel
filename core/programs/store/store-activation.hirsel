@@ -17,6 +17,12 @@ fn staged_migration(db: Db, take plan: SchemaPlan, declared: bool) -> StagedMigr
     StagedMigration(base: declaration_base(db), plan: take plan, declared, first_table: db.next_table, base_rows: share_page_tree(db.heads[0].roots.collections), rewrites: map.new())
 }
 
+/// The staged catalog and rows of a standalone install, read with `reader(db, _)`:
+/// the install's counterpart of `staged_snapshot` on the export side.
+pub fn staged_install_snapshot(db: Db, staged: StagedMigration) -> Snapshot {
+    snapshot_from(db, 0u64, db.heads[0].head, staged.plan.roots, int.saturating_add(staged.plan.next_node, 1))
+}
+
 fn compare_rewrite(a: ActivationRewrite, id: u32, key: Bytes) -> Order {
     match order.compare(a.id, id) {
         Equal => list.compare_bytes(a.key, key),

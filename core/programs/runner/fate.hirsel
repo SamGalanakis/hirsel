@@ -1,0 +1,230 @@
+// The activation fate (RUNNER-SPEC v2.66 §14.6): the activation that would
+// hold a run settles it in its own commit, by the fate its operator gives it.
+pub type HeldFate: codec + key + send = Release | Cancel
+
+pub type EntryFate: codec + send {
+    path: Bytes,
+    fate: HeldFate
+}
+
+// `entries` is sorted by `path` and has no duplicates; an element wins over `all`.
+pub type Fates: codec + send {
+    all: Option[HeldFate],
+    entries: List[EntryFate]
+}
+
+// `Cut` is a started run that is not parked; `same_code` is true when the row's
+// revision stamp equals NEW's identity digest.
+pub type HeldBy: codec + key + send = Cut | Revision(bool) | Request(bool)
+
+pub type HeldGroup: codec + send {
+    path: Bytes,
+    schema: Bytes,
+    hold: HeldBy,
+    fate: Option[HeldFate],
+    count: u64,
+    earliest_due: u64
+}
+
+pub type HeldReport: codec + send {
+    held: List[HeldGroup],
+    unmatched: List[Bytes]
+}
+
+pub fn none() -> Fates {
+    Fates(all: None, entries: list.new())
+}
+
+/// The fate of a held row on `path`: its `entries` element, else `all`.
+pub fn resolve(f: Fates, path: Bytes) -> Option[HeldFate] {
+    for e in f.entries {
+        if e.path == path {
+            return Some(e.fate)
+        }
+    }
+    f.all
+}
+
+fn parse_fate(text: String) -> Option[HeldFate] {
+    if text == "release" {
+        return Some(Release)
+    }
+    if text == "cancel" {
+        return Some(Cancel)
+    }
+    None
+}
+
+/// Adds one `--hirsel-held=` or `--hirsel-held-entry=` option to `f`. Returns
+/// false when `name` is neither; refuses a bad value, a repeated
+/// `--hirsel-held` and a repeated entry path.
+pub fn parse_option(mut f: Fates, name: String) -> Result[bool, ()] {
+    if let Some(value) = std.string.strip_prefix(name, "--hirsel-held=") {
+        if let Some(_) = f.all {
+            return Error(())
+        }
+        let Some(chosen) = parse_fate(value) else {
+            return Error(())
+        }
+        f.all = Some(chosen)
+        return Ok(true)
+    }
+    let Some(spec) = std.string.strip_prefix(name, "--hirsel-held-entry=") else {
+        return Ok(false)
+    }
+    // A path never holds '=', so the fate follows the last one.
+    let raw = string.as_bytes(spec)
+    let mut cut = list.len(raw)
+    while cut > 0u64 && raw[cut - 1u64] != 61u8 {
+        cut -= 1u64
+    }
+    if cut <= 1u64 {
+        return Error(())
+    }
+    let path: Bytes = clone(list.slice(raw, 0u64, cut - 1u64))
+    let Ok(text) = string.from_utf8(clone(list.slice(raw, cut, list.len(raw)))) else {
+        return Error(())
+    }
+    let Some(chosen) = parse_fate(text) else {
+        return Error(())
+    }
+    let mut at = list.len(f.entries)
+    for i in 0u64 .. list.len(f.entries) {
+        match list.compare_bytes(f.entries[i].path, path) {
+            Equal => return Error(()),
+            Greater => {
+                at = i
+                break
+            },
+            _ => {},
+        }
+    }
+    list.insert(mut f.entries, at, EntryFate(path: take path, fate: chosen))
+    Ok(true)
+}
+
+/// The held class of the prepare scan: not cancelling, and held on start
+/// against NEW's identity digest.
+pub fn is_held(p: triggers.Pending, image: Bytes) -> bool {
+    !triggers.cancelling(p) && triggers.held_on_start(p, image)
+}
+
+pub fn held_by(p: triggers.Pending, image: Bytes) -> HeldBy {
+    let same = triggers.stamped(p, image)
+    match triggers.parked_by(p) {
+        None => Cut,
+        Some(Revision(_, _)) => Revision(same),
+        Some(_) => Request(same),
+    }
+}
+
+/// Settles every held row of the staged install in `staged` (RUNNER-SPEC §14.6,
+/// "One commit"). `registered` lists the entry paths OLD and NEW register.
+/// Returns the report, and stages nothing, when a held row has no fate or an
+/// `entries` element is unmatched.
+pub fn settle(db: store.Db, mut staged: store.StagedMigration, t: triggers.Tables, image: Bytes, registered: List[Bytes], f: Fates) -> Result[Option[HeldReport], store.Error] waits {
+    let snap = store.staged_install_snapshot(db, staged)
+    let read_handle = store.reader(db, 0u64)?
+    let mut cursor = triggers.scan_pending(read_handle, snap, t)?
+    let mut seen: List[bool] = list.new()
+    for _ in f.entries {
+        list.push(mut seen, false)
+    }
+    let mut held: List[triggers.Pending] = list.new()
+    let mut groups: Map[(Bytes, Bytes, HeldBy), (u64, u64)] = map.new()
+    let mut settled = true
+    while let Some(take pending) = triggers.next_scanned(read_handle, mut cursor)? {
+        let path: Bytes = clone(triggers.entry_path(pending))
+        for i in 0u64 .. list.len(f.entries) {
+            if f.entries[i].path == path {
+                seen[i] = true
+            }
+        }
+        if !is_held(pending, image) {
+            continue
+        }
+        if let None = resolve(f, path) {
+            settled = false
+        }
+        let due = triggers.due_time(pending)
+        let schema: Bytes = clone(triggers.argument_schema(pending))
+        let key = (take path, take schema, held_by(pending, image))
+        map.update_or_insert(mut groups, take key, (0u64, due), scoped fn(mut totals: (u64, u64)) {
+            totals = (totals.0 + 1u64, std.order.min(totals.1, due))
+        })
+        list.push(mut held, take pending)
+    }
+    let mut unmatched: List[Bytes] = list.new()
+    for i in 0u64 .. list.len(f.entries) {
+        if seen[i] {
+            continue
+        }
+        let mut known = false
+        for path in registered {
+            if path == f.entries[i].path {
+                known = true
+            }
+        }
+        if !known {
+            list.push(mut unmatched, clone(f.entries[i].path))
+        }
+    }
+    if !settled || list.len(unmatched) > 0u64 {
+        let mut report: List[HeldGroup] = list.new()
+        for take ((take path, take schema, hold), (count, earliest)) in take groups {
+            let chosen = resolve(f, path)
+            list.push(mut report, HeldGroup(path: take path, schema: take schema, hold: hold, fate: chosen, count: count, earliest_due: earliest))
+        }
+        return Ok(Some(HeldReport(held: take report, unmatched: take unmatched)))
+    }
+    for p in held {
+        let release = match resolve(f, triggers.entry_path(p)) {
+            Some(Release) => true,
+            _ => false
+        }
+        triggers.settle(mut staged, t, p, release, image)?
+    }
+    Ok(None)
+}
+
+fn push_path(mut line: String, path: Bytes) {
+    match string.from_utf8(clone(path)) {
+        Ok(text) => string.push(mut line, text),
+        Error(_) => string.push(mut line, std.hex.encode(path)),
+    }
+}
+
+fn fate_name(chosen: Option[HeldFate]) -> String {
+    string.from(match chosen {
+        Some(Release) => "release",
+        Some(Cancel) => "cancel",
+        None => "none"
+    })
+}
+
+/// The `Unsettled` refusal of a standalone install: one line per held group and
+/// per unmatched `--hirsel-held-entry` path, after the reason.
+pub fn push_report(mut line: String, report: HeldReport) {
+    string.push(mut line, "Unsettled: the install holds runs; give each a fate with --hirsel-held=release|cancel or --hirsel-held-entry=PATH=release|cancel")
+    for g in report.held {
+        string.push(mut line, "\nheld ")
+        push_path(mut line, g.path)
+        string.push(mut line, match g.hold {
+            Cut => " hold=cut",
+            Revision(true) => " hold=revision(same_code)",
+            Revision(false) => " hold=revision",
+            Request(true) => " hold=request(same_code)",
+            Request(false) => " hold=request",
+        })
+        string.push(mut line, " fate=")
+        string.push(mut line, fate_name(g.fate))
+        string.push(mut line, " count=")
+        string.push_u64(mut line, g.count)
+        string.push(mut line, " earliest_due=")
+        string.push_u64(mut line, g.earliest_due)
+    }
+    for path in report.unmatched {
+        string.push(mut line, "\nunmatched ")
+        push_path(mut line, path)
+    }
+}

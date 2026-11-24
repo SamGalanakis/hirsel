@@ -370,7 +370,7 @@ pub fn law_restart_reopens(parent: Dir, clock: Clock, random: Random, tasks: Tas
     let unwritten = store.version(snap) == 2u64
     result.unwrap(store.close(take check))
     let mut upgrade = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
-    upgrade.selection = Install
+    upgrade.selection = Install(runner.fate.none())
     upgrade.place = code.describe(fixture_place)
     let (_keep, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
     let installed_only = runner.operate(take upgrade, take stop, result.unwrap(runner.status_root()), None)

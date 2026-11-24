@@ -41,24 +41,45 @@ pub opaque type Entry[A] {
     codec: std.codec.Codec[A]
 }
 
-type EntryRef: send { path: Bytes, schema: Bytes, granted: bool }
-pub opaque type Destination: codec + send { path: Bytes, schema: Bytes, granted: bool }
+type EntryRef: send {
+    path: Bytes,
+    schema: Bytes,
+    granted: bool
+}
 
-pub opaque type Entries: send { listed: List[EntryRef] }
+pub opaque type Destination: codec + send {
+    path: Bytes,
+    schema: Bytes,
+    granted: bool
+}
+
+pub opaque type Entries: send {
+    listed: List[EntryRef]
+}
 
 pub opaque type Pending: send {
     id: Id,
     row: SubRow
 }
 
-pub opaque type PendingRows { rows: store.Rows[Id, SubRow] }
+pub opaque type PendingRows {
+    rows: store.Rows[Id, SubRow]
+}
 
-pub opaque type Attempt: send { id: Id, number: u64 }
+pub opaque type Attempt: send {
+    id: Id,
+    number: u64
+}
 
 pub type Started: send = Body(Attempt) | Held
 
-fn rows_name() -> String { "store.triggers.pending" }
-fn outcomes_name() -> String { "store.triggers.outcomes" }
+fn rows_name() -> String {
+    "store.triggers.pending"
+}
+
+fn outcomes_name() -> String {
+    "store.triggers.outcomes"
+}
 
 fn put_id(id: Id, mut out: Bytes) {
     std.codec.put_key_u64(id.store_hi, mut out)
@@ -91,7 +112,9 @@ fn id_key() -> std.codec.Key[Id] {
     std.codec.key_make(put_id, take_id, id_schema)
 }
 
-fn row_due(row: SubRow) -> Result[u64, Capacity] { Ok(row.due) }
+fn row_due(row: SubRow) -> Result[u64, Capacity] {
+    Ok(row.due)
+}
 
 pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
     let value: std.codec.Codec[SubRow] = std.codec.of()
@@ -114,7 +137,9 @@ pub fn scan_pending(read_handle: store.Reader, s: store.Snapshot, t: Tables) -> 
 
 pub fn next_scanned(read_handle: store.Reader, mut cursor: PendingRows) -> Result[Option[Pending], store.Error] waits {
     while let Some((id, take row)) = store.next(read_handle, mut cursor.rows)? {
-        if id.branch == 0u32 { return Ok(Some(Pending(id: id, row: take row))) }
+        if id.branch == 0u32 {
+            return Ok(Some(Pending(id: id, row: take row)))
+        }
     }
     Ok(None)
 }
@@ -133,7 +158,9 @@ fn copy_bytes(b: Bytes) -> Result[Bytes, Error] {
 fn definition_path(identity: Bytes) -> View[Bytes] in identity {
     // PROG-9 encodes a path between the version byte and the first '('.
     let mut end = 1u64
-    while identity[end] != 40u8 { end += 1u64 }
+    while identity[end] != 40u8 {
+        end += 1u64
+    }
     list.slice(identity, 1u64, end)
 }
 
@@ -154,13 +181,19 @@ pub fn granted[G, A: codec, R](f: StaticFn[fn(G, store.Caller, take A) -> Result
     entry(f, true)
 }
 
-pub fn empty_entries() -> Entries { Entries(listed: list.new()) }
+pub fn empty_entries() -> Entries {
+    Entries(listed: list.new())
+}
 
-pub fn is_empty(entries: Entries) -> bool { list.len(entries.listed) == 0u64 }
+pub fn is_empty(entries: Entries) -> bool {
+    list.len(entries.listed) == 0u64
+}
 
 pub fn allow[A](mut entries: Entries, target: Entry[A]) -> Result[(), Error] {
     for ref in entries.listed {
-        if ref.path == target.ref.path { return Error(AlreadyTriggerable) }
+        if ref.path == target.ref.path {
+            return Error(AlreadyTriggerable)
+        }
     }
     let ref: EntryRef = clone(target.ref)
     Ok(list.push(mut entries.listed, take ref))
@@ -187,7 +220,9 @@ pub fn destination[A](target: Entry[A]) -> Destination {
 pub fn write_saved[A: codec](mut tx: store.Tx, t: Tables, entries: Entries, saved: Destination, arg: A, when: Due) -> Result[Id, Error] {
     let codec: std.codec.Codec[A] = std.codec.of()
     let schema = std.codec.schema(codec) ?=> |_| Store(Limit(Value))
-    if schema != saved.schema { return Error(MissingEntry) }
+    if schema != saved.schema {
+        return Error(MissingEntry)
+    }
     let target = Entry(ref: EntryRef(path: clone(saved.path), schema: take schema, granted: saved.granted), codec: codec)
     write(mut tx, t, entries, target, arg, when)
 }
@@ -199,22 +234,28 @@ pub fn write_with_id[A](mut tx: store.Tx, t: Tables, entries: Entries, target: E
 }
 
 fn allocate_id[A](mut tx: store.Tx, t: Tables, entries: Entries, target: Entry[A]) -> Result[(Id, u64), Error] {
-    if !listed(entries, target.ref.path, target.ref.schema, target.ref.granted) { return Error(MissingEntry) }
+    if !listed(entries, target.ref.path, target.ref.schema, target.ref.granted) {
+        return Error(MissingEntry)
+    }
     let info = store.info(mut tx)
     let mut id = Id(store_hi: info.id.store.hi, store_lo: info.id.store.lo, branch: info.id.branch, version: info.id.version, index: 0u64)
     while let Some(_) = stored(store.fetch(tx, t.rows, id))? {
-        let Some(next) = int.checked_add(id.index, 1u64) else { return Error(IndexLimit) }
+        let Some(next) = int.checked_add(id.index, 1u64) else {
+            return Error(IndexLimit)
+        }
         id.index = next
     }
     Ok((id, info.at))
 }
 
 fn write_at[A](mut tx: store.Tx, t: Tables, target: Entry[A], id: Id, arg: A, when: Due, at: u64) -> Result[Id, Error] {
-    let due = match when { AfterCommit => at, At(due) => due }
+    let due = match when {
+        AfterCommit => at,
+        At(due) => due
+    }
     let mut encoded: Bytes = list.new()
     std.codec.encode(target.codec, arg, mut encoded) ?=> |_| Store(Limit(Value))
-    let row = SubRow(path: copy_bytes(target.ref.path)?, schema: copy_bytes(target.ref.schema)?, arg: take encoded, due: due,
-        granted: target.ref.granted, attempt: 0u64, revision: list.new(), state: Waiting, cancel: false)
+    let row = SubRow(path: copy_bytes(target.ref.path)?, schema: copy_bytes(target.ref.schema)?, arg: take encoded, due: due, granted: target.ref.granted, attempt: 0u64, revision: list.new(), state: Waiting, cancel: false)
     stored(store.put(mut tx, t.rows, id, row))?
     Ok(id)
 }
@@ -232,14 +273,37 @@ pub fn next_pending(read_handle: store.Reader, s: store.Snapshot, t: Tables, act
     Ok(None)
 }
 
-pub fn due_time(p: Pending) -> u64 { p.row.due }
-pub fn pending_id(p: Pending) -> Id { p.id }
-pub fn run_id(a: Attempt) -> Id { a.id }
-pub fn number(a: Attempt) -> u64 { a.number }
-pub fn is_granted(p: Pending) -> bool { p.row.granted }
-pub fn argument(p: Pending) -> View[Bytes] in p { view p.row.arg }
-pub fn entry_path(p: Pending) -> View[Bytes] in p { view p.row.path }
-pub fn argument_schema(p: Pending) -> View[Bytes] in p { view p.row.schema }
+pub fn due_time(p: Pending) -> u64 {
+    p.row.due
+}
+
+pub fn pending_id(p: Pending) -> Id {
+    p.id
+}
+
+pub fn run_id(a: Attempt) -> Id {
+    a.id
+}
+
+pub fn number(a: Attempt) -> u64 {
+    a.number
+}
+
+pub fn is_granted(p: Pending) -> bool {
+    p.row.granted
+}
+
+pub fn argument(p: Pending) -> View[Bytes] in p {
+    view p.row.arg
+}
+
+pub fn entry_path(p: Pending) -> View[Bytes] in p {
+    view p.row.path
+}
+
+pub fn argument_schema(p: Pending) -> View[Bytes] in p {
+    view p.row.schema
+}
 
 pub fn is_allowed(p: Pending, choices: Entries) -> bool {
     listed(choices, p.row.path, p.row.schema, p.row.granted)
@@ -249,7 +313,9 @@ pub fn matches(p: Pending, identity: Bytes, schema: Bytes) -> bool {
     p.row.path == definition_path(identity) && p.row.schema == schema
 }
 
-pub fn cancelling(p: Pending) -> bool { p.row.cancel }
+pub fn cancelling(p: Pending) -> bool {
+    p.row.cancel
+}
 
 fn revision_mismatch(row: SubRow, image: Bytes) -> bool {
     row.attempt != 0u64 && row.revision != image
@@ -257,6 +323,64 @@ fn revision_mismatch(row: SubRow, image: Bytes) -> bool {
 
 pub fn held_on_start(p: Pending, image: Bytes) -> bool {
     parked(p.row.state) || (p.row.granted && revision_mismatch(p.row, image))
+}
+
+/// The entry path a registered identity names, as a row stores it.
+pub fn identity_path(identity: Bytes) -> Bytes {
+    clone(definition_path(identity))
+}
+
+/// The hold that parks the row, if any.
+pub fn parked_by(p: Pending) -> Option[Hold] {
+    match p.row.state {
+        Parked(mark) => Some(clone(mark)),
+        _ => None,
+    }
+}
+
+/// True when the row's revision stamp equals `image`.
+pub fn stamped(p: Pending, image: Bytes) -> bool {
+    p.row.revision == image
+}
+
+pub fn attempts(p: Pending) -> u64 {
+    p.row.attempt
+}
+
+pub fn waiting(p: Pending) -> bool {
+    match p.row.state {
+        Waiting => true,
+        _ => false
+    }
+}
+
+/// The row's stored value, for laws that compare rows byte for byte.
+pub fn row_value(p: Pending) -> Result[Bytes, std.codec.EncodeError] {
+    let codec: std.codec.Codec[SubRow] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    std.codec.encode(codec, p.row, mut raw)?
+    Ok(take raw)
+}
+
+pub fn pending_at(read_handle: store.Reader, s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Pending], store.Error] waits {
+    match store.get(read_handle, s, t.rows, id)? {
+        Some(take row) => Ok(Some(Pending(id: id, row: take row))),
+        None => Ok(None),
+    }
+}
+
+/// Stages the activation fate of a held row (RUNNER-SPEC §14.6): Release
+/// restamps it with `image`, Cancel requests its cancel. Either way the row is
+/// left `Waiting`, with its argument, due time and attempt unchanged.
+pub fn settle(mut staged: store.StagedMigration, t: Tables, p: Pending, restamp: bool, image: Bytes) -> Result[(), store.Error] {
+    let mut row: SubRow = clone(p.row)
+    row.state = Waiting
+    if restamp {
+        row.revision = clone(image)
+    } else {
+        row.cancel = true
+    }
+    store.stage_rewrite(mut staged, t.rows, p.id, row)
 }
 
 fn read(tx: store.Tx, t: Tables, id: Id) -> Result[SubRow, Error] {
@@ -267,11 +391,17 @@ fn read(tx: store.Tx, t: Tables, id: Id) -> Result[SubRow, Error] {
 }
 
 fn parked(state: State) -> bool {
-    match state { Parked(_) => true, _ => false }
+    match state {
+        Parked(_) => true,
+        _ => false
+    }
 }
 
 fn running(state: State) -> bool {
-    match state { Running => true, _ => false }
+    match state {
+        Running => true,
+        _ => false
+    }
 }
 
 fn current_attempt(row: SubRow, a: Attempt) -> bool {
@@ -280,7 +410,9 @@ fn current_attempt(row: SubRow, a: Attempt) -> bool {
 
 fn current(tx: store.Tx, t: Tables, a: Attempt) -> Result[SubRow, Error] {
     let row = read(tx, t, a.id)?
-    if !current_attempt(row, a) { return Error(StaleAttempt) }
+    if !current_attempt(row, a) {
+        return Error(StaleAttempt)
+    }
     Ok(take row)
 }
 
@@ -298,23 +430,35 @@ pub fn hold_mark(read_handle: store.Reader, s: store.Snapshot, t: Tables, id: Id
 
 pub fn boundary(read_handle: store.Reader, s: store.Snapshot, t: Tables, a: Attempt) -> Result[bool, Error] waits {
     let row = stored(store.get(read_handle, s, t.rows, a.id))?
-    let Some(value) = row else { return Error(StaleAttempt) }
-    if !current_attempt(value, a) { return Error(StaleAttempt) }
+    let Some(value) = row else {
+        return Error(StaleAttempt)
+    }
+    if !current_attempt(value, a) {
+        return Error(StaleAttempt)
+    }
     Ok(value.cancel)
 }
 
 pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result[Started, Error] {
     let at = store.info(mut tx).at
     let mut row = read(tx, t, p.id)?
-    if at < row.due { return Error(NotDue) }
-    if row.cancel || parked(row.state) { return Error(StaleAttempt) }
+    if at < row.due {
+        return Error(NotDue)
+    }
+    if row.cancel || parked(row.state) {
+        return Error(StaleAttempt)
+    }
     if revision_mismatch(row, revision) {
         row.state = Parked(Revision(copy_bytes(row.revision)?, copy_bytes(revision)?))
         stored(store.put(mut tx, t.rows, p.id, row))?
         return Ok(Held)
     }
-    if row.attempt == 0u64 { row.revision = copy_bytes(revision)? }
-    let Some(n) = int.checked_add(row.attempt, 1u64) else { return Error(AttemptLimit) }
+    if row.attempt == 0u64 {
+        row.revision = copy_bytes(revision)?
+    }
+    let Some(n) = int.checked_add(row.attempt, 1u64) else {
+        return Error(AttemptLimit)
+    }
     row.attempt = n
     row.state = Running
     stored(store.put(mut tx, t.rows, p.id, row))?
@@ -323,7 +467,9 @@ pub fn start(mut tx: store.Tx, t: Tables, p: Pending, revision: Bytes) -> Result
 
 pub fn hold(mut tx: store.Tx, t: Tables, a: Attempt, step: u64, expected: Bytes, actual: Bytes) -> Result[(), Error] {
     let mut row = current(tx, t, a)?
-    if row.cancel { return Error(CancelRequested) }
+    if row.cancel {
+        return Error(CancelRequested)
+    }
     row.state = Parked(Request(a.number, step, copy_bytes(expected)?, copy_bytes(actual)?))
     stored(store.put(mut tx, t.rows, a.id, row))
 }
@@ -332,8 +478,12 @@ pub fn release(mut tx: store.Tx, t: Tables, id: Id, revision: Option[Bytes]) -> 
     let mut row = read(tx, t, id)?
     match row.state {
         Parked(mark) => match revision {
-            Some(selected) => { row.revision = copy_bytes(selected)? },
-            None => if let Revision(_, _) = mark { return Error(NotHeld) },
+            Some(selected) => {
+                row.revision = copy_bytes(selected)?
+            },
+            None => if let Revision(_, _) = mark {
+                return Error(NotHeld)
+            },
         },
         _ => return Error(NotHeld),
     }
@@ -355,21 +505,31 @@ fn consume(mut tx: store.Tx, t: Tables, id: Id, terminal: Terminal) -> Result[()
 
 pub fn finish(mut tx: store.Tx, t: Tables, a: Attempt, terminal: Terminal) -> Result[(), Error] {
     let row = read(tx, t, a.id)?
-    if row.attempt != a.number { return Error(StaleAttempt) }
-    if row.cancel { return consume(mut tx, t, a.id, Cancelled) }
-    if !running(row.state) { return Error(StaleAttempt) }
+    if row.attempt != a.number {
+        return Error(StaleAttempt)
+    }
+    if row.cancel {
+        return consume(mut tx, t, a.id, Cancelled)
+    }
+    if !running(row.state) {
+        return Error(StaleAttempt)
+    }
     consume(mut tx, t, a.id, terminal)
 }
 
 pub fn finish_cancel(mut tx: store.Tx, t: Tables, p: Pending) -> Result[(), Error] {
     let row = read(tx, t, p.id)?
-    if !row.cancel { return Error(StaleAttempt) }
+    if !row.cancel {
+        return Error(StaleAttempt)
+    }
     consume(mut tx, t, p.id, Cancelled)
 }
 
 pub fn finish_transact(mut tx: store.Tx, t: Tables, p: Pending, terminal: Terminal) -> Result[(), Error] {
     let row = read(tx, t, p.id)?
-    if row.granted { return Error(StaleAttempt) }
+    if row.granted {
+        return Error(StaleAttempt)
+    }
     consume(mut tx, t, p.id, terminal)
 }
 
@@ -383,7 +543,6 @@ pub fn fetch_outcome(tx: store.Tx, t: Tables, id: Id) -> Result[Option[Terminal]
 
 pub fn law_options() -> store.Options {
     let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
-
     options.resident_limit = 1048576u64
     options.pack_bytes = 512u64
     options.group_commits = 2u32
@@ -399,5 +558,7 @@ fn done[R](take result: Result[store.Outcome[R, Error], store.Error]) -> store.D
 }
 
 fn first(db: store.Db, t: Tables) -> Option[Pending] waits {
-    result.unwrap(next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), t, fn(id: Id) -> bool { false }))
+    result.unwrap(next_pending(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), t, fn(id: Id) -> bool {
+        false
+    }))
 }

@@ -94,6 +94,7 @@ fn opened_text(e: runner.OpenError) -> String {
         Migrate(_) => "calls: place_head: migration failed",
         NotCurrent(_) => "calls: place_head: activation is not current",
         IdentityUnknown => "calls: place_head: image identity is unavailable",
+        Unsettled(_) => "calls: place_head: a held run has no fate",
         PublisherStopped => "calls: place_head: publisher stopped",
         InstallVersion(_) => "calls: place_head: wrong install activation",
         InstallUncertain(_) => "calls: place_head: install outcome unknown",

@@ -1114,7 +1114,7 @@ pub type Group = X25519 | P256
 pub type Side = Client | Server
 pub type Suite13 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
 pub type Suite12 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
-pub type Profile13 = Quic(Suite13) | Dtls13(Suite13) | Tls13(Suite13)
+pub type Profile13 = Quic(Suite13) | Dtls13(Suite13) | Tls13(Suite13) | QuicMultipath(Suite13)
 pub type SrtpProfile = Aes128CmHmacSha1_80 | AeadAes128Gcm | AeadAes256Gcm
 pub type Space = Initial | Handshake | Application | Rtp | Rtcp
 pub type ScheduleError = Denied | Invalid | Issued | Spent | Capacity(Capacity)
@@ -1325,8 +1325,8 @@ The constructors and transitions:
   because a server sends its first application data before it has the client's Finished,
   and QUIC and DTLS 1.3 keep the handshake keys for retransmission. `retire` ends them.
 - **`key_update(mut s, local)`** replaces the sending (`local`) or receiving application
-  traffic secret with `HKDF-Expand-Label(secret, "traffic upd", "", HashLen)`. The QUIC label
-  is `"quic ku"` ([RFC 9001 §6.1](https://www.rfc-editor.org/rfc/rfc9001#section-6.1)). A QUIC
+  traffic secret with `HKDF-Expand-Label(secret, "traffic upd", "", HashLen)`. Both QUIC profiles use
+  `"quic ku"` ([RFC 9001 §6.1](https://www.rfc-editor.org/rfc/rfc9001#section-6.1)). A QUIC
   header-protection key is not updated (§6). The DTLS 1.3 record-number key is, because
   each key update starts a new epoch with its own `sn` key (RFC 9147 §4.2.3, §8). The
   superseded secret and its keys are zeroed, sealers and openers already issued keep their
@@ -1390,7 +1390,7 @@ has a label of its own:
 
 | profile | payload key | IV or salt | authentication key | header key |
 | --- | --- | --- | --- | --- |
-| `Quic(s)` | `"quic key"`, the suite's key length | `"quic iv"`, 12 | — | `"quic hp"`, the key length ([RFC 9001 §5.1](https://www.rfc-editor.org/rfc/rfc9001#section-5.1)) |
+| `Quic(s)`, `QuicMultipath(s)` | `"quic key"`, the suite's key length | `"quic iv"`, 12 | — | `"quic hp"`, the key length ([RFC 9001 §5.1](https://www.rfc-editor.org/rfc/rfc9001#section-5.1)) |
 | `Dtls13(s)` | `"key"` | `"iv"`, 12 | — | `"sn"`, the key length ([RFC 9147 §4.2.3](https://www.rfc-editor.org/rfc/rfc9147#section-4.2.3)) |
 | `Tls13(s)` | `"key"` | `"iv"`, 12 | — | — |
 | DTLS 1.2 | key block | key block, 4 or 12 | — | — |
@@ -1482,8 +1482,8 @@ only within one cipher. A schedule enforces this for every key it holds:
   ([§2.4](https://www.ietf.org/archive/id/draft-ietf-quic-multipath-15.html#section-2.4)), and
   RFC 3711 §4.1.1 makes the SSRC part of the counter block for it.
 - **Domains.** A domain is a field of the nonce with a fixed width and position (the profile
-  table, below). It is the SSRC for SRTP and SRTCP, the path id for multipath QUIC, and
-  always 0 elsewhere. A domain wider than its field, or nonzero where there is none, is
+  table, below). It is the SSRC for SRTP and SRTCP, or the path ID for the `QuicMultipath`
+  `Application` space. `Quic`, `quic_initial` and QUIC `Handshake` always use domain 0. A domain wider than its field, or nonzero where there is none, is
   `Invalid` before issue. Domain and counter fields never overlap, so distinct domains give
   distinct nonces under one key.
 - **Sealing.** A sealer moves to another unit by moving its handle. It refuses any counter
@@ -1548,7 +1548,7 @@ A protocol that resends a packet under a number it already used resends the byte
 already protected. It never seals them again.
 
 **Header masks.** `header_mask(s, space, local)` gives the mask key of the sending (`local`)
-or receiving side of `space`, for `Quic` and `Dtls13` schedules only (`Invalid` otherwise).
+or receiving side of `space`, for `Quic`, `QuicMultipath` and `Dtls13` schedules (`Invalid` otherwise).
 The algorithm is the suite's: AES-128-ECB, AES-256-ECB or ChaCha20. `packet.mask(m, sample,
 at)` returns 5 bytes computed from the 16 bytes `sample[at..at + 16]`. When those bytes are
 not there, the call faults with `Bounds`, as an out-of-range index does.
@@ -1582,7 +1582,8 @@ sealer and the opener (`Range` when exceeded).
 
 | profile / space | algorithm | domain field | counter field and width | AAD in `buf[aad_at..at]`, then `extra` | tag |
 | --- | --- | --- | --- | --- | --- |
-| QUIC v1 | the suite's AEAD | path id at bytes 0..3 (32 bits) for multipath, else none | bytes 4..11, `pn < 2^62` | the header from its first byte; `extra` empty | 16 |
+| `Quic`, QUIC `Initial` and `Handshake` | the suite's AEAD | none | bytes 4..11, `pn < 2^62` | the header from its first byte; `extra` empty | 16 |
+| `QuicMultipath`, `Application` | the suite's AEAD | path ID at bytes 0..3 (32 bits) | bytes 4..11, `pn < 2^62` | the header from its first byte; `extra` empty | 16 |
 | DTLS 1.3 | the suite's AEAD | none | bytes 4..11, the full 64-bit sequence number of the epoch's protected records, any `u64`. The 48-bit limit belongs to the `DTLSPlaintext` wire field and does not apply here; the suite's usage limits are the library's ([RFC 9147 §4.5.3](https://www.rfc-editor.org/rfc/rfc9147#section-4.5.3)) | the unified header before record-number encryption ([RFC 9147 §4](https://www.rfc-editor.org/rfc/rfc9147#section-4)); `extra` empty | 16 |
 | TLS 1.3 | the suite's AEAD | none | bytes 4..11, 64 bits | the 5-byte record header; `extra` empty | 16 |
 | DTLS 1.2 AES-GCM | AES-GCM | none | bytes 4..11: the explicit nonce. A sealer's `seq` is the 48-bit sequence number (`< 2^48`), and the sealer writes the schedule's `epoch` at bytes 4..5 and `seq` at 6..11; an opener's `seq` is the 8 transmitted bytes read big-endian, any `u64` | none (`aad_at = at`); `extra` the 13 bytes `epoch ‖ seq ‖ type ‖ version ‖ length` from the record ([RFC 6347 §4.1.2.1](https://www.rfc-editor.org/rfc/rfc6347#section-4.1.2.1)) | 16 |
@@ -1591,6 +1592,10 @@ sealer and the opener (`Range` when exceeded).
 | SRTCP AEAD `Rtcp` | AES-GCM | SSRC at bytes 2..5 | bytes 8..11, the 31-bit index (`< 2^31`) (§9.1) | `E = 1`: the first 8 bytes; `E = 0`: the whole compound packet, with an empty plaintext. `extra` the 4 bytes `E ‖ index` (§9.2, §9.3) | 16 |
 | SRTP CM `Rtp` | AES-128-CM, then HMAC-SHA1-80 | SSRC at bytes 4..7 | bytes 8..13, index `< 2^48` ([RFC 3711 §4.1.1](https://www.rfc-editor.org/rfc/rfc3711#section-4.1.1)) | the RTP header; `extra` the 4-byte ROC (§4.2) | 10 |
 | SRTCP CM `Rtcp` | as SRTP CM | SSRC at bytes 4..7 | bytes 10..13, index `< 2^31` | the RTCP header; `extra` `E ‖ index` (§3.4) | 10 |
+
+`QuicMultipath` uses the same labels as `Quic`. For 1-RTT packets it XORs the IV
+with the big-endian 32-bit path ID followed by the packet number in 64 bits.
+A `Quic` opener refuses a nonzero domain as `Range` before issue.
 
 The DTLS 1.2 GCM sealer's counter is the record number, which the caller also writes as the
 8-byte explicit nonce. A peer may choose any explicit nonce, and it is independent of the
@@ -1820,6 +1825,11 @@ AAD and length blocks into full-width stores, the seal and open cycle profiles a
 and 6.49% and 8.33% to one-block GHASH. That GHASH uses the cached H table.
 Packet-rate callers use a sealer.
 
+The `quic_path_id_requires_multipath` law checks the RFC 9001 A.2 unipath nonce
+and refuses a nonzero domain. It uses [multipath draft §2.4](https://www.ietf.org/archive/id/draft-ietf-quic-multipath-15.html#section-2.4)'s
+IV and packet number on paths 3 and 4 and checks both 32-bit path bounds and
+62-bit packet-number bounds.
+
 **Checksums.** SCTP's CRC-32C is `crc32c.update` ([crc32c](../../core/std/api/crc32c.md)). No
 second spelling is added.
 
@@ -1972,7 +1982,7 @@ and L (more than three).
 | **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR5 |
 | **T9** AEAD sink | M | T4 | `AeadAlg`; the `aead(<alg>)` and `open(<alg>)` uses in policy parsing, `narrow` and the canonical text; `aead_seal` and `aead_open` in the OS provider over ring 0.17.14's `aead` (`LessSafeKey`, sealing and opening in the spare of `out`), and in the scripted and virtual paths as the MAC sink is; their issue and delivery frames in a recording | AE1–AE8 in the core and recording law harnesses |
 | **T10** derivation sinks | M | T4, A2 | `derive_hkdf_sha256` over ring's `hkdf` and `derive_argon2id` over A2's wrapper, in the OS, scripted and virtual paths; the derivation rule's child set, applied to `derive_hmac_sha256` too; opacity; the child, working-memory and step charges; their frames in a recording | KD1–KD6 |
-| **T11** packet cipher | M | T9, T14 | `packet` module: `Sealer`, `Opener`, `Space`, `PacketError`; `schedule.sealer` and `schedule.opener` with the sender ledgers; `seal`, `seal_into`, `open`, `open_into` per TLS-8's profile table, in the OS provider (AES-GCM over `os_tls/gcm.rs`'s `AesKey` and `HTable` built in place in the slot on VAES, ring's `aead` elsewhere; AES-CM and HMAC-SHA1-80 over ring's AES block and `hmac`); the nonce, domain and counter rules, `Range`, `Reused`, `TooLong`, the AAD scratch, erasure, charges and replay frames | PC1 to PC6, PC10, PC11; build laws `dtls13_seq_beyond_48_bits`, `replay_issue_binds_arguments` |
+| **T11** packet cipher | M | T9, T14 | `packet` module: `Sealer`, `Opener`, `Space`, `PacketError`; `schedule.sealer` and `schedule.opener` with the sender ledgers; `seal`, `seal_into`, `open`, `open_into` per TLS-8's profile table, in the OS provider (AES-GCM over `os_tls/gcm.rs`'s `AesKey` and `HTable` built in place in the slot on VAES, ring's `aead` elsewhere; AES-CM and HMAC-SHA1-80 over ring's AES block and `hmac`); the nonce, domain and counter rules, `Range`, `Reused`, `TooLong`, the AAD scratch, erasure, charges and replay frames | PC1 to PC6, PC10, PC11; build laws `quic_path_id_requires_multipath`, `dtls13_seq_beyond_48_bits`, `replay_issue_binds_arguments` |
 | **T12** header mask | S | T11, T14 | `HeaderMask`; `schedule.header_mask` and `packet.mask` (5 bytes) over the AES block and ring's ChaCha20 | PC1's mask cases, PC6 |
 | **T13** key agreement and signing keys | M | T4, T10 | `KeyShare`, `Group`; `key_share`, `p256_key` over ring's `agreement` and `EcdsaKeyPair::generate_pkcs8` with `SystemRandom` for host draws, and over RustCrypto `p256` 0.14.0 and `x25519-dalek` 3.0.0 fed by the provider for virtual draws; `sign` gains its `Random` (all callers cut over, deterministic RFC 6979 signing for virtual keys, PKCS#8 decoding with ring's checks); `provide.random_tape` with its fault cleanup; opacity and bytes on replay; terminal provider failures for host draws, in the native adapter and the signing wrapper; std `x509_build` self-signed P-256 certificate with DER `ECDSA-Sig-Value` | PC7, PC8, PC9; build laws `dark_key_sign_replays`, `host_random_failure_ends_run` |
 | **T14** key schedules | M | T10, T13 | `schedule` module: `Schedule`, `Side`, `Suite13`, `Suite12`, `Profile13`, `SrtpProfile`, `ScheduleError`; `tls13`, `quic_initial`, `dtls12`, `application`, `key_update`, `srtp`, `finished`, `verify_finished`; the SRTP KDF; `import_srtp`, `import_traffic` and the `srtp_import(<dir>)` and `traffic_import(<dir>)` uses with the atomic spent mark and `wrap`'s refusal; the agreement registry with its share-count retirement and recorded root verdicts, in the OS, scripted and virtual paths. Helper verdicts follow the same rule when [unit recordings](../../crates/hirsel-core-rt/src/units.rs) exist | PC1's Finished case, PC6's use cases, PC10's PRF fixtures; build laws `tls13_prehashed_context`, `same_agreement_same_side_refused`, `import_direction_from_policy` |

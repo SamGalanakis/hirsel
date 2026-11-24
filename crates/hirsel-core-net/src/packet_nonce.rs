@@ -1,0 +1,129 @@
+//! Nonce fields and sender counter rules for the TLS-8 AEAD profiles.
+use zeroize::Zeroizing;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NonceFormat {
+    Quic,
+    QuicMultipath,
+    Dtls13,
+    Tls13,
+    Dtls12 { epoch: u16 },
+    SrtpRtp,
+    SrtpRtcp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CounterError {
+    Range,
+    Reused,
+}
+
+impl NonceFormat {
+    pub fn valid_domain(self, domain: u64) -> bool {
+        match self {
+            Self::QuicMultipath | Self::SrtpRtp | Self::SrtpRtcp => u32::try_from(domain).is_ok(),
+            _ => domain == 0,
+        }
+    }
+
+    fn sequence_max(self, sending: bool) -> u64 {
+        match self {
+            Self::Quic | Self::QuicMultipath => (1 << 62) - 1,
+            Self::SrtpRtp => (1 << 48) - 1,
+            Self::SrtpRtcp => (1 << 31) - 1,
+            Self::Dtls12 { .. } if sending => (1 << 48) - 1,
+            _ => u64::MAX,
+        }
+    }
+
+    fn nonce(self, base: &[u8; 12], domain: u64, seq: u64) -> [u8; 12] {
+        let mut nonce = *base;
+        let seq = seq.to_be_bytes();
+        let domain = (domain as u32).to_be_bytes();
+        let xor = |a: &mut [u8], b: &[u8]| {
+            for (a, b) in a.iter_mut().zip(b) {
+                *a ^= *b;
+            }
+        };
+        match self {
+            Self::QuicMultipath => {
+                xor(&mut nonce[..4], &domain);
+                xor(&mut nonce[4..], &seq);
+            }
+            Self::SrtpRtp => {
+                xor(&mut nonce[2..6], &domain);
+                xor(&mut nonce[6..], &seq[2..]);
+            }
+            Self::SrtpRtcp => {
+                xor(&mut nonce[2..6], &domain);
+                xor(&mut nonce[8..], &seq[4..]);
+            }
+            _ => xor(&mut nonce[4..], &seq),
+        }
+        nonce
+    }
+}
+
+/// A sender's key lives independently of its owner's issuance ledger.
+pub struct SenderCounter {
+    format: NonceFormat,
+    base: Zeroizing<[u8; 12]>,
+    domain: u64,
+    floor: u64,
+    last: Option<u64>,
+}
+
+impl SenderCounter {
+    pub fn new(format: NonceFormat, base: [u8; 12], domain: u64, floor: u64) -> Option<Self> {
+        format.valid_domain(domain).then(|| Self {
+            format,
+            base: Zeroizing::new(base),
+            domain,
+            floor,
+            last: None,
+        })
+    }
+
+    /// Validation does not advance the counter. The adapter commits only
+    /// after it validates lengths and reserves the caller's destination and
+    /// any AAD scratch, at the same point where the operation issues.
+    pub fn check(&self, seq: u64) -> Result<[u8; 12], CounterError> {
+        if seq > self.format.sequence_max(true) {
+            return Err(CounterError::Range);
+        }
+        if seq < self.floor || self.last.is_some_and(|last| seq <= last) {
+            return Err(CounterError::Reused);
+        }
+        let wire_seq = match self.format {
+            NonceFormat::Dtls12 { epoch } => (u64::from(epoch) << 48) | seq,
+            _ => seq,
+        };
+        Ok(self.format.nonce(&self.base, self.domain, wire_seq))
+    }
+
+    pub fn commit(&mut self, seq: u64) {
+        self.last = Some(seq);
+    }
+}
+
+/// Openers authenticate a caller-supplied sequence without retaining it.
+pub struct ReceiverNonce {
+    format: NonceFormat,
+    base: Zeroizing<[u8; 12]>,
+}
+
+impl ReceiverNonce {
+    pub fn new(format: NonceFormat, base: [u8; 12]) -> Self {
+        Self {
+            format,
+            base: Zeroizing::new(base),
+        }
+    }
+
+    pub fn nonce(&self, domain: u64, seq: u64) -> Result<[u8; 12], CounterError> {
+        if !self.format.valid_domain(domain) || seq > self.format.sequence_max(false) {
+            return Err(CounterError::Range);
+        }
+        Ok(self.format.nonce(&self.base, domain, seq))
+    }
+}

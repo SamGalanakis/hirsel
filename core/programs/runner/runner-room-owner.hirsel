@@ -309,6 +309,10 @@ fn room_owner_send(mut owner: RoomOwner, sub: u32, to: Option[u32], message: Byt
     Ok(())
 }
 
+// The waiter guarantee is decided here: a pen gains its membership token only
+// when the owner accepts the promoting Part. Before that, room_pen_grant has no
+// token, so a waiter's Set or Send is dropped and never installed later. Only a
+// Set taken after this acceptance reaches the room.
 fn room_owner_accept(mut owner: RoomOwner, identity: RoomPartIdentity, register: RoomGrantSet, at: u64) -> bool {
     let Some(index) = room_owner_slot(owner, identity.sub) else { return false }
     let Some(take owned) = list.set(mut owner.pens, index, None) else { return false }

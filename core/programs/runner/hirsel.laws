@@ -1,5 +1,5 @@
 hirsel.laws 1
-runner@1/runner/direct_destination_survives_full_block src=aea63546b8e474bd sig=b150250604390a79 run=304ccdb9aedf2273 bug=- oracle=- rows=pending
+runner@1/runner/direct_destination_survives_full_block src=d889c947ed2ab7b7 sig=b150250604390a79 run=304ccdb9aedf2273 bug=- oracle=- rows=pending
 runner@1/runner/every_no_double_no_gap src=6d839c61e92710bb sig=649d71389faf0f81 run=52846919a3decb1f bug=- oracle=- rows=pending
 runner@1/runner/first_admission_installs_adm src=c38e42425baa0ed5 sig=15b8a2e3ef22bfce run=304ccdb9aedf2273 bug=- oracle=- rows=pending
 runner@1/runner/frame_sizer_matches_vectors src=017c111ed773ba3f sig=c75d3c0dd28057a1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
@@ -22,6 +22,7 @@ runner@1/runner/relay_handler_expiry_leaves_ask_queued src=ae9b73229b218807 sig=
 runner@1/runner/retired_quota_checked_before_idle_keyed_recovery src=312b90ebb8f32138 sig=c9d8f2abc2a85c39 run=52846919a3decb1f bug=- oracle=- rows=pending
 runner@1/runner/room_decode_capacity_reports_loss src=f4259ef386db094d sig=f974e9b5fee5eab3 run=304ccdb9aedf2273 bug=- oracle=- rows=pending
 runner@1/runner/room_session_charge_covers_maximum_session src=1deba96fdf9cd4f1 sig=f075023e51d7f043 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+runner@1/runner/roster_diffs_served_under_sustained_messages src=6455b7c2c24e717b sig=56f2075877448fdb run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 runner@1/runner/test_after_publication src=bf972b4d4decbdb8 sig=c82c9bff4f9b13f4 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_bounced_ended_ages src=752fee34da29fb7d sig=16a6a8bb13383b0b run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_declaration_open src=d8ba61fca3fc6c7a sig=01d3c692490b1287 run=ea720f3846592392 bug=- oracle=- rows=pending

@@ -334,6 +334,10 @@ fn direct_destination_survives_full_block(c: Clock, random: Random, tasks: Tasks
     let marker = room_law_bytes(1u64, 0x66u8)
     wire_client.send_frame(sender, Send(0u32, Some(p2), clone(msg)))
     wire_client.send_frame(sender, Send(0u32, Some(p3), clone(msg)))
+    // Peer 0 is the relay's broadcast sentinel and peer 9 is not in the room:
+    // both destination sets are empty, so neither send may reach anyone.
+    wire_client.send_frame(sender, Send(0u32, Some(0u32), clone(msg)))
+    wire_client.send_frame(sender, Send(0u32, Some(9u32), clone(msg)))
     wire_client.send_frame(sender, Send(0u32, None, clone(marker)))
     let recipients = (room_law_count(first, author, msg, marker, true), room_law_count(second, author, msg, marker, true),
         room_law_count(other, author, msg, marker, true))
@@ -413,6 +417,64 @@ fn message_delivered_under_full_state_churn() -> Result[(), u64] {
     if list.len(part.msgs) != 1u64 || list.len(part.states) != 3u64 { return Error(11u64) }
     let (from, direct, message) = part.msgs[0u64]
     if from != 2u32 || direct || message != payload || part.gap != 0u32 { return Error(12u64) }
+    Ok(())
+}
+
+fn room_law_flush_once(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession, mut receiver: RoomOwner) -> Option[(u64, u64)] {
+    room_desk_flush(mut relay, rounds, id)
+    room_owner_drain(mut receiver)
+    let filled = room_owner_live(mut receiver)?
+    let formats: std.codec.Codec[Frame] = std.codec.of()
+    let decoded = std.codec.decode(formats, filled.data)
+    room_relay_event(mut relay, rounds, Back(id, take filled))
+    let Ok(Live(parts)) = decoded else { return None }
+    let mut states = 0u64
+    let mut msgs = 0u64
+    for part in parts { states += list.len(part.states); msgs += list.len(part.msgs) }
+    Some((states, msgs))
+}
+
+// Carry 4: a maximum head message leaves 65536 - 42 - 32777 bytes, three 8204-byte
+// state diffs. The blocked diffs then take the next Part first: seven fit, so all
+// eight states arrive within two Parts while a maximum message is always pending.
+@test
+fn roster_diffs_served_under_sustained_messages() -> Result[(), u64] {
+    let mut relay = room_relay_state(1048576u64, 9u64)
+    let rounds = latest.new(arc.new(std.http.ReleaseRound(at: 0u64)))
+    let (relay_to, relay_in): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(256u64)
+    let (to_owner, _inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(9u64)
+    let id = RoomSession(low: 0u64, high: 0u64)
+    let mut receiver = room_law_seed_desk(mut relay, rounds, id, relay_to, relay_in, to_owner)
+    let mut senders: List[RoomOwner] = list.with_capacity(8u64)
+    for i in 1u64 .. 9u64 {
+        let sender = room_law_seed_desk(mut relay, rounds, RoomSession(low: i, high: 0u64), relay_to, relay_in, to_owner)
+        list.push(mut senders, take sender)
+    }
+    if none(room_law_flush_once(mut relay, rounds, id, mut receiver)) { return Error(1u64) }
+    let state = room_law_bytes(8188u64, 0x31u8)
+    for i in 0u64 .. 8u64 {
+        let carrier = box.new(RoomCarrier(room_slot: 0u8, instance: 1u64, admission: i + 2u64, publish_epoch: 0u32,
+            state: clone(state), state_pending: true, state_present: true, lost: 0u32, lost_under: 0u64, leave: false))
+        room_relay_event(mut relay, rounds, RoomPost(senders[i].id, take carrier))
+    }
+    let payload = room_law_bytes(32764u64, 0x32u8)
+    let mut states = 0u64
+    let mut delivered = 0u64
+    let mut pending = 0u64
+    for flush in 0u64 .. 3u64 {
+        if pending == 0u64 {
+            let msg = box.new(RoomMsgBlock(instance: 1u64, admission: 2u64, member_epoch: 0u32, publish_epoch: 0u32, to: 0u32,
+                len: 32768u32, data: clone(payload)))
+            room_relay_event(mut relay, rounds, RoomMessage(senders[0u64].id, take msg))
+            pending = 1u64
+        }
+        let Some((s, m)) = room_law_flush_once(mut relay, rounds, id, mut receiver) else { return Error(2u64 + flush) }
+        states += s
+        delivered += m
+        pending -= m
+        if flush == 1u64 && states != 8u64 { return Error(10u64 + states) }
+    }
+    if delivered != 2u64 { return Error(20u64 + delivered) }
     Ok(())
 }
 

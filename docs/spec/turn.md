@@ -1,6 +1,9 @@
 # TURN, long-term credentials and the TCP fallback
 
-Version note (2026-11-24, media-turn-spec-2335): first text of TURN-1 to TURN-11, the Wave 1
+Version note (2026-11-24, turn-spec-amend-2376): review 2354's seven amends applied
+(relay-local addresses, the 401 rate limit and per-source derivation budget, TLS-5's
+key-length rules, stream connections, the recording and vector oracles, quota per subject).
+Earlier (media-turn-spec-2335): first text of TURN-1 to TURN-11, the Wave 1
 connectivity remainder of the real-time media consumer contract (§2). Not yet built: every
 fence is `unbuilt`, and every test path is planned. The sections end with
 [build laws](#build-laws), [cost targets](#cost-targets) and [build slices](#build-slices).
@@ -106,11 +109,13 @@ text assumes no TURN ALPN, since browsers do not send one reliably.
 **Dependency H1, host TLS ingress for a stream listener** (owner: the runner and launch
 track, not this text). A TLS front that hands an accepted plaintext stream to a non-HTTP
 listener must also give the program the client's real address, which the Allocate response
-returns as XOR-MAPPED-ADDRESS and which the nonce and quotas bind to. H1 is either an
-in-process terminator whose accepted `Addr` is the client's, or a separate front that
-prepends a PROXY protocol v2 header, read only from trusted ingress prefixes as RUNNER-SPEC
-reads `X-Forwarded-For` (R2-g). Slice U6 below builds the v2 header decoder as a generic
-std primitive; H1's host side is outside this text.
+returns as XOR-MAPPED-ADDRESS and which the nonce and quotas bind to. H1 is specified as a
+contract in the runner and launch spec's H1 section (lane h1-tls-ingress-spec-2374), not
+here: a separate front prepends a PROXY protocol v2 header, which an H1 listener requires,
+and an untrusted peer or a missing, malformed or LOCAL header closes the connection before
+any byte reaches the `Framer`. What the relay takes from H1 is the header's source address as
+`Origin.client` and its destination address as the nonce's local address (TURN-5). Slice U6
+below builds the v2 header decoder as a generic std primitive.
 
 **What works without H1:** TURN over TCP on a dedicated address's port 443, and over UDP.
 That reaches the first two network classes, exactly what ICE-TCP would have reached.
@@ -130,10 +135,10 @@ pub type Transport = Datagram | Stream      // client-to-server leg; the relay l
 
 pub type Now { mono_ns: u64, unix_s: u64 }  // monotonic for timers, wall for credential expiry
 
-pub type Poll = Send(u64) | WakeAt(u64) | Idle
+pub type Poll = Send(u64) | WakeAt(u64) | Close(u64) | Idle   // Close: relay only (TURN-8)
 
 pub type TurnError = Config | Clock | Closed(Failure) | NotAllocated | Unpermitted(Addr)
-                   | ChannelsFull | Framing | Wire(stun_ice.Error)
+                   | ChannelsFull | StreamsFull | Framing | Wire(stun_ice.Error)
                    | Secret(SecretError) | Mac(MacError) | Capacity(Capacity)
 pub type Failure = Local | Rejected(u16) | Timeout | Credentials | Mismatch | Disconnected
 ```
@@ -141,7 +146,8 @@ pub type Failure = Local | Rejected(u16) | Timeout | Credentials | Mismatch | Di
 `Now.mono_ns` is the caller's monotonic clock in nanoseconds; a value smaller than an
 earlier call's is `Clock`, with no effect. `Now.unix_s` is wall seconds, used only to compare
 against a credential's expiry (TURN-5). Every `TurnError` from `receive` or `poll` other
-than `Capacity`, `Config`, `Clock`, `NotAllocated`, `Unpermitted` and `ChannelsFull` is
+than `Capacity`, `Config`, `Clock`, `NotAllocated`, `Unpermitted`, `ChannelsFull` and
+`StreamsFull` is
 **fatal** for a `Client`, as in [DTLS-3](dtls.md#dtls-3-sans-io-driving): state becomes
 `Closed`, and every later call answers `Closed(f)`. A `Relay` is never closed by an error:
 a `Secret`, `Mac` or `Wire` error while handling one request fails that request (500 if it
@@ -221,12 +227,20 @@ pub fn verify_hmac_sha1(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacE
 
 - `derive_digest` keeps `H(prefix ‖ enc(bytes of s) ‖ suffix)` as a new sealed secret, where
   `enc` is the identity for `Raw` and RFC 4648 §4 padded base64 for `Base64`. It is under
-  TLS-5's derivation rule unchanged: the parent needs `kdf`, the child set is the rule's
+  TLS-5's derivation rule, with the key-length rules of the next bullet: the parent needs `kdf`, the child set is the rule's
   (here `mac`, `verify`, `kdf`), the child is opaque exactly when the parent is, and the
   charges, frames and replay follow `derive_hmac_sha256`'s. MD5 runs in the provider over
   RustCrypto `md-5` (ring has none), SHA-256 over ring's `digest`. MD5 is offered only
   because RFC 8489 makes it the algorithm every TURN client without PASSWORD-ALGORITHMS
   uses, which is every browser today.
+- `derive_digest` with `Raw` and `Sha256` is `Invalid` when `prefix` and `suffix` are both
+  empty, and `derive_hmac_sha256` is `Invalid` when `key_prefix ‖ s` exceeds 64 bytes
+  ([TLS-5, the digest derivation sink](tls.md#tls-5-secrets)). HMAC-SHA256 replaces a key
+  longer than its 64-byte block with the key's SHA-256, so without these rules a `kdf`-only
+  secret could be turned into its own MAC key, and a derived child's sealed bytes could be
+  recomputed in plaintext by `hmac_sha256`. Every derivation in this text has a non-empty
+  prefix except `relay_key`'s first step, whose prefix is empty: **the master is at most 64
+  bytes**, and a longer one makes `relay_key` fail with `Secret(Invalid)`.
 - `hmac_sha1` and `verify_hmac_sha1` extend TLS-5's MAC sink to the 20-byte HMAC-SHA1 that
   MESSAGE-INTEGRITY is, with the same use requirements (`mac` to sign, `mac` or `verify` to
   verify), the same charges and the same frames. SHA-1 is acceptable as HMAC; it is the only
@@ -234,8 +248,9 @@ pub fn verify_hmac_sha1(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacE
 
 **Time-limited credentials.** One master `Secret` per deployment, never sent:
 
-- `username = expiry ":" subject`: `expiry` is decimal Unix seconds, `subject` is 1 to 64
-  printable ASCII bytes chosen by the minting application, with no `:`.
+- `username = expiry ":" subject`: `expiry` is decimal Unix seconds, 1 to 20 digits with no
+  leading zero and a value that fits `u64`; `subject` is 1 to 64 printable ASCII bytes
+  chosen by the minting application, with no `:`.
 - `password = base64(HMAC-SHA256(master, username))`, 44 ASCII bytes.
 
 ```hirsel unbuilt
@@ -247,7 +262,13 @@ pub fn relay_key(master: Secret, username: Bytes, realm: Bytes, alg: Algorithm) 
 `mint` is for the signaling side, which must hand the browser its password in plaintext: it
 calls `secret.hmac_sha256(master, username)` (master needs `mac`) and base64-encodes the tag
 into `password`. This password is a bearer value that leaves the program by design, and it
-expires at `expiry`. `relay_key` is for the relay: `derive_hmac_sha256(master, "", username,
+expires at `expiry`. Because the MAC sink's tag is a delivery at the replay point
+([TLS-5](tls.md#tls-5-secrets)), **a recording of the signaling side holds every password
+it minted, in raw bytes, and each stays a live bearer credential until its `expiry`**: such
+a recording is as sensitive as the credentials themselves until the latest expiry in it
+passes. The relay side's recording holds no password and no key. Every credential expires
+at `expiry`, which must therefore cover the session: TURN-5 step 4 runs on Refresh too, so
+an allocation ends within one lifetime of its credential's expiry. `relay_key` is for the relay: `derive_hmac_sha256(master, "", username,
 "kdf")`, then `derive_digest(that, alg, username ":" realm ":", Base64, "", "mac")`. The
 relay's master needs only `kdf`; the relay never holds the password or the key in plaintext.
 Signaling and the relay may be separate places, each granted the master narrowed to its one
@@ -263,10 +284,13 @@ takes it as a `Secret` with `kdf`, from a grant or `seal`, and derives
 `nonce = "obMatJos2" ‖ base64(features, 3 bytes) ‖ hex(t) ‖ hex(HMAC-SHA256(nonce_key, t ‖ five_tuple)[0..16])`
 
 `t` is `mono_ns / 10^6` as 8 bytes big-endian, `five_tuple` is the ingress kind, the
-server's local address and the client's address as their canonical byte forms, and
+server's local address and the client's address as their canonical byte forms (for a
+`Stream` origin behind H1, the local address is the PROXY v2 header's destination address
+and the client's is its source, both as the caller passes them to `connected`), and
 `nonce_key` is a `Secret` with `mac` (from `derive_hkdf_sha256(master, "", "hirsel turn
-nonce", 32, "mac")` or any caller key). A nonce older than `nonce_s` or with a wrong tag is
-stale (438). The features byte string has bit 0 (Password algorithms) set and bit 1
+nonce", 32, "mac")` or any caller key). A nonce older than `nonce_s`, with a wrong tag, or
+whose `t` is ahead of the current `mono_ns / 10^6` (issued before a restart of the caller's
+monotonic clock) is stale (438). The features byte string has bit 0 (Password algorithms) set and bit 1
 (Username anonymity) clear (RFC 8489 §18.1).
 
 **Why the server sets no Username anonymity bit.** A stateless server cannot invert
@@ -280,36 +304,53 @@ and realm are not secret.
 ChannelData are never authenticated):
 
 1. No MESSAGE-INTEGRITY and no MESSAGE-INTEGRITY-SHA256: 401 with REALM, a fresh NONCE and
-   PASSWORD-ALGORITHMS [SHA-256, MD5]. The answer is computed, not stored: the relay keeps no
-   state for an unauthenticated request.
+   PASSWORD-ALGORITHMS [SHA-256, MD5]. The answer is computed, not stored. On `Udp` ingress,
+   where the source address may be spoofed, this 401 is 116 to 176 bytes (REALM of 1 to 64
+   bytes) for a 20-byte request, so it is rate-limited: at most `challenge_per_s` per source
+   prefix per second, and a request over that is discarded and counted `challenged`. The
+   only state the relay keeps for unauthenticated requests is the source table below.
 2. Integrity present but USERNAME (or USERHASH), REALM or NONCE missing: 400, unauthenticated.
 3. The NONCE carries the cookie with the Password algorithms bit (every nonce this relay
    issues does). If the request has neither PASSWORD-ALGORITHMS nor PASSWORD-ALGORITHM, it is
    processed as MD5: this is every browser today, and it must succeed. Otherwise, unless both
    are present, PASSWORD-ALGORITHMS equals [SHA-256, MD5] and PASSWORD-ALGORITHM is one of
    them: 400 (bid-down, §9.2.1).
-4. USERHASH present: 401 (not offered). USERNAME not `expiry ":" subject`, `expiry` at or
-   before `unix_s`, or `subject` revoked (TURN-9): 401 with REALM, a fresh NONCE and
-   PASSWORD-ALGORITHMS.
+4. USERHASH present: 401 (not offered). USERNAME not `expiry ":" subject` by the grammar
+   above, `expiry` at or before `unix_s`, `expiry` more than `credential_max_s` after
+   `unix_s`, or `subject` revoked (TURN-9): 401 with REALM, a fresh NONCE and
+   PASSWORD-ALGORITHMS. This step runs on every request, Refresh included.
 5. The nonce's tag does not verify for this 5-tuple (a nonce this relay never issued to this
    client): 438 with a fresh NONCE, REALM and PASSWORD-ALGORITHMS. This step is ahead of
    §9.2.4's order on purpose: it costs one `secret.verify_hmac_sha256` and no derivation, and
    it means every derivation below is for a client that received a nonce at its own address.
    A genuine nonce that has merely aged is handled at step 8, in RFC order.
-6. Key. A request on an existing allocation uses the key `Secret` the allocation keeps from
-   its Allocate (no derivation). Otherwise the relay derives `relay_key`, if the derive budget
-   (`derive_per_s`, per relay) allows; if not, the request is discarded and counted
-   `throttled`, and the client's retransmission retries.
+6. Key. A request on an existing allocation whose USERNAME equals the allocation's uses the
+   key `Secret` the allocation keeps from its Allocate (no derivation). Otherwise (no
+   allocation, or another username, which step 9 then answers once integrity holds) the
+   relay derives `relay_key`, if the client's source prefix has derivations left this second
+   (`derive_per_source_s`, in the source table); if not, the request is discarded and
+   counted `throttled`, and the client's retransmission retries. Step 5 has already shown the
+   source received a nonce at its address, so a host can spend only its own prefix's budget:
+   forged usernames from one host never delay another's first Allocate.
 7. Integrity does not verify: 401 with REALM and NONCE. MESSAGE-INTEGRITY-SHA256 is checked
    when present, else MESSAGE-INTEGRITY.
 8. Nonce older than `nonce_s`: 438 with a fresh NONCE, REALM and PASSWORD-ALGORITHMS.
 9. On an existing allocation, a username other than the one that made it: 441.
 
+**The source table.** A source prefix is the client address's IPv4 /32 or IPv6 /64 (an
+IPv4-mapped IPv6 address counts as IPv4). The relay keeps a table of `sources` counter
+slots, sized once at `relay`; a prefix's slot is chosen by a keyed hash whose key comes
+from `relay`'s `Random`, and prefixes that share a slot share its two counters
+(challenges and derivations), which reset at each whole second of `mono_ns`. Sharing can
+only refuse sooner, never admit more, and its effect is a counted discard that the
+client's retransmission retries. The table is the only per-source state, and its size is
+fixed whatever the traffic.
+
 Every response to an authenticated request carries MESSAGE-INTEGRITY-SHA256 under the same
 key, except when the request was processed as MD5 (step 3): then it carries
 MESSAGE-INTEGRITY and no REALM, NONCE, USERNAME or USERHASH (§9.2.4, last paragraph). The
-pre-authentication cost of a request is one STUN parse, at most one nonce MAC check, and no
-state.
+pre-authentication cost of a request is one STUN parse, at most one nonce MAC check, and
+one source-table counter.
 
 **Client rules** (RFC 8489 §9.2.5): the first request goes without integrity. On 401 with
 REALM and NONCE it derives the key once for that realm and algorithm (SHA-256 when the nonce
@@ -390,24 +431,30 @@ reused for 300 s (RFC 8656 §12).
 ```hirsel unbuilt
 pub type Prefix { ip: Ip, bits: u8 }
 pub type Allow { prefix: Prefix, ports_lo: u16, ports_hi: u16 }
-pub type PeerPolicy { deny: List[Prefix], allow: List[Allow] }
+pub type PeerPolicy { deny: List[Prefix], allow: List[Allow], local: List[Ip] }
 
 pub type RelayConfig {
-    realm: Bytes,             // printable ASCII, 1 to 127 bytes
+    realm: Bytes,             // printable ASCII, 1 to 64 bytes
     lifetime_s: u32,          // default 600 (RFC 8656 §7.2)
     lifetime_max_s: u32,      // default 3,600
     nonce_s: u32,             // default 600
-    quota: u16,               // allocations per username; default 12 (LiveKit)
+    credential_max_s: u32,    // furthest a credential's expiry may be ahead; default 86,400
+    quota: u16,               // allocations per subject; default 12 (LiveKit)
     permissions: u16,         // per allocation; default 64
     channels: u16,            // per allocation; default 64
-    derive_per_s: u32,        // relay_key derivations per second, whole relay; default 1,000
+    streams: u32,             // stream connections at once; default 4,096
+    stream_allocate_s: u32,   // a stream with no allocation is closed after this; default 60
+    sources: u32,             // source-table slots (TURN-5); default 65,536
+    challenge_per_s: u16,     // 401 challenges per source prefix per second, Udp only; default 10
+    derive_per_source_s: u16, // relay_key derivations per source prefix per second; default 10
     policy: PeerPolicy
 }
 pub type Ingress = Udp(Addr) | Stream(u64)          // the local UDP address, or a connection
 pub type Origin { ingress: Ingress, client: Addr }  // the client side of the 5-tuple
 pub type Out = ToClient(Origin, Range) | ToPeer(Addr, Addr, Range) | Reply(Origin, u64) | Nothing
 pub type RelayDiscards { malformed: u64, no_allocation: u64, no_permission: u64, policy: u64,
-                         unbound_channel: u64, reserved_channel: u64, throttled: u64 }
+                         unbound_channel: u64, reserved_channel: u64, throttled: u64,
+                         challenged: u64, oversize: u64, unknown_stream: u64, idle_stream: u64 }
 pub type RelayCounts { allocations: u64, permissions: u64, channels: u64, pool_free: u64 }
 
 pub opaque type Relay
@@ -418,6 +465,7 @@ pub fn default_deny() -> List[Prefix]
 pub fn relay(c: RelayConfig, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError]
 pub fn from_client(mut r: Relay, now: Now, rnd: Random, o: Origin, mut packet: Bytes, mut out: Bytes) -> Result[Out, TurnError]
 pub fn from_peer(mut r: Relay, now: Now, relayed: Addr, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[Out, TurnError]
+pub fn connected(mut r: Relay, conn: u64, local: Addr, client: Addr, now: Now) -> Result[(), TurnError]
 pub fn disconnected(mut r: Relay, conn: u64)
 pub fn poll(mut r: Relay, now: Now) -> Poll
 pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64) -> Result[u64, TurnError]
@@ -439,8 +487,21 @@ received on `relayed` from `peer` into `slot[lo..hi]` with `HEADROOM` before `lo
 after `hi`; it writes the ChannelData or Data indication header in place and answers
 `ToClient(o, range)`. ChannelData is used when a channel binds that peer (MUST, RFC 8656
 §12.4), with padding to 4 on a `Stream` origin. A peer IP without permission, or no
-allocation on `relayed`, is `Nothing` and counted. `poll` expires allocations, permissions,
-channels and channel quarantines at their exact times and answers the next `WakeAt`.
+allocation on `relayed`, is `Nothing` and counted. A peer whose IP has a permission but whose
+full address (IP and source port) the policy denies is `Nothing`, counted `policy`. `poll`
+expires allocations, permissions, channels and channel quarantines at their exact times and
+answers the next `WakeAt`.
+
+**Stream connections.** The caller calls `connected(r, conn, local, client, now)` once per
+accepted stream, before its first `from_client`: `local` is the address the client
+connected to and `client` its address (behind H1, the PROXY v2 header's destination and
+source). With `streams` connections already open it answers `StreamsFull`, and the caller
+closes the connection. A `Stream(conn)` origin that was never `connected` is discarded and
+counted `unknown_stream`. A connection that holds no allocation `stream_allocate_s` after
+`connected` (none was made, or the last one ended) is forgotten by the relay, counted
+`idle_stream`, and `poll` answers `Close(conn)`: the caller closes it and need not call
+`disconnected`. Without this bound a stream that never allocates would hold the caller's
+65,552-byte framer buffer for ever.
 
 **Allocate**, RFC 8656 §7.2 steps 2 to 10 in this order, after TURN-5's checks (step 1):
 
@@ -458,7 +519,9 @@ channels and channel quarantines at their exact times and answers the next `Wake
    is ever made).
 9. ADDITIONAL-ADDRESS-FAMILY with value IPv4: 400. With IPv6: the allocation is IPv4 only,
    and success carries ADDRESS-ERROR-CODE 440 (the partial case).
-10. The username holds `quota` allocations: 486.
+10. The username's subject holds `quota` allocations, under any of its usernames: 486. A
+    subject gets a new username at every mint, so a quota per username would give it a
+    fresh 12 each time.
 
 Then: no free pool address of the family (an even port under EVEN-PORT R = 0): 508.
 
@@ -484,15 +547,32 @@ and the peer's permission for 300 s.
 peer's IP: discarded and counted. The policy is checked again on the full address (an `Allow`
 carries ports, a permission does not). A Send never refreshes a permission. **ChannelData**
 on an unbound number, with a length past the datagram, or numbered 0x5000 to 0xFFFF: discarded
-and counted. Indications and ChannelData without an allocation on the origin are discarded,
-never answered.
+and counted. A Send or ChannelData payload over 65,507 bytes (possible only from a `Stream`
+origin) cannot be one UDP datagram to the peer: discarded and counted `oversize`.
+Indications and ChannelData without an allocation on the origin are discarded, never
+answered.
 
-**The peer policy.** An address is denied when a `deny` prefix contains it and no `allow`
-entry covers it and its port; an IPv4-mapped IPv6 address is checked as IPv4. `default_deny`
+**No byte-rate limit.** Decision: the relay limits allocations (`quota`, the pool),
+permissions and channels, not relayed bytes per second, which RFC 8656 §21.1.7 and §21.3.1
+suggest per username and coturn offers as `max-bps`. Every relayed byte goes to a peer
+address the policy admits, so the policy bounds where bytes go; a rate belongs to the
+caller's socket layer, where it can count every path alike. Reversible: a per-allocation
+token bucket fits TURN-7's paths without changing a signature other than `RelayConfig`.
+
+**The peer policy.** An address is denied when a `deny` prefix contains it, or its IP is in
+`local`, and no `allow` entry covers it and its port; an IPv4-mapped IPv6 address is checked
+as IPv4. `local` is the relay host's own addresses: the caller lists every address it
+listens on, and `relay` adds every pool IP. Without it a client could send UDP from the
+relay to any service on the relay's own public addresses, its pool or its TURN port, and
+the host would deliver it locally past its firewall. The check is made on the full address
+in CreatePermission, ChannelBind, Send, ChannelData and `from_peer`, so a datagram from an
+uncovered port of an admitted IP is discarded. `default_deny`
 is LiveKit's list (`/tmp/ref-livekit` at `d210b4d`, `pkg/service/turnrelay.go`): loopback,
 link-local unicast and multicast, multicast, private (10/8, 172.16/12, 192.168/16, fc00::/7),
 unspecified, 0/8, 100.64/10, 198.18/15, 240/4, 64:ff9b::/96 and 64:ff9b:1::/48. A
-co-located SFU's own address and media ports go in `allow` (TURN-8).
+co-located SFU's own address and media ports go in `allow` (TURN-8). A relay that serves
+only one set of media addresses sets `deny` to `0.0.0.0/0` and `::/0` and lists those
+addresses and their media ports in `allow`, so it relays to nothing else (slice U8).
 
 ### TURN-8: Streams, simulation and co-location
 
@@ -509,7 +589,10 @@ pub fn frame_consumed(mut f: Framer, mut buffer: Bytes)
 The caller appends whatever a `recv` returned to `buffer` and calls `frame_next` until
 `Pending`. A first byte whose top two bits are 00 starts a STUN message of `20 + length`
 bytes; 01 starts ChannelData of `4 + length` bytes rounded up to a multiple of 4 (RFC 8656
-§12.5). Top bits 10 or 11 are `Framing`, which is fatal: a byte stream that lost its
+§12.5). Top bits 10 or 11 are `Framing`, and so is a STUN header (once its first 8 bytes are
+buffered) whose length is not a multiple of 4 or whose magic cookie is not 0x2112A442, so
+that a stray byte cannot make the framer wait for up to 65,552 bytes that will never form a
+message. `Framing` is fatal: a byte stream that lost its
 framing cannot be resynchronized, and the caller closes the connection (and the relay is told
 `disconnected`). A STUN message is at most 20 + 65,532 = 65,552 bytes (its length is a
 multiple of 4) and a padded ChannelData message at most 4 + 65,536 = 65,540, so a buffer of
@@ -545,6 +628,8 @@ path identity.
 `subject` at once (no further `ToPeer` or `ToClient` for them), returns their addresses to the
 pool, and refuses that subject at TURN-5 step 4 until `until_unix_s`, which the caller sets
 to the latest expiry it minted for the subject. Entries leave the revoked set at their time.
+The revoked set is in memory only and is lost when the relay restarts: the caller that
+needs revocation to survive a restart calls `revoke` again for each live entry it keeps.
 It answers the number of allocations deleted. When an SFU revokes a participant (webrtc.md
 RTC-7), its signaling side also sends the participant's subject to the relay place, which
 calls `revoke`. That is not part of RTC-7's acknowledgement condition: the SFU's own fence
@@ -560,16 +645,20 @@ caller's trace reads.
 
 ### TURN-11: What the caller does
 
-- Binds the pool and the client-facing UDP and TCP sockets; accepts streams; runs one
-  `Framer` per stream; tells the relay `disconnected`.
+- Binds the pool and the client-facing UDP and TCP sockets; accepts streams and tells the
+  relay `connected`; runs one `Framer` per stream; closes a stream on `Close(conn)` or
+  `Framing`; tells the relay `disconnected` when the client closes.
+- Lists its own listening addresses in `PeerPolicy.local`.
 - Owns `Random` (transaction IDs, pool choice) and both clocks.
 - Holds the master `Secret` (signaling: `mac`; relay: `kdf`) and the nonce key; never seals
   a password it minted.
 - Puts the minted username and password into the session's ICE servers list next to the ICE
   credentials, with `turn:` on UDP 3478, `turn:` with `transport=tcp` on 443 (dedicated
   address), and `turns:` on 443 once H1 exists.
-- Strips and checks a PROXY v2 header (U6, H1) before the first byte reaches the `Framer`,
-  and passes the address it carries as `Origin.client`.
+- On an H1 listener, reads and checks the required PROXY v2 header (U6) under H1's
+  contract before the first byte reaches the `Framer`, closing the connection when H1
+  says so, and passes the header's source as `Origin.client` and to `connected`, with its
+  destination as `local`.
 - Demultiplexes by first byte (RFC 7983) on every socket it shares.
 
 ## Consumer contract coverage
@@ -581,7 +670,7 @@ caller's trace reads.
 | TURN client and relay server (brief) | TURN-6, TURN-7 | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules`, `interop_coturn`, `interop_pion` |
 | long-term credentials, MI-SHA256, USERHASH (brief) | TURN-4, TURN-5 | `long_term_key_vectors`, `userhash_vector`, `challenge_exchange`, `bid_down_refused`, `nonce_bound_to_tuple`, `minted_credentials` |
 | secrets never plaintext where a sink can do the job (brief) | TURN-5 sinks, `relay_key` | `long_term_key_vectors`, `no_key_in_recording` |
-| relay abuse | TURN-7 policy and quota, TURN-5 steps 4 and 5 | `peer_policy`, `quota_and_capacity`, `expired_costs_no_derivation` |
+| relay abuse | TURN-7 policy (`local`, full-address checks) and quota per subject, TURN-5 steps 1 to 6 and the source table, TURN-7 stream connections | `peer_policy`, `quota_and_capacity`, `expired_costs_no_derivation`, `stream_framing` |
 | revocation | TURN-9 | `revoke_drops_paths` |
 
 ## Prior art
@@ -617,11 +706,16 @@ and Pion built from clones in `/tmp`, never vendored. The existing `binding_vect
 not re-pinned; U0 must leave it green.
 
 - **`long_term_key_vectors`** (U1). *Scenario:* `seal` the password, `derive_digest` with
-  `Md5` and `Raw` for `user`/`realm`/`pass`; with `Sha256` for RFC 8489 Appendix B.1's
-  username, realm and password; then `verify_key` with `Long` on B.1's request. *Oracle:* RFC
-  8489 §9.2.2's MD5 key 0x8493fbc53ba582fb4c044c456bdc40eb (checked by `verify_hmac_sha1`
-  over a hand-built message, since the key itself is opaque), and B.1's listed
-  MESSAGE-INTEGRITY-SHA256 with erratum 6268.
+  `Md5` and `Raw` for the username, realm and password of RFC 5769 §2.4's long-term request
+  (realm `example.org`, password `TheMatrix` after SASLprep), then `verify_key` with `Long`
+  on that request's bytes; `derive_digest` with `Sha256` for RFC 8489 Appendix B.1's
+  username, realm and password, then `verify_key` with `Long` on B.1's request as corrected
+  by erratum 6268 (PASSWORD-ALGORITHM added, length 0x0090), whose bytes are written into
+  the case. *Oracle:* RFC 5769 §2.4's published MESSAGE-INTEGRITY (the same vector Pion's
+  `rfc5769_test.go` checks, `/tmp/ref-pion-stun`), and erratum 6268's
+  MESSAGE-INTEGRITY-SHA256 `b5c7bf00…c6518e65`, recomputed independently with Python
+  `hmac` over the erratum's bytes; the keys themselves are opaque and are checked only
+  through these tags.
 - **`userhash_vector`** (U2). *Scenario:* the client's USERHASH for B.1's username and
   realm. *Oracle:* B.1's listed 32 bytes.
 - **`minted_credentials`** (U1, U2). *Scenario:* a master sealed from the 20 bytes `0x0b`
@@ -641,14 +735,21 @@ not re-pinned; U0 must leave it green.
   and a client given a response with the cookie bit but no PASSWORD-ALGORITHMS. *Oracle:*
   RFC 8489 §9.2.1 and §9.2.4 by hand: 400, 400, success, and a counted client discard.
 - **`nonce_bound_to_tuple`** (U2). *Scenario:* a valid nonce replayed from another client
-  address, a nonce with a forged tag, and a genuine one used after `nonce_s`. *Oracle:* by
-  hand from TURN-5: 438 each time, no derivation frame for the first two, and success at
+  address, a nonce with a forged tag, a genuine one used after `nonce_s`, and a genuine one
+  presented to a relay whose `mono_ns` restarted below the nonce's `t`. *Oracle:* by hand
+  from TURN-5: 438 each time, no derivation frame for the first two, and success at
   `nonce_s − 1 ms`.
 - **`expired_costs_no_derivation`** (U2). *Scenario:* 10^4 requests with expired, malformed
-  and revoked usernames or forged nonces, then 2,000 valid first Allocates in one second, then
-  Refreshes on the allocations made. *Oracle:* the recording holds no derivation frame for the
-  first group or for the Refreshes; exactly `derive_per_s` derivations happen in the second
-  and the rest are `throttled`.
+  and revoked usernames, usernames whose expiry is more than `credential_max_s` ahead or has
+  a leading zero, or forged nonces; then 2,000 valid first Allocates in one second from one
+  source; then Refreshes on the allocations made. Separately, under defaults: 10^4 requests
+  without integrity from one UDP source in one second; and one source sending 2,000
+  well-formed forged-username requests a second with valid nonces while a second source
+  sends one valid Allocate. *Oracle:* by hand from TURN-5: the recording holds no derivation
+  frame for the first group or for the Refreshes; exactly `derive_per_source_s` derivations
+  happen for the one source in its second and the rest are `throttled`; exactly 10 replies
+  go to the bare requests and the rest are `challenged`; the second source's Allocate
+  succeeds.
 - **`allocate_check_order`** (U3). *Scenario:* one request per step of TURN-7's Allocate list
   (steps 2 to 10 and pool exhaustion), each violating that step and every later one.
   *Oracle:* RFC 8656 §7.2 by hand: the earliest step's code.
@@ -670,18 +771,28 @@ not re-pinned; U0 must leave it green.
   including ChannelData (not a Data indication) after the bind.
 - **`peer_policy`** (U4). *Scenario:* one CreatePermission per `default_deny` prefix, its
   first and last address, the IPv4-mapped form, and an `allow` entry for 10.0.0.5 ports
-  50000 to 50100. *Oracle:* LiveKit's `isRestrictedPeerIP` over the same addresses, run in
-  Go from the clone, with its answers written into the case; and RFC 6890's registry.
-- **`quota_and_capacity`** (U4). *Scenario:* 13 allocations for one username; a pool of two
-  addresses and three usernames. *Oracle:* by hand: 486, then 508.
+  50000 to 50100. Then, with the relay's public address in `local` and its media ports in
+  `allow`: CreatePermission or Send to a pool address, to the TURN port, and to the public
+  address on a port outside `allow`; and a datagram to a relayed address from an admitted
+  IP's uncovered port. *Oracle:* LiveKit's `isRestrictedPeerIP` and `turnRelayPolicy.allows`
+  over the same addresses, run in Go from the clone, with their answers written into the
+  case; and RFC 6890's registry: 403 for each local case, and the inbound datagram
+  discarded and counted `policy`.
+- **`quota_and_capacity`** (U4). *Scenario:* 13 allocations for one subject, spread over two
+  usernames (two expiries); a pool of two addresses and three subjects; `streams` + 1
+  `connected` calls. *Oracle:* by hand: 486, then 508, then `StreamsFull`.
 - **`revoke_drops_paths`** (U4). *Scenario:* revoke a subject with live allocations while both
   directions carry data under `std.sim.udp`. *Oracle:* the invariant that no `ToPeer` or
   `ToClient` for those allocations follows the call, checked on the capture, and 401 at
   TURN-5 step 4 for a new Allocate until `until_unix_s`.
 - **`stream_framing`** (U5). *Scenario:* client and relay over `std.sim.net` with 1,000
-  seeds of split and join points; ChannelData of every length mod 4; a first byte 0x80.
-  *Oracle:* RFC 8656 §12.5 by hand: every payload arrives once, in order, byte-exact, and
-  0x80 is `Framing`.
+  seeds of split and join points; ChannelData of every length mod 4; a first byte 0x80; a
+  STUN header with length 0x0D0A (not a multiple of 4) and one with a wrong magic cookie;
+  the 12-byte PROXY v2 signature reaching the framer; a stream `connected` and then silent
+  for `stream_allocate_s`. *Oracle:* RFC 8656 §12.5, RFC 8489 §5 and the PROXY v2
+  specification by hand: every payload arrives once, in order, byte-exact; 0x80 is
+  `Framing` at once, and the other three are `Framing` once 8 bytes are buffered; the silent stream gets `Close(conn)` at
+  exactly `stream_allocate_s` and is counted `idle_stream`.
 - **`sim_relay_loss`** (U5). *Scenario:* a client, the relay and an echoing UDP peer under
   `std.sim.udp` at 20% Gilbert–Elliott loss with rebinding of the client's mapping. *Oracle:*
   invariants: the allocation completes; echoed payloads are a byte-exact subsequence of
@@ -691,9 +802,11 @@ not re-pinned; U0 must leave it green.
   *Oracle:* an independent server.
 - **`interop_pion`** (U7). *Scenario:* Pion's `examples/turn-client` (UDP and TCP) against the
   Hirsel relay with minted credentials. *Oracle:* an independent client.
-- **`no_key_in_recording`** (U1, U3). *Scenario:* `minted_credentials` and
-  `challenge_exchange` recorded. *Oracle:* the known password, the known MD5 key and the
-  known master bytes from the case occur nowhere in the recording file.
+- **`no_key_in_recording`** (U1, U3). *Scenario:* the relay side of `minted_credentials` and
+  `challenge_exchange` recorded (the signaling side's recording holds minted passwords by
+  design, TURN-5). *Oracle:* the known password, both known keys and the known master bytes
+  from the case occur nowhere in the recording file, raw, hex or base64, as TLS-5's KD6
+  searches.
 
 Browser behaviour (Chromium sending MESSAGE-INTEGRITY with MD5 and no
 PASSWORD-ALGORITHMS, ChannelBind before media) is covered by Pion's interop history and
@@ -724,14 +837,14 @@ Sizes are S (under a day of one lane), M (one to three days) and L (more than th
 | slice | size | depends on | content | laws |
 |---|---|---|---|---|
 | **U0** STUN message layer | M | — | TURN-4 in `stun_ice`: `Key`, `Attr`, `Header`, `attrs`, `verify_key`, `Builder`; Binding functions rebuilt over them; constants; law lock rewritten | existing `binding_vectors`, `full_connectivity`, `lite_nat_rebinding`, `lite_peer_signaling` stay green |
-| **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording` |
+| **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; the TLS-5 key-length rules: `derive_digest` `Raw`/`Sha256` with empty prefix and suffix is `Invalid`, and the built `derive_hmac_sha256` becomes `Invalid` when `key_prefix ‖ s` exceeds 64 bytes (a change to a built sink; callers on main pass short keys); std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording`, TLS-5's KD4 long-key case |
 | **U2** long-term credentials and client | L | U0, U1 | `core/programs/turn/`<!-- doc-ref: planned --> package; TURN-5 (`mint`, `relay_key`, nonce, server check order as a function the relay calls, client rules, USERHASH); TURN-6 client | `userhash_vector`, `challenge_exchange`, `bid_down_refused`, `nonce_bound_to_tuple`, `expired_costs_no_derivation`, `retransmit_schedule`, client half of `lifetimes_exact` |
 | **U3** relay server | L | U2 | TURN-7 Allocate, Refresh, CreatePermission, ChannelBind, Send, Data, ChannelData; pool; timers; in-place framing | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules` |
-| **U4** relay policy, quota, revocation | M | U3 | TURN-7 policy and `default_deny`, quota, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
-| **U5** streams and simulation | M | U3 | TURN-8 `Framer`; stream origins; the sim runs | `stream_framing`, `sim_relay_loss` |
-| **U6** PROXY v2 header | S | — | a generic sans-IO PROXY protocol v2 header decoder in std, with the trusted-prefix rule of RUNNER-SPEC R2-g; the H1 host side is not this slice | one law in its own std laws: the v2 specification's examples by hand, an untrusted source ignored |
+| **U4** relay policy, quota, revocation | M | U3 | TURN-7 policy with `local` and `default_deny`, the full-address check on every path including `from_peer`, quota per subject, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
+| **U5** streams and simulation | M | U3 | TURN-8 `Framer` with the length and cookie checks; stream origins, `connected`, `streams`, `stream_allocate_s` and `Close(conn)`; the sim runs | `stream_framing`, `sim_relay_loss` |
+| **U6** PROXY v2 header | S | — | a generic sans-IO PROXY protocol v2 header decoder in std, answering H1's contract (header required; untrusted peer, missing, malformed or LOCAL header closes); the H1 host side is not this slice | one law in its own std laws: the v2 specification's examples by hand, plus an untrusted peer and a missing header, both closed |
 | **U7** interop and cost | M | U4, U5 | `interop.py` against coturn and Pion from `/tmp` clones; counted-allocator run | `interop_coturn`, `interop_pion`, the cost targets |
-| **U8** SFU wiring | S | U4, webrtc S3 | the SFU's deployment runs the relay as a sibling place; signaling mints TURN credentials beside ICE ones and forwards revokes to the relay (TURN-9) | webrtc's browser end-to-end case with `iceTransportPolicy: "relay"` over UDP and TCP |
+| **U8** SFU wiring | S | U4, webrtc S3 | the SFU's deployment runs the relay as a sibling place; signaling mints TURN credentials beside ICE ones and forwards revokes to the relay (TURN-9); the relay's `deny` is `0.0.0.0/0` and `::/0` with the SFU's media addresses and ports in `allow` (TURN-7) | webrtc's browser end-to-end case with `iceTransportPolicy: "relay"` over UDP and TCP |
 
 U0, U1 and U6 run in parallel. U3 waits on U2 because the relay uses TURN-5's check order.
 U4 and U5 run in parallel after U3.
@@ -741,4 +854,6 @@ U4 and U5 run in parallel after U3.
 provider surface and U2 holds the credential design, so both are Opus; U4 (policy, quota,
 revocation) is Sol. Each of U1, U2 and U4 gets an Astra security attack before it lands:
 key custody, the derivation sink's opacity and frames, the check order's pre-authentication
-cost, bid-down, nonce replay, and relay abuse toward internal ranges.
+cost, bid-down, nonce replay, and relay abuse toward internal ranges and the relay's own
+addresses. U1's attack has one more named target: a `kdf`-only secret, or a child's sealed
+bytes, reached as a MAC key through HMAC's long-key hashing (TLS-5's key-length rules).

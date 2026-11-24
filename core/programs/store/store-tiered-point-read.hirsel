@@ -52,6 +52,7 @@ fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant
             },
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
+            Some(AttemptFold(_)) => fail("store: a read attempt cannot wait for a fold"),
             None => return take observed,
         }
     }

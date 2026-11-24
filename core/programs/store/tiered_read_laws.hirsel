@@ -446,6 +446,55 @@ fn test_l68_resident_images_ignore_cold_slots() -> Result[(), Error] {
 }
 
 @test
+fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
+    let key = log_key(9, 1)?
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    let value = string.into_bytes(string.from("stored"))
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: InlineValue(take value)))
+    let first_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let first_ptr = std.page.PagePtr(pack: 8, offset: 72, len: 45, checksum: 111, stamp: 40)
+    let first_frame = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(first_ptr)), payload: TieredImage(page_result(std.page.attach_cold(take first_image))?)))
+    let mut before = l62_replay_read_tree(first_ptr)?
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    map.insert(mut visible, (8, 72), take first_frame)
+    let mut initial = capacity(tiered_touch_set(61, 1))?
+    if tiered_plan_prior(mut initial, visible, before, key)? != 7 {
+        fail("L63: the first root's stored value is six bytes")
+    }
+
+    let reference = std.page.BlobRef(stamp: 30, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    list.clear(mut rows)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(reference)))
+    let moved_image = page_result(std.page.encode(rows, 0, 41, Collection))?
+    let moved_ptr = std.page.PagePtr(pack: 9, offset: 72, len: 79, checksum: 112, stamp: 41)
+    let moved_frame = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(moved_ptr)), payload: TieredImage(page_result(std.page.attach_cold(take moved_image))?)))
+    let mut moved = l62_replay_read_tree(moved_ptr)?
+    moved.root = std.page.copy_with_stamp(moved.root, 101)
+    map.insert(mut visible, (9, 72), take moved_frame)
+    let mut deciding = capacity(tiered_touch_set(95, 1))?
+    if tiered_plan_prior(mut deciding, visible, moved, key)? != 1026 || deciding.touched_bytes != 95 {
+        fail("L63: a rerun must read the deciding leaf's BLOB length without touching its body")
+    }
+
+    let mut account = ReplayTieredAccount(total: 258, exact: false, ordinal: 0)
+    let mut ids = 102u64
+    let before_edit = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
+    let new_bytes = string.into_bytes(string.from("second"))
+    let op = JournalOp(key: clone(key), value: Some(take new_bytes), prior: 7, trim: None)
+    replay_tiered_op("j-1", mut before, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before_edit, op)?
+    let mut folded = capacity(tiered_touch_set(0, 1))?
+    let Error(Missed) = tiered_plan_prior(mut folded, visible, before, key) else {
+        fail("L63: a write tried to plan through an overlay")
+    }
+    if let Some(AttemptFold(9)) = folded.stopped {
+        if folded.touched_bytes == 0 {
+            return Ok(())
+        }
+    }
+    fail("L63: the fold demand must precede every touch")
+}
+
+@test
 fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     let owner = StoreId(hi: 3, lo: 4)
     let value = arc.new(string.into_bytes(string.from("test")))

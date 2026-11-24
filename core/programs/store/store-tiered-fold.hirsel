@@ -32,19 +32,8 @@ fn fold_base_prior(source: TieredPageSource, base: std.page.PagePtr, logical: By
     if list.len(path) == 0 {
         return Ok(0u32)
     }
-    let leaf_page = fold_page(path[list.len(path) - 1])
-    let image = std.page.image_of(leaf_page)
-    let (slot, hit) = std.page.search(image, sought)
-    if !hit {
-        return Ok(0u32)
-    }
-    if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
-        return Ok(int.truncate(1 + reference.len))
-    }
-    let Some(stored) = std.page.value_at(leaf_page, slot) else {
-        fail("store: missing value in the fold's leaf")
-    }
-    Ok(int.truncate(1 + list.len(stored)))
+    let leaf = fold_page(path[list.len(path) - 1])
+    Ok(tiered_leaf_prior(leaf, sought))
 }
 
 // Sum the strict prefixes encountered while descending one boundary path.

@@ -1,4 +1,4 @@
-type TieredAttemptStop: send = AttemptMiss(TieredTarget) | AttemptPinLimit(Capacity) | AttemptAllocation(Capacity)
+type TieredAttemptStop: send = AttemptMiss(TieredTarget) | AttemptFold(u32) | AttemptPinLimit(Capacity) | AttemptAllocation(Capacity)
 
 type TieredTouchSet: send {
     stamps: Map[u64, ()],
@@ -144,4 +144,60 @@ fn tiered_point_path(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, A
         return Ok(None)
     }
     Ok(Some(tiered_point_value(mut attempt, visible, page, slot)?))
+}
+
+fn tiered_leaf_prior(leaf: Arc[std.page.Page], key: Bytes) -> u32 {
+    let image = std.page.image_of(leaf)
+    let (slot, hit) = std.page.search(image, key)
+    if !hit {
+        return 0
+    }
+    if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+        return int.truncate(1 + reference.len)
+    }
+    let stored = option.unwrap(std.page.value_at(leaf, slot))
+    int.truncate(1 + list.len(stored))
+}
+
+fn tiered_plan_path(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], page: Arc[std.page.Page], key: Bytes) -> Result[Arc[std.page.Page], Error] {
+    let image = std.page.image_of(page)
+    let Some(slot) = std.page.descend(image, key) else {
+        return Ok(arc.share(page))
+    }
+    let child_level = Some(std.page.level(image) - 1)
+    let edge = option.unwrap(std.page.child_slot(page, slot))
+    let child = tiered_point_page(mut attempt, visible, edge, child_level)?
+    if slot != 0 {
+        let left = option.unwrap(std.page.child_slot(page, slot - 1))
+        let _ = tiered_point_page(mut attempt, visible, left, child_level)?
+    }
+    if let Some(right) = std.page.child_slot(page, slot + 1) {
+        let _ = tiered_point_page(mut attempt, visible, right, child_level)?
+    }
+    tiered_plan_path(mut attempt, visible, child, key)
+}
+
+// The leaf and any siblings that apply can need are resolved before encoding.
+// Reading the old width never resolves the old BLOB.
+fn tiered_plan_prior(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], tree: PageTree, logical: Bytes) -> Result[u32, Error] {
+    if let Some(_) = attempt.stopped {
+        return Error(Missed)
+    }
+    let collection: u32 = list.word_be(logical, 0)
+    if let Some(overlays) = view tree.replay {
+        if let Some(_) = std.omap.get(overlays.collections, collection) {
+            attempt.stopped = Some(AttemptFold(collection))
+            return Error(Missed)
+        }
+    }
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) else {
+        return Error(Stale(collection))
+    }
+    let key = list.slice(logical, 4, list.len(logical))
+    let origin = tiered_point_page(mut attempt, visible, edge, None)?
+    let leaf = tiered_plan_path(mut attempt, visible, origin, key)?
+    if descriptor[52u64] == 4 {
+        return Ok(0u32)
+    }
+    Ok(tiered_leaf_prior(leaf, key))
 }

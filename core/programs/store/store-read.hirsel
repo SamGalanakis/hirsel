@@ -133,10 +133,6 @@ fn table_decoder[K, V](t: Table[K, V]) -> RowDecoder[K, V] {
     RowDecoder(table: t.id, key: t.key, readers: arc.share(t.readers), unique: false, skip: None)
 }
 
-fn table_rows[K, V](s: Snapshot, t: Table[K, V], take cursor: PageRange) -> PageRows[K, V] {
-    PageRows(cursor: take cursor, data: share_page_tree(s.roots.collections), decoder: table_decoder(t))
-}
-
 fn snapshot_pager(r: Reader, s: Snapshot, inventory: TieredReadInventory) -> Result[(TieredPageSource, Arc[TieredReaderGrant], TieredPinRoot), Error] {
     let Some(pool) = view r.pool else {
         return Error(Io(Closed))

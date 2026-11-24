@@ -222,6 +222,23 @@ fn l62_snapshot_index_reads(db: Db, parity: Index[u32, u64, u32, ()]) -> Result[
         next(read_handle, mut odds)? != None {
         fail("L62: a Cold index scan must read the matching primary row for each index entry")
     }
+    let limits = Limits(rows: 1, byte_limit: 18)
+    let first = find_page(read_handle, s, parity, Included(1u32), Included(1u32), limits)?
+    if list.len(first.rows) != 1 || first.rows[0u64] != (1u64, 43u32) || first.byte_count != 18 {
+        fail("L62: an index page must account for the replayed primary value")
+    }
+    let Some(resume) = view first.next else {
+        fail("L62: the remaining equal index key must have a resume")
+    }
+    let Paged(last_page) = find_next(read_handle, s, parity, clone(resume), limits)? else {
+        fail("L62: the index resume belongs to its original Snapshot")
+    }
+    if list.len(last_page.rows) != 1 || last_page.rows[0u64] != (3u64, 39u32) || last_page.byte_count != 18 {
+        fail("L62: the resume must read the next primary among equal index keys")
+    }
+    if let Some(_) = last_page.next {
+        fail("L62: the exhausted index page has no resume")
+    }
     Ok(())
 }
 

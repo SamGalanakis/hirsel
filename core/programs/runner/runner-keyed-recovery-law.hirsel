@@ -1,0 +1,103 @@
+fn recovery_law_claim(clock_value: Clock, _request: ClaimRequest) -> Result[Claimed, ()] waits {
+    host.sleep_until(clock_value, host.mono_ns(clock_value))
+    Error(())
+}
+
+fn recovery_law_retired(declared: u64) -> Registry[Clock, ()] {
+    let mut reg: Registry[Clock, ()] = registry()
+    let claim = Claim(f: code.describe(recovery_law_claim), headers: list.new(), claim_bytes: 8192, claim_steps: DEFAULT_STEPS)
+    result.unwrap(bind_retired(mut reg, "pay", Post, "/pay", Retirement(claim: take claim, keys_max: declared)))
+    take reg
+}
+
+fn recovery_law_policy() -> store.KeyedPolicy {
+    let definition = KeyedEntryRecord(entry: b"charge", deadline_ms: 1000, n_e: 65536, s_e: DEFAULT_STEPS, args: list.new(), output: list.new(), defaults: list.new(), fields: list.new(), method: Post, ok_status: 201, error_status: 422, body_max: 128, claim_identity: clone(code.identity(code.describe(recovery_law_claim))), headers: list.new())
+    let codec: std.codec.Codec[KeyedEntryRecord] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, definition, mut raw))
+    store.KeyedPolicy(retention_ms: 10000, keys_max: 2, principal_keys_max: 2, arg_max: 64, call_record_max: 200, record: take raw)
+}
+
+fn recovery_law_tick(take job: (ClockHand, Sender[HeadInput])) waits {
+    let (take handed, take stop_to) = take job
+    let mut ticks = take handed
+    let mut reached_tick = false
+    while !reached_tick {
+        let Some(due) = clock.idle(mut ticks) else {
+            break
+        }
+        clock.advance_to(mut ticks, due)
+        reached_tick = due >= 1000000000u64
+    }
+    let _ = clock.idle(mut ticks)
+    let _ = channel.send(stop_to, HeadFinish)
+}
+
+@test
+fn retired_quota_checked_before_idle_keyed_recovery(d: Dir, random: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let (time, take clock_handle) = provide.clock(0, 100)
+    let mut name = string.with_capacity(32)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let mut options = result.unwrap(store.sized(Directory, 2147483648))
+    options.resident_limit = 134217728
+    let mut db = store.open(tasks, dir, time, random, options)?
+    let claim = store.ClaimKey(op: b"pay", caller: store.Caller(issuer: 2, subject: b"alice"), key: b"one")
+    let digest = store.request_digest(b"charge", b"args")
+    let Accepted(_) = store.admit_claim(mut db, claim, digest, b"args", Some(recovery_law_policy()))? else {
+        fail("fixture claim did not admit")
+    }
+    store.close(take db)?
+    options.create = false
+    let mut reopened = store.open(tasks, dir, time, random, options)?
+    let held = store.version(store.snapshot(reopened))
+    for declared in[1u64, 3u64] {
+        let incorrect = recovery_law_retired(declared)
+        match startup_claims(mut reopened, incorrect) {
+            Error(KeyedOpQuotaChanged(op, requested, saved)) if op == b"pay" && requested == declared && saved == 2 => (),
+            _ => fail("retired quota mismatch did not name the declaration and stored quota"),
+        }
+        if store.version(store.snapshot(reopened)) != held {
+            fail("a mismatched open wrote a recovery frame")
+        }
+    }
+    let reg = recovery_law_retired(2)
+    // Two padded nodes per map at quota two, plus 392 bytes per key.
+    let member_bytes: u64 = 2 * (104 + 32 * (24 + 24)) + 2 * 392
+    let fifo_bytes: u64 = 2 * (104 + 32 * (8 + 24)) + 2 * 392
+    let reserved = member_bytes + fifo_bytes + 288 + 4096 + bytes[HeadInput]
+    if claim_recovery_bytes(2) != Some(reserved) {
+        fail("recovery envelope differs from the declared quota cost")
+    }
+    let Ok(take recovery) = startup_claims(mut reopened, reg) else {
+        fail("an exact retired quota was refused")
+    }
+    let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2)
+    let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8))
+    let mut hd = Head(db: take reopened, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0, cut: false, trigger_drive: None, parked: list.new(), recovery: take recovery)
+    let (take woken, take helpers, setup) = head_wakes(mut hd, take from_head, None, tasks)
+    setup?
+    let driving = task.spawn(tasks, bytes 65536, (take clock_handle, take to_head), recovery_law_tick)
+    let mut no_triggers: Option[triggers.Tables] = None
+    let _ = serve_head(mut hd, take woken, None, mut no_triggers)?
+    let _ = task.join(take driving)
+    for take helper in take helpers {
+        let mut running = take helper
+        task.cancel(mut running)
+        let _ = task.join(take running)
+    }
+    let _ = take published
+    let Head(db: take kept, ..) = take hd
+    let mut finished = take kept
+    let no_policy: Option[store.KeyedPolicy] = None
+    let Duplicate(reply_bytes) = store.admit_claim(mut finished, claim, digest, b"args", take no_policy)? else {
+        fail("idle timer did not recover the unmatched retired claim")
+    }
+    let codec: std.codec.Codec[Outcome] = std.codec.of()
+    if let Ok(Failed(Gone)) = std.codec.decode(codec, reply_bytes) {} else {
+        fail("retired recovery did not record Gone")
+    }
+    if store.version(store.snapshot(finished)) != held + 1 {
+        fail("recovery did not commit exactly one reply")
+    }
+    store.close(take finished)
+}

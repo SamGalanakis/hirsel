@@ -41,11 +41,14 @@ fn forward_requests(take forward: Forward) -> () waits {
 // without a journal is durable at commit, so its groups release at close.
 fn head_wakes[G: send, H: shareable + inert + send](mut hd: Head[G, H], take inbox: Receiver[HeadInput], drain: Option[HeadDrain], tasks: Tasks) -> (Receiver[HeadInput], List[Task[()]], Result[(), store.Error]) {
     let mut helpers: List[Task[()]] = list.new()
-    let Some(take notices) = store.sync_notices(mut hd.db) else { return (take inbox, take helpers, Ok(())) }
+    let notices = store.sync_notices(mut hd.db)
+    let recovering_claims = match hd.recovery { Some(_) => true, None => false }
+    if none(notices) && !recovering_claims { return (take inbox, take helpers, Ok(())) }
     let (to, woken): (Sender[HeadInput], Receiver[HeadInput]) = match drain {
         Some(control) => (channel.sender(control.head_to), take inbox),
         None => {
-            let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
+            let inbox_room = if recovering_claims { 65u64 } else { 64u64 }
+            let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(inbox_room)
             let forward = Forward(from: take inbox, to: channel.sender(to))
             match task.try_spawn(tasks, bytes 65536u64, take forward, forward_requests) {
                 Ok(take running) => list.push(mut helpers, take running),
@@ -69,10 +72,19 @@ fn head_wakes[G: send, H: shareable + inert + send](mut hd: Head[G, H], take inb
             list.push(mut helpers, take running)
         }
     }
-    let relay = SyncRelay(notices: take notices, to: take to)
-    if let Ok(take running) = task.try_spawn(tasks, bytes 65536u64, take relay, relay_syncs) {
-        list.push(mut helpers, take running)
-        hd.wakes = true
+    if recovering_claims {
+        let timer = ClaimRecoveryTimer(clock: store.claim_clock(hd.db), inbox: channel.sender(to))
+        match task.try_spawn(tasks, bytes 4096, take timer, tick_claim_recovery) {
+            Ok(take running) => list.push(mut helpers, take running),
+            Error((problem, _)) => return (take woken, take helpers, Error(Full(Allocation(problem)))),
+        }
+    }
+    if let Some(take syncs) = take notices {
+        let relay = SyncRelay(notices: take syncs, to: take to)
+        if let Ok(take running) = task.try_spawn(tasks, bytes 65536u64, take relay, relay_syncs) {
+            list.push(mut helpers, take running)
+            hd.wakes = true
+        }
     }
     (take woken, take helpers, take health_setup)
 }

@@ -1,0 +1,308 @@
+const CLAIM_RECOVER_MS: u64 = 1000
+
+const CLAIM_RECOVER_MAX: u8 = 3
+
+type ClaimMember: shareable + send {
+    refusals: u8,
+    queued: Option[u64]
+}
+
+type ClaimQueue {
+    members: std.omap.OMap[Bytes, ClaimMember],
+    fifo: std.omap.OMap[u64, Bytes],
+    next_sequence: u64,
+    stamps: u64
+}
+
+fn new_claim_queue() -> ClaimQueue {
+    ClaimQueue(members: std.omap.new(), fifo: std.omap.new(), next_sequence: 0, stamps: 0)
+}
+
+fn claim_map_bytes(n: u64, slot_width: u64) -> Option[u64] {
+    let leaves = n / 16 + (if n % 16 == 0 {
+        0u64
+    } else {
+        1u64
+    })
+    let nodes = int.checked_mul(2, leaves)?
+    let backing = int.checked_mul(nodes, 104 + 32 * slot_width)?
+    int.checked_add(backing, int.checked_mul(n, 392)?)
+}
+
+fn claim_recovery_bytes(n: u64) -> Option[u64] {
+    let maps = int.checked_add(claim_map_bytes(n, 24 + 24)?, claim_map_bytes(n, 8 + 24)?)?
+    let timer = charge.task(bytes[()], 4096)?
+    int.checked_add(int.checked_add(maps, timer)?, recovery_inbox_slot())
+}
+
+fn recovery_inbox_slot() -> u64 {
+    option.unwrap(charge.channel(bytes[HeadInput], 1)) - option.unwrap(charge.channel(bytes[HeadInput], 0))
+}
+
+fn set_claim_member(mut queue: ClaimQueue, key: Bytes, member: ClaimMember) {
+    let previous = replace(mut queue.members, std.omap.new())
+    let (take members, _) = std.omap.insert_owned(mut queue.stamps, take previous, clone(key), member)
+    queue.members = take members
+}
+
+fn claim_member(queue: ClaimQueue, key: Bytes) -> ClaimMember {
+    match std.omap.get(queue.members, key) {
+        Some(member) => clone(member),
+        None => ClaimMember(refusals: 0, queued: None),
+    }
+}
+
+fn enqueue_recovery(mut queue: ClaimQueue, key: Bytes) {
+    let member = claim_member(queue, key)
+    if member.queued != None {
+        return
+    }
+    let sequence = queue.next_sequence
+    queue.next_sequence += 1
+    let previous = replace(mut queue.fifo, std.omap.new())
+    let (take fifo, _) = std.omap.insert_owned(mut queue.stamps, take previous, sequence, clone(key))
+    queue.fifo = take fifo
+    set_claim_member(mut queue, key, ClaimMember(refusals: member.refusals, queued: Some(sequence)))
+}
+
+fn dequeue_recovery(mut queue: ClaimQueue) -> Option[Bytes] {
+    let front: Option[(u64, Bytes)] = match std.omap.first(queue.fifo) {
+        Some((sequence, key)) => Some((sequence, clone(key))),
+        None => None,
+    }
+    let Some((sequence, take key)) = take front else {
+        return None
+    }
+    queue.fifo = std.omap.remove(mut queue.stamps, queue.fifo, sequence)
+    let member = claim_member(queue, key)
+    set_claim_member(mut queue, key, ClaimMember(refusals: member.refusals, queued: None))
+    Some(take key)
+}
+
+fn recovery_refused(mut queue: ClaimQueue, key: Bytes) -> bool {
+    let member = claim_member(queue, key)
+    if let Some(sequence) = member.queued {
+        queue.fifo = std.omap.remove(mut queue.stamps, queue.fifo, sequence)
+    }
+    let refused = member.refusals + 1
+    set_claim_member(mut queue, key, ClaimMember(refusals: refused, queued: None))
+    if refused == CLAIM_RECOVER_MAX {
+        return true
+    }
+    enqueue_recovery(mut queue, key)
+    false
+}
+
+fn recovery_replied(mut queue: ClaimQueue, key: Bytes) {
+    let member = claim_member(queue, key)
+    if let Some(sequence) = member.queued {
+        queue.fifo = std.omap.remove(mut queue.stamps, queue.fifo, sequence)
+    }
+    queue.members = std.omap.remove(mut queue.stamps, queue.members, key)
+}
+
+type ClaimRecoveryTimer: send {
+    clock: Clock,
+    inbox: Sender[HeadInput]
+}
+
+fn tick_claim_recovery(take timer: ClaimRecoveryTimer) -> () waits {
+    loop {
+        std.clock.sleep_ns(timer.clock, CLAIM_RECOVER_MS * 1000000)
+        if let Error(Closed(_)) = channel.try_send(timer.inbox, RecoveryTick) {
+            return
+        }
+    }
+}
+
+type ParkedRecovery {
+    claim: Bytes,
+    entry: Bytes,
+    caller: Caller,
+    arguments: Bytes,
+    deadline: u64,
+    served: store.Parked
+}
+
+type RecoverClaims {
+    queue: ClaimQueue,
+    parked: Option[ParkedRecovery],
+    sweep: store.ClaimSweep
+}
+
+fn recovery_registered[G: send, H: shareable + inert + send](reg: Registry[G, H], op: Bytes) -> bool {
+    map.contains(reg.keyed, op)
+}
+
+fn startup_claims[G: send, H: shareable + inert + send](mut db: store.Db, reg: Registry[G, H]) -> Result[Option[Box[RecoverClaims]], OpenError] waits {
+    check_keyed_registrations(db, reg)?
+    let dropped = store.check_dropped_claim_ops(mut db, scoped fn(op: Bytes) -> bool {
+        recovery_registered(reg, op)
+    }) ?=> Store
+    if let Some(take gone) = take dropped {
+        return Error(KeyedOpDropped(take gone))
+    }
+    let mut scan = store.open_claim_cursor(db)
+    let mut queue = new_claim_queue()
+    while let Some(take claim) = store.next_open_claim(mut scan) {
+        enqueue_recovery(mut queue, claim)
+    }
+    if map.len(reg.keyed) == 0 && !store.has_keyed_ops(db) {
+        return Ok(None)
+    }
+    Ok(Some(box.new(RecoverClaims(queue: take queue, parked: None, sweep: store.claim_sweep_start()))))
+}
+
+fn claim_run_record(activation: KeyedEntryRecord, arguments: Bytes, revision: Option[Bytes], replay_identity: Bytes) -> Result[store.KeyedCallRecord, store.Error] {
+    let encoding = code_bytes(activation.n_e, activation.s_e, replay_identity) ?=> |problem| Full(Allocation(problem))
+    Ok(store.KeyedCallRecord(entry: copy_bytes(activation.entry)?, args: copy_bytes(arguments)?, revision: clone(revision), code: take encoding))
+}
+
+fn finish_recovered[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut queue: ClaimQueue, claim: Bytes, settled: store.Receipt) {
+    recovery_replied(mut queue, claim)
+    let at = store.snapshot(hd.db)
+    let ver = store.version(at)
+    list.push(mut hd.held, Sealed(settled.ticket, ver, take at, list.new()))
+}
+
+fn conclude_recovered[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut queue: ClaimQueue, claim: Bytes, take pending_run: store.Pending, outcome: Outcome) -> Result[(), store.Error] waits {
+    let reply_bytes = encode_runner_reply(outcome)?
+    match store.conclude(mut hd.db, take pending_run, take reply_bytes, Claim) {
+        Ok(Committed(take settled)) => {
+            finish_recovered(mut hd, mut queue, claim, settled)
+            Ok(())
+        },
+        Ok(NoRoom(_, problem)) => Error(Full(problem)),
+        Error(Before(take problem, _)) => Error(take problem),
+        Error(After(take problem)) => Error(take problem),
+        _ => fail("runner: invalid recovery conclusion"),
+    }
+}
+
+fn recovery_settlement[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut state: RecoverClaims, take named: Bytes, take entry_name: Bytes, take caller: Caller, take arguments: Bytes, deadline: u64, take result: Result[store.Served, store.ServeError]) -> Result[(), store.Error] waits {
+    match take result {
+        Ok(Committed(take receipt)) => {
+            finish_recovered(mut hd, mut state.queue, named, receipt)
+            Ok(())
+        },
+        Ok(Kept(take receipt)) => {
+            finish_recovered(mut hd, mut state.queue, named, receipt)
+            Ok(())
+        },
+        Ok(Failed(take pending_run, stop)) => conclude_recovered(mut hd, mut state.queue, named, take pending_run, failed_stop(stop)?),
+        Ok(NoRoom(take pending_run, problem)) => {
+            if recovery_refused(mut state.queue, named) {
+                let shortfall = store_capacity(problem)
+                conclude_recovered(mut hd, mut state.queue, named, take pending_run, Failed(OutOfBytes(Room(requested: shortfall.requested, available: shortfall.available))))
+            } else {
+                Ok(())
+            }
+        },
+        Ok(Parked(take served)) => {
+            state.parked = Some(ParkedRecovery(claim: take named, entry: take entry_name, caller: take caller, arguments: take arguments, deadline: deadline, served: take served))
+            Ok(())
+        },
+        Error(Before(take problem, _)) => Error(take problem),
+        Error(After(take problem)) => Error(take problem),
+    }
+}
+
+fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut state: RecoverClaims, take named: Bytes, take recovery: store.ClaimRecovery) -> Result[(), store.Error] waits {
+    let decoder: std.codec.Codec[KeyedEntryRecord] = std.codec.of()
+    let activation = std.codec.decode(decoder, store.recovery_policy(recovery).record) ?=> |take problem| Decode(take problem)
+    let store.ClaimRecovery(claim: take claim, arguments: take arguments, completion: take completion) = take recovery
+    let store.ClaimKey(caller: take caller, op: take op, ..) = take claim
+    let deadline = int.saturating_add(host.mono_ns(store.claim_clock(hd.db)), int.saturating_mul(activation.deadline_ms, 1000000))
+    let live = match map.get(hd.r.keyed, op) {
+        Some(KeyedRegistration(policy: Some(_), ..)) => true,
+        _ => false,
+    }
+    if live {
+        let transactional = match map.get(hd.r.slots, activation.entry) {
+            Some(Transact(..)) => true,
+            _ => false
+        }
+        if transactional {
+            let ran = {
+                let Some(Transact(_, _, revision, _, go)) = map.get(hd.r.slots, activation.entry) else {
+                    fail("runner: a keyed entry's slot was removed")
+                }
+                let record = claim_run_record(activation, arguments, revision, hd.replay_identity)?
+                let plan = store.Plan(n_e: activation.n_e, s_e: activation.s_e, reply_max: store.CLAIM_DONE_MAX)
+                let no_record: Option[store.CallRecord] = None
+                (go.serve)(mut hd.db, store.keyed_completion(take completion, take record), plan, take no_record, hd.h, caller, arguments)
+            }
+            return recovery_settlement(mut hd, mut state, take named, clone(activation.entry), take caller, take arguments, deadline, take ran)
+        }
+    }
+    let record = claim_run_record(activation, arguments, None, hd.replay_identity)?
+    let untried = store.untried(store.keyed_completion(take completion, take record), None, store.next_call_info(hd.db))
+    conclude_recovered(mut hd, mut state.queue, named, take untried, Failed(Gone))
+}
+
+fn recovery_turn[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut state: RecoverClaims) -> Result[(), store.Error] waits {
+    if let None = state.parked {
+        if let Some(take named) = dequeue_recovery(mut state.queue) {
+            if let Some(take recovery) = store.recover_claim(hd.db, named)? {
+                run_claim_recovery(mut hd, mut state, take named, take recovery)?
+            } else {
+                recovery_replied(mut state.queue, named)
+            }
+        }
+    }
+    let reg = view hd.r
+    let swept = store.sweep_claims(mut hd.db, mut state.sweep, scoped fn(op: Bytes) -> bool {
+        recovery_registered(reg, op)
+    })
+    match take swept {
+        Ok(_) => Ok(()),
+        Error(Full(_)) => Ok(()),
+        Error(take problem) => Error(take problem),
+    }
+}
+
+fn advance_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
+    let latest = replace(mut hd.recovery, None)
+    let Some(take active) = take latest else {
+        return Ok(())
+    }
+    let mut state = box.unbox(take active)
+    close_group(mut hd)
+    let ran = recovery_turn(mut hd, mut state)
+    hd.recovery = Some(box.new(take state))
+    take ran
+}
+
+fn resume_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[bool, store.Error] waits {
+    let (id, due) = {
+        let Some(active) = view hd.recovery else {
+            return Ok(false)
+        }
+        let Some(parked) = view active.parked else {
+            return Ok(false)
+        }
+        (store.park_id(parked.served), parked.deadline)
+    }
+    let ready = store.poll_parked(mut hd.db)?
+    let timed_out = host.mono_ns(store.claim_clock(hd.db)) >= due
+    if !timed_out && !list.contains(ready, id) {
+        return Ok(false)
+    }
+    let mut state = box.unbox(option.unwrap(replace(mut hd.recovery, None)))
+    let ParkedRecovery(claim: take named, entry: take entry_name, caller: take caller, arguments: take arguments, deadline: deadline, served: take parked_call) = option.unwrap(replace(mut state.parked, None))
+    close_group(mut hd)
+    let ran: Result[(), store.Error] = if timed_out {
+        let _ = store.cancel_parked(mut hd.db, take parked_call)
+        enqueue_recovery(mut state.queue, named)
+        Ok(())
+    } else {
+        let served = match map.get(hd.r.slots, entry_name) {
+            Some(Transact(_, _, _, _, go)) => (go.resume)(mut hd.db, take parked_call, hd.h, caller, arguments),
+            _ => fail("runner: a parked keyed call's entry is registered"),
+        }
+        recovery_settlement(mut hd, mut state, take named, take entry_name, take caller, take arguments, deadline, take served)
+    }
+    hd.recovery = Some(box.new(take state))
+    ran?
+    Ok(true)
+}

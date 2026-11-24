@@ -1,6 +1,69 @@
-pub type ClaimExpiry = Never | Finite(u64)
+pub opaque type OpenClaimCursor {
+    rows: Option[std.page.Cursor]
+}
 
-pub type DroppedClaimOp {
+pub fn open_claim_cursor(db: Db) -> OpenClaimCursor {
+    let roots = view db.heads[0u64].roots
+    OpenClaimCursor(rows: if list.len(roots.keyed) == 0 {
+        None
+    } else {
+        let slot: u64 = int.widen(CLAIM_OPEN)
+        Some(std.page.cursor_open(roots.keyed[slot].root, None, true, false))
+    })
+}
+
+pub fn next_open_claim(mut cursor: OpenClaimCursor) -> Option[Bytes] {
+    match cursor.rows {
+        Some(mut rows) => {
+            let no_prefix: Bytes = list.new()
+            match std.page.cursor_next_key(mut rows, no_prefix) {
+                Some((take encoded, _)) => Some(take encoded),
+                None => None,
+            }
+        },
+        None => None,
+    }
+}
+
+pub type ClaimRecovery {
+    claim: ClaimKey,
+    arguments: Bytes,
+    completion: ClaimCompletion
+}
+
+pub fn recovery_policy(recovery: ClaimRecovery) -> View[KeyedPolicy] in recovery {
+    view recovery.completion.policy
+}
+
+pub fn claim_clock(db: Db) -> Clock { db.clock }
+
+pub fn recover_claim(db: Db, encoded: Bytes) -> Result[Option[ClaimRecovery], Error] {
+    let roots = view db.heads[0u64].roots
+    if let None = keyed_lookup(roots.keyed, CLAIM_OPEN, encoded) { return Ok(None) }
+    let Some(raw_claim) = keyed_lookup(roots.keyed, CLAIMS, encoded) else { return Error(malformed(0)) }
+    let state = claim_parse(raw_claim)?
+    if state.replied { return Error(malformed(0)) }
+    let op_end = claim_op_end(encoded)?
+    let principal_end = claim_principal_end(encoded, op_end)?
+    let op = list.slice(encoded, 0, op_end)
+    let Some(raw_policy) = keyed_lookup(roots.keyed, KEYED_OPS, op) else { return Error(malformed(0)) }
+    let policy = read_keyed_policy(raw_policy)?
+    let arguments = copied(list.slice(raw_claim, 41, list.len(raw_claim)))?
+    let caller = Caller(issuer: encoded[op_end], subject: copied(list.slice(encoded, op_end + 2, principal_end))?)
+    let claim = ClaimKey(op: copied(list.slice(op, 1, op_end))?, caller: take caller,
+        key: copied(list.slice(encoded, principal_end + 1, list.len(encoded)))?)
+    let committed = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0u64].head))
+    let completion = ClaimCompletion(ticket: committed, key: copied(encoded)?, request: state.digest, policy: take policy, admitted_width: list.len(raw_claim))
+    Ok(Some(ClaimRecovery(claim: take claim, arguments: take arguments, completion: take completion)))
+}
+
+pub fn has_keyed_ops(db: Db) -> bool {
+    list.len(db.heads[0u64].roots.keyed) != 0
+}
+
+pub type ClaimExpiry: key + send = Never | Finite(u64)
+
+pub type DroppedClaimOp: send {
     op: Bytes,
     last_expiry: ClaimExpiry
 }

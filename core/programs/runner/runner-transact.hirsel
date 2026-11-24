@@ -43,7 +43,7 @@ fn adapt_transact[H: shareable + inert + send, A, R, E](f: StaticFn[fn(mut store
 }
 
 type TransactAdapters[H: shareable + inert + send]: send {
-    serve: own[send] fn(mut store.Db, take store.Completion, store.Plan, take store.CallRecord, H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
+    serve: own[send] fn(mut store.Db, take store.Completion, store.Plan, take Option[store.CallRecord], H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
     // A parked served call's next attempt, with the request's bytes decoded afresh (STORE-SPEC §13.3a).
     resume: own[send] fn(mut store.Db, take store.Parked, H, Caller, Bytes) -> Result[store.Served, store.ServeError] waits,
     trigger: own[send] fn(mut store.Db, H, Caller, triggers.Tables, triggers.Pending) -> Result[store.Outcome[(), TriggerBodyError], store.Error] waits,
@@ -133,9 +133,9 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
     register_check(mut r, key, ca, n, s)?
     let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
     let entry = TransactEntry(run: f, args: ca, reply: cr, error: ce)
-    let serve_entry = fn(mut db: store.Db, take complete: store.Completion, plan: store.Plan, take rec: store.CallRecord, h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
+    let serve_entry = fn(mut db: store.Db, take complete: store.Completion, plan: store.Plan, take rec: Option[store.CallRecord], h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
         let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
-        store.serve(mut db, take complete, plan, Some(take rec), env, transact_reply)
+        store.serve(mut db, take complete, plan, take rec, env, transact_reply)
     }
     let resume_entry = fn(mut db: store.Db, take parked: store.Parked, h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
         let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))

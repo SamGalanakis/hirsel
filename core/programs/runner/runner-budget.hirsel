@@ -26,8 +26,9 @@ pub fn operate_bytes[G: send, H: shareable + inert + send, S: send, B: send](p: 
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
     let head = place_head_bytes(n_place, p.n_publisher, trigger_bytes(p.triggers))?
+    let funded_head = add_place_bytes(head, keyed_place_bytes(p.place, n_place)?)?
     let serving = serving_bytes(p.session, p.max_sessions, n_place)?
-    let tasks = add_place_bytes(head, serving)?
+    let tasks = add_place_bytes(funded_head, serving)?
     add_place_bytes(tasks, OPERATE_OWN_BYTES)
 }
 

@@ -135,6 +135,17 @@ fn keyed_policy_bytes(policy: KeyedPolicy) -> Result[Bytes, Error] {
     Ok(take raw)
 }
 
+pub fn check_keyed_policy(policy: KeyedPolicy) -> Result[(), Error] {
+    if policy.retention_ms == 0 || policy.retention_ms > 9007199254740992 ||
+        policy.principal_keys_max == 0 || policy.principal_keys_max > policy.keys_max ||
+        policy.call_record_max > FRAME_LIMIT || policy.arg_max > FORMAT_VALUE_MAX - 41 ||
+        terminal_frame_credit(policy) > FRAME_LIMIT {
+        return Error(Limit(Value))
+    }
+    let _ = keyed_policy_bytes(policy)?
+    Ok(())
+}
+
 fn read_keyed_policy(raw: Bytes) -> Result[KeyedPolicy, Error] {
     let codec: std.codec.Codec[KeyedPolicy] = std.codec.of()
     decoded(std.codec.decode(codec, raw))

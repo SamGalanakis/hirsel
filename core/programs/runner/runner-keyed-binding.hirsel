@@ -1,0 +1,230 @@
+pub type ClaimRequest: send {
+    headers: List[(String, Bytes)],
+    body: Bytes
+}
+
+pub type Claimed: send {
+    caller: Caller,
+    key: Bytes
+}
+
+pub type Claim[G: send]: send {
+    f: StaticFn[fn(G, ClaimRequest) -> Result[Claimed, ()] waits],
+    headers: List[String],
+    claim_bytes: u64,
+    claim_steps: u64
+}
+
+pub type KeyedRule[G: send]: send {
+    claim: Claim[G],
+    retention_ms: u64,
+    keys_max: u64,
+    principal_keys_max: u64
+}
+
+pub type Retirement[G: send]: send {
+    claim: Claim[G],
+    keys_max: u64
+}
+
+type KeyedEntryRecord: codec + shareable + send {
+    entry: Bytes,
+    deadline_ms: u64,
+    n_e: u64,
+    s_e: u64,
+    args: Bytes,
+    output: Bytes,
+    defaults: List[HttpDefault],
+    fields: List[FieldSource],
+    method: Method,
+    ok_status: u16,
+    error_status: u16,
+    body_max: u64,
+    claim_identity: Bytes,
+    headers: List[String]
+}
+
+type KeyedRegistration[G: send]: send {
+    claim: Claim[G],
+    route: String,
+    method: Method,
+    keys_max: u64,
+    policy: Option[store.KeyedPolicy]
+}
+
+fn keyed_registration_error(name: String, take check: BindCheck) -> RegisterError {
+    InvalidBinding(BindError(op: string.from(name), check: take check))
+}
+
+fn check_claim_headers[G: send](claim: Claim[G]) -> Result[(), BindCheck] {
+    for i in 0u64 .. list.len(claim.headers) {
+        let name = view claim.headers[i]
+        let token = string.as_bytes(name)
+        if list.len(token) == 0 {
+            return Error(Fields)
+        }
+        for byte in token {
+            if (byte >= b'A' && byte <= b'Z') || !std.http1.token(byte) {
+                return Error(Fields)
+            }
+        }
+        for previous in 0u64 .. i {
+            if claim.headers[previous] == name {
+                return Error(Fields)
+            }
+        }
+    }
+    Ok(())
+}
+
+fn keyed_route_conflicts[G: send, H: shareable + inert + send](reg: Registry[G, H], name: String, method: Method, route: String) -> Result[(), BindCheck] {
+    if !valid_op(name) {
+        return Error(Op)
+    }
+    if method == Get {
+        return Error(Mode)
+    }
+    let (_, tail) = std.router.captures(route) ?=> |_| Path
+    if tail {
+        return Error(Path)
+    }
+    let alias = operation_path(name)
+    if method == Post && (std.router.conflict(route, alias) ?=> |_| Path) {
+        return Error(Route)
+    }
+    if map.contains(reg.keyed, string.as_bytes(name)) {
+        return Error(DuplicateOp)
+    }
+    for (_, prior) in reg.keyed {
+        if prior.method == method && (std.router.conflict(prior.route, route) ?=> |_| Path) {
+            return Error(Route)
+        }
+        if prior.method == Post && (std.router.conflict(prior.route, alias) ?=> |_| Path) {
+            return Error(Route)
+        }
+    }
+    for saved in reg.bindings {
+        let prior = view saved.binding
+        if prior.op == name {
+            return Error(DuplicateOp)
+        }
+        if prior.method == method && (std.router.conflict(prior.path, route) ?=> |_| Path) {
+            return Error(Route)
+        }
+        if prior.method == Post && (std.router.conflict(prior.path, alias) ?=> |_| Path) {
+            return Error(Route)
+        }
+    }
+    Ok(())
+}
+
+pub fn bind_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding, take rule: KeyedRule[G]) -> Result[(), RegisterError] {
+    let KeyedRule(claim: take claim, retention_ms: retention_ms, keys_max: keys_max, principal_keys_max: principal_keys_max) = take rule
+    if retention_ms == 0 || retention_ms > 9007199254740992 || retention_ms <= binding.deadline_ms || principal_keys_max == 0 || principal_keys_max > keys_max {
+        return Error(keyed_registration_error(binding.op, MetadataBytes))
+    }
+    keyed_route_conflicts(reg, binding.op, binding.method, binding.path) ?=> |take problem| keyed_registration_error(binding.op, take problem)
+    check_claim_headers(claim) ?=> |take problem| keyed_registration_error(binding.op, take problem)
+    let defaults = check_http_binding(reg, binding) ?=> |take problem| keyed_registration_error(binding.op, take problem)
+    let index = find_binding_entry(reg.exported, binding.entry) ?=> |_| keyed_registration_error(binding.op, NoEntry)
+    let Some(Transact(n_e, s_e, _, _, _)) = map.get(reg.slots, binding.entry) else {
+        return Error(keyed_registration_error(binding.op, Mode))
+    }
+    let entry_schema = view reg.exported[index].described
+    let activation = KeyedEntryRecord(entry: clone(binding.entry), deadline_ms: binding.deadline_ms, n_e: n_e, s_e: s_e, args: clone(entry_schema.args), output: clone(entry_schema.result), defaults: take defaults, fields: clone(binding.fields), method: binding.method, ok_status: binding.ok_status, error_status: binding.error_status, body_max: binding.body_max, claim_identity: clone(code.identity(claim.f)), headers: clone(claim.headers))
+    let codec: std.codec.Codec[KeyedEntryRecord] = std.codec.of()
+    let mut record_bytes: Bytes = list.new()
+    std.codec.encode(codec, activation, mut record_bytes) ?=> |_| keyed_registration_error(binding.op, MetadataBytes)
+    let Some(call_record_max) = int.checked_add(binding.arg_max, 130 + list.len(binding.entry)) else {
+        return Error(keyed_registration_error(binding.op, MetadataBytes))
+    }
+    let policy = store.KeyedPolicy(retention_ms: retention_ms, keys_max: keys_max, principal_keys_max: principal_keys_max, arg_max: binding.arg_max, call_record_max: call_record_max, record: take record_bytes)
+    store.check_keyed_policy(policy) ?=> |_| keyed_registration_error(binding.op, MetadataBytes)
+    map.insert(mut reg.keyed, clone(string.as_bytes(binding.op)), KeyedRegistration(claim: take claim, route: string.from(binding.path), method: binding.method, keys_max: keys_max, policy: Some(take policy)))
+    Ok(())
+}
+
+pub fn bind_retired[G: send, H: shareable + inert + send](mut reg: Registry[G, H], name: String, method: Method, route: String, take retired: Retirement[G]) -> Result[(), RegisterError] {
+    let Retirement(claim: take claim, keys_max: keys_max) = take retired
+    if keys_max == 0 {
+        return Error(keyed_registration_error(name, MetadataBytes))
+    }
+    keyed_route_conflicts(reg, name, method, route) ?=> |take problem| keyed_registration_error(name, take problem)
+    check_claim_headers(claim) ?=> |take problem| keyed_registration_error(name, take problem)
+    map.insert(mut reg.keyed, clone(string.as_bytes(name)), KeyedRegistration(claim: take claim, route: string.from(route), method: method, keys_max: keys_max, policy: None))
+    Ok(())
+}
+
+fn check_keyed_registrations[G: send, H: shareable + inert + send](db: store.Db, reg: Registry[G, H]) -> Result[(), OpenError] {
+    for (name, registration) in reg.keyed {
+        let Some(saved) = store.keyed_policy(db, name) ?=> Store else {
+            continue
+        }
+        if registration.keys_max != saved.keys_max {
+            return Error(KeyedOpQuotaChanged(clone(name), registration.keys_max, saved.keys_max))
+        }
+        if let Some(live) = registration.policy {
+            if live.record != saved.record || live.retention_ms != saved.retention_ms || live.principal_keys_max != saved.principal_keys_max || live.arg_max != saved.arg_max {
+                return Error(KeyedOpChanged(clone(name), "policy"))
+            }
+        } else {
+            let codec: std.codec.Codec[KeyedEntryRecord] = std.codec.of()
+            let entry_record = std.codec.decode(codec, saved.record) ?=> |take problem| Store(Decode(take problem))
+            if registration.method != entry_record.method {
+                return Error(KeyedOpChanged(clone(name), "method"))
+            }
+            if code.identity(registration.claim.f) != entry_record.claim_identity || registration.claim.headers != entry_record.headers {
+                return Error(KeyedOpChanged(clone(name), "claim"))
+            }
+            let (take captures, _) = std.router.captures(registration.route) ?=> |_| KeyedOpChanged(clone(name), "path")
+            let mut paths = 0u64
+            for placement in entry_record.fields {
+                if placement.source == Path {
+                    paths += 1
+                    let mut found = false
+                    for name_in_route in captures {
+                        found = found || name_in_route == placement.field
+                    }
+                    if !found {
+                        return Error(KeyedOpChanged(clone(name), "path"))
+                    }
+                }
+            }
+            if paths != list.len(captures) {
+                return Error(KeyedOpChanged(clone(name), "path"))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn keyed_registry_count[G: send, H: shareable + inert + send](reg: Registry[G, H]) -> Option[u64] {
+    let mut maximum = 0u64
+    for (_, registration) in reg.keyed {
+        maximum = int.checked_add(maximum, registration.keys_max)?
+    }
+    Some(maximum)
+}
+
+fn keyed_open_report(mut line: String, name: Bytes, detail: String) {
+    string.push(mut line, "keyed operation ")
+    if let Ok(take op) = string.from_utf8(clone(name)) {
+        string.push(mut line, op)
+    }
+    string.push(mut line, " ")
+    string.push(mut line, detail)
+}
+
+fn keyed_place_bytes[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[u64, Capacity] {
+    let count = match placed(place, n_place) {
+        Ok(reg) => keyed_registry_count(reg),
+        Error(_) => Some(0u64),
+    }
+    let Some(declared) = count else {
+        return Error(Capacity(requested: 18446744073709551615, available: n_place))
+    }
+    let Some(requested_bytes) = claim_recovery_bytes(declared) else {
+        return Error(Capacity(requested: 18446744073709551615, available: n_place))
+    }
+    Ok(requested_bytes)
+}

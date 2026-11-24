@@ -45,6 +45,7 @@ pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
 pub type Selection: send = Current(u64) | Reopen | Install | InstallAt(u64)
 pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error)
+    | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Draining | Paused
@@ -234,7 +235,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     current.n_place = n_place
     publish_phase(status, watch, mut current, Starting(Recovering))?
     let (to, inbox): (Sender[LifeEvent], Receiver[LifeEvent]) = channel.new(12u64)
-    let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
+    let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(65u64)
     let hosting = start_host_control(tasks, clock, n_place, head_to, to)?
     let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let serving_total = match serving_bytes(wire_config, limit, n_place) { Ok(total) => total, Error(cap) => return Error(Full(cap)) }
@@ -254,7 +255,9 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     }
 
     let head = place_head_bytes(n_place, n_publisher, trigger_bytes(trigger_config)) ?=> Full
-    let allowance = add_place_bytes(head, store_bytes) ?=> Full
+    let claims = keyed_place_bytes(place, n_place) ?=> Full
+    let funded_head = add_place_bytes(head, claims - recovery_inbox_slot()) ?=> Full
+    let allowance = add_place_bytes(funded_head, store_bytes) ?=> Full
     let activity = cut_activity()?
     let cut = latest.handle(activity.root)
     let head_job = ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
@@ -629,12 +632,13 @@ pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     exported: List[Exported],
     checks: Map[Bytes, CheckedArgument],
     bindings: List[HttpDescribe],
+    keyed: Map[Bytes, KeyedRegistration[G]],
     gone: Map[Bytes, ()],
     trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
 }
 
 pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
-    Registry(slots: map.new(), bound_slots: map.new(), exported: list.new(), checks: map.new(), bindings: list.new(), gone: map.new(), trigger_tables: None)
+    Registry(slots: map.new(), bound_slots: map.new(), exported: list.new(), checks: map.new(), bindings: list.new(), keyed: map.new(), gone: map.new(), trigger_tables: None)
 }
 
 fn check_call_reserve(n_e: u64, s_e: u64) -> Result[(), RegisterError] {
@@ -991,6 +995,14 @@ pub fn start_text(problem: StartError) -> String {
         Open(IdentityUnknown) => string.push(mut line, "release identity is unavailable"),
         Open(StoreMismatch(expected, actual)) => string.push(mut line, store_mismatch(expected, actual)),
         Open(PublisherStopped) => string.push(mut line, "publisher stopped"),
+        Open(KeyedOpDropped(dropped)) => keyed_open_report(mut line, dropped.op, "has an unbound live claim"),
+        Open(KeyedOpQuotaChanged(name, declared, saved)) => {
+            keyed_open_report(mut line, name, "declares keys_max ")
+            string.push_u64(mut line, declared)
+            string.push(mut line, ", stored keys_max ")
+            string.push_u64(mut line, saved)
+        },
+        Open(KeyedOpChanged(name, field)) => keyed_open_report(mut line, name, field),
         Open(InstallUncertain(e)) => { string.push(mut line, "install outcome unknown: "); push_store_error(mut line, e) },
         Open(InstallVersion(next)) => {
             string.push(mut line, "the next install activation is ")
@@ -1368,7 +1380,8 @@ type Head[G: send, H: shareable + inert + send] {
     trigger_drive: Option[Box[TriggerDrive[G]]],
     // Admitted served calls whose attempt latched a Cold miss, oldest first
     // (STORE-SPEC §13.3a). Their streams count as running.
-    parked: List[ParkedCall]
+    parked: List[ParkedCall],
+    recovery: Option[Box[RecoverClaims]]
 }
 
 type Publish[G: send, H: shareable + inert + send]: send {
@@ -1424,6 +1437,10 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: Receiver[HeadInput],
     take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[Option[u64], OpenError] waits {
     let mut owned = take db
+    let recovery = match startup_claims(mut owned, r) {
+        Ok(take prepared) => take prepared,
+        Error(take problem) => { let _ = close_store(take owned); return Error(take problem) },
+    }
     let shared = arc.new(take h)
     let publishing = start_publisher(owned, place, n_place, arc.share(shared), take mail, tasks, n_publisher)
     let (out, publisher_task) = match take publishing {
@@ -1439,7 +1456,7 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
             return Ok(None)
         }
     }
-    let mut hd = Head(db: take owned, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new())
+    let mut hd = Head(db: take owned, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new(), recovery: take recovery)
     let mut tables: Option[triggers.Tables] = None
     let (take woken, take helpers, take health_setup) = head_wakes(mut hd, take inbox, drain, tasks)
     let served = match take health_setup {
@@ -1522,7 +1539,7 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
 pub type HeadInput: send = RunRequest(Req) | RetireCaller(Caller) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
     | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64)
     | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle
-    | SyncWake | ParkWake | StoreUnhealthy | InboxEnded | ReadStreamTime(Sender[StreamTime])
+    | SyncWake | ParkWake | RecoveryTick | StoreUnhealthy | InboxEnded | ReadStreamTime(Sender[StreamTime])
 
 pub type StreamTime: send { now_ms: u64, retention_ms: u64 }
 
@@ -2146,195 +2163,6 @@ fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u6
     Ok(true)
 }
 
-fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take inbox: Receiver[HeadInput], take drain: Option[HeadDrain], mut tables: Option[triggers.Tables]) -> Result[bool, store.Error] waits {
-    let mut closed = false
-    let mut settled = false
-    let mut input: Option[HeadInput] = None
-    let mut pause: Option[WritePause] = None
-    let mut held_write = false
-    let mut resuming = false
-    let mut idle = false
-    // The forwarded request channel closed (InboxEnded); the head ends once idle.
-    let mut ended = false
-    loop {
-        check_store_health(head.db)?
-        if head.cut { return Ok(false) }
-        if let Some(control) = drain {
-            if let Ok(()) = channel.try_receive(control.finish) { release_held(mut head, true)?; return Ok(false) }
-            if let Some(_) = drain_window(latest.read(control.window)) {
-                end_write_pause(mut head.db, mut pause, control, AttemptBusy)
-                // A drain cuts running attempts. Their current rows stay until
-                // the next open, which starts a higher attempt.
-                if let Some(take scheduled) = replace(mut head.trigger_drive, None) { tables = Some(stop_triggers(take scheduled)) }
-            } else if let Some(ms) = control.idle {
-                let eligible = none(pause) && head_is_idle(head, ms)?
-                if eligible != idle {
-                    idle = eligible
-                    let _ = channel.send(control.events, HeadIdle(idle))
-                }
-            }
-            if !none(pause) && pause_expires(pause, host.mono_ns(control.clock)) {
-                end_write_pause(mut head.db, mut pause, control, Expired)
-                refresh_waiting(mut head, true)
-                resuming = true
-            }
-            if !closed && closing_at(control.window, control.clock) {
-                closed = true
-                close_head_admission(mut head)?
-            }
-            if closed && !settled && list.len(head.group) == 0u64 && list.len(head.held) == 0u64 {
-                let _ = channel.send(control.events, Settled)
-                settled = true
-            }
-        }
-        if none(pause) && !closed {
-            if resuming {
-                if next_waiting(mut head, drain)? { continue }
-                resuming = list.len(head.waiting) != 0u64
-            }
-            if advance_triggers(mut head)? { continue }
-        }
-        let next = match replace(mut input, None) {
-            Some(take next) => Some(take next),
-            None => head_next(inbox, false),
-        }
-        match take next {
-            Some(ReadStreamTime(to)) => {
-                let _ = channel.try_send(to, StreamTime(now_ms: store.keyed_time(head.db), retention_ms: store.stream_retention_ms(head.db)))
-                continue
-            },
-            Some(RunRequest(take req)) => {
-                head_arrival(mut head, take req, closed, !none(pause) || resuming)?
-                if none(pause) { continue }
-                held_write = held_write || list.len(head.waiting) != 0u64
-            },
-            Some(StartCutover(take boxed)) => {
-                let starting = none(pause)
-                let work = box.unbox(take boxed)
-                let host_result = channel.sender(work.result_to)
-                if let Some(control) = drain {
-                    if closed || !none(drain_window(latest.read(control.window))) {
-                        let _ = channel.try_send(host_result, Error(AttemptBusy))
-                    } else if let Error(take why) = start_write_pause(mut pause, take work, control) {
-                        let _ = channel.try_send(host_result, Error(take why))
-                    } else {
-                        if starting { held_write = list.len(head.waiting) != 0u64 }
-                        for i in 0u64 .. list.len(head.waiting) { head.waiting[i].held_by_pause = true }
-                    }
-                } else { let _ = channel.try_send(host_result, Error(AttemptBusy)) }
-                continue
-            },
-            Some(AbortCutover(attempt, retry_of, done)) => {
-                store.release_export(mut head.db, attempt)
-                if let Some(previous) = retry_of {
-                    store.release_export(mut head.db, previous)
-                }
-                if let Some(control) = drain {
-                    let current = match pause {
-                        Some(active) => abort_matches(active.attempt, attempt, retry_of),
-                        None => false,
-                    }
-                    if current {
-                        end_write_pause(mut head.db, mut pause, control, AttemptBusy)
-                        refresh_waiting(mut head, true)
-                        resuming = true
-                    }
-                }
-                let _ = channel.try_send(done, ())
-                continue
-            },
-            Some(ExportCommand(take command)) => {
-                let ExportCommand(scratch: scratch, attempt: take attempt, retry: retry, answer: take host_result) = box.unbox(take command)
-                let allowed: Result[(), store.DeployError] = if none(drain) || closed { Error(AttemptBusy) }
-                    else if retry { retry_export(mut pause, attempt) }
-                    else if !none(pause) { Error(AttemptBusy) } else { Ok(()) }
-                let exported: Result[store.ExportCopy, store.DeployError] = match take allowed {
-                    Ok(()) => match activation_version(head.db) {
-                        Ok(version) => store.begin_export_copy(mut head.db, scratch, take attempt, version),
-                        Error(take why) => Error(Store(take why)),
-                    },
-                    Error(take why) => Error(take why),
-                }
-                if let Error(Store(Poisoned(e))) = exported { return Error(Poisoned(e)) }
-                let _ = channel.try_send(host_result, take exported)
-                continue
-            },
-            Some(ReserveImport(take command)) => {
-                let ReserveImport(checked: take checked, answer: take host_result) = box.unbox(take command)
-                let reserved = store.reserve_import(mut head.db, take checked)
-                let _ = channel.try_send(host_result, take reserved)
-                continue
-            },
-            Some(KeepImport(take command)) => {
-                let KeepImport(built: take built, answer: take host_result) = box.unbox(take command)
-                let digest = store.imported_digest(built)
-                let kept: Result[Inline[u8, 32], store.DeployError] = match store.keep_import(mut head.db, take built) {
-                    Ok(()) => Ok(digest), Error(take why) => Error(take why),
-                }
-                let _ = channel.try_send(host_result, take kept)
-                continue
-            },
-            Some(RetireCaller(take caller)) => { retire_head_caller(mut head, caller); continue },
-            Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
-            Some(HeadFinish) => { release_held(mut head, true)?; return Ok(false) },
-            Some(SyncWake) => { release_held(mut head, false)?; continue },
-            Some(ParkWake) => continue,
-            Some(StoreUnhealthy) => continue,
-            Some(InboxEnded) => { ended = true; continue },
-            Some(CheckHeadIdle) => {
-                if let Some(control) = drain {
-                    let eligible = match control.idle {
-                        Some(ms) => !closed && none(pause) && head_is_idle(head, ms)?,
-                        None => false,
-                    }
-                    idle_vote(control.events, true, eligible)
-                }
-                continue
-            },
-            Some(TriggerWake(at)) => { clear_trigger_timer(mut head, at); continue },
-            Some(TriggerMessage(take message)) => { trigger_message(mut head, take message, closed)?; continue },
-            Some(TriggerDone(a, take outcome)) => { trigger_done(mut head, a, take outcome, closed)?; continue },
-            Some(_) => continue,
-            None => (),
-        }
-        // Ready parked calls rerun before any call not yet started, a write pause included.
-        if rerun_parked(mut head, drain)? { continue }
-        if let Some(control) = drain {
-            if pause_has_work(pause) {
-                if pause_progress(mut head, mut pause, control, held_write)? {
-                    let _ = channel.send(head.out, PubIn(e: Halt))
-                    let _ = channel.send(control.events, RetirePlace)
-                    let _ = channel.receive(control.finish)
-                    return Ok(true)
-                }
-                if none(pause) { refresh_waiting(mut head, true); resuming = true }
-                continue
-            }
-        }
-        if none(pause) && !closed && next_waiting(mut head, drain)? { continue }
-        if list.len(head.group) > 0u64 {
-            if let Some(take more) = settle_probe(inbox) { input = Some(take more); continue }
-            // The group's sync runs while the head takes later work; its replies wait
-            // for that sync (release_held), behind every earlier group's.
-            close_group(mut head)
-            let blocking = !head.wakes
-            release_held(mut head, blocking)?
-            continue
-        }
-        if list.len(head.held) != 0u64 {
-            // Every group is closed. A SyncWake or new work ends this wait.
-            release_held(mut head, false)?
-            if list.len(head.held) != 0u64 {
-                match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => { release_held(mut head, true)?; return Ok(false) } }
-            }
-            continue
-        }
-        if none(pause) && advance_stream_retirement(mut head)? { continue }
-        if ended && list.len(head.parked) == 0u64 { return Ok(false) }
-        match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
-    }
-}
-
 fn head_arrival[G: send, H: shareable + inert + send](mut hd: Head[G, H], take message: Req, closed: bool, hold: bool) -> Result[(), store.Error] waits {
     let Req(e: take e) = take message
     match take e {
@@ -2491,7 +2319,7 @@ fn run_effect[G: send, H: shareable + inert + send](mut db: store.Db, identity: 
             let rec = record_request(q, revision, n, s, identity)?
             // The stored Outcome adds a four-byte tag and a four-byte length.
             let plan = store.Plan(n_e: n, s_e: s, reply_max: MAX_RETURNED_BYTES + 8u64)
-            Ok(Served((go.serve)(mut db, take complete, plan, take rec, handles, q.caller, q.arg)))
+            Ok(Served((go.serve)(mut db, take complete, plan, Some(take rec), handles, q.caller, q.arg)))
         },
         _ => {
             let attempted = store.next_call_info(db)
@@ -3103,7 +2931,7 @@ pub fn journal_attempt_gate[H: shareable + inert + send](take db: store.Db, take
     -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
     let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to,
-        busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new())
+        busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None)
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
     let Head(db: take kept, ..) = take head

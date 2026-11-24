@@ -73,3 +73,21 @@ fn test_stop_unstarted(parent: Dir, clock: Clock, random: Random, tasks: Tasks, 
     result.unwrap(std.dir.remove_all(parent, name))
     Ok(())
 }
+
+// The head's refusal, named for stderr.
+fn opened_text(e: runner.OpenError) -> String {
+    string.from(match e {
+        Store(_) => "calls: place_head: store error",
+        StoreMismatch(_, _) => "calls: place_head: store mismatch",
+        Place(_) => "calls: place_head: place registration failed",
+        Migrate(_) => "calls: place_head: migration failed",
+        NotCurrent(_) => "calls: place_head: activation is not current",
+        IdentityUnknown => "calls: place_head: image identity is unavailable",
+        PublisherStopped => "calls: place_head: publisher stopped",
+        InstallVersion(_) => "calls: place_head: wrong install activation",
+        InstallUncertain(_) => "calls: place_head: install outcome unknown",
+        KeyedOpDropped(_) => "calls: place_head: live keyed operation was dropped",
+        KeyedOpQuotaChanged(..) => "calls: place_head: keyed quota changed",
+        KeyedOpChanged(..) => "calls: place_head: keyed operation changed",
+    })
+}

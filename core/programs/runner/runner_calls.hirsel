@@ -442,21 +442,6 @@ fn served_on_with_place(take fresh: store.Db, c: Clock, tasks: Tasks, n: Net, r:
     }
 }
 
-// The head's refusal, named for stderr.
-fn opened_text(e: runner.OpenError) -> String {
-    string.from(match e {
-        Store(_) => "calls: place_head: store error",
-        StoreMismatch(_, _) => "calls: place_head: store mismatch",
-        Place(_) => "calls: place_head: place registration failed",
-        Migrate(_) => "calls: place_head: migration failed",
-        NotCurrent(_) => "calls: place_head: activation is not current",
-        IdentityUnknown => "calls: place_head: image identity is unavailable",
-        PublisherStopped => "calls: place_head: publisher stopped",
-        InstallVersion(_) => "calls: place_head: wrong install activation",
-        InstallUncertain(_) => "calls: place_head: install outcome unknown",
-    })
-}
-
 // A failed task's primary cause, carried to the law's own failure so stderr names it.
 fn cause_text(take prefix: String, cs: Causes) -> String {
     let mut line = take prefix

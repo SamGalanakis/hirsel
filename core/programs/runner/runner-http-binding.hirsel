@@ -1,5 +1,5 @@
 pub type Method: codec + key + send = Get | Post | Put | Patch | Delete
-pub type Mode: codec + key + send = Read | Subscribe | Stream
+pub type Mode: codec + key + send = Read | Subscribe | Stream | Keyed
 pub type Source: codec + key + send = Path | Query | Body
 
 pub type FieldSource: codec + shareable + send { field: String, source: Source }
@@ -62,7 +62,7 @@ fn binding_mode(kind: Kind, mode: Mode, method: Method) -> bool {
     match kind {
         Compute => mode == Read && (method == Get || method == Post),
         Query => (mode == Read || mode == Subscribe) && method == Get,
-        Transact => mode == Stream && method != Get,
+        Transact => (mode == Stream || mode == Keyed) && method != Get,
         Granted => false,
     }
 }
@@ -111,6 +111,7 @@ fn operation_path(op: String) -> String {
 }
 
 pub fn bind[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding) -> Result[(), RegisterError] {
+    if binding.mode == Keyed { return Error(keyed_registration_error(binding.op, Mode)) }
     let details = check_http_binding(reg, binding) ?=> |take check| InvalidBinding(BindError(op: string.from(binding.op), check: take check))
     list.push(mut reg.bindings, HttpDescribe(binding: take binding, defaults: take details))
     Ok(())

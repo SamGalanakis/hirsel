@@ -73,6 +73,12 @@ fn bucket_budget_at_limit(take config: PlaceConfig[(), (), (), ()]) -> Result[(u
 const BUDGET_RUNNER_BYTES: u64 = (262144 + 1048576 + 2097152) +
     (2097152 + 6711 + 65536 + 262144 + 4194304) + 262144 + 1048576
 
+fn keyed_budget_runner_bytes() -> u64 {
+    // With no configured keys, the startup allowance adds the periodic task
+    // and a single input slot. The declared quota test prices the maps.
+    BUDGET_RUNNER_BYTES + 288 + 4096 + bytes[HeadInput]
+}
+
 fn bucket_budget_store(config: PlaceConfig[(), (), (), ()]) -> u64 {
     let Bucket(backing) = view config.backing else { fail("L60: expected Bucket backing") }
     // The fixture fixes resident, pack, checkpoint and group bytes. Its
@@ -84,7 +90,7 @@ fn bucket_budget_store(config: PlaceConfig[(), (), (), ()]) -> u64 {
 fn exercise_bucket_budget(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
     let config = bucket_budget_config(c, r, tasks, n)
     let store_bytes = bucket_budget_store(config)
-    let root = BUDGET_RUNNER_BYTES + store_bytes
+    let root = keyed_budget_runner_bytes() + store_bytes
     let exact = task.spawn(tasks, bytes root, take config, bucket_budget_at_limit)
     if let Ok(Ok((share, total))) = task.join(take exact) {
         if share != store_bytes || total != store_bytes { return Error("L60: Bucket store term must include capture") }
@@ -145,7 +151,7 @@ fn exercise_bucket_capture(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[
     let id = seed_budget_bucket(capture_budget_config(c, r, tasks, n, endpoint, key))?
     let mut stale = capture_budget_config(c, r, tasks, n, endpoint, key)
     stale.selection = Current(2u64)
-    let root = BUDGET_RUNNER_BYTES + bucket_budget_store(stale)
+    let root = keyed_budget_runner_bytes() + bucket_budget_store(stale)
     let refused = task.spawn(tasks, bytes root, take stale, refused_bucket_place)
     let response = task.join(take refused)
     let _ = task.cancel_join(take server)
@@ -167,7 +173,7 @@ fn exercise_bucket_capture(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[
 fn exercise_local_budgets(take grants: (Dir, Clock, Random, Tasks, Net)) -> Result[(), String] waits {
     let (d, c, r, tasks, n) = take grants
     if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
-    let expected_share = runtime.root_limit() - BUDGET_RUNNER_BYTES
+    let expected_share = runtime.root_limit() - keyed_budget_runner_bytes()
     let memory = budget_config(Memory, c, r, tasks, n)
     let (_, share, memory_total, _) = place_store(memory, None) ?=> |problem| start_text(problem)
     if share != expected_share || memory_total != expected_share { return Error("L60: Memory share") }
@@ -195,7 +201,7 @@ fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) ->
     let low = budget_config(Memory, c, r, tasks, n)
     // Memory has a 1 MiB resident minimum and a 1 MiB keep.
     let minimum = store.planned_bytes(result.unwrap(store.planned(Memory, 2 * 1048576u64, low.sizes)))
-    let short_root = BUDGET_RUNNER_BYTES + minimum - 1
+    let short_root = keyed_budget_runner_bytes() + minimum - 1
     let child = task.spawn(tasks, bytes short_root, (take low, short_root), refused_budget)
     match task.join(take child) {
         Ok(Error(Full(cap))) if cap.requested == minimum && cap.available == minimum - 1 => Ok(()),

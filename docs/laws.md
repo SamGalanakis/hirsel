@@ -29,7 +29,8 @@ language. Under R28 ([reserved](spec/reserved.md)), no row, lock line or baselin
 input to acceptance, lowering, code identity, replay or any observable of
 [SEM-8](spec/semantics.md#sem-8-determinism), and no program reads one. `check`, `build`
 and `run` never read `hirsel.laws`. It is not part of any PROG-10 address or package
-digest.
+digest. Under R29 nothing here adds a cause kind: a failing law still raises `Fail(text)`,
+and rows and comparisons are runner output, never failures.
 
 ## Two checks with two homes
 
@@ -115,9 +116,10 @@ That fallback needs its own spec amendment before it is built.
 
 ## Rows
 
-A row describes one **call site**: the observed function, the test-source definition whose
-body holds the call, and the call's ordinal among that definition's calls to that
-function, in source order. Calls from one site, from any task, are aggregated by
+A row describes one **call site**: the observed function, the definition whose body holds
+the call, and the call's ordinal among that definition's calls to that function, in source
+order. The definition may be a test, a test-source helper or a production function. A
+helper called from several tests gives one site per test, since rows are kept per test. Calls from one site, from any task, are aggregated by
 commutative operations:
 
 - the class is the weakest class observed (below);
@@ -225,7 +227,8 @@ Fields:
 
 - **`hirsel laws write PKG`** recomputes `src`, `sig`, `run`, `bug` and `oracle` and adds
   or removes lines for added and removed tests. It runs no test. A line whose `src` or
-  `sig` changed keeps its `rows` and is marked `rows=pending`.
+  `sig` changed, and a new line, gets `rows=pending`; its old rows are dropped. Only a
+  `--write-laws` run replaces `pending`.
 - **`hirsel test PKG --laws --write-laws`** runs the tests and rewrites the `rows` of every
   test it ran. Other lines are left alone, so a filtered run rewrites only its own lines.
 - **`hirsel laws check PKG`** is lock currency. It exits 1 if writing would change any
@@ -238,8 +241,11 @@ the line for the same test and site in FILE.
 
 FILE is the `hirsel.laws` exported from the human-approved target ref, for example with
 `git show REF:pkg/hirsel.laws`. The working tree's `hirsel.laws` is never the comparison
-input. Sam's 2026-11-22 ruling protects that one file from autonomous agent writes, and an
-agent never moves the approved ref.
+input. Sam's 2026-11-22 ruling protects `hirsel.laws` from autonomous agent writes. This
+document realizes it at that ref: an agent never moves the approved ref or edits its copy.
+On main, agents change `hirsel.laws` only through `laws write` and `--write-laws`, never by
+hand, so the land-time currency check can be kept green. Neither can weaken a comparison,
+because FILE never comes from main.
 
 A row is **red** when:
 
@@ -254,14 +260,15 @@ A row is **red** when:
 - **Per-build row.** The baseline holds a count row and the run produced a per-build row
   instead.
 
-A baseline per-build row is satisfied by any row except a negative one. A test that
-`pending` marks is compared against FILE all the same. FILE comes from the approved ref,
+A baseline per-build row is satisfied by any row except a negative one. A line marked
+`pending` in the working tree is compared against FILE all the same. FILE comes from the approved ref,
 so rewriting a working-tree line cannot weaken the comparison. A stronger row is never
 red, and moving the baseline up is a human's act.
 
 **Narrowed runs are refused.** `--laws-baseline` refuses `--filter`, `--seed`, `--sim`,
 `--seeds`, `--property-corpus` and `--replay` with
-`test: --laws-baseline compares a full run; drop OPTION`. A focused run uses `--laws` and
+`test: --laws-baseline compares a full run; drop OPTION`, and exits 2 as any refused
+argument does. A focused run uses `--laws` and
 reports its subset. It cannot certify the full inventory.
 
 The comparison prints each red row with the baseline beside it and exits 1 when any row is
@@ -277,10 +284,10 @@ that already runs `hirsel test` on small packages.
 |---|---|---|---|
 | L1 | `all(c, u64_in(0, 9), ok)` with `cases = 5`, arm `_ => Ok(())` | test `ok`, row `truncated (run 5, discarded 0; cases=5)` | a catch-all arm passing as `held` |
 | L2 | `all(c, filter(u64_in(0, 3), never), ok)`, arm `Held(_, _) => Ok(())` | `vacuous (Held(0, 4))` | an all-discarded run reported as `held` |
-| L3 | `all(c, u64_in(0, 9), ok)` with `cases = 100` | `held (run 10, discarded 0)` | a wrong count, or the final leaf at the limit reported as `truncated` |
+| L3 | `all(c, u64_in(0, 9), ok)` with `cases = 100`, and again with `cases = 10` | `held (run 10, discarded 0)` both times (prop: reaching the case limit on the final leaf still returns `Held`) | a wrong count, or the final leaf at the limit reported as `truncated` |
 | L4 | L3, baseline `held 10/0`, then the generator narrowed to `u64_in(0, 4)` | `--laws-baseline` red: `held 5/0` below `held 10/0` | a narrowed law staying green |
-| L5 | a test calling `sometimes("big", x > 100)` over `u64_in(0, 9)` | `sometimes big 0`; red against a baseline count of 1 | a lost witness staying green |
+| L5 | a test calling `sometimes("big", x > 100)` over `u64_in(0, 9)` | `sometimes big 0`; red against a baseline whose line lists `sometimes:big` | a lost witness staying green |
 | L6 | L3 under `--laws-baseline` with `--filter x` | refused, exit 2 | a filtered run certifying the inventory |
 | L7 | L3 run twice, the second time reused | the reused row equals the executed row | reuse dropping the row |
-| L8 | `check_tasks` law with 4 cases spawning tasks that call `sometimes("t", true)` | `sometimes t 4` on every `-j`, under the same build | a row depending on task completion order |
+| L8 | `check_tasks` law with 4 cases, each case spawning one task that calls `sometimes("t", true)` once | `sometimes t 4` on every `-j`, under the same build | a row depending on task completion order |
 | L9 | `hirsel laws check` after editing one test body | exit 1, naming that test's `src` | lock currency missing a body change |

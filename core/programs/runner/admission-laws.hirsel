@@ -186,7 +186,7 @@ pub fn law_join_cleanup() -> bool {
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let lease = result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(pub_to)))
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 7u64, to: take to, closed: Some(take closed), ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let _ = take lease
     let mut subs = subscriptions()
     let mut waiting: List[Replies] = list.new()
@@ -457,14 +457,14 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     owner.publisher = Some(channel.sender(to))
     if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else { return false }
 
-    wire_subscribed(mut owner, mut work, 10u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, 10u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     wire_deliver_content(mut owner, mut work, inbox)
     let _ = transport_receive(mut owner, mut work)
 
     let sub = 8u32
-    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     wire_deliver_content(mut owner, mut work, inbox)
-    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
     let old_initial_discarded = match transport_receive(mut owner, mut work) { None => true, _ => false }
     wire_deliver_content(mut owner, mut work, inbox)
     let new_initial = transport_receive(mut owner, mut work)
@@ -475,7 +475,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let version = store.version(snapshot)
     result.unwrap(channel.send(to, PubIn(e: Released(Release(version: version, snapshot: Some(take snapshot), answers: list.new())))))
     let stale = result.unwrap(channel.receive(inbox))
-    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, sub, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     if let WireEvent(e: FromRunner(take old_end)) = take stale {
         result.unwrap(wire_step(mut owner, mut work, WRunner(take old_end)))
     } else { return false }
@@ -490,8 +490,8 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let stale_end_discarded = other_sub_kept && wire_initial_count(renewed, sub, 2u64)
 
     // The old complete can still be in the owner inbox when a replacement arrives.
-    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
-    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(room: None, key: list.new(), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, 3u32, SubscriptionInput(grants: None, room: None, key: list.new(), arg: no_arg(), caller: law_caller(1u64)))
     wire_deliver_content(mut owner, mut work, inbox)
     wire_deliver_content(mut owner, mut work, inbox)
     let stale_complete_discarded = match transport_receive(mut owner, mut work) {
@@ -691,8 +691,8 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
     owner.phase = 3u8
     list.reserve(mut owner.leaving, 1u64)
     owner.join_lease = Some(result.unwrap(WireJoinLease(closing: take closing, publisher: channel.sender(to))))
-    wire_subscribed(mut owner, mut work, 8u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
-    wire_subscribed(mut owner, mut work, 9u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, 8u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    wire_subscribed(mut owner, mut work, 9u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     let idle_sent = match (channel.try_receive(from), channel.try_receive(from)) {
         (Ok(PubIn(e: WireSubscribed(1u64, 8u32, _, _))), Ok(PubIn(e: WireSubscribed(1u64, 9u32, _, _)))) => true,
         _ => false,
@@ -700,7 +700,7 @@ pub fn law_removal_waits_for_writer(tasks: Tasks, c: Clock, r: Random) -> bool {
 
     // The writer holds a content unit: a replacement of 9 and an Unsubscribe of 8 wait.
     work.check = Some(4u64)
-    let replace_9: ServicePlan = PlannedSubscribe(9u32, SubscriptionInput(room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
+    let replace_9: ServicePlan = PlannedSubscribe(9u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(qf)), arg: no_arg(), caller: law_caller(1u64)))
     let replaced = match wire_step(mut owner, mut work, WPrepared(box.new(take replace_9))) { Ok(_) => true, Error(_) => false }
     let unsubscribed = match wire_step(mut owner, mut work, WClient(Unsubscribe(8u32), 0u64)) { Ok(_) => true, Error(_) => false }
     let held = replaced && unsubscribed && held_quiet(from)
@@ -762,7 +762,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     let mut bound_registry = take board_reg
     result.unwrap(bind_query_slots(mut bound_registry, h))
     let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
-    let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    let _ = at_base_generation(mut b, 7u64, 1u32, 1u64, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
 
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let reg = result.unwrap(placed(code.describe(subs_place), 1048576u64))
@@ -784,7 +784,7 @@ pub fn law_repair_one_unsent(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     owner.taken = Some(take root)
     let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 7u64, to: take to_owner, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 7u64, to: take to_owner, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: Some(take register), handed: 0u64, http_credit: None))
 
     // The first repair: due, and the owner drained.
     let _ = mark_due(mut b.subs, 7u64, 1u32)
@@ -849,7 +849,7 @@ pub fn law_join_waits(tasks: Tasks, c: Clock, r: Random) -> bool waits {
     owner.phase = 3u8
     // Another session's message fills PubIn.
     result.unwrap(channel.try_send(to_pub, PubIn(e: Drained)))
-    let subscribe: ServicePlan = PlannedSubscribe(1u32, SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
+    let subscribe: ServicePlan = PlannedSubscribe(1u32, SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64)))
     let applied = match wire_step(mut owner, mut work, WPrepared(box.new(take subscribe))) { Ok(_) => true, Error(_) => false }
     let not_refused_full = wire_no_end(work.output)
     let draining = task.spawn(tasks, bytes 1048576u64, BurstDrain(from: take from_pub, back: take back_to), burst_drain)

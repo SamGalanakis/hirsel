@@ -44,6 +44,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                 continue
             },
             Halt => {
+                for i in 0u64 .. list.len(joined) { revoke_room_grants(mut joined[i]) }
                 round_disarm(take rounds)
                 return
             },
@@ -85,10 +86,13 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                         },
                     }
                     // G2 step 3: every fence of the round, then R, before anything is offered.
+                    stage_room_grants(b.subs, mut joined, newest_at)
                     fence_round(mut joined, take fenced, newest_at, mut rounds)
+                    wake_room_grants(mut joined)
                 }
             },
             RelayJoined(take pending) => { relay = take pending },
+            RoomRounds(to) => { let _ = channel.try_send(to, latest.handle(rounds.round)) },
             Joined(take j) => {
                 let Join(to: take to, told: take told, mark: take mark, closed: take closed, identity: take id, fence: take fence, progress: take progress, taken: take taken, first: take first, http_credit: take http_credit) = take j
                 let wake: Option[Sender[WireEvent]] = match closed {
@@ -106,7 +110,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                 match take reserved {
                     Ok(take fences) => {
                         minted += 1u64
-                        list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), reset: false, read_failed: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64, http_credit: take http_credit))
+                        list.push(mut joined, Joiner(grants: None, who: minted, to: take to, closed: take closed, ended: list.new(), reset: false, read_failed: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64, http_credit: take http_credit))
                         let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
                         // v2.22: the Subscribe that made the owner join, at this base (G3).
                         if let Some(take f) = take first {
@@ -122,7 +126,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                     let _ = channel.try_send(sender, wire_event(JoinReady))
                 }
             },
-            Subscribed(who, sub, take caller, take key, take arg) => publish_wire_subscription(mut b, mut joined, mut owes, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg, caller: take caller)),
+            Subscribed(who, sub, take caller, take key, take arg) => publish_wire_subscription(mut b, mut joined, mut owes, who, sub, 0u64, SubscriptionInput(grants: None, room: None, key: take key, arg: take arg, caller: take caller)),
             WireSubscribed(who, sub, generation, take input) => publish_wire_subscription(mut b, mut joined, mut owes, who, sub, generation, take input),
             Unsubscribed(who, sub) => {
                 let _ = remove_sub(mut b.subs, who, sub)
@@ -134,6 +138,8 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
         }
         sweep(mut b.subs, mut joined)
         repair(mut b, mut joined, mut owes)
+        stage_room_grants(b.subs, mut joined, at)
+        wake_room_grants(mut joined)
         http_project_owes(mut b, mut owes)
         settle(mut b.subs, mut joined, mut waiting, take owes, at)
         tell_relay(mut relay)

@@ -31,6 +31,6 @@ fn deliver_round_group(mut subs: Subscriptions, mut owes: List[Owe], id: SubId, 
         Ok(body) => if !append_round_group(mut owes[k], id, generation, projected, body, limit) {
             reset_session(mut subs, mut owes, id.who, version)
         },
-        Error(problem) => end_round_sub(mut subs, mut owes[k], id, generation, Refused(Budget(room(problem)))),
+        Error(problem) => end_round_sub(mut subs, mut owes[k], id, generation, Refused(Budget(capacity_room(problem)))),
     }
 }

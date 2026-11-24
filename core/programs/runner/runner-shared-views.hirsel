@@ -166,7 +166,7 @@ fn view_image_rows[G: send, H: shareable + inert + send](b: Board[G, H], key: By
         Ok(Ok(Ok(()))) => Ok(()),
         Ok(Ok(Error(take problem))) => Error(finish_projection(take problem, clone(image.reads))),
         Ok(Error(limit)) => Error(Faulted(Failed(OutOfTime(limit.steps)), clone(image.reads))),
-        Error(problem) => Error(Stopped(Refused(Budget(room(problem))))),
+        Error(problem) => Error(Stopped(Refused(Budget(capacity_room(problem))))),
     }
 }
 
@@ -194,7 +194,7 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
         Ok(take output) => take output,
         Error(problem) => {
             if let Some(entry) = sub_at(b.subs, who, sub) {
-                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: entry.generation, version: at, outcome: Refused(Budget(room(problem)))))
+                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: entry.generation, version: at, outcome: Refused(Budget(capacity_room(problem)))))
             }
             end_entry(mut b.subs, who, sub)
             return list.remove(mut owes, 0u64)
@@ -222,7 +222,7 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
                     stamp_rows(mut owes[0u64].generations, sub, generation)
                     list.push(mut owes[0u64].complete, sub)
                 },
-                Error(problem) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, Refused(Budget(room(problem)))),
+                Error(problem) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, Refused(Budget(capacity_room(problem)))),
             }
         },
         Error(Stopped(take why)) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),

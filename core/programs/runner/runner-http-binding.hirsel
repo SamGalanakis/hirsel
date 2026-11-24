@@ -64,6 +64,7 @@ fn binding_mode(kind: Kind, mode: Mode, method: Method) -> bool {
         Query => (mode == Read || mode == Subscribe) && method == Get,
         Transact => (mode == Stream || mode == Keyed) && method != Get,
         Granted => false,
+        Room => false,
     }
 }
 

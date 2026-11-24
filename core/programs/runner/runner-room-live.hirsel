@@ -1,0 +1,120 @@
+// Encoded Parts stay in the session's LiveBuffer. The Part ranges are also
+// the receiver's admission checks, so filtering does not decode any payload.
+const ROOM_LIVE_PREFIX: u64 = 8u64
+const ROOM_PART_FIXED: u64 = 34u64
+
+type RoomPartRange: send { identity: RoomPartIdentity, start: u64, end: u64 }
+
+type RoomLiveBuffer: send {
+    data: Bytes,
+    parts: List[RoomPartRange],
+    limit: u64,
+}
+
+fn room_live_buffer(limit: u64) -> RoomLiveBuffer {
+    let data: Bytes = list.with_capacity(limit + 10u64)
+    let parts: List[RoomPartRange] = list.with_capacity(ROOMS_PER_SESSION)
+    let mut buffer = RoomLiveBuffer(data: take data, parts: take parts, limit)
+    room_live_clear(mut buffer)
+    take buffer
+}
+
+fn room_live_clear(mut buffer: RoomLiveBuffer) {
+    list.clear(mut buffer.parts)
+    list.clear(mut buffer.data)
+    std.codec.put_u32(11u32, mut buffer.data)
+    std.codec.put_u32(0u32, mut buffer.data)
+}
+
+fn room_live_available(buffer: RoomLiveBuffer) -> u64 {
+    buffer.limit - list.len(buffer.data)
+}
+
+fn room_live_append(mut buffer: RoomLiveBuffer, part: RoomPartIdentity, write: scoped fn(mut Bytes)) {
+    let offset = list.len(buffer.data)
+    write(mut buffer.data)
+    list.push(mut buffer.parts, RoomPartRange(identity: part, start: offset, end: list.len(buffer.data)))
+    let count: u32 = int.narrow(list.len(buffer.parts))
+    list.set_word_le(mut buffer.data, 4u64, count)
+}
+
+fn room_live_keep(mut buffer: RoomLiveBuffer, keep: scoped fn(RoomPartIdentity) -> bool) -> bool {
+    let mut end = ROOM_LIVE_PREFIX
+    let mut count = 0u32
+    for part in buffer.parts {
+        if !keep(part.identity) { continue }
+        let size = part.end - part.start
+        if part.start != end { list.copy_within(mut buffer.data, part.start, end, size) }
+        end += size
+        count += 1u32
+    }
+    list.truncate(mut buffer.data, end)
+    list.set_word_le(mut buffer.data, 4u64, count)
+    count != 0u32
+}
+
+fn room_part_start(mut out: Bytes, sub: u32, complete: bool, you: Option[u32]) {
+    std.codec.put_u32(sub, mut out)
+    list.push(mut out, if complete { 1u8 } else { 0u8 })
+    match you {
+        Some(peer) => { std.codec.put_u32(1u32, mut out); std.codec.put_u32(peer, mut out) },
+        None => std.codec.put_u32(0u32, mut out),
+    }
+}
+
+fn room_part_end(mut out: Bytes, gap: u32, lost: u32, full: bool) {
+    std.codec.put_u32(gap, mut out)
+    std.codec.put_u32(lost, mut out)
+    list.push(mut out, if full { 1u8 } else { 0u8 })
+}
+
+fn room_live_full(mut buffer: RoomLiveBuffer, part: RoomPartIdentity) {
+    room_live_append(mut buffer, part, scoped fn(mut data: Bytes) {
+        room_part_start(mut data, part.sub, false, None)
+        for _ in 0u64 .. 4u64 { std.codec.put_u32(0u32, mut data) }
+        room_part_end(mut data, 0u32, 0u32, true)
+    })
+}
+
+// One fixed selection per room. Reserve the head message and its sender's
+// diff before taking other diffs. The caller looks for the oldest deliverable
+// ring entry before beginning this selection.
+type RoomPartSlots {
+    included: Inline[bool, 256],
+    available: u64,
+    next: u64,
+    blocked_state: bool,
+}
+
+fn room_part_slots(capacity: u64, head_message: u64, sender_slot: Option[u64],
+    sender_diff: u64, cursor: u64) -> Option[RoomPartSlots] {
+    let available = int.checked_sub(capacity, head_message + sender_diff)?
+    let mut included: Inline[bool, 256] = [false; 256]
+    if let Some(sender) = sender_slot { included[sender] = true }
+    Some(RoomPartSlots(included, available, next: cursor, blocked_state: false))
+}
+
+fn room_part_add_slot(mut plan: RoomPartSlots, position: u64, cost: u64) -> bool {
+    if plan.included[position] || cost > plan.available { return false }
+    plan.available -= cost
+    plan.included[position] = true
+    true
+}
+
+fn room_live_frame(mut buffer: RoomLiveBuffer) {
+    let size = list.len(buffer.data)
+    let header = if size <= 125u64 { 2u64 } else if size <= 65535u64 { 4u64 } else { 10u64 }
+    for _ in 0u64 .. header { list.push(mut buffer.data, 0u8) }
+    list.copy_within(mut buffer.data, 0u64, header, size)
+    buffer.data[0u64] = 130u8
+    if header == 2u64 {
+        buffer.data[1u64] = int.narrow(size)
+    } else if header == 4u64 {
+        buffer.data[1u64] = 126u8
+        let short: u16 = int.narrow(size)
+        list.set_word_be(mut buffer.data, 2u64, short)
+    } else {
+        buffer.data[1u64] = 127u8
+        list.set_word_be(mut buffer.data, 2u64, size)
+    }
+}

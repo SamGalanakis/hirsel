@@ -80,7 +80,7 @@ fn http_owner(pub_to: Sender[PubIn], inbox_size: u64) -> Result[(HttpOwner, Http
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let fence = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
-    let retirement = HttpRetirement(mark: Some(take mark), publisher: channel.sender(pub_to)) ?=> |(c, _)| Budget(room(c))
+    let retirement = HttpRetirement(mark: Some(take mark), publisher: channel.sender(pub_to)) ?=> |(c, _)| Budget(capacity_room(c))
     let listening = HttpOwner(retirement: take retirement, from: take from, to: take to, admit: take admit, fence: take fence, round: None,
         progress: take token, closing: take closing, publisher: channel.sender(pub_to))
     Ok((take listening, HttpJoinPorts(telling: take telling, marked: take marked, closed: take closed, progress: take progress)))
@@ -96,8 +96,8 @@ fn http_join(owner: HttpOwner, take ports: HttpJoinPorts, take input: Subscripti
 }
 
 fn http_subscription_input(take caller: Caller, take key: Bytes, take arg: Bytes, budget: u64, frame_limit: u64) -> Result[SubscriptionInput, Refusal] {
-    let mut quota = subscription_room(budget, 1u64, budget, frame_limit) ?=> |c| Budget(room(c))
-    Ok(subscription_hold_for(mut quota, take caller, take key, take arg, true) ?=> |c| Budget(room(c)))
+    let mut quota = subscription_room(budget, 1u64, budget, frame_limit) ?=> |c| Budget(capacity_room(c))
+    Ok(subscription_hold_for(mut quota, take caller, take key, take arg, true) ?=> |c| Budget(capacity_room(c)))
 }
 
 fn http_subscribe(access: HttpReadAccess, take sent: Send, budget: u64) -> Result[HttpOwner, Refusal] {

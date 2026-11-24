@@ -44,7 +44,7 @@ fn attempt_grants[G: send](to: Sender[GrantRequest[G]], take ctx: TriggerContext
     }
     match channel.receive(inbox) {
         Ok(Ok(take given)) => Ok(take given),
-        Ok(Error(cap)) => Error(Failed(OutOfBytes(room(cap)))),
+        Ok(Error(cap)) => Error(Failed(OutOfBytes(capacity_room(cap)))),
         Error(_) => Error(Failed(Gone)),
     }
 }

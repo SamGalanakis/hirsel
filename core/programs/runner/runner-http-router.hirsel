@@ -334,6 +334,7 @@ fn http_generated_handler[G: send, H: shareable + inert + send, B: send](req: st
             }
         },
         Granted => Ok(Reply(http_refusal(NoEntry)?)),
+        Room => Ok(Reply(http_refusal(NoEntry)?)),
     }
 }
 

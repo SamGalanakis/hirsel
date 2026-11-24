@@ -18,17 +18,17 @@ fn http_group_keys(group: Arc[Bytes], bindings: List[BoundSlot], maximum: u64) -
             },
             Ok(Error(causes)) => {
                 for cause in causes {
-                    if let Capacity(c) = cause.kind { return Error(Refused(Budget(room(c)))) }
+                    if let Capacity(c) = cause.kind { return Error(Refused(Budget(capacity_room(c)))) }
                     break
                 }
                 Error(projection_cause(causes))
             },
-            Error(c) => Error(Refused(Budget(room(c)))),
+            Error(c) => Error(Refused(Budget(capacity_room(c)))),
         }
     }
     match take encoded_keys {
         Ok(take result) => take result,
-        Error(c) => Error(Refused(Budget(room(c)))),
+        Error(c) => Error(Refused(Budget(capacity_room(c)))),
     }
 }
 

@@ -1,0 +1,188 @@
+type RoomGrant: key + shareable + send {
+    sub: u32,
+    instance: u64,
+    grant: Grant,
+    member_epoch: u32,
+    publish_epoch: u32,
+}
+
+type RoomGrantSet: shareable + send {
+    prior: Inline[Option[RoomGrant], 8],
+    latest: Inline[Option[RoomGrant], 8],
+    round: u64,
+    seq: u64,
+}
+
+fn empty_room_grants() -> RoomGrantSet {
+    let absent: Option[RoomGrant] = None
+    RoomGrantSet(prior: [absent; 8], latest: [absent; 8], round: 0u64, seq: 0u64)
+}
+
+fn room_grant_epoch(prior: Option[RoomGrant], sub: u32, instance: u64, grant: Grant) -> Option[RoomGrant] {
+    let mut member = 0u32
+    let mut publish_epoch = 0u32
+    if let Some(old) = prior {
+        if old.instance == instance {
+            member = old.member_epoch
+            publish_epoch = old.publish_epoch
+            if !room_denied(old.grant) && room_denied(grant) { member = int.checked_add(member, 1u32)? }
+            if room_joined(old.grant) && !room_joined(grant) { publish_epoch = int.checked_add(publish_epoch, 1u32)? }
+        }
+    }
+    Some(RoomGrant(sub: sub, instance: instance, grant: grant, member_epoch: member, publish_epoch: publish_epoch))
+}
+
+fn room_denied(g: Grant) -> bool { match g { Denied => true, _ => false } }
+fn room_joined(g: Grant) -> bool { match g { Join => true, _ => false } }
+
+type RoomAction = ChangeState | SendToRoom | SendToPeer
+
+fn room_permits(action: RoomAction, grant: Grant) -> bool {
+    match grant {
+        Denied => false,
+        Watch => match action { SendToPeer => true, _ => false },
+        Join => true,
+    }
+}
+
+fn selected_room_grant(register: RoomGrantSet, committed: u64, sub: u32) -> Option[RoomGrant] {
+    let side = if register.round <= committed { register.latest } else { register.prior }
+    for i in 0u64 .. ROOMS_PER_SESSION {
+        if let Some(entry) = side[i] {
+            if entry.sub == sub { return Some(entry) }
+        }
+    }
+    None
+}
+
+fn room_grant_at(rounds: Latest[RoundAt], register: Latest[RoomGrantSet], sub: u32) -> Option[RoomGrant] {
+    loop {
+        let before = latest.read(rounds).at
+        if before == 18446744073709551615u64 { return None }
+        let grants = latest.read(register)
+        if before == latest.read(rounds).at { return selected_room_grant(grants, before, sub) }
+    }
+}
+
+fn room_grant_pair(rounds: Latest[RoundAt], sender: Latest[RoomGrantSet], from_sub: u32,
+    recipient: Latest[RoomGrantSet], to_sub: u32) -> Option[(RoomGrant, RoomGrant)] {
+    loop {
+        let before = latest.read(rounds).at
+        if before == 18446744073709551615u64 { return None }
+        let from = latest.read(sender)
+        let to = latest.read(recipient)
+        if before == latest.read(rounds).at && from.seq == latest.read(sender).seq {
+            let a = selected_room_grant(from, before, from_sub)?
+            let b = selected_room_grant(to, before, to_sub)?
+            return Some((a, b))
+        }
+    }
+}
+
+type RoomGrantPublisher: send {
+    root: Latest[RoomGrantSet],
+    current: Arc[RoomGrantSet],
+    spares: List[Arc[RoomGrantSet]],
+    wake: bool,
+}
+
+fn reserve_room_grants(take root: Latest[RoomGrantSet]) -> Result[RoomGrantPublisher, Capacity] {
+    let mut spares: List[Arc[RoomGrantSet]] = list.with_capacity(4u64)
+    for _ in 0u64 .. 4u64 { list.push(mut spares, arc.new(empty_room_grants())) }
+    let current = latest.read(root)
+    Ok(RoomGrantPublisher(root: take root, current: take current, spares: take spares, wake: false))
+}
+
+fn publish_room_grants(mut grants: RoomGrantPublisher, next: Inline[Option[RoomGrant], 8], at: u64) -> bool {
+    let prior = grants.current.latest
+    if prior == next { return false }
+    let seq = grants.current.seq + 1u64
+    for i in 0u64 .. list.len(grants.spares) {
+        let written = arc.with_unique(mut grants.spares[i], scoped fn(mut value: RoomGrantSet) {
+            value.prior = prior
+            value.latest = next
+            value.round = at
+            value.seq = seq
+        })
+        if let Some(_) = written {
+            let old = arc.share(grants.current)
+            let selected = list.set(mut grants.spares, i, take old)
+            let _ = replace(mut grants.current, take selected)
+            latest.publish(grants.root, arc.share(grants.current))
+            return true
+        }
+    }
+    fail("room grants: all reserved versions held")
+}
+
+// The single-register acceptance loads R once on either side of its register.
+fn read_room_grants(rounds: Latest[RoundAt], register: Latest[RoomGrantSet]) -> Option[(Arc[RoomGrantSet], u64)] {
+    loop {
+        let before = latest.read(rounds).at
+        if before == ROUND_HALTED { return None }
+        let grants = latest.read(register)
+        if before == latest.read(rounds).at { return Some((take grants, before)) }
+    }
+}
+
+fn reserve_sub_room_grants(mut owner: Joiner, input: SubscriptionInput) -> bool {
+    if let Some(_) = owner.grants { return true }
+    let Some(root) = view input.grants else { return true }
+    match reserve_room_grants(latest.handle(root)) {
+        Ok(take grants) => { owner.grants = Some(take grants); true },
+        Error(_) => false,
+    }
+}
+
+fn current_room_grant(subs: Subscriptions, who: u64, sub: u32) -> Option[(u64, Grant)] {
+    let entry = sub_at(subs, who, sub)?
+    let Some(_) = entry.input.grants else { return None }
+    if !entry.live { return Some((entry.generation, Denied)) }
+    let shared = map.get(subs.indexed, entry.routes)?
+    let Some(image) = shared.image else { return Some((entry.generation, Denied)) }
+    let codec: std.codec.Codec[Grant] = std.codec.of()
+    let value = result.unwrap(std.codec.decode(codec, image.value))
+    Some((entry.generation, value))
+}
+
+fn stage_room_grants(subs: Subscriptions, mut joined: List[Joiner], at: u64) {
+    for i in 0u64 .. list.len(joined) {
+        let Some(take value) = replace(mut joined[i].grants, None) else { continue }
+        let mut grants = take value
+        let who = joined[i].who
+        let mut next = empty_room_grants().latest
+        if let Some(group) = map.get(subs.by_session, who) {
+            let mut count = 0u64
+            for (sub, _) in group {
+                let Some((instance, grant)) = current_room_grant(subs, who, sub) else { continue }
+                let previous = selected_room_grant(grants.current, at, sub)
+                if count == ROOMS_PER_SESSION { fail("room grants: owner exceeded reserved subscriptions") }
+                next[count] = room_grant_epoch(previous, sub, instance, grant)
+                count += 1u64
+            }
+        }
+        if publish_room_grants(mut grants, next, at) { grants.wake = true }
+        joined[i].grants = Some(take grants)
+    }
+}
+
+fn wake_room_grants(mut joined: List[Joiner]) {
+    for i in 0u64 .. list.len(joined) {
+        let Some(take value) = replace(mut joined[i].grants, None) else { continue }
+        let mut grants = take value
+        if grants.wake {
+            let _ = channel.try_send(joined[i].to, wire_event(RegrantRoom))
+            grants.wake = false
+        }
+        joined[i].grants = Some(take grants)
+    }
+}
+
+fn revoke_room_grants(mut owner: Joiner) {
+    let Some(take value) = replace(mut owner.grants, None) else { return }
+    let mut grant = take value
+    let at = grant.current.round
+    if publish_room_grants(mut grant, empty_room_grants().latest, at) {
+        let _ = channel.try_send(owner.to, wire_event(RegrantRoom))
+    }
+}

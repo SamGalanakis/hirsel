@@ -1,0 +1,92 @@
+const ROOM_STATE_PENDING: u8 = 1u8
+
+type RoomMember: send {
+    sub: u32,
+    caller: Caller,
+    grant: RoomGrant,
+    peer: u32,
+    admission: u64,
+    room_slot: u8,
+    state: Bytes,
+    state_present: bool,
+    told: List[u32],
+    changed: List[u8],
+    cursor: u64,
+    state_turn: bool,
+    complete: bool,
+    gap: u32,
+    lost: u32,
+}
+
+fn room_member(sub: u32, take caller: Caller, grant: RoomGrant, room_slot: u8, bounds: RoomBounds) -> RoomMember {
+    let peers: u64 = int.widen(bounds.peers)
+    let state_limit: u64 = int.widen(bounds.state)
+    let state_bytes: Bytes = list.with_capacity(state_limit)
+    let mut told: List[u32] = list.with_capacity(peers)
+    let mut changed: List[u8] = list.with_capacity(peers)
+    list.fill(mut told, peers, 0u32)
+    list.fill(mut changed, peers, 0u8)
+    RoomMember(sub, caller: take caller, grant, peer: 0u32, admission: 0u64, room_slot,
+        state: take state_bytes, state_present: false, told: take told, changed: take changed,
+        cursor: 0u64, state_turn: false, complete: false, gap: 0u32, lost: 0u32)
+}
+
+fn room_install_member(mut member: RoomMember, peer: u32, admission: u64) {
+    member.peer = peer
+    member.admission = admission
+    member.complete = true
+    member.cursor = 0u64
+    member.state_turn = false
+    member.gap = 0u32
+    member.lost = 0u32
+    for i in 0u64 .. list.len(member.told) {
+        member.told[i] = 0u32
+        member.changed[i] = ROOM_STATE_PENDING
+    }
+}
+
+fn same_room_membership(a: RoomGrant, b: RoomGrant) -> bool {
+    a.instance == b.instance && a.member_epoch == b.member_epoch && !room_denied(a.grant) && !room_denied(b.grant)
+}
+
+fn room_accept_state(member: RoomMember, effective: RoomGrant, admission: u64, publish_epoch: u32) -> bool {
+    member.admission != 0u64 && member.admission == admission && same_room_membership(member.grant, effective) &&
+        effective.publish_epoch == publish_epoch && room_permits(ChangeState, effective.grant)
+}
+
+fn room_update_state(mut member: RoomMember, value: Option[View[Bytes]]) {
+    list.clear(mut member.state)
+    member.state_present = false
+    if let Some(state_value) = value {
+        list.append(mut member.state, state_value)
+        member.state_present = true
+    }
+}
+
+fn room_accept_loss(mut member: RoomMember, admission: u64, lost: u32) {
+    if admission != 0u64 && member.admission == admission {
+        member.lost = int.saturating_add(member.lost, lost)
+    }
+}
+
+fn room_target(destination: Option[u32], from_peer: u32, to_peer: u32) -> bool {
+    if to_peer == 0u32 { return false }
+    match destination {
+        Some(peer) => to_peer == peer,
+        None => to_peer != from_peer,
+    }
+}
+
+type RoomPartIdentity: key + send {
+    sub: u32,
+    instance: u64,
+    member_epoch: u32,
+    admission: u64,
+}
+
+fn room_accept_part(effective: RoomGrant, part: RoomPartIdentity, mut held_admission: u64) -> bool {
+    if effective.sub != part.sub || effective.instance != part.instance ||
+        effective.member_epoch != part.member_epoch || room_denied(effective.grant) { return false }
+    if held_admission == 0u64 { held_admission = part.admission }
+    held_admission == part.admission
+}

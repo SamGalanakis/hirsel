@@ -19,7 +19,7 @@ fn terminal_age_case(tasks: Tasks, clock: Clock, random: Random, replaced: bool)
     let (to, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
     let _ = channel.try_send(to, wire_event(FromRunner(update(6u64, None, list.new()))))
-    list.push(mut joined, Joiner(who: 1u64, to: take to, closed: None, ended: list.new(),
+    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take to, closed: None, ended: list.new(),
         reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false,
         progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut active = subscriptions()

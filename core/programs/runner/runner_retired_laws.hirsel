@@ -285,8 +285,8 @@ fn retired_state(c: Clock, r: Random) -> bool waits {
     let mut ended: List[TerminalUpdate] = list.new()
     list.push(mut ended, TerminalUpdate(sub: 1u32, generation: 0u64, version: at, outcome: Refused(Overloaded)))
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
-    list.push(mut joined, Joiner(who: 2u64, to: take m_to, closed: None, ended: take ended, reset: false, read_failed: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take l_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: Some(take l_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 2u64, to: take m_to, closed: None, ended: take ended, reset: false, read_failed: false, mark: Some(take m_mark), identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut outcomes: List[KeyedDone] = list.new()
     list.push(mut outcomes, KeyedDone(stream: no_arg(), p: 0u64, outcome: Refused(Overloaded)))
     let mut waiting: List[Replies] = list.new()
@@ -558,7 +558,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     let (full_to, _full_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let (progressed, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.new()
-    list.push(mut joined, Joiner(who: 4u64, to: take full_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 4u64, to: take full_to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: Some(take progress), progressed: false, taken: None, handed: 0u64, http_credit: None))
     let mut bounced = 0u64
     let mut i = 0u64
     while i < list.len(owes_c) {

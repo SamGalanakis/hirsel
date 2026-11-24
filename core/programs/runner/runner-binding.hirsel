@@ -268,8 +268,8 @@ fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H]
             Ok(Ok(Ok(Ok(take why)))) => take why,
             Ok(Ok(Ok(Error(_)))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
             Ok(Ok(Error(_))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
-            Ok(Error(c)) => Some(Budget(room(c))),
-            Error(c) => Some(Budget(room(c))),
+            Ok(Error(c)) => Some(Budget(capacity_room(c))),
+            Error(c) => Some(Budget(capacity_room(c))),
         }
     }
     let description = fn() -> Result[std.codec.Schema, std.codec.EncodeError] { std.codec.describe(ca) }

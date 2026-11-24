@@ -1,0 +1,294 @@
+type RoomDiff {
+    peer: u32, joined_bytes: u64, state_bytes: u64, left: bool,
+}
+
+fn relay_peer_id(relay: RoomRelay, peer: RoomPeer) -> u32 {
+    match room_desk_slot(relay, peer.session, peer.seat) {
+        Some(seat) => seat.member.peer,
+        None => 0u32,
+    }
+}
+
+fn room_diff(relay: RoomRelay, peers: List[Option[RoomPeer]], member: RoomMember, position: u64) -> RoomDiff {
+    let previous = member.told[position]
+    if let Some(peer) = peers[position] {
+        if let Some(seat) = room_desk_slot(relay, peer.session, peer.seat) {
+            let current = seat.member.peer
+            let join_size = if current != previous { 9u64 + list.len(seat.member.caller.subject) } else { 0u64 }
+            let current_size = if seat.member.state_present { 12u64 + list.len(seat.member.state) } else { 8u64 }
+            return RoomDiff(peer: current, joined_bytes: join_size, state_bytes: current_size, left: previous != 0u32 && previous != current)
+        }
+    }
+    RoomDiff(peer: 0u32, joined_bytes: 0u64, state_bytes: 0u64, left: previous != 0u32)
+}
+
+fn room_diff_size(diff: RoomDiff) -> u64 {
+    diff.joined_bytes + diff.state_bytes + if diff.left { 4u64 } else { 0u64 }
+}
+
+fn room_head_message(relay: RoomRelay, peers: List[Option[RoomPeer]], member: RoomMember, mut ring: RoomRing, mut lost: u32)
+    -> Option[(u64, RingMessage)] {
+    let mut at = 0u64
+    while at < ring.used {
+        let entry = room_ring_message(ring, at)
+        let len: u64 = int.widen(entry.len)
+        let next = at + ROOM_RING_HEADER + len
+        if !entry.consumed && entry.room_slot == member.room_slot {
+            if entry.recv_adm != member.admission {
+                room_ring_consume(mut ring, at)
+            } else {
+                let sender: u64 = int.widen(entry.from_slot)
+                let current = match peers[sender] { Some(peer) => relay_peer_id(relay, peer), None => 0u32 }
+                if member.told[sender] == entry.from_peer || current == entry.from_peer { return Some((at, entry)) }
+                room_ring_consume(mut ring, at)
+                lost = int.saturating_add(lost, 1u32)
+            }
+        }
+        at = next
+    }
+    None
+}
+
+fn reserve_room_part(relay: RoomRelay, peers: List[Option[RoomPeer]], member: RoomMember, room_bytes: u64, head: Option[RingMessage]) -> Option[RoomPartSlots] {
+    let you_bytes = if member.complete { 4u64 } else { 0u64 }
+    let capacity = int.checked_sub(room_bytes, ROOM_PART_FIXED + you_bytes)?
+    let mut sender: Option[u64] = None
+    let mut diff_size = 0u64
+    let mut message_size = 0u64
+    if let Some(entry) = head {
+        let from: u64 = int.widen(entry.from_slot)
+        let len: u64 = int.widen(entry.len)
+        message_size = 9u64 + len
+        if member.changed[from] != 0u8 {
+            sender = Some(from)
+            diff_size = room_diff_size(room_diff(relay, peers, member, from))
+        }
+    }
+    let mut selected = room_part_slots(capacity, message_size, sender, diff_size, member.cursor)?
+    for _ in 0u64 .. list.len(peers) {
+        let pos = selected.next
+        selected.next = (pos + 1u64) % list.len(peers)
+        if member.changed[pos] == 0u8 || selected.included[pos] { continue }
+        if !room_part_add_slot(mut selected, pos, room_diff_size(room_diff(relay, peers, member, pos))) {
+            selected.next = pos
+            selected.blocked_state = true
+            break
+        }
+    }
+    Some(take selected)
+}
+
+fn room_write_joins(relay: RoomRelay, peers: List[Option[RoomPeer]], member: RoomMember, selected: RoomPartSlots, mut out: Bytes) {
+    let count_at = list.len(out)
+    std.codec.put_u32(0u32, mut out)
+    let mut count = 0u32
+    for i in 0u64 .. list.len(peers) {
+        if !selected.included[i] { continue }
+        let Some(peer) = peers[i] else { continue }
+        let Some(seat) = room_desk_slot(relay, peer.session, peer.seat) else { continue }
+        if seat.member.peer == member.told[i] { continue }
+        let source_caller: View[Caller] = seat.member.caller
+        std.codec.put_u32(seat.member.peer, mut out)
+        list.push(mut out, source_caller.issuer)
+        std.codec.put_u32(int.narrow(list.len(source_caller.subject)), mut out)
+        list.append(mut out, source_caller.subject)
+        count += 1u32
+    }
+    list.set_word_le(mut out, count_at, count)
+}
+
+fn room_write_states(relay: RoomRelay, peers: List[Option[RoomPeer]], selected: RoomPartSlots, mut out: Bytes) {
+    let count_at = list.len(out)
+    std.codec.put_u32(0u32, mut out)
+    let mut count = 0u32
+    for i in 0u64 .. list.len(peers) {
+        if !selected.included[i] { continue }
+        let Some(peer) = peers[i] else { continue }
+        let Some(seat) = room_desk_slot(relay, peer.session, peer.seat) else { continue }
+        std.codec.put_u32(seat.member.peer, mut out)
+        if seat.member.state_present {
+            std.codec.put_u32(1u32, mut out)
+            std.codec.put_u32(int.narrow(list.len(seat.member.state)), mut out)
+            list.append(mut out, seat.member.state)
+        } else {
+            std.codec.put_u32(0u32, mut out)
+        }
+        count += 1u32
+    }
+    list.set_word_le(mut out, count_at, count)
+}
+
+fn room_write_left(relay: RoomRelay, peers: List[Option[RoomPeer]], member: RoomMember, selected: RoomPartSlots, mut out: Bytes) {
+    let count_at = list.len(out)
+    std.codec.put_u32(0u32, mut out)
+    let mut count = 0u32
+    for i in 0u64 .. list.len(peers) {
+        if !selected.included[i] || member.told[i] == 0u32 { continue }
+        if room_diff(relay, peers, member, i).left {
+            std.codec.put_u32(member.told[i], mut out)
+            count += 1u32
+        }
+    }
+    list.set_word_le(mut out, count_at, count)
+}
+
+fn room_write_messages(relay: RoomRelay, peers: List[Option[RoomPeer]], member: RoomMember, selected: RoomPartSlots,
+    mut ring: RoomRing, mut out: Bytes, mut available: u64, mut dropped: u32) {
+    let count_at = list.len(out)
+    std.codec.put_u32(0u32, mut out)
+    let mut count = 0u32
+    let mut at = 0u64
+    while at < ring.used {
+        let entry = room_ring_message(ring, at)
+        let len: u64 = int.widen(entry.len)
+        let next = at + ROOM_RING_HEADER + len
+        if !entry.consumed && entry.room_slot == member.room_slot && entry.recv_adm == member.admission {
+            let sender: u64 = int.widen(entry.from_slot)
+            let current = match peers[sender] { Some(peer) => relay_peer_id(relay, peer), None => 0u32 }
+            let seen = member.told[sender] == entry.from_peer || (selected.included[sender] && current == entry.from_peer)
+            if seen {
+                let width = 9u64 + len
+                if width > available { break }
+                room_ring_emit(ring, at, entry, mut out)
+                room_ring_consume(mut ring, at)
+                available -= width
+                count += 1u32
+            } else if current != entry.from_peer || member.changed[sender] == 0u8 {
+                room_ring_consume(mut ring, at)
+                dropped = int.saturating_add(dropped, 1u32)
+            }
+        }
+        at = next
+    }
+    list.set_word_le(mut out, count_at, count)
+}
+
+type RoomFlushResult = NoPart | BufferFull(u32) | FullPart | DataPart(RoomPartSlots, Inline[u32, 256])
+
+fn room_flush_part(relay: RoomRelay, seat: RoomSeat, mut ring: RoomRing, mut live: RoomLiveBuffer) -> RoomFlushResult {
+    let member = view seat.member
+    let identity = RoomPartIdentity(sub: member.sub, instance: member.grant.instance, member_epoch: member.grant.member_epoch, admission: member.admission)
+    if room_denied(member.grant.grant) { return NoPart }
+    if member.admission == 0u64 {
+        if seat.full_sent { return NoPart }
+        if room_live_available(live) < ROOM_PART_FIXED { return BufferFull(0u32) }
+        room_live_full(mut live, identity)
+        return FullPart
+    }
+    let room_index = option.unwrap(find_room(relay.rooms, seat.key))
+    let peers = view relay.rooms[room_index].peers
+    let mut gap = member.gap
+    let head = room_head_message(relay, peers, member, mut ring, mut gap)
+    if !member.complete && member.lost == 0u32 && gap == 0u32 && room_no_head(head) && !list.contains(member.changed, ROOM_STATE_PENDING) {
+        return NoPart
+    }
+    let message: Option[RingMessage] = if member.state_turn { None }
+        else { match head { Some((_, entry)) => Some(entry), None => None } }
+    let Some(plan) = reserve_room_part(relay, peers, member, room_live_available(live), message) else { return BufferFull(gap) }
+    if member.state_turn && plan.blocked_state {
+        let mut picked = false
+        for i in 0u64 .. list.len(peers) { if plan.included[i] { picked = true; break } }
+        if !picked { return BufferFull(gap) }
+    }
+    let mut room_to_send: u64 = plan.available
+    if let Some(entry) = message { room_to_send += 9u64 + int.widen(entry.len) }
+    room_live_append(mut live, identity, scoped fn(mut out: Bytes) {
+        let you = if member.complete { Some(member.peer) } else { None }
+        room_part_start(mut out, member.sub, member.complete, you)
+        room_write_joins(relay, peers, member, plan, mut out)
+        room_write_states(relay, peers, plan, mut out)
+        room_write_messages(relay, peers, member, plan, mut ring, mut out, mut room_to_send, mut gap)
+        room_write_left(relay, peers, member, plan, mut out)
+        room_part_end(mut out, gap, member.lost, false)
+    })
+    let mut told: Inline[u32, 256] = [0u32; 256]
+    for i in 0u64 .. list.len(peers) {
+        if plan.included[i] {
+            if let Some(peer) = peers[i] { told[i] = relay_peer_id(relay, peer) }
+        }
+    }
+    DataPart(plan, told)
+}
+
+fn apply_room_part(mut seat: RoomSeat, part: RoomFlushResult) {
+    match part {
+        BufferFull(gap) => { seat.member.gap = gap },
+        FullPart => { seat.full_sent = true },
+        DataPart(plan, told) => {
+            seat.member.complete = false
+            seat.member.lost = 0u32
+            seat.member.gap = 0u32
+            seat.member.cursor = plan.next
+            // A head message can leave too little space for the next roster diff.
+            // Give that diff the first reservation on the following Part.
+            seat.member.state_turn = !seat.member.state_turn && plan.blocked_state
+            for i in 0u64 .. list.len(seat.member.told) {
+                if plan.included[i] {
+                    seat.member.told[i] = told[i]
+                    seat.member.changed[i] = 0u8
+                }
+            }
+        },
+        _ => (),
+    }
+}
+
+fn room_no_head(head: Option[(u64, RingMessage)]) -> bool { match head { None => true, _ => false } }
+
+fn reconcile_room_senders(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession, position: u8) {
+    let found = {
+        let Some(member) = room_desk_slot(relay, id, position) else { return }
+        find_room(relay.rooms, member.key)
+    }
+    let Some(room_index) = found else { return }
+    for i in 0u64 .. list.len(relay.rooms[room_index].peers) {
+        if let Some(peer) = relay.rooms[room_index].peers[i] {
+            room_reconcile_seat(mut relay, rounds, peer.session, peer.seat)
+        }
+    }
+}
+
+fn room_desk_flush(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession) {
+    let Some(start_pos) = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) -> u64 {
+        if list.len(desk.free) == 0u64 { return ROOMS_PER_SESSION }
+        desk.cursor
+    }) else { return }
+    if start_pos == ROOMS_PER_SESSION { return }
+    room_refresh(mut relay, rounds, id)
+    let mut available: Option[Box[RoomLiveBuffer]] = None
+    let mut retained: Option[RoomRing] = None
+    let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
+        available = list.pop(mut desk.free)
+        retained = replace(mut desk.ring, None)
+    })
+    let mut live = option.unwrap(take available)
+    let mut ring = option.unwrap(take retained)
+    room_live_clear(mut live)
+    let mut cursor = start_pos
+    for _ in 0u64 .. ROOMS_PER_SESSION {
+        let current = cursor
+        reconcile_room_senders(mut relay, rounds, id, int.narrow(current))
+        let result = {
+            let seat = room_desk_slot(relay, id, int.narrow(current))
+            match seat { Some(member) => room_flush_part(relay, member, mut ring, mut live), None => NoPart }
+        }
+        let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
+            let Some(take parked) = list.set(mut desk.seats, current, None) else { return }
+            let mut seat = take parked
+            apply_room_part(mut seat, result)
+            let _ = list.set(mut desk.seats, current, Some(take seat))
+        })
+        if let BufferFull(_) = result { break }
+        cursor = (cursor + 1u64) % ROOMS_PER_SESSION
+    }
+    room_ring_reclaim(mut ring)
+    let mut filled = Some(take live)
+    let mut collected = Some(take ring)
+    let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
+        let next_buffer = option.unwrap(replace(mut filled, None))
+        desk.ring = replace(mut collected, None)
+        desk.cursor = cursor
+        if list.len(next_buffer.parts) == 0u64 { list.push(mut desk.free, take next_buffer) }
+        else { room_out(mut desk, Fill(take next_buffer)) }
+    })
+}

@@ -952,3 +952,14 @@ pub fn finish(take writer: Writer, take reader: Reader, clock: Clock, deadline_n
 pub fn hello_deadline(t: Timers) -> Option[u64] {
     t.hello
 }
+
+/// Write from a buffer owned by the transport. The cursor records partial sends.
+pub fn flush_bytes(mut w: Writer, payload: Bytes, mut cursor: u64, deadline: Until) -> Result[bool, Error] waits {
+    let total = list.len(payload)
+    if cursor == total {
+        return Ok(true)
+    }
+    let sent = host.send_pair(mut w.half, list.slice(payload, cursor, total), string.as_bytes(""), deadline) ?=> Network
+    cursor += sent
+    Ok(cursor == total)
+}

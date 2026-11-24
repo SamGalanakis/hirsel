@@ -15,6 +15,14 @@ store = { major = 1, path = "../store" }
 "runner-describe.hirsel" = "runner"
 "runner-query-slots.hirsel" = "runner"
 "runner-query.hirsel" = "runner"
+"runner-room.hirsel" = "runner"
+"runner-room-ring.hirsel" = "runner"
+"runner-room-live.hirsel" = "runner"
+"runner-room-flush.hirsel" = "runner"
+"runner-room-relay.hirsel" = "runner"
+"runner-room-owner.hirsel" = "runner"
+"runner-room-grants.hirsel" = "runner"
+"runner-room-roster.hirsel" = "runner"
 "runner-query-rows.hirsel" = "runner"
 "runner-shared-views.hirsel" = "runner"
 "runner-staged-round.hirsel" = "runner"
@@ -115,3 +123,15 @@ grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 
 
 [tests.runs."runner@1/runner/test_sim_release_uses_strongest"]
 limit = 134217728
+
+[tests.runs."runner@1/runner/first_admission_installs_adm"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner/waiter_set_not_installed_after_promotion"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner/direct_destination_survives_full_block"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner/room_decode_capacity_reports_loss"]
+limit = 1342177280

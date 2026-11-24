@@ -4,7 +4,7 @@ pub type Room: codec + send { requested: u64, available: u64 }
 
 pub type Bad: codec + send { kind: u32, at: u64 }
 
-pub type Kind: codec + key + send = Compute | Transact | Query | Granted
+pub type Kind: codec + key + send = Compute | Transact | Query | Granted | Room
 
 pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable
 
@@ -25,7 +25,7 @@ pub type SubRow: codec + send { sub: u32, key: Bytes, value: Option[Bytes] }
 pub type Row: codec + send { slot: u16, key: Bytes, value: Option[Bytes] }
 pub type Group: codec + send { sub: u32, value: Bytes, rows: List[Row] }
 
-pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | InvalidBinding(BindError)
+pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds | InvalidBinding(BindError)
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
@@ -651,7 +651,7 @@ fn check_call_reserve(n_e: u64, s_e: u64) -> Result[(), RegisterError] {
     match store.call_reserves(plan) { Some(_) => Ok(()), None => Error(Bounds) }
 }
 
-fn room(c: Capacity) -> Room {
+fn capacity_room(c: Capacity) -> Room {
     Room(requested: c.requested, available: c.available)
 }
 
@@ -715,7 +715,7 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
             match std.codec.decode(ca, arg) {
                 Ok(take a) => match body(take a) {
                     Ok(take r) => Ok(encoded(cr, r)),
-                    Error(c) => Ok(Failed(OutOfBytes(room(c)))),
+                    Error(c) => Ok(Failed(OutOfBytes(capacity_room(c)))),
                 },
                 Error(e) => Error(DecodeFail(e: e)),
             }
@@ -729,13 +729,13 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
         Ok(Ok(Ok(Error(e)))) => Failed(OutOfTime(e.steps)),
         Ok(Ok(Error(cs))) => {
             for cause in cs {
-                if let Capacity(c) = cause.kind { return Failed(OutOfBytes(room(c))) }
+                if let Capacity(c) = cause.kind { return Failed(OutOfBytes(capacity_room(c))) }
                 break
             }
             Failed(Raised(raised(cs)))
         },
-        Ok(Error(c)) => Failed(OutOfBytes(room(c))),
-        Error(c) => Refused(Budget(room(c))),
+        Ok(Error(c)) => Failed(OutOfBytes(capacity_room(c))),
+        Error(c) => Refused(Budget(capacity_room(c))),
     }
 }
 
@@ -767,7 +767,7 @@ fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
         match std.codec.decode(ca, arg) {
             Ok(take a) => match body(grants, caller, take a) {
                 Ok(take r) => encoded(cr, r),
-                Error(c) => Failed(OutOfBytes(room(c))),
+                Error(c) => Failed(OutOfBytes(capacity_room(c))),
             },
             Error(e) => Refused(Malformed(bad(e))),
         }
@@ -1072,10 +1072,11 @@ fn launch_with[G: send, H: shareable + inert + send](launch: LaunchEnv, place: S
         Ok(take payload) => if launch_emit(payload) { Ok(()) } else { Error(Exit(status: 1u8)) },
         Error(take e) => {
             let error: DescribeError = match take e {
-                Full(c) => PlaceCapacity(room(c)),
+                Full(c) => PlaceCapacity(capacity_room(c)),
                 AlreadyRegistered(take key) => AlreadyRegistered(take key),
                 InvalidBinding(take problem) => BadHttpBinding(take problem),
                 Bounds => Bounds,
+                RoomBounds => Bounds,
             }
             let codec: std.codec.Codec[DescribeError] = std.codec.of()
             let mut out: Bytes = list.new()
@@ -1103,7 +1104,7 @@ pub fn start[G: send, H: shareable + inert + send](r: Registry[G, H], tasks: Tas
     match map.get(r.slots, key) {
         Some(Granted(launch)) => match (launch().go)(tasks, Direct(take g), take caller, take arg, None) {
             Ok(take t) => Ok(take t),
-            Error(c) => Error(Budget(room(c))),
+            Error(c) => Error(Budget(capacity_room(c))),
         },
         _ => Error(NoEntry),
     }
@@ -1204,7 +1205,7 @@ pub opaque type Release: send {
 // without selection, which v1 lacks.
 pub opaque type PubIn: send { e: ToPub }
 
-type ToPub: send = Released(Release) | RelayJoined(List[Option[RelayTell]]) | Staged(store.Snapshot) | Joined(Join) | Subscribed(u64, u32, Caller, Bytes, Bytes) | WireSubscribed(u64, u32, u64, SubscriptionInput) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
+type ToPub: send = Released(Release) | RelayJoined(List[Option[RelayTell]]) | Staged(store.Snapshot) | Joined(Join) | Subscribed(u64, u32, Caller, Bytes, Bytes) | WireSubscribed(u64, u32, u64, SubscriptionInput) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained | RoomRounds(Sender[Latest[RoundAt]])
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
@@ -2718,7 +2719,7 @@ fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut d
     let source = FromPlace(take grant_to, take context)
     let raw: Bytes = match copy_bytes(triggers.argument(p)) {
         Ok(take payload) => take payload,
-        Error(Full(cap)) => return Error(Budget(room(store_capacity(cap)))),
+        Error(Full(cap)) => return Error(Budget(capacity_room(store_capacity(cap)))),
         Error(_) => return Error(NoEntry),
     }
     let notice = TriggerReport(attempt: a, to: channel.sender(drive.to))
@@ -2729,7 +2730,7 @@ fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut d
             map.insert(mut drive.active, triggers.run_id(a), take watcher)
             Ok(())
         },
-        Error(cap) => Error(Budget(room(cap))),
+        Error(cap) => Error(Budget(capacity_room(cap))),
     }
 }
 
@@ -2948,7 +2949,7 @@ pub fn apply_attempt[G: send, H: shareable + inert + send](mut db: store.Db, reg
 // wait until the inbox takes them, retried at the current base with any new content.
 // v2.22: `handed` counts the `complete`s the owner's inbox took, and `taken` is the owner's
 // count of those it no longer holds unsent; a due session is repaired only when they agree.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[TerminalUpdate], reset: bool, read_failed: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64, http_credit: Option[HttpBatchCredit] }
+type Joiner { grants: Option[RoomGrantPublisher], who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[TerminalUpdate], reset: bool, read_failed: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64, http_credit: Option[HttpBatchCredit] }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -3010,6 +3011,12 @@ fn reset_waiting(joined: List[Joiner], owner: u64) -> bool {
 fn publish_wire_subscription[G: send, H: shareable + inert + send](mut b: Board[G, H], mut joined: List[Joiner], mut owes: List[Owe], who: u64, sub: u32, generation: u64, take input: SubscriptionInput) waits {
     if let Some(i) = joiner(joined, who) {
         unend(mut joined[i].ended, sub)
+        if !reserve_sub_room_grants(mut joined[i], input) {
+            let at = store.version(b.base)
+            let k = owe(mut owes, who, at)
+            append_terminal(mut owes[k], sub, generation, Refused(Overloaded))
+            return
+        }
         let next = at_base_generation(mut b, who, sub, generation, take input)
         if next.read_failed {
             retire_read_failure(mut joined[i])
@@ -3268,6 +3275,7 @@ fn forget_subs(mut subs: Subscriptions, who: u64) {
 fn forget(mut subs: Subscriptions, mut joined: List[Joiner], who: u64) {
     forget_subs(mut subs, who)
     if let Some(j) = joiner(joined, who) {
+        revoke_room_grants(mut joined[j])
         let _ = list.remove(mut joined, j)
     }
 }
@@ -3605,10 +3613,10 @@ const WIRE_OVERHEAD: u64 = 67108864u64
 const WIRE_SESSION_CEILING: u64 = 16777216u64
 pub const WIRE_POOL_BYTES: u64 = 384u64 * 1024u64 * 1024u64
 const WIRE_STANDALONE_SLOTS: u64 = 2u64
-pub type WireConfig: send { n_pool: u64, n_granted: u64, max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, site: Option[std.wsock.Site] }
+pub type WireConfig: send { n_pool: u64, n_granted: u64, max_subs: u64, socket: std.wsock.Config, q: u64, budget: u64, n_service: u64, n_relay: u64, site: Option[std.wsock.Site] }
 
 pub fn wire_defaults(n_service: u64) -> WireConfig {
-    WireConfig(n_pool: WIRE_POOL_BYTES, n_granted: 0u64, max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, site: None)
+    WireConfig(n_pool: WIRE_POOL_BYTES, n_granted: 0u64, max_subs: 128u64, socket: std.wsock.defaults(), q: 4, budget: 1048576, n_service: n_service, n_relay: 0u64, site: None)
 }
 
 fn wire_owner_task_bytes() -> u64 { option.unwrap(charge.task(bytes[Result[(), std.wsock.Error]], 0u64)) }
@@ -3641,49 +3649,6 @@ fn wire_variable_peak(c: WireConfig) -> u64 {
     input + transport + retained + wire_service_job_bytes(c) + 32768u64
 }
 
-fn wire_configuration(c: WireConfig) -> bool { none(wire_problem(c, launch_target_bytes().size)) }
-
-fn exceeds(name: String, value: u64, limit: u64) -> Option[StartError] {
-    Some(Exceeds(Bound(name: clone(name), value: value, limit: limit)))
-}
-
-fn session_problem(c: WireConfig, max_sessions: u64, target_size: u64) -> Option[StartError] {
-    if max_sessions == 0u64 { return Some(Missing("max_sessions")) }
-    if max_sessions > WIRE_OWNER_LIMIT { return exceeds("max_sessions", max_sessions, WIRE_OWNER_LIMIT) }
-    wire_problem(c, target_size)
-}
-
-// The first WireConfig setting a session cannot run with. The place's one Registry is
-// the serving task's (serving_bytes), not a session's.
-fn wire_problem(c: WireConfig, target_size: u64) -> Option[StartError] {
-    if c.q > 4u64 { return exceeds("q", c.q, 4u64) }
-    if c.socket.max_frame > 262144u64 { return exceeds("socket.max_frame", c.socket.max_frame, 262144u64) }
-    if c.socket.pending_max > 1024u64 { return exceeds("socket.pending_max", c.socket.pending_max, 1024u64) }
-    if c.budget > 1048576u64 { return exceeds("budget", c.budget, 1048576u64) }
-    if c.max_subs == 0u64 { return Some(Missing("max_subs")) }
-    if c.n_pool == 0u64 { return Some(Missing("n_pool")) }
-    if c.n_pool > WIRE_POOL_BYTES { return exceeds("n_pool", c.n_pool, WIRE_POOL_BYTES) }
-    if c.n_service > WIRE_SESSION_CEILING { return exceeds("n_service", c.n_service, WIRE_SESSION_CEILING) }
-    if c.n_granted > WIRE_SESSION_CEILING { return exceeds("n_granted", c.n_granted, WIRE_SESSION_CEILING) }
-    let peak = wire_variable_peak(c) + c.n_granted
-    if peak > WIRE_SESSION_CEILING { return exceeds("session peak", peak, WIRE_SESSION_CEILING) }
-    // Welcome carries one issuer byte, at most SUBJECT_MAX subject bytes and a 32-byte digest.
-    // The launch target belongs to this run, so its size is known at serve.
-    let welcome = 85u64 + SUBJECT_MAX + target_size
-    let mandatory = if welcome > 125u64 { welcome } else { 125u64 }
-    let floor = std.order.max(mandatory, wire_outcome_reserve(c) + 28u64)
-    if c.socket.max_frame < floor { return Some(Missing("socket.max_frame (below the Welcome and outcome frames)")) }
-    if c.budget < wire_round(mandatory + 14u64) { return Some(Missing("budget (below one Welcome frame)")) }
-    None
-}
-
-fn wire_decode(b: Bytes) -> Result[Frame, u16] {
-    if list.len(b) < 4u64 || b[0u64] >= 4u8 || b[1u64] != 0u8 || b[2u64] != 0u8 || b[3u64] != 0u8 {
-        return Error(1007u16)
-    }
-    let codec: std.codec.Codec[Frame] = std.codec.of()
-    Ok(std.codec.decode(codec, b) ?=> |_| 1007u16)
-}
 
 pub const DONE_MAX: u64 = 8192
 const MAX_RETURNED_BYTES: u64 = DONE_MAX - 32u64
@@ -3712,23 +3677,21 @@ pub fn writer_bytes() -> u64 { 4096u64 }
 pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
     if c.n_granted > WIRE_SESSION_CEILING { return Error(Capacity(requested: c.n_granted, available: WIRE_SESSION_CEILING)) }
     if owners > WIRE_OWNER_LIMIT { return Error(Capacity(requested: owners, available: WIRE_OWNER_LIMIT)) }
-    let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted)
+    let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted + reserved_room_owner(c))
     // Use less supervisor room when a caller deliberately serves fewer owners.
     let metadata = 2097152u64 + owners * 6711u64
     let overhead = if metadata < WIRE_OVERHEAD { metadata } else { WIRE_OVERHEAD }
     // The place's one Registry, built once under bytes n_place for every session.
     let fixed = match int.checked_add(overhead + floors, n_place) { Some(f) => f, None => return Error(Capacity(requested: n_place, available: 0xffffffffffffffffu64 - (overhead + floors))) }
-    match int.checked_add(fixed, c.n_pool) {
-        Some(total) => Ok(total),
-        None => Error(Capacity(requested: c.n_pool, available: 0xffffffffffffffffu64 - fixed)),
-    }
+    let pooled = add_place_bytes(fixed, c.n_pool)?
+    add_place_bytes(pooled, c.n_relay)
 }
 
 pub opaque type WireEvent: send { e: WireInput }
 
 fn wire_event(take e: WireInput) -> WireEvent { WireEvent(e: take e) }
 
-type WireInput: send = Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[BoundCaller], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
+type WireInput: send = RegrantRoom | BellRoom(RoomBell) | RoomPassDone | SentRoom(Box[std.wsock.Writer], Box[RoomLiveBuffer]) | Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[BoundCaller], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(Box[std.websocket.Control]) | Ponged | PeerClosed(Box[std.websocket.Control])
 type WireParsed: send { reader: Box[std.wsock.Reader], packet: Result[Option[WirePacket], std.wsock.Error] }
@@ -3836,7 +3799,7 @@ fn wire_allocate[C: send](pool: Sender[WireAllocation[C]], to: Sender[Option[All
 // Read credits cover the inbox and a reader blocked on handing off a packet.
 type WireRead[C: send]: send { reader: Box[std.wsock.Reader], to: Sender[WireEvent], credits: Receiver[()], clock: Clock, config: std.wsock.Config, pool: Sender[WireAllocation[C]] }
 // A staged frame: its deadline, whether a Close may still follow, its first-write notice.
-type WireWrite: send { writer: Box[std.wsock.Writer], to: Sender[WireEvent], out: std.wsock.Outbound, clock: Clock, config: std.wsock.Config, end: u64, can_close: bool, close: bool, report: Option[Sender[u64]] }
+type WireWrite: send { live: Option[Box[RoomLiveBuffer]], cursor: u64, writer: Box[std.wsock.Writer], to: Sender[WireEvent], out: std.wsock.Outbound, clock: Clock, config: std.wsock.Config, end: u64, can_close: bool, close: bool, report: Option[Sender[u64]] }
 
 // One encoded frame to write. A content unit carries its version and handles to the
 // round register and its session's fence root; the owner applies the release check before
@@ -3931,8 +3894,9 @@ fn wire_read[C: send](take x: WireRead[C]) -> () waits {
 // Writes x's staged frame; without `wait`, Ok(false) is a send that would block (v2.44).
 fn wire_push_frame(mut x: WireWrite, wait: bool) -> Result[bool, u16] waits {
     loop {
-        let flushed: Result[bool, std.wsock.Error] = if !wait { std.wsock.flush(mut x.writer, mut x.out, At(x.clock, 0u64)) }
-            else if host.mono_ns(x.clock) >= x.end { Error(Network(TimedOut)) } else { std.wsock.flush(mut x.writer, mut x.out, At(x.clock, x.end)) }
+        let until = if wait { x.end } else { 0u64 }
+        let flushed: Result[bool, std.wsock.Error] = if wait && host.mono_ns(x.clock) >= until { Error(Network(TimedOut)) }
+            else { wire_flush_frame(mut x, until) }
         match flushed {
             Ok(true) => break,
             Ok(false) => {},
@@ -3953,7 +3917,8 @@ fn wire_push_frame(mut x: WireWrite, wait: bool) -> Result[bool, u16] waits {
 }
 
 fn wire_written(take x: WireWrite) -> WireInput {
-    let WireWrite(writer: take writer, to: _, report: _, close: close, ..) = take x
+    let WireWrite(live: take room_buffer, writer: take writer, to: _, report: _, close: close, ..) = take x
+    if let Some(take live) = take room_buffer { return SentRoom(take writer, take live) }
     if close { WriteClosed(take writer) } else { Sent(take writer) }
 }
 
@@ -4049,7 +4014,7 @@ type WireLoop[C: send] {
     // The binding's session expiry (exclusive, Unix ms) and its idle alarm; transport only (CHANGES-v2.57).
     auth_end: Option[u64], auth_alarm: Option[Task[()]],
     run: u64, held: Option[WireEvent], held_credit: bool, deferred: List[(Frame, u64)], busy: bool, control: Option[Bytes], closing: bool, alarm: Option[Task[()]],
-    read_back: Option[Box[std.wsock.Reader]], writer: Option[Box[std.wsock.Writer]], read_closed: bool, write_closed: bool, close_at: Option[u64], expired: bool,
+    room_pass: Option[u64], read_back: Option[Box[std.wsock.Reader]], writer: Option[Box[std.wsock.Writer]], read_closed: bool, write_closed: bool, close_at: Option[u64], expired: bool,
 }
 
 // What one step of the owner's loop asks of it: go on with this frame (if
@@ -4106,7 +4071,7 @@ fn wire_owner_setup[C: send](take x: WireOwner[C], pool: Sender[WireAllocation[C
         encoder: encoder, rh: take rh, wh: None, lease: take lease, hello_at: hello_at, hello_seen: false, hello_alarm: take hello_alarm,
         auth_end: None, auth_alarm: None,
         run: 0u64, held: None, held_credit: false, deferred: list.new(), busy: false, control: None, closing: false, alarm: None,
-        read_back: None, writer: Some(box.new(take writer)), read_closed: false, write_closed: false, close_at: None, expired: false)
+        room_pass: None, read_back: None, writer: Some(box.new(take writer)), read_closed: false, write_closed: false, close_at: None, expired: false)
     Ok((take st, take service))
 }
 
@@ -4124,6 +4089,7 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
             Some(take e) => take e,
             None => break Ok(()),
         }
+        wire_room_drain(mut st.work)
         let frame = match take received {
             Input(take f, at) => {
                 if st.closing { let _ = channel.try_send(st.credit, ()); continue }
@@ -4192,6 +4158,10 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
                 }
             },
             JoinReady => None,
+            RegrantRoom => None,
+            RoomPassDone => None,
+            BellRoom(token) => { wire_room_bell(st.work, token); None },
+            SentRoom(take writer, take sent) => { wire_room_sent(mut st, take writer, take sent); None },
             DrainWake => None, HttpStream(_) => None,
             AuthExpired => {
                 if st.closing || !wire_auth_lapsed(mut st) { continue }
@@ -4278,10 +4248,13 @@ fn wire_owner_join[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) w
 // The next event, or None when the loop ends: the inbox closed, or the work's
 // cut passed (the owner then expires).
 fn wire_owner_next[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) -> Option[WireInput] waits {
-    let event = if let Some(take e) = replace(mut st.done, None) { take e } else if (service.ready)(service.context) && list.len(st.deferred) != 0u64 {
+    let event = if let Some(take e) = replace(mut st.done, None) { take e }
+    else if (service.ready)(service.context) && list.len(st.deferred) != 0u64 {
         let (take pending_frame, at) = list.remove(mut st.deferred, 0u64)
         wire_event(Input(take pending_frame, at))
     } else if let Some(take e) = replace(mut st.held, None) {
+        take e
+    } else if let Some(take e) = wire_room_pass(mut st, mut service) {
         take e
     } else {
         let e = match channel.try_receive(st.inbox) {
@@ -4578,10 +4551,12 @@ fn wire_owner_send[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], p
     }
     if wire_ready(st.busy) && !st.write_closed {
         if let Some(take b) = replace(mut st.control, None) {
+            st.room_pass = None
             wire_owner_write(mut st, WireUnit(frame: take b, check: None, write_ack: false))
             return Again
         }
         if let Some((take packed, welcome, check)) = take data_frame {
+            st.room_pass = None
             // The check version travels with the unit; WSent or WDropped clears the copy.
             st.work.check = check
             let unit = wire_unit(st.work, take packed, check, !none(st.first_write))
@@ -4589,6 +4564,8 @@ fn wire_owner_send[C: send](mut st: WireLoop[C], mut service: Box[Service[C]], p
             if welcome {
                 if let Some(take accepted) = replace(mut st.lease, None) { std.wsock.hello_accepted(take accepted) }
             }
+        } else if !st.closing && list.len(st.work.output) == 0u64 && wire_room_offer(mut st) {
+            return Again
         }
     }
     Go(None)
@@ -4605,7 +4582,7 @@ fn wire_owner_write[C: send](mut st: WireLoop[C], take u: WireUnit) waits {
     let end = if close { std.clock.deadline_after_ms(host.mono_ns(st.clock), st.c.socket.close_ms) } else { int.saturating_add(host.mono_ns(st.clock), std.wsock.MESSAGE_NS) }
     let _ = std.wsock.stage(mut writer, take frame)
     let report = if write_ack { replace(mut st.first_write, None) } else { None }
-    let x = WireWrite(writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end: end, can_close: !close, close: close, report: take report)
+    let x = WireWrite(live: None, cursor: 0u64, writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end: end, can_close: !close, close: close, report: take report)
     match wire_start(st.tasks, take x) { Ok(take h) => { st.wh = Some(take h) }, Error(take e) => { st.done = Some(wire_event(take e)) } }
 }
 
@@ -4618,6 +4595,7 @@ fn wire_owner_lost[C: send](take st: WireLoop[C]) -> Result[(), std.wsock.Error]
         encoder: take encoder, rh: take rh, wh: take wh, work: take work, hello_alarm: take hello_alarm, auth_alarm: take auth_alarm, deferred: take deferred, held: take held, control: take control,
         alarm: take alarm, read_back: take read_back, writer: take write_back, write_closed: write_closed, clock: clock, close_at: close_at, expired: expired, ..) = take st
     wire_join(take rh, take wh)
+    wire_room_done(take work)
     Error(Protocol(1013u16))
 }
 
@@ -4636,6 +4614,7 @@ fn wire_owner_end[C: send](take st: WireLoop[C], mut service: Box[Service[C]], t
     } else {
         wire_join(take rh, take wh)
     }
+    wire_room_done(take work)
     if !expired && write_closed && (match managed { None => true, _ => false }) {
         if let Some(take returned_reader) = take read_back {
             if let Some(take returned_writer) = take write_back {
@@ -4764,12 +4743,17 @@ fn supervise_serve[G: send, H: shareable + inert + send, B: send](take seed: Ser
         max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place,
         head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
     let registered = match placed(place, n_place) { Ok(take r) => take r, Error(take problem) => return Error(Open(Place(take problem))) }
+    let relay = start_room_relay(registered, config, limit, pub_to, tasks)?
     let make: scoped[view] fn() -> Service[WireSession[G, B]] = fn() -> Service[WireSession[G, B]] {
-        wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
+        let mut service = wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
+        if let Some((ports, _)) = relay { service.context.room_link = Some(copy_room_link(ports)) }
+        take service
     }
     let transport = ServeTransport(listener: take listener, config: config, tasks: tasks, clock: clock,
         limit: limit, proxies: take proxies, publisher: take pub_to, inbox: take inbox, to: take to)
-    match serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write, report: report)), make, wire_allocator(take registered, n_place)) {
+    let served = serve_sockets(take transport, Some(ServeDrain(events: take events, window: take drain, status: take status, idle: idle, first_write: take first_write, report: report)), make, wire_allocator(take registered, n_place))
+    if let Some((_, take relay_task)) = take relay { let _ = task.cancel_join(take relay_task) }
+    match take served {
         Ok(count) => Ok(count), Error(Allocation(cap)) => Error(Full(cap)), Error(Network(problem)) => Error(Listen(problem)), _ => Error(Missing("socket")),
     }
 }
@@ -4909,7 +4893,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     service: take boxed, publisher: channel.sender(pub_to), c: config, clock: time, tasks: tasks,
                     control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle { Some(life) => life.report, None => None })
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
-                let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - wire_owner_task_bytes() + config.n_granted), take job, run)
+                let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - wire_owner_task_bytes() + config.n_granted + reserved_room_owner(config)), take job, run)
                 map.insert(mut owners, id, SessionTask(handle: take handle, wake: None, retirement: take retirement))
             },
         }
@@ -4949,9 +4933,9 @@ type WireOwed: send { generation: u64, reply: Bytes }
 // v2.19: `fence` is the session's fence root, made at join, and `round` the place's round
 // register, from the join's answer. `check` and `sending_done` are the unit handed out last:
 // its version, and a copy of its Outcome rows, which a Dropped Reset carries (§3).
-pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], plan_call: bool, timers: Map[u64, Task[()]], granted: Map[u64, Task[Outcome]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done], join: Option[PubIn], sending_complete: bool, posts: List[Req], stream_time: Option[StreamTime], splice: bool, packing: List[OwedGroup] }
+pub opaque type WireWork { head: Option[HeadLease], asking: Option[Task[()]], plan_call: bool, timers: Map[u64, Task[()]], granted: Map[u64, Task[Outcome]], output: List[WireOutput], sending: List[WireMark], deadline: Option[u64], drain: Option[Latest[Option[DrainWindow]]], abandoned: u64, fence: Option[Latest[Fence]], round: Option[Latest[RoundAt]], check: Option[u64], sending_done: List[Done], join: Option[PubIn], sending_complete: bool, posts: List[Req], stream_time: Option[StreamTime], rooms: Option[RoomOwner], splice: bool, packing: List[OwedGroup] }
 
-fn wire_work() -> WireWork { WireWork(head: None, asking: None, plan_call: false, timers: map.new(), granted: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false, posts: list.new(), stream_time: None, splice: false, packing: list.new()) }
+fn wire_work() -> WireWork { WireWork(head: None, asking: None, plan_call: false, timers: map.new(), granted: map.new(), output: list.new(), sending: list.new(), deadline: None, drain: None, abandoned: 0u64, fence: None, round: None, check: None, sending_done: list.new(), join: None, sending_complete: false, posts: list.new(), stream_time: None, rooms: None, splice: false, packing: list.new()) }
 
 fn wire_cut(work: WireWork, clock: Clock) -> bool {
     wire_cut_at(work.drain, clock)
@@ -5001,7 +4985,7 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
 }
 
 pub opaque type WireSession[G: send, B: send]: send {
-    anonymous: Caller, wire: Option[Wire[G, B]], head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String, n_place: u64,
+    room_link: Option[RoomLink], anonymous: Caller, wire: Option[Wire[G, B]], head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String, n_place: u64,
     me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], caller: Option[Caller],
     // known: per entry, 1 registered, 2 gone, 0 neither (set at Hello from the one Registry).
     phase: u8, wants: List[Want], entries: List[Bytes], known: List[u8], launch: Option[GrantedLaunch[G]], placing: u64,
@@ -5023,7 +5007,7 @@ pub fn wire_service[G: send, B: send](random: Random, take session_wire: Option[
 fn wire_service_with_head[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
     let anonymous = option.unwrap(anonymous_caller(random))
     let retirement = wire_retirement(head, anonymous)
-    let context: WireSession[G, B] = WireSession(anonymous: take anonymous, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64,
+    let context: WireSession[G, B] = WireSession(room_link: None, anonymous: take anonymous, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64,
         me: None, publisher: None, caller: None, phase: 0u8, wants: list.new(), entries: list.new(), known: list.new(), launch: None, placing: 0u64,
         pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false,
@@ -5307,7 +5291,7 @@ fn wire_begin_hello[G: send, B: send](s: WireSession[G, B], mut work: WireWork, 
 }
 
 pub type CallRun: send = Computed(Outcome) | Launched | Durable | Uncallable
-pub type ServicePlan: send = NoAction | PlanRefusal(StreamId, u64, Refusal) | PlannedCall(Send, StreamId, Bytes, CallRun) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, SubscriptionInput) | SubscriptionRefusal(u32, Outcome) | ResumeReset
+pub type ServicePlan: send = NoAction | PlanRefusal(StreamId, u64, Refusal) | PlannedCall(Send, StreamId, Bytes, CallRun) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, SubscriptionInput) | PlannedRoomSubscribe(u32, RoomRequest, SubscriptionInput) | SubscriptionRefusal(u32, Outcome) | ResumeReset
 
 fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take pending: WirePending) -> Result[ServicePlan, u16] {
     let WirePending(stream: stream, p: p, wire_slot: wire_slot, deadline: deadline_ms, arg: take arg, at: at, grows: _) = take pending
@@ -5354,6 +5338,7 @@ fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
             return Ok(())
         },
         PlannedSubscribe(sub, take input) => return wire_apply_subscribe(mut s, mut work, sub, take input),
+        PlannedRoomSubscribe(sub, take entry, take input) => return wire_room_subscribe(mut s, mut work, sub, take entry, take input),
         SubscriptionRefusal(sub, take why) => { wire_end(mut s, mut work.output, sub, take why); return Ok(()) },
         ResumeReset => {
             let version = s.last
@@ -5464,7 +5449,7 @@ fn wire_start_granted[G: send, B: send](mut s: WireSession[G, B], mut work: Wire
         Some(outcome) => outcome,
         None => list.try_reserve(mut fresh, 1u64),
     }
-    if let Error(cap) = reserved { return wire_refused(mut s, mut work, stream, p, Budget(room(cap))) }
+    if let Error(cap) = reserved { return wire_refused(mut s, mut work, stream, p, Budget(capacity_room(cap))) }
     s.generation += 1u64
     let generation = s.generation
     let until = match work.deadline { Some(cut) => if cut < deadline { cut } else { deadline }, None => deadline }
@@ -5474,7 +5459,7 @@ fn wire_start_granted[G: send, B: send](mut s: WireSession[G, B], mut work: Wire
     let launched: Result[Task[Outcome], Refusal] = match take launch {
         Some(take prepared) => match (prepared.go)(s.tasks, Direct(take seed), take caller, take argument, Some(WireGrant(take report))) {
             Ok(take handle) => Ok(take handle),
-            Error(cap) => Error(Budget(room(cap))),
+            Error(cap) => Error(Budget(capacity_room(cap))),
         },
         None => Error(NoEntry),
     }
@@ -5776,9 +5761,10 @@ fn wire_step_input[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
             Unsubscribe(sub) => {
                 if s.phase != 3u8 { return Error(1008u16) }
                 wire_stop_sub(mut s, mut work.output, sub)
+                wire_room_sync(s, mut work)
             },
-            Set(sub, _) => wire_check_room_input(s, sub)?,
-            Send(sub, _, _) => wire_check_room_input(s, sub)?,
+            Set(sub, state) => wire_room_state(s, mut work, sub, state)?,
+            Send(sub, to, payload) => wire_room_message(s, mut work, sub, to, payload)?,
             _ => return Error(1007u16),
         },
         WGrantedDone(take tick, take outcome) => wire_finish_granted(mut s, mut work, tick, take outcome),
@@ -5786,7 +5772,7 @@ fn wire_step_input[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
         WRunner(take e) => {
             let Notice(e: take received) = take e
             match take received {
-                Updated(take upd) => wire_update(mut s, mut work, take upd)?,
+                Updated(take upd) => { wire_update(mut s, mut work, take upd)?; wire_room_sync(s, mut work) },
                 Expired(tick) => wire_expired(mut s, mut work, tick),
                 _ => {},
             }
@@ -5807,6 +5793,7 @@ fn wire_step_input[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
         },
         WPoll(writable) => {
             wire_poll_admit(mut s, mut work)
+            wire_room_sync(s, mut work)
             if !writable { return Ok(None) }
             if s.phase == 4u8 { s.phase = 3u8 }
             if s.phase == 2u8 {

@@ -26,7 +26,7 @@ fn query_attempt[H: inert, A, R](tx: store.Tx, attempt: QueryAttempt[H, A, R]) -
     let ran = isolate(fn() -> Result[Answer[Bytes], Outcome] {
         let input = std.codec.decode(attempt.args, attempt.arguments) ?=> |e| Refused(Malformed(bad(e)))
         let Answer(value: take value, covers: take selected) =
-            query_body(attempt.body, tx, attempt.handles, attempt.caller, take input) ?=> |f| Failed(OutOfBytes(room(f)))
+            query_body(attempt.body, tx, attempt.handles, attempt.caller, take input) ?=> |f| Failed(OutOfBytes(capacity_room(f)))
         let encoded_answer = encode_query_value(attempt.value, value, attempt.steps)?
         Ok(Answer(value: take encoded_answer, covers: take selected))
     })
@@ -38,7 +38,7 @@ fn query_attempt[H: inert, A, R](tx: store.Tx, attempt: QueryAttempt[H, A, R]) -
             }
             Error(projection_cause(cs))
         },
-        Error(problem) => Error(Failed(OutOfBytes(room(problem)))),
+        Error(problem) => Error(Failed(OutOfBytes(capacity_room(problem)))),
     }
 }
 
@@ -57,7 +57,7 @@ fn encode_query_value[R](codec: std.codec.Codec[R], value: R, steps: u64) -> Res
             }
             Error(projection_cause(cs))
         },
-        Error(problem) => Error(Failed(OutOfBytes(room(problem)))),
+        Error(problem) => Error(Failed(OutOfBytes(capacity_room(problem)))),
     }
 }
 
@@ -82,7 +82,7 @@ fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, 
             }
         },
         Ok(Failed(cs, take reads)) => Faulted(Failed(Raised(raised(cs))), take reads),
-        Ok(Refused(c, take reads)) => Faulted(Failed(OutOfBytes(room(store_capacity(c)))), take reads),
+        Ok(Refused(c, take reads)) => Faulted(Failed(OutOfBytes(capacity_room(store_capacity(c)))), take reads),
         Ok(Stopped(e, take reads)) => Faulted(Failed(OutOfTime(e.steps)), take reads),
         Error(take problem) => Lost(take problem, list.new()),
     }
@@ -97,7 +97,7 @@ fn project_query_covers[H: send](access: PublisherReads, read_handle: store.Read
         Ok(Ok(Ok(take selected))) => take selected,
         Ok(Ok(Error(take why))) => return Error(ProjectionStopped(take why)),
         Ok(Error(cs)) => return Error(ProjectionStopped(projection_cause(cs))),
-        Error(problem) => return Error(ProjectionStopped(Failed(OutOfBytes(room(problem))))),
+        Error(problem) => return Error(ProjectionStopped(Failed(OutOfBytes(capacity_room(problem))))),
     }
     match old {
         Some(previous) => rerun_rows(access, read_handle, prior, previous, newest, spans, bindings, rows)?,
@@ -116,48 +116,52 @@ fn adapt_query[H: inert + send, Outer: send, A, R](body: QueryBody[H, A, R], ca:
         match take prepared {
             Ok(Ok(take attempt)) => query_projection(access, read_handle, attempt, declared, bindings, newest, prior, rows, old),
             Ok(Error(cs)) => Stopped(projection_cause(cs)),
-            Error(problem) => Stopped(Failed(OutOfBytes(room(problem)))),
+            Error(problem) => Stopped(Failed(OutOfBytes(capacity_room(problem)))),
         }
     }
     match take result {
         Ok(take output) => take output,
-        Error(problem) => Stopped(Refused(Budget(room(problem)))),
+        Error(problem) => Stopped(Refused(Budget(capacity_room(problem)))),
     }
 }
 
 type QueryEntry[H: send]: send {
     by_caller: bool,
+    ephemeral: Option[RoomEntry],
     slots: Slots[H],
     run: own[send] fn(Slots[H], List[BoundSlot], PublisherReads, store.Reader, H, Caller, Bytes, store.Snapshot, store.Snapshot, Log[Row], Option[View[List[Cover]]]) -> Queried waits
 }
 
 pub fn query[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
     f: StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
-    register_query(mut r, Plain(f), take declarations, store.copy_env, n, s)
+    register_query(mut r, Plain(f), take declarations, store.copy_env, n, s, None)
 }
 
 pub fn query_as[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H],
     f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]], take declarations: Slots[H], n: u64, s: u64) -> Result[(), RegisterError] {
-    register_query(mut r, As(f), take declarations, store.copy_env, n, s)
+    register_query(mut r, As(f), take declarations, store.copy_env, n, s, None)
 }
 
 pub fn query_as_with[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](
     mut r: Registry[G, Outer], f: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]],
     take declarations: Slots[H], select: fn(Outer) -> H, n: u64, s: u64) -> Result[(), RegisterError] {
     let projected = map_slots(take declarations, select)
-    register_query(mut r, As(f), take projected, select, n, s)
+    register_query(mut r, As(f), take projected, select, n, s, None)
 }
 
 fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, Outer],
-    body: QueryBody[H, A, R], take registered_slots: Slots[Outer], select: fn(Outer) -> H, n: u64, s: u64) -> Result[(), RegisterError] {
+    body: QueryBody[H, A, R], take registered_slots: Slots[Outer], select: fn(Outer) -> H, n: u64, s: u64, take ephemeral: Option[RoomEntry]) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
     let value = std.codec.schema(cr) ?=> |_| Bounds
     let schemas = slot_descriptions(registered_slots)
-    let result = encode_query_schema(clone(value), clone(schemas)) ?=> |_| Bounds
+    let (kind, take result): (Kind, Bytes) = match ephemeral {
+        Some(definition) => (Room, encode_room_schema(value, schemas, definition)?),
+        None => (Query, encode_query_schema(clone(value), clone(schemas)) ?=> |_| Bounds),
+    }
     let described_query = match body {
-        Plain(f) => described_result(code.identity(f), code.revision(f), Query, ca, take result),
-        As(f) => described_result(code.identity(f), code.revision(f), Query, ca, take result),
+        Plain(f) => described_result(code.identity(f), code.revision(f), kind, ca, take result),
+        As(f) => described_result(code.identity(f), code.revision(f), kind, ca, take result),
     }
     let (take key, take described_entry) = described_query ?=> |_| Bounds
     let mut d = take described_entry
@@ -169,7 +173,7 @@ fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert
         adapt_query(body, ca, cr, declared, bindings, access, read_handle, h, select, caller, arg, n, s, newest, prior, rows, old)
     }
     let by_caller = match body { As(_) => true, Plain(_) => false }
-    insert(mut r, take key, take d, Query(n, s, QueryEntry(by_caller: by_caller, slots: take registered_slots, run: take go)))
+    insert(mut r, take key, take d, Query(n, s, QueryEntry(by_caller: by_caller, ephemeral: take ephemeral, slots: take registered_slots, run: take go)))
 }
 
 fn bind_query_slots[G: send, H: shareable + inert + send](mut r: Registry[G, H], h: H) -> Result[(), RegisterError] {

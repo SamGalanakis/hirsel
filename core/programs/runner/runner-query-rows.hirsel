@@ -30,7 +30,7 @@ type ProjectionIssue = ProjectionStopped(Outcome) | ProjectionRead(store.Error)
 
 fn projection_cause(cs: Causes) -> Outcome {
     for cause in cs {
-        if let Capacity(problem) = cause.kind { return Failed(OutOfBytes(room(problem))) }
+        if let Capacity(problem) = cause.kind { return Failed(OutOfBytes(capacity_room(problem))) }
         break
     }
     Failed(Raised(raised(cs)))
@@ -41,7 +41,7 @@ fn projection_result[R](take projected: Result[Result[Result[R, store.Error], Ca
         Ok(Ok(Ok(take answer))) => Ok(take answer),
         Ok(Ok(Error(take problem))) => Error(ProjectionRead(take problem)),
         Ok(Error(cs)) => Error(ProjectionStopped(projection_cause(cs))),
-        Error(problem) => Error(ProjectionStopped(Failed(OutOfBytes(room(problem))))),
+        Error(problem) => Error(ProjectionStopped(Failed(OutOfBytes(capacity_room(problem))))),
     }
 }
 

@@ -16,7 +16,7 @@ fn check_arg[A](ca: std.codec.Codec[A], arg: Bytes, n: u64) -> Option[Refusal] {
     }
     match take seen {
         Ok(take o) => take o,
-        Error(c) => Some(Budget(room(c))),
+        Error(c) => Some(Budget(capacity_room(c))),
     }
 }
 
@@ -109,8 +109,8 @@ fn run_transact_attempt[H: shareable + inert + send, A, R, E](mut tx: store.Tx, 
         Ok(Commit(take payload)) => Ok(Returned(take payload)),
         Ok(Abort(take payload)) => Error(BodyOutcome(Returned(take payload))),
         Ok(Refuse(take refusal)) => Error(BodyOutcome(Refused(take refusal))),
-        Ok(Exhausted(cap)) => Error(BodyOutcome(Failed(OutOfBytes(room(cap))))),
-        Error(cap) => Error(BodyOutcome(Failed(OutOfBytes(room(cap))))),
+        Ok(Exhausted(cap)) => Error(BodyOutcome(Failed(OutOfBytes(capacity_room(cap))))),
+        Error(cap) => Error(BodyOutcome(Failed(OutOfBytes(capacity_room(cap))))),
     }
 }
 

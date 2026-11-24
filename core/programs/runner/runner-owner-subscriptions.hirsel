@@ -72,15 +72,16 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: Wir
         }
         return Ok(SubscriptionRefusal(sub, take outcome))
     }
-    let is_query = match map.get(r.slots, key) {
-        Some(Query(_, _, _)) => true,
-        _ => false
-    }
-    if !is_query {
+    let Some(Query(_, _, entry)) = map.get(r.slots, key) else {
         return Ok(SubscriptionRefusal(sub, Refused(NoEntry)))
     }
     if list.len(s.subs) >= s.config.max_subs {
         return Ok(SubscriptionRefusal(sub, Refused(NotAllowed)))
+    }
+    if let Some(registered) = entry.ephemeral {
+        if list.len(arg) > registered.arg_limit {
+            return Ok(SubscriptionRefusal(sub, Refused(Budget(Room(requested: list.len(arg), available: registered.arg_limit)))))
+        }
     }
     let refused = match map.get(r.checks, key) {
         Some(check) => (check.validate)(arg, 18446744073709551615u64),
@@ -105,11 +106,19 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: Wir
         Some(held) => clone(held),
         None => return Error(1008u16),
     }
+    let room_req = match entry.ephemeral {
+        Some(registered) => Some(RoomRequest(key: RoomKey(entry: registered.index, arg: clone(arg)),
+            codec: (registered.codecs)(), bounds: registered.bounds)),
+        None => None,
+    }
     let mut quota = option.unwrap(replace(mut s.subscription_room, None))
     let held = subscription_hold(mut quota, take caller, take key, take arg)
     s.subscription_room = Some(take quota)
     match take held {
-        Ok(take input) => Ok(PlannedSubscribe(sub, take input)),
+        Ok(take input) => match take room_req {
+            Some(take plan) => Ok(PlannedRoomSubscribe(sub, take plan, take input)),
+            None => Ok(PlannedSubscribe(sub, take input)),
+        },
         Error(_) => Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
     }
 }

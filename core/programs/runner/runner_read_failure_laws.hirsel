@@ -34,14 +34,14 @@ fn failed_read_owner(mut joined: List[Joiner], mut rounds: RoundRegister, who: u
     let root = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
     let identity = latest.new(arc.new(OwnerNumber(number: who)))
     let fences = result.unwrap(fence_reserve(mut rounds, latest.handle(root)))
-    list.push(mut joined, Joiner(who: who, to: channel.sender(to), closed: None, ended: list.new(),
+    list.push(mut joined, Joiner(grants: None, who: who, to: channel.sender(to), closed: None, ended: list.new(),
         reset: false, read_failed: false, mark: None, identity: Some(take identity),
         fence: Some(take fences), due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     FailedReadOwner(from: take from, fence: take root, to: take to)
 }
 
 fn failed_read_sub() -> SubscriptionInput {
-    SubscriptionInput(room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64))
+    SubscriptionInput(grants: None, room: None, key: query_key(code.describe(q1)), arg: no_arg(), caller: law_caller(1u64))
 }
 
 fn failed_read_reset(owner: FailedReadOwner, at: u64) -> bool {

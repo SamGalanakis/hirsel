@@ -210,3 +210,47 @@ fn filter_content[T](mut items: List[T], stamps: List[(u32, u64)], present: bool
     }
     while list.len(items) > kept { let _ = list.pop(mut items) }
 }
+
+fn wire_configuration(c: WireConfig) -> bool { none(wire_problem(c, launch_target_bytes().size)) }
+
+fn exceeds(name: String, value: u64, limit: u64) -> Option[StartError] {
+    Some(Exceeds(Bound(name: clone(name), value: value, limit: limit)))
+}
+
+fn session_problem(c: WireConfig, max_sessions: u64, target_size: u64) -> Option[StartError] {
+    if max_sessions == 0u64 { return Some(Missing("max_sessions")) }
+    if max_sessions > WIRE_OWNER_LIMIT { return exceeds("max_sessions", max_sessions, WIRE_OWNER_LIMIT) }
+    wire_problem(c, target_size)
+}
+
+// The first WireConfig setting a session cannot run with. The place's one Registry is
+// the serving task's (serving_bytes), not a session's.
+fn wire_problem(c: WireConfig, target_size: u64) -> Option[StartError] {
+    if c.q > 4u64 { return exceeds("q", c.q, 4u64) }
+    if c.socket.max_frame > 262144u64 { return exceeds("socket.max_frame", c.socket.max_frame, 262144u64) }
+    if c.socket.pending_max > 1024u64 { return exceeds("socket.pending_max", c.socket.pending_max, 1024u64) }
+    if c.budget > 1048576u64 { return exceeds("budget", c.budget, 1048576u64) }
+    if c.max_subs == 0u64 { return Some(Missing("max_subs")) }
+    if c.n_pool == 0u64 { return Some(Missing("n_pool")) }
+    if c.n_pool > WIRE_POOL_BYTES { return exceeds("n_pool", c.n_pool, WIRE_POOL_BYTES) }
+    if c.n_service > WIRE_SESSION_CEILING { return exceeds("n_service", c.n_service, WIRE_SESSION_CEILING) }
+    if c.n_granted > WIRE_SESSION_CEILING { return exceeds("n_granted", c.n_granted, WIRE_SESSION_CEILING) }
+    let peak = wire_variable_peak(c) + c.n_granted
+    if peak > WIRE_SESSION_CEILING { return exceeds("session peak", peak, WIRE_SESSION_CEILING) }
+    // Welcome carries one issuer byte, at most SUBJECT_MAX subject bytes and a 32-byte digest.
+    // The launch target belongs to this run, so its size is known at serve.
+    let welcome = 85u64 + SUBJECT_MAX + target_size
+    let mandatory = if welcome > 125u64 { welcome } else { 125u64 }
+    let floor = std.order.max(mandatory, wire_outcome_reserve(c) + 28u64)
+    if c.socket.max_frame < floor { return Some(Missing("socket.max_frame (below the Welcome and outcome frames)")) }
+    if c.budget < wire_round(mandatory + 14u64) { return Some(Missing("budget (below one Welcome frame)")) }
+    None
+}
+
+fn wire_decode(b: Bytes) -> Result[Frame, u16] {
+    if list.len(b) < 4u64 { return Error(1007u16) }
+    let tag: u32 = list.word_le(b, 0u64)
+    if tag > 3u32 && tag != 9u32 && tag != 10u32 { return Error(1007u16) }
+    let codec: std.codec.Codec[Frame] = std.codec.of()
+    Ok(std.codec.decode(codec, b) ?=> |_| 1007u16)
+}

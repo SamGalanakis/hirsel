@@ -50,7 +50,7 @@ fn test_named_slots(clock: Clock, random: Random) -> Result[(), String] waits {
     let output = result.unwrap(row_log())
     let mut arg: Bytes = list.new()
     list.push(mut arg, 0u8)
-    let good = SubscriptionInput(room: None, key: clone(key), arg: take arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
+    let good = SubscriptionInput(grants: None, room: None, key: clone(key), arg: take arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
     let observed = run_query(r, h, access, read_handle, base, good, base, None, output)
     let Covered(projected) = observed else { return Error("matching slots did not project") }
     let mut expected: Bytes = list.new()
@@ -63,7 +63,7 @@ fn test_named_slots(clock: Clock, random: Random) -> Result[(), String] waits {
     if rows[1u64].key != rows[2u64].key { return Error("the second slot missed the shared row") }
     let mut bad_arg: Bytes = list.new()
     list.push(mut bad_arg, 1u8)
-    let wrong = SubscriptionInput(room: None, key: take key, arg: take bad_arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
+    let wrong = SubscriptionInput(grants: None, room: None, key: take key, arg: take bad_arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
     let refused = result.unwrap(row_log())
     match run_query(r, h, access, read_handle, base, wrong, base, None, refused) {
         Faulted(Failed(Raised(5u32)), _) => (),

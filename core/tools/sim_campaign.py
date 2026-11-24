@@ -25,6 +25,7 @@ FLOOD_SEEDS = {
     'runner@1/runner_calls/law_calls_session_charge': 2,
     'harness@1/provider_laws/test_warm_and_hedge': 3,
 }
+TRACE_FLOORS = {'store@1/store/bucket_test_m2_register_fence': 2}
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',
     'startup_ready_deadline', 'fatal_error_during_sync', 'comma_host_refused',
@@ -254,7 +255,8 @@ def prepare(compiler, work, kind, group, jobs, seeds):
         seed_zero = {'status': 0 if row['passed'] else (row.get('status') or 1),
                      'stdout': row.get('stdout', ''), 'stderr': row.get('stderr', row.get('stopped', ''))}
         count = seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
-        laws.append({'law': law, 'executable': str(binary), 'seeds': count, 'seed_zero': seed_zero})
+        laws.append({'law': law, 'executable': str(binary), 'seeds': count, 'seed_zero': seed_zero,
+                     'min_traces': min(count, TRACE_FLOORS.get(law, 0))})
     shutil.rmtree(scratch / 'objects')
     return laws
 

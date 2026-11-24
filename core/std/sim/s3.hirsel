@@ -40,7 +40,8 @@ pub type Report: send {
     multipart_uploads: u64,
     writes: u64,
     attempts: u64,
-    withdrawn: u64
+    withdrawn: u64,
+    fragment_trace: u64
 }
 
 pub opaque type Endpoint {
@@ -83,7 +84,8 @@ type Bucket {
     uploads: Map[String, Upload],
     next_upload: u64,
     writes: u64,
-    served: u64
+    served: u64,
+    fragment_trace: u64
 }
 
 type Target {
@@ -1045,10 +1047,9 @@ fn send(config: Config, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u
     }
 }
 
-fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
+fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut trace: u64, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
     let mut c = take call
     match peer.state {
-        ResetPeer => return answer(mut served, take c, Failed(Reset)),
         Sending => (),
         _ => return answer(mut served, take c, Failed(Reset))
     }
@@ -1063,18 +1064,17 @@ fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut served: Ser
         }
     }
     let limit = order.min(config.fragment_bytes, order.min(room, list.len(peer.outgoing) - peer.sent))
-    let count: u64 = if limit == 0 {
-        0
-    } else {
-        1 + sim.world.pick(mut peer.plan, limit)
+    let count: u64 = match limit {
+        0 => 0,
+        _ => 1 + sim.world.pick(mut peer.plan, limit)
     }
     let staged = provide.fill(mut served, mut c, list.slice(peer.outgoing, peer.sent, peer.sent + count))
-    if answer(mut served, take c, Count(staged)) {
+    let accepted = answer(mut served, take c, Count(staged))
+    if accepted {
         peer.sent += staged
-        true
-    } else {
-        false
+        trace = int.wrapping_mul(trace ^ staged, 0x100000001b3)
     }
+    accepted
 }
 
 fn operate(config: Config, mut bucket: Bucket, mut peer: Peer, clock: Clock, op: NetOp, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
@@ -1083,7 +1083,7 @@ fn operate(config: Config, mut bucket: Bucket, mut peer: Peer, clock: Clock, op:
             send(config, mut bucket, mut peer, prefix, tail, mut served, take call)
             true
         },
-        Recv(room: room, max: max, ..) => recv(config, mut peer, clock, order.min(room, max), mut served, take call),
+        Recv(room: room, max: max, ..) => recv(config, mut peer, clock, order.min(room, max), mut bucket.fragment_trace, mut served, take call),
         Ready(..) => {
             if let Stall(until) = peer.fault {
                 if host.mono_ns(clock) < until {
@@ -1146,7 +1146,7 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
         fail("sim.s3 needs a positive fragment size and a 412 or 304 dialect")
     }
     let mut port = take served
-    let mut bucket = Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0)
+    let mut bucket = Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0, fragment_trace: 0xcbf29ce484222325)
     let mut peers: Map[u64, Peer] = map.new()
     let mut next = 1u64
     let mut dns_changed = false
@@ -1204,10 +1204,10 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
             }
         }
     }
-    let Bucket(objects: take objects, uploads: take uploads, next_upload, writes, ..) = take bucket
+    let Bucket(objects: take objects, uploads: take uploads, next_upload, writes, fragment_trace, ..) = take bucket
     let mut pending: List[String] = list.with_capacity(map.len(uploads))
     for id in sorted_keys(uploads) {
         list.push(mut pending, clone(option.unwrap(map.get(uploads, id)).key))
     }
-    Report(objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: next - 1, withdrawn: withdrawn)
+    Report(objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: next - 1, withdrawn: withdrawn, fragment_trace)
 }

@@ -473,10 +473,14 @@ fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, H
 // L53 register portion. An obsolete If-Match may leave immutable debris.
 // Head names only the new holder's chain.
 @test
-fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+fn bucket_test_m2_register_fence(c: Clock, tasks: Tasks, seed_grant: Env, out: Stdout) -> Result[(), Error] waits {
     let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 5), None, list.new())
     let observed = bucket_m2_law_register(tasks, sim)
     let report = bucket_law_finish(take sim)
+    let mut trace = string.from("trace ")
+    string.push_u64(mut trace, report.fragment_trace)
+    string.push(mut trace, "\n")
+    result.unwrap(stdout.write(out, trace))
     let (committed, orphan) = observed?
     let published = option.unwrap(map.get(report.objects, "head"))
     let final_capture = history_decode_head(published.data)?

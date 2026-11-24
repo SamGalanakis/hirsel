@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Run disjoint sim.world seed ranges on Boat using a prebuilt Hirsel test.
 
-Dispatch exits 0 for a complete passing campaign, 1 for failing seeds, and 2
+Dispatch exits 0 for a complete passing campaign, 1 for a failed law, and 2
 for an incomplete campaign or dispatch error. A batch denied a spare start
 exits 75. Call dispatch directly when its verdict determines the caller's status.
 """
 import argparse
 from bisect import bisect_right
+from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import sqlite3
@@ -20,12 +22,16 @@ import sys
 import tempfile
 
 
+TRACE = re.compile(r"^trace (\S+)$", re.MULTILINE)
+
+
 @dataclass(frozen=True)
 class Law:
     name: str
     binary: Path
     seeds: int
     seed_zero: dict | None
+    min_traces: int = 0
 
 
 def allocate(db, campaign, shards, count):
@@ -47,6 +53,12 @@ def allocate_ranges(db, campaign, laws):
         campaign TEXT, seed INTEGER, same_build_nondeterminism INTEGER NOT NULL,
         status INTEGER NOT NULL, stdout TEXT NOT NULL, stderr TEXT NOT NULL,
         PRIMARY KEY (campaign, seed)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS law_trace_counts (
+        campaign TEXT, shard INTEGER, distinct_hashes INTEGER NOT NULL,
+        minimum INTEGER NOT NULL, failed INTEGER NOT NULL,
+        PRIMARY KEY (campaign, shard),
+        FOREIGN KEY (campaign, shard) REFERENCES shard_laws (campaign, shard)
     )""")
     with db:
         db.execute("BEGIN IMMEDIATE")
@@ -113,6 +125,8 @@ def seed_zero_failed(db, campaign, law, results):
 def record(db, campaign, ranges, output, results, executable, laws=None):
     observed = {}
     replays = []
+    traces = defaultdict(set)
+    trace_reds = []
     malformed = False
     stops = [stop for _, stop in ranges]
     for line in output:
@@ -133,8 +147,12 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             print(line, end="", file=sys.stderr)
             continue
         if laws is not None:
-            law = laws[bisect_right(stops, seed)]
+            shard = bisect_right(stops, seed)
+            law = laws[shard]
             row["law"], executable = law.name, law.binary
+            hashes = TRACE.findall(row.get("stdout", ""))
+            if len(hashes) == 1:
+                traces[shard].add(hashes[0])
         row["replay"] = shlex.join([str(Path(__file__).resolve()), "run", str(executable),
                                     str(seed), str(seed + 1)])
         print(json.dumps(row), file=results, flush=True)
@@ -145,8 +163,20 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             statuses = [observed[seed] for seed in range(start, stop) if seed in observed]
             db.execute("UPDATE shards SET executed = ?, failed = ? WHERE campaign = ? AND shard = ?",
                        (len(statuses), sum(status != 0 for status in statuses), campaign, shard))
+            if laws is not None:
+                law = laws[shard]
+                distinct = len(traces[shard])
+                failed = len(statuses) == stop - start and distinct < law.min_traces
+                db.execute("INSERT INTO law_trace_counts VALUES (?, ?, ?, ?, ?)",
+                           (campaign, shard, distinct, law.min_traces, failed))
+                if failed:
+                    trace_reds.append({"law": law.name, "kind": "trace_diversity_red", "distinct_hashes": distinct,
+                                       "minimum": law.min_traces})
+    for red in trace_reds:
+        print(json.dumps(red), file=results, flush=True)
+        print(f"{red['law']}: {red['distinct_hashes']} distinct trace hashes, need {red['minimum']}", file=sys.stderr)
     complete = not malformed and len(observed) == ranges[-1][1] - ranges[0][0]
-    return complete, sum(status != 0 for status in observed.values())
+    return complete, sum(status != 0 for status in observed.values()) + len(trace_reds)
 
 
 def dispatch(args):
@@ -235,7 +265,10 @@ def read_laws(path):
         if "seed_zero" in entry and (not isinstance(seed_zero, dict) or type(seed_zero.get("status")) is not int
                                      or not all(isinstance(seed_zero.get(stream), str) for stream in ("stdout", "stderr"))):
             raise ValueError(f"invalid seed 0 verdict for {law}")
-        laws.append(Law(law, local_executable(path.parent / binary), count, seed_zero))
+        minimum = entry.get("min_traces", 0)
+        if type(minimum) is not int or not 0 <= minimum <= count:
+            raise ValueError(f"invalid trace diversity floor for {law}")
+        laws.append(Law(law, local_executable(path.parent / binary), count, seed_zero, minimum))
         names.add(law)
     return laws
 

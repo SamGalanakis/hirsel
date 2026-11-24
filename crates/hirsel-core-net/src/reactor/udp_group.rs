@@ -264,7 +264,8 @@ impl Groups {
         }
         let mut writer_visits = 64;
         let mut revisit_first = None;
-        for i in 0..self.runnable.len() {
+        let mut first_live = true;
+        for _ in 0..self.runnable.len() {
             if !budget.has_datagrams() && writer_visits == 0 {
                 break;
             }
@@ -273,9 +274,10 @@ impl Groups {
                 continue;
             };
             intake.queued = false;
+            let started_first = std::mem::replace(&mut first_live, false);
             intake.dispatch(budget, &mut writer_visits);
             if intake.due() {
-                if i == 0 {
+                if started_first {
                     revisit_first = Some(tag);
                 } else {
                     Self::enqueue(&mut self.runnable, tag, intake);
@@ -432,3 +434,7 @@ impl Poller {
         self.wake();
     }
 }
+
+#[cfg(test)]
+#[path = "udp_turn_tests.rs"]
+mod tests;

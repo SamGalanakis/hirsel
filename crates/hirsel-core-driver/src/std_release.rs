@@ -155,8 +155,8 @@ fn program_side(
             if !seen.insert(identity) {
                 continue;
             }
-            for function in unit.module.functions.iter().filter(|f| f.body.is_none()) {
-                let callee = unit.module.identity(function.instance);
+            for function in unit.module().functions.iter().filter(|f| f.body.is_none()) {
+                let callee = unit.module().identity(function.instance);
                 if units.contains_key(&callee) && !seen.contains(&callee) {
                     work.push(callee);
                 }
@@ -179,12 +179,12 @@ fn program_side(
         // Keep their plain callees there too, as for program helpers and
         // closures. The entry can still call the side directly.
         let first_helper = usize::from(identity == entry);
-        for function in &unit.module.functions[first_helper..] {
+        for function in &unit.module().functions[first_helper..] {
             let Some(body) = &function.body else { continue };
             for call in &body.calls {
                 if let Callee::Direct(callee) = call.callee {
-                    let function = &unit.module.functions[callee.index()];
-                    let signature = &unit.module.signatures[function.signature.index()];
+                    let function = &unit.module().functions[callee.index()];
+                    let signature = &unit.module().signatures[function.signature.index()];
                     // These calls pass only floating-point values: the side
                     // can optimise the routine before the caller inlines it.
                     if signature.dest.is_none()
@@ -196,7 +196,7 @@ fn program_side(
                     {
                         continue;
                     }
-                    let callee = unit.module.identity(function.instance);
+                    let callee = unit.module().identity(function.instance);
                     if plain(&callee) {
                         local_roots.push(callee);
                     }
@@ -207,7 +207,7 @@ fn program_side(
     let held = reach(local_roots);
     let roots: Vec<Identity> = units
         .iter()
-        .filter(|(i, u)| plain(i) && !held.contains(*i) && !held_root(&u.module, FuncId(0)))
+        .filter(|(i, u)| plain(i) && !held.contains(*i) && !held_root(u.module(), FuncId(0)))
         .map(|(i, _)| i.clone())
         .collect();
     let reached = reach(roots.clone());
@@ -396,7 +396,7 @@ impl CheckProduct {
             .iter()
             .map(|(identity, unit)| {
                 let size = unit
-                    .module
+                    .module()
                     .functions
                     .iter()
                     .filter_map(|f| f.body.as_ref())
@@ -598,7 +598,7 @@ fn lower_module(
     let points = std::sync::Arc::unwrap_or_clone(bindings.sources).points;
     let mut modules: Vec<_> = units
         .values()
-        .map(|unit| Cow::Borrowed(&unit.module))
+        .map(|unit| Cow::Borrowed(unit.module()))
         .collect();
     // Only the roots are exports: a program lowers every other instance it
     // reaches, so its optimiser sees the arguments it passes them.

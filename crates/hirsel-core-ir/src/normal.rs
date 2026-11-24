@@ -62,7 +62,7 @@ mod results;
 use results::results;
 mod charge;
 mod retained;
-pub use retained::{prepare_retained_assembly, retain};
+pub use retained::{assembly_module, prepare_retained_assembly, retain, retained_annex};
 pub(crate) mod wire;
 use charge::{PlanMeter, reserve};
 pub(crate) use charge::{charge_identity, charge_shape};
@@ -636,8 +636,7 @@ pub fn prepare_assembly(
     sources: &SourcePositions<'_>,
 ) -> (EncodedBody, Annex, Module) {
     let (body, annex) = encode_with_annex(module, root, sources);
-    let (module, _) = decode_payload(&body.bytes, &Debit::unlimited())
-        .expect("the producer's normal form is readable");
+    let module = assembly_module(&body.bytes);
     (body, annex, module)
 }
 

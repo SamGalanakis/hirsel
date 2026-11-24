@@ -586,7 +586,7 @@ impl CheckProduct {
         let root = Identity::plain(entry.clone());
         let code = crate::code_store::CodeStore::cache(&options.store, "code")?;
         let mut units = self
-            .release_units(&root, &reached, &code, None, None)?
+            .release_units(&root, &reached, &code, None, None, false)?
             .units;
         let runtime = inputs.toolchain.runtime;
         let library = self.image.as_ref().map(|image| image.store_root());

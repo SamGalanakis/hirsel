@@ -5,6 +5,27 @@ pub fn prepare_retained_assembly(
     retained: &Module,
     sources: &SourcePositions<'_>,
 ) -> (Annex, Module) {
+    let annex = retained_annex(retained, sources);
+    let mut module = retained.clone();
+    module.items.clear();
+    for body in module.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
+        body.inst_anchors.fill(None);
+        for block in &mut body.blocks {
+            block.anchor = None;
+        }
+        for call in &mut body.calls {
+            call.cold = false;
+        }
+        for edge in &mut body.edges {
+            edge.cold = false;
+        }
+        body.callable_parameters.clear();
+    }
+    (annex, module)
+}
+
+/// Read a retained module's annex in its canonical row order.
+pub fn retained_annex(retained: &Module, sources: &SourcePositions<'_>) -> Annex {
     let functions = retained
         .functions
         .iter()
@@ -21,22 +42,7 @@ pub fn prepare_retained_assembly(
             ))
         })
         .collect();
-    let mut module = retained.clone();
-    module.items.clear();
-    for body in module.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
-        body.inst_anchors.fill(None);
-        for block in &mut body.blocks {
-            block.anchor = None;
-        }
-        for call in &mut body.calls {
-            call.cold = false;
-        }
-        for edge in &mut body.edges {
-            edge.cold = false;
-        }
-        body.callable_parameters.clear();
-    }
-    (Annex(functions, None), module)
+    Annex(functions, None)
 }
 
 /// Materialize the retained module for existing native and evaluator consumers.
@@ -87,4 +93,11 @@ pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
         }
     }
     (code, retained)
+}
+
+/// Decode our own normal body bytes for assembly.
+pub fn assembly_module(bytes: &[u8]) -> Module {
+    decode_payload(bytes, &Debit::unlimited())
+        .expect("the producer's normal form is readable")
+        .0
 }

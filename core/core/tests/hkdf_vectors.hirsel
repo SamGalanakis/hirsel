@@ -5,7 +5,7 @@ fn matches_mac(key: Secret, expected: Bytes) -> bool {
     bytebuf.append_inline(mut out, tag, 0, 32) && out == expected
 }
 
-fn matches_hkdf(ikm: Bytes, salt: Bytes, info: Bytes, len: u64, expected: Bytes) -> bool {
+fn matches_hkdf(take ikm: Bytes, salt: Bytes, info: Bytes, len: u64, expected: Bytes) -> bool {
     let parent = result.unwrap(secret.seal(take ikm, "kdf"))
     match secret.derive_hkdf_sha256(parent, salt, info, len, "mac") {
         Ok(child) => matches_mac(child, expected),
@@ -32,7 +32,9 @@ fn kd2_wycheproof() -> u64 {
         let info = salt + size(data, pos + 6)
         let tag = info + size(data, pos + 8)
         let end = tag + size(data, pos + 10)
-        if !matches_hkdf(list.slice(data, ikm, salt), list.slice(data, salt, info), list.slice(data, info, tag), len, list.slice(data, tag, end)) {
+        let mut raw: Bytes = list.with_capacity(salt - ikm)
+        list.append(mut raw, list.slice(data, ikm, salt))
+        if !matches_hkdf(take raw, list.slice(data, salt, info), list.slice(data, info, tag), len, list.slice(data, tag, end)) {
             return id
         }
         pos = end

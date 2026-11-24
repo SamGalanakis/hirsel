@@ -1094,34 +1094,18 @@ fn ended(mut h: Host, c: launcher.Child, e: launcher.End, now: Now, mut out: Lis
     match take found {
         Some(take outstanding) => {
             let mut cut = take outstanding
-            if cut.held && (gen == cut.candidate || gen == cut.old) {
-                if gen == cut.candidate {
-                    cut.candidate_end = Some(e)
-                } else {
-                    cut.old_end = Some(e)
-                    cut.old_ended = true
-                }
-                set_cut(mut h, name, Some(take cut))
-                return
-            }
             if gen == cut.candidate {
                 cut.candidate_end = Some(e)
-                if cut.old_ended {
-                    undecided(mut h, name, take cut, mut out)
-                } else {
-                    set_cut(mut h, name, Some(take cut))
-                }
             } else if gen == cut.old {
                 cut.old_end = Some(e)
                 cut.old_ended = true
-                if cut.opened {
-                    commit_cut(mut h, name, take cut, now, mut out)
-                } else if let Some(_) = cut.candidate_end {
-                    undecided(mut h, name, take cut, mut out)
-                } else {
-                    set_cut(mut h, name, Some(take cut))
-                }
+            } else {
+                list.push(mut out, Acknowledge(clone(c)))
+                return
             }
+            let held = cut.held
+            finish_ended_cut(mut h, name, take cut, now, mut out)
+            if held { return }
         },
         None => {
             if run_gen(h, name) == Some(gen) {
@@ -1130,6 +1114,16 @@ fn ended(mut h: Host, c: launcher.Child, e: launcher.End, now: Now, mut out: Lis
         },
     }
     list.push(mut out, Acknowledge(clone(c)))
+}
+
+fn finish_ended_cut(mut h: Host, name: String, take cut: Cut, now: Now, mut out: List[launcher.Request]) waits {
+    if !cut.held && cut.old_ended && cut.opened {
+        commit_cut(mut h, name, take cut, now, mut out)
+    } else if !cut.held && cut.old_ended && !is_none(cut.candidate_end) {
+        undecided(mut h, name, take cut, mut out)
+    } else {
+        set_cut(mut h, name, Some(take cut))
+    }
 }
 
 // The store installed the deploy's activation: NEW's assembly becomes the group's root,
@@ -1308,6 +1302,37 @@ fn undecided(mut h: Host, name: String, take cut: Cut, mut out: List[launcher.Re
     let _ = launch_dirty(mut h, name, true, mut out)
 }
 
+fn cutover_result(mut h: Host, c: launcher.Child, attempt: launcher.Attempt, reply: runner.HostReply, now: Now, mut out: List[launcher.Request]) waits {
+    let Some(g) = current(h, c) else { return }
+    let Serving(gen) = c.role else { return }
+    let name = string.from(c.group.name)
+    let Some(take pending) = cut_of(h, name) else { return }
+    let mut cut = take pending
+    if gen != cut.old || attempt.hi != cut.attempt.hi || attempt.lo != cut.attempt.lo { return }
+    let ack_old = cut.held && !is_none(cut.old_end)
+    let ack_new = cut.held && !is_none(cut.candidate_end)
+    let candidate = child_of(name, cut.incarnation, cut.candidate)
+    cut.held = false
+    match reply {
+        PlaceInstalled(v, _) => {
+            if v != cut.activation { return }
+            commit_cut(mut h, name, take cut, now, mut out)
+        },
+        PlaceDrift => drift(mut h, name, g, take cut, now, mut out),
+        PlaceRefused(why) => abort_cut(mut h, name, g, take cut, why, now, mut out),
+        PlaceUncertain => {
+            cut.old_ended = true
+            finish_ended_cut(mut h, name, take cut, now, mut out)
+        },
+        _ => return,
+    }
+    if let Some(remaining) = cut_of(h, name) {
+        if remaining.held { return }
+    }
+    if ack_old { list.push(mut out, Acknowledge(clone(c))) }
+    if ack_new { list.push(mut out, Acknowledge(take candidate)) }
+}
+
 fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut out: List[launcher.Request]) waits {
     let Some(g) = current(h, c) else {
         return
@@ -1363,48 +1388,13 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                 if let PlaceOpened(ready) = reply {
                     if ready.version == cut.activation && ready.release == cut.release {
                         cut.opened = true
-                        if cut.old_ended {
-                            commit_cut(mut h, name, take cut, now, mut out)
-                        } else {
-                            set_cut(mut h, name, Some(take cut))
-                        }
+                        finish_ended_cut(mut h, name, take cut, now, mut out)
                     }
                 }
-            } else if gen == cut.old {
-                let deferred = cut.held
-                cut.held = false
-                let old_done = cut.old_ended
-                let new_done = match cut.candidate_end {
-                    Some(_) => true,
-                    None => false
-                }
-                let (inc, old_gen, new_gen) = (cut.incarnation, cut.old, cut.candidate)
-                match reply {
-                    PlaceInstalled(v, _) => if v == cut.activation {
-                        commit_cut(mut h, name, take cut, now, mut out)
-                    },
-                    PlaceDrift => drift(mut h, name, g, take cut, now, mut out),
-                    PlaceRefused(why) => abort_cut(mut h, name, g, take cut, why, now, mut out),
-                    // OLD ended before it answered (§14.5): as its end, without the report.
-                    PlaceUncertain => {
-                        cut.old_ended = true
-                        if cut.opened {
-                            commit_cut(mut h, name, take cut, now, mut out)
-                        } else if let Some(_) = cut.candidate_end {
-                            undecided(mut h, name, take cut, mut out)
-                        } else {
-                            set_cut(mut h, name, Some(take cut))
-                        }
-                    },
-                    _ => set_cut(mut h, name, Some(take cut)),
-                }
-                if deferred {
-                    if old_done {
-                        list.push(mut out, Acknowledge(child_of(name, inc, old_gen)))
-                    }
-                    if new_done {
-                        list.push(mut out, Acknowledge(child_of(name, inc, new_gen)))
-                    }
+            } else if gen == cut.old && !cut.held {
+                // The launcher can refuse to forward a cutover to a missing endpoint.
+                if let PlaceRefused(why) = reply {
+                    abort_cut(mut h, name, g, take cut, why, now, mut out)
                 }
             }
         },
@@ -1806,7 +1796,7 @@ pub fn event(mut h: Host, take e: launcher.Event, now: Now) -> List[launcher.Req
         Closed(_) => (),
         Retired(g) => finish_retire(mut h, g, now, mut out),
         Placed(c, reply) => placed(mut h, c, reply, now, mut out),
-        CutoverResult(c, _, reply) => placed(mut h, c, reply, now, mut out),
+        CutoverResult(c, attempt, reply) => cutover_result(mut h, c, attempt, reply, now, mut out),
         Answered(c, said) => answered(mut h, c, said, mut out),
         Need(a, keys, done) => needed(mut h, a, keys, done),
         Admitted(a, root, summary, display) => admitted(mut h, a, root, summary, display, mut out),

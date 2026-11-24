@@ -12,7 +12,7 @@ const MAGIC: &[u8] = b"HIRRECIP\0\x02\x00";
 const NORMAL_FORM: u16 = crate::normal::VERSION;
 pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v2";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRef {
     pub hash: ContentHash,
     pub len: u64,
@@ -45,14 +45,14 @@ pub struct ForeignLeaf {
     pub functions: Vec<ForeignFunction>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum Backend {
     Cranelift = 0,
     Llvm = 1,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum GrantKind {
     Dir = 0,
@@ -96,7 +96,7 @@ impl GrantKind {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GrantBinding {
     pub ordinal: u32,
     pub kind: GrantKind,
@@ -107,7 +107,7 @@ pub struct GrantBinding {
     pub policy: Option<ContentHash>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Launch {
     pub backend: Backend,
     pub target: String,

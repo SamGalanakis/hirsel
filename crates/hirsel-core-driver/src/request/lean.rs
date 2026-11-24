@@ -28,6 +28,7 @@ macro_rules! bail {
 
 mod bindings;
 mod checks;
+mod coreir;
 mod expr;
 mod stmt;
 mod syntax;
@@ -902,11 +903,18 @@ pub(crate) fn run(invocation: Invocation) -> R<()> {
     let mut inputs = None;
     let mut store = None;
     let mut output = None;
+    let mut target = None;
+    let mut coreir = false;
     for (option, value) in invocation.options {
         let slot = match option {
             OptionId::Inputs => &mut inputs,
             OptionId::Store => &mut store,
             OptionId::Output => &mut output,
+            OptionId::Target => &mut target,
+            OptionId::CoreIr if !coreir => {
+                coreir = true;
+                continue;
+            }
             _ => bail!("invalid option for {}", invocation.command.name),
         };
         if slot.is_some() {
@@ -920,6 +928,9 @@ pub(crate) fn run(invocation: Invocation) -> R<()> {
         .positional
         .as_deref()
         .ok_or("a module is required")?;
+    if target.is_some() && !coreir {
+        bail!("--target requires --coreir");
+    }
     let product = check(Path::new(inputs), Path::new(store))?;
     if invocation.command.name == "lean probe" {
         return probe(
@@ -928,6 +939,15 @@ pub(crate) fn run(invocation: Invocation) -> R<()> {
         );
     }
     let output = Path::new(output.as_deref().ok_or("--output is required")?);
+    if coreir {
+        let target = target.as_deref().unwrap_or(crate::native::TARGET);
+        let target = hirsel_core_layout::Target::from_triple(target)
+            .ok_or_else(|| format!("unsupported target `{target}`"))?;
+        let snapshot = coreir::capture(&product, module, &invocation.arguments, target)?;
+        return write_output(output, |file| {
+            snapshot.write(file).map_err(|error| error.to_string())
+        });
+    }
     let extracted = extract(&product, module, &invocation.arguments)?;
     print!("{}", extracted.report);
     if !extracted.ok {
@@ -941,15 +961,29 @@ pub(crate) fn run(invocation: Invocation) -> R<()> {
             Err(error) => bail!("{}: {error}", output.display()),
         }
     } else {
-        let parent = output
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        let mut file =
-            tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
-        std::io::Write::write_all(file.as_file_mut(), extracted.lean.as_bytes())
-            .map_err(|error| error.to_string())?;
-        file.persist(output).map_err(|error| error.to_string())?;
+        write_output(output, |file| {
+            std::io::Write::write_all(file, extracted.lean.as_bytes())
+                .map_err(|error| error.to_string())
+        })?;
     }
+    Ok(())
+}
+
+fn write_output(
+    output: &Path,
+    write: impl FnOnce(&mut std::io::BufWriter<&mut std::fs::File>) -> R<()>,
+) -> R<()> {
+    use std::io::Write;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    {
+        let mut buffer = std::io::BufWriter::new(file.as_file_mut());
+        write(&mut buffer)?;
+        buffer.flush().map_err(|error| error.to_string())?;
+    }
+    file.persist(output).map_err(|error| error.to_string())?;
     Ok(())
 }

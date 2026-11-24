@@ -1,5 +1,21 @@
 use super::*;
 
+/// The canonical encoding and its root's source annex, in canonical order.
+#[cfg(any(test, feature = "snapshot"))]
+pub(crate) fn encode_with_root_annex(
+    module: &Module,
+    root: FuncId,
+    sources: &SourcePositions<'_>,
+) -> (EncodedBody, FunctionAnnex) {
+    let mut annex = None;
+    let body = encode_with_orders(module, root, |order| {
+        if annex.is_none() {
+            annex = order.map(|order| function_annex(module, &order, sources));
+        }
+    });
+    (body, annex.expect("the root is a definition"))
+}
+
 /// Prepare assembly from the canonical rows `retain` already decoded.
 pub fn prepare_retained_assembly(
     retained: &Module,

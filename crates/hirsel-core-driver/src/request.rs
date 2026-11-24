@@ -16,7 +16,6 @@ use std::time::Duration;
 
 mod lean;
 mod release;
-
 #[derive(Serialize)]
 struct Output<'a> {
     accepted: bool,
@@ -475,6 +474,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::InspectLibrary
             | Opt::InspectStd
             | Opt::InspectCore
+            | Opt::CoreIr
             | Opt::IncludeCredentials
             | Opt::Lib
             | Opt::FmtCheck

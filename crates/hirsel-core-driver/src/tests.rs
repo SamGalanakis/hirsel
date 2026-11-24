@@ -3530,7 +3530,7 @@ fn corpus_files(dir: &Path, tests: bool) -> Vec<hirsel_core_resolve::ModuleSourc
 
 /// The suite program: core from `core`, std from `root`, langarena from
 /// `langarena`, tests included.
-fn langarena_inputs(root: &Path, core: &Path, langarena: &Path) -> CorpusManifest {
+pub(crate) fn langarena_inputs(root: &Path, core: &Path, langarena: &Path) -> CorpusManifest {
     CorpusManifest {
         core: package("core"),
         packages: vec![

@@ -683,6 +683,7 @@ dependencies = [
  "hirsel-core-net",
  "hirsel-guard",
  "serde",
+ "serde_json",
  "twox-hash",
  "zeroize",
 ]

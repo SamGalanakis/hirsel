@@ -61,7 +61,7 @@ const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 mod results;
 use results::results;
 mod charge;
-mod retained;
+pub(crate) mod retained;
 pub use retained::RetainedSites;
 pub use retained::{assembly_module, prepare_retained_assembly, retain, retained_annex};
 pub(crate) mod wire;
@@ -491,7 +491,7 @@ impl<'m> BodyOrder<'m> {
 }
 
 /// A source position resolved against the current checked sources.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Site {
     pub file: std::sync::Arc<str>,
     pub line: u32,
@@ -499,7 +499,7 @@ pub struct Site {
 }
 
 /// Sites and optimisation hints for a defined function, in body order.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FunctionAnnex {
     pub instructions: Vec<Option<Site>>,
     pub terminators: Vec<Option<Site>>,

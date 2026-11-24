@@ -1,8 +1,13 @@
 //! One command/option catalogue drives parsing and user help.
 pub use crate::cli_tools::scaffold;
 
+#[path = "cli_types.rs"]
+mod types;
+pub use types::{CommandSpec, Invocation};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptionId {
+    CoreIr,
     Json,
     Recipe,
     CodeStore,
@@ -127,12 +132,6 @@ struct OptionSpec {
     commands: &'static [&'static str],
     description: &'static str,
 }
-#[derive(Debug)]
-pub struct CommandSpec {
-    pub name: &'static str,
-    usage: &'static str,
-    description: &'static str,
-}
 macro_rules! commands {
     ($($name:literal, $usage:literal, $description:literal;)*) => {
         pub static COMMANDS: &[CommandSpec] = &[$(CommandSpec {name:$name,usage:$usage,description:$description}),*];
@@ -143,7 +142,7 @@ commands! {
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
     "lean", "lean <extract|status|probe>", "Extract checked functions for optional Lean proofs.";
-    "lean extract", "lean extract MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Generate Lean definitions from checked Hirsel source.";
+    "lean extract", "lean extract MODULE [--coreir] --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Generate Lean definitions or export a checked CoreIR closure.";
     "lean status", "lean status MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Report whether a saved extraction is stale.";
     "lean probe", "lean probe DEFINITION --inputs MANIFEST --store DIRECTORY", "Report instructions the Lean extractor excludes.";
     "laws", "laws <check|write> [package-dir] [options]", "Check or refresh the generated law lock.";
@@ -999,9 +998,17 @@ static OPTIONS: &[OptionSpec] = &[
             "env",
             "core-product",
             "std-product",
-            "sdk"
+            "sdk",
+            "lean extract"
         ],
         "Select the full native target triple."
+    ),
+    option!(
+        CoreIr,
+        ["--coreir"],
+        None,
+        ["lean extract"],
+        "Export linked checked CoreIR, layouts and source annexes as JSON."
     ),
     option!(
         Emulator,
@@ -1166,13 +1173,6 @@ static OPTIONS: &[OptionSpec] = &[
         "Create lib.hirsel and a runnable main that exercises it."
     ),
 ];
-#[derive(Debug)]
-pub struct Invocation {
-    pub command: &'static CommandSpec,
-    pub options: Vec<(OptionId, Option<String>)>,
-    pub positional: Option<String>,
-    pub arguments: Vec<String>,
-}
 #[path = "cli_help.rs"]
 mod help_text;
 pub use help_text::help;

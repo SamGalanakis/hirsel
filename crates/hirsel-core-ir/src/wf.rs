@@ -1,5 +1,4 @@
-//! Structural well-formedness, for tests only (feature `wf`): producers' tests call
-//! it on what they built; no product path does (we trust our own implementation).
+//! Structural well-formedness for producer tests and checked CoreIR export.
 //! It checks references, single definition, arity, the operand typing each
 //! instruction states, that type rows have recipes, and that no failure path
 //! reaches a `return` (FAIL-14: nothing catches a failure), that every value

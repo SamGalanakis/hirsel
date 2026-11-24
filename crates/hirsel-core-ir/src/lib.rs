@@ -1110,8 +1110,7 @@ hirsel_guard::install!();
 
 pub mod address;
 pub mod decode;
-/// A test evaluator for the FORM v0 subset, for this crate's samples and its producers'
-/// behaviour cases.
+/// Reference evaluator for samples and producers' behaviour cases.
 #[cfg(any(test, feature = "eval"))]
 pub mod eval;
 pub mod extent;
@@ -1124,6 +1123,8 @@ pub mod normal;
 pub mod release_recipe;
 pub mod returnable;
 pub mod roles;
+#[cfg(any(test, feature = "snapshot"))]
+pub mod snapshot;
 pub mod source;
 mod static_data;
 pub mod step_contexts;
@@ -1136,7 +1137,6 @@ pub use hirsel_core_layout::{FuncRef, TypeRef, intern_shape};
 pub use ir::*;
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
 mod net_tests;
+#[cfg(test)]
+mod tests;

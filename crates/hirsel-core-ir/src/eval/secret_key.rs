@@ -11,6 +11,9 @@ impl Machine<'_> {
                 KeyFailure::Denied => 1,
                 KeyFailure::Invalid => 2,
                 KeyFailure::Tampered => 3,
+                KeyFailure::Provider(reason) => {
+                    std::panic::resume_unwind(Box::new(RunStop(reason)))
+                }
             };
             vec![0, tag, 0, 0]
         };
@@ -156,7 +159,7 @@ impl Machine<'_> {
             }
             Err(KeyFailure::Invalid) => vec![0, 2, 0, 0],
             Err(KeyFailure::Tampered) => vec![0, 3, 0, 0],
-            Err(KeyFailure::Denied) => unreachable!(),
+            Err(KeyFailure::Denied | KeyFailure::Provider(_)) => unreachable!(),
         }
     }
 

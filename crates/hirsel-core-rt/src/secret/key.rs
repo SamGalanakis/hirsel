@@ -57,6 +57,7 @@ fn key_failure(failure: hirsel_core_net::key_wrap::KeyFailure) -> Outcome {
         KeyFailure::Denied => KEY_DENIED,
         KeyFailure::Invalid => KEY_INVALID,
         KeyFailure::Tampered => KEY_TAMPERED,
+        KeyFailure::Provider(reason) => crate::process::stop(reason.as_bytes()),
     })
 }
 
@@ -426,3 +427,6 @@ pub unsafe extern "C" fn hirsel_core_secret_aead_open(
         )
     }
 }
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod rng_tests;

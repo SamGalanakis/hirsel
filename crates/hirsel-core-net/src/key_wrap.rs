@@ -23,6 +23,8 @@ pub enum KeyFailure {
     Invalid,
     /// The blob is not one this KEK sealed, unaltered. Nothing more is said.
     Tampered,
+    /// The host provider must stop the run before it delivers an outcome.
+    Provider(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -192,8 +194,18 @@ pub fn sign(alg: SignAlg, pkcs8: &[u8], msg: &[u8]) -> Result<Vec<u8>, KeyFailur
                 pkcs8,
                 &rng,
             )
-            .map_err(|_| KeyFailure::Invalid)?;
-            let sig = key.sign(&rng, msg).map_err(|_| KeyFailure::Invalid)?;
+            .map_err(|error| {
+                // ring 0.17.14 uses this diagnostic when loading a valid
+                // document reaches the nonce-key RNG. It exposes no tag.
+                if error.to_string() == "RNG failed" {
+                    KeyFailure::Provider("secret.sign: P-256 key loading: RNG failed")
+                } else {
+                    KeyFailure::Invalid
+                }
+            })?;
+            let sig = key.sign(&rng, msg).map_err(|_| {
+                KeyFailure::Provider("secret.sign: P-256 signing: ring Unspecified")
+            })?;
             Ok(sig.as_ref().to_vec())
         }
         SignAlg::Rs256 => {

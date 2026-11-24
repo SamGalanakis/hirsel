@@ -1,0 +1,211 @@
+const PACKETS: u64 = 1000000
+
+const SIZE: u64 = 1200
+
+const SSRC: u32 = 0xcafebabe
+
+const LIMITS: srtp.Limits = srtp.Limits(send_streams: 1, receive_streams: 1, ended_streams: 0)
+
+type Operation: key = ProtectRtp | ProtectRtpInto | UnprotectRtp | ProtectRtcp | UnprotectRtcp | UnprotectRtcpClear | Seal | Open
+
+fn import_key(profile: schedule.SrtpProfile, sending: bool, byte: u8) -> schedule.Schedule {
+    let n = match profile {
+        Aes128CmHmacSha1_80 => 30u64,
+        AeadAes128Gcm => 28u64,
+        AeadAes256Gcm => 44u64,
+    }
+    let mut key: Bytes = list.with_capacity(n)
+    list.fill(mut key, n, byte)
+    let uses = if sending {
+        "srtp_import(send)"
+    } else {
+        "srtp_import(receive)"
+    }
+    let sealed = result.unwrap(secret.seal(take key, uses))
+    result.unwrap(schedule.import_srtp(profile, take sealed))
+}
+
+fn endpoint(profile: schedule.SrtpProfile, sender: bool) -> srtp.Session {
+    let byte = if sender {
+        1u8
+    } else {
+        2u8
+    }
+    let send = import_key(profile, true, byte)
+    let receive = import_key(profile, false, byte ^ 3)
+    let mut session = result.unwrap(srtp.session_pair(take send, take receive, profile, LIMITS))
+    if sender {
+        result.unwrap(srtp.send_from(mut session, SSRC, 0, 0, 0))
+    } else {
+        result.unwrap(srtp.receive_from(mut session, SSRC, 0, 0, 0))
+    }
+    take session
+}
+
+fn plaintext(rtcp: bool) -> Bytes {
+    let mut plain: Bytes = list.with_capacity(SIZE)
+    list.fill(mut plain, SIZE, 19)
+    plain[0] = 0x80
+    if rtcp {
+        plain[1] = 204
+        list.set_word_be(mut plain, 2, 299u16)
+        list.set_word_be(mut plain, 4, SSRC)
+    } else {
+        plain[1] = 96
+        list.set_word_be(mut plain, 8, SSRC)
+    }
+    take plain
+}
+
+fn reset(mut buf: Bytes, source: Bytes) {
+    list.clear(mut buf)
+    list.append(mut buf, source)
+}
+
+fn fixture(op: Operation, profile: schedule.SrtpProfile, plain: Bytes, wire_size: u64) -> Bytes {
+    if !(op == UnprotectRtp || op == UnprotectRtcp || op == UnprotectRtcpClear || op == Open) {
+        return list.new()
+    }
+    let mut wire: Bytes = list.with_capacity(PACKETS * wire_size)
+    let mut buf: Bytes = list.with_capacity(wire_size)
+    if op == Open || op == UnprotectRtcpClear {
+        let space: packet.Space = if op == Open {
+            Rtp
+        } else {
+            Rtcp
+        }
+        let mut send = import_key(profile, true, 1)
+        let mut sealer = result.unwrap(schedule.sealer(mut send, space, int.widen(SSRC), 0))
+        for index in 0u64 .. PACKETS {
+            reset(mut buf, plain)
+            if op == Open {
+                let seq: u16 = int.truncate(index)
+                list.set_word_be(mut buf, 2, seq)
+                let _ = result.unwrap(packet.seal(mut sealer, index, mut buf, 0, 12, b""))
+            } else {
+                let trailer: u32 = int.narrow(index)
+                list.put_word_be(mut buf, trailer)
+                let _ = result.unwrap(packet.seal(mut sealer, index, mut buf, 0, SIZE + 4, b""))
+                let tag = srtp.tag_room(profile)
+                if tag == 16 {
+                    list.copy_within(mut buf, SIZE + 4, SIZE, tag)
+                    list.set_word_be(mut buf, SIZE + tag, trailer)
+                }
+            }
+            list.append(mut wire, buf)
+        }
+    } else {
+        let mut send = endpoint(profile, true)
+        for index in 0u64 .. PACKETS {
+            reset(mut buf, plain)
+            let _ = if op == UnprotectRtcp {
+                result.unwrap(srtp.protect_rtcp(mut send, mut buf))
+            } else {
+                let seq: u16 = int.truncate(index)
+                list.set_word_be(mut buf, 2, seq)
+                result.unwrap(srtp.protect_rtp(mut send, mut buf))
+            }
+            list.append(mut wire, buf)
+        }
+    }
+    if list.len(wire) != PACKETS * wire_size {
+        fail("wrong fixture size")
+    }
+    take wire
+}
+
+fn number(argv: Args, index: u64) -> u64 {
+    let Some(value) = args.get(argv, index) else {
+        return 255
+    }
+    result.unwrap(int.parse(value))
+}
+
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let profile: schedule.SrtpProfile = match number(argv, 0) {
+        0 => Aes128CmHmacSha1_80,
+        1 => AeadAes128Gcm,
+        2 => AeadAes256Gcm,
+        _ => return Error(Exit(status: 2)),
+    }
+    let op = match number(argv, 1) {
+        0 => ProtectRtp,
+        1 => ProtectRtpInto,
+        2 => UnprotectRtp,
+        3 => ProtectRtcp,
+        4 => UnprotectRtcp,
+        5 => UnprotectRtcpClear,
+        6 => Seal,
+        7 => Open,
+        _ => return Error(Exit(status: 2)),
+    }
+    let rtcp = op == ProtectRtcp || op == UnprotectRtcp || op == UnprotectRtcpClear
+    let opening = op == UnprotectRtp || op == UnprotectRtcp || op == UnprotectRtcpClear || op == Open
+    let tag = srtp.tag_room(profile)
+    let wire_size = SIZE + tag + if rtcp {
+        4
+    } else {
+        0
+    }
+    let plain = plaintext(rtcp)
+    let mut session = endpoint(profile, !opening)
+    let wire = fixture(op, profile, plain, wire_size)
+    let mut buf: Bytes = list.with_capacity(wire_size)
+    let mut header: Bytes = list.with_capacity(12)
+    list.append(mut header, list.slice(plain, 0, 12))
+    let body = list.slice(plain, 12, SIZE)
+    let mut send = import_key(profile, true, 1)
+    let mut sealer = result.unwrap(schedule.sealer(mut send, Rtp, int.widen(SSRC), 0))
+    let receive = import_key(profile, false, 1)
+    let opener = result.unwrap(schedule.opener(receive, Rtp))
+    let mut done = string.from("DONE ")
+    string.push_u64(mut done, PACKETS)
+    string.push(mut done, "\n")
+    result.unwrap(stdout.write(out, "READY\n"))
+    for index in 0u64 .. PACKETS {
+        let seq: u16 = int.truncate(index)
+        if opening {
+            let at = index * wire_size
+            reset(mut buf, list.slice(wire, at, at + wire_size))
+        } else if op == ProtectRtpInto {
+            list.clear(mut buf)
+            list.set_word_be(mut header, 2, seq)
+        } else {
+            reset(mut buf, plain)
+            if !rtcp {
+                list.set_word_be(mut buf, 2, seq)
+            }
+        }
+        let length = match op {
+            ProtectRtp => result.unwrap(srtp.protect_rtp(mut session, mut buf)),
+            ProtectRtpInto => result.unwrap(srtp.protect_rtp_into(mut session, header, body, 0, mut buf)),
+            UnprotectRtp => {
+                let opened = result.unwrap(srtp.unprotect_rtp(mut session, mut buf))
+                if opened.index != index || opened.ssrc != SSRC {
+                    fail("wrong RTP index or SSRC")
+                }
+                opened.length
+            },
+            ProtectRtcp => result.unwrap(srtp.protect_rtcp(mut session, mut buf)),
+            UnprotectRtcp => result.unwrap(srtp.unprotect_rtcp(mut session, mut buf)),
+            UnprotectRtcpClear => result.unwrap(srtp.unprotect_rtcp(mut session, mut buf)),
+            Seal => {
+                let _ = result.unwrap(packet.seal(mut sealer, index, mut buf, 0, 12, b""))
+                list.len(buf)
+            },
+            Open => {
+                let _ = result.unwrap(packet.open(opener, int.widen(SSRC), index, mut buf, 0, 12, b""))
+                list.len(buf)
+            },
+        }
+        if length != (if opening {
+            SIZE
+        } else {
+            wire_size
+        }) {
+            fail("wrong packet length")
+        }
+    }
+    result.unwrap(stdout.write(out, done))
+    Ok(())
+}

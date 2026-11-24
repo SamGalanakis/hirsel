@@ -83,8 +83,8 @@ fn check_schedule(s: schedule.Schedule, p: schedule.SrtpProfile, send: bool, rec
 
 fn new_session(take send: schedule.Schedule, take rtp: packet.Opener, take rtcp: packet.Opener, p: schedule.SrtpProfile, limits: Limits) -> Result[Session, SrtpError] {
     let mut extra: Bytes = list.new()
-    list.try_reserve(mut extra, 4) ?=> |c| Capacity(c)
-    list.fill(mut extra, 4, 0)
+    list.try_reserve(mut extra, 12) ?=> |c| Capacity(c)
+    list.fill(mut extra, 12, 0)
     let tag = tag_room(p)
     Ok(Session(send: take send, rtp: take rtp, rtcp: take rtcp, cm: tag == 10, tag, limits, senders: map.new(), send_count: 0, receivers: map.new(), ended: map.new(), extra: take extra))
 }

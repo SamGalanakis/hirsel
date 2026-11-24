@@ -684,10 +684,10 @@ encrypted once per receiving session without being copied first.
 **Protecting RTCP.** `protect_rtcp(mut s, mut buf)` reads the sender SSRC at bytes 4..7 of
 the first RTCP packet (a compound shorter than 8 bytes, or version other than 2, is
 `Malformed`). It uses and then increments that stream's SRTCP index, starting at 0 or at
-`send_from`'s `srtcp`, and
-always encrypts (`E = 1`). Under AEAD it seals with the first 8 bytes as AAD and `extra` =
-`E ‖ index`, then appends `E ‖ index` after the tag (RFC 7714 §9). Under CM it seals with the
-first 8 bytes as AAD and `extra` = `E ‖ index`, then moves the 10-byte tag 4 bytes on and
+`send_from`'s `srtcp`, and always encrypts (`E = 1`). Under AEAD the first 8 bytes followed
+by `E ‖ index` form the AAD, and `E ‖ index` follows the tag on the wire (RFC 7714 §9).
+Under CM it seals with the first 8 bytes as AAD and `extra` = `E ‖ index`, then moves the
+10-byte tag 4 bytes on and
 writes `E ‖ index` before it (RFC 3711 §3.4). `buf` must have `tag_room(p) + 4` spare.
 Index `2^31 − 1` seals and the next is `Exhausted`. Nothing wraps.
 
@@ -748,9 +748,9 @@ zeroed. A packet shorter than its header plus tag is `Malformed`.
 **Unprotecting RTCP.** `unprotect_rtcp(mut s, mut buf)` reads `E ‖ index` from the end
 (AEAD: the last 4 bytes, after the tag; CM: the 4 bytes before the 10-byte tag, and moves the
 tag back over them before `open`), checks the SRTCP window of the sender SSRC (an index more
-than 127 below the highest authenticated one is `TooOld`, a marked one `Replayed`), opens
-with `extra` = `E ‖ index`, and answers the length of the RTCP compound. As for RTP, the
-SRTCP window marks an index and moves its highest only after `open` authenticates, so a
+than 127 below the highest authenticated one is `TooOld`, a marked one `Replayed`). It
+authenticates `E ‖ index` when opening the compound and returns the plaintext length. As
+for RTP, the SRTCP window marks an index and moves its highest only after `open` authenticates, so a
 forged far-ahead SRTCP index moves nothing. `E = 0` is accepted: the
 compound was authenticated, not encrypted (RFC 3711 §3.4), and is returned as it is.
 
@@ -1049,7 +1049,7 @@ From PLAN rows 1.2 and 1.3, and nothing else:
 | **S4** identity, fingerprints, roles | S | S1 | DTLS-7, `share_identity` | `fingerprint_pins_peer`, `setup_roles` |
 | **S5** SRTP sessions | M | S0; `rtp.seq.estimate` once rtp.md's RTP-2 lands (until then S5 keeps the same unreduced Appendix A estimate and switches) | `core/programs/srtp/`<!-- doc-ref: planned --> package (SRTP-2 to SRTP-6), with `send_from`/`receive_from` SRTCP starts and kept floors after `end_receive` | `rtp_header_boundary`, `roc_rollover`, `replay_window`, `srtcp_trailer_order`, `directions_independent`, `sender_index_monotone`, `streams_after_auth`, `fan_out_into` |
 | **S6** interop | M | S3, S4, S5 | `interop.py` against OpenSSL on loopback (including `s_server -listen`, whose `{254, 255}` HelloVerifyRequest record DTLS-4 Framing accepts), and against dimpl at `e341a90` through a small Rust driver built from a clone in `/tmp`, never vendored | `interop_openssl`, `interop_dimpl`, the live part of `fragments_reassemble` |
-| **S7** SRTP cost | S | S5 | counted-allocator and instruction-count run (cost targets) | the SRTP cost targets: 0 allocations per packet, instructions per packet reported |
+| **S7** SRTP cost | S | S5 | counted-allocator and instruction-count run (cost targets) | [`python3 bench/srtp/cost.py <scratch-dir>`](../../bench/srtp/cost.py) checks 0 allocations per packet and reports instructions per packet |
 
 S1, S2 and S5 run in parallel after S0. S0 blocks S2 and S5. A Sol lane can take
 S0, S1, S2, S4, S5 and S7 from this text. S3 is the security-bearing slice: PLAN row 1.2

@@ -160,6 +160,17 @@ pub fn protect_rtcp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] {
     seal_rtcp(mut s.senders, mut s.extra, s.cm, ssrc, mut buf)
 }
 
+// GCM authenticates the RTCP header followed by the trailer as one span.
+fn rtcp_aad(mut scratch: Bytes, buf: Bytes, cm: bool, trailer: u32) -> (u64, u64) {
+    if cm {
+        list.set_word_be(mut scratch, 0, trailer)
+        return (0, 4)
+    }
+    list.copy_from_slice(mut scratch, 0, list.slice(buf, 0, 8))
+    list.set_word_be(mut scratch, 8, trailer)
+    (8, 12)
+}
+
 fn seal_rtcp(mut senders: Map[u32, Option[SendStream]], mut scratch: Bytes, cm: bool, ssrc: u32, mut buf: Bytes) -> Result[u64, SrtpError] {
     let length = list.len(buf)
     let outcome = option.unwrap(map.update(mut senders, ssrc, scoped fn(mut slot: Option[SendStream]) -> Result[u64, SrtpError] {
@@ -169,8 +180,9 @@ fn seal_rtcp(mut senders: Map[u32, Option[SendStream]], mut scratch: Bytes, cm: 
                 return Error(Exhausted)
             }
             let trailer: u32 = int.narrow(index | RTCP_LIMIT)
-            list.set_word_be(mut scratch, 0, trailer)
-            let _ = packet.seal(mut stream.rtcp, index, mut buf, 0, 8, scratch) ?=> |take e| sealed_error(e)
+            let (aad_at, extra_len) = rtcp_aad(mut scratch, buf, cm, trailer)
+            let extra = list.slice(scratch, 0, extra_len)
+            let _ = packet.seal(mut stream.rtcp, index, mut buf, aad_at, 8, extra) ?=> |take e| sealed_error(e)
             list.put_word_be(mut buf, trailer)
             if cm {
                 list.copy_within(mut buf, length, length + 4, 10)
@@ -235,26 +247,47 @@ pub fn unprotect_rtcp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] 
     let (live, previous) = receive_stream(s, ssrc)
     let mut stream = previous
     check_window(stream.rtcp, index)?
-    let at = if trailer & 0x80000000 != 0 {
+    let encrypted = trailer & 0x80000000 != 0
+    let clear_gcm = !s.cm && !encrypted
+    let at = if encrypted {
         8u64
+    } else if clear_gcm {
+        plain_length + 4
     } else {
         plain_length
     }
-    list.set_word_be(mut s.extra, 0, trailer)
-    if s.cm {
-        list.copy_within(mut buf, trailer_at + 4, trailer_at, s.tag)
+    let (aad_at, extra_len) = if clear_gcm {
+        // Move the index before the tag so the clear compound and index are
+        // contiguous AAD, with an empty ciphertext range.
+        list.copy_within(mut buf, plain_length, plain_length + 4, s.tag)
+        list.set_word_be(mut buf, plain_length, trailer)
+        (0u64, 0u64)
+    } else {
+        if s.cm {
+            list.copy_within(mut buf, trailer_at + 4, trailer_at, s.tag)
+        }
+        list.truncate(mut buf, length - 4)
+        rtcp_aad(mut s.extra, buf, s.cm, trailer)
     }
-    list.truncate(mut buf, length - 4)
-    match packet.open(s.rtcp, int.widen(ssrc), index, mut buf, 0, at, s.extra) {
-        Ok(_) => (),
-        Error(e) => {
+    let opened = {
+        let extra = list.slice(s.extra, 0, extra_len)
+        packet.open(s.rtcp, int.widen(ssrc), index, mut buf, aad_at, at, extra)
+    }
+    if let Error(e) = opened {
+        if clear_gcm {
+            list.copy_within(mut buf, plain_length + 4, plain_length, s.tag)
+            list.set_word_be(mut buf, trailer_at, trailer)
+        } else {
             list.put_word_be(mut buf, trailer)
             if s.cm {
                 list.copy_within(mut buf, trailer_at, trailer_at + 4, s.tag)
                 list.set_word_be(mut buf, trailer_at, trailer)
             }
-            return Error(opened_error(e))
-        },
+        }
+        return Error(opened_error(e))
+    }
+    if clear_gcm {
+        list.truncate(mut buf, plain_length)
     }
     mark(mut stream.rtcp, index)
     commit_receive(mut s, ssrc, live, stream)?

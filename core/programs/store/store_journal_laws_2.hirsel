@@ -168,9 +168,9 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     deploy_result(disk_io(host.remove(exported.dir, "EXPORT")))?
     let mut reopened = deploy_result(open(tasks, exported.dir, c, r, options))?
     let name = string.repeat("n", 100)
-    let live = snapshot(db)
+    let live_bytes = snapshot(db)
     let loaded = snapshot(reopened)
-    let (direct, _) = deploy_result(fork(mut db, name, live))?
+    let (direct, _) = deploy_result(fork(mut db, name, live_bytes))?
     let (from_disk, _) = deploy_result(fork(mut reopened, name, loaded))?
     if direct.id != 1 || from_disk.id != 1 || accounts(db).logical != 604 || accounts(db).exact || accounts(reopened).logical != 518 || !accounts(reopened).exact {
         return Error(ExportMismatch)

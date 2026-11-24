@@ -184,14 +184,14 @@ fn pack_record(path: String, at: u64, raw: Bytes) -> Result[PagePack, Error] {
         return Error(disk_fault(path, at, Malformed))
     }
     let frames: u32 = list.word_le(raw, 1)
-    let live: u64 = list.word_le(raw, 5)
+    let live_bytes: u64 = list.word_le(raw, 5)
     let payload_bytes: u64 = list.word_le(raw, 13)
     let class = raw[0u64]
     let index_offset: u64 = list.word_le(raw, 21)
-    if live > payload_bytes || class == 2 || class > 4 || (class < 3 && index_offset != 0) || (class >= 3 && (index_offset < 72 || index_offset >= payload_bytes || payload_bytes - index_offset < 28)) {
+    if live_bytes > payload_bytes || class == 2 || class > 4 || (class < 3 && index_offset != 0) || (class >= 3 && (index_offset < 72 || index_offset >= payload_bytes || payload_bytes - index_offset < 28)) {
         return Error(disk_fault(path, at, Malformed))
     }
-    Ok(PagePack(class: class, frames: frames, live: live, payload_bytes: payload_bytes, index: index_offset))
+    Ok(PagePack(class: class, frames: frames, live: live_bytes, payload_bytes: payload_bytes, index: index_offset))
 }
 
 type LoadedPack {
@@ -528,14 +528,14 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
     })
     let mut at = 72u64
     let mut slot_order = 0u64
-    let mut live = 0u64
+    let mut live_bytes = 0u64
     let mut checked_pack = pack_scan(2, next_stamp)
     while at < input.size {
         let frame = read_pack_frame(mut input, path, header.context, mut checked_pack, at, false)?
         let end = at + 16 + frame.size
         if frame.stamp != None && slot_order < list.len(reached) && reached[slot_order] == at {
             slot_order += 1
-            live += frame.size
+            live_bytes += frame.size
         }
         if slot_order < list.len(reached) && reached[slot_order] < end {
             return Error(disk_fault(path, reached[slot_order], Malformed))
@@ -547,7 +547,7 @@ fn check_list_pack(d: Dir, id: StoreId, seq: u64, next_stamp: u64, offsets: List
     }
     let JournalInput(file: take handle, ..) = take input
     disk_io(host.close(take handle))?
-    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live, payload_bytes: checked_pack.payload_bytes, index: 0))
+    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
 // A zero child stamp is either an empty collection or an edge owned by the

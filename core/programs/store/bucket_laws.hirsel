@@ -618,11 +618,11 @@ fn bucket_test_m2_reclaim_candidates() -> Result[(), Error] {
     list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 22))
     list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 23))
     list.push(mut chain, HistoryLink(epoch: 2, len: 42, digest: 24))
-    let mut live: Map[String, ()] = map.new()
-    map.insert(mut live, string.from("p-00000000000000000002-00000000000000000001-0000000000000002"), ())
+    let mut live_bytes: Map[String, ()] = map.new()
+    map.insert(mut live_bytes, string.from("p-00000000000000000002-00000000000000000001-0000000000000002"), ())
     let mut leased: Map[String, ()] = map.new()
     map.insert(mut leased, string.from("e-00000000000000000009-00000000000000000001-0000000000000009"), ())
-    let pass = ReclaimPass(epoch: 2, recovered_checkpoint: 20, position: 24, checkpoint: 24, floor: 10, generation: 4, next_pack: 100, chain: take chain, live: take live, leased: take leased)
+    let pass = ReclaimPass(epoch: 2, recovered_checkpoint: 20, position: 24, checkpoint: 24, floor: 10, generation: 4, next_pack: 100, chain: take chain, live: take live_bytes, leased: take leased)
     if history_dead_key(pass, "e-00000000000000000015-00000000000000000001-000000000000ffff") || history_dead_key(pass, "e-00000000000000000021-00000000000000000001-0000000000000015") || history_dead_key(pass, "e-00000000000000000025-00000000000000000002-000000000000ffff") || history_dead_key(pass, "e-00000000000000000009-00000000000000000001-0000000000000009") || history_dead_key(pass, "p-00000000000000000002-00000000000000000001-0000000000000002") || history_dead_key(pass, "p-00000000000000000003-00000000000000000003-0000000000000003") || history_dead_key(pass, "p-00000000000000000100-00000000000000000002-0000000000000003") || history_dead_upload(pass, "p-00000000000000000099-00000000000000000002-0000000000000003") {
         fail("the pass selected a live, leased or later name")
     }

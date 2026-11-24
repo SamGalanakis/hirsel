@@ -280,13 +280,13 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
     }
     let mut incoming: Map[(u64, LawLocationSource), u64] = map.new()
     for (stamp, frame) in oracle.frames {
-        let Some(live) = disk_index_get(known.frames, stamp) else {
+        let Some(live_bytes) = disk_index_get(known.frames, stamp) else {
             fail("location law: missing live stamp")
         }
-        if live.place != frame.place || live.class != frame.class || live.outgoing != frame.outgoing {
+        if live_bytes.place != frame.place || live_bytes.class != frame.class || live_bytes.outgoing != frame.outgoing {
             fail("location law: installed location or outgoing edges differ")
         }
-        for owner in live.incoming {
+        for owner in live_bytes.incoming {
             let source = match owner {
                 PageSource(parent) => LawPage(parent),
                 HolderSource(0, id, tree) => LawBranch(id, tree),
@@ -309,10 +309,10 @@ fn law_compare_locations(db: Db) -> Result[LawLocationGraph, Error] waits {
         }
     }
     for (seq, pack) in oracle.packs {
-        let Some(live) = disk_index_get(known.packs, seq) else {
+        let Some(live_bytes) = disk_index_get(known.packs, seq) else {
             fail("location law: missing pack")
         }
-        if !law_same_pack(live, pack) {
+        if !law_same_pack(live_bytes, pack) {
             fail("location law: installed pack totals differ")
         }
     }

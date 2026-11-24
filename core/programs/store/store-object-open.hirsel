@@ -30,8 +30,8 @@ fn history_check_open(client: std.object.Client, selected: HistoryCapture, reque
         }
     }
     if current.activation != 0 {
-        if let Some(binding) = options.binding {
-            if !history_binding_equals(binding, current.binding) {
+        if let Some(schema_binding) = options.binding {
+            if !history_binding_equals(schema_binding, current.binding) {
                 return Error(NotCurrent(current.activation))
             }
         }
@@ -41,12 +41,12 @@ fn history_check_open(client: std.object.Client, selected: HistoryCapture, reque
     Ok(())
 }
 
-fn history_binding_equals(octets: Bytes, binding: Inline[u8, 32]) -> bool {
+fn history_binding_equals(octets: Bytes, schema_binding: Inline[u8, 32]) -> bool {
     if list.len(octets) != 32 {
         return false
     }
     for i in 0u64 .. 32 {
-        if octets[i] != binding[i] {
+        if octets[i] != schema_binding[i] {
             return false
         }
     }

@@ -53,8 +53,8 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     let mut installation = StagedMigration(base: declaration_base(db), plan: take planned, declared: false)
     let Some(release_at) = int.checked_add(base.head, 1u64) else { return Error(Store(Limit(Ids))) }
     let activation_update = if object_writer_open(db) {
-        let Some(binding) = target_binding else { return Error(Store(Missing("binding"))) }
-        Some(HistoryActivation(number: release_at, binding))
+        let Some(schema_binding) = target_binding else { return Error(Store(Missing("binding"))) }
+        Some(HistoryActivation(number: release_at, binding: schema_binding))
     } else {
         None
     }

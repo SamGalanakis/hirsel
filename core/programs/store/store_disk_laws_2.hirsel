@@ -773,8 +773,8 @@ pub fn disk_law_resident_charge(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bo
     let mut held = 0u64
     let mut state = 1721u64
     let mut cuts = 0u64
-    for step in 0u64 .. 96 {
-        state = splitmix64(state + step)
+    for operation in 0u64 .. 96 {
+        state = splitmix64(state + operation)
         let k = (state >> 8) % 48
         let slot = (state >> 16) % 3
         let bit = 1u64 << slot

@@ -180,16 +180,16 @@ fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
     if !history_entry_range(newest, epoch) || !history_entry_range(base, epoch) || (newest.seq == base.seq && !history_ref_matches(newest, base)) {
         return Error(disk_fault("head", 72, Malformed))
     }
-    let mut binding: Inline[u8, 32] =[0; 32]
+    let mut schema_binding: Inline[u8, 32] =[0; 32]
     for i in 0u64 .. 32 {
-        binding[i] = head[104 + i]
+        schema_binding[i] = head[104 + i]
     }
     let config = history_frame("head", context, raw, field.end, 0x00D0)?
     if config.end != list.len(raw) || config.end - config.payload > AUTHORITY_LIMIT {
         return Error(disk_fault("head", field.end, Malformed))
     }
     let meta = history_config(list.slice(raw, config.payload, config.end), field.end)?
-    let captured = HistoryHead(store: context.store, pair, activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding)
+    let captured = HistoryHead(store: context.store, pair, activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding: schema_binding)
     Ok(HistoryCapture(head: captured, config: take meta))
 }
 

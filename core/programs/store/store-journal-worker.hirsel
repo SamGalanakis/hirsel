@@ -45,9 +45,9 @@ fn journal_set(mut raw: Bytes, at: u64, value: u64, width: u64) {
     }
 }
 
-fn journal_fixed_check(binding: Bytes, raw: Bytes, at: u64, length: u64) -> u64 {
+fn journal_fixed_check(schema_binding: Bytes, raw: Bytes, at: u64, length: u64) -> u64 {
     let mut state = std.check.start()
-    std.check.add(mut state, binding, 0, 33)
+    std.check.add(mut state, schema_binding, 0, 33)
     std.check.add(mut state, raw, at, at + 8)
     std.check.add(mut state, raw, at + 16, at + 16 + length)
     std.check.finish(state)
@@ -57,21 +57,21 @@ fn journal_buffers(reserve: u64) -> Result[JournalBuffers, Capacity] {
     let group: Bytes = list.with_capacity(reserve)
     let mut end_bytes: Bytes = list.with_capacity(96)
     list.fill(mut end_bytes, 96, 0u8)
-    let mut binding: Bytes = list.with_capacity(33)
-    list.fill(mut binding, 33, 0u8)
-    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take binding))
+    let mut schema_binding: Bytes = list.with_capacity(33)
+    list.fill(mut schema_binding, 33, 0u8)
+    Ok(JournalBuffers(group: take group, end_bytes: take end_bytes, binding: take schema_binding))
 }
 
 // END's bytes and checksum binding reuse storage admitted at spawn. The END
 // file is a fixed 96 bytes, rewritten in place through the handle opened when
 // its segment was created; a torn rewrite fails its checksum like a torn
 // truncate-and-write would, and only loses detection (§3.4 step 5).
-fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mut raw: Bytes, mut binding: Bytes) -> Result[(), Error] waits {
-    journal_set(mut binding, 0, id.hi, 8)
-    journal_set(mut binding, 8, id.lo, 8)
-    journal_set(mut binding, 16, 4, 1)
-    journal_set(mut binding, 17, seq, 8)
-    journal_set(mut binding, 25, 0, 8)
+fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mut raw: Bytes, mut schema_binding: Bytes) -> Result[(), Error] waits {
+    journal_set(mut schema_binding, 0, id.hi, 8)
+    journal_set(mut schema_binding, 8, id.lo, 8)
+    journal_set(mut schema_binding, 16, 4, 1)
+    journal_set(mut schema_binding, 17, seq, 8)
+    journal_set(mut schema_binding, 25, 0, 8)
     journal_set(mut raw, 0, 1, 2)
     journal_set(mut raw, 2, 1, 2)
     journal_set(mut raw, 4, 56, 4)
@@ -84,14 +84,14 @@ fn journal_write_end(id: StoreId, seq: u64, end: u64, mut end_file: HostFile, mu
     journal_set(mut raw, 32, id.hi, 8)
     journal_set(mut raw, 40, id.lo, 8)
     journal_set(mut raw, 56, seq, 8)
-    let header_check = journal_fixed_check(binding, raw, 0, 56)
+    let header_check = journal_fixed_check(schema_binding, raw, 0, 56)
     journal_set(mut raw, 8, header_check, 8)
     journal_set(mut raw, 72, 0x0012, 2)
     journal_set(mut raw, 74, 1, 2)
     journal_set(mut raw, 76, 8, 4)
     journal_set(mut raw, 88, end, 8)
-    journal_set(mut binding, 25, 72, 8)
-    let end_check = journal_fixed_check(binding, raw, 72, 8)
+    journal_set(mut schema_binding, 25, 72, 8)
+    let end_check = journal_fixed_check(schema_binding, raw, 72, 8)
     journal_set(mut raw, 80, end_check, 8)
     match host.write_at(mut end_file, 0, raw) {
         Ok(()) => {},
@@ -113,7 +113,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
     let JournalBuffers(group: take reserved, end_bytes: take initial_end, binding: take initial_binding) = take scratch
     let mut buffer = take reserved
     let mut end_bytes = take initial_end
-    let mut binding = take initial_binding
+    let mut schema_binding = take initial_binding
     let group_limit: u64 = int.widen(max_bytes)
     let mut deferred: Option[JournalMsg] = None
     let mut idle_at: Option[u64] = None
@@ -128,7 +128,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
                     },
                     Error(Empty) => {
                         if end != end_named {
-                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+                            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
                             end_named = end
                         }
                         groups = 0
@@ -256,7 +256,7 @@ fn journal_loop(take input: JournalWorker, take scratch: JournalBuffers) -> Resu
         }
         // An END that would repeat the d already named writes nothing.
         if (idle || closing || rotate_now || groups == 64) && end != end_named {
-            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut binding)?
+            journal_write_end(id, seq, end, mut end_handle, mut end_bytes, mut schema_binding)?
             end_named = end
             groups = 0
         }

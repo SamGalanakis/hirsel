@@ -794,8 +794,8 @@ pub fn law_read_cover(c: Clock) -> bool waits {
     let sb = view b
     let mut misses: u64 = 0
     let mut hits: u64 = 0
-    for step in 0u64 .. 128 {
-        let state = splitmix64(step + 1031)
+    for operation in 0u64 .. 128 {
+        let state = splitmix64(operation + 1031)
         let first = snapshot(db)
         let initial = observe_cover(first, sa, sb, ia, ib, state)
         let (take initial_value, take reads) = take initial

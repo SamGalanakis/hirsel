@@ -185,7 +185,7 @@ fn history_check_list_pack(mut client: std.object.Client, locator: HistoryLocato
     let mut checked_pack = pack_scan(2, next_stamp)
     let mut at = 72u64
     let mut validated_offsets = 0u64
-    let mut live = 0u64
+    let mut live_bytes = 0u64
     while at < item.len {
         history_stream_copy(mut client, deadline, mut stream, 16, mut frame_prefix)?
         let frame = disk_read_frame_head(stream.path, frame_prefix, at)?
@@ -204,7 +204,7 @@ fn history_check_list_pack(mut client: std.object.Client, locator: HistoryLocato
         let end = at + 16 + frame.size
         if kept != None && validated_offsets < list.len(reached) && reached[validated_offsets] == at {
             validated_offsets += 1
-            live += frame.size
+            live_bytes += frame.size
         }
         if validated_offsets < list.len(reached) && reached[validated_offsets] < end {
             return Error(disk_fault(stream.path, at, Malformed))
@@ -217,7 +217,7 @@ fn history_check_list_pack(mut client: std.object.Client, locator: HistoryLocato
     if std.check.finish(stream.digest) != item.digest {
         return Error(disk_fault(stream.path, 0, Checksum))
     }
-    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live, payload_bytes: checked_pack.payload_bytes, index: 0))
+    Ok(PagePack(class: 2, frames: int.truncate(checked_pack.frames), live: live_bytes, payload_bytes: checked_pack.payload_bytes, index: 0))
 }
 
 type LocatedNeed = NeedPage(std.page.PagePtr, std.page.Domain, Option[u8]) | NeedBlob(std.page.BlobRef)

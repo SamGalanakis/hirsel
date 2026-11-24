@@ -23,16 +23,16 @@ fn stage_system_put[K, V](mut plan: SchemaPlan, t: Table[K, V], k: K, v: V) -> R
     if list.len(raw) > VALUE_LIMIT {
         return Error(Limit(Value))
     }
-    let mut live = plan.live
+    let mut live_bytes = plan.live
     if !plan.retained {
         if let Some(old) = get_page_row(plan.roots.collections, p) {
-            live -= entry(p, old)
+            live_bytes -= entry(p, old)
         }
     }
-    live = int.saturating_add(live, entry(p, raw))
-    over_ceiling(live, plan.ceiling)?
+    live_bytes = int.saturating_add(live_bytes, entry(p, raw))
+    over_ceiling(live_bytes, plan.ceiling)?
     let _ = insert_row(mut plan.next_node, mut plan.roots, take p, take raw)?
-    plan.live = live
+    plan.live = live_bytes
     plan.changed = true
     Ok(())
 }
@@ -52,13 +52,13 @@ pub fn install_activation(mut db: Db, take staged: StagedMigration) -> Result[()
     install_activation_layout(mut db, take staged, None)
 }
 
-pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activation: u64, binding: Bytes) -> Result[(), Error] waits {
+pub fn install_bound_activation(mut db: Db, take staged: StagedMigration, activation: u64, schema_binding: Bytes) -> Result[(), Error] waits {
     let update = if object_writer_open(db) {
-        if list.len(binding) != 32 { return Error(Missing("binding")) }
+        if list.len(schema_binding) != 32 { return Error(Missing("binding")) }
         let Some(expected) = int.checked_add(db.heads[0].head, 1) else { return Error(Limit(Ids)) }
         if activation != expected { return Error(NotCurrent(db.heads[0].head)) }
         let mut digest: Inline[u8, 32] =[0; 32]
-        for i in 0u64 .. 32 { digest[i] = binding[i] }
+        for i in 0u64 .. 32 { digest[i] = schema_binding[i] }
         Some(HistoryActivation(number: activation, binding: digest))
     } else {
         None
@@ -99,15 +99,15 @@ fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, 
 }
 
 fn publish_schema_plan_binding(mut db: Db, take prepared: SchemaPlan, activation: Option[HistoryActivation]) -> Result[Ticket, Error] waits {
-    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live, bindings: take bindings, ..) = take prepared
-    over_ceiling(live, db.ceiling)?
+    let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live_bytes, bindings: take bindings, ..) = take prepared
+    over_ceiling(live_bytes, db.ceiling)?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let replacement = ProposedMain(roots: take roots, head: db.heads[0u64].head + 1, at: db.heads[0u64].at, tables: tables, activation)
     let publication = capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids))?
     // Stamps stay consumed on refusal. Table ids publish with the roots.
     db.next_node = ids
-    for take binding in take bindings {
-        register_index(mut db.indexes, take binding)
+    for take schema_binding in take bindings {
+        register_index(mut db.indexes, take schema_binding)
     }
     let commit_ticket = cut_install(mut db, ReplaceMain(take replacement, None))?
     publish(take publication)

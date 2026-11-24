@@ -485,7 +485,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     }
     let earlier = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     let before = db.heads[0].head
-    let live = db.resident
+    let live_bytes = db.resident
     let frames = db.frame_seq
     let end = db.file_end
     let ran = result.unwrap(run(mut db, Some(65536u64), t, fn(mut tx, call_env) -> Result[(), Error] {
@@ -498,7 +498,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         },
         _ => return false
     }
-    if db.heads[0].head != before || db.resident != live || db.frame_seq != frames || db.file_end != end {
+    if db.heads[0].head != before || db.resident != live_bytes || db.frame_seq != frames || db.file_end != end {
         return false
     }
     let main = main_branch(db)

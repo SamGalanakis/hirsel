@@ -124,23 +124,23 @@ type ObjectReclaimCapture: send {
     next_pack: u64
 }
 
-fn live_reclaim_name(mut live: Map[String, ()], lead: String, item: HistoryRef) -> Result[(), Error] {
+fn live_reclaim_name(mut live_bytes: Map[String, ()], lead: String, item: HistoryRef) -> Result[(), Error] {
     let name = history_key(lead, item)
-    capacity(map.try_reserve(mut live, 1))?
-    map.insert(mut live, take name, ())
+    capacity(map.try_reserve(mut live_bytes, 1))?
+    map.insert(mut live_bytes, take name, ())
     Ok(())
 }
 
-fn live_reclaim_checkpoint(mut client: std.object.Client, captured: HistoryHead, reference: HistoryRef, mark: HistoryMark, raw: Bytes, mut live: Map[String, ()], deadline: u64) -> Result[(), Error] waits {
+fn live_reclaim_checkpoint(mut client: std.object.Client, captured: HistoryHead, reference: HistoryRef, mark: HistoryMark, raw: Bytes, mut live_bytes: Map[String, ()], deadline: u64) -> Result[(), Error] waits {
     let mut at = captured
     at.checkpoint = reference
     let located = history_locator(mut client, at, mark, raw, deadline)?
-    live_reclaim_name(mut live, "m-", mark.manifest)?
+    live_reclaim_name(mut live_bytes, "m-", mark.manifest)?
     for item in located.chunks {
-        live_reclaim_name(mut live, "l-", item)?
+        live_reclaim_name(mut live_bytes, "l-", item)?
     }
     for (_, item) in located.rows {
-        live_reclaim_name(mut live, "p-", item)?
+        live_reclaim_name(mut live_bytes, "p-", item)?
     }
     Ok(())
 }

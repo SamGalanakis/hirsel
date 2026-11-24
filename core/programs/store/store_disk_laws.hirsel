@@ -88,8 +88,8 @@ pub fn law_frame_size(c: Clock) -> bool {
         }
         list.push(mut model, FrameRow(present: false, op: 0, size: 0, key_size: width))
     }
-    for step in 0u64 .. 96 {
-        let k = splitmix64(step) % 24
+    for operation in 0u64 .. 96 {
+        let k = splitmix64(operation) % 24
         let id: u32 = if k < 12 {
             1
         } else {
@@ -100,7 +100,7 @@ pub fn law_frame_size(c: Clock) -> bool {
             list.append(mut key, key_word(k % 4))
         }
         let physical = result.unwrap(logical_key(id, key))
-        if step % 5 == 0 {
+        if operation % 5 == 0 {
             if model[k].present {
                 size = result.unwrap(edit_frame(ops, below, 0, physical, None, size))
                 let _ = save_data_op(mut ops, below, false, mut rows, take physical, None)
@@ -112,10 +112,10 @@ pub fn law_frame_size(c: Clock) -> bool {
             let width = if id == 2 {
                 0u64
             } else {
-                splitmix64(step + 1) % 33
+                splitmix64(operation + 1) % 33
             }
             let mut value: Bytes = list.with_capacity(width)
-            list.fill(mut value, width, int.truncate(step))
+            list.fill(mut value, width, int.truncate(operation))
             size = result.unwrap(edit_frame(ops, below, 0, physical, Some(width), size))
             let _ = save_data_op(mut ops, below, false, mut rows, take physical, Some(PageValue(take value)))
             model[k].present = true
@@ -916,15 +916,15 @@ pub fn disk_law_branches(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wait
     if sdb.resident != 354 {
         return false
     }
-    for step in 0u64 .. 20 {
-        let committed = result.unwrap(run(mut sdb, None, (copy_env(st), copy_env(step)), fn(mut tx, call_env) -> Result[(), Error] {
+    for operation in 0u64 .. 20 {
+        let committed = result.unwrap(run(mut sdb, None, (copy_env(st), copy_env(operation)), fn(mut tx, call_env) -> Result[(), Error] {
             put(mut tx, call_env.0, 1, call_env.1 + 2)
         }))
         match take committed {
             Committed(done) => result.unwrap(durable(mut sdb, done.ticket)),
             _ => return false
         }
-        if sdb.resident != (if step % 2 == 0 {
+        if sdb.resident != (if operation % 2 == 0 {
             448u64
         } else {
             542u64

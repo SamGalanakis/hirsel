@@ -496,8 +496,8 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
         if let Committed(_) = committed {} else { fail("the fixture write was refused") }
     }
     let description = string.into_bytes(string.from("release 12"))
-    let mut binding: Bytes = list.with_capacity(32)
-    list.fill(mut binding, 32, 91u8)
+    let mut schema_binding: Bytes = list.with_capacity(32)
+    list.fill(mut schema_binding, 32, 91u8)
     let mut stale = stage_migration(writer, tasks, code.describe(bucket_activation_noop))?
     stage_activation(mut stale, 12, None, description, std.codec.of_u64(), 73u64)?
     let committed = run(mut writer, None, copy_env(rows), fn(mut tx, call_env) -> Result[(), Error] {
@@ -508,7 +508,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     if acknowledged != 11 { fail("the fixture has the wrong install base") }
     durable(mut writer, done.ticket)?
     let fence = writer.fence
-    let refused = install_bound_activation(mut writer, take stale, 12, binding)
+    let refused = install_bound_activation(mut writer, take stale, 12, schema_binding)
     let after = snapshot(writer)
     if get(result.unwrap(reader(writer, 0u64)), after, rows, 9)? != Some(9u64) {
         fail("the stale activation lost the acknowledged write")
@@ -521,7 +521,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     if let Error(Missing(_)) = unpublished {} else { fail("the refused activation published its release table") }
     let mut staged = stage_migration(writer, tasks, code.describe(bucket_activation_noop))?
     stage_activation(mut staged, 12, None, description, std.codec.of_u64(), 73u64)?
-    install_bound_activation(mut writer, take staged, 12, binding)?
+    install_bound_activation(mut writer, take staged, 12, schema_binding)?
     let d = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
     let mut process = followers()
     options.expect = Some(identity(writer))
@@ -529,7 +529,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let observed = follower_head(installed)?
     let captured = snapshot_follower(installed, Branch(store: observed.store, id: 0))?
     let releases = follower_table(installed, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_u64())?
-    if observed.activation != 12 || observed.binding != binding || version(captured) != 12 || get(result.unwrap(follower_reader(installed, 0u64)), captured, releases, 12)? != Some(73u64) {
+    if observed.activation != 12 || observed.binding != schema_binding || version(captured) != 12 || get(result.unwrap(follower_reader(installed, 0u64)), captured, releases, 12)? != Some(73u64) {
         fail("activation, binding and the release row were not published by one checkpoint")
     }
     let bad_client = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?

@@ -428,3 +428,178 @@ fn test_typed_read_laws(c: Clock) -> Result[(), Error] waits {
     }
     typed_cursor_case(c)
 }
+
+type ProjectorFixture {
+    decl: ProjectionDecl,
+    source_table: Table[u64, u64],
+    second_table: Table[u64, u64],
+    image_table: Table[(u32, u64), u64]
+}
+
+fn projector_fixture(mut db: Db, mode: Mode) -> Result[ProjectorFixture, Error] waits {
+    let mut d = declare(db, mode)?
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let cursor = projection(mut d, "fixture")?
+    let source_decl = declare_table(mut d, "source", key, value)?
+    let source_table = finish(mut d, take source_decl)?
+    let second_decl = declare_table(mut d, "second", key, value)?
+    let second_table = finish(mut d, take second_decl)?
+    let generation_key: std.codec.Key[(u32, u64)] = std.codec.key_of()
+    let image_decl = declare_table(mut d, "image", generation_key, value)?
+    let image_table = finish(mut d, take image_decl)?
+    let _ = seal(mut db, take d)?
+    Ok(ProjectorFixture(decl: take cursor, source_table: take source_table, second_table: take second_table, image_table: take image_table))
+}
+
+fn projector_apply_law(mut tx: Tx, image_table: Table[(u32, u64), u64], delta: Delta[u64, u64]) -> Result[(), Error] {
+    let key = (delta.generation, delta.key)
+    match delta.value {
+        Some(value) => put(mut tx, image_table, key, value),
+        None => {
+            let _ = delete(mut tx, image_table, key)?
+            Ok(())
+        },
+    }
+}
+
+fn projector_drop_law(mut tx: Tx, image_table: Table[(u32, u64), u64], generation: u32, limits: Limits) -> Result[bool, Error] {
+    let (take keys, remains) = {
+        let mut cursor = range(tx, image_table, Included((generation, 0u64)), Included((generation, 18446744073709551615u64)))?
+        let mut keys: List[(u32, u64)] = list.new()
+        for _ in 0u64 .. limits.rows {
+            let Some((key, _)) = next_in(tx, mut cursor)? else { break }
+            list.push(mut keys, key)
+        }
+        (take keys, next_in(tx, mut cursor)? != None)
+    }
+    for key in keys {
+        let _ = delete(mut tx, image_table, key)?
+    }
+    Ok(remains)
+}
+
+fn projector_fold(fixture: ProjectorFixture) -> Fold[Table[(u32, u64), u64], u64, u64, Error] {
+    Fold(env: clone(fixture.image_table), apply: projector_apply_law, drop: projector_drop_law)
+}
+
+fn projector_refusal(take problem: ProjectError[Error]) -> Error {
+    match take problem {
+        Store(take error) => take error,
+        Apply(take error) => take error,
+    }
+}
+
+fn project_step_law(mut p: Projector[u64, u64], mut db: Db, fixture: ProjectorFixture, limits: Limits) -> Result[Stepped, Error] waits {
+    let result = step(mut p, mut db, limits, projector_fold(fixture)) ?=> projector_refusal
+    Ok(result)
+}
+
+fn project_until_idle(mut p: Projector[u64, u64], mut db: Db, fixture: ProjectorFixture, limits: Limits) -> Result[(), Error] waits {
+    for _ in 0u64 .. 16 {
+        if let Idle = project_step_law(mut p, mut db, fixture, limits)? { return Ok(()) }
+    }
+    Error(MigrationFault)
+}
+
+fn image_row(db: Db, fixture: ProjectorFixture, generation: u32, key: u64) -> Result[Option[u64], Error] waits {
+    get(reader(db, 0)?, snapshot(db), fixture.image_table, (generation, key))
+}
+
+fn law_projector_memory(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let fixture = projector_fixture(mut db, Migrate)?
+    let source_binding = binding(fixture.source_table, main_branch(db))
+    if !typed_put(mut db, fixture.source_table, 1, 11) || !typed_put(mut db, fixture.source_table, 2, 22) {
+        return Error(MigrationFault)
+    }
+    let narrow = Limits(rows: 1, byte_limit: 1024)
+    let wide = Limits(rows: 8, byte_limit: 4096)
+    let mut original = projector(fixture.decl, fixture.source_table, Local(), reader(db, 0)?)
+    if let Reloaded = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if let Paged(1) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != None { return Error(MigrationFault) }
+    let _ = rebuild(mut original, mut db)?
+    let requested = version(snapshot(db))
+    let _ = rebuild(mut original, mut db)?
+    if version(snapshot(db)) != requested { return Error(MigrationFault) }
+    if let Published(_) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != Some(0u32) { return Error(MigrationFault) }
+    if let Paged(1) = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != Some(0u32) { return Error(MigrationFault) }
+
+    let removed = run(mut db, None, fixture.source_table, fn(mut tx, input) -> Result[(), Error] {
+        let _ = delete(mut tx, input, 1)?
+        Ok(())
+    })?
+    if let Committed(_) = removed {} else { return Error(MigrationFault) }
+    let mut restart = projector(fixture.decl, fixture.source_table, Local(), reader(db, 0)?)
+    if let Reloaded = project_step_law(mut restart, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    project_until_idle(mut restart, mut db, fixture, narrow)?
+    let current = read_projection(db, fixture.decl)?
+    let Some(generation) = live(current, source_binding) else { return Error(MigrationFault) }
+    if image_row(db, fixture, generation, 1)? != None || image_row(db, fixture, generation, 2)? != Some(22u64) {
+        return Error(MigrationFault)
+    }
+    let stopped_at = version(snapshot(db))
+    let cuts = db.file_seq
+    if let Reloaded = project_step_law(mut original, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if let Idle = project_step_law(mut restart, mut db, fixture, narrow)? {} else { return Error(MigrationFault) }
+    if version(snapshot(db)) != stopped_at || db.file_seq != cuts { return Error(MigrationFault) }
+
+    let moved = run(mut db, None, fixture.source_table, fn(mut tx, input) -> Result[(), Error] {
+        let _ = delete(mut tx, input, 2)?
+        put(mut tx, input, 9, 22)
+    })?
+    if let Committed(_) = moved {} else { return Error(MigrationFault) }
+    if let Updated(2) = project_step_law(mut restart, mut db, fixture, wide)? {} else { return Error(MigrationFault) }
+    if live(read_projection(db, fixture.decl)?, source_binding) != Some(generation) ||
+        image_row(db, fixture, generation, 2)? != None || image_row(db, fixture, generation, 9)? != Some(22u64) {
+        return Error(MigrationFault)
+    }
+    if !typed_put(mut db, fixture.second_table, 4, 44) { return Error(MigrationFault) }
+    let second_binding = binding(fixture.second_table, main_branch(db))
+    if live(read_projection(db, fixture.decl)?, second_binding) != None { return Error(MigrationFault) }
+    let mut second = projector(fixture.decl, fixture.second_table, Local(), reader(db, 0)?)
+    project_until_idle(mut second, mut db, fixture, wide)?
+    let Some(second_generation) = live(read_projection(db, fixture.decl)?, second_binding) else { return Error(MigrationFault) }
+    if image_row(db, fixture, second_generation, 4)? != Some(44u64) || image_row(db, fixture, second_generation, 9)? != None {
+        return Error(MigrationFault)
+    }
+    Ok(())
+}
+
+fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    disk_io(host.mkdir(d, "projector-cuts"))?
+    let directory = disk_io(host.open_dir(d, "projector-cuts"))?
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let limits = Limits(rows: 8, byte_limit: 4096)
+    {
+        let mut db = open(tasks, directory, c, r, options)?
+        let fixture = projector_fixture(mut db, Migrate)?
+        let mut worker = projector(fixture.decl, fixture.source_table, Local(), reader(db, 0)?)
+        if !typed_put(mut db, fixture.source_table, 3, 30) { return Error(MigrationFault) }
+        project_until_idle(mut worker, mut db, fixture, limits)?
+        let row = read_projection(db, fixture.decl)?
+        if !typed_put(mut db, fixture.source_table, 3, 31) { return Error(MigrationFault) }
+        let staged_target = snapshot(db)
+        let _ = pin_projection_target(worker, mut db, row, staged_target)?
+        let _ = close(take db)?
+    }
+    let mut reopened = open(tasks, directory, c, r, options)?
+    let loaded = projector_fixture(mut reopened, Open)?
+    let saved_binding = binding(loaded.source_table, main_branch(reopened))
+    let Some(generation) = live(read_projection(reopened, loaded.decl)?, saved_binding) else { return Error(MigrationFault) }
+    if image_row(reopened, loaded, generation, 3)? != Some(30u64) { return Error(MigrationFault) }
+    let mut resumed = projector(loaded.decl, loaded.source_table, Local(), reader(reopened, 0)?)
+    if let Updated(1) = project_step_law(mut resumed, mut reopened, loaded, limits)? {} else { return Error(MigrationFault) }
+    if image_row(reopened, loaded, generation, 3)? != Some(31u64) { return Error(MigrationFault) }
+    let _ = close(take reopened)?
+    Ok(())
+}
+
+@test
+fn test_local_projector_laws(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    law_projector_memory(c)?
+    law_projector_disk(d, c, r, tasks)
+}

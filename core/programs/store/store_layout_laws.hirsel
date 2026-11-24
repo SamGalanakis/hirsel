@@ -211,19 +211,19 @@ fn layout_commits(mut db: Db, held: bool) -> bool waits {
     let large = result.unwrap(string.from_utf8(take raw))
     // Then single-row commits run past several leaf splits.
     let mut steps: List[u8] = list.with_capacity(409)
-    for step in[0u8, 1u8, 2u8, 3u8, 3u8, 3u8, 4u8, 4u8, 5u8] {
-        list.push(mut steps, step)
+    for operation in[0u8, 1u8, 2u8, 3u8, 3u8, 3u8, 4u8, 4u8, 5u8] {
+        list.push(mut steps, operation)
     }
     for _ in 0u64 .. 400 {
         list.push(mut steps, 3u8)
     }
     let mut newer = 5000u64
-    for step in steps {
-        if held && step == 0u8 {
+    for operation in steps {
+        if held && operation == 0u8 {
             let first = snapshot(db)
             let _ = result.unwrap(pin(mut db, "held", first))
         }
-        let wrote = result.unwrap(run(mut db, None, (copy_env(t), copy_env(big), copy_env(large), copy_env(newer), copy_env(step)), fn(mut tx, call_env) -> Result[(), Error] {
+        let wrote = result.unwrap(run(mut db, None, (copy_env(t), copy_env(big), copy_env(large), copy_env(newer), copy_env(operation)), fn(mut tx, call_env) -> Result[(), Error] {
             match call_env.4 {
                 0u8 => {
                     let mut k = 2000u64
@@ -275,7 +275,7 @@ pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     if !layout_commits(mut db, false) {
         return false
     }
-    let live = layout_answers(mut db)
+    let live_bytes = layout_answers(mut db)
     result.unwrap(close(take db))
     let mut replayed_db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
     let replayed = layout_answers(mut replayed_db)
@@ -298,16 +298,16 @@ pub fn disk_law_load_path_layout(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
     if !sealed {
         fail("layout checkpoint pages")
     }
-    if !same_layout_answers(live, replayed) {
+    if !same_layout_answers(live_bytes, replayed) {
         fail("layout replay answers")
     }
-    if !same_layout_answers(live, cut) {
+    if !same_layout_answers(live_bytes, cut) {
         fail("layout cut answers")
     }
-    if !same_layout_answers(live, loaded) {
+    if !same_layout_answers(live_bytes, loaded) {
         fail("layout loaded answers")
     }
-    same_layout_answers(live, held)
+    same_layout_answers(live_bytes, held)
 }
 
 @test

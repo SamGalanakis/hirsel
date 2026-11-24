@@ -125,8 +125,8 @@ pub fn law_model(c: Clock) -> bool {
         let mut db = raw_test_db(c, 1073741824)
         let mut model: List[u64] = list.with_capacity(24)
         list.fill(mut model, 24, 0u64)
-        for step in 0u64 .. 64 {
-            let wall = seed * 64 + step
+        for operation in 0u64 .. 64 {
+            let wall = seed * 64 + operation
             let state = splitmix64(wall)
             let k = state % 24
             let choice = (state >> 8) % 5

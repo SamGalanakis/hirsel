@@ -84,8 +84,8 @@ fn history_qualify(mut client: std.object.Client, deadline: u64) -> Result[(), E
 }
 
 fn history_check_namespace(capture: HistoryCapture, client: std.object.Client) -> Result[(), Error] {
-    let live = std.object.bucket_config(client)
-    if capture.config.place.bucket != live.bucket || capture.config.place.prefix != live.prefix {
+    let live_bytes = std.object.bucket_config(client)
+    if capture.config.place.bucket != live_bytes.bucket || capture.config.place.prefix != live_bytes.prefix {
         return Error(Foreign)
     }
     Ok(())

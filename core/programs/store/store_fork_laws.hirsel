@@ -194,8 +194,8 @@ pub fn law_overwrite_account(c: Clock) -> bool waits {
     if db.resident != 260 {
         return false
     }
-    for step in 0u64 .. 100000 {
-        if !typed_put(mut db, t, 1, step + 1) || db.resident != 354 {
+    for operation in 0u64 .. 100000 {
+        if !typed_put(mut db, t, 1, operation + 1) || db.resident != 354 {
             return false
         }
     }
@@ -383,11 +383,11 @@ pub fn law_pin_settle(c: Clock) -> bool waits {
     if db.resident != 354 {
         return false
     }
-    for step in 0u64 .. 100 {
-        if !typed_put(mut db, t, 1, step + 2) {
+    for operation in 0u64 .. 100 {
+        if !typed_put(mut db, t, 1, operation + 2) {
             return false
         }
-        if db.resident != (if step % 2 == 0 {
+        if db.resident != (if operation % 2 == 0 {
             448u64
         } else {
             542u64

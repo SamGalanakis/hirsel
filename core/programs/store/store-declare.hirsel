@@ -93,11 +93,15 @@ fn declaration_name(name: String) -> Result[(), Error] {
 }
 
 pub fn declare_table[K, V](mut d: Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[TableDecl[K, V], Error] {
+    declaration_name(name)?
+    declare_table_inner(mut d, name, key, value)
+}
+
+fn declare_table_inner[K, V](mut d: Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[TableDecl[K, V], Error] {
     if d.failed {
         return Error(MigrationFault)
     }
     d.failed = true
-    declaration_name(name)?
     let lookup_key = table_key(name)?
     let exists = match get_page_row(d.plan.roots.catalog, lookup_key) {
         Some(record) => {
@@ -159,14 +163,14 @@ fn declaration_index_name(key: Bytes) -> Result[String, Error] {
 fn remove_declared_index(mut plan: SchemaPlan, key: Bytes, record: Catalog) -> Result[(), Error] {
     let mut roots = share_roots(plan.roots)
     let charge = remove_store_collection(mut roots.collections, record.id, mut plan.next_node)?
-    let mut live = plan.live
+    let mut live_bytes = plan.live
     if !plan.retained {
         let Some(raw) = get_page_row(roots.catalog, key) else { return Error(Stale(record.id)) }
-        live = int.saturating_sub(live, charge + entry(key, raw))
+        live_bytes = int.saturating_sub(live_bytes, charge + entry(key, raw))
     }
     remove_store_row(mut roots.catalog, key, mut plan.next_node)?
     let next_table = plan.next_table
-    keep_schema(mut plan, take roots, live, next_table)
+    keep_schema(mut plan, take roots, live_bytes, next_table)
 }
 
 fn declaration_revision[F](versioned: bool, f: StaticFn[F]) -> Result[Bytes, Error] {
@@ -243,8 +247,8 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
         for schema in source.schemas {
             list.push(mut proposed.payload_schemas, copied(schema.schema)?)
         }
-    } else if let Some(projection) = project {
-        proposed.projection = Some((copied(code.identity(projection))?, declaration_revision(d.versioned, projection)?))
+    } else if let Some(projection_record) = project {
+        proposed.projection = Some((copied(code.identity(projection_record))?, declaration_revision(d.versioned, projection_record)?))
         let description = std.codec.schema(codec) ?=> |_| Schema(0)
         let unit = std.codec.schema(std.codec.of_unit()) ?=> |_| Schema(0)
         let number: Option[u16] = if description == unit {
@@ -259,9 +263,9 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
             payload_readers = Some(index_payload_readers(codec, proposed, at, description)?)
             Some(at)
         }
-        extractor_project = Some(IndexProjection(by: projection, codec: codec, number: number))
+        extractor_project = Some(IndexProjection(by: projection_record, codec: codec, number: number))
     }
-    let rebuild = match take existing {
+    let needs_rebuild = match take existing {
         None => {
             if let Migrate = d.mode { true } else { return Error(Missing(named(name)?)) }
         },
@@ -283,9 +287,9 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
             }
         },
     }
-    let binding = declare_binding(t.handle, proposed, by, key, take extractor_project, cover_row)
-    if rebuild {
-        match stage_index_backfill(mut d.plan, t.handle, lookup_key, name, proposed, binding.index) {
+    let schema_binding = declare_binding(t.handle, proposed, by, key, take extractor_project, cover_row)
+    if needs_rebuild {
+        match stage_index_backfill(mut d.plan, t.handle, lookup_key, name, proposed, schema_binding.index) {
             Error(Conflict(take conflict)) => {
                 d.conflict = Some(clone(conflict))
                 return Error(Conflict(take conflict))
@@ -297,7 +301,7 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
     let handle = catalog_index_handle(d.plan.roots.catalog, t.handle, proposed, take lookup_key, key, take payload_readers, codec)?
     if let Follower = d.mode {
     } else {
-        list.push(mut d.plan.bindings, take binding)
+        list.push(mut d.plan.bindings, take schema_binding)
     }
     map.insert(mut d.indexes, proposed.id, ())
     d.failed = false
@@ -430,7 +434,7 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
     declaration_name(to)?
     let old_key = table_key(from)?
     let new_key = table_key(to)?
-    let mut live = m.plan.live
+    let mut live_bytes = m.plan.live
     let value = {
         let Some(raw) = get_page_row(m.plan.roots.catalog, old_key) else {
             return Error(Missing(named(from)?))
@@ -439,12 +443,12 @@ pub fn rename_table(mut m: Migration, from: String, to: String) -> Result[(), Er
         if let Some(_) = get_page_row(m.plan.roots.catalog, new_key) {
             return Error(Exists(named(to)?))
         }
-        if !m.plan.retained { live -= entry(old_key, raw) }
+        if !m.plan.retained { live_bytes -= entry(old_key, raw) }
         copied(raw)?
     }
     let base = share_roots(m.plan.roots)
     let mut roots = catalog_insert(mut m.plan.next_node, base, new_key, value)?
     remove_store_row(mut roots.catalog, old_key, mut m.plan.next_node)?
     let next_table = m.plan.next_table
-    keep_schema(mut m.plan, take roots, live + entry(new_key, value), next_table)
+    keep_schema(mut m.plan, take roots, live_bytes + entry(new_key, value), next_table)
 }

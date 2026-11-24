@@ -215,8 +215,8 @@ pub fn law_typed_model(c: Clock) -> bool waits {
         let sh = view t
         let mut model: List[u64] = list.with_capacity(24)
         list.fill(mut model, 24, 0u64)
-        for step in 0u64 .. 64 {
-            let wall = seed * 64 + step
+        for operation in 0u64 .. 64 {
+            let wall = seed * 64 + operation
             let model_state = splitmix64(wall)
             let k = model_state % 24
             let choice = (model_state >> 8) % 5
@@ -461,7 +461,7 @@ pub fn law_look(c: Clock) -> bool waits {
     let sh = view t
     let s = snapshot(db)
     let head = db.heads[0].head
-    let live = db.resident
+    let live_bytes = db.resident
     let high_water = db.next_node
     let end = db.file_end
     let observed = result.unwrap(look(result.unwrap(reader(db, 0u64)), s, None, (copy_env(ix), copy_env(sh)), fn(tx, call_env) -> Result[u64, Error] {
@@ -475,7 +475,7 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || list.len(got.reads) != 7 || db.heads[0].head != head || db.resident != live || db.next_node != high_water || db.file_end != end {
+    if got.version != head || list.len(got.reads) != 7 || db.heads[0].head != head || db.resident != live_bytes || db.next_node != high_water || db.file_end != end {
         return false
     }
     let p1 = match got.reads[0] {
@@ -631,14 +631,14 @@ pub fn law_changes(c: Clock) -> bool waits {
     let a = snapshot(db)
     let after_copy: List[u64] = clone(before)
     let mut after = take after_copy
-    for step in 0u64 .. 48 {
-        let k = (step * 37) % 160
-        let v = if step % 2 == 0 {
+    for operation in 0u64 .. 48 {
+        let k = (operation * 37) % 160
+        let v = if operation % 2 == 0 {
             0u64
         } else {
-            step + 1000
+            operation + 1000
         }
-        let outcome = execute(mut db, 0, step, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let outcome = execute(mut db, 0, operation, None, fn(mut tx: Tx) -> Result[(), Error] {
             if v == 0 {
                 let _ = delete_bytes(mut tx, 1, key_word(k))?
             } else {

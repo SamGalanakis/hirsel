@@ -28,8 +28,8 @@ fn empty_index_registry() -> IndexRegistry {
 
 fn declared_index_registry(take bindings: List[IndexRegistration]) -> IndexRegistry {
     let mut registry = empty_index_registry()
-    for take binding in take bindings {
-        register_index(mut registry, take binding)
+    for take schema_binding in take bindings {
+        register_index(mut registry, take schema_binding)
     }
     take registry
 }
@@ -137,8 +137,8 @@ fn index_registration[K, V](t: Table[K, V], record: Catalog, take extract: own[s
     IndexRegistration(table: t.id, index: RegisteredIndex(id: record.id, schema: t.readers.current, ordinal: 0, by: clone(record.by), key: clone(record.key), extract: take extract))
 }
 
-fn register_index(mut registry: IndexRegistry, take binding: IndexRegistration) {
-    let IndexRegistration(table: table_id, index: take incoming) = take binding
+fn register_index(mut registry: IndexRegistry, take schema_binding: IndexRegistration) {
+    let IndexRegistration(table: table_id, index: take incoming) = take schema_binding
     let mut bound_index = take incoming
     let key = (table_id, bound_index.id, bound_index.schema)
     bound_index.ordinal = registry.next_ordinal
@@ -172,11 +172,11 @@ fn stage_versioned_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: St
     }
     let record = Catalog(kind: 2, id: plan.next_table, owner: t.id, epoch: 1, key: (std.codec.key_schema(key) ?=> |_| Schema(0)),
         schemas: list.new(), next: 0, by: copied(code.identity(by))?, revision: take revision, index_kind: Many, payload_schemas: list.new(), projection: None)
-    let binding = bind_index(t, record, by, key)
-    stage_index_backfill(mut plan, t, k, name, record, binding.index)
+    let schema_binding = bind_index(t, record, by, key)
+    stage_index_backfill(mut plan, t, k, name, record, schema_binding.index)
 }
 
-fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, record: Catalog, binding: RegisteredIndex) -> Result[(), Error] {
+fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, name: String, record: Catalog, schema_binding: RegisteredIndex) -> Result[(), Error] {
     if !same(plan.store, t.store) {
         return Error(Foreign)
     }
@@ -186,11 +186,11 @@ fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, 
     }
     let Some(next_table) = int.checked_add(record.id, 1u32) else { return Error(Limit(Ids)) }
     let raw = encode_catalog(record)?
-    let mut live = int.saturating_add(126, catalog_recharge(plan.live, plan.roots, key, raw, plan.retained))
+    let mut live_bytes = int.saturating_add(126, catalog_recharge(plan.live, plan.roots, key, raw, plan.retained))
     meta.epoch += 1
     let changed = encode_catalog(meta)?
-    live = catalog_recharge(live, plan.roots, t.catalog_key, changed, plan.retained)
-    over_ceiling(live, plan.ceiling)?
+    live_bytes = catalog_recharge(live_bytes, plan.roots, t.catalog_key, changed, plan.retained)
+    over_ceiling(live_bytes, plan.ceiling)?
     let source = match std.page.collection_child(plan.roots.collections.root, prefix(t.id)?) {
         Some(root) => arc.share(root),
         None => return Error(Stale(t.id)),
@@ -205,12 +205,12 @@ fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, 
                 done = true
                 break
             }
-            let values = (binding.extract)(item.value, item.key)?
+            let values = (schema_binding.extract)(item.value, item.key)?
             for row in values.keys {
                 if list.len(row) > 4096 { return Error(Limit(Key)) }
                 let charge = entry(row, values.payload)
-                live = int.saturating_add(live, charge)
-                over_ceiling(live, plan.ceiling)?
+                live_bytes = int.saturating_add(live_bytes, charge)
+                over_ceiling(live_bytes, plan.ceiling)?
                 list.push(mut chunk, std.page.Row(key: copied(list.slice(row, 4, list.len(row)))?, value: copied(values.payload)?, charge: charge))
             }
         }
@@ -224,7 +224,7 @@ fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, 
     bulk_store_collection(mut roots.collections, record.id, 2, backfill, mut plan.next_node)?
     roots = catalog_insert(mut plan.next_node, roots, key, raw)?
     roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
-    keep_schema(mut plan, take roots, live, next_table)
+    keep_schema(mut plan, take roots, live_bytes, next_table)
 }
 
 fn merge_index_runs(take runs: List[List[std.page.Row]], kind: IndexKind, name: String) -> Result[List[std.page.Row], Error] {
@@ -404,7 +404,7 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     let revision = take_blob(raw, mut at)?
     let mut index_kind: IndexKind = Many
     let mut payload_schemas: List[Bytes] = list.new()
-    let mut projection: Option[(Bytes, Bytes)] = None
+    let mut projection_record: Option[(Bytes, Bytes)] = None
     if kind == 2 {
         index_kind = match take_le(raw, mut at, 1)? {
             0 => Many,
@@ -418,7 +418,7 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
         let project_id = take_blob(raw, mut at)?
         let project_revision = take_blob(raw, mut at)?
         if list.len(project_id) > 0 {
-            projection = Some((take project_id, take project_revision))
+            projection_record = Some((take project_id, take project_revision))
         } else if list.len(project_revision) > 0 {
             return Error(malformed(at))
         }
@@ -426,7 +426,7 @@ fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
     if at != list.len(raw) {
         return Error(malformed(at))
     }
-    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision, index_kind: index_kind, payload_schemas: take payload_schemas, projection: take projection))
+    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision, index_kind: index_kind, payload_schemas: take payload_schemas, projection: take projection_record))
 }
 
 fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {

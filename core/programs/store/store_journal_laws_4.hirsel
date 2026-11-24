@@ -291,7 +291,7 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
     result.unwrap(create_table(mut db, spec("steps", std.codec.key_u64(), std.codec.of_u64())))
     let t = result.unwrap(table(mut db, "steps", std.codec.key_u64(), std.codec.of_u64()))
     let before = db.heads[0].head
-    let live = db.resident
+    let live_bytes = db.resident
     let ran = result.unwrap(run(mut db, Some(65536u64), t, fn(mut tx, call_env) -> Result[(), Error] {
         put(mut tx, call_env, 1u64, 91u64)?
         loop {}
@@ -302,7 +302,7 @@ pub fn law_step_bounds(c: Clock) -> bool waits {
         },
         _ => return false
     }
-    if db.heads[0].head != before || db.resident != live {
+    if db.heads[0].head != before || db.resident != live_bytes {
         return false
     }
     let stopped = result.unwrap(look(result.unwrap(reader(db, 0u64)), snapshot(db), Some(65536u64), (), fn(tx, unused_env) -> u64 {

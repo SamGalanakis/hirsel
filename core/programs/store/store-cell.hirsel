@@ -69,7 +69,7 @@ fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schem
 
 fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, catalog: Catalog, created: bool) -> Result[(), Error] {
     let wire = encode_catalog(catalog)?
-    let mut live = catalog_recharge(plan.live, plan.roots, key, wire, plan.retained)
+    let mut live_bytes = catalog_recharge(plan.live, plan.roots, key, wire, plan.retained)
     let base = share_roots(plan.roots)
     let mut roots = catalog_insert(mut plan.next_node, base, key, wire)?
     let mut next_id = plan.next_table
@@ -78,17 +78,17 @@ fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, catalog: Catalog, cr
             return Error(Limit(Ids))
         }
         define_store_collection(mut roots.collections, catalog.id, catalog.kind, mut plan.next_node)?
-        live = int.saturating_add(live, 126)
+        live_bytes = int.saturating_add(live_bytes, 126)
         next_id += 1
     }
-    keep_schema(mut plan, take roots, live, next_id)
+    keep_schema(mut plan, take roots, live_bytes, next_id)
 }
 
-fn readable_value[V](store_id: StoreId, roots: Roots, binding: ValueCollection[V]) -> Result[(), Error] {
-    if !same(store_id, binding.store) {
+fn readable_value[V](store_id: StoreId, roots: Roots, schema_binding: ValueCollection[V]) -> Result[(), Error] {
+    if !same(store_id, schema_binding.store) {
         return Error(Foreign)
     }
-    readable(roots, binding.catalog_key, binding.catalog_page, binding.id)
+    readable(roots, schema_binding.catalog_key, schema_binding.catalog_page, schema_binding.id)
 }
 
 type CellEdit: shareable + send = CellPut(StagedValue) | CellDelete | CellRevert

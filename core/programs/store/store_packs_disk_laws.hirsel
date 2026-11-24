@@ -177,7 +177,7 @@ fn check_pack_membership_selection() -> Result[(), Error] {
     let mut installed = new_page_locations()
     for seq in 1u64 .. 65 {
         let class: u8 = int.truncate(seq % 3)
-        let (live, frames) = match seq {
+        let (live_bytes, frames) = match seq {
             11 => (2u64, 8u64),
             29 => (2u64, 8u64),
             52 => (2u64, 8u64),
@@ -186,8 +186,8 @@ fn check_pack_membership_selection() -> Result[(), Error] {
             47 => (0u64, 8u64),
             _ => (8u64, 8u64),
         }
-        capacity(disk_index_put(mut installed.packs, seq, PagePack(class: class, frames: int.truncate(frames), live: 16 * live, payload_bytes: 16 * frames, index: 0), pack_edge_charge))?
-        for slot in 0u64 .. live {
+        capacity(disk_index_put(mut installed.packs, seq, PagePack(class: class, frames: int.truncate(frames), live: 16 * live_bytes, payload_bytes: 16 * frames, index: 0), pack_edge_charge))?
+        for slot in 0u64 .. live_bytes {
             let stamp = law_pack_stamp(seed, seq, slot)
             let ptr = std.page.PagePtr(pack: seq, offset: 72 + 32 * slot, len: 16, checksum: stamp, stamp: stamp)
             add_location(mut installed, ptr, class, 0, list.new())?

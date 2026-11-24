@@ -1648,6 +1648,7 @@ pub fn projector[K, V](decl: ProjectionDecl, source: Table[K, V], from: Source, 
 pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits
 pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits
 pub fn binding[K, V](source: Table[K, V], b: Branch) -> Binding          // the binding a reader compares (`live`)
+pub fn projection_row(tx: Tx, decl: ProjectionDecl) -> Result[Projection, Error]   // read with derived rows through the same Tx
 pub fn live(row: Projection, b: Binding) -> Option[u32]
 ```
 

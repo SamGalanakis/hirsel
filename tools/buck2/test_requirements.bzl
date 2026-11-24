@@ -70,6 +70,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl1_recording_changes_nothing",
         "native::tests::rl2_divergence_ends_replay_at_position",
         "native::tests::test_replay_flag_records_and_replays",
+        "native::tests::package_cred_grants_are_per_test_and_replay_uses_the_tape",
         "native::tests::served_scram_replays_with_the_same_send_calls",
         "native::tests::host_ready_wait_replays_exactly",
         "native::tests::recording_cli_replays",

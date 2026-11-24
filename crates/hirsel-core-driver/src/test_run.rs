@@ -179,19 +179,21 @@ fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
     if taken & (1 << named("Env")) == 0 {
         options.env_patterns = None;
     }
-    options.secret_grants.retain(|grant| {
+    let takes_named = |ty, name: &str| {
         decl.parameters
             .iter()
-            .any(|p| kind(&p.ty) == Some(named("Secret")) && p.name == grant.parameter)
-    });
+            .any(|p| kind(&p.ty) == Some(named(ty)) && p.name == name)
+    };
+    options
+        .secret_grants
+        .retain(|grant| takes_named("Secret", &grant.parameter));
+    options
+        .cred_grants
+        .retain(|grant| takes_named("Cred", &grant.parameter));
     options.foreign_grants.retain(|interface| {
-        decl.parameters.iter().any(|param| {
-            param
-                .ty
-                .strip_prefix("core@1/core/Foreign[")
-                .and_then(|ty| ty.strip_suffix(']'))
-                == Some(interface)
-        })
+        decl.parameters
+            .iter()
+            .any(|param| param.foreign_interface() == Some(interface))
     });
 }
 
@@ -489,10 +491,7 @@ impl TestBatch<'_> {
                     }
                 }
                 for parameter in &decl.parameters {
-                    if let Some(interface) = parameter
-                        .ty
-                        .strip_prefix("core@1/core/Foreign[")
-                        .and_then(|ty| ty.strip_suffix(']'))
+                    if let Some(interface) = parameter.foreign_interface()
                         && (!test_options.foreign_grants.contains(interface)
                             || !options.foreign_grants.contains(interface))
                         && !self.replay
@@ -863,12 +862,7 @@ impl CheckProduct {
             return Err(NativeStop::Entry(record_stderr.trim().to_owned()));
         }
         let mut replay_options = record_options;
-        replay_options.grant_mask = 0;
-        replay_options.directories.clear();
-        replay_options.net_rules.clear();
-        replay_options.unix_roots.clear();
-        replay_options.exec_grants.clear();
-        replay_options.secret_grants.clear();
+        crate::package_dir::Grants::default().apply(&mut replay_options);
         replay_options.output = options.output.with_extension("replay");
         replay_options.replay = Some(crate::ReplayPlan {
             path: tape_path

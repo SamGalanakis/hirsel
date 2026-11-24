@@ -73,3 +73,59 @@ fn prog4_published_test_marker_and_edits_keep_reference_restrictions() {
     assert_eq!(refused.diagnostics.len(), 1, "{:?}", refused.diagnostics);
     assert_eq!(refused.diagnostics[0].rule, "PROG-4");
 }
+
+#[test]
+fn package_cred_grants_are_per_test_and_replay_uses_the_tape() {
+    let law = PackageLaw::new();
+    let (east, east_server) = fake_imds(b"fixture-east", b"east-token".to_vec(), 1);
+    let (west, west_server) = fake_imds(b"fixture-west", b"west-token".to_vec(), 1);
+    law.app("app", &format!(
+        "[tests]\nlimit = 1048576\ngrants = [\"Cred:east=imds:127.0.0.1:{east} mac\", \"Cred:west=imds:127.0.0.1:{west} mac\"]\n",
+    ));
+    law.write(
+        "app/main.hirsel",
+        r#"
+fn check_token(c: Cred, expected: String) -> Result[(), ()] waits {
+    let mut key_id = string.with_capacity(64)
+    let mut token = string.with_capacity(64)
+    let _ = result.unwrap(cred.fetch(c, mut key_id, mut token, Never))
+    if token == expected { Ok(()) } else { Error(()) }
+}
+
+@test
+fn eastward(east: Cred) -> Result[(), ()] waits { check_token(east, "east-token") }
+@test
+fn westward(west: Cred) -> Result[(), ()] waits { check_token(west, "west-token") }
+@test
+fn pure() -> Result[(), ()] { Ok(()) }
+"#,
+    );
+    let record = PathBuf::from(env_record_runtime()).canonicalize().unwrap();
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let cc = options.link.driver().canonicalize().unwrap();
+    let args = [
+        "test",
+        "app",
+        "--libraries",
+        law.libraries.to_str().unwrap(),
+        "--store",
+        options.store.to_str().unwrap(),
+        "--source-core",
+        "--json",
+        "--runtime",
+        record.to_str().unwrap(),
+        "--cc",
+        cc.to_str().unwrap(),
+        "--replay",
+        "--expect-verdict",
+        "Sealed",
+    ]
+    .map(str::to_owned);
+    let stdout = PackageLaw::pass(process::tape_request(&args, law.dir.path()));
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let tests = report["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 3, "{report}");
+    assert!(tests.iter().all(|row| row["passed"] == true), "{report}");
+    east_server.join().unwrap();
+    west_server.join().unwrap();
+}

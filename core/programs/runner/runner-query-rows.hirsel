@@ -1,4 +1,4 @@
-type SlotRow: send { slot: u16, key: Bytes, value: Option[Bytes] }
+type SlotRow: codec + send { slot: u16, key: Bytes, value: Option[Bytes] }
 
 // Allocate the log in the publisher's budget before a query enters its bindings.
 fn row_log() -> Result[Log[SlotRow], Capacity] {

@@ -187,13 +187,6 @@ fn slot_payload_size(value_len: u64, projected: List[SlotRow]) -> u64 {
     wanted
 }
 
-fn complete_group_room(limit: u64, value_len: u64, projected: List[SlotRow]) -> Result[u64, Capacity] {
-    let available = int.saturating_sub(limit, 40u64)
-    let requested = slot_payload_size(value_len, projected)
-    if requested > available { return Error(Capacity(requested: requested, available: available)) }
-    Ok(12u64 + requested)
-}
-
 fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, at: u64) -> Owe waits {
     let mut owes: List[Owe] = list.new()
     let _ = owe(mut owes, who, at)
@@ -207,23 +200,24 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
             return list.remove(mut owes, 0u64)
         },
     }
-    let (id, generation, value_len, frame_limit, take projected) = {
+    let (id, generation, take current_image, frame_limit, take projected) = {
         let Some(entry) = sub_at(b.subs, who, sub) else { return list.remove(mut owes, 0u64) }
         if !entry.live { return list.remove(mut owes, 0u64) }
         let shared = option.unwrap(map.get(b.subs.indexed, entry.routes))
         let Some(image) = shared.image else { fail("runner: missing live view image") }
         let id = SubId(who: who, sub: sub, serial: entry.serial)
         let read = view_image_rows(b, entry.input.key, image, rows)
-        (id, entry.generation, list.len(image.value), subscription_frame_limit(entry.input), take read)
+        (id, entry.generation, arc.share(image), subscription_frame_limit(entry.input), take read)
     }
     match take projected {
         Ok(()) => {
             let materialized = slot_rows(take rows)
-            match complete_group_room(frame_limit, value_len, materialized) {
-                Ok(encoded_group) => {
+            match complete_group(frame_limit, current_image.value, materialized) {
+                Ok(take packed) => {
                     clear_due(mut b.subs, id)
                     owes[0u64].rows = wire_rows(take materialized, sub)
-                    owes[0u64].group_bytes = encoded_group
+                    owes[0u64].group_bytes = 4u64 + list.len(packed)
+                    list.push(mut owes[0u64].groups, OwedGroup(sub: sub, payload: take packed))
                     owes[0u64].frame_limit = frame_limit
                     stamp_rows(mut owes[0u64].generations, sub, generation)
                     list.push(mut owes[0u64].complete, sub)

@@ -3667,7 +3667,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             continue
         }
         let owner = match joined[i].identity { Some(id) => latest.read(id).number, None => 0u64 }
-        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
+        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
         while content_index < list.len(contents) && contents[content_index].session < who {
             content_index += 1u64
         }
@@ -3683,6 +3683,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             let _ = replace(mut next.generations, list.new())
             let _ = replace(mut next.complete, list.new())
             let _ = replace(mut next.rows, list.new())
+            let _ = replace(mut next.groups, list.new())
             let _ = replace(mut next.ended, list.new())
             next.reset = true
             next.read_failed = next.read_failed || joined[i].read_failed
@@ -3703,7 +3704,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             },
             None => (None, list.new()),
         }
-        let has_content = next.reset || list.len(next.complete) > 0u64 || list.len(next.rows) > 0u64 || list.len(next.ended) > 0u64
+        let has_content = next.reset || list.len(next.complete) > 0u64 || list.len(next.rows) > 0u64 || list.len(next.groups) > 0u64 || list.len(next.ended) > 0u64
         if !has_content && list.len(rows) == 0u64 {
             i += 1u64
             continue
@@ -3744,7 +3745,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // A full inbox bounced this content: a Reset waits and covers it all; otherwise each live sub
 // it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, version: _, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed, ..) = take o
+    let Owe(session: who, version: _, generations: take stamps, ended: take ended, reset: reset, read_failed: failed, ..) = take o
     // A token taken before this bounce never counts after it (§3 "Repair").
     j.progressed = false
     if reset || j.reset {
@@ -3753,11 +3754,8 @@ fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
         j.ended = list.new()
         return
     }
-    for sub in complete {
+    for (sub, _) in stamps {
         if mark_due(mut subs, who, sub) { j.due = true }
-    }
-    for r in rows {
-        if mark_due(mut subs, who, r.sub) { j.due = true }
     }
     for take x in ended {
         list.push(mut j.ended, take x)
@@ -3805,9 +3803,9 @@ fn caught_up(j: Joiner) -> bool {
 }
 
 fn merge_owe(mut into: Owe, take from: Owe) {
-    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, ended: take ended, group_bytes: group_bytes, frame_limit: frame_limit, reset: reset, read_failed: failed) = take from
-    let has_content = list.len(complete) != 0u64 || list.len(rows) != 0u64
-    let already_has_content = list.len(into.complete) != 0u64 || list.len(into.rows) != 0u64
+    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, groups: take groups, ended: take ended, group_bytes: group_bytes, frame_limit: frame_limit, reset: reset, read_failed: failed) = take from
+    let has_content = list.len(complete) != 0u64 || list.len(rows) != 0u64 || list.len(groups) != 0u64
+    let already_has_content = list.len(into.complete) != 0u64 || list.len(into.rows) != 0u64 || list.len(into.groups) != 0u64
     if has_content && (!already_has_content || v < into.version) { into.version = v }
     into.group_bytes = int.saturating_add(into.group_bytes, group_bytes)
     if frame_limit < into.frame_limit { into.frame_limit = frame_limit }
@@ -3816,6 +3814,7 @@ fn merge_owe(mut into: Owe, take from: Owe) {
     for g in generations { list.push(mut into.generations, g) }
     for sub in complete { list.push(mut into.complete, sub) }
     for take r in rows { list.push(mut into.rows, take r) }
+    for take group in groups { list.push(mut into.groups, take group) }
     for take e in ended { list.push(mut into.ended, take e) }
 }
 

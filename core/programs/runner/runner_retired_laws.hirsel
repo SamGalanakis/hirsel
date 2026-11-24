@@ -427,7 +427,7 @@ fn retired_session(c: Clock, r: Random, tasks: Tasks, end: u64) -> bool waits {
         let mut rows: List[Row] = list.new()
         list.push(mut rows, Row(sub: 1u32, key: no_arg(), value: None))
         list.push(mut rows, Row(sub: 3u32, key: no_arg(), value: None))
-        let o = Owe(session: 7u64, version: 9u64, generations: fixture_generations(generation), complete: list.new(), rows: take rows, ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
+        let o = Owe(session: 7u64, version: 9u64, generations: fixture_generations(generation), complete: list.new(), rows: take rows, groups: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
         if let Error(_) = channel.send(inbox, wire_event(Input(Subscribe(2u32, 0u32, no_arg(), None), 0u64))) {
             return false
         }

@@ -291,7 +291,7 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     config.wire = Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64))
     let socket = runner.wire_defaults(65536u64).socket
     let (running, _stop, status) = launch(tasks, take config)
-    mcp_exchange(mut listener, Never, "server/discover", Some(b"2026-07-28"), None, None, "200 OK", MCP_JSON, "{\"resultType\":\"complete\",\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}}}")
+    mcp_exchange(mut listener, Never, "server/discover", Some(b"2026-07-28"), None, None, "200 OK", MCP_JSON, "{\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}}}")
     let (take conn, _) = result.unwrap(host.accept(mut listener, Never))
     let (take reader, take output) = net.split(take conn)
     let mut r = take reader

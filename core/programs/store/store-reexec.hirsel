@@ -463,3 +463,29 @@ pub fn project_recorded[E: inert, R](db: Db, b: Branch, v: u64, plan: Plan, env:
         RoomRefused => Ok(ProjectionUnavailable(AdmissionRefused)),
     }
 }
+
+pub type RecordedClaim {
+    claim: Bytes,
+    call: KeyedCallRecord,
+    settle: u8,
+    base: u64,
+    at: u64,
+    seed: u64,
+    stop: Option[StopKind]
+}
+
+pub fn recorded_claim(db: Db, wanted: u64) -> Result[Option[RecordedClaim], Error] waits {
+    let Some(take commit) = recorded_commit(db, main_branch(db), wanted)? else { return Ok(None) }
+    for edit in commit.keyed {
+        if let Some(section) = edit.call {
+            let context = match section.settlement {
+                Some(current) => current,
+                None => Settlement(way: 0, base: commit.version - 1, at: commit.at,
+                    seed: call_info(db.store, 0, commit.version, commit.at, commit.at).seed, stop: None),
+            }
+            return Ok(Some(RecordedClaim(claim: copied(edit.key)?, call: clone(section.record), settle: context.way,
+                base: context.base, at: context.at, seed: context.seed, stop: context.stop)))
+        }
+    }
+    Ok(None)
+}

@@ -172,3 +172,78 @@ fn claim_reclaims_expired_front(c: Clock) -> Result[(), Error] waits {
     }
     Ok(())
 }
+
+@test
+fn claim_served_body_and_record_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    let mut db = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let digest = request_digest(b"charge", b"args")
+    let policy = claim_law_policy()
+    let first = claim_law_key(b"one")
+    let second = claim_law_key(b"two")
+    let third = claim_law_key(b"bad")
+    let record = KeyedCallRecord(entry: b"charge", args: b"args", revision: None, code: b"0123456789abcdef")
+    let plan = Plan(n_e: 1048576, s_e: 30000, reply_max: 64)
+    let no_stream_record: Option[CallRecord] = None
+    let Accepted(one) = admit_claim(mut db, first, digest, b"args", Some(clone(policy)))? else { fail("first admit") }
+    let Accepted(two) = admit_claim(mut db, second, digest, b"args", Some(clone(policy)))? else { fail("second admit") }
+    let done = serve(mut db, keyed_completion(take one, clone(record)), plan, clone(no_stream_record), rows, fn(mut tx: Tx, data: Table[u64, u64]) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 1u64, 77u64))
+        Ok(b"done")
+    })
+    let Ok(Committed(success)) = done else { fail("keyed success did not commit") }
+    let success_mark = version(snapshot(db))
+    durable(mut db, success.ticket)?
+    let denied = serve(mut db, keyed_completion(take two, clone(record)), plan, clone(no_stream_record), rows, fn(mut tx: Tx, data: Table[u64, u64]) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 2u64, 88u64))
+        Error(b"denied")
+    })
+    let Ok(Kept(typed_error)) = denied else { fail("keyed error did not keep its reply") }
+    let error_mark = version(snapshot(db))
+    durable(mut db, typed_error.ticket)?
+    let Accepted(three) = admit_claim(mut db, third, digest, b"args", Some(clone(policy)))? else { fail("third admit") }
+    let crashed = serve(mut db, keyed_completion(take three, clone(record)), plan, take no_stream_record, rows, fn(mut tx: Tx, data: Table[u64, u64]) -> Result[Bytes, Bytes] {
+        let _ = result.unwrap(put(mut tx, data, 3u64, 99u64))
+        fail("law body fault")
+    })
+    let Ok(Failed(take settlement, Raised(_))) = take crashed else { fail("keyed fault did not leave a pending reply") }
+    let Ok(Committed(fault_receipt)) = conclude(mut db, take settlement, b"failed", Claim) else { fail("keyed fault did not commit from its reserve") }
+    let fault_mark = version(snapshot(db))
+    durable(mut db, fault_receipt.ticket)?
+    close(take db)?
+    options.create = false
+    let mut reopened = open(tasks, directory, c, r, options)?
+    let Some(committed_call) = recorded_claim(reopened, success_mark)? else { fail("keyed success call record missing") }
+    let Some(aborted_call) = recorded_claim(reopened, error_mark)? else { fail("keyed abort call record missing") }
+    let Some(faulted_call) = recorded_claim(reopened, fault_mark)? else { fail("keyed fault call record missing") }
+    if committed_call.claim != b"\x03pay\x02\x05alice\x03one" ||
+        aborted_call.claim != b"\x03pay\x02\x05alice\x03two" ||
+        committed_call.call.entry != b"charge" || committed_call.call.args != b"args" ||
+        aborted_call.call.entry != b"charge" || aborted_call.call.args != b"args" ||
+        faulted_call.claim != b"\x03pay\x02\x05alice\x03bad" || faulted_call.settle != 1 || faulted_call.stop != Some(Raised) {
+        fail("keyed call record identity changed")
+    }
+    let recovered = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let base = snapshot(reopened)
+    let read = reader(reopened, 0u64)?
+    if get(read, base, recovered, 1u64)? != Some(77u64) || get(read, base, recovered, 2u64)? != None || get(read, base, recovered, 3u64)? != None {
+        fail("keyed replay changed the successful effect or kept an aborted effect")
+    }
+    match admit_claim(mut reopened, first, digest, b"args", Some(clone(policy)))? {
+        Duplicate(saved) if saved == b"done" => (),
+        _ => fail("keyed success reply lost"),
+    }
+    match admit_claim(mut reopened, second, digest, b"args", Some(clone(policy)))? {
+        Duplicate(saved) if saved == b"denied" => (),
+        _ => fail("keyed error reply lost"),
+    }
+    match admit_claim(mut reopened, third, digest, b"args", Some(take policy))? {
+        Duplicate(saved) if saved == b"failed" => (),
+        _ => fail("keyed fault reply lost"),
+    }
+    close(take reopened)
+}

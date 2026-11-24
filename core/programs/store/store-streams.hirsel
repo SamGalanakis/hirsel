@@ -576,7 +576,8 @@ pub opaque type Completion {
     admitted: Ticket,
     stream: Bytes,
     p: u64,
-    request: RequestDigest
+    request: RequestDigest,
+    keyed: Option[KeyedRun]
 }
 
 pub fn ticket(c: Completion) -> Ticket {
@@ -664,7 +665,7 @@ fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: Request
     if let Some(t) = mine {
         let active = OpenAdmit(p: p, ticket: Some(t), held: true)
         map.insert(mut db.admits, copied(stream)?, active)
-        return Ok(Abandoned(Completion(admitted: t, stream: copied(stream)?, p: p, request: d)))
+        return Ok(Abandoned(Completion(admitted: t, stream: copied(stream)?, p: p, request: d, keyed: None)))
     }
     // An earlier open's admit: re-commit, keeping the digest bound at p.
     admit_next(mut db, name.caller, stream, p, d, true, at, age, control, protected)
@@ -711,7 +712,7 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
         Stopped(_) => return Error(Missing("admit"))
     }
     map.insert(mut db.admits, take key, OpenAdmit(p: p, ticket: Some(admitted), held: true))
-    let completion = Completion(admitted: admitted, stream: take held_stream, p: p, request: d)
+    let completion = Completion(admitted: admitted, stream: take held_stream, p: p, request: d, keyed: None)
     Ok(if abandoned {
         Abandoned(take completion)
     } else {

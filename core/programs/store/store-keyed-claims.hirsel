@@ -184,7 +184,7 @@ fn remove_keyed_credit(total: KeyedCredit, own_credit: KeyedCredit) -> KeyedCred
 }
 
 fn append_claim_edit(mut edits: List[KeyedEdit], tree: u8, key: Bytes, take value: Option[Bytes]) -> Result[(), Error] {
-    list.push(mut edits, KeyedEdit(tree: tree, key: copied(key)?, value: take value))
+    list.push(mut edits, KeyedEdit(tree: tree, key: copied(key)?, value: take value, call: None))
     Ok(())
 }
 
@@ -334,14 +334,14 @@ pub fn admit_claim(mut db: Db, key: ClaimKey, d: RequestDigest, args: Bytes, tak
     Ok(Accepted(ClaimCompletion(ticket: committed_ticket, key: take full, request: d, policy: take policy, admitted_width: width)))
 }
 
-fn write_claim_reply(mut tx: Tx, completion: ClaimCompletion, reply_bytes: Bytes, credit: KeyedCredit) -> Result[(), Error] {
+fn stage_claim_reply(mut tx: Tx, key: Bytes, digest: RequestDigest, retention_ms: u64, reply_bytes: Bytes, credit: KeyedCredit,
+    take call: Option[KeyedCallSection]) -> Result[(), Error] {
     if list.len(reply_bytes) > CLAIM_DONE_MAX { return Error(Limit(Value)) }
-    let key = view completion.key
     let op_end = claim_op_end(key)?
     let principal_end = claim_principal_end(key, op_end)?
-    let expiry = claim_expiry(tx.info.at, completion.policy.retention_ms)
+    let expiry = claim_expiry(tx.info.at, retention_ms)
     let mut edits: List[KeyedEdit] = list.with_capacity(4)
-    append_claim_edit(mut edits, CLAIMS, key, Some(claim_value(completion.request, expiry, reply_bytes)))?
+    list.push(mut edits, KeyedEdit(tree: CLAIMS, key: copied(key)?, value: Some(claim_value(digest, expiry, reply_bytes)), call: take call))
     append_claim_edit(mut edits, CLAIM_EXP, claim_index_key(list.slice(key, 0, op_end), expiry, key)?, Some(list.new()))?
     append_claim_edit(mut edits, CLAIM_PEXP, claim_index_key(list.slice(key, 0, principal_end), expiry, key)?, Some(list.new()))?
     append_claim_edit(mut edits, CLAIM_OPEN, key, None)?
@@ -368,7 +368,7 @@ pub fn conclude_claim(mut db: Db, take completion: ClaimCompletion, reply_bytes:
     let after = remove_keyed_credit(db.keyed_credit, own_credit)
     let keep: Option[fn(Error) -> bool] = None
     let outcome = store_body_on(mut db, 0, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
-        write_claim_reply(mut tx, completion, reply_bytes, after)
+        stage_claim_reply(mut tx, completion.key, completion.request, completion.policy.retention_ms, reply_bytes, after, None)
     })?
     match take outcome {
         Committed(done) => {
@@ -398,5 +398,45 @@ fn rebuild_keyed_credit(mut db: Db, uncovered: u64, journal_limit: u64) -> Resul
     over_ceiling(int.saturating_add(db.resident, int.saturating_add(credit.resident, credit.padding)), db.ceiling)?
     if let Some(room) = journal_refusal(uncovered, credit.journal, journal_limit) { return Error(Full(Journal(room))) }
     db.keyed_credit = credit
+    Ok(())
+}
+
+pub type KeyedCallRecord: codec + shareable + send {
+    entry: Bytes,
+    args: Bytes,
+    revision: Option[Bytes],
+    code: Bytes
+}
+
+type KeyedRun {
+    policy: KeyedPolicy,
+    admitted_width: u64,
+    record: KeyedCallRecord
+}
+
+pub fn keyed_completion(take claim: ClaimCompletion, take record: KeyedCallRecord) -> Completion {
+    let ClaimCompletion(ticket: admitted, key: take full, request: request, policy: take policy, admitted_width: width) = take claim
+    Completion(admitted: admitted, stream: take full, p: 0, request: request,
+        keyed: Some(KeyedRun(policy: take policy, admitted_width: width, record: take record)))
+}
+
+fn keyed_completion_credit(db: Db, completion: Completion) -> Option[KeyedCredit] {
+    let Some(keyed) = view completion.keyed else { return None }
+    let held = claim_terminal_credit(db.ceiling, keyed.policy, keyed.admitted_width)
+    Some(remove_keyed_credit(db.keyed_credit, held))
+}
+
+fn check_keyed_completion(db: Db, completion: Completion, call_run: KeyedRun) -> Result[(), Error] {
+    let Some(raw) = keyed_lookup(db.heads[0u64].roots.keyed, CLAIMS, completion.stream) else { return Error(Missing("claim")) }
+    let row = claim_parse(raw)?
+    if row.replied || row.digest != completion.request || request_digest(call_run.record.entry, call_run.record.args) != row.digest ||
+        list.slice(raw, 41, list.len(raw)) != call_run.record.args {
+        return Error(Missing("claim"))
+    }
+    if !call_code_size(list.len(call_run.record.code)) { return Error(Missing("code")) }
+    if let Some(revision) = call_run.record.revision {
+        if list.len(revision) != 32 { return Error(Missing("revision")) }
+    }
+    if keyed_record_size(call_run.record, None) + 33 > call_run.policy.call_record_max { return Error(Limit(Transaction)) }
     Ok(())
 }

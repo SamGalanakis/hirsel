@@ -1014,6 +1014,9 @@ fn registered_completion(db: Db, complete: Completion) -> Result[(), ServeError]
     if !same(db.store, complete.admitted.store) || open_number(db) != complete.admitted.open {
         return Error(Before(Foreign, None))
     }
+    if let Some(keyed) = complete.keyed {
+        return serve_before(check_keyed_completion(db, complete, keyed))
+    }
     if let Some(raw) = get_page_row(db.heads[0].roots.streams, complete.stream) {
         let state = serve_before(stream_state(raw))?
         if state.p == complete.p && state.state == 1 && state.digest == complete.request {
@@ -1053,7 +1056,12 @@ fn cause_number(causes: Causes) -> u32 {
     0u32
 }
 
-fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement]) -> Result[(), Error] {
+fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallRecord], settlement: Option[Settlement], credit: Option[KeyedCredit]) -> Result[(), Error] {
+    if let Some(keyed) = complete.keyed {
+        let Some(remaining) = credit else { fail("store: keyed completion must apply its terminal credit") }
+        let call = KeyedCallSection(record: clone(keyed.record), settlement: settlement)
+        return stage_claim_reply(mut tx, complete.stream, complete.request, keyed.policy.retention_ms, output, remaining, Some(take call))
+    }
     let size = if let Some(_) = tx.frame_bytes {
         match rec {
             Some(value) => call_section_bytes(value, settlement),
@@ -1066,7 +1074,7 @@ fn save_reply(mut tx: Tx, complete: Completion, output: Bytes, rec: Option[CallR
     stream_write(mut tx, take key, take value, size)
 }
 
-fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_max: u64, body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Bytes, ServeReply] {
+fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_max: u64, credit: Option[KeyedCredit], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Bytes, ServeReply] {
     let returned = body(mut tx)
     if let Some(problem) = tx.refusal {
         tx.refusal = None
@@ -1084,7 +1092,7 @@ fn stage_reply(mut tx: Tx, complete: Completion, rec: Option[CallRecord], reply_
     if list.len(output) > reply_max {
         return Error(BodyStop(OutOfBytes(Capacity(requested: list.len(output), available: reply_max))))
     }
-    match save_reply(mut tx, complete, output, rec, None) {
+    match save_reply(mut tx, complete, output, rec, None, credit) {
         Ok(()) => (),
         Error(Full(Allocation(problem))) => return Error(BodyStop(OutOfBytes(problem))),
         Error(take problem) => return Error(StoreFailure(take problem)),
@@ -1115,6 +1123,9 @@ fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, 
     let ready = serve_before(settle_draft(mut db, 0, take staged))?
     match take ready {
         OverLimit(_, Journal(problem)) => {
+            if let Some(_) = pending_run.completion.keyed {
+                return Ok(NoRoom(take pending_run, Journal(problem)))
+            }
             let pending = if retry {
                 Some(take pending_run)
             } else {
@@ -1137,8 +1148,11 @@ fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, 
 }
 
 pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reserve: Reserve) -> Result[Served, ServeError] waits {
-    if let Claim = reserve {
-        return Error(Before(Missing("claim"), None))
+    let has_credit = match pending_run.completion.keyed { Some(_) => true, None => false }
+    match reserve {
+        Claim if !has_credit => return Error(Before(Missing("claim"), None)),
+        Resident if has_credit => return Error(Before(Missing("terminal credit"), None)),
+        _ => (),
     }
     serve_before(journal_poll(mut db))?
     serve_before(healthy(db))?
@@ -1159,10 +1173,11 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
     // Saving a reply reads no Tiered row, so it carries no attempt record.
     let attempt: Option[core.Cell[TieredTouchSet]] = None
     let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let credit = keyed_completion_credit(db, pending_run.completion)
     let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
         let held: Bytes = clone(output)
         let moved = take held
-        match save_reply(mut tx, pending_run.completion, output, pending_run.record, settlement) {
+        match save_reply(mut tx, pending_run.completion, output, pending_run.record, settlement, credit) {
             Ok(()) => Ok(take moved),
             Error(Full(Allocation(problem))) => Error(BodyStop(OutOfBytes(problem))),
             Error(take problem) => Error(StoreFailure(take problem)),
@@ -1982,36 +1997,6 @@ fn encode_stream_ops(mut payload: Bytes, ops: DataRows, stream_count: u64, call:
         if list.len(operation.key) != 0u64 { encode_stream_op(mut payload, operation, call, settlement)? }
     }
     Ok(())
-}
-
-fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settlement]) -> Result[(), Capacity] {
-    blob(mut payload, record.key)?
-    blob(mut payload, record.args)?
-    if let Some(revision) = record.revision {
-        blob(mut payload, revision)?
-    } else {
-        le(mut payload, 0, 4)?
-    }
-    blob(mut payload, record.code)?
-    match settlement {
-        None => le(mut payload, 0, 1),
-        Some(context) => {
-            le(mut payload, int.widen(context.way), 1)?
-            append_be(mut payload, context.base, 8)?
-            append_be(mut payload, context.at, 8)?
-            append_be(mut payload, context.seed, 8)?
-            match context.stop {
-                Some(Raised) => le(mut payload, 1, 1),
-                Some(OutOfSteps(steps)) => {
-                    le(mut payload, 2, 1)?
-                    append_be(mut payload, steps, 8)
-                },
-                Some(OutOfBytes) => le(mut payload, 3, 1),
-                Some(Conflict) => le(mut payload, 4, 1),
-                None => Ok(()),
-            }
-        }
-    }
 }
 
 pub type RowSchemas: codec + shareable + send {
@@ -5048,20 +5033,6 @@ pub type Recorded {
     stop: Option[StopKind]
 }
 
-fn call_section_bytes(rec: CallRecord, settlement: Option[Settlement]) -> u64 {
-    let revision = match rec.revision {
-        Some(raw) => list.len(raw),
-        None => 0u64
-    }
-    let extra: u64 = match settlement {
-        Some(Settlement(stop: Some(OutOfSteps(_)), ..)) => 33,
-        Some(Settlement(stop: Some(_), ..)) => 25,
-        Some(_) => 24,
-        None => 0,
-    }
-    17 + list.len(rec.key) + list.len(rec.args) + revision + list.len(rec.code) + extra
-}
-
 // AD1: the CALL revision check. A Some that is not code.revision's 32 bytes is refused
 // before anything is committed.
 fn call_checked(c: CallRecord) -> Result[(), Error] {
@@ -5078,6 +5049,7 @@ fn call_checked(c: CallRecord) -> Result[(), Error] {
 
 fn check_completion_record(complete: Completion, rec: Option[CallRecord]) -> Result[(), Error] {
     if let Some(c) = rec {
+        if let Some(_) = complete.keyed { return Error(Foreign) }
         if !stream_record_matches(complete.stream, c.stream) {
             return Error(Foreign)
         }
@@ -5208,33 +5180,6 @@ fn decode_settlement(file: String, raw: Bytes, mut at: u64, way: u8) -> Result[S
         None
     }
     Ok(Settlement(way: way, base: base, at: wall, seed: seed, stop: stop))
-}
-
-fn decode_call(file: String, raw: Bytes, mut at: u64, take stream: Bytes) -> Result[CallSection, Error] {
-    let key = disk_blob(file, raw, mut at, 16777280)?
-    let args = disk_blob(file, raw, mut at, 16777280)?
-    let revision_at = at
-    let revision_bytes = disk_blob(file, raw, mut at, 32)?
-    let revision: Option[Bytes] = match list.len(revision_bytes) {
-        0 => None,
-        32 => Some(take revision_bytes),
-        _ => return Error(disk_fault(file, revision_at, Malformed))
-    }
-    let code_at = at
-    let code = disk_blob(file, raw, mut at, 48)?
-    if !call_code_size(list.len(code)) {
-        return Error(disk_fault(file, code_at, Malformed))
-    }
-    let way: u8 = int.truncate(disk_number(file, raw, mut at, 1)?)
-    let settlement: Option[Settlement] = match way {
-        0 => None,
-        1 => Some(decode_settlement(file, raw, mut at, way)?),
-        2 => Some(decode_settlement(file, raw, mut at, way)?),
-        _ => return Error(disk_fault(file, at - 1, Malformed)),
-    }
-    let Some(take name) = parse_stream_key(stream) else { return Error(disk_fault(file, at, Malformed)) }
-    let record = CallRecord(key: take key, args: take args, stream: take name, revision: take revision, code: take code)
-    Ok(CallSection(record: take record, settlement: settlement))
 }
 
 fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Error] {

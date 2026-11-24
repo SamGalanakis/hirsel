@@ -78,7 +78,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
                 let reads: core.Log[Read] = log.new()
                 let issued: core.Cell[u64] = cell.new(0)
                 let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
-                    stage_reply(mut tx, complete, rec, plan.reply_max, body)
+                    stage_reply(mut tx, complete, rec, plan.reply_max, keyed_completion_credit(db, complete), body)
                 })
                 let finished = match prepare_metered_pages(issued, attempt, pins, take staged) {
                     Ok(take ready) => take ready,

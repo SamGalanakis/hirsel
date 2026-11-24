@@ -1,7 +1,13 @@
 type KeyedEdit {
     tree: u8,
     key: Bytes,
-    value: Option[Bytes]
+    value: Option[Bytes],
+    call: Option[KeyedCallSection]
+}
+
+type KeyedCallSection {
+    record: KeyedCallRecord,
+    settlement: Option[Settlement]
 }
 
 type KeyedCredit {
@@ -25,6 +31,7 @@ fn keyed_frame_bytes(edits: List[KeyedEdit]) -> u64 {
     for edit in edits {
         size += 6 + list.len(edit.key)
         if let Some(raw) = edit.value { size += 4 + list.len(raw) }
+        if let Some(call) = edit.call { size += keyed_record_size(call.record, call.settlement) }
     }
     size
 }
@@ -36,9 +43,13 @@ fn encode_keyed_edits(mut raw: Bytes, edits: List[KeyedEdit]) -> Result[(), Capa
         list.push(mut raw, edit.tree)
         match edit.value {
             Some(value) => {
-                list.push(mut raw, 1u8)
+                let kind = match edit.call { Some(_) => 3u8, None => 1u8 }
+                list.push(mut raw, kind)
                 blob(mut raw, edit.key)?
                 blob(mut raw, value)?
+                if let Some(call) = edit.call {
+                    encode_call_fields(mut raw, call.record.entry, call.record.args, call.record.revision, call.record.code, call.settlement)?
+                }
             },
             None => {
                 list.push(mut raw, 2u8)
@@ -53,6 +64,7 @@ fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[Keye
     let edit_count = disk_count(file, raw, mut at, 7)?
     if edit_count == 0 { return Error(disk_fault(file, at, Malformed)) }
     let mut edits: List[KeyedEdit] = list.new()
+    let mut saw_keyed_call = false
     for _ in 0u64 .. edit_count {
         let tree: u8 = int.truncate(disk_number(file, raw, mut at, 1)?)
         let width = match tree {
@@ -80,9 +92,21 @@ fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[Keye
                 Some(disk_blob(file, raw, mut at, maximum)?)
             },
             2 => None,
+            3 if tree == CLAIMS && !saw_keyed_call => Some(disk_blob(file, raw, mut at, 41 + CLAIM_DONE_MAX)?),
             _ => return Error(disk_fault(file, at - 1, Malformed)),
         }
-        list.push(mut edits, KeyedEdit(tree: tree, key: take key, value: take value))
+        let call: Option[KeyedCallSection] = if kind == 3 {
+            let Some(reply_bytes) = view value else { return Error(disk_fault(file, at, Malformed)) }
+            let state = claim_parse(reply_bytes) ?=> |_| disk_fault(file, at, Malformed)
+            if !state.replied { return Error(disk_fault(file, at, Malformed)) }
+            let (take record, settlement) = decode_call_fields(file, raw, mut at)?
+            if request_digest(record.entry, record.args) != state.digest {
+                return Error(disk_fault(file, at, Malformed))
+            }
+            saw_keyed_call = true
+            Some(KeyedCallSection(record: take record, settlement: settlement))
+        } else { None }
+        list.push(mut edits, KeyedEdit(tree: tree, key: take key, value: take value, call: take call))
     }
     Ok(take edits)
 }

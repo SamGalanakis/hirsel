@@ -10,5 +10,5 @@ charge = "charge-v1"
 [foreign.native]
 symbols = "hjpg_"
 archives = [
-  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_jpeg.a", sha256 = "0ffb9a5f0d75fe18622c05dcf7b0108833d8c5093c1928dbcc1ba9ff231b933e" },
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_jpeg.a", sha256 = "e90c7e00988a8421042ef5ae6e77f0a241e513de48d36b88fdd1d6b5b801085b" },
 ]

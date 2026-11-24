@@ -31,7 +31,8 @@ cp hirsel_jpeg.c "$stage"
         -fPIC -fno-ident -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unterminated-string-initialization \
         -I codec -I "$src/src" -c hirsel_jpeg.c -o hirsel_jpeg.o
     "$llvm/bin/ld.lld" -r hirsel_jpeg.o codec/libjpeg.a -o hjpg.o
-    "$llvm/bin/llvm-objcopy" --wildcard --keep-global-symbol='hjpg_*' hjpg.o
+    # NASM's ELF file symbols contain the temporary source path.
+    "$llvm/bin/llvm-objcopy" --strip-debug --wildcard --keep-global-symbol='hjpg_*' hjpg.o
     "$llvm/bin/llvm-objdump" --section-headers hjpg.o > sections
     "$llvm/bin/llvm-readelf" --symbols --relocations --wide hjpg.o > symbols
     "$llvm/bin/llvm-nm" --defined-only --extern-only --format=posix hjpg.o > exports

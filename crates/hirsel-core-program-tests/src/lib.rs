@@ -22,7 +22,45 @@ fn std_manifest() -> PackageManifest {
     manifest
 }
 
-/// A fixture opts into std when its diagnostic exercises codec derivation.
+fn library_manifest(name: &str) -> PackageManifest {
+    let root = repo().join("core/programs").join(name);
+    let text = std::fs::read_to_string(root.join("hirsel.toml")).unwrap();
+    let manifest: toml::Table = text.parse().unwrap();
+    let dependencies = std::iter::once(package("core"))
+        .chain(
+            manifest["dependencies"]
+                .as_table()
+                .unwrap()
+                .keys()
+                .map(|name| package(name)),
+        )
+        .collect();
+    let sources = manifest["sources"]
+        .as_table()
+        .unwrap()
+        .iter()
+        .map(|(file, module)| ModuleSource {
+            foreign: false,
+            captured: None,
+            file: root.join(file),
+            modules: module
+                .as_str()
+                .unwrap()
+                .split('/')
+                .map(str::to_owned)
+                .collect(),
+            signatures: false,
+        })
+        .collect();
+    PackageManifest {
+        namespace: None,
+        package: package(name),
+        sources,
+        dependencies,
+    }
+}
+
+/// Fixtures can opt in to checking against library sources.
 pub(crate) fn source_manifest(
     source: &str,
     path: PathBuf,
@@ -31,9 +69,17 @@ pub(crate) fn source_manifest(
 ) -> CorpusManifest {
     let mut dependencies = vec![package("core")];
     let mut packages = vec![PackageManifest::directory(core, package("core"), true).unwrap()];
-    if source.lines().any(|line| line == "// library: std") {
-        dependencies.push(package("std"));
+    let uses_runner = source.lines().any(|line| line == "// library: runner");
+    let uses_std = source.lines().any(|line| line == "// library: std");
+    if uses_runner || uses_std {
         packages.push(std_manifest());
+    }
+    if uses_runner {
+        dependencies.push(package("runner"));
+        packages.extend([library_manifest("store"), library_manifest("runner")]);
+    }
+    if uses_std {
+        dependencies.push(package("std"));
     }
     packages.push(PackageManifest {
         namespace: None,
@@ -119,6 +165,15 @@ impl Checked {
 mod bytes_charge;
 #[cfg(test)]
 mod cases;
+
+#[test]
+fn steps_ctx_confinement_fixtures() {
+    let fixtures = repo().join("core/front/cases/steps");
+    for case in ["ctx-escape", "ctx-store", "ctx-send"] {
+        let failures = cases::run_case(&fixtures.join(format!("{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
 #[cfg(test)]
 mod spec_tests;
 #[cfg(test)]

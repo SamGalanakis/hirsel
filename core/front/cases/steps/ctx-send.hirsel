@@ -1,0 +1,8 @@
+// library: runner
+// expect: refuse CONC-2 at 7:46
+// expect: compared CONC-2 at 7:46 | runner@1/steps/Ctx[core@1/core/Clock] | send
+// The real runner steps.Ctx is scoped and never send, so it cannot move to a task.
+fn child(take ctx: runner.steps.Ctx[Clock]) {}
+fn send_it(tasks: Tasks, take ctx: runner.steps.Ctx[Clock]) waits {
+    let _ = task.spawn(tasks, bytes 4096u64, take ctx, child)
+}

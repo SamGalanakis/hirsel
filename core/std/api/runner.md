@@ -470,7 +470,7 @@ code, and `cancel` ends it `Cancelled`. A run therefore stays parked only when a
 "The activation fate").
 
 The store step library gives a granted trigger a confined process body.
-Include `steps.migrate` in the place migration and `steps.register` in the
+Include `steps.declare_tables` in the place migration and `steps.register` in the
 place registry. Schedule a run with `steps.schedule`, which writes its step
 cap in the same transaction as the trigger. The granted entry calls
 `steps.run` with the attempt context, a map of grants keyed by step index,

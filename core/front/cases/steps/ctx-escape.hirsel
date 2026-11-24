@@ -1,0 +1,4 @@
+// library: runner
+// expect: refuse OWN-20 at 4:49
+// The real runner steps.Ctx is scoped, so a step cannot return it without an anchor.
+fn escape(take ctx: runner.steps.Ctx[Clock]) -> runner.steps.Ctx[Clock] { ctx }

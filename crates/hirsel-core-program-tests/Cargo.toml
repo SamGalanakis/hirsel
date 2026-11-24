@@ -20,6 +20,7 @@ hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }
 hirsel-guard = { path = "../hirsel-guard" }
 tempfile = "3"
+toml = { version = "0.8.23", default-features = false, features = ["parse"] }
 hirsel-cranelift = { path = "../hirsel-cranelift" }
 hirsel-llvm = { path = "../hirsel-llvm" }
 hirsel-llvm-lazy = { path = "../hirsel-llvm-lazy" }

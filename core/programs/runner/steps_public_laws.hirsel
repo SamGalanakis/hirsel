@@ -1,0 +1,293 @@
+// Public end-to-end laws of the steps wrapper's resend and resolve API. The
+// harness drives a real place through runner.operate; inside the process it
+// uses only steps.run, step, resend, resolve and recorded.
+type LawError: codec + send = Broken | Unused
+
+type EffectCall: send {
+    value: u64,
+    reply: Sender[u64]
+}
+
+type LookupCall: send {
+    value: u64,
+    reply: Sender[u64]
+}
+
+type Control: send {
+    effects: Sender[EffectCall],
+    lookups: Sender[LookupCall]
+}
+
+type Recovery: codec + send = Resolve | Resend
+
+type RunArg: codec + send {
+    recovery: Recovery,
+    value: u64
+}
+
+type LawHandles: shareable + send {
+    triggers: triggers.Tables,
+    steps: steps.Tables
+}
+
+fn law_schema(mut d: store.Declare) -> Result[LawHandles, store.Error] {
+    let pending = triggers.declare_tables(mut d)?
+    let step_handles = steps.declare_tables(mut d, clone(pending))?
+    Ok(LawHandles(triggers: take pending, steps: take step_handles))
+}
+
+fn law_trigger_tables(h: LawHandles) -> triggers.Tables {
+    clone(h.triggers)
+}
+
+fn law_step_tables(h: LawHandles) -> steps.Tables {
+    clone(h.steps)
+}
+
+fn control_copy(c: Control) -> Control {
+    Control(effects: channel.sender(c.effects), lookups: channel.sender(c.lookups))
+}
+
+fn effect(control: Control, take value: u64) -> Result[u64, LawError] waits {
+    let (reply, inbox): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    result.unwrap(channel.send(control.effects, EffectCall(value: value, reply: take reply)))
+    Ok(result.unwrap(channel.receive(inbox)))
+}
+
+fn lookup(control: Control, take value: u64) -> Result[u64, LawError] waits {
+    let (reply, inbox): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    result.unwrap(channel.send(control.lookups, LookupCall(value: value, reply: take reply)))
+    Ok(result.unwrap(channel.receive(inbox)))
+}
+
+fn process(mut ctx: steps.Ctx[Control], take arg: RunArg) -> Result[u64, steps.StepError[LawError]] waits {
+    let send = code.describe(effect)
+    let Error(InDoubt(id)) = steps.step(mut ctx, arg.value, send) else {
+        fail("steps public law: expected an in-doubt step on reentry")
+    }
+    let value = match arg.recovery {
+        Resolve => steps.resolve(mut ctx, id, arg.value, send, code.describe(lookup))?,
+        Resend => steps.resend(mut ctx, id, arg.value, send)?,
+    }
+    // This second step is the test's happens-after edge: the wrapper cannot
+    // reach it before the first step's result row is durable.
+    let _ = steps.step(mut ctx, 100u64 + value, send)?
+    Ok(value)
+}
+
+type Grants: send {
+    context: runner.TriggerContext,
+    control: Control
+}
+
+fn make_grants(seed: Control, _handles: LawHandles, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
+    Ok(Grants(context: take ctx, control: control_copy(seed)))
+}
+
+fn run(g: Grants, _caller: runner.Caller, take arg: RunArg) -> Result[u64, Capacity] waits {
+    let mut allowed: Map[u64, Control] = map.new()
+    map.insert(mut allowed, 0u64, control_copy(g.control))
+    map.insert(mut allowed, 1u64, control_copy(g.control))
+    match steps.run(g.context, take allowed, take arg, process) {
+        Ok(value) => Ok(value),
+        Error(_) => Ok(0u64),
+    }
+}
+
+fn place(mut registry: runner.Registry[Grants, LawHandles]) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut registry, law_trigger_tables)
+    steps.register(mut registry, law_step_tables, 131072u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut registry, code.describe(run), 131072u64, runner.DEFAULT_STEPS)
+}
+
+fn commit[R, E](mut db: store.Db, take attempted: Result[store.Outcome[R, E], store.Error]) -> R waits {
+    match take attempted {
+        Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
+            result.unwrap(store.durable(mut db, ticket))
+            take value
+        },
+        _ => fail("steps public law: expected a commit"),
+    }
+}
+
+fn arm(dir: Dir, c: Clock, r: Random, tasks: Tasks, take arg: RunArg) -> triggers.Id waits {
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
+    let h = result.unwrap(store.bind_declaration(mut db, Migrate, law_schema))
+    let target: triggers.Entry[RunArg] = result.unwrap(triggers.granted(code.describe(run)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, target))
+    let made = store.run(mut db, None, (store.copy_env(h), store.copy_env(entries), store.copy_env(target), store.copy_env(arg)), fn(mut tx, call_env) -> Result[triggers.Id, triggers.Error] {
+        steps.schedule(mut tx, law_step_tables(call_env.0), call_env.1, call_env.2, call_env.3, 4u64, AfterCommit)
+    })
+    let id = commit(mut db, take made)
+    result.unwrap(store.close(take db))
+    id
+}
+
+type Demo: send {
+    config: runner.PlaceConfig[Grants, LawHandles, Control, ()],
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    watch: Sender[Receiver[runner.Phase]]
+}
+
+fn operate(take demo: Demo) -> Result[runner.Ended, runner.StartError] waits {
+    let Demo(config: take config, stop: take stop, status: take status, watch: take watch) = take demo
+    runner.operate(take config, take stop, status, Some(take watch))
+}
+
+type Running {
+    handle: Task[Result[runner.Ended, runner.StartError]],
+    stop: Sender[()],
+}
+
+fn settings_for(dir: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, take seed: Control) -> runner.PlaceConfig[Grants, LawHandles, Control, ()] {
+    let target: triggers.Entry[RunArg] = result.unwrap(triggers.granted(code.describe(run)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, target))
+    let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grants: take seed, grant: make_grants, grant_bytes: 65536u64)
+    let mut wire = runner.wire_defaults(65536u64)
+    wire.n_pool = 4194304u64
+    let options = triggers.law_options()
+    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(options.pack_bytes), group_bytes: Some(int.widen(options.group_bytes)), group_commits: Some(options.group_commits), lock_wait_ms: Some(options.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Reopen, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(law_schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 100u64), wire: None, triggers: Some(take trigger_config), idle: None)
+}
+
+fn start_place(tasks: Tasks, take settings: runner.PlaceConfig[Grants, LawHandles, Control, ()]) -> Running waits {
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
+    let status = result.unwrap(runner.status_root())
+    let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, settings.sizes))
+    let allowance = result.unwrap(runner.operate_bytes(settings)) + 2 * 1048576u64 + store.planned_bytes(plan)
+    let demo = Demo(config: take settings, stop: take stopping, status: latest.handle(status), watch: take watch)
+    let running = task.spawn(tasks, bytes allowance, take demo, operate)
+    let phases = result.unwrap(channel.receive(watching))
+    loop {
+        match channel.receive(phases) {
+            Ok(Ready) => break,
+            Ok(Starting(_)) => (),
+            _ => {
+                match task.join(take running) {
+                    Ok(Error(Open(_))) => fail("steps public law: place open failed"),
+                    Ok(Error(Listen(_))) => fail("steps public law: place listen failed"),
+                    Ok(Error(Missing(_))) => fail("steps public law: place config missing"),
+                    Ok(Error(Exceeds(_))) => fail("steps public law: place exceeds bound"),
+                    Ok(Error(Full(_))) => fail("steps public law: place capacity"),
+                    Ok(Ok(_)) => fail("steps public law: place ended before ready"),
+                    Error(_) => fail("steps public law: place task failed"),
+                }
+            },
+        }
+    }
+    Running(handle: take running, stop: take stop)
+}
+
+fn stop_place(take running: Running) -> () waits {
+    let Running(handle: take handle, stop: take stop) = take running
+    result.unwrap(channel.send(stop, ()))
+    match task.join(take handle) {
+        Ok(Ok(Stopped(_))) => (),
+        Ok(Ok(Forced(_))) => (),
+        _ => fail("steps public law: place did not stop"),
+    }
+}
+
+fn receive_within[T: send](inbox: Receiver[T], c: Clock, within_ms: u64) -> Option[T] waits {
+    let deadline = int.saturating_add(host.mono_ns(c), within_ms * 1000000u64)
+    loop {
+        match channel.try_receive(inbox) {
+            Ok(take value) => return Some(take value),
+            Error(_) => (),
+        }
+        if host.mono_ns(c) >= deadline {
+            return None
+        }
+        host.sleep_until(c, int.saturating_add(host.mono_ns(c), 10000000u64))
+    }
+}
+
+fn recorded_step(dir: Dir, c: Clock, r: Random, tasks: Tasks, run_id: triggers.Id, index: u64) -> Option[u64] waits {
+    let mut options = triggers.law_options()
+    options.create = false
+    let mut db = result.unwrap(store.open(tasks, dir, c, r, options))
+    let h = result.unwrap(store.bind_declaration(mut db, Open, law_schema))
+    let found: Result[Option[Result[u64, LawError]], store.Error] = steps.recorded(db, h.steps, steps.StepId(run: run_id, index: index))
+    let answer = match result.unwrap(take found) {
+        Some(Ok(value)) => Some(value),
+        _ => None,
+    }
+    result.unwrap(store.close(take db))
+    answer
+}
+
+fn public_api_law(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, recovery: Recovery) -> bool waits {
+    let mut name = string.with_capacity(64u64)
+    string.push(mut name, "steps-public-")
+    let dir = result.unwrap(host.mkdtemp(parent, mut name))
+    let (effects, effect_in): (Sender[EffectCall], Receiver[EffectCall]) = channel.new(8u64)
+    let (lookups, lookup_in): (Sender[LookupCall], Receiver[LookupCall]) = channel.new(4u64)
+    let arg = RunArg(recovery: recovery, value: 7u64)
+    let run_id = arm(dir, c, r, tasks, arg)
+    let first_settings = settings_for(dir, c, r, tasks, n, Control(effects: channel.sender(effects), lookups: channel.sender(lookups)))
+    let first_place = start_place(tasks, take first_settings)
+    let Some(first_call) = receive_within(effect_in, c, 5000u64) else {
+        fail("steps public law: first step did not call")
+    }
+    if first_call.value != 7u64 {
+        return false
+    }
+    // The request is now outside the store, but no result row exists. Stopping
+    // the place leaves exactly the in-doubt cut of the runner spec.
+    stop_place(take first_place)
+    let _ = take first_call
+    let second_settings = settings_for(dir, c, r, tasks, n, Control(effects: channel.sender(effects), lookups: channel.sender(lookups)))
+    let second_place = start_place(tasks, take second_settings)
+    let expected = match recovery {
+        Resolve => {
+            let Some(answer) = receive_within(lookup_in, c, 5000u64) else {
+                fail("steps public law: resolve did not call lookup")
+            }
+            if answer.value != 7u64 {
+                return false
+            }
+            result.unwrap(channel.send(answer.reply, 1u64))
+            1u64
+        },
+        Resend => {
+            let Some(resent) = receive_within(effect_in, c, 5000u64) else {
+                fail("steps public law: resend did not call the callback")
+            }
+            if resent.value != 7u64 {
+                return false
+            }
+            result.unwrap(channel.send(resent.reply, 2u64))
+            2u64
+        },
+    }
+    let Some(marker) = receive_within(effect_in, c, 5000u64) else {
+        fail("steps public law: process did not pass the first step")
+    }
+    if marker.value != 100u64 + expected {
+        return false
+    }
+    stop_place(take second_place)
+    let _ = take marker
+    recorded_step(dir, c, r, tasks, run_id, 0u64) == Some(expected)
+}
+
+@test
+fn steps_public_resolve(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if public_api_law(d, c, r, tasks, n, Resolve) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
+@test
+fn steps_public_resend(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    if public_api_law(d, c, r, tasks, n, Resend) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

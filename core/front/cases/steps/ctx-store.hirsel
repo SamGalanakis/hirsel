@@ -1,0 +1,5 @@
+// library: runner
+// expect: refuse OWN-19 at 5:13
+// expect: compared OWN-19 at 5:13 | runner@1/steps/Ctx[core@1/core/Clock] | not scoped
+// The real runner steps.Ctx is scoped, so it cannot be stored in an own type.
+type Hold { ctx: runner.steps.Ctx[Clock] }

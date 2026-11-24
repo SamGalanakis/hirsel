@@ -77,6 +77,7 @@ dirs = ["."]
 "operate_budget_law.hirsel" = "runner"
 "sizes_law.hirsel" = "runner_laws"
 "steps_laws.hirsel" = "steps"
+"steps_public_laws.hirsel" = "steps_public"
 "signup.hirsel" = "signup"
 "runner_laws.hirsel" = "runner_laws"
 "runner_reexec_laws.hirsel" = "runner"

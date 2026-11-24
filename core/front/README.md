@@ -31,6 +31,8 @@ disagree. An engine's land that makes it agree removes that engine from the mark
 its NOT-BUILT row in the same commit; the walker fails until it does.
 
 Every case is checked against the one core package, `core/core/`, as every program is.
+Use `// library: std` for std fixtures or `// library: runner` to load the runner
+and its dependencies from their package manifests.
 
 The standing `hirsel-core-program-tests-unittest` / `cases::corpus` sweep checks
 through the driver, with one sealed definition product per body. It walks the

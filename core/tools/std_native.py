@@ -658,8 +658,7 @@ def observation(case, result):
     return f'exit {result.returncode}, stdout {result.stdout!r}, stderr {result.stderr!r}; expected {case.expected}'
 
 
-def test_observation(case, result, entry):
-    """Keep source failure/output oracles while executing PROG-4 test runs."""
+def test_observation(case, result, entry, *, replay=False):
     try:
         product = json.loads(result.stdout)
     except ValueError:
@@ -674,6 +673,8 @@ def test_observation(case, result, entry):
         return True, 'native test execution timed out'
     if result.returncode != int(not test['passed']):
         return False, f'test aggregate disagrees with its outcome: exit {result.returncode}, {test!r}'
+    if replay and (result.returncode != 0 or test['status'] != 0):
+        return True, f"replay did not seal: test exited {test['status']}: {test['stderr']}"
     output = subprocess.CompletedProcess([], test['status'], test['stdout'].encode(), test['stderr'].encode())
     return True, observation(case, output)
 
@@ -881,10 +882,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(source_rows))
-                archive = (record_runtime or runtime) if https or replay else runtime
                 command = [str(compiler), 'run' if https else 'test', '--inputs', str(inputs), '--backend', engine,
-                           '--runtime', str(archive), '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit),
-                           '-o', str(scratch / 'programs')]
+                           '--runtime', str((record_runtime or runtime) if https or replay else runtime),
+                           '--store', str(work / 'store'), '--json', '--limit', str(case.root_limit), '-o', str(scratch / 'programs')]
                 if replay:
                     command.extend(['--replay', '--expect-verdict', 'Sealed', '--rerun'])
                 environment = None
@@ -1017,12 +1017,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if https:
                     row['ran'], row['cause'] = https_observation(case, result, tape, raw, token, peer)
                 else:
-                    row['ran'], row['cause'] = test_observation(case, result, entry)
+                    row['ran'], row['cause'] = test_observation(case, result, entry, replay=replay)
                     for name, value in case.run_env if row['cause'] is None else ():
                         test_environment = {**(os.environb if environment is None else environment),
                                             os.fsencode(name): os.fsencode(value)}
                         again = progress.run(command, cwd=host, capture_output=True, env=test_environment)
-                        _, cause = test_observation(case, again, entry)
+                        _, cause = test_observation(case, again, entry, replay=replay)
                         if cause:
                             row['cause'] = f'with {name}={value}: {cause}'
                             break

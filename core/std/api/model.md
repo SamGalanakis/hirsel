@@ -1,6 +1,6 @@
 # Model
 
-[API overview](../API.md). Verification Phases 1.4 and 1.5. The Bag is implemented.
+[API overview](../API.md). Verification Phases 1.4 and 1.5. The Bag and explorer are implemented.
 The build list is
 `hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
 
@@ -69,9 +69,10 @@ model code. Every call to `actions`, `step`, `done`, a `holds` or `show` runs as
 `bound bytes step_bytes { isolate { bound steps step_steps { … } } }`, as a `std.prop` case
 does.
 
-State identity is whole-state structural equality (SEM-7). The visited set is a
-`Set[S]`. A hash hit is never a match by itself, and there is no fingerprint-only
-compaction and no symmetry reduction. A model-only ("ghost") field is an ordinary field
+State identity is whole-state structural equality (SEM-7). The checker borrows the
+initial states and indexes distinct successors in a `Set[S]`. It checks both when
+testing for a visited state. A hash hit is never a match by itself. There is no
+fingerprint-only compaction or symmetry reduction. A model-only ("ghost") field is an ordinary field
 and is part of the key.
 
 ## Exploring
@@ -393,8 +394,7 @@ wire is empty, so `(Recv,1)` would diverge.
 
 ## Checker self-test corpus
 
-The corpus lives in `std.model`'s contract tests (`core/std/tests/model.hirsel` once it
-exists). It is also 1.4's law set. Each entry is a tiny model with an outcome derived by
+The corpus lives in `std.model`'s contract tests (`core/std/tests/model.hirsel`). It is also 1.4's law set. Each entry is a tiny model with an outcome derived by
 hand. Each bad entry names the checker bug that would make it report the wrong outcome.
 No model needs more than ten states, so the corpus runs in seconds. There is no
 expected-failure registry. A negative entry asserts its exact `Failed` kind, depth and

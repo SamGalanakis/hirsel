@@ -51,3 +51,465 @@ pub fn bag_size[M: key + ordered](b: Bag[M]) -> u64 {
 pub fn bag_entries[M: key + ordered](b: Bag[M]) -> View[List[(M, u64)]] in b {
     view b.entries
 }
+
+pub type Model[S: key, A] {
+    init: List[S],
+    start: A,
+    actions: own fn(S, mut List[A]),
+    step: own fn(S, A) -> S,
+    done: own fn(S) -> bool,
+    always: List[Always[S, A]],
+    sometimes: List[Sometimes[S]],
+    show: own fn(A, mut String)
+}
+
+pub type Always[S: key, A] {
+    label: String,
+    holds: own fn(S, A, S) -> bool
+}
+
+pub type Sometimes[S: key] {
+    label: String,
+    holds: own fn(S) -> bool
+}
+
+pub type Bounds {
+    depth: u64,
+    states: u64,
+    step_steps: u64,
+    step_bytes: u64
+}
+
+pub type Limit: key = Depth | States
+
+pub type Stats {
+    states: u64,
+    edges: u64,
+    depth: u64,
+    witnessed: List[(String, u64)]
+}
+
+pub type Outcome = Closed(Stats) | ToDepth(Stats, Limit) | Failed(Failure)
+
+pub type Kind: key = Violated(String) | Stuck | Unwitnessed(String) | Handler
+
+pub opaque type Failure {
+    reason: Kind,
+    tape: List[u64],
+    path: String,
+    states: u64,
+    handler: Option[HandlerError]
+}
+
+type HandlerError {
+    name: String,
+    cause: String
+}
+
+type Breadcrumb[A] = Initial(u64) | Action(u64, u64, A)
+
+// The model lends its initial states. Keep their indexes and own only successors.
+type StateSet[S: key] {
+    initial: List[u64],
+    reached: set.Set[S]
+}
+
+fn state_set[S: key]() -> StateSet[S] {
+    StateSet(initial: list.new(), reached: set.new())
+}
+
+fn seen_initial[S: key](states: StateSet[S], init: List[S], state: S) -> bool {
+    for i in states.initial {
+        if init[i] == state {
+            return true
+        }
+    }
+    false
+}
+
+fn seen_state[S: key](states: StateSet[S], init: List[S], state: S) -> bool {
+    set.contains(states.reached, state) || seen_initial(states, init, state)
+}
+
+fn with_state[S: key, R](states: StateSet[S], init: List[S], i: u64, visit: scoped fn(S) -> R) -> R {
+    let roots = list.len(states.initial)
+    if i < roots {
+        return visit(init[states.initial[i]])
+    }
+    let mut at = roots
+    for (state, _) in set.entries(states.reached) {
+        if at == i {
+            return visit(state)
+        }
+        at += 1
+    }
+    fail("model: missing discovered state")
+}
+
+type Edge[S: key] = Accepted(S) | Rejected(String)
+
+fn handler_error(name: String, cause: String) -> HandlerError {
+    HandlerError(name: string.from(name), cause: string.from(cause))
+}
+
+fn describe_cause(primary: CauseKind) -> String {
+    match primary {
+        Overflow => string.from("Overflow"),
+        Division => string.from("Division"),
+        Unwrap => string.from("Unwrap"),
+        Fail(text) => {
+            let mut cause = string.from("Fail: ")
+            string.push(mut cause, text)
+            take cause
+        },
+        Cancelled => string.from("Cancelled"),
+        Capacity(_) => string.from("Capacity"),
+        OutOfTime => string.from("OutOfTime"),
+        _ => string.from("Bounds"),
+    }
+}
+
+fn bounded[T](b: Bounds, name: String, call: scoped[view] fn() -> T) -> Result[T, HandlerError] {
+    let run = bound bytes b.step_bytes {
+        isolate(scoped fn() -> Result[T, OutOfTime] {
+            bound steps b.step_steps {
+                call()
+            }
+        })
+    }
+    match take run {
+        Error(_) => Error(handler_error(name, "Capacity")),
+        Ok(Error(_)) => Error(handler_error(name, "Capacity")),
+        Ok(Ok(Error(causes))) => {
+            for cause in causes {
+                return Error(HandlerError(name: string.from(name), cause: describe_cause(cause.kind)))
+            }
+            fail("model: empty handler causes")
+        },
+        Ok(Ok(Ok(Error(_)))) => Error(handler_error(name, "OutOfTime")),
+        Ok(Ok(Ok(Ok(take value)))) => Ok(take value),
+    }
+}
+
+fn enabled[S: key, A](m: Model[S, A], b: Bounds, state: S) -> Result[List[A], HandlerError] {
+    bounded(b, "actions", scoped fn() -> List[A] {
+        let mut actions: List[A] = list.new()
+        m.actions(state, mut actions)
+        take actions
+    })
+}
+
+fn advance[S: key, A](m: Model[S, A], b: Bounds, state: S, action: A) -> Result[S, HandlerError] {
+    bounded(b, "step", scoped fn() -> S {
+        m.step(state, action)
+    })
+}
+
+fn terminal[S: key, A](m: Model[S, A], b: Bounds, state: S) -> Result[bool, HandlerError] {
+    bounded(b, "done", scoped fn() -> bool {
+        m.done(state)
+    })
+}
+
+fn violates[S: key, A](m: Model[S, A], b: Bounds, prev: S, action: A, next: S) -> Result[Option[String], HandlerError] {
+    for law in m.always {
+        if !bounded(b, "always", scoped fn() -> bool {
+            law.holds(prev, action, next)
+        })? {
+            return Ok(Some(string.from(law.label)))
+        }
+    }
+    Ok(None)
+}
+
+fn follow[S: key, A](m: Model[S, A], b: Bounds, state: S, action: A) -> Result[Edge[S], HandlerError] {
+    let next = advance(m, b, state, action)?
+    let verdict = violates(m, b, state, action, next)?
+    match take verdict {
+        Some(take label) => Ok(Rejected(take label)),
+        None => Ok(Accepted(take next)),
+    }
+}
+
+fn witness[S: key, A](m: Model[S, A], b: Bounds, state: S, mut counts: List[(String, u64)]) -> Result[(), HandlerError] {
+    for i in 0 .. list.len(m.sometimes) {
+        let law = view m.sometimes[i]
+        if bounded(b, "sometimes", scoped fn() -> bool {
+            law.holds(state)
+        })? {
+            counts[i].1 += 1
+        }
+    }
+    Ok(())
+}
+
+fn utf8_prefix(text: String, limit: u64) -> u64 {
+    let mut end = limit
+    let data = string.as_bytes(text)
+    while data[end] & 0xc0 == 0x80 {
+        end -= 1
+    }
+    end
+}
+
+fn append_path(mut path: String, text: String) -> bool {
+    let used = string.byte_len(path)
+    if string.byte_len(text) <= 1024 - used {
+        string.push(mut path, text)
+        return true
+    }
+    if used > 1021 {
+        let end = utf8_prefix(path, 1021)
+        string.truncate(mut path, end)
+    } else {
+        string.push(mut path, string.slice(text, 0, utf8_prefix(text, 1021 - used)))
+    }
+    string.push(mut path, "…")
+    false
+}
+
+fn make_failure[A](show: own fn(A, mut String), b: Bounds, links: List[Breadcrumb[A]], tip: u64, take reason: Kind, take handler: Option[HandlerError]) -> Failure {
+    let mut reversed: List[u64] = list.new()
+    let mut at = tip
+    while let Action(parent, _, _) = links[at] {
+        list.push(mut reversed, at)
+        at = parent
+    }
+    let Initial(initial) = links[at] else {
+        fail("model: missing initial state on path")
+    }
+    let mut tape: List[u64] = list.with_capacity(list.len(reversed) + 1)
+    list.push(mut tape, initial)
+    let mut path = string.from("init ")
+    string.push_u64(mut path, initial)
+    let mut fits = true
+    while let Some(i) = list.pop(mut reversed) {
+        let Action(_, index, action) = links[i] else {
+            fail("model: missing action on path")
+        }
+        if fits {
+            let rendered = bounded(b, "show", scoped fn() -> String {
+                let mut text = string.new()
+                show(action, mut text)
+                take text
+            })
+            match take rendered {
+                Ok(take text) => {
+                    fits = append_path(mut path, ", ") && append_path(mut path, text)
+                },
+                Error(take error) => {
+                    return Failure(reason: Handler, tape: take tape, path: take path, states: 0, handler: Some(take error))
+                },
+            }
+        }
+        list.push(mut tape, index)
+    }
+    Failure(reason: take reason, tape: take tape, path: take path, states: 0, handler: take handler)
+}
+
+fn validate[S: key, A](m: Model[S, A]) {
+    if list.len(m.init) == 0 {
+        fail("model: config: empty init")
+    }
+    if list.len(m.sometimes) == 0 {
+        fail("model: config: no sometimes")
+    }
+}
+
+pub fn explore[S: key, A](m: Model[S, A], b: Bounds) -> Outcome {
+    validate(m)
+    let mut stats = Stats(states: 0, edges: 0, depth: 0, witnessed: list.new())
+    for law in m.sometimes {
+        list.push(mut stats.witnessed, (string.from(law.label), 0))
+    }
+    let mut visited: StateSet[S] = state_set()
+    let mut depths: List[u64] = list.new()
+    let mut links: List[Breadcrumb[A]] = list.new()
+    for i in 0 .. list.len(m.init) {
+        let state = view m.init[i]
+        let pseudo = violates(m, b, state, m.start, state)
+        match take pseudo {
+            Ok(Some(take label)) => {
+                let tip = list.len(links)
+                list.push(mut links, Initial(i))
+                return Failed(make_failure(m.show, b, links, tip, Violated(take label), None))
+            },
+            Error(take error) => {
+                let tip = list.len(links)
+                list.push(mut links, Initial(i))
+                return Failed(make_failure(m.show, b, links, tip, Handler, Some(take error)))
+            },
+            Ok(None) => {},
+        }
+        if seen_initial(visited, m.init, state) {
+            continue
+        }
+        if stats.states == b.states {
+            return ToDepth(take stats, States)
+        }
+        list.push(mut visited.initial, i)
+        list.push(mut depths, 0u64)
+        list.push(mut links, Initial(i))
+        stats.states += 1
+    }
+    let mut from: u64 = 0
+    while from < list.len(depths) {
+        stats.depth = depths[from]
+        if stats.depth == b.depth {
+            return ToDepth(take stats, Depth)
+        }
+        let gathered = with_state(visited, m.init, from, scoped fn(state: S) -> Result[List[A], HandlerError] {
+            enabled(m, b, state)
+        })
+        let actions = match take gathered {
+            Ok(take actions) => take actions,
+            Error(take error) => return Failed(make_failure(m.show, b, links, from, Handler, Some(take error))),
+        }
+        if list.len(actions) == 0 {
+            let done = with_state(visited, m.init, from, scoped fn(state: S) -> Result[bool, HandlerError] {
+                terminal(m, b, state)
+            })
+            match take done {
+                Ok(false) => return Failed(make_failure(m.show, b, links, from, Stuck, None)),
+                Error(take error) => return Failed(make_failure(m.show, b, links, from, Handler, Some(take error))),
+                Ok(true) => {},
+            }
+        }
+        let mut index: u64 = 0
+        for take action in take actions {
+            let stepped = with_state(visited, m.init, from, scoped fn(state: S) -> Result[Edge[S], HandlerError] {
+                follow(m, b, state, action)
+            })
+            stats.edges += 1
+            let next = match take stepped {
+                Ok(Accepted(take next)) => take next,
+                Ok(Rejected(take label)) => {
+                    let tip = list.len(links)
+                    list.push(mut links, Action(from, index, take action))
+                    return Failed(make_failure(m.show, b, links, tip, Violated(take label), None))
+                },
+                Error(take error) => return Failed(make_failure(m.show, b, links, from, Handler, Some(take error))),
+            }
+            let checked = witness(m, b, next, mut stats.witnessed)
+            if let Error(take error) = take checked {
+                return Failed(make_failure(m.show, b, links, from, Handler, Some(take error)))
+            }
+            if !seen_state(visited, m.init, next) {
+                if stats.states == b.states {
+                    return ToDepth(take stats, States)
+                }
+                set.insert(mut visited.reached, take next)
+                list.push(mut depths, stats.depth + 1)
+                list.push(mut links, Action(from, index, take action))
+                stats.states += 1
+            }
+            index += 1
+        }
+        from += 1
+    }
+    for entry in stats.witnessed {
+        if entry.1 == 0 {
+            return Failed(Failure(reason: Unwitnessed(string.from(entry.0)), tape: list.new(), path: string.new(), states: stats.states, handler: None))
+        }
+    }
+    Closed(take stats)
+}
+
+pub fn kind(f: Failure) -> Kind {
+    clone(f.reason)
+}
+
+pub fn depth(f: Failure) -> u64 {
+    let n = list.len(f.tape)
+    if n == 0 {
+        0
+    } else {
+        n - 1
+    }
+}
+
+fn put_uleb(mut data: Bytes, value: u64) {
+    let mut left = value
+    while left >= 128 {
+        list.push(mut data, int.narrow((left & 127) | 128))
+        left >>= 7
+    }
+    list.push(mut data, int.narrow(left))
+}
+
+pub fn token(f: Failure, mut out: String) {
+    let mut data: Bytes = list.new()
+    list.push(mut data, 1u8)
+    list.push(mut data, 0u8)
+    put_uleb(mut data, list.len(f.tape))
+    for index in f.tape {
+        put_uleb(mut data, index)
+    }
+    string.push(mut out, base64.encode_string(data))
+}
+
+pub fn report(f: Failure, mut out: String) {
+    if let Unwitnessed(label) = f.reason {
+        string.push(mut out, "model: unwitnessed: sometimes ")
+        string.push(mut out, label)
+        string.push(mut out, "; closed with ")
+        string.push_u64(mut out, f.states)
+        string.push(mut out, " states")
+        return
+    }
+    string.push(mut out, "model: ")
+    string.push(mut out, match f.reason {
+        Violated(_) => "violated",
+        Stuck => "stuck",
+        Handler => "handler",
+        Unwitnessed(_) => "unwitnessed",
+    })
+    string.push(mut out, ": reproduce: model.replay(m, b, \"")
+    token(f, mut out)
+    string.push(mut out, "\"); ")
+    if let Violated(label) = f.reason {
+        string.push(mut out, "always ")
+        string.push(mut out, label)
+        string.push(mut out, " ")
+    }
+    if let Some(error) = f.handler {
+        string.push(mut out, error.cause)
+        string.push(mut out, " in ")
+        string.push(mut out, error.name)
+        string.push(mut out, " ")
+    }
+    string.push(mut out, "at depth ")
+    string.push_u64(mut out, depth(f))
+    string.push(mut out, "; path: ")
+    string.push(mut out, f.path)
+}
+
+fn limit_name(limit: Limit) -> String {
+    match limit {
+        Depth => string.from("Depth"),
+        States => string.from("States"),
+    }
+}
+
+pub fn check[S: key, A](m: Model[S, A], b: Bounds) -> Result[(), ()] {
+    let outcome = explore(m, b)
+    match outcome {
+        Closed(_) => Ok(()),
+        Failed(failure) => {
+            let mut text = string.new()
+            report(failure, mut text)
+            fail(take text)
+        },
+        ToDepth(stats, limit) => {
+            let mut text = string.from("model: to depth ")
+            string.push_u64(mut text, stats.depth)
+            string.push(mut text, " (")
+            string.push(mut text, limit_name(limit))
+            string.push(mut text, "), not closed; states ")
+            string.push_u64(mut text, stats.states)
+            string.push(mut text, ", edges ")
+            string.push_u64(mut text, stats.edges)
+            fail(take text)
+        },
+    }
+}

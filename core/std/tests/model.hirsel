@@ -26,3 +26,253 @@ fn bag_laws() -> bool {
         None => false,
     }
 }
+
+type CounterAction = Start | Inc
+
+fn counter(broken: bool) -> model.Model[u64, CounterAction] {
+    let mut init: List[u64] = list.new()
+    list.push(mut init, 0u64)
+    let mut always: List[model.Always[u64, CounterAction]] = list.new()
+    if broken {
+        list.push(mut always, model.Always(
+            label: string.from("never_wrap"),
+            holds: fn(prev: u64, action: CounterAction, next: u64) -> bool {
+                !(prev == 2 && next == 0)
+            },
+        ))
+    }
+    let mut sometimes: List[model.Sometimes[u64]] = list.new()
+    list.push(mut sometimes, model.Sometimes(label: string.from("wrap"), holds: fn(s: u64) -> bool {
+        s == 0
+    }))
+    model.Model(
+        init: take init,
+        start: Start,
+        actions: fn(state: u64, mut out: List[CounterAction]) {
+            list.push(mut out, Inc)
+        },
+        step: fn(state: u64, action: CounterAction) -> u64 {
+            (state + 1) % 3
+        },
+        done: fn(state: u64) -> bool {
+            false
+        },
+        always: take always,
+        sometimes: take sometimes,
+        show: fn(action: CounterAction, mut out: String) {
+            string.push(mut out, "Inc")
+        },
+    )
+}
+
+fn model_bounds() -> model.Bounds {
+    model.Bounds(depth: 10, states: 10, step_steps: 1000, step_bytes: 4096)
+}
+
+fn closed_stats(stats: model.Stats, states: u64, edges: u64, depth: u64, label: String) -> bool {
+    stats.states == states && stats.edges == edges && stats.depth == depth && list.len(stats.witnessed) == 1 && stats.witnessed[0].0 == label && stats.witnessed[0].1 == 1
+}
+
+fn failure_token(f: model.Failure) -> String {
+    let mut text = string.new()
+    model.token(f, mut text)
+    take text
+}
+
+fn failure_report(f: model.Failure) -> String {
+    let mut text = string.new()
+    model.report(f, mut text)
+    take text
+}
+
+// C1
+// expect: run explore_counter_closed() = true
+fn explore_counter_closed() -> bool {
+    let Closed(stats) = model.explore(counter(false), model_bounds()) else {
+        return false
+    }
+    closed_stats(stats, 3, 3, 2, "wrap") && model.check(counter(false), model_bounds()) == Ok(())
+}
+
+// C2
+// expect: run explore_counter_wrap() = true
+fn explore_counter_wrap() -> bool {
+    let Failed(f) = model.explore(counter(true), model_bounds()) else {
+        return false
+    }
+    model.kind(f) == Violated(string.from("never_wrap")) && model.depth(f) == 3 && failure_token(f) == "AQAEAAAAAA==" && failure_report(f) == "model: violated: reproduce: model.replay(m, b, \"AQAEAAAAAA==\"); always never_wrap at depth 3; path: init 0, Inc, Inc, Inc"
+}
+
+// C3
+// expect: run explore_counter_depth() = true
+fn explore_counter_depth() -> bool {
+    let mut b = model_bounds()
+    b.depth = 1
+    let ToDepth(stats, Depth) = model.explore(counter(false), b) else {
+        return false
+    }
+    stats.states == 2 && stats.edges == 1 && stats.depth == 1
+}
+
+// C4
+// expect: run explore_counter_states() = true
+fn explore_counter_states() -> bool {
+    let mut b = model_bounds()
+    b.states = 2
+    let ToDepth(stats, States) = model.explore(counter(false), b) else {
+        return false
+    }
+    stats.states == 2 && stats.edges == 2 && stats.depth == 1
+}
+
+type Network: key {
+    sent: u64,
+    delivered: u64,
+    net: model.Bag[u64]
+}
+
+type Message = StartNetwork | Send | Deliver(u64)
+
+fn network_step(state: Network, action: Message) -> Network {
+    let mut next: Network = clone(state)
+    match action {
+        StartNetwork => {},
+        Send => {
+            model.bag_add(mut next.net, 7u64)
+            next.sent += 1
+        },
+        Deliver(message) => {
+            model.bag_remove(mut next.net, message)
+            next.delivered += 1
+        },
+    }
+    take next
+}
+
+fn network(take done: own fn(Network) -> bool) -> model.Model[Network, Message] {
+    let mut init: List[Network] = list.new()
+    list.push(mut init, Network(sent: 0, delivered: 0, net: model.bag_new()))
+    let mut sometimes: List[model.Sometimes[Network]] = list.new()
+    list.push(mut sometimes, model.Sometimes(label: string.from("both"), holds: fn(s: Network) -> bool {
+        s.delivered == 2
+    }))
+    model.Model(
+        init: take init,
+        start: StartNetwork,
+        actions: fn(state: Network, mut out: List[Message]) {
+            if state.sent < 2 {
+                list.push(mut out, Send)
+            }
+            for (message, _) in model.bag_entries(state.net) {
+                list.push(mut out, Deliver(message))
+            }
+        },
+        step: network_step,
+        done: take done,
+        always: list.new(),
+        sometimes: take sometimes,
+        show: fn(action: Message, mut out: String) {
+            match action {
+                StartNetwork => string.push(mut out, "Start"),
+                Send => string.push(mut out, "Send"),
+                Deliver(message) => {
+                    string.push(mut out, "Deliver(")
+                    string.push_u64(mut out, message)
+                    string.push(mut out, ")")
+                },
+            }
+        },
+    )
+}
+
+// C5
+// expect: run explore_bag_closed() = true
+fn explore_bag_closed() -> bool {
+    let Closed(stats) = model.explore(network(fn(s: Network) -> bool {
+        s.delivered == 2
+    }), model_bounds()) else {
+        return false
+    }
+    closed_stats(stats, 6, 6, 4, "both")
+}
+
+// C6
+// expect: run explore_bag_stuck() = true
+fn explore_bag_stuck() -> bool {
+    let Failed(f) = model.explore(network(fn(s: Network) -> bool {
+        false
+    }), model_bounds()) else {
+        return false
+    }
+    model.kind(f) == Stuck && model.depth(f) == 4 && failure_token(f) == "AQAFAAAAAAA="
+}
+
+fn ghosts() -> model.Model[(u64, bool), CounterAction] {
+    let mut init: List[(u64, bool)] = list.new()
+    list.push(mut init, (0u64, false))
+    list.push(mut init, (0u64, true))
+    let mut sometimes: List[model.Sometimes[(u64, bool)]] = list.new()
+    list.push(mut sometimes, model.Sometimes(label: string.from("any"), holds: fn(state: (u64, bool)) -> bool {
+        true
+    }))
+    model.Model(
+        init: take init,
+        start: Start,
+        actions: fn(state: (u64, bool), mut out: List[CounterAction]) {},
+        step: fn(state: (u64, bool), action: CounterAction) -> (u64, bool) {
+            state
+        },
+        done: fn(state: (u64, bool)) -> bool {
+            true
+        },
+        always: list.new(),
+        sometimes: take sometimes,
+        show: fn(action: CounterAction, mut out: String) {},
+    )
+}
+
+// C7
+// expect: run explore_ghost_state() = true
+fn explore_ghost_state() -> bool {
+    let mut b = model_bounds()
+    b.depth = 0
+    let ToDepth(stats, Depth) = model.explore(ghosts(), b) else {
+        return false
+    }
+    if stats.states != 2 || stats.edges != 0 || stats.depth != 0 {
+        return false
+    }
+    b.depth = 1
+    let Failed(f) = model.explore(ghosts(), b) else {
+        return false
+    }
+    model.kind(f) == Unwitnessed(string.from("any")) && model.depth(f) == 0
+}
+
+// C8
+// expect: run explore_initial_pseudo_edge() = true
+fn explore_initial_pseudo_edge() -> bool {
+    let mut m = counter(false)
+    let _ = list.set(mut m.init, 0, 5u64)
+    list.push(mut m.always, model.Always(
+        label: string.from("small"),
+        holds: fn(prev: u64, action: CounterAction, next: u64) -> bool {
+            next < 4
+        },
+    ))
+    let Failed(f) = model.explore(m, model_bounds()) else {
+        return false
+    }
+    model.kind(f) == Violated(string.from("small")) && model.depth(f) == 0 && failure_token(f) == "AQABAA=="
+}
+
+// C9
+// expect: run explore_handler_timeout() = true
+fn explore_handler_timeout() -> bool {
+    let mut b = model_bounds()
+    b.step_steps = 0
+    let Failed(f) = model.explore(counter(false), b) else {
+        return false
+    }
+    model.kind(f) == Handler && model.depth(f) == 0 && failure_report(f) == "model: handler: reproduce: model.replay(m, b, \"AQABAA==\"); OutOfTime in actions at depth 0; path: init 0"
+}

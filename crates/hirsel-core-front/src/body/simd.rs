@@ -230,14 +230,58 @@ impl Cx<'_, '_, '_> {
                 let shape = Vector::new(table_shape.lane(), index_shape.lanes()).unwrap();
                 (self.vector_type(shape), table, indices)
             }
-            WrappingAdd | WrappingSub | SaturatingAdd | SaturatingSub | Eq | Lt => {
+            WrappingAdd | WrappingSub | WrappingMul | SaturatingAdd | SaturatingSub | Eq | Lt
+            | MulhiI16 => {
                 let hint = expected.map(|v| self.vector_type(v));
                 let (ty, left) = self.expr(a, hint.and_then(expect));
-                if self.require_vector(ty, a).is_none() {
+                let Some(shape) = self.require_vector(ty, a) else {
+                    return (ERROR, None);
+                };
+                if op == MulhiI16 && shape.lane() != Scalar::I16 {
+                    self.refuse("SEM-11", a, "simd.mulhi_i16 takes vectors of i16 lanes");
                     return (ERROR, None);
                 }
                 let (_, right) = self.expr(args[1], expect(ty));
                 (ty, left, right)
+            }
+            MaddI16 => {
+                let hint = expected
+                    .filter(|v| v.lane() == Scalar::I32)
+                    .and_then(|v| Vector::new(Scalar::I16, v.lanes() * 2))
+                    .map(|v| self.vector_type(v));
+                let (ty, left) = self.expr(a, hint.and_then(expect));
+                let Some(shape) = self.require_vector(ty, a) else {
+                    return (ERROR, None);
+                };
+                if shape.lane() != Scalar::I16 {
+                    self.refuse("SEM-11", a, "simd.madd_i16 takes vectors of i16 lanes");
+                    return (ERROR, None);
+                }
+                let (_, right) = self.expr(args[1], expect(ty));
+                let out = Vector::new(Scalar::I32, shape.lanes() / 2).unwrap();
+                (self.vector_type(out), left, right)
+            }
+            PackSaturating => {
+                let Some(out) = expected else {
+                    return self.simd_expected(n);
+                };
+                let wide = match out.lane() {
+                    Scalar::I8 | Scalar::U8 => Scalar::I16,
+                    Scalar::I16 | Scalar::U16 => Scalar::I32,
+                    _ => {
+                        self.refuse(
+                            "SEM-11",
+                            n,
+                            "simd.pack_saturating makes a vector of i8, u8, i16 or u16 lanes",
+                        );
+                        return (ERROR, None);
+                    }
+                };
+                let input = Vector::new(wide, out.lanes() / 2).unwrap();
+                let input = self.vector_type(input);
+                let (_, left) = self.expr(a, expect(input));
+                let (_, right) = self.expr(args[1], expect(input));
+                (self.vector_type(out), left, right)
             }
             BitAnd | BitOr | BitXor | BitNot | Shl | Shr => unreachable!(),
         };

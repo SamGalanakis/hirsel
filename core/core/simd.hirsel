@@ -8,6 +8,14 @@ pub fn saturating_add(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
 
 pub fn saturating_sub(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
 
+pub fn wrapping_mul(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
+
+pub fn madd_i16(a: Simd[i16, 8], b: Simd[i16, 8]) -> Simd[i32, 4]
+
+pub fn mulhi_i16(a: Simd[i16, 8], b: Simd[i16, 8]) -> Simd[i16, 8]
+
+pub fn pack_saturating(a: Simd[i16, 8], b: Simd[i16, 8]) -> Simd[u8, 16]
+
 pub fn eq(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]
 
 pub fn lt(a: Simd[u8, 16], b: Simd[u8, 16]) -> Simd[u8, 16]

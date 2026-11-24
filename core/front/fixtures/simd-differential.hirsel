@@ -149,3 +149,197 @@ fn wide_sat(delta: i64) -> bool {
     let diff = simd.saturating_sub(lo, by)
     simd.bitmask(simd.eq(sum, hi) & simd.eq(diff, lo)) == 15
 }
+
+// SEM-11 widening and narrowing (sem11-int-simd-2229). Each law compares the vector
+// operation with a scalar reference written from the SEM-11 text, lane by lane, at
+// both widths. Lane 0 of `a` is the seed; the other lanes hold the edges:
+// −32768 × −32768 in mulhi and in a madd pair, −1 × 1 for the sign-keeping shift, and
+// values past both ends of every pack's range, negative ones included.
+// expect: run mulhi_law(-32768) = true
+// expect: run mulhi_law(-1) = true
+// expect: run mulhi_law(32767) = true
+// expect: run madd_law(-32768) = true
+// expect: run madd_law(32767) = true
+// expect: run madd_law(0) = true
+// expect: run madd_edges() = true
+// expect: run pack16_law(-32768) = true
+// expect: run pack16_law(200) = true
+// expect: run pack16_law(-1) = true
+// expect: run pack32_law(-2147483648) = true
+// expect: run pack32_law(65535) = true
+// expect: run pack32_law(-1) = true
+
+fn lanes_a(seed: i16) -> Inline[i16, 16] {
+    let mut a: Inline[i16, 16] = [0, -32768, -32768, 32767, -1, 1, 12345, -23456, 300, -300, 128, -129, 32767, -32768, 255, -256]
+    a[0] = seed
+    a
+}
+
+fn lanes_b() -> Inline[i16, 16] {
+    [-32768, -32768, -32768, 32767, 1, -1, -321, 987, 300, 301, 127, -128, 32767, 32767, -255, 256]
+}
+
+fn low_8(a: Inline[i16, 16]) -> Inline[i16, 8] {
+    let mut r: Inline[i16, 8] = [0; 8]
+    for i in 0u64 .. 8u64 {
+        r[i] = a[i]
+    }
+    r
+}
+
+fn product(x: i16, y: i16) -> i32 {
+    let wide_x: i32 = int.widen(x)
+    let wide_y: i32 = int.widen(y)
+    wide_x * wide_y
+}
+
+// SEM-11: the top 16 bits of the exact product, the sign kept.
+fn mulhi_ref(x: i16, y: i16) -> i16 {
+    int.narrow(product(x, y) >> 16)
+}
+
+fn mulhi_law(seed: i16) -> bool {
+    let a = lanes_a(seed)
+    let b = lanes_b()
+    let mut high: Inline[i16, 16] = [0; 16]
+    let mut low: Inline[i16, 16] = [0; 16]
+    for i in 0u64 .. 16u64 {
+        high[i] = mulhi_ref(a[i], b[i])
+        low[i] = int.wrapping_mul(a[i], b[i])
+    }
+    let wide_a: Simd[i16, 16] = simd.from(a)
+    let wide_b: Simd[i16, 16] = simd.from(b)
+    let narrow_a: Simd[i16, 8] = simd.from(low_8(a))
+    let narrow_b: Simd[i16, 8] = simd.from(low_8(b))
+    let want_high: Simd[i16, 16] = simd.from(high)
+    let want_low: Simd[i16, 16] = simd.from(low)
+    let want_high_8: Simd[i16, 8] = simd.from(low_8(high))
+    let want_low_8: Simd[i16, 8] = simd.from(low_8(low))
+    simd.bitmask(simd.eq(simd.mulhi_i16(wide_a, wide_b), want_high) & simd.eq(simd.wrapping_mul(wide_a, wide_b), want_low)) == 65535
+        && simd.bitmask(simd.eq(simd.mulhi_i16(narrow_a, narrow_b), want_high_8) & simd.eq(simd.wrapping_mul(narrow_a, narrow_b), want_low_8)) == 255
+}
+
+// SEM-11: a[2i] × b[2i] + a[2i+1] × b[2i+1] modulo 2^32.
+fn madd_ref(a: Inline[i16, 16], b: Inline[i16, 16]) -> Inline[i32, 8] {
+    let mut r: Inline[i32, 8] = [0; 8]
+    for i in 0u64 .. 8u64 {
+        r[i] = int.wrapping_add(product(a[2 * i], b[2 * i]), product(a[2 * i + 1], b[2 * i + 1]))
+    }
+    r
+}
+
+fn madd_law(seed: i16) -> bool {
+    let a = lanes_a(seed)
+    let b = lanes_b()
+    let want = madd_ref(a, b)
+    let mut want_4: Inline[i32, 4] = [0; 4]
+    for i in 0u64 .. 4u64 {
+        want_4[i] = want[i]
+    }
+    let wide_a: Simd[i16, 16] = simd.from(a)
+    let wide_b: Simd[i16, 16] = simd.from(b)
+    let narrow_a: Simd[i16, 8] = simd.from(low_8(a))
+    let narrow_b: Simd[i16, 8] = simd.from(low_8(b))
+    let want_8: Simd[i32, 8] = simd.from(want)
+    let want_narrow: Simd[i32, 4] = simd.from(want_4)
+    simd.bitmask(simd.eq(simd.madd_i16(wide_a, wide_b), want_8)) == 255
+        && simd.bitmask(simd.eq(simd.madd_i16(narrow_a, narrow_b), want_narrow)) == 15
+}
+
+// Hand-derived: four −32768 lanes sum to 2^31, which wraps to −2^31 (pmaddwd gives
+// 0x80000000), and −32768 × −32768 has top half 0x4000.
+fn madd_edges() -> bool {
+    let min: Simd[i16, 8] = simd.splat(-32768)
+    let sum: Simd[i32, 4] = simd.splat(-2147483648)
+    let high: Simd[i16, 8] = simd.splat(16384)
+    simd.bitmask(simd.eq(simd.madd_i16(min, min), sum)) == 15 && simd.bitmask(simd.eq(simd.mulhi_i16(min, min), high)) == 255
+}
+
+fn clamp(x: i32, min: i32, max: i32) -> i32 {
+    if x < min {
+        min
+    } else if x > max {
+        max
+    } else {
+        x
+    }
+}
+
+// SEM-11: a's lanes then b's, each clamped to the result lane's range.
+fn pack16_law(seed: i16) -> bool {
+    let a = lanes_a(seed)
+    let b = lanes_b()
+    let mut signed: Inline[i8, 32] = [0; 32]
+    let mut unsigned: Inline[u8, 32] = [0; 32]
+    let mut signed_16: Inline[i8, 16] = [0; 16]
+    let mut unsigned_16: Inline[u8, 16] = [0; 16]
+    for i in 0u64 .. 32u64 {
+        let x: i32 = if i < 16 { int.widen(a[i]) } else { int.widen(b[i - 16]) }
+        signed[i] = int.narrow(clamp(x, -128, 127))
+        unsigned[i] = int.narrow(clamp(x, 0, 255))
+    }
+    for i in 0u64 .. 16u64 {
+        let x: i32 = if i < 8 { int.widen(a[i]) } else { int.widen(b[i - 8]) }
+        signed_16[i] = int.narrow(clamp(x, -128, 127))
+        unsigned_16[i] = int.narrow(clamp(x, 0, 255))
+    }
+    let wide_a: Simd[i16, 16] = simd.from(a)
+    let wide_b: Simd[i16, 16] = simd.from(b)
+    let narrow_a: Simd[i16, 8] = simd.from(low_8(a))
+    let narrow_b: Simd[i16, 8] = simd.from(low_8(b))
+    let got_signed: Simd[i8, 32] = simd.pack_saturating(wide_a, wide_b)
+    let got_unsigned: Simd[u8, 32] = simd.pack_saturating(wide_a, wide_b)
+    let got_signed_16: Simd[i8, 16] = simd.pack_saturating(narrow_a, narrow_b)
+    let got_unsigned_16: Simd[u8, 16] = simd.pack_saturating(narrow_a, narrow_b)
+    simd.bitmask(simd.eq(got_signed, simd.from(signed))) == 4294967295
+        && simd.bitmask(simd.eq(got_unsigned, simd.from(unsigned))) == 4294967295
+        && simd.bitmask(simd.eq(got_signed_16, simd.from(signed_16))) == 65535
+        && simd.bitmask(simd.eq(got_unsigned_16, simd.from(unsigned_16))) == 65535
+}
+
+fn clamp_64(x: i64, min: i64, max: i64) -> i64 {
+    if x < min {
+        min
+    } else if x > max {
+        max
+    } else {
+        x
+    }
+}
+
+fn pack32_law(seed: i32) -> bool {
+    let a: Inline[i32, 8] = [seed, 32768, -32769, -1, 65535, 65536, -2147483648, 2147483647]
+    let b: Inline[i32, 8] = [32767, -32768, 0, 1, -65536, 40000, 2147483647, -2147483648]
+    let mut signed: Inline[i16, 16] = [0; 16]
+    let mut unsigned: Inline[u16, 16] = [0; 16]
+    let mut signed_8: Inline[i16, 8] = [0; 8]
+    let mut unsigned_8: Inline[u16, 8] = [0; 8]
+    for i in 0u64 .. 16u64 {
+        let x: i64 = if i < 8 { int.widen(a[i]) } else { int.widen(b[i - 8]) }
+        signed[i] = int.narrow(clamp_64(x, -32768, 32767))
+        unsigned[i] = int.narrow(clamp_64(x, 0, 65535))
+    }
+    for i in 0u64 .. 8u64 {
+        let x: i64 = if i < 4 { int.widen(a[i]) } else { int.widen(b[i - 4]) }
+        signed_8[i] = int.narrow(clamp_64(x, -32768, 32767))
+        unsigned_8[i] = int.narrow(clamp_64(x, 0, 65535))
+    }
+    let mut a_4: Inline[i32, 4] = [0; 4]
+    let mut b_4: Inline[i32, 4] = [0; 4]
+    for i in 0u64 .. 4u64 {
+        a_4[i] = a[i]
+        b_4[i] = b[i]
+    }
+    let wide_a: Simd[i32, 8] = simd.from(a)
+    let wide_b: Simd[i32, 8] = simd.from(b)
+    let narrow_a: Simd[i32, 4] = simd.from(a_4)
+    let narrow_b: Simd[i32, 4] = simd.from(b_4)
+    let got_signed: Simd[i16, 16] = simd.pack_saturating(wide_a, wide_b)
+    let got_unsigned: Simd[u16, 16] = simd.pack_saturating(wide_a, wide_b)
+    let got_signed_8: Simd[i16, 8] = simd.pack_saturating(narrow_a, narrow_b)
+    let got_unsigned_8: Simd[u16, 8] = simd.pack_saturating(narrow_a, narrow_b)
+    simd.bitmask(simd.eq(got_signed, simd.from(signed))) == 65535
+        && simd.bitmask(simd.eq(got_unsigned, simd.from(unsigned))) == 65535
+        && simd.bitmask(simd.eq(got_signed_8, simd.from(signed_8))) == 255
+        && simd.bitmask(simd.eq(got_unsigned_8, simd.from(unsigned_8))) == 255
+}

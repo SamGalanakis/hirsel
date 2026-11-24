@@ -124,6 +124,29 @@ pub(super) fn apply(
                 .fold(0, |mask, i| mask | ((get_lane(&a, shape, i) >> top) << i));
             return Ok(ResultValue::Scalar(mask));
         }
+        MaddI16 => {
+            let from = shape(first);
+            let lane = Ty::Scalar(from.lane());
+            let product = |i| int(lane, get_lane(&a, from, i)) * int(lane, get_lane(&b, from, i));
+            make_vector(shape(result), |i| {
+                (product(2 * i) + product(2 * i + 1)) as u64
+            })
+        }
+        PackSaturating => {
+            let from = shape(first);
+            let out = shape(result);
+            let wide = Ty::Scalar(from.lane());
+            let (min, max) = range(Ty::Scalar(out.lane()));
+            let half = from.lanes() as usize;
+            make_vector(out, |i| {
+                let word = if i < half {
+                    get_lane(&a, from, i)
+                } else {
+                    get_lane(&b, from, i - half)
+                };
+                int(wide, word).clamp(min, max) as u64
+            })
+        }
         _ => {
             let shape = shape(result);
             let lane = Ty::Scalar(shape.lane());
@@ -142,6 +165,8 @@ pub(super) fn apply(
                 match op {
                     WrappingAdd => a.wrapping_add(b),
                     WrappingSub => a.wrapping_sub(b),
+                    WrappingMul => a.wrapping_mul(b),
+                    MulhiI16 => ((int(lane, a) * int(lane, b)) >> 16) as u64,
                     SaturatingAdd | SaturatingSub => {
                         let (min, max) = range(lane);
                         let (a, b) = (int(lane, a), int(lane, b));

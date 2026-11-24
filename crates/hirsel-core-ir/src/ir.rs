@@ -14,7 +14,9 @@ pub(crate) use flow::for_each_successor;
 pub(crate) use flow::successors;
 mod host_op;
 mod runtime_types;
+mod simd;
 pub use host_op::HostOp;
+pub use simd::SimdOp;
 
 use crate::decode::{Debit, DecodeResult};
 use hirsel_core_ids::{ContentHash, DefPath};
@@ -351,99 +353,6 @@ pub enum ReadMode {
 /// An instruction. A `fail` block is the failure successor of an operation that
 /// can fail; the block takes no parameters in FORM v0 and what it does (cause
 /// storage, cleanup, propagation) is FORM v1.
-/// The vector value operations of SEM-11.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum SimdOp {
-    WrappingAdd,
-    WrappingSub,
-    SaturatingAdd,
-    SaturatingSub,
-    Eq,
-    Lt,
-    Splat,
-    From,
-    Swizzle,
-    Cast,
-    Any,
-    Bitmask,
-    BitAnd,
-    BitOr,
-    BitXor,
-    BitNot,
-    Shl,
-    Shr,
-    Lanes,
-}
-impl SimdOp {
-    pub const ALL: [Self; 19] = [
-        Self::WrappingAdd,
-        Self::WrappingSub,
-        Self::SaturatingAdd,
-        Self::SaturatingSub,
-        Self::Eq,
-        Self::Lt,
-        Self::Splat,
-        Self::From,
-        Self::Swizzle,
-        Self::Cast,
-        Self::Any,
-        Self::Bitmask,
-        Self::BitAnd,
-        Self::BitOr,
-        Self::BitXor,
-        Self::BitNot,
-        Self::Shl,
-        Self::Shr,
-        Self::Lanes,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::WrappingAdd => "wrapping_add",
-            Self::WrappingSub => "wrapping_sub",
-            Self::SaturatingAdd => "saturating_add",
-            Self::SaturatingSub => "saturating_sub",
-            Self::Eq => "eq",
-            Self::Lt => "lt",
-            Self::Splat => "splat",
-            Self::From => "from",
-            Self::Swizzle => "swizzle",
-            Self::Cast => "cast",
-            Self::Any => "any",
-            Self::Bitmask => "bitmask",
-            Self::BitAnd => "bit_and",
-            Self::BitOr => "bit_or",
-            Self::BitXor => "bit_xor",
-            Self::BitNot => "bit_not",
-            Self::Shl => "shl",
-            Self::Shr => "shr",
-            Self::Lanes => "lanes",
-        }
-    }
-
-    pub const fn binary(self) -> bool {
-        matches!(
-            self,
-            Self::WrappingAdd
-                | Self::WrappingSub
-                | Self::SaturatingAdd
-                | Self::SaturatingSub
-                | Self::Eq
-                | Self::Lt
-                | Self::Swizzle
-                | Self::BitAnd
-                | Self::BitOr
-                | Self::BitXor
-                | Self::Shl
-                | Self::Shr
-        )
-    }
-
-    pub const fn can_fail(self) -> bool {
-        matches!(self, Self::Shl | Self::Shr)
-    }
-}
-
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Inst {
     /// The bits of a scalar of the result's type (floats by their IEEE bits,

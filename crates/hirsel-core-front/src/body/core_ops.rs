@@ -8,11 +8,15 @@ mod argon2;
 mod cell;
 mod charge;
 mod conn;
+#[cfg(test)]
+mod declarations;
 mod flow;
 mod net_error;
 mod provide;
 mod secret_kdf;
 mod secret_key;
+#[cfg(test)]
+pub(crate) use declarations::assert_declarations;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
@@ -242,6 +246,10 @@ operations! {
     ("simd", "wrapping_sub", Lane::Simd(SimdCall::Value(SimdOp::WrappingSub)), "A", "simd-impl-1344", false),
     ("simd", "saturating_add", Lane::Simd(SimdCall::Value(SimdOp::SaturatingAdd)), "A", "simd-impl-1344", false),
     ("simd", "saturating_sub", Lane::Simd(SimdCall::Value(SimdOp::SaturatingSub)), "A", "simd-impl-1344", false),
+    ("simd", "wrapping_mul", Lane::Simd(SimdCall::Value(SimdOp::WrappingMul)), "A", "sem11-int-simd-2229", false),
+    ("simd", "madd_i16", Lane::Simd(SimdCall::Value(SimdOp::MaddI16)), "A", "sem11-int-simd-2229", false),
+    ("simd", "mulhi_i16", Lane::Simd(SimdCall::Value(SimdOp::MulhiI16)), "A", "sem11-int-simd-2229", false),
+    ("simd", "pack_saturating", Lane::Simd(SimdCall::Value(SimdOp::PackSaturating)), "A", "sem11-int-simd-2229", false),
     ("simd", "eq", Lane::Simd(SimdCall::Value(SimdOp::Eq)), "A", "simd-impl-1344", false),
     ("simd", "lt", Lane::Simd(SimdCall::Value(SimdOp::Lt)), "A", "simd-impl-1344", false),
     ("simd", "splat", Lane::Simd(SimdCall::Value(SimdOp::Splat)), "A", "simd-impl-1344", false),
@@ -1723,42 +1731,6 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             fd.path
         );
     }
-}
-
-#[cfg(test)]
-pub(crate) fn assert_declarations(p: &Program<'_>) {
-    use std::collections::BTreeSet;
-    let actual: BTreeSet<_> = p
-        .fns
-        .iter()
-        .filter(|f| f.path.package_is("core", "1") && f.body.is_none())
-        .map(|f| (f.path.0.modules[0].as_str(), f.path.0.name.as_str()))
-        .collect();
-    for entry in OPERATIONS {
-        assert!(matches!(entry.class, "A" | "B" | "C"));
-        if entry.private {
-            assert!(
-                entry.module == "string"
-                    && matches!(
-                        entry.name,
-                        "of_bytes" | "to_bytes" | "view_string" | "shorten"
-                    )
-                    || entry.module == "map"
-                    || entry.module == "list" && entry.name.starts_with("slots_")
-                    || matches!(entry.module, "deque" | "heap")
-            );
-        }
-    }
-    let recorded: BTreeSet<_> = OPERATIONS.iter().map(|e| (e.module, e.name)).collect();
-    assert_eq!(
-        recorded.len(),
-        OPERATIONS.len(),
-        "duplicate core operation binding"
-    );
-    assert_eq!(
-        actual, recorded,
-        "assign each bodiless core function to its owning lane"
-    );
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {

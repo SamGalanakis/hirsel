@@ -239,6 +239,10 @@ tags!(SimdOp {
     16 => Shl,
     17 => Shr,
     18 => Lanes,
+    19 => WrappingMul,
+    20 => MaddI16,
+    21 => MulhiI16,
+    22 => PackSaturating,
 });
 
 tags!(Inst {

@@ -426,11 +426,23 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
 
 
 fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, funded: bool) -> Result[(), Error] waits {
+    let initial_room = follower_law_room()
     let service = follower_service(tasks, 80 + plan_bytes(plan))?
-    let requested = follower_slot(follower_owner(service)?, plan)
+    let service_room = if funded { 746u64 } else { 745u64 }
+    if follower_law_room() != service_room { fail("L85: room after service startup") }
+    let owner = follower_owner(service)?
+    if follower_law_room() != service_room { fail("L85: room after taking the owner endpoint") }
+    let requested = follower_slot(owner, plan)
+    if follower_law_room() != service_room { fail("L85: room after the slot request") }
+    let _ = take owner
     if funded {
         let mut ids = followers()
-        let opened = follower(mut ids, requested?, log_authority(d), c, None)?
+        let mut opened = follower(mut ids, requested?, log_authority(d), c, None)?
+        if follower_law_room() != 746u64 { fail("L85: room after binding the follower") }
+        for _ in 0u64 .. 3u64 {
+            let _ = fresh(mut opened, clock.deadline_after_ms(host.mono_ns(c), 30000u64))?
+            if follower_law_room() != 746u64 { fail("L85: room after fresh") }
+        }
         let _ = take opened
     } else {
         if let Error(Full(Allocation(cause))) = requested {
@@ -441,7 +453,9 @@ fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, fu
             fail("L85: the one-byte-short starter provisioned a slot")
         }
     }
-    close_follower_service(take service)
+    close_follower_service(take service)?
+    if follower_law_room() != initial_room { fail("L85: room after closing the service") }
+    Ok(())
 }
 
 @test

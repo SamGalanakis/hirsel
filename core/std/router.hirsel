@@ -1,4 +1,4 @@
-pub type Route[S: shareable + send]: shareable + send {
+pub type Route[S: send]: shareable + send {
     handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits,
     body_max: Option[u64],
     upgrade_bytes: Option[u64],
@@ -6,7 +6,7 @@ pub type Route[S: shareable + send]: shareable + send {
     steps: Option[u64]
 }
 
-pub fn raw[S: shareable + send](handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits) -> Route[S] {
+pub fn raw[S: send](handler: fn(http.Request, Region, mut http.Responder, S) -> Result[http.Outcome, http.HandlerError] waits) -> Route[S] {
     Route(handler, body_max: None, upgrade_bytes: None, stream_bytes: None, steps: None)
 }
 
@@ -17,17 +17,17 @@ pub opaque type Pattern: shareable + send {
     tail: Option[String]
 }
 
-pub type Entry[S: shareable + send]: shareable + send {
+pub type Entry[S: send]: shareable + send {
     method: String,
     pattern: Pattern,
     route: Route[S]
 }
 
-pub opaque type Builder[S: shareable + send]: send {
+pub opaque type Builder[S: send]: send {
     entries: List[Entry[S]]
 }
 
-pub opaque type Router[S: shareable + send]: shareable + send {
+pub opaque type Router[S: send]: shareable + send {
     entries: List[Entry[S]]
 }
 
@@ -35,7 +35,7 @@ pub type AddError: send = InvalidMethod | InvalidPattern
 
 pub type RouteConflict: key {}
 
-pub fn builder[S: shareable + send]() -> Builder[S] {
+pub fn builder[S: send]() -> Builder[S] {
     Builder(entries: list.new())
 }
 
@@ -120,7 +120,7 @@ fn parse(pattern: String) -> Result[Pattern, AddError] {
     Ok(Pattern(pieces: take pieces, tail: take tail))
 }
 
-pub fn add[S: shareable + send](mut b: Builder[S], method: String, pattern: String, take route: Route[S]) -> Result[(), AddError] {
+pub fn add[S: send](mut b: Builder[S], method: String, pattern: String, take route: Route[S]) -> Result[(), AddError] {
     let raw_bytes = string.as_bytes(method)
     if list.len(raw_bytes) == 0 {
         return Error(InvalidMethod)
@@ -215,7 +215,7 @@ fn relationship(a: Pattern, b: Pattern) -> Relationship {
     }
 }
 
-pub fn build[S: shareable + send](take b: Builder[S]) -> Result[Router[S], RouteConflict] {
+pub fn build[S: send](take b: Builder[S]) -> Result[Router[S], RouteConflict] {
     let Builder(entries: take entries) = take b
     for i in 0u64 .. list.len(entries) {
         for j in 0u64 .. i {
@@ -250,7 +250,7 @@ fn matches(p: Pattern, path: List[String]) -> bool {
     true
 }
 
-pub fn select[S: shareable + send](r: Router[S], method: Bytes, path: List[String]) -> Option[View[Entry[S]]] in r {
+pub fn select[S: send](r: Router[S], method: Bytes, path: List[String]) -> Option[View[Entry[S]]] in r {
     let head = method == string.as_bytes("HEAD")
     let end = list.len(r.entries)
     let mut selected = end
@@ -295,7 +295,7 @@ fn add_method(mut methods: String, method: String) {
     string.push(mut methods, method)
 }
 
-pub fn allow[S: shareable + send](r: Router[S], path: List[String], all: bool) -> String {
+pub fn allow[S: send](r: Router[S], path: List[String], all: bool) -> String {
     let mut methods = string.new()
     for entry in r.entries {
         if all || matches(entry.pattern, path) {
@@ -306,4 +306,61 @@ pub fn allow[S: shareable + send](r: Router[S], path: List[String], all: bool) -
         }
     }
     take methods
+}
+
+pub type TargetError: key = BadTarget | TargetCapacity
+
+fn segment(b: Bytes) -> Result[String, TargetError] {
+    let end = list.len(b)
+    // A refused target answers 503, so this admission is recovered inline.
+    let mut decoded: Bytes = list.new()
+    if let Error(_) = list.try_reserve(mut decoded, end) {
+        return Error(TargetCapacity)
+    }
+    let mut at: u64 = 0
+    while at < end {
+        let (byte, next) = match uri.decode_next(b, at, end) {
+            Ok(value) => value,
+            Error(_) => return Error(BadTarget),
+        }
+        list.push(mut decoded, byte)
+        at = next
+    }
+    if decoded == string.as_bytes(".") || decoded == string.as_bytes("..") {
+        return Error(BadTarget)
+    }
+    match string.from_utf8(take decoded) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(BadTarget),
+    }
+}
+
+// Split before decoding; a decoded slash is data in a single segment.
+// Root and an empty absolute-form path both have zero segments.
+pub fn request_segments(raw_path: Bytes) -> Result[List[String], TargetError] {
+    let mut decoded_segments: List[String] = list.new()
+    let n = list.len(raw_path)
+    if n <= 1 {
+        return Ok(take decoded_segments)
+    }
+    let mut start: u64 = 1
+    while start <= n {
+        let end = match list.find_byte(raw_path, start, n, b'/') {
+            Some(at) => at,
+            None => n,
+        }
+        if end == start && end < n {
+            return Error(BadTarget)
+        }
+        let s = segment(list.slice(raw_path, start, end))?
+        if let Error(_) = list.try_reserve(mut decoded_segments, 1) {
+            return Error(TargetCapacity)
+        }
+        list.push(mut decoded_segments, take s)
+        if end == n {
+            return Ok(take decoded_segments)
+        }
+        start = end + 1
+    }
+    Ok(take decoded_segments)
 }

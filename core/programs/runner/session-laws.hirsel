@@ -132,10 +132,15 @@ fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
     if list.len(head.group) != 0u64 { result.unwrap(gate(mut head)) }
     let PubIn(e: take event) = result.unwrap(channel.receive(inbox))
     let Released(Release(version: _, snapshot: _, answers: take rows)) = take event else { return false }
-    if list.len(rows) != 1u64 || rows[0u64].row.p != 0u64 { return false }
+    if list.len(rows) != 1u64 { return false }
+    let row_ok = match rows[0u64] { CallAnswer(_, row) => row.p == 0u64, _ => false }
+    if !row_ok { return false }
     let codec: std.codec.Codec[Result[u32, u32]] = std.codec.of()
-    let reply = match rows[0u64].row.outcome {
-        Returned(body) => match std.codec.decode(codec, body) { Ok(Ok(7u32)) => true, _ => false },
+    let reply = match rows[0u64] {
+        CallAnswer(_, row) => match row.outcome {
+            Returned(body) => match std.codec.decode(codec, body) { Ok(Ok(7u32)) => true, _ => false },
+            _ => false,
+        },
         _ => false,
     }
     reply && store.version(store.snapshot(head.db)) == version

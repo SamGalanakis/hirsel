@@ -2,6 +2,30 @@ type BindingJob[G: send]: send {
     seed: G, bind: StaticFn[fn(G, Bytes) -> Result[Caller, ()] waits], credential: Bytes, steps: u64
 }
 
+fn binding_job[G: send, B: send](supplied: Option[Wire[G, B]], take credential: Option[Bytes]) -> Option[(BindingJob[B], u64)] {
+    if let Some(w) = supplied {
+        if let Some(bind) = w.bind {
+            let raw = match take credential { Some(take bytes_in) => take bytes_in, None => list.new() }
+            let job = BindingJob(seed: (w.duplicate)(w.seed), bind: bind, credential: take raw, steps: w.bind_steps)
+            return Some((take job, w.bind_bytes))
+        }
+    }
+    None
+}
+
+fn bind_principal[B: send](tasks: Tasks, random: Random, take binding: Option[(BindingJob[B], u64)]) -> Option[Caller] waits {
+    match take binding {
+        Some((take job, allowance)) => bound_caller(tasks, take job, allowance),
+        None => anonymous_caller(random),
+    }
+}
+
+fn anonymous_caller(random: Random) -> Option[Caller] {
+    let mut nonce: Bytes = list.with_capacity(16u64)
+    host.random(random, mut nonce)
+    Some(store.Caller(issuer: 1u8, subject: take nonce))
+}
+
 fn run_binding[G: send](take job: BindingJob[G]) -> Option[Caller] waits {
     let BindingJob(seed: take seed, bind: bind, credential: take credential, steps: steps) = take job
     let invoke = code.callable(bind)
@@ -164,4 +188,124 @@ fn launch_digest() -> Result[Bytes, Capacity] { Ok(launch_bytes(launch_image()))
 
 fn owned_launch_target(target: LaunchBytes) -> String {
     result.unwrap(string.from_utf8(launch_bytes(target)))
+}
+
+pub type HttpBindError: key = RejectedCredential | BindingDeadline | BindingCapacity
+
+type HttpBindingResult: send = Bound(Option[Caller]) | BindingExpired
+
+resource type BindingCompletion: send {
+    to: Sender[HttpBindingResult], sent: bool
+} drop(completion) {
+    if !completion.sent { let _ = channel.try_send(completion.to, Bound(None)) }
+}
+
+type HttpBindingJob[B: send]: send { app: BindingJob[B], completion: BindingCompletion }
+
+fn run_http_binding[B: send](take job: HttpBindingJob[B]) -> () waits {
+    let HttpBindingJob(app: take app, completion: take done) = take job
+    let mut completion = take done
+    let caller = run_binding(take app)
+    let _ = channel.try_send(completion.to, Bound(take caller))
+    completion.sent = true
+}
+
+pub fn bind_http[G: send, B: send](supplied: Option[Wire[G, B]], take credential: Option[Bytes], take entries: List[Bytes],
+    random: Random, clock: Clock, tasks: Tasks, deadline: u64, budget: u64, arg_max: u64) -> Result[Admitted, HttpBindError] waits {
+    let arrived = host.mono_ns(clock)
+    if arrived >= deadline { return Error(BindingDeadline) }
+    let binding = binding_job(supplied, take credential)
+    let Some((take app, allowance)) = take binding else {
+        let caller = option.unwrap(anonymous_caller(random))
+        return Ok(admitted(take caller, take entries, arrived, arrived, budget, arg_max))
+    }
+    let (to, from): (Sender[HttpBindingResult], Receiver[HttpBindingResult]) = channel.new(1u64)
+    let completion = BindingCompletion(to: channel.sender(to), sent: false) ?=> |(_, _)| BindingCapacity
+    let alarm = std.clock.alarm(tasks, clock, deadline, to, BindingExpired)
+    let job = HttpBindingJob(app: take app, completion: take completion)
+    let run: fn(take HttpBindingJob[B]) -> () waits = run_http_binding
+    let child = task.try_spawn(tasks, bytes allowance, take job, run) ?=> |(_, _)| BindingCapacity
+    let answer = channel.receive(from)
+    let now = host.mono_ns(clock)
+    let _ = std.task.cancel_join(take child)
+    let _ = std.task.cancel_join(take alarm)
+    if now >= deadline { return Error(BindingDeadline) }
+    match take answer {
+        Ok(Bound(Some(take caller))) => Ok(admitted(take caller, take entries, arrived, now, budget, arg_max)),
+        Ok(BindingExpired) => Error(BindingDeadline),
+        _ => Error(RejectedCredential),
+    }
+}
+
+fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H], key: Bytes, ca: std.codec.Codec[A], n: u64, steps: u64) -> Result[(), RegisterError] {
+    let check = fn(arg: Bytes, maximum: u64) -> Option[Refusal] {
+        let seen = bound bytes order.min(n, maximum) {
+            let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
+                bound steps steps {
+                    match std.codec.decode(ca, arg) {
+                        Ok(_) => { let no_refusal: Option[Refusal] = None; no_refusal },
+                        Error(e) => Some(Malformed(bad(e))),
+                    }
+                }
+            }
+            isolate(validate)
+        }
+        match take seen {
+            Ok(Ok(Ok(Ok(take why)))) => take why,
+            Ok(Ok(Ok(Error(_)))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
+            Ok(Ok(Error(_))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
+            Ok(Error(c)) => Some(Budget(room(c))),
+            Error(c) => Some(Budget(room(c))),
+        }
+    }
+    let go = check
+    let copied_result: Bytes = clone(key)
+    let copied: Bytes = take copied_result
+    map.insert(mut r.checks, take copied, take go)
+    Ok(())
+}
+
+// The composition root supplies previous/current activation keys. A current key
+// always wins; retaining a gone key never substitutes a newly registered entry.
+pub fn retain_gone[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes) -> Result[(), RegisterError] {
+    map.insert(mut r.gone, take key, ())
+    Ok(())
+}
+
+pub opaque type Admitted: send {
+    caller: Caller, entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64
+}
+
+fn admitted(take caller: Caller, take entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64) -> Admitted {
+    Admitted(caller: take caller, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
+}
+
+pub type CallWant: send { key: Bytes, stream: u32, p: u64, arg: Bytes, deadline_ms: u32 }
+pub opaque type Send: send { caller: Caller, key: Bytes, stream: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64 }
+
+pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
+    let known = map.contains(r.slots, want.key)
+    if !known && !map.contains(r.gone, want.key) { return Error(NoEntry) }
+    let mut allowed = false
+    for key in a.entries { if key == want.key { allowed = true } }
+    if !allowed { return Error(NotAllowed) }
+    let size = list.len(want.arg)
+    if size > a.arg_max { return Error(Budget(Room(requested: size, available: a.arg_max))) }
+    if size > a.budget { return Error(Budget(Room(requested: size, available: a.budget))) }
+    let relative: u64 = int.widen(want.deadline_ms)
+    let end = std.clock.deadline_after_ms(a.arrived, relative)
+    if want.deadline_ms == 0u32 || end <= a.now { return Error(Deadline) }
+    if let Some(check) = map.get(r.checks, want.key) {
+        if let Some(take why) = check(want.arg, a.arg_max) { return Error(take why) }
+    }
+    let digest = store.request_digest(want.key, want.arg)
+    let stream = match stream_key(a.caller, want.stream) { Ok(take b) => take b, Error(c) => return Error(Budget(room(c))) }
+    let CallWant(key: take key, stream: _, p: p, arg: take arg, deadline_ms: _) = take want
+    Ok(Send(caller: clone(a.caller), key: take key, stream: take stream, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget))
+}
+
+fn prepared_request(lease: HeadLease, take seed: Option[Arc[OwnerNumber]], take prepared: Send, take target: ReplyTarget) -> Req {
+    let Send(caller: take caller, key: take key, stream: take stream, p: p, arg: take arg, digest: digest, deadline: deadline, budget: _) = take prepared
+    Req(e: Requested(Request(caller: take caller, stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
+        deadline: deadline, reply_to: take target, live: latest.handle(lease.live), identity: latest.handle(lease.identity), seed: take seed)))
 }

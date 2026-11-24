@@ -18,6 +18,11 @@ shortens active exchanges to that deadline. A promoted stream finishes
 its current output and closes. An upgraded protocol can read the deadline
 from its socket. At the deadline any remaining socket task is cancelled.
 
+`serve_with_factory` uses the same supervisor and creates a sendable state
+value for each admitted connection. The supervisor calls the factory within
+`state_bytes`. Live state allocations stay charged there until they drop.
+`serve` and `serve_with_stop` share one state allocation.
+
 Build `routes` with [router](router.md). A raw handler receives an anchored
 `Request`, a scratch `Region`, a mutable `Responder` and a read-only
 view of shared state. The region's allocations

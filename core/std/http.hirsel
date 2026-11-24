@@ -558,63 +558,6 @@ fn request_policy(b: Bytes, h: View[http1.Head]) -> Result[(RequestHead, Framing
     Ok((head, wire_fields))
 }
 
-type TargetError: key = BadTarget | TargetCapacity
-
-fn segment(b: Bytes) -> Result[String, TargetError] {
-    let end = list.len(b)
-    // A refused target answers 503, so this admission is recovered inline.
-    let mut decoded: Bytes = list.new()
-    if let Error(_) = list.try_reserve(mut decoded, end) {
-        return Error(TargetCapacity)
-    }
-    let mut at: u64 = 0
-    while at < end {
-        let (byte, next) = match uri.decode_next(b, at, end) {
-            Ok(value) => value,
-            Error(_) => return Error(BadTarget),
-        }
-        list.push(mut decoded, byte)
-        at = next
-    }
-    if decoded == string.as_bytes(".") || decoded == string.as_bytes("..") {
-        return Error(BadTarget)
-    }
-    match string.from_utf8(take decoded) {
-        Ok(take s) => Ok(take s),
-        Error(_) => Error(BadTarget),
-    }
-}
-
-// Split before decoding; a decoded slash is data in a single segment.
-// Root and an empty absolute-form path both have zero segments.
-fn segments_of(raw_path: Bytes) -> Result[List[String], TargetError] {
-    let mut decoded_segments: List[String] = list.new()
-    let n = list.len(raw_path)
-    if n <= 1 {
-        return Ok(take decoded_segments)
-    }
-    let mut start: u64 = 1
-    while start <= n {
-        let end = match list.find_byte(raw_path, start, n, b'/') {
-            Some(at) => at,
-            None => n,
-        }
-        if end == start && end < n {
-            return Error(BadTarget)
-        }
-        let s = segment(list.slice(raw_path, start, end))?
-        if let Error(_) = list.try_reserve(mut decoded_segments, 1) {
-            return Error(TargetCapacity)
-        }
-        list.push(mut decoded_segments, take s)
-        if end == n {
-            return Ok(take decoded_segments)
-        }
-        start = end + 1
-    }
-    Ok(take decoded_segments)
-}
-
 pub type Config: shareable + send {
     ingress: List[wsock.Prefix],
     sockets_max: u64,
@@ -1165,7 +1108,7 @@ fn send_response(mut b: Body, mut out: Bytes, r: Response, version: u8, suppress
     FinalReply(write_succeeded(write_wire_until(mut b.writer, out, payload, b.clock, write_end, b.stop)))
 }
 
-fn route_response[S: shareable + send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Response, HandlerError] {
+fn route_response[S: send](routes: router.Router[S], decoded: List[String], options_star: bool) -> Result[Response, HandlerError] {
     let methods = router.allow(routes, decoded, options_star)
     let status: u16 = if options_star {
         204
@@ -1254,11 +1197,11 @@ fn encode_stream(mut out: Bytes, take spec: stream.Spec, c: Clock, version: u8, 
     Ok(stream.prepare(take spec, out, chunked, heartbeat, suppress, at, pre_head))
 }
 
-fn handle[S: shareable + send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: Framing, take request_body: Body in input, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> (Step, Option[Body]) in input waits {
+fn handle[S: send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: Framing, take request_body: Body in input, mut out: Bytes, cfg: Config, routes: router.Router[S], state: S, mut cache: DateCache) -> (Step, Option[Body]) in input waits {
     let mut b = take request_body
     let step = 'exchange: {
         let outcome = bound bytes cfg.handler_bytes {
-            let normalized = match segments_of(part(input, meta.path)) {
+            let normalized = match router.request_segments(part(input, meta.path)) {
                 Ok(take x) => take x,
                 Error(BadTarget) => {
                     break 'exchange error_step(mut b.writer, 400, b.clock, clock.deadline_after_ms(host.mono_ns(b.clock), cfg.write_ms), b.stop)
@@ -1569,14 +1512,13 @@ fn send_stream_promotion(inbox: Sender[ConnectionSignal], slot: u64, take transf
     }
 }
 
-type ConnectionJob[S: shareable + send]: send {
+type ConnectionStart[S: send]: send {
     socket: Socket,
     c: Clock,
     cfg: Arc[Config],
     peer: Ip,
     at: u64,
     routes: Arc[router.Router[S]],
-    state: Arc[S],
     inbox: Sender[ConnectionSignal],
     slot: u64,
     stop: Option[DrainSignal],
@@ -1605,14 +1547,29 @@ fn change_source(inbox: Sender[ConnectionSignal], slot: u64, ip: Ip) -> bool wai
     }
 }
 
-fn connection[S: shareable + send](take job: ConnectionJob[S]) waits {
-    let ConnectionJob(socket: take socket, c, cfg: take cfg, peer, at: accepted, routes: take routes, state: take state, inbox: take inbox, slot, stop: take signal, completion: take notice) = take job
+type ConnectionJob[S: send, E: send]: send {
+    opening: ConnectionStart[S],
+    state: E,
+    run: fn(take ConnectionStart[S], E) waits
+}
+
+fn connection[S: send, E: send](take job: ConnectionJob[S, E]) waits {
+    let ConnectionJob(opening: take opening, state: take state, run) = take job
+    run(take opening, state)
+}
+
+fn shared_connection[S: shareable + send](take opening: ConnectionStart[S], state: Arc[S]) waits {
+    owned_connection(take opening, state)
+}
+
+fn owned_connection[S: send](take opening: ConnectionStart[S], state: S) waits {
+    let ConnectionStart(socket: take socket, c, cfg: take cfg, peer, at: accepted, routes: take routes, inbox: take inbox, slot, stop: take signal, completion: take notice) = take opening
     let mut completion = take notice
     completion.armed = true
     let _ = run_connection(take socket, c, cfg, peer, accepted, routes, state, inbox, slot, signal)
 }
 
-fn run_connection[S: shareable + send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, routes: router.Router[S], state: S, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal]) -> u64 waits {
+fn run_connection[S: send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, routes: router.Router[S], state: S, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal]) -> u64 waits {
     let (r, w) = net.split(take socket)
     let mut reader = take r
     let mut writer = take w
@@ -2092,22 +2049,42 @@ fn discard_socket(take socket: Socket) {}
 
 /// Serves a group of listeners with an immutable router and shared handler state.
 pub fn serve[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S) -> Result[(), ServeError] waits {
-    serve_internal(take listeners, c, tasks, take cfg, take routes, take state, None)
+    serve_shared(take listeners, c, tasks, take cfg, take routes, take state, None)
 }
 
 /// The first deadline on stop closes admission and bounds the active exchanges.
 pub fn serve_with_stop[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S, take stop: Receiver[u64]) -> Result[(), ServeError] waits {
-    serve_internal(take listeners, c, tasks, take cfg, take routes, take state, Some(take stop))
+    serve_shared(take listeners, c, tasks, take cfg, take routes, take state, Some(take stop))
 }
 
-fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+fn serve_shared[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    let shared = arc.new(take state)
+    let make: scoped[view] fn() -> Result[Arc[S], Capacity] = fn() -> Result[Arc[S], Capacity] {
+        Ok(arc.share(shared))
+    }
+    let run: fn(take ConnectionStart[S], Arc[S]) waits = shared_connection
+    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
+}
+
+/// Serves an immutable router with one owned state value per admitted connection.
+/// The factory's byte allowance is held by the supervisor until the state drops.
+pub fn serve_with_factory[S: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, make_state: scoped[view] fn() -> S, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    let make: scoped[view] fn() -> Result[S, Capacity] = fn() -> Result[S, Capacity] {
+        bound bytes state_bytes {
+            make_state()
+        }
+    }
+    let run: fn(take ConnectionStart[S], S) waits = owned_connection
+    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
+}
+
+fn serve_internal[S: send, E: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make_state: scoped[view] fn() -> Result[E, Capacity], run: fn(take ConnectionStart[S], E) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
     if !valid_config(cfg) {
         return Error(Configuration)
     }
     if list.len(listeners) == 0 {
         return Ok(())
     }
-    let shared = arc.new(take state)
     let routing = arc.new(take routes)
     let settings = arc.new(take cfg)
     let (tx, rx): (Sender[ConnectionSignal], Receiver[ConnectionSignal]) = channel.new(settings.inbox_cap)
@@ -2202,14 +2179,24 @@ fn serve_internal[S: shareable + send](take listeners: List[Listener], c: Clock,
                             continue
                         },
                     }
-                    let job = ConnectionJob(socket: take socket, c, cfg: arc.share(settings), peer, at, routes: arc.share(routing), state: arc.share(shared), inbox: channel.sender(tx), slot: vacant, stop: share_signal(signal), completion: take completion)
-                    match task.try_spawn(tasks, bytes child_bytes, take job, connection) {
+                    let owned_state = match make_state() {
+                        Ok(take state) => take state,
+                        Error(_) => {
+                            refuse(mut group.refusals, take socket, at)
+                            continue
+                        },
+                    }
+                    let opening = ConnectionStart(socket: take socket, c, cfg: arc.share(settings), peer, at, routes: arc.share(routing), inbox: channel.sender(tx), slot: vacant, stop: share_signal(signal), completion: take completion)
+                    let job = ConnectionJob(opening: take opening, state: take owned_state, run)
+                    let run_child: fn(take ConnectionJob[S, E]) waits = connection
+                    match task.try_spawn(tasks, bytes child_bytes, take job, run_child) {
                         Ok(take child) => {
                             group.connections[vacant] = Some(HttpSlot(child: take child, first: true, promoted: false, active: false, ip))
                             in_first_phase += 1
                         },
                         Error((_, take refused)) => {
-                            let ConnectionJob(socket: take declined, c: _, cfg: _, peer: _, at: _, routes: _, state: _, inbox: _, slot: _, stop: _, completion: _) = take refused
+                            let ConnectionJob(opening: take returned, ..) = take refused
+                            let ConnectionStart(socket: take declined, ..) = take returned
                             refuse(mut group.refusals, take declined, at)
                         },
                     }

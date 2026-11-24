@@ -331,7 +331,7 @@ pub fn law_full_head_waits(tasks: Tasks, clock: Clock, random: Random) -> bool w
         let arg: Bytes = list.new()
         let digest = store.request_digest(key, arg)
         let request = Request(caller: store.Caller(issuer: 1, subject: list.new()), stream: list.new(), p: p, key: take key, arg: take arg, digest: digest,
-            deadline: deadline, reply_to: wire_me(rig.owner), live: latest.handle(filling.live),
+            deadline: deadline, reply_to: WireReply(wire_me(rig.owner)), live: latest.handle(filling.live),
             identity: latest.handle(filling.identity), seed: result.unwrap(owner_seed(filling)))
         if let Posted = try_head(rig.owner.head, Req(e: Requested(take request))) {} else { return false }
     }
@@ -890,4 +890,12 @@ fn wire_no_end(output: List[WireOutput]) -> bool {
 @test
 fn test_join_waits(tasks: Tasks, clock: Clock, random: Random) -> Result[(), ()] waits {
     if law_join_waits(tasks, clock, random) { Ok(()) } else { Error(()) }
+}
+
+fn keep_answers(mut waiting: List[Replies], take answers: List[CallAnswer]) {
+    for take answer in answers {
+        if let CallAnswer(take recipient, take row) = take answer {
+            keep_wire_answer(mut waiting, take recipient, take row)
+        }
+    }
 }

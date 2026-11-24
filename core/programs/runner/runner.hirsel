@@ -641,7 +641,7 @@ pub opaque type Registry[G: send, H: shareable + inert + send]: send {
     slots: Map[Bytes, Slot[G, H]],
     bound_slots: Map[Bytes, List[BoundSlot]],
     exported: List[Exported],
-    checks: Map[Bytes, own[send] fn(Bytes) -> Option[Refusal]],
+    checks: Map[Bytes, own[send] fn(Bytes, u64) -> Option[Refusal]],
     gone: Map[Bytes, ()],
     trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
 }
@@ -1156,7 +1156,7 @@ type Request: send {
     arg: Bytes,
     digest: store.RequestDigest,
     deadline: u64,
-    reply_to: Sender[WireEvent],
+    reply_to: ReplyTarget,
     live: Latest[HeadLife],
     identity: Latest[OwnerNumber],
     seed: Option[Arc[OwnerNumber]]
@@ -1164,7 +1164,17 @@ type Request: send {
 
 type Recipient: send { owner: u64, to: Sender[WireEvent] }
 
-type CallAnswer: send { recipient: Recipient, row: KeyedDone }
+type ReplyTarget: send = WireReply(Sender[WireEvent]) | RelayReply(RelayRecipient)
+type CallWaiter: send { owner: u64, target: ReplyTarget }
+type CallAnswer: send = CallAnswer(Recipient, KeyedDone) | RelayAnswer(RelayRecipient, Outcome, bool)
+
+fn call_answer(take waiter: CallWaiter, stream: Bytes, p: u64, take outcome: Outcome, replayed: bool) -> CallAnswer {
+    let CallWaiter(owner: owner, target: take target) = take waiter
+    match take target {
+        WireReply(take to) => CallAnswer(Recipient(owner: owner, to: take to), KeyedDone(stream: clone(stream), p: p, outcome: take outcome)),
+        RelayReply(take recipient) => RelayAnswer(take recipient, take outcome, replayed),
+    }
+}
 
 type Replies: send { recipient: Recipient, rows: List[KeyedDone] }
 
@@ -1182,7 +1192,7 @@ pub opaque type Release: send {
 // without selection, which v1 lacks.
 pub opaque type PubIn: send { e: ToPub }
 
-type ToPub: send = Released(Release) | Staged(store.Snapshot) | Joined(Join) | Subscribed(u64, u32, Caller, Bytes, Bytes) | WireSubscribed(u64, u32, u64, SubscriptionInput) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
+type ToPub: send = Released(Release) | RelayJoined(List[Option[RelayTell]]) | Staged(store.Snapshot) | Joined(Join) | Subscribed(u64, u32, Caller, Bytes, Bytes) | WireSubscribed(u64, u32, u64, SubscriptionInput) | Unsubscribed(u64, u32) | Left(u64) | Halt | Drained
 
 // A session's join, on its first Subscribe: where its content goes, and where the
 // publisher answers with the id it mints for the session.
@@ -1350,7 +1360,7 @@ pub fn post(m: Mailbox) -> Sender[PubIn] {
 }
 
 // A stream's worker, from its commit until the gate releases its group.
-type Worker: send { p: u64, digest: store.RequestDigest, version: u64, outcome: Outcome, waiters: List[Recipient] }
+type Worker: send { p: u64, digest: store.RequestDigest, version: u64, outcome: Outcome, waiters: List[CallWaiter] }
 
 type Waiting: send { req: Request, parked: bool, held_by_pause: bool }
 
@@ -2391,7 +2401,7 @@ fn route_admission[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
                 Some(take x) => take x,
                 None => return Ok(()),
             }
-            list.push(mut w.waiters, Recipient(owner: owner, to: take to))
+            list.push(mut w.waiters, CallWaiter(owner: owner, target: take to))
             map.insert(mut hd.busy, take stream, take w)
             Ok(())
         } else if closed {
@@ -2412,7 +2422,10 @@ fn next_waiting[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain:
             let Waiting(req: take q, held_by_pause: held, ..) = list.remove(mut hd.waiting, i)
             if held {
                 if let Some(control) = drain {
-                    if host.mono_ns(control.clock) >= q.deadline { continue }
+                    if host.mono_ns(control.clock) >= q.deadline {
+                        if let RelayReply(_) = q.reply_to { commitless(mut hd, take q, Refused(Deadline))? }
+                        continue
+                    }
                 }
             }
             if latest.read(q.live).active {
@@ -2557,14 +2570,14 @@ fn duplicate_reply[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
         _ => fail("runner: a stored reply does not decode"),
     }
     // A duplicate gets its saved reply as it was committed (ruling 73 as amended).
-    commitless(mut hd, take q, take outcome)
+    publish_commitless(mut hd, take q, take outcome, true)
 }
 
 fn worker[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, t: store.Ticket, version: u64) -> Result[(), store.Error] {
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, digest: d, reply_to: take to, ..) = take q
-    let mut waiters: List[Recipient] = list.new()
-    list.push(mut waiters, Recipient(owner: owner, to: take to))
+    let mut waiters: List[CallWaiter] = list.new()
+    list.push(mut waiters, CallWaiter(owner: owner, target: take to))
     let named: Bytes = clone(stream)
     map.insert(mut hd.busy, take named, Worker(p: p, digest: d, version: version, outcome: take o, waiters: take waiters))
     list.push(mut hd.group, take stream)
@@ -2575,10 +2588,14 @@ fn worker[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Requ
 // V3: a commitless answer goes at once, in a snapshot-less Release behind every earlier
 // Release on the one FIFO to the publisher, held ones included.
 fn commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome) -> Result[(), store.Error] waits {
+    publish_commitless(mut hd, take q, take o, false)
+}
+
+fn publish_commitless[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take o: Outcome, replayed: bool) -> Result[(), store.Error] waits {
     let owner = latest.read(q.identity).number
     let Request(stream: take stream, p: p, reply_to: take to, ..) = take q
     let mut answers: List[CallAnswer] = list.new()
-    list.push(mut answers, CallAnswer(recipient: Recipient(owner: owner, to: take to), row: KeyedDone(stream: take stream, p: p, outcome: take o)))
+    list.push(mut answers, call_answer(CallWaiter(owner: owner, target: take to), stream, p, take o, replayed))
     let release = Release(version: 0u64, snapshot: None, answers: take answers)
     if list.len(hd.held) != 0u64 {
         list.push(mut hd.held, Loose(take release))
@@ -2632,9 +2649,7 @@ fn release_held[G: send, H: shareable + inert + send](mut hd: Head[G, H], wait: 
                     }
                     let Worker(p: p, digest: _, version: _, outcome: take o, waiters: take waiters) = take w
                     for take recipient in waiters {
-                        let s: Bytes = clone(stream)
-                        let each: Outcome = clone(o)
-                        list.push(mut answers, CallAnswer(recipient: take recipient, row: KeyedDone(stream: take s, p: p, outcome: take each)))
+                        list.push(mut answers, call_answer(take recipient, stream, p, clone(o), false))
                     }
                 }
                 publish_release(mut hd, Release(version: d, snapshot: Some(take at), answers: take answers))
@@ -3242,17 +3257,14 @@ fn reply_bucket(waiting: List[Replies], owner: u64) -> Option[u64] {
     None
 }
 
-fn keep_answers(mut waiting: List[Replies], take answers: List[CallAnswer]) {
-    for take a in answers {
-        let CallAnswer(recipient: take recipient, row: take row) = take a
-        match reply_bucket(waiting, recipient.owner) {
-            Some(i) => list.push(mut waiting[i].rows, take row),
-            None => {
-                let mut rows: List[KeyedDone] = list.new()
-                list.push(mut rows, take row)
-                list.push(mut waiting, Replies(recipient: take recipient, rows: take rows))
-            },
-        }
+fn keep_wire_answer(mut waiting: List[Replies], take recipient: Recipient, take row: KeyedDone) {
+    match reply_bucket(waiting, recipient.owner) {
+        Some(i) => list.push(mut waiting[i].rows, take row),
+        None => {
+            let mut rows: List[KeyedDone] = list.new()
+            list.push(mut rows, take row)
+            list.push(mut waiting, Replies(recipient: take recipient, rows: take rows))
+        },
     }
 }
 
@@ -3498,7 +3510,7 @@ pub fn head_request(take author: Caller, take stream: Bytes, p: u64, take key: B
     let identity = latest.new(take blank)
     let seed = arc.new(OwnerNumber(number: 0u64))
     Req(e: Requested(Request(caller: take author, stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
-        deadline: 18446744073709551615u64, reply_to: take reply_to, live: take live, identity: take identity, seed: Some(take seed))))
+        deadline: 18446744073709551615u64, reply_to: WireReply(take reply_to), live: take live, identity: take identity, seed: Some(take seed))))
 }
 
 pub fn head_outcome(take event: WireEvent) -> Option[KeyedDone] {
@@ -4359,7 +4371,8 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
         let frame = match take received {
             Input(take f, at) => {
                 if st.closing { let _ = channel.try_send(st.credit, ()); continue }
-                match wire_owner_input(mut st, take service, pool, take f, at) {
+                let arrival = match f { Call(..) => host.mono_ns(st.clock), _ => at }
+                match wire_owner_input(mut st, take service, pool, take f, arrival) {
                     Some((take kept, take outcome)) => {
                         service = take kept
                         match take outcome { Go(take next) => take next, Again => continue, Stop(take r) => break take r }
@@ -5136,73 +5149,6 @@ fn limited_reply(take b: Bytes) -> Outcome {
     } else { Returned(take b) }
 }
 
-fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H], key: Bytes, ca: std.codec.Codec[A], n: u64, steps: u64) -> Result[(), RegisterError] {
-    let check = fn(arg: Bytes) -> Option[Refusal] {
-        let seen = bound bytes n {
-            let validate = scoped fn() -> Result[Option[Refusal], OutOfTime] {
-                bound steps steps {
-                    match std.codec.decode(ca, arg) {
-                        Ok(_) => { let no_refusal: Option[Refusal] = None; no_refusal },
-                        Error(e) => Some(Malformed(bad(e))),
-                    }
-                }
-            }
-            isolate(validate)
-        }
-        match take seen {
-            Ok(Ok(Ok(Ok(take why)))) => take why,
-            Ok(Ok(Ok(Error(_)))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
-            Ok(Ok(Error(_))) => Some(Malformed(Bad(kind: 6u32, at: 0u64))),
-            Ok(Error(c)) => Some(Budget(room(c))),
-            Error(c) => Some(Budget(room(c))),
-        }
-    }
-    let go = check
-    let copied_result: Bytes = clone(key)
-    let copied: Bytes = take copied_result
-    map.insert(mut r.checks, take copied, take go)
-    Ok(())
-}
-
-// The composition root supplies previous/current activation keys. A current key
-// always wins; retaining a gone key never substitutes a newly registered entry.
-pub fn retain_gone[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes) -> Result[(), RegisterError] {
-    map.insert(mut r.gone, take key, ())
-    Ok(())
-}
-
-pub opaque type Admitted: send {
-    caller: Caller, entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64
-}
-
-pub fn admitted(take caller: Caller, take entries: List[Bytes], arrived: u64, now: u64, budget: u64, arg_max: u64) -> Admitted {
-    Admitted(caller: take caller, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
-}
-
-pub type CallWant: send { key: Bytes, stream: u32, p: u64, arg: Bytes, deadline_ms: u32 }
-pub opaque type Send: send { key: Bytes, stream: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64 }
-
-pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
-    let known = map.contains(r.slots, want.key)
-    if !known && !map.contains(r.gone, want.key) { return Error(NoEntry) }
-    let mut allowed = false
-    for key in a.entries { if key == want.key { allowed = true } }
-    if !allowed { return Error(NotAllowed) }
-    let size = list.len(want.arg)
-    if size > a.arg_max { return Error(Budget(Room(requested: size, available: a.arg_max))) }
-    if size > a.budget { return Error(Budget(Room(requested: size, available: a.budget))) }
-    let relative: u64 = int.widen(want.deadline_ms)
-    let end = std.clock.deadline_after_ms(a.arrived, relative)
-    if want.deadline_ms == 0u32 || end <= a.now { return Error(Deadline) }
-    if let Some(check) = map.get(r.checks, want.key) {
-        if let Some(take why) = check(want.arg) { return Error(take why) }
-    }
-    let digest = store.request_digest(want.key, want.arg)
-    let stream = match stream_key(a.caller, want.stream) { Ok(take b) => take b, Error(c) => return Error(Budget(room(c))) }
-    let CallWant(key: take key, stream: _, p: p, arg: take arg, deadline_ms: _) = take want
-    Ok(Send(key: take key, stream: take stream, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget))
-}
-
 // The wire owner owns this state.
 type WireOwed: send { generation: u64, reply: Bytes }
 
@@ -5236,23 +5182,14 @@ type WireMark: send = Unit(Bytes) | V1 | WriteUnit(Bytes)
 // check"); None for a unit that carries no content and passes unchecked.
 type WireOutput: send { frame: Frame, tapes: List[OwedGroup], marks: List[WireMark], generations: List[(u32, u64)], external: bool, check: Option[u64] }
 type WirePending: send { stream: u32, p: u64, wire_slot: u32, deadline: u32, arg: Bytes, at: u64, grows: bool }
-fn anonymous_caller(random: Random) -> Option[Caller] {
-    let mut nonce: Bytes = list.with_capacity(16u64)
-    host.random(random, mut nonce)
-    Some(store.Caller(issuer: 1u8, subject: take nonce))
-}
-
 type WireHello[G: send]: send {
     binding: Option[(BindingJob[G], u64)], random: Random, tasks: Tasks, to: Sender[WireEvent]
 }
 
 fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
     let WireHello(binding: take binding, random: random, tasks: tasks, to: take to) = take job
-    let identity_result: Option[Caller] = match take binding {
-        Some((take app, allowance)) => bound_caller(tasks, take app, allowance),
-        None => anonymous_caller(random),
-    }
-    let _ = channel.send(to, wire_event(HelloBound(take identity_result)))
+    let identity = bind_principal(tasks, random, take binding)
+    let _ = channel.send(to, wire_event(HelloBound(take identity)))
 }
 
 fn deadline_notice(take stream: Bytes, p: u64, generation: u64) -> WireEvent {
@@ -5692,24 +5629,20 @@ fn wire_sent[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) {
 
 fn wire_begin_hello[G: send, B: send](s: WireSession[G, B], mut work: WireWork, take credential: Option[Bytes]) -> Result[(), u16] {
     let to = match s.me { Some(to) => channel.sender(to), None => return Error(1008u16) }
-    let mut binding: Option[(BindingJob[B], u64)] = None
-    let mut allowance = 4096u64
-    if let Some(w) = s.wire {
-        if let Some(bind) = w.bind {
-            let raw = match take credential { Some(take payload) => take payload, None => list.new() }
-            let app = BindingJob(seed: (w.duplicate)(w.seed), bind: bind, credential: take raw, steps: w.bind_steps)
-            allowance = int.saturating_add(allowance, w.bind_bytes)
-            binding = Some((take app, w.bind_bytes))
-        }
+    let binding = binding_job(s.wire, take credential)
+    let allowance = match binding {
+        Some((_, bytes_reserved)) => int.saturating_add(4096u64, bytes_reserved),
+        None => 4096u64,
     }
     let job = WireHello(binding: take binding, random: s.random, tasks: s.tasks, to: take to)
     let run: fn(take WireHello[B]) -> () waits = wire_bind_hello
     let h = task.spawn(s.tasks, bytes allowance, take job, run)
- work.asking = Some(take h); Ok(())
+    work.asking = Some(take h)
+    Ok(())
 }
 
 pub type CallRun: send = Computed(Outcome) | Launched | Durable | Uncallable
-pub type ServicePlan: send = NoAction | PlanRefusal(u32, u64, Refusal) | PlannedCall(Send, Admitted, u32, Bytes, CallRun) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, SubscriptionInput) | SubscriptionRefusal(u32, Outcome) | ResumeReset
+pub type ServicePlan: send = NoAction | PlanRefusal(u32, u64, Refusal) | PlannedCall(Send, u32, Bytes, CallRun) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, SubscriptionInput) | SubscriptionRefusal(u32, Outcome) | ResumeReset
 
 fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take pending: WirePending) -> Result[ServicePlan, u16] {
     let WirePending(stream: stream, p: p, wire_slot: wire_slot, deadline: deadline_ms, arg: take arg, at: at, grows: _) = take pending
@@ -5740,14 +5673,14 @@ fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSess
                 None => Durable,
                 _ => Uncallable,
             }
-            Ok(PlannedCall(take sent, take context, stream, take backing, take run))
+            Ok(PlannedCall(take sent, stream, take backing, take run))
         },
         Error(take why) => Ok(PlanRefusal(stream, p, take why)),
     }
 }
 
 fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take plan: ServicePlan) -> Result[(), u16] {
-    let (take sent, take context, stream, take reply, take run) = match take plan {
+    let (take sent, stream, take reply, take run) = match take plan {
         NoAction => return Ok(()),
         PlanRefusal(stream, p, take why) => return wire_refused(mut s, mut work, stream, p, take why),
         PlannedUpdate(take output, take completed) => {
@@ -5761,8 +5694,8 @@ fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
             let version = s.last
             return wire_reset_rows(mut s, mut work.output, version, list.new(), list.new())
         },
-        PlannedCall(take prepared, take caller_context, stream, take reply, take planned) =>
-            (take prepared, take caller_context, stream, take reply, take planned),
+        PlannedCall(take prepared, stream, take reply, take planned) =>
+            (take prepared, stream, take reply, take planned),
     }
     let p = sent.p
     let k = slot_key(sent.stream, p)
@@ -5776,7 +5709,7 @@ fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
     if wire_admission_closed(work, s.clock) && !forwarded { return wire_refused(mut s, mut work, stream, p, Overloaded) }
     let computed = match take run {
         Launched => {
-            let Admitted(caller: take caller, ..) = take context
+            let caller: Caller = clone(sent.caller)
             return wire_start_granted(mut s, mut work, take caller, take sent, take k, stream, take reply)
         },
         Uncallable => return wire_refused(mut s, mut work, stream, p, NotAllowed),
@@ -5817,19 +5750,16 @@ fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
         list.push(mut held.owed, take owed)
         map.insert(mut s.held, take k, take held)
     } else {
-        let Send(key: take entry, stream: take named, p: position, arg: take argument, digest: digest, deadline: deadline, budget: _) = take sent
-        let (live, identity) = match work.head {
-            Some(lease) => (latest.handle(lease.live), latest.handle(lease.identity)),
+        let digest = sent.digest
+        let req = match work.head {
+            Some(lease) => prepared_request(lease, take seed, take sent, WireReply(wire_me(s))),
             None => fail("runner: missing head lease"),
         }
-        let Admitted(caller: take principal, ..) = take context
-        let request = Request(caller: take principal, stream: take named, p: position, key: take entry, arg: take argument, digest: digest, deadline: deadline, reply_to: wire_me(s), live: take live, identity: take identity, seed: take seed)
         let mut sends: List[WireOwed] = list.new()
         list.push(mut sends, take owed)
         // v2.23: a full head inbox does not refuse. The request waits in `posts`, in order, and
         // the owner loop posts it with a waiting send (wire_post). The slot table still bounds a
         // session to 1 + q requests at the head.
-        let req = Req(e: Requested(take request))
         if list.len(work.posts) != 0u64 {
             list.push(mut work.posts, take req)
         } else {
@@ -5847,7 +5777,7 @@ fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
 
 fn wire_start_granted[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take caller: Caller, take sent: Send, take key: Bytes, stream: u32, take reply: Bytes) -> Result[(), u16] {
     let launch = replace(mut s.launch, None)
-    let Send(key: _, stream: take named, p: p, arg: take argument, digest: digest, deadline: deadline, budget: _) = take sent
+    let Send(caller: _, key: _, stream: take named, p: p, arg: take argument, digest: digest, deadline: deadline, budget: _) = take sent
     let copied: Option[G] = match s.wire {
         Some(w) => match w.grant { Some(g) => Some((g.duplicate)(g.value)), None => None },
         None => None,
@@ -5961,7 +5891,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: Wir
     let mut registered = false
     for id in s.pub_subs { if id == sub { registered = true } }
     if !registered && list.len(s.pub_subs) >= s.config.max_subs { return Ok(SubscriptionRefusal(sub, Refused(NotAllowed))) }
-    let refused = match map.get(r.checks, key) { Some(check) => check(arg), _ => { let no_refusal: Option[Refusal] = None; no_refusal } }
+    let refused = match map.get(r.checks, key) { Some(check) => check(arg, 18446744073709551615u64), _ => { let no_refusal: Option[Refusal] = None; no_refusal } }
     if let Some(take why) = take refused { return Ok(SubscriptionRefusal(sub, Refused(take why))) }
     if let None = s.subscription_room {
         let limit = int.saturating_sub(WIRE_SESSION_CEILING, wire_variable_peak(s.config) + s.config.n_granted)

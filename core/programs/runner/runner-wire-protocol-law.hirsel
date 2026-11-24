@@ -152,7 +152,9 @@ fn test_unique_conflict_wire(clock: Clock, random: Random) -> Result[(), String]
     }
     let mut wire_reply: Bytes = list.new()
     let codec: std.codec.Codec[Outcome] = std.codec.of()
-    result.unwrap(std.codec.encode(codec, answers[0u64].row.outcome, mut wire_reply))
+    if let CallAnswer(_, row) = answers[0u64] {
+        result.unwrap(std.codec.encode(codec, row.outcome, mut wire_reply))
+    } else { return Error("expected a wire answer") }
     if wire_reply != b"\x01\x00\x00\x00\x04\x00\x00\x00\x0c\x00\x00\x00unique_value" {
         return Error("wire Conflict must use Fault tag 4 and carry the index name")
     }

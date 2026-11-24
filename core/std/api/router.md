@@ -12,6 +12,7 @@ reservation on the route. `raw(handler)` creates an ordinary response route.
 Set `steps` to bound the handler's source steps. Exhaustion closes that
 connection and releases the request region and responder.
 
+`request_segments` splits a raw request path at slashes, then percent-decodes each segment.
 Patterns match decoded path segments. A literal can contain percent escapes.
 `{name}` captures a single nonempty segment. Final `{name...}` captures
 the remaining segments after the preceding slash. Use `http.capture` and

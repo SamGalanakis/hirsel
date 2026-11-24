@@ -637,7 +637,7 @@ fn trap_trace(c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let mut answers: List[CallAnswer] = list.new()
     for i in 0u64 .. 16384u64 {
         let row = KeyedDone(stream: list.new(), p: i, outcome: Abandoned)
-        list.push(mut answers, CallAnswer(recipient: Recipient(owner: 999u64, to: channel.sender(s_to)), row: take row))
+        list.push(mut answers, CallAnswer(Recipient(owner: 999u64, to: channel.sender(s_to)), take row))
     }
     let _ = channel.send(to, PubIn(e: Released(Release(version: 0u64, snapshot: None, answers: take answers))))
     let trapped = match task.join(take publishing) {

@@ -21,6 +21,10 @@ use std::{
 };
 mod pack;
 
+/// Each cache store's packs as a resident compiler has read them, by root.
+pub(crate) static PACKS: crate::resident::Memo<PathBuf, Arc<Mutex<pack::Packs>>> =
+    crate::resident::Memo::new();
+
 /// A launcher publish writes its recipe here until the compiling process exits.
 pub(crate) const PUBLISH_RECIPE_STAGE: &str = "HIRSEL_PUBLISH_RECIPE_STAGE";
 
@@ -152,11 +156,21 @@ impl CodeStore {
         }
     }
 
-    /// The cache store `name` inside driver store `store`.
+    /// The cache store `name` inside driver store `store`. A resident
+    /// compiler is one process: its requests share the store's packs, so a
+    /// row is checked once per process, as `pack` states.
     pub(crate) fn cache(store: &Path, name: &str) -> io::Result<Self> {
+        let root = store.join(name);
+        let packs = PACKS.get_or(Some(root.clone()), || {
+            Ok::<_, io::Error>(Arc::new(Mutex::new(pack::Packs::new(&root))))
+        })?;
+        // Another process may have committed or merged since the last request.
+        packs.lock().unwrap().relist();
         Ok(Self {
             cache: Some(Store::new(store)?),
-            ..Self::new(store.join(name))
+            packs,
+            root,
+            recipe_stage: None,
         })
     }
 

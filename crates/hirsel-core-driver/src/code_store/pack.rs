@@ -261,7 +261,7 @@ struct Pending {
 
 /// The packs of one code store, as this process has read them, and the
 /// objects it has put but not committed.
-pub(super) struct Packs {
+pub(crate) struct Packs {
     directory: PathBuf,
     listed: bool,
     packs: Vec<Pack>,
@@ -278,8 +278,15 @@ impl Packs {
         }
     }
 
+    /// List `packs/` again on the next lookup: another process may have
+    /// committed or merged since this one last listed it.
+    pub(crate) fn relist(&mut self) {
+        self.listed = false;
+    }
+
     /// Read the packs named in `packs/` that are not read yet, in sequence
-    /// order. A pack removed by a merge stays readable while held.
+    /// order, and let go of those a merge removed. A merge renames its pack
+    /// in before it removes the packs it absorbs, so their rows are listed.
     fn list(&mut self) -> io::Result<()> {
         self.listed = true;
         let rows = match fs::read_dir(&self.directory) {
@@ -287,15 +294,20 @@ impl Packs {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
         };
-        let mut names = Vec::new();
+        let mut listed = Vec::new();
         for row in rows {
             if let Ok(name) = row?.file_name().into_string()
                 && let Some(sequence) = sequence(&name)
-                && !self.packs.iter().any(|pack| pack.name == name)
             {
-                names.push((sequence, name));
+                listed.push((sequence, name));
             }
         }
+        self.packs
+            .retain(|pack| listed.iter().any(|(_, name)| *name == pack.name));
+        let mut names = listed
+            .into_iter()
+            .filter(|(_, name)| !self.packs.iter().any(|pack| pack.name == *name))
+            .collect::<Vec<_>>();
         names.sort();
         for (_, name) in names {
             if let Some(pack) = Pack::open(&self.directory.join(&name), name)? {

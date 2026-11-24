@@ -411,6 +411,7 @@ fn evict(id: SetId) {
     PARSED.evict(id);
     RESOLVED.evict(id);
     crate::incremental_link::RESIDENT.0.evict(id);
+    crate::code_store::PACKS.evict(id);
     crate::source_delta::STATE.0.evict(id);
 }
 

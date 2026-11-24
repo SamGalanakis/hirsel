@@ -1,0 +1,350 @@
+// L15. The head inbox is the cut before admission. Timers and reply channels
+// are the relay's real ones; the test controls when the head's Told arrives.
+fn l15_timers(tasks: Tasks) waits {
+    let (take world, time) = std.sim.world.new(15u64, 0u64, 0u64)
+    let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
+    let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
+    let key = http_law_key(reg.exported[0u64])
+    let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
+    let reserve = option.unwrap(relay_bytes(reg, cfg))
+    let mut maximum: Bytes = list.with_capacity(MAX_RETURNED_BYTES)
+    list.fill(mut maximum, MAX_RETURNED_BYTES, b'x')
+    let returned = Returned(take maximum)
+    let (head_to, head_from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(6u64)
+    let checked = bound bytes reserve {
+        let (to, from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(option.unwrap(relay_inbox_size(cfg)))
+        let own_head = result.unwrap(head_lease(LifecycleHead(channel.sender(head_to))))
+        let mut records: List[RelaySend] = list.with_capacity(2u64)
+        list.push(mut records, Vacant)
+        list.push(mut records, Vacant)
+        let mut state = RelayState(sends: take records, positions: list.with_capacity(cfg.positions_max), generation: 0u64,
+            owner: take own_head, inbox: channel.sender(to), clock: time, tasks: tasks, config: cfg, key_max: relay_key_max(reg))
+        let (first, closed_first): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
+        relay_step(mut state, RelayAsk(l15_send(reg, key, time, 1u32, 0u64, 1u64), take first))
+        let _ = take closed_first
+        let held = result.unwrap(channel.receive(head_from))
+        relay_step(mut state, result.unwrap(channel.receive(from)))
+        let mut last_delivery: Option[RelayOutcome] = None
+        for i in 0u64 .. 1000u64 {
+            if list.len(state.positions) != 1u64 || state.positions[0u64].id != 1u64 {
+                fail("L15 expiry refunded the head's position")
+            }
+            let (reply, reply_from): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
+            relay_step(mut state, RelayAsk(l15_send(reg, key, time, 1u32, 0u64, 1u64), take reply))
+            if i % 2u64 == 0u64 {
+                let _ = take reply_from
+                relay_step(mut state, result.unwrap(channel.receive(from)))
+            } else {
+                relay_step(mut state, result.unwrap(channel.receive(from)))
+                let result = l15_delivery(reply_from)
+                if let Abandoned = l15_outcome(result) {} else { fail("L15 an owed send did not get Abandoned") }
+                if let Error(Closed) = channel.try_receive(reply_from) {} else { fail("L15 an expired send kept a reply sender") }
+                // The earlier connection can still own its delivery block
+                // while the relay allocates the next connection's block.
+                last_delivery = Some(take result)
+            }
+            if let Error(Empty) = channel.try_receive(from) {} else { fail("L15 stale Expired after retirement") }
+            for record in state.sends {
+                if let Vacant = record {} else { fail("L15 an expired timer retained a send record") }
+            }
+            if let Error(Empty) = channel.try_receive(head_from) {} else { fail("L15 reconnect forwarded the same position twice") }
+        }
+        let (a, a_from): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
+        let (b, b_from): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
+        // The long timer must cancel. The short timer has finished already,
+        // but its Expired sits behind Told in the relay inbox.
+        relay_step(mut state, RelayAsk(l15_send(reg, key, time, 1u32, 0u64, 1u64), take a))
+        let short = state.generation
+        relay_step(mut state, RelayAsk(l15_send(reg, key, time, 1u32, 0u64, 30u64), take b))
+        let told = l15_told(take held, returned)
+        result.unwrap(channel.try_send(to, take told))
+        host.sleep_until(time, std.clock.deadline_after_ms(host.mono_ns(time), 2u64))
+        let _ = take last_delivery
+        relay_step(mut state, result.unwrap(channel.receive(from)))
+        if list.len(state.positions) != 0u64 { fail("L15 Told did not refund its position") }
+        if let Retiring(id) = state.sends[0u64] {
+            if id != short { fail("L15 the wrong timer is retiring") }
+        } else { fail("L15 a queued expiry lost its charged send record") }
+        if let Vacant = state.sends[1u64] {} else { fail("L15 cancelled timer did not refund immediately") }
+        let first_delivery = l15_delivery(a_from)
+        let second_delivery = l15_delivery(b_from)
+        if list.len(first_delivery.payload) != 8180u64 || list.slice(first_delivery.payload, 0u64, 8u64) != b"\x00\x00\x00\x00\xec\x1f\x00\x00" ||
+            second_delivery.payload != first_delivery.payload || first_delivery.replayed || second_delivery.replayed {
+            fail("L15 joined sends disagree with the head outcome")
+        }
+        for byte in list.slice(first_delivery.payload, 8u64, 8180u64) {
+            if byte != b'x' { fail("L15 delivery lost part of the maximum outcome") }
+        }
+        let expired = result.unwrap(channel.receive(from))
+        if let RelayExpired(id) = expired { if id != short { fail("L15 unexpected expiry") } }
+        else { fail("L15 expected pending expiry") }
+        relay_step(mut state, take expired)
+        if let Vacant = state.sends[0u64] {} else { fail("L15 taking Expired did not refund the retiring record") }
+        if let Error(Empty) = channel.try_receive(from) {} else { fail("L15 relay inbox retained an expiry") }
+        let _ = (take first_delivery, take second_delivery)
+        l15_position_caps(mut state, from, reg, key, time)
+    }
+    if let Error(_) = checked { fail("L15 relay exceeded its declared bytes") }
+    let _ = std.task.cancel_join(take clock_task)
+}
+
+fn l15_position_caps(mut state: RelayState, from: Receiver[RelayEvent], reg: Registry[(), HttpLawHandles], key: Bytes, time: Clock) waits {
+    for stream_id in 1u32 .. 6u32 {
+        let (reply, dropped): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
+        relay_step(mut state, RelayAsk(l15_send(reg, key, time, stream_id, 0u64, 1u64), take reply))
+        let _ = take dropped
+        relay_step(mut state, result.unwrap(channel.receive(from)))
+        if list.len(state.positions) != int.widen(stream_id) { fail("L15 expired principal position was released early") }
+    }
+    l15_over_capacity(mut state, l15_send(reg, key, time, 6u32, 0u64, 1u64), 5u64)
+
+    let (reply, dropped): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
+    relay_step(mut state, RelayAsk(l15_send_for(reg, key, time, 6u32, 0u64, 1u64, 2u64), take reply))
+    let _ = take dropped
+    relay_step(mut state, result.unwrap(channel.receive(from)))
+    if list.len(state.positions) != 6u64 { fail("L15 one principal's quota consumed another principal's slot") }
+    l15_over_capacity(mut state, l15_send_for(reg, key, time, 7u32, 0u64, 1u64, 2u64), 6u64)
+}
+
+fn l15_over_capacity(mut state: RelayState, take attempt: Send, occupied: u64) waits {
+    let (reply, returned): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
+    relay_step(mut state, RelayAsk(take attempt, take reply))
+    if list.len(state.positions) != occupied { fail("L15 relay exceeded its position cap") }
+    let got = result.unwrap(channel.try_receive(returned))
+    if let Delivered(answer) = got {
+        if let Refused(Overloaded) = l15_outcome(answer) { return }
+    }
+    fail("L15 exhausted positions did not refuse the send")
+}
+
+fn l15_send(reg: Registry[(), HttpLawHandles], key: Bytes, time: Clock, stream_id: u32, position: u64, milliseconds: u64) -> Send {
+    l15_send_for(reg, key, time, stream_id, position, milliseconds, 1u64)
+}
+
+fn l15_send_for(reg: Registry[(), HttpLawHandles], key: Bytes, time: Clock, stream_id: u32, position: u64, milliseconds: u64, author: u64) -> Send {
+    let mut allowed: List[Bytes] = list.with_capacity(1u64)
+    list.push(mut allowed, std.http.copy_bytes(key))
+    let now = host.mono_ns(time)
+    let context = admitted(law_caller(author), take allowed, now, now, 65536u64, 1024u64)
+    result.unwrap(prepare_call(reg, context, std.http.copy_bytes(key), stream_id, position, b"\x05\x00\x00\x00saved", milliseconds))
+}
+
+fn l15_delivery(from: Receiver[RelayResult]) -> RelayOutcome waits {
+    match channel.receive(from) {
+        Ok(Delivered(take answer)) => take answer,
+        _ => fail("L15 relay did not deliver an outcome"),
+    }
+}
+
+fn l15_outcome(item: RelayOutcome) -> Outcome {
+    let coding: std.codec.Codec[Outcome] = std.codec.of()
+    result.unwrap(std.codec.decode(coding, item.payload))
+}
+
+fn l15_told(take message: HeadInput, answer: Outcome) -> RelayEvent {
+    let RunRequest(Req(e: Requested(Request(reply_to: RelayReply(take destination), ..)))) = take message
+        else { fail("L15 head did not get the relay's position") }
+    let RelayRecipient(to: _, position, backing: take buffer) = take destination
+    let mut backing = take buffer
+    relay_fill(answer, mut backing)
+    RelayTold(position, RelayOutcome(payload: take backing, replayed: false))
+}
+
+@test
+fn test_l15(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    l15_timers(tasks)
+    let mut name = string.with_capacity(32u64)
+    let directory = result.unwrap(host.mkdtemp(parent, mut name))
+    l15_disk(directory, clock, random, tasks, net, false)
+    l15_disk(directory, clock, random, tasks, net, true)
+    result.unwrap(std.dir.remove_all(parent, name))
+    Ok(())
+}
+
+fn l15_body(mut tx: store.Tx, h: HttpLawHandles, caller: Caller, take input: HttpOpInput) -> Result[u64, ()] {
+    // The CONC-10 sink counts the 37 sends on this body-local channel. The
+    // trace still sees a body whose effects get rolled back.
+    let (to, _from): (Sender[()], Receiver[()]) = channel.new(37u64)
+    for _ in 0u64 .. 37u64 { let _ = channel.try_send(to, ()) }
+    http_op_increment(mut tx, h, caller, take input)
+}
+
+fn l15_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(l15_body), 65536u64, DEFAULT_STEPS)?
+    let binding = http_op_binding(r, "increment", "/old", 201u16)
+    bind(mut r, take binding)
+}
+
+type L15Drive: send {
+    head: Sender[HeadInput], publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net,
+    reopening: bool,
+}
+
+fn l15_native(take job: L15Drive) waits {
+    let L15Drive(head: take head, publisher: take pub_to, clock, random, tasks, net, reopening) = take job
+    let reg = result.unwrap(placed(code.describe(l15_place), HTTP_LAW_PLACE_BYTES))
+    let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: 1024u64)
+    let (take endpoint, take relay_task, take joined) = l15_start_relay(reg, intercept, pub_to, clock, tasks, cfg)
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let seed = HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
+        place: code.describe(l15_place), previous: None, stage: 0u8)
+    let server = task.spawn(tasks, bytes 4194304u64, take seed, http_op_serve)
+    if reopening {
+        for stream_id in 1u32 .. 4u32 {
+            let mut replay = l15_post(net, clock, address, stream_id, true)
+            result.unwrap(channel.send(head, l15_head_request(waiting)))
+            l15_response(mut replay, int.widen(stream_id), true)
+        }
+    } else {
+        // No argument reached the handler before this peer disconnected.
+        std.http_client.close(l15_post(net, clock, address, 1u32, false))
+        let mut first = l15_post(net, clock, address, 1u32, true)
+        result.unwrap(channel.send(head, l15_head_request(waiting)))
+        l15_response(mut first, 1u64, false)
+        std.http_client.close(take first)
+
+        {
+            // The first request's position is already held by the relay.
+            // The retry joins it while the head is still processing that send.
+            let second = l15_post(net, clock, address, 2u32, true)
+            let request = l15_head_request(waiting)
+            std.http_client.close(take second)
+            let mut recovery = l15_post(net, clock, address, 2u32, true)
+            result.unwrap(channel.receive(joined))
+            result.unwrap(channel.send(head, take request))
+            l15_response(mut recovery, 2u64, false)
+            std.http_client.close(take recovery)
+        }
+        {
+            // Publisher owns Told only after commit. Hold it there, drop the
+            // original peer, then release it before issuing the retry.
+            let third = l15_post(net, clock, address, 3u32, true)
+            let (result_to, result_from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(1u64)
+            let answer_to = l15_forward(head, result_to, l15_head_request(waiting))
+            let told = result.unwrap(channel.receive(result_from))
+            std.http_client.close(take third)
+            result.unwrap(channel.try_send(answer_to, take told))
+            let mut recovery = l15_post(net, clock, address, 3u32, true)
+            result.unwrap(channel.send(head, l15_head_request(waiting)))
+            l15_response(mut recovery, 3u64, true)
+            std.http_client.close(take recovery)
+        }
+    }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    let _ = take head
+}
+
+// A test relay observes Ask decisions before letting the fixture release the
+// head. It runs the same charged state and event step as the serving relay.
+type L15Relay: send { seed: RelayStart, joined: Sender[()] }
+
+fn l15_relay(take input: L15Relay) waits {
+    let L15Relay(seed: take setup, joined: take joined) = take input
+    let (take ready, take from, take credits) = option.unwrap(relay_boot(take setup))
+    let mut state = take ready
+    while let Ok(take event) = channel.receive(from) {
+        let existing = if let RelayAsk(request, _) = event {
+            let _ = channel.try_receive(credits)
+            list.len(state.positions) == 1u64 && state.positions[0u64].stream == request.stream &&
+                state.positions[0u64].position == request.p
+        } else { false }
+        let before = state.generation
+        relay_step(mut state, take event)
+        if existing && state.generation != before { let _ = channel.try_send(joined, ()) }
+    }
+}
+
+fn l15_start_relay(reg: Registry[(), HttpLawHandles], head: Sender[HeadInput], pub_to: Sender[PubIn], clock: Clock,
+    tasks: Tasks, cfg: RelayConfig) -> (Relay, Task[()], Receiver[()]) waits {
+    let (ready, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
+    let (join_to, joined): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let key_max = relay_key_max(reg)
+    let seed = RelayStart(to: take ready, head: channel.sender(head), clock: clock, tasks: tasks, config: cfg,
+        inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: key_max)
+    let child = task.spawn(tasks, bytes option.unwrap(relay_child_bytes(cfg, key_max)), L15Relay(seed: take seed, joined: take join_to), l15_relay)
+    let endpoint = result.unwrap(channel.receive(from))
+    let held: List[Option[RelayTell]] = list.with_capacity(cfg.positions_max)
+    result.unwrap(channel.send(pub_to, PubIn(e: RelayJoined(take held))))
+    (take endpoint, take child, take joined)
+}
+
+fn l15_head_request(from: Receiver[HeadInput]) -> HeadInput waits {
+    let next = result.unwrap(channel.receive(from))
+    if let RunRequest(_) = next { return take next }
+    fail("L15 expected a forwarded request")
+}
+
+fn l15_forward(to: Sender[HeadInput], during: Sender[RelayEvent], take msg: HeadInput) -> Sender[RelayEvent] waits {
+    let RunRequest(Req(e: Requested(take req))) = take msg else { fail("L15 expected a relay request") }
+    let Request(caller: take caller, stream: take stream_bytes, p, key: take key, arg: take arg, digest, deadline,
+        reply_to: RelayReply(RelayRecipient(to: take answer_to, position, backing: take backing)),
+        live: take live, identity: take identity, seed: take seed) = take req else { fail("L15 expected relay reply authority") }
+    let target = RelayReply(RelayRecipient(to: channel.sender(during), position, backing: take backing))
+    let request = Request(caller: take caller, stream: take stream_bytes, p, key: take key, arg: take arg, digest, deadline,
+        reply_to: take target, live: take live, identity: take identity, seed: take seed)
+    result.unwrap(channel.send(to, RunRequest(Req(e: Requested(take request)))))
+    take answer_to
+}
+
+fn l15_post(net: Net, clock: Clock, address: Addr, stream_id: u32, submit: bool) -> std.http_client.Connection waits {
+    let mut fields: List[std.http_client.Header] = list.with_capacity(4u64)
+    list.push(mut fields, std.http_client.Header(name: "Connection", value: Public(b"close")))
+    list.push(mut fields, std.http_client.Header(name: "Content-Type", value: Public(b"application/json")))
+    list.push(mut fields, std.http_client.Header(name: "Authorization", value: Public(b"token")))
+    let mut header = string.from("\"")
+    string.push_u64(mut header, int.widen(stream_id))
+    string.push(mut header, ".0\"")
+    list.push(mut fields, std.http_client.Header(name: "Idempotency-Key", value: Public(string.into_bytes(take header))))
+    let req = std.http_client.Request(method: "POST", target: "/old", headers: take fields, body: Fixed(2u64))
+    let mut client = result.unwrap(std.http_client.dial(net, address, "a", clock, req, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64)))
+    if submit { result.unwrap(std.http_client.write(mut client, b"{}")) }
+    take client
+}
+
+fn l15_response(mut client: std.http_client.Connection, number: u64, replayed: bool) waits {
+    result.unwrap(std.http_client.finish_request(mut client, 4096u64))
+    {
+        let response = std.http_client.head(client)
+        let mut marked = false
+        let mut copied = false
+        for i in 0u64 .. std.http_client.field_count(response) {
+            if let Some((name, value)) = std.http_client.field_at(response, i) {
+                if std.http1.equal_ascii(name, b"Idempotent-Outcome") && value == b"committed" { marked = true }
+                if std.http1.equal_ascii(name, b"Idempotent-Replayed") && value == b"true" { copied = true }
+            }
+        }
+        if std.http_client.status(response) != 201u16 || !marked || copied != replayed { fail("L15 status or replay headers differ") }
+    }
+    let mut expected = string.from("\"")
+    string.push_u64(mut expected, number)
+    string.push(mut expected, "\"")
+    let answer = sse_law_body(mut client)
+    if answer != string.as_bytes(expected) { fail("L15 replayed body or durable counter differs") }
+}
+
+fn l15_disk(directory: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, reopening: bool) waits {
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let db = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let publisher_in = result.unwrap(mailbox(16u64))
+    let seed = L15Drive(head: take head, publisher: post(publisher_in), clock, random, tasks, net, reopening)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, l15_native)
+    let selection: Selection = if reopening { Reopen } else { Install }
+    let started = place_head_selected(take db, selection, code.describe(l15_place), HTTP_LAW_PLACE_BYTES, None, code.describe(http_law_schema),
+        take requests, take publisher_in, tasks, 1048576u64)
+    if let Error(take problem) = started { fail(start_text(Open(take problem))) }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+}
+
+pub fn l15_process(directory: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, argv: Args) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0u64))
+    if phase != "cut" && phase != "recover" { return Error(Exit(status: 2u8)) }
+    l15_disk(directory, clock, random, tasks, net, phase == "recover")
+    Ok(())
+}

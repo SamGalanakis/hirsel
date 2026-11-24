@@ -130,7 +130,16 @@ pub fn relay_call(r: Relay, take send: Send, clock: Clock, tasks: Tasks, handler
     }
 }
 
-fn relay_owner(take initial: RelayStart) -> () waits {
+fn relay_owner(take initial: RelayStart) waits {
+    let Some((take ready, take from, take credits)) = relay_boot(take initial) else { return }
+    let mut state = take ready
+    while let Ok(take event) = channel.receive(from) {
+        if let RelayAsk(..) = event { let _ = channel.try_receive(credits) }
+        relay_step(mut state, take event)
+    }
+}
+
+fn relay_boot(take initial: RelayStart) -> Option[(RelayState, Receiver[RelayEvent], Receiver[()])] {
     let RelayStart(to: take started, head: take head, clock: clock, tasks: tasks, config: c, inbox_size: inbox_size, key_max: key_max) = take initial
     let (inbox, from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(inbox_size)
     let (credit, credits): (Sender[()], Receiver[()]) = channel.new(c.http_max)
@@ -138,44 +147,43 @@ fn relay_owner(take initial: RelayStart) -> () waits {
     let mut sends: List[RelaySend] = list.with_capacity(c.sends_max)
     for _ in 0u64 .. c.sends_max { list.push(mut sends, Vacant) }
     let positions: List[RelayPosition] = list.with_capacity(c.positions_max)
-    let mut state = RelayState(sends: take sends, positions: take positions, generation: 0u64, owner: take owner,
+    let state = RelayState(sends: take sends, positions: take positions, generation: 0u64, owner: take owner,
         inbox: channel.sender(inbox), clock: clock, tasks: tasks, config: c, key_max: key_max)
-    if let Error(_) = channel.try_send(started, Relay(inbox: take inbox, credit: take credit)) { return }
-    while let Ok(take event) = channel.receive(from) {
-        match take event {
-            RelayAsk(take send, take reply) => {
-                let _ = channel.try_receive(credits)
-                relay_ask(mut state, take send, take reply)
-            },
-            RelayExpired(id) => {
-                for i in 0u64 .. list.len(state.sends) {
-                    let active = match state.sends[i] { Active(n, ..) => n == id, _ => false }
-                    let retiring = match state.sends[i] { Retiring(n) => n == id, _ => false }
-                    if active {
-                        relay_handover(mut state, i, relay_encode(Abandoned), false, true)
-                        break
-                    }
-                    if retiring {
-                        let _ = list.set(mut state.sends, i, Vacant)
-                        break
-                    }
+    if let Error(_) = channel.try_send(started, Relay(inbox: take inbox, credit: take credit)) { return None }
+    Some((take state, take from, take credits))
+}
+
+fn relay_step(mut state: RelayState, take event: RelayEvent) waits {
+    match take event {
+        RelayAsk(take send, take reply) => relay_ask(mut state, take send, take reply),
+        RelayExpired(id) => {
+            for i in 0u64 .. list.len(state.sends) {
+                let active = match state.sends[i] { Active(n, ..) => n == id, _ => false }
+                let retiring = match state.sends[i] { Retiring(n) => n == id, _ => false }
+                if active {
+                    relay_handover(mut state, i, relay_encode(Abandoned), false, true)
+                    break
                 }
-            },
-            RelayTold(position, take outcome) => {
-                for i in 0u64 .. list.len(state.sends) {
-                    let owed = match state.sends[i] { Active(_, p, _, _) => p == position, _ => false }
-                    if owed { relay_handover(mut state, i, std.http.copy_bytes(outcome.payload), outcome.replayed, false) }
+                if retiring {
+                    let _ = list.set(mut state.sends, i, Vacant)
+                    break
                 }
-                for i in 0u64 .. list.len(state.positions) {
-                    if state.positions[i].id == position {
-                        let last = list.len(state.positions) - 1u64
-                        list.swap(mut state.positions, i, last)
-                        let _ = list.pop(mut state.positions)
-                        break
-                    }
+            }
+        },
+        RelayTold(position, take outcome) => {
+            for i in 0u64 .. list.len(state.sends) {
+                let owed = match state.sends[i] { Active(_, p, _, _) => p == position, _ => false }
+                if owed { relay_handover(mut state, i, std.http.copy_bytes(outcome.payload), outcome.replayed, false) }
+            }
+            for i in 0u64 .. list.len(state.positions) {
+                if state.positions[i].id == position {
+                    let last = list.len(state.positions) - 1u64
+                    list.swap(mut state.positions, i, last)
+                    let _ = list.pop(mut state.positions)
+                    break
                 }
-            },
-        }
+            }
+        },
     }
 }
 
@@ -250,13 +258,16 @@ fn relay_refuse(to: Sender[RelayResult], take why: Refusal) {
 }
 
 fn relay_handover(mut s: RelayState, index: u64, take block: Bytes, replayed: bool, expired: bool) waits {
-    let prior = list.set(mut s.sends, index, Vacant)
-    let Active(id, _, take to, take timer) = take prior else { return }
+    let generation = match s.sends[index] { Active(id, ..) => id, _ => return }
+    // Keep the slot charged across the named wait. A completed timer can
+    // already have queued its Expired, whose take then releases the slot.
+    let prior = list.set(mut s.sends, index, Retiring(generation))
+    let Active(_, _, take to, take timer) = take prior else { fail("relay: expected an active send") }
     let _ = channel.try_send(to, Delivered(RelayOutcome(payload: take block, replayed: replayed)))
     match std.task.cancel_join(take timer) {
-        Ok(()) if !expired => { let _ = list.set(mut s.sends, index, Retiring(id)) },
-        Ok(()) => (),
-        Error(Cancelled(_)) => (),
+        Ok(()) if !expired => (),
+        Ok(()) => { let _ = list.set(mut s.sends, index, Vacant) },
+        Error(Cancelled(_)) => { let _ = list.set(mut s.sends, index, Vacant) },
         Error(Failed(_)) => fail("runner: relay deadline alarm failed"),
     }
 }

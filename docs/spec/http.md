@@ -1455,7 +1455,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 **BUILD (successor to http-part-a-2067).** Build H5 → H6 → H8 in that order; the five questions of 2067's OPEN.md are settled in the text (decisions 45-48, B-2, B-8, B-12):
 - **H5** builds B-2's bind step in the transport's own task (no `Ingress` task, inbox or bucket table), `prepare`, the relay with B-8's timer retirement (cancel, then join), and the session's move onto them. Its laws are L10 over hand-derived codec bytes through the raw-route arm, and L11 with the bucket and Ingress cases removed. Mutants `digest_over_json` and `sort_map_members` moved to H6's L10j.
 - **H6** builds B-3 check 6's equal-status rule and B-12's removed-alias resolution, and adds L10j. L-op's mutant `status_from_current_binding` is replaced by `op_in_identity`, `status_per_op` and `stale_alias_concludes_gone`.
-- **H7**'s L15 is unchanged; `refund_before_timer_join` catches a record refunded before its timer's join returns.
+- **H7**'s L15 checks that a send record stays charged until its timer's join returns. Run `python3 core/tools/runner_http_delivery_test.py --compiler <hirsel>` to count body runs and verify the saved responses in a second process.
 - **H8** is unchanged. H10 lands with W3's upgrade route. Part B (H9 → H12) runs beside it and nothing in Part A waits on it.
 
 **Known failures allowed at landing:** B1's hyper side, if its build lags.

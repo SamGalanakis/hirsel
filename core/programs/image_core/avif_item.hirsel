@@ -5,7 +5,13 @@ pub type ByteRange {
 
 pub type AvifItem {
     payload: ByteRange,
-    config: ByteRange
+    config: ByteRange,
+    nclx: Option[AvifColor]
+}
+
+pub type AvifColor {
+    matrix: u16,
+    full_range: bool
 }
 
 pub type AvifImage {
@@ -275,14 +281,14 @@ fn avif_in_mdat(input: Bytes, range: BoxRange) -> Result[(), Error] {
 fn avif_item(input: Bytes, tables: AvifTables, id: u16, canvas: ImageInfo, limits: Limits) -> Result[AvifItem, Error] {
     avif_item_type(input, tables.iinf, id)?
     let payload = avif_location(input, tables, id)?
-    let config = avif_item_config(input, tables.iprp, id, id != tables.primary, canvas)?
+    let (config, color) = avif_item_config(input, tables.iprp, id, id != tables.primary, canvas)?
     validate_av1_config(list.slice(input, config.start, config.end), limits)?
     let packet = list.slice(input, payload.start, payload.end)
     validate_av1_still(packet, limits)?
-    Ok(AvifItem(payload: payload, config: config))
+    Ok(AvifItem(payload: payload, config: config, nclx: color))
 }
 
-fn avif_item_config(input: Bytes, iprp: BoxRange, id: u16, alpha: bool, canvas: ImageInfo) -> Result[ByteRange, Error] {
+fn avif_item_config(input: Bytes, iprp: BoxRange, id: u16, alpha: bool, canvas: ImageInfo) -> Result[(ByteRange, Option[AvifColor]), Error] {
     let mut at = iprp.start
     let mut props = empty_range()
     let mut associations = empty_range()
@@ -314,6 +320,7 @@ fn avif_item_config(input: Bytes, iprp: BoxRange, id: u16, alpha: bool, canvas: 
     }
     let mut pos = start + 8
     let mut config = empty_range()
+    let mut color: Option[AvifColor] = None
     let mut extent = false
     let mut auxiliary = false
     for _ in 0u32 .. count {
@@ -350,6 +357,14 @@ fn avif_item_config(input: Bytes, iprp: BoxRange, id: u16, alpha: bool, canvas: 
                         return Error(Malformed)
                     }
                     config = unique_range(config, body, boundary)?
+                } else if kind == 0x636f6c72 && boundary - body >= 4 && (list.word_be(input, body) : u32) == 0x6e636c78 {
+                    if boundary - body != 11 || input[body + 10] & 127 != 0 {
+                        return Error(Malformed)
+                    }
+                    if let Some(_) = color {
+                        return Error(Malformed)
+                    }
+                    color = Some(AvifColor(matrix: tiff_short(input, body + 8, false), full_range: input[body + 10] == 128))
                 } else if kind == 0x69737065 {
                     let (w, h) = avif_ispe(input, body, boundary)?
                     if extent || w != canvas.width || h != canvas.height {
@@ -369,7 +384,7 @@ fn avif_item_config(input: Bytes, iprp: BoxRange, id: u16, alpha: bool, canvas: 
     if pos != end || !extent || config.start == 0 || alpha != auxiliary {
         return Error(Malformed)
     }
-    Ok(ByteRange(start: config.start, end: config.end))
+    Ok((ByteRange(start: config.start, end: config.end), color))
 }
 
 fn probe_avif(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {

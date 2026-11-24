@@ -55,7 +55,7 @@ fn check_accept() {
     }
 }
 
-fn check_signatures(transform: pipeline.Transform) {
+fn check_signatures(codecs: pipeline.Codecs, transform: pipeline.Transform, limits: image_core.image.Limits) waits {
     let key = result.unwrap(secret.seal(string.into_bytes("fixture-key"), "mac"))
     let digest = std.sha256.hash(load("jpeg.image"))
     let signed = load_path("signed.path")
@@ -68,6 +68,9 @@ fn check_signatures(transform: pipeline.Transform) {
     }
     let Error(PipelineSignature) = pipeline.verify_url(key, load_path("unsigned.path")) else {
         fail("accepted an unsigned transform")
+    }
+    let Error(PipelineSignature) = pipeline.render_signed(codecs, key, signed, load("webp.image"), b"image/jpeg", limits, 8388608) else {
+        fail("accepted a different source for the signed transform")
     }
 }
 
@@ -124,11 +127,12 @@ fn pipeline_oracles(jpeg: Foreign[image_jpeg.Jpeg], webp: Foreign[image_webp.web
     let target = image_core.image.Size(width: 96, height: 64)
     let transform = pipeline.Transform(width: 96, height: 64, crop: None, pad: None)
     check_accept()
-    check_signatures(transform)
+    check_signatures(codecs, transform, limits)
     check_thumbnails(codecs, target, limits)
     check_geometry(codecs, limits)
     check_case(codecs, "jpeg.image", "jpeg.rgb", b"image/jpeg", OutputJpeg, limits, target, transform)
     check_case(codecs, "webp.image", "webp.rgb", b"image/webp", OutputWebp, limits, target, transform)
     check_case(codecs, "avif.image", "avif.rgb", b"image/avif", OutputAvif, limits, target, transform)
+    check_case(codecs, "avif-full.image", "avif-full.rgb", b"image/avif", OutputAvif, limits, target, transform)
     Ok(())
 }

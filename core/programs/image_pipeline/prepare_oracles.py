@@ -52,7 +52,9 @@ def main():
     webp = encoded(source, "WEBP", lossless=True)
     avif = encoded(source, "AVIF", quality=85, speed=8, subsampling="4:2:0",
                    range="limited", max_threads=1)
-    for name, packet in (("jpeg", jpeg), ("webp", webp), ("avif", avif)):
+    avif_full = encoded(source, "AVIF", quality=85, speed=8, subsampling="4:2:0",
+                        range="full", max_threads=1)
+    for name, packet in (("jpeg", jpeg), ("webp", webp), ("avif", avif), ("avif-full", avif_full)):
         save(name + ".image", packet)
         image = ImageOps.exif_transpose(Image.open(io.BytesIO(packet))).convert("RGB")
         save(name + ".rgb", image.resize(TARGET, Image.Resampling.LANCZOS).tobytes())

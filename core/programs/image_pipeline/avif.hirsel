@@ -47,8 +47,14 @@ fn avif_decode(codecs: Codecs, input: Bytes, target: image_core.image.Size, limi
     }
     let count = yuv_result(video_yuv.yuv_size(I420, w, h))?
     let monochrome = (input[avif.primary.config.start + 2] & 16) != 0
+    let matrix = avif_matrix(avif.primary.nclx)?
     let mut yuv = buffer(count, 128)?
     avif_picture(codecs.av1_decode, input, avif.primary, avif.info, monochrome, mut yuv)?
+    if let Some(color) = avif.primary.nclx {
+        if color.full_range {
+            avif_limit_range(mut yuv, area(w, h))
+        }
+    }
     let source = image_core.image.Size(width: w, height: h)
     let (size, reduced) = if let None = avif.alpha {
         let size = shrink_size(w, h, target)
@@ -63,7 +69,7 @@ fn avif_decode(codecs: Codecs, input: Bytes, target: image_core.image.Size, limi
         (source, take yuv)
     }
     let mut rgba = buffer(4 * area(size.width, size.height), 0)?
-    yuv_result(video_yuv.to_rgb(codecs.yuv, I420, Rgba, Bt601, size.width, size.height, reduced, mut rgba))?
+    yuv_result(video_yuv.to_rgb(codecs.yuv, I420, Rgba, matrix, size.width, size.height, reduced, mut rgba))?
     if let Some(item) = avif.alpha {
         let pixels = area(w, h)
         let mut alpha = buffer(pixels, 0)?
@@ -73,6 +79,31 @@ fn avif_decode(codecs: Codecs, input: Bytes, target: image_core.image.Size, limi
         }
     }
     Ok(image_core.image.Raster(width: size.width, height: size.height, rgba: take rgba))
+}
+
+fn avif_matrix(color: Option[image_core.image.AvifColor]) -> Result[video_yuv.Matrix, PipelineError] {
+    let Some(cicp) = color else {
+        return Ok(Bt601)
+    }
+    match cicp.matrix {
+        1 => Ok(Bt709),
+        2 => Ok(Bt601),
+        5 => Ok(Bt601),
+        6 => Ok(Bt601),
+        9 => Ok(Bt2020),
+        _ => Error(PipelineUnsupported),
+    }
+}
+
+fn avif_limit_range(mut planes: Bytes, luma_count: u64) {
+    for i in 0u64 .. luma_count {
+        let sample: u32 = int.widen(planes[i])
+        planes[i] = int.narrow(16 + (sample * 219 + 127) / 255)
+    }
+    for i in luma_count .. list.len(planes) {
+        let sample: u32 = int.widen(planes[i])
+        planes[i] = int.narrow(16 + (sample * 224 + 127) / 255)
+    }
 }
 
 fn avif_size(w: u32, h: u32) -> bool {

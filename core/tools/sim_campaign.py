@@ -118,7 +118,7 @@ def contract_inputs(group, work):
         groups[case.file].append((law, case))
     entries = {}
     for index, (path, cases) in enumerate(groups.items()):
-        source = path.read_text()
+        source = std_native.fixture_source(path)
         first = cases[0][1]
         modules = [first.test_of] if first.test_of else ['tests', path.stem]
         in_core = first.package == 'core'

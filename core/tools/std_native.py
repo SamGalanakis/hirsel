@@ -36,6 +36,15 @@ from loopback_peer import accept_from
 LOOPBACK_RULES = ('Connect 127.0.0.0/8 1-65535', 'Listen 127.0.0.0/8 1-65535', 'Tls *.test 0-65535 System')
 
 
+def fixture_source(file):
+    """A contract file's source, with its generated vectors when it opts in."""
+    source = file.read_text()
+    if source.startswith('// test-vectors\n'):
+        generator = file.parent / 'vectors' / file.stem / 'generate.py'
+        source += '\n' + subprocess.check_output([sys.executable, generator], text=True)
+    return source
+
+
 def simulation_support(module):
     """Hirsel declarations shared by source-only simulation adapters."""
     return f"""
@@ -560,11 +569,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     (host / 'link').symlink_to('a', target_is_directory=True)
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                fixture = case.file.read_text()
-                source = original + fixture
-                if fixture.startswith('// test-vectors\n'):
-                    generator = case.file.parent / 'vectors' / case.file.stem / 'generate.py'
-                    source += '\n' + subprocess.check_output([sys.executable, generator], text=True)
+                source = original + fixture_source(case.file)
                 if case.call.startswith(('ts_codec_vectors(', 'ts_hirsel_differential(', 'ts_frame_vectors(', 'ts_frame_differential(')):
                     frame = case.package == 'runner'
                     if frame and protocol_codec is None and typescript_override is None:

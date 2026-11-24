@@ -260,13 +260,13 @@ fn bucket_law_seed(e: Env, fallback: u64) -> u64 {
     }
 }
 
-// Cut each request of the serial row groups, with the last request
-// either applied without a reply or dropped.
+// Allow room for the objects@1 bootstrap, three groups and their checkpoints.
+// Hold the simulation seed fixed across wire positions and modes.
 @test
 fn bucket_test_l4_cuts(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    for after in 0u64 .. BUCKET_LAW_CUTS {
-        let finished_applied = bucket_law_cut(c, r, tasks, after, bucket_law_wire_cut(after, true), list.new())?
-        let finished_dropped = bucket_law_cut(c, r, tasks, after, bucket_law_wire_cut(after, false), list.new())?
+    for after in 0u64 .. 128 {
+        let finished_applied = bucket_law_cut(c, r, tasks, 0, bucket_law_wire_cut(after, true), list.new())?
+        let finished_dropped = bucket_law_cut(c, r, tasks, 0, bucket_law_wire_cut(after, false), list.new())?
         if finished_applied && finished_dropped {
             if after < 4 * BUCKET_LAW_ROUNDS {
                 fail("bucket wire cut: the cut never reached the writer")

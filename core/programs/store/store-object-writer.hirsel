@@ -294,6 +294,8 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let (take previous, _) = history_checkpoint(mut lane.client, old, now)?
     let retained = history_retain(previous, old.checkpoint, seq, disk_state(db).options.retain)?
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] { cut_participants(db, delta) })?
+    // objects@1 has no Tiered publisher (§13.6a); its open refuses a Tiered account.
+    require_memory_collections(holders_tiered(participants.roots), Install)?
     let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, participants.holders, participants.roots)?
     over_ceiling(base.account, db.ceiling)?
     if let Some(wanted) = target {

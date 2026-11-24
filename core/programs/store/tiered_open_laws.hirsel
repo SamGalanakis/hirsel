@@ -115,3 +115,79 @@ fn l70_reexecute_cold_read(mut db: Db, rows: Table[u64, u32]) -> Result[(), Erro
     }
     Ok(())
 }
+
+// L68 (e2) through the real cut (§13.6a "The tiered-write-2188 sequence"):
+// row 3 = 30 is Cold, a put of 31 leaves a Hot class-3 path, and
+// `checkpoint` with no reopen first must emit it (T2) and seal the map to it.
+// Production apply is not wired yet, so the Hot leaf is built by hand from
+// the Memory leaf the fixture sealed, with only row 3's value byte changed.
+@test
+fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 10u32)?
+        put(mut tx, handle, 3u64, 30u32)?
+        put(mut tx, handle, 5u64, 50u32)
+    })? else {
+        fail("L68: fixture inserts did not commit")
+    }
+    let id = prefix(rows.id)?
+    let memory_leaf = {
+        let Some((here, _)) = std.page.collection_entry(db.heads[0u64].roots.collections.root, id) else {
+            fail("L68: the fixture has no collection")
+        }
+        arc.share(here)
+    }
+    let pack_seq = disk_state(db).pages.next_pack
+    match db.disk {
+        Some(mut state) => {
+            state.pages.next_pack = pack_seq + 1
+        },
+        None => fail("L68: the fixture store is on disk"),
+    }
+    l62_prepare_snapshot_pages(mut db, d, rows.id, pack_seq)?
+    let _ = cut_install(mut db, NoHolderChange)?
+
+    // put(3, 31): the same-width value keeps the descriptor's totals.
+    let image = std.page.image_of(memory_leaf)
+    let row_key = option.unwrap(std.page.key_at(image, 1))
+    let mut written: Bytes = clone(option.unwrap(std.page.value_at(memory_leaf, 1)))
+    let mut changed = 0u64
+    for at in 0u64 .. list.len(written) {
+        if written[at] == 30u8 {
+            let _ = list.set(mut written, at, 31u8)
+            changed += 1
+        }
+    }
+    if changed != 1 {
+        fail("L68: the fixture value 30 must be one byte")
+    }
+    let mut hot = arc.share(memory_leaf)
+    let mut draw = stamp_after(db.next_node)?
+    let first = draw
+    page_result(std.page.insert(mut hot, row_key, take written, None, 1024, first, mut draw))?
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(arc.share(hot)), mut draw))?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    let _ = checkpoint(mut db)?
+    close(take db)?
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if accounts(reopened).tiered != 258 {
+        fail("L68: the cut publishes the Tiered account of the three rows")
+    }
+    let rows_again = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(done) = run(mut reopened, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(Option[u32], Option[u32]), Error] {
+        Ok((fetch(tx, handle, 3u64)?, fetch(tx, handle, 5u64)?))
+    })? else {
+        fail("L68: a read of the reopened Tiered collection commits")
+    }
+    if done.value != (Some(31u32), Some(50u32)) {
+        fail("L68: after the cut, row 3 reads the acknowledged 31 from a class-3 leaf")
+    }
+    close(take reopened)
+}

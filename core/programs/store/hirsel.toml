@@ -36,6 +36,8 @@ std = { major = 1 }
 "store-tiered-replay.hirsel" = "store"
 "store-tiered-fold.hirsel" = "store"
 "store-tiered-emission.hirsel" = "store"
+"store-tiered-publish.hirsel" = "store"
+"store-cut-participants.hirsel" = "store"
 "store-tiered-probe.hirsel" = "store"
 "store-tiered-probe-index.hirsel" = "store"
 "store-tiered-promote.hirsel" = "store"
@@ -166,6 +168,9 @@ limit = 83886080
 # A store open at the Tiered floor: r = 182,375,272 B resident (the pager's
 # C + K + P among it) plus the journal worker and timer tasks.
 [tests.runs."store@1/store/test_l70_tiered_open_at_floor"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l68_cut_emits_hot_tiered_write"]
 limit = 268435456
 
 [tests.runs."store@1/store/bucket_test_l4_cuts"]

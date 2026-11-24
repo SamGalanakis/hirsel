@@ -186,6 +186,7 @@ store@1/store/test_l63_served_miss_reruns_and_commits_once src=40f87193e8e14b64 
 store@1/store/test_l63_tiered_plan_writes_deciding_priors src=5cfb705fefff41b2 sig=c40fd2eec0b32abd run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l65_pager_directory src=f9d6225cbf04e41f sig=b1fbee04e11fa53b run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l65_tiered_edges src=5beff9f45cbebfa1 sig=ba8f120645d447c7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/test_l68_cut_emits_hot_tiered_write src=b553682dc02c9f04 sig=e52155df507b0078 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l68_cut_keeps_cold_inventory_out_of_memory_graph src=691c4b115492b28a sig=7b5cc36d5a2778a1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_fold_reuses_cold_edges src=b2fc93dbefcc14b3 sig=ed1bd55460da26b1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_indexed_tiered_pack src=12fe852bfe6ceecd sig=695621102413d3b1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

@@ -53,7 +53,7 @@ fn object_follower_steps_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[
     let mut source = history_reader(take connected, 0)
     let mut scratch = history_buffers(1024)?
     let options = bucket_law_options(true)
-    let declaration = history_config_bytes(HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket"))?
+    let declaration = history_config_bytes(object_history_config(std.object.bucket_config(source.client), "bucket"))?
     let (take opened, _) = history_open_register(mut source, sim.time, r, options, "bucket", mut scratch, BUCKET_LAW_OP_MS)?
     let mut held = take opened
     let plan = follower_law_plan(Bucket(bucket_law_lanes(1)), options)
@@ -210,7 +210,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
         }
     }
 
-    let observed = HistoryHead(store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)),
+    let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)),
         activation: 0, entry: HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding: [0; 32])
     let denied = capacity(bound bytes 4096 { history_suffix(mut client, observed, object_ref, due) })?
     if let Error(Full(Allocation(cause))) = denied {

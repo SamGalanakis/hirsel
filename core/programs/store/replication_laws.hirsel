@@ -12,7 +12,7 @@ type ReplicationWriter {
 
 fn replication_writer(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, expected: Option[StoreId]) -> Result[ReplicationWriter, Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, "spare.test", seed, true, 1)?
-    let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(client), level: "bucket"))?
+    let authority = history_config_bytes(object_history_config(std.object.bucket_config(client), "bucket"))?
     let mut source = history_reader(take client, 0)
     let mut buffers = history_buffers(1024)?
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
@@ -43,7 +43,7 @@ fn replication_stream_row(mut raw: Bytes, key: u64, value: u64) {
 
 fn replication_packet(mut raw: Bytes, head: HistoryHead, entry_version: u64, value: u64) -> Result[(), Error] {
     let ctx = DiskContext(store: head.store, role: 2, seq: history_next_id(head.entry.seq)?)
-    history_packet_header(mut raw, ctx, head.pair.epoch, head.entry)?
+    history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, 0u32)
     list.put_word_le(mut raw, entry_version)

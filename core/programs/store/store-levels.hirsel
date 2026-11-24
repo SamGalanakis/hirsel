@@ -4,9 +4,6 @@ pub opaque type Level: send {
 }
 
 fn store_level_name(db: Db) -> String {
-    if let Some(connection) = db.disk {
-        if let Some(object_writer) = connection.object { return string.from(object_writer.level_name) }
-    }
     if is_disk(db) {
         "host"
     } else {
@@ -15,26 +12,63 @@ fn store_level_name(db: Db) -> String {
 }
 
 pub fn levels(db: Db) -> List[String] {
+    if object_writer_open(db) { return clone(object_state(db).levels) }
     let mut declared: List[String] = list.with_capacity(1)
     list.push(mut declared, store_level_name(db))
     take declared
 }
 
 pub fn level(db: Db, name: String) -> Result[Level, Error] {
-    if name != store_level_name(db) {
-        return Error(NoLevel(string.from(name)))
+    if object_writer_open(db) {
+        if list.contains(object_state(db).levels, name) {
+            return Ok(Level(store: db.store, name: string.from(name)))
+        }
+    } else if name == store_level_name(db) {
+        return Ok(Level(store: db.store, name: string.from(name)))
     }
-    Ok(Level(store: db.store, name: string.from(name)))
+    Error(NoLevel(string.from(name)))
 }
 
 pub fn durable_at(mut db: Db, receipt: Ticket, requested: Level) -> Result[(), Error] waits {
     if !same(requested.store, db.store) {
         return Error(Foreign)
     }
-    if requested.name != store_level_name(db) {
+    if object_writer_open(db) {
+        let level_total = list.len(object_state(db).levels)
+        for slot_index in 0u64 .. level_total {
+            if requested.name == object_state(db).levels[slot_index] {
+                if slot_index + 1 == level_total { return durable(mut db, receipt) }
+                return durable_weak(mut db, receipt, slot_index)
+            }
+        }
         return Error(NoLevel(string.from(requested.name)))
     }
+    if requested.name != store_level_name(db) { return Error(NoLevel(string.from(requested.name))) }
     durable(mut db, receipt)
+}
+
+fn weak_covered(db: Db, slot_index: u64, seq: u64) -> bool {
+    let backend = object_state(db)
+    let Some(waiters) = view backend.weak else { return false }
+    let frontiers = latest.read(waiters.frontiers)
+    for stronger in slot_index .. list.len(object_state(db).levels) - 1 {
+        if frontiers.seqs[stronger] >= seq { return true }
+    }
+    false
+}
+
+fn durable_weak(mut db: Db, receipt: Ticket, slot_index: u64) -> Result[(), Error] waits {
+    if receipt.open != open_number(db) { return Error(Foreign) }
+    let Journal(seq, _, _) = receipt.mark else { return durable(mut db, receipt) }
+    while !covered(db, receipt.mark) && !weak_covered(db, slot_index, seq) {
+        let outcome = journal_poll_groups(mut db)
+        if covered(db, receipt.mark) || weak_covered(db, slot_index, seq) { return Ok(()) }
+        let _ = outcome?
+        let backend = object_state(db)
+        let Some(waiters) = view backend.weak else { return Error(Io(Closed)) }
+        let _ = channel.receive(waiters.notices[slot_index]) ?=> |_| Io(Closed)
+    }
+    Ok(())
 }
 
 pub type Position {

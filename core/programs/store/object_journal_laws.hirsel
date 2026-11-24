@@ -2,7 +2,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let first_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = history_reader(take first_client, 0)
     let mut workspace = history_buffers(1024)?
-    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket"))?
+    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(source.client), "bucket"))?
     let (take held, _) = history_open_register(mut source, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let initial_head = held.head
     let (init, ready): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
@@ -21,7 +21,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     }
     let ObjectPackRead(client: take client, ..) = take source
     let (take requests, take lifetime) = std.object.split(take client)
-    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, sweep: sweep_start(), issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None)
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, sweep: sweep_start(), issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None, weak: None)
     result.unwrap(channel.send(init, take opened))
     let ObjectJournaled(2, observed_bytes, 2) = result.unwrap(channel.receive(delivered)) else {
         fail("the worker did not acknowledge both frames as one group")
@@ -421,7 +421,7 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let retained = HistoryRetention(floor: 2, earlier: list.new())
     let locate = HistoryLocateRoot(depth: 0, rows: take refs)
-    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: 2), 1, predecessor.entry, base, retained, locate)?
+    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: 2), 1, 1, predecessor.entry, base, retained, locate)?
     let mut selected = predecessor
     selected.entry = entry_ref
     selected.checkpoint = entry_ref
@@ -432,11 +432,11 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
 
 fn retention_base(id: StoreId) -> Result[WitnessCut, Error] {
     let mut raw_manifest: Bytes = list.with_capacity(1024)
-    let base = history_manifest_packet(mut raw_manifest, id)?
+    let base = history_manifest_packet(mut raw_manifest, id, 1)?
     let mut raw_entry: Bytes = list.with_capacity(1024)
-    let entry_ref = history_genesis_packet(mut raw_entry, id, base, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    let entry_ref = history_genesis_packet(mut raw_entry, id, 1, base, HistoryLocateRoot(depth: 0, rows: list.new()))?
     let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18))
-    let selected = HistoryHead(store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding: [0; 32])
+    let selected = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding: [0; 32])
     Ok(WitnessCut(head: selected, manifest: base, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
@@ -580,7 +580,7 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
     let sim = bucket_law_sim_holds(tasks, c, seed, None, list.new(), take holds, std.sim.world.plan(seed))
     let mut inspector = bucket_law_client_with(sim, tasks, "s3.test", 90, true)?
     let due = std.object.deadline_after_ms(inspector, BUCKET_LAW_OP_MS)
-    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(inspector), level: "bucket"))?
+    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(inspector), "bucket"))?
     let mut tag = witness_install_cut(mut inspector, base, metadata, Absent, due)?
     let stages_pack = retention_is_pack_case(case)
     let cold_first = retention_case_is_cold(case)

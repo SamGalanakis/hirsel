@@ -249,3 +249,12 @@ pub fn follower_starter_bytes() -> u64 {
     FOLLOWER_TASK_BYTES + order.max(FOLLOWER_STARTUP_REPLY_BYTES,
         order.max(FOLLOWER_PROVISION_BYTES, FOLLOWER_REQUEST_BYTES))
 }
+
+// Two Latest roots, their initial Arc payloads, and the lifetime channel.
+// Each weak level takes a channel with one 24-byte notice, three
+// handle slots, and a copied String descriptor and its rounded text.
+fn sim_level_bytes(names: List[String]) -> u64 {
+    let mut room = 64 + 32 + 128 + 64 + (64 + 24 + 3 * 24 + 24) * list.len(names)
+    for name in names { room += round8(string.byte_len(name)) }
+    room
+}

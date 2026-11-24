@@ -895,7 +895,7 @@ fn test_l68_replay_branch_accounts() -> Result[(), Error] {
 fn l68_object_pack(mut source: ObjectPackRead, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
     let (take raw, ptr) = l68_page_pack(owner, seq, stamp, payload_bytes)?
     let mut object_bytes = take raw
-    history_copy_header(mut object_bytes, DiskContext(store: owner, role: 3, seq: seq), 1)?
+    history_copy_header(mut object_bytes, DiskContext(store: owner, role: 3, seq: seq), 1, 1)?
     let item = history_new_ref(seq, 1, object_bytes)
     let (take stored, _) = std.object.store(mut source.client, history_key("p-", item), take object_bytes, source.deadline)
     let _ = stored ?=> |problem| Remote(problem)

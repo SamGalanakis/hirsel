@@ -9,7 +9,8 @@ type ObjectJournalStart: send {
     issued_generation: u64,
     next_pack: u64,
     export_lease: Option[ObjectExportLease],
-    reclaim: Option[ObjectReclaimCapture]
+    reclaim: Option[ObjectReclaimCapture],
+    weak: Option[WeakPublisher]
 }
 
 type ObjectJournalTask: send {
@@ -60,23 +61,31 @@ type ObjectJournalSession {
     issued_generation: u64,
     next_pack: u64,
     export_lease: Option[ObjectExportLease],
-    reclaim: Option[ObjectReclaimCapture]
+    reclaim: Option[ObjectReclaimCapture],
+    weak: Option[WeakPublisher]
 }
 
 fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
-    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim) = take input
-    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim)
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak) = take input
+    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim) = take active
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak) = take active
     let (take requests, _) = std.object.split(take client)
-    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak)
 }
 
-fn object_journal_advance(mut lane: ObjectJournalSession) -> Result[(), Error] waits {
+fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), Error] waits {
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    let advanced = history_register_advance(mut lane.client, mut lane.register, lane.authority, mut lane.buffers, due)
+    let mut candidate = lane.register.head
+    let next_position = history_next_id(candidate.entry.seq)?
+    candidate.entry = history_new_ref(next_position, candidate.pair.epoch, lane.buffers.packet)
+    let weak_barrier = view lane.weak
+    let advanced = history_register_publish(mut lane.client, mut lane.register, candidate, lane.authority, mut lane.buffers, due,
+        scoped fn(created: u64) {
+            if let Some(publisher) = weak_barrier { weak_publish(publisher, candidate, created, sequence) }
+        })
     match take advanced {
         Ok(HistoryApplied(_)) => Ok(()),
         Error(take e) => Error(take e),
@@ -129,7 +138,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
         match take selected {
             Frame(take raw, sequence) => {
                 let ctx = history_group_context(lane.register.head)?
-                history_packet_header(mut lane.buffers.packet, ctx, lane.register.head.pair.epoch, lane.register.head.entry)?
+                history_packet_header(mut lane.buffers.packet, ctx, lane.register.head.pair.epoch, lane.register.head.authority_kind, lane.register.head.entry)?
                 object_journal_add(mut lane, ctx, raw)?
                 let mut group_size = list.len(raw)
                 let mut last_sequence = sequence
@@ -154,11 +163,12 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 }
                 list.clear(mut lane.buffers.compare)
                 capacity(list.try_reserve(mut lane.buffers.compare, list.len(lane.buffers.packet)))?
-                object_journal_advance(mut lane)?
+                object_journal_advance(mut lane, last_sequence)?
                 written += group_size
                 if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
                     return Ok(())
                 }
+                if let Some(publisher) = lane.weak { weak_notify_strong(publisher.notices) }
                 let _ = channel.try_send(input.synced, ())
                 if lane.failed_polls != 0 {
                     lane.failed_polls = 0
@@ -221,10 +231,12 @@ fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] wai
     }
     let acks = channel.sender(input.acks)
     let synced = channel.sender(input.synced)
+    let weak_wakes = weak_notice_senders(initial.weak)
     let failure = object_journal_loop(take input, take initial)
     if let Error(problem) = failure {
         if let Some(signal) = signals { emit_health(signal, health_failure(problem)) }
         let _ = channel.send(acks, ObjectBroken(clone(problem)))
+        weak_notify_strong(weak_wakes)
         let _ = channel.try_send(synced, ())
     }
     take failure

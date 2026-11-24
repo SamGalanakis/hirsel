@@ -91,6 +91,7 @@ fn history_locator(mut client: std.object.Client, head: HistoryHead, mark: Histo
 }
 
 type ObjectPackRead {
+    authority_kind: u8,
     client: std.object.Client,
     locator: HistoryLocator,
     deadline: u64,
@@ -98,7 +99,7 @@ type ObjectPackRead {
 }
 
 fn history_reader(take client: std.object.Client, deadline: u64) -> ObjectPackRead {
-    ObjectPackRead(client: take client, locator: empty_history_locator(), deadline, admitted_base: None)
+    ObjectPackRead(authority_kind: 1, client: take client, locator: empty_history_locator(), deadline, admitted_base: None)
 }
 
 fn history_list_page(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {

@@ -1,4 +1,4 @@
-pub opaque type Authority = LogAuthority(Dir) | ObjectAuthority(ObjectAuthorityConfig)
+pub opaque type Authority = LogAuthority(Dir) | ObjectAuthority(ObjectAuthorityConfig) | SimAuthority(ObjectAuthorityConfig)
 
 pub fn log_authority(d: Dir) -> Authority {
     LogAuthority(d)
@@ -33,7 +33,7 @@ pub opaque type Follower {
     stopped: Option[StoreCapacity]
 }
 
-type FollowerTransport: send = DirectoryFollow(Dir) | ObjectFollow(std.object.Requests)
+type FollowerTransport: send = DirectoryFollow(Dir) | ObjectFollow(std.object.Requests, u8)
 
 type FollowerRequest: send = Bind(FollowerTransport, Option[StoreId], u64)
     | Apply(Arc[FollowCapture], u64) | Floor(Arc[FollowCapture], u64, u64, u64)
@@ -161,7 +161,11 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
     let Bind(take transport, expect, due) = box.unbox(take request) else { return }
     let mut source = match take transport {
         DirectoryFollow(directory) => DirectorySource(directory),
-        ObjectFollow(take requests) => ObjectSource(history_reader(std.object.attach(take requests, None), due)),
+        ObjectFollow(take requests, kind) => {
+            let mut remote = history_reader(std.object.attach(take requests, None), due)
+            remote.authority_kind = kind
+            ObjectSource(take remote)
+        },
     }
     let initial = initial_follow_capture(mut source, expect, ceiling)
     let admitted = if let Ok(Some(_)) = initial { true } else { false }
@@ -186,12 +190,8 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
 pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: Authority, c: Clock, expect: Option[StoreId]) -> Result[Follower, Error] waits {
     let (take transport, take workers, on_log, op_ms, due): (FollowerTransport, Option[std.object.Workers], bool, u64, u64) = match (slot.plan.kind, take authority) {
         (Directory, LogAuthority(directory)) => (DirectoryFollow(directory), None, true, 0u64, 0u64),
-        (Bucket(lanes), ObjectAuthority(ObjectAuthorityConfig(client: take client, op_ms, ..))) => {
-            if !std.object.matches_lanes(client, lanes) { return Error(Missing("follower_kind")) }
-            let deadline = std.object.deadline_after_ms(client, op_ms)
-            let (take requests, take workers) = std.object.split(take client)
-            (ObjectFollow(take requests), take workers, false, op_ms, deadline)
-        },
+        (Bucket(lanes), ObjectAuthority(take config)) => object_follow_transport(take config, lanes, 1)?,
+        (Bucket(lanes), SimAuthority(take config)) => object_follow_transport(take config, lanes, 2)?,
         _ => return Error(Missing("follower_kind")),
     }
     let minted = history_next_id(source.issued)?
@@ -200,6 +200,15 @@ pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: 
     task.check_cancel()
     source.issued = minted
     Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, pager: None, slot: take slot, workers: take workers, on_log, op_ms, clock: c, capture: take captured, stopped: None))
+}
+
+fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object.LaneConfig, kind: u8) -> Result[(FollowerTransport, Option[std.object.Workers], bool, u64, u64), Error] {
+    let ObjectAuthorityConfig(client: take client, op_ms, ..) = take config
+    if kind == 2 && !std.object.simulated(client) { return Error(Unqualified("sim:provider")) }
+    if !std.object.matches_lanes(client, lanes) { return Error(Missing("follower_kind")) }
+    let deadline = std.object.deadline_after_ms(client, op_ms)
+    let (take requests, take workers) = std.object.split(take client)
+    Ok((ObjectFollow(take requests, kind), take workers, false, op_ms, deadline))
 }
 
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {

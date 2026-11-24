@@ -281,10 +281,10 @@ fn genesis_debris_case(d: Dir, real: Clock, tasks: Tasks, seed: u64, phase: Gene
     let _ = capacity(disk_identity(predict)) ?=> Store
     let identity_bytes = capacity(disk_identity(predict)) ?=> Store
     let mut manifest: Bytes = list.new()
-    let manifest_ref = deploy_result(history_manifest_packet(mut manifest, identity_bytes))?
+    let manifest_ref = deploy_result(history_manifest_packet(mut manifest, identity_bytes, 1))?
     let mut entry_bytes: Bytes = list.new()
     let no_packs = HistoryLocateRoot(depth: 0, rows: list.new())
-    let checkpoint_ref = deploy_result(history_genesis_packet(mut entry_bytes, identity_bytes, manifest_ref, no_packs))?
+    let checkpoint_ref = deploy_result(history_genesis_packet(mut entry_bytes, identity_bytes, 1, manifest_ref, no_packs))?
     let manifest_name = history_key("m-", manifest_ref)
     let entry_name = history_key("e-", checkpoint_ref)
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)

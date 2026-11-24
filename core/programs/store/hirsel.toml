@@ -52,6 +52,7 @@ std = { major = 1 }
 "store-object-cut.hirsel" = "store"
 "store-activation.hirsel" = "store"
 "store-object-journal.hirsel" = "store"
+"store-sim-levels.hirsel" = "store"
 "store-object-writer.hirsel" = "store"
 "store-levels.hirsel" = "store"
 "store-health.hirsel" = "store"
@@ -226,4 +227,7 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_genesis_debris"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_sim_levels"]
 limit = 134217728

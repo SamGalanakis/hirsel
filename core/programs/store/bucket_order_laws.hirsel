@@ -287,8 +287,8 @@ fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let retained = HistoryRetention(floor: pos, earlier: list.new())
     let locate = HistoryLocateRoot(depth: 0, rows: list.new())
-    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: pos), pair.epoch, predecessor, reference, retained, locate)?
-    let header = HistoryHead(store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding: [0; 32])
+    let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate)?
+    let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding: [0; 32])
     Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
@@ -373,7 +373,7 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
     }
     let sim = bucket_law_sim_holds(tasks, c, seed, None, list.new(), take holds, std.sim.world.plan(seed))
     let mut publisher = bucket_law_client_with(sim, tasks, "s3.test", 19, true)?
-    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(publisher), level: "bucket"))?
+    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(publisher), "bucket"))?
     let due = std.object.deadline_after_ms(publisher, BUCKET_LAW_OP_MS)
     let first_tag = witness_install_cut(mut publisher, first, metadata, Absent, due)?
     let claimant = WitnessClaimant(tasks, r, clock: sim.time, endpoint: sim.endpoint)

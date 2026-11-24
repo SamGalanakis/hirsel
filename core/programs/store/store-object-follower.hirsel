@@ -1,11 +1,16 @@
 type ObjectAuthorityConfig {
     client: std.object.Client,
     level_name: String,
-    op_ms: u64
+    op_ms: u64,
+    sim: Option[(List[String], LevelSync)]
 }
 
 pub fn object_authority(take c: std.object.Client, level_name: String, op_ms: u64) -> Authority {
-    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms))
+    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms, sim: None))
+}
+
+pub fn sim_authority(take c: std.object.Client, declared: SimLevels, take sync: LevelSync, op_ms: u64) -> Authority {
+    SimAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(declared.strongest), op_ms, sim: Some((clone(declared.weak), take sync))))
 }
 
 type ObjectFollowHead: shareable + send {
@@ -79,7 +84,10 @@ fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCap
         Error(take problem) => return Error(take problem),
     }
     let latest = history_decode_head(scratch)?
-    history_qualify(mut source.client, source.deadline)?
+    if latest.head.authority_kind != source.authority_kind {
+        return Error(Unsupported(int.widen(latest.head.authority_kind)))
+    }
+    if source.authority_kind == 1 { history_qualify(mut source.client, source.deadline)? }
     history_check_namespace(latest, source.client)?
     Ok(Some((take latest, tag)))
 }

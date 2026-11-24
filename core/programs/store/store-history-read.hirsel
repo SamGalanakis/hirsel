@@ -30,7 +30,7 @@ fn history_object_context(path: String, id: StoreId, role: u8, reference: Histor
     if format != DISK_FORMAT {
         return Error(Unsupported(format))
     }
-    if raw[29] != 1 {
+    if raw[29] != 1 && raw[29] != 2 {
         return Error(Unsupported(int.widen(raw[29])))
     }
     Ok(ctx)

@@ -401,11 +401,11 @@ fn bucket_test_read_only_capture(c: Clock, r: Random, tasks: Tasks) -> Result[()
 // L60 wire vectors use the §2.1 and §12.2 layouts and libxxhash.
 @test
 fn bucket_test_m2_head_vectors() -> Result[(), Error] {
-    let config = HistoryConfig(place: std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), level: "bucket")
+    let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
     let payload = history_config_bytes(config)?
     let test_id = StoreId(hi: 9, lo: 10)
     let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
-    let first = HistoryHead(store: test_id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
+    let first = HistoryHead(authority_kind: 1, store: test_id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
     let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
     history_encode_head(mut raw, first, payload)?
     history_check_vector(raw, "AQABADgAAAATDx3sxKx4R0hJUlNUT1JFBQAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
@@ -453,7 +453,7 @@ fn history_check_vector(raw: Bytes, expected: String) {
 fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number: u64) -> Result[(), Error] {
     let seq = history_next_id(head.entry.seq)?
     let ctx = DiskContext(store: head.store, role: 2, seq)
-    history_packet_header(mut raw, ctx, head.pair.epoch, head.entry)?
+    history_packet_header(mut raw, ctx, head.pair.epoch, head.authority_kind, head.entry)?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, 0u32)
     list.put_word_le(mut raw, version_number)
@@ -467,12 +467,12 @@ fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number
 fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, HistoryRef), Error] waits {
     let mut first = bucket_law_client(sim, tasks, "s3.test", 1)?
     let mut second = bucket_law_client(sim, tasks, "s3.test", 2)?
-    let config = HistoryConfig(place: std.object.bucket_config(first), level: "bucket")
+    let config = object_history_config(std.object.bucket_config(first), "bucket")
     let metadata = history_config_bytes(config)?
     let mut a_buffers = history_buffers(1024)?
     let mut b_buffers = history_buffers(1024)?
     let due = std.object.deadline_after_ms(first, BUCKET_LAW_OP_MS)
-    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), metadata, mut a_buffers, due)?
+    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut a_buffers, due)?
     history_claim_packet(mut a_buffers.packet, a.head)?
     let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
         fail("genesis CLAIM did not advance")
@@ -552,13 +552,13 @@ fn bucket_test_m2_link_recovery(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     let test_id = StoreId(hi: 9, lo: 10)
     let mut raw: Bytes = list.with_capacity(1024)
     let largest = HistoryRef(seq: 1, epoch: 1, len: wire_limit, digest: 3)
-    let fitted = history_genesis_packet(mut raw, test_id, largest, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    let fitted = history_genesis_packet(mut raw, test_id, 1, largest, HistoryLocateRoot(depth: 0, rows: list.new()))?
     let admitted = history_read_mark("max MANIFEST", test_id, fitted, raw)?
     if admitted.manifest.len != wire_limit {
         fail("the max legal MANIFEST wire length was refused")
     }
     let excess = HistoryRef(seq: 1, epoch: 1, len: wire_limit + 1, digest: 3)
-    let too_large = history_genesis_packet(mut raw, test_id, excess, HistoryLocateRoot(depth: 0, rows: list.new()))?
+    let too_large = history_genesis_packet(mut raw, test_id, 1, excess, HistoryLocateRoot(depth: 0, rows: list.new()))?
     if let Error(Corrupt(Fault(why: Malformed, ..))) = history_read_mark("oversize MANIFEST", test_id, too_large, raw) {} else {
         fail("one byte above the wire limit was admitted for GET")
     }
@@ -631,7 +631,7 @@ fn bucket_m2_seed_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
 
 fn bucket_m2_object_header(mut raw: Bytes, id: StoreId, role: u8, seq: u64) -> Result[(), Error] {
     let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
-    capacity(history_append_header(mut header, DiskContext(store: id, role, seq), 1))?
+    capacity(history_append_header(mut header, DiskContext(store: id, role, seq), 1, 1))?
     for at in 0u64 .. 72 {
         raw[at] = header[at]
     }
@@ -641,7 +641,7 @@ fn bucket_m2_object_header(mut raw: Bytes, id: StoreId, role: u8, seq: u64) -> R
 fn bucket_m2_pack_entry(mut raw: Bytes, id: StoreId, manifest: HistoryRef, refs: List[HistoryRef]) -> Result[HistoryRef, Error] {
     let ctx = DiskContext(store: id, role: 2, seq: 1)
     let empty = HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0)
-    history_packet_header(mut raw, ctx, 1, empty)?
+    history_packet_header(mut raw, ctx, 1, 1, empty)?
     list.fill(mut raw, 16, 0u8)
     list.put_word_le(mut raw, manifest.seq)
     list.put_word_le(mut raw, manifest.epoch)
@@ -697,7 +697,7 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
     let mut raw_entry: Bytes = list.with_capacity(65536)
     let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
     history_create(mut client, history_key("e-", entry_ref), mut raw_entry, mut compare, due)?
-    let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
+    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
     let source = history_reader(take client, due)
     Ok((take source, head))
 }
@@ -768,12 +768,12 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
     if !s3_host_matches("s3.us-east-1.amazonaws.com", "us-east-1") || s3_host_matches("s3.dualstack.us-east-1.amazonaws.com", "us-east-1") || s3_host_matches("s3.us-east-1.amazonaws.com.example.com", "us-east-1") {
         fail("S3 host qualification used a partial match")
     }
-    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(old), level: "bucket"))?
+    let metadata = history_config_bytes(object_history_config(std.object.bucket_config(old), "bucket"))?
     let mut first = history_buffers(1024)?
     let mut successor = history_buffers(1024)?
     let id = StoreId(hi: 9, lo: 10)
     let holder = StoreId(hi: 13, lo: 14)
-    let previous = history_publish_genesis(mut old, id, StoreId(hi: 11, lo: 12), metadata, mut first, deadline)?
+    let previous = history_publish_genesis(mut old, id, StoreId(hi: 11, lo: 12), 1, metadata, mut first, deadline)?
     let unchanged = history_probe_head(mut old, previous.tag, mut first.witness, deadline)?
     if let Some(_) = unchanged {
         fail("unchanged conditional head probe returned a body")
@@ -815,7 +815,7 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
     let (take loaded, head) = bucket_m2_upload_checkpoint(d, tasks, sim)?
     let mut source = take loaded
     let mut workspace = history_buffers(1024)?
-    let cfg = HistoryConfig(place: std.object.bucket_config(source.client), level: "bucket")
+    let cfg = object_history_config(std.object.bucket_config(source.client), "bucket")
     let authority = history_config_bytes(cfg)?
     history_encode_head(mut workspace.body, head, authority)?
     let HistoryApplied(tag) = history_write_head(mut source.client, Absent, mut workspace.body, mut workspace.witness, source.deadline) else {
@@ -873,7 +873,7 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), E
     let read_source = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     let mut writer = history_reader(take initial_client, 0)
     let mut workspace = history_buffers(1024)?
-    let authority = history_config_bytes(HistoryConfig(place: std.object.bucket_config(writer.client), level: "bucket"))?
+    let authority = history_config_bytes(object_history_config(std.object.bucket_config(writer.client), "bucket"))?
     let (take opened, _) = history_open_register(mut writer, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let mut held = take opened
     let mut source = followers()

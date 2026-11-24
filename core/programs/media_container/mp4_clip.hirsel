@@ -1,0 +1,448 @@
+pub type ClipError = Container(VodError) | InvalidWindow | NoKeyframe
+
+pub type ClipLimits {
+    mux: MuxLimits,
+    nal_headers: u64
+}
+
+pub type RemuxPlan {
+    headers: VodHeaders,
+    payload: List[FileRange],
+    source_start: u64,
+    duration: u64,
+    timescale: u32
+}
+
+type Timeline {
+    delay: u64,
+    media_start: u64,
+    span: u64
+}
+
+type ClipTrack {
+    first: u64,
+    end: u64,
+    delay: u64,
+    duration: u64,
+    media_start: u64
+}
+
+fn clip_error[T](take value: Result[T, VodError]) -> Result[T, ClipError] {
+    match take value {
+        Ok(take item) => Ok(take item),
+        Error(e) => Error(Container(e)),
+    }
+}
+
+fn scale_ticks(ticks: u64, from: u32, to: u32, round_up: bool) -> Result[u64, ClipError] {
+    let divisor: u64 = int.widen(from)
+    let multiplier: u64 = int.widen(to)
+    let whole = ticks / divisor
+    let frac = (ticks % divisor) * multiplier
+    let Some(high) = int.checked_mul(whole, multiplier) else {
+        return Error(InvalidWindow)
+    }
+    let low = frac / divisor
+    let extra = if round_up && frac % divisor != 0 {
+        1u64
+    } else {
+        0u64
+    }
+    let Some(result) = int.checked_add(high, low + extra) else {
+        return Error(InvalidWindow)
+    }
+    Ok(result)
+}
+
+fn presentation(sample: VodSample) -> Result[i64, ClipError] {
+    let Some(dts): Option[i64] = int.try_narrow(sample.decode_time) else {
+        return Error(InvalidWindow)
+    }
+    let Some(pts) = int.checked_add(dts, sample.composition_offset) else {
+        return Error(InvalidWindow)
+    }
+    Ok(pts)
+}
+
+fn track_samples(vod: Vod, index: u64, mut remaining: u64) -> Result[List[VodSample], ClipError] {
+    let expected: u64 = int.widen(vod.tracks[index].info.sample_count)
+    if expected > remaining {
+        return Error(Container(ResourceLimit))
+    }
+    remaining -= expected
+    let mut samples: List[VodSample] = list.new()
+    match list.try_reserve(mut samples, expected) {
+        Ok(()) => {},
+        Error(_) => return Error(Container(ResourceLimit)),
+    }
+    clip_error(vod_samples(vod, index, expected, scoped fn(sample: VodSample) -> Result[(), VodError] {
+        list.push(mut samples, sample)
+        Ok(())
+    }))?
+    Ok(take samples)
+}
+
+fn take_span(mut spans: List[FileRange], start: u64, end: u64) {
+    let count = list.len(spans)
+    if count != 0 && spans[count - 1].end == start {
+        spans[count - 1].end = end
+    } else {
+        list.push(mut spans, FileRange(start: start, end: end))
+    }
+}
+
+fn tracks_plan(vod: Vod, index: u64, input: List[VodSample], selection: Option[ClipTrack], mut cursor: u64, mut spans: List[FileRange]) -> Result[MuxTrack, ClipError] {
+    let track = vod.tracks[index].info
+    let media = match track.handler {
+        0x76696465 => Video(track.width, track.height),
+        0x736f756e => Audio,
+        _ => return Error(Container(UnsupportedVod)),
+    }
+    let mut edits: List[Edit] = list.new()
+    let mut entry: Bytes = list.new()
+    clip_error(vod_sample_entry(vod, index, scoped fn(source: Bytes) {
+        list.append(mut entry, source)
+    }))?
+    let (first, end, movie_length) = match selection {
+        Some(s) => {
+            if s.first >= s.end || s.end > list.len(input) {
+                return Error(InvalidWindow)
+            }
+            let dts = input[s.first].decode_time
+            if s.media_start < dts {
+                return Error(Container(UnsupportedVod))
+            }
+            let Some(time): Option[i64] = int.try_narrow(s.media_start - dts) else {
+                return Error(InvalidWindow)
+            }
+            if s.delay != 0 {
+                list.push(mut edits, Edit(duration: s.delay, media_time: -1, rate_integer: 1, rate_fraction: 0))
+            }
+            list.push(mut edits, Edit(duration: s.duration, media_time: time, rate_integer: 1, rate_fraction: 0))
+            (s.first, s.end, s.delay + s.duration)
+        },
+        None => {
+            clip_error(vod_edits(vod, index, scoped fn(e: Edit) {
+                list.push(mut edits, e)
+            }))?
+            (0u64, list.len(input), track.movie_duration)
+        },
+    }
+    let mut samples: List[VodSample] = list.with_capacity(end - first)
+    let base = if first < end {
+        input[first].decode_time
+    } else {
+        0u64
+    }
+    for i in first .. end {
+        let mut sample = input[i]
+        let size: u64 = int.widen(sample.size)
+        let Some(next) = int.checked_add(cursor, size) else {
+            return Error(Container(BadTable))
+        }
+        take_span(mut spans, sample.offset, sample.offset + size)
+        sample.offset = cursor
+        sample.decode_time -= base
+        cursor = next
+        list.push(mut samples, sample)
+    }
+    Ok(MuxTrack(id: track.id, timescale: track.timescale, media: media, matrix: track.matrix, movie_duration: movie_length, sample_entry: take entry, edits: take edits, samples: take samples))
+}
+
+// The payload ranges follow the returned prefix. Append the suffix after
+// copying those ranges. Track order and each track's decode order are stable.
+pub fn remux_vod(vod: Vod, limits: MuxLimits) -> Result[RemuxPlan, ClipError] {
+    let mut remaining = limits.sample_count
+    let mut payload: List[FileRange] = list.new()
+    let mut tracks: List[MuxTrack] = list.new()
+    let mut cursor = 0u64
+    for index in 0u64 .. list.len(vod.tracks) {
+        let samples = track_samples(vod, index, mut remaining)?
+        let track = tracks_plan(vod, index, samples, None, mut cursor, mut payload)?
+        list.push(mut tracks, take track)
+    }
+    let movie = vod.movie
+    let headers = clip_error(write_vod(movie.timescale, movie.duration, tracks, cursor, limits))?
+    Ok(RemuxPlan(headers: take headers, payload: take payload, source_start: 0, duration: movie.duration, timescale: movie.timescale))
+}
+
+fn track_timeline(vod: Vod, index: u64, track: TrackIndex) -> Result[Timeline, ClipError] {
+    let mut map = Timeline(delay: 0, media_start: 0, span: track.movie_duration)
+    let mut media_seen = false
+    let mut empty_seen = false
+    let mut unsupported = false
+    clip_error(vod_edits(vod, index, scoped fn(edit: Edit) {
+        if edit.rate_integer != 1 || edit.rate_fraction != 0 || media_seen {
+            unsupported = true
+        } else if edit.media_time == -1 && !empty_seen {
+            map.delay = edit.duration
+            empty_seen = true
+        } else if edit.media_time >= 0 {
+            media_seen = true
+            map.media_start = int.truncate(edit.media_time)
+            map.span = edit.duration
+        } else {
+            unsupported = true
+        }
+    }))?
+    let Some(stop) = int.checked_add(map.delay, map.span) else {
+        return Error(InvalidWindow)
+    }
+    if unsupported || (empty_seen && !media_seen) || stop != track.movie_duration {
+        return Error(Container(UnsupportedVod))
+    }
+    Ok(map)
+}
+
+fn nal_length(vod: Vod, index: u64, codec: u32) -> Result[u64, ClipError] {
+    let is_hevc = codec == 0x68766331 || codec == 0x68657631
+    if !is_hevc && codec != 0x61766331 && codec != 0x61766333 {
+        if codec == 0x76703039 || codec == 0x61763031 {
+            return Ok(0)
+        }
+        return Error(Container(UnsupportedVod))
+    }
+    let range = vod.tracks[index].entry
+    let input = view vod.metadata
+    let entry = clip_error(vod_box(input, range.start, range.end))?
+    let children = BoxHeader(kind: codec, body: entry.body + 78, next: entry.next)
+    let config = clip_error(require_child(input, children, if is_hevc {
+        0x68766343
+    } else {
+        0x61766343
+    }))?
+    let pos = if is_hevc {
+        21u64
+    } else {
+        4u64
+    }
+    if config.next - config.body <= pos {
+        return Error(Container(BadMovie))
+    }
+    let width: u64 = int.widen((input[config.body + pos] & 3) + 1)
+    Ok(width)
+}
+
+fn idr_sample(sample: VodSample, codec: u32, width: u64, mut budget: u64, read: scoped fn(u64, u64) -> Result[Bytes, VodError] waits) -> Result[bool, ClipError] waits {
+    if width == 0 {
+        return Ok(true)
+    }
+    let is_hevc = codec == 0x68766331 || codec == 0x68657631
+    let header = if is_hevc {
+        2u64
+    } else {
+        1u64
+    }
+    let size: u64 = int.widen(sample.size)
+    let mut at = 0u64
+    while at < size {
+        if budget == 0 {
+            return Error(Container(ResourceLimit))
+        }
+        budget -= 1
+        if size - at < width + header {
+            return Error(Container(BadTable))
+        }
+        let raw = clip_error(fetch_range(sample.offset + at, width + header, read))?
+        let mut unit = 0u64
+        for i in 0u64 .. width {
+            let part: u64 = int.widen(raw[i])
+            unit = (unit << 8) | part
+        }
+        if unit < header || unit > size - at - width {
+            return Error(Container(BadTable))
+        }
+        let nal = list.slice(raw, width, width + header)
+        let is_idr = if is_hevc {
+            match media_bits.hevc.nal(nal) {
+                Ok(found) => found.idr,
+                Error(_) => return Error(Container(BadTable)),
+            }
+        } else {
+            match media_bits.h264.nal(nal) {
+                Ok(found) => found.kind == 5,
+                Error(_) => return Error(Container(BadTable)),
+            }
+        }
+        if is_idr {
+            return Ok(true)
+        }
+        at += width + unit
+    }
+    Ok(false)
+}
+
+fn clip_key(vod: Vod, index: u64, video: List[VodSample], map: Timeline, request: u64, nal_limit: u64, read: scoped fn(u64, u64) -> Result[Bytes, VodError] waits) -> Result[(u64, u64, u64), ClipError] waits {
+    let movie = vod.movie
+    let track = vod.tracks[index].info
+    if request < map.delay {
+        return Error(NoKeyframe)
+    }
+    let converted = scale_ticks(request - map.delay, movie.timescale, track.timescale, false)?
+    let Some(wanted) = int.checked_add(map.media_start, converted) else {
+        return Error(InvalidWindow)
+    }
+    let width = nal_length(vod, index, track.codec)?
+    let mut nal_budget = nal_limit
+    let mut chosen: Option[(u64, u64)] = None
+    let mut best = map.media_start
+    for i in 0u64 .. list.len(video) {
+        let sample = video[i]
+        if sample.sync {
+            let pts = presentation(sample)?
+            if pts >= 0 {
+                let time: u64 = int.truncate(pts)
+                if time >= best && time <= wanted && idr_sample(sample, track.codec, width, mut nal_budget, read)? {
+                    best = time
+                    chosen = Some((i, time))
+                }
+            }
+        }
+    }
+    let Some((first, time)) = chosen else {
+        return Error(NoKeyframe)
+    }
+    let on_movie = scale_ticks(time - map.media_start, track.timescale, movie.timescale, false)?
+    let Some(anchor) = int.checked_add(map.delay, on_movie) else {
+        return Error(InvalidWindow)
+    }
+    Ok((first, time, anchor))
+}
+
+fn clip_track_samples(movie: MovieInfo, track: TrackIndex, source: List[VodSample], timeline: Timeline, anchor: u64, stop: u64, key: Option[(u64, u64)]) -> Result[Option[ClipTrack], ClipError] {
+    let start = if anchor > timeline.delay {
+        anchor
+    } else {
+        timeline.delay
+    }
+    let track_end = timeline.delay + timeline.span
+    let end = if stop < track_end {
+        stop
+    } else {
+        track_end
+    }
+    if start >= end {
+        return Ok(None)
+    }
+    let start_delta = scale_ticks(start - timeline.delay, movie.timescale, track.timescale, false)?
+    let stop_delta = scale_ticks(end - timeline.delay, movie.timescale, track.timescale, true)?
+    let (Some(media_start), Some(media_end)) = (int.checked_add(timeline.media_start, start_delta), int.checked_add(timeline.media_start, stop_delta)) else {
+        return Error(InvalidWindow)
+    }
+    let Some(until): Option[i64] = int.try_narrow(media_end) else {
+        return Error(InvalidWindow)
+    }
+    if let Some((first, selected_time)) = key {
+        let mut last = first
+        for i in first .. list.len(source) {
+            if presentation(source[i])? < until {
+                last = i + 1
+            }
+        }
+        if last == first {
+            return Error(InvalidWindow)
+        }
+        return Ok(Some(ClipTrack(first: first, end: last, delay: start - anchor, duration: end - start, media_start: selected_time)))
+    }
+    let beginning: i64 = int.narrow(media_start)
+    let mut first: Option[u64] = None
+    let mut last = 0u64
+    for i in 0u64 .. list.len(source) {
+        let sample = source[i]
+        let pts = presentation(sample)?
+        let duration: i64 = int.widen(sample.duration)
+        let Some(play_end) = int.checked_add(pts, duration) else {
+            return Error(InvalidWindow)
+        }
+        if pts < until && play_end > beginning {
+            if let None = first {
+                first = Some(i)
+            }
+            last = i + 1
+        }
+    }
+    let Some(first_presented) = first else {
+        return Ok(None)
+    }
+    let mut first_decode = first_presented
+    if track.codec == 0x6d703461 && first_decode != 0 {
+        // One previous AAC access unit supplies overlap data at the cut.
+        first_decode -= 1
+    } else if track.codec == 0x4f707573 {
+        // Opus recommends 80 ms of seek preroll.
+        let preroll = scale_ticks(80, 1000, track.timescale, true)?
+        let dts = source[first_decode].decode_time
+        let pre = if dts > preroll {
+            dts - preroll
+        } else {
+            0u64
+        }
+        while first_decode > 0 && source[first_decode].decode_time > pre {
+            first_decode -= 1
+        }
+    }
+    Ok(Some(ClipTrack(first: first_decode, end: last, delay: start - anchor, duration: end - start, media_start: media_start)))
+}
+
+// Aligns the start to the preceding AVC/HEVC IDR or AV1/VP9 sync sample.
+// The range reader is used only for length prefixes and NAL headers.
+pub fn clip_vod(vod: Vod, start_ms: u64, end_ms: u64, limits: ClipLimits, read: scoped fn(u64, u64) -> Result[Bytes, VodError] waits) -> Result[RemuxPlan, ClipError] waits {
+    if start_ms >= end_ms {
+        return Error(InvalidWindow)
+    }
+    let movie = vod.movie
+    let start = scale_ticks(start_ms, 1000, movie.timescale, false)?
+    let wanted_end = scale_ticks(end_ms, 1000, movie.timescale, true)?
+    let stop = if wanted_end < movie.duration {
+        wanted_end
+    } else {
+        movie.duration
+    }
+    if start >= stop {
+        return Error(InvalidWindow)
+    }
+    let mut primary: Option[u64] = None
+    for i in 0u64 .. list.len(vod.tracks) {
+        let kind = vod.tracks[i].info.handler
+        if kind == 0x76696465 {
+            if let Some(_) = primary {
+                return Error(Container(UnsupportedVod))
+            }
+            primary = Some(i)
+        } else if kind != 0x736f756e {
+            return Error(Container(UnsupportedVod))
+        }
+    }
+    let Some(index) = primary else {
+        return Error(NoKeyframe)
+    }
+    let mut remaining = limits.mux.sample_count
+    let picture = vod.tracks[index].info
+    let video = track_samples(vod, index, mut remaining)?
+    let timeline = track_timeline(vod, index, picture)?
+    let (first, key_pts, anchor) = clip_key(vod, index, video, timeline, start, limits.nal_headers, read)?
+    let clip_length = stop - anchor
+    let mut tracks: List[MuxTrack] = list.new()
+    let mut spans: List[FileRange] = list.new()
+    let mut cursor = 0u64
+    for i in 0u64 .. list.len(vod.tracks) {
+        let info = vod.tracks[i].info
+        if i == index {
+            if let Some(s) = clip_track_samples(movie, info, video, timeline, anchor, stop, Some((first, key_pts)))? {
+                let chosen = tracks_plan(vod, i, video, Some(s), mut cursor, mut spans)?
+                list.push(mut tracks, take chosen)
+            } else {
+                return Error(InvalidWindow)
+            }
+        } else {
+            let audio = track_samples(vod, i, mut remaining)?
+            let audio_time = track_timeline(vod, i, info)?
+            if let Some(s) = clip_track_samples(movie, info, audio, audio_time, anchor, stop, None)? {
+                let chosen = tracks_plan(vod, i, audio, Some(s), mut cursor, mut spans)?
+                list.push(mut tracks, take chosen)
+            }
+        }
+    }
+    let headers = clip_error(write_vod(movie.timescale, clip_length, tracks, cursor, limits.mux))?
+    Ok(RemuxPlan(headers: take headers, payload: take spans, source_start: anchor, duration: clip_length, timescale: movie.timescale))
+}

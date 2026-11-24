@@ -1595,12 +1595,31 @@ fn render_pointer(s: String, declarations: List[String], tokens: List[PointerTok
 }
 
 fn declared_path(mut d: ReadTyped, name: String) {
+    if d.mode == DecodeInput {
+        return
+    }
     let slot = list.len(d.declarations)
     list.push(mut d.declarations, string.from(name))
     list.push(mut d.path, Declared(slot))
 }
 
+// DecodeInput is speculative. DiagnoseInput replays any failure with locations.
+fn push_path(mut d: ReadTyped, token: PointerToken) {
+    if d.mode != DecodeInput {
+        list.push(mut d.path, token)
+    }
+}
+
+fn truncate_path(mut d: ReadTyped, len: u64) {
+    if d.mode != DecodeInput {
+        list.truncate(mut d.path, len)
+    }
+}
+
 fn source_mark(mut d: ReadTyped, pos: u64, key: bool) {
+    if d.mode == DecodeInput {
+        return
+    }
     let path_start = list.len(d.mark_tokens)
     list.append(mut d.mark_tokens, d.path)
     list.push(mut d.marks, SourceMark(pos, source: d.pos, path_start, path_end: list.len(d.mark_tokens), key))
@@ -1698,14 +1717,14 @@ fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError]
                 let pos = d.pos
                 let mut input = text_input(s)
                 let name = typed_string(mut input, true, mut d)?
-                list.push(mut d.path, InputMember(pos))
+                push_path(mut d, InputMember(pos))
                 remember_member(s, mut seen, string.from(name), pos, d)?
             } else {
-                list.push(mut d.path, Index(i))
+                push_path(mut d, Index(i))
                 i += 1
             }
             skip_typed(s, depth + 1, mut d)?
-            list.truncate(mut d.path, path)
+            truncate_path(mut d, path)
             if after_typed(s, close, mut d)? {
                 break
             }
@@ -1783,15 +1802,23 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
     codec.put_u32(0, mut out)
     let mut n: u64 = 0
     let mut keys: Map[Bytes, ()] = map.new()
+    let atom = if plan.facts[item].form == item {
+        match plan.shapes[item] {
+            Atom(op) => Some(op),
+            _ => None,
+        }
+    } else {
+        None
+    }
     let path = list.len(d.path)
     if !ends(s, mut d.pos, b']') {
         loop {
-            list.push(mut d.path, Index(n))
+            push_path(mut d, Index(n))
             if let Some(child) = value {
                 skip(s, mut d.pos)
                 open_typed(s, depth + 1, b'[', mut d)?
                 let pair = list.len(d.path)
-                list.push(mut d.path, Index(0))
+                push_path(mut d, Index(0))
                 skip(s, mut d.pos)
                 let source = d.pos
                 let key_start = list.len(out)
@@ -1808,16 +1835,19 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
                     list.append(mut key, encoded)
                     map.insert(mut keys, take key, ())
                 }
-                list.truncate(mut d.path, pair)
+                truncate_path(mut d, pair)
                 close_typed(s, b',', mut d)?
-                list.push(mut d.path, Index(1))
+                push_path(mut d, Index(1))
                 read_shape(plan, child, s, depth + 2, mut d, mut out)?
-                list.truncate(mut d.path, pair)
+                truncate_path(mut d, pair)
                 close_typed(s, b']', mut d)?
+            } else if let Some(op) = atom {
+                skip(s, mut d.pos)
+                read_atom(plan.profile, op, s, mut d, mut out)?
             } else {
                 read_shape(plan, item, s, depth + 1, mut d, mut out)?
             }
-            list.truncate(mut d.path, path)
+            truncate_path(mut d, path)
             n += 1
             if after_typed(s, b']', mut d)? {
                 break
@@ -1847,13 +1877,13 @@ fn read_string_map(plan: JsonPlan, value: u64, s: String, depth: u64, mut d: Rea
             let pos = d.pos
             let mut input = text_input(s)
             let name = typed_string(mut input, true, mut d)?
-            list.push(mut d.path, InputMember(pos))
+            push_path(mut d, InputMember(pos))
             if d.mode != DecodeInput {
                 remember_member(s, mut seen, string.from(name), pos, d)?
             }
             codec.put_string(name, mut out) ?=> |_| LengthOverflow
             read_shape(plan, value, s, depth + 1, mut d, mut out)?
-            list.truncate(mut d.path, path)
+            truncate_path(mut d, path)
             n += 1
             if after_typed(s, b'}', mut d)? {
                 break
@@ -1871,7 +1901,7 @@ fn single_member_end(s: String, name: String, mut d: ReadTyped) -> Result[(), Ty
     let start = d.pos
     let mut input = text_input(s)
     let extra = typed_string(mut input, true, mut d)?
-    list.push(mut d.path, InputMember(start))
+    push_path(mut d, InputMember(start))
     if extra == name {
         return Error(typed_input_issue(s, d, start, DuplicateMember))
     }
@@ -1885,7 +1915,7 @@ fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d:
     let mut input = text_input(s)
     let name = typed_string(mut input, true, mut d)?
     let path = list.len(d.path)
-    list.push(mut d.path, InputMember(start))
+    push_path(mut d, InputMember(start))
     if name == "ok" {
         codec.put_tag(0, mut out)
         read_shape(plan, ok, s, depth + 1, mut d, mut out)?
@@ -1895,7 +1925,7 @@ fn read_outcome(plan: JsonPlan, ok: u64, err: u64, s: String, depth: u64, mut d:
     } else {
         return Error(typed_input_issue(s, d, start, UnknownMember))
     }
-    list.truncate(mut d.path, path)
+    truncate_path(mut d, path)
     single_member_end(s, name, mut d)
 }
 
@@ -1935,7 +1965,7 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             let member_at = d.pos
             let mut input = text_input(s)
             let name = typed_string(mut input, true, mut d)?
-            list.push(mut d.path, InputMember(member_at))
+            push_path(mut d, InputMember(member_at))
             if let Some(i) = field_index(fields, name) {
                 let byte_at = bits + i / 8
                 let mask = (1u8 << int.truncate(i % 8))
@@ -1956,7 +1986,7 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
                 remember_member(s, mut ignored, string.from(name), member_at, d)?
                 skip_typed(s, depth + 1, mut d)?
             }
-            list.truncate(mut d.path, path)
+            truncate_path(mut d, path)
             if after_typed(s, b'}', mut d)? {
                 break
             }
@@ -1989,7 +2019,7 @@ fn reorder_record(plan: JsonPlan, definition: u64, fields: List[Field], s: Strin
             if fields[i].shape != plan.facts[fields[i].shape].form {
                 declared_path(mut d, fields[i].name)
                 source_mark(mut d, list.len(out), false)
-                list.truncate(mut d.path, path)
+                truncate_path(mut d, path)
             }
             codec.put_tag(0, mut out)
         } else {
@@ -2010,7 +2040,7 @@ fn read_sum(plan: JsonPlan, variants: List[Variant], s: String, depth: u64, mut 
     let mut input = text_input(s)
     let name = typed_string(mut input, wrapped, mut d)?
     let path = list.len(d.path)
-    list.push(mut d.path, InputMember(start))
+    push_path(mut d, InputMember(start))
     for tag in 0u64 .. list.len(variants) {
         let v = variants[tag]
         if v.live && v.name == name {
@@ -2030,13 +2060,13 @@ fn read_sum(plan: JsonPlan, variants: List[Variant], s: String, depth: u64, mut 
                     if i != 0 {
                         close_typed(s, b',', mut d)?
                     }
-                    list.push(mut d.path, Index(i))
+                    push_path(mut d, Index(i))
                     read_shape(plan, fields[i], s, depth + 2, mut d, mut out)?
-                    list.truncate(mut d.path, variant)
+                    truncate_path(mut d, variant)
                 }
                 close_typed(s, b']', mut d)?
             }
-            list.truncate(mut d.path, path)
+            truncate_path(mut d, path)
             if wrapped {
                 single_member_end(s, name, mut d)?
             }
@@ -2073,6 +2103,18 @@ fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Byt
                 return Error(typed_input_issue(s, d, start, ExpectedValue))
             }
             codec.put_char(scalar, mut out)
+            Ok(())
+        },
+        3 => {
+            codec.put_u8(int.truncate(read_small_unsigned(s, 255, mut d)?), mut out)
+            Ok(())
+        },
+        4 => {
+            codec.put_u16(int.truncate(read_small_unsigned(s, 65535, mut d)?), mut out)
+            Ok(())
+        },
+        5 => {
+            codec.put_u32(int.truncate(read_small_unsigned(s, 4294967295, mut d)?), mut out)
             Ok(())
         },
         11 => read_float(profile, op, s, mut d, mut out),
@@ -2123,23 +2165,46 @@ fn read_integer(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: 
     put_integer(s, op, string.slice(s, start, end), start, d, mut out)
 }
 
+fn read_small_unsigned(s: String, limit: u64, mut d: ReadTyped) -> Result[u64, TypedError] {
+    let start = d.pos
+    let first = at(s, start)
+    if !int.is_ascii_digit(first) {
+        let issue = if first == b'-' {
+            InvalidNumber
+        } else {
+            ExpectedValue
+        }
+        return Error(typed_input_issue(s, d, start, issue))
+    }
+    let data = string.as_bytes(s)
+    let end = list.len(data)
+    let mut i = start + 1
+    let mut value: u64 = int.widen(first - b'0')
+    while i < end {
+        let c = data[i]
+        if !int.is_ascii_digit(c) {
+            if is_number_byte(c) {
+                return Error(typed_input_issue(s, d, start, InvalidNumber))
+            }
+            break
+        }
+        let digit: u64 = int.widen(c - b'0')
+        // Each previous prefix fits u32, so this arithmetic fits u64.
+        value = int.wrapping_add(int.wrapping_mul(value, 10), digit)
+        if first == b'0' || value > limit {
+            return Error(typed_input_issue(s, d, start, InvalidNumber))
+        }
+        i += 1
+    }
+    d.pos = i
+    Ok(value)
+}
+
 fn put_integer(s: String, op: u8, spelling: String, start: u64, d: ReadTyped, mut out: Bytes) -> Result[(), TypedError] {
     if !canonical_decimal(spelling) {
         return Error(typed_input_issue(s, d, start, InvalidNumber))
     }
     match op {
-        3 => {
-            let n = read_integer_value(s, (int.parse(spelling) : Result[u8, ParseError]), start, d)?
-            codec.put_u8(n, mut out)
-        },
-        4 => {
-            let n = read_integer_value(s, (int.parse(spelling) : Result[u16, ParseError]), start, d)?
-            codec.put_u16(n, mut out)
-        },
-        5 => {
-            let n = read_integer_value(s, (int.parse(spelling) : Result[u32, ParseError]), start, d)?
-            codec.put_u32(n, mut out)
-        },
         6 => {
             let n = read_integer_value(s, (int.parse(spelling) : Result[u64, ParseError]), start, d)?
             codec.put_u64(n, mut out)

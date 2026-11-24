@@ -86,3 +86,26 @@ fn position_survives_three_cuts(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_
     }
     Ok(())
 }
+
+@test
+fn log_follower_refuses_expired_catch_up(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut writer = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    close(take writer)?
+    let mut ids = followers()
+    let mut mirror = follower(mut ids, tasks, log_authority(directory), c, options)?
+    let main = option.unwrap(follower_branch(mirror, "main"))
+    // A recovery read would fail here. The expired call must return the
+    // already published position without trying to load another manifest.
+    disk_io(host.remove(directory, "MANIFEST"))?
+    match catch_up(mut mirror, 0) {
+        Error(Behind(p)) if same(p.store, main.store) && p.branch == 0 && p.version == 1 => (),
+        _ => fail("expired catch-up did not return Behind at the applied position"),
+    }
+    if version(snapshot_follower(mirror, main)?) != 1 {
+        fail("expired catch-up changed the published capture")
+    }
+    Ok(())
+}

@@ -477,6 +477,21 @@ fn journal_worker_zero(take input: JournalWorker) -> Result[(), Error] waits {
     capacity(take attempt)?
 }
 
+// STORE-SPEC §1.8: issuer, length, subject, and two BE u64s.
+fn journal_vector_stream() -> Bytes {
+    let mut key: Bytes = list.with_capacity(24)
+    list.push(mut key, 2u8)
+    list.push(mut key, 6u8)
+    list.append(mut key, b"stream")
+    list.put_word_be(mut key, 123u64)
+    list.put_word_be(mut key, 456u64)
+    take key
+}
+
+fn journal_vector_stream_name() -> StreamKey {
+    StreamKey(caller: Caller(issuer: 2, subject: clone(b"stream")), id: StreamId(t: 123, n: 456))
+}
+
 // L24's S3 half writes the specified CALL frame directly. record/reply are
 // S5's producers; the S3 reader retains no call record in resident trees.
 pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
@@ -495,7 +510,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(le(mut payload, 1, 1))
     result.unwrap(le(mut payload, 1, 4))
     result.unwrap(le(mut payload, 3, 1))
-    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    result.unwrap(blob(mut payload, journal_vector_stream()))
     let mut stream_value: Bytes = list.new()
     result.unwrap(le(mut stream_value, 1, 8))
     list.fill(mut stream_value, 32, 5u8)
@@ -504,14 +519,14 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(blob(mut payload, stream_value))
     result.unwrap(blob(mut payload, string.as_bytes("entry")))
     result.unwrap(blob(mut payload, string.as_bytes("arguments")))
-    // AP1a. The 21-byte prefix, 5-byte streams head and 61-byte reply op
+    // AP1a and §1.8. The 21-byte prefix, 5-byte streams head and 79-byte reply op
     // are followed by the 9-byte entry and 13-byte args blobs.
-    let revision_at = 109u64
+    let revision_at = 127u64
     result.unwrap(blob(mut payload, revision_vector()))
     result.unwrap(blob(mut payload, code_vector()))
     result.unwrap(le(mut payload, 0, 1))
     // Revision (36), code (52) and settle (1) add 89 bytes.
-    if list.len(payload) != 198 {
+    if list.len(payload) != 216 {
         return false
     }
     let raw = result.unwrap(disk_seal(DiskContext(store: id, role: 2, seq: seq), 72, 0x0011, 1, payload))
@@ -521,12 +536,12 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(host.sync(mut file))
     result.unwrap(host.close(take file))
     let end_path = result.unwrap(disk_path("j-", seq, ".end"))
-    // HEADER (72) + COMMIT frame overhead (16) + payload (198).
-    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 286)))
+    // HEADER (72) + COMMIT frame overhead (16) + payload (216).
+    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 304)))
     let mut reopened = result.unwrap(open(tasks, d, c, r, options))
     let b = main_branch(reopened)
     match result.unwrap(recorded(reopened, b, 1)) {
-        Some(call_record) => if call_record.record.key != string.as_bytes("entry") || call_record.record.args != string.as_bytes("arguments") || call_record.record.stream.caller.subject != string.as_bytes("stream") || !revision_is_vector(call_record.record.revision) {
+        Some(call_record) => if call_record.record.key != string.as_bytes("entry") || call_record.record.args != string.as_bytes("arguments") || call_record.record.stream != journal_vector_stream_name() || !revision_is_vector(call_record.record.revision) {
             return false
         },
         None => return false
@@ -565,7 +580,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(blob(mut short, code_vector()))
     result.unwrap(le(mut short, 0, 1))
     // The one-byte revision makes this payload 31 bytes shorter.
-    if list.len(short) != 167 {
+    if list.len(short) != 185 {
         return false
     }
     let short_raw = result.unwrap(disk_seal(DiskContext(store: bad_id, role: 2, seq: bad_seq), 72, 0x0011, 1, short))
@@ -575,7 +590,7 @@ pub fn journal_law_recorded(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
     result.unwrap(host.sync(mut short_file))
     result.unwrap(host.close(take short_file))
     let short_end = result.unwrap(disk_path("j-", bad_seq, ".end"))
-    result.unwrap(disk_write_synced(bad_dir, short_end, journal_end_bytes(bad_id, bad_seq, 255)))
+    result.unwrap(disk_write_synced(bad_dir, short_end, journal_end_bytes(bad_id, bad_seq, 273)))
     match open(tasks, bad_dir, c, r, options) {
         Error(Corrupt(fault)) => match fault.why {
             Malformed => {},
@@ -706,11 +721,12 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     let calls = begin_export_copy(mut db, scratch, result.unwrap(copied(attempt)), 0)?
     let _ = deploy_result(checkpoint(mut db))?
     let saved_calls = export_copy(take calls)?
-    // HEADER(72), put(77), FORK(46), then two CALL frames. Without the
-    // revision, the CALL frame is 42 + 98 + 113 = 253 bytes.
+    // HEADER(72), put(77), FORK(46), then two CALL frames. The first CALL
+    // starts at 195 and is 42 + 116 + 113 = 271 bytes. The second adds a
+    // 32-byte revision. Each stream key includes 18 bytes beyond its subject.
     let name = deploy_result(capacity(disk_path("j-", saved_calls.stamp.terminal, "")))?
-    let wire = deploy_result(disk_read_file(saved_calls.dir, name, 733))?
-    if list.len(wire) != 733 || read_le(wire, 149, 2) != 19 || read_le(wire, 195, 2) != 17 || read_le(wire, 211, 4) != 0 || read_le(wire, 448, 2) != 17 || read_le(wire, 464, 4) != 1 || read_le(wire, 215, 8) != 3 || read_le(wire, 468, 8) != 3 {
+    let wire = deploy_result(disk_read_file(saved_calls.dir, name, 769))?
+    if list.len(wire) != 769 || read_le(wire, 149, 2) != 19 || read_le(wire, 195, 2) != 17 || read_le(wire, 211, 4) != 0 || read_le(wire, 466, 2) != 17 || read_le(wire, 482, 4) != 1 || read_le(wire, 215, 8) != 3 || read_le(wire, 486, 8) != 3 {
         return Error(ExportMismatch)
     }
     release_export(mut db, attempt)

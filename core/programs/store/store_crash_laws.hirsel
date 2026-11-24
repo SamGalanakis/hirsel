@@ -676,7 +676,8 @@ pub fn journal_law_payload() -> bool {
     result.unwrap(le(mut payload, 1, 1))
     result.unwrap(le(mut payload, 1, 4))
     result.unwrap(le(mut payload, 3, 1))
-    result.unwrap(blob(mut payload, string.as_bytes("stream")))
+    let stream = journal_vector_stream()
+    result.unwrap(blob(mut payload, stream))
     let mut replied: Bytes = list.new()
     list.fill(mut replied, 40, 0u8)
     list.push(mut replied, 2u8)
@@ -703,7 +704,7 @@ pub fn journal_law_payload() -> bool {
     if got.data[1].key != string.as_bytes("gone") || got.data[1].value != None || got.data[1].prior != 10 {
         return false
     }
-    if got.streams[0].key != string.as_bytes("stream") {
+    if got.streams[0].key != stream {
         return false
     }
     match got.streams[0].value {
@@ -713,20 +714,20 @@ pub fn journal_law_payload() -> bool {
         None => return false
     }
     match got.call {
-        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream.caller.subject != string.as_bytes("stream") || !revision_is_vector(c.record.revision) {
+        Some(c) => if c.record.key != string.as_bytes("entry") || c.record.args != string.as_bytes("arguments") || c.record.stream != journal_vector_stream_name() || !revision_is_vector(c.record.revision) {
             return false
         },
         None => return false
     }
-    // The 21-byte fixed header, 39-byte data section, 66-byte streams prefix,
-    // 9-byte entry key and 13-byte args place revision at [148, 184).
+    // The 21-byte fixed header, 39-byte data section, 84-byte streams prefix,
+    // 9-byte entry key and 13-byte args place revision at [166, 202).
     for size in 0u64 .. 2 {
-        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 148)))
+        let mut other: Bytes = result.unwrap(copied(list.slice(payload, 0, 166)))
         result.unwrap(le(mut other, size, 4))
         if size == 1 {
             list.push(mut other, 0u8)
         }
-        list.append(mut other, list.slice(payload, 184, list.len(payload)))
+        list.append(mut other, list.slice(payload, 202, list.len(payload)))
         let read_back = journal_decode_commit("j-7", other)
         if size == 1 {
             match read_back {
@@ -755,9 +756,9 @@ pub fn journal_law_payload() -> bool {
     if !disk_corrupt(journal_decode_commit("j-7", trailing)) {
         return false
     }
-    // The CALL's stream op must have state Replied. The value starts at 80.
+    // The CALL's stream op must have state Replied. The value starts at 98.
     let mut no_reply = result.unwrap(copied(payload))
-    let _ = list.set(mut no_reply, 120, 1u8)
+    let _ = list.set(mut no_reply, 138, 1u8)
     if !disk_corrupt(journal_decode_commit("j-7", no_reply)) {
         return false
     }
@@ -766,7 +767,7 @@ pub fn journal_law_payload() -> bool {
         let mut repeated: Bytes = result.unwrap(copied(payload))
         list.set_word_le(mut repeated, 61, 2u32)
         result.unwrap(le(mut repeated, tag, 1))
-        result.unwrap(blob(mut repeated, string.as_bytes("stream")))
+        result.unwrap(blob(mut repeated, stream))
         if tag == 1 {
             result.unwrap(blob(mut repeated, replied))
         }
@@ -777,22 +778,22 @@ pub fn journal_law_payload() -> bool {
     let mut two_calls: Bytes = result.unwrap(copied(payload))
     list.set_word_le(mut two_calls, 61, 2u32)
     list.append(mut two_calls, list.slice(payload, 65, list.len(payload)))
-    let _ = list.set(mut two_calls, 242, 120u8)
+    let _ = list.set(mut two_calls, list.len(payload) + 7, b'x')
     if !disk_corrupt(journal_decode_commit("j-7", two_calls)) {
         return false
     }
-    // The stream section cannot precede data. Tag 2 is retired.
+    // The stream section cannot precede data. Format 6 tag 2 accepts only control.
     let mut reversed: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
     list.append(mut reversed, list.slice(payload, 60, list.len(payload)))
     list.append(mut reversed, list.slice(payload, 21, 60))
     if !disk_corrupt(journal_decode_commit("j-7", reversed)) {
         return false
     }
-    let mut retired: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
-    let _ = list.set(mut retired, 20, 1u8)
-    result.unwrap(le(mut retired, 2, 1))
-    list.append(mut retired, list.slice(payload, 126, list.len(payload)))
-    if !disk_corrupt(journal_decode_commit("j-7", retired)) {
+    let mut control: Bytes = result.unwrap(copied(list.slice(payload, 0, 21)))
+    let _ = list.set(mut control, 20, 1u8)
+    result.unwrap(le(mut control, 2, 1))
+    list.append(mut control, list.slice(payload, 61, list.len(payload)))
+    if !disk_corrupt(journal_decode_commit("j-7", control)) {
         return false
     }
     // Two sections with the same tag are malformed, including an empty one.

@@ -559,9 +559,6 @@ pub fn read_only_snapshot(read_source: ReadOnly) -> Snapshot {
     Snapshot(store: read_source.snapshot.store, open: read_source.snapshot.open, branch: read_source.snapshot.branch, head: read_source.snapshot.head, roots: share_roots(read_source.snapshot.roots), watermark: read_source.snapshot.watermark)
 }
 
-pub opaque type ByteRows: send {
-    cursor: PageRange
-}
 
 /// Mix a SplitMix64 seed after adding the generator stride with wrapping arithmetic.
 pub fn splitmix64(x: u64) -> u64 {
@@ -2429,24 +2426,22 @@ fn lower_bytes(id: u32, limit: Bound[Bytes], high: bool) -> Result[Bytes, Error]
     }
 }
 
-fn byte_cursor(data: PageTree, take low: Bound[Bytes], high: Bytes) -> Result[ByteRows, Error] {
+fn byte_cursor(data: PageTree, take low: Bound[Bytes], high: Bytes) -> Result[PageRange, Error] {
     let empty: Bytes = list.new()
     let (take start, inclusive) = match take low {
         Unbounded => (take empty, true),
         Included(take key) => (take key, true),
         Excluded(take key) => (take key, false),
     }
-    let cursor = open_page_range(data, Some(take start), inclusive, false, Some(copied(high)?))?
-    Ok(ByteRows(cursor: take cursor))
+    open_page_range(data, Some(take start), inclusive, false, Some(copied(high)?))
 }
 
-fn reverse_byte_cursor(data: PageTree, low: Bytes, high: Bytes) -> Result[ByteRows, Error] {
-    let cursor = open_page_range(data, Some(copied(high)?), false, true, Some(copied(low)?))?
-    Ok(ByteRows(cursor: take cursor))
+fn reverse_byte_cursor(data: PageTree, low: Bytes, high: Bytes) -> Result[PageRange, Error] {
+    open_page_range(data, Some(copied(high)?), false, true, Some(copied(low)?))
 }
 
-fn next_bytes(mut rows: ByteRows) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    next_page_range(mut rows.cursor)
+fn next_bytes(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    next_page_range(mut rows)
 }
 
 // Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
@@ -2905,7 +2900,8 @@ pub opaque type Index[J, K, V, P]: shareable + send {
     primary: std.codec.Key[K],
     readers: Arc[Readers[V]],
     kind: IndexKind,
-    payload: Option[Arc[Readers[P]]]
+    payload: Option[Arc[Readers[P]]],
+    payload_codec: std.codec.Codec[P]
 }
 
 // AB1: a table declared whole, for create_table and migrate. Each index keeps
@@ -2963,7 +2959,7 @@ pub fn with_index[J, K, V](mut s: TableSpec[K, V], name: String, by: StaticFn[fn
 }
 
 type PageRows[K, V]: send {
-    cursor: ByteRows,
+    cursor: PageRange,
     data: PageTree,
     decoder: RowDecoder[K, V]
 }
@@ -3071,33 +3067,6 @@ pub fn fetch[K, V](tx: Tx, t: Table[K, V], k: K) -> Result[Option[V], Error] {
     }
 }
 
-pub fn range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error] in tx {
-    open_range(tx, t, lo, hi, false)
-}
-
-pub fn range_reverse[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[TxRows[K, V], Error] in tx {
-    open_range(tx, t, lo, hi, true)
-}
-
-fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[TxRows[K, V], Error] in tx {
-    if !same(tx.store, t.store) {
-        return Error(Foreign)
-    }
-    readable(tx.roots, t.catalog_key, t.catalog_page, t.id)?
-    let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
-    let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let tree = transaction_collection_pages(tx)?
-    let cursor = if reverse {
-        reverse_byte_cursor(tree, low, high)?
-    } else {
-        byte_cursor(tree, Included(copied(low)?), high)?
-    }
-    let rows = PageRows(cursor: take cursor, data: take tree, decoder: table_decoder(t))
-    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse, log_tail: None))
-}
-
-// RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
-// gives the Span a fully consumed range over the same bounds covers.
 pub fn key_span[K, V](t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Read, Error] {
     Ok(Span(lower_bytes(t.id, typed_bound(t.key, lo)?, false)?, lower_bytes(t.id, typed_bound(t.key, hi)?, true)?))
 }
@@ -3152,7 +3121,7 @@ fn index_decoder[J, K, V, P](ix: Index[J, K, V, P]) -> RowDecoder[K, V] {
     RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), unique: (ix.kind == Unique), skip: Some(take skip))
 }
 
-fn indexed_rows[J, K, V, P](data: PageTree, ix: Index[J, K, V, P], take cursor: ByteRows) -> Result[PageRows[K, V], Error] {
+fn indexed_rows[J, K, V, P](data: PageTree, ix: Index[J, K, V, P], take cursor: PageRange) -> Result[PageRows[K, V], Error] {
     Ok(PageRows(cursor: take cursor, data: share_page_tree(data), decoder: index_decoder(ix)))
 }
 
@@ -3197,20 +3166,6 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
             }
         }
     }
-}
-
-pub fn lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
-    if !same(tx.store, ix.store) {
-        return Error(Foreign)
-    }
-    readable(tx.roots, ix.catalog_key, ix.catalog_page, ix.id)?
-    let low = index_bound(ix.id, ix.key, lo, false)?
-    let high = index_bound(ix.id, ix.key, hi, true)?
-    note_read(tx, Span(copied(low)?, copied(high)?))?
-    let tree = transaction_collection_pages(tx)?
-    let cursor = byte_cursor(tree, Included(take low), high)?
-    let rows = indexed_rows(tree, ix, take cursor)?
-    Ok(IndexRows(rows: take rows, reads: tx.reads))
 }
 
 fn page_limits(limits: Limits) -> Result[(), Error] {
@@ -3759,7 +3714,7 @@ fn bind_table_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
     healthy(db)?
     let catalog = view db.heads[0].roots.catalog
     let (take k, take c) = read_catalog_index(db.store, catalog, t, name, by, key)?
-    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None)?
+    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None, std.codec.of_unit())?
     register_index(mut db.indexes, bind_index(t, c, by, key))
     Ok(take handle)
 }
@@ -3767,7 +3722,7 @@ fn bind_table_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: Stati
 pub fn schema_index[J, K, V](source: Schema, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
     application_name(name)?
     let (take k, take c) = read_catalog_index(source.store, source.catalog, t, name, by, key)?
-    let handle: Index[J, K, V, ()] = catalog_index_handle(source.catalog, t, c, take k, key, None)?
+    let handle: Index[J, K, V, ()] = catalog_index_handle(source.catalog, t, c, take k, key, None, std.codec.of_unit())?
     if let Some(bindings) = source.bindings {
         log.append(bindings, bind_index(t, c, by, key))
     }
@@ -3778,7 +3733,7 @@ pub fn migration_index[J, K, V](mut phase: Migration, t: Table[K, V], name: Stri
     application_name(name)?
     let catalog = view phase.plan.roots.catalog
     let (take k, take c) = read_catalog_index(phase.plan.store, catalog, t, name, by, key)?
-    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None)?
+    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None, std.codec.of_unit())?
     list.push(mut phase.plan.bindings, bind_index(t, c, by, key))
     Ok(take handle)
 }
@@ -3799,9 +3754,9 @@ fn read_catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, t: Table[K,
 }
 
 fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J],
-    take payload: Option[Arc[Readers[P]]]) -> Result[Index[J, K, V, P], Error] {
+    take payload: Option[Arc[Readers[P]]], payload_codec: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
     Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?,
-        table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload))
+        table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload, payload_codec: payload_codec))
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -4027,8 +3982,8 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     }
     let low = index_prefix(from.id)?
     let high = index_prefix(from.id + 1)?
-    let mut entries = byte_cursor(roots.catalog, Included(take low), high)?
-    while let Some((k, v)) = next_bytes(mut entries)? {
+    let mut catalog_rows = byte_cursor(roots.catalog, Included(take low), high)?
+    while let Some((k, v)) = next_bytes(mut catalog_rows)? {
         if !retained {
             live = int.saturating_sub(live, entry(k, v))
         }
@@ -4304,35 +4259,6 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
     }
 }
 
-pub scoped type IndexRows[K, V] {
-    rows: PageRows[K, V],
-    reads: View[core.Log[Read]]
-}
-
-fn next_row[K, V](mut r: PageRows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
-    let found = next_bytes(mut r.cursor)?
-    match take found {
-        Some((take key, take raw)) => {
-            let row = advance_rows(r.decoder, r.data, key, raw, None, seen)?
-            match take row {
-                Some((take value, _)) => Ok(Some(take value)),
-                None => Ok(None)
-            }
-        },
-        None => Ok(None)
-    }
-}
-
-pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error] {
-    indexed_advance(mut r.rows, r.reads)
-}
-
-fn indexed_advance[K, V](mut rows: PageRows[K, V], reads: View[core.Log[Read]]) -> Result[Option[(K, V)], Error] {
-    next_row(mut rows, fn(key: Bytes) -> Result[(), Error] {
-        log.append(reads, Point(copied(key)?))
-        Ok(())
-    })
-}
 
 fn catalog_recharge(live: u64, roots: Roots, key: Bytes, value: Bytes, retained: bool) -> u64 {
     let old_charge = if retained {
@@ -4945,7 +4871,7 @@ fn changed_ranges(edits: List[CatalogChange], initial: u32, advanced: u32) -> Re
     Ok(take changes_by_id)
 }
 
-fn entries_of(data: PageTree, id: u32) -> Result[ByteRows, Error] {
+fn entries_of(data: PageTree, id: u32) -> Result[PageRange, Error] {
     if id == 4294967295u32 {
         return Error(malformed(0u64))
     }

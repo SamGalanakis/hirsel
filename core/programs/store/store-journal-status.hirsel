@@ -16,12 +16,12 @@ fn journal_ack(mut db: Db, take ack: Ack) -> Result[(), Error] {
                 state.acked_bytes = bytes_out
                 Ok(())
             },
-            ObjectJournaled(n, bytes_out, entries) => {
+            ObjectJournaled(n, bytes_out, journal_entries) => {
                 state.journaled = n
                 state.inflight -= bytes_out - state.acked_bytes
                 state.acked_bytes = bytes_out
                 if let Some(mut object_writer) = state.object {
-                    object_writer.entries = entries
+                    object_writer.entries = journal_entries
                 }
                 Ok(())
             },

@@ -80,10 +80,10 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, scratch: Dir, t
     deploy_result(history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due))?
     let (take mark, _) = deploy_result(history_checkpoint(mut lane.client, head, due))?
     let suffix = deploy_result(history_suffix(mut lane.client, head, head.checkpoint, due))?
-    let (take packs, take entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[HistoryRef], List[HistoryRef], Map[String, ()]), Error] {
+    let (take packs, take history_entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[HistoryRef], List[HistoryRef], Map[String, ()]), Error] {
         let locator = object_state(db).locator
         let mut packs: List[HistoryRef] = list.with_capacity(map.len(locator.rows))
-        let mut entries: List[HistoryRef] = list.with_capacity(list.len(suffix))
+        let mut history_entries: List[HistoryRef] = list.with_capacity(list.len(suffix))
         let mut names: Map[String, ()] = map.new()
         live_reclaim_name(mut names, "m-", mark.manifest)?
         live_reclaim_name(mut names, "e-", head.checkpoint)?
@@ -94,13 +94,13 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, scratch: Dir, t
         }
         for suffix_index in 0u64 .. list.len(suffix) {
             let item = history_length(suffix[suffix_index], head.checkpoint.seq + 1 + suffix_index)
-            list.push(mut entries, item)
+            list.push(mut history_entries, item)
             live_reclaim_name(mut names, "e-", item)?
         }
-        Ok((take packs, take entries, take names))
+        Ok((take packs, take history_entries, take names))
     }))?
     let mut journal_end = 72u64
-    for item in entries {
+    for item in history_entries {
         let key = history_key("e-", item)
         if item.len < 128 { return Error(Store(disk_fault(key, 112, Truncated))) }
         deploy_result(history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, due))?
@@ -110,7 +110,7 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, scratch: Dir, t
             journal_end = total
         }
     }
-    let source = ObjectExportCopy(journal: channel.sender(disk_state(db).journal), health: latest.handle(object_state(db).health), manifest: mark.manifest, packs: take packs, entries: take entries)
+    let source = ObjectExportCopy(journal: channel.sender(disk_state(db).journal), health: latest.handle(object_state(db).health), manifest: mark.manifest, packs: take packs, entries: take history_entries)
     let retained = deploy_result(copied(attempt))?
     let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation, terminal: head.checkpoint.seq, end: journal_end)
     let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))

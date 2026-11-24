@@ -4447,7 +4447,7 @@ pub fn next[K, V](r: Reader, mut c: Rows[K, V]) -> Result[Option[(K, V)], Error]
 pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List[Change], Error] waits
 pub fn changes(r: Reader, a: Snapshot, b: Snapshot) -> Result[Changes, Error] waits   // v2.58: rows and trimmed Log spans (§14.8)
 pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: Bytes, l: Limits) -> Result[ChangePage, Error] waits   // v2.57 (§1.5)
-pub fn count[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] waits   // v2.59: AP7's bounded count descends interiors
+pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] waits   // v2.59: AP7's bounded count descends interiors
 pub fn scan_page[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], l: Limits) -> Result[Page[K, V], Error] waits   // v2.59, astra 1990 #13
 pub fn find_page[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] waits
 pub fn scan_next[K, V](r: Reader, s: Snapshot, t: Table[K, V], take c: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits

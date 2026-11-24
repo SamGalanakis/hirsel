@@ -60,16 +60,16 @@ fn history_genesis_debris(key: String) -> bool {
 
 fn history_check_empty(mut client: std.object.Client, deadline: u64) -> Result[(), Error] waits {
     let mut after = string.new()
-    let mut entries = disk_allocation(scoped fn() -> Result[List[std.object.Entry], Error] {
+    let mut listed_entries = disk_allocation(scoped fn() -> Result[List[std.object.Entry], Error] {
         Ok(list.with_capacity(1000))
     })?
     loop {
-        list.clear(mut entries)
-        let page = match std.object.list(mut client, "", after, mut entries, deadline) {
+        list.clear(mut listed_entries)
+        let page = match std.object.list(mut client, "", after, mut listed_entries, deadline) {
             Ok(value) => value,
             Error(take e) => return Error(Remote(take e)),
         }
-        for member in entries {
+        for member in listed_entries {
             if !history_genesis_debris(std.object.key_text(member.key)) {
                 return Error(Exists("authority"))
             }

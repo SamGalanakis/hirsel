@@ -189,7 +189,7 @@ pub fn declare_single_index[J, K, V](mut d: Declare, t: TableDecl[K, V], name: S
     }
     let (take address, take record) = read_catalog_index(d.plan.store, d.plan.roots.catalog, t.handle, name, by, key)?
     if map.contains(d.indexes, record.id) { return Error(Exists(named(name)?)) }
-    let handle: Index[J, K, V, ()] = catalog_index_handle(d.plan.roots.catalog, t.handle, record, take address, key, None)?
+    let handle: Index[J, K, V, ()] = catalog_index_handle(d.plan.roots.catalog, t.handle, record, take address, key, None, std.codec.of_unit())?
     match d.mode {
         Follower => (),
         _ => list.push(mut d.plan.bindings, bind_index(t.handle, record, by, key)),
@@ -201,23 +201,23 @@ pub fn declare_single_index[J, K, V](mut d: Declare, t: TableDecl[K, V], name: S
 
 pub fn index[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
     by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
-    define_index(mut d, t, name, kind, by, key, None, None, false)
+    define_index(mut d, t, name, kind, by, key, None, std.codec.of_unit(), None, false)
 }
 
 pub fn covering[J, K, V, P](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
     by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J],
     project: StaticFn[fn(K, V) -> Result[P, Capacity]], take payload: std.codec.Codec[P]) -> Result[Index[J, K, V, P], Error] {
-    define_index(mut d, t, name, kind, by, key, Some((project, payload)), None, false)
+    define_index(mut d, t, name, kind, by, key, Some(project), payload, None, false)
 }
 
 pub fn covering_row[J, K, V](mut d: Declare, mut t: TableDecl[K, V], name: String, kind: IndexKind,
     by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, V], Error] {
-    define_index(mut d, t, name, kind, by, key, None, Some(arc.share(t.handle.readers)), true)
+    define_index(mut d, t, name, kind, by, key, None, t.handle.readers.codec, Some(arc.share(t.handle.readers)), true)
 }
 
 fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, kind: IndexKind,
     by: StaticFn[fn(K, V) -> Result[List[J], Capacity]], take key: std.codec.Key[J],
-    project: Option[(StaticFn[fn(K, V) -> Result[P, Capacity]], std.codec.Codec[P])],
+    project: Option[StaticFn[fn(K, V) -> Result[P, Capacity]]], codec: std.codec.Codec[P],
     take row_readers: Option[Arc[Readers[P]]], cover_row: bool) -> Result[Index[J, K, V, P], Error] {
     active_table(d, t)?
     d.failed = true
@@ -243,7 +243,7 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
         for schema in source.schemas {
             list.push(mut proposed.payload_schemas, copied(schema.schema)?)
         }
-    } else if let Some((projection, codec)) = project {
+    } else if let Some(projection) = project {
         proposed.projection = Some((copied(code.identity(projection))?, declaration_revision(d.versioned, projection)?))
         let description = std.codec.schema(codec) ?=> |_| Schema(0)
         let unit = std.codec.schema(std.codec.of_unit()) ?=> |_| Schema(0)
@@ -294,7 +294,7 @@ fn define_index[J, K, V, P](mut d: Declare, t: TableDecl[K, V], name: String, ki
             Ok(()) => (),
         }
     }
-    let handle = catalog_index_handle(d.plan.roots.catalog, t.handle, proposed, take lookup_key, key, take payload_readers)?
+    let handle = catalog_index_handle(d.plan.roots.catalog, t.handle, proposed, take lookup_key, key, take payload_readers, codec)?
     if let Follower = d.mode {
     } else {
         list.push(mut d.plan.bindings, take binding)

@@ -601,8 +601,11 @@ fn lookup_cover_points(c: Clock) -> bool waits {
     if list.len(values) != 2 || values[0] != 1 || values[1] != 1 || list.len(reads) != 2 {
         return false
     }
+    let mut suffix = key_word(1)
+    list.append(mut suffix, key_word(1))
+    list.push(mut suffix, 0u8)
     let span = match reads[0] {
-        Span(low, high) => low == result.unwrap(logical_key(2, key_word(1))) && high == result.unwrap(logical_key(2, key_word(2))),
+        Span(low, high) => low == result.unwrap(logical_key(2, key_word(1))) && high == result.unwrap(logical_key(2, suffix)),
         _ => false
     }
     let point = match reads[1] {
@@ -645,12 +648,12 @@ fn lookup_cover_points(c: Clock) -> bool waits {
         return false
     }
     let zero = observe_lookup(e, ix, 0)
-    if list.len(zero.0) != 0 || list.len(zero.1) != 1 {
+    if list.len(zero.0) != 0 || list.len(zero.1) != 0 {
         return false
     }
     let all = observe_lookup(e, ix, 8)
     let expected: Inline[u64, 6] =[1, 13, 2, 9, 3, 9]
-    if list.len(all.0) != 6 || list.len(all.1) != 4 {
+    if list.len(all.0) != 6 || list.len(all.1) != 7 {
         return false
     }
     for i in 0u64 .. 6 {
@@ -963,7 +966,7 @@ pub fn law_range_prefix(c: Clock) -> bool waits {
     if read_set_hit(forward, middle) || !read_set_hit(two_forward, middle) {
         return false
     }
-    if result.unwrap(count(result.unwrap(reader(db, 0u64)), snapshot(db), sh, Included(2), Excluded(8))) != 4 {
+    if result.unwrap(count_at(result.unwrap(reader(db, 0u64)), snapshot(db), sh, Included(2), Excluded(8))) != 4 {
         return false
     }
     let mut rows = result.unwrap(scan_reverse(result.unwrap(reader(db, 0u64)), snapshot(db), sh, Included(2), Excluded(8)))

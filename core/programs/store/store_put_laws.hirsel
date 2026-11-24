@@ -164,7 +164,7 @@ pub fn law_snapshots(c: Clock) -> bool {
     }
     let held = snapshot(db)
     let before = version(held)
-    let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[ByteRows, Error] {
+    let rows_result = execute(mut db, 0, 30, None, fn(mut tx: Tx) -> Result[PageRange, Error] {
         let rows = byte_cursor(tx.roots.collections, Included(prefix(1)?), prefix(2)?)?
         put_bytes(mut tx, 1, key_word(0), key_word(9999))?
         Ok(take rows)

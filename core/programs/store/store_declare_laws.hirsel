@@ -347,3 +347,84 @@ fn test_unique_conflict_atomic(c: Clock) -> Result[(), Error] waits {
     if version(snapshot(db)) != staged_base { return Error(MigrationFault) }
     Ok(())
 }
+
+fn typed_read_keys(k: (u8, u64), value: u64) -> Result[List[(u8, u64)], Capacity] {
+    let mut keys: List[(u8, u64)] = list.new()
+    list.push(mut keys, (k.0, value % 2))
+    Ok(take keys)
+}
+
+fn typed_read_owner(k: (u8, u64), value: u64) -> Result[List[u64], Capacity] {
+    backfill_keys(k.1, k.1)
+}
+
+fn typed_read_payload(k: (u8, u64), value: u64) -> Result[u64, Capacity] {
+    Ok(k.1 + value)
+}
+
+fn typed_cursor_case(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key: std.codec.Key[(u8, u64)] = std.codec.key_of()
+    let value = std.codec.of_u64()
+    let mut schema = declare(db, Migrate)?
+    let mut item_decl = declare_table(mut schema, "items", key, value)?
+    let covering_index = covering(mut schema, mut item_decl, "cover", Many, code.describe(typed_read_keys), key, code.describe(typed_read_payload), value)?
+    let unique_index = covering_row(mut schema, mut item_decl, "owner", Unique, code.describe(typed_read_owner), std.codec.key_u64())?
+    let items = finish(mut schema, take item_decl)?
+    let _ = seal(mut db, take schema)?
+    let inserted = run(mut db, None, items, fn(mut tx, target) -> Result[(), Error] {
+        put(mut tx, target, (255u8, 1u64), 11)?
+        put(mut tx, target, (255u8, 2u64), 13)?
+        put(mut tx, target, (0u8, 20u64), 17)?
+        if count(tx, target, Included((255u8, 0u64)), Unbounded)? != 2 { return Error(MigrationFault) }
+        Ok(())
+    })?
+    if let Committed(_) = inserted {} else { return Error(MigrationFault) }
+    let at = snapshot(db)
+    let read_handle = reader(db, 0)?
+    let observed = look(read_handle, at, None, (items, covering_index, unique_index), fn(tx, input) -> Result[(), Error] {
+        let pair = (255u8, 1u64)
+        let leading: std.codec.Key[u8] = std.codec.key_of()
+        if fetch(tx, input.0, pair)? != Some(11u64) { return Error(MigrationFault) }
+        let mut table_cursor = range_prefix(tx, input.0, 255u8, leading)?
+        if next_in(tx, mut table_cursor)? != Some((pair, 11u64)) ||
+            next_in(tx, mut table_cursor)? != Some(((255u8, 2u64), 13u64)) || next_in(tx, mut table_cursor)? != None {
+            return Error(MigrationFault)
+        }
+        match range_prefix(tx, input.0, 255u64, std.codec.key_u64()) {
+            Error(Schema(0)) => (),
+            _ => return Error(MigrationFault),
+        }
+        let mut joined = lookup_prefix(tx, input.1, 255u8, leading)?
+        if next_indexed(mut joined)? != Some((pair, 11u64)) { return Error(MigrationFault) }
+        let mut covering_cursor = entries(tx, input.1, Included(pair), Included(pair))?
+        if next_entry(mut covering_cursor)? != Some((pair, pair, 12u64)) ||
+            next_entry(mut covering_cursor)? != Some((pair, (255u8, 2u64), 15u64)) || next_entry(mut covering_cursor)? != None {
+            return Error(MigrationFault)
+        }
+        let mut owners = entries(tx, input.2, Included(2), Included(2))?
+        if next_entry(mut owners)? != Some((2u64, (255u8, 2u64), 13u64)) || next_entry(mut owners)? != None {
+            return Error(MigrationFault)
+        }
+        Ok(())
+    })?
+    match take observed {
+        Seen(Seen(value: Ok(()), reads: observed_reads, ..)) => {
+            let mut points = 0u64
+            for cursor_read in observed_reads {
+                if let Point(_) = cursor_read { points += 1 }
+            }
+            if points != 2 { return Error(MigrationFault) }
+        },
+        _ => return Error(MigrationFault),
+    }
+    Ok(())
+}
+
+@test
+fn test_typed_read_laws(c: Clock) -> Result[(), Error] waits {
+    if !law_typed_model(c) || !law_schema_numbers(c) || !lookup_cover_points(c) {
+        return Error(MigrationFault)
+    }
+    typed_cursor_case(c)
+}

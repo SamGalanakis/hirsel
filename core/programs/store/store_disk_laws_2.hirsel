@@ -538,9 +538,9 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         return Error(Foreign)
     }
     durable(mut db, done.ticket)?
-    let entries = result.unwrap(std.dir.list(directory))
-    let mut original: List[Bytes] = list.with_capacity(list.len(entries))
-    for file in entries {
+    let listed_entries = result.unwrap(std.dir.list(directory))
+    let mut original: List[Bytes] = list.with_capacity(list.len(listed_entries))
+    for file in listed_entries {
         list.push(mut original, disk_read_paged_file(directory, file.name, 4096)?)
     }
     let planned = 72u64 + 16 + 8 + 6 + 1024
@@ -551,11 +551,11 @@ fn check_publish_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         _ => return Error(Foreign),
     }
     let after = result.unwrap(std.dir.list(directory))
-    if list.len(after) != list.len(entries) {
+    if list.len(after) != list.len(listed_entries) {
         return Error(Foreign)
     }
-    for i in 0u64 .. list.len(entries) {
-        if after[i].name != entries[i].name || disk_read_paged_file(directory, after[i].name, 4096)? != original[i] {
+    for i in 0u64 .. list.len(listed_entries) {
+        if after[i].name != listed_entries[i].name || disk_read_paged_file(directory, after[i].name, 4096)? != original[i] {
             return Error(Foreign)
         }
     }

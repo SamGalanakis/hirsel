@@ -76,9 +76,9 @@ type RefusalFile {
 }
 
 fn refusal_directory(d: Dir) -> List[RefusalFile] waits {
-    let entries = result.unwrap(std.dir.list(d))
-    let mut files: List[RefusalFile] = list.with_capacity(list.len(entries))
-    for listed in entries {
+    let listed_entries = result.unwrap(std.dir.list(d))
+    let mut files: List[RefusalFile] = list.with_capacity(list.len(listed_entries))
+    for listed in listed_entries {
         if let File = listed.kind {
             let body = result.unwrap(std.file.read(d, listed.name))
             list.push(mut files, RefusalFile(name: clone(listed.name), body: take body))
@@ -538,7 +538,7 @@ fn test_l79_overlay_trim_evidence() -> Result[(), Error] {
     }
     match (replay_overlay_at(edited, first_key), replay_overlay_at(inherited, first_key), replay_overlay_at(edited, last_key)) {
         (None, Some(_), Some(_)) => (),
-        _ => fail("L79: trim removed the wrong entries or changed the fork source"),
+        _ => fail("L79: trim removed the wrong listed_entries or changed the fork source"),
     }
     let Error(Corrupt(Fault(offset: 120, why: Malformed, ..))) = replay_overlay_trim(mut edited, "j-1", 120, ReplayOrigin(ordinal: 5, branch: 1), 9, retained, JournalTrim(floor: 5, dropped: 85)) else {
         fail("L79: trim undercounting known suffix bytes must fail at replay")

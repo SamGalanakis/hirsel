@@ -1,0 +1,287 @@
+pub type GifFrame {
+    delay_centiseconds: u16,
+    rgba: Bytes
+}
+
+pub type GifAnimation {
+    width: u32,
+    height: u32,
+    plays: u32,
+    frames: List[GifFrame]
+}
+
+type GifControl {
+    delay: u16,
+    disposal: u8,
+    transparent: u16
+}
+
+type GifRect {
+    x: u64,
+    y: u64,
+    width: u64,
+    height: u64,
+    palette: BoxRange,
+    interlace: bool
+}
+
+type GifBits {
+    at: u64,
+    end: u64,
+    register: u32,
+    held: u32
+}
+
+fn gif_control() -> GifControl {
+    GifControl(delay: 0, disposal: 0, transparent: 256)
+}
+
+pub fn decode_gif(input: Bytes, limits: Limits) -> Result[GifAnimation, Error] {
+    if list.len(input) > limits.max_bytes {
+        return Error(ByteLimit)
+    }
+    match (bound steps limits.max_steps {
+        decode_gif_inner(input, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn decode_gif_inner(input: Bytes, limits: Limits) -> Result[GifAnimation, Error] {
+    let header = probe_header(input, limits)?
+    if let Gif = header.format {} else {
+        return Error(UnknownFormat)
+    }
+    let size = rgba_size(header.width, header.height)?
+    let width: u64 = int.widen(header.width)
+    let mut canvas = alloc_bytes(size)?
+    list.fill(mut canvas, size, 0)
+    let table_end = 13 + gif_table_size(input[10])
+    let global = BoxRange(start: 13, end: table_end)
+    let background_index: u64 = int.widen(input[11])
+    let background = if global.start + 3 * background_index < global.end {
+        gif_rgb(input, global.start + 3 * background_index)
+    } else {
+        0
+    }
+    let count: u64 = int.widen(header.frame_count)
+    let mut frames: List[GifFrame] = list.new()
+    if let Error(_) = list.try_reserve(mut frames, count) {
+        return Error(ByteLimit)
+    }
+    let mut control = gif_control()
+    let mut plays = 1u32
+    let mut at = table_end
+    while input[at] != 0x3b {
+        if input[at] == 0x21 {
+            let tag = input[at + 1]
+            at += 2
+            let next = gif_skip(input, at)?
+            if tag == 0xf9 {
+                let flags = input[at + 1]
+                let disposal = (flags >> 2) & 7
+                if disposal > 3 || flags & 0xe0 != 0 {
+                    return Error(Malformed)
+                }
+                control.delay = tiff_short(input, at + 2, true)
+                control.disposal = disposal
+                control.transparent = if flags & 1 == 0 {
+                    256
+                } else {
+                    int.widen(input[at + 4])
+                }
+            } else if tag == 0x01 {
+                // The optional GIF text rendering block needs a font.
+                return Error(Unsupported)
+            } else if tag == 0xff && next - at == 17 && input[at] == 11 && (list.slice(input, at + 1, at + 12) == b"NETSCAPE2.0" || list.slice(input, at + 1, at + 12) == b"ANIMEXTS1.0") && input[at + 12] == 3 && input[at + 13] == 1 {
+                let repeats: u32 = int.widen(tiff_short(input, at + 14, true))
+                plays = if repeats == 0 {
+                    0
+                } else {
+                    repeats + 1
+                }
+            }
+            at = next
+            continue
+        }
+        at += 1
+        let flags = input[at + 8]
+        let start = at + 9
+        let local_end = start + gif_table_size(flags)
+        let rect = GifRect(x: int.widen(tiff_short(input, at, true)), y: int.widen(tiff_short(input, at + 2, true)), width: int.widen(tiff_short(input, at + 4, true)), height: int.widen(tiff_short(input, at + 6, true)), palette: if local_end == start {
+            global
+        } else {
+            BoxRange(start: start, end: local_end)
+        }, interlace: flags & 64 != 0)
+        let trans: u64 = int.widen(control.transparent)
+        if trans < 256 && trans >= (rect.palette.end - rect.palette.start) / 3 {
+            return Error(Malformed)
+        }
+        let clear: u32 = if control.transparent != 256 {
+            0
+        } else {
+            background
+        }
+        if list.len(frames) == 0 && clear != 0 {
+            for pos in 0u64 .. size / 4 {
+                list.set_word_be(mut canvas, pos * 4, clear)
+            }
+        }
+        let mut previous: Bytes = list.new()
+        if control.disposal == 3 {
+            previous = alloc_bytes(size)?
+            list.append(mut previous, canvas)
+        }
+        let end = gif_skip(input, local_end + 1)?
+        gif_lzw(input, local_end, end, rect, width, control.transparent, mut canvas)?
+        let mut rgba = alloc_bytes(size)?
+        list.append(mut rgba, canvas)
+        list.push(mut frames, GifFrame(delay_centiseconds: control.delay, rgba: take rgba))
+        if control.disposal == 2 {
+            for y in 0u64 .. rect.height {
+                let row = ((rect.y + y) * width + rect.x) * 4
+                for x in 0u64 .. rect.width {
+                    list.set_word_be(mut canvas, row + x * 4, clear)
+                }
+            }
+        } else if control.disposal == 3 {
+            canvas = take previous
+        }
+        control = gif_control()
+        at = end
+    }
+    Ok(GifAnimation(width: header.width, height: header.height, plays: plays, frames: take frames))
+}
+
+fn gif_rgb(input: Bytes, at: u64) -> u32 {
+    (u24le(input, at) & 0xff) << 24 | (u24le(input, at) & 0xff00) << 8 | (u24le(input, at) & 0xff0000) >> 8 | 255
+}
+
+fn gif_code(input: Bytes, limit: u64, n: u32, mut bits: GifBits) -> Result[u16, Error] {
+    while bits.held < n {
+        if bits.at == bits.end {
+            if bits.at >= limit || input[bits.at] == 0 {
+                return Error(Truncated)
+            }
+            let count: u64 = int.widen(input[bits.at])
+            bits.at += 1
+            bits.end = bits.at + count
+        }
+        let value: u32 = int.widen(input[bits.at])
+        bits.at += 1
+        bits.register |= value << bits.held
+        bits.held += 8
+    }
+    let value: u16 = int.narrow(bits.register & ((1u32 << n) - 1))
+    bits.register >>= n
+    bits.held -= n
+    Ok(value)
+}
+
+fn gif_lzw(input: Bytes, start: u64, end: u64, rect: GifRect, stride: u64, transparent: u16, mut canvas: Bytes) -> Result[(), Error] {
+    let minimum: u16 = int.widen(input[start])
+    let clear = 1u16 << minimum
+    let terminator = clear + 1
+    let mut count = minimum + 1
+    let mut cursor = GifBits(at: start + 1, end: start + 1, register: 0, held: 0)
+    if gif_code(input, end, int.widen(count), mut cursor)? != clear {
+        return Error(Malformed)
+    }
+    let mut next = clear + 2
+    let mut previous = 4096u16
+    let mut prefix: Inline[u16, 4096] =[0; 4096]
+    let mut suffix: Inline[u16, 4096] =[0; 4096]
+    let mut stack: Inline[u16, 4096] =[0; 4096]
+    let mut emitted = 0u64
+    let expected = rect.width * rect.height
+    while true {
+        let code = gif_code(input, end, int.widen(count), mut cursor)?
+        if code == clear {
+            next = clear + 2
+            count = minimum + 1
+            previous = 4096
+            continue
+        }
+        if code == terminator {
+            if emitted != expected {
+                return Error(Malformed)
+            }
+            return Ok(())
+        }
+        if code > next || (code == next && previous == 4096) {
+            return Error(Malformed)
+        }
+        let extra = code == next
+        let mut node = if extra {
+            previous
+        } else {
+            code
+        }
+        let mut length = 0u64
+        while node >= clear {
+            let index: u64 = int.widen(node)
+            stack[length] = suffix[index]
+            length += 1
+            node = prefix[index]
+        }
+        let first = node
+        stack[length] = first
+        length += 1
+        let more: u64 = if extra {
+            1
+        } else {
+            0
+        }
+        if length + more > expected - emitted {
+            return Error(Malformed)
+        }
+        for i in 0u64 .. length + more {
+            let value = if i < length {
+                stack[length - 1 - i]
+            } else {
+                first
+            }
+            let palette_index: u64 = int.widen(value)
+            let color = rect.palette.start + palette_index * 3
+            if color >= rect.palette.end {
+                return Error(Malformed)
+            }
+            if value != transparent {
+                let y = gif_row(rect, emitted / rect.width)
+                let x = emitted % rect.width
+                list.set_word_be(mut canvas, ((rect.y + y) * stride + rect.x + x) * 4, gif_rgb(input, color))
+            }
+            emitted += 1
+        }
+        if next < 4096 && previous != 4096 {
+            let index: u64 = int.widen(next)
+            prefix[index] = previous
+            suffix[index] = first
+            next += 1
+            if next < 4096 && next == (1u16 << count) {
+                count += 1
+            }
+        }
+        previous = code
+    }
+    Error(Truncated)
+}
+
+fn gif_row(rect: GifRect, row: u64) -> u64 {
+    if !rect.interlace {
+        return row
+    }
+    let r0 = pass_length(rect.height, 0, 8)
+    let r1 = pass_length(rect.height, 4, 8)
+    let r2 = pass_length(rect.height, 2, 4)
+    if row < r0 {
+        row * 8
+    } else if row < r0 + r1 {
+        4 + (row - r0) * 8
+    } else if row < r0 + r1 + r2 {
+        2 + (row - r0 - r1) * 4
+    } else {
+        1 + (row - r0 - r1 - r2) * 2
+    }
+}

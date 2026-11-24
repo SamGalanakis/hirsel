@@ -1,0 +1,50 @@
+@test
+fn gif_and_avif_reference() -> Result[(), ()] {
+    let limits = image.Limits(max_bytes: 4096, max_pixels: 96, max_frames: 2, max_steps: 1000000)
+    let gif = result.unwrap(image.decode_gif(fixture(4), limits))
+    if gif.width != 8 || gif.height != 6 || list.len(gif.frames) != 2 || gif.frames[0].delay_centiseconds != 3 || gif.frames[1].delay_centiseconds != 3 {
+        fail("GIF dimensions, frame count or delay differ from Pillow")
+    }
+    for i in 0u64 .. 48 {
+        let first: u32 = list.word_be(gif.frames[0].rgba, i * 4)
+        let second: u32 = list.word_be(gif.frames[1].rgba, i * 4)
+        if first != 0x132a5fff || second != 0x273578ff {
+            fail("GIF pixel differs from Pillow")
+        }
+    }
+    let file = fixture(3)
+    let still = result.unwrap(image.demux_avif(file, limits))
+    let raw = b"\x0a\x05\x18\x08\xbd\x6c\x02\x32\x12\x18\x00\x00\x00\x50\x00\x00\x00\x00\xb0\x13\x51\x3f\x14\x4e\x7c\xb4\x60"
+    let cfg = b"\x81\x00\x0c\x00"
+    if list.slice(file, still.primary.payload.start, still.primary.payload.end) != raw || list.slice(file, still.primary.config.start, still.primary.config.end) != cfg || still.info.has_alpha {
+        fail("AVIF ranges differ from FFmpeg file")
+    }
+    let alpha_raw = b"\x0a\x05\x18\x08\xbd\x6d\x50\x32\x07\x18\x00\x00\x01\x40\x04\x0f"
+    let alpha_cfg = b"\x81\x00\x1c\x00"
+    let primary = image.AvifSource(av1: take raw, configuration: take cfg)
+    let alpha = image.AvifSource(av1: take alpha_raw, configuration: take alpha_cfg)
+    let options = image.AvifOptions(width: 8, height: 6, bit_depth: 8, orientation: 7, monochrome: false, color_space: DisplayP3)
+    let packed = result.unwrap(image.mux_avif(primary, Some(take alpha), options, limits))
+    let again = result.unwrap(image.demux_avif(packed, limits))
+    if again.info.width != 8 || again.info.height != 6 || again.info.orientation != 7 || !again.info.has_alpha {
+        fail("AVIF orientation, extent or auxiliary alpha changed")
+    }
+    if let DisplayP3 = again.info.color_space {} else {
+        fail("AVIF nclx lost Display P3")
+    }
+    if let Some(item) = again.alpha {
+        if list.slice(packed, item.payload.start, item.payload.end) != b"\x0a\x05\x18\x08\xbd\x6d\x50\x32\x07\x18\x00\x00\x01\x40\x04\x0f" {
+            fail("AVIF alpha extent differs from FFmpeg payload")
+        }
+    } else {
+        fail("AVIF auxl relationship missing")
+    }
+    let mut damaged: Bytes = list.with_capacity(list.len(file))
+    list.append(mut damaged, file)
+    // FFmpeg's first iloc extent offset at byte 127 must point inside mdat.
+    list.set_word_be(mut damaged, 127, 0u32)
+    if let Ok(_) = image.demux_avif(damaged, limits) {
+        fail("accepted AVIF extent outside mdat")
+    }
+    Ok(())
+}

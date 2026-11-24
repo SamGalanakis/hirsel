@@ -48,7 +48,7 @@ fn unique_range(previous: BoxRange, body: u64, end: u64) -> Result[BoxRange, Err
     }
 }
 
-fn probe_avif(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
+fn probe_avif_boxes(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
     let n = list.len(input)
     let ftyp = avif_box(input, 0, n)?
     avif_brand(input, media_container.mp4.box_body(ftyp), media_container.mp4.box_next(ftyp))?

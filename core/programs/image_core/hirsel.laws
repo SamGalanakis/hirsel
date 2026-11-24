@@ -1,3 +1,4 @@
 hirsel.laws 1
+image_core@1/tests/gif_and_avif_reference src=8a8a92ebd7e5ee45 sig=8e64a8f3f9f5c27e run=acdd7fe37d41c86f bug=- oracle=- rows=pending
 image_core@1/tests/png_and_qoi_reference_pixels src=8d0c6e8dcfdb3587 sig=e1af6848ff85bf9c run=acdd7fe37d41c86f bug=- oracle=- rows=pending
 image_core@1/tests/probe_headers_and_bombs src=686f8d1f44afb7b4 sig=6e7259e3d0335cb1 run=acdd7fe37d41c86f bug=- oracle=- rows=pending

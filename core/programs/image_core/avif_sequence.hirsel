@@ -1,0 +1,101 @@
+fn av1_bits(input: Bytes, mut at: u64, count: u64) -> Result[u32, Error] {
+    if (at + count + 7) / 8 > list.len(input) {
+        return Error(Truncated)
+    }
+    let mut value = 0u32
+    for bit in at .. at + count {
+        let shift: u8 = int.narrow(7 - bit % 8)
+        let next: u32 = int.widen((input[bit / 8] >> shift) & 1)
+        value = (value << 1) | next
+    }
+    at += count
+    Ok(value)
+}
+
+// AV1 §5.5.1 sequence_header_obu, through the maximum frame dimensions.
+fn av1_size(sequence: Bytes) -> Result[(u32, u32), Error] {
+    let mut at = 0u64
+    let profile = av1_bits(sequence, mut at, 3)?
+    let still = av1_bits(sequence, mut at, 1)?
+    let reduced = av1_bits(sequence, mut at, 1)?
+    if profile > 2 || still == 0 {
+        return Error(Unsupported)
+    }
+    if reduced == 1 {
+        let _ = av1_bits(sequence, mut at, 5)?
+    } else {
+        let timing = av1_bits(sequence, mut at, 1)?
+        if timing != 0 {
+            // Timing models apply to timed streams.
+            return Error(Unsupported)
+        }
+        let display_delay = av1_bits(sequence, mut at, 1)?
+        let points = av1_bits(sequence, mut at, 5)? + 1
+        for _ in 0u32 .. points {
+            let _ = av1_bits(sequence, mut at, 12)?
+            let level = av1_bits(sequence, mut at, 5)?
+            if level > 7 {
+                let _ = av1_bits(sequence, mut at, 1)?
+            }
+            if display_delay != 0 && av1_bits(sequence, mut at, 1)? != 0 {
+                let _ = av1_bits(sequence, mut at, 4)?
+            }
+        }
+    }
+    let w: u64 = int.widen(av1_bits(sequence, mut at, 4)? + 1)
+    let h: u64 = int.widen(av1_bits(sequence, mut at, 4)? + 1)
+    let width = av1_bits(sequence, mut at, w)? + 1
+    let height = av1_bits(sequence, mut at, h)? + 1
+    Ok((width, height))
+}
+
+fn validate_av1_still(packet: Bytes, limits: Limits) -> Result[(), Error] {
+    let mut at = 0u64
+    let mut sequence = false
+    let mut frame = false
+    while at < list.len(packet) {
+        let obu = match media_bits.av1.parse_obu(packet, at) {
+            Ok(value) => value,
+            Error(_) => return Error(Malformed),
+        }
+        if obu.kind == 1 {
+            if sequence || frame {
+                return Error(Malformed)
+            }
+            let (width, height) = av1_size(list.slice(packet, obu.payload_start, obu.end))?
+            check_size(width, height, 1, limits)?
+            sequence = true
+        } else if obu.kind == 3 || obu.kind == 6 {
+            if frame || !sequence || obu.end == obu.payload_start {
+                return Error(Malformed)
+            }
+            frame = true
+        }
+        at = obu.end
+    }
+    if !frame {
+        return Error(Malformed)
+    }
+    Ok(())
+}
+
+fn validate_av1_config(config: Bytes, limits: Limits) -> Result[(), Error] {
+    if list.len(config) < 4 || config[0] != 0x81 || config[3] & 0xe0 != 0 {
+        return Error(Malformed)
+    }
+    let mut at = 4u64
+    while at < list.len(config) {
+        let obu = match media_bits.av1.parse_obu(config, at) {
+            Ok(value) => value,
+            Error(_) => return Error(Malformed),
+        }
+        if obu.kind == 1 {
+            let (width, height) = av1_size(list.slice(config, obu.payload_start, obu.end))?
+            check_size(width, height, 1, limits)?
+        } else if obu.kind != 5 && obu.kind != 15 {
+            return Error(Malformed)
+        }
+        at = obu.end
+    }
+    Ok(())
+}

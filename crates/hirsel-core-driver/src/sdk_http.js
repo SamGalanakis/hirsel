@@ -330,6 +330,11 @@ function subscribeHttp(client, options, binding, request, subscription = {}) {
         if (response.status !== binding.okStatus) {
           let body;
           try { body = await response.text(); } catch { body = ''; }
+          // An empty 503 is the place unable to decide now: a binding's Unavailable
+          // (RUNNER-SPEC §15.6) or transport capacity. It is not a credential failure, so
+          // the same bytes re-request after jittered backoff, as after a lost stream.
+          // A 503 with a body is the subscription's own refusal (budget, reset).
+          if (response.status === 503 && body === '') return {tag: 'Lost'};
           return {tag: 'Refused', status: response.status, body};
         }
         retried = false;

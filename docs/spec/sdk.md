@@ -373,9 +373,10 @@ issuer-1 reset to LocallyUnknown is unchanged. Calls queued in memory wait
 through `CredentialNeeded`.
 
 A binding that cannot decide answers Close 1013 before Welcome or HTTP 503 at
-bind (RUNNER-SPEC §15.6, J2). Client recovery is planned for J5. The client keeps
-its credential and images and reconnects with jittered backoff, as after a
-transport failure.
+bind (RUNNER-SPEC §15.6, J2). It is not a credential failure (J5). The client
+keeps its credential, does not call the source, and reconnects with jittered
+backoff, as after a transport failure. An SSE consumer that gets a 503 with no
+body before the head re-requests the same way with the same credential.
 
 An SSE subscription (http.md B-9) shares the same credential source and the
 same refresh in flight. Its final event `expired`, and a 401 on any SSE
@@ -394,7 +395,8 @@ Call `bindHttp(client, {url}).<op>(args, {signal, onChange, onEnd})` for a
 generated Subscribe binding. It returns the same typed image reads as a
 decoded WebSocket subscription and a `done` promise. `done` reports
 `Ended` with the decoded Outcome, `Refused` with the pre-head HTTP status
-and body, or `Aborted` on cancellation. It rejects with the client's error
+and body (other than 401 and a 503 with no body, which recover as above), or
+`Aborted` on cancellation. It rejects with the client's error
 if the shared credential recovery ends in `Unbound`. A Reset or a transport
 failure clears the image and resubscribes with jittered backoff. Each active
 SSE subscription holds one HTTP/1.1 connection for its current request.

@@ -335,6 +335,18 @@ export async function laws(codec, only, mutant, entries, http) {
       assert.equal(h.client.state,'Ready');h.server.check();
     }
   };
+  // RUNNER-SPEC §15.6: Close 1013 before Welcome is a binding that cannot decide now. The
+  // client keeps its credential, never calls the source, and reconnects with the same bytes
+  // after jittered backoff, as after a transport failure.
+  tests.binding_unavailable_before_welcome_backs_off=async()=>{
+    const c=source();let refuse=true;
+    const h=await setup(new Memory(),{credential:c.fn,prepare:server=>{server.onHello=s=>{if(refuse)server.close(s,1013);};}});
+    await c.give(0,credential);await settle();
+    assert.equal(h.client.state,'Backoff');assert.equal(c.asks.length,1);
+    refuse=false;h.server.onHello=undefined;await h.time.advance(120000);await ready(h);
+    assert.equal(h.client.state,'Ready');assert.equal(c.asks.length,1);
+    assert.deepEqual(helloCredential(h,1),helloCredential(h,0));
+  };
   if (http) {
     for (const name of ['http.js', 'codec.js', 'entries.js']) {
       await writeFile(join(runtime.dir, name), await readFile(new URL(name, http)));
@@ -454,6 +466,21 @@ export async function laws(codec, only, mutant, entries, http) {
       f.requests[1].reject(503,'too large');
       assert.deepEqual(await sub.done,{tag:'Refused',status:503,body:'too large'});
       await h.time.advance(10000);assert.equal(f.requests.length,2);
+    };
+    // RUNNER-SPEC §15.6: a binding that cannot decide answers 503 with no body before the
+    // head. That is not a credential failure: the same bytes re-request after jittered
+    // backoff, the source is not called and the subscription stays open.
+    tests.http_subscribe_retries_binding_unavailable=async()=>{
+      const c=source();
+      const h=await setup(new Memory(),{credential:c.fn});await c.give(0,credential);await ready(h);
+      const f=flow(), sub=f.connect(h);let ended=false;sub.done.then(()=>{ended=true;},()=>{ended=true;});
+      await settle();f.requests[0].reject(503);await settle();
+      assert.equal(f.requests.length,1);assert.equal(h.client.state,'Ready');assert.equal(c.asks.length,1);
+      await h.time.advance(499);assert.equal(f.requests.length,1);
+      await h.time.advance(1);assert.equal(f.requests.length,2);
+      assert.equal(f.requests[1].auth,f.requests[0].auth);assert.equal(ended,false);
+      const stream=f.requests[1].open();stream.send(event('empty','1'));await settle();
+      assert.equal(sub.current(),true);assert.equal(c.asks.length,1);assert.equal(ended,false);
     };
   }
   // A credential source answers in the order its promises are settled by the law.

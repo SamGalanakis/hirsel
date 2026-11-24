@@ -1017,6 +1017,7 @@ pub enum RtOp {
     MapStrongStart,
     /// The SHA-256 compression of whole blocks into an eight-word state (crate docs, "SHA-256").
     Sha256Blocks,
+    Sha512Blocks,
     /// The next cell of a `Causes` chain, or null (crate docs, "Causes").
     CauseNext,
     /// A cause cell's `Cause`, in core's layout (crate docs, "Causes").
@@ -1199,6 +1200,7 @@ impl RtOp {
     /// | `sha1_blocks` | state `ptr`, `data: ptr`, `len: u64` | (crate docs, "SHA-1") |
     /// | `zero_bytes` | `block: ptr`, `at: ptr`, `len: u64` | (crate docs, "Zero fill") |
     /// | `sha256_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-256") |
+    /// | `sha512_blocks` | state `ptr`, `data: ptr`, `blocks: u64` | (crate docs, "SHA-512") |
     /// | `crc32c` | `crc: u32`, `data: ptr`, `len: u64` | `u32`: updated CRC-32C |
     /// | `crc64nvme` | `crc: u64`, `data: ptr`, `len: u64` | `u64`: updated CRC-64/NVME |
     /// | `crc32c_combine` | `a: u32`, `b: u32`, `len_b: u64` | `u32`: concatenated CRC-32C |
@@ -1305,7 +1307,7 @@ impl RtOp {
             RtOp::Xxh3Stripes => (vec![V(p), V(p), V(p), V(u64_)], vec![]),
             RtOp::Sha1Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::ZeroBytes => (vec![V(p), V(p), V(u64_)], vec![]),
-            RtOp::Sha256Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
+            RtOp::Sha256Blocks | RtOp::Sha512Blocks => (vec![V(p), V(p), V(u64_)], vec![]),
             RtOp::Crc32c => {
                 let u32_ = Ty::Scalar(Scalar::U32);
                 (vec![V(u32_), V(p), V(u64_)], vec![u32_])

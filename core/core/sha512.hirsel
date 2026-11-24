@@ -1,0 +1,8 @@
+// FIPS 180-4 SHA-512 compression. std.sha512 extends this module
+// with the streaming hash.
+// Compress count 128-byte blocks of b, from at, into h in order.
+// An invalid range fails with Bounds before any write. Alloc: none.
+pub fn blocks(mut h: Inline[u64, 8], b: Bytes, at: u64, count: u64)
+
+// Compress one 128-byte block into h. Alloc: none.
+pub fn block(mut h: Inline[u64, 8], b: Inline[u8, 128])

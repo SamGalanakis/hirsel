@@ -249,9 +249,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 4315,
-    "raise_revision": 3,
-    "reason": "std2-host-2117"
+    "lines": 4304,
+    "raise_revision": 4,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2866,
@@ -259,7 +259,9 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/lists.rs": {
-    "lines": 2354
+    "lines": 2361,
+    "raise_revision": 1,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-front/src/body/maps.rs": {
     "lines": 1325
@@ -310,22 +312,22 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 8510,
-    "raise_revision": 3,
-    "reason": "std2-host-2117"
+    "lines": 8512,
+    "raise_revision": 4,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2488,
-    "raise_revision": 5,
-    "reason": "verify-observer-2037"
+    "lines": 2321,
+    "raise_revision": 6,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
-    "lines": 1145,
-    "raise_revision": 1,
-    "reason": "verify-observer-2037"
+    "lines": 1151,
+    "raise_revision": 2,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-ir/src/normal.rs": {
     "lines": 2181
@@ -337,9 +339,9 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2450,
-    "raise_revision": 3,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 2375,
+    "raise_revision": 4,
+    "reason": "crypto-sha512-2121"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1905

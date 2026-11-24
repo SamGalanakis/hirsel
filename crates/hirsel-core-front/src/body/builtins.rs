@@ -132,10 +132,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["sha1"] && name == "blocks" {
             return Some(self.sha1_blocks(vals[0]?, vals[1]?, n));
         }
-        if module == ["sha256"] {
+        if let Some(op) = match module {
+            [m] if m == "sha256" => Some(RtOp::Sha256Blocks),
+            [m] if m == "sha512" => Some(RtOp::Sha512Blocks),
+            _ => None,
+        } {
             return match name {
-                "blocks" => Some(self.sha256_blocks(vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)),
-                "block" => Some(self.sha256_block(vals[0]?, vals[1]?, n)),
+                "blocks" => Some(self.sha2_blocks(op, vals[0]?, vals[1]?, vals[2]?, vals[3]?, n)),
+                "block" => Some(self.sha2_block(op, vals[0]?, vals[1]?, n)),
                 _ => None,
             };
         }

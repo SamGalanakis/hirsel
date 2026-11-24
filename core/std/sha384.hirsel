@@ -1,0 +1,39 @@
+// FIPS 180-4 section 6.5. SHA-384 uses SHA-512 compression with its
+// own initial words and emits the first 48 bytes.
+pub opaque type Sha384 {
+    state: sha512.Sha512
+}
+
+/// Start from the FIPS 180-4 SHA-384 initial words. Alloc: none.
+pub fn start() -> Sha384 {
+    Sha384(state: sha512.start_from([0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17, 0x152fecd8f70e5939, 0x67332667ffc00b31, 0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4]))
+}
+
+/// Append input[lo,hi), with list.slice's checked range semantics.
+/// Alloc: none. Retains no input view. Work: O(hi - lo).
+pub fn add(mut s: Sha384, input: Bytes, lo: u64, hi: u64) {
+    sha512.add(mut s.state, input, lo, hi)
+}
+
+/// Append one byte. Alloc: none. Work: O(1).
+pub fn add_byte(mut s: Sha384, x: u8) {
+    sha512.add_byte(mut s.state, x)
+}
+
+/// Digest in big-endian order. Leaves s usable for further add calls.
+/// Alloc: none. Work: O(1).
+pub fn finish(s: Sha384) -> Inline[u8, 48] {
+    let digest = sha512.finish(s.state)
+    let mut out: Inline[u8, 48] =[0; 48]
+    for i in 0u64 .. 48u64 {
+        out[i] = digest[i]
+    }
+    out
+}
+
+/// FIPS 180-4 SHA-384 over all bytes. Alloc: none. Work: O(n).
+pub fn hash(b: Bytes) -> Inline[u8, 48] {
+    let mut s = start()
+    add(mut s, b, 0, list.len(b))
+    finish(s)
+}

@@ -69,6 +69,7 @@ mod scram;
 pub mod secret;
 mod sha1;
 mod sha256;
+mod sha512;
 pub mod shared;
 mod signature;
 #[cfg(all(feature = "standalone", not(test)))]

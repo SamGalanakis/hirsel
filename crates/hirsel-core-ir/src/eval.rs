@@ -15,6 +15,7 @@ mod frame;
 mod launch;
 mod map;
 mod provide;
+mod sha512;
 mod signature;
 mod simd;
 
@@ -6832,6 +6833,22 @@ impl Machine<'_> {
                     a[0],
                     &h.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),
                 );
+                vec![]
+            }
+            RtOp::Sha512Blocks => {
+                if a[2] != 0 {
+                    let mut h = [0u64; 8];
+                    for (word, bytes) in h.iter_mut().zip(self.get(a[0], 64).as_chunks::<8>().0) {
+                        *word = u64::from_le_bytes(*bytes);
+                    }
+                    let data = self.get(a[1], (a[2] * 128) as usize);
+                    sha512::compress(&mut h, data.as_chunks::<128>().0);
+                    let mut encoded = [0; 64];
+                    for (word, bytes) in h.into_iter().zip(encoded.as_chunks_mut::<8>().0) {
+                        *bytes = word.to_le_bytes();
+                    }
+                    self.put(a[0], &encoded);
+                }
                 vec![]
             }
             RtOp::Crc32c | RtOp::Crc64Nvme => {

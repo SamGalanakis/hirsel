@@ -322,6 +322,8 @@ operations! {
     ("sha1", "blocks", Lane::Value, "A", "sha1-hardware", false),
     ("sha256", "blocks", Lane::Value, "A", "sha256-hardware", false),
     ("sha256", "block", Lane::Value, "A", "sha256-hardware", false),
+    ("sha512", "blocks", Lane::Value, "A", "sha512-hardware", false),
+    ("sha512", "block", Lane::Value, "A", "sha512-hardware", false),
     ("ed25519", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify_der", Lane::Value, "A", "crypto-verify-impl-1595", false),

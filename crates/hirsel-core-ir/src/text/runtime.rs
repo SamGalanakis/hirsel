@@ -45,6 +45,7 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::Sha1Blocks => "rt.sha1_blocks".into(),
         RtOp::ZeroBytes => "rt.zero_bytes".into(),
         RtOp::Sha256Blocks => "rt.sha256_blocks".into(),
+        RtOp::Sha512Blocks => "rt.sha512_blocks".into(),
         RtOp::Crc32c => "rt.crc32c".into(),
         RtOp::Crc64Nvme => "rt.crc64nvme".into(),
         RtOp::Crc32cCombine => "rt.crc32c_combine".into(),

@@ -501,6 +501,11 @@ impl FunctionEmitter<'_> {
                 &[],
                 &[p(&args[0]), p(&args[1]), u(&args[2])],
             ),
+            RtOp::Sha512Blocks => self.native_call(
+                "hirsel_core_sha512_blocks",
+                &[],
+                &[p(&args[0]), p(&args[1]), u(&args[2])],
+            ),
             RtOp::Crc32c => self.native_call(
                 "hirsel_core_crc32c",
                 &[W],

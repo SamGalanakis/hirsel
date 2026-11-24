@@ -47,6 +47,7 @@ impl RtOp {
             | RtOp::Sha1Blocks
             | RtOp::ZeroBytes
             | RtOp::Sha256Blocks
+            | RtOp::Sha512Blocks
             | RtOp::Crc32c
             | RtOp::Crc64Nvme
             | RtOp::Crc32cCombine

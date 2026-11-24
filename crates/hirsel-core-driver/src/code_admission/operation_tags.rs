@@ -28,6 +28,7 @@ fn runtime_probes() -> Module {
         RtOp::DestId,
         RtOp::CompareBytes,
         RtOp::Sha256Blocks,
+        RtOp::Sha512Blocks,
         RtOp::CauseNext,
         RtOp::CauseValue,
         RtOp::ArgsLen,

@@ -477,6 +477,12 @@
 //! it to `void hirsel_core_sha256_blocks(uint32_t *, const uint8_t *, uint64_t)`,
 //! with no context or status.
 //!
+//! # SHA-512
+//!
+//! `rt.sha512_blocks` has the SHA-256 row's range, admission and step rules,
+//! with 128-byte blocks and eight `u64` state words. Engines map it to
+//! `void hirsel_core_sha512_blocks(uint64_t *, const uint8_t *, uint64_t)`.
+//!
 //! # CRC
 //!
 //! `rt.crc32c` and `rt.crc64nvme` extend finalized checksums over readable

@@ -1663,10 +1663,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
-    /// `sha256.blocks`: Bounds unless `at + 64 × count ≤ len`, checked before
+    /// SHA-2 `blocks`: Bounds unless the full block range fits, checked before
     /// the state changes; no data address is formed for zero blocks.
-    pub(super) fn sha256_blocks(
+    pub(super) fn sha2_blocks(
         &mut self,
+        op: hirsel_core_ir::RtOp,
         state: ValueId,
         header: ValueId,
         at: ValueId,
@@ -1676,7 +1677,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64_ = Ty::Scalar(Scalar::U64);
         let carrier = self.list_carrier(scalar(Scalar::U8), n)?;
         let len = self.carrier_word(header, carrier, SeqWord::Len, n);
-        let block = self.konst(u64_, 64, n)?;
+        let block_size = match op {
+            hirsel_core_ir::RtOp::Sha256Blocks => 64,
+            hirsel_core_ir::RtOp::Sha512Blocks => 128,
+            _ => unreachable!(),
+        };
+        let block = self.konst(u64_, block_size, n)?;
         let (bytes, overflow) = self.list_arith(ArithOp::Mul, ArithMode::Checked, count, block, n);
         let no_overflow = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
         let within = self.list_compare(CompareOp::Le, at, len, n);
@@ -1696,7 +1702,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let from = self.address(AddressBase::Value(data), &[Step::Byte(at)], byte, n);
         let from = self.pointer(from, n);
         self.runtime_row(
-            hirsel_core_ir::RtOp::Sha256Blocks,
+            op,
             &[Arg::Value(state), Arg::Value(from), Arg::Value(count)],
             n,
         )?;
@@ -1705,16 +1711,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
-    /// `sha256.block`: one block from an Inline array; nothing to check.
-    pub(super) fn sha256_block(
+    /// SHA-2 `block`: one block from an Inline array; nothing to check.
+    pub(super) fn sha2_block(
         &mut self,
+        op: hirsel_core_ir::RtOp,
         state: ValueId,
         data: ValueId,
         n: NodeId,
     ) -> Option<ValueId> {
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
         self.runtime_row(
-            hirsel_core_ir::RtOp::Sha256Blocks,
+            op,
             &[Arg::Value(state), Arg::Value(data), Arg::Value(one)],
             n,
         )?;

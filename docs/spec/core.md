@@ -27,7 +27,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
 | `ed25519`, `p256` | [ed25519](../../core/core/ed25519.hirsel), [p256](../../core/core/p256.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
-| `sha512` | unbuilt: `blocks`, `block` | SEM-8, MEM-30 |
+| `sha512` | [sha512](../../core/core/sha512.hirsel) | SEM-8, MEM-30 |
 | `rsa`, `p384` | [rsa](../../core/core/rsa.hirsel), [p384](../../core/core/p384.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
 | `argon2` | unbuilt: `id` | SEM-8, MEM-30; [Argon2id](#argon2id) |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
@@ -323,10 +323,9 @@ operations it names; nothing else about them may be inferred from an implementat
   `Sha512` holds the eight words, a 128-byte pending block, its fill and the total byte
   count; `start`, `add(mut s, b, lo, hi)`, `add_byte`, `finish` (64 bytes, leaving the state
   usable) and `hash`, plus `start_from(h)`, which starts from given initial words. `add`
-  compresses all of its complete blocks in one core call, so every operation takes a fixed
-  number of steps whatever the input length, as in `std.sha256`. The length field is the
-  128-bit big-endian bit count of the total, which is exact for every total below 2^64
-  bytes. `std.sha384` is the same streaming hash over a `Sha512` started from the
+  completes the pending block first and compresses the remaining complete blocks in one
+  core call. Its step count is bounded independently of the input length. The length field
+  is the 128-bit big-endian bit count of the total, exact for every total below 2^64 bytes. `std.sha384` is the same streaming hash over a `Sha512` started from the
   FIPS 180-4 §5.3.4 SHA-384 initial words, and its `finish` and `hash` return the first
   48 bytes.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
@@ -602,19 +601,19 @@ copied byte for byte.
 
 | law | bug | oracle and setup |
 |---|---|---|
-| **H1** CAVP | a wrong round constant, rotation or initial word, or SHA-384 returning the wrong 48 bytes | Every record of the four files: `sha512.hash` or `sha384.hash` of `Msg` (the first `Len / 8` bytes) equals `MD`. The FIPS 180-4 example messages `abc` and the 896-bit two-block message are among the short and long records. |
+| **H1** CAVP | a wrong round constant, rotation or initial word, or SHA-384 returning the wrong 48 bytes | Every record of the four files: `sha512.hash` or `sha384.hash` of `Msg` (the first `Len / 8` bytes) equals `MD`. Also check the published NIST `abc` and 896-bit two-block examples for both hashes. |
 | **H2** padding and streaming | a wrong pad at the 112-byte boundary, a 64-bit length field in the 128-bit slot, or a pending block lost between `add` calls | For every length 0 to 300 of the bytes `i mod 251`, and every split of the input into two `add` calls, `sha512.hash` and `sha384.hash` equal Python `hashlib`'s `sha512` and `sha384` digests, which the test reads from a checked-in table that `hashlib` generated, not from this build. A million `a` bytes streamed 1000 bytes per `add` give the million-`a` digests published with FIPS 180-2's SHA-384 and SHA-512 examples. |
 | **H3** `finish` keeps the state | `finish` mutating the state it was given | After `finish` on the first 100 bytes, adding the remaining 200 and finishing equals the one-shot digest of all 300, for both hashes. |
 | **H4** steps do not grow with the input | a per-block charge, or `add` compressing block by block in user code | On the reference evaluator, let `k` be the least bound under which `bound steps k { let mut s = take st; sha512.add(mut s, b, 0, list.len(b)); s }` succeeds for a 256-byte `b`, with `st` from `start()` and `b` bound outside the scope. The same scope under `k` also succeeds for a 1 MiB `b`, and for a 1 MiB `b` after a 5-byte `add` (so the pending path runs). The invariant is MEM-30's: a core call is one step whatever `count` is, and `add` has no loop over blocks. |
 
-The laws are cases in `core/std/tests/sha512.hirsel` <!-- doc-ref: planned -->, run by the shared walker with
+The laws are cases in [sha512.hirsel](../../core/std/tests/sha512.hirsel), run by the shared walker with
 `--backend all`.
 
 ### SHA-512 build slice
 
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
-| **S5** SHA-512 | S | — | `core/core/sha512.hirsel` <!-- doc-ref: planned --> (`blocks`, `block`), `RtOp::Sha512Blocks` lowered as `Sha256Blocks` is, its C entry over a `hirsel-core-rt` `sha512.rs` shaped as `sha256.rs` is (portable rounds, plus the CPU's SHA-512 instructions where present), the evaluator arm; `core/std/sha512.hirsel` <!-- doc-ref: planned --> and `core/std/sha384.hirsel` <!-- doc-ref: planned --> with their API pages. | H1–H4 |
+| **S5** SHA-512 | S | — | [Core SHA-512](../../core/core/sha512.hirsel) (`blocks`, `block`), `RtOp::Sha512Blocks` lowered as `Sha256Blocks` is, its C entry over a `hirsel-core-rt` `sha512.rs` shaped as `sha256.rs` is (portable rounds, plus the CPU's SHA-512 instructions where present), the evaluator arm; [std.sha512](../../core/std/sha512.hirsel) and [std.sha384](../../core/std/sha384.hirsel) with their API pages. | H1–H4 |
 
 ## Signature verification
 

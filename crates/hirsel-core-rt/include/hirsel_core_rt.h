@@ -99,6 +99,9 @@ void hirsel_core_zero_bytes(uint8_t *block, uint8_t *at, uint64_t len);
    context or status; zero blocks read nothing. */
 void hirsel_core_sha256_blocks(uint32_t *state, const uint8_t *data, uint64_t blocks);
 
+/* rt.sha512_blocks: FIPS 180-4 compression of 128-byte blocks. */
+void hirsel_core_sha512_blocks(uint64_t *state, const uint8_t *data, uint64_t blocks);
+
 /* Extend a finalized CRC. Zero length reads nothing. */
 uint32_t hirsel_core_crc32c(uint32_t crc, const uint8_t *data, uint64_t len);
 uint64_t hirsel_core_crc64nvme(uint64_t crc, const uint8_t *data, uint64_t len);

@@ -393,6 +393,7 @@ tags!(RtOp {
     73 => SharedShare,
     74 => SharedRelease { item },
     75 => RootLimit,
+    76 => Sha512Blocks,
     77 => P384Verify,
     78 => P384VerifyDer,
     79 => RsaVerifyPkcs1Sha256,

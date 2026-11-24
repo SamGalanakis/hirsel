@@ -1887,6 +1887,7 @@ impl BodyParser {
                 "sha1_blocks" => RtOp::Sha1Blocks,
                 "zero_bytes" => RtOp::ZeroBytes,
                 "sha256_blocks" => RtOp::Sha256Blocks,
+                "sha512_blocks" => RtOp::Sha512Blocks,
                 "crc32c" => RtOp::Crc32c,
                 "crc64nvme" => RtOp::Crc64Nvme,
                 "crc32c_combine" => RtOp::Crc32cCombine,

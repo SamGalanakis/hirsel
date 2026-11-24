@@ -118,6 +118,29 @@ pub(super) fn parse<'a>(
 }
 
 impl LaunchOptions<'_> {
+    pub(super) fn dry_run_path<'b>(
+        &self,
+        args: &'b [Vec<u8>],
+        directories: usize,
+    ) -> Result<Option<&'b Path>, StartupError> {
+        if !args.first().is_some_and(|arg| arg == b"--hirsel-dry-run") {
+            return Ok(None);
+        }
+        let path = args.get(1).map(|value| Path::new(OsStr::from_bytes(value)));
+        match path {
+            Some(dir)
+                if dir.is_absolute()
+                    && directories != 0
+                    && !self.describe_mode
+                    && !self.wake
+                    && self.install_child.is_none() =>
+            {
+                Ok(Some(dir))
+            }
+            _ => Err(io::Error::from_raw_os_error(libc::EINVAL).into()),
+        }
+    }
+
     pub(super) fn prepare_path<'b>(
         &self,
         args: &'b [Vec<u8>],
@@ -145,4 +168,18 @@ impl LaunchOptions<'_> {
         }
         Ok(prepare_path)
     }
+}
+
+pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
+    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
+    if text.len() != 2 * N {
+        return Err(invalid());
+    }
+    let mut out = [0u8; N];
+    for (byte, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
+        let hi = char::from(pair[0]).to_digit(16).ok_or_else(invalid)?;
+        let lo = char::from(pair[1]).to_digit(16).ok_or_else(invalid)?;
+        *byte = (hi * 16 + lo) as u8;
+    }
+    Ok(out)
 }

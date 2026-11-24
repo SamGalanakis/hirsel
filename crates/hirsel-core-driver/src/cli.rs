@@ -1,5 +1,5 @@
 //! One command/option catalogue drives parsing and user help.
-use std::path::Path;
+pub use crate::cli_tools::scaffold;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptionId {
@@ -60,6 +60,7 @@ pub enum OptionId {
     Entry,
     Libraries,
     Store,
+    DryRunExe,
     Inputs,
     PackageStore,
     Locked,
@@ -156,6 +157,7 @@ commands! {
     "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS] [--cgroup-root DIR]", "Hold the groups' listeners and start their children for the platform host.";
     "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
+    "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
@@ -1089,10 +1091,18 @@ static OPTIONS: &[OptionSpec] = &[
             "std-product",
             "sdk",
             "serve",
+            "dry-run",
             "laws check",
             "laws write"
         ],
-        "Select the request or product store."
+        "Select the database for dry-run, or the request or product store."
+    ),
+    option!(
+        DryRunExe,
+        ["--exe"],
+        Some("NEW"),
+        ["dry-run"],
+        "The built candidate executable."
     ),
     option!(
         Inputs,
@@ -1325,7 +1335,12 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             invocation.options.push((OptionId::ProfMem, Some(value)));
             continue;
         }
-        if argument == "--" && matches!(name.as_str(), "run" | "prof run" | "call" | "register") {
+        if argument == "--"
+            && matches!(
+                name.as_str(),
+                "run" | "prof run" | "call" | "register" | "dry-run"
+            )
+        {
             invocation.arguments.extend(arguments);
             break;
         }
@@ -1370,42 +1385,4 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         }
     }
     Ok(Action::Invoke(invocation))
-}
-/// Refuse to replace an existing directory, even when it contains no sources.
-pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = directory.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::create_dir(directory)?;
-    let main = if library {
-        "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(Exit(status: 1))\n    }\n}\n"
-    } else {
-        "pub fn main() -> Result[(), Exit] {\n    Ok(())\n}\n\npub fn twice(n: u64) -> u64 {\n    n + n\n}\n"
-    };
-    let lib = "pub fn answer() -> u64 {\n    42\n}\n";
-    let test = if library {
-        "@test\nfn test_answer() -> Result[(), ()] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
-    } else {
-        "@test\nfn test_twice() -> Result[(), ()] {\n    if main.twice(21) == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
-    };
-    let sources = ["main.hirsel"]
-        .into_iter()
-        .chain(library.then_some("lib.hirsel"));
-    let manifest = crate::package_dir::scaffold_manifest(sources);
-    for (name, source) in [
-        ("main.hirsel", main),
-        ("tests.hirsel", test),
-        (crate::package_dir::MANIFEST, &manifest),
-    ]
-    .into_iter()
-    .chain(library.then_some(("lib.hirsel", lib)))
-    {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(directory.join(name))?
-            .write_all(source.as_bytes())?;
-    }
-    Ok(())
 }

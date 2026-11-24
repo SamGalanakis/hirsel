@@ -69,6 +69,7 @@ pub struct Metadata {
     preparing: Option<([u8; 16], [u8; 32])>,
     install_child: Option<u64>,
     witness: Option<u64>,
+    dry_run: bool,
 }
 
 impl Metadata {
@@ -105,6 +106,7 @@ impl Metadata {
             preparing: None,
             install_child: None,
             witness: None,
+            dry_run: false,
         }
     }
 
@@ -204,6 +206,11 @@ impl Metadata {
         self
     }
 
+    pub fn with_dry_run(mut self) -> Self {
+        self.dry_run = true;
+        self
+    }
+
     pub fn with_witness(mut self, witness: Option<u64>) -> Self {
         self.witness = witness;
         self
@@ -261,6 +268,7 @@ impl Metadata {
                 .map_or(0, |revision| revision.len() as u64),
             18 => self.revision.as_ref().map_or(0, |revision| byte(revision)),
             19 => self.witness.unwrap_or(0),
+            20 => u64::from(self.dry_run),
             _ => 0,
         }
     }

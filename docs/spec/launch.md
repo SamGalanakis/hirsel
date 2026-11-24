@@ -605,15 +605,20 @@ listener.
 
 ## Dry run and dev loop
 
-*(Planned, RUNNER-SPEC v2.45 and STORE-SPEC v2.57; neither verb is built.)*
+*(The dev loop is planned. See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
 
-`hirsel dry-run --exe NEW --store DIR`<!-- doc-ref: planned --> opens a copy-on-write image of the place's store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev SERVER`<!-- doc-ref: planned --> runs SERVER against a `Temp` store, rebuilds on a source change, and on each rebuild performs the same migration on the live temporary store and resubscribes every open session, so a query's new slot list or R reaches the client as a `complete` group. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
+`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev SERVER`<!-- doc-ref: planned --> runs SERVER against a `Temp` store, rebuilds on a source change, and on each rebuild performs the same migration on the live temporary store and resubscribes every open session, so a query's new slot list or R reaches the client as a `complete` group. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6).
 
 Backfill counts give the source rows read and the rows emitted into the
 preview image. A unique backfill reports the first duplicate by encoded
 index key, then the first two encoded primary keys for that key. The preview
 keeps the first row in its scratch index so it can check later declarations.
 Any such conflict makes the migration fail.
+
+Dry run takes the Store's lock while it captures the private image. It
+refuses a store held by another process. The candidate uses the root limit
+embedded in the executable and the same Store sizing overrides it would use
+when serving. Arguments after `--` go to the candidate.
 
 ## Platform host and launcher
 

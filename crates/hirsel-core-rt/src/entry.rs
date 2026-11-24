@@ -334,19 +334,7 @@ unsafe fn bytes<'a>(view: View) -> &'a [u8] {
         unsafe { std::slice::from_raw_parts(view.data, view.len) }
     }
 }
-pub(crate) fn prepare_hex<const N: usize>(text: &[u8]) -> io::Result<[u8; N]> {
-    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
-    if text.len() != 2 * N {
-        return Err(invalid());
-    }
-    let mut out = [0u8; N];
-    for (byte, pair) in out.iter_mut().zip(text.chunks_exact(2)) {
-        let hi = char::from(pair[0]).to_digit(16).ok_or_else(invalid)?;
-        let lo = char::from(pair[1]).to_digit(16).ok_or_else(invalid)?;
-        *byte = (hi * 16 + lo) as u8;
-    }
-    Ok(out)
-}
+pub(crate) use launch_options::prepare_hex;
 
 /// The platform launcher pins the image across exec, including the serving shell's
 /// exec. Consume its descriptor before any grants or process metadata are opened.
@@ -465,6 +453,10 @@ impl OsProcess {
             let options = launch_options::parse(argv.clone(), input.exec_bindings_len != 0)?;
             let args: Vec<_> = argv.skip(options.prefix).map(<[u8]>::to_vec).collect();
             let prepare_path = options.prepare_path(&args, input.directories_len)?;
+            let dry_run_path = options.dry_run_path(&args, input.directories_len)?;
+            let isolated_store = prepare_path.or(dry_run_path);
+            let dry_run = dry_run_path.is_some();
+            let program_args = if dry_run { &args[2..] } else { &args[..] };
             let launch_options::LaunchOptions {
                 n_place,
                 n_place_explicit,
@@ -513,6 +505,9 @@ impl OsProcess {
             if prepare_path.is_some() {
                 launch = launch.with_prepare(prepare_hex(&args[2])?, prepare_hex(&args[3])?);
             }
+            if dry_run {
+                launch = launch.with_dry_run();
+            }
             if let Some(activation) = install_child {
                 launch = launch.with_install_child(activation);
             }
@@ -534,6 +529,7 @@ impl OsProcess {
             let net_ops = input.socket_activation.as_ref();
             let (inherited, operator) = if let Some(activation) = net_ops
                 && !installing
+                && !dry_run
                 && input.grant_mask & (1 << NET) != 0
             {
                 ((activation.receive)()?, (activation.operator)()?)
@@ -541,7 +537,7 @@ impl OsProcess {
                 (None, None)
             };
             let host_control = receive_host_control()?;
-            if host_control.is_some() && (describe_mode || prepare_path.is_some() || installing) {
+            if host_control.is_some() && (describe_mode || isolated_store.is_some() || installing) {
                 return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
             }
             let rows = if input.net_rules_len == 0 {
@@ -551,7 +547,7 @@ impl OsProcess {
             };
             let unix = !describe_mode
                 && !installing
-                && prepare_path.is_none()
+                && isolated_store.is_none()
                 && input.grant_mask & (1 << NET) != 0
                 && rows.iter().any(|row| row.address.dir == 4);
             let exec = if input.exec_bindings_len != 0 {
@@ -579,25 +575,29 @@ impl OsProcess {
             });
             let stdin = (!describe_mode && input.grant_mask & (1 << STDIN) != 0)
                 .then(|| Box::new(crate::stdin::Stream::new(duplicate(libc::STDIN_FILENO))));
-            let stdout = if !describe_mode && !installing && input.grant_mask & (1 << STDOUT) != 0 {
+            let stdout = if !describe_mode
+                && !installing
+                && !dry_run
+                && input.grant_mask & (1 << STDOUT) != 0
+            {
                 duplicate_stream(input.stdout_fd, libc::STDOUT_FILENO)?
             } else {
                 duplicate_stream(input.stderr_fd, libc::STDERR_FILENO)?
             };
             let stderr = duplicate_stream(input.stderr_fd, libc::STDERR_FILENO)?;
             let mut os = Box::new(OsProvider::from_streams(stdout, stderr));
-            if !describe_mode && prepare_path.is_none() {
+            if !describe_mode && isolated_store.is_none() {
                 *os.inherited_listener.get_mut().unwrap() = inherited;
                 *os.inherited_unix.get_mut().unwrap() = operator;
             }
-            let describe_out = if describe_mode || installing {
+            let describe_out = if describe_mode || installing || dry_run {
                 Some(duplicate(input.stdout_fd)?)
             } else {
                 wake_report
             };
             let directory_ops = input.directory_ops.as_ref();
             let mut dirs = Vec::new();
-            if let Some(scratch) = prepare_path {
+            if let Some(scratch) = isolated_store {
                 let operations =
                     directory_ops.ok_or_else(|| io::Error::from_raw_os_error(libc::EACCES))?;
                 let handle = (operations.grant)(&mut os, scratch)?;
@@ -623,7 +623,7 @@ impl OsProcess {
             } else {
                 None
             };
-            let views = args
+            let views = program_args
                 .iter()
                 .map(|a| Buffer {
                     data: a.as_ptr().cast_mut(),
@@ -634,7 +634,7 @@ impl OsProcess {
             let net_granted = input.grant_mask & (1 << NET) != 0;
             let net_rules = if describe_mode {
                 None
-            } else if prepare_path.is_some() || installing {
+            } else if isolated_store.is_some() || installing {
                 net_granted.then(crate::net::RulesStorage::empty)
             } else if input.net_rules_len != 0 {
                 let ops = net_ops.ok_or(StartupError::NetRules)?;

@@ -159,6 +159,7 @@ type LaunchEnv {
     store_id: Option[(u64, u64)],
     install: Option[u64],
     witness: u64,
+    dry_run: bool,
 }
 
 fn launch_env() -> LaunchEnv {
@@ -171,7 +172,7 @@ fn launch_env() -> LaunchEnv {
     LaunchEnv(n_place: launch_word(0u64, 0u64), n_place_explicit: launch_word(16u64, 0u64) != 0u64,
         revision: LaunchBytes(field: 18u64, size: launch_word(17u64, 0u64)), digest: launch_image(), target: launch_target_bytes(),
         describe: launch_word(5u64, 0u64) != 0u64, preview: preview, prepare: prepare_mode, wake: launch_word(12u64, 0u64) != 0u64,
-        idle: idle, store_id: store_id, install: install_at, witness: launch_word(19u64, 0u64))
+        idle: idle, store_id: store_id, install: install_at, witness: launch_word(19u64, 0u64), dry_run: launch_word(20u64, 0u64) != 0u64)
 }
 
 fn launch_image() -> LaunchBytes { LaunchBytes(field: 2u64, size: launch_word(1u64, 0u64)) }

@@ -424,6 +424,20 @@ def cli_call_fingerprint_mismatch():
     assert all(op != 2 for op, _ in after), after
 
 
+def cli_dry_run_conflict():
+    store = Path(CLI['server']).with_name('migration-store')
+    subprocess.run([CLI['server'], 'seed'], check=True)
+    before = {file.name: file.read_bytes() for file in store.iterdir()}
+    done = subprocess.run([CLI['compiler'], 'dry-run', '--exe', CLI['server'], '--store', str(store)],
+                          capture_output=True, text=True)
+    assert done.returncode == 1, (done.stdout, done.stderr)
+    assert 'add index unique' in done.stdout.splitlines(), done.stdout
+    # The fixture inserts 9 and 3 with value 22, plus 5 with value 17.
+    assert ('backfill rows.unique: read 3, wrote 2, Conflict: '
+            '0000000000000003 and 0000000000000009') in done.stdout.splitlines(), done.stdout
+    assert {file.name: file.read_bytes() for file in store.iterdir()} == before
+
+
 CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, second_hello_closes,
          request_mismatch_wire, resend_same_p, held_request_mismatch, hello_deadline, resume_unknown,
          history_below_latest, reply_over_done_max, faulted_owner_releases_slot, welcome_with_small_budget,
@@ -433,7 +447,7 @@ CASES = {f.__name__: f for f in (hello_order, slot_out_of_range, gone_slot_v5, s
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--server', required=True, type=Path)
-    p.add_argument('--case', action='append', choices=CASES)
+    p.add_argument('--case', action='append', choices=[*CASES, 'cli_dry_run_conflict'])
     p.add_argument('--report', type=Path)
     p.add_argument('--compiler', type=Path, help='hirsel, for the hirsel call laws')
     p.add_argument('--runtime', type=Path)
@@ -443,6 +457,11 @@ def main():
     rows = []
     selected = args.case or CASES
     for name in selected:
+        if name == 'cli_dry_run_conflict':
+            cli_dry_run_conflict()
+            rows.append({'law': name, 'passed': True})
+            print(f'{name}: PASS', flush=True)
+            continue
         temporary = TemporaryDirectory(prefix='wire-cut-') if name == 'resend_same_p' else None
         environment = None
         if temporary:

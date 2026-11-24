@@ -11,6 +11,7 @@ store = { major = 1, path = "../store" }
 "runner.hirsel" = "runner"
 "runner-managed-head.hirsel" = "runner"
 "runner-schema.hirsel" = "runner"
+"runner-dry-run.hirsel" = "runner"
 "runner-describe.hirsel" = "runner"
 "runner-query-slots.hirsel" = "runner"
 "runner-query.hirsel" = "runner"

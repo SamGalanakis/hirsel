@@ -1610,7 +1610,6 @@ fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) 
         })
         .collect();
 }
-
 #[cfg(test)]
 #[path = "../../hirsel-core-rt/src/openat2_required.rs"]
 mod openat2_required;

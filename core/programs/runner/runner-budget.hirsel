@@ -95,7 +95,9 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
 }
 
 fn report_store_shortage(report: Option[Stderr], short: store.Shortage, cap: Capacity) waits {
-    if let Some(out) = report {
+    if launch_env().dry_run {
+        let _ = launch_emit(string.as_bytes(shortage_text(short, cap)))
+    } else if let Some(out) = report {
         let _ = stderr.write(out, shortage_text(short, cap))
     }
 }

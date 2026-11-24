@@ -215,6 +215,7 @@ pub fn operate_report[G: send, H: shareable + inert + send, S: send, B: send](ta
 fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
+    if launch.dry_run && !launch_emit(b"hirsel dry-run\n") { return Error(Missing("dry-run report output")) }
     let sized_store = place_store(p, report)
     let (take options, _, store_bytes, take follower_plan) = match take sized_store {
         Ok(take sized) => take sized,
@@ -223,6 +224,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
             return Error(take e)
         },
     }
+    if launch.dry_run { return operate_dry_run(p, take options, n_place) }
     if let Some((attempt, image)) = launch.prepare { return operate_prepare(take p, take options, n_place, attempt, image) }
     if let Some(version) = launch.install {
         let result = operate_install(take p, take options, InstallAt(version), n_place)
@@ -1496,9 +1498,6 @@ fn next_trigger_due(db: store.Db, tables: triggers.Tables) -> Result[Option[u64]
     Ok(match next { Some(pending) => Some(triggers.due_time(pending)), None => None })
 }
 
-fn close_store(take db: store.Db) -> Result[(), OpenError] waits {
-    match store.close(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Store(take problem)) }
-}
 
 fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take shared: Arc[H], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
     let Mailbox(to: take out, from: take from, rounds: take rounds) = take mail

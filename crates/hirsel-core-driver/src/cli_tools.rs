@@ -210,3 +210,42 @@ fn explain_library(name: &str, json: bool) -> Result<(), Box<dyn std::error::Err
     }
     Ok(())
 }
+
+/// Refuse to replace an existing directory, even when it contains no sources.
+pub fn scaffold(directory: &Path, library: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = directory.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::create_dir(directory)?;
+    let main = if library {
+        "pub fn main() -> Result[(), Exit] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(Exit(status: 1))\n    }\n}\n"
+    } else {
+        "pub fn main() -> Result[(), Exit] {\n    Ok(())\n}\n\npub fn twice(n: u64) -> u64 {\n    n + n\n}\n"
+    };
+    let lib = "pub fn answer() -> u64 {\n    42\n}\n";
+    let test = if library {
+        "@test\nfn test_answer() -> Result[(), ()] {\n    if lib.answer() == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
+    } else {
+        "@test\nfn test_twice() -> Result[(), ()] {\n    if main.twice(21) == 42 {\n        Ok(())\n    } else {\n        Error(())\n    }\n}\n"
+    };
+    let sources = ["main.hirsel"]
+        .into_iter()
+        .chain(library.then_some("lib.hirsel"));
+    let manifest = crate::package_dir::scaffold_manifest(sources);
+    for (name, source) in [
+        ("main.hirsel", main),
+        ("tests.hirsel", test),
+        (crate::package_dir::MANIFEST, &manifest),
+    ]
+    .into_iter()
+    .chain(library.then_some(("lib.hirsel", lib)))
+    {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(directory.join(name))?
+            .write_all(source.as_bytes())?;
+    }
+    Ok(())
+}

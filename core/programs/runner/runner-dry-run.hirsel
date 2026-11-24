@@ -1,0 +1,91 @@
+fn operate_dry_run[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B],
+    take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
+    let dir = match p.backing {
+        Disk(d) => d,
+        Temp(d) => d,
+        _ => return Error(Missing("directory store")),
+    }
+    let _ = placed(p.place, n_place) ?=> |problem| Open(Place(problem))
+    let mut opening = take options
+    opening.create = false
+    let mut text = dry_run_sizes(opening)
+    let db = store.open(p.tasks, dir, p.clock, p.random, opening) ?=> |problem| Open(Store(problem))
+    let previewed = store.preview_migration(db, p.tasks, p.on_migrate, p.schema)
+    store.close(take db) ?=> |problem| Open(Store(problem))
+    let migration = previewed ?=> |problem| Open(Migrate(problem))
+    for change in migration.changes {
+        match change {
+            CollectionAdded(item) => {
+                string.push(mut text, "add ")
+                dry_run_collection(mut text, item)
+            },
+            CollectionDropped(item) => {
+                string.push(mut text, "drop ")
+                dry_run_collection(mut text, item)
+            },
+            CollectionRenamed(item, to) => {
+                string.push(mut text, "rename ")
+                dry_run_collection(mut text, item)
+                string.push(mut text, " to ")
+                string.push(mut text, to)
+            },
+        }
+        string.push(mut text, "\n")
+    }
+    let mut failure: Option[store.Error] = clone(migration.failure)
+    for filled in migration.backfills {
+        string.push(mut text, "backfill ")
+        string.push(mut text, filled.table)
+        if let Some(name) = filled.index {
+            string.push(mut text, ".")
+            string.push(mut text, name)
+        }
+        string.push(mut text, ": read ")
+        string.push_u64(mut text, filled.read)
+        string.push(mut text, ", wrote ")
+        string.push_u64(mut text, filled.written)
+        if let Conflict(keys) = filled.outcome {
+            string.push(mut text, ", Conflict: ")
+            string.push(mut text, std.hex.encode(keys.first))
+            string.push(mut text, " and ")
+            string.push(mut text, std.hex.encode(keys.second))
+            if let None = failure {
+                if let Some(name) = filled.index { failure = Some(Conflict(clone(name))) }
+            }
+        }
+        string.push(mut text, "\n")
+    }
+    if !launch_emit(string.as_bytes(text)) { return Error(Missing("dry-run report output")) }
+    match take failure {
+        Some(take problem) => Error(Open(Migrate(take problem))),
+        None => Ok(Unstarted),
+    }
+}
+
+fn dry_run_collection(mut text: String, item: store.DeclaredCollection) {
+    string.push(mut text, if item.kind == 2u8 { "index " } else { "table " })
+    string.push(mut text, item.name)
+}
+
+fn dry_run_sizes(options: store.Options) -> String {
+    let mut text = string.from("store sizes")
+    dry_run_size(mut text, "resident_limit", options.resident_limit)
+    dry_run_size(mut text, "journal_limit", options.journal_limit)
+    dry_run_size(mut text, "checkpoint_bytes", options.checkpoint_bytes)
+    dry_run_size(mut text, "pack_bytes", options.pack_bytes)
+    dry_run_size(mut text, "group_bytes", int.widen(options.group_bytes))
+    dry_run_size(mut text, "group_commits", int.widen(options.group_commits))
+    dry_run_size(mut text, "cache_bytes", options.cache_bytes)
+    dry_run_size(mut text, "writer_pin_bytes", options.writer_pin_bytes)
+    dry_run_size(mut text, "dirty_bytes", options.dirty_bytes)
+    dry_run_size(mut text, "pager_task_bytes", options.pager_task_bytes)
+    string.push(mut text, "\n")
+    take text
+}
+
+fn dry_run_size(mut text: String, name: String, count: u64) {
+    string.push(mut text, " ")
+    string.push(mut text, name)
+    string.push(mut text, "=")
+    string.push_u64(mut text, count)
+}

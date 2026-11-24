@@ -152,3 +152,7 @@ fn push_undeclared_schema(mut line: String, name: String) {
     string.push(mut line, name)
     string.push(mut line, ". Declare it in schema, or remove it during an upgrade. For a table, call store.drop_named_table in on_migrate. For an index, omit it from its table's declaration.")
 }
+
+fn close_store(take db: store.Db) -> Result[(), OpenError] waits {
+    match store.close(take db) { Ok(()) => Ok(()), Error(take problem) => Error(Store(take problem)) }
+}

@@ -98,6 +98,8 @@ The [TLS and secrets specification](tls.md) defines the client TLS provider
 operations and `Secret`.
 The [DTLS and SRTP specification](dtls.md) defines the sans-IO DTLS 1.2 endpoint, its
 certificate fingerprints and SRTP exporter, and SRTP/SRTCP sessions (design, not yet built).
+The [RTP and RTCP specification](rtp.md) defines the sans-IO `rtp` package: headers and
+extensions, RTCP, retransmission, congestion control, pacing and stream rewriting (design, not yet built).
 The [HTTP specification](http.md) defines std `http` (built, Layer 1), the runner's HTTP bindings
 and keyed operations (Part B, design).
 The [WebRTC specification](webrtc.md) defines the `webrtc_sfu` package (design, RTC-1 to RTC-8):

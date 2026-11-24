@@ -110,7 +110,9 @@ pub fn listing(server: String, pages: List[String]) -> Result[Listing, ()] {
             return Error(())
         }
         for raw in definitions {
-            let tool = mcp.metadata.definition(raw)?
+            let Ok(take tool) = mcp.metadata.definition(raw) else {
+                return Error(())
+            }
             let name = mcp.metadata.tool_name(tool)
             let key = offered_name(server, name)
             if map.contains(rows, key) {
@@ -183,9 +185,11 @@ pub fn discover(peer: Peer, server: String, limit: u64, deadline: u64) -> Result
     let mut cursors: Map[String, bool] = map.new()
     let mut params: mcp.rpc.Fields = map.new()
     loop {
-        let body = std.result.map_err(mcp.client.call(peer.net, peer.clock, peer.endpoint, None, peer.identity, TextId("list"), "tools/list", take params, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
+        let session = mcp.client.stateless(peer.identity)
+        let reply = std.result.map_err(mcp.client.call(peer.net, peer.clock, peer.endpoint, session, None, TextId("list"), "tools/list", take params, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
             wire_fault(take issue)
         })?
+        let mcp.client.Reply(body: take body, ..) = take reply
         let Ok(fields) = mcp.rpc.object(body) else {
             return Error(Refused("invalid MCP tool list"))
         }
@@ -265,8 +269,9 @@ pub fn call(peer: Peer, remote: Remote, take args: Bytes, limit: u64, deadline: 
     let Ok(tool) = mcp.metadata.definition(remote.definition) else {
         return Error(Refused("invalid MCP definition"))
     }
-    let reply = std.result.map_err(mcp.client.call_tool(peer.net, peer.clock, peer.endpoint, None, peer.identity, TextId("call"), tool, take arguments, None, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
+    let session = mcp.client.stateless(peer.identity)
+    let reply = std.result.map_err(mcp.client.call_tool(peer.net, peer.clock, peer.endpoint, session, None, TextId("call"), tool, take arguments, None, limit, limit, deadline, notice), fn(take issue) -> harness.Fault {
         wire_fault(take issue)
     })?
-    result_text(reply)
+    result_text(reply.body)
 }

@@ -1,0 +1,271 @@
+// A Streamable HTTP server at 2025-06-18 that requires its session, applied as
+// rules from that revision's transports and lifecycle pages, not as a script:
+// - initialize carries no Mcp-Session-Id; its response assigns one.
+// - every later request carries that Mcp-Session-Id (else 400) and
+//   MCP-Protocol-Version: 2025-06-18, the negotiated version (else 400).
+// - notifications/initialized is a notification, answered 202 with no body,
+//   and requests before it are refused.
+// - a request on a terminated session gets 404.
+// It ends the session after one tools/list.
+const SIM_MEMORY: u64 = 1048576
+
+const SIM_SESSION: String = "sim-7f3a"
+
+type Sim: send {
+    listener: Listener,
+    clock: Clock,
+    deadline: u64
+}
+
+fn sim_field(wire: Bytes, h: std.http1.Head, name: Bytes) -> Option[Bytes] {
+    for i in 0u64 .. h.count {
+        let field = h.fields[i]
+        if std.http1.equal_ascii(list.slice(wire, field.name.start, field.name.end), name) {
+            return Some(std.http.copy_bytes(list.slice(wire, field.value.start, field.value.end)))
+        }
+    }
+    None
+}
+
+fn sim_reply(status: u16, reason: String, fields: String, body: String) -> Bytes {
+    let mut h = string.from("HTTP/1.1 ")
+    string.push_u64(mut h, int.widen(status))
+    string.push(mut h, " ")
+    string.push(mut h, reason)
+    string.push(mut h, "\r\nConnection: close\r\n")
+    string.push(mut h, fields)
+    string.push(mut h, "Content-Length: ")
+    string.push_u64(mut h, string.byte_len(body))
+    string.push(mut h, "\r\n\r\n")
+    string.push(mut h, body)
+    string.into_bytes(take h)
+}
+
+fn sim_id(id: rpc.Id) -> String {
+    let mut out = string.new()
+    std.json.write(mut out, false, fn(w) {
+        rpc.write_id(w, id)
+    })
+    take out
+}
+
+fn no_session() -> Bytes {
+    sim_reply(400, "Bad Request", "Content-Type: application/json\r\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"Bad Request: No valid session ID provided\"},\"id\":null}")
+}
+
+fn bad_request() -> Bytes {
+    sim_reply(400, "Bad Request", "", "")
+}
+
+// phase: 0 before initialize, 1 initialized response sent, 2 ready, 3 ended.
+fn sim_answer(wire: Bytes, h: std.http1.Head, body: String, mut phase: u8) -> (u16, Bytes) {
+    let Ok(take request) = rpc.request(body) else {
+        return (400, bad_request())
+    }
+    let rpc.Request(id: take id, method: take method, params: take params) = take request
+    let accept = match sim_field(wire, h, b"accept") {
+        Some(take value) => std.http1.contains(value, b"application/json") && std.http1.contains(value, b"text/event-stream"),
+        None => false,
+    }
+    if !accept {
+        return (400, bad_request())
+    }
+    let session = sim_field(wire, h, b"mcp-session-id")
+    if method == "initialize" {
+        let Some(call_id) = id else {
+            return (400, bad_request())
+        }
+        if let Some(_) = session {
+            return (400, bad_request())
+        }
+        if let None = rpc.field_text(params, "protocolVersion") {
+            return (400, bad_request())
+        }
+        phase = 1
+        let mut result = string.from("{\"jsonrpc\":\"2.0\",\"id\":")
+        string.push(mut result, sim_id(call_id))
+        string.push(mut result, ",\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"sim\",\"version\":\"1\"}}}")
+        let mut fields = string.from("Content-Type: application/json\r\nMcp-Session-Id: ")
+        string.push(mut fields, SIM_SESSION)
+        string.push(mut fields, "\r\n")
+        return (200, sim_reply(200, "OK", fields, result))
+    }
+    let Some(take presented) = session else {
+        return (400, no_session())
+    }
+    if phase == 0 || phase == 3 || presented != string.as_bytes(SIM_SESSION) {
+        return (404, sim_reply(404, "Not Found", "", ""))
+    }
+    if sim_field(wire, h, b"mcp-protocol-version") != Some(string.into_bytes(string.from("2025-06-18"))) {
+        return (400, bad_request())
+    }
+    if method == "notifications/initialized" {
+        if let Some(_) = id {
+            return (400, bad_request())
+        }
+        if phase != 1 {
+            return (400, bad_request())
+        }
+        phase = 2
+        return (202, sim_reply(202, "Accepted", "", ""))
+    }
+    let Some(call_id) = id else {
+        return (400, bad_request())
+    }
+    if phase != 2 || method != "tools/list" {
+        return (400, bad_request())
+    }
+    phase = 3
+    let mut event = string.from("event: message\nid: 1\ndata: {\"jsonrpc\":\"2.0\",\"id\":")
+    string.push(mut event, sim_id(call_id))
+    string.push(mut event, ",\"result\":{\"tools\":[{\"name\":\"echo\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"bad\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"number\",\"x-mcp-header\":\"Q\"}}}}]}}\n\n")
+    (200, sim_reply(200, "OK", "Content-Type: text/event-stream\r\nX-Trace: t-42\r\n", event))
+}
+
+fn sim_exchange(mut listener: Listener, until: Until, mut phase: u8, mut log: String) -> bool waits {
+    let Ok((sock, _)) = host.accept(mut listener, until) else {
+        return false
+    }
+    let (rx, tx) = net.split(take sock)
+    let mut input = take rx
+    let mut output = take tx
+    let mut wire: Bytes = list.with_capacity(8192)
+    let mut h = std.http1.head()
+    loop {
+        match std.http1.request(wire, mut h) {
+            Complete => break,
+            Partial => (),
+            _ => return false,
+        }
+        let room = 8192 - list.len(wire)
+        let Ok(got) = host.recv_bounded(mut input, mut wire, room, until) else {
+            return false
+        }
+        if room == 0 || got == 0 {
+            return false
+        }
+    }
+    let mut length: u64 = 0
+    if let Some(raw) = sim_field(wire, h, b"content-length") {
+        let Ok(n) = int.parse_decimal_span(raw, 0, list.len(raw), 8192) else {
+            return false
+        }
+        length = n
+    }
+    while list.len(wire) < h.end + length {
+        let left = h.end + length - list.len(wire)
+        let Ok(got) = host.recv_bounded(mut input, mut wire, left, until) else {
+            return false
+        }
+        if got == 0 {
+            return false
+        }
+    }
+    let Ok(body) = string.from_utf8(std.http.copy_bytes(list.slice(wire, h.end, h.end + length))) else {
+        return false
+    }
+    let method = match rpc.request(body) {
+        Ok(rpc.Request(method: take m, ..)) => take m,
+        Error(_) => string.from("?"),
+    }
+    let (status, response) = sim_answer(wire, h, body, mut phase)
+    if string.byte_len(log) != 0 {
+        string.push(mut log, ";")
+    }
+    string.push(mut log, method)
+    string.push(mut log, " ")
+    string.push_u64(mut log, int.widen(status))
+    let mut sent: u64 = 0
+    while sent < list.len(response) {
+        let Ok(n) = host.send_pair(mut output, list.slice(response, sent, list.len(response)), b"", until) else {
+            return false
+        }
+        if n == 0 {
+            return false
+        }
+        sent += n
+    }
+    true
+}
+
+fn sim_serve(take job: Sim) -> String waits {
+    let Sim(listener: take site, clock, deadline) = take job
+    let until = At(clock, deadline)
+    let mut listener = take site
+    let mut phase: u8 = 0
+    let mut log = string.new()
+    for _ in 0u64 .. 5u64 {
+        if !sim_exchange(mut listener, until, mut phase, mut log) {
+            string.push(mut log, ";broken")
+            break
+        }
+    }
+    take log
+}
+
+fn sim_notice(notice: client.Notice) -> bool {
+    true
+}
+
+// Oracle: the 2025-06-18 handshake order (initialize, then
+// notifications/initialized, then requests) and its header rules, as the sim
+// server enforces them; the 2026-07-28 x-mcp-header rule that a number-typed
+// parameter makes the definition invalid.
+@test
+fn legacy_session_handshake(n: Net, c: Clock, tasks: Tasks) -> Result[(), ()] waits {
+    let (site, address) = result.unwrap(host.listen(n, Addr(ip: V4(2130706433), port: 0), 4))
+    let end = host.mono_ns(c) + 5000000000
+    let server = task.spawn(tasks, bytes 262144, Sim(listener: take site, clock: c, deadline: end), sim_serve)
+    let mut authority = string.from("127.0.0.1:")
+    string.push_u64(mut authority, int.widen(address.port))
+    let peer = client.Endpoint(address, authority: take authority, target: string.from("/mcp"), origin: string.from("http://mcp.local"), security: Plain)
+    let identity = rpc.Identity(name: string.from("hirsel-test"), version: string.from("1"))
+    let connected = client.connect(n, c, peer, None, identity, SIM_MEMORY, 65536, end)
+    let mut problem = string.new()
+    if let Ok(session) = connected {
+        if client.protocol_version(session) != "2025-06-18" || client.session_id(session) != Some(SIM_SESSION) {
+            problem = string.from("wrong negotiated session")
+        } else {
+            match client.call(n, c, peer, session, None, option.unwrap(rpc.id_value("2")), "tools/list", map.new(), SIM_MEMORY, 65536, end, sim_notice) {
+                Ok(reply) => {
+                    let traced = match client.reply_header(reply, "x-trace") {
+                        Some(value) => value == b"t-42",
+                        None => false,
+                    }
+                    if !traced {
+                        problem = string.from("response header not visible")
+                    } else if let Ok(listed) = metadata.tools(reply.body) {
+                        let one_good = list.len(listed.tools) == 1 && metadata.tool_name(listed.tools[0]) == "echo"
+                        let one_bad = list.len(listed.rejected) == 1 && listed.rejected[0].tool == Some("bad") && listed.rejected[0].field == "inputSchema.properties.q.x-mcp-header"
+                        if !one_good || !one_bad {
+                            problem = string.from("malformed tool not reported by name and field")
+                        }
+                    } else {
+                        problem = string.from("tools/list result refused")
+                    }
+                },
+                Error(_) => {
+                    problem = string.from("tools/list failed")
+                },
+            }
+            if string.byte_len(problem) == 0 {
+                match client.call(n, c, peer, session, None, option.unwrap(rpc.id_value("3")), "tools/list", map.new(), SIM_MEMORY, 65536, end, sim_notice) {
+                    Error(SessionExpired) => (),
+                    _ => {
+                        problem = string.from("404 on the session was not SessionExpired")
+                    },
+                }
+            }
+        }
+    } else {
+        problem = string.from("connect failed")
+    }
+    let log = result.unwrap(task.join(take server))
+    if string.byte_len(problem) != 0 {
+        fail(take problem)
+    }
+    if log != "server/discover 400;initialize 200;notifications/initialized 202;tools/list 200;tools/list 404" {
+        fail(take log)
+    }
+    Ok(())
+}

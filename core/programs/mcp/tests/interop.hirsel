@@ -69,10 +69,11 @@ fn serve(n: Net, c: Clock, tasks: Tasks, dir: Dir, out: Stdout) waits {
     result.unwrap(std.http.serve(take listeners, c, tasks, config(), result.unwrap(std.router.build(take routes)), take state))
 }
 
-fn invoke(n: Net, c: Clock, peer: client.Endpoint, method: String, input: String, notice: scoped fn(client.Notice) -> bool) -> Result[String, client.Error] waits {
-    let identity = rpc.Identity(name: string.from("hirsel-test"), version: string.from("1"))
+fn invoke(n: Net, c: Clock, peer: client.Endpoint, session: client.Session, method: String, input: String, notice: scoped fn(client.Notice) -> bool) -> Result[String, client.Error] waits {
     let id = option.unwrap(rpc.id_value("1"))
-    client.call(n, c, peer, None, identity, id, method, result.unwrap(rpc.object(input)), MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000), notice)
+    let reply = client.call(n, c, peer, session, None, take id, method, result.unwrap(rpc.object(input)), MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000), notice)?
+    let client.Reply(body: take body, ..) = take reply
+    Ok(take body)
 }
 
 fn ignore_notice(notice: client.Notice) -> bool {
@@ -91,12 +92,17 @@ fn expect_content(result_body: String, key: String, expected: String) {
 
 fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
     let peer = client.Endpoint(address: Addr(ip: V4(2130706433), port), authority: string.from(authority), target: string.from("/mcp"), origin: string.from("http://mcp.local"), security: Plain)
-    let discover = result.unwrap(invoke(n, c, peer, "server/discover", "{}", ignore_notice))
+    let identity = rpc.Identity(name: string.from("hirsel-test"), version: string.from("1"))
+    let session = result.unwrap(client.connect(n, c, peer, None, identity, MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000)))
+    if client.protocol_version(session) != rpc.REVISION {
+        fail("negotiated a session version with a per-request server")
+    }
+    let discover = result.unwrap(invoke(n, c, peer, session, "server/discover", "{}", ignore_notice))
     expect_content(discover, "supportedVersions", "2026-07-28")
-    let tools = result.unwrap(invoke(n, c, peer, "tools/list", "{}", ignore_notice))
+    let tools = result.unwrap(invoke(n, c, peer, session, "tools/list", "{}", ignore_notice))
     expect_content(tools, "tools", "echo")
-    let definitions = result.unwrap(metadata.tools(tools))
-    let echo_tool = option.unwrap(list.get(definitions, 0))
+    let listed = result.unwrap(metadata.tools(tools))
+    let echo_tool = option.unwrap(list.get(listed.tools, 0))
     if metadata.tool_name(echo_tool) != "echo" {
         fail("wrong listed tool")
     }
@@ -106,17 +112,16 @@ fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
     if description != "Echo text" {
         fail("wrong tool description")
     }
-    let identity = rpc.Identity(name: string.from("hirsel-test"), version: string.from("1"))
     let request_id = option.unwrap(rpc.id_value("2"))
-    let echo_result = result.unwrap(client.call_tool(n, c, peer, None, identity, request_id, echo_tool, string.from("{\"text\":\" café \"}"), None, MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000), ignore_notice))
-    expect_content(echo_result, "content", " café ")
-    let failed_tool = result.unwrap(invoke(n, c, peer, "tools/call", "{\"name\":\"failure\"}", ignore_notice))
+    let echo_reply = result.unwrap(client.call_tool(n, c, peer, session, None, take request_id, echo_tool, string.from("{\"text\":\" café \"}"), None, MEMORY, 65536, std.clock.deadline_after_ms(host.mono_ns(c), 5000), ignore_notice))
+    expect_content(echo_reply.body, "content", " café ")
+    let failed_tool = result.unwrap(invoke(n, c, peer, session, "tools/call", "{\"name\":\"failure\"}", ignore_notice))
     expect_content(failed_tool, "isError", "true")
-    let resources = result.unwrap(invoke(n, c, peer, "resources/list", "{}", ignore_notice))
+    let resources = result.unwrap(invoke(n, c, peer, session, "resources/list", "{}", ignore_notice))
     expect_content(resources, "resources", "fixture://notes/readme")
-    let note_result = result.unwrap(invoke(n, c, peer, "resources/read", "{\"uri\":\"fixture://notes/readme\"}", ignore_notice))
+    let note_result = result.unwrap(invoke(n, c, peer, session, "resources/read", "{\"uri\":\"fixture://notes/readme\"}", ignore_notice))
     expect_content(note_result, "contents", "fixture note")
-    match invoke(n, c, peer, "tools/call", "{\"name\":\"slow\",\"_meta\":{\"progressToken\":\"cancel-1\"}}", fn(notice: client.Notice) -> bool {
+    match invoke(n, c, peer, session, "tools/call", "{\"name\":\"slow\",\"_meta\":{\"progressToken\":\"cancel-1\"}}", fn(notice: client.Notice) -> bool {
         if notice.method != "notifications/progress" {
             fail("unexpected SSE notification")
         }
@@ -136,7 +141,7 @@ fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
         _ => fail("SSE stream did not cancel"),
     }
     let mut acknowledged = false
-    match invoke(n, c, peer, "subscriptions/listen", "{\"notifications\":{\"toolsListChanged\":true}}", fn(notice: client.Notice) -> bool {
+    match invoke(n, c, peer, session, "subscriptions/listen", "{\"notifications\":{\"toolsListChanged\":true}}", fn(notice: client.Notice) -> bool {
         let Some(raw_meta) = map.get(notice.params, "_meta") else {
             fail("missing subscription metadata")
         }
@@ -172,7 +177,7 @@ fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
         Error(Cancelled) => {},
         _ => fail("subscription did not deliver a tools-list change"),
     }
-    let _ = result.unwrap(invoke(n, c, peer, "server/discover", "{}", ignore_notice))
+    let _ = result.unwrap(invoke(n, c, peer, session, "server/discover", "{}", ignore_notice))
 }
 
 pub fn main(n: Net, c: Clock, tasks: Tasks, directory: Dir, out: Stdout, argv: Args) -> Result[(), ()] waits {

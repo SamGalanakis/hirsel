@@ -179,10 +179,7 @@ pub fn incoming(source: String) -> Result[Incoming, ()] {
             let Some(take request_id) = take id else {
                 return Error(())
             }
-            let Ok(take result_fields) = object(raw) else {
-                return Error(())
-            }
-            if field_text(result_fields, "resultType") != Some("complete") {
+            if let Error(_) = object(raw) {
                 return Error(())
             }
             Ok(Reply(take request_id, string.from(raw)))

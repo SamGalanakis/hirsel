@@ -1,10 +1,33 @@
 # MCP over Streamable HTTP
 
-This package targets MCP revision 2026-07-28.
-The TypeScript SDK v2 supports this revision. Requests carry their own
-version, identity and capabilities. This revision uses `server/discover`
-and `subscriptions/listen`. It has no initialization handshake, session
-headers, GET stream or replay after disconnect. [MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
+The server targets MCP revision 2026-07-28. The TypeScript SDK v2 supports this
+revision. Requests carry their own version, identity and capabilities, and the
+revision uses `server/discover` and `subscriptions/listen`.
+[MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
+
+The client speaks 2026-07-28 and the Streamable HTTP session revisions
+2025-11-25, 2025-06-18 and 2025-03-26. `client.connect` negotiates the version
+in one place, following the 2026-07-28 backward-compatibility rules:
+
+1. It probes with a `server/discover` request at 2026-07-28.
+   - A reply means the server serves requests statelessly at that revision.
+   - A -32020, -32021 or -32022 error comes from a 2026-07-28 server.
+     A -32022 error's `supported` list chooses the version.
+   - Any other JSON-RPC error, or a 400, 404 or 405 without one, falls back
+     to `initialize` at 2025-11-25.
+2. The server answers with the version it chose, which must be one of the
+   three. The client then sends `notifications/initialized` and expects 202.
+
+The `Session` keeps the version and the `Mcp-Session-Id` from the initialize
+response. Every later request sends them as `MCP-Protocol-Version` and
+`Mcp-Session-Id`. A 404 on a request that carried a session ID is
+`SessionExpired`, and the caller calls `connect` again. Per-request `_meta`,
+`Mcp-Method`, `Mcp-Name` and `Mcp-Param-*` belong to 2026-07-28 only.
+`client.stateless` makes a 2026-07-28 session without a round trip. Every call
+returns a `Reply` with the HTTP status, all response headers (`reply_header`
+looks one up) and the result. The client does not open the GET stream,
+resume with `Last-Event-ID` or use the HTTP+SSE transport.
+[2025-11-25 transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
 
 Mount `server.mount` on a `std.router` and serve it with `std.http`.
 The server checks each supplied Origin against its configured allowlist.
@@ -22,6 +45,10 @@ A `subscriptions/listen` client can opt into changes to that catalog.
 Use `client.call` for discovery, listing and resource reads. Read tool
 definitions with `metadata.tools`, then pass a selected definition to
 `client.call_tool` so annotated arguments appear in `Mcp-Param-*` headers.
+`metadata.tools` returns the valid definitions in `tools`. Each malformed one
+goes to `rejected` as a `Malformed` naming the tool and the dotted field path,
+such as `inputSchema.properties.q.x-mcp-header`. A bad definition never hides
+the valid ones, and it is never dropped silently.
 A notice callback can stop the current SSE stream by returning false.
 
 The package covers discovery, tool listing and calls, resource listing

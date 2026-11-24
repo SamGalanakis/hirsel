@@ -8,7 +8,66 @@ pub type Endpoint {
     security: Security
 }
 
-pub type Error: send = Transport(std.http_client.Error) | Http(u16) | Event(std.sse.SseError) | InvalidMessage | InvalidRequest | Disconnected | Cancelled | Remote(rpc.Fault)
+/// `SessionExpired` is a 404 on a request that carried `Mcp-Session-Id`: the
+/// caller starts a new session with `connect`. `Unsupported` names the
+/// version (or the server's supported list) none of `VERSIONS` matched.
+pub type Error: send = Transport(std.http_client.Error) | Http(u16) | Event(std.sse.SseError) | InvalidMessage | InvalidRequest | Disconnected | Cancelled | Remote(rpc.Fault) | SessionExpired | Unsupported(String)
+
+/// Every protocol version this client speaks, most preferred first. The
+/// first is per-request (`rpc.REVISION`); the rest open an `initialize` session.
+pub fn versions() -> List[String] {
+    let mut out: List[String] = list.new()
+    for v in[rpc.REVISION, "2025-11-25", "2025-06-18", "2025-03-26"] {
+        list.push(mut out, string.from(v))
+    }
+    take out
+}
+
+fn session_version(version: String) -> bool {
+    version == "2025-11-25" || version == "2025-06-18" || version == "2025-03-26"
+}
+
+/// The negotiated protocol version and, for an `initialize` session, the
+/// server's `Mcp-Session-Id`.
+pub opaque type Session: send {
+    identity: rpc.Identity,
+    version: String,
+    id: Option[String]
+}
+
+/// A session at `rpc.REVISION`, which needs no handshake.
+pub fn stateless(identity: rpc.Identity) -> Session {
+    Session(identity: rpc.Identity(name: string.from(identity.name), version: string.from(identity.version)), version: string.from(rpc.REVISION), id: None)
+}
+
+pub fn protocol_version(session: Session) -> View[String] in session {
+    view session.version
+}
+
+pub fn session_id(session: Session) -> Option[View[String]] in session {
+    match session.id {
+        Some(text) => Some(text),
+        None => None,
+    }
+}
+
+/// A response: its HTTP status, every response header as sent, and the
+/// JSON-RPC result (empty for an accepted notification).
+pub type Reply: send {
+    status: u16,
+    headers: List[(Bytes, Bytes)],
+    body: String
+}
+
+/// The first response header named `name`, compared case-insensitively.
+pub fn reply_header(reply: Reply, name: String) -> Option[View[Bytes]] in reply {
+    for (field, value) in reply.headers {
+        if std.http1.equal_ascii(field, string.as_bytes(name)) {
+            return Some(value)
+        }
+    }
+    None
+}
 
 pub type Notice: send {
     method: String,
@@ -62,11 +121,21 @@ fn response_message(raw: Bytes) -> Result[rpc.Incoming, Error] {
     }
 }
 
-fn finish(take message: rpc.Incoming, id: rpc.Id, status: u16) -> Result[String, Error] {
+// A per-request (rpc.REVISION) result carries resultType "complete"; an
+// initialize-session result is any JSON object.
+fn finish(take message: rpc.Incoming, id: rpc.Id, status: u16, stateless_result: bool) -> Result[String, Error] {
     match take message {
         Reply(reply_id, take data) => {
             if status != 200 || !rpc.same_id(reply_id, id) {
                 return Error(InvalidMessage)
+            }
+            if stateless_result {
+                let Ok(fields) = rpc.object(data) else {
+                    return Error(InvalidMessage)
+                }
+                if rpc.field_text(fields, "resultType") != Some("complete") {
+                    return Error(InvalidMessage)
+                }
             }
             Ok(take data)
         },
@@ -84,7 +153,7 @@ fn finish(take message: rpc.Incoming, id: rpc.Id, status: u16) -> Result[String,
     }
 }
 
-fn read_events(mut connection: std.http_client.Connection, id: rpc.Id, event_max: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
+fn read_events(mut connection: std.http_client.Connection, id: rpc.Id, stateless_result: bool, event_max: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
     let mut decoder = std.sse.decoder(event_max)
     let mut chunk: Bytes = list.with_capacity(8192)
     let mut terminal: Option[String] = None
@@ -95,7 +164,8 @@ fn read_events(mut connection: std.http_client.Connection, id: rpc.Id, event_max
             return Error(Disconnected)
         }
         let fed = std.sse.feed(mut decoder, chunk, fn(name: Bytes, data: Bytes, event_id: Bytes) -> std.sse.FeedControl[Error] {
-            if name != b"message" {
+            // 2025-11-25 servers prime a stream with an event ID and empty data.
+            if name != b"message" || list.len(data) == 0 {
                 return Continue
             }
             match response_message(data) {
@@ -107,7 +177,7 @@ fn read_events(mut connection: std.http_client.Connection, id: rpc.Id, event_max
                         Fail(Cancelled)
                     }
                 },
-                Ok(take message) => match finish(take message, id, 200) {
+                Ok(take message) => match finish(take message, id, 200, stateless_result) {
                     Ok(take answer) => {
                         terminal = Some(take answer)
                         Stop
@@ -126,37 +196,68 @@ fn read_events(mut connection: std.http_client.Connection, id: rpc.Id, event_max
     }
 }
 
-fn exchange(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], identity: rpc.Identity, id: rpc.Id, method: String, take params_fields: rpc.Fields, mirrored: List[(String, String)], body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
-    let mut params = take params_fields
-    let mut info: rpc.Fields = map.new()
-    rpc.put(mut info, metadata.VERSION_FIELD, rpc.typed_json(rpc.REVISION))
-    rpc.put(mut info, metadata.CLIENT_INFO, rpc.typed_json(identity))
-    rpc.put(mut info, metadata.CLIENT_CAPABILITIES, string.from("{}"))
-    if let Some(raw) = map.get(params, "_meta") {
-        let Ok(take extra) = rpc.object(raw) else {
-            return Error(InvalidRequest)
-        }
-        for (key, value) in extra {
-            if !rpc.contains(info, key) {
-                rpc.put(mut info, key, string.from(value))
-            }
+fn response_headers(head: std.http_client.ResponseHead) -> List[(Bytes, Bytes)] {
+    let mut out: List[(Bytes, Bytes)] = list.new()
+    for i in 0u64 .. std.http_client.field_count(head) {
+        if let Some((name, value)) = std.http_client.field_at(head, i) {
+            list.push(mut out, (std.http.copy_bytes(name), std.http.copy_bytes(value)))
         }
     }
-    rpc.put(mut params, "_meta", rpc.encode_object(info))
+    take out
+}
+
+fn shared(bearer: Option[Secret]) -> Option[Secret] {
+    match bearer {
+        Some(token) => Some(secret.share(token)),
+        None => None,
+    }
+}
+
+// One POST in `session`. `id` None sends a notification, which the server
+// accepts with 202. `opening` marks the initialize request, which carries no
+// version header. Per-request metadata, Mcp-Method, Mcp-Name and Mcp-Param-*
+// belong to rpc.REVISION only.
+fn post(n: Net, clock: Clock, peer: Endpoint, session: Session, take bearer: Option[Secret], take id: Option[rpc.Id], method: String, take params_fields: rpc.Fields, mirrored: List[(String, String)], opening: bool, body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[Reply, Error] waits {
+    let stateless_mode = session.version == rpc.REVISION
+    let mut params = take params_fields
+    if stateless_mode {
+        let mut info: rpc.Fields = map.new()
+        rpc.put(mut info, metadata.VERSION_FIELD, rpc.typed_json(rpc.REVISION))
+        rpc.put(mut info, metadata.CLIENT_INFO, rpc.typed_json(session.identity))
+        rpc.put(mut info, metadata.CLIENT_CAPABILITIES, string.from("{}"))
+        if let Some(raw) = map.get(params, "_meta") {
+            let Ok(take extra) = rpc.object(raw) else {
+                return Error(InvalidRequest)
+            }
+            for (key, value) in extra {
+                if !rpc.contains(info, key) {
+                    rpc.put(mut info, key, string.from(value))
+                }
+            }
+        }
+        rpc.put(mut params, "_meta", rpc.encode_object(info))
+    }
     let mut headers: List[std.http_client.Header] = list.new()
     list.push(mut headers, header("Content-Type", "application/json"))
     list.push(mut headers, header("Accept", "application/json, text/event-stream"))
-    list.push(mut headers, header("MCP-Protocol-Version", rpc.REVISION))
-    list.push(mut headers, header("Mcp-Method", method))
-    list.push(mut headers, header("Origin", peer.origin))
-    if let Some(key) = metadata.named_parameter(method) {
-        let Some(take name) = rpc.field_text(params, key) else {
-            return Error(InvalidRequest)
-        }
-        list.push(mut headers, header("Mcp-Name", metadata.header_value(name)))
+    if !opening {
+        list.push(mut headers, header("MCP-Protocol-Version", session.version))
     }
-    for (name, value) in mirrored {
-        list.push(mut headers, header(name, value))
+    list.push(mut headers, header("Origin", peer.origin))
+    if stateless_mode {
+        list.push(mut headers, header("Mcp-Method", method))
+        if let Some(key) = metadata.named_parameter(method) {
+            let Some(take name) = rpc.field_text(params, key) else {
+                return Error(InvalidRequest)
+            }
+            list.push(mut headers, header("Mcp-Name", metadata.header_value(name)))
+        }
+        for (name, value) in mirrored {
+            list.push(mut headers, header(name, value))
+        }
+    }
+    if let Some(sid) = session.id {
+        list.push(mut headers, header("Mcp-Session-Id", sid))
     }
     if let Some(take token) = take bearer {
         list.push(mut headers, std.http_client.Header(name: string.from("Authorization"), value: Protected(b"Bearer ", take token)))
@@ -166,14 +267,19 @@ fn exchange(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], i
             return Error(InvalidRequest)
         }
     }
-    let mut encoded_id = string.new()
-    std.json.write(mut encoded_id, false, fn(w) {
-        rpc.write_id(w, id)
-    })
-    let Some(take copied) = rpc.id_value(encoded_id) else {
-        return Error(InvalidRequest)
+    let body = match id {
+        Some(call_id) => {
+            let mut encoded_id = string.new()
+            std.json.write(mut encoded_id, false, fn(w) {
+                rpc.write_id(w, call_id)
+            })
+            let Some(take copied) = rpc.id_value(encoded_id) else {
+                return Error(InvalidRequest)
+            }
+            rpc.encode_call(Some(take copied), method, params)
+        },
+        None => rpc.encode_call(None, method, params),
     }
-    let body = rpc.encode_call(Some(take copied), method, params)
     let request = std.http_client.Request(method: string.from("POST"), target: string.from(peer.target), headers: take headers, body: Fixed(string.byte_len(body)))
     let mut connection = open(n, clock, peer, request, deadline)?
     if let Error(e) = std.http_client.write(mut connection, string.as_bytes(body)) {
@@ -182,12 +288,26 @@ fn exchange(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], i
     if let Error(e) = std.http_client.finish_request(mut connection, body_max) {
         return Error(Transport(e))
     }
-    let (status, events, json) = {
+    let (status, events, json, fields) = {
         let head = std.http_client.head(connection)
-        (std.http_client.status(head), response_media(head, "text/event-stream"), response_media(head, "application/json"))
+        (std.http_client.status(head), response_media(head, "text/event-stream"), response_media(head, "application/json"), response_headers(head))
+    }
+    let expired = match session.id {
+        Some(_) => status == 404,
+        None => false,
+    }
+    if expired {
+        return Error(SessionExpired)
+    }
+    let Some(call_id) = id else {
+        if status == 202 {
+            return Ok(Reply(status, headers: take fields, body: string.new()))
+        }
+        return Error(Http(status))
     }
     if status == 200 && events {
-        return read_events(mut connection, id, event_max, on_notice)
+        let answer = read_events(mut connection, call_id, stateless_mode, event_max, on_notice)?
+        return Ok(Reply(status, headers: take fields, body: take answer))
     }
     if !json {
         return Error(Http(status))
@@ -199,16 +319,165 @@ fn exchange(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], i
             break
         }
     }
-    finish(response_message(body_bytes)?, id, status)
+    // A failure status whose body is no JSON-RPC message is an HTTP failure.
+    let message = match response_message(body_bytes) {
+        Ok(take parsed) => take parsed,
+        Error(take issue) => return if status == 200 {
+            Error(take issue)
+        } else {
+            Error(Http(status))
+        },
+    }
+    let answer = finish(take message, call_id, status, stateless_mode)?
+    Ok(Reply(status, headers: take fields, body: take answer))
 }
 
-/// Sends a stateless request. Returning false from on_notice closes its stream.
-pub fn call(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], identity: rpc.Identity, id: rpc.Id, method: String, take params_fields: rpc.Fields, body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
-    exchange(n, clock, peer, take bearer, identity, id, method, take params_fields, list.new(), body_max, event_max, deadline, on_notice)
+fn ignore(notice: Notice) -> bool {
+    true
 }
 
-/// Calls a listed tool, projecting its annotated arguments into HTTP headers.
-pub fn call_tool(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secret], identity: rpc.Identity, id: rpc.Id, tool: metadata.ToolDefinition, take arguments: String, take extra_meta: Option[String], body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[String, Error] waits {
+fn listed_version(data: Option[String], stateless_ok: bool) -> Option[String] {
+    let Some(raw) = view data else {
+        return None
+    }
+    let Ok(fields) = rpc.object(raw) else {
+        return None
+    }
+    let Some(list_raw) = map.get(fields, "supported") else {
+        return None
+    }
+    let Ok(rows) = rpc.array(list_raw) else {
+        return None
+    }
+    let mut offered: List[String] = list.new()
+    for row in rows {
+        if let Some(take text) = rpc.text(row) {
+            list.push(mut offered, take text)
+        }
+    }
+    for wanted in versions() {
+        if wanted == rpc.REVISION && !stateless_ok {
+            continue
+        }
+        for have in offered {
+            if have == wanted {
+                return Some(string.from(wanted))
+            }
+        }
+    }
+    None
+}
+
+fn session_header(reply: Reply) -> Result[Option[String], Error] {
+    let Some(raw) = reply_header(reply, "mcp-session-id") else {
+        return Ok(None)
+    }
+    if list.len(raw) == 0 {
+        return Error(InvalidMessage)
+    }
+    for c in raw {
+        if c < 0x21 || c > 0x7e {
+            return Error(InvalidMessage)
+        }
+    }
+    match string.from_utf8(std.http.copy_bytes(raw)) {
+        Ok(take text) => Ok(Some(take text)),
+        Error(_) => Error(InvalidMessage),
+    }
+}
+
+fn initialize(n: Net, clock: Clock, peer: Endpoint, bearer: Option[Secret], identity: rpc.Identity, requested: String, body_max: u64, event_max: u64, deadline: u64) -> Result[Session, Error] waits {
+    let opening = Session(identity: rpc.Identity(name: string.from(identity.name), version: string.from(identity.version)), version: string.from(requested), id: None)
+    let mut params: rpc.Fields = map.new()
+    rpc.put(mut params, "protocolVersion", rpc.typed_json(requested))
+    rpc.put(mut params, "capabilities", string.from("{}"))
+    rpc.put(mut params, "clientInfo", rpc.typed_json(identity))
+    let reply = post(n, clock, peer, opening, shared(bearer), Some(TextId(string.from("initialize"))), "initialize", take params, list.new(), true, body_max, event_max, deadline, ignore)?
+    let Ok(fields) = rpc.object(reply.body) else {
+        return Error(InvalidMessage)
+    }
+    let Some(take chosen) = rpc.field_text(fields, "protocolVersion") else {
+        return Error(InvalidMessage)
+    }
+    if !session_version(chosen) {
+        return Error(Unsupported(take chosen))
+    }
+    let sid = session_header(reply)?
+    let session = Session(identity: rpc.Identity(name: string.from(identity.name), version: string.from(identity.version)), version: take chosen, id: take sid)
+    let _ = post(n, clock, peer, session, shared(bearer), None, "notifications/initialized", map.new(), list.new(), false, body_max, event_max, deadline, ignore)?
+    Ok(take session)
+}
+
+/// Negotiates a version with the server at `peer`. A `server/discover` probe
+/// at `rpc.REVISION` comes first. A recognised per-request error
+/// (-32020, -32021, -32022) identifies a per-request server. Any other
+/// JSON-RPC error, or a 400, 404 or 405 without one, falls back to
+/// `initialize` at the newest session version. The server may answer with
+/// an older one, and the client then sends `notifications/initialized`.
+pub fn connect(n: Net, clock: Clock, peer: Endpoint, bearer: Option[Secret], identity: rpc.Identity, body_max: u64, event_max: u64, deadline: u64) -> Result[Session, Error] waits {
+    let probe = post(n, clock, peer, stateless(identity), shared(bearer), Some(TextId(string.from("discover"))), "server/discover", map.new(), list.new(), false, body_max, event_max, deadline, ignore)
+    let mut requested = match take probe {
+        Ok(_) => return Ok(stateless(identity)),
+        Error(Remote(take fault)) => {
+            if fault.code == -32022 {
+                match listed_version(fault.data, true) {
+                    Some(take v) => {
+                        if v == rpc.REVISION {
+                            return Error(Remote(take fault))
+                        }
+                        take v
+                    },
+                    None => {
+                        let rpc.Fault(data: take listed, ..) = take fault
+                        return Error(Unsupported(match take listed {
+                            Some(take raw) => take raw,
+                            None => string.new(),
+                        }))
+                    },
+                }
+            } else if fault.code == -32020 || fault.code == -32021 {
+                return Error(Remote(take fault))
+            } else {
+                string.from("2025-11-25")
+            }
+        },
+        Error(Http(code)) => {
+            if code != 400 && code != 404 && code != 405 {
+                return Error(Http(code))
+            }
+            string.from("2025-11-25")
+        },
+        Error(take issue) => return Error(take issue),
+    }
+    let mut retried = false
+    loop {
+        match initialize(n, clock, peer, bearer, identity, requested, body_max, event_max, deadline) {
+            Ok(take session) => return Ok(take session),
+            Error(Remote(take fault)) => {
+                if !retried {
+                    if let Some(take v) = listed_version(fault.data, false) {
+                        if v != requested {
+                            requested = take v
+                            retried = true
+                            continue
+                        }
+                    }
+                }
+                return Error(Remote(take fault))
+            },
+            Error(take issue) => return Error(take issue),
+        }
+    }
+}
+
+/// Sends a request in `session`. Returning false from on_notice closes its stream.
+pub fn call(n: Net, clock: Clock, peer: Endpoint, session: Session, take bearer: Option[Secret], take id: rpc.Id, method: String, take params_fields: rpc.Fields, body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[Reply, Error] waits {
+    post(n, clock, peer, session, take bearer, Some(take id), method, take params_fields, list.new(), false, body_max, event_max, deadline, on_notice)
+}
+
+/// Calls a listed tool. At `rpc.REVISION` its annotated arguments also go
+/// into `Mcp-Param-*` headers.
+pub fn call_tool(n: Net, clock: Clock, peer: Endpoint, session: Session, take bearer: Option[Secret], take id: rpc.Id, tool: metadata.ToolDefinition, take arguments: String, take extra_meta: Option[String], body_max: u64, event_max: u64, deadline: u64, on_notice: scoped fn(Notice) -> bool) -> Result[Reply, Error] waits {
     if let Error(_) = rpc.object(arguments) {
         return Error(InvalidRequest)
     }
@@ -221,5 +490,5 @@ pub fn call_tool(n: Net, clock: Clock, peer: Endpoint, take bearer: Option[Secre
     if let Some(take extra) = take extra_meta {
         rpc.put(mut params, "_meta", take extra)
     }
-    exchange(n, clock, peer, take bearer, identity, id, "tools/call", take params, mirrored, body_max, event_max, deadline, on_notice)
+    post(n, clock, peer, session, take bearer, Some(take id), "tools/call", take params, mirrored, false, body_max, event_max, deadline, on_notice)
 }

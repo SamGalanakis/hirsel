@@ -7,8 +7,10 @@ fn read_tool_catalog() -> Result[(), ()] {
     if !rpc.same_id(id, option.unwrap(rpc.id_value("7"))) {
         return Error(())
     }
-    let tools = metadata.tools(body)?
-    if list.len(tools) != 1 || metadata.tool_name(tools[0]) != "echo" {
+    let Ok(listed) = metadata.tools(body) else {
+        return Error(())
+    }
+    if list.len(listed.tools) != 1 || list.len(listed.rejected) != 0 || metadata.tool_name(listed.tools[0]) != "echo" {
         fail("expected the catalog's echo tool")
     }
     Ok(())

@@ -15,7 +15,9 @@ std = { major = 1 }
 
 [tests]
 limit = 33554432
+grants = ["Clock", "Tasks", "Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
 
 [tests.sources]
 "tests/rpc.hirsel" = "laws"
+"tests/legacy.hirsel" = "laws"
 "example.hirsel" = "example"

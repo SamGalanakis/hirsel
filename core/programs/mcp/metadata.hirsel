@@ -100,20 +100,47 @@ pub fn tool_schema(tool: ToolDefinition) -> View[String] in tool {
     view tool.schema
 }
 
-fn annotation(fields: rpc.Fields, raw: String, path: List[String], mut mirrors: List[Mirror]) -> Result[(), ()] {
+/// A tool definition the client refused, naming the tool (when its name could
+/// be read) and the dotted path of the offending field.
+pub type Malformed: send {
+    tool: Option[String],
+    field: String
+}
+
+/// A `tools/list` page: the definitions that passed and the ones refused.
+pub type Listed: send {
+    tools: List[ToolDefinition],
+    rejected: List[Malformed]
+}
+
+fn located(at: List[String], last: String) -> String {
+    let mut out = string.from("inputSchema")
+    for part in at {
+        string.push(mut out, ".")
+        string.push(mut out, part)
+    }
+    if last != "" {
+        string.push(mut out, ".")
+        string.push(mut out, last)
+    }
+    take out
+}
+
+fn annotation(fields: rpc.Fields, raw: String, path: List[String], at: List[String], mut mirrors: List[Mirror]) -> Result[(), String] {
+    let field = located(at, "x-mcp-header")
     let Some(take suffix) = rpc.text(raw) else {
-        return Error(())
+        return Error(take field)
     }
     if suffix == "" || list.len(path) == 0 {
-        return Error(())
+        return Error(take field)
     }
     for c in string.as_bytes(suffix) {
         if !std.http1.token(c) {
-            return Error(())
+            return Error(take field)
         }
     }
     let Some(take type_name) = rpc.field_text(fields, "type") else {
-        return Error(())
+        return Error(take field)
     }
     let kind = if type_name == "string" {
         TextValue
@@ -122,13 +149,13 @@ fn annotation(fields: rpc.Fields, raw: String, path: List[String], mut mirrors: 
     } else if type_name == "boolean" {
         BooleanValue
     } else {
-        return Error(())
+        return Error(take field)
     }
     let mut header = string.from("Mcp-Param-")
     string.push(mut header, suffix)
     for entry in mirrors {
         if std.http1.equal_ascii(string.as_bytes(entry.header), string.as_bytes(header)) {
-            return Error(())
+            return Error(take field)
         }
     }
     let mut copied: List[String] = list.with_capacity(list.len(path))
@@ -139,79 +166,105 @@ fn annotation(fields: rpc.Fields, raw: String, path: List[String], mut mirrors: 
     Ok(())
 }
 
-fn scan(source: String, property_chain: bool, mut path: List[String], mut mirrors: List[Mirror]) -> Result[(), ()] {
+fn scan(source: String, property_chain: bool, mut path: List[String], mut at: List[String], mut mirrors: List[Mirror]) -> Result[(), String] {
     if let Ok(take fields) = rpc.object(source) {
         if let Some(raw) = map.get(fields, "x-mcp-header") {
             if !property_chain {
-                return Error(())
+                return Error(located(at, "x-mcp-header"))
             }
-            annotation(fields, raw, path, mut mirrors)?
+            annotation(fields, raw, path, at, mut mirrors)?
         }
         for (key, child) in fields {
+            list.push(mut at, string.from(key))
             if key == "properties" && property_chain {
                 if let Ok(take properties) = rpc.object(child) {
                     for (name, node) in properties {
                         list.push(mut path, string.from(name))
-                        scan(node, true, mut path, mut mirrors)?
+                        list.push(mut at, string.from(name))
+                        scan(node, true, mut path, mut at, mut mirrors)?
+                        let _ = list.pop(mut at)
                         let _ = list.pop(mut path)
                     }
                 } else {
-                    scan(child, false, mut path, mut mirrors)?
+                    scan(child, false, mut path, mut at, mut mirrors)?
                 }
             } else if key != "x-mcp-header" {
-                scan(child, false, mut path, mut mirrors)?
+                scan(child, false, mut path, mut at, mut mirrors)?
             }
+            let _ = list.pop(mut at)
         }
     } else if let Ok(take items) = rpc.array(source) {
-        for node in items {
-            scan(node, false, mut path, mut mirrors)?
+        for i in 0u64 .. list.len(items) {
+            let mut index = string.new()
+            string.push_u64(mut index, i)
+            list.push(mut at, take index)
+            scan(items[i], false, mut path, mut at, mut mirrors)?
+            let _ = list.pop(mut at)
         }
     }
     Ok(())
 }
 
-pub fn definition(source: String) -> Result[ToolDefinition, ()] {
+fn refused(take name: Option[String], field: String) -> Malformed {
+    Malformed(tool: name, field: string.from(field))
+}
+
+pub fn definition(source: String) -> Result[ToolDefinition, Malformed] {
     let Ok(take fields) = rpc.object(source) else {
-        return Error(())
+        return Error(refused(None, "definition"))
     }
     let Some(take name) = rpc.field_text(fields, "name") else {
-        return Error(())
+        return Error(refused(None, "name"))
+    }
+    let description = match map.get(fields, "description") {
+        Some(raw) => match rpc.text(raw) {
+            Some(take text) => Some(take text),
+            None => return Error(refused(Some(take name), "description")),
+        },
+        None => None,
     }
     let Some(schema) = map.get(fields, "inputSchema") else {
-        return Error(())
+        return Error(refused(Some(take name), "inputSchema"))
     }
     let Ok(take schema_fields) = rpc.object(schema) else {
-        return Error(())
+        return Error(refused(Some(take name), "inputSchema"))
     }
     let Some(take kind) = rpc.field_text(schema_fields, "type") else {
-        return Error(())
+        return Error(refused(Some(take name), "inputSchema.type"))
     }
     if kind != "object" {
-        return Error(())
+        return Error(refused(Some(take name), "inputSchema.type"))
     }
     let mut mirrored: List[Mirror] = list.new()
     let mut path: List[String] = list.new()
-    scan(schema, true, mut path, mut mirrored)?
-    Ok(ToolDefinition(name: take name, description: rpc.field_text(fields, "description"), schema: string.from(schema), mirrored: take mirrored))
+    let mut at: List[String] = list.new()
+    if let Error(take field) = scan(schema, true, mut path, mut at, mut mirrored) {
+        return Error(Malformed(tool: Some(take name), field: take field))
+    }
+    Ok(ToolDefinition(name: take name, description: take description, schema: string.from(schema), mirrored: take mirrored))
 }
 
-pub fn tools(result_body: String) -> Result[List[ToolDefinition], ()] {
+/// Reads a `tools/list` result. A malformed definition is excluded from
+/// `tools` and reported in `rejected`; it never hides the valid ones.
+pub fn tools(result_body: String) -> Result[Listed, Malformed] {
     let Ok(take fields) = rpc.object(result_body) else {
-        return Error(())
+        return Error(refused(None, "result"))
     }
     let Some(raw) = map.get(fields, "tools") else {
-        return Error(())
+        return Error(refused(None, "tools"))
     }
     let Ok(take rows) = rpc.array(raw) else {
-        return Error(())
+        return Error(refused(None, "tools"))
     }
     let mut parsed: List[ToolDefinition] = list.new()
+    let mut rejected: List[Malformed] = list.new()
     for row in rows {
-        if let Ok(take tool) = definition(row) {
-            list.push(mut parsed, take tool)
+        match definition(row) {
+            Ok(take tool) => list.push(mut parsed, take tool),
+            Error(take issue) => list.push(mut rejected, take issue),
         }
     }
-    Ok(take parsed)
+    Ok(Listed(tools: take parsed, rejected: take rejected))
 }
 
 fn argument(arguments: String, path: List[String], index: u64) -> Option[String] {

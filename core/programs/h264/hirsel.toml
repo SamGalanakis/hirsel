@@ -14,7 +14,7 @@ std = { major = 1 }
 [foreign.native]
 symbols = "hh264_"
 archives = [
-  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_h264.a", sha256 = "8dca14a508fc7f84985719862d501cae582fed16ced6c11f8da342b3b3a650e6" },
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_h264.a", sha256 = "0ad007335b669d8145b8e3eece706305f4203222b3062006d33343a3eec627b0" },
 ]
 
 [tests]

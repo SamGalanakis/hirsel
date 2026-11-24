@@ -256,8 +256,8 @@ void *hh264_encoder_create(uint32_t width, uint32_t height, uint32_t fps,
         layer.sSliceArgument.uiSliceMode = SM_SINGLE_SLICE;
 
         int trace = WELS_LOG_QUIET;
+        state->codec->SetOption(ENCODER_OPTION_TRACE_LEVEL, &trace);
         if (state->codec->InitializeExt(&param) == 0 && !state->heap.refused) {
-            state->codec->SetOption(ENCODER_OPTION_TRACE_LEVEL, &trace);
             state->width = width;
             state->height = height;
             return state;

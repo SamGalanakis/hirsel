@@ -44,6 +44,7 @@ dirs = ["."]
 "admission-laws.hirsel" = "runner"
 "runner_wire.hirsel" = "runner_wire"
 "runner_trigger_laws.hirsel" = "runner"
+"runner_trigger_model.hirsel" = "triggers"
 "runner_retired_laws.hirsel" = "runner"
 "runner_read_failure_laws.hirsel" = "runner"
 "runner_owner_laws.hirsel" = "runner"

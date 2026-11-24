@@ -1,0 +1,285 @@
+type ModelOp = Write | WriteUnlisted | Start | HoldRun | Release | Cancel | Finish | FinishCancel
+type ModelPhase = Empty | WaitingRow | RunningRow | HeldRow | Finished
+type ModelRow { phase: ModelPhase, attempt: u64, cancel: bool }
+type ModelReply = Written | StartedRun | Changed | Unlisted | Stale | Unheld | Cancelling
+
+// RUNNER-SPEC §12.1 and §14.6, STORE-SPEC §1.13, and ENDSTATE triggers/steps.
+// This trace uses due entries on one revision. Starting a running row models
+// replay after a cut. Each slot can be rearmed with a fresh identity after end.
+fn model_step(mut row: ModelRow, op: ModelOp) -> ModelReply {
+    match op {
+        WriteUnlisted => return Unlisted,
+        Write => {
+            row = ModelRow(phase: WaitingRow, attempt: 0u64, cancel: false)
+            return Written
+        },
+        _ => (),
+    }
+    match row.phase {
+        Empty => return Stale,
+        Finished => return Stale,
+        _ => (),
+    }
+    match op {
+        Start => {
+            if row.cancel { return Stale }
+            match row.phase {
+                HeldRow => return Stale,
+                _ => (),
+            }
+            row.phase = RunningRow
+            row.attempt += 1u64
+            StartedRun
+        },
+        HoldRun => match row.phase {
+            RunningRow if row.cancel => Cancelling,
+            RunningRow => {
+                row.phase = HeldRow
+                Changed
+            },
+            _ => Stale,
+        },
+        Release => match row.phase {
+            HeldRow => {
+                row.phase = WaitingRow
+                Changed
+            },
+            _ => Unheld,
+        },
+        Cancel => {
+            row.cancel = true
+            Changed
+        },
+        Finish => {
+            if row.attempt == 0u64 { return Stale }
+            match row.phase {
+                RunningRow => (),
+                _ if row.cancel => (),
+                _ => return Stale,
+            }
+            row.phase = Finished
+            Changed
+        },
+        FinishCancel => {
+            if !row.cancel { return Stale }
+            row.phase = Finished
+            Changed
+        },
+        _ => fail("trigger model: invalid row operation"),
+    }
+}
+
+type ModelSlot {
+    expected: ModelRow,
+    pending: Option[Pending],
+    actor: Option[Attempt],
+}
+
+type ModelEntries {
+    tables: Tables,
+    allowed: Entries,
+    entry: Entry[u64],
+}
+
+type ModelStore {
+    db: store.Db,
+    reader: store.Reader,
+    entries: ModelEntries,
+    slots: List[ModelSlot],
+}
+
+type ModelActual = Wrote(Id) | Began(Attempt) | Applied
+
+type ModelCall {
+    entries: ModelEntries,
+    pending: Option[Pending],
+    actor: Option[Attempt],
+    op: ModelOp,
+}
+
+fn model_apply(mut tx: store.Tx, call: ModelCall) -> Result[ModelActual, Error] {
+    let entries = view call.entries
+    match call.op {
+        Write => return Ok(Wrote(write(mut tx, entries.tables, entries.allowed, entries.entry, 0u64, AfterCommit)?)),
+        WriteUnlisted => return Ok(Wrote(write(mut tx, entries.tables, empty_entries(), entries.entry, 0u64, AfterCommit)?)),
+        _ => (),
+    }
+    let Some(pending) = view call.pending else { fail("trigger model: missing pending handle") }
+    match call.op {
+        Start => match start(mut tx, entries.tables, pending, list.new())? {
+            Body(a) => Ok(Began(a)),
+            Held => fail("trigger model: unexpected revision hold"),
+        },
+        HoldRun => {
+            hold(mut tx, entries.tables, option.unwrap(call.actor), 0u64, list.new(), list.new())?
+            Ok(Applied)
+        },
+        Release => {
+            release(mut tx, entries.tables, pending.id, None)?
+            Ok(Applied)
+        },
+        Cancel => {
+            request_cancel(mut tx, entries.tables, pending.id)?
+            Ok(Applied)
+        },
+        Finish => {
+            finish(mut tx, entries.tables, option.unwrap(call.actor), Returned(list.new()))?
+            Ok(Applied)
+        },
+        FinishCancel => {
+            finish_cancel(mut tx, entries.tables, pending)?
+            Ok(Applied)
+        },
+        _ => fail("trigger model: invalid row operation"),
+    }
+}
+
+fn model_refusal(want: ModelReply, take got: Error) -> bool {
+    match (want, take got) {
+        (Unlisted, MissingEntry) => true,
+        (Stale, StaleAttempt) => true,
+        (Unheld, NotHeld) => true,
+        (Cancelling, CancelRequested) => true,
+        _ => false,
+    }
+}
+
+fn model_rows(law: ModelStore, snapshot: store.Snapshot) waits {
+    let mut expected_count = 0u64
+    for slot in law.slots {
+        if let Some(p) = slot.pending {
+            let row = result.unwrap(store.get(law.reader, snapshot, law.entries.tables.rows, p.id))
+            let end = result.unwrap(outcome(law.reader, snapshot, law.entries.tables, p.id))
+            match slot.expected.phase {
+                Finished => {
+                    if let Some(_) = row { fail("trigger model: finished row still pending") }
+                    match end {
+                        Some(Cancelled) if slot.expected.cancel => (),
+                        Some(Returned(raw)) if !slot.expected.cancel && list.len(raw) == 0u64 => (),
+                        _ => fail("trigger model: wrong terminal outcome"),
+                    }
+                },
+                phase => {
+                    expected_count += 1u64
+                    if let Some(_) = end { fail("trigger model: live row has an outcome") }
+                    let seen = option.unwrap(take row)
+                    let observed = match seen.state {
+                        Waiting => WaitingRow,
+                        Running => RunningRow,
+                        Parked(Request(_, _, _, _)) => HeldRow,
+                        _ => fail("trigger model: unexpected revision hold"),
+                    }
+                    match (phase, observed) {
+                        (WaitingRow, WaitingRow) => (),
+                        (RunningRow, RunningRow) => (),
+                        (HeldRow, HeldRow) => (),
+                        _ => fail("trigger model: wrong row state"),
+                    }
+                    if seen.attempt != slot.expected.attempt { fail("trigger model: wrong attempt number") }
+                    if seen.cancel != slot.expected.cancel { fail("trigger model: wrong cancel mark") }
+                },
+            }
+        }
+    }
+    let mut rows = result.unwrap(store.scan(law.reader, snapshot, law.entries.tables.rows, Unbounded, Unbounded))
+    let mut actual_count = 0u64
+    while let Some(_) = result.unwrap(store.next(law.reader, mut rows)) { actual_count += 1u64 }
+    if actual_count != expected_count { fail("trigger model: unexpected row count") }
+}
+
+fn model_check(mut law: ModelStore, i: u64, op: ModelOp) waits {
+    let mut expected = law.slots[i].expected
+    let want = model_step(mut expected, op)
+    let before = store.version(store.snapshot(law.db))
+    let call = ModelCall(entries: store.copy_env(law.entries), pending: store.copy_env(law.slots[i].pending),
+        actor: law.slots[i].actor, op: op)
+    let ran = store.run(mut law.db, None, take call, model_apply)
+    law.slots[i].expected = expected
+    match take ran {
+        Ok(Committed(store.Done(value: take value, ticket: ticket, ..))) => {
+            match (want, take value) {
+                (Written, Wrote(id)) => {
+                    let row = option.unwrap(result.unwrap(store.get(law.reader, store.snapshot(law.db), law.entries.tables.rows, id)))
+                    law.slots[i].pending = Some(Pending(id: id, row: take row))
+                },
+                (StartedRun, Began(a)) => {
+                    let id = match law.slots[i].pending {
+                        Some(p) => p.id,
+                        None => fail("trigger model: missing pending handle"),
+                    }
+                    if a.id != id || a.number != expected.attempt { fail("trigger model: wrong attempt handle") }
+                    law.slots[i].actor = Some(a)
+                },
+                (Changed, Applied) => (),
+                (Unlisted, _) => fail("trigger model: write accepted an unlisted entry"),
+                (Unheld, _) => fail("trigger model: released an unheld row"),
+                (Cancelling, _) => fail("trigger model: held a cancelling row"),
+                _ => fail("trigger model: unexpected commit"),
+            }
+            result.unwrap(store.durable(mut law.db, ticket))
+        },
+        Ok(Aborted(store.Undone(value: take error, ticket: None))) => {
+            if !model_refusal(want, take error) { fail("trigger model: wrong refusal") }
+            if store.version(store.snapshot(law.db)) != before { fail("trigger model: refusal committed") }
+        },
+        _ => fail("trigger model: unexpected store result"),
+    }
+    model_rows(law, store.snapshot(law.db))
+}
+
+pub fn check_trigger_model(tasks: Tasks, seed: u64) waits {
+    let (c, hand) = provide.clock(0u64, 0u64)
+    let mut db = store.memory(c, provide.random(seed), result.unwrap(store.sized(Memory, 1074790400u64)))
+    result.unwrap(store.run_migration(mut db, tasks, code.describe(migrate)))
+    let model_tables = result.unwrap(store.with_schema(mut db, code.describe(tables)))
+    let reader = result.unwrap(store.reader(db, store.VALUE_LIMIT + 1048576u64))
+    let target: Entry[u64] = result.unwrap(granted(code.describe(sample_granted)))
+    let mut allowed = empty_entries()
+    result.unwrap(allow(mut allowed, target))
+    match allow(mut allowed, target) {
+        Error(AlreadyTriggerable) => (),
+        _ => fail("trigger model: duplicate allow must return AlreadyTriggerable"),
+    }
+    let mut slots: List[ModelSlot] = list.new()
+    for _ in 0u64..3u64 {
+        list.push(mut slots, ModelSlot(expected: ModelRow(phase: Empty, attempt: 0u64, cancel: false),
+            pending: None, actor: None))
+    }
+    let entries = ModelEntries(tables: take model_tables, allowed: take allowed, entry: take target)
+    let mut law = ModelStore(db: take db, reader: take reader, entries: take entries, slots: take slots)
+
+    // Reach all four refusal guards on every seed.
+    model_check(mut law, 0u64, WriteUnlisted)
+    model_check(mut law, 0u64, Write)
+    model_check(mut law, 0u64, Start)
+    model_check(mut law, 0u64, Release)
+    model_check(mut law, 0u64, Cancel)
+    model_check(mut law, 0u64, HoldRun)
+    model_check(mut law, 0u64, Finish)
+    model_check(mut law, 1u64, Write)
+    model_check(mut law, 1u64, Start)
+    model_check(mut law, 1u64, HoldRun)
+    model_check(mut law, 1u64, Start)
+    model_check(mut law, 1u64, Release)
+    model_check(mut law, 1u64, Start)
+    model_check(mut law, 1u64, Finish)
+    model_check(mut law, 2u64, Write)
+    model_check(mut law, 2u64, Start)
+
+    let mut plan = std.sim.world.plan(seed)
+    for _ in 0u64..96u64 {
+        let i = std.sim.world.pick(mut plan, 3u64)
+        let op = match std.sim.world.pick(mut plan, 7u64) {
+            0u64 => match law.slots[i].expected.phase { Finished => Write, _ => WriteUnlisted },
+            1u64 => Start,
+            2u64 => HoldRun,
+            3u64 => Release,
+            4u64 => Cancel,
+            5u64 => Finish,
+            _ => FinishCancel,
+        }
+        model_check(mut law, i, op)
+    }
+    let ModelStore(db: take finished, ..) = take law
+    result.unwrap(store.close(take finished))
+}

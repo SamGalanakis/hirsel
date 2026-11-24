@@ -1,3 +1,10 @@
+@test
+fn law_trigger_model(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {
+    let seed = match std.sim.world.test_seed(seed_grant) { Some(n) => n, None => 0u64 }
+    triggers.check_trigger_model(tasks, seed)
+    Ok(())
+}
+
 // G3: the query runs at the base, and its whole result goes in one owe naming it complete.
 fn at_base[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, take key: Bytes, take arg: Bytes) -> Owe waits {
     at_base_generation(mut b, who, sub, 0u64, SubscriptionInput(room: None, key: take key, arg: take arg, caller: law_caller(who)))

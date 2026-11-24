@@ -17,7 +17,7 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
-PACKAGE_LAWS = ('store', 'harness', 'platform')
+PACKAGE_LAWS = ('store', 'harness', 'platform', 'runner')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
 # Keep the 10,000-frame floods and the real-time hedge deadlines intact.
 FLOOD_SEEDS = {
@@ -83,7 +83,7 @@ def selected_laws():
         types = [pair.split(':')[1].strip() for pair in signature[1].split(',') if pair.strip()]
         if 'Net' in types:
             runner[f'runner@1/runner_calls/law_{name}'] = types
-    laws['runner'] = runner
+    laws['runner-adapters'] = runner
     laws.update((package, seeded_package_laws(package)) for package in PACKAGE_LAWS)
     return laws
 
@@ -274,7 +274,10 @@ def main():
     args = parser.parse_args()
     inventory = selected_laws()
     if args.package:
-        inventory = {kind: laws for kind, laws in inventory.items() if kind in args.package}
+        packages = set(args.package)
+        if 'runner' in packages:
+            packages.add('runner-adapters')
+        inventory = {kind: laws for kind, laws in inventory.items() if kind in packages}
     if args.law and not any(args.law in laws for laws in inventory.values()):
         parser.error('unknown simulation law')
     if args.list:

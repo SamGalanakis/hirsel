@@ -1,0 +1,84 @@
+type ReplayValue: shareable + send = ReplayPut(Arc[Bytes]) | ReplayAbsent
+
+type ReplayRow: shareable + send {
+    base: u32,
+    now: ReplayValue
+}
+
+type ReplayOverlay: shareable + send {
+    entries: std.omap.OMap[Bytes, ReplayRow],
+    ids: u64,
+    charged: u64
+}
+
+fn empty_replay_overlay() -> Arc[ReplayOverlay] {
+    arc.new(ReplayOverlay(entries: std.omap.new(), ids: 0, charged: 0))
+}
+
+fn replay_overlay_at(overlay: Arc[ReplayOverlay], logical: Bytes) -> Option[View[ReplayRow]] in overlay {
+    std.omap.get(overlay.entries, logical)
+}
+
+fn replay_value_width(stored: ReplayValue) -> u64 {
+    match stored {
+        ReplayPut(bytes_value) => list.len(bytes_value),
+        ReplayAbsent => 0,
+    }
+}
+
+fn replay_value_prior(stored: ReplayValue) -> u32 {
+    match stored {
+        ReplayPut(bytes_value) => int.truncate(1 + list.len(bytes_value)),
+        ReplayAbsent => 0,
+    }
+}
+
+// A first prior describes the unread Cold base. Later priors must agree
+// with the suffix entry already present, including a tombstone.
+fn replay_overlay_edit(mut overlay: Arc[ReplayOverlay], path: String, at: u64, logical: Bytes, prior: u32, now: ReplayValue) -> Result[(), Error] {
+    let charge = 24 + list.len(logical)
+    let (base, removed) = match replay_overlay_at(overlay, logical) {
+        Some(row) => {
+            if replay_value_prior(row.now) != prior {
+                return Error(disk_fault(path, at, Malformed))
+            }
+            (row.base, charge + replay_value_width(row.now))
+        },
+        None => (prior, 0u64),
+    }
+    let ready = disk_allocation(scoped fn() -> Result[Arc[ReplayOverlay], Error] {
+        let mut ids = overlay.ids
+        let row = ReplayRow(base: base, now: clone(now))
+        let (take entries, _) = std.omap.insert(mut ids, overlay.entries, clone(logical), take row)
+        let charged = overlay.charged - removed + charge + replay_value_width(now)
+        Ok(arc.new(ReplayOverlay(entries: take entries, ids: ids, charged: charged)))
+    })?
+    overlay = take ready
+    Ok(())
+}
+
+fn replay_overlay_count(overlay: Arc[ReplayOverlay], low: Bytes, high: Bytes, base_count: u64) -> Result[u64, Error] {
+    if low >= high {
+        return Ok(0u64)
+    }
+    disk_allocation(scoped fn() -> Result[u64, Error] {
+        let mut walked = std.omap.range(overlay.entries, Included(clone(low)), Excluded(clone(high)))
+        let mut added = 0u64
+        let mut removed = 0u64
+        while let Some((_, row)) = std.omap.next(mut walked) {
+            if let ReplayPut(_) = row.now {
+                added += 1
+            }
+            if row.base != 0 {
+                removed += 1
+            }
+        }
+        let Some(surviving) = int.checked_sub(base_count, removed) else {
+            return Error(disk_fault("overlay", 0, Malformed))
+        }
+        let Some(total) = int.checked_add(surviving, added) else {
+            return Error(disk_fault("overlay", 0, Malformed))
+        }
+        Ok(total)
+    })
+}

@@ -465,3 +465,35 @@ fn test_l70_cache_overlap() -> Result[(), Error] {
     }
     Ok(())
 }
+
+@test
+fn test_l68_replay_overlay_table() -> Result[(), Error] {
+    let mut main_overlay = empty_replay_overlay()
+    let mut logical = prefix(9)?
+    list.push(mut logical, 5u8)
+    let mut larger = prefix(9)?
+    list.push(mut larger, 6u8)
+    let value = string.into_bytes(string.from("stored"))
+    replay_overlay_edit(mut main_overlay, "j-1", 72, logical, 4, ReplayPut(arc.new(take value)))?
+    let fork_overlay = arc.share(main_overlay)
+    if main_overlay.charged != 35 {
+        fail("L68: key, value and 24-byte overlay entry")
+    }
+    let Error(Corrupt(Fault(offset: 80, why: Malformed, ..))) = replay_overlay_edit(mut main_overlay, "j-1", 80, logical, 0, ReplayAbsent) else {
+        fail("L68: prior contradicted the already-replayed put")
+    }
+    if main_overlay.charged != 35 || replay_overlay_count(main_overlay, logical, larger, 2)? != 2 {
+        fail("L68: a refused prior changed the overlay")
+    }
+    replay_overlay_edit(mut main_overlay, "j-1", 80, logical, 7, ReplayAbsent)?
+    let Some(deleted) = replay_overlay_at(main_overlay, logical) else {
+        fail("L68: missing tombstone")
+    }
+    let Some(ReplayRow(base: 4, now: ReplayPut(fork_value))) = replay_overlay_at(fork_overlay, logical) else {
+        fail("L68: changing main changed the fork")
+    }
+    if deleted.base != 4 || main_overlay.charged != 29 || list.compare_bytes(fork_value, string.as_bytes("stored")) != Equal || replay_overlay_count(main_overlay, logical, larger, 2)? != 1 || replay_overlay_count(fork_overlay, logical, larger, 2)? != 2 {
+        fail("L68: the first prior must survive a later edit in the branch")
+    }
+    Ok(())
+}

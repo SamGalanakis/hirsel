@@ -3,7 +3,7 @@
 //! program calls it by its symbol and holds none of its bodies. Every
 //! optimised LLVM build takes one, of two kinds:
 //! - prebuilt: `std-product` lowers every plain function its image checked
-//!   whole, less the held roots and what they reach, in several modules with
+//!   whole, less the held roots, in several modules with
 //!   their dependencies. It runs the full optimizer on each and generates every
 //!   part's machine code into the image's own store ([`PREBUILT`]), once per
 //!   toolchain and target. A build over that image whose units agree with the
@@ -15,9 +15,9 @@
 //!
 //! A program lowers every other library instance it reaches itself, so its
 //! optimiser sees the closure and dictionary arguments it passes them, and
-//! the held roots with what they reach: those that take code a caller can
-//! bind ([`callable_variants::takes_code`]) and those that make an owned
-//! network wait, whose returnable variants a program builds.
+//! the held roots alone: those that take code a caller can bind
+//! ([`callable_variants::takes_code`]) and those that make an owned network
+//! wait, whose private and returnable variants a program builds.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -54,9 +54,9 @@ const STD_SCHEMA: u32 = 12;
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
 
-/// A plain root a program lowers itself, with what it reaches. The root's
-/// own function takes code a caller can bind or makes an owned network wait,
-/// whose returnable variant (`returnable.rs`) only the program's unit can build.
+/// A plain root a program lowers itself, without its plain callees. Its own
+/// function takes code a caller can bind or makes an owned network wait, whose
+/// private or returnable variant only the program's unit can build.
 fn held_root(module: &hirsel_core_ir::Module, root: FuncId) -> bool {
     crate::callable_variants::takes_code(module, root)
         || hirsel_core_ir::returnable::waits_owned(module, root)
@@ -170,11 +170,7 @@ fn program_side(
             && identity.closures.is_empty()
             && identity.dictionaries.is_empty()
     };
-    let mut local_roots: Vec<_> = units
-        .iter()
-        .filter(|(i, unit)| plain(i) && held_root(&unit.module, FuncId(0)))
-        .map(|(i, _)| i.clone())
-        .collect();
+    let mut local_roots = Vec::new();
     for (identity, unit) in units {
         if plain(identity) {
             continue;
@@ -210,9 +206,9 @@ fn program_side(
     }
     let held = reach(local_roots);
     let roots: Vec<Identity> = units
-        .keys()
-        .filter(|i| plain(i) && !held.contains(*i))
-        .cloned()
+        .iter()
+        .filter(|(i, u)| plain(i) && !held.contains(*i) && !held_root(&u.module, FuncId(0)))
+        .map(|(i, _)| i.clone())
         .collect();
     let reached = reach(roots.clone());
     (roots, reached)
@@ -338,8 +334,8 @@ impl CheckProduct {
 
     /// The units of the prebuilt release std of this product's library
     /// image: every plain root the image checked whole and what it reaches,
-    /// less each held root and what it reaches, prepared as a recipe names
-    /// them. Reads the library image only.
+    /// less each held root, prepared as a recipe names them. Reads the library
+    /// image only.
     fn image_side(&self) -> Result<(SideUnits, Vec<ModuleRoots>), NativeStop> {
         let plain = self.std_plain_roots()?;
         let mut materialized = crate::instances::InstanceSet::default();
@@ -353,12 +349,10 @@ impl CheckProduct {
                 walks.push((root, walked));
             }
         }
-        // What a held root reaches stays the program's to lower.
         let mut held = BTreeSet::new();
-        for (root, walked) in &walks {
+        for (root, _) in &walks {
             let instance = materialized.get(root);
             if held_root(instance.ir()?, instance.function) {
-                held.extend(walked.iter().cloned());
                 held.insert(root.clone());
             }
         }

@@ -25,7 +25,7 @@ fn row(chunk: u32) -> runner.Row {
 }
 
 fn done() -> runner.Done {
-    runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b("0000000001")))
+    runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Returned(b("0000000001")))
 }
 
 fn batch_empty() -> runner.Frame {

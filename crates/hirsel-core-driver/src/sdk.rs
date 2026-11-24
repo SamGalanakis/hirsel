@@ -586,7 +586,7 @@ pub fn write_with_frame(describe: &Describe, frame_schema: &[u8], out: &Path) ->
         .get_mut("codec.d.ts")
         .unwrap()
         .push_str(&schema.declarations("Frame"));
-    for name in ["Outcome", "Fault", "Refusal"] {
+    for name in ["Outcome", "Fault", "Refusal", "StreamId", "Part"] {
         let index = schema
             .definitions
             .iter()
@@ -604,8 +604,8 @@ pub fn write_with_frame(describe: &Describe, frame_schema: &[u8], out: &Path) ->
             "export type {name} = FrameDef{index};\nexport const {name}: Codec<{name}>;\n"
         ));
     }
-    files.insert("frame.js".into(),"export {Frame,Outcome,Fault,Refusal} from './codec.js';\nexport const subprotocol = 'hirsel.3';\nexport const Raised = Object.freeze({Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});\nexport const BadKind = Object.freeze({Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6});\n".into());
-    files.insert("frame.d.ts".into(),"export {Frame,Outcome,Fault,Refusal} from './codec.js';\nexport const subprotocol: 'hirsel.3';\nexport const Raised: Readonly<{Overflow:1; Bounds:2; Division:3; Unwrap:4; Fail:5; Cancelled:6; Capacity:7; OutOfTime:8}>;\nexport const BadKind: Readonly<{Truncated:0; Invalid:1; Utf8:2; Duplicate:3; Trailing:4; Schema:5; Value:6}>;\n".into());
+    files.insert("frame.js".into(),"export {Frame,Outcome,Fault,Refusal,StreamId,Part} from './codec.js';\nexport const subprotocol = 'hirsel.4';\nexport const Raised = Object.freeze({Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});\nexport const BadKind = Object.freeze({Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6,StreamFuture:7});\n".into());
+    files.insert("frame.d.ts".into(),"export {Frame,Outcome,Fault,Refusal,StreamId,Part} from './codec.js';\nexport const subprotocol: 'hirsel.4';\nexport const Raised: Readonly<{Overflow:1; Bounds:2; Division:3; Unwrap:4; Fail:5; Cancelled:6; Capacity:7; OutOfTime:8}>;\nexport const BadKind: Readonly<{Truncated:0; Invalid:1; Utf8:2; Duplicate:3; Trailing:4; Schema:5; Value:6; StreamFuture:7}>;\n".into());
     write_files(files, out)
 }
 

@@ -71,14 +71,14 @@ fn drive(take d: D) -> () waits {
     let bad = string_arg(4096u64, true)
     for _ in 0u64 .. d.flood {
         let a: Bytes = clone(bad)
-        let request: runner.Frame = Call(0u32, 0u64, 0u32, 4294967295u32, take a)
+        let request: runner.Frame = Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 4294967295u32, take a)
         wire_client.send_frame(cn, take request)
         match answer(cn) {
             Refused(Malformed(_)) => (),
             _ => fail("runner_rss: a malformed call not Refused(Malformed)"),
         }
     }
-    let request: runner.Frame = Call(0u32, 0u64, 0u32, 4294967295u32, string_arg(4096u64, false))
+    let request: runner.Frame = Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 4294967295u32, string_arg(4096u64, false))
     wire_client.send_frame(cn, take request)
     match answer(cn) {
         Returned(_) => (),

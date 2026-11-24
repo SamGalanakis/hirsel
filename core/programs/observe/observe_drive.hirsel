@@ -78,7 +78,7 @@ fn ask(c: Conn, trace: Log[observe.Obs], a: observe_fixture.Request, key: Bytes,
         digest: observe_fixture.digest(key, raw), deadline: deadline, at: at)))
     let mut offset = 0u64
     let stream_number: u32 = int.narrow(result.unwrap(std.codec.take_u64(a.stream, mut offset)))
-    wire_client.send_frame(c.wire, Call(stream_number, a.p, wire_client.slot(keys(), key), ms, take raw))
+    wire_client.send_frame(c.wire, Call(store.StreamId(t: 0u64, n: int.widen(stream_number)), a.p, wire_client.slot(keys(), key), ms, take raw))
 }
 
 type Got { version: u64, stream: Bytes, p: u64, outcome: runner.Outcome }
@@ -91,7 +91,7 @@ fn received(take incoming: runner.Frame) -> Got {
             if list.len(rows) != 0u64 || list.len(outcomes) != 1u64 { fail("observe drive: one outcome per Batch") }
             for take outcome in take outcomes {
                 let runner.Done(stream: id, p: p, outcome: take o) = take outcome
-                return Got(version: v, stream: stream(int.widen(id)), p: p, outcome: take o)
+                return Got(version: v, stream: stream(id.n), p: p, outcome: take o)
             }
             fail("observe drive: empty Batch")
         },

@@ -7,7 +7,7 @@ pub type RetiredToken: key + send = One | Two
 pub type Protocol: key + send = Current | Retired(RetiredToken) | NoProtocol
 pub type Upgrade = Waiting | Upgraded(u64, Protocol, Bytes) | Refused(u16)
 
-// Ready carries the consumed head offset and whether hirsel.3 was selected.
+// Ready carries the consumed head offset and whether hirsel.4 was selected.
 pub type Checked = Pending | Ready(u64, bool) | Failed(u16)
 
 fn part(b: Bytes, s: http1.Span) -> View[Bytes] in b {
@@ -54,7 +54,7 @@ fn protocol(b: Bytes) -> Protocol {
         let start = at
         while at < n && b[at] != 44 && b[at] != 32 && b[at] != 9 { at += 1u64 }
         let token = list.slice(b, start, at)
-        if token == b"hirsel.3" { return Current }
+        if token == b"hirsel.4" { return Current }
         if selected == NoProtocol {
             if token == b"hirsel.1" { selected = Retired(One) }
             if token == b"hirsel.2" { selected = Retired(Two) }
@@ -152,7 +152,7 @@ pub fn server_head(b: Bytes, h: http1.Head) -> Upgrade {
     list.append(mut out, accepted)
     list.append(mut out, string.as_bytes("\r\n"))
     let selected = match offered {
-        Current => b"hirsel.3",
+        Current => b"hirsel.4",
         Retired(One) => b"hirsel.1",
         Retired(Two) => b"hirsel.2",
         NoProtocol => return Refused(400),
@@ -164,7 +164,7 @@ pub fn server_head(b: Bytes, h: http1.Head) -> Upgrade {
 }
 
 /// Validates the client's bounded 101 response against its sent key. The
-/// only supported offer is hirsel.3; no extensions are offered. Ready also
+/// only supported offer is hirsel.4; no extensions are offered. Ready also
 /// reports selection, so the caller decides whether a protocol is required. O(head).
 /// Ex: `websocket.client(input, key, true)`.
 pub fn client(b: Bytes, key: Bytes, offered_protocol: bool) -> Checked {
@@ -191,7 +191,7 @@ pub fn client(b: Bytes, key: Bytes, offered_protocol: bool) -> Checked {
     let selected = match field(b, h, "sec-websocket-protocol") {
         Ok(None) => false,
         Ok(Some(p)) => {
-            if !offered_protocol || part(b, p) != string.as_bytes("hirsel.3") {
+            if !offered_protocol || part(b, p) != string.as_bytes("hirsel.4") {
                 return Failed(400)
             }
             true
@@ -220,7 +220,7 @@ pub fn request(host: Bytes, nonce: Bytes, offer_protocol: bool) -> Result[Bytes,
     base64.encode(nonce, mut out)
     list.append(mut out, string.as_bytes("\r\n"))
     if offer_protocol {
-        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.3\r\n"))
+        list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.4\r\n"))
     }
     list.append(mut out, string.as_bytes("\r\n"))
     if list.len(out) > 8192 {

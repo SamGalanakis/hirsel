@@ -880,7 +880,7 @@ pub type Connected: send {
     timers: Timers
 }
 
-/// Client handshake with a host.random challenge and the exact hirsel.3
+/// Client handshake with a host.random challenge and the exact hirsel.4
 /// selection. A bounded response's tail becomes the first frame input.
 pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Clock, random: Random) -> Result[Connected, Error] waits {
     if !valid(config) {

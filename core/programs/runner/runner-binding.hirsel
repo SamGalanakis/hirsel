@@ -287,15 +287,15 @@ fn admitted(take caller: Caller, take entries: List[Bytes], arrived: u64, now: u
     Admitted(caller: take caller, entries: take entries, arrived: arrived, now: now, budget: budget, arg_max: arg_max)
 }
 
-pub type CallWant: send { key: Bytes, stream: u32, p: u64, arg: Bytes, deadline_ms: u32 }
-pub opaque type Send: send { caller: Caller, key: Bytes, stream: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64 }
+pub type CallWant: send { key: Bytes, stream: StreamId, p: u64, arg: Bytes, deadline_ms: u32 }
+pub opaque type Send: send { stream: store.StreamKey, key: Bytes, p: u64, arg: Bytes, digest: store.RequestDigest, deadline: u64, budget: u64 }
 
 pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take want: CallWant) -> Result[Send, Refusal] {
     let CallWant(key: take key, stream: stream_id, p: p, arg: take arg, deadline_ms: relative) = take want
     prepare_call(r, a, take key, stream_id, p, take arg, int.widen(relative))
 }
 
-fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take key: Bytes, stream_id: u32, p: u64, take arg: Bytes, relative: u64) -> Result[Send, Refusal] {
+fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take key: Bytes, stream_id: StreamId, p: u64, take arg: Bytes, relative: u64) -> Result[Send, Refusal] {
     let known = map.contains(r.slots, key)
     if !known && !map.contains(r.gone, key) { return Error(NoEntry) }
     let mut allowed = false
@@ -310,12 +310,15 @@ fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admi
         if let Some(take why) = (check.validate)(arg, a.arg_max) { return Error(take why) }
     }
     let digest = store.request_digest(key, arg)
-    let stream_key_bytes = match stream_key(a.caller, stream_id) { Ok(take b) => take b, Error(c) => return Error(Budget(room(c))) }
-    Ok(Send(caller: clone(a.caller), key: take key, stream: take stream_key_bytes, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget))
+    let subject_size = list.len(a.caller.subject)
+    if subject_size > SUBJECT_MAX { return Error(Budget(Room(requested: subject_size, available: SUBJECT_MAX))) }
+    let stream = store.StreamKey(caller: clone(a.caller), id: stream_id)
+    Ok(Send(stream: take stream, key: take key, p: p, arg: take arg, digest: digest, deadline: end, budget: a.budget))
 }
 
 fn prepared_request(lease: HeadLease, take seed: Option[Arc[OwnerNumber]], take prepared: Send, take target: ReplyTarget) -> Req {
-    let Send(caller: take caller, key: take key, stream: take stream, p: p, arg: take arg, digest: digest, deadline: deadline, budget: _) = take prepared
-    Req(e: Requested(Request(caller: take caller, stream: take stream, p: p, key: take key, arg: take arg, digest: digest,
+    let stream = result.unwrap(store.stream_key_bytes(prepared.stream))
+    let Send(stream: store.StreamKey(caller: take caller, id: stream_id), key: take key, p: p, arg: take arg, digest: digest, deadline: deadline, budget: _) = take prepared
+    Req(e: Requested(Request(caller: take caller, stream: take stream, stream_id: stream_id, p: p, key: take key, arg: take arg, digest: digest,
         deadline: deadline, reply_to: take target, live: latest.handle(lease.live), identity: latest.handle(lease.identity), seed: take seed)))
 }

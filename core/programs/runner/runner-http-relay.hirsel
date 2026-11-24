@@ -20,7 +20,7 @@ type RelayTell: send { to: Sender[RelayEvent], position: u64, result: RelayOutco
 
 type RelaySend = Vacant | Active(u64, u64, Sender[RelayResult], Task[()]) | Retiring(u64)
 
-type RelayPosition { id: u64, stream: Bytes, position: u64, digest: store.RequestDigest }
+type RelayPosition { id: u64, stream: store.StreamKey, position: u64, digest: store.RequestDigest }
 
 type RelayState {
     sends: List[RelaySend],
@@ -65,7 +65,7 @@ fn head_lease_bytes() -> u64 {
 
 fn relay_position_bytes(arg_max: u64, key_max: u64) -> Option[u64] {
     // One stream backing for the slot table and one for the request, both made here.
-    let stream = charge.round(SUBJECT_MAX + 6u64)?
+    let stream = charge.round(SUBJECT_MAX + 18u64)?
     let seed = charge.counted(bytes[OwnerNumber])?
     let fixed = seed + charge.round(SUBJECT_MAX)? + 2u64 * stream + charge.round(DONE_MAX)?
     let payload = int.checked_add(charge.round(arg_max)?, charge.round(key_max)?)?
@@ -205,12 +205,10 @@ fn relay_ask(mut s: RelayState, take send: Send, take reply: Sender[RelayResult]
         if let Vacant = s.sends[i] { vacancy = Some(i); break }
     }
     let Some(index) = vacancy else { relay_refuse(reply, Overloaded); return }
-    let principal = list.slice(send.stream, 0u64, list.len(send.stream) - 4u64)
     let mut held: Option[u64] = None
     let mut principal_positions = 0u64
     for p in s.positions {
-        let caller = list.slice(p.stream, 0u64, list.len(p.stream) - 4u64)
-        if principal == caller {
+        if p.stream.caller == send.stream.caller {
             principal_positions += 1u64
             if p.position == send.p && p.stream == send.stream {
                 if p.digest != send.digest { relay_refuse(reply, RequestMismatch); return }
@@ -240,12 +238,11 @@ fn relay_ask(mut s: RelayState, take send: Send, take reply: Sender[RelayResult]
 fn relay_forward(mut s: RelayState, id: u64, sent: Send) -> bool {
     let seed = result.unwrap(owner_seed(s.owner))
     let receiver = RelayRecipient(to: channel.sender(s.inbox), position: id, backing: list.with_capacity(DONE_MAX))
-    let owned = Send(caller: store.Caller(issuer: sent.caller.issuer, subject: std.http.copy_bytes(sent.caller.subject)),
-        key: std.http.copy_bytes(sent.key), stream: std.http.copy_bytes(sent.stream), p: sent.p, arg: std.http.copy_bytes(sent.arg),
+    let owned = Send(stream: clone(sent.stream), key: std.http.copy_bytes(sent.key), p: sent.p, arg: std.http.copy_bytes(sent.arg),
         digest: sent.digest, deadline: sent.deadline, budget: sent.budget)
     let req = prepared_request(s.owner, take seed, take owned, RelayReply(take receiver))
     if let Posted = try_head(s.owner.head, take req) {
-        list.push(mut s.positions, RelayPosition(id: id, stream: std.http.copy_bytes(sent.stream), position: sent.p, digest: sent.digest))
+        list.push(mut s.positions, RelayPosition(id: id, stream: clone(sent.stream), position: sent.p, digest: sent.digest))
         return true
     }
     false

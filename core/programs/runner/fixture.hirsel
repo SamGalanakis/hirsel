@@ -374,7 +374,7 @@ fn step(mut c: Client, want: Option[u64]) -> Step waits {
             if let Some(p) = want {
                 for take d in take done {
                     let runner.Done(stream: stream, p: at, outcome: take outcome) = take d
-                    if stream == 0u32 && at == p {
+                    if stream == store.StreamId(t: 0u64, n: 0u64) && at == p {
                         return Answered(take outcome, version)
                     }
                 }
@@ -424,7 +424,7 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
     let arg = encoded(e.args, a)?
     let p = c.next_p
     c.next_p += 1u64
-    if let Error(_) = channel.send(c.conn.to, Send(Call(0u32, p, slot, deadline_ms, take arg))) {
+    if let Error(_) = channel.send(c.conn.to, Send(Call(store.StreamId(t: 0u64, n: 0u64), p, slot, deadline_ms, take arg))) {
         return Error(Closed)
     }
     loop {

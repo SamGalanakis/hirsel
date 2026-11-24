@@ -127,7 +127,7 @@ fn open_socket(take socket: Socket, authority: Bytes, c: Clock, random: Random, 
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, hello, mut b))
     send(mut w, mut out, 2u8, b, c)?
-    let who = match receive(mut r, mut w, mut out, c, until)? { Welcome(take p, _, _, _, _, _) => take p, _ => return Error(Protocol(1008u16)) }
+    let who = match receive(mut r, mut w, mut out, c, until)? { Welcome(take p, _, _, _, _, _, _, _) => take p, _ => return Error(Protocol(1008u16)) }
     for _ in keys { match receive(mut r, mut w, mut out, c, until)? { Placed(_) => (), _ => return Error(Protocol(1008u16)) } }
     Ok((take r, take w, take out, take who))
 }
@@ -226,10 +226,7 @@ pub fn slot(keys: List[Bytes], key: Bytes) -> u32 {
 }
 
 pub fn stream(caller: runner.Caller, s: u32) -> Bytes {
-    let mut b: Bytes = list.new()
-    result.unwrap(runner.caller_key(caller, mut b))
-    std.codec.encode_key(std.codec.key_u32(), s, mut b)
-    b
+    result.unwrap(runner.stream_key(caller, store.StreamId(t: 0u64, n: int.widen(s))))
 }
 
 // Reads are demand-driven, so an intentionally unread client holds its bytes

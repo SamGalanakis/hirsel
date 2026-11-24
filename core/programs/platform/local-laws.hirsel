@@ -428,7 +428,7 @@ fn unit_grant(seed: (), unused_handles: Hd, take context: runner.TriggerContext)
 }
 
 fn ping_call(client: runner.wire_client.Conn, ping_keys: List[Bytes], key: Bytes, position: u64, arg: u64) -> u64 waits {
-    runner.wire_client.send_frame(client, Call(0u32, position, runner.wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
+    runner.wire_client.send_frame(client, Call(store.StreamId(t: 0u64, n: 0u64), position, runner.wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
     loop {
         match runner.wire_client.next(client) {
             Ok(Batch(_, _, _, done)) => for item in done {

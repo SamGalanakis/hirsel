@@ -152,18 +152,21 @@ fn http_has_op(bindings: List[HttpDescribe], op: String) -> bool {
     false
 }
 
-fn http_request_identity(req: std.http.Request) -> Option[(u32, u64)] {
+fn http_request_identity(req: std.http.Request) -> Option[(StreamId, u64)] {
     if let Some(_) = std.http.field_at(req, b"idempotency-key", 1u64) { return None }
     let Some(raw) = std.http.field(req, b"idempotency-key") else { return None }
     let n = list.len(raw)
-    if n < 5u64 || raw[0] != b'"' || raw[n - 1u64] != b'"' { return None }
-    let mut point = 1u64
-    while point < n - 1u64 && raw[point] != b'.' { point += 1u64 }
-    if point == n - 1u64 { return None }
-    let Some(stream_id) = http_identity_decimal(list.slice(raw, 1u64, point)) else { return None }
-    let Some(position) = http_identity_decimal(list.slice(raw, point + 1u64, n - 1u64)) else { return None }
-    if stream_id > 4294967295u64 { return None }
-    Some((int.narrow(stream_id), position))
+    if n < 36u64 || n > 55u64 || raw[0] != b'"' || raw[33] != b'.' || raw[n - 1u64] != b'"' { return None }
+    let stamp = list.slice(raw, 1u64, 33u64)
+    for digit in stamp {
+        if !int.is_ascii_digit(digit) && (digit < b'a' || digit > b'f') { return None }
+    }
+    let position = http_identity_decimal(list.slice(raw, 34u64, n - 1u64))?
+    let decoded = std.hex.decode(stamp)?
+    let mut at = 0u64
+    let time = result.unwrap(std.codec.take_key_u64(decoded, mut at))
+    let nonce = result.unwrap(std.codec.take_key_u64(decoded, mut at))
+    Some((store.StreamId(t: time, n: nonce), position))
 }
 
 fn http_identity_decimal(raw: Bytes) -> Option[u64] {
@@ -211,7 +214,7 @@ fn http_generated_handler[G: send, H: shareable + inert + send, B: send](req: st
     let (stream_id, position) = if binding.mode == Stream {
         let Some(identity) = http_request_identity(req) else { return Ok(Reply(http_reply(400u16, "", false, false, false)?)) }
         identity
-    } else { (0u32, 0u64) }
+    } else { (store.StreamId(t: 0u64, n: 0u64), 0u64) }
     let credential = match std.http.field(req, b"authorization") {
         Some(value) => Some(std.http.copy_bytes(value)),
         None => None,

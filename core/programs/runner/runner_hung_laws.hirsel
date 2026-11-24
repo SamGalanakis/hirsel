@@ -51,3 +51,31 @@ pub fn law_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> boo
 fn test_calls_deadline_hung(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     if law_calls_deadline_hung(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
+
+fn drain_id(label: String) -> store.StreamId {
+    let mut raw: Bytes = list.with_capacity(8u64)
+    list.append(mut raw, string.as_bytes(label))
+    let padding = 8u64 - list.len(raw)
+    list.fill(mut raw, padding, 0u8)
+    store.StreamId(t: 0u64, n: list.word_le(raw, 0u64))
+}
+
+fn drain_caller() -> store.Caller { store.Caller(issuer: 1u8, subject: list.new()) }
+
+fn drain_stream(label: String) -> Bytes { result.unwrap(runner.stream_key(drain_caller(), drain_id(label))) }
+
+fn drain_send(to: Sender[runner.HeadInput], stream: String, position: u64, argument: u64) -> Receiver[runner.WireEvent] waits {
+    let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(2u64)
+    let req = runner.head_request(drain_caller(), drain_id(stream), position, k_write(), u64_arg(argument), take reply_to)
+    result.unwrap(channel.send(to, RunRequest(take req)))
+    take reply_from
+}
+
+fn drain_answer(from: Receiver[runner.WireEvent], stream: String, position: u64) -> runner.Outcome {
+    let event = match channel.try_receive(from) { Ok(take event) => take event, Error(_) => fail("drain: send got no answer") }
+    let received = option.unwrap(runner.head_outcome(take event))
+    want(received.stream == drain_stream(stream) && received.p == position, "drain: answer to wrong send")
+    if let Ok(_) = channel.try_receive(from) { fail("drain: send answered twice") }
+    let runner.KeyedDone(outcome: take outcome, ..) = take received
+    take outcome
+}

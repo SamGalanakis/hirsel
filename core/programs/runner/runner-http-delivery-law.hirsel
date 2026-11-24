@@ -7,10 +7,11 @@ fn l15_timers(tasks: Tasks) waits {
     let key = http_law_key(reg.exported[0u64])
     let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
     let reserve = option.unwrap(relay_bytes(reg, cfg))
-    // Ten RelayEvents cost 64 + 10 * 185. The empty credits cost 64.
+    // Ten RelayEvents cost 64 + 10 * 177. The empty credits cost 64.
     // HeadLease costs 56 fields + 32 cause, two 32-byte roots and three 16-byte Arc nodes.
     // Two send slots cost 2 * 56, and their alarms cost 2 * (288 + 4096).
-    // Each position costs 72 record + 16 owner seed + 64 subject + 2 * 72 streams
+    // Six positions cost round8(6 * 89) for the records. Each also costs
+    // 16 owner seed + 64 subject + 2 * 88 for the widened stream keys
     // + 8192 reply + 1024 argument + the longest rounded registry key.
     // Three delivered buffers cost 3 * 8192. Startup adds 288 for the task record,
     // 64 + 48 for its ready channel and round8(6 * 65) = 392 for pending tells.
@@ -20,7 +21,7 @@ fn l15_timers(tasks: Tasks) waits {
         let length = list.len(entry.described.identity) + 16u64
         longest = order.max(longest, length)
     }
-    let expected = 93498u64 + 6u64 * ((longest + 7u64) / 8u64 * 8u64)
+    let expected = 93714u64 + 6u64 * ((longest + 7u64) / 8u64 * 8u64)
     if reserve != expected { fail("L15 relay allowance differs from its hand derivation") }
     let mut maximum: Bytes = list.with_capacity(MAX_RETURNED_BYTES)
     list.fill(mut maximum, MAX_RETURNED_BYTES, b'x')
@@ -92,11 +93,11 @@ fn l15_timers(tasks: Tasks) waits {
         if let Vacant = state.sends[1u64] {} else { fail("L15 cancelled timer did not refund immediately") }
         let first_delivery = l15_delivery(a_from)
         let second_delivery = l15_delivery(b_from)
-        if list.len(first_delivery.payload) != 8180u64 || list.slice(first_delivery.payload, 0u64, 8u64) != b"\x00\x00\x00\x00\xec\x1f\x00\x00" ||
+        if list.len(first_delivery.payload) != 8168u64 || list.slice(first_delivery.payload, 0u64, 8u64) != b"\x00\x00\x00\x00\xe0\x1f\x00\x00" ||
             second_delivery.payload != first_delivery.payload || first_delivery.replayed || second_delivery.replayed {
             fail("L15 joined sends disagree with the head outcome")
         }
-        for byte in list.slice(first_delivery.payload, 8u64, 8180u64) {
+        for byte in list.slice(first_delivery.payload, 8u64, 8168u64) {
             if byte != b'x' { fail("L15 delivery lost part of the maximum outcome") }
         }
         let expired = result.unwrap(channel.receive(from))
@@ -130,6 +131,29 @@ fn l15_position_caps(mut state: RelayState, from: Receiver[RelayEvent], reg: Reg
     l15_over_capacity(mut state, l15_send_for(reg, key, time, 7u32, 0u64, 1u64, 2u64), 6u64)
 }
 
+@test
+fn http_caller_cap_structured(tasks: Tasks) -> Result[(), ()] waits {
+    let (take world, time) = std.sim.world.new(15u64, 0u64, 0u64)
+    let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
+    let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
+    let key = http_law_key(reg.exported[0u64])
+    let cfg = RelayConfig(http_max: 1u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
+    let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(6u64)
+    let (to, from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(option.unwrap(relay_inbox_size(cfg)))
+    let owner = result.unwrap(head_lease(LifecycleHead(take head)))
+    let mut sends: List[RelaySend] = list.with_capacity(2u64)
+    list.push(mut sends, Vacant)
+    list.push(mut sends, Vacant)
+    let mut state = RelayState(sends: take sends, positions: list.with_capacity(6u64), generation: 0u64,
+        owner: take owner, inbox: take to, clock: time, tasks: tasks, config: cfg, key_max: relay_key_max(reg))
+    l15_position_caps(mut state, from, reg, key, time)
+    for _ in 0u64 .. 6u64 {
+        if let Ok(RunRequest(_)) = channel.try_receive(forwarded) {} else { fail("L15 counted a position without forwarding it") }
+    }
+    let _ = std.task.cancel_join(take clock_task)
+    Ok(())
+}
+
 fn l15_over_capacity(mut state: RelayState, take attempt: Send, occupied: u64) waits {
     let (reply, returned): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
     relay_step(mut state, RelayAsk(take attempt, take reply))
@@ -150,7 +174,8 @@ fn l15_send_for(reg: Registry[(), HttpLawHandles], key: Bytes, time: Clock, stre
     list.push(mut allowed, std.http.copy_bytes(key))
     let now = host.mono_ns(time)
     let context = admitted(law_caller(author), take allowed, now, now, 65536u64, 1024u64)
-    result.unwrap(prepare_call(reg, context, std.http.copy_bytes(key), stream_id, position, b"\x05\x00\x00\x00saved", milliseconds))
+    let stamp: u64 = int.widen(stream_id)
+    result.unwrap(prepare_call(reg, context, std.http.copy_bytes(key), store.StreamId(t: stamp, n: stamp << 32u64), position, b"\x05\x00\x00\x00saved", milliseconds))
 }
 
 fn l15_delivery(from: Receiver[RelayResult]) -> RelayOutcome waits {
@@ -302,11 +327,11 @@ fn l15_head_request(from: Receiver[HeadInput]) -> HeadInput waits {
 
 fn l15_forward(to: Sender[HeadInput], during: Sender[RelayEvent], take msg: HeadInput) -> Sender[RelayEvent] waits {
     let RunRequest(Req(e: Requested(take req))) = take msg else { fail("L15 expected a relay request") }
-    let Request(caller: take caller, stream: take stream_bytes, p, key: take key, arg: take arg, digest, deadline,
+    let Request(caller: take caller, stream: take stream_bytes, stream_id, p, key: take key, arg: take arg, digest, deadline,
         reply_to: RelayReply(RelayRecipient(to: take answer_to, position, backing: take backing)),
         live: take live, identity: take identity, seed: take seed) = take req else { fail("L15 expected relay reply authority") }
     let target = RelayReply(RelayRecipient(to: channel.sender(during), position, backing: take backing))
-    let request = Request(caller: take caller, stream: take stream_bytes, p, key: take key, arg: take arg, digest, deadline,
+    let request = Request(caller: take caller, stream: take stream_bytes, stream_id, p, key: take key, arg: take arg, digest, deadline,
         reply_to: take target, live: take live, identity: take identity, seed: take seed)
     result.unwrap(channel.send(to, RunRequest(Req(e: Requested(take request)))))
     take answer_to
@@ -318,7 +343,7 @@ fn l15_post(net: Net, clock: Clock, address: Addr, stream_id: u32, submit: bool)
     list.push(mut fields, std.http_client.Header(name: "Content-Type", value: Public(b"application/json")))
     list.push(mut fields, std.http_client.Header(name: "Authorization", value: Public(b"token")))
     let mut header = string.from("\"")
-    string.push_u64(mut header, int.widen(stream_id))
+    string.push_uint(mut header, int.widen(stream_id), 16u32, 32u64, '0')
     string.push(mut header, ".0\"")
     list.push(mut fields, std.http_client.Header(name: "Idempotency-Key", value: Public(string.into_bytes(take header))))
     let req = std.http_client.Request(method: "POST", target: "/old", headers: take fields, body: Fixed(2u64))

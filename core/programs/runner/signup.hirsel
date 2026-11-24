@@ -214,7 +214,7 @@ fn operate(take demo: Demo) -> Result[runner.Ended, runner.StartError] waits {
 }
 
 fn client_call[R: codec](conn: wire_client.Conn, slot: u32, take arg: Bytes, position: u64) -> R waits {
-    wire_client.send_frame(conn, Call(0u32, position, slot, 1000u32, take arg))
+    wire_client.send_frame(conn, Call(store.StreamId(t: 0u64, n: 0u64), position, slot, 1000u32, take arg))
     loop {
         match wire_client.next(conn) {
             Ok(Batch(_, _, _, done)) => {

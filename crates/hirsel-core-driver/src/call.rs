@@ -922,7 +922,7 @@ fn float(x: f64, canonical_nan: bool) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
-// One RFC 6455 client session speaking hirsel.3
+// One RFC 6455 client session speaking hirsel.4
 
 struct Url {
     host: String,
@@ -994,7 +994,7 @@ impl Session {
         };
         let key = base64(&random::<16>()?);
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.3\r\n\r\n",
+            "GET {} HTTP/1.1\r\nHost: {}:{}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
             url.path, url.host, url.port
         );
         session.stream.write_all(request.as_bytes())?;
@@ -1028,8 +1028,8 @@ impl Session {
         if header("Sec-WebSocket-Accept").as_deref() != Some(accept.as_str()) {
             return Err("server's Sec-WebSocket-Accept does not answer our key".into());
         }
-        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.3") {
-            return Err("server did not select the hirsel.3 subprotocol".into());
+        if header("Sec-WebSocket-Protocol").as_deref() != Some("hirsel.4") {
+            return Err("server did not select the hirsel.4 subprotocol".into());
         }
         Ok(session)
     }
@@ -1149,8 +1149,8 @@ impl Session {
     }
 }
 
-/// Hello for one entry, Welcome, Placed, then one Call on a fresh anonymous
-/// Caller (stream 0, position 0). The Call is sent only once the server has
+/// Hello for one entry, Welcome, Placed, then one Call at position 0 on a
+/// fresh stream. The Call is sent only once the server has
 /// placed the entry under the Describe fingerprints; it is never resent.
 fn exchange(
     url: &Url,
@@ -1166,24 +1166,20 @@ fn exchange(
     let want = json!({"identity": hex(&entry.identity), "args_fp": entry.args_fp, "result_fp": entry.result_fp});
     let hello = json!({"tag": "Hello", "values": [{"tag": "None"}, [want]]});
     session.send(0x2, &encode(frame, &hello)?)?;
-    let mut welcomed = false;
+    let mut stream = None;
     let mut sent = false;
     let deadline_ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
     loop {
         let bytes = match session.message() {
             Ok(bytes) => bytes,
-            Err(error) if sent => {
-                return Err(
-                    format!("{error}; the call was sent once and its outcome is unknown").into(),
-                );
-            }
+            Err(error) if sent => return Err(format!("LocallyUnknown: {error}").into()),
             Err(error) => return Err(error),
         };
         let received = decode(frame, &bytes).map_err(|e| format!("server frame: {e}"))?;
         let (tag, _) = tagged(&received, "server frame")?;
         let values = &received["values"];
         match tag {
-            "Welcome" if !welcomed => {
+            "Welcome" if stream.is_none() => {
                 let subject = values[0]["subject"]
                     .as_str()
                     .and_then(from_hex)
@@ -1191,7 +1187,8 @@ fn exchange(
                 if subject.len() > 64 {
                     return Err("Welcome Caller subject exceeds 64 bytes".into());
                 }
-                welcomed = true;
+                let now = values[6].as_u64().ok_or("Welcome has no keyed time")?;
+                stream = Some(json!({"t": now, "n": u64::from_le_bytes(random::<8>()?)}));
                 let digest = from_hex(values[3].as_str().unwrap_or_default()).unwrap_or_default();
                 let target = values[4].as_str().unwrap_or_default();
                 let n_place = values[5].as_u64().unwrap_or_default();
@@ -1211,13 +1208,15 @@ fn exchange(
                     .into());
                 }
             }
-            "Placed" if welcomed && !sent => {
+            "Placed" if stream.is_some() && !sent => {
                 let (placed, _) = tagged(&received["value"], "Placed")?;
                 match placed {
                     "Ready" => {
                         let slot = &received["value"]["value"];
-                        let call = json!({"tag": "Call", "values": [0, 0, slot, deadline_ms, hex(&argument)]});
-                        session.send(0x2, &encode(frame, &call)?)?;
+                        let call = json!({"tag": "Call", "values": [stream, 0, slot, deadline_ms, hex(&argument)]});
+                        session
+                            .send(0x2, &encode(frame, &call)?)
+                            .map_err(|error| format!("LocallyUnknown: {error}"))?;
                         sent = true;
                     }
                     "Gone" => {
@@ -1243,13 +1242,13 @@ fn exchange(
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .find(|d| d["stream"] == 0 && d["p"] == 0)
+                    .find(|d| Some(&d["stream"]) == stream.as_ref() && d["p"] == 0)
                 {
                     session.close();
                     return Ok(done["outcome"].clone());
                 }
             }
-            "Batch" | "Ended" if welcomed => {}
+            "Batch" | "Ended" if stream.is_some() => {}
             other => {
                 session.close();
                 return Err(format!("server sent {other} out of order").into());

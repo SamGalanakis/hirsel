@@ -53,9 +53,9 @@ fn replay_record(mut db: store.Db, registered: ReplayRegistry, h: ReplayMembers,
     let key = result.unwrap(attempt_key(code.describe(replay_member), std.codec.of_u64(), reply_codec))
     let mut arg_bytes: Bytes = list.new()
     std.codec.put_u64(arg, mut arg_bytes)
-    let raw_stream = result.unwrap(stream_key(author, stream))
+    let id = store.StreamId(t: store.keyed_time(db), n: int.widen(stream))
     let (reply_to, _reply_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
-    let Req(e: Requested(take q)) = head_request(take author, take raw_stream, 0u64, take key, take arg_bytes, take reply_to) else {
+    let Req(e: Requested(take q)) = head_request(take author, id, 0u64, take key, take arg_bytes, take reply_to) else {
         fail("replay expected a request")
     }
     let admission = result.unwrap(store.admit(mut db, q.stream, q.p, q.digest))

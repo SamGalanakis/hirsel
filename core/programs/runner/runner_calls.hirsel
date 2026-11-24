@@ -358,7 +358,7 @@ fn wsock_text(take prefix: String, e: std.wsock.Error) -> String {
 fn ask(cn: Conn, clock: Clock, s: u64, p: u64, take key: Bytes, take arg: Bytes, after: u64) -> () waits {
     let stream: u32 = int.narrow(s)
     let ms: u32 = int.narrow(after / 1000000u64)
-    let request: runner.Frame = Call(stream, p, wire_client.slot(client_keys(), key), ms, take arg)
+    let request: runner.Frame = Call(store.StreamId(t: 0u64, n: int.widen(stream)), p, wire_client.slot(client_keys(), key), ms, take arg)
     match cn { Socket(wire, _) => wire_client.send_frame(wire, take request), _ => fail("calls: synthetic owner cannot call") }
 }
 
@@ -723,10 +723,10 @@ fn anonymous_reply(d: Drive) -> Option[u64] waits {
     let unbound: Option[runner.Wire[(), ()]] = None
     let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post,
         code.describe(place), requested, Some(clone(d.token)), 0u64, 2097152u64))
-    wire_client.send_frame(wire, Call(7u32, 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
+    wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 7u64), 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
     let observed = match wire_client.next(wire) {
         Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 =>
-            if done[0u64].stream == 7u32 && done[0u64].p == 0u64 { ok_value(done[0u64].outcome) } else { None },
+            if done[0u64].stream == store.StreamId(t: 0u64, n: 7u64) && done[0u64].p == 0u64 { ok_value(done[0u64].outcome) } else { None },
         _ => None,
     }
     let _ = wire_client.close(take wire)
@@ -773,7 +773,7 @@ fn drive_granted_copies(take d: Drive) -> () waits {
         code.describe(stamp_place), requested, None, config, 2097152u64))
     // The supplied offset is 40. Each call independently returns offset + input.
     for p in 0u64 .. 2u64 {
-        wire_client.send_frame(wire, Call(0u32, p, 0u32, 10000u32, u64_arg(p + 1u64)))
+        wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 0u64), p, 0u32, 10000u32, u64_arg(p + 1u64)))
         let returned = match wire_client.next(wire) {
             Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 && done[0u64].p == p =>
                 match done[0u64].outcome {
@@ -841,7 +841,7 @@ fn drive_bind_only(take d: Drive) -> () waits {
     let cn: Conn = Socket(take wire, take session)
     let mut image = Image(rows: map.new(), at: 0u64, completes: 0u64)
     image_at(cn, mut image, 5u64, 1u64, key_list(Some(2u64), None), string.from("bind_only: mine runs as the bound Caller"))
-    match cn { Socket(sock, _) => wire_client.send_frame(sock, Call(0u32, 0u64, 1u32, 10000u32, u64_arg(1u64))), _ => fail("bind_only: not a socket") }
+    match cn { Socket(sock, _) => wire_client.send_frame(sock, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 1u32, 10000u32, u64_arg(1u64))), _ => fail("bind_only: not a socket") }
     want(is(frame(cn).outcome, Refused(NotAllowed)), "bind_only: a Granted call is refused")
     hang(take cn)
     hang(take w)
@@ -922,7 +922,7 @@ fn keyed(take outcomes: List[runner.Done]) -> List[runner.KeyedDone] {
     let mut out: List[runner.KeyedDone] = list.new()
     for take d in outcomes {
         let runner.Done(stream: stream, p: p, outcome: take o) = take d
-        list.push(mut out, runner.KeyedDone(stream: sid(int.widen(stream)), p: p, outcome: take o))
+        list.push(mut out, runner.KeyedDone(stream: sid(stream.n), p: p, outcome: take o))
     }
     take out
 }
@@ -1403,22 +1403,6 @@ fn disk_options() -> store.Options {
     o
 }
 
-fn drain_send(to: Sender[runner.HeadInput], stream: String, position: u64, argument: u64) -> Receiver[runner.WireEvent] waits {
-    let (reply_to, reply_from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(2u64)
-    let req = runner.head_request(store.Caller(issuer: 1, subject: list.new()), digest_bytes(stream), position, k_write(), u64_arg(argument), take reply_to)
-    result.unwrap(channel.send(to, RunRequest(take req)))
-    take reply_from
-}
-
-fn drain_answer(from: Receiver[runner.WireEvent], stream: String, position: u64) -> runner.Outcome {
-    let event = match channel.try_receive(from) { Ok(take event) => take event, Error(_) => fail("drain: send got no answer") }
-    let received = option.unwrap(runner.head_outcome(take event))
-    want(received.stream == digest_bytes(stream) && received.p == position, "drain: answer to wrong send")
-    if let Ok(_) = channel.try_receive(from) { fail("drain: send answered twice") }
-    let runner.KeyedDone(outcome: take outcome, ..) = take received
-    take outcome
-}
-
 fn drained(take fresh: store.Db, tasks: Tasks) -> bool waits {
     let mut db = take fresh
     let cv: std.codec.Codec[u64] = std.codec.of()
@@ -1463,8 +1447,8 @@ fn test_drain_reopened(parent: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
     want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 41u64)) == None, "drain: FIFO refusal wrote data")
     want(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table.t, 42u64)) == None, "drain: closed admission wrote data")
     let key = k_write()
-    let held = digest_bytes("held")
-    let fresh_stream = digest_bytes("new")
+    let held = drain_stream("held")
+    let fresh_stream = drain_stream("new")
     if let Duplicate(_) = result.unwrap(store.admit(mut db, held, 0u64, store.request_digest(key, u64_arg(40u64)))) {} else { fail("drain: admitted reply did not survive reopen") }
     if let Admitted(_) = result.unwrap(store.admit(mut db, held, 1u64, store.request_digest(key, u64_arg(41u64)))) {} else { fail("drain: refused FIFO position left a row") }
     if let Admitted(_) = result.unwrap(store.admit(mut db, fresh_stream, 0u64, store.request_digest(key, u64_arg(42u64)))) {} else { fail("drain: refused fresh position left a row") }
@@ -1722,7 +1706,7 @@ fn test_lag_window(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net:
         Ok(take connected) => take connected,
         Error(_) => fail("lag: connection refused inside the lag window"),
     }
-    wire_client.send_frame(connection, Call(0u32, 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
+    wire_client.send_frame(connection, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, wire_client.slot(client_keys(), k_write()), 1000u32, u64_arg(43u64)))
     match wire_client.next(connection) {
         Ok(Batch(_, _, _, done)) => {
             want(list.len(done) == 1u64 && done[0u64].p == 0u64, "lag: wrong outcome count")
@@ -1814,7 +1798,7 @@ fn unit_grant(seed: (), unused_handles: Hd, take context: runner.TriggerContext)
 }
 
 fn ping_call(client: wire_client.Conn, ping_keys: List[Bytes], key: Bytes, position: u64, arg: u64) -> u64 waits {
-    wire_client.send_frame(client, Call(0u32, position, wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
+    wire_client.send_frame(client, Call(store.StreamId(t: 0u64, n: 0u64), position, wire_client.slot(ping_keys, key), 1000u32, u64_arg(arg)))
     loop {
         match wire_client.next(client) {
             Ok(Batch(_, _, _, done)) => for item in done {
@@ -2305,10 +2289,10 @@ fn note_send(d: NoteDriver, owner: u8, stream: u32, p: u64, f: StaticFn[fn(mut s
     let mut subject: Bytes = list.new()
     list.push(mut subject, owner)
     let caller = store.Caller(issuer: 1u8, subject: take subject)
-    let name = result.unwrap(runner.stream_key(caller, stream))
+    let name = store.StreamId(t: 0u64, n: int.widen(stream))
     let key = key_of(code.identity(f), std.codec.of_u64(), reply())
     let (to, from): (Sender[runner.WireEvent], Receiver[runner.WireEvent]) = channel.new(1u64)
-    result.unwrap(channel.send(d.head, RunRequest(runner.head_request(take caller, take name, p, take key, u64_arg(arg), take to))))
+    result.unwrap(channel.send(d.head, RunRequest(runner.head_request(take caller, name, p, take key, u64_arg(arg), take to))))
     let delivery = option.unwrap(runner.head_outcome(result.unwrap(channel.receive(from))))
     let runner.KeyedDone(outcome: take outcome, ..) = take delivery
     take outcome

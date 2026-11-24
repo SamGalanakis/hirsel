@@ -141,7 +141,7 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
     let mut token: Bytes = list.new()
     for _ in 0u64 .. 16u64 { list.push(mut token, 0u8) }
     let caller = result.unwrap(runner.ingress.caller((), token))
-    let stream = result.unwrap(runner.stream_key(caller, 77u32))
+    let stream = result.unwrap(runner.stream_key(caller, store.StreamId(t: 0u64, n: 77u64)))
     let _ = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(retired(), list.new())))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
     let mail = result.unwrap(runner.mailbox(64u64))

@@ -31,7 +31,7 @@ fn row(chunk: u32) -> runner.Row {
 }
 
 fn done() -> runner.Done {
-    runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b("0000000001")))
+    runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Returned(b("0000000001")))
 }
 
 fn batch_empty() -> runner.Frame {
@@ -126,12 +126,12 @@ pub fn law_frame_vectors() -> bool {
     if !wire(out, Hello(Some(b("aabb")), one(runner.Want(identity: b("aabb"), args_fp: 0x0102030405060708u64, result_fp: 0x1112131415161718u64))), b("8228000000000100000002000000aabb0100000002000000aabb08070605040302011817161514131211")) {
         return false
     }
-    // call: Call tag, stream u32, position u64, slot u32, deadline u32 and argument blob
-    let c_call: std.codec.Codec[runner.Frame] = std.codec.of()
-    if !vector(c_call, Call(0x01020304u32, 0x0102030405060708u64, 0x11121314u32, 0x21222324u32, b("aabb")), b("01000000040302010807060504030201141312112423222102000000aabb")) {
+    // call_streamid: Call tag, stream timestamp and nonce, position, slot, deadline and argument blob
+    let c_call_streamid: std.codec.Codec[runner.Frame] = std.codec.of()
+    if !vector(c_call_streamid, Call(store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), 0x3132333435363738u64, 0x11121314u32, 0x21222324u32, b("aabb")), b("01000000080706050403020128272625242322213837363534333231141312112423222102000000aabb")) {
         return false
     }
-    if !wire(out, Call(0x01020304u32, 0x0102030405060708u64, 0x11121314u32, 0x21222324u32, b("aabb")), b("821e01000000040302010807060504030201141312112423222102000000aabb")) {
+    if !wire(out, Call(store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), 0x3132333435363738u64, 0x11121314u32, 0x21222324u32, b("aabb")), b("822a01000000080706050403020128272625242322213837363534333231141312112423222102000000aabb")) {
         return false
     }
     // subscribe_none: Subscribe tag, sub, slot, argument blob and None
@@ -158,12 +158,12 @@ pub fn law_frame_vectors() -> bool {
     if !wire(out, Unsubscribe(0x01020304u32), b("82080300000004030201")) {
         return false
     }
-    // welcome: Welcome tag, Caller issuer and subject, q, budget, digest, target, n_place
-    let c_welcome: std.codec.Codec[runner.Frame] = std.codec.of()
-    if !vector(c_welcome, Welcome(store.Caller(issuer: 2u8, subject: b("000102030405060708090a0b0c0d0e0f")), 4u32, 1048576u64, b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), "x86_64-unknown-linux-gnu", 16777216u64), b("040000000210000000000102030405060708090a0b0c0d0e0f04000000000010000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f180000007838365f36342d756e6b6e6f776e2d6c696e75782d676e750000000100000000")) {
+    // welcome_times: Welcome tag, Caller issuer and subject, q, budget, digest, target, n_place, keyed time, retention
+    let c_welcome_times: std.codec.Codec[runner.Frame] = std.codec.of()
+    if !vector(c_welcome_times, Welcome(store.Caller(issuer: 2u8, subject: b("000102030405060708090a0b0c0d0e0f")), 4u32, 1048576u64, b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), "x86_64-unknown-linux-gnu", 16777216u64, 0x0000019a6b2c3d4eu64, 5184000000u64), b("040000000210000000000102030405060708090a0b0c0d0e0f04000000000010000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f180000007838365f36342d756e6b6e6f776e2d6c696e75782d676e7500000001000000004e3d2c6b9a0100000090fd3401000000")) {
         return false
     }
-    if !wire(out, Welcome(store.Caller(issuer: 2u8, subject: b("000102030405060708090a0b0c0d0e0f")), 4u32, 1048576u64, b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), "x86_64-unknown-linux-gnu", 16777216u64), b("826d040000000210000000000102030405060708090a0b0c0d0e0f04000000000010000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f180000007838365f36342d756e6b6e6f776e2d6c696e75782d676e750000000100000000")) {
+    if !wire(out, Welcome(store.Caller(issuer: 2u8, subject: b("000102030405060708090a0b0c0d0e0f")), 4u32, 1048576u64, b("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), "x86_64-unknown-linux-gnu", 16777216u64, 0x0000019a6b2c3d4eu64, 5184000000u64), b("827d040000000210000000000102030405060708090a0b0c0d0e0f04000000000010000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f180000007838365f36342d756e6b6e6f776e2d6c696e75782d676e7500000001000000004e3d2c6b9a0100000090fd3401000000")) {
         return false
     }
     // placed_ready: Placed tag and Entry bytes
@@ -318,9 +318,9 @@ pub fn law_frame_vectors() -> bool {
     if !wire(out, Ended(0x01020304u32, InDoubt), b("820c070000000403020104000000")) {
         return false
     }
-    // done: stream u32, position u64 and Outcome
+    // done: stream timestamp and nonce, position and Outcome
     let c_done: std.codec.Codec[runner.Done] = std.codec.of()
-    if !vector(c_done, runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b("0000000001"))), b("04030201080706050403020100000000050000000000000001")) {
+    if !vector(c_done, runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Returned(b("0000000001"))), b("08070605040302012827262524232221080706050403020100000000050000000000000001")) {
         return false
     }
     // row_removed: slot u16, key blob and None tag
@@ -359,10 +359,10 @@ pub fn law_frame_vectors() -> bool {
     }
     // caller_update: one group with one row and one Done
     let c_caller_update: std.codec.Codec[runner.Frame] = std.codec.of()
-    if !vector(c_caller_update, batch_caller(), b("06000000080706050403020100000000010000000700000000000000010000000000080000000102030405060708010000004400000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0100000004030201080706050403020100000000050000000000000001")) {
+    if !vector(c_caller_update, batch_caller(), b("06000000080706050403020100000000010000000700000000000000010000000000080000000102030405060708010000004400000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0100000008070605040302012827262524232221080706050403020100000000050000000000000001")) {
         return false
     }
-    if !wire(out, batch_caller(), b("827e009706000000080706050403020100000000010000000700000000000000010000000000080000000102030405060708010000004400000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0100000004030201080706050403020100000000050000000000000001")) {
+    if !wire(out, batch_caller(), b("827e00a306000000080706050403020100000000010000000700000000000000010000000000080000000102030405060708010000004400000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0100000008070605040302012827262524232221080706050403020100000000050000000000000001")) {
         return false
     }
     // full_board: one complete id and one group with 1954 rows
@@ -391,20 +391,70 @@ pub fn law_frame_vectors() -> bool {
     }
     // reset_outcome: Reset tag, version and one Done
     let c_reset_outcome: std.codec.Codec[runner.Frame] = std.codec.of()
-    if !vector(c_reset_outcome, Reset(0x0102030405060708u64, one(runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b("0000000001"))))), b("0800000008070605040302010100000004030201080706050403020100000000050000000000000001")) {
+    if !vector(c_reset_outcome, Reset(0x0102030405060708u64, one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Returned(b("0000000001"))))), b("0800000008070605040302010100000008070605040302012827262524232221080706050403020100000000050000000000000001")) {
         return false
     }
-    if !wire(out, Reset(0x0102030405060708u64, one(runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b("0000000001"))))), b("82290800000008070605040302010100000004030201080706050403020100000000050000000000000001")) {
+    if !wire(out, Reset(0x0102030405060708u64, one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Returned(b("0000000001"))))), b("82350800000008070605040302010100000008070605040302012827262524232221080706050403020100000000050000000000000001")) {
         return false
     }
-    // done_refused_request_mismatch: stream u32, position u64 and precise refusal
+    // done_refused_request_mismatch: stream timestamp and nonce, position and precise refusal
     let c_done_refused_request_mismatch: std.codec.Codec[runner.Done] = std.codec.of()
-    if !vector(c_done_refused_request_mismatch, runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Refused(RequestMismatch)), b("0403020108070605040302010200000006000000")) {
+    if !vector(c_done_refused_request_mismatch, runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Refused(RequestMismatch)), b("0807060504030201282726252423222108070605040302010200000006000000")) {
         return false
     }
-    // done_refused_history_unavailable: stream u32, position u64 and precise refusal
+    // done_refused_history_unavailable: stream timestamp and nonce, position and precise refusal
     let c_done_refused_history_unavailable: std.codec.Codec[runner.Done] = std.codec.of()
-    if !vector(c_done_refused_history_unavailable, runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Refused(HistoryUnavailable)), b("0403020108070605040302010200000007000000")) {
+    if !vector(c_done_refused_history_unavailable, runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Refused(HistoryUnavailable)), b("0807060504030201282726252423222108070605040302010200000007000000")) {
+        return false
+    }
+    // done_refused_budget: 48 bytes: stream, position, two tags and Room
+    let c_done_refused_budget: std.codec.Codec[runner.Done] = std.codec.of()
+    if !vector(c_done_refused_budget, runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64)))), b("080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251")) {
+        return false
+    }
+    // batch_one_refusal: 24-byte Batch prefix and one 48-byte Done
+    let c_batch_one_refusal: std.codec.Codec[runner.Frame] = std.codec.of()
+    if !vector(c_batch_one_refusal, Batch(0x6162636465666768u64, list.new(), list.new(), one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64)))))), b("060000006867666564636261000000000000000001000000080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251")) {
+        return false
+    }
+    if !wire(out, Batch(0x6162636465666768u64, list.new(), list.new(), one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64)))))), b("8248060000006867666564636261000000000000000001000000080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251")) {
+        return false
+    }
+    // reset_one_refusal: 16-byte Reset prefix and one 48-byte Done
+    let c_reset_one_refusal: std.codec.Codec[runner.Frame] = std.codec.of()
+    if !vector(c_reset_one_refusal, Reset(0x6162636465666768u64, one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64)))))), b("08000000686766656463626101000000080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251")) {
+        return false
+    }
+    if !wire(out, Reset(0x6162636465666768u64, one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64)))))), b("824008000000686766656463626101000000080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251")) {
+        return false
+    }
+    // done_stream_future: stream, position, refusal tags, STREAM_FUTURE and its keyed time
+    let c_done_stream_future: std.codec.Codec[runner.Done] = std.codec.of()
+    if !vector(c_done_stream_future, runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0u64, outcome: Refused(Malformed(runner.Bad(kind: 7u32, at: 0x0000019a6b2c3d4eu64)))), b("0807060504030201282726252423222100000000000000000200000001000000070000004e3d2c6b9a010000")) {
+        return false
+    }
+    // set_state: Set tag, sub, Some tag and state blob
+    let c_set_state: std.codec.Codec[runner.Frame] = std.codec.of()
+    if !vector(c_set_state, Set(7u32, Some(b("aabb"))), b("09000000070000000100000002000000aabb")) {
+        return false
+    }
+    if !wire(out, Set(7u32, Some(b("aabb"))), b("821209000000070000000100000002000000aabb")) {
+        return false
+    }
+    // send_direct: Send tag, sub, Some tag, peer and message blob
+    let c_send_direct: std.codec.Codec[runner.Frame] = std.codec.of()
+    if !vector(c_send_direct, Send(7u32, Some(8u32), b("aabb")), b("0a00000007000000010000000800000002000000aabb")) {
+        return false
+    }
+    if !wire(out, Send(7u32, Some(8u32), b("aabb")), b("82160a00000007000000010000000800000002000000aabb")) {
+        return false
+    }
+    // live_all_fields: Live tag and one Part, with all options and lists populated
+    let c_live_all_fields: std.codec.Codec[runner.Frame] = std.codec.of()
+    if !vector(c_live_all_fields, Live(one(runner.Part(sub: 7u32, complete: true, you: Some(8u32), joined: one((9u32, store.Caller(issuer: 2u8, subject: b("000102030405060708090a0b0c0d0e0f")))), states: one((9u32, Some(b("aabb")))), msgs: one((9u32, true, b("cafe"))), left: one(10u32), gap: 11u32, lost: 12u32, full: true))), b("0b000000010000000700000001010000000800000001000000090000000210000000000102030405060708090a0b0c0d0e0f01000000090000000100000002000000aabb01000000090000000102000000cafe010000000a0000000b0000000c00000001")) {
+        return false
+    }
+    if !wire(out, Live(one(runner.Part(sub: 7u32, complete: true, you: Some(8u32), joined: one((9u32, store.Caller(issuer: 2u8, subject: b("000102030405060708090a0b0c0d0e0f")))), states: one((9u32, Some(b("aabb")))), msgs: one((9u32, true, b("cafe"))), left: one(10u32), gap: 11u32, lost: 12u32, full: true))), b("82640b000000010000000700000001010000000800000001000000090000000210000000000102030405060708090a0b0c0d0e0f01000000090000000100000002000000aabb01000000090000000102000000cafe010000000a0000000b0000000c00000001")) {
         return false
     }
     true

@@ -101,7 +101,7 @@ fn http_subscription_input(take caller: Caller, take key: Bytes, take arg: Bytes
 }
 
 fn http_subscribe(access: HttpReadAccess, take sent: Send, budget: u64) -> Result[HttpOwner, Refusal] {
-    let Send(caller: take caller, key: take key, arg: take arg, ..) = take sent
+    let Send(stream: store.StreamKey(caller: take caller, ..), key: take key, arg: take arg, ..) = take sent
     let input = http_subscription_input(take caller, take key, take arg, budget, access.frame_limit)?
     let (take owner, take ports) = http_owner(access.publisher, 3u64)?
     http_join(owner, take ports, take input, None)?
@@ -210,7 +210,7 @@ fn http_ended_reply(take outcome: Outcome) -> Result[std.http.Response, std.http
 type HttpStreamSeed: codec + send { route: u64, caller: Caller, key: Bytes, arg: Bytes, budget: u64 }
 
 fn http_stream_offer(req: std.http.Request, take sent: Send, budget: u64) -> Result[std.stream.Spec, std.http.HandlerError] {
-    let Send(caller: take caller, key: take key, arg: take arg, ..) = take sent
+    let Send(stream: store.StreamKey(caller: take caller, ..), key: take key, arg: take arg, ..) = take sent
     let seed = HttpStreamSeed(route: std.http.route_tag(req), caller: take caller, key: take key, arg: take arg, budget: budget)
     let mut stream = std.stream.spec_managed(req, seed)?
     std.stream.header(mut stream, b"Content-Type", b"text/event-stream")?

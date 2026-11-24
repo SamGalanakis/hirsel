@@ -43,7 +43,7 @@ pub fn ts_frame_vectors() -> bool {
     if encoded(Ended(3u32, Abandoned)) != raw("070000000300000003000000") || encoded(Ended(3u32, InDoubt)) != raw("070000000300000004000000") || encoded(Ended(3u32, Refused(RequestMismatch))) != raw("07000000030000000200000006000000") || encoded(Ended(3u32, Refused(HistoryUnavailable))) != raw("07000000030000000200000007000000") {
         return false
     }
-    encoded(Hello(None, list.new())) == raw("000000000000000000000000") && encoded(Call(7u32, 9007199254740993u64, 2u32, 3u32, raw("ff"))) == raw("01000000070000000100000000002000020000000300000001000000ff") && encoded(Batch(2u64, list.new(), list.new(), list.new())) == raw("060000000200000000000000000000000000000000000000") && encoded(Batch(2u64, singleton(7u32), singleton(runner.Group(sub: 7u32, value: list.new(), rows: list.new())), list.new())) == raw("06000000020000000000000001000000070000000100000007000000000000000000000000000000") && encoded(Welcome(store.Caller(issuer: 2u8, subject: raw("aa")), 2u32, 3u64, list.new(), "t", 4u64)) == raw("040000000201000000aa0200000003000000000000000000000001000000740400000000000000")
+    encoded(Hello(None, list.new())) == raw("000000000000000000000000") && encoded(Call(store.StreamId(t: 0u64, n: 7u64), 9007199254740993u64, 2u32, 3u32, raw("ff"))) == raw("01000000000000000000000007000000000000000100000000002000020000000300000001000000ff") && encoded(Batch(2u64, list.new(), list.new(), list.new())) == raw("060000000200000000000000000000000000000000000000") && encoded(Batch(2u64, singleton(7u32), singleton(runner.Group(sub: 7u32, value: list.new(), rows: list.new())), list.new())) == raw("06000000020000000000000001000000070000000100000007000000000000000000000000000000") && encoded(Welcome(store.Caller(issuer: 2u8, subject: raw("aa")), 2u32, 3u64, list.new(), "t", 4u64, 5u64, 6u64)) == raw("040000000201000000aa020000000300000000000000000000000100000074040000000000000005000000000000000600000000000000")
 }
 
 fn ts_frame_bytes() -> String {
@@ -53,20 +53,21 @@ fn ts_frame_bytes() -> String {
 fn sample(i: u64, state: u64) -> runner.Frame {
     let p = (state << 32) | i
     let id: u32 = int.truncate(i)
+    let stream = store.StreamId(t: state, n: i)
     match i % 9 {
         0 => Hello(if i % 2 == 0 {
             None
         } else {
             Some(raw("0102"))
         }, singleton(runner.Want(identity: raw("03"), args_fp: state, result_fp: p))),
-        1 => Call(id, p, int.truncate(state % 4), 123u32, singleton(int.truncate(state))),
+        1 => Call(stream, p, int.truncate(state % 4), 123u32, singleton(int.truncate(state))),
         2 => Subscribe(id, 2u32, raw("07"), if i % 2 == 0 {
             None
         } else {
             Some(raw("08"))
         }),
         3 => Unsubscribe(id),
-        4 => Welcome(store.Caller(issuer: 2u8, subject: raw("0102")), 4u32, state, raw("03"), "t", 16777216u64),
+        4 => Welcome(store.Caller(issuer: 2u8, subject: raw("0102")), 4u32, state, raw("03"), "t", 16777216u64, p, 5184000000u64),
         5 => {
             let entry: runner.Entry = match state % 3 {
                 0 => Ready(id),
@@ -82,7 +83,7 @@ fn sample(i: u64, state: u64) -> runner.Frame {
                 list.new()
             }
             let r = runner.Row(slot: 0u16, key: raw("01"), value: Some(raw("03")))
-            let d = runner.Done(stream: id, p: p, outcome: Returned(raw("04")))
+            let d = runner.Done(stream: stream, p: p, outcome: Returned(raw("04")))
             Batch(state, take complete, singleton(runner.Group(sub: id, value: list.new(), rows: singleton(take r))), singleton(take d))
         }
         7 => {
@@ -100,7 +101,7 @@ fn sample(i: u64, state: u64) -> runner.Frame {
                 2 => Refused(RequestMismatch),
                 _ => Refused(HistoryUnavailable)
             }
-            Reset(state, singleton(runner.Done(stream: id, p: p, outcome: take outcome)))
+            Reset(state, singleton(runner.Done(stream: stream, p: p, outcome: take outcome)))
         }
     }
 }

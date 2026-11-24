@@ -81,7 +81,7 @@ fn live_counter(cn: runner.wire_client.Conn, out: Stdout) -> u64 waits {
 
 // One bump at stream 0 position p. If subscribed, observe both the group and outcome.
 fn bump_once(cn: runner.wire_client.Conn, p: u64, observed: Option[(Stdout, u64)]) -> Option[(bool, u64)] waits {
-    runner.wire_client.send_frame(cn, Call(0u32, p, 0u32, 30000u32, u64_bytes(p)))
+    runner.wire_client.send_frame(cn, Call(store.StreamId(t: 0u64, n: 0u64), p, 0u32, 30000u32, u64_bytes(p)))
     let mut published: Option[u64] = None
     let mut replied: Option[(bool, u64)] = None
     loop {

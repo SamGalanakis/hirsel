@@ -1,5 +1,5 @@
 {
-  "contract": "RUNNER-SPEC section 3, hirsel.3",
+  "contract": "RUNNER-SPEC section 3, hirsel.4",
   "oracle": "Derived from codec.md widths. hex is the payload; wire_bytes includes the unmasked server header.",
   "vectors": [
     {
@@ -45,11 +45,11 @@
       "derivation": "Hello tag, Some credential blob and one Want"
     },
     {
-      "name": "call",
+      "name": "call_streamid",
       "type": "Frame",
-      "value": "Call(0x01020304u32, 0x0102030405060708u64, 0x11121314u32, 0x21222324u32, b(\"aabb\"))",
-      "hex": "01000000040302010807060504030201141312112423222102000000aabb",
-      "derivation": "Call tag, stream u32, position u64, slot u32, deadline u32 and argument blob"
+      "value": "Call(store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), 0x3132333435363738u64, 0x11121314u32, 0x21222324u32, b(\"aabb\"))",
+      "hex": "01000000080706050403020128272625242322213837363534333231141312112423222102000000aabb",
+      "derivation": "Call tag, stream timestamp and nonce, position, slot, deadline and argument blob"
     },
     {
       "name": "subscribe_none",
@@ -73,12 +73,12 @@
       "derivation": "Unsubscribe tag and sub u32"
     },
     {
-      "name": "welcome",
+      "name": "welcome_times",
       "type": "Frame",
-      "value": "Welcome(store.Caller(issuer: 2u8, subject: b(\"000102030405060708090a0b0c0d0e0f\")), 4u32, 1048576u64, b(\"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\"), \"x86_64-unknown-linux-gnu\", 16777216u64)",
-      "hex": "040000000210000000000102030405060708090a0b0c0d0e0f04000000000010000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f180000007838365f36342d756e6b6e6f776e2d6c696e75782d676e750000000100000000",
-      "derivation": "Welcome tag, Caller issuer and subject, q, budget, digest, target, n_place",
-      "wire_bytes": 111
+      "value": "Welcome(store.Caller(issuer: 2u8, subject: b(\"000102030405060708090a0b0c0d0e0f\")), 4u32, 1048576u64, b(\"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\"), \"x86_64-unknown-linux-gnu\", 16777216u64, 0x0000019a6b2c3d4eu64, 5184000000u64)",
+      "hex": "040000000210000000000102030405060708090a0b0c0d0e0f04000000000010000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f180000007838365f36342d756e6b6e6f776e2d6c696e75782d676e7500000001000000004e3d2c6b9a0100000090fd3401000000",
+      "derivation": "Welcome tag, Caller issuer and subject, q, budget, digest, target, n_place, keyed time, retention",
+      "wire_bytes": 127
     },
     {
       "name": "placed_ready",
@@ -216,9 +216,9 @@
     {
       "name": "done",
       "type": "Done",
-      "value": "runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b(\"0000000001\")))",
-      "hex": "04030201080706050403020100000000050000000000000001",
-      "derivation": "stream u32, position u64 and Outcome"
+      "value": "runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Returned(b(\"0000000001\")))",
+      "hex": "08070605040302012827262524232221080706050403020100000000050000000000000001",
+      "derivation": "stream timestamp and nonce, position and Outcome"
     },
     {
       "name": "row_removed",
@@ -261,9 +261,9 @@
       "name": "caller_update",
       "type": "Frame",
       "value": "batch_caller()",
-      "hex": "06000000080706050403020100000000010000000700000000000000010000000000080000000102030405060708010000004400000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0100000004030201080706050403020100000000050000000000000001",
+      "hex": "06000000080706050403020100000000010000000700000000000000010000000000080000000102030405060708010000004400000040000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f0100000008070605040302012827262524232221080706050403020100000000050000000000000001",
       "derivation": "one group with one row and one Done",
-      "wire_bytes": 155
+      "wire_bytes": 167
     },
     {
       "name": "full_board",
@@ -291,23 +291,75 @@
     {
       "name": "reset_outcome",
       "type": "Frame",
-      "value": "Reset(0x0102030405060708u64, one(runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Returned(b(\"0000000001\")))))",
-      "hex": "0800000008070605040302010100000004030201080706050403020100000000050000000000000001",
+      "value": "Reset(0x0102030405060708u64, one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Returned(b(\"0000000001\")))))",
+      "hex": "0800000008070605040302010100000008070605040302012827262524232221080706050403020100000000050000000000000001",
       "derivation": "Reset tag, version and one Done"
     },
     {
       "name": "done_refused_request_mismatch",
       "type": "Done",
-      "value": "runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Refused(RequestMismatch))",
-      "hex": "0403020108070605040302010200000006000000",
-      "derivation": "stream u32, position u64 and precise refusal"
+      "value": "runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Refused(RequestMismatch))",
+      "hex": "0807060504030201282726252423222108070605040302010200000006000000",
+      "derivation": "stream timestamp and nonce, position and precise refusal"
     },
     {
       "name": "done_refused_history_unavailable",
       "type": "Done",
-      "value": "runner.Done(stream: 0x01020304u32, p: 0x0102030405060708u64, outcome: Refused(HistoryUnavailable))",
-      "hex": "0403020108070605040302010200000007000000",
-      "derivation": "stream u32, position u64 and precise refusal"
+      "value": "runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x0102030405060708u64, outcome: Refused(HistoryUnavailable))",
+      "hex": "0807060504030201282726252423222108070605040302010200000007000000",
+      "derivation": "stream timestamp and nonce, position and precise refusal"
+    },
+    {
+      "name": "done_refused_budget",
+      "type": "Done",
+      "value": "runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64))))",
+      "hex": "080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251",
+      "derivation": "48 bytes: stream, position, two tags and Room"
+    },
+    {
+      "name": "batch_one_refusal",
+      "type": "Frame",
+      "value": "Batch(0x6162636465666768u64, list.new(), list.new(), one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64))))))",
+      "hex": "060000006867666564636261000000000000000001000000080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251",
+      "derivation": "24-byte Batch prefix and one 48-byte Done",
+      "wire_bytes": 74
+    },
+    {
+      "name": "reset_one_refusal",
+      "type": "Frame",
+      "value": "Reset(0x6162636465666768u64, one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64))))))",
+      "hex": "08000000686766656463626101000000080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251",
+      "derivation": "16-byte Reset prefix and one 48-byte Done",
+      "wire_bytes": 66
+    },
+    {
+      "name": "done_stream_future",
+      "type": "Done",
+      "value": "runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0u64, outcome: Refused(Malformed(runner.Bad(kind: 7u32, at: 0x0000019a6b2c3d4eu64))))",
+      "hex": "0807060504030201282726252423222100000000000000000200000001000000070000004e3d2c6b9a010000",
+      "derivation": "stream, position, refusal tags, STREAM_FUTURE and its keyed time"
+    },
+    {
+      "name": "set_state",
+      "type": "Frame",
+      "value": "Set(7u32, Some(b(\"aabb\")))",
+      "hex": "09000000070000000100000002000000aabb",
+      "derivation": "Set tag, sub, Some tag and state blob"
+    },
+    {
+      "name": "send_direct",
+      "type": "Frame",
+      "value": "Send(7u32, Some(8u32), b(\"aabb\"))",
+      "hex": "0a00000007000000010000000800000002000000aabb",
+      "derivation": "Send tag, sub, Some tag, peer and message blob"
+    },
+    {
+      "name": "live_all_fields",
+      "type": "Frame",
+      "value": "Live(one(runner.Part(sub: 7u32, complete: true, you: Some(8u32), joined: one((9u32, store.Caller(issuer: 2u8, subject: b(\"000102030405060708090a0b0c0d0e0f\")))), states: one((9u32, Some(b(\"aabb\")))), msgs: one((9u32, true, b(\"cafe\"))), left: one(10u32), gap: 11u32, lost: 12u32, full: true)))",
+      "hex": "0b000000010000000700000001010000000800000001000000090000000210000000000102030405060708090a0b0c0d0e0f01000000090000000100000002000000aabb01000000090000000102000000cafe010000000a0000000b0000000c00000001",
+      "derivation": "Live tag and one Part, with all options and lists populated",
+      "wire_bytes": 102
     }
   ]
 }

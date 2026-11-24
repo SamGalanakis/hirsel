@@ -274,9 +274,9 @@ fn secret_client(take d: SecretClient) -> String waits {
     let _ = take head
     let mut answered = true
     for p in 0u64 .. 2u64 {
-        runner.wire_client.send_frame(wire, Call(7u32, p, 0u32, 5000u32, u64_bytes(p)))
+        runner.wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 7u64), p, 0u32, 5000u32, u64_bytes(p)))
         let ok = match runner.wire_client.next(wire) {
-            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == 7u32 &&
+            Ok(Batch(_, _, _, ds)) => list.len(ds) == 1u64 && ds[0u64].stream == store.StreamId(t: 0u64, n: 7u64) &&
                 ds[0u64].p == p && same(ds[0u64].outcome, returned(Ok(p))),
             _ => false,
         }
@@ -355,7 +355,7 @@ fn later(calls: List[Pos], x: Pos) -> bool {
 fn send_call(cn: runner.wire_client.Conn, x: Pos, mut t: Tally) waits {
     let stream: u32 = int.narrow(x.stream)
     let slot: u32 = int.narrow(x.body)
-    let request: runner.Frame = Call(stream, x.p, slot, 4294967295u32, u64_bytes(x.k))
+    let request: runner.Frame = Call(store.StreamId(t: 0u64, n: int.widen(stream)), x.p, slot, 4294967295u32, u64_bytes(x.k))
     list.push(mut t.pending, clone(x))
     runner.wire_client.send_frame(cn, take request)
 }
@@ -363,7 +363,7 @@ fn send_call(cn: runner.wire_client.Conn, x: Pos, mut t: Tally) waits {
 fn accept_answer(mut pending: List[Pos], calls: List[Pos], session: u64, answer: runner.Done) -> bool {
     for at in 0u64 .. list.len(pending) {
         let x = pending[at]
-        if x.from == session && x.stream == int.widen(answer.stream) && x.p == answer.p {
+        if x.from == session && x.stream == answer.stream.n && x.p == answer.p {
             let below = match answer.outcome {
                 Refused(HistoryUnavailable) => later(calls, x),
                 _ => false,
@@ -384,11 +384,11 @@ fn runner_crash_answer_oracle() {
     list.push(mut pending, clone(calls[0u64]))
     list.push(mut pending, clone(calls[1u64]))
     list.push(mut pending, clone(calls[3u64]))
-    let both = runner.Done(stream: 0u32, p: 0u64, outcome: returned(Ok(1u64)))
+    let both = runner.Done(stream: store.StreamId(t: 0u64, n: 0u64), p: 0u64, outcome: returned(Ok(1u64)))
     want(accept_answer(mut pending, calls, 0u64, both), "oracle: first session's p0 was rejected")
     want(accept_answer(mut pending, calls, 1u64, both), "oracle: second session's p0 was rejected")
     want(!accept_answer(mut pending, calls, 0u64, both), "oracle: a repeated p0 answered p1")
-    let next = runner.Done(stream: 0u32, p: 1u64, outcome: returned(Ok(3u64)))
+    let next = runner.Done(stream: store.StreamId(t: 0u64, n: 0u64), p: 1u64, outcome: returned(Ok(3u64)))
     want(accept_answer(mut pending, calls, 0u64, next) && list.len(pending) == 0u64, "oracle: p1 did not clear the remaining send")
 }
 
@@ -782,7 +782,7 @@ fn freeze_until_stop(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, n: 
     let connection = result.unwrap(runner.wire_client.connect(tasks, n, status_address(latest.read(status)), c, r, keys, Some(clone(credential)), wire.socket))
     remember(out, credential)
     result.unwrap(stdout.write(out, "FREEZE"))
-    runner.wire_client.send_frame(connection, Call(0u32, 0u64, 0u32, 10000u32, u64_bytes(9u64)))
+    runner.wire_client.send_frame(connection, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, u64_bytes(9u64)))
     let watchdog = host.mono_ns(c) + 5000000000u64
     while let Error(_) = stdout.write(out, "FROZEN?") {
         let now = host.mono_ns(c)

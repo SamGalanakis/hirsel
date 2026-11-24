@@ -260,7 +260,7 @@ fn step(mut c: Client, take f: runner.Frame, want: Option[u64]) -> Result[Option
             let rows = runner.publication_rows(take groups)
             apply(mut c, version, complete, take rows)
             for take d in take done {
-                if d.stream == 0u32 && want == Some(d.p) { return Ok(Some(take d)) }
+                if d.stream == store.StreamId(t: 0u64, n: 0u64) && want == Some(d.p) { return Ok(Some(take d)) }
             }
         },
         Ended(sub, _) => { let _ = map.remove(mut c.subs, sub) },
@@ -306,7 +306,7 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
     let arg = encoded(e.args, a)?
     let p = c.next_p
     c.next_p += 1u64
-    write(mut c, Call(0u32, p, slot, deadline_ms, take arg))?
+    write(mut c, Call(store.StreamId(t: 0u64, n: 0u64), p, slot, deadline_ms, take arg))?
     let ms: u64 = int.widen(deadline_ms)
     let until = std.clock.deadline_after_ms(host.mono_ns(c.clock), ms)
     loop {

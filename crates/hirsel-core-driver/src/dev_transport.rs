@@ -11,7 +11,7 @@ use super::{Error, STOP};
 
 const MAX_HEAD: usize = 8192;
 const MAX_MESSAGE: usize = 64 << 20;
-const PROTOCOL: &str = "hirsel.3";
+const PROTOCOL: &str = "hirsel.4";
 const HANDSHAKE: Duration = Duration::from_secs(5);
 
 struct Reader {
@@ -247,7 +247,7 @@ impl Socket {
                     .any(|part| part.trim().eq_ignore_ascii_case("upgrade"))
             })
         {
-            return Err("expected a hirsel.3 WebSocket upgrade".into());
+            return Err("expected a hirsel.4 WebSocket upgrade".into());
         }
         let key = header(&request, "Sec-WebSocket-Key").ok_or("missing WebSocket key")?;
         write!(
@@ -270,7 +270,7 @@ impl Socket {
             || header(&response, "Sec-WebSocket-Accept") != Some(accept_key(&key).as_str())
             || header(&response, "Sec-WebSocket-Protocol") != Some(PROTOCOL)
         {
-            return Err("the place refused the hirsel.3 WebSocket upgrade".into());
+            return Err("the place refused the hirsel.4 WebSocket upgrade".into());
         }
         Self::new(reader, true)
     }

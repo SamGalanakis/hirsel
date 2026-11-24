@@ -6,7 +6,7 @@ pub type StoreId: codec + key {
 
 pub type StorageKind: send = Directory() | Bucket(std.object.Bucket)
 
-pub type Caller: codec + send {
+pub type Caller: codec + key + send {
     issuer: u8,
     subject: Bytes
 }

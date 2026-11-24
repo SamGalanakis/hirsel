@@ -71,7 +71,7 @@ fn pool_call_owner(take owner: PoolCallOwner) -> () waits {
     task.cancel(mut reader)
     let stopped = match task.join(take reader) { Error(Cancelled(_)) => true, _ => false }
     let queued = match deferred[0u64].0 {
-        Call(0u32, 0u64, 0u32, 10000u32, arg) => list.len(arg) == 4u64 && arg[0u64] == 7u8,
+        Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, arg) => list.len(arg) == 4u64 && arg[0u64] == 7u8,
         _ => false,
     }
     result.unwrap(channel.send(ready, stopped && queued))
@@ -125,9 +125,8 @@ fn pool_durable_add(mut tx: store.Tx, table: store.Table[u64, u32], author: Call
 fn pool_retry(mut head: Head[(), store.Table[u64, u32]], inbox: Receiver[PubIn],
     take key: Bytes, take arg: Bytes, version: u64) -> bool waits {
     let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
-    let mut stream: Bytes = list.new()
-    std.codec.put_u32(0u32, mut stream)
-    let request = head_request(store.Caller(issuer: 1, subject: list.new()), take stream, 0u64, take key, take arg, take to)
+    let stream = store.StreamId(t: store.keyed_time(head.db), n: 0u64)
+    let request = head_request(store.Caller(issuer: 1, subject: list.new()), stream, 0u64, take key, take arg, take to)
     result.unwrap(head_arrival(mut head, take request, false, false))
     if list.len(head.group) != 0u64 { result.unwrap(gate(mut head)) }
     let PubIn(e: take event) = result.unwrap(channel.receive(inbox))
@@ -165,7 +164,7 @@ pub fn law_pool_releases_cancelled_reader(tasks: Tasks, clock: Clock, random: Ra
     let writing = result.unwrap(wire_pack(pool, reply, result_from, Reset(41u64, list.new()), list.new()))
     let mut arg: Bytes = list.new()
     std.codec.put_u32(7u32, mut arg)
-    let call_frame = Call(0u32, 0u64, 0u32, 10000u32, take arg)
+    let call_frame = Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, take arg)
     let frames: std.codec.Codec[Frame] = std.codec.of()
     let mut payload: Bytes = list.with_capacity(wire_output_size(call_frame))
     result.unwrap(std.codec.encode(frames, call_frame, mut payload))

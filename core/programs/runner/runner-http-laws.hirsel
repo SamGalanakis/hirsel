@@ -169,7 +169,7 @@ fn http_law_raw(req: std.http.Request, _scratch: Region, mut resp: std.http.Resp
     }
     if ms == 0u32 { return http_law_reply(504u16, list.new(), false) }
     let denied = std.http.path(req) == b"/denied"
-    let want = CallWant(key: if denied { clone(state.reads) } else { clone(state.writes) }, stream: stream, p: p, arg: take input, deadline_ms: ms)
+    let want = CallWant(key: if denied { clone(state.reads) } else { clone(state.writes) }, stream: store.StreamId(t: 0u64, n: int.widen(stream)), p: p, arg: take input, deadline_ms: ms)
     let send = match prepare(state.reg, admit, take want) {
         Ok(take sent) => take sent,
         Error(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
@@ -245,7 +245,7 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
     string.push(mut head, " ")
     string.push(mut head, path)
     string.push(mut head, " HTTP/1.1\r\nHost: a\r\nConnection: close\r\nIdempotency-Key: \"")
-    string.push_u64(mut head, int.widen(stream))
+    string.push_uint(mut head, int.widen(stream), 16u32, 32u64, '0')
     string.push(mut head, ".")
     string.push_u64(mut head, p)
     string.push(mut head, "\"\r\nX-Law-Deadline: ")
@@ -331,12 +331,12 @@ fn http_law_socket(d: HttpLawDrive, keys: List[Bytes], take credential: Bytes) -
 }
 
 fn http_law_wire(s: wire_client.Conn, stream: u32, p: u64, index: u32, deadline_ms: u32, data: Bytes) -> Outcome waits {
-    wire_client.send_frame(s, Call(stream, p, index, deadline_ms, clone(data)))
+    wire_client.send_frame(s, Call(store.StreamId(t: 0u64, n: int.widen(stream)), p, index, deadline_ms, clone(data)))
     loop {
         match result.unwrap(wire_client.next(s)) {
             Batch(_, _, _, take outcomes) => {
                 for row in outcomes {
-                    if row.stream == stream && row.p == p { return clone(row.outcome) }
+                    if row.stream == store.StreamId(t: 0u64, n: int.widen(stream)) && row.p == p { return clone(row.outcome) }
                 }
             },
             _ => fail("HTTP law did not get a wire Outcome"),

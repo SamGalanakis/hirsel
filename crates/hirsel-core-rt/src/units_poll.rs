@@ -1,8 +1,8 @@
 use super::*;
 
-/// Poll one slot, waking units with socket arrivals in event order and firing
-/// due timers. `None` waits for an event and `Some(0)` is nonblocking.
-pub(super) fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) {
+/// Poll one slot and return the number of units queued by socket arrivals.
+/// `None` waits for an event and `Some(0)` is nonblocking.
+fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) -> usize {
     let slot = &p.slots[ix];
     let mut evs = [libc::epoll_event { events: 0, u64: 0 }; 256];
     bump(S_GPOLLS);
@@ -24,7 +24,7 @@ pub(super) fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) {
         slot.last_poll.store(now(), Ordering::Relaxed);
         slot.poller.dispatch_udp_slot(&mut evs[..n.max(0) as usize])
     };
-    let mut published = false;
+    let mut published = 0;
     // A wake carries nothing; epoll's eventfd is edge-triggered and never read.
     for e in evs.iter().take(n).filter(|e| e.u64 != WAKE_TAG) {
         bump(S_GPOLL_EVENTS);
@@ -38,16 +38,43 @@ pub(super) fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) {
                 observe::queued(u);
                 // Put arrivals on this slot's queue in event order.
                 push_counted(p, &p.locals[ix], UP(u));
-                published = true;
+                published += 1;
             }
         }
     }
-    if published {
-        // One worker starts the search for the batch. The search path
-        // passes the wake on if queued work remains.
-        notify_worker(p);
+    published
+}
+
+/// Wait for a wake, socket readiness, or the earliest timer. A wake sent
+/// after the slot joins the idle list stays pending until the poll returns.
+/// Return whether a notifier handed this slot the search role.
+pub(super) fn park_slot(p: &Pool, ix: usize) -> bool {
+    {
+        let mut idle = p.idle.lock().unwrap();
+        p.nsleep.fetch_add(1, Ordering::SeqCst);
+        if p.queued.load(Ordering::SeqCst) != 0 || p.stop.load(Ordering::SeqCst) {
+            p.nsleep.fetch_sub(1, Ordering::SeqCst);
+            return false;
+        }
+        idle.push(ix);
+    }
+    let nt = p.slots[ix].next_timer.load(Ordering::SeqCst);
+    let timeout = (nt != u64::MAX).then(|| nt.saturating_sub(now()));
+    let arrivals = poll_slot(p, ix, timeout);
+    // A notifier that already removed the slot gave it the search role.
+    let mut idle = p.idle.lock().unwrap();
+    if let Some(at) = idle.iter().position(|&w| w == ix) {
+        idle.swap_remove(at);
+        p.nsleep.fetch_sub(1, Ordering::SeqCst);
+    }
+    drop(idle);
+    let handed = p.handed[ix].swap(false, Ordering::AcqRel);
+    // This slot can take one arrival. A handed slot already counts as searching.
+    if arrivals > 1 {
+        notify_worker(p, usize::from(!handed));
     }
     fire_timers(p, ix);
+    handed
 }
 
 /// The owning thread's check of its slot between units: take whatever its
@@ -63,9 +90,8 @@ pub(super) fn check_slot(p: &Pool, ix: usize) {
                 && now().saturating_sub(p.slots[ix].last_poll.load(Ordering::Relaxed))
                     > p.poll_every_ns
     };
-    if due {
-        poll_slot(p, ix, Some(0));
-    } else {
-        fire_timers(p, ix);
+    if due && poll_slot(p, ix, Some(0)) > 0 {
+        notify_worker(p, 0);
     }
+    fire_timers(p, ix);
 }

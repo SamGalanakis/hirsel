@@ -988,7 +988,7 @@ fn run_helper() {
 /// Put `up` on queue `q`, count it and tell the pool.
 fn publish(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
     push_counted(p, q, up);
-    notify_worker(p);
+    notify_worker(p, 0);
 }
 
 fn push_counted(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
@@ -999,9 +999,9 @@ fn push_counted(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
 /// Wake a sleeping worker unless the workers already searching cover the
 /// queued units. A handed worker counts as searching before the OS runs it,
 /// so a burst wakes several workers at once instead of one wake at a time.
-fn notify_worker(p: &Pool) {
+fn notify_worker(p: &Pool, reserved: usize) {
     let covered = |p: &Pool| {
-        let s = p.searching.load(Ordering::SeqCst);
+        let s = p.searching.load(Ordering::SeqCst) + reserved;
         s > 0 && p.queued.load(Ordering::SeqCst) <= s
     };
     if covered(p) {
@@ -1113,7 +1113,7 @@ fn fire_timers(p: &Pool, ix: usize) {
 
 #[path = "units_poll.rs"]
 mod poll;
-use poll::{check_slot, poll_slot};
+use poll::{check_slot, park_slot};
 
 /// The next unit for worker `ix`, taken off the queues and the count.
 fn find(p: &Pool, ix: usize) -> Option<UP> {
@@ -1335,7 +1335,7 @@ fn run_slot(p: &'static Pool, ix: usize) {
         if let Some(u) = got {
             // The last searcher to find work wakes another if work remains.
             if p.queued.load(Ordering::SeqCst) > 0 {
-                notify_worker(p);
+                notify_worker(p, 0);
             }
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
@@ -1344,31 +1344,7 @@ fn run_slot(p: &'static Pool, ix: usize) {
         if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
             break;
         }
-        // Park in the slot's own poller until a wake, readiness on its
-        // sockets, or its earliest timer. A wake sent after the push below
-        // stays pending in the poller, so the wait returns at once.
-        {
-            let mut idle = p.idle.lock().unwrap();
-            p.nsleep.fetch_add(1, Ordering::SeqCst);
-            if p.queued.load(Ordering::SeqCst) != 0 || p.stop.load(Ordering::SeqCst) {
-                p.nsleep.fetch_sub(1, Ordering::SeqCst);
-                continue;
-            }
-            idle.push(ix);
-        }
-        let slot = &p.slots[ix];
-        let nt = slot.next_timer.load(Ordering::SeqCst);
-        let timeout = (nt != u64::MAX).then(|| nt.saturating_sub(now()));
-        poll_slot(p, ix, timeout);
-        // Leave the idle list; a hand that already took this worker off it
-        // gave it the search role.
-        let mut idle = p.idle.lock().unwrap();
-        if let Some(at) = idle.iter().position(|&w| w == ix) {
-            idle.swap_remove(at);
-            p.nsleep.fetch_sub(1, Ordering::SeqCst);
-        }
-        drop(idle);
-        handed = p.handed[ix].swap(false, Ordering::AcqRel);
+        handed = park_slot(p, ix);
     }
 }
 

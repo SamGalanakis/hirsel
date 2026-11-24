@@ -679,13 +679,18 @@ fn retained_assembly_is_the_original_assembly() {
         .into(),
     };
     let sources = sources.positions();
-    let (_, retained) = retain(&module, FuncId(0));
+    let (code, retained) = retain(&module, FuncId(0));
     let (_, annex, decoded) = prepare_assembly(&module, FuncId(0), &sources);
     assert_eq!(
         prepare_retained_assembly(&retained, &sources),
         (annex, decoded),
         "a retained module's annex is read off in canonical order"
     );
+    let named = crate::source::anchored_items(&retained);
+    let sites = RetainedSites::take(retained.clone());
+    assert_eq!(sites.anchored_items(), named);
+    assert_eq!(sites.annex(&sources), retained_annex(&retained, &sources));
+    assert_eq!(sites.restore(&code.bytes), retained);
 }
 
 fn local_row_permutation() {

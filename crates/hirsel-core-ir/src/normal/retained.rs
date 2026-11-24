@@ -45,6 +45,104 @@ pub fn retained_annex(retained: &Module, sources: &SourcePositions<'_>) -> Annex
     Annex(functions, None)
 }
 
+/// Source anchors and optimization hints left out of a canonical body.
+pub struct RetainedSites {
+    items: Vec<DefPath>,
+    functions: Vec<Option<SourceRows>>,
+}
+
+struct SourceRows {
+    instructions: Vec<Option<Anchor>>,
+    terminators: Vec<Option<Anchor>>,
+    cold_calls: Vec<bool>,
+    cold_edges: Vec<bool>,
+    callable_parameters: Vec<ValueId>,
+}
+
+impl RetainedSites {
+    /// Take the non-encoded fields of a canonical module.
+    pub fn take(mut module: Module) -> Self {
+        let functions = module
+            .functions
+            .iter_mut()
+            .map(|function| {
+                let body = function.body.take()?;
+                Some(SourceRows {
+                    instructions: body.inst_anchors,
+                    terminators: body.blocks.iter().map(|block| block.anchor).collect(),
+                    cold_calls: body.calls.iter().map(|call| call.cold).collect(),
+                    cold_edges: body.edges.iter().map(|edge| edge.cold).collect(),
+                    callable_parameters: body.callable_parameters,
+                })
+            })
+            .collect();
+        Self {
+            items: module.items,
+            functions,
+        }
+    }
+
+    pub fn items(&self) -> &[DefPath] {
+        &self.items
+    }
+
+    pub fn anchored_items(&self) -> Vec<DefPath> {
+        let anchors = self
+            .functions
+            .iter()
+            .flatten()
+            .flat_map(|rows| rows.instructions.iter().chain(&rows.terminators).flatten());
+        crate::source::named_items(&self.items, anchors)
+    }
+
+    pub fn annex(&self, sources: &SourcePositions<'_>) -> Annex {
+        let site = |&anchor| resolve_site(&self.items, sources, anchor);
+        let functions = self
+            .functions
+            .iter()
+            .map(|rows| {
+                let rows = rows.as_ref()?;
+                Some(FunctionAnnex {
+                    instructions: rows.instructions.iter().map(site).collect(),
+                    terminators: rows.terminators.iter().map(site).collect(),
+                    cold_calls: rows.cold_calls.clone(),
+                    cold_edges: rows.cold_edges.clone(),
+                    callable_parameters: rows
+                        .callable_parameters
+                        .iter()
+                        .map(|parameter| parameter.0)
+                        .collect(),
+                })
+            })
+            .collect();
+        Annex(functions, None)
+    }
+
+    /// Recover the retained module for consumers that need more than its sites.
+    pub fn restore(&self, bytes: &[u8]) -> Module {
+        let mut module = assembly_module(bytes);
+        module.items.clone_from(&self.items);
+        for (function, rows) in module.functions.iter_mut().zip(&self.functions) {
+            let (Some(body), Some(rows)) = (&mut function.body, rows) else {
+                continue;
+            };
+            body.inst_anchors.clone_from(&rows.instructions);
+            for (block, &anchor) in body.blocks.iter_mut().zip(&rows.terminators) {
+                block.anchor = anchor;
+            }
+            for (call, &cold) in body.calls.iter_mut().zip(&rows.cold_calls) {
+                call.cold = cold;
+            }
+            for (edge, &cold) in body.edges.iter_mut().zip(&rows.cold_edges) {
+                edge.cold = cold;
+            }
+            body.callable_parameters
+                .clone_from(&rows.callable_parameters);
+        }
+        module
+    }
+}
+
 /// Materialize the retained module for existing native and evaluator consumers.
 /// Source anchors and hints keep their original facts in the canonical numbering.
 pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
@@ -100,4 +198,18 @@ pub fn assembly_module(bytes: &[u8]) -> Module {
     decode_payload(bytes, &Debit::unlimited())
         .expect("the producer's normal form is readable")
         .0
+}
+
+pub(super) fn resolve_site(
+    items: &[DefPath],
+    sources: &SourcePositions<'_>,
+    anchor: Option<Anchor>,
+) -> Option<Site> {
+    let anchor = anchor?;
+    let (file, line, column) = sources.position(&items[anchor.item.index()], anchor.start)?;
+    Some(Site {
+        file: file.path.clone(),
+        line,
+        column,
+    })
 }

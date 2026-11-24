@@ -130,15 +130,26 @@ impl SourcePositions<'_> {
 /// The items a failure anchor in `module` names, outside core@1 (whose anchors
 /// a native unit never emits): the items whose first sites a run needs.
 pub fn anchored_items(module: &crate::Module) -> Vec<DefPath> {
-    let mut named = vec![false; module.items.len()];
-    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
-        let blocks = body.blocks.iter().map(|b| &b.anchor);
-        for anchor in body.inst_anchors.iter().chain(blocks).flatten() {
-            named[anchor.item.index()] = true;
-        }
+    let anchors = module
+        .functions
+        .iter()
+        .filter_map(|f| f.body.as_ref())
+        .flat_map(|body| {
+            let blocks = body.blocks.iter().map(|b| &b.anchor);
+            body.inst_anchors.iter().chain(blocks).flatten()
+        });
+    named_items(&module.items, anchors)
+}
+
+pub(crate) fn named_items<'a>(
+    items: &[DefPath],
+    anchors: impl Iterator<Item = &'a crate::Anchor>,
+) -> Vec<DefPath> {
+    let mut named = vec![false; items.len()];
+    for anchor in anchors {
+        named[anchor.item.index()] = true;
     }
-    module
-        .items
+    items
         .iter()
         .zip(named)
         .filter(|(item, named)| *named && !item.package_is("core", "1"))

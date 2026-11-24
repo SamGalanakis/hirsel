@@ -336,7 +336,7 @@ impl CheckProduct {
         let instances = reached.require()?;
         let anchored = instances
             .iter()
-            .map(|i| reached.materialized.get(i).ir().map(anchored_items))
+            .map(|i| reached.materialized.get(i).anchored_items())
             .collect::<io::Result<Vec<_>>>()?;
         let items = anchored.iter().flatten().cloned().collect::<Vec<_>>();
         let map = self.native_sources(&items)?;
@@ -363,14 +363,13 @@ impl CheckProduct {
             };
             // The materialised module is `retain`'s canonical decoding of
             // `instance.code`, so its annex is read off without encoding again.
-            let retained = instance.ir()?;
             let (mut annex, module) = if defer_modules && identity != entry {
                 (
-                    normal::retained_annex(retained, &sources),
+                    instance.annex(&sources)?,
                     UnitModule::Encoded(Arc::clone(&instance.code)),
                 )
             } else {
-                let (annex, module) = normal::prepare_retained_assembly(retained, &sources);
+                let (annex, module) = normal::prepare_retained_assembly(instance.ir()?, &sources);
                 (annex, UnitModule::Decoded(Box::new(module)))
             };
             if identity == entry {

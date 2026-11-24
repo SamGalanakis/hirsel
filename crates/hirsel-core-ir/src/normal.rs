@@ -62,6 +62,7 @@ mod results;
 use results::results;
 mod charge;
 mod retained;
+pub use retained::RetainedSites;
 pub use retained::{assembly_module, prepare_retained_assembly, retain, retained_annex};
 pub(crate) mod wire;
 use charge::{PlanMeter, reserve};
@@ -922,16 +923,7 @@ fn annex_in_order(
     edges: impl Iterator<Item = usize>,
     sources: &SourcePositions<'_>,
 ) -> FunctionAnnex {
-    let site = |anchor: Option<Anchor>| {
-        let anchor = anchor?;
-        let (file, line, column) =
-            sources.position(&module.items[anchor.item.index()], anchor.start)?;
-        Some(Site {
-            file: file.path.clone(),
-            line,
-            column,
-        })
-    };
+    let site = |anchor| retained::resolve_site(&module.items, sources, anchor);
     let mut callable_parameters: Vec<_> = body
         .callable_parameters
         .iter()

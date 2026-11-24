@@ -17,8 +17,9 @@ type TieredCutStage: send {
     next_pack: u64,
     // The first stamp the fold left unissued.
     stamp_end: u64,
-    // The fold released a replay overlay, so the holders take these roots
-    // even when the fold emitted nothing.
+    // The fold released a replay overlay, a residency change loaded a tree,
+    // or a promotion re-pointed a root, so the holders take these roots even
+    // when the stage emitted nothing.
     folded: bool,
     // T8 step 3's added rows, live then fold order, and step 4's drain.
     queue: CutQueue,
@@ -127,7 +128,7 @@ fn queue_live_dropped(dropped: List[DeferredFree], mut seen: Map[(u32, u64, u64)
 // T2 then T4: every Hot Tiered page and blob that a participant reaches is
 // emitted once by stamp, class 4 then class 3, from the installed `next_pack`
 // upward.
-fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32], heads: u64, cap: u64) -> Result[TieredCutStage, Error] waits {
+fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32], heads: u64, promote: Option[u64], cap: u64) -> Result[TieredCutStage, Error] waits {
     let id = db.store
     let first_pack = disk_state(db).pages.next_pack
     let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
@@ -143,7 +144,14 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     let owners = fold_owners(branches, heads, disk_state(db).pages.forked)?
     let overlays = fold_cut_roots(pager, mut roots, branches, owners, mut next_stamp, mut seen, mut queued, mut replaced)?
     // A Tiered -> Memory change installs its loaded tree like a fold does.
-    let folded = load_memory_residency(pager, mut roots, branches, disk_state(db).unload, mut next_stamp, mut queued)? || overlays
+    let loaded = load_memory_residency(pager, mut roots, branches, disk_state(db).unload, mut next_stamp, mut queued)? || overlays
+    // A promoted root can name only existing Cold frames, so a promotion
+    // that emits nothing still installs its re-pointed collection map.
+    let promoted = match promote {
+        Some(slot) => promote_cut_holder(db, pager, mut roots, slot, queued, mut next_stamp)?,
+        None => false,
+    }
+    let folded = loaded || promoted
     let compacted = compact_cut(db, pager, mut roots, queued, mut next_stamp)?
     let leases = lease_cut_inventories(disk_state(db).pages.compaction, roots)?
     let TieredCompactStep(probes: take probes, retiring: take retiring, moved: take moved) = take compacted

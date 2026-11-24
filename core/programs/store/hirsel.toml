@@ -376,6 +376,9 @@ limit = 268435456
 [tests.runs."store@1/store/test_l69_random_seed_3"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_l69_pin_after_its_pack_retires"]
+limit = 268435456
+
 [tests.runs."store@1/store/test_tiered_tx_reads_see_staged_overlay_and_cold_rows"]
 limit = 268435456
 

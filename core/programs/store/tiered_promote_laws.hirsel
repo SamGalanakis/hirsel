@@ -7,10 +7,6 @@ fn l88_leaf_pack(d: Dir, owner: StoreId, seq: u64) -> Result[std.page.PagePtr, E
     l68_write_page_pack(d, owner, seq, 40, std.page.payload(image))
 }
 
-fn l88_share_source(source: TieredPageSource) -> TieredPageSource {
-    TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline)
-}
-
 fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr, old: std.page.PagePtr, moved: std.page.PagePtr, sibling: std.page.PagePtr) -> Result[(), Error] waits {
     let mut map_stamp = 80u64
     let head = l79_cut_table(moved, 3, 258, mut map_stamp)?
@@ -19,7 +15,7 @@ fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr,
     }
     let mut lookup_roots: List[TieredPromotionRoot] = list.with_capacity(1)
     list.push(mut lookup_roots, PromotionPage(take lookup_root))
-    let cut = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: take lookup_roots, probed_through: map.new())
+    let cut = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: take lookup_roots, probed_through: map.new())
     let HotPage(take revised) = promotion_resolve_page(cut, 9, ColdPage(parent))? else {
         fail("L88(a): moving one child must re-emit the captured parent")
     }
@@ -41,7 +37,7 @@ fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr,
         fail("L88(c): the Hot page resolves to the installed Cold copy")
     }
     let mut ids = 0u64
-    let mut retired = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: list.new(), probed_through: map.new())
+    let mut retired = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: list.new(), probed_through: map.new())
     retired.installed.packs = std.omap.remove(mut ids, retired.installed.packs, 8u64)
     let HotPage(take first) = promotion_resolve_page(retired, 9, ColdPage(old))? else {
         fail("L88(d): the first promotion must copy from the leased pack")
@@ -57,7 +53,7 @@ fn l88_converges_locations(captured: TieredPageSource, parent: std.page.PagePtr,
     if std.page.stamp(std.page.image_of(second)) != 40 {
         fail("L88(d): promotion must keep the copied page's stamp")
     }
-    let mut prefix_only = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: list.new(), probed_through: map.new())
+    let mut prefix_only = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: list.new(), probed_through: map.new())
     map.insert(mut prefix_only.probed_through, old.pack, old.offset)
     let HotPage(take copied_leaf) = promotion_resolve_page(prefix_only, 9, ColdPage(old))? else {
         fail("L88(b): a listed page behind the installed cursor must still be copied")
@@ -134,7 +130,7 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(PagePack, std.page.PagePtr)
 
 fn l88_probe_keeps_progress(captured: TieredPageSource, pack: PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {
     let mut cursor = start_tiered_probe(pack)
-    let mut promotion = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: list.new(), probed_through: map.new())
+    let mut promotion = TieredPromotion(installed: share_page_source(captured), captured: share_page_source(captured), lookup: list.new(), probed_through: map.new())
     for cut in 0u64 .. 4 {
         if cut != 0 {
             let HotPage(take copied_leaf) = promotion_resolve_page(promotion, 9, ColdPage(original))? else {

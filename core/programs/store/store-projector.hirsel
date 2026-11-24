@@ -482,15 +482,28 @@ fn replace_projector_pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket
 }
 
 fn capture_matches_head(from: Snapshot, head: Head) -> bool {
-    if !(head.head == from.head &&
-        tree_stamp(head.roots.collections) == tree_stamp(from.roots.collections) &&
-        tree_stamp(head.roots.streams) == tree_stamp(from.roots.streams) &&
-        tree_stamp(head.roots.catalog) == tree_stamp(from.roots.catalog) &&
-        list.len(head.roots.keyed) == list.len(from.roots.keyed)) { return false }
+    roots_match_head(from.head, from.roots, head)
+}
+
+fn roots_match_head(at_version: u64, roots: Roots, head: Head) -> bool {
+    if !(head.head == at_version &&
+        tree_stamp(head.roots.collections) == tree_stamp(roots.collections) &&
+        tree_stamp(head.roots.streams) == tree_stamp(roots.streams) &&
+        tree_stamp(head.roots.catalog) == tree_stamp(roots.catalog) &&
+        list.len(head.roots.keyed) == list.len(roots.keyed)) { return false }
     for slot in 0u64 .. list.len(head.roots.keyed) {
-        if tree_stamp(head.roots.keyed[slot]) != tree_stamp(from.roots.keyed[slot]) { return false }
+        if tree_stamp(head.roots.keyed[slot]) != tree_stamp(roots.keyed[slot]) { return false }
     }
     true
+}
+
+// A pin `change_pin` gave the head's shares needs no promotion (§13.5
+// "Pinning the live head"); any other pin is historical.
+fn pin_shares_head(db: Db, held: Pin) -> bool {
+    match branch_slot(db, held.branch) {
+        Ok(slot) => roots_match_head(held.version, held.roots, db.heads[slot]),
+        Error(_) => false,
+    }
 }
 
 fn change_pin(mut db: Db, owner: PinOwner, name: String, s: Snapshot) -> Result[Ticket, Error] waits {

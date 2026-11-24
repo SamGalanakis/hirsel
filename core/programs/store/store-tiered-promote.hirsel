@@ -191,3 +191,123 @@ fn promotion_resolve_page(cut: TieredPromotion, collection: u32, root: std.page.
         Ok(HotPage(take winner))
     })
 }
+
+fn share_page_source(source: TieredPageSource) -> TieredPageSource {
+    TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline)
+}
+
+// Each Tiered collection of a collection map, with its root slot.
+fn promotion_tiered_collections(root: Arc[std.page.Page], mut found: List[(u32, std.page.Slot)]) -> Result[(), Error] {
+    let image = std.page.image_of(root)
+    for slot in 0u64 .. std.page.count(image) {
+        if std.page.level(image) != 0 {
+            promotion_tiered_collections(option.unwrap(std.page.child(root, slot)), mut found)?
+            continue
+        }
+        if option.unwrap(std.page.value_at(root, slot))[53u64] != 1 {
+            continue
+        }
+        let key = option.unwrap(std.page.key_at(image, slot))
+        let collection: u32 = list.word_be(key, 0)
+        capacity(list.try_reserve(mut found, 1))?
+        list.push(mut found, (collection, clone(option.unwrap(std.page.child_slot(root, slot)))))
+    }
+    Ok(())
+}
+
+fn promotion_queue_root(source: TieredPageSource, row: DeferredFree, mut roots_found: List[TieredPromotionRoot]) -> Result[(), Error] {
+    let (pack, root) = match row.target {
+        TieredPage(ptr) => (ptr.pack, PromotionPage(ColdPage(ptr))),
+        TieredBlob(reference) => (reference.pack, PromotionBlob(reference)),
+    }
+    // Lookups read through the installed inventory, which lists every pack
+    // a queue row of the installed generation names.
+    if let None = std.omap.get(source.packs, pack) {
+        return Ok(())
+    }
+    capacity(list.try_reserve(mut roots_found, 1))?
+    list.push(mut roots_found, take root)
+    Ok(())
+}
+
+// §13.5 step 2 at the cut that publishes a historical pin or a cut-path
+// fork. Each Tiered collection of the added root resolves against the lookup
+// roots: every other participant after the fold, the installed queue and
+// this cut's added rows. A collection whose root takes another location is
+// re-pointed in a copy of the collection map with fresh stamps, so the
+// Memory classes emit the map again. Whether the published generation lists
+// a pack is the installed inventory's answer; the Snapshot's own inventory,
+// which its lease keeps readable, reads what it captured. A refusal here
+// refuses the cut: promotion is mandatory.
+fn promote_cut_holder(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], at: u64, queued: List[DeferredFree], mut next_stamp: u64) -> Result[bool, Error] waits {
+    let mut collections: List[(u32, std.page.Slot)] = list.new()
+    promotion_tiered_collections(roots[at].collections.root, mut collections)?
+    if list.len(collections) == 0 {
+        return Ok(false)
+    }
+    let Some(requests) = pager else {
+        return Error(Io(Closed))
+    }
+    let installed = disk_state(db).pages
+    let paging = recovered_tiered_inventory(installed.locations, None, db.checkpointed)?
+    let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+    // A Snapshot whose Tiered roots are all Hot reads nothing it captured.
+    let captured_packs = match view roots[at].collections.paging {
+        Some(inventory) => std.omap.snapshot(inventory.packs),
+        None => std.omap.snapshot(paging.packs),
+    }
+    let captured = TieredPageSource(pager: channel.sender(requests), packs: captured_packs, next_stamp: next_stamp, deadline: 0)
+    let mut probed_through: Map[u64, u64] = map.new()
+    for (seq, cursor) in installed.compaction.probes {
+        capacity(map.try_reserve(mut probed_through, 1))?
+        map.insert(mut probed_through, seq, cursor.next_data - 1)
+    }
+    let mut queue_roots: List[TieredPromotionRoot] = list.new()
+    let mut rows = std.page.cursor_open(arc.share(installed.lists.deferred), None, true, false)
+    while let Some(queue_row) = std.page.cursor_next(mut rows) {
+        promotion_queue_root(source, queued_free(queue_row.value), mut queue_roots)?
+    }
+    for added in queued {
+        promotion_queue_root(source, added, mut queue_roots)?
+    }
+    let mut map_root = arc.share(roots[at].collections.root)
+    let mut changed = false
+    for (collection, edge) in collections {
+        let mut against: List[TieredPromotionRoot] = list.new()
+        for slot in 0u64 .. list.len(roots) {
+            if slot == at {
+                continue
+            }
+            if let Some(take other) = promotion_collection_root(roots[slot].collections, collection)? {
+                capacity(list.try_reserve(mut against, 1))?
+                list.push(mut against, PromotionPage(take other))
+            }
+        }
+        capacity(list.try_reserve(mut against, list.len(queue_roots)))?
+        for queue_root in queue_roots {
+            list.push(mut against, clone(queue_root))
+        }
+        let cut = TieredPromotion(installed: share_page_source(source), captured: share_page_source(captured), lookup: take against, probed_through: clone(probed_through))
+        let resolved = promotion_resolve_page(cut, collection, edge)?
+        if let (ColdPage(before), ColdPage(after)) = (view edge, view resolved) {
+            if before == after {
+                continue
+            }
+        }
+        let key = prefix(collection)?
+        let draw_from = next_stamp
+        let (take mapped, following) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], u64), Error] {
+            let mut candidate = arc.share(map_root)
+            let mut draw = draw_from
+            page_result(std.page.install_tiered_root(mut candidate, key, resolved, mut draw))?
+            Ok((take candidate, draw))
+        })?
+        map_root = take mapped
+        next_stamp = following
+        changed = true
+    }
+    if changed {
+        roots[at].collections.root = take map_root
+    }
+    Ok(changed)
+}

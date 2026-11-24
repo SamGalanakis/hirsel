@@ -234,16 +234,10 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 Some((take s, take snap_model)) => {
                     let name = random_pin_name(model.pinned_count)
                     model.pinned_count += 1
-                    // Held out (2397 finding): a pin of a Snapshot whose head has
-                    // moved since capture takes the capture's roots in place,
-                    // because §13.5 step 2's promotion has no production caller
-                    // yet. A compaction cut re-stamps the collection map path,
-                    // so any cut moves the head. Once a pack those roots reach
-                    // retires, the pin's cut fails `Corrupt(Dangling)`. Until
-                    // promotion is wired, history is pinned only while the head
-                    // still matches the capture, and is otherwise released
-                    // after riding across cuts as an unpinned lease.
-                    if !map.contains(model.pins, name) && capture_matches_head(s, db.heads[0u64]) {
+                    // A pin of a Snapshot whose head has moved since capture
+                    // is promoted by the cut that publishes it (§13.5 step 2),
+                    // even after a pack it reached has retired.
+                    if !map.contains(model.pins, name) {
                         let key: String = clone(name)
                         match pin(mut db, name, s) {
                             Ok(_) => {
@@ -316,4 +310,47 @@ fn test_l69_random_seed_2(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
 @test
 fn test_l69_random_seed_3(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     random_arm(d, c, r, tasks, 3)
+}
+
+// The seed-3 failure as a fixed case: capture main, run cuts until the probe
+// retires the pack its Tiered root sat in (the Snapshot's lease keeps the
+// file), then pin the capture. The pin's cut promotes it, so the pin and main
+// read the model, and the walker finds every reached frame listed, before
+// and after reopen.
+@test
+fn test_l69_pin_after_its_pack_retires(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, RANDOM_ROWS, RANDOM_WIDTH)?
+    let mut options = compact_crash_options(floor)?
+    options.probe_budget = 4
+    let mut db = open(tasks, d, c, r, clone(options))?
+    let probed = compact_branch_root(db, 0, rows.id)?.pack
+    let s = snapshot(db)
+    let mut cuts = 0u64
+    while compact_listed(db, probed) {
+        let _ = checkpoint(mut db)?
+        cuts += 1
+        if cuts == 200 {
+            fail("L69 random: the probe retires the captured root's pack")
+        }
+    }
+    let _ = checkpoint(mut db)?
+    if !disk_exists(d, paged_pack_path(probed)?)? {
+        fail("L69 random: the Snapshot's lease keeps the retired pack's file")
+    }
+    let mut initial: Map[u64, u8] = map.new()
+    for key in 0u64 .. RANDOM_ROWS {
+        map.insert(mut initial, key, 0u8)
+    }
+    let mut model = RandomModel(heads: map.new(), pins: map.new(), forks: 0, pinned_count: 1)
+    map.insert(mut model.heads, db.heads[0u64].id, clone(initial))
+    map.insert(mut model.pins, clone("history"), take initial)
+    let _ = pin(mut db, "history", s)?
+    let _ = checkpoint(mut db)?
+    random_check(d, db, rows, model)?
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, options)?
+    let _ = checkpoint(mut reopened)?
+    random_check(d, reopened, rows, model)?
+    close(take reopened)
 }

@@ -598,7 +598,7 @@ copied byte for byte.
 | **H3** `finish` keeps the state | `finish` mutating the state it was given | After `finish` on the first 100 bytes, adding the remaining 200 and finishing equals the one-shot digest of all 300, for both hashes. |
 | **H4** steps do not grow with the input | a per-block charge, or `add` compressing block by block in user code | On the reference evaluator, let `k` be the least bound under which `bound steps k { let mut s = take st; sha512.add(mut s, b, 0, list.len(b)); s }` succeeds for a 256-byte `b`, with `st` from `start()` and `b` bound outside the scope. The same scope under `k` also succeeds for a 1 MiB `b`, and for a 1 MiB `b` after a 5-byte `add` (so the pending path runs). The invariant is MEM-30's: a core call is one step whatever `count` is, and `add` has no loop over blocks. |
 
-The laws are cases in `core/std/tests/sha512.hirsel`, run by the shared walker with
+The laws are cases in `core/std/tests/sha512.hirsel` <!-- doc-ref: planned -->, run by the shared walker with
 `--backend all`.
 
 ### SHA-512 build slices
@@ -606,7 +606,7 @@ The laws are cases in `core/std/tests/sha512.hirsel`, run by the shared walker w
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
 | **CK** crate set | S | — | the RustCrypto crates at exact versions through `third-party/` and reindeer: `sha2 =0.11.1` (replacing the workspace's 0.10 pins, so one `sha2` is linked), `hmac =0.13.0`, `hkdf =0.13.0`, `aes-gcm =0.11.1`, `chacha20poly1305 =0.11.0`, `rsa =0.10.0`, `p384 =0.14.0` (feature `ecdsa`), `argon2 =0.6.0` (default features off, `alloc` on) and their dependency closure, each with its licence file. No kernel is added in this slice. | builds and lints |
-| **S5** SHA-512 | S | CK | `core/core/sha512.hirsel` (`blocks`, `block`), `RtOp::Sha512Blocks` lowered as `Sha256Blocks` is, its C entry over `sha2::compress512`, the evaluator arm; `core/std/sha512.hirsel` and `core/std/sha384.hirsel` with their API pages. | H1–H4 |
+| **S5** SHA-512 | S | CK | `core/core/sha512.hirsel` <!-- doc-ref: planned --> (`blocks`, `block`), `RtOp::Sha512Blocks` lowered as `Sha256Blocks` is, its C entry over `sha2::compress512`, the evaluator arm; `core/std/sha512.hirsel` <!-- doc-ref: planned --> and `core/std/sha384.hirsel` <!-- doc-ref: planned --> with their API pages. | H1–H4 |
 
 ## Signature verification
 
@@ -748,9 +748,9 @@ with key `0x04 || Qx || Qy` and signature `R || S`.
 | **SV17** reference charge | a per-byte charge, or RSA's modular exponentiation lowered as a loop | On the reference evaluator, `bound bytes 0 { bound steps 1 { rsa.verify_pkcs1_sha256(n, e, m, s) } }` gives `Ok(Ok(true))` for SV13's tcId 1, the same scope over `rsa.verify_pss_sha256` gives `Ok(Ok(true))` for `rsa_pss_2048_sha256_mgf1_32_test.json` tcId 1, and over `p384.verify` for its P1363 tcId 1. The arguments are locals bound outside the scopes. By hand from MEM-30, a core call is one step and admits nothing. |
 
 The laws are cases in the core contract harness, in `core/core/tests/ed25519.hirsel`,
-`core/core/tests/p256.hirsel`, `core/core/tests/p384.hirsel` and `core/core/tests/rsa.hirsel`.
+`core/core/tests/p256.hirsel`, `core/core/tests/p384.hirsel` <!-- doc-ref: planned --> and `core/core/tests/rsa.hirsel` <!-- doc-ref: planned -->.
 SV11, SV14 and SV15 walk whole Wycheproof files, which are checked in under
-`core/core/tests/vectors/` byte for byte from the pinned commit. They take no capability, so the shared walker's `--backend all`
+`core/core/tests/vectors/` <!-- doc-ref: planned --> byte for byte from the pinned commit. They take no capability, so the shared walker's `--backend all`
 runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/std/tests/README.md)).
 
 ### Build slice
@@ -758,7 +758,7 @@ runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
 | **SV** signature verification | S | — | `core/core/ed25519.hirsel` and `core/core/p256.hirsel` with the three bodiless headers, and their rows in `core_ops.rs` as `Lane::Value` kernels. Separate functions in `hirsel-core-net` wrap ring 0.17.14's `ED25519`, `ECDSA_P256_SHA256_FIXED` and `ECDSA_P256_SHA256_ASN1`. The `RtOp`s `Ed25519Verify`, `P256Verify` and `P256VerifyDer` take key, message and signature pointer and length pairs and return a `u64` 0 or 1. The C entries `hirsel_core_ed25519_verify`, `hirsel_core_p256_verify` and `hirsel_core_p256_verify_der` in `hirsel-core-rt` each call the corresponding wrapper, as does the evaluator's `RtOp` arm (its `eval` feature already links `hirsel-core-net`), so compiled code and the evaluator answer from the same code. Cranelift and LLVM lower these as native calls, as `Sha256Blocks` is lowered. There is no `HostOp`, provider path or recording change. The module row's `unbuilt` mark is removed when the slice lands. | SV1–SV10 |
-| **SR** P-384 and RSA | S | SV, CK | `core/core/p384.hirsel` and `core/core/rsa.hirsel` with the four bodiless headers, their `core_ops.rs` rows as `Lane::Value` kernels, the `RtOp`s `P384Verify`, `P384VerifyDer`, `RsaVerifyPkcs1Sha256` and `RsaVerifyPssSha256` (pointer and length pairs in, `u64` 0 or 1 out), wrappers in `hirsel-core-net` beside the ring ones over `p384` 0.14.0 and `rsa` 0.10.0, the C entries in `hirsel-core-rt`, and the evaluator's arms calling the same wrappers. Lowered as native calls, as SV's kernels are. | SV11–SV17 |
+| **SR** P-384 and RSA | S | SV, CK | `core/core/p384.hirsel` <!-- doc-ref: planned --> and `core/core/rsa.hirsel` <!-- doc-ref: planned --> with the four bodiless headers, their `core_ops.rs` rows as `Lane::Value` kernels, the `RtOp`s `P384Verify`, `P384VerifyDer`, `RsaVerifyPkcs1Sha256` and `RsaVerifyPssSha256` (pointer and length pairs in, `u64` 0 or 1 out), wrappers in `hirsel-core-net` beside the ring ones over `p384` 0.14.0 and `rsa` 0.10.0, the C entries in `hirsel-core-rt`, and the evaluator's arms calling the same wrappers. Lowered as native calls, as SV's kernels are. | SV11–SV17 |
 
 ## Argon2id
 
@@ -857,7 +857,7 @@ locals bound outside.
 | **AR5** memory admission | working memory taken from nowhere, kept after return, or admitted before the steps | Under a limit with `262,143` bytes free, AR4's call gives `Capacity(c)` with `c.requested = 262,144`; with `262,144` free it succeeds, and afterwards the limit has `262,144` free again. |
 | **AR6** PHC strictness | a lenient parser that accepts a downgraded variant or version | Starting from AR2's first string, `argon2.verify` gives `Malformed` for `$argon2i$` in its place, `v=16`, `v=` removed, `t=2,m=65536` swapped, `m=065536`, a trailing `=` on the salt, and `,keyid=AAAA` after the parameters. |
 
-The laws are cases in `core/core/tests/argon2.hirsel` and `core/std/tests/argon2.hirsel`
+The laws are cases in `core/core/tests/argon2.hirsel` <!-- doc-ref: planned --> and `core/std/tests/argon2.hirsel` <!-- doc-ref: planned -->
 with `--backend all`. AR2's larger cases take a quarter of a GiB and a fraction of a second
 each on native engines; on the evaluator only the `m = 256` cases run.
 
@@ -865,7 +865,7 @@ each on native engines; on the evaluator only the `m = 256` cases run.
 
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
-| **A2** Argon2id | M | CK | `Argon2Cost` and `Argon2Error` in the prelude, `core/core/argon2.hirsel` with `id`, its `core_ops.rs` row, `RtOp::Argon2id` taking the seven arguments as pointer and length pairs and words, the per-block steps in the reference evaluator and in every engine (MEM-30's list), the working-memory admission and refund, the native C entry and the evaluator arm over one wrapper; `core/std/argon2.hirsel` and its API page. | AR1–AR6 |
+| **A2** Argon2id | M | CK | `Argon2Cost` and `Argon2Error` in the prelude, `core/core/argon2.hirsel` <!-- doc-ref: planned --> with `id`, its `core_ops.rs` row, `RtOp::Argon2id` taking the seven arguments as pointer and length pairs and words, the per-block steps in the reference evaluator and in every engine (MEM-30's list), the working-memory admission and refund, the native C entry and the evaluator arm over one wrapper; `core/std/argon2.hirsel` <!-- doc-ref: planned --> and its API page. | AR1–AR6 |
 
 ### Open
 

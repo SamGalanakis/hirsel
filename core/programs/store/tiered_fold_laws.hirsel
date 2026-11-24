@@ -319,7 +319,7 @@ fn l87_fold_fork_shape(source: TieredPageSource, base: std.page.PagePtr) -> Resu
     let mut replay = journal_replay_manifest(capacity(main_state(take roots, 0, 0))?, manifest)?
     let mut deleted: List[JournalOp] = list.with_capacity(1)
     list.push(mut deleted, JournalOp(key: log_key(9, 2)?, value: None, prior: 7, trim: None))
-    journal_apply("j-1", mut replay, Commit(JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), call: None)))?
+    journal_apply("j-1", mut replay, Commit(JournalCommit(branch: 0, version: 1, at: 1, data: take deleted, streams: list.new(), keyed: list.new(), call: None)))?
     journal_apply("j-1", mut replay, Fork(JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 60)))?
     journal_apply("j-1", mut replay, l68_replay_put(1, 2, 0, "stored")?)?
 

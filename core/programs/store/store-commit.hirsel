@@ -2,8 +2,11 @@
 type AdmittedDraft[R, A] = Ready(Ran[R, A], Publication) | OverLimit(Ran[R, A], StoreCapacity)
 
 fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[(), Error] {
-    if ran.prepared_roots || (ran.edits.count == 0 && ran.replies.count == 0) {
+    if ran.prepared_roots {
         return Ok(())
+    }
+    if let None = ran.keyed {
+        if ran.edits.count == 0 && ran.replies.count == 0 { return Ok(()) }
     }
     let (take candidate, after) = disk_allocation(scoped fn() -> Result[(Roots, u64), Error] {
         let Some(base) = view ran.roots else {
@@ -20,6 +23,9 @@ fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[
         let mut stamp_out = first
         materialize_rows(mut roots.collections, ran.edits, false, first, mut stamp_out)?
         materialize_rows(mut roots.streams, ran.replies, false, first, mut stamp_out)?
+        if let Some(keyed) = ran.keyed {
+            materialize_keyed_edits(mut roots, keyed.edits, first, mut stamp_out)?
+        }
         canonical_roots(mut roots)?
         Ok((take roots, stamp_out))
     })?
@@ -33,6 +39,7 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
     if ran.prepared_roots {
         return Ok(false)
     }
+    if let Some(_) = ran.keyed { return Ok(false) }
     if let Some(_) = db.heads[i].following {
         return Ok(false)
     }
@@ -116,7 +123,8 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
 fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] {
     if over_bound(db, ran) {
         let needed = ran.live
-        return Ok(OverLimit(take ran, Resident(Capacity(requested: needed, available: db.ceiling))))
+        let available = resident_with_credit(db.ceiling, draft_credit(db, ran))
+        return Ok(OverLimit(take ran, Resident(Capacity(requested: needed, available: available))))
     }
     let mut draft = take ran
     match prepare_direct_edit(mut db, i, mut draft) {
@@ -128,6 +136,10 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
         Ok(()) => (),
         Error(Full(problem)) => return Ok(OverLimit(take draft, problem)),
         Error(take problem) => return Error(take problem),
+    }
+    if let Some(roots) = draft.roots {
+        let extra = int.saturating_sub(keyed_root_record_bytes(roots.keyed), keyed_root_record_bytes(db.heads[i].roots.keyed))
+        check_manifest_addition(db, extra)?
     }
     if let Some(_) = draft.tiered {
         let total = {
@@ -160,6 +172,7 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
 }
 
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
+    db.keyed_credit = draft_credit(db, ran)
     if i == 0u64 {
         for reply_slot in 0u64 .. ran.replies.count {
             let drafted_reply = data_row(ran.replies, reply_slot)
@@ -187,10 +200,13 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
         },
     }
     if let Some(take candidate) = take roots {
-        let PageRoots(collections: take collections, streams: take streams, catalog: take catalog) = take candidate
+        let PageRoots(collections: take collections, streams: take streams, catalog: take catalog, keyed: take keyed) = take candidate
         install_page_tree(mut db.heads[i].roots.collections, take collections)
         install_page_tree(mut db.heads[i].roots.streams, take streams)
         install_page_tree(mut db.heads[i].roots.catalog, take catalog)
+        db.record_bytes -= keyed_root_record_bytes(db.heads[i].roots.keyed)
+        db.record_bytes += keyed_root_record_bytes(keyed)
+        db.heads[i].roots.keyed = take keyed
     }
     db.resident = live_bytes
     if let Some(n) = tiered {
@@ -238,7 +254,7 @@ fn draft_row_account(db: Db, i: u64, proposed: Roots) -> Result[u64, Error] {
 fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] waits {
     if is_disk(db) {
         let refusal = match ran.frame {
-            Some(raw) => journal_refusal(disk_state(db).uncovered, list.len(raw), disk_state(db).options.journal_limit),
+            Some(raw) => journal_refusal(disk_state(db).uncovered, list.len(raw), available_journal(db, draft_credit(db, ran))),
             None => None,
         }
         if let Some(overflow) = refusal {
@@ -313,7 +329,7 @@ fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecor
                     Some(plan) => Some(view plan.deltas),
                     None => None,
                 }
-                prepared.frame = Some(encode_staged(ci, Some(view base), deltas, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
+                prepared.frame = Some(encode_staged(ci, Some(view base), deltas, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, prepared.keyed, db.file_seq, db.file_end)?)
             }
             Ok(Prepared(take prepared))
         },
@@ -345,6 +361,9 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
                     draw = tiered_plan.next_stamp
                     prepared.plan = Some(take tiered_plan)
                 }
+            }
+            if let Some(keyed) = prepared.keyed {
+                materialize_keyed_edits(mut prepared.roots, keyed.edits, first, mut draw)?
             }
             canonical_roots(mut prepared.roots)?
             prepared.prepared_roots = true

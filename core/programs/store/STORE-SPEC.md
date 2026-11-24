@@ -2294,6 +2294,8 @@ objects@1 has its own names (§12.2): entries (role 2), MANIFESTs (role 1), pack
 
 ### 2.4 Journal segment `j-<seq>` and its end file
 
+Keyed claims reserve journal bytes as specified by [HTTP K-7](../../../docs/spec/http.md#k-7-cardinality-and-bytes). For a proposed append, the available journal bytes equal `journal_limit` minus the sum of the terminal frame bounds of the claims left Admitted by that append. An admission adds its own frame bound to the sum. A terminal commit removes exactly its own. Refusal leaves both the journal and its credit unchanged. Credit is rebuilt from the checkpoint and replayed `claim_open` tree before writable open. It is bounded by the sum of the claims' resident terminal reserves.
+
 **Format 6.** The header word is 6. Sections 0 and 1 use the format-5 data and stream operation grammars. Section 2 is a control section with one put and an empty key. The value is `streams_max u64 LE ‖ streams_count u64 LE ‖ expiry_floor Option[u64 LE]`. The option starts with one tag byte. Section 1 carries the typed stream keys and Caller metadata from §1.8. Checkpoints carry the control value at the reserved empty key alongside the stream rows. Readers accept format 6.
 
 **COMMIT (kind 0x0011, MUST)**, payload:

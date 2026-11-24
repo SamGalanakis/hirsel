@@ -78,7 +78,7 @@ fn law_generation_locations(known: PageLocations) -> bool {
 fn check_paged_generation(d: Dir) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let id = StoreId(hi: 1, lo: 2)
-    let mut roots = PageRoots(collections: new_page_tree(CollectionMap, 1024), streams: new_page_tree(Unprefixed, 1024), catalog: new_page_tree(Unprefixed, 1024))
+    let mut roots = empty_roots()
     let mut key: Bytes = list.with_capacity(1)
     list.push(mut key, 16u8)
     let mut next_stamp = 1u64

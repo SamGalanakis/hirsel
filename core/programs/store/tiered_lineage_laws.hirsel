@@ -6,7 +6,7 @@ fn l69_pack() -> Result[DiskIndex[u64, PagePack], Error] {
 
 fn l69_pin(name: String, branch_id: u32, watermark: u64) -> LocatedPin {
     let zero = std.page.unlocated(0)
-    LocatedPin(name: string.from(name), branch: branch_id, version: 0, roots: LocatedRoots(collections: zero, streams: zero, catalog: zero), watermark: watermark)
+    LocatedPin(name: string.from(name), branch: branch_id, version: 0, roots: LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new()), watermark: watermark)
 }
 
 fn l69_live(packs: DiskIndex[u64, PagePack]) -> u64 {

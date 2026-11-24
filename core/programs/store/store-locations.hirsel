@@ -99,7 +99,9 @@ fn published_tree_pointer(known: PageLocations, root: Arc[std.page.Page]) -> std
 }
 
 fn published_page_roots(known: PageLocations, roots: PageRoots) -> LocatedRoots {
-    LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog))
+    let mut keyed: List[std.page.PagePtr] = list.with_capacity(list.len(roots.keyed))
+    for tree in roots.keyed { list.push(mut keyed, published_page_pointer(known, tree)) }
+    LocatedRoots(collections: published_page_pointer(known, roots.collections), streams: published_page_pointer(known, roots.streams), catalog: published_page_pointer(known, roots.catalog), keyed: take keyed)
 }
 
 fn add_page_source(mut known: PageLocations, stamp: u64, source: IncomingEdge) -> Result[(), Error] {
@@ -132,7 +134,11 @@ fn add_location(mut known: PageLocations, ptr: std.page.PagePtr, class: u8, imag
 fn add_location_holder(mut known: PageLocations, kind: u8, holder: u64, roots: LocatedRoots) -> Result[(), Error] {
     add_page_source(mut known, roots.collections.stamp, HolderSource(kind, holder, 0))?
     add_page_source(mut known, roots.streams.stamp, HolderSource(kind, holder, 1))?
-    add_page_source(mut known, roots.catalog.stamp, HolderSource(kind, holder, 2))
+    add_page_source(mut known, roots.catalog.stamp, HolderSource(kind, holder, 2))?
+    for slot in 0u64 .. list.len(roots.keyed) {
+        add_page_source(mut known, roots.keyed[slot].stamp, HolderSource(kind, holder, int.narrow(3 + slot)))?
+    }
+    Ok(())
 }
 
 // Rebuild the installed generation's metadata from the validated postorder.

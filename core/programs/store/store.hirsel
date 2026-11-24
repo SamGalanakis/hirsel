@@ -1,4 +1,4 @@
-// M4 store. The writer owns three persistent byte trees; readers hold Arc roots.
+// The writer owns the persistent page trees; readers hold Arc roots.
 pub type StoreId: codec + key {
     hi: u64,
     lo: u64
@@ -34,11 +34,11 @@ pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(
 type Roots = PageRoots
 
 fn empty_roots() -> Roots {
-    PageRoots(collections: new_page_tree(CollectionMap, 1024), streams: new_page_tree(Unprefixed, 1024), catalog: new_page_tree(Unprefixed, 1024))
+    PageRoots(collections: new_page_tree(CollectionMap, 1024), streams: new_page_tree(Unprefixed, 1024), catalog: new_page_tree(Unprefixed, 1024), keyed: list.new())
 }
 
 fn share_roots(r: Roots) -> Roots {
-    PageRoots(collections: share_page_tree(r.collections), streams: share_page_tree(r.streams), catalog: share_page_tree(r.catalog))
+    PageRoots(collections: share_page_tree(r.collections), streams: share_page_tree(r.streams), catalog: share_page_tree(r.catalog), keyed: share_keyed_pages(r.keyed))
 }
 
 type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u64, u64) | ObjectBroken(Error)
@@ -78,6 +78,7 @@ pub opaque type Db {
     // The `changes` count at which `resident` was last exact (I4).
     settled: u64,
     ceiling: u64,
+    keyed_credit: KeyedCredit,
     checkpointed: u64,
     // Stream name to the unreplied Admitted(p) this open committed (§1.8).
     admits: Map[Bytes, OpenAdmit],
@@ -232,14 +233,14 @@ fn prepare_holder_slot(mut db: Db, delta: HolderDelta) -> Result[(), Error] {
 }
 
 fn install_head(mut db: Db, take added: Head, take indexed_name: String) {
-    db.record_bytes += branch_record_bytes(added.name)
+    db.record_bytes += branch_root_bytes(added.name, added.roots)
     map.insert(mut db.branch_names, take indexed_name, added.id)
     list.push(mut db.heads, take added)
 }
 
 fn remove_head(mut db: Db, slot: u64) {
     let removed = list.remove(mut db.heads, slot)
-    db.record_bytes -= branch_record_bytes(removed.name)
+    db.record_bytes -= branch_root_bytes(removed.name, removed.roots)
     let _ = map.remove(mut db.branch_names, removed.name)
 }
 
@@ -249,7 +250,7 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
         AddHead(take added, take name) => install_head(mut db, take added, take name),
         RemoveHead(slot) => remove_head(mut db, slot),
         AddPin(take added) => {
-            db.record_bytes += pin_record_bytes(added.name)
+            db.record_bytes += pin_root_bytes(added.name, added.roots)
             let mut slot = 0u64
             while slot < list.len(db.pins) && db.pins[slot].name < added.name {
                 slot += 1
@@ -258,13 +259,17 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
         },
         RemovePin(slot) => {
             let removed = list.remove(mut db.pins, slot)
-            db.record_bytes -= pin_record_bytes(removed.name)
+            db.record_bytes -= pin_root_bytes(removed.name, removed.roots)
         },
         ReplacePin(slot, take replacement) => {
+            db.record_bytes -= pin_root_bytes(db.pins[slot].name, db.pins[slot].roots)
+            db.record_bytes += pin_root_bytes(replacement.name, replacement.roots)
             let _ = list.set(mut db.pins, slot, take replacement)
         },
         ReplaceMain(take proposed, gone) => {
             let ProposedMain(roots: take roots, head: head, at: at, tables: tables, ..) = take proposed
+            db.record_bytes -= keyed_root_record_bytes(db.heads[0u64].roots.keyed)
+            db.record_bytes += keyed_root_record_bytes(roots.keyed)
             db.heads[0u64].roots = take roots
             db.heads[0u64].head = head
             db.heads[0u64].at = at
@@ -520,6 +525,7 @@ pub opaque scoped type Tx {
     // The streams section's ops (§1.8). `extra_bytes` is that section with
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
     stream_ops: DataOps,
+    keyed: Option[KeyedDraft],
     extra_bytes: u64,
     call: Option[CallSection],
     // Layers beneath `ops`, oldest first. The last `own` are this Tx's own
@@ -601,7 +607,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new(),
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(),
         stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None)
 }
 
@@ -619,7 +625,7 @@ pub fn accounts(db: Db) -> Accounts {
         Some(state) => (state.inflight, state.uncovered),
         None => (0u64, 0u64)
     }
-    Accounts(logical: int.saturating_add(db.resident, db.tiered), tiered: db.tiered, exact: !retaining(db) || db.changes == db.settled, frames: frames, journal: journal, resident: db.page_resident)
+    Accounts(logical: int.saturating_add(int.saturating_add(db.resident, db.tiered), db.keyed_credit.padding), tiered: db.tiered, exact: !retaining(db) || db.changes == db.settled, frames: frames, journal: journal, resident: db.page_resident)
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -744,7 +750,7 @@ fn cut_install(mut db: Db, take delta: HolderDelta) -> Result[Ticket, Error] wai
     }
     let (live_bytes, pages) = memory_cut_accounts(proposed)?
     if admission {
-        over_ceiling(live_bytes, db.ceiling)?
+        over_ceiling(live_bytes, available_resident(db))?
     }
     let commit_ticket = record_memory_cut(mut db, live_bytes, pages)
     install_holder_delta(mut db, take delta)
@@ -757,6 +763,14 @@ fn branch_record_bytes(name: String) -> u64 {
 
 fn pin_record_bytes(name: String) -> u64 {
     130 + string.byte_len(name)
+}
+
+fn branch_root_bytes(name: String, roots: Roots) -> u64 {
+    branch_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
+}
+
+fn pin_root_bytes(name: String, roots: Roots) -> u64 {
+    pin_record_bytes(name) + keyed_root_record_bytes(roots.keyed)
 }
 
 fn check_manifest_addition(db: Db, extra: u64) -> Result[(), Error] {
@@ -780,7 +794,7 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
     if id == 4294967295 {
         return Error(Limit(Ids))
     }
-    check_manifest_addition(db, branch_record_bytes(name))?
+    check_manifest_addition(db, branch_root_bytes(name, from.roots))?
     // A Snapshot carries no wall time; the branch it was taken on, if it is
     // still live, gives the at its CallInfo continues from (section 1.7).
     let mut at = db.heads[0].at
@@ -807,7 +821,7 @@ fn fork_live(mut db: Db, name: String, parent: u64) -> Result[(Branch, Ticket), 
     let size = 42 + string.byte_len(name)
     let disk = is_disk(db)
     if disk {
-        if let Some(over) = journal_refusal(disk_state(db).uncovered, size, disk_state(db).options.journal_limit) {
+        if let Some(over) = journal_refusal(disk_state(db).uncovered, size, available_journal(db, db.keyed_credit)) {
             return Error(Full(Journal(over)))
         }
     }
@@ -1261,6 +1275,7 @@ type Ran[R, A] {
     roots: Option[Roots],
     edits: DataRows,
     replies: DataRows,
+    keyed: Option[KeyedDraft],
     first_stamp: u64,
     prepared_roots: bool,
     tiered: Option[u64],
@@ -1289,6 +1304,7 @@ type Prepared[R, A] {
     ops: DataRows,
     frame_tail: u64,
     stream_ops: DataRows,
+    keyed: Option[KeyedDraft],
     first_stamp: u64,
     prepared_roots: bool,
     call: Option[CallSection]
@@ -1358,7 +1374,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1378,7 +1394,8 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
                 Some(decide) => decide(a),
                 None => true
             }
-            if !keep || tx.stream_ops.rows.count == 0 {
+            let keyed_reply = match tx.keyed { Some(_) => true, None => false }
+            if !keep || (tx.stream_ops.rows.count == 0 && !keyed_reply) {
                 return RolledBack(Aborted(Undone(value: take a, ticket: None)))
             }
             // F2 keeps the streams and CALL writes with the old data roots.
@@ -1401,7 +1418,10 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Error(Full(problem)) => return RolledBack(Refused(problem)),
         Error(_) => fail("store: invalid staged Log trim"),
     }
-    let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, call: take call, ..) = take tx
+    if let Some(keyed) = tx.keyed {
+        tx.resident = keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
+    }
+    let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
     let DataOps(cells: take cells, ..) = take ops
     seal_cell_edits(mut rows, cells)
     let DataOps(rows: take stream_rows, ..) = take stream_ops
@@ -1409,7 +1429,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => Some(db.tiered),
         None => None,
     }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
+    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
@@ -1418,8 +1438,9 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         DraftFault(take problem) => return DraftError(take problem),
         Prepared(take tx) => take tx,
     }
-    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
-    let mut admits_rows = stream_edits.count != 0
+    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
+    let keyed_writes = match keyed { Some(_) => true, None => false }
+    let mut admits_rows = stream_edits.count != 0 || keyed_writes
     if !admits_rows {
         for slot in 0u64 .. operations.count {
             let edit = data_row(operations, slot)
@@ -1432,7 +1453,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
             }
         }
     }
-    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
+    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
 }
 
 // F2: the account after only the reply writes `ops`, against the base `streams` tree.
@@ -1463,7 +1484,7 @@ fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {
 }
 
 fn over_bound[R, A](db: Db, ran: Ran[R, A]) -> bool {
-    ran.admits_rows && ran.live > db.ceiling
+    ran.admits_rows && ran.live > resident_with_credit(db.ceiling, draft_credit(db, ran))
 }
 
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
@@ -1994,79 +2015,6 @@ fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settle
             }
         }
     }
-}
-
-fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    if let Some(record) = rec {
-        return encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view record), settlement, seq, offset)
-    }
-    match call {
-        Some(section) => encode_frame(ci, base, tiered, mut ops, tail, streams, Some(view section.record), section.settlement, seq, offset),
-        None => encode_frame(ci, base, tiered, mut ops, tail, streams, None, None, seq, offset),
-    }
-}
-
-fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], tiered: Option[View[List[Option[TieredDataDelta]]]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    let data = ops.count != 0 || streams.count == 0
-    let control = stream_control_slot(streams)
-    let control_count = if let Some(_) = control { 1u64 } else { 0u64 }
-    let stream_count = streams.count - control_count
-    let sections = (if data {
-        1u64
-    } else {
-        0u64
-    }) + (if stream_count != 0u64 {
-        1u64
-    } else {
-        0u64
-    }) + control_count
-    let mut size = 21 + 5 * sections
-    for slot in 0u64 .. ops.count {
-        let operation = data_row(ops, slot)
-        size += data_op_size(operation, false)
-    }
-    for slot in 0u64 .. streams.count {
-        let operation = data_row(streams, slot)
-        size += data_op_size(operation, true)
-        if let (Some(_), Some(record)) = (view operation.value, view call) {
-            if stream_record_matches(operation.key, record.stream) {
-                size += call_section_bytes(record, settlement)
-            }
-        }
-    }
-    let order = data_order(ops)?
-    let room = 16 + size + BINDING_BYTES
-    let mut out: Bytes = if tail == 0 {
-        bytebuf.from_tail(mut ops.first[0].key, room)
-    } else if tail == 1 {
-        bytebuf.from_tail(mut ops.first[1].key, room)
-    } else if tail < OPEN_FRAME_TAIL {
-        bytebuf.from_tail(mut ops.rest[tail - 2].key, room)
-    } else {
-        list.with_capacity(room)
-    }
-    le(mut out, 0x0011, 2)?
-    le(mut out, 1, 2)?
-    le(mut out, size, 4)?
-    le(mut out, 0, 8)?
-    le(mut out, int.widen(ci.id.branch), 4)?
-    le(mut out, ci.id.version, 8)?
-    le(mut out, ci.at, 8)?
-    le(mut out, sections, 1)?
-    if data {
-        encode_data_ops(mut out, base, tiered, ops, order)?
-    }
-    if stream_count != 0u64 {
-        encode_stream_ops(mut out, streams, stream_count, call, settlement)?
-    }
-    if let Some(slot) = control {
-        le(mut out, 2u64, 1u64)?
-        le(mut out, 1u64, 4u64)?
-        let operation = data_row(streams, slot)
-        encode_data_op(mut out, operation.key, operation.value, None)?
-    }
-    seal_frame(mut out, DiskContext(store: ci.id.store, role: 2, seq: seq), offset)?
-    Ok(take out)
 }
 
 pub type RowSchemas: codec + shareable + send {
@@ -3791,7 +3739,7 @@ fn write_prepared_payload(mut file: HostFile, ctx: DiskContext, mut offset: u64,
 pub fn validate_preparation(source: Preparation, staged: StagedMigration) -> Result[(), Error] {
     let mut state = capacity(current_state(source.db))?
     state.tips[0].roots = share_roots(staged.plan.roots)
-    over_ceiling(capacity(state_account(state))?, source.db.ceiling)
+    over_ceiling(capacity(state_account(state))?, available_resident(source.db))
 }
 
 pub fn write_prepared(source: Preparation, staged: StagedMigration, d: Dir, take target: PreparedTarget) -> Result[(), DeployError] waits {
@@ -4435,6 +4383,10 @@ fn remember_roots(mut owners: Map[IncomingEdge, u64], kind: u8, owner: u64, root
     if roots.catalog.stamp != 0 {
         map.insert(mut owners, HolderSource(kind, owner, 2), roots.catalog.stamp)
     }
+    for slot in 0u64 .. list.len(roots.keyed) {
+        let stamp = roots.keyed[slot].stamp
+        if stamp != 0 { map.insert(mut owners, HolderSource(kind, owner, int.narrow(3 + slot)), stamp) }
+    }
 }
 
 fn located_owners(manifest: PageManifest) -> Map[IncomingEdge, u64] {
@@ -4649,7 +4601,7 @@ fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
     let mut total = 0u64
     for take t in take tips {
         let Tip(id: br, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: head, at: at) = take t
-        total += branch_record_bytes(name)
+        total += branch_root_bytes(name, roots)
         if br != 0 {
             let key = disk_allocation(scoped fn() -> Result[String, Error] {
                 named(name)
@@ -4661,7 +4613,7 @@ fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
     db.heads = take heads
     db.branch_names = take names
     for stored in pins {
-        total += pin_record_bytes(stored.name)
+        total += pin_root_bytes(stored.name, stored.roots)
     }
     db.record_bytes = total
     db.next_pin = list.len(pins)
@@ -4791,6 +4743,8 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Ok(empty_db(c, id, options))
     })?
     open_heads(mut db, take state)?
+    db.resident = live_bytes
+    rebuild_keyed_credit(mut db, uncovered, options.journal_limit)?
     // The pager starts before the journal tasks, so a refusal here leaves none
     // running. Its task reserves C + K + P at once (§1.1 "The Tiered plan").
     let pager_task: Option[Task[()]] = if store_has_tiered(db) {
@@ -4804,7 +4758,6 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     db.next_node = next_node
     db.next_table = next_table
     db.file_seq = seq
-    db.resident = live_bytes
     db.tiered = tiered
     db.page_resident = resident_pages
     db.checkpointed = generation
@@ -4851,18 +4804,6 @@ fn disk_rotate(mut db: Db, id: StoreId, seq: u64, previous: u64) -> Result[(), E
         }
     }
     journal_poll(mut db)
-}
-
-fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
-    let records = match delta {
-        AddHead(head, _) => db.record_bytes + branch_record_bytes(head.name),
-        RemoveHead(slot) => db.record_bytes - branch_record_bytes(db.heads[slot].name),
-        ReplaceMain(_, Some(slot)) => db.record_bytes - branch_record_bytes(db.heads[slot].name),
-        AddPin(held) => db.record_bytes + pin_record_bytes(held.name),
-        RemovePin(slot) => db.record_bytes - pin_record_bytes(db.pins[slot].name),
-        _ => db.record_bytes,
-    }
-    page_manifest_file_size(MANIFEST_FIXED_BYTES + records, db.fence)
 }
 
 fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], scrubs: List[Arc[ScrubLease]], first: u64, end: u64) -> Result[(PageDisk, DiskRemovals), Error] {
@@ -4980,7 +4921,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
     list_tiered_cut(mut base.locations, staged)?
-    over_ceiling(base.account, db.ceiling)?
+    over_ceiling(base.account, available_resident(db))?
     let manifest_bytes = cut_manifest_size(db, delta)
     let d = log_directory(db)?
     let mut next_stamp = stamp_after(db.next_node)?
@@ -5168,6 +5109,7 @@ type JournalCommit {
     at: u64,
     data: List[JournalOp],
     streams: List[JournalOp],
+    keyed: List[KeyedEdit],
     call: Option[CallSection]
 }
 
@@ -5302,16 +5244,17 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
     let head = disk_number(file, raw, mut at, 8)?
     let wall = disk_number(file, raw, mut at, 8)?
     let sections = disk_number(file, raw, mut at, 1)?
-    if sections == 0 || sections > 3 {
+    if sections == 0 || sections > 4 {
         return Error(disk_fault(file, at - 1, Malformed))
     }
     let mut data: List[JournalOp] = list.new()
     let mut streams: List[JournalOp] = list.new()
+    let mut keyed: List[KeyedEdit] = list.new()
     let mut call: Option[CallSection] = None
     let mut previous_tag: Option[u64] = None
     for _ in 0u64 .. sections {
         let tag = disk_number(file, raw, mut at, 1)?
-        if tag > 2u64 || (if let Some(prior_tag) = previous_tag { tag <= prior_tag } else { false }) {
+        if tag > 3u64 || (if let Some(prior_tag) = previous_tag { tag <= prior_tag } else { false }) {
             return Error(disk_fault(file, at - 1, Malformed))
         }
         previous_tag = Some(tag)
@@ -5323,7 +5266,7 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
                     if list.len(operation.key) == 0u64 { return Error(disk_fault(file, at, Malformed)) }
                 }
             },
-            _ => {
+            2 => {
                 let mut no_call: Option[CallSection] = None
                 let mut control_rows = journal_ops(file, raw, true, mut at, mut no_call)?
                 if list.len(control_rows) != 1u64 || list.len(control_rows[0u64].key) != 0u64 {
@@ -5336,6 +5279,10 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
                     let _ = decode_stream_control(control) ?=> |_| disk_fault(file, at, Malformed)
                 }
                 list.insert(mut streams, 0u64, take row)
+            },
+            _ => {
+                if br != 0 { return Error(disk_fault(file, at, Malformed)) }
+                keyed = decode_keyed_edits(file, raw, mut at)?
             },
         }
     }
@@ -5353,7 +5300,7 @@ fn journal_decode_commit(file: String, raw: Bytes) -> Result[JournalCommit, Erro
             return Error(disk_fault(file, at, Malformed))
         }
     }
-    Ok(JournalCommit(branch: br, version: head, at: wall, data: take data, streams: take streams, call: take call))
+    Ok(JournalCommit(branch: br, version: head, at: wall, data: take data, streams: take streams, keyed: take keyed, call: take call))
 }
 
 fn journal_decode(file: String, kind: u16, raw: Bytes) -> Result[JournalEvent, Error] {
@@ -5540,10 +5487,10 @@ fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Er
         capacity(map.try_reserve(mut names, list.len(state.tips)))?
         let mut total = 0u64
         for held in state.pins {
-            total += pin_record_bytes(held.name)
+            total += pin_root_bytes(held.name, held.roots)
         }
         for head in state.tips {
-            total += branch_record_bytes(head.name)
+            total += branch_root_bytes(head.name, head.roots)
             map.insert(mut names, string.from(head.name), head.id)
         }
         Ok((take names, total))
@@ -5643,6 +5590,15 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
     }
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered)?
     journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered)?
+    if list.len(commit.keyed) != 0 {
+        let before = keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
+        let mut draw = stamp_after(replay.next_node)?
+        materialize_keyed_edits(mut replay.state.tips[i].roots, commit.keyed, 0, mut draw)?
+        canonical_roots(mut replay.state.tips[i].roots)?
+        replay.next_node = draw - 1
+        replay.record_bytes = replay.record_bytes - before + keyed_root_record_bytes(replay.state.tips[i].roots.keyed)
+        if replay.record_bytes > META_LIMIT { return Error(disk_fault(file, 0, Malformed)) }
+    }
     replay.state.tips[i].head = commit.version
     replay.state.tips[i].at = commit.at
     Ok(())

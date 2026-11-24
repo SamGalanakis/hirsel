@@ -847,7 +847,7 @@ fn l68_replay_base() -> Result[JournalReplay, Error] {
 fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[JournalEvent, Error] {
     let mut ops: List[JournalOp] = list.new()
     list.push(mut ops, JournalOp(key: log_key(9, 2)?, value: Some(string.into_bytes(string.from(value))), prior: prior, trim: None))
-    Ok(Commit(JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), call: None)))
+    Ok(Commit(JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), keyed: list.new(), call: None)))
 }
 
 fn l68_check_replay_root(tree: PageTree, rows: u64, charge: u64, expected_value: String) -> Result[(), Error] {

@@ -10,7 +10,7 @@ pub fn journal_law_apply() -> bool {
         list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10)), prior: prior, trim: None))
         let mut streams: List[JournalOp] = list.new()
         list.push(mut streams, JournalOp(key: result.unwrap(copied(string.as_bytes("stream"))), value: Some(key_word(head)), prior: 0, trim: None))
-        let commit = JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, call: None)
+        let commit = JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, keyed: list.new(), call: None)
         result.unwrap(journal_apply("j-7", mut replay, Commit(take commit)))
         if replay.state.tips[0].head != head || replay.state.tips[0].at != 100 + head {
             return false
@@ -29,7 +29,7 @@ pub fn journal_law_apply() -> bool {
         }
     }
     let saved = share_page_tree(replay.state.tips[0].roots.collections)
-    let duplicate = JournalCommit(branch: 0, version: 3, at: 103, data: list.new(), streams: list.new(), call: None)
+    let duplicate = JournalCommit(branch: 0, version: 3, at: 103, data: list.new(), streams: list.new(), keyed: list.new(), call: None)
     match journal_apply("j-7", mut replay, Commit(take duplicate)) {
         Error(Corrupt(f)) => match f.why {
             Gap(3) => {},
@@ -37,7 +37,7 @@ pub fn journal_law_apply() -> bool {
         },
         _ => return false
     }
-    let foreign_branch = JournalCommit(branch: 1, version: 4, at: 104, data: list.new(), streams: list.new(), call: None)
+    let foreign_branch = JournalCommit(branch: 1, version: 4, at: 104, data: list.new(), streams: list.new(), keyed: list.new(), call: None)
     match journal_apply("j-7", mut replay, Commit(take foreign_branch)) {
         Error(Corrupt(f)) => match f.why {
             Gap(4) => {},
@@ -48,7 +48,7 @@ pub fn journal_law_apply() -> bool {
     let key = result.unwrap(logical_key(1, key_word(7)))
     let mut deletes: List[JournalOp] = list.new()
     list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None, prior: 9, trim: None))
-    let removed = JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), call: None)
+    let removed = JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), keyed: list.new(), call: None)
     result.unwrap(journal_apply("j-7", mut replay, Commit(take removed)))
     if page_row_count(replay.state.tips[0].roots.collections) != 0 || page_row_count(saved) != 1 || replay.state.tips[0].head != 4 || replay.state.tips[0].at != 104 {
         return false

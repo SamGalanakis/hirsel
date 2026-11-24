@@ -96,8 +96,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, read: JournalRead, take init
 
 fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
     let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, watermark: watermark) = take encoded
-    let charge = branch_record_bytes(name)
-    if id < replay.state.next_branch || id == 4294967295 || charge > META_LIMIT - replay.record_bytes || map.contains(replay.names, name) {
+    if id < replay.state.next_branch || id == 4294967295 || map.contains(replay.names, name) {
         return Error(disk_fault(file, 0, Malformed))
     }
     let (take roots, at, take key) = disk_allocation(scoped fn() -> Result[(Roots, u64, String), Error] {
@@ -116,6 +115,8 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
         }
         Error(disk_fault(file, 0, Malformed))
     })?
+    let charge = branch_root_bytes(name, roots)
+    if charge > META_LIMIT - replay.record_bytes { return Error(disk_fault(file, 0, Malformed)) }
     capacity(list.try_reserve(mut replay.state.tips, 1))?
     capacity(map.try_reserve(mut replay.names, 1))?
     map.insert(mut replay.names, take key, id)

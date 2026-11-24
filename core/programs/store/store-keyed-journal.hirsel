@@ -1,0 +1,158 @@
+type KeyedEdit {
+    tree: u8,
+    key: Bytes,
+    value: Option[Bytes]
+}
+
+type KeyedCredit {
+    resident: u64,
+    padding: u64,
+    journal: u64
+}
+
+type KeyedDraft {
+    edits: List[KeyedEdit],
+    after: KeyedCredit
+}
+
+fn no_keyed_credit() -> KeyedCredit {
+    KeyedCredit(resident: 0, padding: 0, journal: 0)
+}
+
+fn keyed_frame_bytes(edits: List[KeyedEdit]) -> u64 {
+    if list.len(edits) == 0 { return 0 }
+    let mut size = 5u64
+    for edit in edits {
+        size += 6 + list.len(edit.key)
+        if let Some(raw) = edit.value { size += 4 + list.len(raw) }
+    }
+    size
+}
+
+fn encode_keyed_edits(mut raw: Bytes, edits: List[KeyedEdit]) -> Result[(), Capacity] {
+    list.push(mut raw, 3u8)
+    le(mut raw, list.len(edits), 4)?
+    for edit in edits {
+        list.push(mut raw, edit.tree)
+        match edit.value {
+            Some(value) => {
+                list.push(mut raw, 1u8)
+                blob(mut raw, edit.key)?
+                blob(mut raw, value)?
+            },
+            None => {
+                list.push(mut raw, 2u8)
+                blob(mut raw, edit.key)?
+            },
+        }
+    }
+    Ok(())
+}
+
+fn decode_keyed_edits(file: String, raw: Bytes, mut at: u64) -> Result[List[KeyedEdit], Error] {
+    let edit_count = disk_count(file, raw, mut at, 7)?
+    if edit_count == 0 { return Error(disk_fault(file, at, Malformed)) }
+    let mut edits: List[KeyedEdit] = list.new()
+    for _ in 0u64 .. edit_count {
+        let tree: u8 = int.truncate(disk_number(file, raw, mut at, 1)?)
+        let width = match tree {
+            0 => 65u64,
+            4 => 65u64,
+            1 => 387u64,
+            6 => 387u64,
+            2 => 460u64,
+            3 => 526u64,
+            5 => 131u64,
+            _ => return Error(disk_fault(file, at - 1, Malformed)),
+        }
+        let kind = disk_number(file, raw, mut at, 1)?
+        let key = disk_blob(file, raw, mut at, width)?
+        if list.len(key) == 0 { return Error(disk_fault(file, at, Malformed)) }
+        let value: Option[Bytes] = match kind {
+            1 => {
+                let maximum = match tree {
+                    0 => 16384u64,
+                    1 => FORMAT_VALUE_MAX,
+                    4 => 8u64,
+                    5 => 8u64,
+                    _ => 0u64,
+                }
+                Some(disk_blob(file, raw, mut at, maximum)?)
+            },
+            2 => None,
+            _ => return Error(disk_fault(file, at - 1, Malformed)),
+        }
+        list.push(mut edits, KeyedEdit(tree: tree, key: take key, value: take value))
+    }
+    Ok(take edits)
+}
+
+fn materialize_keyed_edits(mut roots: Roots, edits: List[KeyedEdit], private_from: u64, mut stamps: u64) -> Result[(), Error] {
+    if list.len(edits) == 0 { return Ok(()) }
+    if list.len(roots.keyed) == 0 { roots.keyed = new_keyed_pages(roots.streams.inline) }
+    for edit in edits {
+        let slot: u64 = int.widen(edit.tree)
+        match edit.value {
+            Some(value) => put_page_row(mut roots.keyed[slot], edit.key, value, private_from, mut stamps)?,
+            None => {
+                let _ = remove_page_row(mut roots.keyed[slot], edit.key, private_from, mut stamps)?
+            },
+        }
+    }
+    if std.list.all(roots.keyed, fn(tree: PageTree) -> bool { tree_stamp(tree) == 0 }) {
+        roots.keyed = list.new()
+    }
+    Ok(())
+}
+
+fn keyed_lookup(trees: List[PageTree], tree: u8, key: Bytes) -> Option[View[Bytes]] in trees {
+    if list.len(trees) == 0 { return None }
+    let slot: u64 = int.widen(tree)
+    get_page_row(trees[slot], key)
+}
+
+fn keyed_drafted_charge(roots: Roots, edits: List[KeyedEdit], tree: u8, key: Bytes) -> u64 {
+    let mut edit_index = list.len(edits)
+    while edit_index != 0 {
+        edit_index -= 1
+        let edit = view edits[edit_index]
+        if edit.tree == tree && edit.key == key {
+            return match edit.value {
+                Some(raw) => entry(key, raw),
+                None => 0u64,
+            }
+        }
+    }
+    match keyed_lookup(roots.keyed, tree, key) {
+        Some(raw) => entry(key, raw),
+        None => 0u64,
+    }
+}
+
+fn keyed_draft_live(base: Roots, edits: List[KeyedEdit], retained: bool, current: u64) -> u64 {
+    let mut total = current
+    for slot in 0u64 .. list.len(edits) {
+        let edit = view edits[slot]
+        if !retained {
+            total = int.saturating_sub(total, keyed_drafted_charge(base, list.slice(edits, 0, slot), edit.tree, edit.key))
+        }
+        if let Some(raw) = edit.value { total = int.saturating_add(total, entry(edit.key, raw)) }
+    }
+    total
+}
+
+fn resident_with_credit(ceiling: u64, credit: KeyedCredit) -> u64 {
+    int.saturating_sub(int.saturating_sub(ceiling, credit.resident), credit.padding)
+}
+
+fn available_resident(db: Db) -> u64 {
+    resident_with_credit(db.ceiling, db.keyed_credit)
+}
+
+fn available_journal(db: Db, credit: KeyedCredit) -> u64 {
+    int.saturating_sub(disk_state(db).options.journal_limit, credit.journal)
+}
+
+fn draft_credit[R, A](db: Db, ran: Ran[R, A]) -> KeyedCredit {
+    match ran.keyed { Some(keyed) => keyed.after, None => db.keyed_credit }
+}

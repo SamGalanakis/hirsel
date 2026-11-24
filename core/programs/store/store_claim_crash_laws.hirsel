@@ -1,0 +1,174 @@
+@test
+fn claim_roots_survive_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    let mut db = open(tasks, directory, c, r, options)?
+    let digest = request_digest(b"charge", b"args")
+    let policy = claim_law_policy()
+    let first = claim_law_key(b"one")
+    let second = claim_law_key(b"two")
+    let Accepted(one) = admit_claim(mut db, first, digest, b"args", Some(clone(policy)))? else { fail("first admit") }
+    let Accepted(_) = admit_claim(mut db, second, digest, b"args", Some(clone(policy)))? else { fail("second admit") }
+    let _ = conclude_claim(mut db, take one, b"done")?
+    let expiry = db.heads[0u64].at + 10000
+    let reserved = db.keyed_credit.resident
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    close(take db)?
+    options.create = false
+    let reopened = open(tasks, directory, c, r, options)?
+    let op = b"\x03pay"
+    let principal = b"\x03pay\x02\x05alice"
+    let replied = b"\x03pay\x02\x05alice\x03one"
+    let admitted = b"\x03pay\x02\x05alice\x03two"
+    {
+        let trees = view reopened.heads[0u64].roots.keyed
+        if list.len(trees) != 7 || reopened.keyed_credit.resident != reserved {
+            fail("checkpoint lost a keyed root or reserve")
+        }
+        let expected: Inline[u64, 7] = [1u64, 2u64, 1u64, 1u64, 1u64, 1u64, 1u64]
+        for slot in 0u64 .. 7u64 {
+            let (rows, _) = std.page.totals(trees[slot].root)
+            if rows != expected[slot] { fail("checkpoint changed keyed tree cardinality") }
+        }
+        let mut global: Bytes = clone(op)
+        list.put_word_be(mut global, expiry)
+        list.append(mut global, replied)
+        let mut local: Bytes = clone(principal)
+        list.put_word_be(mut local, expiry)
+        list.append(mut local, replied)
+        let Some(done) = get_page_row(trees[1u64], replied) else { fail("replied row missing") }
+        let Some(opened) = get_page_row(trees[1u64], admitted) else { fail("open row missing") }
+        let Some(op_count) = get_page_row(trees[4u64], op) else { fail("op count missing") }
+        let Some(principal_count) = get_page_row(trees[5u64], principal) else { fail("principal count missing") }
+        if done[0u64] != 2 || list.slice(done, 41, list.len(done)) != b"done" ||
+            opened[0u64] != 1 || list.slice(opened, 41, list.len(opened)) != b"args" ||
+            op_count != b"\x02\x00\x00\x00\x00\x00\x00\x00" || principal_count != op_count {
+            fail("checkpoint changed claim rows or counts")
+        }
+        if let None = get_page_row(trees[2u64], global) { fail("op expiry index missing") }
+        if let None = get_page_row(trees[3u64], local) { fail("principal expiry index missing") }
+        if let None = get_page_row(trees[6u64], admitted) { fail("open index missing") }
+        if let Some(_) = get_page_row(trees[6u64], replied) { fail("replied claim remained open") }
+    }
+    close(take reopened)
+}
+
+fn claim_law_policy() -> KeyedPolicy {
+    KeyedPolicy(retention_ms: 10000, keys_max: 5, principal_keys_max: 5, arg_max: 64, call_record_max: 198, record: b"fixture")
+}
+
+fn claim_law_key(key: Bytes) -> ClaimKey {
+    ClaimKey(op: b"pay", caller: Caller(issuer: 2, subject: b"alice"), key: clone(key))
+}
+
+@test
+fn claim_terminal_credit_survives_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    options.checkpoint_bytes = 4096
+    options.journal_limit = 16781392
+    let mut db = open(tasks, directory, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let digest = request_digest(b"charge", b"args")
+    let policy = claim_law_policy()
+    let first = claim_law_key(b"one")
+    let second = claim_law_key(b"two")
+    let extra = claim_law_key(b"three")
+    let Accepted(one) = admit_claim(mut db, first, digest, b"args", Some(clone(policy)))? else { fail("first admit") }
+    let Accepted(_) = admit_claim(mut db, second, digest, b"args", Some(clone(policy)))? else { fail("second admit") }
+    let hand_frame: u64 = 37 + 5 + (10 + 387 + 41 + 8192) + (10 + 460) + (10 + 526) + (6 + 387) + 198
+    // A 128 MiB ceiling gives ceil(log2(floor(134217728 / 70) + 1)) = 21.
+    let hand_resident: u64 = 526 + 590 + hand_frame + 4 * (6 * 22 + 2) * 32768
+    if db.keyed_credit.journal != 2 * hand_frame || db.keyed_credit.resident != 2 * hand_resident {
+        fail("independently counted terminal credit")
+    }
+    // Each single-row frame has 73 bytes before its value. Use eight
+    // frames so the fixture does not need a maximum-size staging allocation.
+    let mut remaining = options.journal_limit - accounts(db).journal - 2 * hand_frame
+    let keep: Option[fn(Error) -> bool] = None
+    for left in 0u64 .. 8u64 {
+        let width = remaining / (8 - left) - 73
+        let prepared = append_transaction_at(mut db, 0, host.wall_ms(c), None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
+            let mut data: Bytes = list.with_capacity(width)
+            list.fill(mut data, width, 7u8)
+            put(mut tx, rows, 1u64, data)
+        })?
+        let fill_commit = match take prepared {
+            Committed(take done) => take done,
+            Refused(Journal(_)) => fail("fill ran out of journal credit"),
+            Refused(Resident(_)) => fail("fill ran out of resident room"),
+            Refused(Allocation(_)) => fail("fill ran out of allocation room"),
+            Aborted(Undone(value: take why, ..)) => return Error(take why),
+            _ => fail("unexpected fill outcome"),
+        }
+        durable(mut db, fill_commit.ticket)?
+        remaining -= 73 + width
+    }
+    if accounts(db).journal + db.keyed_credit.journal != options.journal_limit { fail("journal and credit sum") }
+    match admit_claim(mut db, extra, digest, b"args", Some(clone(policy))) {
+        Error(Full(Journal(_))) => (),
+        _ => fail("new claim result"),
+    }
+    let _ = capacity(bound bytes 1048576 { conclude_claim(mut db, take one, b"done") })??
+    if db.keyed_credit.journal != hand_frame || accounts(db).journal <= options.checkpoint_bytes || accounts(db).journal > options.journal_limit - hand_frame {
+        fail("first terminal credit")
+    }
+    let covered_before_reopen = accounts(db).journal
+    close(take db)?
+    options.create = false
+    let mut reopened = open(tasks, directory, c, r, options)?
+    if reopened.keyed_credit.journal != hand_frame || reopened.keyed_credit.resident != hand_resident ||
+        accounts(reopened).journal != covered_before_reopen {
+        fail("reopened credit")
+    }
+    match admit_claim(mut reopened, extra, digest, b"args", Some(clone(policy))) {
+        Error(Full(Journal(_))) => (),
+        _ => fail("new claim used the remaining terminal credit after reopen"),
+    }
+    match admit_claim(mut reopened, first, digest, b"args", Some(clone(policy)))? {
+        Duplicate(saved) if saved == b"done" => (),
+        _ => fail("first duplicate"),
+    }
+    let Ownerless(again) = admit_claim(mut reopened, second, digest, b"args", Some(clone(policy)))? else { fail("second ownerless") }
+    let _ = conclude_claim(mut reopened, take again, b"finished")?
+    if reopened.keyed_credit.journal != 0 || accounts(reopened).journal > options.journal_limit {
+        fail("last credit")
+    }
+    close(take reopened)
+}
+
+@test
+fn claim_reclaims_expired_front(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 134217728)
+    let mut policy = claim_law_policy()
+    policy.keys_max = 1
+    policy.principal_keys_max = 1
+    let first = claim_law_key(b"old")
+    let second = claim_law_key(b"new")
+    let mut third = claim_law_key(b"newer")
+    third.caller.subject = b"bob"
+    let digest = request_digest(b"charge", b"args")
+    let Accepted(one) = admit_claim(mut db, first, digest, b"args", Some(clone(policy)))? else { fail("first admit") }
+    let _ = conclude_claim(mut db, take one, b"done")?
+    let expiry = db.heads[0u64].at + 10000
+    let keep: Option[fn(Error) -> bool] = None
+    let _ = store_body_at(mut db, 0, expiry, None, keep, scoped fn(mut _tx: Tx) -> Result[(), Error] { Ok(()) })?
+    let Accepted(two) = admit_claim(mut db, second, digest, b"args", Some(clone(policy)))? else { fail("principal reclaim") }
+    let _ = conclude_claim(mut db, take two, b"done")?
+    let next_expiry = db.heads[0u64].at + 10000
+    let _ = store_body_at(mut db, 0, next_expiry, None, keep, scoped fn(mut _tx: Tx) -> Result[(), Error] { Ok(()) })?
+    let Accepted(_) = admit_claim(mut db, third, digest, b"args", Some(take policy))? else { fail("op reclaim") }
+    let trees = view db.heads[0u64].roots.keyed
+    let (rows, _) = std.page.totals(trees[1u64].root)
+    let (op_expiries, _) = std.page.totals(trees[2u64].root)
+    let (principal_expiries, _) = std.page.totals(trees[3u64].root)
+    let (principals, _) = std.page.totals(trees[5u64].root)
+    if rows != 1 || op_expiries != 0 || principal_expiries != 0 || principals != 1 {
+        fail("reclaim left rows or counts in an expired scope")
+    }
+    Ok(())
+}

@@ -432,10 +432,15 @@ fn replace_projector_pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket
 }
 
 fn capture_matches_head(from: Snapshot, head: Head) -> bool {
-    head.head == from.head &&
+    if !(head.head == from.head &&
         tree_stamp(head.roots.collections) == tree_stamp(from.roots.collections) &&
         tree_stamp(head.roots.streams) == tree_stamp(from.roots.streams) &&
-        tree_stamp(head.roots.catalog) == tree_stamp(from.roots.catalog)
+        tree_stamp(head.roots.catalog) == tree_stamp(from.roots.catalog) &&
+        list.len(head.roots.keyed) == list.len(from.roots.keyed)) { return false }
+    for slot in 0u64 .. list.len(head.roots.keyed) {
+        if tree_stamp(head.roots.keyed[slot]) != tree_stamp(from.roots.keyed[slot]) { return false }
+    }
+    true
 }
 
 fn change_pin(mut db: Db, name: String, s: Snapshot, overwrite: bool) -> Result[Ticket, Error] waits {
@@ -447,8 +452,9 @@ fn change_pin(mut db: Db, name: String, s: Snapshot, overwrite: bool) -> Result[
     let replacing = slot != list.len(db.pins)
     if replacing {
         if !overwrite { return Error(Exists(take owned)) }
+        check_manifest_addition(db, int.saturating_sub(keyed_root_record_bytes(s.roots.keyed), keyed_root_record_bytes(db.pins[slot].roots.keyed)))?
     } else {
-        check_manifest_addition(db, pin_record_bytes(name))?
+        check_manifest_addition(db, pin_root_bytes(name, s.roots))?
     }
     let serial = db.next_pin
     let Some(following) = int.checked_add(serial, 1) else { return Error(Limit(Ids)) }

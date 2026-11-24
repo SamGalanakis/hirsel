@@ -10,7 +10,24 @@ type PageTree: shareable + send {
 type PageRoots: shareable + send {
     collections: PageTree,
     streams: PageTree,
-    catalog: PageTree
+    catalog: PageTree,
+    keyed: List[PageTree]
+}
+
+const KEYED_TREE_COUNT: u64 = 7
+
+fn new_keyed_pages(inline: u64) -> List[PageTree] {
+    let mut trees: List[PageTree] = list.with_capacity(KEYED_TREE_COUNT)
+    for _ in 0u64 .. KEYED_TREE_COUNT {
+        list.push(mut trees, new_page_tree(Unprefixed, inline))
+    }
+    take trees
+}
+
+fn share_keyed_pages(trees: List[PageTree]) -> List[PageTree] {
+    let mut shared: List[PageTree] = list.with_capacity(list.len(trees))
+    for tree in trees { list.push(mut shared, share_page_tree(tree)) }
+    take shared
 }
 
 fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, domain: std.page.Domain, inline: u64, take empty_collection: Option[Arc[std.page.Page]]) -> PageTree {
@@ -26,7 +43,9 @@ fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, 
 }
 
 fn attach_page_roots(pages: Map[u64, Arc[std.page.Page]], roots: LocatedRoots, inline: u64, empty_collection: Arc[std.page.Page]) -> PageRoots {
-    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline, Some(arc.share(empty_collection))), streams: attach_page_tree(pages, roots.streams, Unprefixed, inline, None), catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline, None))
+    let mut keyed: List[PageTree] = list.with_capacity(list.len(roots.keyed))
+    for ptr in roots.keyed { list.push(mut keyed, attach_page_tree(pages, ptr, Unprefixed, inline, None)) }
+    PageRoots(collections: attach_page_tree(pages, roots.collections, CollectionMap, inline, Some(arc.share(empty_collection))), streams: attach_page_tree(pages, roots.streams, Unprefixed, inline, None), catalog: attach_page_tree(pages, roots.catalog, Unprefixed, inline, None), keyed: take keyed)
 }
 
 fn new_page_tree(domain: std.page.Domain, inline: u64) -> PageTree {
@@ -169,6 +188,10 @@ fn one_page_account(roots: PageRoots) -> u64 {
     let (_, streams) = std.page.totals(roots.streams.root)
     let (_, catalog) = std.page.totals(roots.catalog.root)
     let mut charge = int.saturating_add(streams, catalog)
+    for tree in roots.keyed {
+        let (_, rows) = std.page.totals(tree.root)
+        charge = int.saturating_add(charge, rows)
+    }
     let mut listed = std.page.cursor_open(roots.collections.root, None, true, false)
     let leading: Bytes = list.new()
     while let Some((_, slot)) = std.page.cursor_next_key(mut listed, leading) {
@@ -215,6 +238,9 @@ fn resident_images(roots: List[PageRoots], lists: Option[View[PagedLists]]) -> u
         total = int.saturating_add(total, page_image_charge(held.collections.root, mut seen))
         total = int.saturating_add(total, page_image_charge(held.streams.root, mut seen))
         total = int.saturating_add(total, page_image_charge(held.catalog.root, mut seen))
+        for tree in held.keyed {
+            total = int.saturating_add(total, page_image_charge(tree.root, mut seen))
+        }
     }
     if let Some(published) = lists {
         total = int.saturating_add(total, page_image_charge(published.packs, mut seen))
@@ -391,6 +417,16 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
         }
     }
     let mut charge = int.saturating_add(row_version_union(streams, 0), row_version_union(catalog, 0))
+    if std.list.any(roots, fn(root: PageRoots) -> bool { list.len(root.keyed) != 0 }) {
+        let mut versions: List[Arc[std.page.Page]] = list.with_capacity(list.len(roots))
+        for slot in 0u64 .. KEYED_TREE_COUNT {
+            for root in roots {
+                if list.len(root.keyed) != 0 { list.push(mut versions, arc.share(root.keyed[slot].root)) }
+            }
+            charge = int.saturating_add(charge, row_version_union(versions, 0))
+            list.clear(mut versions)
+        }
+    }
     charge = int.saturating_add(charge, int.saturating_mul(map.len(descriptors), 126))
     for (_, group) in collections {
         charge = int.saturating_add(charge, row_version_union(group, 4))

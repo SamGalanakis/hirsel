@@ -21,19 +21,19 @@ fn test_paged_row_account() -> Result[(), Error] {
     put_page_row(mut collections, key, string.as_bytes("A"), 1, mut next_stamp)?
     let mut participants: List[PageRoots] = list.with_capacity(3)
     list.push(mut participants, PageRoots(collections: share_page_tree(collections),
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
+        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
     // One descriptor at 126, one logical 12-byte key and a one-byte value.
     if page_row_account(participants) != 212 { return Error(Foreign) }
     let changed_from = next_stamp
     put_page_row(mut collections, key, string.as_bytes("B"), changed_from, mut next_stamp)?
     define_collection(mut collections, 9, 2, changed_from, mut next_stamp)?
     list.push(mut participants, PageRoots(collections: share_page_tree(collections),
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
+        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
     // The same value is written under a new blob stamp.
     let rewritten_from = next_stamp
     put_page_row(mut collections, key, string.as_bytes("B"), rewritten_from, mut next_stamp)?
     list.push(mut participants, PageRoots(collections: take collections,
-        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0)))
+        streams: new_page_tree(Unprefixed, 0), catalog: new_page_tree(Unprefixed, 0), keyed: list.new()))
     // Two distinct descriptors and two byte-distinct versions of key 1.
     if page_row_account(participants) != 424 { return Error(Foreign) }
     Ok(())

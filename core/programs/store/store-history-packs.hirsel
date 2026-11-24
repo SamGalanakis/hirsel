@@ -250,6 +250,9 @@ fn history_want_roots(mut pending: Map[u64, List[LocatedNeed]], roots: LocatedRo
     if roots.catalog.stamp != 0 {
         history_want(mut pending, roots.catalog.pack, NeedPage(roots.catalog, Unprefixed, None))?
     }
+    for ptr in roots.keyed {
+        if ptr.stamp != 0 { history_want(mut pending, ptr.pack, NeedPage(ptr, Unprefixed, None))? }
+    }
     Ok(())
 }
 

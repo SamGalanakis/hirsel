@@ -493,7 +493,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
 }
 
 fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    encode_staged(ci, None, None, mut ops, NO_FRAME_TAIL, streams, call, None, None, seq, offset)
+    encode_staged(ci, None, None, mut ops, NO_FRAME_TAIL, streams, call, None, None, None, seq, offset)
 }
 
 // Hand-derived COMMIT bytes: delete key 1, then put key 2 = 33. Check from

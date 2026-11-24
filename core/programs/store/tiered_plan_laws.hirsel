@@ -45,7 +45,7 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     }
     let owner = StoreId(hi: 3, lo: 4)
     let call = CallInfo(id: CallId(store: owner, branch: 0, version: 1), at: 1, seed: 0)
-    let wire = capacity(encode_staged(call, Some(view base), Some(view plan.deltas), mut operations, NO_FRAME_TAIL, new_data_rows(), None, None, None, 1, 72))?
+    let wire = capacity(encode_staged(call, Some(view base), Some(view plan.deltas), mut operations, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72))?
     // The section starts at byte 37 and has a five-byte head. Each put
     // takes 31 bytes, and its prior comes 17 bytes after its tag.
     if list.len(wire) != 104 || word_be(wire, 51) != 2 || read_le(wire, 59, 4) != 7 ||

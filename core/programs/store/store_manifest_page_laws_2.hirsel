@@ -528,7 +528,7 @@ fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
     if data.place.pack != 1 || data.place.offset != 72 || list.len(data.incoming) != 1 || data.incoming[0u64] != HolderSource(0, 0, 1) || listed.place.pack != 2 || listed.place.offset != 72 || list.len(listed.incoming) != 1 || listed.incoming[0u64] != ListSource(0) {
         return Error(Foreign)
     }
-    let root_ptrs = validated.manifest.branches[0u64].roots
+    let root_ptrs: LocatedRoots = clone(validated.manifest.branches[0u64].roots)
     let inline = validated.manifest.inline
     let ValidatedPageManifest(graph: take resolved, ..) = take validated
     let mut graph = take resolved

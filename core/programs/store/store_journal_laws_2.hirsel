@@ -56,14 +56,14 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
 fn fork_limit_manifest() -> PageManifest {
     let mut manifest = page_manifest_empty()
     manifest.fence = 1
-    let roots = manifest.branches[0].roots
+    let roots: LocatedRoots = clone(manifest.branches[0].roots)
     let padding = string.repeat("x", 249)
     for i in 0u64 .. 43575 {
         let name = result.unwrap(disk_path("", 100000 + i, padding))
-        list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: roots, watermark: 1))
+        list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: clone(roots), watermark: 1))
     }
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 143), branch: 0, version: 0, roots: roots, watermark: 1))
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 144), branch: 0, version: 0, roots: roots, watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 143), branch: 0, version: 0, roots: clone(roots), watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 144), branch: 0, version: 0, roots: clone(roots), watermark: 1))
     take manifest
 }
 

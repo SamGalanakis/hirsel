@@ -100,7 +100,7 @@ fn publish_schema_plan(mut db: Db, take prepared: SchemaPlan) -> Result[Ticket, 
 
 fn publish_schema_plan_binding(mut db: Db, take prepared: SchemaPlan, activation: Option[HistoryActivation]) -> Result[Ticket, Error] waits {
     let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, live: live_bytes, bindings: take bindings, ..) = take prepared
-    over_ceiling(live_bytes, db.ceiling)?
+    over_ceiling(live_bytes, available_resident(db))?
     // Schema commits are main's (section 1.2). Installed only after the cut.
     let replacement = ProposedMain(roots: take roots, head: db.heads[0u64].head + 1, at: db.heads[0u64].at, tables: tables, activation)
     let publication = capacity(prepare_publication(db, 0, replacement.head, replacement.roots, ids))?

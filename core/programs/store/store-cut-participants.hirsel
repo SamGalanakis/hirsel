@@ -4,6 +4,9 @@ fn note_held_roots(mut holders: List[HeldPage], kind: u8, owner: u64, roots: Roo
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 0), root: arc.share(roots.collections.root)))
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 1), root: arc.share(roots.streams.root)))
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 2), root: arc.share(roots.catalog.root)))
+    for slot in 0u64 .. list.len(roots.keyed) {
+        list.push(mut holders, HeldPage(source: HolderSource(kind, owner, int.narrow(3 + slot)), root: arc.share(roots.keyed[slot].root)))
+    }
 }
 
 fn visit_cut_heads[T](db: Db, delta: HolderDelta, mut output: T, visit: scoped fn(mut T, Head, Roots, u64, u64) -> Result[(), Error]) -> Result[(), Error] {
@@ -129,6 +132,13 @@ fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List
         slot += 1
         append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, published[slot - 1]), held.watermark)
     })?
+    for order_slot in 0u64 .. list.len(published) {
+        let keyed = view published[order_slot].keyed
+        if list.len(keyed) != 0 {
+            capacity(le(mut raw, order_slot, 4))?
+            for tree in keyed { put_page_ptr(mut raw, published_page_pointer(layout.locations, tree)) }
+        }
+    }
     write_seal(mut raw, context, db.fence)?
     Ok(())
 }

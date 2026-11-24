@@ -639,7 +639,7 @@ fn format4_manifest_law() -> Result[(), Error] {
     m.archive = std.page.PagePtr(pack: 5, offset: 100, len: 113, checksum: 14, stamp: 43)
     m.archive_drop = 77
     m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
-    let roots = m.branches[0].roots
+    let roots: LocatedRoots = clone(m.branches[0].roots)
     list.push(mut m.pins, LocatedPin(name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
     let oracle = format5_manifest()
     if disk_page_manifest_bytes(id, m)? != oracle {

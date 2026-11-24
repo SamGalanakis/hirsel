@@ -557,7 +557,9 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
 fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, roots: LocatedRoots, mut graph: PageGraph) -> Result[(), Error] {
     resolve_data_page(packs, inventory, roots.collections, CollectionMap, None, mut graph)?
     resolve_data_page(packs, inventory, roots.streams, Unprefixed, None, mut graph)?
-    resolve_data_page(packs, inventory, roots.catalog, Unprefixed, None, mut graph)
+    resolve_data_page(packs, inventory, roots.catalog, Unprefixed, None, mut graph)?
+    for ptr in roots.keyed { resolve_data_page(packs, inventory, ptr, Unprefixed, None, mut graph)? }
+    Ok(())
 }
 
 type ValidatedPageManifest {

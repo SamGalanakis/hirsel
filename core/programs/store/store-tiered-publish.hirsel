@@ -104,7 +104,7 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     capacity(list.try_reserve(mut sealed, list.len(roots)))?
     for held in roots {
         let collections = seal_holder_tiered(held.collections, emitted)?
-        list.push(mut sealed, PageRoots(collections: take collections, streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog)))
+        list.push(mut sealed, PageRoots(collections: take collections, streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
     }
     Ok(TieredCutStage(packs: take packs, roots: take sealed, next_pack: page_run.next_pack, stamp_end: next_stamp, folded: folded, queued: take queued))
 }
@@ -116,10 +116,12 @@ fn sealed_cut_holders(take holders: List[HeldPage], cut_stage: TieredCutStage) -
     }
     let mut ready: List[HeldPage] = list.new()
     capacity(list.try_reserve(mut ready, list.len(holders)))?
-    for slot in 0u64 .. list.len(holders) {
-        let held = view holders[slot]
-        let root = if slot % 3 == 0 {
-            arc.share(cut_stage.roots[slot / 3].collections.root)
+    let mut slot = 0u64
+    for held in holders {
+        let root = if let HolderSource(_, _, 0) = held.source {
+            let chosen = arc.share(cut_stage.roots[slot].collections.root)
+            slot += 1
+            take chosen
         } else {
             arc.share(held.root)
         }

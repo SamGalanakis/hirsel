@@ -243,16 +243,10 @@ impl CheckRequest {
             else {
                 return Ok(false);
             };
-            if in_image.dependencies != requested.dependencies
-                || directory
-                    .stamps
-                    .get(&in_image.package)
-                    .map(|stamp| stamp.hash)
-                    != Some(
-                        image::stamp(requested, self.manifest.as_deref(), self.entry.as_ref())?
-                            .hash,
-                    )
-            {
+            let Some(stamp) = directory.stamps.get(&in_image.package) else {
+                return Ok(false);
+            };
+            if in_image.dependencies != requested.dependencies || !stamp.matches(requested, self)? {
                 return Ok(false);
             }
         }

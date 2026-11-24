@@ -1,6 +1,7 @@
 //! A package's checked image is a toolchain input, not a user-build computation.
 //! The bundled source identity is fixed when Cargo/Buck constructs the toolchain.
 use super::*;
+use crate::image::ImageInput;
 use hirsel_core_resolve::ModuleSource;
 
 pub(crate) mod bundled {
@@ -125,42 +126,28 @@ impl PackageProduct {
             packages.push(Self::manifest(&sources, name, texts, dependencies));
         }
         Self::produce(
-            CorpusManifest {
-                core: package("core"),
-                packages,
-            },
-            directory,
+            ImageInput::prepare(
+                Self::request(
+                    CorpusManifest {
+                        core: package("core"),
+                        packages,
+                    },
+                    directory,
+                ),
+                true,
+            )?,
             meter,
             digest,
         )
     }
     /// Source-owned package producers use this explicit identity once per package
     /// revision. The installed consumer passes only the resulting cache key/image.
-    pub fn sources(mut inputs: CorpusManifest, root: &Path, meter: &mut Meter) -> io::Result<Self> {
-        inputs.normalise(None);
-        let mut stamps = Vec::new();
-        for package in &inputs.packages {
-            for source in &package.sources {
-                stamps.push((
-                    &package.package,
-                    &source.modules,
-                    source.mode(),
-                    ContentHash::of_bytes(&std::fs::read(&source.file)?),
-                ));
-            }
-        }
-        let dependencies: Vec<_> = inputs
-            .packages
-            .iter()
-            .map(|p| (&p.package, &p.dependencies))
-            .collect();
-        // v2: stamps follow the driver's traversal. A v1 record was keyed by
-        // module order alone and could name a different traversal; it is never
-        // selected under this name.
-        let digest = ContentHash::of_parts(
-            "hirsel.package-sources.v2",
-            [&encode(&(&inputs.core, dependencies, stamps))?[..]],
-        );
+    pub fn sources(inputs: CorpusManifest, root: &Path, meter: &mut Meter) -> io::Result<Self> {
+        Self::source_request(Self::request(inputs, root.to_owned()), root, meter)
+    }
+    fn source_request(request: CheckRequest, root: &Path, meter: &mut Meter) -> io::Result<Self> {
+        let mut input = ImageInput::prepare(request, false)?;
+        let digest = input.digest()?;
         let directory = cache_path(root, digest)?;
         if let Some(image) = CoreImage::open(&directory)?
             && image.source_stamp == digest
@@ -172,26 +159,25 @@ impl PackageProduct {
             });
         }
         meter.finish("package product lookup");
-        Self::produce(inputs, directory, meter, digest)
+        input.set_store(directory);
+        Self::produce(input, meter, digest)
+    }
+    fn request(inputs: CorpusManifest, store: PathBuf) -> CheckRequest {
+        CheckRequest {
+            manifest: None,
+            inputs,
+            store,
+            library: LibraryInput::Sources,
+            entry: None,
+        }
     }
     fn produce(
-        inputs: CorpusManifest,
-        directory: PathBuf,
+        input: ImageInput,
         meter: &mut Meter,
         source_stamp: ContentHash,
     ) -> io::Result<Self> {
-        let (checked, image) = Driver::default().produce_package(
-            CheckRequest {
-                manifest: None,
-                inputs,
-                store: directory,
-                library: LibraryInput::Sources,
-                entry: None,
-            },
-            meter,
-            false,
-            source_stamp,
-        )?;
+        let (checked, image) =
+            Driver::default().produce_package(input, meter, false, source_stamp)?;
         let image = image.ok_or_else(|| {
             io::Error::other(format!(
                 "package product incomplete: {} refusals, {} gaps; first: {}",
@@ -306,14 +292,13 @@ impl Driver {
         } else if is_bundled {
             PackageProduct::bundled(root, meter)?
         } else {
-            PackageProduct::sources(
-                CorpusManifest {
-                    core: request.inputs.core.clone(),
-                    packages: vec![core.clone()],
-                },
-                root,
-                meter,
-            )?
+            let inputs = CorpusManifest {
+                core: request.inputs.core.clone(),
+                packages: vec![core.clone()],
+            };
+            let mut library = PackageProduct::request(inputs, root.to_owned());
+            library.manifest.clone_from(&request.manifest);
+            PackageProduct::source_request(library, root, meter)?
         };
         request.inputs.packages.retain(|p| {
             p.package != request.inputs.core && !(bundled_std && p.package == package("std"))

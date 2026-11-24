@@ -182,7 +182,7 @@ fn layout_answers(mut db: Db) -> LayoutAnswers waits {
     let large = collect_layout_rows(result.unwrap(scan(result.unwrap(reader(db, 0u64)), at, big, Unbounded, Unbounded)))
     let indexed = collect_layout_rows(result.unwrap(find(result.unwrap(reader(db, 0u64)), at, ix, Included(1), Included(2))))
     let empty = Snapshot(store: at.store, open: at.open, branch: at.branch, head: 0, roots: empty_roots(), watermark: 1)
-    let delta = result.unwrap(changes(result.unwrap(reader(db, 0u64)), empty, at)).rows
+    let Changes(rows: take delta, ..) = result.unwrap(changes(result.unwrap(reader(db, 0u64)), empty, at))
     let account = accounts(db)
     if !account.exact {
         fail("layout account")

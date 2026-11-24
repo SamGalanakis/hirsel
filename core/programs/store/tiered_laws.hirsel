@@ -915,7 +915,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let cold = HistoryRef(seq: 8, epoch: 1, len: 220, digest: 79)
     // The locator names the Tiered pack, but the test never uploads it.
     map.insert(mut source.locator.rows, 8u64, cold)
-    let verified = validate_bucket_graph(mut source, owner, "MANIFEST", clone(manifest), true)?
+    let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(manifest), true)?
     let loaded = rebuild_page_store(take verified)?
     let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, prefix(9)?) else {
         fail("L68: Bucket recovery did not preserve the Cold slot")
@@ -926,7 +926,7 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     let mut truncated = cold
     truncated.len = 219
     map.insert(mut source.locator.rows, 8u64, truncated)
-    let Error(Corrupt(Fault(why: Malformed, ..))) = validate_bucket_graph(mut source, owner, "MANIFEST", take manifest, true) else {
+    let Error(Corrupt(Fault(why: Malformed, ..))) = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", take manifest, true) else {
         fail("L68: a Tiered locator width differing from the pack row was accepted")
     }
     Ok(())

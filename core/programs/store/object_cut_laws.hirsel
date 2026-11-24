@@ -344,6 +344,88 @@ fn bucket_test_m2_export_replay(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     outcome
 }
 
+fn release_witness(digest: Inline[u8, 32]) -> Bytes {
+    let mut octets: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 { list.push(mut octets, digest[i]) }
+    take octets
+}
+
+fn prepared_release_witness(_target: PreparedTarget, digest: Inline[u8, 32]) -> Result[Bytes, DeployError] {
+    Ok(release_witness(digest))
+}
+
+fn stage_object_preparation(mut db: Db, scratch: Dir, c: Clock, tasks: Tasks, attempt: Bytes, resident: u64) -> Result[Inline[u8, 32], DeployError] waits {
+    let pending = begin_export_copy(mut db, scratch, clone(attempt), 1)?
+    let image = export_copy(take pending)?
+    let source = open_export(image.dir, c, attempt, disk_crash_options("install"))?
+    let staged = deploy_result(stage_export_migration(source, tasks, code.describe(install_next)))?
+    let target = PreparedTarget(describe: install_fixture_bytes(32, 66), release: install_fixture_bytes(32, 67), digest: install_fixture_bytes(32, 68), resident_limit: resident, pack_bytes: 1048576, checkpoint_bytes: 4096, journal_limit: 16781392)
+    write_prepared(source, staged, image.dir, take target)?
+    let checked = validate_prepared(image.dir)?
+    let work = reserve_import(mut db, take checked)?
+    let assembled = import_trees(take work)?
+    let digest = imported_digest(assembled)
+    keep_import(mut db, take assembled)?
+    Ok(digest)
+}
+
+fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), DeployError] waits {
+    let original = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 1))?
+    let mut options = bucket_law_options(true)
+    options.group_bytes = 65536
+    options.head_poll_ms = 10000
+    let mut writer = deploy_result(open_authority(tasks, take original, c, r, options))?
+    let mut staged = deploy_result(stage_migration(writer, tasks, code.describe(install_old)))?
+    let description = install_fixture_bytes(32, 65)
+    deploy_result(stage_activation(mut staged, 1, None, description, std.codec.of_bytes(), description))?
+    deploy_result(install_bound_activation(mut writer, take staged, 1, description))?
+    let rows = deploy_result(table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    if !typed_put(mut writer, rows, 7, 14) || !typed_put(mut writer, rows, 8, 15) { fail("could not write rows at versions 2 and 3") }
+    let mut witness = deploy_result(bucket_law_client_with(sim, tasks, "s3.test", 2, true))?
+    let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
+    let mut workspace = deploy_result(history_buffers(65536))?
+    let too_small = install_fixture_bytes(16, 1)
+    let refused_digest = stage_object_preparation(mut writer, d, c, tasks, too_small, 1)?
+    let _ = deploy_result(history_fetch(mut witness, "head", mut workspace.witness, deadline))?
+    let refused = Cutover(attempt: take too_small, digest: refused_digest, deadline: 0xffffffffffffffffu64)
+    if let Error(FullNew(Resident(_))) = perform_bound_cutover(mut writer, refused, 1, description, std.codec.of_bytes(), prepared_release_witness, [66; 32], fn() -> bool { true }) {} else {
+        fail("the new resident ceiling did not refuse the installation")
+    }
+    let _ = deploy_result(history_fetch(mut witness, "head", mut workspace.body, deadline))?
+    if workspace.body != workspace.witness { fail("a pre-publication refusal changed HEAD") }
+    deploy_result(healthy(writer))?
+
+    let attempt = install_fixture_bytes(16, 2)
+    let digest = stage_object_preparation(mut writer, d, c, tasks, attempt, 2097152)?
+    let request = Cutover(attempt: take attempt, digest, deadline: 0xffffffffffffffffu64)
+    let installed = perform_bound_cutover(mut writer, request, 1, description, std.codec.of_bytes(), prepared_release_witness, [66; 32], fn() -> bool { true })?
+    if installed != 4 { fail("activation did not use the exported main version plus one") }
+    deploy_result(close(take writer))?
+
+    let read_grant = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 3))?
+    let mut process = followers()
+    let observer = deploy_result(follower(mut process, tasks, take read_grant, sim.time, options))?
+    let capture = deploy_result(follower_head(observer))?
+    let visible = deploy_result(snapshot_follower(observer, Branch(store: capture.store, id: 0)))?
+    let view_reader = deploy_result(follower_reader(observer, 0))?
+    let releases = deploy_result(follower_table(observer, "hirsel.runner.releases", std.codec.key_u64(), std.codec.of_bytes()))?
+    let migrated = deploy_result(follower_table(observer, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    if capture.activation != 4 || capture.binding != install_fixture_bytes(32, 66) || version(visible) != 4 ||
+        deploy_result(get(view_reader, visible, releases, 4))? != Some(release_witness(digest)) ||
+        deploy_result(get(view_reader, visible, migrated, 7))? != Some(1014u64) {
+        fail("the cold capture lost the atomic activation, binding, or PREPARED witness")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_prepared_install(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let sim = bucket_law_sim(tasks, c, 612, None, list.new())
+    let outcome = object_prepared_install_law(d, c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}
+
 fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = history_reader(take client, 0)

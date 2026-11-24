@@ -187,13 +187,12 @@ fn return_object_journal(take lane: ObjectJournalSession, resume: Sender[ObjectJ
 }
 
 fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
-    if let Some(_) = target { return Error(Unsupported(1)) }
     let latest_receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     durable(mut db, latest_receipt)?
     prepare_holder_slot(mut db, delta)?
     let (take paused, take resume) = take_object_journal(mut db)?
     let mut lane = take paused
-    let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, pack_bytes, limit)
+    let outcome = object_cut_work(mut db, mut lane, take delta, write_seal, target, pack_bytes, limit)
     if let Error(problem) = outcome {
         if let Some(_) = lane.register.terminal {
             let saved: Error = clone(problem)
@@ -208,7 +207,7 @@ fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(m
     take outcome
 }
 
-fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
+fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
     let old = lane.register.head
     let seq = history_next_id(old.entry.seq)?
     let activation = match delta {
@@ -221,6 +220,12 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] { cut_participants(db, delta) })?
     let base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, participants.holders, participants.roots)?
     over_ceiling(base.account, db.ceiling)?
+    if let Some(wanted) = target {
+        if let Some(problem) = journal_floor(wanted.checkpoint, wanted.journal) {
+            return Error(Full(Journal(problem)))
+        }
+        over_ceiling(base.account, wanted.resident)?
+    }
     let manifest_bytes = cut_manifest_size(db, delta)
     let mut next_stamp = stamp_after(db.next_node)?
     let mut workspace = history_buffers(65536)?
@@ -252,6 +257,19 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
             }
             Ok(take located)
         })?
+        if let Some(_) = target {
+            let checked = disk_allocation(scoped fn() -> Result[PageManifest, Error] {
+                Ok(clone(manifest))
+            })?
+            match history_validate_manifest(mut lane.client, candidate_locator, now, old.store, "prepared MANIFEST", take checked) {
+                Ok(_) => (),
+                Error(HistoryMissing(take name, _)) => {
+                    history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, now)?
+                    return Error(disk_fault(name, 0, Absent))
+                },
+                Error(take problem) => return Error(take problem),
+            }
+        }
         let locate_root = history_make_locator_reusing(mut lane.client, old.store, seq, old.pair.epoch, take refs, object_state(db).locator, mut candidate_locator, mut workspace, now)?
         let installed = history_create_manifest(mut lane.client, old.store, old.pair.epoch, manifest, mut workspace, now)?
         let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)?

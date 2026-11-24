@@ -59,15 +59,23 @@ mod tests {
     fn linked_langarena_round_trips_as_checked_coreir() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let directory = tempfile::tempdir().unwrap();
+        let mut inputs = crate::tests::langarena_inputs(
+            &root,
+            &root.join("core/core"),
+            &root.join("core/langarena"),
+        );
+        // The nested layout and IO fixtures use their own source manifests.
+        inputs
+            .packages
+            .last_mut()
+            .unwrap()
+            .sources
+            .retain(|source| source.modules.len() == 1);
         let product = Driver::default()
             .check(
                 CheckRequest {
                     manifest: None,
-                    inputs: crate::tests::langarena_inputs(
-                        &root,
-                        &root.join("core/core"),
-                        &root.join("core/langarena"),
-                    ),
+                    inputs,
                     store: directory.path().join("store"),
                     library: LibraryInput::Sources,
                     entry: None,
@@ -80,7 +88,7 @@ mod tests {
         let start = Instant::now();
         let snapshot = capture(
             &product,
-            "langarena@1/compress",
+            "langarena@1/template",
             &["main".into()],
             Target::X86_64Linux,
         )
@@ -92,7 +100,7 @@ mod tests {
         assert_eq!(printed, hirsel_core_ir::text::print(&snapshot.module));
         assert_eq!(snapshot, decoded);
         eprintln!(
-            "LangArena compress/main: {} functions, {} instructions, {} bytes, {:?}",
+            "LangArena template/main: {} functions, {} instructions, {} bytes, {:?}",
             snapshot.module.functions.len(),
             snapshot
                 .module

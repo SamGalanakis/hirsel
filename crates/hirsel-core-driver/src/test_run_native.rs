@@ -1117,6 +1117,37 @@ fn main() -> Result[(), ()] {
 }
 
 #[test]
+fn package_run_imports_generic_core_instances_from_checkout_libraries() {
+    let mut law = PackageLaw::new();
+    law.write(
+        "core/core/source_probe.hirsel",
+        "pub fn value() -> u64 { 271u64 }\n",
+    );
+    for entry in std::fs::read_dir(law.libraries.join("core")).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().is_some_and(|ext| ext == "hirsel") {
+            std::os::unix::fs::symlink(entry.path(), law.path("core/core").join(entry.file_name()))
+                .unwrap();
+        }
+    }
+    std::os::unix::fs::symlink(law.libraries.join("std"), law.path("core/std")).unwrap();
+    law.libraries = law.path("core");
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n");
+    law.write(
+        "app/main.hirsel",
+        r#"
+fn main() -> Result[(), ()] {
+    let mut values: Map[(u64, u64), u64] = map.new()
+    map.insert(mut values, (2u64, 3u64), source_probe.value())
+    let value = option.unwrap(map.get(values, (2u64, 3u64)))
+    if value == 271u64 { Ok(()) } else { Error(()) }
+}
+"#,
+    );
+    PackageLaw::pass(law.run(&["run", "app"]));
+}
+
+#[test]
 fn build_names_unmatched_grant_and_entry() {
     let law = PackageLaw::new();
     law.app("app", "");

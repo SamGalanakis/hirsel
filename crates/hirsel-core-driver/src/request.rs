@@ -4,6 +4,7 @@
 //! executable does (request_sequences.rs compares their outputs).
 use crate::code_store::CodeStore;
 use crate::native::recipe_build::Publication;
+use crate::product::ProductLibraries;
 use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
     NativeOptions,
@@ -733,8 +734,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let env_recording_runtime = installed
         .as_ref()
         .and_then(|installed| installed.recording_runtime(&target));
+    let source_tree = libraries.is_some();
+    let source_libraries = source_core || source_std || source_tree;
     if let Some(installed) = &installed {
-        if core_product.is_none() {
+        if core_product.is_none() && !source_tree {
             core_product = Some(installed.cache());
         }
         if runtime.is_none() {
@@ -825,13 +828,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     if profile_front {
         meter.profile_image_index();
     }
-    let installed_std = if installed.is_some()
-        && libraries.is_none()
-        && !source_std
-        && !source_core
+    let installed_std = if !source_libraries
+        && image_path.is_none()
         && workspace_app.as_ref().is_none_or(|app| app.needs_std())
+        && let Some(installed) = &installed
     {
-        installed.as_ref().unwrap().product("std")?
+        installed.product("std")?
     } else {
         None
     };
@@ -839,14 +841,13 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         meter.result.image_selection = Some("image used: explicit image".into());
     } else if installed_std.is_some() {
         meter.result.image_selection = Some("image used: installed std product".into());
-    } else if source_std || libraries.is_some() {
+    } else if source_libraries {
         meter.result.image_selection = Some("source checked: explicit library source".into());
     } else if installed.is_some() {
         meter.result.image_selection = Some("source checked: no registered std product".into());
     } else {
         meter.result.image_selection = Some("source checked: no installed image".into());
     }
-    let source_libraries = source_core || source_std || libraries.is_some();
     // A checkout supplies sources when requested. Default native builds
     // use the bundled libraries even when invoked from the checkout.
     let libraries = libraries.as_deref().or_else(|| {
@@ -1164,7 +1165,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 .into());
             }
         } else if let Some(image) = installed_std {
-            request.use_image(image)?;
+            if !request.use_image(image)? {
+                return Err("installed std product does not match the bundled libraries".into());
+            }
         } else if request.manifest.is_some()
             && !source_core
             && !source_std
@@ -1282,13 +1285,23 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         (crate::Checked::Product(product, None), image)
     } else {
         (
-            if !source_core && (native_command || core_product.is_some()) {
+            if !source_core
+                && !(source_tree && source_std)
+                && (native_command || core_product.is_some())
+            {
                 let root = core_product.unwrap_or_else(crate::PackageProduct::default_cache);
+                let libraries = if source_tree {
+                    ProductLibraries::SourceTree
+                } else if source_std {
+                    ProductLibraries::Core
+                } else {
+                    ProductLibraries::BundledStd
+                };
                 driver.check_package_product(
                     request,
                     &root,
                     &mut meter,
-                    (native_command, !source_std),
+                    (native_command, libraries),
                     record.as_ref(),
                 )?
             } else {

@@ -57,12 +57,10 @@ const LEND_LIMIT: usize = 2000;
 
 /// Definitions whose callers need the program to lower them, with every
 /// plain root they reach, to pass Guard B: their hot loops call through
-/// std bodies the program's optimizer must see whole.
-const ALWAYS_IMPORT: &[&str] = &[
-    "std@1/json/parse",
-    "std@1/regex/next_captures",
-    "std@1/string/next_split",
-];
+/// std bodies the program's optimizer must see whole. Regex search is not one:
+/// the side optimises it once and lends its bodies, and a program's inliner
+/// takes each lent body only at the call sites its cost admits.
+const ALWAYS_IMPORT: &[&str] = &["std@1/json/parse", "std@1/string/next_split"];
 
 fn always_imported(definition: &DefPath) -> bool {
     let path = definition.to_string();

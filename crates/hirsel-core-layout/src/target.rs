@@ -49,16 +49,14 @@ impl Target {
 }
 
 impl Target {
-    /// The target this compiler was built for, when it is a supported one.
-    pub fn host() -> Option<Self> {
-        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            Some(Self::X86_64Linux)
-        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
-            Some(Self::Aarch64Linux)
-        } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            Some(Self::Aarch64Darwin)
+    /// The native target a request builds for when it names none: macOS on
+    /// Apple silicon builds for itself, and every other host for x86-64
+    /// Linux, the release target.
+    pub fn default_native() -> Self {
+        if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            Self::Aarch64Darwin
         } else {
-            None
+            Self::X86_64Linux
         }
     }
 

@@ -310,8 +310,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut root_limit = 64 * 1024 * 1024;
     let mut emulator = None;
     let mut sysroot = None;
-    let mut target = hirsel_core_layout::Target::host()
-        .unwrap_or(hirsel_core_layout::Target::X86_64Linux)
+    let mut target = hirsel_core_layout::Target::default_native()
         .triple()
         .to_owned();
     // How a native request links: --cc, else the recipe the installation

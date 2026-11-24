@@ -1,0 +1,290 @@
+type Tag: key = Default | NonSpecific | StrTag | NullTag | BoolTag | IntTag | FloatTag | SeqTag | MapTag
+
+type Properties {
+    tag: Tag,
+    anchor: String,
+    serial: u64,
+    marked: bool,
+}
+
+fn property_end(b: u8) -> bool {
+    separated(b) || flow_punctuation(b)
+}
+
+fn anchor_name(s: String, mut p: Reader) -> Result[String, Error] {
+    let start = p.at
+    while !property_end(byte(s, p.at)) {
+        if is_bom(s, p.at) {
+            return Error(InvalidCharacter(p.at))
+        }
+        p.at += 1
+    }
+    if p.at == start {
+        return Error(Syntax(start))
+    }
+    Ok(string.from(string.slice(s, start, p.at)))
+}
+
+fn properties(s: String, mut p: Reader, mode: Mode, floor: u64) -> Result[Properties, Error] {
+    let mut anchor = string.new()
+    let mut tag = Default
+    let mut serial = 0u64
+    let mut marked = false
+    loop {
+        let start = p.at
+        let b = byte(s, start)
+        if b == b'&' && anchor == "" {
+            p.at += 1
+            anchor = anchor_name(s, mut p)?
+            serial = start
+            map.insert(mut p.anchors, string.from(anchor), Anchor(serial: start, value: None))
+        } else if b == b'!' && tag == Default {
+            tag = read_tag(s, mut p)?
+        } else {
+            break
+        }
+        marked = true
+        if !property_end(byte(s, p.at)) {
+            return Error(Syntax(p.at))
+        }
+        horizontal(s, mut p)
+        if mode != Key && (line_break(byte(s, p.at)) || byte(s, p.at) == b'#') {
+            let saved_at = p.at
+            let saved_line = p.line
+            if mode == Flow {
+                flow_space(s, mut p, floor)?
+            } else {
+                finish(s, mut p)?
+                lines(s, mut p)?
+                let next = byte(s, p.at)
+                if (next != b'&' && next != b'!') || p.at - p.line < floor || block_pair(s, p.at) {
+                    p.at = saved_at
+                    p.line = saved_line
+                }
+            }
+        }
+    }
+    Ok(Properties(tag: tag, anchor: take anchor, serial: serial, marked: marked))
+}
+
+fn apply_properties(mut p: Reader, props: Properties, take value: Value, at: u64) -> Result[Value, Error] {
+    if props.tag != Default && props.tag != NonSpecific {
+        let compatible = match value {
+            Sequence(_) => props.tag == SeqTag,
+            Mapping(_) => props.tag == MapTag,
+            _ => props.tag != SeqTag && props.tag != MapTag,
+        }
+        if !compatible {
+            return Error(Syntax(at))
+        }
+    }
+    if props.anchor != "" {
+        // A nested property of the same name shadows this anchor.
+        if anchor_pending(p.anchors, props.anchor, props.serial) {
+            let anchored = copy_value(value, 64)?
+            map.insert(mut p.anchors, string.from(props.anchor), Anchor(serial: props.serial, value: Some(take anchored)))
+        }
+    }
+    Ok(take value)
+}
+
+fn anchor_pending(anchors: Map[String, Anchor], key: String, serial: u64) -> bool {
+    if let Some(anchor) = map.get(anchors, key) {
+        if let None = anchor.value {
+            return anchor.serial == serial
+        }
+    }
+    false
+}
+
+fn alias(s: String, mut p: Reader, depth: u64) -> Result[Value, Error] {
+    let at = p.at
+    p.at += 1
+    let key = anchor_name(s, mut p)?
+    let Some(anchor) = map.get(p.anchors, key) else {
+        return Error(UnknownAlias(at))
+    }
+    let Some(value) = anchor.value else {
+        return Error(RecursiveAlias(at))
+    }
+    copy_value(value, depth)
+}
+
+// Walk each copy under the caller's byte and step scopes. Checking depth at
+// the destination is necessary because the source may be shallower.
+fn copy_value(value: Value, depth: u64) -> Result[Value, Error] {
+    match value {
+        Null => Ok(Null),
+        Boolean(v) => Ok(Boolean(v)),
+        Integer(v) => Ok(Integer(string.from(v))),
+        Float(v) => Ok(Float(v)),
+        Text(v) => Ok(Text(string.from(v))),
+        Sequence(items) => {
+            collection_depth(depth)?
+            let mut result: List[Value] = list.new()
+            for item in items {
+                list.push(mut result, copy_value(item, depth - 1)?)
+            }
+            Ok(Sequence(take result))
+        },
+        Mapping(entries) => {
+            collection_depth(depth)?
+            let mut result: List[Entry] = list.new()
+            for entry in entries {
+                let key = copy_value(entry.key, depth - 1)?
+                let child = copy_value(entry.value, depth - 1)?
+                list.push(mut result, Entry(key: take key, value: take child))
+            }
+            Ok(Mapping(take result))
+        },
+    }
+}
+
+fn tag_text(s: String, at: u64) -> Result[String, Error] {
+    let mut i = 0u64
+    let mut out: Bytes = list.new()
+    while i < string.byte_len(s) {
+        let b = byte(s, i)
+        if b == b'%' {
+            let Some(hi) = int.ascii_digit(byte(s, i + 1), 16) else {
+                return Error(Syntax(at + i))
+            }
+            let Some(lo) = int.ascii_digit(byte(s, i + 2), 16) else {
+                return Error(Syntax(at + i))
+            }
+            list.push(mut out, (hi << 4) | lo)
+            i += 3
+        } else if b == b'<' || b == b'>' || b == b'"' || b == b'\\' {
+            return Error(Syntax(at + i))
+        } else {
+            list.push(mut out, b)
+            i += 1
+        }
+    }
+    match string.from_utf8(take out) {
+        Ok(take decoded) => Ok(take decoded),
+        Error(_) => Error(Syntax(at)),
+    }
+}
+
+fn read_tag(s: String, mut p: Reader) -> Result[Tag, Error] {
+    let start = p.at
+    p.at += 1
+    let uri = if byte(s, p.at) == b'<' {
+        p.at += 1
+        let from = p.at
+        while byte(s, p.at) != b'>' && !separated(byte(s, p.at)) {
+            p.at += 1
+        }
+        if byte(s, p.at) != b'>' || p.at == from {
+            return Error(Syntax(p.at))
+        }
+        let decoded = tag_text(string.slice(s, from, p.at), from)?
+        p.at += 1
+        take decoded
+    } else {
+        if property_end(byte(s, p.at)) {
+            return Ok(NonSpecific)
+        }
+        let token = anchor_name(s, mut p)?
+        let mut handle_end = 1u64
+        if let Some(second) = string.find(token, 0, "!") {
+            handle_end = second + 2
+        }
+        let handle = string.slice(s, start, start + handle_end)
+        let suffix_at = start + handle_end
+        if suffix_at == p.at {
+            return Error(Syntax(suffix_at))
+        }
+        let mut prefix = if let Some(prefix) = map.get(p.handles, handle) {
+            string.from(prefix)
+        } else if handle == "!!" {
+            string.from("tag:yaml.org,2002:")
+        } else {
+            return Error(UnknownTag(start))
+        }
+        let suffix = tag_text(string.slice(s, suffix_at, p.at), suffix_at)?
+        string.push(mut prefix, suffix)
+        take prefix
+    }
+    if uri == "tag:yaml.org,2002:str" {
+        return Ok(StrTag)
+    }
+    if uri == "tag:yaml.org,2002:null" {
+        return Ok(NullTag)
+    }
+    if uri == "tag:yaml.org,2002:bool" {
+        return Ok(BoolTag)
+    }
+    if uri == "tag:yaml.org,2002:int" {
+        return Ok(IntTag)
+    }
+    if uri == "tag:yaml.org,2002:float" {
+        return Ok(FloatTag)
+    }
+    if uri == "tag:yaml.org,2002:seq" {
+        return Ok(SeqTag)
+    }
+    if uri == "tag:yaml.org,2002:map" {
+        return Ok(MapTag)
+    }
+    Error(UnknownTag(start))
+}
+
+fn directive_word(s: String, mut p: Reader) -> Result[String, Error] {
+    let start = p.at
+    while !separated(byte(s, p.at)) {
+        if is_bom(s, p.at) {
+            return Error(InvalidCharacter(p.at))
+        }
+        p.at += 1
+    }
+    if start == p.at {
+        return Error(Syntax(start))
+    }
+    Ok(string.from(string.slice(s, start, p.at)))
+}
+
+fn directive(s: String, mut p: Reader) -> Result[(), Error] {
+    let start = p.at
+    p.at += 1
+    let kind = directive_word(s, mut p)?
+    horizontal(s, mut p)
+    if kind == "YAML" {
+        if p.version {
+            return Error(Syntax(start))
+        }
+        p.version = true
+        let version = directive_word(s, mut p)?
+        if !string.starts_with(version, "1.") || string.byte_len(version) <= 2 || digits_end(version, 2) != string.byte_len(version) {
+            return Error(Syntax(start))
+        }
+    } else if kind == "TAG" {
+        let handle = directive_word(s, mut p)?
+        if handle != "!" && handle != "!!" {
+            let n = string.byte_len(handle)
+            if n < 3 || byte(handle, 0) != b'!' || byte(handle, n - 1) != b'!' {
+                return Error(Syntax(start))
+            }
+            let mut i = 1u64
+            while i + 1 < n {
+                let b = byte(handle, i)
+                if !int.is_ascii_digit(b) && !(b >= b'a' && b <= b'z') && !(b >= b'A' && b <= b'Z') && b != b'-' {
+                    return Error(Syntax(start))
+                }
+                i += 1
+            }
+        }
+        if let Some(_) = map.get(p.handles, handle) {
+            return Error(Syntax(start))
+        }
+        horizontal(s, mut p)
+        let at = p.at
+        let raw = directive_word(s, mut p)?
+        let prefix = tag_text(raw, at)?
+        map.insert(mut p.handles, take handle, take prefix)
+    } else {
+        line_content(s, mut p)?
+    }
+    finish(s, mut p)
+}

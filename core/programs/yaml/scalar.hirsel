@@ -1,0 +1,486 @@
+fn sign_width(s: String) -> u64 {
+    if byte(s, 0) == b'-' || byte(s, 0) == b'+' {
+        1
+    } else {
+        0
+    }
+}
+
+fn integer_base(s: String) -> u32 {
+    let mut at = sign_width(s)
+    let mut radix = 10u32
+    if at == 0 && byte(s, 0) == b'0' {
+        if byte(s, 1) == b'o' {
+            radix = 8
+            at = 2
+        } else if byte(s, 1) == b'x' {
+            radix = 16
+            at = 2
+        }
+    }
+    let end = string.byte_len(s)
+    if at >= end {
+        return 0
+    }
+    while at < end {
+        if let None = int.ascii_digit(byte(s, at), radix) {
+            return 0
+        }
+        at += 1
+    }
+    radix
+}
+
+fn canonical_integer(s: String, radix: u32) -> String {
+    let mut at = if radix == 10 {
+        sign_width(s)
+    } else {
+        2u64
+    }
+    let end = string.byte_len(s)
+    while at < end && byte(s, at) == b'0' {
+        at += 1
+    }
+    if at == end {
+        return "0"
+    }
+    if radix == 10 {
+        let mut result = if byte(s, 0) == b'-' {
+            string.from("-")
+        } else {
+            string.new()
+        }
+        string.push(mut result, string.slice(s, at, end))
+        return take result
+    }
+    let mut limbs: List[u64] = list.new()
+    let base: u64 = int.widen(radix)
+    while at < end {
+        let Some(digit) = int.ascii_digit(byte(s, at), radix) else {
+            return "0"
+        }
+        let mut carry: u64 = int.widen(digit)
+        let mut i = 0u64
+        while i < list.len(limbs) {
+            let n = limbs[i] * base + carry
+            let _ = list.set(mut limbs, i, n % 1000000000)
+            carry = n / 1000000000
+            i += 1
+        }
+        if carry != 0 {
+            list.push(mut limbs, carry)
+        }
+        at += 1
+    }
+    let mut result = string.new()
+    if let Some(first) = list.pop(mut limbs) {
+        string.push_u64(mut result, first)
+    }
+    while let Some(limb) = list.pop(mut limbs) {
+        string.push_uint(mut result, limb, 10, 9, '0')
+    }
+    take result
+}
+
+fn digits_end(s: String, start: u64) -> u64 {
+    let mut at = start
+    while int.is_ascii_digit(byte(s, at)) {
+        at += 1
+    }
+    at
+}
+
+fn yaml_float(s: String) -> Option[u64] {
+    let width = sign_width(s)
+    let sign = if byte(s, 0) == b'-' {
+        0x8000000000000000u64
+    } else {
+        0u64
+    }
+    let end = string.byte_len(s)
+    let unsigned = string.slice(s, width, end)
+    if unsigned == ".inf" || unsigned == ".Inf" || unsigned == ".INF" {
+        return Some(sign | 0x7ff0000000000000)
+    }
+    if width == 0 && (s == ".nan" || s == ".NaN" || s == ".NAN") {
+        return Some(0x7ff8000000000000)
+    }
+    let whole_end = digits_end(s, width)
+    let point = byte(s, whole_end) == b'.'
+    let fraction_start = if point {
+        whole_end + 1
+    } else {
+        whole_end
+    }
+    let fraction_end = digits_end(s, fraction_start)
+    if whole_end == width && fraction_end == fraction_start {
+        return None
+    }
+    let mut at = fraction_end
+    if byte(s, at) == b'e' || byte(s, at) == b'E' {
+        at += 1
+        if byte(s, at) == b'+' || byte(s, at) == b'-' {
+            at += 1
+        }
+        let first = at
+        at = digits_end(s, at)
+        if at == first {
+            return None
+        }
+    }
+    if at != end {
+        return None
+    }
+    let mut normalized = if sign != 0 {
+        string.from("-")
+    } else {
+        string.new()
+    }
+    let mut first = width
+    while first < whole_end && byte(s, first) == b'0' {
+        first += 1
+    }
+    if first == whole_end {
+        string.push(mut normalized, "0")
+    } else {
+        string.push(mut normalized, string.slice(s, first, whole_end))
+    }
+    if fraction_end > fraction_start {
+        string.push(mut normalized, string.slice(s, whole_end, fraction_end))
+    }
+    string.push(mut normalized, string.slice(s, fraction_end, end))
+    match float.parse64(normalized) {
+        Ok(value) => Some(float.to_bits64(value)),
+        Error(OutOfRange) => Some(sign | 0x7ff0000000000000),
+        Error(_) => None,
+    }
+}
+
+fn resolve(s: String, plain_style: bool, tag: Tag, at: u64) -> Result[Value, Error] {
+    if tag == StrTag || tag == NonSpecific || (tag == Default && !plain_style) {
+        return Ok(Text(string.from(s)))
+    }
+    if tag == Default || tag == NullTag {
+        if s == "" || s == "~" || s == "null" || s == "Null" || s == "NULL" {
+            return Ok(Null)
+        }
+    }
+    if tag == Default || tag == BoolTag {
+        if s == "true" || s == "True" || s == "TRUE" {
+            return Ok(Boolean(true))
+        }
+        if s == "false" || s == "False" || s == "FALSE" {
+            return Ok(Boolean(false))
+        }
+    }
+    if tag == Default || tag == IntTag {
+        let radix = integer_base(s)
+        if radix != 0 {
+            return Ok(Integer(canonical_integer(s, radix)))
+        }
+    }
+    if tag == Default || tag == FloatTag {
+        if let Some(bits) = yaml_float(s) {
+            return Ok(Float(bits))
+        }
+    }
+    if tag == Default {
+        Ok(Text(string.from(s)))
+    } else {
+        Error(Syntax(at))
+    }
+}
+
+fn append_breaks(mut out: String, count: u64) {
+    let mut i = 0u64
+    while i < count {
+        string.push_char(mut out, '\n')
+        i += 1
+    }
+}
+
+// Flow folding consumes horizontal padding. A non-empty run of blank lines
+// contributes one LF per blank line. An escaped break contributes no space.
+fn quote_break(s: String, mut p: Reader, mut out: String, floor: u64, escaped: bool) -> Result[(), Error] {
+    break_line(s, mut p)
+    let mut empty = 0u64
+    loop {
+        horizontal(s, mut p)
+        if !line_break(byte(s, p.at)) {
+            break
+        }
+        empty += 1
+        break_line(s, mut p)
+    }
+    if marker(s, p, b'-') || marker(s, p, b'.') || space_indent(s, p.line) < floor {
+        return Error(Syntax(p.at))
+    }
+    if empty != 0 {
+        append_breaks(mut out, empty)
+    } else if !escaped {
+        string.push_char(mut out, ' ')
+    }
+    Ok(())
+}
+
+fn escaped_char(s: String, mut p: Reader) -> Result[char, Error] {
+    let start = p.at
+    let b = byte(s, p.at)
+    p.at += 1
+    let width = match b {
+        b'x' => 2u64,
+        b'u' => 4u64,
+        b'U' => 8u64,
+        _ => 0u64,
+    }
+    let cp = if width != 0 {
+        let mut cp = 0u32
+        let end = p.at + width
+        while p.at < end {
+            let Some(digit) = int.ascii_digit(byte(s, p.at), 16) else {
+                return Error(Syntax(p.at))
+            }
+            cp = (cp << 4) | int.widen(digit)
+            p.at += 1
+        }
+        cp
+    } else {
+        match b {
+            b'0' => 0,
+            b'a' => 7,
+            b'b' => 8,
+            b't' => 9,
+            b'\t' => 9,
+            b'n' => 10,
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => 13,
+            b'e' => 27,
+            _ if b == b' ' || b == b'"' || b == b'/' || b == b'\\' => int.widen(b),
+            b'N' => 0x85,
+            b'_' => 0xa0,
+            b'L' => 0x2028,
+            b'P' => 0x2029,
+            _ => return Error(Syntax(start)),
+        }
+    }
+    if let Some(c) = char.from_u32(cp) {
+        Ok(c)
+    } else {
+        Error(Syntax(start))
+    }
+}
+
+fn quoted(s: String, mut p: Reader, floor: u64, single_line: bool) -> Result[String, Error] {
+    let quote = byte(s, p.at)
+    p.at += 1
+    let mut out = string.new()
+    loop {
+        let start = p.at
+        let b = byte(s, start)
+        if b == 0 {
+            return Error(Syntax(start))
+        }
+        if b == quote {
+            p.at += 1
+            if quote != b'\'' || byte(s, p.at) != quote {
+                return Ok(take out)
+            }
+            p.at += 1
+            string.push_char(mut out, '\'')
+        } else if quote == b'"' && b == b'\\' {
+            p.at += 1
+            if line_break(byte(s, p.at)) {
+                if single_line {
+                    return Error(Syntax(p.at))
+                }
+                quote_break(s, mut p, mut out, floor, true)?
+            } else {
+                let c = escaped_char(s, mut p)?
+                string.push_char(mut out, c)
+            }
+        } else if white(b) || line_break(b) {
+            horizontal(s, mut p)
+            if line_break(byte(s, p.at)) {
+                if single_line {
+                    return Error(Syntax(p.at))
+                }
+                quote_break(s, mut p, mut out, floor, false)?
+            } else {
+                string.push(mut out, string.slice(s, start, p.at))
+            }
+        } else {
+            let Some((c, next)) = string.next_scalar(s, p.at) else {
+                return Error(Syntax(p.at))
+            }
+            p.at = next
+            string.push_char(mut out, c)
+        }
+    }
+    Error(Syntax(p.at))
+}
+
+fn plain(s: String, mut p: Reader, floor: u64, mode: Mode) -> Result[String, Error] {
+    let start = p.at
+    let first = byte(s, start)
+    let flow = mode == Flow
+    if first == b'#' || separated(first) || flow_punctuation(first) || first == b'@' || first == 96 || first == b'|' || first == b'>' || first == b'%' || first == b'!' || first == b'&' || ((first == b'-' || first == b'?' || first == b':') && (separated(byte(s, start + 1)) || (flow && flow_punctuation(byte(s, start + 1))))) {
+        return Error(Syntax(start))
+    }
+    let mut out = string.new()
+    loop {
+        let segment = p.at
+        let mut end = segment
+        while p.at < string.byte_len(s) && !line_break(byte(s, p.at)) {
+            let b = byte(s, p.at)
+            if is_bom(s, p.at) {
+                return Error(InvalidCharacter(p.at))
+            }
+            if (b == b':' && (mode == Key && indicator(s, p.at, b':') || flow && flow_colon(s, p.at))) || (flow && flow_punctuation(b)) {
+                break
+            }
+            if b == b'#' && p.at > segment && white(byte(s, p.at - 1)) {
+                break
+            }
+            if b == b':' && mode == Block && indicator(s, p.at, b':') {
+                return Error(Syntax(p.at))
+            }
+            p.at += 1
+            if !white(b) {
+                end = p.at
+            }
+        }
+        string.push(mut out, string.slice(s, segment, end))
+        if (mode == Key) || !line_break(byte(s, p.at)) {
+            p.at = end
+            break
+        }
+        let previous = p.at
+        let previous_line = p.line
+        let mut empty = 0u64
+        break_line(s, mut p)
+        loop {
+            let mut indent = 0u64
+            while byte(s, p.at) == b' ' {
+                p.at += 1
+                indent += 1
+            }
+            horizontal(s, mut p)
+            if !line_break(byte(s, p.at)) {
+                let next = byte(s, p.at)
+                if next == 0 || next == b'#' || indent < floor || boundary(s, p) || (flow && (flow_punctuation(next) || flow_colon(s, p.at))) || (!flow && (block_pair(s, p.at) || (indent == 0 && indicator(s, p.at, b'-')))) {
+                    p.at = previous
+                    p.line = previous_line
+                }
+                break
+            }
+            empty += 1
+            break_line(s, mut p)
+        }
+        if p.at == previous {
+            p.at = end
+            break
+        }
+        if empty == 0 {
+            string.push_char(mut out, ' ')
+        } else {
+            append_breaks(mut out, empty)
+        }
+    }
+    Ok(take out)
+}
+
+fn block_scalar(s: String, mut p: Reader, floor: u64) -> Result[String, Error] {
+    let folded = byte(s, p.at) == b'>'
+    p.at += 1
+    let mut chomp = 0u8
+    let mut explicit = 0u64
+    loop {
+        let b = byte(s, p.at)
+        if chomp == 0 && (b == b'-' || b == b'+') {
+            chomp = b
+        } else if explicit == 0 && b >= b'1' && b <= b'9' {
+            explicit = int.widen(b - b'0')
+        } else {
+            break
+        }
+        p.at += 1
+    }
+    finish(s, mut p)?
+    let mut width = if explicit == 0 {
+        0u64
+    } else {
+        int.saturating_sub(floor, 1u64) + explicit
+    }
+    let mut leading_indent = 0u64
+    let mut inferred = explicit != 0
+    let mut out = string.new()
+    let mut breaks = 0u64
+    let mut content = false
+    let mut was_indented = false
+    while p.at < string.byte_len(s) && !boundary(s, p) {
+        let start = p.at
+        let mut end_indent = start
+        while byte(s, end_indent) == b' ' {
+            end_indent += 1
+        }
+        let indent = end_indent - start
+        let first = byte(s, end_indent)
+        let blank = line_break(first) || end_indent == string.byte_len(s)
+        if first == b'\t' && (indent < floor || indent < width) {
+            return Error(Syntax(end_indent))
+        }
+        if !inferred && !blank {
+            if indent < floor {
+                break
+            }
+            if leading_indent > indent {
+                return Error(Syntax(start))
+            }
+            width = indent
+            inferred = true
+        }
+        if !blank && indent < width {
+            break
+        }
+        if !inferred && blank && indent > leading_indent {
+            leading_indent = indent
+        }
+        if !inferred || blank && indent <= width {
+            p.at = end_indent
+        } else {
+            p.at = start + width
+            let more_indented = white(byte(s, p.at))
+            if folded && content && !was_indented && !more_indented {
+                if breaks == 1 {
+                    string.push_char(mut out, ' ')
+                } else {
+                    append_breaks(mut out, breaks - 1)
+                }
+            } else {
+                append_breaks(mut out, breaks)
+            }
+            breaks = 0
+            was_indented = more_indented
+            content = true
+            let from = p.at
+            line_content(s, mut p)?
+            string.push(mut out, string.slice(s, from, p.at))
+        }
+        if line_break(byte(s, p.at)) {
+            breaks += 1
+            break_line(s, mut p)
+        } else {
+            if blank && indent != 0 {
+                breaks += 1
+            }
+            break
+        }
+    }
+    if chomp == b'+' {
+        append_breaks(mut out, breaks)
+    } else if chomp != b'-' && content && breaks != 0 {
+        string.push_char(mut out, '\n')
+    }
+    Ok(take out)
+}

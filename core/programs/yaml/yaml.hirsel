@@ -1,0 +1,274 @@
+/// An owned YAML Core Schema tree. Integers use signed decimal text without a
+/// range limit. Floating-point values carry IEEE 754 bits, with a single NaN
+/// spelling on parse. Mappings preserve source order and require unique keys.
+pub type Value = Null | Boolean(bool) | Integer(String) | Float(u64) | Text(String) | Sequence(List[Value]) | Mapping(List[Entry])
+
+pub type Entry {
+    key: Value,
+    value: Value
+}
+
+/// Input and allocation limits are bytes. Depth counts nested collections.
+/// The default caps apply to the whole stream, including alias copies.
+/// The hard maximum depth is 64, even with a larger custom limit.
+pub type Limits {
+    input_bytes: u64,
+    allocation_bytes: u64,
+    steps: u64,
+    depth: u64
+}
+
+pub type Error = Syntax(u64) | InvalidCharacter(u64) | UnknownTag(u64) | UnknownAlias(u64) | RecursiveAlias(u64) | DuplicateKey(u64) | InputLimit | ByteLimit | StepLimit | DepthLimit | InvalidValue
+
+pub fn defaults() -> Limits {
+    Limits(input_bytes: 1048576, allocation_bytes: 8388608, steps: 16000000, depth: 64)
+}
+
+/// Parses a stream. A comment-only or empty stream has no documents.
+/// Offsets are UTF-8 byte offsets into the input. Aliases resolve to copies.
+pub fn parse(source: String) -> Result[List[Value], Error] {
+    parse_with(source, defaults())
+}
+
+pub fn parse_with(source: String, limits: Limits) -> Result[List[Value], Error] {
+    if string.byte_len(source) > limits.input_bytes {
+        return Error(InputLimit)
+    }
+    within_limits(limits, scoped fn() -> Result[List[Value], Error] {
+        read_stream(source, min_depth(limits.depth))
+    })
+}
+
+fn min_depth(depth: u64) -> u64 {
+    if depth > 64 {
+        64
+    } else {
+        depth
+    }
+}
+
+fn within_limits[T](limits: Limits, body: scoped[view] fn() -> Result[T, Error]) -> Result[T, Error] {
+    let isolated = isolate(scoped fn() -> Result[Result[Result[T, Error], OutOfTime], Capacity] {
+        bound bytes limits.allocation_bytes {
+            bound steps limits.steps {
+                body()
+            }
+        }
+    })
+    match take isolated {
+        Ok(Ok(Ok(Ok(take parsed)))) => take parsed,
+        Ok(Ok(Ok(Error(_)))) => Error(StepLimit),
+        Error(_) => Error(ByteLimit),
+        Ok(Ok(Error(_))) => Error(ByteLimit),
+        Ok(Error(causes)) => {
+            for cause in causes {
+                if let Capacity(_) = cause.kind {
+                    return Error(ByteLimit)
+                }
+                break
+            }
+            fail("YAML: unexpected computation failure")
+        },
+    }
+}
+
+/// Structural equality including mapping order and floating-point sign bits.
+pub fn equal(a: Value, b: Value) -> bool {
+    match (view a, view b) {
+        (Null, Null) => true,
+        (Boolean(x), Boolean(y)) => x == y,
+        (Integer(x), Integer(y)) => x == y,
+        (Float(x), Float(y)) => x == y,
+        (Text(x), Text(y)) => x == y,
+        (Sequence(xs), Sequence(ys)) => {
+            if list.len(xs) != list.len(ys) {
+                return false
+            }
+            let mut i = 0u64
+            for x in xs {
+                if !equal(x, ys[i]) {
+                    return false
+                }
+                i += 1
+            }
+            true
+        },
+        (Mapping(xs), Mapping(ys)) => {
+            if list.len(xs) != list.len(ys) {
+                return false
+            }
+            let mut i = 0u64
+            for x in xs {
+                if !equal(x.key, ys[i].key) || !equal(x.value, ys[i].value) {
+                    return false
+                }
+                i += 1
+            }
+            true
+        },
+        _ => false,
+    }
+}
+
+/// Emits one explicit document per tree, with flow collections and quoted
+/// strings. Refuses noncanonical integers, duplicate keys and noncanonical NaNs.
+pub fn emit(documents: List[Value]) -> Result[String, Error] {
+    emit_with(documents, defaults())
+}
+
+pub fn emit_with(documents: List[Value], limits: Limits) -> Result[String, Error] {
+    within_limits(limits, scoped fn() -> Result[String, Error] {
+        let mut output = string.new()
+        for doc in documents {
+            string.push(mut output, "--- ")
+            write_value(mut output, doc, min_depth(limits.depth))?
+            string.push_char(mut output, '\n')
+        }
+        if string.byte_len(output) > limits.input_bytes {
+            Error(InputLimit)
+        } else {
+            Ok(take output)
+        }
+    })
+}
+
+fn write_value(mut output: String, value: Value, depth: u64) -> Result[(), Error] {
+    match value {
+        Null => string.push(mut output, "null"),
+        Boolean(v) => if v {
+            string.push(mut output, "true")
+        } else {
+            string.push(mut output, "false")
+        },
+        Integer(v) => {
+            if integer_base(v) != 10 || (byte(v, 0) == b'+' || v == "-0") {
+                return Error(InvalidValue)
+            }
+            let start = if byte(v, 0) == b'-' {
+                1u64
+            } else {
+                0u64
+            }
+            if byte(v, start) == b'0' && start + 1 < string.byte_len(v) {
+                return Error(InvalidValue)
+            }
+            string.push(mut output, v)
+        },
+        Float(bits) => {
+            let number_value = float.from_bits64(bits)
+            if float.is_finite(number_value) {
+                let mut number = string.new()
+                float.push_f64(mut number, number_value)
+                string.push(mut output, number)
+                if integer_base(number) != 0 {
+                    string.push(mut output, ".0")
+                }
+            } else {
+                match bits {
+                    0x7ff0000000000000 => string.push(mut output, ".inf"),
+                    0xfff0000000000000 => string.push(mut output, "-.inf"),
+                    0x7ff8000000000000 => string.push(mut output, ".nan"),
+                    _ => return Error(InvalidValue),
+                }
+            }
+        },
+        Text(v) => write_text(mut output, v),
+        Sequence(items) => {
+            if depth == 0 {
+                return Error(DepthLimit)
+            }
+            string.push(mut output, "[")
+            let mut first = true
+            for item in items {
+                if !first {
+                    string.push(mut output, ", ")
+                }
+                first = false
+                write_value(mut output, item, depth - 1)?
+            }
+            string.push(mut output, "]")
+        },
+        Mapping(entries) => {
+            if depth == 0 {
+                return Error(DepthLimit)
+            }
+            string.push(mut output, "{")
+            let mut seen: Map[String, bool] = map.new()
+            let mut i = 0u64
+            for entry in entries {
+                if i != 0 {
+                    string.push(mut output, ", ")
+                }
+                string.push(mut output, "? ")
+                let start = string.byte_len(output)
+                write_value(mut output, entry.key, depth - 1)?
+                remember_key(mut seen, entry.key, depth - 1, start)?
+                string.push(mut output, " : ")
+                write_value(mut output, entry.value, depth - 1)?
+                i += 1
+            }
+            string.push(mut output, "}")
+        },
+    }
+    Ok(())
+}
+
+// Mapping order is presentation detail when determining key identity.
+fn write_key(mut output: String, value: Value, depth: u64) -> Result[(), Error] {
+    match value {
+        Sequence(items) => {
+            collection_depth(depth)?
+            string.push_char(mut output, '[')
+            for item in items {
+                write_key(mut output, item, depth - 1)?
+                string.push_char(mut output, ',')
+            }
+            string.push_char(mut output, ']')
+        },
+        Mapping(entries) => {
+            collection_depth(depth)?
+            let mut pairs: List[String] = list.new()
+            for entry in entries {
+                let mut pair = string.from("? ")
+                write_key(mut pair, entry.key, depth - 1)?
+                string.push(mut pair, " : ")
+                write_key(mut pair, entry.value, depth - 1)?
+                list.push(mut pairs, take pair)
+            }
+            list.sort(mut pairs, scoped fn(a: String, b: String) -> Order {
+                list.compare_bytes(string.as_bytes(a), string.as_bytes(b))
+            })
+            string.push_char(mut output, '{')
+            for pair in pairs {
+                string.push(mut output, pair)
+                string.push_char(mut output, ',')
+            }
+            string.push_char(mut output, '}')
+        },
+        _ => write_value(mut output, value, depth)?,
+    }
+    Ok(())
+}
+
+fn write_text(mut output: String, value: String) {
+    string.push_char(mut output, '"')
+    let mut at = 0u64
+    while let Some((c, next)) = string.next_scalar(value, at) {
+        let cp = char.to_u32(c)
+        match c {
+            '"' => string.push(mut output, "\\\""),
+            '\\' => string.push(mut output, "\\\\"),
+            '\n' => string.push(mut output, "\\n"),
+            '\r' => string.push(mut output, "\\r"),
+            '\t' => string.push(mut output, "\\t"),
+            _ => if cp < 32 || (cp >= 127 && cp <= 159) || cp == 0xfeff || cp == 0xfffe || cp == 0xffff {
+                string.push(mut output, "\\u")
+                string.push_uint(mut output, int.widen(cp), 16, 4, '0')
+            } else {
+                string.push_char(mut output, c)
+            },
+        }
+        at = next
+    }
+    string.push_char(mut output, '"')
+}

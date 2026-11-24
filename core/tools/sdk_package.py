@@ -60,8 +60,8 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
                         '--entry', 'store@1/packed_consumer/main', '--grant', 'Stdout',
                         '--grant', 'Clock', '--grant', 'Random', '--grant', 'Tasks',
                         '--store', work / 'store', '-o', executable], cwd=work, check=True)
-        subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated',
-                        '--runtime', runtime], cwd=work, check=True)
+        subprocess.run([compiler, 'sdk', 'ts', executable, '--output', consumer / 'generated'],
+                       cwd=work, check=True)
         (consumer / 'payload.bin').write_bytes(subprocess.check_output([executable], cwd=work))
         shutil.copyfile(fixture.with_suffix('.ts'), consumer / 'consumer.ts')
 

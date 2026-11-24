@@ -65,6 +65,10 @@ fn main() {
         }
         generated.push_str("];\n");
     }
+    let frame_schema = root.join("programs/runner/frame-schema.bin");
+    println!("cargo:rerun-if-changed={}", frame_schema.display());
+    let schema = fs::read(frame_schema).unwrap();
+    generated.push_str(&format!("pub const FRAME_SCHEMA: &[u8] = &{schema:?};\n"));
     let mut combined = Sha256::new();
     combined.update(b"hirsel.bundled-core-std.v1");
     combined.update(core);

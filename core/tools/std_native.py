@@ -485,7 +485,7 @@ class Evaluator:
     def __enter__(self):
         return self
 
-    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, sdk_compiler=None, sdk_native_options=None, events=False, progress=None):
+    def evaluate(self, manifest, entry, program_entry=False, instructions=None, sdk_out=None, sdk_describe=None, events=False, progress=None):
         request = dict(manifest=str(manifest), entry=entry, program_entry=program_entry)
         if events:
             # CONC-10 events are recorded only on request (22f95498).
@@ -494,8 +494,6 @@ class Evaluator:
             request["instructions"] = instructions
         if sdk_out is not None:
             request.update(sdk_out=str(sdk_out), sdk_describe=str(sdk_describe))
-        if sdk_compiler is not None:
-            request.update(sdk_compiler=str(sdk_compiler), sdk_native_options=sdk_native_options)
         with (contextlib.nullcontext(progress) if progress else Case(entry, 'evaluator')) as active:
             self.active_case = active
             line = bytearray()
@@ -830,13 +828,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         probe.write_text(case.file.read_text())
                         probe_inputs = work / 'frame-schema.json'
                         probe_inputs.write_text(json.dumps(manifest(root, case, probe)))
-                        native_options = ['--runtime', str(runtime)] if compiler and runtime else None
-                        if native_options and cc:
-                            native_options += ['--cc', str(cc)]
                         built = resident.evaluate(probe_inputs, 'runner@1/tests/codec_frames/ts_frame_schema', progress=progress,
-                                                  sdk_out=generated, sdk_describe=description_file,
-                                                  sdk_compiler=compiler if native_options else None,
-                                                  sdk_native_options=native_options)
+                                                  sdk_out=generated, sdk_describe=description_file)
                         report = json.loads(built.stdout)
                         if built.returncode or report.get('error'):
                             resident.errors.seek(0)

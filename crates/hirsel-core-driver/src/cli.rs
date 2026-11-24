@@ -983,8 +983,7 @@ static OPTIONS: &[OptionSpec] = &[
             "env",
             "core-product",
             "std-product",
-            "sdk",
-            "call"
+            "sdk"
         ],
         "Select the core runtime archive for the requested recording mode."
     ),
@@ -999,7 +998,7 @@ static OPTIONS: &[OptionSpec] = &[
         Cc,
         ["--cc"],
         Some("PROGRAM"),
-        ["build", "run", "replay", "test", "sdk", "call"],
+        ["build", "run", "replay", "test", "sdk"],
         "Select the C linker driver for this request."
     ),
     option!(

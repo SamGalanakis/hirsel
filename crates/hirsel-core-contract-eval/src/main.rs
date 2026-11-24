@@ -228,23 +228,8 @@ fn request(driver: &mut Driver, store: &Path, input: &Value) -> Value {
                 .iter()
                 .map(|b| b.as_u64().unwrap() as u8)
                 .collect();
-            if let Some(compiler) = input["sdk_compiler"].as_str() {
-                let work = tempfile::tempdir().map_err(|e| e.to_string())?;
-                let options: Vec<String> = input["sdk_native_options"]
-                    .as_array()
-                    .ok_or("expected sdk_native_options")?
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_owned())
-                    .collect();
-                let native = hirsel_core_driver::sdk_command::frame_schema(
-                    Path::new(compiler),
-                    work.path(),
-                    &options,
-                )
-                .map_err(|e| e.to_string())?;
-                if native != bytes {
-                    return Err("native/evaluator Frame schemas differ".into());
-                }
+            if bytes != hirsel_core_driver::sdk_command::FRAME_SCHEMA {
+                return Err("evaluator Frame schema differs from frame-schema.bin".into());
             }
             let description = std::fs::read(
                 input["sdk_describe"]

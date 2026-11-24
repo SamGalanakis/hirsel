@@ -26,7 +26,6 @@ pub struct Options {
     pub n_place: u64,
     pub place_timeout: Duration,
     pub timeout: Duration,
-    pub build: Vec<String>,
     /// The entry name and its flags, after `--`.
     pub call: Vec<String>,
 }
@@ -55,7 +54,6 @@ impl Options {
             n_place: 16 * 1024 * 1024,
             place_timeout: Duration::from_secs(10),
             timeout: Duration::from_secs(10),
-            build: Vec::new(),
             call: invocation.arguments,
         };
         for (id, value) in invocation.options {
@@ -71,17 +69,6 @@ impl Options {
                     options.place_timeout = seconds("--place-timeout", &text)?
                 }
                 OptionId::CallTimeout => options.timeout = seconds("--timeout", &text)?,
-                OptionId::Runtime | OptionId::Cc => {
-                    options.build.push(
-                        if id == OptionId::Runtime {
-                            "--runtime"
-                        } else {
-                            "--cc"
-                        }
-                        .into(),
-                    );
-                    options.build.push(text);
-                }
                 _ => return Err("unsupported call option".into()),
             }
         }
@@ -141,7 +128,7 @@ fn run_with(
         .into());
     }
     let result = Schema::read(&entry.result)?;
-    // Every argument is typed before the Frame probe or any connection.
+    // Every argument is typed before connecting.
     let argument = arguments(&args, &flags)?;
     let url = Url::parse(
         options
@@ -149,12 +136,7 @@ fn run_with(
             .as_deref()
             .ok_or("call requires --url ws://HOST:PORT/PATH")?,
     )?;
-    let work = tempfile::tempdir()?;
-    let frame = Schema::read(&crate::sdk_command::frame_schema(
-        &std::env::current_exe()?,
-        work.path(),
-        &options.build,
-    )?)?;
+    let frame = Schema::read(crate::sdk_command::FRAME_SCHEMA)?;
     let outcome = exchange(
         &url,
         &frame,
@@ -1391,7 +1373,6 @@ mod tests {
                 n_place: 17,
                 place_timeout: Duration::from_secs(1),
                 timeout: Duration::from_secs(1),
-                build: vec![],
                 call,
             };
             run_with(options, |_, _, _| Ok(describe.clone()))

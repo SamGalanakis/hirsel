@@ -86,9 +86,9 @@ come from the described program; the generator does not implement fingerprinting
 `frame.js` exports the Frame, Outcome, Fault and Refusal codecs, the fixed Raised
 and BadKind number tables, and `subprotocol = "hirsel.3"`. Frame is a protocol
 type shared by every executable. The schema `std.codec.schema(of[runner.Frame]())`
-is computed by a tool from the compiler's bundled runner and std sources and
-checked in as a generated file; CI regenerates it and fails when the checked-in
-file differs <!-- doc-ref: planned -->. The generator reads that file, and
+is generated from the Runner and std sources by `core/tools/frame_schema.py`
+and checked in as `core/programs/runner/frame-schema.bin`. The
+`core-runner-frame-schema` CI target regenerates it and compares the bytes. The generator reads that file, and
 Describe contains only per-program data. A Frame change requires a subprotocol
 change; the client checks the negotiated subprotocol. To a client that offers
 only retired tokens (`hirsel.1`, `hirsel.2`) the server answers 101 selecting the
@@ -193,9 +193,8 @@ is never resent. `wss://` is refused as unsupported.
 from SERVER's describe launch mode, as in `hirsel sdk ts`. `--n-place` and
 `--place-timeout` mean what they mean there. They must match the running place,
 so the types match what is running. The Frame codec is the same one the SDK
-generates: `std.codec.schema(of[runner.Frame]())` from the compiler's bundled
-runner. The native options `--runtime` and `--cc` select the toolchain for that
-probe. Before sending a Call, the CLI checks two things:
+uses, from the checked-in Runner frame schema. Before sending a Call, the CLI
+checks two things:
 
 - If Welcome names a launch digest, the digest, target and `n_place` must equal
   the Describe's. Otherwise the CLI refuses and sends nothing more.

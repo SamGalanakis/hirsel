@@ -101,13 +101,8 @@ fn run_with(
 ) -> Result<(), Error> {
     let work = tempfile::tempdir()?;
     let executable = if options.program.is_file() {
-        if let Some(flag) = ["--frozen", "--locked"]
-            .into_iter()
-            .find(|flag| options.build.iter().any(|option| option == flag))
-        {
-            return Err(
-                format!("{flag} needs a workspace lock; the SDK executable has none").into(),
-            );
+        if let Some(flag) = options.build.first() {
+            return Err(format!("{flag} applies when building a program directory").into());
         }
         options.program.canonicalize()?
     } else {
@@ -127,155 +122,10 @@ fn run_with(
     };
     let response = describe(&executable, options.n_place, options.timeout)?;
     let description = Describe::read(&response)?;
-    let schema = frame_schema(&std::env::current_exe()?, work.path(), &options.build)?;
-    write_with_frame(&description, &schema, &options.out)
+    write_with_frame(&description, FRAME_SCHEMA, &options.out)
 }
 
-/// The protocol schema is produced by std.codec from the runner bundled with
-/// this compiler. It is independent of the server's place description.
-pub fn frame_schema(
-    compiler: &Path,
-    work: &Path,
-    native_options: &[String],
-) -> Result<Vec<u8>, Error> {
-    use hirsel_core_resolve::{CorpusManifest, ModuleSource, PackageManifest};
-    let core = crate::package("core");
-    let std = crate::package("std");
-    let store = crate::package("store");
-    let runner = crate::package("runner");
-    let sdk = crate::package("sdk");
-    let mut packages = Vec::new();
-    for (name, texts, dependencies, signatures) in [
-        ("core", crate::product::bundled::SOURCES, vec![], true),
-        (
-            "std",
-            crate::product::bundled::STD_SOURCES,
-            vec![core.clone()],
-            false,
-        ),
-    ] {
-        let directory = work.join(name);
-        std::fs::create_dir_all(&directory)?;
-        let mut sources = Vec::new();
-        for (i, (module, text)) in texts.iter().enumerate() {
-            // Nested modules (std's `sim/fs`) are paths, as in the bundled product
-            // manifest; a module may span several files (the store's `store`).
-            let file = directory.join(format!("{module}.{i}.hirsel"));
-            if let Some(parent) = file.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&file, text)?;
-            sources.push(ModuleSource {
-                foreign: false,
-                captured: None,
-                file,
-                modules: module.split('/').map(str::to_owned).collect(),
-                signatures,
-            });
-        }
-        packages.push(PackageManifest {
-            namespace: None,
-            package: crate::package(name),
-            sources,
-            dependencies,
-        });
-    }
-    for (package, texts, dependencies) in [
-        (
-            store.clone(),
-            crate::product::bundled::STORE_SOURCES,
-            vec![core.clone(), std.clone()],
-        ),
-        (
-            runner.clone(),
-            crate::product::bundled::RUNNER_SOURCES,
-            vec![core.clone(), std.clone(), store.clone()],
-        ),
-    ] {
-        let directory = work.join(&package.name);
-        let mut sources = Vec::new();
-        for (file, module, text) in texts {
-            let file = directory.join(file);
-            std::fs::create_dir_all(file.parent().expect("a bundled source has a directory"))?;
-            std::fs::write(&file, text)?;
-            sources.push(ModuleSource {
-                foreign: false,
-                captured: None,
-                file,
-                modules: module.split('.').map(str::to_owned).collect(),
-                signatures: false,
-            });
-        }
-        packages.push(PackageManifest {
-            namespace: None,
-            package,
-            sources,
-            dependencies,
-        });
-    }
-    let source = work.join("schema.hirsel");
-    std::fs::write(
-        &source,
-        "pub fn main(out: Stdout) -> Result[(), Exit] waits {\n    let c: std.codec.Codec[runner.Frame] = std.codec.of()\n    let schema = std.result.unwrap(std.codec.schema(c))\n    match stdout.write_bytes(out, schema) {\n        Ok(()) => Ok(()),\n        Error(_) => Error(Exit(status: 1))\n    }\n}\n",
-    )?;
-    packages.push(PackageManifest {
-        namespace: None,
-        package: sdk,
-        dependencies: vec![core.clone(), std, store, runner],
-        sources: vec![ModuleSource {
-            foreign: false,
-            captured: None,
-            file: source,
-            modules: vec!["main".into()],
-            signatures: false,
-        }],
-    });
-    let manifest = work.join("schema.json");
-    std::fs::write(
-        &manifest,
-        serde_json::to_vec(&CorpusManifest { core, packages })?,
-    )?;
-    let executable = work.join("schema-probe");
-    let mut command = Command::new(compiler);
-    command
-        .args(["build", "--inputs"])
-        .arg(&manifest)
-        .args(["--entry", "sdk@1/main/main", "--grant", "Stdout", "-o"])
-        .arg(&executable)
-        .arg("--store")
-        .arg(work.join("schema-store"))
-        .stdout(Stdio::null());
-    let mut flags = native_options.iter();
-    while let Some(flag) = flags.next() {
-        if flag == "--release" {
-            command.arg(flag);
-        } else if matches!(
-            flag.as_str(),
-            "--runtime" | "--backend" | "--cc" | "--target" | "--debug-lines"
-        ) {
-            command
-                .arg(flag)
-                .arg(flags.next().ok_or("missing build option value")?);
-        } else if !matches!(
-            flag.as_str(),
-            "--source-core" | "--source-std" | "--locked" | "--frozen"
-        ) {
-            let _ = flags.next();
-        }
-    }
-    if !command.status()?.success() {
-        return Err("SDK Frame schema build failed".into());
-    }
-    let output = Command::new(&executable).output()?;
-    if !output.status.success() {
-        return Err(format!(
-            "SDK Frame schema failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-    Ok(output.stdout)
-}
+pub use crate::product::bundled::FRAME_SCHEMA;
 
 #[cfg(test)]
 mod tests {

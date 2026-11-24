@@ -363,9 +363,8 @@ def faulted_owner_releases_slot():
 
 def hirsel_call(url, *call):
     # Describe the admission fixture at the same n_place it serves.
-    command = [CLI['compiler'], 'call', CLI['server'], '--url', url, '--runtime', CLI['runtime'],
+    command = [CLI['compiler'], 'call', CLI['server'], '--url', url,
                '--n-place', '1048576']
-    command += ['--cc', CLI['cc']] if CLI.get('cc') else []
     return subprocess.Popen(command + ['--', *call], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 

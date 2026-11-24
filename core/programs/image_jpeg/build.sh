@@ -24,7 +24,7 @@ cp hirsel_jpeg.c "$stage"
         -DCMAKE_C_COMPILER="$llvm/bin/clang" -DCMAKE_C_COMPILER_TARGET=x86_64-unknown-linux-gnu \
         -DCMAKE_AR="$llvm/bin/llvm-ar" -DCMAKE_RANLIB="$llvm/bin/llvm-ranlib" \
         -DCMAKE_C_FLAGS="$flags" -DCMAKE_C_FLAGS_RELEASE=-DNDEBUG \
-        -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DREQUIRE_SIMD=ON \
+        -DBUILD=20261124 -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DREQUIRE_SIMD=ON \
         -DWITH_ARITH_DEC=OFF -DWITH_ARITH_ENC=OFF -DWITH_TURBOJPEG=OFF -DWITH_TOOLS=OFF -DWITH_TESTS=OFF
     cmake --build codec --target jpeg-static --parallel "${HIRSEL_JOBS:-4}"
     "$llvm/bin/clang" --target=x86_64-unknown-linux-gnu -std=c11 -O2 \

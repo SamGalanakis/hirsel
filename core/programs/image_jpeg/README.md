@@ -10,12 +10,14 @@ is under the [IJG license](README.ijg), with the SIMD code under the zlib
 terms described in the [upstream license](LICENSE.md).
 
 Decode takes owned JPEG bytes and borrows them only for individual calls.
-The header probe enforces byte and source pixel limits before native
-allocation. The decoder accepts 8-bit grayscale or three-component Huffman
-DCT JPEGs, including progressive files, and outputs packed RGB. The target
-size selects a DCT scale before decoding. Call `start_decode` until the
-output dimensions are available, then call `decode_strip` until `End`.
-`Pending` means the decoder needs another call without having written rows.
+The shared `image_core.image.probe` firewall validates the JPEG structure
+through EOI and enforces byte and source pixel limits before native
+allocation. The codec also checks the pre-SOS header length and supports
+8-bit grayscale and three-component Huffman DCT JPEGs, including
+progressive files. The target size selects a DCT scale before decoding.
+Call `start_decode` until the packed RGB dimensions are available, then
+call `decode_strip` until `End`. `Pending` means the decoder needs another
+call without having written rows.
 
 Encode accepts packed RGB in strips of up to 16 rows and writes to an
 initialized, caller-supplied buffer. Reoffer the unread rows when a call
@@ -38,6 +40,14 @@ a time. Suspension limits the compressed bytes offered per call. The
 codec still has to process across the row, so call duration depends on
 image width, sampling, and entropy.
 
+The wrapper uses `waits` for decoder starts and strips at source widths
+of **168 px or more**, and for encoder starts and strips at input widths
+of **283 px or more**. Narrower images issue those calls on the host
+stack. The cutoff multiplies the width by the rounded-up cost per pixel
+at the first measured crossing, 299 ns for decode and 177 ns for encode,
+and uses a helper when the estimate exceeds 50 µs. Decode uses the
+unscaled source width because DCT shrink still reads the source iMCUs.
+
 A shielded x86-64 run used 200 repetitions per width of a high-entropy,
 37-row, sequential 4:4:4 fixture. At 2048 px, the longest strip calls
 were 128.2 µs for decoder input and 95.6 µs for encoder input, or 62.6
@@ -52,6 +62,7 @@ against the PLAN targets of <10 ms and <10 MiB. This measurement used
 the native adapter and a C resizer, with the 9.81 MiB compressed input
 included in RSS. Timing started after reading the compressed input.
 
-In 60 matched pairs per mode on CPU 16, the release wrapper used 1.199×
-direct C cycles for sequential decode, 1.026× for sequential encode,
-1.077× for progressive decode, and 1.049× for progressive encode.
+Before width routing and shared firewall integration, 60 matched pairs
+per mode on CPU 16 measured 1.199× direct C cycles for sequential decode,
+1.026× for sequential encode, 1.077× for progressive decode, and 1.049×
+for progressive encode.

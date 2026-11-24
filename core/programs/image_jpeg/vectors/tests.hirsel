@@ -12,7 +12,7 @@ fn limits() -> image_jpeg.DecodeLimits {
     image_jpeg.DecodeLimits(max_input_bytes: 1048576, max_header_bytes: 131072, max_pixels: 1000000, max_native_bytes: 2097152)
 }
 
-fn dimensions(mut decoder: image_jpeg.Decoder) -> image_jpeg.Size {
+fn dimensions(mut decoder: image_jpeg.Decoder) -> image_jpeg.Size waits {
     for _ in 0u64 .. 64 {
         if let Some(size) = result.unwrap(image_jpeg.start_decode(mut decoder)) {
             return size
@@ -21,7 +21,7 @@ fn dimensions(mut decoder: image_jpeg.Decoder) -> image_jpeg.Size {
     fail("decoder header made no progress")
 }
 
-fn check_decode(f: Foreign[image_jpeg.Jpeg], take input: Bytes, expected: Bytes, eighths: u32) {
+fn check_decode(f: Foreign[image_jpeg.Jpeg], take input: Bytes, expected: Bytes, eighths: u32) waits {
     let source = result.unwrap(image_jpeg.probe(input, limits()))
     let target = if eighths == 8 {
         source
@@ -120,6 +120,13 @@ fn check_limits(f: Foreign[image_jpeg.Jpeg], take input: Bytes, big_app: Bytes) 
     } else {
         fail("header byte limit did not gate decode")
     }
+    let mut truncated: Bytes = list.with_capacity(list.len(input) - 2)
+    list.append(mut truncated, list.slice(input, 0, list.len(input) - 2))
+    if let Error(Invalid) = image_jpeg.decoder(f, take truncated, size, limits()) {
+        ()
+    } else {
+        fail("opened a decoder without an end-of-image marker")
+    }
     if let Error(Limit) = image_jpeg.decoder(f, take input, size, no_native) {
         ()
     } else {
@@ -149,6 +156,7 @@ fn libjpeg_vectors(f: Foreign[image_jpeg.Jpeg], dir: Dir) -> Result[(), ()] wait
     }
     check_decode(f, take long_app, load(dir, "long-app-8.rgb"), 8)
     check_decode(f, load(dir, "wide.jpg"), load(dir, "wide-8.rgb"), 8)
+    check_decode(f, load(dir, "narrow.jpg"), load(dir, "narrow-8.rgb"), 8)
     check_decode(f, load(dir, "flat.jpg"), load(dir, "flat-8.rgb"), 8)
     let rgb = load(dir, "source.rgb")
     let size = image_jpeg.Size(width: 227, height: 149)

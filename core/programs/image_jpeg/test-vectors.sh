@@ -8,5 +8,5 @@ work=$1
 reference=$2
 shift 2
 python3 "$codec/vectors/prepare.py" "$work" "$reference"
-"$compiler" test "$work" --exact image_jpeg@1/tests/libjpeg_vectors \
+"$compiler" test "$work/codec" --exact image_jpeg@1/tests/libjpeg_vectors \
     --grant Foreign=image_jpeg@1/image_jpeg/Jpeg "$@"

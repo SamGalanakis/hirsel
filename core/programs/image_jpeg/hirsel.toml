@@ -3,6 +3,9 @@ name = "image_jpeg"
 major = 1
 charge = "charge-v1"
 
+[dependencies]
+image_core = { major = 1, path = "../image_core" }
+
 [sources]
 "image_jpeg.hirsel" = "image_jpeg"
 "native.hirsel" = "native"
@@ -10,5 +13,5 @@ charge = "charge-v1"
 [foreign.native]
 symbols = "hjpg_"
 archives = [
-  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_jpeg.a", sha256 = "e90c7e00988a8421042ef5ae6e77f0a241e513de48d36b88fdd1d6b5b801085b" },
+  { target = "x86_64-unknown-linux-gnu", file = "libhirsel_jpeg.a", sha256 = "26ce549bcfc38a8f4bdcf873871986fc7aa8d3e7e86c06f3e212c70f55a05271" },
 ]

@@ -24,11 +24,19 @@ pub type Sampling = S444 | S420
 
 pub type Coding = Sequential | Progressive
 
+const STACK_CALL_NS: u64 = 50000
+
+// Round up the cost per pixel at the first measured 50 µs crossing.
+const DECODE_ROW_NS_PER_PIXEL: u64 = 299
+
+const ENCODE_ROW_NS_PER_PIXEL: u64 = 177
+
 pub opaque resource type Decoder: send {
     f: Foreign[Jpeg],
     p: foreign.Ptr[DecoderHandle],
     input: Bytes,
-    eighths: u32
+    eighths: u32,
+    helper: bool
 } drop(d) {
     native.decoder_destroy(d.f, d.p)
 }
@@ -36,7 +44,8 @@ pub opaque resource type Decoder: send {
 pub opaque resource type Encoder: send {
     f: Foreign[Jpeg],
     p: foreign.Ptr[EncoderHandle],
-    output: Bytes
+    output: Bytes,
+    helper: bool
 } drop(e) {
     native.encoder_destroy(e.f, e.p)
 }
@@ -50,23 +59,19 @@ fn status(code: i64) -> Error {
     }
 }
 
-/// Checks the first 8-bit, one- or three-component DCT frame through SOS.
-/// Runs before any native decoder allocation.
-pub fn probe(input: Bytes, limits: DecodeLimits) -> Result[Size, Error] {
+// Keep the codec's supported frame types and separate pre-SOS byte limit.
+fn check_header(input: Bytes, max_header_bytes: u64) -> Result[(), Error] {
     let length = list.len(input)
-    if length > limits.max_input_bytes {
-        return Error(Limit)
-    }
     if length < 2 || input[0] != 255 || input[1] != 216 {
         return Error(Invalid)
     }
-    let end = if length < limits.max_header_bytes {
+    let end = if length < max_header_bytes {
         length
     } else {
-        limits.max_header_bytes
+        max_header_bytes
     }
     let mut at = 2u64
-    let mut frame: Option[Size] = None
+    let mut frame = false
     while at < end {
         if input[at] != 255 {
             return Error(Invalid)
@@ -88,30 +93,20 @@ pub fn probe(input: Bytes, limits: DecodeLimits) -> Result[Size, Error] {
             break
         }
         if marker == 218 {
-            match frame {
-                Some(size) => return Ok(size),
-                None => return Error(Invalid),
+            if frame {
+                return Ok(())
             }
+            return Error(Invalid)
         }
         if marker == 192 || marker == 193 || marker == 194 {
-            if let Some(_) = frame {
+            if frame || span < 8 || input[at + 2] != 8 {
                 return Error(Invalid)
             }
-            if span < 8 || input[at + 2] != 8 {
-                return Error(Invalid)
-            }
-            let height: u32 = int.widen((list.word_be(input, at + 3) : u16))
-            let width: u32 = int.widen((list.word_be(input, at + 5) : u16))
             let components: u64 = int.widen(input[at + 7])
-            if (components != 1 && components != 3) || span != 8 + 3 * components || width == 0 || height == 0 {
+            if (components != 1 && components != 3) || span != 8 + 3 * components {
                 return Error(Invalid)
             }
-            let w: u64 = int.widen(width)
-            let h: u64 = int.widen(height)
-            if w * h > limits.max_pixels {
-                return Error(Limit)
-            }
-            frame = Some(Size(width: width, height: height))
+            frame = true
         } else {
             if marker != 196 && marker != 204 && marker != 219 && marker != 221 && marker != 254 && (marker < 224 || marker > 239) {
                 return Error(Invalid)
@@ -123,6 +118,26 @@ pub fn probe(input: Bytes, limits: DecodeLimits) -> Result[Size, Error] {
         Error(Limit)
     } else {
         Error(Invalid)
+    }
+}
+
+/// Checks the JPEG with the shared image firewall before native allocation.
+pub fn probe(input: Bytes, limits: DecodeLimits) -> Result[Size, Error] {
+    let length = list.len(input)
+    if length > limits.max_input_bytes {
+        return Error(Limit)
+    }
+    check_header(input, limits.max_header_bytes)?
+    // The JPEG scanner advances through the compressed bytes and metadata.
+    let steps = int.saturating_add(256u64, int.saturating_mul(16u64, length))
+    let checked = image_core.image.probe(input, image_core.image.Limits(max_bytes: limits.max_input_bytes, max_pixels: limits.max_pixels, max_frames: 1, max_steps: steps))
+    match checked {
+        Ok(info) => Ok(Size(width: info.width, height: info.height)),
+        Error(ByteLimit) => Error(Limit),
+        Error(PixelLimit) => Error(Limit),
+        Error(FrameLimit) => Error(Limit),
+        Error(WorkLimit) => Error(Limit),
+        Error(_) => Error(Invalid),
     }
 }
 
@@ -148,11 +163,13 @@ pub fn shrink_eighths(source: Size, target: Size) -> u32 {
 pub fn decoder(f: Foreign[Jpeg], take input: Bytes, target: Size, limits: DecodeLimits) -> Result[Decoder, Error] {
     let size = probe(input, limits)?
     let eighths = shrink_eighths(size, target)
+    let width: u64 = int.widen(size.width)
+    let helper = width * DECODE_ROW_NS_PER_PIXEL > STACK_CALL_NS
     match native.decoder_create(f, limits.max_native_bytes) {
         None => Error(Limit),
-        Some(p) => match Decoder(f: f, p: p, input: take input, eighths: eighths) {
+        Some(p) => match Decoder(f: f, p: p, input: take input, eighths: eighths, helper: helper) {
             Ok(take d) => Ok(take d),
-            Error((_, (grant, handle, _, _))) => {
+            Error((_, (grant, handle, _, _, _))) => {
                 native.decoder_destroy(grant, handle)
                 Error(Limit)
             },
@@ -162,8 +179,12 @@ pub fn decoder(f: Foreign[Jpeg], take input: Bytes, target: Size, limits: Decode
 
 /// Advances header processing. Some contains the RGB output dimensions.
 /// Call until it returns Some before requesting strips.
-pub fn start_decode(mut d: Decoder) -> Result[Option[Size], Error] {
-    let code = native.decoder_start(d.f, d.p, d.input, d.eighths)
+pub fn start_decode(mut d: Decoder) -> Result[Option[Size], Error] waits {
+    let code = if d.helper {
+        native.decoder_start_waiting(d.f, d.p, d.input, d.eighths)
+    } else {
+        native.decoder_start(d.f, d.p, d.input, d.eighths)
+    }
     if code < 0 {
         return Error(status(int.widen(code)))
     }
@@ -175,8 +196,12 @@ pub fn start_decode(mut d: Decoder) -> Result[Option[Size], Error] {
 
 /// Writes at most 16 RGB rows to the initialized destination. The destination
 /// must fit all remaining rows up to 16. Pending can occur without output.
-pub fn decode_strip(mut d: Decoder, mut rgb: Bytes) -> Result[DecodeStep, Error] {
-    let code = native.decode_strip(d.f, d.p, d.input, mut rgb)
+pub fn decode_strip(mut d: Decoder, mut rgb: Bytes) -> Result[DecodeStep, Error] waits {
+    let code = if d.helper {
+        native.decode_strip_waiting(d.f, d.p, d.input, mut rgb)
+    } else {
+        native.decode_strip(d.f, d.p, d.input, mut rgb)
+    }
     if code == -5 {
         return Ok(End)
     }
@@ -191,7 +216,7 @@ pub fn decode_strip(mut d: Decoder, mut rgb: Bytes) -> Result[DecodeStep, Error]
 }
 
 /// Takes an initialized output buffer. Its length bounds the JPEG size.
-pub fn encoder(f: Foreign[Jpeg], size: Size, quality: i32, sampling: Sampling, coding: Coding, max_native_bytes: u64, take output: Bytes) -> Result[Encoder, Error] {
+pub fn encoder(f: Foreign[Jpeg], size: Size, quality: i32, sampling: Sampling, coding: Coding, max_native_bytes: u64, take output: Bytes) -> Result[Encoder, Error] waits {
     let sampling_bit: u32 = match sampling {
         S444 => 0,
         S420 => 1,
@@ -203,14 +228,20 @@ pub fn encoder(f: Foreign[Jpeg], size: Size, quality: i32, sampling: Sampling, c
     let Some(p) = native.encoder_create(f, max_native_bytes) else {
         return Error(Limit)
     }
-    let mut e = match Encoder(f: f, p: p, output: take output) {
+    let width: u64 = int.widen(size.width)
+    let helper = width * ENCODE_ROW_NS_PER_PIXEL > STACK_CALL_NS
+    let mut e = match Encoder(f: f, p: p, output: take output, helper: helper) {
         Ok(take e) => e,
-        Error((_, (grant, handle, _))) => {
+        Error((_, (grant, handle, _, _))) => {
             native.encoder_destroy(grant, handle)
             return Error(Limit)
         },
     }
-    let code = native.encoder_start(e.f, e.p, size.width, size.height, quality, mode, mut e.output)
+    let code = if e.helper {
+        native.encoder_start_waiting(e.f, e.p, size.width, size.height, quality, mode, mut e.output)
+    } else {
+        native.encoder_start(e.f, e.p, size.width, size.height, quality, mode, mut e.output)
+    }
     if code < 0 {
         Error(status(int.widen(code)))
     } else {
@@ -219,8 +250,12 @@ pub fn encoder(f: Foreign[Jpeg], size: Size, quality: i32, sampling: Sampling, c
 }
 
 /// Accepts 1–16 whole RGB rows. Supply any unconsumed rows again.
-pub fn encode_strip(mut e: Encoder, rgb: Bytes) -> Result[u32, Error] {
-    let code = native.encode_strip(e.f, e.p, rgb, mut e.output)
+pub fn encode_strip(mut e: Encoder, rgb: Bytes) -> Result[u32, Error] waits {
+    let code = if e.helper {
+        native.encode_strip_waiting(e.f, e.p, rgb, mut e.output)
+    } else {
+        native.encode_strip(e.f, e.p, rgb, mut e.output)
+    }
     if code < 0 {
         Error(status(int.widen(code)))
     } else {

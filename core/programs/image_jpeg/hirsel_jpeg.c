@@ -478,3 +478,26 @@ int64_t hjpg_encode_finish_progressive(void *encoder, uint8_t *output, uint64_t 
 {
     return finish(encoder, output, size, true);
 }
+
+int32_t hjpg_decoder_start_waiting(void *decoder, const uint8_t *input, uint64_t size, uint32_t scale)
+{
+    return hjpg_decoder_start(decoder, input, size, scale);
+}
+
+int32_t hjpg_decode_strip_waiting(void *decoder, const uint8_t *input, uint64_t size,
+                                 uint8_t *rgb, uint64_t rgb_size)
+{
+    return hjpg_decode_strip(decoder, input, size, rgb, rgb_size);
+}
+
+int32_t hjpg_encoder_start_waiting(void *encoder, uint32_t width, uint32_t height, int32_t quality,
+                                  uint32_t mode, uint8_t *output, uint64_t size)
+{
+    return hjpg_encoder_start(encoder, width, height, quality, mode, output, size);
+}
+
+int32_t hjpg_encode_strip_waiting(void *encoder, const uint8_t *rgb, uint64_t rgb_size,
+                                 uint8_t *output, uint64_t size)
+{
+    return hjpg_encode_strip(encoder, rgb, rgb_size, output, size);
+}

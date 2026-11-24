@@ -14,12 +14,19 @@ def main(work, reference):
     codec = vectors.parent
     fixtures = work / "fixtures"
     fixtures.mkdir(parents=True, exist_ok=True)
+    staged = work / "codec"
+    staged.mkdir(exist_ok=True)
+    dependencies = ["image_core", "media_container", "media_bits"]
+    (work / "hirsel.toml").write_text("[workspace]\nmembers = " + json.dumps(["codec", *dependencies]) + "\n")
+    for dependency in dependencies:
+        shutil.copytree(codec.parent / dependency, work / dependency, dirs_exist_ok=True)
     for name in ("image_jpeg.hirsel", "native.hirsel", "libhirsel_jpeg.a"):
-        shutil.copyfile(codec / name, work / name)
-    shutil.copyfile(vectors / "tests.hirsel", work / "tests.hirsel")
+        shutil.copyfile(codec / name, staged / name)
+    shutil.copyfile(vectors / "tests.hirsel", staged / "tests.hirsel")
     manifest = (codec / "hirsel.toml").read_text()
+    manifest = manifest.replace("[dependencies]\n", "[dependencies]\nstd = { major = 1 }\n")
     tests = (vectors / "test.toml").read_text()
-    (work / "hirsel.toml").write_text(manifest + tests.replace('"fixtures"', json.dumps(str(fixtures))))
+    (staged / "hirsel.toml").write_text(manifest + tests.replace('"fixtures"', json.dumps(str(fixtures))))
 
     direct = work / "direct"
     subprocess.run([
@@ -48,16 +55,21 @@ def main(work, reference):
 
     # High-entropy scanlines exercise output suspension in sequential encoding.
     wide_rgb = fixtures / "wide.rgb"
-    wide_rgb.write_bytes(random.Random(2233).randbytes(2048 * 37 * 3))
+    noise = random.Random(2233).randbytes(2048 * 37 * 3)
+    wide_rgb.write_bytes(noise)
     run("encode", wide_rgb, fixtures / "wide.jpg", 0, 2048, 37)
+    narrow_rgb = fixtures / "narrow.rgb"
+    narrow_rgb.write_bytes(b"".join(noise[y * 2048 * 3 : y * 2048 * 3 + 128 * 3] for y in range(37)))
+    run("encode", narrow_rgb, fixtures / "narrow.jpg", 0, 128, 37)
     # A flat progressive scan can complete rows without consuming input.
     flat_rgb = fixtures / "flat.rgb"
     flat_jpeg = fixtures / "flat.jpg"
     flat_rgb.write_bytes(bytes(512 * 512 * 3))
     run("encode", flat_rgb, flat_jpeg, 2, 512, 512)
-    with flat_jpeg.open("ab") as stream:
-        stream.write(bytes(65536))
-    for name in ("baseline", "encode-2", "long-app", "wide", "flat"):
+    flat = flat_jpeg.read_bytes()
+    assert flat.endswith(b"\xff\xd9")
+    flat_jpeg.write_bytes(flat[:-2] + b"\xff\xe3\xff\xff" + bytes(65533) + flat[-2:])
+    for name in ("baseline", "encode-2", "long-app", "wide", "narrow", "flat"):
         for scale in range(1, 9) if name in ("baseline", "encode-2") else (8,):
             run("decode", fixtures / f"{name}.jpg", fixtures / f"{name}-{scale}.rgb", scale)
 

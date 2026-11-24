@@ -242,6 +242,7 @@ pub use tls_rule::{Name, Pattern, TlsRule, TlsTrust};
 mod cred_grant;
 pub mod key_wrap;
 pub use cred_grant::{CredGrant, CredSource, StsSource};
+pub mod packet_cipher;
 pub mod random_stream;
 pub mod secret_aead;
 mod secret_grant;

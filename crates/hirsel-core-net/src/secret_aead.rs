@@ -1,11 +1,13 @@
 //! The TLS-5 AEAD sink over ring.
 
-use crate::{SecretUse, key_wrap::KeyFailure};
+use crate::{
+    SecretUse,
+    key_wrap::KeyFailure,
+    packet_cipher::{PacketCipher, TAG_LEN},
+};
 use ring::aead;
 use std::{mem::MaybeUninit, ops::Deref, sync::OnceLock};
 use zeroize::Zeroizing;
-
-const TAG_LEN: usize = 16;
 
 #[cfg(test)]
 thread_local! {
@@ -33,7 +35,7 @@ impl AeadAlg {
         self as u8
     }
 
-    fn algorithm(self) -> &'static aead::Algorithm {
+    pub(super) fn algorithm(self) -> &'static aead::Algorithm {
         match self {
             Self::ChaCha20Poly1305 => &aead::CHACHA20_POLY1305,
             Self::Aes128Gcm => &aead::AES_128_GCM,
@@ -75,7 +77,7 @@ pub struct AeadInput<'a> {
 /// to the bytes, so narrowing and sharing a designation do not expand again.
 pub struct SecretBytes {
     bytes: Zeroizing<Vec<u8>>,
-    aead: [OnceLock<Result<Box<aead::LessSafeKey>, KeyFailure>>; 3],
+    aead: [OnceLock<Result<Box<PacketCipher>, KeyFailure>>; 3],
 }
 
 impl SecretBytes {
@@ -86,7 +88,7 @@ impl SecretBytes {
         }
     }
 
-    fn key(&self, alg: AeadAlg) -> Result<&aead::LessSafeKey, KeyFailure> {
+    fn key(&self, alg: AeadAlg) -> Result<&PacketCipher, KeyFailure> {
         self.aead[usize::from(alg.case())]
             .get_or_init(|| expand(alg, &self.bytes).map(Box::new))
             .as_deref()
@@ -138,42 +140,25 @@ impl AeadInput<'_> {
     /// The caller publishes its bytes only on success.
     pub fn apply(&self, key: &SecretBytes, out: &mut [MaybeUninit<u8>]) -> Result<(), KeyFailure> {
         let key = key.key(self.alg)?;
-        let nonce =
-            aead::Nonce::try_assume_unique_for_key(self.nonce).map_err(|_| KeyFailure::Invalid)?;
-        let aad = aead::Aad::from(self.aad);
+        let nonce = self.nonce.try_into().map_err(|_| KeyFailure::Invalid)?;
         match self.mode {
             AeadMode::Seal => {
-                let (body, tail) = out.split_at_mut(self.bytes.len());
-                let body = body.write_copy_of_slice(self.bytes);
-                let tag = key
-                    .seal_in_place_separate_tag(nonce, aad, body)
+                key.seal_into(nonce, self.aad, self.bytes, out)
                     .expect("AEAD message length checked before issue");
-                tail.write_copy_of_slice(tag.as_ref());
+                Ok(())
             }
-            AeadMode::Open => {
-                let len = self
-                    .bytes
-                    .len()
-                    .checked_sub(TAG_LEN)
-                    .ok_or(KeyFailure::Tampered)?;
-                let (body, tag) = self.bytes.split_at(len);
-                let tag = aead::Tag::try_from(tag).map_err(|_| KeyFailure::Tampered)?;
-                let body = out.write_copy_of_slice(body);
-                // ring clears the decrypted bytes if authentication fails.
-                key.open_in_place_separate_tag(nonce, aad, tag, body, 0..)
-                    .map_err(|_| KeyFailure::Tampered)?;
-            }
+            AeadMode::Open => key
+                .open_into(nonce, self.aad, self.bytes, out)
+                .map_err(|_| KeyFailure::Tampered),
         }
-        Ok(())
     }
 }
 
-fn expand(alg: AeadAlg, key: &[u8]) -> Result<aead::LessSafeKey, KeyFailure> {
+fn expand(alg: AeadAlg, key: &[u8]) -> Result<PacketCipher, KeyFailure> {
     #[cfg(test)]
     EXPANSIONS.update(|n| n + 1);
 
-    let key = aead::UnboundKey::new(alg.algorithm(), key).map_err(|_| KeyFailure::Invalid)?;
-    Ok(aead::LessSafeKey::new(key))
+    PacketCipher::new(alg, key).map_err(|_| KeyFailure::Invalid)
 }
 
 #[cfg(test)]

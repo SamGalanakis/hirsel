@@ -959,3 +959,6 @@ fn the_release_gate_admits_6_13_and_later_only() {
         assert_eq!(release_allows_uring(release), allowed, "{release}");
     }
 }
+
+#[path = "udp_tests.rs"]
+mod udp_tests;

@@ -204,13 +204,13 @@ A refused selection returns `NotCurrent(found)` before handles run. A disk
 genesis or standalone install requires a known release identity (an available `revision`)
 and returns `IdentityUnknown` if it is unavailable.
 
-**Held runs (RUNNER-SPEC v2.62 §14.6 "The activation fate").** An install whose store holds
+**Held runs (RUNNER-SPEC v2.64 §14.6 "The activation fate").** An install whose store holds
 a run that this activation holds (one parked, or one started under another release identity)
 settles it in the install's own commit. `--hirsel-held=release|cancel`<!-- doc-ref: external --> gives every held run a
 fate, and each `--hirsel-held-entry=PATH=release|cancel`<!-- doc-ref: external --> gives one for that entry path. Both
 are run arguments, like `--hirsel-install`<!-- doc-ref: external -->. An install that finds a held run with no fate, or
-an entry option that matches no held run, exits 1 with `Unsettled` and the trigger report, and
-writes nothing. A hand install that recovers a hosted group therefore names a fate when the
+an entry option whose path is the entry path of no pending run and of no entry the old or new
+release registers, exits 1 with `Unsettled` and the trigger report, and publishes no cut. A hand install that recovers a hosted group therefore names a fate when the
 store holds held runs:
 
 ```sh
@@ -823,7 +823,7 @@ answered `Error(Protocol)` and closes only that exchange.
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
-| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Unsettled. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Unsettled is a deploy whose trigger report has a held run with no fate, or an `entries` path that matches no held run; its report names them. Failed uses the same classes. An exchange error never changes another request's outcome. |
+| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Unsettled. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Unsettled is a deploy whose trigger report has a held run with no fate, or an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers; its report names them. Failed uses the same classes. An exchange error never changes another request's outcome. |
 | 5 GroupInfo(G) | A group lookup's result. |
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
@@ -1222,7 +1222,7 @@ takes the first that applies:
    and `Cancel` requests its cancel so that NEW's head ends it `Cancelled`. So NEW never parks a
    row that this activation would have held. This class comes before `gone`: `triggers.start` runs before
    the head looks for the entry, so a started granted run under another digest whose entry
-   NEW removes is held, not consumed. A parked `Request` hold stays parked even when the
+   NEW removes is held, not consumed. A parked `Request` hold is held even when the
    digests are equal.
 3. **`gone`**: NEW's trigger entry list does not allow its entry, or no registered entry of
    NEW has its kind, path and argument schema. NEW's head will consume it with the terminal
@@ -1236,11 +1236,16 @@ takes the first that applies:
 
 The report gives the exact count and earliest due time for each (class, kind, entry path,
 argument schema). Each `held` group also carries `fate: Option[HeldFate]`, resolved from the
-deploy's `Fates` (the prepare launch's fourth argument). TRIGGERS is the value-codec
+deploy's `Fates` (the prepare launch's fourth argument). Each `held` group is also keyed by
+`hold: Option[HeldBy]`, `None` on other classes, with `HeldBy = Cut | Revision | Request(same_code: bool)`: `Cut` is a started run that is not
+parked, `Revision` and `Request` name its hold, and `same_code` is true when the rows' stamp
+equals NEW's identity digest. A `Request(same_code: true)` group was held by this code
+(RUNNER-SPEC v2.64 §14.6, residual R-2393-1). TRIGGERS is the value-codec
 `TriggerReport { rows: List[TriggerScanRow], unmatched: List[Bytes] }`, and `unmatched` lists
-each `entries` path that matches no held row. When every held group has a fate and `unmatched`
-is empty, the child writes PREPARED with one activation rewrite per held row (STORE-SPEC v2.101
-§3.5a). Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host fails the deploy
+each `entries` path that is the entry path of no pending row and of no entry OLD or NEW
+registers. When every held group has a fate and `unmatched`
+is empty, the child writes PREPARED with one activation rewrite per held row (STORE-SPEC v2.102
+§3.5a); a rewrite list that does not fit fails prepare with `Limit(triggers)`. Otherwise it writes TRIGGERS and no PREPARED, and exits 0; the host fails the deploy
 `Unsettled`. A report above the prepare child's bound fails
 prepare with `Limit(triggers)`. The guard on started granted runs uses the identity digest,
 whose entry revision covers changes in `handles` such as table names, bindings and key codecs,

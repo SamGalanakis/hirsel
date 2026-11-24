@@ -2157,9 +2157,9 @@ fn exec_close_rows_match_by_part_and_impossible_spawn_issues_no_handles() {
             let (provider, key) = tape.on_tape_exec((no_host.provider(), 0)).unwrap();
             let mut files = crate::host_file::Files::default();
             let mut context = Context::new(1 << 20);
-            context.host_files = &mut files;
             files.net_tape = Some(SocketTape::new(provider, key));
             let grant = files.registry.grant(provider, key);
+            context.host_files = &mut files;
             let spawned = hirsel_core_exec_spawn(
                 &mut context,
                 grant,

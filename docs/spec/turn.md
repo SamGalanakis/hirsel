@@ -135,7 +135,7 @@ pub type Transport = Datagram | Stream      // client-to-server leg; the relay l
 
 pub type Now { mono_ns: u64, unix_s: u64 }  // monotonic for timers, wall for credential expiry
 
-pub type Poll = Send(u64) | WakeAt(u64) | Close(u64) | Idle   // Close: relay only (TURN-8)
+pub type Poll = Send(u64) | WakeAt(u64) | Close(u64) | Idle   // Close: relay only (TURN-7)
 
 pub type TurnError = Config | Clock | Closed(Failure) | NotAllocated | Unpermitted(Addr)
                    | ChannelsFull | StreamsFull | Framing | Wire(stun_ice.Error)
@@ -285,8 +285,8 @@ takes it as a `Secret` with `kdf`, from a grant or `seal`, and derives
 
 `t` is `mono_ns / 10^6` as 8 bytes big-endian, `five_tuple` is the ingress kind, the
 server's local address and the client's address as their canonical byte forms (for a
-`Stream` origin behind H1, the local address is the PROXY v2 header's destination address
-and the client's is its source, both as the caller passes them to `connected`), and
+`Stream` origin behind H1, the local address is the PROXY v2 header's destination address,
+as the caller passes it to `connected`, and the client's is its source), and
 `nonce_key` is a `Secret` with `mac` (from `derive_hkdf_sha256(master, "", "hirsel turn
 nonce", 32, "mac")` or any caller key). A nonce older than `nonce_s`, with a wrong tag, or
 whose `t` is ahead of the current `mono_ns / 10^6` (issued before a restart of the caller's
@@ -304,11 +304,16 @@ and realm are not secret.
 ChannelData are never authenticated):
 
 1. No MESSAGE-INTEGRITY and no MESSAGE-INTEGRITY-SHA256: 401 with REALM, a fresh NONCE and
-   PASSWORD-ALGORITHMS [SHA-256, MD5]. The answer is computed, not stored. On `Udp` ingress,
-   where the source address may be spoofed, this 401 is 116 to 176 bytes (REALM of 1 to 64
-   bytes) for a 20-byte request, so it is rate-limited: at most `challenge_per_s` per source
-   prefix per second, and a request over that is discarded and counted `challenged`. The
-   only state the relay keeps for unauthenticated requests is the source table below.
+   PASSWORD-ALGORITHMS [SHA-256, MD5]. The answer is computed, not stored.
+
+**Pre-authentication replies are rate-limited on `Udp` ingress**, where the source address
+may be spoofed. Step 1's 401 is 116 to 176 bytes (REALM of 1 to 64 bytes) for a 20-byte
+request, and steps 2 to 5 and 7 answer forged requests with a 400, 401 or 438 of the same
+order. So every reply to a request whose integrity has not verified, at any of those steps,
+takes one unit of its source prefix's `challenge_per_s` for the current second; with none
+left, the request is discarded and counted `challenged`. Stream ingress is not limited: a
+stream's source completed a TCP handshake and cannot be spoofed. The only state the relay
+keeps for unauthenticated requests is the source table below.
 2. Integrity present but USERNAME (or USERHASH), REALM or NONCE missing: 400, unauthenticated.
 3. The NONCE carries the cookie with the Password algorithms bit (every nonce this relay
    issues does). If the request has neither PASSWORD-ALGORITHMS nor PASSWORD-ALGORITHM, it is
@@ -330,8 +335,10 @@ ChannelData are never authenticated):
    relay derives `relay_key`, if the client's source prefix has derivations left this second
    (`derive_per_source_s`, in the source table); if not, the request is discarded and
    counted `throttled`, and the client's retransmission retries. Step 5 has already shown the
-   source received a nonce at its address, so a host can spend only its own prefix's budget:
-   forged usernames from one host never delay another's first Allocate.
+   source received a nonce at its address, so a host can spend only the budget of its own
+   prefix's slot: forged usernames from one host delay another's first Allocate only when
+   the two prefixes share a slot, which a fresh slot key at every `relay` makes a
+   `1 / sources` chance per pair.
 7. Integrity does not verify: 401 with REALM and NONCE. MESSAGE-INTEGRITY-SHA256 is checked
    when present, else MESSAGE-INTEGRITY.
 8. Nonce older than `nonce_s`: 438 with a fresh NONCE, REALM and PASSWORD-ALGORITHMS.
@@ -465,7 +472,7 @@ pub fn default_deny() -> List[Prefix]
 pub fn relay(c: RelayConfig, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError]
 pub fn from_client(mut r: Relay, now: Now, rnd: Random, o: Origin, mut packet: Bytes, mut out: Bytes) -> Result[Out, TurnError]
 pub fn from_peer(mut r: Relay, now: Now, relayed: Addr, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[Out, TurnError]
-pub fn connected(mut r: Relay, conn: u64, local: Addr, client: Addr, now: Now) -> Result[(), TurnError]
+pub fn connected(mut r: Relay, conn: u64, local: Addr, now: Now) -> Result[(), TurnError]
 pub fn disconnected(mut r: Relay, conn: u64)
 pub fn poll(mut r: Relay, now: Now) -> Poll
 pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64) -> Result[u64, TurnError]
@@ -492,15 +499,16 @@ full address (IP and source port) the policy denies is `Nothing`, counted `polic
 expires allocations, permissions, channels and channel quarantines at their exact times and
 answers the next `WakeAt`.
 
-**Stream connections.** The caller calls `connected(r, conn, local, client, now)` once per
-accepted stream, before its first `from_client`: `local` is the address the client
-connected to and `client` its address (behind H1, the PROXY v2 header's destination and
-source). With `streams` connections already open it answers `StreamsFull`, and the caller
+**Stream connections.** The caller calls `connected(r, conn, local, now)` once per accepted
+stream, before its first `from_client`: `local` is the address the client connected to
+(behind H1, the PROXY v2 header's destination). The client's address arrives, as for UDP, in
+each `from_client`'s `Origin.client` (behind H1, the header's source). With `streams` connections already open it answers `StreamsFull`, and the caller
 closes the connection. A `Stream(conn)` origin that was never `connected` is discarded and
 counted `unknown_stream`. A connection that holds no allocation `stream_allocate_s` after
-`connected` (none was made, or the last one ended) is forgotten by the relay, counted
-`idle_stream`, and `poll` answers `Close(conn)`: the caller closes it and need not call
-`disconnected`. Without this bound a stream that never allocates would hold the caller's
+`connected`, or `stream_allocate_s` after its last allocation ended (the timer restarts
+then), is forgotten by the relay, counted `idle_stream`, and `poll` answers `Close(conn)`:
+the caller closes it, need not call `disconnected`, and calls `poll` again until it answers
+`WakeAt` or `Idle`. Without this bound a stream that never allocates would hold the caller's
 65,552-byte framer buffer for ever.
 
 **Allocate**, RFC 8656 §7.2 steps 2 to 10 in this order, after TURN-5's checks (step 1):
@@ -657,8 +665,8 @@ caller's trace reads.
   address), and `turns:` on 443 once H1 exists.
 - On an H1 listener, reads and checks the required PROXY v2 header (U6) under H1's
   contract before the first byte reaches the `Framer`, closing the connection when H1
-  says so, and passes the header's source as `Origin.client` and to `connected`, with its
-  destination as `local`.
+  says so, and passes the header's source as `Origin.client` and its destination as
+  `connected`'s `local`.
 - Demultiplexes by first byte (RFC 7983) on every socket it shares.
 
 ## Consumer contract coverage
@@ -707,7 +715,7 @@ not re-pinned; U0 must leave it green.
 
 - **`long_term_key_vectors`** (U1). *Scenario:* `seal` the password, `derive_digest` with
   `Md5` and `Raw` for the username, realm and password of RFC 5769 §2.4's long-term request
-  (realm `example.org`, password `TheMatrix` after SASLprep), then `verify_key` with `Long`
+  (username `マトリックス`, realm `example.org`, password `TheMatrIX` after SASLprep, as Pion's test spells it), then `verify_key` with `Long`
   on that request's bytes; `derive_digest` with `Sha256` for RFC 8489 Appendix B.1's
   username, realm and password, then `verify_key` with `Long` on B.1's request as corrected
   by erratum 6268 (PASSWORD-ALGORITHM added, length 0x0090), whose bytes are written into
@@ -744,12 +752,14 @@ not re-pinned; U0 must leave it green.
   a leading zero, or forged nonces; then 2,000 valid first Allocates in one second from one
   source; then Refreshes on the allocations made. Separately, under defaults: 10^4 requests
   without integrity from one UDP source in one second; and one source sending 2,000
-  well-formed forged-username requests a second with valid nonces while a second source
-  sends one valid Allocate. *Oracle:* by hand from TURN-5: the recording holds no derivation
+  well-formed forged-username requests a second with valid nonces while a second source,
+  whose prefix the case's fixed seed places in another slot, sends one valid Allocate; and
+  10^4 spoofed UDP requests from one source carrying integrity, USERNAME, REALM and a forged
+  NONCE. *Oracle:* by hand from TURN-5: the recording holds no derivation
   frame for the first group or for the Refreshes; exactly `derive_per_source_s` derivations
   happen for the one source in its second and the rest are `throttled`; exactly 10 replies
-  go to the bare requests and the rest are `challenged`; the second source's Allocate
-  succeeds.
+  go to the bare requests and exactly 10 to the forged-nonce ones, the rest `challenged`;
+  the second source's Allocate succeeds.
 - **`allocate_check_order`** (U3). *Scenario:* one request per step of TURN-7's Allocate list
   (steps 2 to 10 and pool exhaustion), each violating that step and every later one.
   *Oracle:* RFC 8656 §7.2 by hand: the earliest step's code.

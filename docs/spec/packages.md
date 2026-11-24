@@ -846,8 +846,8 @@ library is published by `pack`.
 ### Adding a dependency
 
 `hirsel add` edits a manifest and updates its lock. The implemented forms accept HTTPS URLs,
-`.hpkg` paths and package-store roots. GitHub references, workspace placement, toolchain names
-and member directories are planned.
+`github:` references, `.hpkg` paths and package-store roots. Workspace placement, toolchain
+names and member directories are planned.
 
 `hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 

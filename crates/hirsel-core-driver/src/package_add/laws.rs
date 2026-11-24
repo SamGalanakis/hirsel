@@ -663,3 +663,227 @@ fn s6_add_protocol() {
     store_source_and_post_commit_failure();
     archive_memory_limits();
 }
+
+enum Release {
+    Asset(Vec<u8>),
+    Redirect(&'static str),
+    Missing,
+}
+
+/// A release host standing in for github.com behind a CONNECT proxy. Each exchange is the
+/// expected request path and its response, in order; the recorded paths are compared at the end,
+/// so a followed redirect to another host or an extra lookup fails the law.
+fn release_host(
+    law: &PackageLaw,
+    exchanges: Vec<(&'static str, Release)>,
+    commands: impl FnOnce(&dyn Fn(&str, &[&str]) -> Command),
+) {
+    use rustls::{
+        ServerConfig, ServerConnection, StreamOwned,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    const CA: &[u8] = include_bytes!("../../../hirsel-core-rt/testdata/tls/github-ca.pem");
+    const LEAF: &[u8] = include_bytes!("../../../hirsel-core-rt/testdata/tls/github.pem");
+    const KEY: &[u8] = include_bytes!("../../../hirsel-core-rt/testdata/tls/github.key.pem");
+    law.write("github-ca.pem", CA);
+    let config = Arc::new(
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from_pem_slice(LEAF).unwrap()],
+                PrivateKeyDer::from_pem_slice(KEY).unwrap(),
+            )
+            .unwrap(),
+    );
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let expected: Vec<String> = exchanges
+        .iter()
+        .map(|(path, _)| format!("CONNECT github.com:443 GET {path}"))
+        .collect();
+    let (done, finished) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut seen = Vec::new();
+        let mut exchanges = exchanges.into_iter();
+        loop {
+            let socket = match listener.accept() {
+                Ok((socket, _)) => socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if finished.recv_timeout(Duration::from_millis(5))
+                        != Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                Err(error) => panic!("{error}"),
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
+            let mut socket = BufReader::new(socket);
+            let connect = headers(&mut socket);
+            let connect = connect
+                .strip_suffix(" HTTP/1.1\r\n")
+                .unwrap_or(&connect)
+                .to_owned();
+            if connect != "CONNECT github.com:443" {
+                seen.push(connect);
+                continue;
+            }
+            let socket = socket.get_mut();
+            socket
+                .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                .unwrap();
+            let mut tls = BufReader::new(StreamOwned::new(
+                ServerConnection::new(config.clone()).unwrap(),
+                socket,
+            ));
+            let request = headers(&mut tls);
+            let request = request.strip_suffix(" HTTP/1.1\r\n").unwrap_or(&request);
+            seen.push(format!("{connect} {request}"));
+            let tls = tls.get_mut();
+            let Some((path, release)) = exchanges.next() else {
+                continue;
+            };
+            if request != format!("GET {path}") {
+                continue;
+            }
+            let _ = match release {
+                Release::Asset(bytes) => write!(
+                    tls,
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+                    bytes.len()
+                )
+                .and_then(|_| tls.write_all(&bytes)),
+                Release::Redirect(location) => write!(
+                    tls,
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+                ),
+                Release::Missing => tls.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                ),
+            };
+            let _ = tls.flush();
+        }
+        seen
+    });
+    commands(&|dir, args| {
+        let mut command = if args[0] == "fetch" {
+            let mut arguments: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            arguments.extend(["--package-store".into(), law.path("cold").display().to_string()]);
+            let mut command = process::tape_request_command(&arguments, law.dir.path());
+            command.env("XDG_CACHE_HOME", law.path("cache"));
+            command
+        } else {
+            add(law, dir, args)
+        };
+        command
+            .env("ALL_PROXY", &proxy)
+            .env("NO_PROXY", "")
+            .env_remove("no_proxy")
+            .env("SSL_CERT_FILE", law.path("github-ca.pem"))
+            .env_remove("SSL_CERT_DIR");
+        command
+    });
+    done.send(()).unwrap();
+    assert_eq!(server.join().unwrap(), expected);
+}
+
+#[test]
+fn s7_add_github() {
+    // Hand-built: the tag `v1.0+build 2` percent-encoded as one path component.
+    const LATEST: &str = "/o/r/releases/latest";
+    const ASSET: &str = "/o/r/releases/download/v1.0%2Bbuild%202/r.hpkg";
+    const JSON: &str = "/o/r/releases/download/v1.0%2Bbuild%202/json.hpkg";
+    const GONE: &str = "/o/r/releases/download/gone/r.hpkg";
+    let law = PackageLaw::new();
+    law.fixture_json();
+    for app in ["app", "tagged", "bad", "pinned"] {
+        law.app(app, "");
+    }
+    let x = || Release::Asset(fs::read(law.path("vendor/jx.hpkg")).unwrap());
+    let y = || Release::Asset(fs::read(law.path("vendor/jy.hpkg")).unwrap());
+    let url = format!("https://github.com{ASSET}");
+    let bad_manifest = fs::read(law.path("bad/hirsel.toml")).unwrap();
+    release_host(
+        &law,
+        vec![
+            // L7.1 untagged: one lookup, then one archive GET of the tag URL.
+            (LATEST, Release::Redirect("https://github.com/o/r/releases/tag/v1.0%2Bbuild%202")),
+            (ASSET, x()),
+            // L7.1 tagged: no lookup.
+            (JSON, x()),
+            // L7.2 invalid latest redirects: one request each, never followed.
+            (LATEST, Release::Redirect("https://evil.test/o/r/releases/tag/v1")),
+            (LATEST, Release::Redirect("https://github.com/o/other/releases/tag/v1")),
+            (LATEST, Release::Redirect("https://github.com/o/r/releases/tag/a%2Fb")),
+            // L7.2 moved tag: a cold fetch of the saved URL fails the pinned root.
+            (ASSET, y()),
+            // L7.2 --update with a mismatching --root refuses.
+            (ASSET, y()),
+            // L7.2 deleted asset: add names the asset; a cold fetch keeps the fetch diagnostic.
+            (GONE, Release::Missing),
+            (ASSET, Release::Missing),
+        ],
+        |command| {
+            let call = |dir: &str, args: &[&str]| result(command(dir, args).output().unwrap());
+            let json = PackageLaw::pass(call("app", &["github:o/r", "--json"]));
+            let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(json["source"], format!("url:{url}"));
+            assert_eq!(json["root"], PACKAGE_X);
+            let binding = format!("json = {{ major = 1, root = \"{PACKAGE_X}\", url = \"{url}\" }}");
+            let manifest = fs::read_to_string(law.path("app/hirsel.toml")).unwrap();
+            assert!(manifest.contains(&binding), "{manifest}");
+
+            PackageLaw::pass(call("tagged", &["github:o/r/json@v1.0+build 2"]));
+            let manifest = fs::read_to_string(law.path("tagged/hirsel.toml")).unwrap();
+            assert!(
+                manifest.contains(&format!("url = \"https://github.com{JSON}\"")),
+                "{manifest}"
+            );
+
+            for location in [
+                "https://evil.test/o/r/releases/tag/v1",
+                "https://github.com/o/other/releases/tag/v1",
+                "https://github.com/o/r/releases/tag/a%2Fb",
+            ] {
+                PackageLaw::refuse(
+                    call("bad", &["github:o/r"]),
+                    &format!("unexpected latest redirect {location}"),
+                );
+                assert_eq!(fs::read(law.path("bad/hirsel.toml")).unwrap(), bad_manifest);
+            }
+
+            let (status, _, stderr) = call("", &["fetch", "app", "--locked"]);
+            assert_ne!(status, Some(0), "{stderr}");
+            assert!(
+                stderr.contains(&format!("holds {PACKAGE_Y}, but the binding pins {PACKAGE_X}")),
+                "{stderr}"
+            );
+            let pinned = fs::read(law.path("app/hirsel.toml")).unwrap();
+            let (status, _, stderr) = call(
+                "app",
+                &["github:o/r@v1.0+build 2", "--update", "--root", PACKAGE_X],
+            );
+            assert_eq!(status, Some(2), "{stderr}");
+            assert!(stderr.contains("fetched root differs from --root"), "{stderr}");
+            assert_eq!(fs::read(law.path("app/hirsel.toml")).unwrap(), pinned);
+
+            PackageLaw::refuse(
+                call("pinned", &["github:o/r@gone"]),
+                &format!("no release asset r.hpkg at https://github.com{GONE}"),
+            );
+            let (status, _, stderr) = call("", &["fetch", "app", "--locked"]);
+            assert_ne!(status, Some(0), "{stderr}");
+            assert!(
+                stderr.contains(&format!("fetching {url} failed: http status: 404")),
+                "{stderr}"
+            );
+        },
+    );
+}

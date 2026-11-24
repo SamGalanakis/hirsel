@@ -16,12 +16,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 mod edit;
+mod github;
 
 type Failure = Box<dyn std::error::Error>;
 
 enum Source {
     Archive(String),
     Url(String),
+    GitHub(github::Reference),
     Store(Root),
 }
 
@@ -29,6 +31,8 @@ impl Source {
     fn parse(text: String) -> Result<Self, Failure> {
         if text.starts_with("https://") {
             Ok(Self::Url(text))
+        } else if let Some(reference) = text.strip_prefix("github:") {
+            Ok(Self::GitHub(github::Reference::parse(reference)?))
         } else if text.starts_with("sha256:") {
             Ok(Self::Store(Root::parse(&text).ok_or(
                 "expected sha256: followed by 64 lowercase hex digits",
@@ -36,7 +40,7 @@ impl Source {
         } else if text.ends_with(".hpkg") && !text.contains("://") && !text.starts_with("github:") {
             Ok(Self::Archive(text))
         } else {
-            Err("add SOURCE requires an https:// URL, a .hpkg path, or a sha256: root".into())
+            Err("add SOURCE requires an https:// URL, a github: reference, a .hpkg path, or a sha256: root".into())
         }
     }
 }
@@ -231,6 +235,10 @@ fn acquire(
             fetch_https(url).map_err(|error| format!("fetching {url} failed: {error}"))?,
             SourceLocation::Url(url.clone()),
         ),
+        Source::GitHub(reference) => {
+            let url = reference.locator()?;
+            (reference.fetch(&url)?, SourceLocation::Url(url))
+        }
         Source::Archive(path) => {
             let (from, relative) = if Path::new(path).is_absolute() {
                 (

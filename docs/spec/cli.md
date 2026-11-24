@@ -106,11 +106,12 @@ fixed for the session.
 
 `hirsel add SOURCE [--root sha256:HEX] [--update] [--dry-run] [--package-store DIR] [--json]`
 binds one dependency in the nearest package manifest and updates `hirsel.lock`. `SOURCE` is an
-`https://` URL, a `.hpkg` path, or a `sha256:` root already in the package store. It verifies
+`https://` URL, `github:OWNER/REPO[/PACKAGE][@TAG]` (a release asset; untagged, one lookup of
+the latest tag), a `.hpkg` path, or a `sha256:` root already in the package store. It verifies
 the archive and resolves the workspace before publishing the manifest. It exits 0 for added,
 updated, unchanged or a dry run, 2 for a refusal before publication, and 1 for a failure after
-publication begins. The full package specification also covers the planned GitHub references,
-workspace placement, toolchain names and member directories. [Packages](packages.md#adding-a-dependency)
+publication begins. The full package specification also covers the planned workspace
+placement, toolchain names and member directories. [Packages](packages.md#adding-a-dependency)
 
 ## CPU profiles
 

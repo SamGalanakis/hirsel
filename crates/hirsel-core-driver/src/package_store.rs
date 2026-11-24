@@ -143,7 +143,9 @@ impl PackageStore {
     }
 }
 
-pub(crate) fn fetch_https(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+/// The HTTPS-only agent every package fetch uses. `follow` false returns a redirect to the
+/// caller instead of following it.
+pub(crate) fn https_agent(follow: bool) -> ureq::Agent {
     use ureq::tls::{Certificate, RootCerts, TlsConfig};
     let system_roots = rustls_native_certs::load_native_certs();
     let roots = RootCerts::from(
@@ -156,12 +158,20 @@ pub(crate) fn fetch_https(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Erro
         .root_certs(roots)
         .unversioned_rustls_crypto_provider(rustls::crypto::ring::default_provider().into())
         .build();
-    let agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .https_only(true)
-        .tls_config(tls)
-        .build()
-        .new_agent();
-    let mut response = agent.get(url).call()?;
+        .tls_config(tls);
+    if follow {
+        config
+    } else {
+        config.max_redirects(0)
+    }
+    .build()
+    .new_agent()
+}
+
+pub(crate) fn fetch_https(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut response = https_agent(true).get(url).call()?;
     let mut bytes = Vec::new();
     response
         .body_mut()

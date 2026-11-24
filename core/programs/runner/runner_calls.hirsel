@@ -785,62 +785,6 @@ fn test_granted_copied(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), 
     if law_granted_copied(c, r, tasks, n) { Ok(()) } else { Error(()) }
 }
 
-// bind_only (RUNNER-SPEC §3 "Binding", L36): a registry whose grant owns a list, so is not
-// plain, binds its sessions through `runner.wire_bind`. The test chose subject byte 2 for
-// credential [2], so Welcome names Caller(2, [2]). `mine` covers keys from the subject byte
-// up; W wrote keys 1 and 2, so the bound session's image is {2} at 5. A wire call to the
-// registry's `Granted` entry is Refused(NotAllowed): the configuration has no grant.
-type HeldGrant: send { clock: Clock, values: List[u64] }
-
-fn held_body(grant: HeldGrant, caller: runner.Caller, take value: u64) -> Result[u64, Capacity] waits {
-    host.sleep_until(grant.clock, host.mono_ns(grant.clock))
-    Ok(list.len(grant.values) + value)
-}
-
-fn held_place(mut r: runner.Registry[HeldGrant, Hd]) -> Result[(), runner.RegisterError] {
-    runner.granted(mut r, code.describe(held_body), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(mine), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
-}
-
-fn chosen_caller(_seed: (), credential: Bytes) -> Result[runner.BoundCaller, ()] {
-    if list.len(credential) != 1u64 { return Error(()) }
-    Ok(runner.BoundCaller(caller: subject_caller(credential[0]), expires_at_ms: None))
-}
-
-fn drive_bind_only(take d: Drive) -> () waits {
-    let w = conn(d, 1u64)
-    put_at(w, d.clock, 0u64, 1u64)
-    put_at(w, d.clock, 1u64, 2u64)
-    let mut requested: List[Bytes] = list.new()
-    list.push(mut requested, k_mine())
-    list.push(mut requested, key_of(code.identity(code.describe(held_body)), std.codec.of_u64(), std.codec.of_u64()))
-    let binding: runner.Wire[HeldGrant, ()] = runner.wire_bind((), code.describe(chosen_caller), 4096u64, 65536u64)
-    let mut credential: Bytes = list.new()
-    list.push(mut credential, 2u8)
-    let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(take binding), d.head, d.post,
-        code.describe(held_place), requested, Some(take credential), 1u64, 2097152u64))
-    want(wire.caller.issuer == 2u8 && wire.caller.subject == subject_caller(2u8).subject, "bind_only: Welcome names the bound Caller")
-    let mut arg: Bytes = list.new()
-    result.unwrap(std.codec.encode(std.codec.of_u32(), 0u32, mut arg))
-    wire_client.send_frame(wire, Subscribe(1u32, 0u32, take arg, None))
-    let cn: Conn = Socket(take wire, take session)
-    let mut image = Image(rows: map.new(), at: 0u64, completes: 0u64)
-    image_at(cn, mut image, 5u64, 1u64, key_list(Some(2u64), None), string.from("bind_only: mine runs as the bound Caller"))
-    match cn { Socket(sock, _) => wire_client.send_frame(sock, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 1u32, 10000u32, u64_arg(1u64))), _ => fail("bind_only: not a socket") }
-    want(is(frame(cn).outcome, Refused(NotAllowed)), "bind_only: a Granted call is refused")
-    hang(take cn)
-    hang(take w)
-}
-
-pub fn law_bind_only(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    served(c, r, tasks, n, drive_bind_only)
-}
-
-@test
-fn test_bind_only(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    if law_bind_only(c, r, tasks, n) { Ok(()) } else { Error(()) }
-}
-
 // refusals with L2 and L3, one session with q = 0:
 // - V1, C7, L2: 10,000 malformed calls are answered at once at the last version (0) and
 //   record nothing, so the first valid call still commits at 4;

@@ -64,7 +64,7 @@ const PAGE_LINES_MAX: u64 = 256u64
 // over `harness.window`, and how to reach it. A new session starts as `agent` with
 // `narrow`. Each connection's task spends `conn_bytes`, which must hold a wire client.
 pub type Front: send {
-    bind: StaticFn[fn((), Bytes) -> Result[runner.BoundCaller, ()] waits],
+    bind: StaticFn[fn((), Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] waits],
     bind_bytes: u64,
     bind_steps: u64,
     authority: Bytes,
@@ -175,19 +175,17 @@ fn request_position(req: Request) -> Result[u64, u16] {
     Ok(std.int.parse_uint(text_of(take at), 10) ?=> |_| 400u16)
 }
 
-fn bearer(f: Front, req: Request) -> Result[Identity, u16] waits {
+fn bearer(f: Front, req: Request) -> Result[Identity, runner.BindRefusal] waits {
     let Some(auth) = field(req, "authorization") else {
-        return Error(401u16)
+        return Error(Rejected)
     }
     if list.len(auth) <= 7u64 || !std.http1.equal_ascii(std.http.copy_bytes(list.slice(auth, 0u64, 7u64)), string.as_bytes("Bearer ")) {
-        return Error(401u16)
+        return Error(Rejected)
     }
     let Some(take credential) = std.base64.decode(std.http.copy_bytes(list.slice(auth, 7u64, list.len(auth)))) else {
-        return Error(401u16)
+        return Error(Rejected)
     }
-    let Some(runner.BoundCaller(caller: take caller, expires_at_ms: _)) = runner.bind_credential(f.tasks, f.clock, (), f.bind, clone(credential), f.bind_bytes, f.bind_steps) else {
-        return Error(401u16)
-    }
+    let runner.BoundCaller(caller: take caller, ..) = runner.bind_credential(f.tasks, f.clock, (), f.bind, clone(credential), f.bind_bytes, f.bind_steps)?
     Ok(Identity(credential: take credential, caller: take caller))
 }
 
@@ -709,6 +707,10 @@ fn history(d: harness.gateway.Door, f: Front, id: u64, identity: Identity, befor
 }
 
 fn reply(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes) -> () waits {
+    reply_with_retry(mut w, f, status, take payload, false)
+}
+
+fn reply_with_retry(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes, retry: bool) -> () waits {
     let mut head = string.from("HTTP/1.1 ")
     string.push_uint(mut head, int.widen(status), 10u32, 3u64, '0')
     string.push(mut head, " \r\nContent-Length: ")
@@ -716,6 +718,7 @@ fn reply(mut w: WriteHalf, f: Front, status: u16, take payload: Bytes) -> () wai
     if list.len(payload) > 0u64 {
         string.push(mut head, "\r\nContent-Type: application/json")
     }
+    if retry { string.push(mut head, "\r\nRetry-After: 5") }
     string.push(mut head, "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n")
     let _ = std.http.write_wire(mut w, string.into_bytes(take head), payload, f.clock, deadline_ms(f.clock, f.within_ms))
 }
@@ -770,7 +773,8 @@ fn serve_one(d: harness.gateway.Door, f: Front, mut read: ReadHalf, mut write: W
     }
     let identity = match bearer(f, req) {
         Ok(take b) => take b,
-        Error(code) => return reply(mut write, f, code, list.new())
+        Error(Rejected) => return reply(mut write, f, 401u16, list.new()),
+        Error(Unavailable) => return reply_with_retry(mut write, f, 503u16, list.new(), true),
     }
     if list.len(path) == 1u64 {
         if method == b"GET" {

@@ -1,14 +1,18 @@
 // Binding used explicitly by the checkbox application and the wire fixtures.
 // The client supplies a random 16-byte credential and keeps it across reconnects.
-pub fn caller(_seed: (), supplied: Bytes) -> Result[runner.BoundCaller, ()] {
-    if list.len(supplied) != 16u64 { return Error(()) }
+pub fn caller(_seed: (), supplied: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    if list.len(supplied) != 16u64 {
+        return Error(Rejected)
+    }
     let tag = string.as_bytes("hirsel.example.credential.v1")
     let mut hash = std.sha256.start()
     std.sha256.add(mut hash, tag, 0u64, list.len(tag))
     std.sha256.add(mut hash, supplied, 0u64, list.len(supplied))
     let digest = std.sha256.finish(hash)
     let mut subject: Bytes = list.with_capacity(16u64)
-    for i in 0u64 .. 16u64 { list.push(mut subject, digest[i]) }
+    for i in 0u64 .. 16u64 {
+        list.push(mut subject, digest[i])
+    }
     Ok(runner.BoundCaller(caller: store.Caller(issuer: 2u8, subject: take subject), expires_at_ms: None))
 }
 

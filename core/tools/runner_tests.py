@@ -961,20 +961,20 @@ def evaluate(evaluator, inputs_path, definition, launch_image=None):
     return value, report
 
 
-# L36: a movable wire grant (`runner.wire`) and a movable bind seed (`runner.wire_bind`) are
-# each refused at the constructor's plain bound.
-NONPLAIN_WIRES = (('wire_granted_nonplain', 'OwnedGrant'), ('wire_bind_nonplain', 'OwnedSeed'))
+WIRE_BOUNDS = (('wire_granted_nonplain', 'OwnedGrant', 'plain'), ('wire_bind_nonshareable', 'OwnedSeed', 'shareable'))
 
 
 def granted_bound(args, root, work, row):
-    for name, movable in NONPLAIN_WIRES:
+    for name, movable, bound in WIRE_BOUNDS:
         rejected = manifest(root, work, name, extra=[(root / f'core/programs/runner/{name}.hirsel', name)])
         command = [str(args.compiler.resolve()), 'check', '--inputs', str(rejected),
                    '--source-core', '--source-std', '--store', str(work / name), '--json']
         checked = run_case(name, 'checker', command, capture_output=True, text=True)
         report = json.loads(checked.stdout)
         actual = [(d.get('rule'), d.get('message')) for d in report.get('diagnostics', [])]
-        expected = [('LANG-12', f'`runner@1/{name}/{movable}` is not plain')]
+        expected = [('LANG-12', f'`runner@1/{name}/{movable}` is not {bound}')]
+        if bound == 'shareable':  # The argument and result annotations are also refused.
+            expected[:0] = [('LANG-12', 'type argument is not shareable')] * 2
         passed = (checked.returncode == 1 and report.get('accepted') is False and actual == expected
                   and not report.get('incomplete') and not report.get('resources'))
         row(engine='checker', law=name, passed=passed, result=report)

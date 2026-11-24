@@ -10,7 +10,7 @@ fn scripted_entries(mut r: runner.Registry[notes.main.Grants, notes.main.Handles
 
 fn scripted_place(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services, ()], Capacity] {
     let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: None, stream: notes.main.copy_stream(s.stream, supplied.name)))
-    config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
+    config.wire = Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64))
     config.place = code.describe(scripted_entries)
     Ok(take config)
 }
@@ -19,7 +19,11 @@ fn scripted_factory() -> platform.local.Factory[notes.main.Services] {
     platform.local.seeded_factory(scripted_place)
 }
 
-type ScriptedWatch: send { door: harness.gateway.Door, out: Stdout, clock: Clock }
+type ScriptedWatch: send {
+    door: harness.gateway.Door,
+    out: Stdout,
+    clock: Clock
+}
 
 fn scripted_downs(take watch: ScriptedWatch) -> () waits {
     let mut downs = 0u64
@@ -33,11 +37,19 @@ fn scripted_downs(take watch: ScriptedWatch) -> () waits {
     }
 }
 
-type ScriptedControl: codec { action: String, credential: String, at: u64 }
+type ScriptedControl: codec {
+    action: String,
+    credential: String,
+    at: u64
+}
 
 fn scripted_revoke(d: harness.gateway.Door, credential: Bytes, p: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[u64, String] waits {
-    let Ok(take lease) = harness.gateway.route(d, 0u64) else { return Error("could not route revocation") }
-    let Some(address) = latest.read(platform.local.status(lease)).addr else { return Error("no place address") }
+    let Ok(take lease) = harness.gateway.route(d, 0u64) else {
+        return Error("could not route revocation")
+    }
+    let Some(address) = latest.read(platform.local.status(lease)).addr else {
+        return Error("no place address")
+    }
     let keys = result.unwrap(runner.fixture.entry_keys(code.describe(scripted_entries)))
     let Ok(take opened) = runner.fixture.client_at(tasks, net, clock, random, keys, notes.main.wire().socket, address, Some(clone(credential)), p, notes.main.HTTP_MS) else {
         return Error("could not connect for revocation")

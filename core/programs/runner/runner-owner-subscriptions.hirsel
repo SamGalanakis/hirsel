@@ -1,9 +1,9 @@
 // An Ended the owner makes itself passes unchecked; a publisher-made one is content (§3).
-fn wire_end[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32, take outcome: Outcome) {
+fn wire_end[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32, take outcome: Outcome) {
     wire_end_checked(mut s, mut output, sub, take outcome, None)
 }
 
-fn wire_end_checked[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32, take outcome: Outcome, check: Option[u64]) {
+fn wire_end_checked[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32, take outcome: Outcome, check: Option[u64]) {
     let mut generations: List[(u32, u64)] = list.new()
     if let Some(generation) = sub_generation(s.subs, sub) {
         stamp_rows(mut generations, sub, generation)
@@ -18,7 +18,7 @@ type DeferredSub: send {
     input: SubscriptionInput
 }
 
-fn wire_has_leaving[G: send, B: send](s: WireSession[G, B]) -> bool {
+fn wire_has_leaving[G: send, B: shareable + send](s: WireSession[G, B]) -> bool {
     for sub in s.pub_subs {
         if let None = sub_generation(s.subs, sub) {
             return true
@@ -27,7 +27,7 @@ fn wire_has_leaving[G: send, B: send](s: WireSession[G, B]) -> bool {
     false
 }
 
-fn wire_subscribed[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take input: SubscriptionInput) {
+fn wire_subscribed[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take input: SubscriptionInput) {
     let who = option.unwrap(s.joined)
     s.sub_generation += 1u64
     let generation = s.sub_generation
@@ -46,7 +46,7 @@ fn wire_subscribed[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
     list.push(mut s.subs, (sub, generation))
 }
 
-fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], sub: u32, wire_slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
+fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: shareable + send](mut s: WireSession[G, B], r: Registry[G, H], sub: u32, wire_slot: u32, take arg: Bytes, take resume: Option[Bytes]) -> Result[ServicePlan, u16] {
     if s.phase != 3u8 {
         return Error(1008u16)
     }
@@ -107,8 +107,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: Wir
         None => return Error(1008u16),
     }
     let room_req = match entry.ephemeral {
-        Some(registered) => Some(RoomRequest(key: RoomKey(entry: registered.index, arg: clone(arg)),
-            codec: (registered.codecs)(), bounds: registered.bounds)),
+        Some(registered) => Some(RoomRequest(key: RoomKey(entry: registered.index, arg: clone(arg)), codec: (registered.codecs)(), bounds: registered.bounds)),
         None => None,
     }
     let mut quota = option.unwrap(replace(mut s.subscription_room, None))
@@ -123,7 +122,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: Wir
     }
 }
 
-fn wire_apply_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take input: SubscriptionInput) -> Result[(), u16] {
+fn wire_apply_subscribe[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take input: SubscriptionInput) -> Result[(), u16] {
     if wire_admission_closed(work, s.clock) {
         wire_end(mut s, mut work.output, sub, Refused(Overloaded))
         return Ok(())
@@ -188,7 +187,7 @@ fn wire_apply_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: Wi
     Ok(())
 }
 
-fn wire_remove_sub[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32) {
+fn wire_remove_sub[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32) {
     let mut i = 0u64
     while i < list.len(s.subs) {
         if s.subs[i].0 == sub {
@@ -200,7 +199,7 @@ fn wire_remove_sub[G: send, B: send](mut s: WireSession[G, B], mut output: List[
     wire_prune_output(mut s, mut output, Some(sub))
 }
 
-fn wire_forget_sub[G: send, B: send](mut s: WireSession[G, B], sub: u32) {
+fn wire_forget_sub[G: send, B: shareable + send](mut s: WireSession[G, B], sub: u32) {
     let mut i = 0u64
     while i < list.len(s.pub_subs) {
         if s.pub_subs[i] == sub {
@@ -211,7 +210,7 @@ fn wire_forget_sub[G: send, B: send](mut s: WireSession[G, B], sub: u32) {
     }
 }
 
-fn wire_stop_sub[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32) {
+fn wire_stop_sub[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], sub: u32) {
     wire_remove_sub(mut s, mut output, sub)
     let mut at = 0u64
     while at < list.len(s.deferred_subs) {
@@ -225,7 +224,7 @@ fn wire_stop_sub[G: send, B: send](mut s: WireSession[G, B], mut output: List[Wi
 
 // A reset drops the join, after the writer retires a unit that can still use
 // that join's read set.
-fn wire_leave[G: send, B: send](mut s: WireSession[G, B]) {
+fn wire_leave[G: send, B: shareable + send](mut s: WireSession[G, B]) {
     while let Some(_) = list.pop(mut s.deferred_subs) {}
     if let Some(take lease) = replace(mut s.join_lease, None) {
         if s.holding {
@@ -234,7 +233,7 @@ fn wire_leave[G: send, B: send](mut s: WireSession[G, B]) {
     }
 }
 
-fn wire_flush_subscriptions[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) waits {
+fn wire_flush_subscriptions[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork) waits {
     if let Some(_) = work.check {
         return
     }
@@ -270,7 +269,7 @@ fn wire_flush_subscriptions[G: send, B: send](mut s: WireSession[G, B], mut work
     }
 }
 
-fn wire_check_room_input[G: send, B: send](s: WireSession[G, B], sub: u32) -> Result[(), u16] {
+fn wire_check_room_input[G: send, B: shareable + send](s: WireSession[G, B], sub: u32) -> Result[(), u16] {
     let named: u64 = int.widen(sub)
     if named >= s.next_sub {
         return Error(1002u16)

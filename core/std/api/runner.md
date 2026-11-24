@@ -19,12 +19,13 @@ grant and no `Arc[G]`. Your application does both:
 
 - **Authentication** is your binding, `runner.wire(grant, Some(bind), ..)`: a
   function from a copy of your grant and the client's credential bytes (the
-  Hello `credential`, or the HTTP `Authorization` value) to `Ok(Caller)` or
-  `Error(())`. An `Error` refuses the Hello with Close 1008, or the HTTP request
-  with 401. The runner never reads the credential itself. A place whose trigger
-  grant is not plain binds with `runner.wire_bind(seed, bind, ..)` instead: the
-  binding gets a copy of its own plain `seed`, and wire calls to granted entries
-  are refused.
+  Hello `credential` or the HTTP `Authorization` value) to
+  `Result[BoundCaller, BindRefusal]`. `Rejected` gives Close 1008 or HTTP 401.
+  `Unavailable` gives Close 1013 or HTTP 503 with `Retry-After: 5`. The runner
+  bounds the application binding and passes the credential bytes through.
+  `runner.wire_bind(latest_seed, bind, ..)` reads a `Latest[B]` once per bind,
+  where `B: shareable + send`. The binding sees a view of that version. A
+  bind-only wire carries no grant, so its calls to granted entries are refused.
 - **Authorization** is your entry bodies. Transact, query and granted bodies
   receive the Caller and decide access in their own code, for example by reading
   a membership row in the same transaction.
@@ -62,10 +63,9 @@ session `n_place` that differed from the place's, and the session no longer carr
 **`PlaceConfig.wire`.** `None` serves anonymous sessions: each Hello gets a fresh
 anonymous Caller and a granted entry is `Refused(NotAllowed)`. `Some(runner.wire(grant,
 bind, bind_bytes, bind_steps))` gives granted entries a copy of `grant`, and with
-`bind = Some(f)` maps the client's credential to a Caller; a refused binding closes
-the Hello with 1008, so its clients must pass `credential`. `Some(runner.wire_bind(seed,
-bind, ..))` binds the same way and carries no grant, so granted entries stay
-`Refused(NotAllowed)`.
+`bind = Some(f)` maps the client's credential to a Caller.
+`Some(runner.wire_bind(latest_seed, bind, ..))` binds from the current published
+seed and carries no grant, so granted entries stay `Refused(NotAllowed)`.
 
 **Sizing `n_place`.** The serving task builds the place's one Registry under
 `n_place` and every wire session plans against it, so `n_place` counts once in the

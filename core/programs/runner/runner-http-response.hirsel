@@ -1,9 +1,21 @@
+fn http_binding_unavailable() -> Result[std.http.Response, std.http.HandlerError] {
+    let mut response = std.http.response(503u16, list.new(), false)?
+    std.http.header(mut response, b"Retry-After", b"5")?
+    Ok(take response)
+}
+
 fn http_reply(status: u16, take body: String, close: bool, retry: bool, replayed: bool) -> Result[std.http.Response, std.http.HandlerError] {
     let has_body = string.byte_len(body) != 0u64
     let mut response = std.http.response(status, std.http.copy_bytes(string.as_bytes(body)), close)?
-    if has_body { std.http.content_type(mut response, ApplicationJson)? }
-    if retry { std.http.header(mut response, b"Retry-After", b"1")? }
-    if replayed { std.http.header(mut response, b"Idempotent-Replayed", b"true")? }
+    if has_body {
+        std.http.content_type(mut response, ApplicationJson)?
+    }
+    if retry {
+        std.http.header(mut response, b"Retry-After", b"1")?
+    }
+    if replayed {
+        std.http.header(mut response, b"Idempotent-Replayed", b"true")?
+    }
     Ok(take response)
 }
 
@@ -45,7 +57,9 @@ fn http_fault(detail: Fault, replayed: bool) -> Result[std.http.Response, std.ht
         Gone => string.push(mut text, "\"gone\""),
         Conflict(name) => {
             string.push(mut text, "\"conflict\",\"name\":")
-            std.json.write(mut text, false, scoped fn(w: std.json.Writer) { std.json.write_string_value(w, name) })
+            std.json.write(mut text, false, scoped fn(w: std.json.Writer) {
+                std.json.write_string_value(w, name)
+            })
         },
     }
     string.push(mut text, "}")
@@ -66,7 +80,9 @@ fn http_json_reply(status: u16, take data: Bytes, offset: u64, plan: Arc[std.jso
         Ok(take response) => {
             let mut reply = take response
             std.http.content_type(mut reply, ApplicationJson)?
-            if replayed { std.http.header(mut reply, b"Idempotent-Replayed", b"true")? }
+            if replayed {
+                std.http.header(mut reply, b"Idempotent-Replayed", b"true")?
+            }
             Ok(take reply)
         },
         Error(JsonEncoding(DepthLimit)) => http_reply(500u16, "{\"fault\":\"depth\"}", false, false, replayed),
@@ -77,9 +93,15 @@ fn http_json_reply(status: u16, take data: Bytes, offset: u64, plan: Arc[std.jso
 
 fn http_mark_outcome(mut reply: std.http.Response, req: std.http.Request, mode: Mode, expires: Option[u64]) -> Result[(), std.http.ResponseError] {
     if mode == Keyed {
-        let Some(at) = expires else { return Ok(()) }
+        let Some(at) = expires else {
+            return Ok(())
+        }
         let mut value = string.new()
-        if at == 18446744073709551615u64 { string.push(mut value, "never") } else { string.push_u64(mut value, at) }
+        if at == 18446744073709551615u64 {
+            string.push(mut value, "never")
+        } else {
+            string.push_u64(mut value, at)
+        }
         std.http.header(mut reply, b"Hirsel-Dedup-Until", string.into_bytes(take value))?
     }
     std.http.mark_committed(mut reply, req)
@@ -93,13 +115,23 @@ fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std
         // Returned carries one counted codec value. Keep the relay backing
         // through the write so the connection never copies the stored payload.
         let n: u64 = int.widen(std.codec.take_u32(payload, mut offset) ?=> |_| StatusInvalid)
-        if list.len(payload) - offset != n { return Error(StatusInvalid) }
+        if list.len(payload) - offset != n {
+            return Error(StatusInvalid)
+        }
         let tag_value = std.codec.take_tag(payload, mut offset, 2u32) ?=> |_| StatusInvalid
         let Outcome(ok, error_case) = plan.shapes[plan.facts[plan.root].form] else {
             fail("transact result plan has a Result shape")
         }
-        let status = if tag_value == 0u32 { binding.ok_status } else { binding.error_status }
-        let root = if tag_value == 0u32 { ok } else { error_case }
+        let status = if tag_value == 0u32 {
+            binding.ok_status
+        } else {
+            binding.error_status
+        }
+        let root = if tag_value == 0u32 {
+            ok
+        } else {
+            error_case
+        }
         let mut reply = http_json_reply(status, take payload, offset, plan, root, replayed)?
         http_mark_outcome(mut reply, req, binding.mode, expires)?
         return Ok(take reply)
@@ -120,7 +152,9 @@ fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std
 }
 
 fn http_refused_attempt(req: std.http.Request, take why: Refusal) -> Result[std.http.Response, std.http.HandlerError] {
-    if let None = std.http.field(req, b"idempotency-key") { return http_refusal(take why) }
+    if let None = std.http.field(req, b"idempotency-key") {
+        return http_refusal(take why)
+    }
     let kind = match why {
         NoEntry => b"no_entry",
         NotAllowed => b"not_allowed",
@@ -131,7 +165,10 @@ fn http_refused_attempt(req: std.http.Request, take why: Refusal) -> Result[std.
         RequestMismatch => b"request_mismatch",
         HistoryUnavailable => b"history_unavailable",
     }
-    let sample = match why { Malformed(detail) if detail.kind == 7u32 => Some(detail.at), _ => None }
+    let sample = match why {
+        Malformed(detail) if detail.kind == 7u32 => Some(detail.at),
+        _ => None
+    }
     let mut response = http_refusal(take why)?
     if let Some(time) = sample {
         let mut now = string.new()
@@ -142,8 +179,7 @@ fn http_refused_attempt(req: std.http.Request, take why: Refusal) -> Result[std.
     Ok(take response)
 }
 
-fn http_render_delivery(req: std.http.Request, binding: HttpBinding, plan: Arc[std.json.JsonPlan],
-    take delivery: RelayDelivery) -> Result[std.http.Response, std.http.HandlerError] {
+fn http_render_delivery(req: std.http.Request, binding: HttpBinding, plan: Arc[std.json.JsonPlan], take delivery: RelayDelivery) -> Result[std.http.Response, std.http.HandlerError] {
     match take delivery {
         Answered(take delivered) => http_render_stream(req, binding, plan, take delivered),
         RefusedBeforePost(take why) => http_refused_attempt(req, take why),

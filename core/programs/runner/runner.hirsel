@@ -103,7 +103,7 @@ pub type Stop: codec + send {
 
 // An objects@1 place (RUNNER-SPEC v2.50). `credentials.secret` is a sealed
 // grant. The head starts the client and opens it through `open_authority`.
-pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: send]: send {
+pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
     backing: Backing,
     sizes: store.Overrides,
     selection: Selection,
@@ -303,15 +303,15 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
     Ok(task.spawn(tasks, bytes 4096u64, take alarm, drain_timer))
 }
 
-pub fn operate[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+pub fn operate[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     operate_with_report(take p, take stop, status, take watching, None)
 }
 
-pub fn operate_report[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
+pub fn operate_report[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
     operate_with_report(take p, take stop, status, take watching, Some(errors))
 }
 
-fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
+fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place
@@ -759,7 +759,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
 
 // Installation shares the serving head's open and activation, then closes the store
 // before it sends proof. No publisher, triggers, or listener start for this launch.
-fn operate_install[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
+fn operate_install[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
     let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
     let persistent = persistent_backing(backing)
     if let InstallAt(_) = selection {
@@ -821,17 +821,17 @@ fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartEr
     }
 }
 
-pub fn prepare_place[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
+pub fn prepare_place[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
     let (take options, _, _, _, _) = place_store(p, Some(errors))?
     let n_place = p.n_place
     prepare_placed(take p, take options, n_place, take attempt, take image)
 }
 
-fn operate_prepare[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
+fn operate_prepare[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, attempt: LaunchBytes, image: LaunchBytes) -> Result[Ended, StartError] waits {
     prepare_placed(take p, take options, n_place, launch_bytes(attempt), launch_bytes(image))
 }
 
-fn prepare_placed[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
+fn prepare_placed[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64, take attempt: Bytes, take image: Bytes) -> Result[Ended, StartError] waits {
     let PlaceConfig(backing: take backing, place: place, on_migrate: on_migrate, schema: schema, clock: clock, tasks: tasks, triggers: take config, ..) = take p
     let Disk(scratch) = backing else {
         return Error(Missing("scratch"))

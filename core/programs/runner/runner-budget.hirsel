@@ -52,7 +52,7 @@ fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan)
     add_place_bytes(pooled, rooms.relay_bytes)
 }
 
-pub fn operate_bytes[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
+pub fn operate_bytes[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B]) -> Result[u64, Capacity] {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place
@@ -78,7 +78,7 @@ fn place_reservations[G: send, H: shareable + inert + send](place: StaticFn[fn(m
     Ok((claims, rooms))
 }
 
-fn operate_reservation[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], n_place: u64, claims: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
+fn operate_reservation[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B], n_place: u64, claims: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
     let head = place_head_bytes(n_place, p.n_publisher, trigger_bytes(p.triggers))?
     let funded_head = add_place_bytes(head, claims)?
     let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms)?
@@ -86,7 +86,7 @@ fn operate_reservation[G: send, H: shareable + inert + send, S: send, B: send](p
     add_place_bytes(tasks, OPERATE_OWN_BYTES)
 }
 
-fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
+fn place_store[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place

@@ -1,4 +1,4 @@
-fn wire_units[G: send, B: send](s: WireSession[G, B]) -> u64 {
+fn wire_units[G: send, B: shareable + send](s: WireSession[G, B]) -> u64 {
     let mut units = 0u64
     for (_, h) in s.held {
         let live = list.len(h.owed) + h.queued
@@ -61,7 +61,7 @@ fn wire_queue_checked(mut output: List[WireOutput], take frame: Frame, take mark
     list.push(mut output, WireOutput(frame: take frame, tapes: list.new(), marks: take marks, generations: take generations, external: false, check: check))
 }
 
-fn wire_refused[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, stream: StreamId, p: u64, take why: Refusal) -> Result[(), u16] {
+fn wire_refused[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, stream: StreamId, p: u64, take why: Refusal) -> Result[(), u16] {
     if s.refusals >= 1u64 + s.config.q {
         return Error(1008u16)
     }
@@ -75,7 +75,7 @@ fn wire_refused[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, 
     Ok(())
 }
 
-fn wire_row[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, key: Bytes, stream: StreamId, p: u64, version: u64, take outcome: Outcome) {
+fn wire_row[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, key: Bytes, stream: StreamId, p: u64, version: u64, take outcome: Outcome) {
     let mut done: List[Done] = list.new()
     list.push(mut done, Done(stream: stream, p: p, outcome: take outcome))
     let mut marks: List[WireMark] = list.new()
@@ -83,7 +83,7 @@ fn wire_row[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, key:
     wire_queue(mut work.output, Batch(version, list.new(), list.new(), take done), take marks, list.new())
 }
 
-fn wire_reset[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], version: u64) -> Result[(), u16] {
+fn wire_reset[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], version: u64) -> Result[(), u16] {
     if s.reset_seen {
         return Error(1008u16)
     }
@@ -91,7 +91,7 @@ fn wire_reset[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireO
     wire_reset_rows(mut s, mut output, version, list.new(), list.new())
 }
 
-fn wire_reset_rows[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], version: u64, take latest_done: List[Done], take latest_marks: List[WireMark]) -> Result[(), u16] {
+fn wire_reset_rows[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], version: u64, take latest_done: List[Done], take latest_marks: List[WireMark]) -> Result[(), u16] {
     let mut done: List[Done] = list.new()
     let mut marks: List[WireMark] = list.new()
     let all = replace(mut output, list.new())
@@ -208,7 +208,7 @@ fn wire_superseded(take output: WireOutput, replacing: List[(u32, u64)]) -> Opti
     filter_output_groups(take next, gone, false)
 }
 
-fn wire_prune_output[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], retired: Option[u32]) {
+fn wire_prune_output[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], retired: Option[u32]) {
     let mut kept = 0u64
     for index in 0u64 .. list.len(output) {
         let empty = WireOutput(frame: Reset(0u64, list.new()), tapes: list.new(), marks: list.new(), generations: list.new(), external: false, check: None)
@@ -233,7 +233,7 @@ fn wire_prune_output[G: send, B: send](mut s: WireSession[G, B], mut output: Lis
 // A content unit's Outcome rows are copied before it is handed out, so a Dropped Reset can
 // carry them (§3); a copy that cannot be made closes the session (1013) rather than send the
 // unit unchecked or lose the rows.
-fn wire_take_output[G: send, B: send](s: WireSession[G, B], mut work: WireWork) -> Result[Option[Frame], u16] {
+fn wire_take_output[G: send, B: shareable + send](s: WireSession[G, B], mut work: WireWork) -> Result[Option[Frame], u16] {
     let selected = loop {
         if list.len(work.output) == 0u64 {
             return Ok(None)
@@ -270,7 +270,7 @@ fn wire_take_output[G: send, B: send](s: WireSession[G, B], mut work: WireWork) 
 // v2.19 (§3): the writer dropped the content unit it was handed. Every content component
 // the owner holds goes; every Outcome row, the dropped unit's included, rides in one Reset
 // that never counts toward the protocol-error close.
-fn wire_dropped[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) -> Result[(), u16] {
+fn wire_dropped[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork) -> Result[(), u16] {
     let marks = replace(mut work.sending, list.new())
     let done = replace(mut work.sending_done, list.new())
     work.check = None
@@ -279,7 +279,7 @@ fn wire_dropped[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) 
     wire_reset_rows(mut s, mut work.output, version, take done, take marks)
 }
 
-fn wire_sent[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) {
+fn wire_sent[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork) {
     work.check = None
     work.sending_complete = false
     work.sending_done = list.new()
@@ -303,7 +303,7 @@ fn wire_sent[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) {
     }
 }
 
-fn wire_update[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take upd: Update) -> Result[(), u16] {
+fn wire_update[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, take upd: Update) -> Result[(), u16] {
     let mut completed: List[u64] = list.new()
     let result = wire_stage_update(mut s, mut work.output, mut completed, work.drain, take upd)
     for id in completed {
@@ -312,7 +312,7 @@ fn wire_update[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, t
     result
 }
 
-fn wire_stage_update[G: send, B: send](mut s: WireSession[G, B], mut output: List[WireOutput], mut completed: List[u64], drain: Option[Latest[Option[DrainWindow]]], take upd: Update) -> Result[(), u16] {
+fn wire_stage_update[G: send, B: shareable + send](mut s: WireSession[G, B], mut output: List[WireOutput], mut completed: List[u64], drain: Option[Latest[Option[DrainWindow]]], take upd: Update) -> Result[(), u16] {
     let Update(version: at, content: take content, outcomes: take answers) = take upd
     let mut done: List[Done] = list.new()
     let mut marks: List[WireMark] = list.new()
@@ -429,7 +429,7 @@ fn wire_stage_update[G: send, B: send](mut s: WireSession[G, B], mut output: Lis
     Ok(())
 }
 
-fn wire_answer[G: send, B: send](mut s: WireSession[G, B], mut completed: List[u64], drain: Option[Latest[Option[DrainWindow]]], told: KeyedDone, mut done: List[Done], mut marks: List[WireMark]) -> Result[(), u16] {
+fn wire_answer[G: send, B: shareable + send](mut s: WireSession[G, B], mut completed: List[u64], drain: Option[Latest[Option[DrainWindow]]], told: KeyedDone, mut done: List[Done], mut marks: List[WireMark]) -> Result[(), u16] {
     if wire_cut_at(drain, s.clock) {
         return Ok(())
     }

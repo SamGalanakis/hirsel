@@ -206,7 +206,7 @@ fn keyed_registry_count[G: send, H: shareable + inert + send](reg: Registry[G, H
     Some(maximum)
 }
 
-fn check_keyed_wire[G: send, H: shareable + inert + send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, wire_input: Option[Wire[G, B]]) -> Option[OpenError] {
+fn check_keyed_wire[G: send, H: shareable + inert + send, B: shareable + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, wire_input: Option[Wire[G, B]]) -> Option[OpenError] {
     if let Some(supplied) = wire_input {
         if !none(supplied.grant) {
             return None

@@ -874,7 +874,7 @@ type InvisiblePost: send {
 fn invisible_post(take job: InvisiblePost) waits {
     let InvisiblePost(net, clock, address) = take job
     let lost = http_law_post(net, clock, address, "/old", b"token", 7u32, 0u64, b"{}", 1000u32)
-    if lost.status != 409u16 || lost.committed || lost.replayed || !lost.retry || !none(lost.refused) {
+    if lost.status != 409u16 || lost.committed || lost.replayed || lost.retry_after != Some(1u64) || !none(lost.refused) {
         fail("an owed send past its deadline was not an unmarked 409")
     }
 }

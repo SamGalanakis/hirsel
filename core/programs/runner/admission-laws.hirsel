@@ -1,4 +1,4 @@
-fn wire_call_ready[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], mut work: WireWork, take pending: WirePending) -> Result[(), u16] {
+fn wire_call_ready[G: send, H: shareable + inert + send, B: shareable + send](mut s: WireSession[G, B], r: Registry[G, H], mut work: WireWork, take pending: WirePending) -> Result[(), u16] {
     let plan = wire_plan_call(mut s, r, take pending)?
     wire_apply_plan(mut s, mut work, take plan)
 }
@@ -22,7 +22,7 @@ fn w3c_key[A, R](f: View[Bytes], ca: std.codec.Codec[A], cr: std.codec.Codec[R])
     key
 }
 
-fn transport_receive[G: send, B: send](mut s: WireSession[G, B], mut w: WireWork) -> Option[Frame] {
+fn transport_receive[G: send, B: shareable + send](mut s: WireSession[G, B], mut w: WireWork) -> Option[Frame] {
     let frame = result.unwrap(wire_take_output(s, mut w))
     wire_sent(mut s, mut w)
     take frame

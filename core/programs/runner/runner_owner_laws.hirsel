@@ -59,7 +59,7 @@ fn no_wire[G: send]() -> Option[Wire[G, ()]] {
     None
 }
 
-fn wire_service_seed[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
+fn wire_service_seed[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
     wire_service_with_head(random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
 }
 

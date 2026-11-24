@@ -31,7 +31,11 @@ fn http_status_script(req: std.http.Request, _scratch: Region, mut _body: std.ht
     Ok(Reply(take response))
 }
 
-type HttpStatusListener: send { listener: Listener, clock: Clock, tasks: Tasks }
+type HttpStatusListener: send {
+    listener: Listener,
+    clock: Clock,
+    tasks: Tasks
+}
 
 fn http_status_serve(take seed: HttpStatusListener) waits {
     let HttpStatusListener(listener: take listener, clock, tasks) = take seed
@@ -55,7 +59,7 @@ fn test_l14(c: Clock, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     let (take listener, addr) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let server = task.spawn(tasks, bytes 4194304u64, HttpStatusListener(listener: take listener, clock: c, tasks: tasks), http_status_serve)
     let mut position = 0u64
-    for (status, body, retry, committed) in [
+    for (status, body, retry, committed) in[
         (404u16, b"", false, false),
         (400u16, b"{\"refused\":\"malformed\",\"kind\":3}", false, false),
         (403u16, b"", false, false),
@@ -74,8 +78,7 @@ fn test_l14(c: Clock, tasks: Tasks, n: Net) -> Result[(), ()] waits {
         (422u16, b"{\"refused\":\"request_mismatch\"}", false, true),
     ] {
         let got = http_law_post(n, c, addr, "/status", b"", 0u32, position, b"", 1000u32)
-        if got.status != status || got.body != body || got.retry != retry || got.committed != committed ||
-            got.replayed != (position == 14u64) {
+        if got.status != status || got.body != body || (got.retry_after == Some(1u64)) != retry || got.committed != committed || got.replayed != (position == 14u64) {
             fail("L14 status, response JSON or header differs from B-7")
         }
         position += 1u64

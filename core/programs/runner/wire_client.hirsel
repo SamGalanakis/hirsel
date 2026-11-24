@@ -1,28 +1,57 @@
 // Fixture client over the same wsock machines as the server. The HTTP challenge,
 // response checks, read-ahead tail and fresh client masks belong to std.wsock.
 pub type Command: send = Send(runner.Frame) | Control(u8, std.websocket.Control) | Close
+
 // The reader posts each frame, then Gone when it ends. A bounded wait posts Woke into the
 // same queue through `alarm`, so one receive sees a frame, the end or the bound in order.
 pub type Incoming: send = Got(runner.Frame) | Woke(u64) | Gone
 
 // `shut` holds the code of the peer's Close, once one arrives.
 pub type Conn {
-    to: Sender[Command], from: Receiver[Incoming], wake: Sender[Incoming], credit: Sender[()], caller: runner.Caller,
-    reading: Task[()], writing: Task[()], shut: Receiver[u16]
+    to: Sender[Command],
+    from: Receiver[Incoming],
+    wake: Sender[Incoming],
+    credit: Sender[()],
+    caller: runner.Caller,
+    reading: Task[()],
+    writing: Task[()],
+    shut: Receiver[u16]
 }
 
-type Read: send { reader: std.wsock.Reader, to: Sender[Incoming], control: Sender[Command], credits: Receiver[()], clock: Clock, idle_ms: u64, shut: Sender[u16] }
-type Write: send { writer: std.wsock.Writer, outgoing: std.wsock.Outbound, from: Receiver[Command], clock: Clock }
+type Read: send {
+    reader: std.wsock.Reader,
+    to: Sender[Incoming],
+    control: Sender[Command],
+    credits: Receiver[()],
+    clock: Clock,
+    idle_ms: u64,
+    shut: Sender[u16]
+}
 
-fn deadline(c: Clock) -> Until { within(c, 5000u64) }
+type Write: send {
+    writer: std.wsock.Writer,
+    outgoing: std.wsock.Outbound,
+    from: Receiver[Command],
+    clock: Clock
+}
 
-fn within(c: Clock, ms: u64) -> Until { At(c, std.clock.deadline_after_ms(host.mono_ns(c), ms)) }
+fn deadline(c: Clock) -> Until {
+    within(c, 5000u64)
+}
+
+fn within(c: Clock, ms: u64) -> Until {
+    At(c, std.clock.deadline_after_ms(host.mono_ns(c), ms))
+}
 
 pub fn send(mut w: std.wsock.Writer, mut out: std.wsock.Outbound, opcode: u8, payload: Bytes, c: Clock) -> Result[(), std.wsock.Error] waits {
     let encoded = std.wsock.encode(mut out, true, opcode, payload)?
-    if let Error(_) = std.wsock.stage(mut w, take encoded) { return Error(Protocol(1008u16)) }
+    if let Error(_) = std.wsock.stage(mut w, take encoded) {
+        return Error(Protocol(1008u16))
+    }
     let until = deadline(c)
-    while !std.wsock.drained(w) { let _ = std.wsock.flush(mut w, mut out, until)? }
+    while !std.wsock.drained(w) {
+        let _ = std.wsock.flush(mut w, mut out, until)?
+    }
     Ok(())
 }
 
@@ -31,11 +60,23 @@ pub fn receive(mut r: std.wsock.Reader, mut w: std.wsock.Writer, mut out: std.ws
         match std.wsock.read(mut r, until)? {
             Message(take b) => {
                 let codec: std.codec.Codec[runner.Frame] = std.codec.of()
-                return match std.codec.decode(codec, b) { Ok(take f) => Ok(take f), _ => Error(Protocol(1007u16)) }
+                return match std.codec.decode(codec, b) {
+                    Ok(take f) => Ok(take f),
+                    _ => Error(Protocol(1007u16))
+                }
             },
-            Ping(control) => { let mut b: Bytes = list.new(); std.websocket.control(control, mut b); send(mut w, mut out, 10u8, b, c)? },
+            Ping(control) => {
+                let mut b: Bytes = list.new();
+                std.websocket.control(control, mut b);
+                send(mut w, mut out, 10u8, b, c)?
+            },
             Pong(_) => (),
             Need => (),
+            Closed(p) if p.len >= 2u64 => {
+                let high: u16 = int.widen(p.data[0u64])
+                let low: u16 = int.widen(p.data[1u64])
+                return Error(Protocol((high << 8u16) | low))
+            },
             _ => return Error(Protocol(1008u16)),
         }
     }
@@ -51,30 +92,44 @@ fn read_frames(take seed: Read) -> () waits {
     let Read(reader: take input, to: take to, control: take control, credits: take credits, clock: c, idle_ms: idle_ms, shut: take shut) = take seed
     let mut r = take input
     loop {
-        if let Error(_) = channel.receive(credits) { return }
+        if let Error(_) = channel.receive(credits) {
+            return
+        }
         let mut pending = true
         while pending {
-        match std.wsock.read(mut r, within(c, idle_ms)) {
-            Ok(Message(take b)) => {
-                let codec: std.codec.Codec[runner.Frame] = std.codec.of()
-                let f = match std.codec.decode(codec, b) { Ok(take f) => take f, _ => return }
-                if let Error(_) = channel.send(to, Got(take f)) { return }
-                pending = false
-            },
-            Ok(Ping(p)) => { if let Error(_) = channel.send(control, Control(10u8, p)) { break } },
-            Ok(Pong(_)) => (),
-            Ok(Need) => (),
-            Ok(Closed(p)) => {
-                if p.len >= 2u64 {
-                    let high: u16 = int.widen(p.data[0u64])
-                    let low: u16 = int.widen(p.data[1u64])
-                    let _ = channel.try_send(shut, (high << 8u16) | low)
-                }
-                let _ = channel.send(control, Control(8u8, p))
-                return
-            },
-            _ => { let _ = channel.send(control, Close); return },
-        }
+            match std.wsock.read(mut r, within(c, idle_ms)) {
+                Ok(Message(take b)) => {
+                    let codec: std.codec.Codec[runner.Frame] = std.codec.of()
+                    let f = match std.codec.decode(codec, b) {
+                        Ok(take f) => take f,
+                        _ => return
+                    }
+                    if let Error(_) = channel.send(to, Got(take f)) {
+                        return
+                    }
+                    pending = false
+                },
+                Ok(Ping(p)) => {
+                    if let Error(_) = channel.send(control, Control(10u8, p)) {
+                        break
+                    }
+                },
+                Ok(Pong(_)) => (),
+                Ok(Need) => (),
+                Ok(Closed(p)) => {
+                    if p.len >= 2u64 {
+                        let high: u16 = int.widen(p.data[0u64])
+                        let low: u16 = int.widen(p.data[1u64])
+                        let _ = channel.try_send(shut, (high << 8u16) | low)
+                    }
+                    let _ = channel.send(control, Control(8u8, p))
+                    return
+                },
+                _ => {
+                    let _ = channel.send(control, Close);
+                    return
+                },
+            }
         }
     }
 }
@@ -91,11 +146,19 @@ fn write(take seed: Write) -> () waits {
                 result.unwrap(std.codec.encode(codec, f, mut b))
                 (2u8, take b)
             },
-            Ok(Control(op, p)) => { let mut b: Bytes = list.new(); std.websocket.control(p, mut b); (op, take b) },
+            Ok(Control(op, p)) => {
+                let mut b: Bytes = list.new();
+                std.websocket.control(p, mut b);
+                (op, take b)
+            },
             _ => (8u8, list.new()),
         }
-        if let Error(_) = send(mut w, mut out, opcode, b, c) { return }
-        if opcode == 8u8 { return }
+        if let Error(_) = send(mut w, mut out, opcode, b, c) {
+            return
+        }
+        if opcode == 8u8 {
+            return
+        }
     }
 }
 
@@ -104,7 +167,9 @@ pub fn wants(keys: List[Bytes]) -> List[runner.Want] {
     for key in keys {
         let n = list.len(key)
         let mut id: Bytes = list.new()
-        for i in 0u64 .. n - 16u64 { list.push(mut id, key[i]) }
+        for i in 0u64 .. n - 16u64 {
+            list.push(mut id, key[i])
+        }
         let mut at = n - 16u64
         let af = result.unwrap(std.codec.take_u64(key, mut at))
         let rf = result.unwrap(std.codec.take_u64(key, mut at))
@@ -120,13 +185,14 @@ pub fn connect(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, ke
 // The Hello exchange completes within `within_ms`, and each later read waits at most `idle_ms`.
 pub fn open(n: Net, address: Addr, authority: Bytes, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64) -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller), std.wsock.Error] waits {
     let until = within(c, within_ms)
-    let socket = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
+    let socket = match host.connect(n, address, until) {
+        Ok(take s) => take s,
+        Error(e) => return Error(Network(e))
+    }
     open_socket(take socket, authority, c, random, keys, take token, config, until)
 }
 
-fn open_socket(take socket: Socket, authority: Bytes, c: Clock, random: Random, keys: List[Bytes],
-    take token: Option[Bytes], config: std.wsock.Config, until: Until)
-    -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller), std.wsock.Error] waits {
+fn open_socket(take socket: Socket, authority: Bytes, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, until: Until) -> Result[(std.wsock.Reader, std.wsock.Writer, std.wsock.Outbound, runner.Caller), std.wsock.Error] waits {
     let std.wsock.Connected(reader: take input, writer: take output, outgoing: take outgoing, timers: _) = std.wsock.client(take socket, authority, config, c, random)?
     let mut r = take input
     let mut w = take output
@@ -136,19 +202,29 @@ fn open_socket(take socket: Socket, authority: Bytes, c: Clock, random: Random, 
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, hello, mut b))
     send(mut w, mut out, 2u8, b, c)?
-    let who = match receive(mut r, mut w, mut out, c, until)? { Welcome(take p, _, _, _, _, _, _, _) => take p, _ => return Error(Protocol(1008u16)) }
-    for _ in keys { match receive(mut r, mut w, mut out, c, until)? { Placed(_) => (), _ => return Error(Protocol(1008u16)) } }
+    let who = match receive(mut r, mut w, mut out, c, until)? {
+        Welcome(take p, _, _, _, _, _, _, _) => take p,
+        _ => return Error(Protocol(1008u16))
+    }
+    for _ in keys {
+        match receive(mut r, mut w, mut out, c, until)? {
+            Placed(_) => (),
+            _ => return Error(Protocol(1008u16))
+        }
+    }
     Ok((take r, take w, take out, take who))
 }
 
 pub fn connect_for(tasks: Tasks, n: Net, address: Addr, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, within_ms: u64, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
     let until = within(c, within_ms)
-    let socket = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
+    let socket = match host.connect(n, address, until) {
+        Ok(take s) => take s,
+        Error(e) => return Error(Network(e))
+    }
     connect_socket(tasks, take socket, c, random, keys, take token, config, until, idle_ms)
 }
 
-pub fn connect_socket(tasks: Tasks, take socket: Socket, c: Clock, random: Random, keys: List[Bytes],
-    take token: Option[Bytes], config: std.wsock.Config, until: Until, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
+pub fn connect_socket(tasks: Tasks, take socket: Socket, c: Clock, random: Random, keys: List[Bytes], take token: Option[Bytes], config: std.wsock.Config, until: Until, idle_ms: u64) -> Result[Conn, std.wsock.Error] waits {
     let (take r, take w, take out, take who) = open_socket(take socket, string.as_bytes("127.0.0.1"), c, random, keys, take token, config, until)?
     let (to, commands): (Sender[Command], Receiver[Command]) = channel.new(64u64)
     let (frames, from): (Sender[Incoming], Receiver[Incoming]) = channel.new(64u64)
@@ -164,11 +240,16 @@ pub fn connect_socket(tasks: Tasks, take socket: Socket, c: Clock, random: Rando
 
 // The code of the peer's Close, once the reader has seen it.
 pub fn shut_code(c: Conn) -> Option[u16] {
-    match channel.try_receive(c.shut) { Ok(code) => Some(code), _ => None }
+    match channel.try_receive(c.shut) {
+        Ok(code) => Some(code),
+        _ => None
+    }
 }
 
 pub fn send_frame(c: Conn, take f: runner.Frame) -> () waits {
-    if let Error(_) = channel.send(c.to, Send(take f)) { fail("wire client: writer closed") }
+    if let Error(_) = channel.send(c.to, Send(take f)) {
+        fail("wire client: writer closed")
+    }
 }
 
 pub fn close(take cn: Conn) -> bool waits {
@@ -178,36 +259,55 @@ pub fn close(take cn: Conn) -> bool waits {
     let wrote = task.join(take writing)
     task.cancel(mut reading)
     let heard = task.join(take reading)
-    match (wrote, heard) { (Ok(()), Ok(())) => true, (Ok(()), Error(_)) => true, _ => false }
+    match (wrote, heard) {
+        (Ok(()), Ok(())) => true,
+        (Ok(()), Error(_)) => true,
+        _ => false
+    }
 }
 
 // A one-connection fixture listener. Each connection has an ephemeral loopback
 // port; all listeners in one fixture share the head and publisher.
-type Server[G: send, H: shareable + inert + send, B: send]: send {
-    listener: Listener, peer: Addr, tasks: Tasks, clock: Clock, random: Random, wire: Option[runner.Wire[G, B]],
-    head: Sender[runner.HeadInput], post: Sender[runner.PubIn], config: runner.WireConfig,
+type Server[G: send, H: shareable + inert + send, B: shareable + send]: send {
+    listener: Listener,
+    peer: Addr,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
+    wire: Option[runner.Wire[G, B]],
+    head: Sender[runner.HeadInput],
+    post: Sender[runner.PubIn],
+    config: runner.WireConfig,
     place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]]
 }
 
-fn server[G: send, H: shareable + inert + send, B: send](take seed: Server[G, H, B]) -> Result[(), std.wsock.Error] waits {
+fn server[G: send, H: shareable + inert + send, B: shareable + send](take seed: Server[G, H, B]) -> Result[(), std.wsock.Error] waits {
     let Server(listener: take listener, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, head: take head, post: take post, config: config, place: place) = take seed
     let mut l = take listener
-    let socket = match std.net.accept_from(mut l, peer, deadline(c)) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
+    let socket = match std.net.accept_from(mut l, peer, deadline(c)) {
+        Ok(take s) => take s,
+        Error(e) => return Error(Network(e))
+    }
     let pending = std.wsock.pending(config.socket)?
     let lease = option.unwrap(std.wsock.acquire(pending)?)
     let up = std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c))?
     let service = runner.wire_target_service(random, take session_wire, head, c, tasks, config, "fixture")
     let placed: Result[own[send] fn(mut runner.WireSession[G, B], take runner.ServiceAllocation) -> Result[runner.ServicePlan, u16], runner.RegisterError] = runner.wire_place_allocator(place, 65536u64)
-    let allocate = match take placed { Ok(take a) => take a, Error(_) => return Error(Protocol(1013u16)) }
-    let h = match runner.serve_connection(tasks, take up, take service, take allocate, post, config, c) { Ok(take h) => take h, Error(cap) => return Error(Allocation(cap)) }
-    match task.join(take h) { Ok(take r) => take r, Error(_) => Error(Protocol(1008u16)) }
+    let allocate = match take placed {
+        Ok(take a) => take a,
+        Error(_) => return Error(Protocol(1013u16))
+    }
+    let h = match runner.serve_connection(tasks, take up, take service, take allocate, post, config, c) {
+        Ok(take h) => take h,
+        Error(cap) => return Error(Allocation(cap))
+    }
+    match task.join(take h) {
+        Ok(take r) => take r,
+        Error(_) => Error(Protocol(1008u16))
+    }
 }
 
-pub fn pair[G: send, H: shareable + inert + send, B: send](tasks: Tasks, n: Net, c: Clock, random: Random,
-    take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn],
-    place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
-    keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64)
-    -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
+pub fn pair[G: send, H: shareable + inert + send, B: shareable + send](tasks: Tasks, n: Net, c: Clock, random: Random, take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn], place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]], keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64) -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
     let mut config = runner.wire_defaults(524288u64)
     config.q = q
     config.budget = 65536u64
@@ -217,26 +317,39 @@ pub fn pair[G: send, H: shareable + inert + send, B: send](tasks: Tasks, n: Net,
 
 // Cover retention needs one whole initial Batch of 1,954 rows. Its fixture
 // selects the frame bound explicitly, using the same listener and owner.
-pub fn pair_config[G: send, H: shareable + inert + send, B: send](tasks: Tasks, n: Net, c: Clock, random: Random,
-    take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn],
-    place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]],
-    keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64)
-    -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
-    let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) { Ok(take sockets) => take sockets, Error(e) => return Error(Network(e)) }
+pub fn pair_config[G: send, H: shareable + inert + send, B: shareable + send](tasks: Tasks, n: Net, c: Clock, random: Random, take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn], place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]], keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64) -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
+    let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) {
+        Ok(take sockets) => take sockets,
+        Error(e) => return Error(Network(e))
+    }
     let until = deadline(c)
-    let client = match host.connect(n, address, until) { Ok(take s) => take s, Error(e) => return Error(Network(e)) }
-    let peer = match net.local_addr(client) { Ok(a) => a, Error(e) => return Error(Network(e)) }
+    let client = match host.connect(n, address, until) {
+        Ok(take s) => take s,
+        Error(e) => return Error(Network(e))
+    }
+    let peer = match net.local_addr(client) {
+        Ok(a) => a,
+        Error(e) => return Error(Network(e))
+    }
     let seed = Server(listener: take l, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, head: channel.sender(head), post: channel.sender(post), config: config, place: place)
     let run: fn(take Server[G, H, B]) -> Result[(), std.wsock.Error] waits = server
     let mut h = task.spawn(tasks, bytes n_session, take seed, run)
     match connect_socket(tasks, take client, c, random, keys, take token, config.socket, until, 5000u64) {
         Ok(take cn) => Ok((take cn, take h)),
-        Error(e) => { task.cancel(mut h); let _ = task.join(take h); Error(e) },
+        Error(e) => {
+            task.cancel(mut h);
+            let _ = task.join(take h);
+            Error(e)
+        },
     }
 }
 
 pub fn slot(keys: List[Bytes], key: Bytes) -> u32 {
-    for i in 0u64 .. list.len(keys) { if keys[i] == key { return int.narrow(i) } }
+    for i in 0u64 .. list.len(keys) {
+        if keys[i] == key {
+            return int.narrow(i)
+        }
+    }
     4294967295u32
 }
 
@@ -247,22 +360,35 @@ pub fn stream(caller: runner.Caller, s: u32) -> Bytes {
 // Reads are demand-driven, so an intentionally unread client holds its bytes
 // in the bounded transport rather than in a second fixture prefetch queue.
 pub fn next(c: Conn) -> Result[runner.Frame, ReceiveError] waits {
-    if let Error(_) = channel.send(c.credit, ()) { return Error(Closed) }
+    if let Error(_) = channel.send(c.credit, ()) {
+        return Error(Closed)
+    }
     loop {
-        match channel.receive(c.from) { Ok(Got(take f)) => return Ok(take f), Ok(Woke(_)) => (), _ => return Error(Closed) }
+        match channel.receive(c.from) {
+            Ok(Got(take f)) => return Ok(take f),
+            Ok(Woke(_)) => (),
+            _ => return Error(Closed)
+        }
     }
 }
 
 // The reader drops the credit receiver as it ends, so a closed credit channel with nothing
 // queued means the connection has ended, though `wake` keeps the queue itself open.
 pub fn try_next(c: Conn) -> Result[runner.Frame, ReceiveError] {
-    let ended = match channel.try_send(c.credit, ()) { Error(Closed(_)) => true, _ => false }
+    let ended = match channel.try_send(c.credit, ()) {
+        Error(Closed(_)) => true,
+        _ => false
+    }
     loop {
         match channel.try_receive(c.from) {
             Ok(Got(take f)) => return Ok(take f),
             Ok(Woke(_)) => (),
             Ok(Gone) => return Error(Closed),
-            Error(Empty) => return if ended { Error(Closed) } else { Error(Empty) },
+            Error(Empty) => return if ended {
+                Error(Closed)
+            } else {
+                Error(Empty)
+            },
             Error(e) => return Error(e),
         }
     }
@@ -272,9 +398,15 @@ pub fn try_next(c: Conn) -> Result[runner.Frame, ReceiveError] {
 // outstanding is kept, so a Woke never leaves a second read owed.
 pub fn wait(c: Conn) -> Incoming waits {
     if let Error(Closed(_)) = channel.try_send(c.credit, ()) {
-        return match channel.try_receive(c.from) { Ok(take i) => take i, Error(_) => Gone }
+        return match channel.try_receive(c.from) {
+            Ok(take i) => take i,
+            Error(_) => Gone
+        }
     }
-    match channel.receive(c.from) { Ok(take i) => take i, Error(_) => Gone }
+    match channel.receive(c.from) {
+        Ok(take i) => take i,
+        Error(_) => Gone
+    }
 }
 
 // Posts Woke(generation) to `wait` at `at` on the clock (host.mono_ns).

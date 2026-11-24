@@ -232,13 +232,9 @@ fn wire_owner_run[C: send](take job: WireSteady[C]) -> Result[(), std.wsock.Erro
             HelloBound(take given, sample) => {
                 st.work.stream_time = sample
                 let _ = replace(mut st.work.asking, None)
-                let mut auth_end: Option[u64] = None
-                let identity_result = match unexpired(st.clock, take given) {
-                    Some(BoundCaller(caller: take caller, expires_at_ms: end)) => {
-                        auth_end = end;
-                        Some(take caller)
-                    },
-                    None => None,
+                let (take identity_result, auth_end): (Result[Caller, BindRefusal], Option[u64]) = match unexpired(st.clock, take given) {
+                    Ok(BoundCaller(caller: take caller, expires_at_ms: end)) => (Ok(take caller), end),
+                    Error(why) => (Error(why), None),
                 }
                 match wire_owner_hello(mut st, take service, pool, take identity_result) {
                     Some(take kept) => {
@@ -629,8 +625,18 @@ fn wire_take_queued(inbox: Receiver[WireEvent], mut run: u64, capacity: u64, mut
 }
 
 // Installs the Hello binding's result through the allocation pool.
-fn wire_owner_hello[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take identity_result: Option[Caller]) -> Option[Box[Service[C]]] waits {
-    let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take held, AcceptHello(take identity_result)) {
+fn wire_owner_hello[C: send](mut st: WireLoop[C], take held: Box[Service[C]], pool: Sender[WireAllocation[C]], take result: Result[Caller, BindRefusal]) -> Option[Box[Service[C]]] waits {
+    let identity = match take result {
+        Ok(take caller) => Some(take caller),
+        Error(Rejected) => None,
+        Error(Unavailable) => {
+            if !st.closing {
+                wire_owner_refuse(mut st, 1013u16)
+            }
+            return Some(take held)
+        },
+    }
+    let AllocatedState(service: take restored, status: take status) = match wire_allocate(pool, st.allocation_to, st.allocation_from, take held, AcceptHello(take identity)) {
         Some(take returned) => take returned,
         None => return None,
     }

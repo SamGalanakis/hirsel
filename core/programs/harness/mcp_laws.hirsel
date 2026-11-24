@@ -288,7 +288,7 @@ fn test_mcp_working_and_blob(parent: Dir, clock: Clock, random: Random, tasks: T
     let services = Services(model: take model, tool: take tool, blobs: Some(copy_blob_fixture(fixture)))
     let w = result.unwrap(mcp_blob_wiring())
     let mut config = settings_of(code.describe(mcp_blob_place), harness.entries(w), dir, clock, random, tasks, network, take services, Some(IDLE_MS))
-    config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
+    config.wire = Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64))
     let socket = runner.wire_defaults(65536u64).socket
     let (running, _stop, status) = launch(tasks, take config)
     mcp_exchange(mut listener, Never, "server/discover", Some(b"2026-07-28"), None, None, "200 OK", MCP_JSON, "{\"resultType\":\"complete\",\"supportedVersions\":[\"2026-07-28\"],\"capabilities\":{\"tools\":{}}}")

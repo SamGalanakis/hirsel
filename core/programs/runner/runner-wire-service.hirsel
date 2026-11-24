@@ -122,7 +122,7 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
     }
 }
 
-pub opaque type WireSession[G: send, B: send]: send {
+pub opaque type WireSession[G: send, B: shareable + send]: send {
     room_link: Option[RoomLink],
     anonymous: Caller,
     wire: Option[Wire[G, B]],
@@ -171,18 +171,18 @@ pub opaque type WireSession[G: send, B: send]: send {
     told_taken: u64
 }
 
-pub fn wire_service[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, B]] {
+pub fn wire_service[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, B]] {
     wire_service_with_head(random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, launch_target(a))
 }
 
-fn wire_service_with_head[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
+fn wire_service_with_head[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[G, B]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
     let anonymous = option.unwrap(anonymous_caller(random))
     let retirement = wire_retirement(head, anonymous)
     let context: WireSession[G, B] = WireSession(room_link: None, anonymous: take anonymous, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64, me: None, publisher: None, caller: None, phase: 0u8, wants: list.new(), entries: list.new(), known: list.new(), launch: None, placing: 0u64, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64, joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false, holding: false, leaving: list.new(), deferred_subs: list.new(), next_sub: 0u64, progress: None, taken: None, completes: 0u64, told_taken: 0u64)
     Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live, retirement: Some(take retirement), flush_subscriptions: wire_flush_subscriptions)
 }
 
-fn wire_can_read[G: send, B: send](s: WireSession[G, B]) -> bool {
+fn wire_can_read[G: send, B: shareable + send](s: WireSession[G, B]) -> bool {
     (s.phase == 0u8 || s.phase == 3u8) && (match s.pending {
         None => true,
         _ => false
@@ -216,7 +216,7 @@ fn wire_stream(caller: Caller, id: StreamId) -> Bytes {
     result.unwrap(stream_key(caller, id))
 }
 
-fn wire_begin_hello[G: send, B: send](s: WireSession[G, B], mut work: WireWork, take credential: Option[Bytes]) -> Result[(), u16] {
+fn wire_begin_hello[G: send, B: shareable + send](s: WireSession[G, B], mut work: WireWork, take credential: Option[Bytes]) -> Result[(), u16] {
     let to = match s.me {
         Some(to) => channel.sender(to),
         None => return Error(1008u16)
@@ -237,7 +237,7 @@ pub type CallRun: send = Computed(Outcome) | Launched | Durable | Uncallable
 
 pub type ServicePlan: send = NoAction | PlanRefusal(StreamId, u64, Refusal) | PlannedCall(Send, StreamId, Bytes, CallRun) | PlannedUpdate(List[WireOutput], List[u64]) | PlannedSubscribe(u32, SubscriptionInput) | PlannedRoomSubscribe(u32, RoomRequest, SubscriptionInput) | SubscriptionRefusal(u32, Outcome) | ResumeReset
 
-fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take pending: WirePending) -> Result[ServicePlan, u16] {
+fn wire_plan_call[G: send, H: shareable + inert + send, B: shareable + send](mut s: WireSession[G, B], r: Registry[G, H], take pending: WirePending) -> Result[ServicePlan, u16] {
     let WirePending(stream: stream, p: p, wire_slot: wire_slot, deadline: deadline_ms, arg: take arg, at: at, grows: _) = take pending
     let index: u64 = int.widen(wire_slot)
     if index >= list.len(s.entries) {
@@ -277,7 +277,7 @@ fn wire_plan_call[G: send, H: shareable + inert + send, B: send](mut s: WireSess
     }
 }
 
-fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take plan: ServicePlan) -> Result[(), u16] {
+fn wire_apply_plan[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, take plan: ServicePlan) -> Result[(), u16] {
     let (take sent, stream, take reply, take run) = match take plan {
         NoAction => return Ok(()),
         PlanRefusal(stream, p, take why) => return wire_refused(mut s, mut work, stream, p, take why),
@@ -401,7 +401,7 @@ fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
     Ok(())
 }
 
-fn wire_start_granted[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take caller: Caller, take sent: Send, take key: Bytes, stream: StreamId, take reply: Bytes) -> Result[(), u16] {
+fn wire_start_granted[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, take caller: Caller, take sent: Send, take key: Bytes, stream: StreamId, take reply: Bytes) -> Result[(), u16] {
     let launch = replace(mut s.launch, None)
     let named = result.unwrap(store.stream_key_bytes(sent.stream))
     let Send(stream: _, key: _, p: p, arg: take argument, digest: digest, deadline: deadline, ..) = take sent
@@ -467,18 +467,18 @@ fn wire_start_granted[G: send, B: send](mut s: WireSession[G, B], mut work: Wire
     Ok(())
 }
 
-fn wire_expired[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, tick: Tick) {
+fn wire_expired[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, tick: Tick) {
     let _ = map.remove(mut work.granted, tick.generation)
     wire_finish_owed(mut s, mut work, tick, Abandoned)
 }
 
-fn wire_finish_granted[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, tick: Tick, take outcome: Outcome) {
+fn wire_finish_granted[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, tick: Tick, take outcome: Outcome) {
     if let Some(_) = map.remove(mut work.granted, tick.generation) {
         wire_finish_owed(mut s, mut work, tick, take outcome)
     }
 }
 
-fn wire_finish_owed[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, tick: Tick, take outcome: Outcome) {
+fn wire_finish_owed[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, tick: Tick, take outcome: Outcome) {
     let _ = map.remove(mut work.timers, tick.generation)
     let version = s.last
     let key = slot_key(tick.stream, tick.p)
@@ -502,7 +502,7 @@ fn wire_finish_owed[G: send, B: send](mut s: WireSession[G, B], mut work: WireWo
     }
 }
 
-fn wire_service_allocate[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] {
+fn wire_service_allocate[G: send, H: shareable + inert + send, B: shareable + send](mut s: WireSession[G, B], r: Registry[G, H], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] {
     match take allocation {
         AcceptHello(take identity_result) => {
             wire_accept_hello(mut s, r, take identity_result)?;
@@ -528,7 +528,7 @@ fn wire_service_allocate[G: send, H: shareable + inert + send, B: send](mut s: W
 }
 
 // Adds a Hello entry with what the shared Registry knows of it: 1 registered, 2 gone, 0 neither.
-fn wire_know[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take key: Bytes) {
+fn wire_know[G: send, H: shareable + inert + send, B: shareable + send](mut s: WireSession[G, B], r: Registry[G, H], take key: Bytes) {
     list.push(mut s.known, if map.contains(r.slots, key) {
         1u8
     } else if map.contains(r.gone, key) {
@@ -539,7 +539,7 @@ fn wire_know[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G
     list.push(mut s.entries, take key)
 }
 
-fn wire_accept_hello[G: send, H: shareable + inert + send, B: send](mut s: WireSession[G, B], r: Registry[G, H], take identity_result: Option[Caller]) -> Result[(), u16] {
+fn wire_accept_hello[G: send, H: shareable + inert + send, B: shareable + send](mut s: WireSession[G, B], r: Registry[G, H], take identity_result: Option[Caller]) -> Result[(), u16] {
     let caller = match take identity_result {
         Some(take value) => take value,
         None => return Error(1008u16)
@@ -559,7 +559,7 @@ fn wire_accept_hello[G: send, H: shareable + inert + send, B: send](mut s: WireS
 // The publisher's answer to this session's Join. Id 0 (it could not reserve the session's fence
 // Arcs) or a Join the publisher never took (its inbox closed) refuses the first Subscribe;
 // otherwise that Subscribe, carried in the Join (v2.22), is live at the generation it was sent with.
-fn wire_poll_admit[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork) {
+fn wire_poll_admit[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork) {
     if let Some(_) = work.join {
         return
     }
@@ -599,7 +599,7 @@ fn wire_poll_admit[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
 // v2.22 (§3 "Repair"): once the owner holds no `complete` it took and has not sent, it publishes
 // how many it has taken for this join and wakes the publisher, so a due sub held back for an
 // unsent repair is repaired without waiting for another drain.
-fn wire_offer_taken[G: send, B: send](mut s: WireSession[G, B], work: WireWork) {
+fn wire_offer_taken[G: send, B: shareable + send](mut s: WireSession[G, B], work: WireWork) {
     if s.completes == s.told_taken || work.sending_complete {
         return
     }
@@ -625,13 +625,13 @@ fn wire_carries_complete(f: Frame) -> bool {
     }
 }
 
-fn wire_step[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
+fn wire_step[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
     let stepped = wire_step_input(mut s, mut work, take input)
     wire_offer_taken(mut s, work)
     stepped
 }
 
-fn wire_step_input[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
+fn wire_step_input[G: send, B: shareable + send](mut s: WireSession[G, B], mut work: WireWork, take input: ServiceInput) -> Result[Option[Frame], u16] {
     s.holding = match work.check {
         Some(_) => true,
         None => false
@@ -777,21 +777,21 @@ fn wire_step_input[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
     Ok(None)
 }
 
-fn wire_me[G: send, B: send](s: WireSession[G, B]) -> Sender[WireEvent] {
+fn wire_me[G: send, B: shareable + send](s: WireSession[G, B]) -> Sender[WireEvent] {
     match s.me {
         Some(to) => channel.sender(to),
         _ => fail("runner: detached wire service")
     }
 }
 
-fn wire_publisher[G: send, B: send](s: WireSession[G, B]) -> Sender[PubIn] {
+fn wire_publisher[G: send, B: shareable + send](s: WireSession[G, B]) -> Sender[PubIn] {
     match s.publisher {
         Some(to) => channel.sender(to),
         _ => fail("runner: detached wire service")
     }
 }
 
-fn wire_finish[G: send, B: send](mut s: WireSession[G, B]) -> Option[PubIn] {
+fn wire_finish[G: send, B: shareable + send](mut s: WireSession[G, B]) -> Option[PubIn] {
     s.mark = None
     if s.marked {
         Some(PubIn(e: Drained))
@@ -804,17 +804,17 @@ fn wire_finish[G: send, B: send](mut s: WireSession[G, B]) -> Option[PubIn] {
 }
 
 // Embedded hosts and socket fixtures supply their launch target directly.
-pub fn wire_target_service[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
+pub fn wire_target_service[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
     wire_service_with_head(random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
 }
 
 // The place's one Registry, built once under `bytes n_place` and owned by the allocation
 // pool's step for every session the pool serves (§3 "One Registry").
-pub fn wire_place_allocator[G: send, H: shareable + inert + send, B: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16], RegisterError] {
+pub fn wire_place_allocator[G: send, H: shareable + inert + send, B: shareable + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16], RegisterError] {
     Ok(wire_allocator(placed(place, n_place)?, n_place))
 }
 
-fn wire_allocator[G: send, H: shareable + inert + send, B: send](take r: Registry[G, H], n_place: u64) -> own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16] {
+fn wire_allocator[G: send, H: shareable + inert + send, B: shareable + send](take r: Registry[G, H], n_place: u64) -> own[send] fn(mut WireSession[G, B], take ServiceAllocation) -> Result[ServicePlan, u16] {
     fn(mut s: WireSession[G, B], take allocation: ServiceAllocation) -> Result[ServicePlan, u16] {
         if let AcceptHello(_) = view allocation {
             s.n_place = n_place
@@ -833,7 +833,7 @@ resource type WireJoinLease: send {
 
 // A second digest at a live position closes before preparing another call. Otherwise
 // a head answer could reach the writer while that conflicting send is being prepared.
-fn wire_check_live[G: send, B: send](s: WireSession[G, B], f: Frame) -> Option[u16] {
+fn wire_check_live[G: send, B: shareable + send](s: WireSession[G, B], f: Frame) -> Option[u16] {
     if let Call(stream, p, wire_slot, _, arg) = f {
         let index: u64 = int.widen(wire_slot)
         if index >= list.len(s.entries) {

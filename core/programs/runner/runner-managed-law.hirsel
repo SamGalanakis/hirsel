@@ -1,27 +1,30 @@
-type ManagedRun[G: send, S: send, B: send]: send {
-    settings: runner.PlaceConfig[G, Hd, S, B], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]],
+type ManagedRun[G: send, S: send, B: shareable + send]: send {
+    settings: runner.PlaceConfig[G, Hd, S, B],
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    watch: Sender[Receiver[runner.Phase]],
 }
 
-fn run_managed[G: send, S: send, B: send](take job: ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_managed[G: send, S: send, B: shareable + send](take job: ManagedRun[G, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let ManagedRun(settings: take settings, stop: take stop, status: take status, watch: take watch) = take job
     runner.operate(take settings, take stop, status, Some(take watch))
 }
 
-fn managed_address(status: runner.Status) -> Addr { option.unwrap(status.addr) }
+fn managed_address(status: runner.Status) -> Addr {
+    option.unwrap(status.addr)
+}
 
 fn managed_settings(dir: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, listen: Addr, stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
-    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None,
-        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE,
-        on_migrate: None, schema: code.describe(schema), session: wire, max_sessions: 1u64,
-        proxies: list.new(), n_publisher: 1048576u64, listen: listen,
-        net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
+    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop, wire: Some(ingress.binding()), triggers: None, idle: None)
 }
 
-fn try_start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool, allowance: u64) -> Result[(Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]), runner.StartError] waits {
+fn try_start_managed[G: send, S: send, B: shareable + send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool, allowance: u64) -> Result[(Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]), runner.StartError] waits {
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    if stop_pending { result.unwrap(channel.send(stop_to, ())) }
+    if stop_pending {
+        result.unwrap(channel.send(stop_to, ()))
+    }
     let (handoff, phase_rx): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let request = ManagedRun(settings: take settings, stop: take stop_from, status: latest.handle(status), watch: take handoff)
@@ -36,14 +39,14 @@ fn try_start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: run
     }
 }
 
-fn managed_budget[G: send, S: send, B: send](settings: runner.PlaceConfig[G, Hd, S, B]) -> (u64, u64) {
+fn managed_budget[G: send, S: send, B: shareable + send](settings: runner.PlaceConfig[G, Hd, S, B]) -> (u64, u64) {
     let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, settings.sizes))
     // Operate includes the head, serving and supervisor. Its keep is 1 MiB.
     let share = store.planned_bytes(plan)
     (result.unwrap(runner.operate_bytes(settings)) + 1048576u64 + share, share)
 }
 
-fn start_managed[G: send, S: send, B: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
+fn start_managed[G: send, S: send, B: shareable + send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S, B], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {
     let (allowance, _) = managed_budget(settings)
     match try_start_managed(tasks, take settings, stop_pending, allowance) {
         Ok(take started) => take started,
@@ -65,10 +68,18 @@ fn test_stop_unstarted(parent: Dir, clock: Clock, random: Random, tasks: Tasks, 
     }
     let config = managed_settings(dir, clock, random, tasks, net, listen, stop)
     let (running, stop_to, phases, _) = start_managed(tasks, take config, true)
-    if let Ok(Ok(Unstarted)) = task.join(take running) {} else { fail("stop: expected Unstarted") }
-    if let Ok(Starting(Recovering)) = channel.try_receive(phases) {} else { fail("stop: expected Recovering") }
-    if let Ok(Draining) = channel.try_receive(phases) {} else { fail("stop: expected Draining") }
-    if let Error(Closed) = channel.try_receive(phases) {} else { fail("stop: place continued after Draining") }
+    if let Ok(Ok(Unstarted)) = task.join(take running) {} else {
+        fail("stop: expected Unstarted")
+    }
+    if let Ok(Starting(Recovering)) = channel.try_receive(phases) {} else {
+        fail("stop: expected Recovering")
+    }
+    if let Ok(Draining) = channel.try_receive(phases) {} else {
+        fail("stop: expected Draining")
+    }
+    if let Error(Closed) = channel.try_receive(phases) {} else {
+        fail("stop: place continued after Draining")
+    }
     let _ = take stop_to
     result.unwrap(std.dir.remove_all(parent, name))
     Ok(())

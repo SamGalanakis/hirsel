@@ -12,9 +12,13 @@ fn sse_law_schema(mut d: store.Declare) -> Result[SseLawTables, store.Error] {
     Ok(SseLawTables(unit_rows: take unit_rows, option_rows: take option_rows))
 }
 
-fn sse_law_units(h: SseLawTables) -> store.Table[u32, ()] { clone(h.unit_rows) }
+fn sse_law_units(h: SseLawTables) -> store.Table[u32, ()] {
+    clone(h.unit_rows)
+}
 
-fn sse_law_options(h: SseLawTables) -> store.Table[u32, Option[u32]] { clone(h.option_rows) }
+fn sse_law_options(h: SseLawTables) -> store.Table[u32, Option[u32]] {
+    clone(h.option_rows)
+}
 
 type SseLawValue: codec {}
 
@@ -36,17 +40,22 @@ fn sse_law_place(mut r: Registry[(), SseLawTables]) -> Result[(), RegisterError]
     slot(mut views, "option", code.describe(sse_law_options))?
     query(mut r, code.describe(sse_law_query), take views, 65536u64, DEFAULT_STEPS)?
     let subscribe: Mode = Subscribe
-    for (mode, name, path) in [(Read, "read", "/read"), (subscribe, "events", "/events")] {
+    for (mode, name, path) in[(Read, "read", "/read"), (subscribe, "events", "/events")] {
         let key = http_law_key(r.exported[0u64])
-        bind(mut r, HttpBinding(op: clone(name), method: Get, path: clone(path), entry: take key, fields: list.new(),
-            mode: mode, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))?
+        bind(mut r, HttpBinding(op: clone(name), method: Get, path: clone(path), entry: take key, fields: list.new(), mode: mode, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))?
     }
     Ok(())
 }
 
 type SseLawServer: send {
-    listener: Listener, publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks,
-    frame_limit: u64, lease_ms: u64, stop: Receiver[u64],
+    listener: Listener,
+    publisher: Sender[PubIn],
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    frame_limit: u64,
+    lease_ms: u64,
+    stop: Receiver[u64],
 }
 
 fn sse_law_empty(mut _state: u64) -> Result[Option[Bytes], Capacity] {
@@ -69,9 +78,13 @@ fn sse_law_override(req: std.http.Request, _scratch: Region, mut _out: std.http.
     Ok(Stream(take spec))
 }
 
-fn sse_law_bind(_seed: (), credential: Bytes) -> Result[BoundCaller, ()] {
+fn sse_law_bind(_seed: (), credential: Bytes) -> Result[BoundCaller, BindRefusal] {
     if credential == b"short" || credential == b"fresh" {
-        let expiry = if credential == b"short" { 1050u64 } else { 1100u64 }
+        let expiry = if credential == b"short" {
+            1050u64
+        } else {
+            1100u64
+        }
         return Ok(BoundCaller(caller: store.Caller(issuer: 7u8, subject: b"A"), expires_at_ms: Some(expiry)))
     }
     http_op_bind_original((), credential)
@@ -79,7 +92,9 @@ fn sse_law_bind(_seed: (), credential: Bytes) -> Result[BoundCaller, ()] {
 
 fn sse_law_raw_producer(take seed: std.stream.Seed, c: Clock, _directory: Option[Dir]) waits {
     let next = fn(mut state: (u64, Clock)) -> Result[Option[Bytes], Capacity] waits {
-        if state.0 != 0u64 { host.sleep_until(state.1, 1000000000u64) }
+        if state.0 != 0u64 {
+            host.sleep_until(state.1, 1000000000u64)
+        }
         state.0 += 1u64
         Ok(Some(b"private"))
     }
@@ -87,9 +102,14 @@ fn sse_law_raw_producer(take seed: std.stream.Seed, c: Clock, _directory: Option
 }
 
 fn sse_law_raw(req: std.http.Request, _scratch: Region, mut _out: std.http.Responder, state: HttpConnection[(), SseLawTables, ()]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
-    let Some(auth) = std.http.field(req, b"authorization") else { return Ok(Reply(http_reply(401u16, "", false, false, false)?)) }
-    let Some(identity) = bind_credential(state.tasks, state.clock, (), code.describe(sse_law_bind), std.http.copy_bytes(auth), 8192u64, DEFAULT_STEPS)
-        else { return Ok(Reply(http_reply(401u16, "", false, false, false)?)) }
+    let Some(auth) = std.http.field(req, b"authorization") else {
+        return Ok(Reply(http_reply(401u16, "", false, false, false)?))
+    }
+    let identity = match bind_credential(state.tasks, state.clock, (), code.describe(sse_law_bind), std.http.copy_bytes(auth), 8192u64, DEFAULT_STEPS) {
+        Ok(take caller) => take caller,
+        Error(Rejected) => return Ok(Reply(http_reply(401u16, "", false, false, false)?)),
+        Error(Unavailable) => return Ok(Reply(http_binding_unavailable()?)),
+    }
     let bounds = std.stream.Bounds(event_max: 128u64, producer_bytes: 16384u64, producer_steps: 256u64)
     let mut spec = std.stream.spec_owned(req, 200u16, bounds, None, sse_law_raw_producer)?
     std.stream.expire_at(mut spec, identity.expires_at_ms)
@@ -101,10 +121,8 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     let place: StaticFn[fn(mut Registry[(), SseLawTables]) -> Result[(), RegisterError]] = code.describe(sse_law_place)
     let reg = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
     let mut builder: std.router.Builder[HttpConnection[(), SseLawTables, ()]] = std.router.builder()
-    result.unwrap(std.router.add(mut builder, "GET", "/head-override",
-        std.router.Route(handler: sse_law_override, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768u64), steps: None)))
-    result.unwrap(std.router.add(mut builder, "GET", "/private",
-        std.router.Route(handler: sse_law_raw, body_max: None, upgrade_bytes: None, stream_bytes: Some(65536u64), steps: None)))
+    result.unwrap(std.router.add(mut builder, "GET", "/head-override", std.router.Route(handler: sse_law_override, body_max: None, upgrade_bytes: None, stream_bytes: Some(32768u64), steps: None)))
+    result.unwrap(std.router.add(mut builder, "GET", "/private", std.router.Route(handler: sse_law_raw, body_max: None, upgrade_bytes: None, stream_bytes: Some(65536u64), steps: None)))
     let (take routes, take plans) = result.unwrap(http_router(reg, None, take builder))
     let declarations = result.unwrap(store.describe_declarations(clock, code.describe(sse_law_schema)))
     let reads = http_read_access(pub_to, declarations, frame_limit)
@@ -133,18 +151,15 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     http_serve(take listeners, clock, tasks, take cfg, take routes, plans, reads, 2097152u64, make, 4u64, Some(take stop))
 }
 
-fn sse_law_start(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64)
-    -> (Addr, Sender[u64], Task[Result[(), std.http.ServeError]]) waits {
+fn sse_law_start(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64) -> (Addr, Sender[u64], Task[Result[(), std.http.ServeError]]) waits {
     sse_law_start_with_lease(to, n, c, r, tasks, frame_limit, 60000u64)
 }
 
-fn sse_law_start_with_lease(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64, lease_ms: u64)
-    -> (Addr, Sender[u64], Task[Result[(), std.http.ServeError]]) waits {
+fn sse_law_start_with_lease(to: Sender[PubIn], n: Net, c: Clock, r: Random, tasks: Tasks, frame_limit: u64, lease_ms: u64) -> (Addr, Sender[u64], Task[Result[(), std.http.ServeError]]) waits {
     let addr = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let (take listener, address) = result.unwrap(host.listen(n, addr, 8u16))
     let (stop, stopping): (Sender[u64], Receiver[u64]) = channel.new(1u64)
-    let seed = SseLawServer(listener: take listener, publisher: channel.sender(to), clock: c, random: r, tasks: tasks,
-        frame_limit: frame_limit, lease_ms, stop: take stopping)
+    let seed = SseLawServer(listener: take listener, publisher: channel.sender(to), clock: c, random: r, tasks: tasks, frame_limit: frame_limit, lease_ms, stop: take stopping)
     (address, take stop, task.spawn(tasks, bytes 4194304u64, take seed, sse_law_serve))
 }
 
@@ -156,7 +171,9 @@ fn sse_law_dial_with_token(n: Net, c: Clock, addr: Addr, path: String, resume: b
     let mut headers: List[std.http_client.Header] = list.with_capacity(3u64)
     list.push(mut headers, std.http_client.Header(name: "Authorization", value: Public(std.http.copy_bytes(token))))
     list.push(mut headers, std.http_client.Header(name: "Accept", value: Public(b"text/event-stream")))
-    if resume { list.push(mut headers, std.http_client.Header(name: "Last-Event-ID", value: Public(b"1"))) }
+    if resume {
+        list.push(mut headers, std.http_client.Header(name: "Last-Event-ID", value: Public(b"1")))
+    }
     let req = std.http_client.Request(method: "GET", target: clone(path), headers: take headers, body: Fixed(0u64))
     result.unwrap(std.http_client.dial(n, addr, "a", c, req, std.clock.deadline_after_ms(host.mono_ns(c), 4000u64)))
 }
@@ -164,11 +181,17 @@ fn sse_law_dial_with_token(n: Net, c: Clock, addr: Addr, path: String, resume: b
 fn sse_law_event(mut client: std.http_client.Connection) -> Bytes waits {
     let mut line: Bytes = list.with_capacity(4096u64)
     loop {
-        if result.unwrap(std.http_client.read(mut client, mut line)) == 0u64 { fail("L16 event ended early") }
+        if result.unwrap(std.http_client.read(mut client, mut line)) == 0u64 {
+            fail("L16 event ended early")
+        }
         let n = list.len(line)
         if n >= 2u64 && line[n - 2u64] == b'\n' && line[n - 1u64] == b'\n' {
-            if line == b"retry: 1000\n\n" { continue }
-            if line != b":\n\n" { return take line }
+            if line == b"retry: 1000\n\n" {
+                continue
+            }
+            if line != b":\n\n" {
+                return take line
+            }
             list.clear(mut line)
         }
     }
@@ -224,15 +247,17 @@ fn sse_law_body(mut client: std.http_client.Connection) -> Bytes waits {
 fn sse_law_update(mut db: store.Db, tables: SseLawTables, removing: bool) waits {
     let applied = store.run(mut db, None, (store.copy_env(tables), store.copy_env(removing)), fn(mut tx, env) -> Result[(), store.Error] {
         if env.1 {
-            let _ = store.delete(mut tx, env.0.unit_rows, 1u32)?
-            let _ = store.delete(mut tx, env.0.option_rows, 2u32)?
+            let _ = store.delete(mut tx, env.0 .unit_rows, 1u32)?
+            let _ = store.delete(mut tx, env.0 .option_rows, 2u32)?
         } else {
-            store.put(mut tx, env.0.unit_rows, 1u32, ())?
-            store.put(mut tx, env.0.option_rows, 2u32, None)?
+            store.put(mut tx, env.0 .unit_rows, 1u32, ())?
+            store.put(mut tx, env.0 .option_rows, 2u32, None)?
         }
         Ok(())
     })
-    if let Ok(Committed(_)) = applied {} else { fail("L16 fixture did not commit rows") }
+    if let Ok(Committed(_)) = applied {} else {
+        fail("L16 fixture did not commit rows")
+    }
 }
 
 fn sse_law_publish(to: Sender[PubIn], db: store.Db) waits {
@@ -253,9 +278,7 @@ type SseLawVectors {
 }
 
 fn sse_law_vectors() -> SseLawVectors {
-    SseLawVectors(empty: string.from(B9_EMPTY), delta: string.from(B9_DELTA),
-        inserted: string.from(B9_INSERTED), present: string.from(B9_PRESENT), deletions: string.from(B9_REMOVED),
-        reset: string.from(B9_RESET), ended: string.from(B9_ENDED), expired: string.from(B9_EXPIRED))
+    SseLawVectors(empty: string.from(B9_EMPTY), delta: string.from(B9_DELTA), inserted: string.from(B9_INSERTED), present: string.from(B9_PRESENT), deletions: string.from(B9_REMOVED), reset: string.from(B9_RESET), ended: string.from(B9_ENDED), expired: string.from(B9_EXPIRED))
 }
 
 fn sse_law_vector(template: String, version: u64) -> Bytes {
@@ -267,10 +290,14 @@ fn sse_law_vector(template: String, version: u64) -> Bytes {
 fn sse_law_check_read(n: Net, c: Clock, addr: Addr, completing: Bytes) waits {
     let mut read = sse_law_dial(n, c, addr, "/read", false)
     result.unwrap(std.http_client.finish_request(mut read, 4096u64))
-    if std.http_client.status(std.http_client.head(read)) != 200u16 { fail("L16 one-shot status") }
+    if std.http_client.status(std.http_client.head(read)) != 200u16 {
+        fail("L16 one-shot status")
+    }
     let body = sse_law_body(mut read)
     let data = list.len(b"retry: 1000\n\nevent: batch\ndata: ")
-    if body != list.slice(completing, data, list.len(completing) - 2u64) { fail("L16 one-shot body differs from completing SSE data") }
+    if body != list.slice(completing, data, list.len(completing) - 2u64) {
+        fail("L16 one-shot body differs from completing SSE data")
+    }
 }
 
 @test
@@ -284,16 +311,18 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     let first_version = store.version(store.snapshot(db))
     let Mailbox(to: take pub_in, from: take waiting, rounds: take rounds) = result.unwrap(mailbox(16u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let job = Publish(place: code.describe(sse_law_place), n_place: HTTP_LAW_PLACE_BYTES, staging: 1048576u64,
-        h: arc.new(clone(tables)), read_handle: result.unwrap(store.reader(db, 0u64)), base: store.snapshot(db),
-        from: take waiting, rounds: take rounds, ready: take ready_to)
+    let job = Publish(place: code.describe(sse_law_place), n_place: HTTP_LAW_PLACE_BYTES, staging: 1048576u64, h: arc.new(clone(tables)), read_handle: result.unwrap(store.reader(db, 0u64)), base: store.snapshot(db), from: take waiting, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
-    if let Ok(None) = channel.receive(ready_from) {} else { fail("L16 publisher did not start") }
+    if let Ok(None) = channel.receive(ready_from) {} else {
+        fail("L16 publisher did not start")
+    }
     let (address, take stop, take server) = sse_law_start(pub_in, n, c, r, tasks, 65536u64)
     sse_law_check_overrides(n, c, address)
     let mut first = sse_law_dial(n, c, address, "/events", false)
     result.unwrap(std.http_client.finish_request(mut first, 65536u64))
-    if std.http_client.status(std.http_client.head(first)) != 200u16 { fail("L16 expected SSE head") }
+    if std.http_client.status(std.http_client.head(first)) != 200u16 {
+        fail("L16 expected SSE head")
+    }
     sse_law_check_headers(std.http_client.head(first), b"no-store", b"no")
     if sse_law_event(mut first) != sse_law_vector(vectors.empty, first_version) {
         fail("L16 empty initial Batch must decode the zero-byte record")
@@ -301,7 +330,9 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     sse_law_update(mut db, tables, false)
     let inserted = store.version(store.snapshot(db))
     sse_law_publish(pub_in, db)
-    if sse_law_event(mut first) != sse_law_vector(vectors.inserted, inserted) { fail("L16 present null rows") }
+    if sse_law_event(mut first) != sse_law_vector(vectors.inserted, inserted) {
+        fail("L16 present null rows")
+    }
     std.http_client.close(take first)
     let mut resumed = sse_law_dial(n, c, address, "/events", true)
     result.unwrap(std.http_client.finish_request(mut resumed, 65536u64))
@@ -321,14 +352,15 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     sse_law_update(mut db, tables, true)
     let removed = store.version(store.snapshot(db))
     sse_law_publish(pub_in, db)
-    if sse_law_event(mut resumed) != sse_law_vector(vectors.deletions, removed) { fail("L16 removed rows") }
+    if sse_law_event(mut resumed) != sse_law_vector(vectors.deletions, removed) {
+        fail("L16 removed rows")
+    }
     sse_law_check_read(n, c, address, sse_law_vector(vectors.empty, removed))
     std.http_client.close(take resumed)
     let (limited_addr, take limited_stop, take limited_server) = sse_law_start(pub_in, n, c, r, tasks, 40u64)
     let mut reset_client = sse_law_dial(n, c, limited_addr, "/events", false)
     result.unwrap(std.http_client.finish_request(mut reset_client, 65536u64))
-    if std.http_client.status(std.http_client.head(reset_client)) != 200u16 ||
-        sse_law_event(mut reset_client) != sse_law_vector(vectors.empty, removed) {
+    if std.http_client.status(std.http_client.head(reset_client)) != 200u16 || sse_law_event(mut reset_client) != sse_law_vector(vectors.empty, removed) {
         fail("L16 reset fixture did not start empty")
     }
     sse_law_update(mut db, tables, false)
@@ -371,7 +403,9 @@ fn sse_law_pre_head(c: Clock, r: Random, tasks: Tasks, n: Net) waits {
     if std.http_client.status(std.http_client.head(client)) != 503u16 || sse_law_body(mut client) != b"" {
         fail("L16 delayed initial Batch committed an SSE head")
     }
-    let Join(mark: Some(take mark), ..) = take join else { fail("L16 subscription lost retirement mark") }
+    let Join(mark: Some(take mark), ..) = take join else {
+        fail("L16 subscription lost retirement mark")
+    }
     if let Error(Closed) = channel.try_receive(mark) {} else {
         // The response may reach the client just before the owner completes.
         let _ = channel.receive(mark)
@@ -399,13 +433,11 @@ fn sse_law_retire_state(c: Clock, r: Random) waits {
     let mut reg = result.unwrap(placed(code.describe(sse_law_place), HTTP_LAW_PLACE_BYTES))
     let key = http_law_key(reg.exported[0u64])
     result.unwrap(bind_query_slots(mut reg, tables))
-    let mut board = Board(r: take reg, h: arc.new(take tables), read_handle: result.unwrap(store.reader(db, 0u64)),
-        reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut board = Board(r: take reg, h: arc.new(take tables), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let _ = at_base(mut board, 1u64, 7u32, clone(key), no_arg())
     let (live, _live_rx): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let mut joined: List[Joiner] = list.with_capacity(2u64)
-    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take live, closed: None, ended: list.new(), reset: false, read_failed: false,
-        mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+    list.push(mut joined, Joiner(grants: None, who: 1u64, to: take live, closed: None, ended: list.new(), reset: false, read_failed: false, mark: None, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
     let baseline = map.len(board.subs.indexed)
     let (out, inbox): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
     let version = store.version(board.base)
@@ -414,16 +446,18 @@ fn sse_law_retire_state(c: Clock, r: Random) waits {
         let (take owner, take ports) = result.unwrap(http_owner(out, 5u64))
         let input = result.unwrap(http_subscription_input(law_caller(id), clone(key), no_arg(), 65536u64, 65536u64))
         result.unwrap(http_join(owner, take ports, take input, None))
-        let Join(to: take to, mark: take mark, first: Some(take first), ..) = sse_law_take_join(inbox)
-            else { fail("L9p HTTP did not carry a subscription") }
-        list.push(mut joined, Joiner(grants: None, who: id, to: take to, closed: None, ended: list.new(), reset: false, read_failed: false,
-            mark: take mark, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
+        let Join(to: take to, mark: take mark, first: Some(take first), ..) = sse_law_take_join(inbox) else {
+            fail("L9p HTTP did not carry a subscription")
+        }
+        list.push(mut joined, Joiner(grants: None, who: id, to: take to, closed: None, ended: list.new(), reset: false, read_failed: false, mark: take mark, identity: None, fence: None, due: false, progress: None, progressed: false, taken: None, handed: 0u64, http_credit: None))
         let JoinSubscribe(sub, generation, input: take staged_input) = take first
         let mut owes: List[Owe] = list.new()
         publish_wire_subscription(mut board, mut joined, mut owes, id, sub, generation, take staged_input)
         let mut replies: List[Replies] = list.new()
         settle(mut board.subs, mut joined, mut replies, take owes, version)
-        if map.len(board.subs.by_session) != 2u64 || list.len(joined) != 2u64 { fail("L9p missing live subscription") }
+        if map.len(board.subs.by_session) != 2u64 || list.len(joined) != 2u64 {
+            fail("L9p missing live subscription")
+        }
         if i % 2u64 == 0u64 {
             result.unwrap(channel.try_send(out, PubIn(e: Unsubscribed(0u64, 0u32))))
         }
@@ -435,9 +469,7 @@ fn sse_law_retire_state(c: Clock, r: Random) waits {
             _ => fail("L9p dropped wake did not leave a message to sweep"),
         }
         sweep(mut board.subs, mut joined)
-        if list.len(joined) != 1u64 || joined[0u64].who != 1u64 ||
-            map.len(board.subs.by_session) != 1u64 || !map.contains(board.subs.by_session, 1u64) ||
-            map.len(board.subs.indexed) != baseline {
+        if list.len(joined) != 1u64 || joined[0u64].who != 1u64 || map.len(board.subs.by_session) != 1u64 || !map.contains(board.subs.by_session, 1u64) || map.len(board.subs.indexed) != baseline {
             fail("L9p publisher retained a retired subscription or removed the live session")
         }
     }
@@ -450,7 +482,10 @@ fn test_l9p(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     Ok(())
 }
 
-type SseLawProvider: send { port: Served[NetOp], clock: Clock }
+type SseLawProvider: send {
+    port: Served[NetOp],
+    clock: Clock
+}
 
 fn sse_law_sim_clock(take w: std.sim.world.World) waits {
     let mut world = take w
@@ -487,7 +522,9 @@ fn sse_law_partial_reset(random: Random, tasks: Tasks, empty: String) waits {
     list.push(mut frames[index].groups, OwedGroup(sub: 0u32, payload: arc.new(std.http.copy_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x00"))))
     result.unwrap(channel.send(events, wire_event(FromRunner(update(1u64, Some(list.remove(mut frames, index)), list.new())))))
     result.unwrap(std.http_client.finish_request(mut client, 65536u64))
-    if sse_law_event(mut client) != sse_law_vector(empty, 1u64) { fail("L16 slow client missed initial Batch") }
+    if sse_law_event(mut client) != sse_law_vector(empty, 1u64) {
+        fail("L16 slow client missed initial Batch")
+    }
     let terminal = owe(mut frames, 1u64, 2u64)
     frames[terminal].reset = true
     result.unwrap(channel.send(events, wire_event(FromRunner(update(2u64, Some(list.remove(mut frames, terminal)), list.new())))))
@@ -495,7 +532,9 @@ fn sse_law_partial_reset(random: Random, tasks: Tasks, empty: String) waits {
     host.sleep_until(c, until)
     let mut partial: Bytes = list.with_capacity(4096u64)
     while let Ok(received) = std.http_client.read(mut client, mut partial) {
-        if received == 0u64 { break }
+        if received == 0u64 {
+            break
+        }
     }
     // The receive queue holds only the start of the Reset before the writer's
     // unit deadline. The blank line is what dispatches the event.
@@ -515,13 +554,19 @@ fn sse_law_partial_reset(random: Random, tasks: Tasks, empty: String) waits {
 
 fn sse_law_reset_prefix(raw: Bytes) -> bool {
     let text = result.unwrap(string.from_utf8(std.http.copy_bytes(raw)))
-    if !string.starts_with(text, "event: reset\ndata:") { return false }
+    if !string.starts_with(text, "event: reset\ndata:") {
+        return false
+    }
     let mut parser = std.sse.decoder(4096u64)
     let parsed = std.sse.feed(mut parser, raw, scoped fn(_name: Bytes, _data: Bytes, _id: Bytes) -> std.sse.FeedControl[()] {
         Fail(())
     })
     std.sse.finish(mut parser)
-    if let Ok(Consumed(n)) = parsed { n == list.len(raw) } else { false }
+    if let Ok(Consumed(n)) = parsed {
+        n == list.len(raw)
+    } else {
+        false
+    }
 }
 
 fn sse_law_retire_requests(c: Clock, r: Random, tasks: Tasks, n: Net) waits {
@@ -531,8 +576,9 @@ fn sse_law_retire_requests(c: Clock, r: Random, tasks: Tasks, n: Net) waits {
     // reach PubIn only if the first response gave its read slot back.
     for _ in 0u64 .. 2u64 {
         let mut read = sse_law_dial(n, c, addr, "/read", false)
-        let Join(to: take events, told: take answer, mark: Some(take mark), ..) = sse_law_take_join(from)
-            else { fail("L9p one-shot read omitted its mark") }
+        let Join(to: take events, told: take answer, mark: Some(take mark), ..) = sse_law_take_join(from) else {
+            fail("L9p one-shot read omitted its mark")
+        }
         let register = latest.new(arc.new(std.http.ReleaseRound(at: 1u64)))
         result.unwrap(channel.send(answer, Admit(who: 1u64, round: take register)))
         result.unwrap(channel.send(events, wire_event(JoinReady)))
@@ -542,23 +588,30 @@ fn sse_law_retire_requests(c: Clock, r: Random, tasks: Tasks, n: Net) waits {
         sse_law_fill_publisher(to)
         result.unwrap(channel.send(events, wire_event(FromRunner(update(1u64, Some(list.remove(mut owed, index)), list.new())))))
         result.unwrap(std.http_client.finish_request(mut read, 4096u64))
-        if std.http_client.status(std.http_client.head(read)) != 503u16 { fail("L9p failed read did not finish") }
+        if std.http_client.status(std.http_client.head(read)) != 503u16 {
+            fail("L9p failed read did not finish")
+        }
         std.http_client.close(take read)
-        if let Error(_) = channel.receive(mark) {} else { fail("L9p failed read kept its mark") }
+        if let Error(_) = channel.receive(mark) {} else {
+            fail("L9p failed read kept its mark")
+        }
         while let Ok(_) = channel.try_receive(from) {}
     }
     let stream = sse_law_dial(n, c, addr, "/events", false)
-    let Join(mark: Some(take mark), ..) = sse_law_take_join(from) else { fail("L9p stream omitted its mark") }
+    let Join(mark: Some(take mark), ..) = sse_law_take_join(from) else {
+        fail("L9p stream omitted its mark")
+    }
     sse_law_fill_publisher(to)
     std.http_client.close(take stream)
-    if let Error(_) = channel.receive(mark) {} else { fail("L9p closed stream kept its mark") }
+    if let Error(_) = channel.receive(mark) {} else {
+        fail("L9p closed stream kept its mark")
+    }
     if let Ok(PubIn(e: Unsubscribed(0u64, 0u32))) = channel.try_receive(from) {} else {
         fail("L9p teardown waited on the full publisher inbox")
     }
     result.unwrap(channel.send(stop, std.clock.deadline_after_ms(host.mono_ns(c), 1000u64)))
     result.unwrap(result.unwrap(task.join(take server)))
 }
-
 
 fn sse_law_fill_publisher(to: Sender[PubIn]) {
     while let Ok(()) = channel.try_send(to, PubIn(e: Unsubscribed(0u64, 0u32))) {}
@@ -567,7 +620,9 @@ fn sse_law_fill_publisher(to: Sender[PubIn]) {
 fn sse_expiry_batch(events: Sender[WireEvent], version: u64, complete: bool) waits {
     let mut frames: List[Owe] = list.new()
     let index = owe(mut frames, 1u64, version)
-    if complete { list.push(mut frames[index].complete, 0u32) }
+    if complete {
+        list.push(mut frames[index].complete, 0u32)
+    }
     list.push(mut frames[index].groups, OwedGroup(sub: 0u32, payload: arc.new(std.http.copy_bytes(b"\x00\x00\x00\x00\x00\x00\x00\x00"))))
     let _ = channel.send(events, wire_event(FromRunner(update(version, Some(list.remove(mut frames, index)), list.new()))))
 }
@@ -579,8 +634,7 @@ fn sse_expiry_complete(from: Receiver[PubIn], mut client: std.http_client.Connec
     result.unwrap(channel.send(events, wire_event(JoinReady)))
     sse_expiry_batch(events, version, true)
     result.unwrap(std.http_client.finish_request(mut client, 65536u64))
-    if std.http_client.status(std.http_client.head(client)) != 200u16 ||
-        sse_law_event(mut client) != sse_law_vector(empty, version) {
+    if std.http_client.status(std.http_client.head(client)) != 200u16 || sse_law_event(mut client) != sse_law_vector(empty, version) {
         fail("L63 fresh subscription did not deliver a completing Batch")
     }
     take events
@@ -606,11 +660,14 @@ fn test_sse_expiry_terminal(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] w
     let _ = sse_law_take_join(from)
     clock.set_wall(mut wall_hand, 1049u64)
     sse_expiry_batch(events, 1u64, false)
-    if sse_law_event(mut committed) != sse_law_vector(vectors.delta, 1u64) { fail("L63 stream ended before expiry") }
+    if sse_law_event(mut committed) != sse_law_vector(vectors.delta, 1u64) {
+        fail("L63 stream ended before expiry")
+    }
     clock.set_wall(mut wall_hand, 1050u64)
     sse_expiry_batch(events, 1u64, false)
-    if sse_law_event(mut committed) != string.as_bytes(vectors.expired) ||
-        sse_law_body(mut committed) != b"" { fail("L63 expiry did not terminate the stream with expired") }
+    if sse_law_event(mut committed) != string.as_bytes(vectors.expired) || sse_law_body(mut committed) != b"" {
+        fail("L63 expiry did not terminate the stream with expired")
+    }
     std.http_client.close(take committed)
     sse_expiry_401(mut pending)
     std.http_client.close(take pending)
@@ -623,25 +680,29 @@ fn test_sse_expiry_terminal(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] w
     let mut raw = sse_law_dial_with_token(n, c, addr, "/private", false, b"fresh")
     result.unwrap(std.http_client.finish_request(mut raw, 4096u64))
     let mut item: Bytes = list.with_capacity(64u64)
-    if std.http_client.status(std.http_client.head(raw)) != 200u16 ||
-        result.unwrap(std.http_client.read(mut raw, mut item)) == 0u64 { fail("L63 raw body did not start") }
+    if std.http_client.status(std.http_client.head(raw)) != 200u16 || result.unwrap(std.http_client.read(mut raw, mut item)) == 0u64 {
+        fail("L63 raw body did not start")
+    }
     clock.set_wall(mut wall_hand, 1100u64)
     let tail = sse_law_body(mut raw)
-    if std.http1.contains(tail, b"event:") { fail("L63 raw stream wrote a terminal event") }
+    if std.http1.contains(tail, b"event:") {
+        fail("L63 raw stream wrote a terminal event")
+    }
     std.http_client.close(take raw)
     let mut raw_refused = sse_law_dial_with_token(n, c, addr, "/private", false, b"fresh")
     sse_expiry_401(mut raw_refused)
     std.http_client.close(take raw_refused)
     result.unwrap(channel.send(stop, 1000000000u64))
     result.unwrap(result.unwrap(task.join(take server)))
-
     let (lease_clock, take lease_manual) = provide.clock(0u64, 1000u64)
     let mut lease_hand = take lease_manual
     let (lease_addr, take lease_stop, take lease_server) = sse_law_start_with_lease(to, n, lease_clock, r, tasks, 65536u64, 20u64)
     let mut leased = sse_law_dial_with_token(n, lease_clock, lease_addr, "/events", false, b"short")
     let _ = sse_expiry_complete(from, mut leased, vectors.empty, 1u64)
     clock.advance_to(mut lease_hand, 20000000u64)
-    if sse_law_body(mut leased) != b"" { fail("L63 lease end wrote a terminal event") }
+    if sse_law_body(mut leased) != b"" {
+        fail("L63 lease end wrote a terminal event")
+    }
     std.http_client.close(take leased)
     result.unwrap(channel.send(lease_stop, 1000000000u64))
     result.unwrap(result.unwrap(task.join(take lease_server)))

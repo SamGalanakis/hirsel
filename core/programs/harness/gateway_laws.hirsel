@@ -231,7 +231,7 @@ fn wire() -> runner.WireConfig {
 fn session_place(take supplied: platform.local.Supplied, s: Services) -> Result[runner.PlaceConfig[Grants, harness.Handles, Services, ()], Capacity] {
     let w = result.unwrap(wired())
     let config = runner.TriggerConfig(entries: harness.entries(w), author: store.Caller(issuer: 0u8, subject: list.new()), grants: services_of(s, string.from(supplied.name)), grant: make_grants, grant_bytes: EFFECT_GRANT)
-    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64)), triggers: Some(take config), idle: Some(IDLE_MS)))
+    Ok(runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(harness.declare_tables), session: wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 200u64), wire: Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64)), triggers: Some(take config), idle: Some(IDLE_MS)))
 }
 
 fn session_factory() -> platform.local.Factory[Services] {

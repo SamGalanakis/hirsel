@@ -22,7 +22,7 @@ const OWN_BYTES: u64 = 65536u64
 
 type PlaceEvent: send = Phase(runner.Phase) | Finished(Result[runner.Ended, runner.StartError]) | Expired
 
-type PlaceJob[G: send, H: shareable + inert + send, S: send, B: send]: send {
+type PlaceJob[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
     config: runner.PlaceConfig[G, H, S, B],
     stop: Receiver[()],
     status: Latest[runner.Status],
@@ -30,7 +30,7 @@ type PlaceJob[G: send, H: shareable + inert + send, S: send, B: send]: send {
     need: u64,
 }
 
-type Operated[G: send, H: shareable + inert + send, S: send, B: send]: send {
+type Operated[G: send, H: shareable + inert + send, S: send, B: shareable + send]: send {
     config: runner.PlaceConfig[G, H, S, B],
     stop: Receiver[()],
     status: Latest[runner.Status],
@@ -145,7 +145,7 @@ fn loopback_any(a: Addr) -> bool {
     }
 }
 
-fn run_place[G: send, H: shareable + inert + send, S: send, B: send](take job: PlaceJob[G, H, S, B]) -> () waits {
+fn run_place[G: send, H: shareable + inert + send, S: send, B: shareable + send](take job: PlaceJob[G, H, S, B]) -> () waits {
     let PlaceJob(config: take config, stop: take halt, status: take root, to: take to, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
@@ -166,12 +166,12 @@ fn run_place[G: send, H: shareable + inert + send, S: send, B: send](take job: P
     let _ = channel.send(to, Finished(take ended))
 }
 
-fn run_operate[G: send, H: shareable + inert + send, S: send, B: send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
+fn run_operate[G: send, H: shareable + inert + send, S: send, B: shareable + send](take request: Operated[G, H, S, B]) -> Result[runner.Ended, runner.StartError] waits {
     let Operated(config: take config, stop: take halt, status: take root, watch: take phases) = take request
     runner.operate(take config, take halt, root, Some(take phases))
 }
 
-pub fn start[G: send, H: shareable + inert + send, S: send, B: send](take p: runner.PlaceConfig[G, H, S, B], within_ms: u64) -> Result[Fixture, FixtureError] waits {
+pub fn start[G: send, H: shareable + inert + send, S: send, B: shareable + send](take p: runner.PlaceConfig[G, H, S, B], within_ms: u64) -> Result[Fixture, FixtureError] waits {
     match p.backing {
         Memory => (),
         Temp(_) => (),
@@ -188,9 +188,14 @@ pub fn start[G: send, H: shareable + inert + send, S: send, B: send](take p: run
         Ok(total) => total,
         Error(cap) => return Error(Full(cap))
     }
-    let store_share = match p.backing { Memory => 1074790400u64, _ => 67108864u64 }
+    let store_share = match p.backing {
+        Memory => 1074790400u64,
+        _ => 67108864u64
+    }
     let configured = int.checked_add(overhead, store_share + 1048576u64)
-    let Some(need) = configured else { return Error(Full(Capacity(requested: store_share, available: 0))) }
+    let Some(need) = configured else {
+        return Error(Full(Capacity(requested: store_share, available: 0)))
+    }
     let root = match runner.status_root() {
         Ok(take made) => take made,
         Error(cap) => return Error(Full(cap))

@@ -87,8 +87,15 @@ fn http_law_place(mut reg: Registry[(), HttpLawHandles]) -> Result[(), RegisterE
     bind(mut reg, HttpBinding(op: "increment", method: Post, path: "/generated", entry: take entry, fields: take fields, mode: Stream, ok_status: 200u16, error_status: 422u16, body_max: HTTP_LAW_ARG_MAX, arg_max: 65536u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))
 }
 
+fn http_law_binding(_seed: (), credential: Bytes) -> Result[BoundCaller, BindRefusal] {
+    if credential == b"unavailable" {
+        return Error(Unavailable)
+    }
+    ingress.caller((), credential)
+}
+
 fn http_law_bind() -> Option[Wire[(), ()]] {
-    Some(ingress.binding())
+    Some(wire((), Some(code.describe(http_law_binding)), 4096u64, 65536u64))
 }
 
 fn http_law_credential() -> Bytes {
@@ -295,7 +302,7 @@ type HttpLawReply {
     outcome: Option[Outcome],
     replayed: bool,
     committed: bool,
-    retry: bool,
+    retry_after: Option[u64],
     body: Bytes,
     dedup_until: Option[Bytes],
     refused: Option[Bytes]
@@ -352,7 +359,7 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
     }
     let mut replayed = false
     let mut committed = false
-    let mut retry = false
+    let mut retry_after: Option[u64] = None
     let mut dedup_until: Option[Bytes] = None
     let mut marker: Option[Bytes] = None
     for field in parsed.fields {
@@ -364,7 +371,7 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
             committed = list.slice(received, field.value.start, field.value.end) == b"committed"
         }
         if std.http1.equal_ascii(name, b"Retry-After") {
-            retry = list.slice(received, field.value.start, field.value.end) == b"1"
+            retry_after = http_law_decimal(list.slice(received, field.value.start, field.value.end))
         }
         if std.http1.equal_ascii(name, b"Hirsel-Dedup-Until") {
             dedup_until = Some(std.http.copy_bytes(list.slice(received, field.value.start, field.value.end)))
@@ -379,8 +386,10 @@ fn http_law_request(method: String, n: Net, clock: Clock, addr: Addr, path: Stri
         Ok(take value) => Some(take value),
         _ => None
     }
-    HttpLawReply(status: parsed.status, outcome: take decoded, replayed: replayed, committed: committed, retry: retry, body: std.http.copy_bytes(payload), dedup_until: take dedup_until, refused: take marker)
+    HttpLawReply(status: parsed.status, outcome: take decoded, replayed: replayed, committed: committed, retry_after: retry_after, body: std.http.copy_bytes(payload), dedup_until: take dedup_until, refused: take marker)
 }
+
+type HttpLawCase: key + send = RawParity | RawRefusals | GeneratedParity | BindCodes
 
 type HttpLawDrive: send {
     head: Sender[HeadInput],
@@ -389,24 +398,23 @@ type HttpLawDrive: send {
     clock: Clock,
     random: Random,
     tasks: Tasks,
-    parity: bool,
-    generated: bool
+    case: HttpLawCase,
 }
 
 fn http_law_drive(take d: HttpLawDrive) waits {
     let reg = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
     let (take relay, take relay_task) = result.unwrap(start_relay(reg, d.head, d.publisher_out, d.clock, d.tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: HTTP_LAW_ARG_MAX)))
     let (take listener, addr) = result.unwrap(host.listen(d.net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
-    let job = HttpLawServer(generated: d.generated, relay: take relay, listener: take listener, clock: d.clock, random: d.random, tasks: d.tasks)
+    let generated = d.case == GeneratedParity || d.case == BindCodes
+    let job = HttpLawServer(generated: generated, relay: take relay, listener: take listener, clock: d.clock, random: d.random, tasks: d.tasks)
     let server = task.spawn(d.tasks, bytes 4194304u64, take job, http_law_serve)
     let keys = http_law_keys(reg)
     let (take socket, take wire_task) = result.unwrap(http_law_socket(d, keys, http_law_credential()))
-    if d.generated {
-        http_law_lexical(d, addr, socket)
-    } else if d.parity {
-        http_law_parity(d, addr, socket)
-    } else {
-        http_law_refusals(d, addr, socket, keys)
+    match d.case {
+        RawParity => http_law_parity(d, addr, socket),
+        RawRefusals => http_law_refusals(d, addr, socket, keys),
+        GeneratedParity => http_law_lexical(d, addr, socket),
+        BindCodes => http_law_binding_codes(d, addr, keys),
     }
     let _ = wire_client.close(take socket)
     let _ = std.task.cancel_join(take wire_task)
@@ -493,6 +501,28 @@ fn http_law_parity(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn) waits 
     }
 }
 
+// L67's transport cases use an application-selected refusal before any call is admitted.
+fn http_law_binding_codes(d: HttpLawDrive, address: Addr, keys: List[Bytes]) waits {
+    let refusals =[
+        (b"unavailable", 1013u16, 503u16, Some(5u64)),
+        (b"rejected", 1008u16, 401u16, (None : Option[u64])),
+    ]
+    for (credential, close_code, status, retry_after) in refusals {
+        match http_law_socket(d, keys, std.http.copy_bytes(credential)) {
+            Error(Protocol(code)) if code == close_code => (),
+            _ => fail("L67 the Hello got the wrong binding close code"),
+        }
+        let reply = http_law_post(d.net, d.clock, address, "/generated", credential, 7u32, 0u64, b"{\"request\":\"Unit\"}", 1000u32)
+        if reply.status != status || reply.retry_after != retry_after || reply.committed || reply.replayed {
+            fail("L67 the HTTP bind refusal got the wrong status or headers")
+        }
+    }
+    let accepted = http_law_post(d.net, d.clock, address, "/generated", http_law_credential(), 7u32, 0u64, b"{\"request\":\"Unit\"}", 1000u32)
+    if accepted.status != 200u16 || !accepted.committed || accepted.replayed || accepted.body != b"\"1\"" {
+        fail("L67 a refused bind consumed the call's position")
+    }
+}
+
 fn http_law_lexical(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn) waits {
     let credential = http_law_credential()
     let mut position = 0u64
@@ -570,12 +600,12 @@ fn http_law_refusals(d: HttpLawDrive, addr: Addr, socket: wire_client.Conn, keys
     }
 }
 
-fn http_law_run(c: Clock, r: Random, tasks: Tasks, n: Net, parity: bool, generated: bool) -> Result[(), ()] waits {
+fn http_law_run(c: Clock, r: Random, tasks: Tasks, n: Net, case: HttpLawCase) -> Result[(), ()] waits {
     let info = result.unwrap(store.sized(Memory, 33554432u64))
     let db = store.memory(c, r, info)
     let (head, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(32u64)
     let mail = result.unwrap(mailbox(16u64))
-    let drive = HttpLawDrive(head: take head, publisher_out: post(mail), net: n, clock: c, random: r, tasks: tasks, parity: parity, generated: generated)
+    let drive = HttpLawDrive(head: take head, publisher_out: post(mail), net: n, clock: c, random: r, tasks: tasks, case: case)
     let work = task.spawn(tasks, bytes 16777216u64, take drive, http_law_drive)
     result.unwrap(place_head(take db, code.describe(http_law_place), HTTP_LAW_PLACE_BYTES, None, code.describe(http_law_schema), take inbox, take mail, tasks, 1048576u64))
     match task.join(take work) {
@@ -612,15 +642,34 @@ fn http_law_cause(causes: Causes) -> String {
 
 @test
 fn test_l10(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    http_law_run(c, r, tasks, n, true, false)
+    http_law_run(c, r, tasks, n, RawParity)
 }
 
 @test
 fn test_l11(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    http_law_run(c, r, tasks, n, false, false)
+    http_law_run(c, r, tasks, n, RawRefusals)
 }
 
 @test
 fn test_l10j(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    http_law_run(c, r, tasks, n, true, true)
+    http_law_run(c, r, tasks, n, GeneratedParity)
+}
+
+pub fn law_j2_binding(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
+    runner_calls.law_granted_copied(c, r, tasks, n) && runner_calls.law_bind_only(c, r, tasks, n) && match http_law_run(c, r, tasks, n, BindCodes) {
+        Ok(()) => true,
+        Error(()) => false
+    }
+}
+
+@test
+fn test_j2_binding(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
+    let (clock, take test_clock_hand) = provide.clock(0u64, 1000u64)
+    let passed = law_j2_binding(clock, r, tasks, n)
+    let _ = take test_clock_hand
+    if passed {
+        Ok(())
+    } else {
+        Error(())
+    }
 }

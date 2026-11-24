@@ -1,5 +1,7 @@
 const LIMIT: u64 = 536870912u64
+
 const PLACE_POOL: u64 = 134217728u64
+
 const HELPER_BYTES: u64 = 67108864u64
 
 fn session(take supplied: platform.local.Supplied, s: notes.main.Services) -> Result[runner.PlaceConfig[notes.main.Grants, notes.main.Handles, notes.main.Services, ()], Capacity] {
@@ -9,12 +11,18 @@ fn session(take supplied: platform.local.Supplied, s: notes.main.Services) -> Re
     }
     let seed = notes.main.Services(helper: channel.sender(s.helper), clock: s.clock, live: take live, stream: notes.main.copy_stream(s.stream, supplied.name))
     let mut config = notes.main.settings(Memory, supplied.clock, supplied.random, supplied.tasks, supplied.net, take seed)
-    config.wire = Some(runner.wire_bind((), code.describe(runner.ingress.caller), 4096u64, 65536u64))
+    config.wire = Some(runner.wire_bind(latest.new(arc.new(())), code.describe(runner.ingress.caller), 4096u64, 65536u64))
     Ok(take config)
 }
 
 type Host {
-    out: Stdout, input: Stdin, data: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net,
+    out: Stdout,
+    input: Stdin,
+    data: Dir,
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    net: Net,
 }
 
 fn listen(h: Host, hub: harness.preview.Hub, model: String, take live: Option[notes.main.Live]) -> Result[(), Exit] waits {

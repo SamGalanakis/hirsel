@@ -1,4 +1,7 @@
-type H: shareable + send { table: store.Table[u64, u32] }
+type H: shareable + send {
+    table: store.Table[u64, u32]
+}
+
 type Reg = runner.Registry[Random, H]
 
 fn schema(mut d: store.Declare) -> Result[H, store.Error] {
@@ -8,31 +11,43 @@ fn schema(mut d: store.Declare) -> Result[H, store.Error] {
     Ok(H(table: table))
 }
 
-
 fn put(mut tx: store.Tx, h: H, author: runner.Caller, take value: u32) -> Result[u64, u32] {
-    if let Error(_) = store.put(mut tx, h.table, 0u64, value) { return Error(1u32) }
+    if let Error(_) = store.put(mut tx, h.table, 0u64, value) {
+        return Error(1u32)
+    }
     Ok(store.info(mut tx).id.version)
 }
 
 fn large(mut tx: store.Tx, h: H, author: runner.Caller, take count: u32) -> Result[Bytes, u32] {
-    if let Error(_) = store.put(mut tx, h.table, 0u64, 99u32) { return Error(1u32) }
+    if let Error(_) = store.put(mut tx, h.table, 0u64, 99u32) {
+        return Error(1u32)
+    }
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
-    for _ in 0u64 .. n { list.push(mut b, 1u8) }
+    for _ in 0u64 .. n {
+        list.push(mut b, 1u8)
+    }
     Ok(take b)
 }
 
 fn big(take count: u32) -> Result[Bytes, Capacity] {
     let mut b: Bytes = list.new()
     let n: u64 = int.widen(count)
-    for _ in 0u64 .. n { list.push(mut b, 2u8) }
+    for _ in 0u64 .. n {
+        list.push(mut b, 2u8)
+    }
     Ok(take b)
 }
 
 // The hirsel call law decodes this hand-derived value: a tagged union, a nested
 // option and integers above 2^53 (docs/spec/sdk.md, "Calling an entry").
 type Sum: codec + send = Small(u32) | Large(u64, Option[u64]) | Empty
-type Shape: codec + send { sum: Sum, nested: Option[Option[u64]], total: u64 }
+
+type Shape: codec + send {
+    sum: Sum,
+    nested: Option[Option[u64]],
+    total: u64
+}
 
 fn shape(take n: u64) -> Result[Shape, Capacity] {
     let m = n + 2u64
@@ -68,9 +83,17 @@ fn place(mut r: Reg) -> Result[(), runner.RegisterError] {
     runner.retain_gone(mut r, retired())
 }
 
-type Server: send { net: Net, clock: Clock, tasks: Tasks, random: Random, args: Args, head: Sender[runner.HeadInput], post: Sender[runner.PubIn] }
+type Server: send {
+    net: Net,
+    clock: Clock,
+    tasks: Tasks,
+    random: Random,
+    args: Args,
+    head: Sender[runner.HeadInput],
+    post: Sender[runner.PubIn]
+}
 
-fn bind_test(random: Random, credential: Bytes) -> Result[runner.BoundCaller, ()] {
+fn bind_test(random: Random, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
     if list.len(credential) == 0u64 {
         return Ok(runner.BoundCaller(caller: store.Caller(issuer: 2u8, subject: runner.ingress.credential(random)), expires_at_ms: None))
     }
@@ -79,11 +102,16 @@ fn bind_test(random: Random, credential: Bytes) -> Result[runner.BoundCaller, ()
 
 fn server(take seed: Server) -> () waits {
     let Server(net: n, clock: c, tasks: tasks, random: random, args: a, head: take head, post: take post) = take seed
-    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) { Ok((take l, _)) => take l, Error(_) => return }
+    let listener = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 18094u16), 128u16) {
+        Ok((take l, _)) => take l,
+        Error(_) => return
+    }
     let mut config = runner.wire_defaults(1048576u64)
     config.socket.close_ms = 200u64
     if let Some(mode) = args.get(a, 0u64) {
-        if mode == "welcome_with_small_budget" { config.budget = 65536u64 }
+        if mode == "welcome_with_small_budget" {
+            config.budget = 65536u64
+        }
     }
     let make: scoped[view] fn() -> runner.Service[runner.WireSession[Random, Random]] = fn() -> runner.Service[runner.WireSession[Random, Random]] {
         runner.wire_service(random, Some(runner.wire(random, Some(code.describe(bind_test)), 4096u64, 65536u64)), head, c, tasks, config, a)
@@ -101,10 +129,13 @@ fn fault_step(mut context: (), mut work: runner.WireWork, take input: runner.Ser
 }
 
 fn fault_service() -> runner.Service[()] {
-    runner.Service(context: (), step: fault_step, ready: fn(context: ()) -> bool { true },
-        finish: fn(mut context: ()) -> Option[runner.PubIn] { None },
-        check: fn(context: (), f: runner.Frame) -> Option[u16] { None },
-        retirement: None, flush_subscriptions: fn(mut context: (), mut work: runner.WireWork) -> () {})
+    runner.Service(context: (), step: fault_step, ready: fn(context: ()) -> bool {
+        true
+    }, finish: fn(mut context: ()) -> Option[runner.PubIn] {
+        None
+    }, check: fn(context: (), f: runner.Frame) -> Option[u16] {
+        None
+    }, retirement: None, flush_subscriptions: fn(mut context: (), mut work: runner.WireWork) -> () {})
 }
 
 fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Exit] waits {
@@ -114,10 +145,22 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
     }
     let mail = result.unwrap(runner.mailbox(1u64))
     let mut config = runner.wire_defaults(0u64)
-    if reject { config.budget = 100u64 }
-    match runner.serve_wire(take listener, tasks, c, runner.post(mail), config, 1u64, list.new(), fault_service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) }) {
-        Error(Configuration) => if reject { Ok(()) } else { Error(Exit(status: 1u8)) },
-        Ok(()) => if reject { Error(Exit(status: 1u8)) } else { Ok(()) },
+    if reject {
+        config.budget = 100u64
+    }
+    match runner.serve_wire(take listener, tasks, c, runner.post(mail), config, 1u64, list.new(), fault_service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] {
+        Error(1013u16)
+    }) {
+        Error(Configuration) => if reject {
+            Ok(())
+        } else {
+            Error(Exit(status: 1u8))
+        },
+        Ok(()) => if reject {
+            Error(Exit(status: 1u8))
+        } else {
+            Ok(())
+        },
         Error(_) => Error(Exit(status: 1u8)),
     }
 }
@@ -125,17 +168,25 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
 // launch_server answers --hirsel-describe before any grant is used, so hirsel call
 // can read this place's entries from the executable.
 pub fn main(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
-    runner.launch_server(a, c, code.describe(place), code.describe(schema), scoped fn() -> Result[(), Exit] waits { serve_place(n, c, random, tasks, a) })
+    runner.launch_server(a, c, code.describe(place), code.describe(schema), scoped fn() -> Result[(), Exit] waits {
+        serve_place(n, c, random, tasks, a)
+    })
 }
 
 fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Result[(), Exit] waits {
     if let Some(mode) = args.get(a, 0u64) {
-        if mode == "faulted_owner_releases_slot" { return fault_listener(n, c, tasks, false) }
-        if mode == "wire_control_budget_too_small" { return fault_listener(n, c, tasks, true) }
+        if mode == "faulted_owner_releases_slot" {
+            return fault_listener(n, c, tasks, false)
+        }
+        if mode == "wire_control_budget_too_small" {
+            return fault_listener(n, c, tasks, true)
+        }
     }
     let mut options = result.unwrap(store.sized(Memory, 1074790400u64))
     if let Some(mode) = args.get(a, 0u64) {
-        if mode == "welcome_samples_store_stream_time" { options.stream_retention_ms = 721000u64 }
+        if mode == "welcome_samples_store_stream_time" {
+            options.stream_retention_ms = 721000u64
+        }
     }
     let mut db = store.memory(c, random, options)
     let mut declaration = result.unwrap(store.declare(db, Migrate))
@@ -144,7 +195,9 @@ fn serve_place(n: Net, c: Clock, random: Random, tasks: Tasks, a: Args) -> Resul
     // An admitted, unreplied position on the retained key exercises V5 on resend.
     // The key is the runner's own stream key for the client's fixed token and stream 77.
     let mut token: Bytes = list.new()
-    for _ in 0u64 .. 16u64 { list.push(mut token, 0u8) }
+    for _ in 0u64 .. 16u64 {
+        list.push(mut token, 0u8)
+    }
     let given = result.unwrap(runner.ingress.caller((), token))
     let birth = match args.get(a, 1u64) {
         Some(stamp) => result.unwrap(std.int.parse_uint(stamp, 10u32)),

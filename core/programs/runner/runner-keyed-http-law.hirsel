@@ -131,7 +131,7 @@ fn keyed_http_law_drive(take job: KeyedHttpLawDrive) waits {
         keyed_http_expect(http_law_post(net, clock, address, "/first", b"alice", 0u32, 0u64, b"{}", 1000u32), 201u16, false, b"\"1\"", until, "alice's first claim did not admit")
         let saturated = http_law_post(net, clock, address, "/first", b"alice", 1u32, 0u64, b"{}", 1000u32)
         keyed_http_expect(saturated, 503u16, false, saturated.body, None, "a saturated principal was not refused with 503")
-        if !saturated.retry {
+        if saturated.retry_after != Some(1u64) {
             fail("the quota 503 carried no Retry-After")
         }
         keyed_http_expect(http_law_post(net, clock, address, "/first", b"bob", 1u32, 0u64, b"{}", 1000u32), 201u16, false, b"\"2\"", until, "another principal did not admit beside a saturated one")

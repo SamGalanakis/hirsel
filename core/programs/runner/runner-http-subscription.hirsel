@@ -26,7 +26,10 @@ pub fn http_read_endpoint(original: HttpReadAccess) -> HttpReadAccess {
     result.unwrap(HttpReadAccess(publisher: channel.sender(original.publisher), tables: arc.share(original.tables), frame_limit: original.frame_limit))
 }
 
-resource type HttpRetirement: send { mark: Option[Sender[()]], publisher: Sender[PubIn] } drop(retirement) {
+resource type HttpRetirement: send {
+    mark: Option[Sender[()]],
+    publisher: Sender[PubIn]
+} drop(retirement) {
     if let Some(_) = retirement.mark {
         retirement.mark = None
         let _ = channel.try_send(retirement.publisher, PubIn(e: Drained))
@@ -45,24 +48,36 @@ type HttpOwner: send {
     publisher: Sender[PubIn],
 }
 
-type HttpBatchCredit: send { take_from: Receiver[()], refund: Sender[()] }
+type HttpBatchCredit: send {
+    take_from: Receiver[()],
+    refund: Sender[()]
+}
 
 // A Batch holds its credit across inbox, queue and writer. Terminal content
 // can still reach the owner while both Batch credits are in use.
 fn offer_content(owner: Joiner, take notice: Notice) -> Offered {
-    let Some(credit) = view owner.http_credit else { return offer(owner.to, take notice) }
+    let Some(credit) = view owner.http_credit else {
+        return offer(owner.to, take notice)
+    }
     let batch = match notice.e {
-        Updated(current) => match current.content { Some(content) => list.len(content.groups) != 0u64, None => false },
+        Updated(current) => match current.content {
+            Some(content) => list.len(content.groups) != 0u64,
+            None => false
+        },
         _ => false,
     }
-    if !batch { return offer(owner.to, take notice) }
+    if !batch {
+        return offer(owner.to, take notice)
+    }
     match channel.try_receive(credit.take_from) {
         Ok(()) => (),
         Error(Empty) => return Bounced(take notice),
         Error(Closed) => return Shut,
     }
     let delivered = offer(owner.to, take notice)
-    if let Took = delivered {} else { let _ = channel.try_send(credit.refund, ()) }
+    if let Took = delivered {} else {
+        let _ = channel.try_send(credit.refund, ())
+    }
     take delivered
 }
 
@@ -81,16 +96,13 @@ fn http_owner(pub_to: Sender[PubIn], inbox_size: u64) -> Result[(HttpOwner, Http
     let (token, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
     let fence = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
     let retirement = HttpRetirement(mark: Some(take mark), publisher: channel.sender(pub_to)) ?=> |(c, _)| Budget(capacity_room(c))
-    let listening = HttpOwner(retirement: take retirement, from: take from, to: take to, admit: take admit, fence: take fence, round: None,
-        progress: take token, closing: take closing, publisher: channel.sender(pub_to))
+    let listening = HttpOwner(retirement: take retirement, from: take from, to: take to, admit: take admit, fence: take fence, round: None, progress: take token, closing: take closing, publisher: channel.sender(pub_to))
     Ok((take listening, HttpJoinPorts(telling: take telling, marked: take marked, closed: take closed, progress: take progress)))
 }
 
 fn http_join(owner: HttpOwner, take ports: HttpJoinPorts, take input: SubscriptionInput, take credit: Option[HttpBatchCredit]) -> Result[(), Refusal] {
     let HttpJoinPorts(telling: take telling, marked: take marked, closed: take closed, progress: take progress) = take ports
-    let join = Join(to: channel.sender(owner.to), told: take telling, mark: Some(take marked), closed: Some(take closed),
-        identity: None, fence: Some(latest.handle(owner.fence)), progress: Some(take progress), taken: None,
-        first: Some(JoinSubscribe(sub: 0u32, generation: 1u64, input: take input)), http_credit: take credit)
+    let join = Join(to: channel.sender(owner.to), told: take telling, mark: Some(take marked), closed: Some(take closed), identity: None, fence: Some(latest.handle(owner.fence)), progress: Some(take progress), taken: None, first: Some(JoinSubscribe(sub: 0u32, generation: 1u64, input: take input)), http_credit: take credit)
     channel.try_send(owner.publisher, PubIn(e: Joined(take join))) ?=> |_| Overloaded
     Ok(())
 }
@@ -112,7 +124,9 @@ type HttpFrame: send = HttpBatch(u64, bool, Arc[Bytes]) | HttpEnded(u64, Outcome
 
 fn http_admitted(mut owner: HttpOwner) -> Result[(), Refusal] {
     let Admit(who: id, round: take register) = channel.try_receive(owner.admit) ?=> |_| Overloaded
-    if id == 0u64 { return Error(Overloaded) }
+    if id == 0u64 {
+        return Error(Overloaded)
+    }
     owner.round = Some(take register)
     Ok(())
 }
@@ -120,7 +134,9 @@ fn http_admitted(mut owner: HttpOwner) -> Result[(), Refusal] {
 fn http_frame(take notice: Notice) -> Option[HttpFrame] {
     if let Notice(e: Updated(Update(version: version, content: Some(take update_body), ..))) = take notice {
         let Owe(reset: reset, complete: complete, groups: take groups, ended: take ended, ..) = take update_body
-        if reset { return Some(HttpReset(version)) }
+        if reset {
+            return Some(HttpReset(version))
+        }
         for take terminal in take ended {
             let TerminalUpdate(outcome: take outcome, version: at, ..) = take terminal
             return Some(HttpEnded(at, take outcome))
@@ -139,7 +155,9 @@ fn http_next_frame(mut owner: HttpOwner) -> Result[HttpFrame, Refusal] waits {
         match take notice {
             JoinReady => http_admitted(mut owner)?,
             FromRunner(Notice(e: Expired(_))) => return Error(Deadline),
-            FromRunner(take publication) => if let Some(take frame) = http_frame(take publication) { return Ok(take frame) },
+            FromRunner(take publication) => if let Some(take frame) = http_frame(take publication) {
+                return Ok(take frame)
+            },
             _ => (),
         }
     }
@@ -150,13 +168,16 @@ fn http_initial_frame(mut owner: HttpOwner, clock: Clock, tasks: Tasks, deadline
     let alarm = std.clock.alarm(tasks, clock, deadline, owner.to, take expired)
     let frame = http_next_frame(mut owner)
     let _ = std.task.cancel_join(take alarm)
-    if host.mono_ns(clock) >= deadline { return Error(Deadline) }
+    if host.mono_ns(clock) >= deadline {
+        return Error(Deadline)
+    }
     take frame
 }
 
-fn http_one_shot(req: std.http.Request, resp: std.http.Responder, access: HttpReadAccess,
-    operation: HttpOperation, take sent: Send, budget: u64, clock: Clock, tasks: Tasks) -> Result[std.http.Response, std.http.HandlerError] waits {
-    let Some(take permit) = std.http.read_slot(resp, tasks) else { return http_refusal(Overloaded) }
+fn http_one_shot(req: std.http.Request, resp: std.http.Responder, access: HttpReadAccess, operation: HttpOperation, take sent: Send, budget: u64, clock: Clock, tasks: Tasks) -> Result[std.http.Response, std.http.HandlerError] waits {
+    let Some(take permit) = std.http.read_slot(resp, tasks) else {
+        return http_refusal(Overloaded)
+    }
     let mut owner = match http_subscribe(access, take sent, budget) {
         Ok(take running) => take running,
         Error(take problem) => {
@@ -175,13 +196,17 @@ fn http_read_reply(owner: HttpOwner, operation: HttpOperation, tables: Arc[Map[u
     match take answer {
         Ok(HttpBatch(version, true, take data)) => {
             let mut reply = http_batch_reply(operation, tables, version, take data)?
-            let Some(register) = view owner.round else { return http_refusal(Overloaded) }
+            let Some(register) = view owner.round else {
+                return http_refusal(Overloaded)
+            }
             std.http.guard_response(mut reply, register, owner.fence, version)
             Ok(take reply)
         },
         Ok(HttpEnded(version, take outcome)) => {
             let mut reply = http_ended_reply(take outcome)?
-            let Some(register) = view owner.round else { return http_refusal(Overloaded) }
+            let Some(register) = view owner.round else {
+                return http_refusal(Overloaded)
+            }
             std.http.guard_response(mut reply, register, owner.fence, version)
             Ok(take reply)
         },
@@ -207,7 +232,14 @@ fn http_ended_reply(take outcome: Outcome) -> Result[std.http.Response, std.http
     }
 }
 
-type HttpStreamSeed: codec + send { route: u64, caller: Caller, key: Bytes, arg: Bytes, budget: u64, expires_at_ms: Option[u64] }
+type HttpStreamSeed: codec + send {
+    route: u64,
+    caller: Caller,
+    key: Bytes,
+    arg: Bytes,
+    budget: u64,
+    expires_at_ms: Option[u64]
+}
 
 fn http_stream_offer(req: std.http.Request, take sent: Send, budget: u64) -> Result[std.stream.Spec, std.http.HandlerError] {
     let Send(stream: store.StreamKey(caller: take caller, ..), key: take key, arg: take arg, expires_at_ms, ..) = take sent
@@ -228,19 +260,16 @@ type HttpStreamSite: send {
 }
 
 /// Serves the generated routes and promotes subscriptions into the configured stream slots.
-pub fn http_serve[G: send, H: shareable + inert + send, B: send](
-    take listeners: List[Listener], clock: Clock, tasks: Tasks, take cfg: std.http.Config,
-    take routes: std.router.Router[HttpConnection[G, H, B]], plans: Arc[HttpRoutes], reads: HttpReadAccess,
-    state_bytes: u64, make_state: scoped[view] fn() -> HttpConnection[G, H, B], q: u64,
-    take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
-    if q > 4u64 { return Error(Configuration) }
+pub fn http_serve[G: send, H: shareable + inert + send, B: shareable + send](take listeners: List[Listener], clock: Clock, tasks: Tasks, take cfg: std.http.Config, take routes: std.router.Router[HttpConnection[G, H, B]], plans: Arc[HttpRoutes], reads: HttpReadAccess, state_bytes: u64, make_state: scoped[view] fn() -> HttpConnection[G, H, B], q: u64, take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
+    if q > 4u64 {
+        return Error(Configuration)
+    }
     let inbox_size = 1u64 + q
     let format: std.codec.Codec[Outcome] = std.codec.of()
     let shape = result.unwrap(std.codec.describe(format))
     let outcome = arc.new(result.unwrap(std.json.prepare_schema(take shape, Strict)))
     let make: scoped[view] fn() -> HttpStreamSite = fn() -> HttpStreamSite {
-        HttpStreamSite(publisher: channel.sender(reads.publisher), tables: arc.share(reads.tables), frame_limit: reads.frame_limit,
-            outcome: arc.share(outcome), inbox_size: inbox_size, routes: arc.share(plans))
+        HttpStreamSite(publisher: channel.sender(reads.publisher), tables: arc.share(reads.tables), frame_limit: reads.frame_limit, outcome: arc.share(outcome), inbox_size: inbox_size, routes: arc.share(plans))
     }
     let make_connection: scoped[view] fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] = fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] {
         let mut state = make_state()
@@ -251,8 +280,7 @@ pub fn http_serve[G: send, H: shareable + inert + send, B: send](
         let _ = channel.try_send(reads.publisher, PubIn(e: Drained))
     }
     let request_done: fn(HttpConnection[G, H, B]) waits = http_request_finished
-    std.http.serve_with_stream_factory(take listeners, clock, tasks, take cfg, take routes, state_bytes, make_connection,
-        request_done, http_needs_retirement, http_retire_connection, 256u64, make, http_stream_drive, retire, take stop)
+    std.http.serve_with_stream_factory(take listeners, clock, tasks, take cfg, take routes, state_bytes, make_connection, request_done, http_needs_retirement, http_retire_connection, 256u64, make, http_stream_drive, retire, take stop)
 }
 
 fn http_stream_notice(take event: std.stream.Delivery) -> WireEvent {
@@ -261,9 +289,13 @@ fn http_stream_notice(take event: std.stream.Delivery) -> WireEvent {
 
 fn http_stream_drive(take work: std.stream.Work, take site: HttpStreamSite) waits {
     let (clock, pre_head, lease_ms, write_ms, expires_at_ms) = std.stream.managed_timing(work)
-    let Ok((take owner, take ports)) = http_owner(site.publisher, site.inbox_size) else { return }
+    let Ok((take owner, take ports)) = http_owner(site.publisher, site.inbox_size) else {
+        return
+    }
     let mut joined = take owner
-    let Some(take writer) = std.stream.start_managed(take work, joined.to, http_stream_notice) else { return }
+    let Some(take writer) = std.stream.start_managed(take work, joined.to, http_stream_notice) else {
+        return
+    }
     http_stream_loop(writer, mut joined, take ports, site, clock, pre_head, lease_ms, write_ms, expires_at_ms)
     std.stream.finish_managed(take writer)
     let _ = take joined
@@ -271,10 +303,14 @@ fn http_stream_drive(take work: std.stream.Work, take site: HttpStreamSite) wait
 
 type HttpStreamEnd: send = EndNormally | EndWithFrame(HttpFrame) | EndWithRefusal(Refusal) | EndWithExpiry
 
-type HttpQueuedBatch: send { version: u64, complete: bool, payload: Arc[Bytes], charge: u64 }
+type HttpQueuedBatch: send {
+    version: u64,
+    complete: bool,
+    payload: Arc[Bytes],
+    charge: u64
+}
 
-fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take ports: HttpJoinPorts,
-    site: HttpStreamSite, clock: Clock, pre_head: u64, lease_ms: u64, write_ms: u64, expires_at_ms: Option[u64]) waits {
+fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take ports: HttpJoinPorts, site: HttpStreamSite, clock: Clock, pre_head: u64, lease_ms: u64, write_ms: u64, expires_at_ms: Option[u64]) waits {
     let (refund, available): (Sender[()], Receiver[()]) = channel.new(2u64)
     let _ = channel.try_send(refund, ())
     let _ = channel.try_send(refund, ())
@@ -296,27 +332,43 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
         let end_at = std.clock.deadline_after_ms(now, write_ms)
         let mut heartbeat = false
         let mut expired = std.stream.auth_lapsed(clock, expires_at_ms)
-        if let HttpStream(delivery) = event { expired = expired || std.stream.expiry_wake(delivery) }
-        if expired && http_stream_open(ending) { ending = Some((end_at, EndWithExpiry)) }
+        if let HttpStream(delivery) = event {
+            expired = expired || std.stream.expiry_wake(delivery)
+        }
+        if expired && http_stream_open(ending) {
+            ending = Some((end_at, EndWithExpiry))
+        }
         if awaiting_admit && http_stream_open(ending) {
             match channel.try_receive(owner.admit) {
                 Ok(Admit(who: id, round: take register)) => {
                     awaiting_admit = false
-                    if id == 0u64 { ending = Some((end_at, EndWithRefusal(Overloaded))) } else { owner.round = Some(take register) }
+                    if id == 0u64 {
+                        ending = Some((end_at, EndWithRefusal(Overloaded)))
+                    } else {
+                        owner.round = Some(take register)
+                    }
                 },
-                Error(Closed) => { ending = Some((end_at, EndWithRefusal(Overloaded))) },
+                Error(Closed) => {
+                    ending = Some((end_at, EndWithRefusal(Overloaded)))
+                },
                 Error(Empty) => (),
             }
         }
         if let Some(_) = owner.round {
-            if wire_taken(mut taken, site.inbox_size) { http_stream_progress(owner) }
+            if wire_taken(mut taken, site.inbox_size) {
+                http_stream_progress(owner)
+            }
         }
         match take event {
-            HttpStream(Committed(at)) => { lease = Some(std.clock.deadline_after_ms(at, lease_ms)) },
+            HttpStream(Committed(at)) => {
+                lease = Some(std.clock.deadline_after_ms(at, lease_ms))
+            },
             HttpStream(WriteFailed) => return,
             HttpStream(Sent(EndSent)) => return,
             HttpStream(ReadEnd) if lease == None => return,
-            HttpStream(ReadEnd) => if let None = ending { ending = Some((end_at, EndNormally)) },
+            HttpStream(ReadEnd) => if let None = ending {
+                ending = Some((end_at, EndNormally))
+            },
             HttpStream(Sent(_)) => {
                 busy = false
                 if sending != 0u64 {
@@ -335,22 +387,31 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
             HttpStream(UnitDropped) => {
                 busy = false
                 if http_stream_open(ending) || matches_normal(ending) {
-                    if let Some(register) = view owner.round { version = latest.read(register).at }
-                    let deadline = match ending { Some((until, _)) => until, None => end_at }
+                    if let Some(register) = view owner.round {
+                        version = latest.read(register).at
+                    }
+                    let deadline = match ending {
+                        Some((until, _)) => until,
+                        None => end_at
+                    }
                     ending = Some((deadline, EndWithFrame(HttpReset(version))))
                 }
             },
-            HttpStream(Tick) => { heartbeat = true },
+            HttpStream(Tick) => {
+                heartbeat = true
+            },
             HttpStream(Staged(take packet, at)) if now < pre_head && http_stream_open(ending) => {
-                let HttpStreamSeed(route, caller: take caller, key: take key, arg: take arg, budget: limit, expires_at_ms: _) =
-                    result.unwrap((std.stream.managed_state(packet, at) : Result[HttpStreamSeed, std.codec.DecodeError]))
+                let HttpStreamSeed(route, caller: take caller, key: take key, arg: take arg, budget: limit, expires_at_ms: _) = result.unwrap((std.stream.managed_state(packet, at) : Result[HttpStreamSeed, std.codec.DecodeError]))
                 operation_index = route - 1u64
                 budget = limit
-                let started = http_stream_join(owner, option.unwrap(replace(mut join_ports, None)),
-                    take caller, take key, take arg, limit, site.frame_limit, replace(mut credit, None))
+                let started = http_stream_join(owner, option.unwrap(replace(mut join_ports, None)), take caller, take key, take arg, limit, site.frame_limit, replace(mut credit, None))
                 match take started {
-                    Ok(()) => { awaiting_admit = true },
-                    Error(take refusal) => { ending = Some((end_at, EndWithRefusal(take refusal))) },
+                    Ok(()) => {
+                        awaiting_admit = true
+                    },
+                    Error(take refusal) => {
+                        ending = Some((end_at, EndWithRefusal(take refusal)))
+                    },
                 }
             },
             FromRunner(take notice) if http_stream_open(ending) => {
@@ -358,7 +419,11 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
                     match take frame {
                         HttpBatch(at, complete, take payload) => {
                             version = at
-                            let charge = wire_round(list.capacity(payload)) + 32u64 + (if complete { 28u64 } else { 24u64 })
+                            let charge = wire_round(list.capacity(payload)) + 32u64 + (if complete {
+                                28u64
+                            } else {
+                                24u64
+                            })
                             if int.saturating_add(held, charge) > budget {
                                 ending = Some((end_at, EndWithFrame(HttpReset(at))))
                             } else {
@@ -366,16 +431,24 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
                                 list.push(mut batches, HttpQueuedBatch(version: at, complete, payload: take payload, charge: charge))
                             }
                         },
-                        HttpReset(at) => { ending = Some((end_at, EndWithFrame(HttpReset(at)))) },
-                        HttpEnded(at, take outcome) => { ending = Some((end_at, EndWithFrame(HttpEnded(at, take outcome)))) },
+                        HttpReset(at) => {
+                            ending = Some((end_at, EndWithFrame(HttpReset(at))))
+                        },
+                        HttpEnded(at, take outcome) => {
+                            ending = Some((end_at, EndWithFrame(HttpEnded(at, take outcome))))
+                        },
                     }
                 }
             },
             _ => (),
         }
         if let Some(stop_at) = std.stream.managed_stop(writer) {
-            if lease == None { return }
-            if http_stream_open(ending) { ending = Some((std.order.min(end_at, stop_at), EndNormally)) }
+            if lease == None {
+                return
+            }
+            if http_stream_open(ending) {
+                ending = Some((std.order.min(end_at, stop_at), EndNormally))
+            }
         }
         if lease == None && now >= pre_head && !busy && !matches_expiry(ending) {
             std.stream.managed_deadline(writer)
@@ -383,12 +456,18 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
             continue
         }
         if let Some(at) = lease {
-            if now >= at && http_stream_open(ending) { ending = Some((end_at, EndNormally)) }
+            if now >= at && http_stream_open(ending) {
+                ending = Some((end_at, EndNormally))
+            }
         }
         if let Some((until, _)) = ending {
-            if now >= until { return }
+            if now >= until {
+                return
+            }
             list.clear(mut batches)
-            if busy { continue }
+            if busy {
+                continue
+            }
             let (_, take reason) = option.unwrap(replace(mut ending, None))
             if lease == None {
                 match take reason {
@@ -414,7 +493,9 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
                         Ok(take unit) => take unit,
                         Error(_) => http_sse_reset(version),
                     }
-                    if !std.stream.managed_offer(writer, take control, until, false) { return }
+                    if !std.stream.managed_offer(writer, take control, until, false) {
+                        return
+                    }
                     // After the final event, close the chunked message under the same deadline.
                     ending = Some((until, EndNormally))
                 },
@@ -426,27 +507,38 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
             busy = true
             continue
         }
-        if busy { continue }
+        if busy {
+            continue
+        }
         if list.len(batches) != 0u64 {
-            if lease == None && !batches[0u64].complete { return }
+            if lease == None && !batches[0u64].complete {
+                return
+            }
             let HttpQueuedBatch(version: at, complete, payload: take payload, charge) = list.remove(mut batches, 0u64)
             let spec = view site.routes.operations[operation_index]
             let initial = lease == None
             match http_sse_batch(spec, site.tables, at, complete, take payload, initial, http_stream_gate(owner, at)) {
                 Ok(take item) => {
-                    if !std.stream.managed_offer(writer, take item, 18446744073709551615u64, initial) { return }
+                    if !std.stream.managed_offer(writer, take item, 18446744073709551615u64, initial) {
+                        return
+                    }
                     sending = charge
                     busy = true
                 },
                 Error(fault) => {
                     if initial {
-                        let reply = if let DepthLimit = fault { http_reply(500u16, "{\"fault\":\"depth\"}", false, false, false) }
-                            else { http_reply(500u16, "{\"fault\":\"codec\"}", false, false, false) }
+                        let reply = if let DepthLimit = fault {
+                            http_reply(500u16, "{\"fault\":\"depth\"}", false, false, false)
+                        } else {
+                            http_reply(500u16, "{\"fault\":\"codec\"}", false, false, false)
+                        }
                         std.stream.managed_failure(writer, result.unwrap(take reply), None)
                         busy = true
                     } else {
                         let reset = http_sse_reset(at)
-                        if !std.stream.managed_offer(writer, take reset, end_at, false) { return }
+                        if !std.stream.managed_offer(writer, take reset, end_at, false) {
+                            return
+                        }
                         busy = true
                     }
                     ending = Some((end_at, EndNormally))
@@ -465,25 +557,38 @@ fn http_stream_progress(owner: HttpOwner) {
 }
 
 fn http_stream_open(ending: Option[(u64, HttpStreamEnd)]) -> bool {
-    if let None = ending { true } else { false }
+    if let None = ending {
+        true
+    } else {
+        false
+    }
 }
 
 fn matches_expiry(ending: Option[(u64, HttpStreamEnd)]) -> bool {
-    if let Some((_, EndWithExpiry)) = ending { true } else { false }
+    if let Some((_, EndWithExpiry)) = ending {
+        true
+    } else {
+        false
+    }
 }
 
 fn matches_normal(ending: Option[(u64, HttpStreamEnd)]) -> bool {
-    if let Some((_, EndNormally)) = ending { true } else { false }
+    if let Some((_, EndNormally)) = ending {
+        true
+    } else {
+        false
+    }
 }
 
-fn http_stream_join(owner: HttpOwner, take ports: HttpJoinPorts, take caller: Caller, take key: Bytes,
-    take arg: Bytes, budget: u64, frame_limit: u64, take credit: Option[HttpBatchCredit]) -> Result[(), Refusal] {
+fn http_stream_join(owner: HttpOwner, take ports: HttpJoinPorts, take caller: Caller, take key: Bytes, take arg: Bytes, budget: u64, frame_limit: u64, take credit: Option[HttpBatchCredit]) -> Result[(), Refusal] {
     let input = http_subscription_input(take caller, take key, take arg, budget, frame_limit)?
     http_join(owner, take ports, take input, take credit)
 }
 
 fn http_stream_gate(owner: HttpOwner, version: u64) -> Option[std.http.ReleaseGate] {
-    let Some(register) = view owner.round else { return None }
+    let Some(register) = view owner.round else {
+        return None
+    }
     Some(std.http.ReleaseGate(fence: latest.handle(owner.fence), round: latest.handle(register), version: version))
 }
 

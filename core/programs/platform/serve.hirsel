@@ -1,5 +1,4 @@
 /// Start a place under the executable's `--limit` and drain it on stop.
-pub fn serve[G: send, H: shareable + inert + send, S: send, B: send](take config: runner.PlaceConfig[G, H, S, B],
-    take stopping: Receiver[()], updates: Latest[runner.Status], take watch: Option[Sender[Receiver[runner.Phase]]]) -> Result[runner.Ended, runner.StartError] waits {
+pub fn serve[G: send, H: shareable + inert + send, S: send, B: shareable + send](take config: runner.PlaceConfig[G, H, S, B], take stopping: Receiver[()], updates: Latest[runner.Status], take watch: Option[Sender[Receiver[runner.Phase]]]) -> Result[runner.Ended, runner.StartError] waits {
     runner.operate(take config, take stopping, updates, take watch)
 }

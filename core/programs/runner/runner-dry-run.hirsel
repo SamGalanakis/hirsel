@@ -1,5 +1,4 @@
-fn operate_dry_run[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B],
-    take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
+fn operate_dry_run[G: send, H: shareable + inert + send, S: send, B: shareable + send](p: PlaceConfig[G, H, S, B], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
     let dir = match p.backing {
         Disk(d) => d,
         Temp(d) => d,
@@ -50,12 +49,16 @@ fn operate_dry_run[G: send, H: shareable + inert + send, S: send, B: send](p: Pl
             string.push(mut text, " and ")
             string.push(mut text, std.hex.encode(keys.second))
             if let None = failure {
-                if let Some(name) = filled.index { failure = Some(Conflict(clone(name))) }
+                if let Some(name) = filled.index {
+                    failure = Some(Conflict(clone(name)))
+                }
             }
         }
         string.push(mut text, "\n")
     }
-    if !launch_emit(string.as_bytes(text)) { return Error(Missing("dry-run report output")) }
+    if !launch_emit(string.as_bytes(text)) {
+        return Error(Missing("dry-run report output"))
+    }
     match take failure {
         Some(take problem) => Error(Open(Migrate(take problem))),
         None => Ok(Unstarted),
@@ -63,7 +66,11 @@ fn operate_dry_run[G: send, H: shareable + inert + send, S: send, B: send](p: Pl
 }
 
 fn dry_run_collection(mut text: String, item: store.DeclaredCollection) {
-    string.push(mut text, if item.kind == 2u8 { "index " } else { "table " })
+    string.push(mut text, if item.kind == 2u8 {
+        "index "
+    } else {
+        "table "
+    })
     string.push(mut text, item.name)
 }
 

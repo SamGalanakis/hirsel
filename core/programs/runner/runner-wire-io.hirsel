@@ -98,7 +98,7 @@ fn wire_event(take e: WireInput) -> WireEvent {
     WireEvent(e: take e)
 }
 
-type WireInput: send = RegrantRoom | BellRoom(RoomBell) | RoomPassDone | SentRoom(Box[std.wsock.Writer], Box[RoomLiveBuffer]) | Input(Frame, u64) | FromRunner(Notice) | HelloBound(Option[BoundCaller], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
+type WireInput: send = RegrantRoom | BellRoom(RoomBell) | RoomPassDone | SentRoom(Box[std.wsock.Writer], Box[RoomLiveBuffer]) | Input(Frame, u64) | FromRunner(Notice) | HelloBound(Result[BoundCaller, BindRefusal], Option[StreamTime]) | GrantedDone(Tick, Outcome) | JoinReady | HelloExpired | AuthExpired | Published(Frame) | Control(u8, Box[std.websocket.Control]) | Sent(Box[std.wsock.Writer]) | Dropped | WriteTimedOut(u64) | ReadClosed(Box[std.websocket.Control], Box[std.wsock.Reader]) | WriteClosed(Box[std.wsock.Writer]) | Ended(u16) | DrainWake | RetireWire | HttpStream(std.stream.Delivery)
 
 type WirePacket: send = Fragment | Decoded(Frame, u64) | Pinged(Box[std.websocket.Control]) | Ponged | PeerClosed(Box[std.websocket.Control])
 

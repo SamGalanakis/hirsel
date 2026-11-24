@@ -1,0 +1,13 @@
+// A published binding seed must be shareable. Owning a list does not
+// confer that bound on a nominal type that declares only send.
+type OwnedSeed: send {
+    values: List[u64]
+}
+
+fn bind(seed: OwnedSeed, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
+    Error(Rejected)
+}
+
+pub fn configure(take seed: Latest[OwnedSeed]) -> runner.Wire[(), OwnedSeed] {
+    runner.wire_bind(take seed, code.describe(bind), 0u64, 0u64)
+}

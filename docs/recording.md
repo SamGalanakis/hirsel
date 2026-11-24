@@ -674,6 +674,11 @@ each sequence's length as a multiple of its element size, is the replay's: a mis
 `Diverged(Take)` in a `TAKE` and `Diverged(Op)` at position 0 in an entry, as for a
 descriptor that does not resolve.
 
+A value's **canonical form** is its bytes as above with each snapshot's ordinal field left
+out, at every depth. The sender cannot know the ordinals the receiving stream allocates, so
+the arguments of `UNIT_SPAWN`, `CONN_SEND` and `CONN_TRY_SEND` hash the canonical form, and
+RL9 compares a sent item with the canonical form of the item taken.
+
 **Snapshots.** A snapshot is its kind tag `u8` (above), its new object ordinal in the
 receiving stream as a `varint`, then:
 
@@ -681,11 +686,11 @@ receiving stream as a `varint`, then:
 |---|---|
 | 0 `Client` | inbox stream `u32`; connection ordinal `varint`; `cap` `u64`; room `b` `u64` |
 | 1 `Shared` | home stream `u32`; node ordinal `varint`; the payload as a value |
-| 2 `Socket` | direction `u8` (its Net rule's direction byte); peer address, 19 bytes as a `LISTEN` delivery writes one; TLS `u8` 0, or 1 followed by the `TLS_CONNECT` success payload as `bytes`; state `u8`, bit 0 end of stream received, bit 1 send side shut, other bits `Corrupt` |
+| 2 `Socket` | direction `u8` (0 made by `CONNECT`, 1 by `ACCEPT`); peer address, 19 bytes as a `LISTEN` delivery writes one; TLS `u8` 0, or 1 followed by the `TLS_CONNECT` success payload as `bytes`; state `u8`, bit 0 end of stream received and bit 1 reset received (the reactor record's `ended` and `reset`), other bits `Corrupt` |
 | 3 `Listener` | direction `u8`; bound address, 19 bytes |
 | 4 `UdpSocket` | direction `u8`; bound address, 19 bytes; peer `u8` 0, or 1 followed by the connected address, 19 bytes |
-| 5 capability | grant kind `u8`, as its `GRANT` frame writes it; then `bytes`: for `Net` its rule count `varint` and rules as the header's grant snapshot writes them after the `Net` kind byte; for `Env` its record as the header writes it after the `Env` kind byte; for `Cred` its record after its kind byte; for `Exec` the profile snapshot; for `Stdin`, `Stdout` and `Stderr` the terminal byte; for every other kind nothing |
-| 6 virtual capability | grant kind `u8`; home stream `u32` |
+| 5 capability | grant kind `u8` in `GrantKind`'s numbering (`Dir` 0, `Net` 1, `Clock` 2, `Random` 3, `Stdout` 4, `Stderr` 5, `Stdin` 6, `Env` 7, `Process` 8, `Exec` 13, `Cred` 14; a `random_tape` cell is `Random`), as its `GRANT` frame writes it; then `bytes`: for `Net` its rule count `varint` and rules as the header's grant snapshot writes them after the `Net` kind byte; for `Env` its record as the header writes it after the `Env` kind byte; for `Cred` its record after its kind byte; for `Exec` the profile snapshot; for `Stdin`, `Stdout` and `Stderr` the terminal byte; for every other kind nothing |
+| 6 virtual capability | grant kind `u8`, as for tag 5; home stream `u32` |
 | 7 `Secret` | designation: stream `u32`, position `varint`; canonical policy text `bytes` |
 | 8 `KeyShare` | origin: stream `u32`, position `varint`; group `u8` (`X25519` 0, `P256` 1) |
 | 9 `Schedule` | origin; profile; side `u8` (`Client` 0, `Server` 1, imported send 2, imported receive 3); stage `u8` (handshake 0, `Application` 1); send generation `u64`; receive generation `u64`; retired spaces `u8`, bit `i` for space `i`; exported `u8` (1 once `srtp` was called on it); ledger count `varint`, then per issued domain of a current send epoch its space `u8` and domain `u64` |
@@ -746,8 +751,8 @@ operation codes 164, 165, 166 and 167 of `ISSUE`, `DONE` and `OP`, in
 
 | code | operation | frame | object | args | `Out` value |
 |---|---|---|---|---|---|
-| 164 | `UNIT_SPAWN` | `OP` | 0 | `Args` over the descriptor `bytes`, `n` as a `u64` and `x` as a value, as the entry writes them | the helper's stream number |
-| 165 | `CONN_SEND` | `OP`, or `ISSUE` for a send that waits | client ordinal | `Args` over the item as a value | 0 `Accepted`, 1 `Closed` |
+| 164 | `UNIT_SPAWN` | `OP` | 0 | `Args` over the descriptor `bytes`, `n` as a `u64` and `x` in canonical form | the helper's stream number |
+| 165 | `CONN_SEND` | `OP`, or `ISSUE` for a send that waits | client ordinal | `Args` over the item in canonical form | 0 `Accepted`, 1 `Closed` |
 | 166 | `CONN_TRY_SEND` | `OP` | client ordinal | as 165 | 0 `Accepted`, 1 `Full`, 2 `Closed` |
 | 167 | `UNIT_CANCEL` | `OP` | the helper handle's ordinal | the empty literal | 0 |
 
@@ -791,8 +796,8 @@ spawn-index path, compared numerically.
 ordinal 0 (the root limit), taken at a scheduler pump with gap 0 and count 0, and then an
 `END` returning exit status 0. The tape id is the bytes `00` to `0f`. The header has an
 empty identity, a zero revision, charge policy 0, limit 65536, bound 0, the FIFO chooser,
-an empty `arg` and no grants; a runtime would refuse that empty launch metadata, which only
-keeps the example short. Checks are xxh3-64 with seed 0, written little-endian.
+an empty `arg` and no grants. A recorder writes the run's launch metadata in `arg`; the
+example leaves it empty to stay short. Checks are xxh3-64 with seed 0, written little-endian.
 
 Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 
@@ -856,7 +861,7 @@ Block 1 (stream 0, seq 1, flags `END`, 25-byte payload), 53 bytes:
 |---|---|---|---|---|
 | **U1** format 14 | S | — | `crates/hirsel-tape-format`: stream number in the block head, stream header, `TAKE` (kind 14, point kind, arrival and snapshot tags), unit operation codes 164-167, value and snapshot layouts, carriers (`DATA` continuation of entries, takes and helper results, survivor lists inside the helper-end body); the open-time index with its `Damaged` rules (sequence gap, duplicate header, failed check, trailing bytes); `tape show` by spawn-index path; `FORMAT = 14`, format 13 refused; the recorder writes the root stream only | RL6 |
 | **U2** helper streams | M | U1 | each helper gets its own recorder at its spawn; its entry, host frames and `END` go to its stream; the writer carries several recorders into one file; per-stream truncation and its report; no `END` at a run stop other than `Deadlock` | RL7's recording half, RL12 |
-| **U3** takes and unit operations | M | U2 | `TAKE` at every take point and all three take paths, with gap, point kind and count, the refund mailbox drain included; refund takes for posts from other units and for registry entry retirements; the unit operation frames; handle snapshots, with capability rows in the `cross` descriptor (`hirsel-core-layout` `cross.rs`, today without one) and key-object and virtual-capability snapshots; limit ordinals; designations by stream and position; imports always passing the replay point, `Spent` as a delivery; a virtual cell's home and its first foreign operation, and the replay point for foreign and later home operations on it; `RETIRED` in the refunded unit; key objects and registry entries in the helper-end survivor list | RL8, RL9 |
+| **U3** takes and unit operations | M | U2 | `TAKE` at every take point and all three take paths, with gap, point kind and count, the refund mailbox drain included; refund takes for posts from other units and for registry entry retirements; the unit operation frames; handle snapshots, with capability and function-word rows in the `cross` descriptor (`hirsel-core-layout` `cross.rs`, today without either) and key-object and virtual-capability snapshots; limit ordinals; designations by stream and position; imports always passing the replay point, `Spent` as a delivery; a virtual cell's home and its first foreign operation, and the replay point for foreign and later home operations on it; `RETIRED` in the refunded unit; key objects and registry entries in the helper-end survivor list | RL8, RL9 |
 | **U4** replay by stream | L | U3 | open every stream; start each unit from its entry; takes and unit outcomes from the stream; drop published arrivals and posted refunds; `UNIT_SPAWN` handles ended by the parent's `TAKE`; the missing-stream check; `Diverged(Take)` with its three cases; registry entries retired only at their refund takes, never by the replaying registry's share count (`ShareTicket::replay`); per-stream verdicts ordered by spawn-index path; `--unit` | RL7, RL10, RL11 |
 | **U5** retire the Unbuilt text | S | U4 | remove CONC-15's Unbuilt recording bullet, TLS-8's root-only sentence and T14's "when unit recordings are built", and the "Not built" line above; rewrite the `crates/hirsel-core-rt/src/units.rs` header to point here | the T14 helper case |
 

@@ -62,6 +62,7 @@ mod frame_lists;
 mod frame_logs;
 mod frame_strings;
 mod growth;
+mod joins;
 mod key_glue;
 mod lists;
 mod maps;
@@ -2298,83 +2299,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let r = self.b.blocks[blk.index()].params;
         r.get(&self.b.pools.values).unwrap_or_default().to_vec()
     }
-    fn new_join(&mut self) -> usize {
-        self.joins.push(Join::default());
-        self.joins.len() - 1
-    }
-    fn new_result_join(&mut self) -> usize {
-        let j = self.new_join();
-        self.joins[j].destination = self.expression_destination(self.node);
-        j
-    }
-    /// Leave the current block for join `j`, whose parameters carry a value of `ty`.
-    fn goto(&mut self, j: usize, ty: TyId, v: Option<ValueId>, n: NodeId) {
-        if !self.live() {
-            return;
-        }
-        let blk = match self.joins[j].block {
-            Some(b) => b,
-            None => {
-                let tys: Vec<Ty> = self.ir_ty(ty).into_iter().collect();
-                let b = self.new_block(&tys);
-                self.joins[j].block = Some(b);
-                b
-            }
-        };
-        if let Some(id) = self.drop_id(ty)
-            && v.is_some()
-        {
-            self.consume(v, n);
-            self.joins[j].drop = Some(id);
-        }
-        self.join_descriptor(j, v);
-        self.joins[j].anchors = self.anchors.union(self.joins[j].anchors, self.anchors.last);
-        let value = match (self.joins[j].destination, v) {
-            (Some(to), Some(from)) if self.pointer_address(from) != Some(to) => {
-                let PlaceTy::Declared(id) = self.b.addresses[to.index()].ty else {
-                    unreachable!("only aggregate results have a destination");
-                };
-                self.copy_to(to, from, id, n);
-                Some(self.pointer(to, n))
-            }
-            _ => v,
-        };
-        let args: Vec<ValueId> = value.into_iter().collect();
-        self.jump(blk, &args, n);
-    }
-    /// Continue at join `j`, if any edge reached it; its parameter is the joined value.
-    fn land(&mut self, j: usize) -> Option<ValueId> {
-        let blk = self.joins[j].block?;
-        self.start(blk);
-        let v = self.block_params(blk).first().copied();
-        if let (Some(v), Some(to)) = (v, self.joins[j].destination) {
-            self.note_pointer(v, to);
-        }
-        let anchors = self.joins[j].anchors;
-        self.anchors.last = anchors;
-        if anchors != 0 {
-            self.anchors.expressions.insert(self.node, anchors);
-            if let Some(v) = v {
-                self.anchors.values.insert(v, anchors);
-            }
-        }
-        if let (Some(value), Some(id)) = (v, self.joins[j].descriptor) {
-            self.descriptors.values.insert(value, id);
-        }
-        if let (Some(id), Some(value), true) = (self.joins[j].drop, v, self.live()) {
-            self.owners.push(cleanup::Owner::Temp(cleanup::Temp {
-                value,
-                source: self.node,
-                id,
-                avail: Avail::Live,
-                flag: None,
-                reached: 0,
-            }));
-            self.epoch += 1;
-        }
-        v
-    }
-
     // ---- the definition
     fn run(&mut self, f: usize, body: NodeId) {
         let row = self.e.row(self.p, &mut self.t, f);

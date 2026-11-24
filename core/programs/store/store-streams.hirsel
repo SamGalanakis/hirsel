@@ -762,3 +762,22 @@ fn next_bytes(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error]
     next_page_range(mut rows)
 }
 // Codec-independent S1 law fixtures. Byte keys are fixed-width big endian.
+
+// F2: the account after only the reply writes `ops`, against the base `streams` tree.
+fn stream_live(db: Db, streams: PageTree, ops: DataOps) -> Result[u64, Capacity] {
+    let retained = retaining(db)
+    let mut live_bytes = db.resident
+    for slot in 0u64 .. ops.rows.count {
+        let operation = data_row(ops.rows, slot)
+        let k = operation.key
+        if let Some(raw) = operation.value {
+            if !retained {
+                if let Some(old) = get_page_row(streams, k) {
+                    live_bytes = int.saturating_sub(live_bytes, entry(k, old))
+                }
+            }
+            live_bytes = int.saturating_add(live_bytes, entry(k, staged_bytes(raw)))
+        }
+    }
+    Ok(live_bytes)
+}

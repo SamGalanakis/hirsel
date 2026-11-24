@@ -1,14 +1,15 @@
-// 120 appends of 48 bytes in a Tiered Log whose tree the cut emits Cold.
-fn l87_cold_log(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[Log[Bytes], Error] waits {
+// `appended` appends of 48 bytes in a Tiered Log whose tree the cut emits Cold.
+fn l87_cold_log(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, appended: u64) -> Result[Log[Bytes], Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let mut declaring = declare(db, Migrate)?
     let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
     let _ = seal(mut db, take declaring)?
-    let Committed(_) = run(mut db, None, copy_env(events), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
-        for seq in 0u64 .. 120 {
+    let fixture: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut db, None, copy_env((fixture, appended)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        for seq in 0u64 .. env.1 {
             let mut body: Bytes = list.with_capacity(48)
             list.fill(mut body, 48, int.truncate(seq))
-            let _ = append(mut tx, l, body)?
+            let _ = append(mut tx, env.0, body)?
         }
         Ok(())
     })? else {
@@ -83,7 +84,7 @@ fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
 @test
 fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
-    let events = l87_cold_log(d, c, r, tasks, floor)?
+    let events = l87_cold_log(d, c, r, tasks, floor, 120)?
     let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
     let (leaf, trim) = l87_first_leaf(d, cold, events.binding.id)?
     let Committed(_) = run(mut cold, Some(100000), copy_env((events, trim)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
@@ -111,4 +112,174 @@ fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Ta
         fail("L87: the queue names main's detached Cold leaf at its exact location")
     }
     close(take reopened)
+}
+
+// L87 (a) on the live path (§13.6a T8 step 3, §13.8 dropped list): a
+// served trim past the first Cold leaf queues that leaf at the next cut.
+// A whole-Log trim after a fresh open loses the Cold root and every leaf;
+// each lost frame lands in exactly one of the replaced and dropped lists,
+// and the leaves no read reached are queued in order (2207 #1).
+@test
+fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let appended = 400u64
+    let events = l87_cold_log(d, c, r, tasks, floor, appended)?
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let collection = events.binding.id
+    let (leaf, trim) = l87_first_leaf(d, db, collection)?
+    let first_events: Log[Bytes] = clone(events)
+    let Committed(_) = run(mut db, Some(100000), copy_env((first_events, trim)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1)
+    })? else {
+        fail("L87: the served trim of a Cold Tiered Log commits")
+    }
+    let _ = checkpoint(mut db)?
+    let id = prefix(collection)?
+    let root = match std.page.collection_slot(db.heads[0u64].roots.collections.root, id) {
+        Some((ColdPage(located), _)) => located,
+        _ => fail("L87: the cut leaves the trimmed Log root Cold"),
+    }
+    let mut detached: List[std.page.PagePtr] = list.new()
+    list.push(mut detached, root)
+    {
+        let path = paged_pack_path(root.pack)?
+        let wire = disk_read_file(d, path, 1048576)?
+        let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, stamp_after(db.next_node)?)?
+        let page = fold_page(frame)
+        let image = std.page.image_of(page)
+        if std.page.level(image) != 1 || std.page.count(image) < 3 {
+            fail("L87: the trimmed root keeps at least three Cold leaves")
+        }
+        for slot in 0u64 .. std.page.count(image) {
+            let Some(ColdPage(child)) = std.page.child_slot(page, slot) else {
+                fail("L87: the cut leaves every leaf Cold")
+            }
+            list.push(mut detached, child)
+        }
+    }
+    close(take db)?
+    db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let Committed(_) = run(mut db, Some(100000), copy_env((events, appended)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+        trim_before(mut tx, env.0, env.1)
+    })? else {
+        fail("L87: the whole-Log trim commits")
+    }
+    let mut dropped: List[std.page.PagePtr] = list.new()
+    let mut lost = 0u64
+    for frames in disk_state(db).tiered_dirty.replaced {
+        for frame in frames.frames {
+            lost += 1
+            let mut hits = 0u64
+            for ptr in detached {
+                if ptr.pack == frame.pack && ptr.stamp == frame.stamp && ptr.len == frame.len {
+                    hits += 1
+                }
+            }
+            if hits != 1 {
+                fail("L87: each replaced frame is one detached page")
+            }
+        }
+    }
+    for row in disk_state(db).tiered_dirty.dropped {
+        let TieredPage(ptr) = row.target else {
+            fail("L87: a Log trim drops pages only")
+        }
+        if row.branch_id != 0 {
+            fail("L87: the dropped row names main")
+        }
+        lost += 1
+        list.push(mut dropped, ptr)
+    }
+    if lost != list.len(detached) || list.len(dropped) == 0 {
+        fail("L87: every detached page is replaced or dropped once, and an unread leaf is dropped")
+    }
+    for ptr in detached {
+        let mut hits = 0u64
+        for frames in disk_state(db).tiered_dirty.replaced {
+            for frame in frames.frames {
+                if ptr.pack == frame.pack && ptr.stamp == frame.stamp && ptr.len == frame.len {
+                    hits += 1
+                }
+            }
+        }
+        for other in dropped {
+            if other == ptr {
+                hits += 1
+            }
+        }
+        if hits != 1 {
+            fail("L87: each detached page lands in exactly one list")
+        }
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let queued = l87_queue(reopened)?
+    let expected = 1 + list.len(dropped)
+    if list.len(queued) != expected || disk_state(reopened).pages.lists.deferred_next != expected {
+        fail("L87: the queue holds the first leaf and every dropped page")
+    }
+    for at in 0u64 .. expected {
+        let (seq, row) = queued[at]
+        let TieredPage(target) = row.target else {
+            fail("L87: detached subtrees are queued as Page rows")
+        }
+        let wanted = if at == 0 { leaf } else { dropped[at - 1] }
+        if seq != at || row.branch_id != 0 || target != wanted {
+            fail("L87: the queue names each detached Cold page in order at its exact location")
+        }
+    }
+    close(take reopened)
+}
+
+// §13.8's list charges: 24 bytes per replaced row and one 48-byte slot per
+// dropped row, against `dirty_bytes`. A refused commit changes neither list.
+@test
+fn test_l70_dirty_admission() -> Result[(), ()] {
+    let mut dirty = clean_tiered_cut()
+    let one = std.page.PagePtr(pack: 12, offset: 72, len: 72, checksum: 102, stamp: 2)
+    let two = std.page.BlobRef(stamp: 1, len: 1025, checksum: 101, pack: 11, offset: 72, body: 0)
+    let three = std.page.PagePtr(pack: 12, offset: 160, len: 80, checksum: 103, stamp: 3)
+    let mut edited: List[ReplacedFrame] = list.new()
+    list.push(mut edited, replaced_page(one))
+    list.push(mut edited, replaced_blob(two))
+    let mut detached: List[TieredTarget] = list.new()
+    list.push(mut detached, TieredPage(three))
+    // 2 × 24 + 1 × 48 = 96.
+    let first = TieredFreed(replaced: take edited, dropped: take detached)
+    if let Error(_) = reserve_tiered_commit(mut dirty, first, 200) {
+        return Error(())
+    }
+    admit_tiered_commit(mut dirty, 7, take first)
+    // 2 × 24 + 3 × 48 = 192.
+    let mut blobs: List[TieredTarget] = list.new()
+    list.push(mut blobs, TieredBlob(two))
+    list.push(mut blobs, TieredBlob(std.page.BlobRef(stamp: 4, len: 900, checksum: 104, pack: 11, offset: 1120, body: 0)))
+    let second = TieredFreed(replaced: list.new(), dropped: take blobs)
+    if let Error(_) = reserve_tiered_commit(mut dirty, second, 200) {
+        return Error(())
+    }
+    admit_tiered_commit(mut dirty, 8, take second)
+    // 3 × 24 + 3 × 48 = 216 > 200.
+    let mut more: List[ReplacedFrame] = list.new()
+    list.push(mut more, replaced_page(three))
+    let third = TieredFreed(replaced: take more, dropped: list.new())
+    let Error(Full(Resident(refused))) = reserve_tiered_commit(mut dirty, third, 200) else {
+        return Error(())
+    }
+    if refused.requested != 216 || refused.available != 200 {
+        return Error(())
+    }
+    if list.len(dirty.replaced) != 1 || dirty.replaced_rows != 2 || list.len(dirty.dropped) != 3 {
+        return Error(())
+    }
+    let published = view dirty.replaced[0u64]
+    if published.branch != 7 || list.len(published.frames) != 2 || published.frames[0u64] != ReplacedFrame(pack: 12, len: 72, stamp: 2) || published.frames[1u64] != ReplacedFrame(pack: 11, len: 1033, stamp: 1) {
+        return Error(())
+    }
+    if dirty.dropped[0u64].branch_id != 7 || dirty.dropped[1u64].branch_id != 8 || dirty.dropped[2u64].branch_id != 8 {
+        return Error(())
+    }
+    Ok(())
 }

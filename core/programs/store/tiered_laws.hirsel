@@ -236,37 +236,6 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     close(take db)
 }
 
-@test
-fn test_l70_dirty_admission() -> Result[(), ()] {
-    let mut dirty = clean_tiered_cut()
-    let one = std.page.PagePtr(pack: 12, offset: 72, len: 72, checksum: 102, stamp: 2)
-    let two = std.page.BlobRef(stamp: 1, len: 1025, checksum: 101, pack: 11, offset: 72, body: 0)
-    let mut edited: List[ReplacedFrame] = list.new()
-    list.push(mut edited, replaced_page(one))
-    list.push(mut edited, replaced_blob(two))
-    // 72 image bytes, two 20-byte replacements and one 40-byte trim row.
-    if result.unwrap(admit_tiered_commit(mut dirty, 7, 72, take edited, 1, 200)) {
-        return Error(())
-    }
-    if !result.unwrap(admit_tiered_commit(mut dirty, 7, 120, list.new(), 0, 200)) {
-        return Error(())
-    }
-    let Error(Full(Resident(refused))) = admit_tiered_commit(mut dirty, 8, 121, list.new(), 0, 200) else {
-        return Error(())
-    }
-    if refused.requested != 201 || refused.available != 200 || dirty.images != 120 {
-        return Error(())
-    }
-    if list.len(dirty.replaced) != 1 || dirty.replaced_rows != 2 || dirty.dropped_rows != 1 {
-        return Error(())
-    }
-    let published = view dirty.replaced[0u64]
-    if published.branch != 7 || list.len(published.frames) != 2 || published.frames[0u64] != ReplacedFrame(pack: 12, len: 72, stamp: 2) || published.frames[1u64] != ReplacedFrame(pack: 11, len: 1033, stamp: 1) {
-        return Error(())
-    }
-    Ok(())
-}
-
 fn l65_wrong_edge(target: TieredTarget, cached: Arc[TieredFrame]) -> bool {
     match verify_tiered_edge("p-7", target, cached.identity) {
         Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) => true,

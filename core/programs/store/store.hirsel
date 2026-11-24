@@ -1135,6 +1135,9 @@ fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, 
         },
         OverLimit(_, problem) => Ok(NoRoom(take pending_run, problem)),
         Ready(take accepted, take publication) => {
+            if let Some(problem) = reserve_tiered_freed(mut db, accepted) {
+                return Ok(NoRoom(take pending_run, problem))
+            }
             let committed = commit_prepared(mut db, 0, take accepted, take publication)
             serve_after(handoff(mut db))?
             serve_after(maybe_checkpoint(mut db))?
@@ -1291,6 +1294,7 @@ type Ran[R, A] {
     first_stamp: u64,
     prepared_roots: bool,
     tiered: Option[u64],
+    freed: Option[TieredFreed],
     live: u64,
     exact: bool,
     admits_rows: bool,
@@ -1450,7 +1454,16 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         DraftFault(take problem) => return DraftError(take problem),
         Prepared(take tx) => take tx,
     }
-    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
+    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
+    // A draft without a Tiered plan makes no call here: the draft's step
+    // overhead is fixed (§13.3 call reserves).
+    let freed = match take plan {
+        Some(take written) => {
+            let TieredWritePlan(freed: take plan_freed, ..) = take written
+            Some(take plan_freed)
+        },
+        None => None,
+    }
     let keyed_writes = match keyed { Some(_) => true, None => false }
     let mut admits_rows = stream_edits.count != 0 || keyed_writes
     if !admits_rows {
@@ -1465,38 +1478,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
             }
         }
     }
-    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
-}
-
-// F2: the account after only the reply writes `ops`, against the base `streams` tree.
-fn stream_live(db: Db, streams: PageTree, ops: DataOps) -> Result[u64, Capacity] {
-    let retained = retaining(db)
-    let mut live_bytes = db.resident
-    for slot in 0u64 .. ops.rows.count {
-        let operation = data_row(ops.rows, slot)
-        let k = operation.key
-        if let Some(raw) = operation.value {
-            if !retained {
-                if let Some(old) = get_page_row(streams, k) {
-                    live_bytes = int.saturating_sub(live_bytes, entry(k, old))
-                }
-            }
-            live_bytes = int.saturating_add(live_bytes, entry(k, staged_bytes(raw)))
-        }
-    }
-    Ok(live_bytes)
-}
-
-fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {
-    if uncovered > limit || frame > limit - uncovered {
-        Some(Capacity(requested: int.saturating_add(uncovered, frame), available: limit))
-    } else {
-        None
-    }
-}
-
-fn over_bound[R, A](db: Db, ran: Ran[R, A]) -> bool {
-    ran.admits_rows && ran.live > resident_with_credit(db.ceiling, draft_credit(db, ran))
+    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
 }
 
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {
@@ -4535,6 +4517,7 @@ type DiskState {
     inflight: u64,
     uncovered: u64,
     since_cut: u64,
+    tiered_dirty: TieredDirty,
     acked_bytes: u64,
     written: Receiver[WriteNotice],
     written_send: Sender[WriteNotice],
@@ -4760,7 +4743,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task))
     Ok(take db)
 }
 
@@ -4961,6 +4944,8 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
         state.record_cut = seq
         state.recorded_after = recorded_after
         state.uncovered = 0
+        // Step 5: the lists' rows are now queue rows of the published generation.
+        state.tiered_dirty = clean_tiered_cut()
     })
     db.checkpointed = generation
     db.resident = base.account

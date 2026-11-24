@@ -47,9 +47,8 @@ fn encode_tiered_run(id: StoreId, layout: TieredPackRun, mut emitted: Map[u64, s
 // branch and frame, so holders that share one overlaid tree queue it once.
 // The replaced list waits for `lineage`, so the Cold frames a fold replaces
 // stay counted live.
-fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], mut next_stamp: u64, mut queued: List[DeferredFree]) -> Result[bool, Error] waits {
+fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree]) -> Result[bool, Error] waits {
     let mut folded = false
-    let mut seen: Map[(u32, u64, u64), ()] = map.new()
     for slot in 0u64 .. list.len(roots) {
         let overlaid = match roots[slot].collections.replay {
             Some(_) => true,
@@ -76,6 +75,22 @@ fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: Li
     Ok(folded)
 }
 
+// T8 step 3's added rows from the live dropped list come first, then the
+// fold's. A row is added once per branch and frame.
+fn queue_live_dropped(dropped: List[DeferredFree], mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree]) -> Result[(), Error] {
+    for row in dropped {
+        let frame = tiered_frame_id(row.target)
+        let key = (row.branch_id, frame.pack, frame.offset)
+        if !map.contains(seen, key) {
+            capacity(map.try_reserve(mut seen, 1))?
+            map.insert(mut seen, key, ())
+            capacity(list.try_reserve(mut queued, 1))?
+            list.push(mut queued, clone(row))
+        }
+    }
+    Ok(())
+}
+
 // T2 then T4: every Hot Tiered page and blob that a participant reaches is
 // emitted once by stamp, class 4 then class 3, from the installed `next_pack`
 // upward.
@@ -88,11 +103,13 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     }
     let mut next_stamp = stamp_after(db.next_node)?
     let mut roots = take participants
+    let mut seen: Map[(u32, u64, u64), ()] = map.new()
     let mut queued: List[DeferredFree] = list.new()
-    let folded = fold_cut_roots(pager, mut roots, branches, mut next_stamp, mut queued)?
+    queue_live_dropped(disk_state(db).tiered_dirty.dropped, mut seen, mut queued)?
+    let folded = fold_cut_roots(pager, mut roots, branches, mut next_stamp, mut seen, mut queued)?
     let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = tiered_cut_frames(roots)?
     if list.len(pages) == 0 && !folded {
-        return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, queued: list.new()))
+        return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, queued: take queued))
     }
     let blob_run = layout_tiered_packs(take blobs, 4, first_pack, cap)?
     let page_run = layout_tiered_packs(take pages, 3, blob_run.next_pack, cap)?

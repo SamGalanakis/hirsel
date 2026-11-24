@@ -193,6 +193,9 @@ limit = 268435456
 [tests.runs."store@1/store/test_l87_fold_cut_queues_detached_leaf"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_l87_live_trims_queue_detached_subtrees"]
+limit = 268435456
+
 [tests.runs."store@1/store/bucket_test_l4_cuts"]
 limit = 536870912
 

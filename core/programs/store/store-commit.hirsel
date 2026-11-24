@@ -171,6 +171,26 @@ fn prepare_run_commit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[A
     Ok(Ready(take draft, take publication))
 }
 
+// §13.8's charge for the commit's replaced and dropped rows, checked and
+// reserved once the commit is otherwise decided, so applying it cannot fail.
+fn reserve_tiered_freed[R, A](mut db: Db, ran: Ran[R, A]) -> Option[StoreCapacity] {
+    let Some(freed) = view ran.freed else {
+        return None
+    }
+    if !is_disk(db) || (list.len(freed.replaced) == 0 && list.len(freed.dropped) == 0) {
+        return None
+    }
+    let limit = disk_state(db).options.dirty_bytes
+    let reserved = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Result[(), Error] {
+        reserve_tiered_commit(mut state.tiered_dirty, freed, limit)
+    })
+    match reserved {
+        Ok(()) => None,
+        Error(Full(problem)) => Some(problem),
+        Error(_) => fail("store: a list reservation refuses only with Full"),
+    }
+}
+
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
     db.keyed_credit = draft_credit(db, ran)
     if i == 0u64 {
@@ -185,9 +205,13 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
             }
         }
     }
-    let Ran(value: take value, roots: take roots, live: live_bytes, tiered: tiered, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
+    let Ran(value: take value, roots: take roots, live: live_bytes, tiered: tiered, freed: take freed, exact: exact, frame: take frame, info: ci, reads: take seen, ..) = take ran
+    let branch_id = db.heads[i].id
     match db.disk {
         Some(mut state) => {
+            if let Some(take written) = take freed {
+                admit_tiered_commit(mut state.tiered_dirty, branch_id, take written)
+            }
             db.file_end += match frame {
                 Some(raw) => list.len(raw),
                 None => 0u64
@@ -312,6 +336,9 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
     let checked = settle_draft(mut db, i, take ran)?
     match take checked {
         Ready(take draft, take publication) => {
+            if let Some(problem) = reserve_tiered_freed(mut db, draft) {
+                return Ok(Refused(problem))
+            }
             Ok(commit_prepared(mut db, i, take draft, take publication))
         },
         OverLimit(_, c) => Ok(Refused(c)),
@@ -417,4 +444,16 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool,
         }
     }
     Ok(())
+}
+
+fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {
+    if uncovered > limit || frame > limit - uncovered {
+        Some(Capacity(requested: int.saturating_add(uncovered, frame), available: limit))
+    } else {
+        None
+    }
+}
+
+fn over_bound[R, A](db: Db, ran: Ran[R, A]) -> bool {
+    ran.admits_rows && ran.live > resident_with_credit(db.ceiling, draft_credit(db, ran))
 }

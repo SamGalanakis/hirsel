@@ -3,7 +3,8 @@ type TieredDataDelta = TieredPrior(u32) | TieredDropped(u64)
 type TieredWritePlan {
     tree: PageTree,
     deltas: List[Option[TieredDataDelta]],
-    next_stamp: u64
+    next_stamp: u64,
+    freed: TieredFreed
 }
 
 fn tiered_staged_value(op: DataOp) -> Result[ReplayValue, Error] {
@@ -70,6 +71,7 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
     capacity(list.try_reserve(mut deltas, operations.count))?
     let inline = staged.inline
     let mut draw = first_stamp
+    let mut touched: List[PlannedCollection] = list.new()
     for slot in 0u64 .. operations.count {
         let op = ordered_row(operations, order, slot)
         let id = list.slice(op.key, 0, 4)
@@ -91,10 +93,76 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
         }
         let (take ready, take revised, delta) = tiered_stage_collection_edit(attempt, visible, staged, op, prior, first_stamp, mut draw)?
         page_result(std.page.insert(mut staged.root, id, revised, Some(take ready), inline, first_stamp, mut draw))?
+        restore_planned_root(mut staged.root, id, first_stamp, visible, mut draw)?
         list.push(mut deltas, Some(delta))
+        note_planned_collection(mut touched, id, match op.trim { Some(_) => true, None => false })?
         tiered_seek(attempt, SeekOperation)
     }
-    Ok(TieredWritePlan(tree: take staged, deltas: take deltas, next_stamp: draw))
+    let freed = planned_freed(base, staged, touched, first_stamp, visible)?
+    Ok(TieredWritePlan(tree: take staged, deltas: take deltas, next_stamp: draw, freed: take freed))
+}
+
+// A loaded Cold page the edit left unchanged goes back to its location, as
+// the fold's restore does, so the cut never re-emits a stamp it already has.
+fn restore_planned_root(mut root: Arc[std.page.Page], id: Bytes, first_stamp: u64, visible: Map[TieredCacheKey, Arc[TieredFrame]], mut draw: u64) -> Result[(), Error] {
+    let held: Option[Arc[std.page.Page]] = match std.page.collection_slot(root, id) {
+        Some((HotPage(page), _)) => Some(arc.share(page)),
+        _ => None,
+    }
+    let Some(take page) = take held else {
+        return Ok(())
+    }
+    let restored = restore_fold_slots(take page, first_stamp, visible)
+    page_result(std.page.install_tiered_root(mut root, id, restored, mut draw))
+}
+
+// Operations come in key order, so one collection's edits are adjacent.
+type PlannedCollection {
+    id: Bytes,
+    trimmed: bool
+}
+
+fn note_planned_collection(mut touched: List[PlannedCollection], id: Bytes, trimmed: bool) -> Result[(), Error] {
+    let noted = list.len(touched)
+    if noted != 0 && list.compare_bytes(touched[noted - 1].id, id) == Equal {
+        if trimmed {
+            touched[noted - 1].trimmed = true
+        }
+        return Ok(())
+    }
+    capacity(list.try_reserve(mut touched, 1))?
+    list.push(mut touched, PlannedCollection(id: copied(id)?, trimmed: trimmed))
+    Ok(())
+}
+
+// The commit's replaced and dropped lists (§13.6a T8, §13.8): the Cold
+// frames each touched collection's deciding root reached and its planned
+// root no longer does. A floor's detached subtrees and blobs are dropped
+// rows; loaded pages and the edges a write replaced are replaced rows.
+fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollection], first_stamp: u64, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[TieredFreed, Error] {
+    let mut freed = no_tiered_freed()
+    for collection in touched {
+        let Some((before, _)) = std.page.collection_slot(base.root, collection.id) else {
+            continue
+        }
+        let Some((after, _)) = std.page.collection_slot(staged.root, collection.id) else {
+            continue
+        }
+        let effects = folded_step_effects(before, after, first_stamp, visible, collection.trimmed)?
+        for take effect in take effects {
+            match take effect {
+                FoldReplaced(frame) => {
+                    capacity(list.try_reserve(mut freed.replaced, 1))?
+                    list.push(mut freed.replaced, frame)
+                },
+                FoldDropped(take target) => {
+                    capacity(list.try_reserve(mut freed.dropped, 1))?
+                    list.push(mut freed.dropped, take target)
+                },
+            }
+        }
+    }
+    Ok(take freed)
 }
 
 

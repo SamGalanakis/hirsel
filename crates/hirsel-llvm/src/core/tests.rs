@@ -276,15 +276,15 @@ fn loan_facts_and_diagnostic_off_preserve_abi_and_legal_aliases() {
     wf::module(&module).unwrap();
     let on = emit_ir_with_facts(&module, false, true).unwrap();
     let off = emit_ir_with_facts(&module, false, false).unwrap();
-    assert!(on.contains("ptr noalias readonly dereferenceable(24) %p0"));
-    assert!(on.contains("ptr noalias %dest"));
+    assert!(on.contains("ptr noalias nofree readonly dereferenceable(24) %p0"));
+    assert!(on.contains("ptr noalias nofree %dest"));
     for function in [2, 3] {
         let name = symbol(&module, FuncId(function));
         let definition = on
             .lines()
             .find(|l| l.starts_with("define ") && l.contains(&format!("@{name}(")))
             .unwrap();
-        assert!(definition.contains("ptr noalias dereferenceable(24) %p0"));
+        assert!(definition.contains("ptr noalias nofree dereferenceable(24) %p0"));
     }
     for fact in [
         "noalias",

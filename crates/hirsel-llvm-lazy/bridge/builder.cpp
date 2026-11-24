@@ -209,6 +209,7 @@ static void attribute(HirselLlvmBuilder *u, LLVMValueRef value, unsigned index, 
     case 10: attr = Attribute::get(u->context, Attribute::NoUnwind); break;
     case 11: attr = Attribute::getWithAlignment(u->context, Align(n)); break;
     case 13: attr = Attribute::getWithDereferenceableBytes(u->context, n); break;
+    case 14: attr = Attribute::get(u->context, Attribute::NoFree); break;
     default: attr = Attribute::getWithMemoryEffects(u->context, MemoryEffects::argMemOnly(ModRefInfo::Ref)); break;
     }
     if (auto *f = dyn_cast<Function>(unwrap(value))) f->addAttributeAtIndex(index, attr);

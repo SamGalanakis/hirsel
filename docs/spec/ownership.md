@@ -429,6 +429,12 @@ evaluated left to right into temporaries before the places are compared. This on
 relation governs views, reservations, `mut` loans, moves, assignments, replacements,
 arguments of one call and captures.
 
+A compiler may rely on this rule for the call's whole extent: storage a `mut` argument
+owns, its place and the buffer of a `List`, `String` or `Bytes`, shares no byte with any
+other argument's, and nothing writes the buffer of a viewed one. It may assume nothing
+about storage that values only refer to, which two arguments can share: `Rc` and `Arc`
+payloads, region and compact storage, map and queue storage.
+
 ```hirsel
 type Pair { left: List[u8], right: List[u8] }
 fn swap_halves(mut p: Pair) { list.append(mut p.left, p.right) }   // distinct fields

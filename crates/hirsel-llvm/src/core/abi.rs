@@ -173,6 +173,12 @@ impl Return {
             params.push(match p {
                 Param::Value(t) => self.value_parameter(*t),
                 Param::Address { loan, place } if facts => Parameter {
+                    // Every `noalias` place, this one and the destination, is
+                    // also `nofree`: it is the caller's and outlives the call,
+                    // and a drop in place frees what it owns, never the place
+                    // (hirsel-core-ir docs, "Loans"). LLVM then keeps
+                    // `dereferenceable` for the whole body, so a carrier's data
+                    // word can be loaded once ahead of a checked loop.
                     noalias: true,
                     // FORM address arguments lend a live place throughout the
                     // call. Its readable extent lets argument promotion load

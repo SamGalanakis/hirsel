@@ -1,4 +1,15 @@
 //! Storage roles (crate docs, "Roles"): derived from a body, never stored.
+//!
+//! `ViewBuffers` is the one role whose bytes another role may share: the buffers
+//! of every `view` carrier parameter, one role for all, since two views may share
+//! one buffer. Nothing writes them during the call (OWN-10 freezes a viewed list's
+//! elements, OWN-9 keeps every `mut` argument off them), and another role may reach
+//! them only to read. The evaluator stops a run that writes one, or that reads one
+//! where another role wrote.
+//!
+//! The alias claims stop at storage that values only refer to, which two arguments
+//! can share: `Rc` and `Arc` payloads, region and compact storage, maps, queues and
+//! counted headers get no role, so no scope.
 
 use crate::{
     AddressBase, AddressId, AllocPlace, Arg, Body, Callee, FuncId, Function, Inst, Loan, Module,
@@ -26,6 +37,12 @@ pub enum Role {
     Buffer(Root),
     /// Storage any other carrier role's data word points at: one role for all.
     Buffers,
+    /// Storage reached through the data word of a `view` carrier parameter: one
+    /// role for every `view` parameter, since two views of one place may be passed
+    /// together. Nothing writes these bytes during the call (OWN-10 freezes the
+    /// viewed list's elements, OWN-9 keeps a `mut` argument off them), so a write
+    /// through any other role touches other bytes; reads may share them.
+    ViewBuffers,
 }
 
 /// A carrier type: an own record whose one field is a `seq` of a plain element
@@ -421,8 +438,8 @@ impl Facts {
         let Some(s) = shape(m, &m.functions[f.index()]) else {
             return Vec::new();
         };
-        // A `view` parameter is a root only for place-blindness: two views of
-        // one place may be passed together, so its bytes and buffers claim no role.
+        // Two views of one place may be passed together, so a `view` parameter's
+        // own bytes claim no role and the buffers of all of them share one.
         let sig = &m.signatures[m.functions[f.index()].signature.index()];
         let viewed = |r: Root| {
             matches!(r, Root::Param(i) if matches!(
@@ -434,10 +451,11 @@ impl Facts {
             .iter()
             .map(|l| {
                 l.and_then(|l| match l {
-                    Loc::Carrier(root, _) | Loc::Buffer(root) if viewed(root) => None,
+                    Loc::Carrier(root, _) if viewed(root) => None,
                     l => Some(l),
                 })
                 .map(|l| match l {
+                    Loc::Buffer(root) if viewed(root) => Role::ViewBuffers,
                     Loc::Carrier(root, _) => Role::Carrier(root),
                     Loc::Buffer(Root::Param(i)) if self.sealed(f, i) => {
                         Role::Buffer(Root::Param(i))

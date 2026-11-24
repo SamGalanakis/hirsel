@@ -628,3 +628,84 @@ fn divide_or_remainder(callee: &str) -> bool {
     .any(|prefix| name.starts_with(prefix))
         || matches!(name, "ldiv" | "lldiv" | "imaxdiv")
 }
+
+/// OWN-9 overlap law: the loan facts (`noalias`, `nofree`, one scope per role
+/// and one shared scope for view buffers) never change a result. A view callee
+/// runs between writes to the list it views, one list is viewed twice beside a
+/// `mut` list, and a `mut` field is filled from a `view` of its sibling. The
+/// evaluator, which checks every role on every access, Cranelift and optimised
+/// LLVM agree with sums derived by hand.
+#[test]
+fn disjoint_loans_keep_overlapping_programs_agreeing() {
+    let source = r#"
+type Pair { left: List[u64], right: List[u64] }
+
+fn sum(xs: List[u64]) -> u64 {
+    let mut s: u64 = 0
+    for i in 0u64 .. list.len(xs) { s += xs[i] }
+    s
+}
+
+fn add_into(mut out: List[u64], a: List[u64], b: List[u64]) {
+    for i in 0u64 .. list.len(out) { out[i] = a[i] * 10 + b[i] }
+}
+
+fn pour(mut to: List[u64], from: List[u64]) {
+    for i in 0u64 .. list.len(to) { to[i] = to[i] + from[i] }
+}
+
+fn filled(n: u64, base: u64) -> List[u64] {
+    let mut xs: List[u64] = list.with_capacity(n)
+    for i in 0u64 .. n { list.push(mut xs, base + i) }
+    xs
+}
+
+fn overlap(n: u64, pick: u64) -> u64 {
+    let mut xs = filled(n, 1)
+    xs[0] = 5
+    let s = sum(xs)
+    xs[0] = 9
+    let t = sum(xs)
+    let mut out = filled(n, 0)
+    add_into(mut out, xs, xs)
+    let u = sum(out)
+    let mut p = Pair(left: filled(n, 100), right: filled(n, 1))
+    pour(mut p.left, p.right)
+    let v = sum(p.left)
+    if pick == 0 { s } else if pick == 1 { t } else if pick == 2 { u } else { v }
+}
+"#;
+    let (program, names) = hirsel_core_program_tests::SourceProgram::lower(source, None);
+    // xs holds 1..=n with its first element replaced: by 5, then by 9. out holds
+    // 11 * xs, and p.left holds (100 + i) + (1 + i).
+    let expected = |n: u64, pick: u64| {
+        let ones = n * (n + 1) / 2;
+        [ones + 4, ones + 8, 11 * (ones + 8), 101 * n + n * (n - 1)][pick as usize]
+    };
+    let cases: Vec<_> = [8u64, 1000]
+        .into_iter()
+        .flat_map(|n| (0..4).map(move |pick| (n, pick)))
+        .map(|(n, pick)| Case {
+            function: names["overlap"],
+            args: vec![n, pick],
+            limit: 1 << 20,
+            injection: None,
+        })
+        .collect();
+    let outcomes: Vec<_> = cases
+        .iter()
+        .map(|case| eval::Outcome::Returned(vec![expected(case.args[0], case.args[1])]))
+        .collect();
+    for (case, outcome) in cases.iter().zip(&outcomes) {
+        let evaluated = eval::run(&program, case.function, &case.args, case.limit);
+        assert_eq!(&evaluated.outcome, outcome, "{:?}", case.args);
+    }
+    let cranelift = program.cranelift_object("x86_64-unknown-linux-gnu", false, false, false);
+    let llvm = program.llvm_program(Target::X86_64Linux, false, false, &[names["overlap"]]);
+    for (mode, object) in [(Optimization::None, cranelift), (Optimization::Speed, llvm)] {
+        let reports = execute_object(&program, &cases, "", "", mode, Some(object));
+        for ((report, outcome), case) in reports.into_iter().zip(&outcomes).zip(&cases) {
+            assert_eq!(&report.outcome, outcome, "{mode:?} {:?}", case.args);
+        }
+    }
+}

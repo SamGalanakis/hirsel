@@ -14,7 +14,9 @@ mod argon2;
 mod chan;
 mod conn;
 mod crc;
+mod footprint;
 mod frame;
+use footprint::Footprint;
 mod host;
 mod key_share;
 mod launch;
@@ -1002,8 +1004,7 @@ struct Machine<'m> {
     /// its first call.
     facts: Arc<roles::Facts>,
     roles: Vec<Option<Arc<[Option<roles::Role>]>>>,
-    /// Per running activation: its roles, and by block the byte spans each role
-    /// touched (`lo -> (hi, role)`, disjoint, a role's adjacent spans merged).
+    /// Per running activation, the bytes each role touched ([`Footprint`]).
     footprints: Vec<Footprint>,
     role_checks: u64,
     copy_size: Option<u64>,
@@ -1024,11 +1025,6 @@ struct Machine<'m> {
     /// By function, the address of its static descriptor (`Inst::DescriptorRef`),
     /// 0 for a function no body describes. Functions of one code identity share one.
     descriptors: Vec<u64>,
-}
-
-struct Footprint {
-    roles: Arc<[Option<roles::Role>]>,
-    spans: HashMap<usize, BTreeMap<usize, (usize, roles::Role)>>,
 }
 
 // ---- tasks (CONC-3..10)
@@ -5870,10 +5866,7 @@ impl Machine<'_> {
         let roles = self.roles[f.index()]
             .get_or_insert_with(|| facts.roles(m, f).into())
             .clone();
-        self.footprints.push(Footprint {
-            roles,
-            spans: HashMap::new(),
-        });
+        self.footprints.push(Footprint::new(roles));
         #[cfg(feature = "map-observation")]
         let (probe, rebuild, promotes_rebuild, strong) = if let Some(stats) = &mut self.world.maps {
             let definition = &m.instances[m.functions[f.index()].instance.index()].definition;
@@ -5919,9 +5912,10 @@ impl Machine<'_> {
         r
     }
 
-    /// Note that an access through `a` touched `n` bytes at `p`, and stop the run
-    /// when another role of this activation touched any of them (crate docs, "Roles").
-    fn touch(&mut self, a: AddressId, p: u64, n: usize) {
+    /// Note that an access through `a` read or wrote (`write`) `n` bytes at `p`,
+    /// and stop the run when another role of this activation touched any of them,
+    /// unless both are reads and one is the view buffers' role (crate docs, "Roles").
+    fn touch(&mut self, a: AddressId, p: u64, n: usize, write: bool) {
         let Some(frame) = self.footprints.last_mut() else {
             return;
         };
@@ -5937,29 +5931,7 @@ impl Machine<'_> {
         if self.mem[b].fixed {
             return;
         }
-        let hi = lo + n;
-        let spans = frame.spans.entry(b).or_default();
-        let near: Vec<(usize, usize, roles::Role)> = spans
-            .range(..=hi)
-            .rev()
-            .take_while(|(_, (h, _))| *h >= lo)
-            .map(|(&l, &(h, r))| (l, h, r))
-            .collect();
-        let (mut start, mut end) = (lo, hi);
-        for (l, h, r) in near {
-            if r == role {
-                spans.remove(&l);
-                (start, end) = (start.min(l), end.max(h));
-            } else {
-                assert!(
-                    h <= lo || hi <= l,
-                    "{role:?} touches +{}..+{} of a block that {r:?} touched",
-                    lo.max(l),
-                    hi.min(h)
-                );
-            }
-        }
-        spans.insert(start, (end, role));
+        frame.touch(role, b, lo, lo + n, write);
     }
 
     /// SITES.md: the innermost anchor of the task's activations that is not in a
@@ -6324,7 +6296,7 @@ impl Machine<'_> {
                 let ptr = places[to.index()].0;
                 let bytes = vectors.value(vector);
                 let count = vals[count.index()] as usize;
-                self.touch(to, ptr, count);
+                self.touch(to, ptr, count, true);
                 for (i, &byte) in bytes[..count].iter().enumerate() {
                     self.store(ptr + i as u64, 1, u64::from(byte));
                 }
@@ -6540,7 +6512,7 @@ impl Machine<'_> {
                 result, address, ..
             } => {
                 let n = bytes_of(ty(result));
-                self.touch(address, places[address.index()].0, n);
+                self.touch(address, places[address.index()].0, n, false);
                 if matches!(ty(result), Ty::Vector(_)) {
                     vectors.set(result, self.load_vector(places[address.index()].0, n));
                 } else {
@@ -6556,7 +6528,7 @@ impl Machine<'_> {
                 if let Ty::Vector(shape) = t {
                     let ptr = places[address.index()].0;
                     let n = shape.size() as usize;
-                    self.touch(address, ptr, n);
+                    self.touch(address, ptr, n, true);
                     let bytes = vectors.value(value);
                     for (i, chunk) in bytes[..n].chunks_exact(8).enumerate() {
                         self.store(
@@ -6575,7 +6547,7 @@ impl Machine<'_> {
                     *k += 1;
                 }
                 let n = bytes_of(t);
-                self.touch(address, places[address.index()].0, n);
+                self.touch(address, places[address.index()].0, n, true);
                 self.store(places[address.index()].0, n, x);
                 if let (p, At::Word(w, size)) = places[address.index()] {
                     self.check_carrier(p - w.offset(), size, Some(w));
@@ -6799,8 +6771,8 @@ impl Machine<'_> {
                     // a valid operand (SEM-4).
                     return Ok(());
                 }
-                self.touch(from, places[from.index()].0, n);
-                self.touch(to, places[to.index()].0, n);
+                self.touch(from, places[from.index()].0, n, false);
+                self.touch(to, places[to.index()].0, n, true);
                 let (f, t) = (places[from.index()].0, places[to.index()].0);
                 assert!(
                     f == t || split(f).0 != split(t).0 || f + n as u64 <= t || t + n as u64 <= f,
@@ -6815,8 +6787,8 @@ impl Machine<'_> {
                 if n == 0 {
                     return Ok(());
                 }
-                self.touch(from, places[from.index()].0, n);
-                self.touch(to, places[to.index()].0, n);
+                self.touch(from, places[from.index()].0, n, false);
+                self.touch(to, places[to.index()].0, n, true);
                 let f = places[from.index()].0;
                 self.read_marked(f, n);
                 // Read the whole source first, so an overlapping target sees the old bytes.
@@ -6842,7 +6814,7 @@ impl Machine<'_> {
                 let FieldTy::Seq(elem) = &edge else {
                     unreachable!("a sequence edge")
                 };
-                self.touch(carrier, at, hirsel_core_layout::SEQ_CARRIER as usize);
+                self.touch(carrier, at, hirsel_core_layout::SEQ_CARRIER as usize, true);
                 let (old, len, cap) = (
                     self.load(at, 8),
                     self.load(at + 8, 8),

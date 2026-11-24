@@ -715,7 +715,7 @@ fn scopes(out: &mut String, scoped: &Option<Scoped>) {
 fn parameter(out: &mut String, p: &Parameter) {
     write!(out, "{}{}", p.ty, p.extension.text()).unwrap();
     if p.noalias {
-        out.push_str(" noalias");
+        out.push_str(" noalias nofree");
     }
     if p.readonly {
         out.push_str(" readonly");

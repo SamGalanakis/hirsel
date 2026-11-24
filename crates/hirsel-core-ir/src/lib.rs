@@ -990,9 +990,9 @@
 //! parameters facts. It derives them from the form itself, over the whole module
 //! as the greatest fixpoint of its direct calls (#96); nothing stores them. Two accesses (`read`, `store`,
 //! either side of a `copy`) through addresses of different roles touch disjoint
-//! bytes, or static bytes, which nothing writes, throughout one activation. An
-//! emitter may rely on that, and may ignore it. An address without a role makes
-//! no claim.
+//! bytes, or static bytes, which nothing writes, throughout one activation; other
+//! roles may also read `ViewBuffers` bytes ([`roles`]). An emitter may rely on
+//! that, and may ignore it. An address without a role makes no claim.
 //! - A **carrier type** is an own record whose one field is a `seq` of a plain
 //!   element (a scalar, an array of plain elements, or an own record or variant of
 //!   plain fields with no finalizer or clone body): `String`, `Bytes`, `List` of
@@ -1006,7 +1006,7 @@
 //! - A buffer is storage reached through a pointer read from a carrier role's data
 //!   word, then `index` or `byte` steps. A move hands a buffer from one carrier
 //!   to another, so buffers share one role, `Buffers`, unless the body seals their
-//!   carrier.
+//!   carrier or views it (`ViewBuffers`, [`roles`]).
 //! - `Buffer(root)`: the buffers of a **sealed** `mut` or `take` parameter, whose
 //!   buffer never changes hands within the body. Every address that reaches the
 //!   carrier is a carrier-role word access, a `pointer` of one, or a `view` lend
@@ -1048,7 +1048,7 @@
 //! records and provider handles have no role. LLVM can take one alias domain per
 //! function and one scope per role; its inliner clones them. The test evaluator
 //! derives the same roles on every call, and it stops the run when two roles of
-//! one activation touch the same byte that is not static.
+//! one activation touch the same byte that is not static, save `ViewBuffers` reads.
 //!
 //! # Instances
 //!

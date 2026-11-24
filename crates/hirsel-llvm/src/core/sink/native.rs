@@ -24,6 +24,7 @@ const NOUNWIND: u32 = 10;
 const ALIGN: u32 = 11;
 const ARGMEM_READ: u32 = 12;
 const DEREFERENCEABLE: u32 = 13;
+const NOFREE: u32 = 14;
 const ALIAS_SCOPE: u32 = 0;
 const NOALIAS_SCOPE: u32 = 1;
 const INVARIANT: u32 = 2;
@@ -355,6 +356,7 @@ impl<'a> NativeSink<'a> {
             self.extension(target, index, p.extension);
             if p.noalias {
                 self.attribute(target, index, NOALIAS, None, 0);
+                self.attribute(target, index, NOFREE, None, 0);
             }
             if p.readonly {
                 self.attribute(target, index, READONLY, None, 0);

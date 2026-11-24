@@ -120,37 +120,57 @@ fn value_at(s: Snapshot, k: u64) -> u64 {
 
 // L1: sorted slot model, own writes, abort and fault never change published roots.
 // Wrong implementation caught: publish before body success; omit old-root lookup.
-pub fn law_model(c: Clock) -> bool {
-    for seed in 0u64 .. 2 {
-        let mut db = raw_test_db(c, 1073741824)
-        let mut model: List[u64] = list.with_capacity(24)
-        list.fill(mut model, 24, 0u64)
-        for operation in 0u64 .. 64 {
-            let wall = seed * 64 + operation
-            let state = splitmix64(wall)
-            let k = state % 24
-            let choice = (state >> 8) % 5
-            let v = wall + 1
-            let ok = model_step(mut db, wall)
-            if !ok {
-                return false
-            }
-            if choice < 3 {
-                let _ = list.set(mut model, k, if choice == 0 {
-                    0u64
-                } else {
-                    v
-                })
-            }
-            let held = snapshot(db)
-            for at in 0u64 .. 24 {
-                if value_at(held, at) != model[at] {
-                    return false
-                }
+// The commands come from a std.prop tape, so a failing sequence shrinks to a
+// minimal one. A command is (kind, slot): kind 0 deletes, 1 and 2 put, 3 puts
+// then aborts, 4 puts then faults. Command i runs at wall i and puts wall + 1.
+pub fn law_model() -> Result[(), ()] {
+    let commands = std.prop.list_of(std.prop.pair(std.prop.u64_in(0, 4), std.prop.u64_in(0, 23)), 0, 64)
+    std.prop.check(std.prop.config(), take commands, fn(tape: List[(u64, u64)]) -> Result[(), String] {
+        model_run(tape)
+    })
+}
+
+// A closure cannot capture the test's Clock (LANG-14), so each run takes a
+// virtual one; the store reads no time beyond the wall each command passes.
+fn model_run(tape: List[(u64, u64)]) -> Result[(), String] {
+    let (c, _hand) = provide.clock(0u64, 0u64)
+    let mut db = raw_test_db(c, 1073741824)
+    let mut model: List[u64] = list.with_capacity(24)
+    list.fill(mut model, 24, 0u64)
+    let mut wall: u64 = 0
+    for (kind, k) in tape {
+        if !model_step(mut db, wall, kind, k) {
+            return Error(model_miss("outcome", wall, kind, k))
+        }
+        if kind < 3 {
+            let _ = list.set(mut model, k, if kind == 0 {
+                0u64
+            } else {
+                wall + 1
+            })
+        }
+        let held = snapshot(db)
+        for at in 0u64 .. 24 {
+            if value_at(held, at) != model[at] {
+                return Error(model_miss("published slots", wall, kind, k))
             }
         }
+        wall += 1
     }
-    true
+    Ok(())
+}
+
+fn model_miss(what: String, wall: u64, kind: u64, k: u64) -> String {
+    let mut out = string.from("L1: ")
+    string.push(mut out, what)
+    string.push(mut out, " differ from the model after command ")
+    string.push_u64(mut out, wall)
+    string.push(mut out, " (kind ")
+    string.push_u64(mut out, kind)
+    string.push(mut out, ", slot ")
+    string.push_u64(mut out, k)
+    string.push(mut out, ")")
+    out
 }
 
 // L2: an escaped cursor and snapshot retain exactly the transaction's frozen tree.
@@ -323,15 +343,10 @@ pub fn law_foreign(c: Clock) -> bool waits {
     true
 }
 
-fn model_step(mut db: Db, wall: u64) -> bool {
-    let outer_choice = (splitmix64(wall) >> 8) % 5
+fn model_step(mut db: Db, wall: u64, kind: u64, k: u64) -> bool {
     let outcome = execute(mut db, 0, wall, None, fn(mut tx: Tx) -> Result[u64, Error] {
-        let at = info(mut tx).at
-        let state = splitmix64(at)
-        let choice = (state >> 8) % 5
-        let k = state % 24
-        let v = at + 1
-        if choice == 0 {
+        let v = info(mut tx).at + 1
+        if kind == 0 {
             let _ = delete_bytes(mut tx, 1, key_word(k))?
         } else {
             put_bytes(mut tx, 1, key_word(k), key_word(v))?
@@ -340,29 +355,25 @@ fn model_step(mut db: Db, wall: u64) -> bool {
                 return Error(Missing("law"))
             }
         }
-        if choice == 3 {
+        if kind == 3 {
             return Error(Foreign)
         }
-        if choice == 4 {
+        if kind == 4 {
             fail("L1 injected fault")
         }
         Ok(1)
     })
     match take outcome {
-        Ok(Committed(_)) => outer_choice < 3,
-        Ok(Aborted(Undone(value: Foreign, ticket: None))) => outer_choice == 3,
-        Ok(Failed(_)) => outer_choice == 4,
+        Ok(Committed(_)) => kind < 3,
+        Ok(Aborted(Undone(value: Foreign, ticket: None))) => kind == 3,
+        Ok(Failed(_)) => kind == 4,
         _ => false
     }
 }
 
 @test
-fn test_model(c: Clock) -> Result[(), ()] {
-    if law_model(c) {
-        Ok(())
-    } else {
-        Error(())
-    }
+fn test_model() -> Result[(), ()] {
+    law_model()
 }
 
 @test
@@ -471,7 +482,7 @@ pub fn law_frames(c: Clock) -> bool {
     })
     match take outcome {
         Ok(Committed(done)) => {
-            let expected: Inline[u8, 96] = [17, 0, 1, 0, 80, 0, 0, 0, 135, 213, 200, 80, 237, 65, 92, 89, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33]
+            let expected: Inline[u8, 96] =[17, 0, 1, 0, 80, 0, 0, 0, 135, 213, 200, 80, 237, 65, 92, 89, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33]
             if list.len(done.value) != 96 {
                 return false
             }

@@ -89,16 +89,20 @@ impl Uring {
     const ENTRIES: u32 = 64;
     /// NODROP retains completions past this capacity. The owner enters
     /// with GETEVENTS to flush them once reaping has made room.
-    pub(super) const COMPLETIONS: u32 = 4096;
+    const COMPLETIONS: u32 = 4096;
 
     /// A ring whose kernel runs multishot polls, bounded waits and blind
     /// MSG_RING wakes. Any refusal (an old kernel, a seccomp filter,
     /// `io_uring_disabled`) is an error, and the caller uses epoll.
     pub(super) fn open() -> io::Result<Uring> {
+        Self::with_cq_size(Self::COMPLETIONS)
+    }
+
+    pub(super) fn with_cq_size(completions: u32) -> io::Result<Uring> {
         use io_uring::{opcode, register::Probe};
         let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
         let ring = io_uring::IoUring::builder()
-            .setup_cqsize(Self::COMPLETIONS)
+            .setup_cqsize(completions)
             .setup_clamp()
             .setup_coop_taskrun()
             .setup_taskrun_flag()

@@ -222,22 +222,22 @@ fn cross_home_release(make: fn() -> io::Result<Arc<Poller>>) -> (bool, bool, boo
 /// queue's capacity may be lost.
 #[test]
 fn readiness_beyond_the_completion_queue_is_all_reported() {
-    const SOCKETS: usize = 3 * Uring::COMPLETIONS as usize;
-    let mut limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
+    const CQ_ENTRIES: u32 = 512;
+    let (poller, completion_entries) = match reactor().unwrap() {
+        Reactor::IoUring => {
+            let ring = Uring::with_cq_size(CQ_ENTRIES).unwrap();
+            let entries = ring.ring.params().cq_entries();
+            (Poller::from_uring(ring), entries)
+        }
+        Reactor::Epoll => (Poller::new_epoll().unwrap(), CQ_ENTRIES),
     };
-    // SAFETY: plain resource-limit calls on this process.
-    unsafe {
-        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit), 0);
-        limit.rlim_cur = limit.rlim_max;
-        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &limit), 0);
-    }
-    assert!(limit.rlim_cur as usize > 2 * SOCKETS + 64, "{limit:?}");
+    // Keep the burst at three times the CQ while fitting within 4,096 fds.
+    let socket_count = 3 * completion_entries as usize;
     let mut sockets = Sockets::default();
-    let mut peers = Vec::with_capacity(SOCKETS);
-    let mut keys = Vec::with_capacity(SOCKETS);
-    for token in 0..SOCKETS as u64 {
+    sockets.poller = Some(poller);
+    let mut peers = Vec::with_capacity(socket_count);
+    let mut keys = Vec::with_capacity(socket_count);
+    for token in 0..socket_count as u64 {
         let (socket, peer) = UnixStream::pair().unwrap();
         socket.set_nonblocking(true).unwrap();
         let key = sockets.insert(socket.into()).unwrap();
@@ -263,8 +263,8 @@ fn readiness_beyond_the_completion_queue_is_all_reported() {
     for peer in &mut peers {
         peer.write_all(b"x").unwrap();
     }
-    let mut seen = vec![false; SOCKETS];
-    let mut left = SOCKETS;
+    let mut seen = vec![false; socket_count];
+    let mut left = socket_count;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while left != 0 && std::time::Instant::now() < deadline {
         sockets
@@ -278,7 +278,7 @@ fn readiness_beyond_the_completion_queue_is_all_reported() {
     assert_eq!(
         left,
         0,
-        "{left} of {SOCKETS} unreported under {:?}",
+        "{left} of {socket_count} unreported under {:?}",
         reactor()
     );
 }

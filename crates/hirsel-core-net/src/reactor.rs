@@ -246,18 +246,17 @@ impl Poller {
     }
     fn new_uring() -> io::Result<Arc<Self>> {
         let probed = PROBED.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let ring = match probed {
-            Some(probed) => probed,
-            None => Uring::open()?,
-        };
-        Ok(Arc::new(Self {
+        Ok(Self::from_uring(probed.map_or_else(Uring::open, Ok)?))
+    }
+    fn from_uring(ring: Uring) -> Arc<Self> {
+        Arc::new(Self {
             backend: Backend::Uring(Box::new(ring)),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_uring,
                 wake: Self::wake_ring,
             },
-        }))
+        })
     }
     fn new_epoll() -> io::Result<Arc<Self>> {
         // SAFETY: creates a new, uniquely owned CLOEXEC descriptor.

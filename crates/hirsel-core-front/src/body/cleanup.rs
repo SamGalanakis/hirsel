@@ -40,16 +40,24 @@ pub(super) struct Temp {
 }
 /// What the cleanup being emitted has already done on its edge, for the failure block
 /// of a drop that runs code (FAIL-9, FAIL-12): owners from `from` on are cleaned,
-/// except those the edge keeps (the value `keep`, and slots when `temps`); the scopes
-/// from `scopes` on are closed; `pending` is the edge's pending result.
+/// except those the edge keeps (the value `keep`, owners skipped by `cleanup`,
+/// and `retained`). The scopes from `scopes` on are closed. `pending` is the
+/// edge's pending result.
 #[derive(Clone, Copy)]
 pub(super) struct Edge {
     pub from: usize,
     pub keep: Option<ValueId>,
-    pub temps: bool,
+    cleanup: EdgeCleanup,
     pub scopes: usize,
     pub pending: Option<(AddressBase, TypeId)>,
     pub retained: PoolRange<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum EdgeCleanup {
+    Unwind,
+    EndOwners { temps: bool },
+    Temporaries,
 }
 
 /// An old value moved aside to be finalized after an install (T3.2), and the value of
@@ -577,7 +585,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let edge = self.edge.unwrap_or(Edge {
             from: self.owners.len(),
             keep: None,
-            temps: false,
+            cleanup: EdgeCleanup::Unwind,
             scopes: self.patterns_len(),
             pending: None,
             retained: PoolRange::EMPTY,
@@ -594,12 +602,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some((base, id)) = edge.pending {
             self.emit_drop(base, id, n);
         }
+        let (skip_slots, held_temps) = match edge.cleanup {
+            EdgeCleanup::Unwind => (false, None),
+            EdgeCleanup::EndOwners { temps } => (temps, Some(temps)),
+            EdgeCleanup::Temporaries => (true, None),
+        };
         let done = |cx: &Self, i: usize| match cx.owners[i] {
             // A drain resumes where it stopped, and ends at once when it finished.
             Owner::Drain { .. } => false,
             Owner::Temp(t) if Some(t.value) == edge.keep => edge.pending.is_some(),
-            Owner::Slot(_) if edge.temps => false,
-            Owner::Temp(t) if cx.temporary_held(t, edge.temps) => false,
+            Owner::Slot(_) if skip_slots => false,
+            Owner::Temp(t) if held_temps.is_some_and(|temps| cx.temporary_held(t, temps)) => false,
             _ if edge.retained.get(&cx.retained_owners).unwrap().contains(&i) => false,
             _ => i >= edge.from,
         };
@@ -700,7 +713,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.edge = Some(Edge {
                         from: i,
                         keep,
-                        temps,
+                        cleanup: EdgeCleanup::EndOwners { temps },
                         scopes: self.patterns_len(),
                         pending,
                         retained,
@@ -749,7 +762,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.edge = Some(Edge {
                     from: i,
                     keep: None,
-                    temps: false,
+                    cleanup: EdgeCleanup::Unwind,
                     scopes: s + 1,
                     pending,
                     retained,
@@ -766,7 +779,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.edge = Some(Edge {
                 from: i,
                 keep: None,
-                temps: false,
+                cleanup: EdgeCleanup::Unwind,
                 scopes,
                 pending,
                 retained,
@@ -840,7 +853,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.edge = Some(Edge {
                     from: i,
                     keep: None,
-                    temps: true,
+                    cleanup: EdgeCleanup::Temporaries,
                     scopes: self.patterns_len(),
                     pending: None,
                     retained: PoolRange::EMPTY,

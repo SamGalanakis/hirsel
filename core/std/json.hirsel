@@ -1029,37 +1029,33 @@ fn string_word_prefix(b: Bytes, i: u64) -> u64 {
     bit >> 3
 }
 
-// The input is already a String. Only quote, escape and control bytes stop a run.
-fn string_run(s: String, start: u64) -> u64 {
-    let b = string.as_bytes(s)
-    let end = list.len(b)
-    let mut i = start
-    while end - i >= 8 {
-        let run = string_word_prefix(b, i)
-        i += run
-        if run != 8 {
-            return i
-        }
-        i = scan_string_blocks(b, i)
-    }
-    loop {
-        let c = at(s, i)
-        if c < 0x20 || c == b'"' || c == b'\\' {
-            return i
-        }
-        i += 1
-    }
-}
-
 /// At the opening '"': the decoded UTF-8 length of the string.
 fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
-    let start = i + 1
-    i = string_run(s, start)
-    string_size_rest(s, i - start, mut i)
+    i += 1
+    let start = i
+    let b = string.as_bytes(s)
+    for _ in 0u32 .. 2 {
+        if int.wrapping_sub(list.len(b), i) < 8 {
+            break
+        }
+        let run = string_word_prefix(b, i)
+        i = int.wrapping_add(i, run)
+        if run != 8 {
+            if b[i] == b'"' {
+                let n = int.wrapping_sub(i, start)
+                i += 1
+                return Ok(n)
+            }
+            break
+        }
+    }
+    string_size_rest(s, int.wrapping_sub(i, start), mut i)
 }
 
 fn string_size_rest(s: String, prefix: u64, mut i: u64) -> Result[u64, Error] {
     let mut n = prefix
+    let b = string.as_bytes(s)
+    let end = list.len(b)
     loop {
         let c = at(s, i)
         if c == b'"' {
@@ -1071,7 +1067,14 @@ fn string_size_rest(s: String, prefix: u64, mut i: u64) -> Result[u64, Error] {
         }
         if c != b'\\' {
             let start = i
-            i = string_run(s, i)
+            let mut run: u64 = 1
+            if end - i >= 8 {
+                run = string_word_prefix(b, i)
+            }
+            i += run
+            if run == 8 && end - i >= 32 {
+                i = scan_string_blocks(b, i)
+            }
             n += i - start
         } else if at(s, i + 1) == b'u' {
             n += char.utf8_len(unicode(s, mut i)?)
@@ -1280,7 +1283,10 @@ fn decoded_string_part(s: String, mut i: u64) -> Result[DecodedStringPart, Error
         return Ok(StringEscape(c))
     }
     let start = i
-    i = string_run(s, i)
+    i += 1
+    while at(s, i) != b'"' && at(s, i) != b'\\' {
+        i += 1
+    }
     Ok(StringRun(start, i))
 }
 
@@ -1334,10 +1340,8 @@ fn at(s: String, i: u64) -> u8 {
 
 /// Skips JSON whitespace: space, tab, line feed, carriage return.
 fn skip(s: String, mut i: u64) {
-    let b = string.as_bytes(s)
-    let end = list.len(b)
-    while i < end {
-        let c = b[i]
+    loop {
+        let c = at(s, i)
         if c != b' ' && c != b'\t' && c != b'\n' && c != b'\r' {
             return
         }
@@ -1661,22 +1665,16 @@ fn typed_string[in a](mut input: TypedInput in a, colon: bool, mut d: ReadTyped)
         return Error(typed_input_issue(input.source, d, d.pos, ExpectedValue))
     }
     let start = d.pos + 1
-    let end = string_run(input.source, start)
-    let raw = at(input.source, end) == b'"'
-    d.pos = end
-    if raw {
-        d.pos += 1
-    } else {
-        let _ = read_error(input.source, string_size_rest(input.source, end - start, mut d.pos), d)?
-        let decoded = read_error(input.source, decode_string(input.source, start), d)?
-        input.decoded = take decoded
-    }
+    let width = read_error(input.source, string_size(input.source, mut d.pos), d)?
+    let end = d.pos - 1
     if colon {
         close_typed(input.source, b':', mut d)?
     }
-    if raw {
+    if end - start == width {
         return Ok(string.slice(input.source, start, end))
     }
+    let decoded = read_error(input.source, decode_string(input.source, start), d)?
+    input.decoded = take decoded
     Ok(view input.decoded)
 }
 

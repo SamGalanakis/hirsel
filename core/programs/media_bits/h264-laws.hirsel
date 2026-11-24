@@ -1,0 +1,73 @@
+fn invalid_rtp(payload: Bytes) {
+    if let Ok(_) = h264.parse_rtp(payload) {
+        fail("malformed H.264 RTP packet accepted")
+    }
+}
+
+/// bug: Mis-reconstruct a fragmented NAL header, miss an aggregation boundary, or misread cropped SPS dimensions and PPS IDs.
+/// oracle: RFC 6184 sections 5.7.1 and 5.8, and FFmpeg trace_headers and ffprobe on str0m tests/data/h264.pcap.
+@test
+fn h264_rtp_parameter_sets() -> Result[(), ()] {
+    // First two units in STAP-A packet 19249. FFmpeg reports 494 by 370,
+    // Constrained Baseline level 3, SPS 0 and PPS 0 with CAVLC.
+    let packet = b"\x78\x00\x10\x67\x42\xc0\x1e\x8c\x8d\x40\xf8\x63\xd4\x44\x03\xc2\x21\x1a\x80\x00\x04\x68\xce\x3c\x80"
+    if let StapA(false) = result.unwrap(h264.parse_rtp(packet)) {} else {
+        fail("captured SPS/PPS aggregation header")
+    }
+    let mut at: u64 = 1
+    let seq_unit = option.unwrap(result.unwrap(h264.stap_next(packet, mut at)))
+    let pic_unit = option.unwrap(result.unwrap(h264.stap_next(packet, mut at)))
+    if seq_unit.nal.kind != 7 || seq_unit.start != 3 || seq_unit.end != 19 || pic_unit.nal.kind != 8 || pic_unit.start != 21 || pic_unit.end != 25 || at != 25 {
+        fail("captured STAP-A element lengths")
+    }
+    let seq = result.unwrap(h264.parse_sps(list.slice(packet, seq_unit.start, seq_unit.end)))
+    let size = h264.sequence(seq)
+    if size.id != 0 || size.width != 494 || size.height != 370 || size.profile != 66 || size.constraints != 192 || size.level != 30 {
+        fail("captured SPS dimensions, cropping or profile")
+    }
+    let pic = result.unwrap(h264.parse_pps(list.slice(packet, pic_unit.start, pic_unit.end), seq))
+    if pic.id != 0 || pic.sequence_id != 0 || pic.entropy_coding || pic.transform_8x8 {
+        fail("captured PPS fields")
+    }
+    // Packet 19251 changes both parameter-set IDs while preserving dimensions.
+    let other = result.unwrap(h264.parse_sps(b"\x67\x42\xc0\x1e\x43\x23\x50\x3e\x18\xf5\x11\x00\xf0\x88\x46\xa0"))
+    let other_pic = b"\x68\x48\xe3\xc8"
+    let other_size = h264.sequence(other)
+    let other_ids = result.unwrap(h264.parse_pps(other_pic, other))
+    if other_size.id != 1 || other_size.width != 494 || other_size.height != 370 || other_ids.id != 1 || other_ids.sequence_id != 1 {
+        fail("second parameter-set pair")
+    }
+    if let Ok(_) = h264.parse_pps(other_pic, seq) {
+        fail("PPS with the wrong SPS accepted")
+    }
+    if let Ok(_) = h264.parse_sps(list.slice(packet, seq_unit.start, seq_unit.end - 1)) {
+        fail("truncated SPS accepted")
+    }
+    // FFmpeg libx264 (High profile) and FFprobe independently produce
+    // 640x360. The timing fields contain two emulation-prevention octets.
+    let high = result.unwrap(h264.parse_sps(b"\x67\x64\x00\x1e\xac\xd9\x40\xa0\x2f\xf9\x70\x11\x00\x00\x03\x00\x01\x00\x00\x03\x00\x32\x0f\x16\x2d\x96"))
+    let high_size = h264.sequence(high)
+    let high_pic = result.unwrap(h264.parse_pps(b"\x68\xeb\xe3\xcb\x22\xc0", high))
+    if high_size.profile != 100 || high_size.width != 640 || high_size.height != 360 || !high_pic.entropy_coding || !high_pic.transform_8x8 {
+        fail("High-profile SPS escaping or PPS extension")
+    }
+    // RFC 6184 allows an empty fragment and requires the receiver to ignore R.
+    if let FuA(fu) = result.unwrap(h264.parse_rtp(b"\x7c\xa5")) {
+        if !fu.first || fu.last || !fu.nal.idr || fu.reconstructed_header != 0x65 {
+            fail("FU-A header reconstruction")
+        }
+    } else {
+        fail("empty FU-A accepted as the wrong payload kind")
+    }
+    if let FuA(fu) = result.unwrap(h264.parse_rtp(b"\x7c\x41\x9c\x10")) {
+        if fu.first || !fu.last || fu.nal.idr || fu.reconstructed_header != 0x61 {
+            fail("captured non-IDR final fragment")
+        }
+    } else {
+        fail("captured FU-A rejected")
+    }
+    invalid_rtp(b"\x7c\xc5")
+    invalid_rtp(b"\x78\x00\x02\x65")
+    invalid_rtp(b"\x78\x00\x01\x7c")
+    Ok(())
+}

@@ -7,6 +7,7 @@ charge = "charge-v1"
 std = { major = 1 }
 
 [sources]
+"h264.hirsel" = "h264"
 "opus.hirsel" = "opus"
 "vp9.hirsel" = "vp9"
 
@@ -14,5 +15,6 @@ std = { major = 1 }
 limit = 67108864
 
 [tests.sources]
+"h264-laws.hirsel" = "h264_laws"
 "opus-laws.hirsel" = "opus_laws"
 "vp9-laws.hirsel" = "vp9_laws"

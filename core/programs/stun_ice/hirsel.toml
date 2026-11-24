@@ -1,0 +1,17 @@
+[package]
+name = "stun_ice"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"stun.hirsel" = "stun_ice"
+"integrity.hirsel" = "stun_ice"
+
+[tests]
+limit = 1048576
+
+[tests.sources]
+"laws.hirsel" = "laws"

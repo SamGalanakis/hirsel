@@ -670,15 +670,11 @@ len, mut out)` builds the RTX header, then appends the OSN, `pre` (the leg's rew
 descriptor, or nothing) and `payload[from..from + len]` (the shared remainder) behind it into
 a packet pre-sized in `out`, and answers the header's length. Like `header.write`, it
 appends the whole packet or nothing: a short spare is `Capacity` with the whole packet's
-length as `requested`. The caller then
-protects the packet in place from the end of the RTP header with TLS-8's
-[`seal`](tls.md#tls-8-packet-ciphers-and-key-agreement): the packet's start as `aad_at` and
-`start + header length` as `at`. So the OSN and any rewritten codec descriptor are encrypted
-payload, and only the RTP header is authenticated data, as for every SRTP packet. A repair
-costs one copy of its payload; repairs are rare, and the copy buys a wire format every
-receiver can open. (`seal_into` cannot be used here: it treats everything already in its
-destination as authenticated data, so an OSN written into the destination would go out in
-the clear.)
+length as `requested`. The caller then passes the plaintext packet to `srtp.protect_rtp`
+([SRTP-3](dtls.md#srtp-3-streams-roc-and-sending)). It parses the RTP header and uses its end
+as the offset `at` for in-place protection. It authenticates the header and encrypts the OSN
+and the rest of the payload, including any rewritten codec descriptor. A repair costs one
+copy of its payload. See `rtx_protected` in [Build laws](#build-laws).
 
 `rtx.unwrap(h, pkt)` reads a received, decrypted RTX packet. It takes the payload range
 from `header.payload`, so it is bound to `pkt` like every RTP-1 accessor (`Buffer`), and
@@ -1013,12 +1009,14 @@ can follow it. A rewrite answers numbers; the caller writes the header
 
 **What is encrypted.** On every egress packet, SRTP authenticates the RTP header and
 encrypts everything after it. A rewritten codec descriptor is payload, so it must be
-encrypted. When a leg's payload is the shared plaintext unchanged (audio, H.264, a frame
-whose descriptor needs no rewrite), the caller writes only the header into its destination
-and calls TLS-8 `seal_into` with the shared payload as source. When the descriptor is
-rewritten, the caller writes the rewritten descriptor and the rest of the payload after the
-header and calls `seal` in place from the header's end: one copy of that payload. The AV1
-dependency descriptor is a header extension, so its rewrite stays in the clear header.
+encrypted. For RTX packets, use the in-place protection path in
+[RTP-7](#rtp-7-retransmission-history-and-rtx). When an original media packet's payload is the
+shared plaintext unchanged (audio, H.264, a frame whose descriptor needs no rewrite), the
+caller writes only the header into its destination and calls TLS-8 `seal_into` with the
+shared payload as source. When the descriptor is rewritten, the caller writes it and the
+rest of the payload after the header and calls `seal` in place from the header's end. This
+copies the payload once. The AV1 dependency descriptor is a header extension, so its rewrite
+stays in the clear header.
 
 **Sources and units.** A source is an incoming stream, named by the caller's 32-bit key
 (for simulcast, one per layer SSRC). Every packet arrives with its authenticated index,
@@ -1381,13 +1379,14 @@ written here and repeated in the law's comment.
   the repair on a leg carry two distinct transport numbers. After a source switch, a NACK for
   an index before the switch yields nothing (`BeforeSwitch`). *Oracle:* RFC 4588 §4 and RFC
   8852 §3, by hand.
-- **`rtx_protected` (RTP-7, with SRTP).** *Harness:* `core/programs/srtp/laws.hirsel` <!-- doc-ref: planned -->.
+- **`rtx_protected` (RTP-7, with SRTP).** *Harness:* `core/programs/srtp/laws.hirsel`.
   For each SRTP profile TLS-8 names (`Aes128CmHmacSha1_80`, `AeadAes128Gcm`,
-  `AeadAes256Gcm`), a fixed master key and salt, and the `rtx_layout` packet at index 5
-  sealed in place from `at = 12`. *Oracle:* an independent opener in Python `cryptography`
-  (RFC 3711 §4 AES-CM with HMAC-SHA1-80; RFC 7714 AES-GCM with the 12-byte header as AAD),
-  written for the law and run once, its expected wire bytes pinned with the script beside
-  the law. The independent opener recovers OSN 0x1234 and `AA BB CC`, and the wire bytes at
+  `AeadAes256Gcm`), the law uses a fixed master key and salt and calls `srtp.protect_rtp` on
+  the `rtx_layout` packet at index 5. Protection starts at `at = 12`. *Oracle:* an independent
+  opener in `core/programs/srtp/oracle.py` uses Python `cryptography` (RFC 3711 §4 AES-CM
+  with HMAC-SHA1-80 and RFC 7714 AES-GCM with the 12-byte header as AAD). The law compares
+  the protected packet with the expected wire bytes in `core/programs/srtp/vectors.hirsel`.
+  The independent opener recovers OSN 0x1234 and `AA BB CC`, and the wire bytes at
   offsets 12 to 16 differ from `12 34 AA BB CC`. Negative control, the same packet sealed
   with the OSN left in the authenticated header (protection from offset 14): under each GCM
   profile the independent opener's tag check fails; under AES-CM the tag passes, because the
@@ -1553,7 +1552,7 @@ package. Each law is carried by exactly one slice.
 | **S9** unit adapter in `media_bits` | a `vp8` module (RFC 7741 descriptor: picture ID, TL0PICIDX, TID, `Y`, `S`, `PID`, keyframe from `P`, in-place rewrite of picture ID and TL0PICIDX at the output width), and the `Unit` adapter for VP8, VP9, H.264 and AV1. The one owner of the VP8 parser and descriptor laws; WebRTC slice S2 consumes them at egress | nothing | `unit_adapter` | M | Opus |
 | **S10** network laws | the two `sim.udp` laws | S4 to S7, `std.sim.udp` (media-w0-sim-udp-2324) | `nack_recovery_under_loss`, `congestion_backoff` | M | Sol |
 | **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost` | S | Sol |
-| **S12** protected RTX | the SRTP wire case of RTP-7, in `core/programs/srtp/` <!-- doc-ref: planned --> | S4, DTLS slice S5 | `rtx_protected` | S | Devin |
+| **S12** protected RTX | the SRTP wire case of RTP-7, in `core/programs/srtp/` | S4, DTLS slice S5 | `rtx_protected` in `core/programs/srtp/laws.hirsel` | S | Devin |
 
 Every slice that changes a `.hirsel` source under `core/programs/rtp` <!-- doc-ref: planned --> or
 `core/programs/media_bits` refreshes that package's `hirsel.laws` in the same commit.

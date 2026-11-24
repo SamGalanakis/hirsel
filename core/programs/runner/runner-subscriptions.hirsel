@@ -345,7 +345,9 @@ fn due_subs(subs: Subscriptions, who: u64) -> List[u32] {
 
 // What one step owes one session: at `version`, the subs whose whole initial result it
 // carries, its rows and its Ended subs; or, with `reset`, a Reset and nothing else.
-type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[Row], ended: List[(u32, u64, Outcome)], reset: bool, read_failed: bool }
+type TerminalUpdate: send { sub: u32, generation: u64, version: u64, outcome: Outcome }
+
+type Owe: send { session: u64, version: u64, generations: List[(u32, u64)], complete: List[u32], rows: List[Row], ended: List[TerminalUpdate], reset: bool, read_failed: bool }
 
 type PublisherReads: send {
     changes: own[send] fn(store.Reader, Option[store.Snapshot], store.Snapshot, Bytes, Bytes, store.Limits) -> Result[store.ChangePage, store.Error] waits,
@@ -404,7 +406,7 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
     let rows = match row_log() {
         Ok(take x) => take x,
         Error(c) => {
-            list.push(mut o.ended, (sub, generation, Refused(Budget(room(c)))))
+            list.push(mut o.ended, TerminalUpdate(sub: sub, generation: generation, version: version, outcome: Refused(Budget(room(c)))))
             return take o
         },
     }
@@ -425,13 +427,13 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
         },
         Stopped(take why) => {
             let _ = remove_sub(mut b.subs, who, sub)
-            list.push(mut o.ended, (sub, generation, take why))
+            list.push(mut o.ended, TerminalUpdate(sub: sub, generation: generation, version: version, outcome: take why))
         },
         // A faulted or refused run: its partial read log is its ended entry.
         Faulted(take why, take reads) => {
             let _ = remove_sub(mut b.subs, who, sub)
             match add_subscription(mut b.subs, who, sub, generation, take input, None, take reads) {
-                Ok(()) => list.push(mut o.ended, (sub, generation, take why)),
+                Ok(()) => list.push(mut o.ended, TerminalUpdate(sub: sub, generation: generation, version: version, outcome: take why)),
                 Error(_) => { o.reset = true },
             }
         },
@@ -541,7 +543,8 @@ fn replace_routes(mut subs: Subscriptions, id: SubId, take c: Option[List[Cover]
 
 // The sub keeps the read set of its last run as its ended entry.
 fn end_round_sub(mut subs: Subscriptions, mut out: Owe, id: SubId, generation: u64, take why: Outcome) {
-    list.push(mut out.ended, (id.sub, generation, take why))
+    let version = out.version
+    list.push(mut out.ended, TerminalUpdate(sub: id.sub, generation: generation, version: version, outcome: take why))
     end_entry(mut subs, id.who, id.sub)
 }
 
@@ -624,7 +627,7 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
             },
             EndSub(take why) => end_round_sub(mut b.subs, mut owes[k], id, generation, take why),
             EndRead(take why, take reads) => match replace_routes(mut b.subs, id, None, take reads) {
-                Ok(()) => list.push(mut owes[k].ended, (id.sub, generation, take why)),
+                Ok(()) => list.push(mut owes[k].ended, TerminalUpdate(sub: id.sub, generation: generation, version: version, outcome: take why)),
                 Error(_) => reset_session(mut b.subs, mut owes, id.who, version),
             },
             ResetSubs(failed) => {

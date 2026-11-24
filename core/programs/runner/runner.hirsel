@@ -3438,11 +3438,9 @@ pub fn apply_attempt[G: send, H: shareable + inert + send](mut db: store.Db, reg
 // the session is due. On the owner's progress the publisher reruns each due sub at its base
 // and sends its whole image as a `complete`. A bounced Ended (or Reset) and bounced answers
 // wait until the inbox takes them, retried at the current base with any new content.
-// `ended_at` is the oldest computation version among `ended` (u64::MAX when empty): a waiting
-// Ended keeps the version it was computed at when it is folded into later content.
 // v2.22: `handed` counts the `complete`s the owner's inbox took, and `taken` is the owner's
 // count of those it no longer holds unsent; a due session is repaired only when they agree.
-type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[(u32, u64, Outcome)], ended_at: u64, reset: bool, read_failed: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64 }
+type Joiner { who: u64, to: Sender[WireEvent], closed: Option[Receiver[()]], ended: List[TerminalUpdate], reset: bool, read_failed: bool, mark: Option[Receiver[()]], identity: Option[Latest[OwnerNumber]], fence: Option[FenceSet], due: bool, progress: Option[Receiver[()]], progressed: bool, taken: Option[Latest[Taken]], handed: u64 }
 
 // One try_send to an owner: taken, bounced back by a full inbox, or shut.
 type Offered = Took | Bounced(Notice) | Shut
@@ -3526,7 +3524,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                 match take reserved {
                     Ok(take fences) => {
                         minted += 1u64
-                        list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), ended_at: ROUND_HALTED, reset: false, read_failed: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64))
+                        list.push(mut joined, Joiner(who: minted, to: take to, closed: take closed, ended: list.new(), reset: false, read_failed: false, mark: take mark, identity: take id, fence: take fences, due: false, progress: take progress, progressed: false, taken: take taken, handed: 0u64))
                         let _ = channel.try_send(told, Admit(who: minted, round: latest.handle(rounds.round)))
                         // v2.22: the Subscribe that made the owner join, at this base (G3).
                         if let Some(take f) = take first {
@@ -3640,10 +3638,10 @@ fn keep_answers(mut waiting: List[Replies], take answers: List[CallAnswer]) {
 }
 
 // A resubscribed sub's waiting Ended is moot: the new Subscribe's Batch replaces it.
-fn unend(mut ended: List[(u32, u64, Outcome)], sub: u32) {
+fn unend(mut ended: List[TerminalUpdate], sub: u32) {
     let mut i = 0u64
     while i < list.len(ended) {
-        if ended[i].0 == sub {
+        if ended[i].sub == sub {
             let _ = list.remove(mut ended, i)
         } else {
             i += 1u64
@@ -3679,8 +3677,6 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             take empty
         }
         let old = replace(mut joined[i].ended, list.new())
-        let old_at = joined[i].ended_at
-        joined[i].ended_at = ROUND_HALTED
         if joined[i].reset || next.reset {
             let _ = replace(mut next.generations, list.new())
             let _ = replace(mut next.complete, list.new())
@@ -3691,8 +3687,6 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             end_session(mut subs, who)
             joined[i].due = false
         } else if list.len(old) > 0u64 {
-            // A unit is checked at its oldest component (§3).
-            if old_at < next.version { next.version = old_at }
             let now = replace(mut next.ended, take old)
             for take ended in now {
                 list.push(mut next.ended, take ended)
@@ -3748,14 +3742,13 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // A full inbox bounced this content: a Reset waits and covers it all; otherwise each live sub
 // it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, version: computed, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take o
+    let Owe(session: who, version: _, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take o
     // A token taken before this bounce never counts after it (§3 "Repair").
     j.progressed = false
     if reset || j.reset {
         j.reset = true
         j.read_failed = j.read_failed || failed
         j.ended = list.new()
-        j.ended_at = ROUND_HALTED
         return
     }
     for sub in complete {
@@ -3764,8 +3757,6 @@ fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
     for r in rows {
         if mark_due(mut subs, who, r.sub) { j.due = true }
     }
-    if list.len(ended) == 0u64 { return }
-    if computed < j.ended_at { j.ended_at = computed }
     for take x in ended {
         list.push(mut j.ended, take x)
     }
@@ -3812,7 +3803,7 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
         Ok(take output) => take output,
         Error(problem) => {
             if let Some(entry) = sub_at(b.subs, who, sub) {
-                list.push(mut owes[0u64].ended, (sub, entry.generation, Refused(Budget(room(problem)))))
+                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: entry.generation, version: at, outcome: Refused(Budget(room(problem)))))
             }
             end_entry(mut b.subs, who, sub)
             return list.remove(mut owes, 0u64)
@@ -3840,7 +3831,7 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
         Faulted(take why, take reads) => match replace_routes(mut b.subs, id, None, take reads) {
             Ok(()) => {
                 clear_due(mut b.subs, id)
-                list.push(mut owes[0u64].ended, (sub, generation, take why))
+                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: generation, version: at, outcome: take why))
             },
             Error(_) => { owes[0u64].reset = true },
         },
@@ -3866,7 +3857,9 @@ fn caught_up(j: Joiner) -> bool {
 
 fn merge_owe(mut into: Owe, take from: Owe) {
     let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take from
-    if v < into.version { into.version = v }
+    let has_content = list.len(complete) != 0u64 || list.len(rows) != 0u64
+    let already_has_content = list.len(into.complete) != 0u64 || list.len(into.rows) != 0u64
+    if has_content && (!already_has_content || v < into.version) { into.version = v }
     if reset { into.reset = true }
     into.read_failed = into.read_failed || failed
     for g in generations { list.push(mut into.generations, g) }
@@ -4038,7 +4031,7 @@ fn hand(to: Sender[Down], take o: Owe, mut dropped: List[u32], take outcomes: Li
         let _ = channel.send(to, Batched(KeyedBatch(version: v, complete: take complete, rows: take heard, outcomes: take outcomes)))
     }
     for take e in take ended {
-        let (sub, _, take why) = take e
+        let TerminalUpdate(sub: sub, outcome: take why, ..) = take e
         if has_sub(dropped, sub) {
             forgive(mut dropped, sub)
         } else {
@@ -4162,7 +4155,7 @@ fn apply(mut c: Client, take o: Owe) -> bool {
         }
     }
     for e in ended {
-        drop_cache(mut c, who, e.0)
+        drop_cache(mut c, who, e.sub)
     }
     true
 }
@@ -6552,7 +6545,7 @@ fn wire_stage_update[G: send, B: send](mut s: WireSession[G, B], mut output: Lis
     let version = s.last
     let mut live_rows: List[Row] = list.new()
     let mut live_complete: List[u32] = list.new()
-    let mut ended: List[(u32, u64, Outcome)] = list.new()
+    let mut ended: List[TerminalUpdate] = list.new()
     let mut generations: List[(u32, u64)] = list.new()
     let mut computed = 0u64
     if current {
@@ -6611,10 +6604,10 @@ fn wire_stage_update[G: send, B: send](mut s: WireSession[G, B], mut output: Lis
         wire_queue_checked(mut output, take frame, take marks, take generations, check)
     }
     for take e in ended {
-        let (sub, generation, take why) = take e
+        let TerminalUpdate(sub, generation, version: checked_at, outcome: take why) = take e
         if sub_generation(s.subs, sub) == Some(generation) {
             wire_forget_sub(mut s, sub)
-            wire_end_checked(mut s, mut output, sub, take why, Some(computed))
+            wire_end_checked(mut s, mut output, sub, take why, Some(checked_at))
         }
     }
     Ok(())

@@ -51,6 +51,7 @@ dirs = ["."]
 "runner_trigger_model.hirsel" = "triggers"
 "runner_query_law_entries.hirsel" = "runner"
 "runner_named_slot_law.hirsel" = "runner"
+"runner_terminal_age_law.hirsel" = "runner"
 "runner_retired_laws.hirsel" = "runner"
 "runner_read_failure_laws.hirsel" = "runner"
 "runner_owner_laws.hirsel" = "runner"

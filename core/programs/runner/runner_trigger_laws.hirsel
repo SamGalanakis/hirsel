@@ -832,7 +832,7 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     let mut faulted = false
     for o in owes {
         for e in o.ended {
-            faulted = o.session == 0u64 && e.0 == 2u32 && match e.2 {
+            faulted = o.session == 0u64 && e.sub == 2u32 && match e.outcome {
                 Failed(Raised(n)) => n == 5u32,
                 _ => false,
             }

@@ -9,7 +9,7 @@
 //! Nothing is synced: a torn,
 //! short, zero-filled or missing file after a power loss fails its check or
 //! is absent, so it is a miss and is rebuilt.
-use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::{ContentHash, encoding};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -202,9 +202,7 @@ impl ArchiveWriter {
     pub fn record<T: serde::Serialize>(&mut self, row: &T) -> io::Result<Record> {
         hirsel_core_front::cost_scope!("non-check", "archive binary encoding");
         let start = self.buffer.len() as u64;
-        // serialize_into visits the borrowed tables once. serialize() first counts
-        // their encoded size and would add a complete second traversal.
-        bincode::serialize_into(&mut self.buffer, row).map_err(io::Error::other)?;
+        encoding::write_fixed(&mut self.buffer, row)?;
         Ok(Record {
             start,
             len: self.buffer.len() as u64 - start,

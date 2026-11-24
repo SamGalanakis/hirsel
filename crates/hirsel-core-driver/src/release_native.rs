@@ -41,10 +41,10 @@ fn unit_key(
     use std::io::Write as _;
 
     let fields = (hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs);
-    let length = bincode::serialized_size(&fields).map_err(io::Error::other)?;
+    let length = encoding::fixed_size(&fields)?;
     ContentHash::of_stream("hirsel.core-release-unit.v6", length, |digest| {
         let mut buffered = io::BufWriter::new(digest);
-        bincode::serialize_into(&mut buffered, &fields).map_err(io::Error::other)?;
+        encoding::write_fixed(&mut buffered, &fields)?;
         buffered.flush()
     })
 }

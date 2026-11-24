@@ -86,7 +86,6 @@ mod resident;
 mod reuse;
 mod source_delta;
 mod store;
-use bincode::Options;
 pub use meter::{Measurements, Meter, Stage};
 pub use reuse::DefinitionKey;
 use reuse::{Keys, compiler_identity};
@@ -94,7 +93,7 @@ pub use store::Store;
 pub use tool_inputs::link_driver;
 
 use hirsel_core_front::{CoreCheck, Emitter, ModuleInput, Program};
-use hirsel_core_ids::{ContentHash, DefPath, PackageId};
+use hirsel_core_ids::{ContentHash, DefPath, PackageId, encoding};
 use hirsel_core_ir::Module;
 use hirsel_core_resolve::{
     CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
@@ -325,7 +324,7 @@ mod body {
     /// hasher costs a dispatched write per encoded field.
     pub(crate) fn ir_hash(module: &Module, scratch: &mut Vec<u8>) -> io::Result<ContentHash> {
         scratch.clear();
-        bincode::serialize_into(&mut *scratch, module).map_err(io::Error::other)?;
+        encoding::write_fixed(scratch, module)?;
         Ok(Store::ir_hash(scratch))
     }
     impl DefinitionProduct {
@@ -365,7 +364,7 @@ mod body {
                 scratch.clear();
                 {
                     hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
-                    bincode::serialize_into(&mut *scratch, ir).map_err(io::Error::other)?;
+                    encoding::write_fixed(scratch, ir)?;
                 }
                 Ok::<_, io::Error>(Store::frame_body(&head, scratch))
             })?;
@@ -1352,17 +1351,12 @@ impl Checked {
 fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
     let mut bytes = Vec::with_capacity(64);
-    bincode::serialize_into(&mut bytes, value).map_err(io::Error::other)?;
+    encoding::write_fixed(&mut bytes, value)?;
     Ok(bytes)
 }
 
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
-    bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(bytes.len() as u64)
-        .reject_trailing_bytes()
-        .deserialize(bytes)
-        .ok()
+    encoding::read_fixed(bytes).ok()
 }
 /// A body record checked under the current key: the one the prior
 /// publication's live row names when the row carries the key, else the one

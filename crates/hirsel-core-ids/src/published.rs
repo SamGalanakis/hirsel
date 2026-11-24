@@ -1,7 +1,6 @@
 //! Immutable, indexed package prefixes with request-owned suffixes.
 //! Only external decoding can fail during an otherwise infallible table lookup.
-use crate::ContentHash;
-use bincode::Options;
+use crate::{ContentHash, encoding};
 use serde::{Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
@@ -164,21 +163,13 @@ impl<T> Sparse<T> {
 /// than the compiler's fixed-width record encoding.
 pub fn encode_row<T: Serialize + ?Sized>(row: &T) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(64);
-    bincode::DefaultOptions::new()
-        .with_varint_encoding()
-        .serialize_into(&mut bytes, row)
-        .map_err(io::Error::other)?;
+    encoding::write_compact(&mut bytes, row)?;
     Ok(bytes)
 }
 
 /// Decode exactly one published row, rejecting trailing bytes.
 pub fn decode_row<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
-    bincode::DefaultOptions::new()
-        .with_varint_encoding()
-        .with_limit(bytes.len() as u64)
-        .reject_trailing_bytes()
-        .deserialize(bytes)
-        .map_err(io::Error::other)
+    encoding::read_compact(bytes)
 }
 
 // Keys share the row encoding, written once into a reused per-thread buffer.
@@ -190,10 +181,7 @@ pub fn with_lookup_key<R>(key: &(impl Serialize + ?Sized), f: impl FnOnce(&[u8])
     // Taken, not borrowed: a lookup inside `f` gets its own buffer.
     let mut bytes = KEY.take();
     bytes.clear();
-    bincode::DefaultOptions::new()
-        .with_varint_encoding()
-        .serialize_into(&mut bytes, key)
-        .expect("published lookup key encoding");
+    encoding::write_compact(&mut bytes, key).expect("published lookup key encoding");
     let result = f(&bytes);
     KEY.set(bytes);
     result
@@ -893,16 +881,14 @@ mod tests {
         let path = crate::DefPath::from_full("library@1/parent/child/answer").unwrap();
         let long = "long\0borrowed\u{00e9}".repeat(64);
         let key = (&path, long.as_str(), vec![0u32, 42, u32::MAX]);
-        assert_eq!(
-            encode_lookup_key(&key),
-            bincode::DefaultOptions::new().serialize(&key).unwrap()
-        );
-        assert_eq!(
-            encode_lookup_key("borrowed"),
-            bincode::DefaultOptions::new()
-                .serialize("borrowed")
-                .unwrap()
-        );
+        let mut expected = b"\x07library\x011\x02\x06parent\x05child\x06answer".to_vec();
+        expected.push(251);
+        expected.extend((long.len() as u16).to_le_bytes());
+        expected.extend(long.as_bytes());
+        expected.extend([3, 0, 42, 252]);
+        expected.extend(u32::MAX.to_le_bytes());
+        assert_eq!(encode_lookup_key(&key), expected);
+        assert_eq!(encode_lookup_key("borrowed"), b"\x08borrowed");
     }
 
     #[test]
@@ -1014,25 +1000,11 @@ mod tests {
     struct Image(u32);
     impl Image {
         fn rows(&self, table: u32) -> Vec<Vec<u8>> {
-            let tag = self.0 * 100 + table * 10;
+            let tag = u8::try_from(self.0 * 100 + table * 10).unwrap();
             match table {
-                0 => vec![
-                    bincode::DefaultOptions::new()
-                        .serialize(&(7u32, tag))
-                        .unwrap(),
-                    bincode::DefaultOptions::new()
-                        .serialize(&(9u32, tag + 1))
-                        .unwrap(),
-                ],
-                1 => vec![
-                    bincode::DefaultOptions::new()
-                        .serialize(&(9u32, tag))
-                        .unwrap(),
-                    bincode::DefaultOptions::new()
-                        .serialize(&(7u32, tag + 1))
-                        .unwrap(),
-                ],
-                _ => vec![bincode::DefaultOptions::new().serialize(&tag).unwrap()],
+                0 => vec![vec![7, tag], vec![9, tag + 1]],
+                1 => vec![vec![9, tag], vec![7, tag + 1]],
+                _ => vec![vec![tag]],
             }
         }
     }
@@ -1077,16 +1049,13 @@ mod tests {
                 .into();
             assert_eq!((rows[0][0], rows[1][0]), (tag + 20, tag + 30));
             // A value's descriptor decodes into the reader decoding it.
-            let wire = bincode::serialize(&second).unwrap();
-            let decoded: Map<u32, u32> = reader.decode(|| bincode::deserialize(&wire)).unwrap();
+            let wire = encode_row(&second).unwrap();
+            let decoded: Map<u32, u32> = reader.decode(|| decode_row(&wire)).unwrap();
             assert_eq!(decoded.get(&9), Some(&(tag + 10)));
         }
-        let wire = bincode::serialize(&one.map::<u32, u32>(at(ns1, 0, 2)).unwrap()).unwrap();
-        assert!(
-            two.decode(|| bincode::deserialize::<Map<u32, u32>>(&wire))
-                .is_err()
-        );
-        assert!(bincode::deserialize::<Map<u32, u32>>(&wire).is_err());
+        let wire = encode_row(&one.map::<u32, u32>(at(ns1, 0, 2)).unwrap()).unwrap();
+        assert!(two.decode(|| decode_row::<Map<u32, u32>>(&wire)).is_err());
+        assert!(decode_row::<Map<u32, u32>>(&wire).is_err());
     }
 
     /// A key whose encoding asks another map, and panics when it is 13.

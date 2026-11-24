@@ -269,16 +269,13 @@ pub(crate) struct Reach {
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
-fn options() -> impl bincode::Options {
-    use bincode::Options;
-    bincode::DefaultOptions::new().with_varint_encoding()
+fn encode_element(value: &(impl Serialize + ?Sized)) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(64);
+    encoding::write_compact(&mut bytes, value).expect("a reach element encodes");
+    bytes
 }
 fn decode_element<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
-    use bincode::Options;
-    options()
-        .reject_trailing_bytes()
-        .deserialize(bytes)
-        .expect("a checked reach record's element decodes")
+    encoding::read_compact(bytes).expect("a checked reach record's element decodes")
 }
 
 impl Reach {
@@ -826,9 +823,7 @@ impl Vector {
         Ok(())
     }
     fn encode<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Overflow> {
-        use bincode::Options;
-        let bytes = options().serialize(value).expect("a reach element encodes");
-        self.push(&bytes)
+        self.push(&encode_element(value))
     }
     fn finish(self) -> Result<Vec<u8>, Overflow> {
         let n = u32::try_from(self.ends.len()).map_err(|_| Overflow)?;
@@ -968,10 +963,7 @@ fn encode_record<'a>(
     for closure in closures {
         closure_bytes.encode(closure)?;
     }
-    let link = {
-        use bincode::Options;
-        options().serialize(entry).expect("an entry link encodes")
-    };
+    let link = encode_element(entry);
     let sections: [Vec<u8>; SECTIONS] = [
         path_bytes.finish()?,
         row_bytes.finish()?,

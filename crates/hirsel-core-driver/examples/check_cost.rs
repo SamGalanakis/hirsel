@@ -98,6 +98,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for node in &item.tree.nodes[item.range.nodes.start as usize..item.range.nodes.end as usize] {
             *syntax_kinds.entry(format!("{:?}", node.kind)).or_default() += 1;
         }
+        let mut payload = Vec::new();
+        hirsel_core_ids::encoding::write_fixed(&mut payload, &(ir, &d.check.template)).unwrap();
         Ok(json!({
             "definition": d.definition.to_string(),
             "source": item.source_text(),
@@ -110,8 +112,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "places": d.check.counts.places,
             "types": d.check.counts.types,
             "ir_bytes": d.check.counts.bytes,
-            "publication_payload_bytes": bincode::serialized_size(&(ir, &d.check.template)).unwrap(),
-            "publication_payload_hash": format!("{:?}", hirsel_core_ids::ContentHash::of_bytes(&bincode::serialize(&(ir, &d.check.template)).unwrap())),
+            "publication_payload_bytes": payload.len(),
+            "publication_payload_hash": format!("{:?}", hirsel_core_ids::ContentHash::of_bytes(&payload)),
             "template": d.check.template.is_some(),
             "key": {
                 "body":d.key.body, "lookups":d.key.lookups,

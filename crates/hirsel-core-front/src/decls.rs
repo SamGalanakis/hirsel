@@ -494,11 +494,11 @@ pub(crate) enum Pending {
         rule: &'static str,
     },
     /// A type argument of a generic other than Option and Result is not scoped (OWN-19);
-    /// a `Log`'s element holds no view or scoped value (MEM-29).
+    /// a `Log`'s element meets LANG-14's capture mask with these rigid bounds (MEM-29).
     NotScoped {
         ty: TyId,
         site: Site,
-        log: bool,
+        element: Option<Vec<u16>>,
     },
     Root {
         base: TyId,
@@ -1547,10 +1547,13 @@ impl Program<'_> {
         }
         if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
+                let element = (role == Some(Role::Log)
+                    && !crate::element::exempt(self.index, self.modules[at.module as usize].id))
+                .then(|| generics.iter().map(|g| g.bounds).collect());
                 self.pending.push(Pending::NotScoped {
                     ty: *t,
                     site: *s,
-                    log: role == Some(Role::Log),
+                    element,
                 });
                 if d.generics[i].region {
                     self.pending.pop();
@@ -2011,7 +2014,7 @@ impl Program<'_> {
                         }
                     }
                 }
-                Pending::NotScoped { ty, site, log } => {
+                Pending::NotScoped { ty, site, element } => {
                     if crate::foreign::holds_raw_handle(&self.decls, &self.types, ty) {
                         self.refusals.push(refusal(
                             "FFI-6",
@@ -2020,24 +2023,17 @@ impl Program<'_> {
                         ));
                         continue;
                     }
-                    if kind(&self.decls, &self.types, ty, &[]) == Kind::Scoped {
-                        let (rule, wanted, message) = if log {
-                            (
-                                "MEM-29",
-                                "no view or scoped value",
-                                "a Log's element holds no view or scoped value",
-                            )
-                        } else {
-                            (
-                                "OWN-19",
-                                "not scoped",
-                                "a scoped type is not a type argument of a generic other than Option and Result",
-                            )
-                        };
-                        self.refusals.push(
-                            refusal(rule, site, message)
-                                .with_comparison(canonical(&self.decls, &self.types, ty), wanted),
-                        );
+                    let shown = || canonical(&self.decls, &self.types, ty);
+                    if let Some(params) = element {
+                        if crate::element::refused(&self.decls, &self.types, ty, &params) {
+                            let r = refusal("MEM-29", site, crate::element::MESSAGE);
+                            self.refusals
+                                .push(r.with_comparison(shown(), crate::element::WANTED));
+                        }
+                    } else if kind(&self.decls, &self.types, ty, &[]) == Kind::Scoped {
+                        let message = "a scoped type is not a type argument of a generic other than Option and Result";
+                        let r = refusal("OWN-19", site, message);
+                        self.refusals.push(r.with_comparison(shown(), "not scoped"));
                     }
                 }
             }

@@ -1246,14 +1246,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             checked[i] = true;
             if crate::foreign::holds_raw_handle(&p.decls, &self.t, t) {
-                self.refuse(
-                    "FFI-6",
-                    use_site,
-                    "a raw handle cannot be an inferred type argument",
-                );
+                let message = "a raw handle cannot be an inferred type argument";
+                self.refuse("FFI-6", use_site, message);
                 return;
             }
-            if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR {
+            // MEM-29 holds at every call, also for a parameter absent from the result.
+            if self.outside_vector(n, t, "a type argument") == ERROR && t != ERROR
+                || crate::element::parameter(&p.fns[f].path) && self.element_refused(n, t)
+            {
                 return;
             }
             if !p.fns[f].generics[i].region && self.type_kind(t) == Kind::Scoped {

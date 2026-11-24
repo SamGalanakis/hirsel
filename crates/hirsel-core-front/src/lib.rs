@@ -17,6 +17,7 @@ mod recursion_decls;
 pub use constants::{ConstData, ConstValue, Constant};
 mod decls;
 mod defaults;
+mod element;
 mod foreign;
 pub use foreign::{AbiParameter, AbiResult, AbiSignature};
 mod identity;

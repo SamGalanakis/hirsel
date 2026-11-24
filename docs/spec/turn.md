@@ -110,7 +110,7 @@ text assumes no TURN ALPN, since browsers do not send one reliably.
 track, not this text). A TLS front that hands an accepted plaintext stream to a non-HTTP
 listener must also give the program the client's real address, which the Allocate response
 returns as XOR-MAPPED-ADDRESS and which the nonce and quotas bind to. H1 is specified as a
-contract in the runner and launch spec's H1 section (lane h1-tls-ingress-spec-2374), not
+contract in [launch.md's H1 section](launch.md#stream-ingress-behind-a-tls-front), not
 here: a separate front prepends a PROXY protocol v2 header, which an H1 listener requires,
 and an untrusted peer or a missing, malformed or LOCAL header closes the connection before
 any byte reaches the `Framer`. What the relay takes from H1 is the header's source address as
@@ -852,7 +852,7 @@ Sizes are S (under a day of one lane), M (one to three days) and L (more than th
 | **U3** relay server | L | U2 | TURN-7 Allocate, Refresh, CreatePermission, ChannelBind, Send, Data, ChannelData; pool; timers; in-place framing | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules` |
 | **U4** relay policy, quota, revocation | M | U3 | TURN-7 policy with `local` and `default_deny`, the full-address check on every path including `from_peer`, quota per subject, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
 | **U5** streams and simulation | M | U3 | TURN-8 `Framer` with the length and cookie checks; stream origins, `connected`, `streams`, `stream_allocate_s` and `Close(conn)`; the sim runs | `stream_framing`, `sim_relay_loss` |
-| **U6** PROXY v2 header | S | — | a generic sans-IO PROXY protocol v2 header decoder in std, answering H1's contract (header required; untrusted peer, missing, malformed or LOCAL header closes); the H1 host side is not this slice | one law in its own std laws: the v2 specification's examples by hand, plus an untrusted peer and a missing header, both closed |
+| **U6** PROXY v2 header | S | — | a generic sans-IO PROXY protocol v2 header decoder in std, answering the H1 contract in [launch.md](launch.md#stream-ingress-behind-a-tls-front) (header required; untrusted peer, missing, malformed or LOCAL header closes); the H1 host side is not this slice | one law in its own std laws: the v2 specification's examples by hand, plus an untrusted peer and a missing header, both closed |
 | **U7** interop and cost | M | U4, U5 | `interop.py` against coturn and Pion from `/tmp` clones; counted-allocator run | `interop_coturn`, `interop_pion`, the cost targets |
 | **U8** SFU wiring | S | U4, webrtc S3 | the SFU's deployment runs the relay as a sibling place; signaling mints TURN credentials beside ICE ones and forwards revokes to the relay (TURN-9); the relay's `deny` is `0.0.0.0/0` and `::/0` with the SFU's media addresses and ports in `allow` (TURN-7) | webrtc's browser end-to-end case with `iceTransportPolicy: "relay"` over UDP and TCP |
 

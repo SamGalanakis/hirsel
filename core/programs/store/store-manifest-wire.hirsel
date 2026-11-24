@@ -263,7 +263,15 @@ fn manifest_account(m: PageManifest) -> u64 {
 
 // The Memory recovery paths cannot retain these roots until AP21-T lands.
 fn require_memory_manifest(m: PageManifest) -> Result[(), Error] {
-    if m.account_tiered != 0 || m.lineage.stamp != 0 || m.deferred_frees.stamp != 0 || m.archive.stamp != 0 || m.deferred_next != 0 || m.archive_on != 0 || m.archive_drop != 0 {
+    if m.account_tiered != 0 {
+        return Error(Unsupported(0x0031))
+    }
+    require_unarchived_manifest(m)
+}
+
+// The lineage, deferred-free and archive plans (M3 S7) have no reader yet.
+fn require_unarchived_manifest(m: PageManifest) -> Result[(), Error] {
+    if m.lineage.stamp != 0 || m.deferred_frees.stamp != 0 || m.archive.stamp != 0 || m.deferred_next != 0 || m.archive_on != 0 || m.archive_drop != 0 {
         return Error(Unsupported(0x0031))
     }
     Ok(())

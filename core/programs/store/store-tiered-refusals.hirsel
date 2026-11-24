@@ -20,6 +20,15 @@ fn tiered_collections(root: Arc[std.page.Page]) -> bool {
     false
 }
 
+fn holders_tiered(all: List[Roots]) -> bool {
+    for roots in all {
+        if tiered_collections(roots.collections.root) {
+            return true
+        }
+    }
+    false
+}
+
 fn store_has_tiered(db: Db) -> bool {
     for head in db.heads {
         if tiered_collections(head.roots.collections.root) {

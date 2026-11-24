@@ -817,9 +817,17 @@ fn cleanup_page_manifest(d: Dir, validated: ValidatedPageManifest) -> Result[(),
     Ok(())
 }
 
+// A store's own open and its cut's check accept Tiered roots: the walk reads
+// the collection map and the pack list, never a Cold page (§13.8). Whether the
+// open can fund them is checked once the holders are attached.
+fn validate_store_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
+    require_unarchived_manifest(manifest)?
+    validate_directory_graph(d, id, take manifest, true)
+}
+
 fn select_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
     disk_io(host.sync_dir(d))?
-    let validated = validate_page_manifest(d, id, take manifest)?
+    let validated = validate_store_manifest(d, id, take manifest)?
     cleanup_page_manifest(d, validated)?
     Ok(take validated)
 }
@@ -835,7 +843,7 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: TargetLim
         return Error(disk_fault("MANIFEST.tmp", 0, Header))
     }
     let requested = manifest_account(manifest)
-    let _ = validate_page_manifest(d, id, take manifest)?
+    let _ = validate_store_manifest(d, id, take manifest)?
     over_ceiling(requested, target.resident)
 }
 

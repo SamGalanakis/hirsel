@@ -109,6 +109,37 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
     DraftedCall(stage: take staged, next_id: next_id)
 }
 
+type CallDraft {
+    finished: Finished[Bytes, ServeReply],
+    reads: core.Log[Read],
+    issued: core.Log[u64]
+}
+
+type DraftedCall {
+    stage: Stage[Bytes, ServeReply],
+    next_id: u64
+}
+
+type DraftRefusal = AdmissionBytes(Capacity) | DraftStopped(Stop)
+
+fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, DraftRefusal] {
+    // These synchronous scopes cannot lose task room between admission and use.
+    // Refund the admission before encoding, so frame bytes come from the head.
+    let admitted = bound bytes grant.retained {
+        ()
+    }
+    if let Error(problem) = admitted {
+        return Error(AdmissionBytes(problem))
+    }
+    let metered = bound steps grant.steps {
+        draft_call(db, complete, ci, plan, rec, body)
+    }
+    match take metered {
+        Error(limit) => Error(DraftStopped(OutOfSteps(limit.steps))),
+        Ok(take drafted) => Ok(take drafted),
+    }
+}
+
 fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
     let tree = view tx.roots.collections
     if list.len(key) < 4 {

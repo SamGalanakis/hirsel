@@ -62,6 +62,9 @@ type TieredPagerFunding {
     cut_pins: bool
 }
 
+// Demands a store's open pager queues before a sender waits (§13.2).
+const TIERED_PAGER_QUEUE: u64 = 4
+
 fn start_tiered_pager(tasks: Tasks, owner: StoreId, opened: u64, take authority: TieredPagerSource, funding: TieredPagerFunding, queue_slots: u64) -> Result[(Sender[TieredPagerMessage], Task[()]), Error] {
     let Some(shared) = int.checked_sub(funding.cache_bytes, funding.writer_pin_bytes) else {
         return Error(Missing("cache_bytes"))

@@ -123,6 +123,7 @@ dirs = ["."]
 "tiered_pager_batch_laws.hirsel" = "store"
 "tiered_attempt_laws.hirsel" = "store"
 "tiered_call_laws.hirsel" = "store"
+"tiered_open_laws.hirsel" = "store"
 "tiered_count_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
@@ -149,6 +150,11 @@ limit = 134217728
 # plus the Task allocation and request channel.
 [tests.runs."store@1/store/test_l70_tiered_sizes_include_cut_quota"]
 limit = 83886080
+
+# A store open at the Tiered floor: r = 182,375,272 B resident (the pager's
+# C + K + P among it) plus the journal worker and timer tasks.
+[tests.runs."store@1/store/test_l70_tiered_open_at_floor"]
+limit = 268435456
 
 [tests.runs."store@1/store/bucket_test_l4_cuts"]
 limit = 536870912

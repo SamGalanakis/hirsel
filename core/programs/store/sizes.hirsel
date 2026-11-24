@@ -152,6 +152,18 @@ fn tiered_sizes_at(q: u64, resident_limit: u64, o: Overrides) -> Option[(TieredS
     Some((TieredSizes(cache: cache, writer: writer, dirty: dirty, pager: pager), remainder))
 }
 
+// The open's Tiered floor (§13.8): the writer partition is at least Wmin and
+// inside the cache, and the resident limit covers C + K + D + P + 64 MiB with
+// each term counted once.
+fn tiered_open_funded(o: Options) -> bool {
+    if o.writer_pin_bytes < MIN_WRITER_PINS || o.cache_bytes < o.writer_pin_bytes {
+        return false
+    }
+    let needed = int.saturating_add(int.saturating_add(int.saturating_add(o.cache_bytes, CUT_PIN_BYTES),
+        int.saturating_add(o.dirty_bytes, o.pager_task_bytes)), 64 * MIB)
+    needed <= o.resident_limit
+}
+
 fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
     let zero = TieredSizes(cache: 0, writer: 0, dirty: 0, pager: 0)
     if let Memory = kind { return zero }

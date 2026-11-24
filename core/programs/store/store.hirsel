@@ -1471,37 +1471,6 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
     Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, replies: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
 }
 
-type CallDraft {
-    finished: Finished[Bytes, ServeReply],
-    reads: core.Log[Read],
-    issued: core.Log[u64]
-}
-
-type DraftedCall {
-    stage: Stage[Bytes, ServeReply],
-    next_id: u64
-}
-
-type DraftRefusal = AdmissionBytes(Capacity) | DraftStopped(Stop)
-
-fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[DraftedCall, DraftRefusal] {
-    // These synchronous scopes cannot lose task room between admission and use.
-    // Refund the admission before encoding, so frame bytes come from the head.
-    let admitted = bound bytes grant.retained {
-        ()
-    }
-    if let Error(problem) = admitted {
-        return Error(AdmissionBytes(problem))
-    }
-    let metered = bound steps grant.steps {
-        draft_call(db, complete, ci, plan, rec, body)
-    }
-    match take metered {
-        Error(limit) => Error(DraftStopped(OutOfSteps(limit.steps))),
-        Ok(take drafted) => Ok(take drafted),
-    }
-}
-
 // F2: the account after only the reply writes `ops`, against the base `streams` tree.
 fn stream_live(db: Db, streams: PageTree, ops: DataOps) -> Result[u64, Capacity] {
     let retained = retaining(db)
@@ -5231,7 +5200,13 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
         Ok((id, take manifest)) => {
             check_expected_store(options.expect, id)?
             let validated = select_page_manifest(d, id, take manifest)?
-            disk_loaded(id, take validated)?
+            let loaded = disk_loaded(id, take validated)?
+            // §13.8: a catalog with a Tiered collection opens only on a funded
+            // plan, refused before the journal is read or a task is started.
+            if !tiered_open_funded(options) && holders_tiered(loaded.all) {
+                return Error(Missing("cache_bytes"))
+            }
+            take loaded
         },
         Error(Io(NotFound)) => {
             if let Some(_) = options.expect {
@@ -5355,7 +5330,10 @@ type DiskState {
     journal: Sender[JournalMsg],
     pending: Option[Bytes],
     journal_task: Task[Result[(), Error]],
-    journal_idle_task: Task[()]
+    journal_idle_task: Task[()],
+    // The pager of a store opened with a Tiered collection (§13.8); `Db.pager`
+    // holds its requests.
+    pager_task: Option[Task[()]]
 }
 
 fn open_number(db: Db) -> u64 {
@@ -5533,6 +5511,16 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Ok(empty_db(c, id, options))
     })?
     open_heads(mut db, take state)?
+    // The pager starts before the journal tasks, so a refusal here leaves none
+    // running. Its task reserves C + K + P at once (§1.1 "The Tiered plan").
+    let pager_task: Option[Task[()]] = if store_has_tiered(db) {
+        let funding = TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
+        let (take requests, take worker) = start_tiered_pager(tasks, id, seq, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
+        db.pager = Some(take requests)
+        Some(take worker)
+    } else {
+        None
+    }
     db.fence = fence
     db.next_node = next_node
     db.next_table = next_table
@@ -5556,7 +5544,7 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     capacity(result.unwrap(channel.receive(waiting)))?
-    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer))
+    db.disk = Some(DiskState(lock: Some(take lock), d: Some(d), open: seq, options: clone(options), lease: None, scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: cut_first, recorded_after: recorded_after, pages: take pages, object: None, acks: take journal_received, journaled: 0, inflight: 0, uncovered: uncovered, since_cut: 0, acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task))
     Ok(take db)
 }
 

@@ -1,0 +1,198 @@
+// Module `http_request`: the request-head encoder behind `std.http_client`'s connection
+// operations (HTTP-17). It writes into caller-owned fixed storage and marks the place of
+// each secret for `tls.send_secret` (TLS-5).
+/// How the body after a head is framed.
+pub type Upload: key = Remaining(u64) | Chunks | Whole
+
+pub fn append(mut out: Bytes, data: Bytes) -> Result[(), http_client.Error] {
+    if list.len(data) > order.min(8192, list.capacity(out)) - list.len(out) {
+        return Error(TooLarge)
+    }
+    let _ = list.append(mut out, data)
+    Ok(())
+}
+
+pub fn text(mut out: Bytes, data: String) -> Result[(), http_client.Error] {
+    append(mut out, string.as_bytes(data))
+}
+
+pub fn reserved(name: Bytes) -> bool {
+    http1.equal_ascii(name, string.as_bytes("host")) || http1.equal_ascii(name, string.as_bytes("content-length")) || http1.equal_ascii(name, string.as_bytes("transfer-encoding")) || http1.equal_ascii(name, string.as_bytes("trailer")) || http1.equal_ascii(name, string.as_bytes("expect")) || http1.equal_ascii(name, string.as_bytes("upgrade"))
+}
+
+pub fn field_prefix(mut out: Bytes, name: Bytes, value: Bytes) -> Result[(), http_client.Error] {
+    if !http1.valid_field(name, value) {
+        return Error(InvalidRequest)
+    }
+    append(mut out, name)?
+    text(mut out, ": ")?
+    append(mut out, value)
+}
+
+pub fn number(mut out: Bytes, n: u64, radix: u32) -> Result[(), http_client.Error] {
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let digits_at = int.radix_digits(n, radix, mut digits)
+    if 64 - digits_at > order.min(8192, list.capacity(out)) - list.len(out) {
+        return Error(TooLarge)
+    }
+    let _ = bytebuf.append_inline(mut out, digits, digits_at, 64)
+    Ok(())
+}
+
+pub type EncodedHead {
+    close: bool,
+    /// The secrets that `marks` places, protected fields first.
+    secrets: u64,
+    /// A `Segments` body with no protected segment, sent after the head from
+    /// the caller's bytes.
+    plain_body: bool
+}
+
+/// One `tls.send_secret` mark group (TLS-5).
+pub fn mark(mut marks: List[u64], at: u64, kind: u64, a: u64, b: u64) {
+    list.push(mut marks, at)
+    list.push(mut marks, kind)
+    list.push(mut marks, a)
+    list.push(mut marks, b)
+}
+
+pub fn sealed(segments: List[http_client.Segment]) -> bool {
+    for segment in segments {
+        if let Sealed(_, _) = segment {
+            return true
+        }
+    }
+    false
+}
+
+/// Appends the plain segments and marks each protected one at its place,
+/// numbering secrets from `first`; returns the next number.
+pub fn body_segments(mut out: Bytes, mut marks: List[u64], segments: List[http_client.Segment], first: u64) -> Result[u64, http_client.Error] {
+    let mut next = first
+    for segment in segments {
+        match segment {
+            Plain(data) => append(mut out, data)?,
+            Sealed(_, coding) => {
+                mark(mut marks, list.len(out), if coding == Form {
+                    1
+                } else {
+                    0
+                }, next, 0)
+                next += 1
+            },
+        }
+    }
+    Ok(next)
+}
+
+/// The secrets `marks` places, in its order: protected fields, then the body.
+pub fn secret_list(headers: List[http_client.Header], body: Option[View[List[http_client.Segment]]], count: u64) -> List[Secret] {
+    let mut secrets: List[Secret] = list.with_capacity(count)
+    for f in headers {
+        if let Protected(_, credential) = f.value {
+            list.push(mut secrets, secret.share(credential))
+        }
+    }
+    if let Some(segments) = body {
+        for segment in segments {
+            if let Sealed(credential, _) = segment {
+                list.push(mut secrets, secret.share(credential))
+            }
+        }
+    }
+    secrets
+}
+
+/// Writes the head into `out`, and a body that holds a secret after it.
+/// Every secret's place goes into `marks`.
+pub fn encode_head(mut out: Bytes, mut marks: List[u64], authority: String, method: String, target: String, headers: List[http_client.Header], upload: Upload, body: Option[View[List[http_client.Segment]]], unframed: bool) -> Result[EncodedHead, http_client.Error] {
+    list.clear(mut out)
+    if method == "" || method == "CONNECT" {
+        return Error(InvalidRequest)
+    }
+    for c in string.as_bytes(method) {
+        if !http1.token(c) {
+            return Error(InvalidRequest)
+        }
+    }
+    if method != "OPTIONS" || target != "*" {
+        if let Error(_) = uri.http_origin_form(target) {
+            return Error(InvalidRequest)
+        }
+    }
+    if !http.valid_authority(string.as_bytes(authority)) {
+        return Error(InvalidRequest)
+    }
+    text(mut out, method)?
+    text(mut out, " ")?
+    text(mut out, target)?
+    text(mut out, " HTTP/1.1\r\nHost: ")?
+    text(mut out, authority)?
+    text(mut out, "\r\n")?
+    if list.len(headers) > 62 {
+        return Error(TooLarge)
+    }
+    let mut encoded = EncodedHead(close: false, secrets: 0, plain_body: false)
+    for f in headers {
+        let name = string.as_bytes(f.name)
+        if reserved(name) {
+            return Error(InvalidRequest)
+        }
+        let connection = http1.equal_ascii(name, string.as_bytes("connection"))
+        match f.value {
+            Public(value) => {
+                field_prefix(mut out, name, value)?
+                if connection {
+                    encoded.close = encoded.close || http1.contains(value, string.as_bytes("close"))
+                }
+            },
+            Protected(prefix, _) => {
+                encoded.close = encoded.close || connection
+                field_prefix(mut out, name, prefix)?
+                mark(mut marks, list.len(out), 0, encoded.secrets, 0)
+                encoded.secrets += 1
+            },
+        }
+        text(mut out, "\r\n")?
+    }
+    match upload {
+        Remaining(n) => {
+            text(mut out, "Content-Length: ")?
+            number(mut out, n, 10)?
+            text(mut out, "\r\n")?
+        },
+        Chunks => text(mut out, "Transfer-Encoding: chunked\r\n")?,
+        Whole => {
+            if unframed {
+                text(mut out, "\r\n")?
+                return Ok(encoded)
+            }
+            let Some(segments) = body else {
+                return Error(State)
+            }
+            text(mut out, "Content-Length: ")?
+            if sealed(segments) {
+                // The runtime writes the length of the whole body (TLS-5 kind 2).
+                let group = list.len(marks)
+                mark(mut marks, list.len(out), 2, 0, 0)
+                text(mut out, "\r\n\r\n")?
+                let body_at = list.len(out)
+                encoded.secrets = body_segments(mut out, mut marks, segments, encoded.secrets)?
+                let _ = list.set(mut marks, group + 2, body_at)
+                let _ = list.set(mut marks, group + 3, list.len(out))
+                return Ok(encoded)
+            }
+            let mut n = 0u64
+            for segment in segments {
+                if let Plain(data) = segment {
+                    n += list.len(data)
+                }
+            }
+            number(mut out, n, 10)?
+            text(mut out, "\r\n")?
+            encoded.plain_body = true
+        },
+    }
+    text(mut out, "\r\n")?
+    Ok(encoded)
+}

@@ -1789,60 +1789,37 @@ fn fetch_room() -> u64 {
     }
 }
 
-fn empty_fetch(mut cl: http_client.Client, req: http_client.Fetch, end: u64) -> http_client.Response waits {
-    let mut reply = result.unwrap(http_client.fetch(mut cl, req, end))
+fn empty_fetch(cl: http_client.Client, req: http_client.Fetch, end: u64) waits {
+    let mut reply = result.unwrap(http_client.fetch(cl, req, end))
     let mut sink: Bytes = list.with_capacity(8)
     if result.unwrap(http_client.fetch_read(mut reply, mut sink)) != 0 {
         fail("expected an empty body")
     }
-    take reply
 }
 
-// HTTP-18 / MEM-20. The peer accepts once, then reads one request per bound.
-// expect: run http_fetch_pool_sibling_bounds(network) = true
-fn http_fetch_pool_sibling_bounds(n: Net, c: Clock, tasks: Tasks) -> bool waits {
+// HTTP-18 / MEM-20. A handler that exits while its connection is parked leaves
+// no charge behind: the connection, its lease and its origin key are the pool's.
+// The peer accepts once, so the second handler reuses the parked connection.
+// expect: run http_fetch_pool_parked_handler(network) = true
+fn http_fetch_pool_parked_handler(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     let (peer, signal, _, request) = fetch_pool_fixture(n, c, tasks, 2)
     let before = fetch_room()
-    let mut cl = http_client.client(n, c, System, http_client.limits(0))
+    let p = result.unwrap(http_client.pool(n, c, tasks, System, http_client.limits(1024)))
+    let cl = http_client.handle(p)
+    let pooled = fetch_room()
     let end = after_ms(host.mono_ns(c), 2000)
     result.unwrap(bound bytes 131072 {
-        let first = empty_fetch(mut cl, request, end)
-        http_client.fetch_done(mut cl, take first)
+        empty_fetch(cl, request, end)
     })
-    let warm = fetch_room()
-    result.unwrap(bound bytes 16384 {
-        let second = empty_fetch(mut cl, request, end)
-        http_client.fetch_done(mut cl, take second)
+    let first = fetch_room()
+    result.unwrap(bound bytes 131072 {
+        empty_fetch(cl, request, end)
     })
-    let twice = fetch_room()
+    let second = fetch_room()
     let _ = take cl
+    let _ = take p
     let after = fetch_room()
     let stop = take signal
     result.unwrap(channel.send(stop, ()))
-    result.unwrap(task.join(take peer)) && before - warm >= 24576 && twice == warm && after == before
-}
-
-// HTTP-18. A response cannot import a connected socket into a narrower client.
-// expect: run http_fetch_pool_rejects_other_client(network) = true
-fn http_fetch_pool_rejects_other_client(n: Net, c: Clock, tasks: Tasks) -> bool waits {
-    let (peer, signal, address, request) = fetch_pool_fixture(n, c, tasks, 1)
-    let port: u16 = if address.port == 1 {
-        2
-    } else {
-        1
-    }
-    let restricted = result.unwrap(net.narrow(n, Rule(dir: Connect, prefix: address.ip, bits: 32, ports: (port, port))))
-    let mut a = http_client.client(n, c, System, http_client.limits(0))
-    let mut b = http_client.client(restricted, c, System, http_client.limits(0))
-    let end = after_ms(host.mono_ns(c), 2000)
-    let first = empty_fetch(mut a, request, end)
-    http_client.fetch_done(mut b, take first)
-    let denied = match http_client.fetch(mut b, request, end) {
-        Error(Http(Connect(Denied))) => true,
-        _ => false,
-    }
-    let _ = take b
-    let stop = take signal
-    result.unwrap(channel.send(stop, ()))
-    result.unwrap(task.join(take peer)) && denied
+    result.unwrap(task.join(take peer)) && before > pooled && first == pooled && second == pooled && after == before
 }

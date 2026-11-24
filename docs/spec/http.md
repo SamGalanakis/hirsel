@@ -656,10 +656,8 @@ protected segment is sent from the caller's bytes and has no such bound.
 URL is its scheme, its host with ASCII letters lowercased, and its port, or 80 for `http`
 and 443 for `https` when none is written.
 
-**A hop.** `fetch` parses the URL and takes an idle connection for its origin from the
-client's pool, or opens one. A host that is a name is resolved with `host.resolve` under
-the client's `Net`. The addresses are tried in the order returned, one at a time, until
-one connects. An `https` origin's TLS name is its host. The request is written with
+**A hop.** `fetch` parses the URL and takes a lease on a connection for its origin from
+the pool (below), which parks or dials one. The request is written with
 `start`, and its head is read with `finish_request`.
 
 **Redirects.** When `redirects` is `Follow(n)` and a hop's status is 301, 302, 303, 307 or
@@ -680,8 +678,8 @@ When the body is dropped, the next hop also drops the caller's `Content-Encoding
 fields (RFC 9110 §15.4, item 5). The client writes framing fields itself. Before the next
 hop, the redirect's body is read and discarded up to 2048 bytes (Go's `maxBodySlurpSize`, `2 << 10`,
 `/tmp/ref-go` 8eaf19e `src/net/http/client.go:717`; redirect bodies are short notices). If it ends within them
-and the connection is reusable, the connection goes back to the pool. Otherwise it is
-closed.
+at a clean boundary (below), the connection carries the next hop when that hop has the
+same origin, and is parked otherwise. Otherwise it is closed.
 
 **Credentials across origins.** When a hop's origin differs from the previous hop's, the
 next hop drops every `Protected` header and every `Authorization`, `Proxy-Authorization`
@@ -731,33 +729,92 @@ or compute more than the caller states:
 **Storage.** This rule amends HTTP-16 for decoded bodies. The connection receives encoded
 payload into the response's own 8192-byte input buffer, and the decoder writes decoded
 bytes directly into the caller's spare capacity. The decoder and the input buffer are
-admitted when the response is returned and refunded when it is done or dropped. An
+admitted when the response is returned and refunded when it is dropped. An
 undecoded body keeps HTTP-16's path exactly.
 
-**Reuse.** An idle connection is keyed by origin. `fetch_done` returns a connection to the
-pool only when its body reached its end, `reusable` holds, the response belongs to that
-client, and the pool has fewer than `idle_per_origin` connections for that origin and
-fewer than `idle_max` in all. Otherwise it closes the connection. Each client has a
-private identity that follows it when moved. A different client may hold different
-Net or Trust authority. `fetch` takes the most recently returned eligible connection
-for the origin and closes connections for that origin idle for `idle_ns` or longer on
-the client's Clock. Expired sockets stay open until a fetch for their origin or until
-the client is dropped, which closes every idle connection.
+**Pool.** `std.http_client.pool(n, c, tasks, take trust, cfg)` makes a `Pool`, the only
+holder of the `Net` and `Trust` that fetches use. It is not `send`. It owns one
+coordinator task. `handle(p)` returns a `Client`, a `send` handle that holds a sender to
+the coordinator, the pool's Clock and a copy of its `Limits`, and no `Net` or `Trust`. A
+server gives each connection its own handle, for example through `serve_with_factory`.
+The coordinator keeps the idle connections and the counts, and nothing else. A handle
+does its own socket I/O on a connection it holds.
 
-Moving a connection to or from the pool admits nothing for its existing blocks. Each
-block keeps its admission record. When a bound ends, its surviving charges follow
-MEM-20 to the parent. New allocations, including pool storage, are admitted under the
-limit current at the allocating operation.
+- **Leases.** A fetch asks the coordinator for a connection to its origin and waits for
+  one reply. The reply is a **lease**, which holds the connection and one of the pool's
+  `conns_max` slots, or a refusal. A slot is held from the dial's start to the
+  connection's close, whether the connection is being dialed, leased or idle.
+- **Choice.** The coordinator serves the oldest waiting ask first. For each ask it takes,
+  in order: the most recently parked idle connection for the ask's origin; a new dial
+  when fewer than `conns_max` slots are held; or a new dial in the slot of the least
+  recently parked idle connection, of any origin, which it closes. Otherwise the ask
+  waits. An idle connection parked `idle_ns` or longer ago on the pool's Clock is closed
+  before any choice.
+- **Waiters.** At most `waiters_max` asks wait. An ask that finds the queue full is
+  refused with `Busy` at once. `Busy` means only that. A waiting ask whose deadline
+  passes is refused with `Http(Deadline)`. The coordinator keeps one timer task for the
+  earliest waiting deadline, so a waiter learns of its deadline when it passes, not at
+  the next pool event. An ask served before its deadline gets a parked connection when
+  one for its origin becomes idle, or a new dial when a slot is freed. It never waits
+  for a dial made for another ask.
+- **Dials.** A dial runs in its own task, spawned by the coordinator from the pool's
+  reservation, never under the asking handler's limit. It resolves a name with
+  `host.resolve` under the pool's `Net` and tries at most the first 64 addresses
+  returned, in order, until one connects. An `https` origin's TLS name is its host. A
+  dial is bounded by the deadline of the ask it was made for, and that ask gets its
+  error. A dial whose ask has gone, by cancellation, parks its connection.
+- **Parking.** A connection is parked only at a clean boundary: its response body read
+  to its end, `reusable` holding, and no received byte staged past the body's end. Bytes
+  staged past the end are a pipelined or stray response that the next request would
+  read as its own. Such a connection is closed. This rule is the pool's, not HTTP-16's:
+  the low-level connection keeps those bytes for its caller. `fetch_read` parks the
+  connection when it returns the body's end, and a response whose framing has no body
+  bytes (HEAD, 204, 304 or `Content-Length: 0`, with no coding removed) is parked before
+  `fetch` returns. The response keeps a copy of its head. Its connection is then gone
+  from it. Bytes can also arrive after a connection is parked. Before the coordinator
+  leases an idle connection it polls the socket once with `recv_ready` at the pool
+  Clock's current time. A byte, an end or an error pending there closes the connection,
+  and the coordinator takes the next candidate.
+- **Release.** Dropping a lease before it is parked closes its connection and frees its
+  slot. The lease's finalizer only sends one message to the coordinator with
+  `try_send`, which neither waits nor allocates. Its queue holds `conns_max` items,
+  so the send always finds room: each slot has at most one message in flight. Dropping
+  an unread `Response` therefore never waits and never fails on `Capacity`. Parking also
+  sends with `try_send`, and a coordinator that has ended closes the connection.
+- **Ending.** Dropping the `Pool` cancels the coordinator. Its dials are cancelled, its
+  idle connections are closed, and every waiting or later ask from a handle is refused
+  with `Gone`. Leased connections stay usable until their responses are dropped.
 
-**Retry.** A hop on a connection from the pool that fails with `Write(_)` or `Receive(_)`
-before the connection received any byte of a response is sent once more on a new
+**Charging.** `pool` admits, under the limit current at the call, the coordinator task
+with a reserved limit of `conns_max` × (49152 + r) + 8192 bytes, where r is the length
+of the trust value's roots rounded up to 8, plus its channels and tables: an ask channel
+of max(`waiters_max`, 1) items, a return channel of max(`conns_max`, 1) items, a waiter
+table of `waiters_max` entries and idle and dial tables of `conns_max` entries. A refusal
+returns `Error(c)` and makes nothing. Every block of a connection, its lease and its
+origin key is admitted under that reservation, so each keeps the pool's limit record
+(MEM-20) wherever the lease travels, and its refund returns there when the connection
+closes. A handler that exits while its connection is parked therefore leaves no charge
+behind. A handler's fetch admits its own URL, rebuilt headers, one reply channel, the
+head copy and any decoder, under its current limit.
+
+**Endpoint.** `endpoint(cl, base_url)` parses an origin-only URL (path empty or `/`, no
+query or fragment) once and returns an `Endpoint`, a `send` handle that can reach that
+origin and no other. `call(e, req, deadline_ns)` sends a request for `req.target`, which
+must begin with `/` (`Url(Invalid(0))` otherwise), with no URL parsing. A redirect to
+another origin ends the call with `CrossOrigin` before any byte goes to that origin.
+Redirects within the origin follow the rules above.
+
+**Retry.** A hop on a connection from the pool that fails with `Write(_)`, with
+`Receive(_)`, or with `MalformedHead` because the peer closed before sending a whole
+head, before the connection received any byte of a response, is sent once more on a new
 connection when either `request_started` is false, or the method is GET, HEAD, OPTIONS or
-TRACE (RFC 9110 §9.2.1's safe methods). A hop on a new connection is never retried, so a
-server that always hangs up cannot cause a loop.
+TRACE (RFC 9110 §9.2.1's safe methods). These are how a peer's close of an idle
+connection shows. A hop on a new connection is never retried, so a server that always
+hangs up cannot cause a loop.
 
-**Deadline.** The one absolute deadline covers every hop's resolve, connect, handshake,
-request and head, the redirect drains, and every `fetch_read` of the final body.
-Cancellation (CONC-7) is observed at each of those waits.
+**Deadline.** The one absolute deadline covers the wait for a lease, every hop's resolve,
+connect, handshake, request and head, the redirect drains, and every `fetch_read` of the
+final body. Cancellation (CONC-7) is observed at each of those waits.
 
 **Laws.** FE1 redirect method table: for each status and method, the next hop's method and
 body match the table above (oracle: RFC 9110 §15.4.2-15.4.9 text). FE2 credential
@@ -768,7 +825,21 @@ covers). FE3 bomb bounds: a gzip body of `body_max + 1` zero bytes gives `TooLar
 exactly `body_max` bytes, and a zstd frame asking for a window of `max_window + 1` gives
 `WindowTooLarge` before any output (oracle: the bounds above). FE4 decoding differential:
 bodies encoded by `gzip`, `zlib-flate` and `zstd` command-line tools decode to their
-inputs (oracle: the reference tools).
+inputs (oracle: the reference tools). FE5 stray bytes: a response followed by
+a second, unrequested response is never reused, whether the stray bytes were staged with
+its body or arrive in the socket after it is parked. The next fetch to that origin dials
+and never reads those bytes (oracle: the parking rule; bugs caught: parking on `reusable`
+alone, and leasing a parked connection without the poll). FE6
+unread drop at capacity: with no byte of room left in the handler's bound, dropping an
+unread response returns, and the slot it held serves the next fetch (oracle: the release
+rule; bug caught: a finalizer that waits or admits). FE7 waiters: at `conns_max` with a
+full queue an ask gets `Busy`, a waiter whose deadline passes gets `Http(Deadline)` within
+its timer's wake, and a waiter served in time gets the parked connection with no new
+accept at the peer (oracle: the waiter rule). FE8 handler charge: a handler that fetches
+and exits while its connection is parked leaves its bound's used bytes at zero (oracle:
+the charging rule; bug caught: dialing under the handler's limit, MEM-20). FE9 endpoint
+confinement: a redirect from an endpoint's origin to another origin ends the call with
+`CrossOrigin` and no accept at the other origin (oracle: the endpoint rule).
 
 ## 2. Stream ownership
 

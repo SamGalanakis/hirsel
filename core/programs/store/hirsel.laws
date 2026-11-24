@@ -8,7 +8,7 @@ store@1/store/bucket_test_l4_cuts src=db89b4decfd1c437 sig=fdbce2b65e3f65a1 run=
 store@1/store/bucket_test_m2_ack_history src=4b1964b0b78990bf sig=69b899a7e5997d45 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_admitted_claim src=ff3846aa414d0d59 sig=79b406fd3d8af1a1 run=bc0855e1b21bfb40 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_binding src=373fcd2f311df460 sig=9481baa2c6742f0a run=2f2681ca48ebe043 bug=- oracle=- rows=pending
-store@1/store/bucket_test_m2_branch_position src=2be9ccd9b81940dd sig=1fc43fecd21c0172 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+store@1/store/bucket_test_m2_branch_position src=2be9ccd9b81940dd sig=8d3b4f698f9a0df8 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_checkpoint_advance src=d97cb6d9f56afdf5 sig=8ad03e84315f1de2 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_claim_witness src=7949e58e70a4c02b sig=0408256f456dc1fd run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_export_replay src=9c5bebf8f7dbf697 sig=63371cf3f5e58c60 run=ea720f3846592392 bug=- oracle=- rows=pending

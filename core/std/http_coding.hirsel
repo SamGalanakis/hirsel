@@ -1,0 +1,169 @@
+// Module `http_coding`: the content codings `std.http_client`'s fetch removes (HTTP-18).
+// A `Body` decodes gzip, deflate or zstd from a connection's body under the fetch's bound
+// and deadline.
+pub type Decoder: send = Flate(flate.Decoder) | Zstd(zstd.Decoder)
+
+pub opaque type Body: send {
+    decoder: Decoder,
+    input: Bytes,
+    cursor: u64,
+    consumed: u64,
+    remaining: u64,
+    clock: Clock,
+    deadline: u64,
+    boundary: bool,
+    wire_end: bool
+}
+
+pub fn coding_of(h: http_client.ResponseHead, offer: bool) -> Result[Option[http_client.ContentCoding], http_client.FetchError] {
+    let code = http_client.status(h)
+    if !offer || code == 204 || code == 304 {
+        return Ok(None)
+    }
+    let mut seen = false
+    let mut applied: Option[http_client.ContentCoding] = None
+    for i in 0u64 .. http_client.field_count(h) {
+        if let Some((name, value)) = http_client.field_at(h, i) {
+            if !http1.equal_ascii(name, b"content-encoding") {
+                continue
+            }
+            if seen {
+                return Error(Coding(Unsupported))
+            }
+            seen = true
+            applied = if http1.equal_ascii(value, b"gzip") || http1.equal_ascii(value, b"x-gzip") {
+                Some(Gzip)
+            } else if http1.equal_ascii(value, b"deflate") {
+                Some(Deflate)
+            } else if http1.equal_ascii(value, b"zstd") {
+                Some(Zstd)
+            } else if http1.equal_ascii(value, b"identity") {
+                None
+            } else {
+                return Error(Coding(Unsupported))
+            }
+        }
+    }
+    Ok(applied)
+}
+
+pub fn encoded_limit(max: u64) -> u64 {
+    let blocks = max / 65535 + (if max % 65535 == 0 {
+        0u64
+    } else {
+        1u64
+    })
+    int.saturating_add(max, 5 * blocks + 131072)
+}
+
+fn refill(mut b: Body, mut conn: http_client.Connection) -> Result[(), http_client.FetchError] waits {
+    list.drop_prefix(mut b.input, b.cursor)
+    b.cursor = 0
+    b.wire_end = result.map_err(http_client.read(mut conn, mut b.input), http_error)? == 0
+    Ok(())
+}
+
+fn flate_error(take e: flate.FlateError) -> http_client.FetchError {
+    match e {
+        TooLarge => Http(TooLarge),
+        _ => Coding(Flate(e)),
+    }
+}
+
+pub fn too_large(e: http_client.FetchError) -> bool {
+    if let Http(TooLarge) = e {
+        return true
+    }
+    false
+}
+
+fn zstd_error(take e: zstd.ZstdError) -> http_client.FetchError {
+    match e {
+        TooLarge => Http(TooLarge),
+        _ => Coding(Zstd(e)),
+    }
+}
+
+fn next_frame(mut b: Body, kind: http_client.ContentCoding, mut conn: http_client.Connection) -> Result[bool, http_client.FetchError] waits {
+    if b.cursor == list.len(b.input) && !b.wire_end {
+        refill(mut b, mut conn)?
+    }
+    if b.cursor == list.len(b.input) {
+        return Ok(false)
+    }
+    if kind == Deflate {
+        return Error(Coding(Flate(TrailingData(b.consumed))))
+    }
+    if kind == Gzip {
+        if b.input[b.cursor] != 31 {
+            return Error(Coding(Flate(TrailingData(b.consumed))))
+        }
+        if list.len(b.input) - b.cursor == 1 && !b.wire_end {
+            refill(mut b, mut conn)?
+        }
+        if list.len(b.input) - b.cursor > 1 && b.input[b.cursor + 1] != 139 {
+            return Error(Coding(Flate(TrailingData(b.consumed))))
+        }
+        if let Flate(mut d) = b.decoder {
+            flate.next_member(mut d)
+        }
+    }
+    b.boundary = false
+    Ok(true)
+}
+
+fn step(mut b: Body, mut into: Bytes) -> Result[flate.Step, http_client.FetchError] {
+    match b.decoder {
+        Flate(mut d) => result.map_err(flate.decode_step_bounded(mut d, b.input, b.cursor, list.len(b.input), mut into, b.remaining), flate_error),
+        Zstd(mut d) => result.map_err(zstd.decode_step(mut d, b.input, b.cursor, list.len(b.input), mut into), zstd_error),
+    }
+}
+
+pub fn read_coded(mut b: Body, kind: http_client.ContentCoding, mut conn: http_client.Connection, mut into: Bytes) -> Result[u64, http_client.FetchError] waits {
+    loop {
+        if host.mono_ns(b.clock) >= b.deadline {
+            return Error(Http(Deadline))
+        }
+        if b.boundary {
+            if !next_frame(mut b, kind, mut conn)? {
+                return Ok(0)
+            }
+        }
+        let progress = step(mut b, mut into)?
+        b.cursor += progress.consumed
+        b.consumed += progress.consumed
+        b.remaining -= progress.produced
+        b.boundary = progress.ended
+        if progress.produced != 0 {
+            if host.mono_ns(b.clock) >= b.deadline {
+                return Error(Http(Deadline))
+            }
+            return Ok(progress.produced)
+        }
+        if progress.ended {
+            continue
+        }
+        if b.wire_end {
+            return if kind == Zstd {
+                Error(Coding(Zstd(Truncated)))
+            } else {
+                Error(Coding(Flate(Truncated)))
+            }
+        }
+        refill(mut b, mut conn)?
+    }
+}
+
+/// A decoder for one response body of at most `max` decoded bytes.
+pub fn body(kind: http_client.ContentCoding, max: u64, max_window: u64, clock: Clock, deadline: u64) -> Body {
+    let decoder: Decoder = match kind {
+        Gzip => Flate(flate.decoder(Gzip)),
+        Deflate => Flate(flate.decoder(Zlib)),
+        Zstd => Zstd(zstd.decoder_bounded(max_window, max)),
+    }
+    Body(decoder: take decoder, input: list.with_capacity(8192), cursor: 0, consumed: 0, remaining: max, clock, deadline, boundary: false, wire_end: false)
+}
+
+fn http_error(take e: http_client.Error) -> http_client.FetchError {
+    Http(e)
+}

@@ -112,10 +112,10 @@ For an event-stream response, feed the decoded body bytes to the
 
 The normative rules are [HTTP-18](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse).
 
-`fetch` sends one request to an `http` or `https` URL. It resolves the name, reuses an idle
-connection or opens one, follows redirects, decodes a gzip, deflate or zstd body, and
-returns the final response. It is built from the connection operations above, which stay
-the tool for streaming uploads, `Upgrade` and anything else `fetch` does not do.
+`fetch` sends one request to an `http` or `https` URL. It takes a connection from a pool,
+follows redirects, decodes a gzip, deflate or zstd body, and returns the final response.
+It is built from the connection operations above, which stay the tool for streaming
+uploads, `Upgrade` and anything else `fetch` does not do.
 
 ```
 pub type Redirects: key + send = Follow(u8) | Return
@@ -123,35 +123,57 @@ pub type Limits: send {
     redirects: Redirects,
     body_max: u64,            // decoded body bytes
     max_window: u64,          // zstd window a response may demand
-    idle_max: u16,            // idle connections kept, in total
-    idle_per_origin: u16,     // idle connections kept, per origin
+    conns_max: u16,           // connections dialing, leased or idle, over all origins
+    waiters_max: u16,         // fetches that may wait for a connection
     idle_ns: u64,             // how long an idle connection may be reused
     decode: bool              // offer and remove gzip, deflate and zstd
 }
 pub fn limits(body_max: u64) -> Limits
+pub opaque type Pool
+pub fn pool(n: Net, c: Clock, tasks: Tasks, take trust: Trust, cfg: Limits) -> Result[Pool, Capacity]
 pub opaque type Client: send
-pub fn client(n: Net, c: Clock, take trust: Trust, cfg: Limits) -> Client
+pub fn handle(p: Pool) -> Client
+pub opaque type Endpoint: send
+pub fn endpoint(cl: Client, base_url: String) -> Result[Endpoint, FetchError]
 pub type Fetch: send { method: String, url: String, headers: List[Header], body: List[Segment] }
+pub type Call: send { method: String, target: String, headers: List[Header], body: List[Segment] }
 pub type ContentCoding: key + send = Gzip | Deflate | Zstd
 pub type CodingError: send = Unsupported | Flate(flate.FlateError) | Zstd(zstd.ZstdError)
-pub type FetchError: send = Http(Error) | Url(uri.Error) | Scheme | UserInfo | Resolve(NetError) | NoAddress | Location | TooManyRedirects | CrossOriginSecret | Coding(CodingError)
+pub type FetchError: send = Http(Error) | Url(uri.Error) | Scheme | UserInfo | Resolve(NetError) | NoAddress | Location | TooManyRedirects | CrossOriginSecret | CrossOrigin | Coding(CodingError) | Busy | Gone
 pub opaque type Response: send
-pub fn fetch(mut cl: Client, req: Fetch, deadline_ns: u64) -> Result[Response, FetchError] waits
+pub fn fetch(cl: Client, req: Fetch, deadline_ns: u64) -> Result[Response, FetchError] waits
+pub fn call(e: Endpoint, req: Call, deadline_ns: u64) -> Result[Response, FetchError] waits
+pub fn fetch_all(cl: Client, req: Fetch, mut into: Bytes, deadline_ns: u64) -> Result[ResponseHead, FetchError] waits
+pub fn get(cl: Client, url: String, mut into: Bytes, deadline_ns: u64) -> Result[u16, FetchError] waits
 pub fn fetch_head(r: Response) -> View[ResponseHead] in r
 pub fn fetch_url(r: Response) -> View[String] in r
 pub fn fetch_coding(r: Response) -> Option[ContentCoding]
 pub fn fetch_read(mut r: Response, mut into: Bytes) -> Result[u64, FetchError] waits
-pub fn fetch_done(mut cl: Client, take r: Response)
 ```
 
 ```hirsel
-let mut cl = std.http_client.client(n, c, System, std.http_client.limits(1 << 20))
+let p = std.http_client.pool(n, c, tasks, System, std.http_client.limits(1 << 20))?
+let cl = std.http_client.handle(p)
 let req = Fetch(method: "GET", url: "https://api.example.com/v1/items", headers: [Header(name: "Authorization", value: Protected(string.as_bytes("Bearer "), token))], body: list.new())
-let mut r = std.http_client.fetch(mut cl, req, host.mono_ns(c) + 10_000_000_000)?
+let mut r = std.http_client.fetch(cl, req, host.mono_ns(c) + 10_000_000_000)?
 let mut buf: Bytes = list.with_capacity(65536)
 while std.http_client.fetch_read(mut r, mut buf)? != 0 { if list.len(buf) == list.capacity(buf) { list.reserve(mut buf, list.capacity(buf)) } }
-std.http_client.fetch_done(mut cl, take r)
 ```
+
+A server makes one `Pool` at startup and gives each connection handler its own `Client`
+from `handle`, for example through `serve_with_factory`. A `Client` holds no `Net` and no
+`Trust`. Its fetches share the pool's connections and limits.
+
+`get(cl, url, mut into, deadline_ns)` and `fetch_all(cl, req, mut into, deadline_ns)`
+read the whole decoded body into `into`, growing it up to `body_max` bytes, and return
+the status or the head.
+
+**Endpoint.** `endpoint(cl, base_url)` checks an origin-only URL (`https://api.example.com`
+or the same with a path of `/`, and no query or fragment) once. `call(e, req, deadline_ns)`
+then sends `req.target`, which must begin with `/`, to that origin without parsing a URL.
+An `Endpoint` can reach that origin and no other: a redirect elsewhere ends the call with
+`CrossOrigin` before anything is sent there. Hand a handler an `Endpoint` when it should
+reach one service.
 
 **Limits.** `limits(body_max)` gives the derived defaults and the caller's body bound,
 which has no universal value:
@@ -160,62 +182,67 @@ which has no universal value:
 |---|---|---|
 | `redirects` | `Follow(10)` | Go (`stopped after 10 redirects`), reqwest (`Policy::limited(10)`) and Python (`max_redirections = 10`) all stop at 10. RFC 9110 §15.4 asks only that a client detect loops, and 10 is the common bound. |
 | `max_window` | 8,388,608 (2^23) | RFC 9659 §3: for the zstd content coding, decoders MUST support windows up to 8 MB and encoders MUST NOT exceed it. 2^23 covers 8 MB under either reading, so no conforming response is refused. |
-| `idle_max` | 100 | Go's `DefaultTransport.MaxIdleConns`. |
-| `idle_per_origin` | 2 | Go's `DefaultMaxIdleConnsPerHost`. |
+| `conns_max` | 100 | Go's `DefaultTransport.MaxIdleConns`. Here it bounds every connection, not only idle ones, so the pool's reservation has a fixed size. |
+| `waiters_max` | 256 | Bounds the waiter table that the reservation pays for. A fetch that finds it full gets `Busy` at once instead of a wait with no bound. |
 | `idle_ns` | 90 s | Go's `IdleConnTimeout` and reqwest's `pool_idle_timeout`. |
 | `decode` | `true` | |
 
 **Requests.** `url` is an absolute RFC 3986 URI ([uri](uri.md)) with scheme `http` or
-`https` (`Scheme` otherwise) and no userinfo (`UserInfo`). Credentials go in `Protected`
-headers, never in a URL that a redirect, a render or a log could copy. The fragment is
-not sent. The target is the path (`/` when empty) and the query. `body` is the whole body
-as segments ([HTTP-17](../../../docs/spec/http.md#http-17-client-request-bodies)), so
-`fetch` can send it again on a 307 or 308 redirect or a retry. An empty body sends no body
-for GET, HEAD, DELETE, OPTIONS and TRACE, and `Content-Length: 0` for any other method
+`https` (`Scheme` otherwise) and no userinfo (`UserInfo`). Its host is at most 255 bytes.
+Credentials go in `Protected` headers, never in a URL that a redirect, a render or a log
+could copy. The fragment is not sent. The target is the path (`/` when empty) and the
+query. `body` is the whole body as segments
+([HTTP-17](../../../docs/spec/http.md#http-17-client-request-bodies)), so `fetch` can
+send it again on a 307 or 308 redirect or a retry. An empty body sends no body for GET,
+HEAD, DELETE, OPTIONS and TRACE, and `Content-Length: 0` for any other method
 (RFC 9110 §8.6). The header rules are `start`'s.
 
 **Reading.** `fetch` returns once the final response head is read. `fetch_head` borrows it,
 with the wire's fields unchanged, including `Content-Encoding` when a coding was removed.
 `fetch_coding` says which coding was removed. `fetch_url` is the URL of the last hop.
 `fetch_read` is `read`'s contract (spare capacity, `NoSpace`, `Ok(0)` at the end) over the
-decoded body. `fetch_done` returns the connection to the pool when the body was read to
-its end and the connection is reusable, and closes it otherwise. Dropping a `Response`
-closes its connection.
+decoded body. When it returns the end, the connection goes back to the pool if nothing
+was received past the body, and is closed otherwise. A response with no body bytes goes
+back before `fetch` returns. Dropping a `Response` before its end closes its connection
+and frees its slot at once, without waiting.
 
-- **Authority.** `n` with a `Resolve` rule covering every host name the request and its
-  redirects reach, and a `Connect` rule covering every address and port
+- **Authority.** The pool's `n` needs a `Resolve` rule covering every host name a request
+  and its redirects reach, and a `Connect` rule covering every address and port
   ([net.md](../../../docs/spec/net.md)). A redirect to a host the grant does not cover is
   `Resolve(Denied)`, or `Http(Connect(Denied))` for an address. `c` reads deadlines and
   idle ages. `trust` verifies every `https` hop. A `Protected` header or `Sealed` segment
-  still passes TLS-5's sink check on each hop's verified name.
+  still passes TLS-5's sink check on each hop's verified name. A `Client` carries the
+  pool's authority, and an `Endpoint` narrows it to one origin.
 - **Failures.** Each `FetchError` names one cause. `Http(e)` is the connection's own error
-  on any hop, including `TooLarge` for either body bound and `Deadline`. `NoAddress` means
-  the name resolved to no address. `Location` is a redirect whose `Location` field is
-  repeated, is not a URI reference, or resolves to a URL `fetch` refuses.
-  `TooManyRedirects` and `CrossOriginSecret` are HTTP-18's. `Coding(e)` is a body that
-  cannot be decoded. A refused allocation raises `Capacity`. Cancellation and the
-  deadline end the fetch as on a connection, and the response's connection is closed.
-- **Charging.** `client` takes ownership of its trust value and admits nothing. A
-  new connection admits three 8192-byte buffers for wire data, the response head and
-  request encoding, plus its authority string. Each hop admits its URL and rebuilt
-  headers. A decoded response admits an 8192-byte encoded-input buffer and decoder
-  storage. Flate uses a 32 KiB window and fixed tables. Zstd uses at most `max_window`
-  of history, fixed tables and buffers for blocks of at most 128 KiB (RFC 8878
-  §3.1.1.2.4). Idle list storage and retained origin keys are admitted under the limit
-  current when they are allocated.
+  on any hop, including `TooLarge` for either body bound and `Deadline`, which also ends
+  a wait for a connection. `NoAddress` means the name resolved to no address. `Location`
+  is a redirect whose `Location` field is repeated, is not a URI reference, or resolves
+  to a URL `fetch` refuses. `TooManyRedirects` and `CrossOriginSecret` are HTTP-18's.
+  `CrossOrigin` is an endpoint's redirect to another origin. `Busy` means every
+  connection is in use and `waiters_max` fetches already wait. `Gone` means the `Pool`
+  was dropped. `Coding(e)` is a body that cannot be decoded. A refused allocation raises
+  `Capacity`. Cancellation and the deadline end the fetch as on a connection, and the
+  response's connection is closed.
+- **Charging.** `pool` takes ownership of its trust value and admits, under the limit
+  current at the call, its coordinator task with a reservation of `conns_max` × (49152 +
+  r) + 8192 bytes, where r is the trust value's roots, plus its channels and tables
+  (HTTP-18 gives the exact terms). `Error(c)` makes nothing. That reservation pays for
+  every connection: its three 8192-byte buffers for wire data, the response head and
+  request encoding, its TLS state on the host's side, its lease and its origin key. A
+  handler that exits while its connection is idle in the pool leaves no charge behind.
+  A fetch admits under the caller's limit its URL, rebuilt headers, one reply channel,
+  the copy of the head it keeps, and for a decoded response an 8192-byte encoded-input
+  buffer and decoder storage. Flate uses a 32 KiB window and fixed tables. Zstd uses at
+  most `max_window` of history, fixed tables and buffers for blocks of at most 128 KiB
+  (RFC 8878 §3.1.1.2.4). `handle` and `endpoint` admit a sender and, for an endpoint,
+  its origin.
 
-  For example, an inner `bound bytes` scope can fetch and return a connection to an
-  outer client. Its surviving allocations stay charged when the scope exits, with
-  their records leading to the parent under MEM-20. A sibling bound can use the
-  connection. The charges are refunded when the storage is freed.
-
-  A hop takes O(header bytes + URL bytes) steps of its own, plus host calls. The
-  pool compares the origins of at most `idle_max` entries per selection or return.
-  Selection compacts removed entries in one linear pass. Decoding is O(encoded input
-  + decoded output).
+  A hop takes O(header bytes + URL bytes) steps of its own, plus host calls. Choosing
+  a connection takes O(`conns_max`) steps in the pool's task, and serving waiters
+  O(`waiters_max`). Decoding is O(encoded input + decoded output).
 - **Replay.** `fetch` passes no replay point of its own. Each resolve, connect, send,
-  receive and Clock read passes its own, and decoding is recomputed. Pool choices depend
-  only on those values, so a replay reuses the same connections.
+  receive, channel message and Clock read passes its own, and decoding is recomputed.
+  Pool choices depend only on those values, so a replay reuses the same connections.
 
 ### Prior art
 
@@ -227,7 +254,7 @@ closes its connection.
   (`src/net/http/transport.go:54-55,62`), gzip only and never for HEAD or ranges
   (`transport.go:2395-2406`), and retry of replayable requests on a reused connection
   (`transport.go:847-852`, `isReplayable` at `src/net/http/request.go:1562`).
-  ADOPTED: the limit of 10, the drain bound, the pool defaults, the HEAD and range
+  ADOPTED: the limit of 10, the drain bound, the pool default of 100 and the idle timeout, the HEAD and range
   exceptions, and the retry rule. REPLACED: Go turns every non-GET/HEAD method into GET on
   301 and 302. Here only POST changes, as RFC 9110 §15.4 describes. REPLACED: Go forwards
   `Authorization` and `Cookie` to subdomains. Here any change of origin strips them.

@@ -44,204 +44,11 @@ pub fn idempotency_key(mut headers: List[Header], key: Bytes) -> Result[(), Erro
     Ok(())
 }
 
-fn append(mut out: Bytes, data: Bytes) -> Result[(), Error] {
-    if list.len(data) > order.min(8192, list.capacity(out)) - list.len(out) {
-        return Error(TooLarge)
-    }
-    let _ = list.append(mut out, data)
-    Ok(())
-}
-
-fn text(mut out: Bytes, data: String) -> Result[(), Error] {
-    append(mut out, string.as_bytes(data))
-}
-
-fn reserved(name: Bytes) -> bool {
-    http1.equal_ascii(name, string.as_bytes("host")) || http1.equal_ascii(name, string.as_bytes("content-length")) || http1.equal_ascii(name, string.as_bytes("transfer-encoding")) || http1.equal_ascii(name, string.as_bytes("trailer")) || http1.equal_ascii(name, string.as_bytes("expect")) || http1.equal_ascii(name, string.as_bytes("upgrade"))
-}
-
-fn field_prefix(mut out: Bytes, name: Bytes, value: Bytes) -> Result[(), Error] {
-    if !http1.valid_field(name, value) {
-        return Error(InvalidRequest)
-    }
-    append(mut out, name)?
-    text(mut out, ": ")?
-    append(mut out, value)
-}
-
-fn number(mut out: Bytes, n: u64, radix: u32) -> Result[(), Error] {
-    let mut digits: Inline[u8, 64] =[0; 64]
-    let digits_at = int.radix_digits(n, radix, mut digits)
-    if 64 - digits_at > order.min(8192, list.capacity(out)) - list.len(out) {
-        return Error(TooLarge)
-    }
-    let _ = bytebuf.append_inline(mut out, digits, digits_at, 64)
-    Ok(())
-}
-
-type EncodedHead {
-    close: bool,
-    /// The secrets that `marks` places, protected fields first.
-    secrets: u64,
-    /// A `Segments` body with no protected segment, sent after the head from
-    /// the caller's bytes.
-    plain_body: bool
-}
-
-/// One `tls.send_secret` mark group (TLS-5).
-fn mark(mut marks: List[u64], at: u64, kind: u64, a: u64, b: u64) {
-    list.push(mut marks, at)
-    list.push(mut marks, kind)
-    list.push(mut marks, a)
-    list.push(mut marks, b)
-}
-
-fn sealed(segments: List[Segment]) -> bool {
-    for segment in segments {
-        if let Sealed(_, _) = segment {
-            return true
-        }
-    }
-    false
-}
-
-/// Appends the plain segments and marks each protected one at its place,
-/// numbering secrets from `first`; returns the next number.
-fn body_segments(mut out: Bytes, mut marks: List[u64], segments: List[Segment], first: u64) -> Result[u64, Error] {
-    let mut next = first
-    for segment in segments {
-        match segment {
-            Plain(data) => append(mut out, data)?,
-            Sealed(_, coding) => {
-                mark(mut marks, list.len(out), if coding == Form {
-                    1
-                } else {
-                    0
-                }, next, 0)
-                next += 1
-            },
-        }
-    }
-    Ok(next)
-}
-
-/// The secrets `marks` places, in its order: protected fields, then the body.
-fn secret_list(headers: List[Header], body: Option[View[List[Segment]]], count: u64) -> List[Secret] {
-    let mut secrets: List[Secret] = list.with_capacity(count)
-    for f in headers {
-        if let Protected(_, credential) = f.value {
-            list.push(mut secrets, secret.share(credential))
-        }
-    }
-    if let Some(segments) = body {
-        for segment in segments {
-            if let Sealed(credential, _) = segment {
-                list.push(mut secrets, secret.share(credential))
-            }
-        }
-    }
-    secrets
-}
-
-/// Writes the head into `out`, and a body that holds a secret after it.
-/// Every secret's place goes into `marks`.
-fn encode_head(mut out: Bytes, mut marks: List[u64], authority: String, method: String, target: String, headers: List[Header], upload: Upload, body: Option[View[List[Segment]]], unframed: bool) -> Result[EncodedHead, Error] {
-    list.clear(mut out)
-    if method == "" || method == "CONNECT" {
-        return Error(InvalidRequest)
-    }
-    for c in string.as_bytes(method) {
-        if !http1.token(c) {
-            return Error(InvalidRequest)
-        }
-    }
-    if method != "OPTIONS" || target != "*" {
-        if let Error(_) = uri.http_origin_form(target) {
-            return Error(InvalidRequest)
-        }
-    }
-    if !http.valid_authority(string.as_bytes(authority)) {
-        return Error(InvalidRequest)
-    }
-    text(mut out, method)?
-    text(mut out, " ")?
-    text(mut out, target)?
-    text(mut out, " HTTP/1.1\r\nHost: ")?
-    text(mut out, authority)?
-    text(mut out, "\r\n")?
-    if list.len(headers) > 62 {
-        return Error(TooLarge)
-    }
-    let mut encoded = EncodedHead(close: false, secrets: 0, plain_body: false)
-    for f in headers {
-        let name = string.as_bytes(f.name)
-        if reserved(name) {
-            return Error(InvalidRequest)
-        }
-        let connection = http1.equal_ascii(name, string.as_bytes("connection"))
-        match f.value {
-            Public(value) => {
-                field_prefix(mut out, name, value)?
-                if connection {
-                    encoded.close = encoded.close || http1.contains(value, string.as_bytes("close"))
-                }
-            },
-            Protected(prefix, _) => {
-                encoded.close = encoded.close || connection
-                field_prefix(mut out, name, prefix)?
-                mark(mut marks, list.len(out), 0, encoded.secrets, 0)
-                encoded.secrets += 1
-            },
-        }
-        text(mut out, "\r\n")?
-    }
-    match upload {
-        Remaining(n) => {
-            text(mut out, "Content-Length: ")?
-            number(mut out, n, 10)?
-            text(mut out, "\r\n")?
-        },
-        Chunks => text(mut out, "Transfer-Encoding: chunked\r\n")?,
-        Whole => {
-            if unframed {
-                text(mut out, "\r\n")?
-                return Ok(encoded)
-            }
-            let Some(segments) = body else {
-                return Error(State)
-            }
-            text(mut out, "Content-Length: ")?
-            if sealed(segments) {
-                // The runtime writes the length of the whole body (TLS-5 kind 2).
-                let group = list.len(marks)
-                mark(mut marks, list.len(out), 2, 0, 0)
-                text(mut out, "\r\n\r\n")?
-                let body_at = list.len(out)
-                encoded.secrets = body_segments(mut out, mut marks, segments, encoded.secrets)?
-                let _ = list.set(mut marks, group + 2, body_at)
-                let _ = list.set(mut marks, group + 3, list.len(out))
-                return Ok(encoded)
-            }
-            let mut n = 0u64
-            for segment in segments {
-                if let Plain(data) = segment {
-                    n += list.len(data)
-                }
-            }
-            number(mut out, n, 10)?
-            text(mut out, "\r\n")?
-            encoded.plain_body = true
-        },
-    }
-    text(mut out, "\r\n")?
-    Ok(encoded)
-}
-
 /// Writes an HTTP/1.1 request head into caller-owned fixed storage.
 /// Returns whether Connection asks the peer to close. Protected fields need a TLS stream.
 pub fn encode_request(mut out: Bytes, authority: String, req: Request) -> Result[bool, Error] {
     let mut marks: List[u64] = list.new()
-    let encoded = encode_head(mut out, mut marks, authority, req.method, req.target, req.headers, request_upload(req), request_segments(req), false)?
+    let encoded = http_request.encode_head(mut out, mut marks, authority, req.method, req.target, req.headers, request_upload(req), request_segments(req), false)?
     if encoded.secrets != 0 {
         list.clear(mut out)
         return Error(Write(Denied))
@@ -250,21 +57,21 @@ pub fn encode_request(mut out: Bytes, authority: String, req: Request) -> Result
 }
 
 fn render_request_into(mut out: Bytes, req: Request) -> Result[(), Error] {
-    text(mut out, req.method)?
-    text(mut out, " ")?
-    text(mut out, req.target)?
-    text(mut out, "\n")?
+    http_request.text(mut out, req.method)?
+    http_request.text(mut out, " ")?
+    http_request.text(mut out, req.target)?
+    http_request.text(mut out, "\n")?
     for f in req.headers {
-        text(mut out, f.name)?
-        text(mut out, ": ")?
+        http_request.text(mut out, f.name)?
+        http_request.text(mut out, ": ")?
         match f.value {
-            Public(value) => append(mut out, value)?,
+            Public(value) => http_request.append(mut out, value)?,
             Protected(prefix, credential) => {
-                append(mut out, prefix)?
-                text(mut out, secret.render(credential))?
+                http_request.append(mut out, prefix)?
+                http_request.text(mut out, secret.render(credential))?
             },
         }
-        text(mut out, "\n")?
+        http_request.text(mut out, "\n")?
     }
     Ok(())
 }
@@ -292,8 +99,8 @@ pub fn render_error(mut out: Bytes, error: Error, req: Request) -> Result[(), Er
         Deadline => "Deadline",
         Cancelled => "Cancelled",
     }
-    text(mut out, label)?
-    text(mut out, "\n")?
+    http_request.text(mut out, label)?
+    http_request.text(mut out, "\n")?
     render_request_into(mut out, req)
 }
 
@@ -303,8 +110,8 @@ pub fn encode_chunk_prefix(mut out: Bytes, size: u64) -> Result[(), Error] {
     if size == 0 {
         return Error(InvalidRequest)
     }
-    number(mut out, size, 16)?
-    text(mut out, "\r\n")
+    http_request.number(mut out, size, 16)?
+    http_request.text(mut out, "\r\n")
 }
 
 pub opaque type ResponseHead: send {
@@ -501,9 +308,7 @@ type Phase: key = Idle | Upload | Download | Closed
 
 /// What the request's body still takes: plain bytes, chunks, or nothing
 /// because `start` sent it whole.
-type Upload: key = Remaining(u64) | Chunks | Whole
-
-fn request_upload(req: Request) -> Upload {
+fn request_upload(req: Request) -> http_request.Upload {
     match req.body {
         Fixed(n) => Remaining(n),
         Chunked => Chunks,
@@ -530,7 +335,7 @@ pub opaque type Connection: send {
     head_committed: bool,
     response_committed: bool,
     response_fresh: bool,
-    upload: Upload,
+    upload: http_request.Upload,
     head_request: bool,
     close_after: bool
 }
@@ -556,11 +361,11 @@ fn send(mut output: WriteHalf, prefix: Bytes, body: Bytes, clock: Clock, deadlin
     write_result(http.write_wire(mut output, prefix, body, clock, deadline))
 }
 
-fn send_head(mut c: Connection, headers: List[Header], body: Option[View[List[Segment]]], encoded: EncodedHead, marks: List[u64]) -> Result[(), Error] waits {
+fn send_head(mut c: Connection, headers: List[Header], body: Option[View[List[Segment]]], encoded: http_request.EncodedHead, marks: List[u64]) -> Result[(), Error] waits {
     let empty = string.as_bytes("")
     if encoded.secrets != 0 {
         // One message: the head, any body, and every secret (TLS-5).
-        let secrets = secret_list(headers, body, encoded.secrets)
+        let secrets = http_request.secret_list(headers, body, encoded.secrets)
         // send_secret does not return a committed count on failure.
         c.head_committed = true
         return write_result(tls.send_secret(mut c.output, c.encoding, secrets, marks, At(c.clock, c.deadline)))
@@ -672,7 +477,7 @@ pub fn start_fetch(mut c: Connection, authority: String, method: String, target:
     start_parts(mut c, Some(view authority), method, target, headers, Whole, Some(view segments), unframed, deadline_ns)
 }
 
-fn start_parts(mut c: Connection, authority: Option[View[String]], method: String, target: String, headers: List[Header], upload: Upload, body: Option[View[List[Segment]]], unframed: bool, deadline_ns: u64) -> Result[(), Error] waits {
+fn start_parts(mut c: Connection, authority: Option[View[String]], method: String, target: String, headers: List[Header], upload: http_request.Upload, body: Option[View[List[Segment]]], unframed: bool, deadline_ns: u64) -> Result[(), Error] waits {
     if c.phase != Idle {
         return Error(State)
     }
@@ -686,7 +491,7 @@ fn start_parts(mut c: Connection, authority: Option[View[String]], method: Strin
             Some(name) => name,
             None => view c.authority,
         }
-        encode_head(mut c.encoding, mut marks, host_name, method, target, headers, upload, body, unframed)?
+        http_request.encode_head(mut c.encoding, mut marks, host_name, method, target, headers, upload, body, unframed)?
     }
     c.close_after = encoded.close
     c.phase = Closed
@@ -750,11 +555,11 @@ pub fn write_segments(mut c: Connection, segments: List[Segment]) -> Result[(), 
     check_deadline(mut c)?
     list.clear(mut c.wire.head.raw)
     let mut marks: List[u64] = list.new()
-    let protected = sealed(segments)
+    let protected = http_request.sealed(segments)
     if protected {
         // The size goes before the line end, over the chunk's data.
-        text(mut c.wire.head.raw, "\r\n")?
-        mark(mut marks, 0, 3, 2, 0)
+        http_request.text(mut c.wire.head.raw, "\r\n")?
+        http_request.mark(mut marks, 0, 3, 2, 0)
     } else {
         let mut n = 0u64
         for segment in segments {
@@ -762,11 +567,11 @@ pub fn write_segments(mut c: Connection, segments: List[Segment]) -> Result[(), 
                 n += list.len(data)
             }
         }
-        number(mut c.wire.head.raw, n, 16)?
-        text(mut c.wire.head.raw, "\r\n")?
+        http_request.number(mut c.wire.head.raw, n, 16)?
+        http_request.text(mut c.wire.head.raw, "\r\n")?
     }
     let data_at = list.len(c.wire.head.raw)
-    let count = body_segments(mut c.wire.head.raw, mut marks, segments, 0)?
+    let count = http_request.body_segments(mut c.wire.head.raw, mut marks, segments, 0)?
     // Only plain bytes keep the size from being zero, which ends the body.
     if list.len(c.wire.head.raw) == data_at {
         return Error(InvalidRequest)
@@ -774,7 +579,7 @@ pub fn write_segments(mut c: Connection, segments: List[Segment]) -> Result[(), 
     if protected {
         let _ = list.set(mut marks, 3, list.len(c.wire.head.raw))
     }
-    text(mut c.wire.head.raw, "\r\n")?
+    http_request.text(mut c.wire.head.raw, "\r\n")?
     c.phase = Closed
     if protected {
         let mut secrets: List[Secret] = list.with_capacity(count)
@@ -912,6 +717,52 @@ pub fn reusable(c: Connection) -> bool {
     c.phase == Idle
 }
 
+/// Whether the connection is reusable and holds no received byte past its last
+/// response: the boundary at which a pool may park it (HTTP-18).
+pub fn drained(c: Connection) -> bool {
+    c.phase == Idle && c.wire.at == list.len(c.wire.input)
+}
+
+/// Whether a receive on the connection would wait: no byte, end or error is pending.
+/// It polls once at the current time on the connection's clock and consumes nothing
+/// (HTTP-18). A served Net answers a deadline already past without asking its server.
+pub fn quiet(mut c: Connection) -> bool waits {
+    match host.recv_ready(mut c.input, At(c.clock, host.mono_ns(c.clock) + 1)) {
+        Error(TimedOut) => true,
+        _ => false,
+    }
+}
+
+/// Ends a response whose body has no byte left to receive, as a read of its end
+/// would, and returns true. A body with bytes to come is left as it was.
+pub fn end_empty(mut c: Connection) -> bool {
+    if c.phase != Download {
+        return false
+    }
+    let current = replace(mut c.wire.body, None)
+    let Some(take d) = take current else {
+        return false
+    }
+    let mut decoder = take d
+    let none: Bytes = list.new()
+    if let Done = http.decode(mut decoder, none) {
+        c.response_fresh = false
+        c.phase = if c.wire.head.persistent && !c.close_after {
+            Idle
+        } else {
+            Closed
+        }
+        return true
+    }
+    c.wire.body = Some(take decoder)
+    false
+}
+
+/// A copy of the response head, charged where it is made, that outlives the connection.
+pub fn copy_head(c: Connection) -> ResponseHead {
+    ResponseHead(raw: clone(c.wire.head.raw), parsed: c.wire.head.parsed, persistent: c.wire.head.persistent)
+}
+
 pub fn close(take c: Connection) {}
 
 pub fn response_started(c: Connection) -> bool {
@@ -944,20 +795,32 @@ pub type Limits: send {
     redirects: Redirects,
     body_max: u64,
     max_window: u64,
-    idle_max: u16,
-    idle_per_origin: u16,
+    conns_max: u16,
+    waiters_max: u16,
     idle_ns: u64,
     decode: bool
 }
 
 pub fn limits(body_max: u64) -> Limits {
-    Limits(redirects: Follow(10), body_max, max_window: 8388608, idle_max: 100, idle_per_origin: 2, idle_ns: 90000000000, decode: true)
+    Limits(redirects: Follow(10), body_max, max_window: 8388608, conns_max: 100, waiters_max: 256, idle_ns: 90000000000, decode: true)
+}
+
+pub type Pool = http_fetch.Pool
+
+pub fn pool(n: Net, c: Clock, tasks: Tasks, take trust: Trust, cfg: Limits) -> Result[Pool, Capacity] {
+    http_fetch.pool(n, c, tasks, take trust, cfg)
 }
 
 pub type Client = http_fetch.Client
 
-pub fn client(n: Net, c: Clock, take trust: Trust, cfg: Limits) -> Client {
-    http_fetch.client(n, c, take trust, cfg)
+pub fn handle(p: Pool) -> Client {
+    http_fetch.handle(p)
+}
+
+pub type Endpoint = http_fetch.Endpoint
+
+pub fn endpoint(cl: Client, base_url: String) -> Result[Endpoint, FetchError] {
+    http_fetch.endpoint(cl, base_url)
 }
 
 pub type Fetch: send {
@@ -967,16 +830,35 @@ pub type Fetch: send {
     body: List[Segment]
 }
 
+pub type Call: send {
+    method: String,
+    target: String,
+    headers: List[Header],
+    body: List[Segment]
+}
+
 pub type ContentCoding: key + send = Gzip | Deflate | Zstd
 
 pub type CodingError: send = Unsupported | Flate(flate.FlateError) | Zstd(zstd.ZstdError)
 
-pub type FetchError: send = Http(Error) | Url(uri.Error) | Scheme | UserInfo | Resolve(NetError) | NoAddress | Location | TooManyRedirects | CrossOriginSecret | Coding(CodingError)
+pub type FetchError: send = Http(Error) | Url(uri.Error) | Scheme | UserInfo | Resolve(NetError) | NoAddress | Location | TooManyRedirects | CrossOriginSecret | CrossOrigin | Coding(CodingError) | Busy | Gone
 
 pub type Response = http_fetch.Response
 
-pub fn fetch(mut cl: Client, req: Fetch, deadline_ns: u64) -> Result[Response, FetchError] waits {
-    http_fetch.fetch(mut cl, req, deadline_ns)
+pub fn fetch(cl: Client, req: Fetch, deadline_ns: u64) -> Result[Response, FetchError] waits {
+    http_fetch.fetch(cl, req, deadline_ns)
+}
+
+pub fn call(e: Endpoint, req: Call, deadline_ns: u64) -> Result[Response, FetchError] waits {
+    http_fetch.call(e, req, deadline_ns)
+}
+
+pub fn fetch_all(cl: Client, req: Fetch, mut into: Bytes, deadline_ns: u64) -> Result[ResponseHead, FetchError] waits {
+    http_fetch.fetch_all(cl, req, mut into, deadline_ns)
+}
+
+pub fn get(cl: Client, url: String, mut into: Bytes, deadline_ns: u64) -> Result[u16, FetchError] waits {
+    http_fetch.get(cl, url, mut into, deadline_ns)
 }
 
 pub fn fetch_head(r: Response) -> View[ResponseHead] in r {
@@ -993,8 +875,4 @@ pub fn fetch_coding(r: Response) -> Option[ContentCoding] {
 
 pub fn fetch_read(mut r: Response, mut into: Bytes) -> Result[u64, FetchError] waits {
     http_fetch.read(mut r, mut into)
-}
-
-pub fn fetch_done(mut cl: Client, take r: Response) {
-    http_fetch.done(mut cl, take r)
 }

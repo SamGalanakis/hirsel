@@ -529,6 +529,7 @@ pub fn due(mut l: Losses, now_ns: u64, rtt_ns: Option[u64], max: u32, mut pairs:
 
 pub fn keyframes(fir: bool, interval_ns: u64) -> Keyframes
 pub fn want(mut k: Keyframes, why: Why, now_ns: u64) -> Option[Request]
+pub fn set_interval(mut k: Keyframes, interval_ns: u64)
 pub fn keyframe_seen(mut k: Keyframes)
 ```
 
@@ -574,6 +575,9 @@ whether the upstream peer negotiated `ccm fir`.
 - A FIR request is **new** when no FIR is outstanding: it takes the next command sequence
   number, mod 256. A **repeat**, sent when `interval_ns` passed with the request still
   outstanding, carries the same number, as RFC 5104 §4.3.1.1 requires.
+- `set_interval` changes the interval in place, as the caller's round-trip estimate moves.
+  The outstanding request and its FIR command sequence number are kept, and the next repeat
+  is due at the last send plus the new interval.
 - `keyframe_seen` ends the outstanding request. The next `want` is new and goes at once.
 
 The caller detects keyframes with `media_bits` and tells `Keyframes`. Which subscribers
@@ -1331,8 +1335,10 @@ written here and repeated in the law's comment.
   §6.4.1, by hand.
 - **`keyframe_coalesce` (RTP-6).** Interval 200 ms, `fir` set. `want(Switch)` at 0, 10 and
   50 ms answers `Fir(0)`, `None`, `None`. At 210 ms it answers `Fir(0)` again (repeat, same
-  number). After `keyframe_seen`, `want(Switch)` at 220 ms answers `Fir(1)`. After
-  `keyframe_seen`, `want(Loss)` at 500 ms answers `Pli`, and `want(Switch)` at 510 ms answers
+  number). `set_interval` to 100 ms at 250 ms: `want(Switch)` at 300 ms answers `None`, and at
+  310 ms answers `Fir(0)` (a repeat, 100 ms after 210). After `keyframe_seen`,
+  `want(Switch)` at 320 ms answers `Fir(1)`. After
+  `keyframe_seen` again, `want(Loss)` at 500 ms answers `Pli`, and `want(Switch)` at 510 ms answers
   `None` (covered). With `fir` clear, `want(Switch)` answers `Pli`. *Oracle:* RFC 5104
   §§4.3.1.1–4.3.1.2, by hand.
 - **`history_lookup` (RTP-7).** Four slots. Put indices 1 to 6. `get(2)` is `Missing`

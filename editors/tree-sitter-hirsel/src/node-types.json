@@ -59,6 +59,10 @@
           "named": true
         },
         {
+          "type": "bytes_expression",
+          "named": true
+        },
+        {
           "type": "call_expression",
           "named": true
         },
@@ -215,6 +219,10 @@
         },
         {
           "type": "byte_string_literal",
+          "named": true
+        },
+        {
+          "type": "bytes_expression",
           "named": true
         },
         {
@@ -379,6 +387,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -524,6 +536,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -715,6 +731,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -865,6 +885,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -1088,6 +1112,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -1249,6 +1277,10 @@
         },
         {
           "type": "byte_string_literal",
+          "named": true
+        },
+        {
+          "type": "bytes_expression",
           "named": true
         },
         {
@@ -1419,6 +1451,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -1603,6 +1639,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -1711,6 +1751,22 @@
     }
   },
   {
+    "type": "bytes_expression",
+    "named": true,
+    "fields": {
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "call_expression",
     "named": true,
     "fields": {
@@ -1744,6 +1800,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -2155,6 +2215,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -2471,6 +2535,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -2663,6 +2731,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -3048,6 +3120,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -3214,6 +3290,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -3349,6 +3429,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -3557,6 +3641,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -3783,6 +3871,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -4031,6 +4123,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -4204,6 +4300,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -4353,6 +4453,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -4536,6 +4640,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -4685,6 +4793,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -4873,6 +4985,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -5106,6 +5222,10 @@
         },
         {
           "type": "byte_string_literal",
+          "named": true
+        },
+        {
+          "type": "bytes_expression",
           "named": true
         },
         {
@@ -5500,6 +5620,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -5654,6 +5778,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {
@@ -5833,6 +5961,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -5975,6 +6107,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -6108,6 +6244,10 @@
         },
         {
           "type": "byte_string_literal",
+          "named": true
+        },
+        {
+          "type": "bytes_expression",
           "named": true
         },
         {
@@ -6422,6 +6562,10 @@
             "named": true
           },
           {
+            "type": "bytes_expression",
+            "named": true
+          },
+          {
             "type": "call_expression",
             "named": true
           },
@@ -6668,6 +6812,10 @@
           },
           {
             "type": "byte_string_literal",
+            "named": true
+          },
+          {
+            "type": "bytes_expression",
             "named": true
           },
           {

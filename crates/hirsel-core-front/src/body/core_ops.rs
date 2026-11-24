@@ -6,6 +6,7 @@ mod net_error;
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
+mod charge;
 mod conn;
 mod flow;
 mod log;
@@ -74,6 +75,7 @@ pub(crate) enum Kernel {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Lane {
+    Charge(charge::Price),
     Numeric,
     Value,
     Language,
@@ -98,6 +100,16 @@ macro_rules! operations {
 }
 
 operations! {
+    ("charge", "round", Lane::Charge(charge::Price::Round), "A", "bytes-charge-2132", false),
+    ("charge", "boxed", Lane::Charge(charge::Price::Round), "A", "bytes-charge-2132", false),
+    ("charge", "counted", Lane::Charge(charge::Price::Counted), "A", "bytes-charge-2132", false),
+    ("charge", "shared", Lane::Charge(charge::Price::Shared), "A", "bytes-charge-2132", false),
+    ("charge", "seq", Lane::Charge(charge::Price::Seq), "A", "bytes-charge-2132", false),
+    ("charge", "map", Lane::Charge(charge::Price::Map), "A", "bytes-charge-2132", false),
+    ("charge", "channel", Lane::Charge(charge::Price::Channel), "A", "bytes-charge-2132", false),
+    ("charge", "task", Lane::Charge(charge::Price::Task), "A", "bytes-charge-2132", false),
+    ("charge", "block", Lane::Charge(charge::Price::Block), "A", "bytes-charge-2132", false),
+    ("charge", "port", Lane::Charge(charge::Price::Port), "A", "bytes-charge-2132", false),
     ("bytebuf", "append_inline", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "freeze", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "as_bytes", Lane::Value, "A", "http-b1-1204", false),
@@ -520,7 +532,7 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
         for (i, entry) in OPERATIONS.iter().enumerate() {
             if matches!(
                 entry.lane,
-                Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_)
+                Lane::Runtime(_) | Lane::PendingCode | Lane::Simd(_) | Lane::Charge(_)
             ) {
                 bound.entry((entry.module, entry.name)).or_insert(i as u16);
             }
@@ -608,6 +620,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let entry = &OPERATIONS[binding as usize];
         match entry.lane {
+            Lane::Charge(price) => Some(self.charge_value(price, vals, result, n)),
             Lane::Runtime(kernel) => Some(self.runtime_kernel(kernel, f, types, vals, result, n)),
             Lane::PendingCode => self.pending_code(entry, f, types, vals, result, n),
             _ => None,
@@ -1351,101 +1364,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         })
-    }
-
-    /// Saturated exact charge. Overflow is a recoverable refusal by the runtime;
-    /// it is not a source Overflow failure while building the Capacity record.
-    fn runtime_charge(
-        &mut self,
-        count: ValueId,
-        size: ValueId,
-        base: ValueId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        self.runtime_charge_parts(count, size, base, false, n)
-            .map(|p| p.0)
-    }
-
-    fn runtime_charge_parts(
-        &mut self,
-        count: ValueId,
-        size: ValueId,
-        base: ValueId,
-        round: bool,
-        n: NodeId,
-    ) -> Option<(ValueId, ValueId)> {
-        let u = Ty::Scalar(Scalar::U64);
-        let product = self.value(u);
-        let mul_overflow = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::IntArith {
-                result: product,
-                flag: Some(mul_overflow),
-                op: ArithOp::Mul,
-                mode: ArithMode::Checked,
-                left: count,
-                right: size,
-            },
-            n,
-        );
-        let total = self.value(u);
-        let add_overflow = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::IntArith {
-                result: total,
-                flag: Some(add_overflow),
-                op: ArithOp::Add,
-                mode: ArithMode::Checked,
-                left: product,
-                right: base,
-            },
-            n,
-        );
-        let overflow = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Binary {
-                result: overflow,
-                op: BinaryOp::BitOr,
-                left: mul_overflow,
-                right: add_overflow,
-                fail: None,
-            },
-            n,
-        );
-        let total = if round {
-            let mask = self.konst(u, !7, n)?;
-            let aligned = self.value(u);
-            self.inst(
-                Inst::Binary {
-                    result: aligned,
-                    op: BinaryOp::BitAnd,
-                    left: total,
-                    right: mask,
-                    fail: None,
-                },
-                n,
-            );
-            aligned
-        } else {
-            total
-        };
-        let max = self.konst(u, u64::MAX, n)?;
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let join = self.new_block(&[u]);
-        self.runtime_branch(overflow, yes, no, n);
-        self.start(yes);
-        self.jump(join, &[max], n);
-        self.start(no);
-        self.jump(join, &[total], n);
-        self.start(join);
-        Some((
-            self.b.blocks[join.index()]
-                .params
-                .get(&self.b.pools.values)
-                .expect("the join block just built holds its parameter")[0],
-            overflow,
-        ))
     }
 
     pub(super) fn runtime_capacity(

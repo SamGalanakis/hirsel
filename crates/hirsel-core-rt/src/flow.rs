@@ -310,12 +310,6 @@ pub struct StageCharge {
     pub item_steps: u64,
 }
 
-fn port_charge(cap: u32, size: u64) -> Option<u64> {
-    size.checked_add(16)?
-        .checked_mul(u64::from(cap))?
-        .checked_add(64)
-}
-
 /// The ordered graph. Items are plain, so preparing a stage's call can view
 /// the head until the step commits its take. Each stage owns its callback and
 /// state, so preparing a result reads nothing any other stage can observe.
@@ -417,7 +411,8 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
         item_size: u64,
         physical: usize,
     ) -> Result<Endpoint, WireError> {
-        let port = self.connect(to, cap, physical, context, port_charge(cap, item_size))?;
+        let charge = hirsel_core_layout::charge::port(u64::from(cap), item_size);
+        let port = self.connect(to, cap, physical, context, charge)?;
         self.writers.push(port);
         Ok(self.endpoint(port))
     }
@@ -446,11 +441,12 @@ impl<T, Q: Fifo<T>> Reference<T, Q> {
     where
         F: FnMut(&mut crate::Context, u64, &T) -> Result<Option<T>, Halt> + 'static,
     {
-        let total = port_charge(cap, charge.output).and_then(|port| {
-            port.checked_add(charge.working)?
-                .checked_add(charge.state)?
-                .checked_add(320)
-        });
+        let total =
+            hirsel_core_layout::charge::port(u64::from(cap), charge.output).and_then(|port| {
+                port.checked_add(charge.working)?
+                    .checked_add(charge.state)?
+                    .checked_add(320)
+            });
         let output = self.connect(to, cap, physical, context, total)?;
         let input = self.merge();
         let mut body = make();

@@ -164,6 +164,12 @@ fn item_text(item: &Item) -> String {
             NodeKind::Attribute => roles[range.end - 1].line_after = true,
             NodeKind::Parameters => roles[range.start].attach = true,
             NodeKind::Ascription => roles[node.token.unwrap().0 as usize].spaced_colon = true,
+            NodeKind::BytesOf => {
+                let open = (range.start + 1..range.end)
+                    .find(|&t| !tree.tokens[t].kind.is_trivia())
+                    .unwrap();
+                roles[open].attach = true;
+            }
             NodeKind::RepeatArray => {
                 let end = tree.node(children[0]).origin.tokens.end as usize;
                 let semicolon = (end..range.end)

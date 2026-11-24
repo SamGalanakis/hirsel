@@ -272,7 +272,7 @@ admit what the logical charges would refuse.
 
 ### MEM-33: Reading a logical charge
 
-*Unbuilt (admission-plans-2113).* A program reads the logical charges of MEM-24 from the
+A program reads the logical charges of MEM-24 from the
 type, never from a number it copied. Two pieces do it, and nothing else prices a type.
 
 **`bytes[T]`** is an expression of type `u64` whose value is `T`'s logical size under the
@@ -288,15 +288,13 @@ resource type counts 8 here, as wherever it is held; its block is priced by `cha
 below. `bytes[T]` is a source of truth for what a type counts and never a prediction of an
 engine's layout: an engine may hold fewer bytes (MEM-28).
 
-These examples are `text` until the parser has the form; they become `hirsel` fences with it.
-
-```text
+```hirsel
 type Pair { a: u64, b: u32 }
 const PAIR: u64 = bytes[Pair]                                // 12
 const SLOT: u64 = bytes[Option[Pair]]                        // 20: 8 + 12
 fn item[T](n: u64) -> u64 { n * bytes[T] }
 ```
-```text
+```hirsel
 const BAD: u64 = bytes[List]                                 // refused: LANG-12, List takes a type argument
 ```
 
@@ -305,7 +303,7 @@ are the only place in any package where a recipe's own constants (the 256-byte t
 the 32-byte cause cell, the 64-byte channel base, Map's 16-byte entry overhead, the
 rounding to 8) are written, and each returns `None` on overflow:
 
-```hirsel unbuilt
+```hirsel core
 pub fn round(n: u64) -> Option[u64]                                    // up to a multiple of 8
 pub fn boxed(payload: u64) -> Option[u64]                              // Box[T]: round(payload)
 pub fn counted(payload: u64) -> Option[u64]                            // Rc, Arc, Unique node: round(payload + 8)

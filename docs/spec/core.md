@@ -32,7 +32,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `argon2` | unbuilt: `id` | SEM-8, MEM-30; [Argon2id](#argon2id) |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
-| `charge` | unbuilt: `round`, `boxed`, `counted`, `shared`, `seq`, `map`, `channel`, `task`, `block`, `port` | MEM-24, MEM-33 |
+| `charge` | [charge](../../core/core/charge.hirsel) | MEM-24, MEM-33 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
 | `deque` | [deque](../../core/core/deque.hirsel) | Deques and heaps, MEM-24 |
 | `heap` | [heap](../../core/core/heap.hirsel) | Deques and heaps, MEM-24 |

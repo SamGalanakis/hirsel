@@ -42,6 +42,7 @@ use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, ch
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use simd::SimdCall;
 mod admission;
+use admission::held_size;
 mod anchors;
 mod builtins;
 mod bytes;
@@ -2872,6 +2873,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 self.expr_into_field(c[0], expect(ty), address, fresh)
             }
             NodeKind::Literal => self.literal(n, want, false),
+            NodeKind::BytesOf => {
+                let ty = self.ty(c[0]);
+                if mentions_error(&self.t, ty) {
+                    return (ERROR, None);
+                }
+                (scalar(Scalar::U64), self.layout_size(ty, true, n))
+            }
             NodeKind::Unit => (UNIT, None),
             NodeKind::Path => self.path(n, want),
             NodeKind::Block => self.block(n, want),
@@ -3036,27 +3044,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.synth[(n.0 - self.item.range.nodes.start) as usize] = if r { 1 } else { 2 };
         r
     }
-}
-
-/// The bytes a value of a row with `repr` and `recipe` takes where it is held (a
-/// local, a field, an element, a copy), or with `logical` what it counts in a
-/// portable size (FORM #116). A resource's or a region value's holder is its block
-/// pointer, and a region holder counts as a `RegionRef` field, 16 (MEM-24); only
-/// allocating the value takes its block. The emitter and the generic materialiser
-/// both ask here, so a rigid `T` and its instance cannot disagree.
-pub(super) fn held_size(repr: LRepr, recipe: &Recipe, logical: bool) -> Result<u64, &'static str> {
-    Ok(match repr {
-        LRepr::Resource => hirsel_core_layout::POINTER,
-        LRepr::Region if logical => 16,
-        LRepr::Region => hirsel_core_layout::POINTER,
-        _ if logical => recipe
-            .logical_size
-            .ok_or("logical size of a compact generic value is not built")?,
-        _ => match &recipe.layout {
-            Layout::Fixed(f) => f.size,
-            Layout::Compact(_) => return Err("copying a compact generic value is not built"),
-        },
-    })
 }
 
 #[cfg(test)]

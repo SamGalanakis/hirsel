@@ -37,14 +37,32 @@ pub const PROVIDE_CELL: u64 = 32;
 pub const EXEC_HANDLE: u64 = 8;
 /// Logical size of a Map entry's bookkeeping beside its key and value.
 pub const MAP_ENTRY_EXTRA: u64 = 16;
+/// A flow port's bookkeeping, besides its slots.
+pub const FLOW_PORT_BASE: u64 = 64;
+/// A flow port slot's bookkeeping, besides its item.
+pub const FLOW_SLOT_EXTRA: u64 = 16;
+/// The count in an Rc, Arc or Unique node.
+pub const COUNTED_EXTRA: u64 = 8;
+/// The low bits cleared when rounding a charge to a multiple of 8.
+pub const ROUND_MASK: u64 = 7;
+
+/// Logical charge for a held value. Resource and region blocks are admitted
+/// separately, so their holders only count the resource or region reference.
+pub fn held(repr: crate::Repr, recipe: &crate::Recipe) -> Option<u64> {
+    match repr {
+        crate::Repr::Resource => Some(crate::POINTER),
+        crate::Repr::Region => Some(16),
+        _ => recipe.logical_size,
+    }
+}
 /// Growth that doubles capacity starts from this many elements.
 pub const FIRST_GROWTH: u64 = 4;
 
 /// `n` rounded up to a multiple of 8. `None` when the rounding overflows u64; the
 /// caller's admission then fails with `Capacity` (no limit holds such a charge).
 pub const fn round8(n: u64) -> Option<u64> {
-    match n.checked_add(7) {
-        Some(m) => Some(m & !7),
+    match n.checked_add(ROUND_MASK) {
+        Some(m) => Some(m & !ROUND_MASK),
         None => None,
     }
 }
@@ -90,7 +108,7 @@ pub const fn map(capacity: u64, key: u64, value: u64) -> Option<u64> {
 
 /// An `Rc` or `Arc` node: payload plus its count, rounded up to 8.
 pub const fn counted(payload: u64) -> Option<u64> {
-    match payload.checked_add(8) {
+    match payload.checked_add(COUNTED_EXTRA) {
         Some(n) => round8(n),
         None => None,
     }
@@ -169,6 +187,13 @@ pub const fn channel(capacity: u64, item: u64) -> Option<u64> {
         Some(n) => n.checked_add(CHANNEL_BASE),
         None => None,
     }
+}
+
+/// A flow port: a record and `capacity` slots, each holding an item.
+pub fn port(capacity: u64, item: u64) -> Option<u64> {
+    item.checked_add(FLOW_SLOT_EXTRA)?
+        .checked_mul(capacity)?
+        .checked_add(FLOW_PORT_BASE)
 }
 
 /// The capacity a doubling growth step chooses: `max(4, 2 * current)`, and at least

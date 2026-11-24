@@ -69,7 +69,7 @@ module.exports = grammar({
   externals: $ => [
     $.line_comment, $.raw_string_literal, $.raw_byte_string_literal,
     $._expression_newline, $._entry_newline, $._exit_newline, $._trivia_newline,
-    $._item_newline, $.steps_mode, $._projection_dot, $._error_recovery,
+    $._item_newline, $.steps_mode, $._projection_dot, $._error_recovery, $._bytes_mode,
   ],
 
   conflicts: $ => [
@@ -198,7 +198,9 @@ module.exports = grammar({
     arguments: $ => seq('(', commaList($._argument), ')'),
     _argument: $ => choice($._expression, $.named_argument, $.marked_argument),
     named_argument: $ => seq(field('name', $.identifier), ':', field('value', $._expression)),
-    marked_argument: $ => seq(field('mode', choice('bytes', $.steps_mode)), field('value', $._expression)),
+    marked_argument: $ => seq(
+      field('mode', choice(alias($._bytes_mode, 'bytes'), $.steps_mode)), field('value', $._expression),
+    ),
     index_expression: $ => prec.left(seq(
       field('object', $._postfix), '[', field('index', $._expression), ']',
     )),
@@ -215,13 +217,14 @@ module.exports = grammar({
     mapper_arm: $ => seq('|', field('pattern', $._pattern), '|', field('value', $._prefix)),
 
     _primary: $ => choice(
-      $._literal, $.identifier, $.parenthesized_expression, $.ascription_expression,
+      $._literal, $.identifier, $.parenthesized_expression, $.ascription_expression, $.bytes_expression,
       $.tuple_expression, $.array_expression, $.repeat_array_expression,
       $.block, $.labelled_expression, $._loop, $.if_expression, $.match_expression,
       $.closure, $.region_expression, $.bound_expression,
     ),
     parenthesized_expression: $ => seq('(', $._expression, ')'),
     ascription_expression: $ => seq('(', field('value', $._expression), ':', field('type', $.type), ')'),
+    bytes_expression: $ => seq('bytes', '[', field('type', $.type), ']'),
     tuple_expression: $ => seq('(', optional(seq($._expression, ',', commaList($._expression))), ')'),
     array_expression: $ => seq('[', commaList($._expression), ']'),
     repeat_array_expression: $ => seq('[', field('value', $._expression), ';',

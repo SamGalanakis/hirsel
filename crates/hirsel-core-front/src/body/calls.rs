@@ -2268,7 +2268,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(yes);
     }
     /// The overflow flag decides which ordinary Option variant is constructed.
-    fn numeric_option(
+    pub(super) fn numeric_option(
         &mut self,
         ty: TyId,
         payload: TyId,

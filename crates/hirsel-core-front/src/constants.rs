@@ -1,5 +1,7 @@
 //! LANG-20 constants: declaration-only values evaluated in dependency order.
 //! Values share one append-only field arena; no expression owns a child vector.
+mod bytes;
+
 use crate::*;
 use hirsel_core_ir::Ty;
 use hirsel_core_layout::Scalar;
@@ -350,6 +352,7 @@ impl ConstCx<'_, '_> {
                 data: ConstData::Unit,
             },
             NodeKind::Literal => self.literal(n, want, false)?,
+            NodeKind::BytesOf => self.bytes_of(kids[0])?,
             NodeKind::Path => {
                 let Some(use_) = self.p.resolved(self.at, n) else {
                     return None;

@@ -4,7 +4,7 @@
 enum Token {
   LINE_COMMENT, RAW_STRING, RAW_BYTE_STRING,
   EXPRESSION_NEWLINE, ENTRY_NEWLINE, EXIT_NEWLINE, TRIVIA_NEWLINE,
-  ITEM_NEWLINE, STEPS_MODE, PROJECTION_DOT, ERROR_RECOVERY,
+  ITEM_NEWLINE, STEPS_MODE, PROJECTION_DOT, ERROR_RECOVERY, BYTES_MODE,
 };
 
 static void advance(TSLexer *lexer) { lexer->advance(lexer, false); }
@@ -33,10 +33,6 @@ static bool comment(TSLexer *lexer) {
 
 static bool raw_string(TSLexer *lexer, bool bytes) {
   advance(lexer);
-  if (bytes) {
-    if (lexer->lookahead != 'r') return false;
-    advance(lexer);
-  }
   unsigned hashes = 0;
   while (lexer->lookahead == '#') {
     advance(lexer);
@@ -125,7 +121,15 @@ bool tree_sitter_hirsel_external_scanner_scan(void *payload, TSLexer *lexer, con
   while (lexer->lookahead == ' ' || lexer->lookahead == '\t') lexer->advance(lexer, true);
   int32_t c = lexer->lookahead;
   if (c == 'r' && valid[RAW_STRING]) return raw_string(lexer, false);
-  if (c == 'b' && valid[RAW_BYTE_STRING]) return raw_string(lexer, true);
+  if (c == 'b' && (valid[RAW_BYTE_STRING] || valid[BYTES_MODE])) {
+    advance(lexer);
+    if (lexer->lookahead == 'r' && valid[RAW_BYTE_STRING]) return raw_string(lexer, true);
+    if (!valid[BYTES_MODE] || valid[ERROR_RECOVERY] || !keyword(lexer, "ytes")) return false;
+    lexer->mark_end(lexer);
+    if (next_token(lexer) == '[') return false;
+    lexer->result_symbol = BYTES_MODE;
+    return true;
+  }
   if (c == 's' && valid[STEPS_MODE] && !valid[ERROR_RECOVERY]) {
     if (!keyword(lexer, "steps")) return false;
     lexer->mark_end(lexer);

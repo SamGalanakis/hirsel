@@ -1,0 +1,216 @@
+fn qoi_hash(pixel: u32) -> u64 {
+    let r = pixel >> 24
+    let g = (pixel >> 16) & 255
+    let b = (pixel >> 8) & 255
+    let a = pixel & 255
+    int.widen((3 * r + 5 * g + 7 * b + 11 * a) & 63)
+}
+
+fn qoi_delta(pixel: u32, r: u8, g: u8, b: u8) -> u32 {
+    let pr: u8 = int.narrow(pixel >> 24)
+    let pg: u8 = int.narrow((pixel >> 16) & 255)
+    let pb: u8 = int.narrow((pixel >> 8) & 255)
+    let nr: u32 = int.widen(int.wrapping_add(pr, r))
+    let ng: u32 = int.widen(int.wrapping_add(pg, g))
+    let nb: u32 = int.widen(int.wrapping_add(pb, b))
+    (nr << 24) | (ng << 16) | (nb << 8) | (pixel & 255)
+}
+
+pub fn decode_qoi(input: Bytes, limits: Limits) -> Result[Raster, Error] {
+    if list.len(input) > limits.max_bytes {
+        return Error(ByteLimit)
+    }
+    match (bound steps limits.max_steps {
+        decode_qoi_inner(input, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn decode_qoi_inner(input: Bytes, limits: Limits) -> Result[Raster, Error] {
+    let header = probe_header(input, limits)?
+    if let Qoi = header.format {} else {
+        return Error(UnknownFormat)
+    }
+    let n = list.len(input)
+    if n < 22 {
+        return Error(Truncated)
+    }
+    let last = n - 8
+    let endmark: u64 = list.word_be(input, last)
+    if endmark != 1 {
+        return Error(Malformed)
+    }
+    let size = rgba_size(header.width, header.height)?
+    // An encoded byte can describe at most 62 pixels.
+    let count = size / 4
+    if last - 14 < count / 62 + (if count % 62 != 0 {
+        1
+    } else {
+        0
+    }) {
+        return Error(Malformed)
+    }
+    let mut rgba = alloc_bytes(size)?
+    let mut table: Inline[u32, 64] =[0; 64]
+    let mut pixel = 255u32
+    let mut at = 14u64
+    while at < last && list.len(rgba) < size {
+        let tag = input[at]
+        at += 1
+        let mut run = 1u64
+        if tag == 0xfe {
+            if last - at < 3 {
+                return Error(Truncated)
+            }
+            let r: u32 = int.widen(input[at])
+            let g: u32 = int.widen(input[at + 1])
+            let b: u32 = int.widen(input[at + 2])
+            pixel = (r << 24) | (g << 16) | (b << 8) | (pixel & 255)
+            at += 3
+        } else if tag == 0xff {
+            if last - at < 4 {
+                return Error(Truncated)
+            }
+            pixel = list.word_be(input, at)
+            at += 4
+        } else {
+            match tag >> 6 {
+                0 => {
+                    let index: u64 = int.widen(tag & 63)
+                    pixel = table[index]
+                },
+                1 => {
+                    let r = int.wrapping_sub((tag >> 4) & 3, 2)
+                    let g = int.wrapping_sub((tag >> 2) & 3, 2)
+                    let b = int.wrapping_sub(tag & 3, 2)
+                    pixel = qoi_delta(pixel, r, g, b)
+                },
+                2 => {
+                    if at == last {
+                        return Error(Truncated)
+                    }
+                    let extra = input[at]
+                    at += 1
+                    let g = int.wrapping_sub(tag & 63, 32)
+                    let r = int.wrapping_add(g, int.wrapping_sub(extra >> 4, 8))
+                    let b = int.wrapping_add(g, int.wrapping_sub(extra & 15, 8))
+                    pixel = qoi_delta(pixel, r, g, b)
+                },
+                _ => {
+                    run = int.widen((tag & 63) + 1)
+                },
+            }
+        }
+        if run > (size - list.len(rgba)) / 4 {
+            return Error(Malformed)
+        }
+        table[qoi_hash(pixel)] = pixel
+        for _ in 0u64 .. run {
+            list.put_word_be(mut rgba, pixel)
+        }
+    }
+    if at != last || list.len(rgba) != size {
+        return Error(Malformed)
+    }
+    Ok(Raster(width: header.width, height: header.height, rgba: take rgba))
+}
+
+pub fn encode_qoi(raster: Raster, linear: bool, limits: Limits) -> Result[Bytes, Error] {
+    match (bound steps limits.max_steps {
+        encode_qoi_inner(raster, linear, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn qoi_diff(value: u32, before: u32, shift: u32) -> i32 {
+    let a: i32 = int.narrow((value >> shift) & 255)
+    let b: i32 = int.narrow((before >> shift) & 255)
+    ((a - b + 128) & 255) - 128
+}
+
+fn encode_qoi_inner(raster: Raster, linear: bool, limits: Limits) -> Result[Bytes, Error] {
+    let n = check_raster(raster, limits)?
+    if limits.max_bytes < 22 {
+        return Error(ByteLimit)
+    }
+    let worst = if n / 4 > (limits.max_bytes - 22) / 5 {
+        limits.max_bytes
+    } else {
+        n / 4 * 5 + 22
+    }
+    let mut encoded = alloc_bytes(worst)?
+    list.append(mut encoded, b"qoif")
+    list.put_word_be(mut encoded, raster.width)
+    list.put_word_be(mut encoded, raster.height)
+    list.push(mut encoded, 4)
+    list.push(mut encoded, if linear {
+        1
+    } else {
+        0
+    })
+    let mut table: Inline[u32, 64] =[0; 64]
+    let mut prev = 255u32
+    let mut run = 0u8
+    for i in 0u64 .. n / 4 {
+        let pixel: u32 = list.word_be(raster.rgba, i * 4)
+        if pixel == prev {
+            run += 1
+            if run == 62 || i + 1 == n / 4 {
+                if list.len(encoded) >= worst - 8 {
+                    return Error(ByteLimit)
+                }
+                list.push(mut encoded, 0xc0 | (run - 1))
+                run = 0
+            }
+            continue
+        }
+        if run != 0 {
+            if list.len(encoded) >= worst - 8 {
+                return Error(ByteLimit)
+            }
+            list.push(mut encoded, 0xc0 | (run - 1))
+            run = 0
+        }
+        let slot = qoi_hash(pixel)
+        let r = qoi_diff(pixel, prev, 24)
+        let g = qoi_diff(pixel, prev, 16)
+        let b = qoi_diff(pixel, prev, 8)
+        let same_alpha = pixel & 255 == prev & 255
+        let size: u64 = if table[slot] == pixel {
+            1
+        } else if !same_alpha {
+            5
+        } else if r >= -2 && r < 2 && g >= -2 && g < 2 && b >= -2 && b < 2 {
+            1
+        } else if g >= -32 && g < 32 && r - g >= -8 && r - g < 8 && b - g >= -8 && b - g < 8 {
+            2
+        } else {
+            4
+        }
+        if size > worst - 8 - list.len(encoded) {
+            return Error(ByteLimit)
+        }
+        if table[slot] == pixel {
+            list.push(mut encoded, int.narrow(slot))
+        } else if size == 1 {
+            list.push(mut encoded, int.narrow(0x40 | ((r + 2) << 4) | ((g + 2) << 2) | (b + 2)))
+        } else if size == 2 {
+            list.push(mut encoded, int.narrow(0x80 | (g + 32)))
+            list.push(mut encoded, int.narrow(((r - g + 8) << 4) | (b - g + 8)))
+        } else if size == 4 {
+            list.push(mut encoded, 0xfe)
+            list.append(mut encoded, list.slice(raster.rgba, i * 4, i * 4 + 3))
+        } else {
+            list.push(mut encoded, 0xff)
+            list.put_word_be(mut encoded, pixel)
+        }
+        table[slot] = pixel
+        prev = pixel
+    }
+    list.put_word_be(mut encoded, 1u64)
+    Ok(take encoded)
+}

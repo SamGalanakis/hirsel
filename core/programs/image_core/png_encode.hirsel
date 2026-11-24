@@ -1,0 +1,89 @@
+pub fn encode_png(raster: Raster, level: u8, limits: Limits) -> Result[Bytes, Error] {
+    match (bound steps limits.max_steps {
+        encode_png_inner(raster, level, limits)
+    }) {
+        Ok(value) => value,
+        Error(_) => Error(WorkLimit),
+    }
+}
+
+fn encode_png_inner(raster: Raster, level: u8, limits: Limits) -> Result[Bytes, Error] {
+    let size = check_raster(raster, limits)?
+    if level > 9 || raster.width > 0x7fffffff || raster.height > 0x7fffffff {
+        return Error(Malformed)
+    }
+    let h: u64 = int.widen(raster.height)
+    let width: u64 = int.widen(raster.width)
+    let row = width * 4
+    if size > 0xffffffffffffffff - h || limits.max_bytes < 57 {
+        return Error(ByteLimit)
+    }
+    let n = size + h
+    let overhead = (n / 32768 + 1) * 5 + 6
+    let cap = limits.max_bytes - 57
+    let avoid_overflow = n > 0xffffffffffffffff - overhead
+    let capacity = if avoid_overflow {
+        cap
+    } else {
+        order.min(cap, n + overhead)
+    }
+    let mut filtered = alloc_bytes(n)?
+    for y in 0u64 .. h {
+        let start = y * row
+        list.push(mut filtered, if y == 0 {
+            1
+        } else {
+            4
+        })
+        for i in 0u64 .. row {
+            let at = start + i
+            let a = if i >= 4 {
+                raster.rgba[at - 4]
+            } else {
+                0
+            }
+            let base = if y == 0 {
+                a
+            } else {
+                let b = raster.rgba[at - row]
+                let c = if i >= 4 {
+                    raster.rgba[at - row - 4]
+                } else {
+                    0
+                }
+                png_paeth(a, b, c)
+            }
+            list.push(mut filtered, int.wrapping_sub(raster.rgba[at], base))
+        }
+    }
+    let mut encoder = std.flate.encoder(Zlib, level)
+    let mut compressed = alloc_bytes(capacity)?
+    let step = std.flate.encode_step(mut encoder, filtered, 0, n, mut compressed)
+    if step.consumed != n {
+        return Error(ByteLimit)
+    }
+    if !std.flate.finish_step(mut encoder, mut compressed).ended {
+        return Error(ByteLimit)
+    }
+    let packed = list.len(compressed)
+    if packed > 0x7fffffff {
+        return Error(ByteLimit)
+    }
+    let mut encoded = alloc_bytes(packed + 57)?
+    list.append(mut encoded, b"\x89PNG\x0d\x0a\x1a\x0a")
+    list.put_word_be(mut encoded, 13u32)
+    list.append(mut encoded, b"IHDR")
+    list.put_word_be(mut encoded, raster.width)
+    list.put_word_be(mut encoded, raster.height)
+    list.append(mut encoded, b"\x08\x06\x00\x00\x00")
+    let ihdr = std.crc32.update(0, encoded, 12, 29)
+    list.put_word_be(mut encoded, ihdr)
+    let count: u32 = int.narrow(packed)
+    list.put_word_be(mut encoded, count)
+    list.append(mut encoded, b"IDAT")
+    list.append(mut encoded, compressed)
+    let idat = std.crc32.update(0, encoded, 37, 41 + packed)
+    list.put_word_be(mut encoded, idat)
+    list.append(mut encoded, b"\x00\x00\x00\x00IEND\xae\x42\x60\x82")
+    Ok(take encoded)
+}

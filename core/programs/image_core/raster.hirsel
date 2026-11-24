@@ -1,0 +1,34 @@
+// Straight alpha RGBA8, in row order. Operations validate the byte count.
+pub type Raster {
+    width: u32,
+    height: u32,
+    rgba: Bytes
+}
+
+fn rgba_size(w: u32, h: u32) -> Result[u64, Error] {
+    let wide: u64 = int.widen(w)
+    let high: u64 = int.widen(h)
+    let count = wide * high
+    if count > 0x3fffffffffffffff {
+        Error(PixelLimit)
+    } else {
+        Ok(count * 4)
+    }
+}
+
+fn check_raster(r: Raster, limits: Limits) -> Result[u64, Error] {
+    check_size(r.width, r.height, 1, limits)?
+    let size_bytes = rgba_size(r.width, r.height)?
+    if list.len(r.rgba) != size_bytes {
+        return Error(Malformed)
+    }
+    Ok(size_bytes)
+}
+
+fn alloc_bytes(n: u64) -> Result[Bytes, Error] {
+    let mut size_bytes: Bytes = list.new()
+    match list.try_reserve(mut size_bytes, n) {
+        Ok(()) => Ok(take size_bytes),
+        Error(_) => Error(ByteLimit),
+    }
+}

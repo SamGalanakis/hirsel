@@ -1,5 +1,6 @@
 //! TLS-8 key derivation. This module has no language entry point. Only the
 //! protocol schedules supply labels and consume the output keys.
+use crate::secret_aead::AeadAlg;
 use ring::{digest, hkdf, hmac};
 use zeroize::Zeroizing;
 
@@ -162,6 +163,57 @@ pub enum Side {
     Server,
 }
 
+/// The packet keys computed for one send or receive epoch.
+pub struct Tls13PacketKeys {
+    payload: Zeroizing<[u8; 32]>,
+    iv: Zeroizing<[u8; 12]>,
+    header: Option<Zeroizing<[u8; 32]>>,
+    key_len: usize,
+}
+
+impl Tls13PacketKeys {
+    pub fn payload(&self) -> &[u8] {
+        &self.payload[..self.key_len]
+    }
+
+    pub fn iv(&self) -> [u8; 12] {
+        *self.iv
+    }
+
+    pub fn header(&self) -> Option<&[u8]> {
+        self.header.as_deref().map(|key| &key[..self.key_len])
+    }
+}
+
+impl DigestSecret {
+    fn packet_keys(&self, labels: Tls13Labels, algorithm: AeadAlg) -> Tls13PacketKeys {
+        let (key_label, iv_label, header_label): (&[u8], &[u8], Option<&[u8]>) = match labels {
+            Tls13Labels::Tls => (b"key", b"iv", None),
+            Tls13Labels::Dtls => (b"key", b"iv", Some(b"sn")),
+            Tls13Labels::Quic => (b"quic key", b"quic iv", Some(b"quic hp")),
+        };
+        let key_len = algorithm.algorithm().key_len();
+        let expand = |label, output: &mut [u8]| {
+            labels.expand(self.hash, self.as_bytes(), label, &[], output);
+        };
+        let mut payload = Zeroizing::new([0; 32]);
+        let mut iv = Zeroizing::new([0; 12]);
+        expand(key_label, &mut payload[..key_len]);
+        expand(iv_label, iv.as_mut());
+        let header = header_label.map(|label| {
+            let mut key = Zeroizing::new([0; 32]);
+            expand(label, &mut key[..key_len]);
+            key
+        });
+        Tls13PacketKeys {
+            payload,
+            iv,
+            header,
+            key_len,
+        }
+    }
+}
+
 /// The protocol's client and server traffic secrets, in wire direction order.
 pub struct Tls13Traffic {
     labels: Tls13Labels,
@@ -169,6 +221,10 @@ pub struct Tls13Traffic {
 }
 
 impl Tls13Traffic {
+    pub fn packet_keys(&self, sending: Side, alg: AeadAlg) -> Tls13PacketKeys {
+        self.secrets[sending as usize].packet_keys(self.labels, alg)
+    }
+
     pub fn key_update(&mut self, side: Side) {
         let secret = &mut self.secrets[side as usize];
         let label: &[u8] = match self.labels {

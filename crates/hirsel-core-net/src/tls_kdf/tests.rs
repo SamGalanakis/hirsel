@@ -105,3 +105,49 @@ fn tls_derivation_vectors() {
     }
     assert!(handshake.application(&finished).is_none());
 }
+
+#[test]
+fn rfc8448_handshake_records_use_the_sending_side() {
+    use crate::{
+        packet_cipher::{PacketCipher, TAG_LEN},
+        secret_aead::AeadAlg,
+    };
+    let shared = bytes("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d");
+    let hello = bytes("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8");
+    let hs = Tls13Handshake::new(
+        TlsHash::Sha256,
+        Tls13Labels::Tls,
+        shared.as_slice().try_into().unwrap(),
+        &hello,
+    )
+    .unwrap();
+    // RFC 8448 §3. Both sides start their handshake traffic at sequence zero.
+    let [server_record, client_record] = [
+        include_bytes!("testdata/server-handshake-record.bin").as_slice(),
+        include_bytes!("testdata/client-finished-record.bin").as_slice(),
+    ];
+    let [server_plain, client_plain] = [
+        include_bytes!("testdata/server-handshake-plain.bin").as_slice(),
+        include_bytes!("testdata/client-finished-plain.bin").as_slice(),
+    ];
+    for (sending, record, plain, other) in [
+        (Side::Server, server_record, server_plain, Side::Client),
+        (Side::Client, client_record, client_plain, Side::Server),
+    ] {
+        let alg = AeadAlg::Aes128Gcm;
+        let key = hs.traffic().packet_keys(sending, alg);
+        let cipher = PacketCipher::new(alg, key.payload()).unwrap();
+        let (aad, sealed) = record.split_at(5);
+        let (encrypted, tag) = sealed.split_at(sealed.len() - TAG_LEN);
+        let tag = tag.try_into().unwrap();
+        let mut body = encrypted.to_vec();
+        cipher.open(key.iv(), aad, &mut body, tag).unwrap();
+        assert_eq!(body, [plain, &[0x16]].concat());
+        assert_eq!(&cipher.seal(key.iv(), aad, &mut body).unwrap(), tag);
+        assert_eq!(body, encrypted);
+
+        let other = hs.traffic().packet_keys(other, alg);
+        let cipher = PacketCipher::new(alg, other.payload()).unwrap();
+        assert!(cipher.open(other.iv(), aad, &mut body, tag).is_err());
+    }
+}

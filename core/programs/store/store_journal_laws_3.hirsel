@@ -368,12 +368,12 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     if !put_run(mut db, 9, 2) || !put_run(mut db, 9, 3) || !put_run(mut db, 9, 4) {
         return false
     }
-    let last = match result.unwrap(admit(mut db, s, 2, ours)) {
+    let final_item = match result.unwrap(admit(mut db, s, 2, ours)) {
         Admitted(t) => ticket(t),
         _ => return false
     }
     result.unwrap(durable(mut db, kept))
-    result.unwrap(durable(mut db, last))
+    result.unwrap(durable(mut db, final_item))
     let wall = host.wall_ms(db.clock)
     let keep_reply: Option[fn(u64) -> bool] = None
     let figure = match stage(mut db, 0, wall, None, keep_reply, fn(mut tx: Tx) -> Result[(), u64] {
@@ -530,7 +530,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
         put(mut tx, call_env, 9u64, 90u64)?
         Ok(5u64)
     }))
-    let last = match take bounded {
+    let final_item = match take bounded {
         Committed(done) => if done.value != 5 {
             return false
         } else {
@@ -541,7 +541,7 @@ pub fn journal_law_step_stop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     if db.heads[0].head != before + 2 || db.file_end - bounded_end != unbounded_bytes || unbounded_bytes == 0 {
         return false
     }
-    result.unwrap(durable(mut db, last))
+    result.unwrap(durable(mut db, final_item))
     result.unwrap(close(take db))
     let mut after = result.unwrap(open(tasks, dir, c, r, options))
     let t2 = result.unwrap(table(mut after, "steps", std.codec.key_u64(), std.codec.of_u64()))
@@ -841,13 +841,13 @@ fn journal_test_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
     }
 }
 
-fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, accepted: bool) -> bool waits {
+fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: u64, accepted: bool) -> bool waits {
     let mut options = journal_crash_options()
     options.resident_limit = 134217728
     options.checkpoint_bytes = 134217728
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
-    let done = result.unwrap(run(mut db, None, last, fn(mut tx, call_env) -> Result[u64, Error] {
+    let done = result.unwrap(run(mut db, None, final_item, fn(mut tx, call_env) -> Result[u64, Error] {
         for k in 0u64 .. 16 {
             let size = if k == 15 {
                 call_env
@@ -867,7 +867,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     }))
     match take done {
         Committed(x) => {
-            if !accepted || x.value != 15729082 + last || db.heads[0].head != 2 {
+            if !accepted || x.value != 15729082 + final_item || db.heads[0].head != 2 {
                 return false
             }
             result.unwrap(durable(mut db, x.ticket))
@@ -882,7 +882,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     let path = result.unwrap(disk_path("j-", seq, ""))
     let raw = result.unwrap(disk_read_file(d, path, 16777400))
     if accepted {
-        if list.len(raw) != 72 + 15729082 + last || read_le(raw, 76, 4) != 15729066 + last {
+        if list.len(raw) != 72 + 15729082 + final_item || read_le(raw, 76, 4) != 15729066 + final_item {
             return false
         }
     } else if list.len(raw) != 72 {
@@ -907,7 +907,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
         for k in 0u64 .. 16 {
             let found = option.unwrap(result.unwrap(get_raw(snapshot(reopened), 1, key_word(k))))
             let expected_size = if k == 15 {
-                last
+                final_item
             } else {
                 1048576u64
             }

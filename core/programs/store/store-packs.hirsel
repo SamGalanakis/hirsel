@@ -232,7 +232,7 @@ fn encode_pack_row(pack: PagePack) -> Bytes {
 
 // Apply final class-0 and class-1 counts to the installed pack-list tree.
 // The list is edited in place only on paths private to this candidate.
-fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: Log[u64]) -> Result[u64, Error] {
+fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: core.Log[u64]) -> Result[u64, Error] {
     let height: u64 = int.widen(std.page.level(std.page.image_of(root)))
     // Per level an edit can copy the path page, replace two siblings during
     // a rotation, and split into three pieces. The final root needs one stamp.
@@ -245,7 +245,7 @@ fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: Log[
     Ok(first)
 }
 
-fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_from: u64, mut next_stamp: u64, issued: Log[u64]) -> Result[List[u64], Error] {
+fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_from: u64, mut next_stamp: u64, issued: core.Log[u64]) -> Result[List[u64], Error] {
     let mut retired: List[u64] = list.new()
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
@@ -327,7 +327,7 @@ fn retiring_list_packs(known: PageLocations, emission: CutFrames, mut retiring: 
     }
 }
 
-fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: Log[u64], relocated: Option[View[Log[bool]]]) -> Result[ListLayout, Error] {
+fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, mut next_stamp: u64, issued: core.Log[u64], relocated: Option[View[core.Log[bool]]]) -> Result[ListLayout, Error] {
     let mut pack_root = arc.share(installed.packs)
     let private_from = next_stamp
     let data_retired = edit_pack_list(mut pack_root, known, private_from, mut next_stamp, issued)?
@@ -412,8 +412,8 @@ type PagedCutLayout: send {
     lists: ListLayout
 }
 
-fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
-    let issued = disk_allocation(fn() -> Result[Log[u64], Error] {
+fn plan_page_cut(base: PageRetryBase, holders: List[HeldPage], installed: PagedLists, carried: Option[View[List[u64]]], first_pack: u64, cap: u64, marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut next_stamp: u64) -> Result[PagedCutLayout, Error] {
+    let issued = disk_allocation(fn() -> Result[core.Log[u64], Error] {
         Ok(log.new())
     })?
     let first_stamp = next_stamp
@@ -447,7 +447,7 @@ fn write_page_cut(d: Dir, id: StoreId, take cut: PagedCutLayout, mut buffers: Pa
     Ok(PagedCutLayout(locations: take known, blobs: take blobs, data_pages: take data_pages, lists: take lists))
 }
 
-fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64, attempt: scoped fn(Map[u64, ()], Option[View[Log[bool]]], mut u64) -> Result[T, Error] waits) -> Result[T, Error] waits {
+fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64, attempt: scoped fn(Map[u64, ()], Option[View[core.Log[bool]]], mut u64) -> Result[T, Error] waits) -> Result[T, Error] waits {
     let selected = disk_allocation(scoped fn() -> Result[Map[u64, ()], Error] {
         Ok(relocation_ancestors(base, moved_frames(base, false)))
     })
@@ -456,7 +456,7 @@ fn prepare_page_cut[T](base: PageLocations, mut next_stamp: u64, attempt: scoped
         Error(Full(Allocation(_))) => map.new(),
         Error(take problem) => return Error(take problem),
     }
-    let observer = disk_allocation(fn() -> Result[Log[bool], Error] {
+    let observer = disk_allocation(fn() -> Result[core.Log[bool], Error] {
         Ok(log.new())
     })
     if let Ok(take observed) = take observer {

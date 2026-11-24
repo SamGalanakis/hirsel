@@ -861,13 +861,13 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), E
     let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
         fail("the second group did not advance")
     }
-    let last = history_key("e-", held.head.entry)
-    match std.object.erase(mut writer.client, last, deadline) {
+    let final_item = history_key("e-", held.head.entry)
+    match std.object.erase(mut writer.client, final_item, deadline) {
         Error(take problem) => return Error(Remote(take problem)),
         Ok(()) => (),
     }
     if let Error(Corrupt(Fault(file: gone, why: Absent, ..))) = fresh(mut followed, deadline) {
-        if gone != last { fail("witness named another object") }
+        if gone != final_item { fail("witness named another object") }
     } else {
         fail("a missing live entry was accepted or classified as reclaimed")
     }

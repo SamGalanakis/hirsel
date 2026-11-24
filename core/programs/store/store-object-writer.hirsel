@@ -148,8 +148,8 @@ pub fn claim_of(db: Db) -> Result[Claim, Error] {
 
 fn object_cut_state(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits, target: Option[TargetLimits], pack_bytes: u64, limit: u64) -> Result[Ticket, Error] waits {
     if let Some(_) = target { return Error(Unsupported(1)) }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
-    durable(mut db, last)?
+    let latest_receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, latest_receipt)?
     prepare_holder_slot(mut db, delta)?
     let (handover, paused): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (resume, resuming): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
@@ -203,7 +203,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
     let manifest_bytes = cut_manifest_size(db, delta)
     let mut next_stamp = stamp_after(db.next_node)?
     let mut workspace = history_buffers(65536)?
-    let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator, u64), Error] waits {
+    let plan = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[(PageDisk, HistoryLocator, u64), Error] waits {
         let planned = {
             let installed = disk_state(db).pages
             plan_page_cut(base, participants.holders, installed.lists, None, lane.next_pack, pack_bytes, marks, relocated, mut stamp)?

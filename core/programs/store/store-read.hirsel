@@ -158,14 +158,14 @@ pub fn find[J, K, V](r: Reader, s: Snapshot, ix: Index[J, K, V], lo: Bound[J], h
     Ok(Rows(capture: take captured, source: ix.id, catalog_key: arc.share(ix.catalog_key), catalog_page: arc.share(ix.catalog_page), low: take low, high: take high, last: None, reverse: false, done: false, decoder: index_decoder(ix)))
 }
 
-fn resume_data(data: PageTree, low: Bytes, high: Bytes, last: Option[Bytes], reverse: bool) -> Result[ByteRows, Error] {
+fn resume_data(data: PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes], reverse: bool) -> Result[ByteRows, Error] {
     if reverse {
-        return match last {
+        return match final_item {
             Some(previous) => reverse_byte_cursor(data, low, previous),
             None => reverse_byte_cursor(data, low, high),
         }
     }
-    let start = match last {
+    let start = match final_item {
         Some(previous) => Excluded(copied(previous)?),
         None => Included(copied(low)?),
     }

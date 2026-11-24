@@ -259,7 +259,7 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
         return Error(Foreign)
     }
     let first_path = paged_pack_path(old.next_pack)?
-    let refused_watermarks: Log[u64] = log.new()
+    let refused_watermarks: core.Log[u64] = log.new()
     let _ = disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] waits {
         let first = disk_read_paged_file(directory, first_path, 4096)?
         if read_le(first, 72, 2) == 0x0022 {

@@ -164,8 +164,8 @@ fn tiered_l70_refusals(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let rows = spec("rows", std.codec.key_u64(), std.codec.of_u64())
     let other = spec("other", std.codec.key_u64(), std.codec.of_u64())
     let _ = create_table(mut db, take rows)?
-    let last = create_table(mut db, take other)?
-    durable(mut db, last)?
+    let final_item = create_table(mut db, take other)?
+    durable(mut db, final_item)?
     let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let other_handle = table(mut db, "other", std.codec.key_u64(), std.codec.of_u64())?
     let staged = stage_migration(db, tasks, code.describe(refusal_noop))?
@@ -570,10 +570,10 @@ fn l84_parallel_read(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits 
     let Error(HistoryMissing(_, None)) = received[1u64] else {
         fail("L84: missing pack had the wrong result")
     }
-    let Ok(last) = received[2u64] else {
+    let Ok(final_item) = received[2u64] else {
         fail("L84: last range failed")
     }
-    if list.len(first) != 131072 || first[0u64] != 3 || first[131071u64] != 4 || list.len(last) != 131072 || last[0u64] != 5 || last[131071u64] != 6 {
+    if list.len(first) != 131072 || first[0u64] != 3 || first[131071u64] != 4 || list.len(final_item) != 131072 || final_item[0u64] != 5 || final_item[131071u64] != 6 {
         fail("L84: range jobs did not preserve their result order and sizes")
     }
     Ok(())

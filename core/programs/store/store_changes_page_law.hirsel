@@ -104,14 +104,14 @@ fn projector_bounded(c: Clock) -> Result[(), ()] waits {
     if resume != bounded_law_key(6) {
         return Error(())
     }
-    let last = result.unwrap(changes_page(result.unwrap(reader(db, 0u64)), Some(base), newer, resume, high, limits))
-    if list.len(last.changes) != 1 || last.changes[0u64].tree_key != bounded_law_key(6) {
+    let final_item = result.unwrap(changes_page(result.unwrap(reader(db, 0u64)), Some(base), newer, resume, high, limits))
+    if list.len(final_item.changes) != 1 || final_item.changes[0u64].tree_key != bounded_law_key(6) {
         return Error(())
     }
-    if let Some(_) = last.next {
+    if let Some(_) = final_item.next {
         return Error(())
     }
-    let Some(raw) = view last.changes[0u64].value else {
+    let Some(raw) = view final_item.changes[0u64].value else {
         return Error(())
     }
     if list.compare_bytes(raw, view_law_stored(bounded_law_value(4))) == Equal {

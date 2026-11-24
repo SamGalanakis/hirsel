@@ -323,3 +323,113 @@ fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     cell_law_require(cell_get(reopened_reader, held, cell)? == Some(a), "pinned cell after replay")?
     close(take reopened)
 }
+
+fn append_law_batch(mut db: Db, log_handle: Log[Bytes], start: u64, batch_size: u64) -> Result[Ticket, Error] waits {
+    let outcome = run(mut db, None, (copy_env(log_handle), start, batch_size), fn(mut tx: Tx, env: (Log[Bytes], u64, u64)) -> Result[(), Error] {
+        let target = view env.0
+        for offset in 0u64 .. env.2 {
+            let seq = env.1 + offset
+            let byte: u8 = int.truncate(seq)
+            let value = cell_law_value(24, byte)
+            cell_law_require(append(mut tx, target, value)? == seq, "dense append sequence")?
+        }
+        let limits = bounds(tx, target)?
+        cell_law_require(limits.first == 0 && limits.next == env.1 + env.2, "staged log bounds")?
+        let expected = limits.next - 1
+        let Some((tail, value)) = last(tx, target)? else { return Error(Missing("staged last")) }
+        cell_law_require(tail == expected && value[0] == int.truncate(expected), "staged last value")?
+        let mut rows = log_range(tx, target, Included(env.1 - 1), Excluded(env.1 + 2))?
+        for seq in env.1 - 1 .. env.1 + 2 {
+            let Some((observed, row_value_bytes)) = next_in(tx, mut rows)? else { return Error(Missing("staged range")) }
+            cell_law_require(observed == seq && row_value_bytes[0] == int.truncate(seq), "staged range row")?
+        }
+        if let Some(_) = next_in(tx, mut rows)? {
+            return Error(Missing("staged range exhaustion"))
+        }
+        Ok(())
+    })?
+    match take outcome {
+        Committed(done) => Ok(done.ticket),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing("log batch")),
+    }
+}
+
+fn log_rollback_law(mut db: Db, target: Log[Bytes]) -> Result[(), Error] waits {
+    let outcome = run(mut db, None, copy_env(target), fn(mut tx: Tx, l: Log[Bytes]) -> Result[(), Error] {
+        let value = cell_law_value(24, 0)
+        let aborted = rollback_writes_on_error(mut tx, scoped fn(mut child: Tx) -> Result[(), Error] {
+            cell_law_require(append(mut child, l, value)? == 0, "aborted append sequence")?
+            Error(Missing("abort"))
+        })
+        match aborted {
+            Error(Missing(reason)) if reason == "abort" => (),
+            _ => return Error(Missing("typed rollback")),
+        }
+        let stopped = rollback_writes_on_overrun(mut tx, 8192, scoped fn(mut child: Tx) -> Result[(), Error] {
+            cell_law_require(append(mut child, l, value)? == 0, "overrun append sequence")?
+            loop {}
+        })
+        match stopped {
+            Error(_) => (),
+            _ => return Error(Missing("append overrun")),
+        }
+        cell_law_require(append(mut tx, l, value)? == 0, "sequence reused after rollback")
+    })?
+    match take outcome {
+        Committed(done) => durable(mut db, done.ticket),
+        Aborted(undone) => Error(clone(undone.value)),
+        _ => Error(Missing("log rollback commit")),
+    }
+}
+
+fn append_fill_law(s: Snapshot, id: u32) -> Result[(), Error] {
+    let map_key = prefix(id)?
+    let Some(root) = std.page.collection_child(s.roots.collections.root, map_key) else {
+        return Error(Missing("log root"))
+    }
+    let root_image = std.page.image_of(root)
+    // Stored 30-byte values, 4 bytes of slots and suffix length, 3 bytes of
+    // value tag and length, and (8 - prefix) bytes of sequence suffix.
+    let counts: Inline[u64, 4] = [106, 106, 104, 1]
+    let starts: Inline[u64, 4] = [0, 106, 212, 316]
+    cell_law_require(std.page.level(root_image) == 1 && std.page.count(root_image) == 4, "append branch shape")?
+    for slot in 0u64 .. 4 {
+        let leaf = option.unwrap(std.page.child(root, slot))
+        let image = std.page.image_of(leaf)
+        let lo = option.unwrap(std.page.key_at(image, 0))
+        cell_law_require(std.page.count(image) == counts[slot] && decode_word(lo) == starts[slot], "append leaf boundary")?
+    }
+    Ok(())
+}
+
+@test
+fn log_dense_and_append_fill(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut declaring = declare(db, Migrate)?
+    let target = declare_log(mut declaring, "events", std.codec.of_bytes())?
+    let _ = seal(mut db, take declaring)?
+    let baseline = db.resident
+    log_rollback_law(mut db, target)?
+    let receipt = append_law_batch(mut db, target, 1, 316)?
+    durable(mut db, receipt)?
+    let before = snapshot(db)
+    append_fill_law(before, target.binding.id)?
+    cell_law_require(db.resident == baseline + 317 * 110, "live log charge")?
+    close(take db)?
+    let replayed = open(tasks, dir, c, r, options)?
+    let current = snapshot(replayed)
+    append_fill_law(current, target.binding.id)?
+    let reading_log = reader(replayed, 0)?
+    let limits = log_bounds(reading_log, current, target)?
+    cell_law_require(limits.first == 0 && limits.next == 317, "replayed log bounds")?
+    cell_law_require(replayed.resident == baseline + 317 * 110, "replayed log charge")?
+    let mut rows = log_scan(reading_log, current, target, Included(314), Excluded(317))?
+    for seq in 314u64 .. 317 {
+        let Some((found_seq, value)) = next(reading_log, mut rows)? else { return Error(Missing("replayed log row")) }
+        cell_law_require(seq == found_seq && value[0] == int.truncate(seq), "replayed log bytes")?
+    }
+    close(take replayed)
+}

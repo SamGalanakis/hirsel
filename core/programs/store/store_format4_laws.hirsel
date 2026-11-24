@@ -732,20 +732,20 @@ fn format4_index_law() -> Result[(), Error] {
     }
     let frame = disk_read_frame(path, ctx, out, at)?
     let payload = list.slice(out, frame.payload, frame.end)
-    let mut last = 0u64
-    let parsed = decode_pack_index(path, at, payload, mut last)?
-    let tail = decode_pack_index(path, second_at, list.slice(following_wire, 16, list.len(following_wire)), mut last)?
-    if frame.kind != 0x0023 || frame.flags != 1 || parsed.prev != 0 || list.len(parsed.rows) != 2 || parsed.rows[0].offset != 72 || parsed.rows[0].len != 1033 || parsed.rows[0].kind != 0x22 || parsed.rows[0].collection != 7 || parsed.rows[0].stamp != 17 || parsed.rows[0].key != key || parsed.rows[1].len != 73 || parsed.rows[1].key != other || tail.prev != at || tail.rows[0].key != key || last != 1210 {
+    let mut final_item = 0u64
+    let parsed = decode_pack_index(path, at, payload, mut final_item)?
+    let tail = decode_pack_index(path, second_at, list.slice(following_wire, 16, list.len(following_wire)), mut final_item)?
+    if frame.kind != 0x0023 || frame.flags != 1 || parsed.prev != 0 || list.len(parsed.rows) != 2 || parsed.rows[0].offset != 72 || parsed.rows[0].len != 1033 || parsed.rows[0].kind != 0x22 || parsed.rows[0].collection != 7 || parsed.rows[0].stamp != 17 || parsed.rows[0].key != key || parsed.rows[1].len != 73 || parsed.rows[1].key != other || tail.prev != at || tail.rows[0].key != key || final_item != 1210 {
         return Error(Foreign)
     }
     let mut corrupt = copied(payload)?
     let _ = list.set(mut corrupt, 37, 1u8)
-    last = 0
-    if !disk_corrupt(decode_pack_index(path, at, corrupt, mut last)) || !disk_corrupt(decode_pack_index(path, at, list.slice(payload, 0, list.len(payload) - 1), mut last)) {
+    final_item = 0
+    if !disk_corrupt(decode_pack_index(path, at, corrupt, mut final_item)) || !disk_corrupt(decode_pack_index(path, at, list.slice(payload, 0, list.len(payload) - 1), mut final_item)) {
         return Error(Foreign)
     }
-    last = 72
-    if !disk_corrupt(decode_pack_index(path, at, payload, mut last)) {
+    final_item = 72
+    if !disk_corrupt(decode_pack_index(path, at, payload, mut final_item)) {
         return Error(Foreign)
     }
     let page_ctx = DiskContext(store: id, role: 3, seq: 7)

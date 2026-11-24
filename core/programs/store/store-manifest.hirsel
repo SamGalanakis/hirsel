@@ -423,7 +423,7 @@ fn page_edge_order(path: String, parent: std.page.PagePtr, child: std.page.PageP
     Ok(())
 }
 
-fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: std.page.PagePtr, expected_level: Option[u8], retired: bool, mut last: Option[u64], mut lists: ListedPages, load_list_image: scoped[view] fn(mut S, StoreId, std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits) -> Result[(), Error] waits {
+fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: std.page.PagePtr, expected_level: Option[u8], retired: bool, mut final_item: Option[u64], mut lists: ListedPages, load_list_image: scoped[view] fn(mut S, StoreId, std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits) -> Result[(), Error] waits {
     if ptr.stamp == 0 {
         return Ok(())
     }
@@ -464,7 +464,7 @@ fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: st
         match row.cell {
             Child(edge) => {
                 page_edge_order(path, ptr, edge.child)?
-                read_page_list(mut source, id, manifest, edge.child, Some(height - 1), retired, mut last, mut lists, load_list_image)?
+                read_page_list(mut source, id, manifest, edge.child, Some(height - 1), retired, mut final_item, mut lists, load_list_image)?
                 capacity(list.try_reserve(mut kids, 1))?
                 list.push(mut kids, edge.child.stamp)
             },
@@ -473,7 +473,7 @@ fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: st
                     return Error(disk_fault(path, ptr.offset, Malformed))
                 }
                 let seq: u64 = list.word_be(row.key, 0)
-                if let Some(prior) = last {
+                if let Some(prior) = final_item {
                     if seq <= prior {
                         return Error(disk_fault(path, ptr.offset, Order))
                     }
@@ -481,7 +481,7 @@ fn read_page_list[S](mut source: S, id: StoreId, manifest: PageManifest, ptr: st
                 if seq == 0 || seq >= manifest.next_pack {
                     return Error(disk_fault(path, ptr.offset, Malformed))
                 }
-                last = Some(seq)
+                final_item = Some(seq)
                 if retired {
                     if list.len(raw) != 0 || map.contains(lists.packs, seq) {
                         return Error(disk_fault(path, ptr.offset, Malformed))
@@ -672,11 +672,11 @@ fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> R
     require_memory_manifest(manifest)?
     let graph = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = ListedPages(packs: map.new(), retired: map.new(), class_two: map.new(), live_graph: take graph)
-    let mut last: Option[u64] = None
+    let mut final_item: Option[u64] = None
     let mut directory = d
-    read_page_list(mut directory, id, manifest, manifest.pack_root, None, false, mut last, mut lists, read_list_page)?
-    last = None
-    read_page_list(mut directory, id, manifest, manifest.retirement_root, None, true, mut last, mut lists, read_list_page)?
+    read_page_list(mut directory, id, manifest, manifest.pack_root, None, false, mut final_item, mut lists, read_list_page)?
+    final_item = None
+    read_page_list(mut directory, id, manifest, manifest.retirement_root, None, true, mut final_item, mut lists, read_list_page)?
     for (seq, _) in lists.class_two {
         if map.contains(lists.packs, seq) || map.contains(lists.retired, seq) {
             return Error(disk_fault("MANIFEST", 72, Malformed))

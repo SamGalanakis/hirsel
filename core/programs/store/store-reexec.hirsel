@@ -60,12 +60,12 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
             Some(h) => Some(h.prev_end),
             None => disk_end(d, db.store, seq)?
         }
-        let last = match following {
+        let final_item = match following {
             Some(_) => false,
             None => true
         }
         let mut search: Option[JournalCommit] = None
-        let _ = journal_scan(mut source, path, db.store, seq, boundary, last, mut search, scoped fn(mut found: Option[JournalCommit], take event: JournalEvent) -> Result[(), Error] {
+        let _ = journal_scan(mut source, path, db.store, seq, boundary, final_item, mut search, scoped fn(mut found: Option[JournalCommit], take event: JournalEvent) -> Result[(), Error] {
             let Commit(take commit) = take event else {
                 return Ok(())
             }
@@ -81,7 +81,7 @@ fn recorded_commit(db: Db, b: Branch, wanted: u64) -> Result[Option[JournalCommi
         if let Some(take commit) = take search {
             return Ok(Some(take commit))
         }
-        if last {
+        if final_item {
             return Ok(None)
         }
         seq += 1
@@ -133,11 +133,11 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
             Some(h) => Some(h.prev_end),
             None => disk_end(d, id, seq)?
         }
-        let last = match following {
+        let final_item = match following {
             Some(_) => false,
             None => true
         }
-        let scanned = journal_scan(mut source, path, id, seq, boundary, last, mut held, scoped fn(mut at: BaseReplay, take event: JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, boundary, final_item, mut held, scoped fn(mut at: BaseReplay, take event: JournalEvent) -> Result[(), Error] {
             if at.stopped {
                 return Ok(())
             }
@@ -155,7 +155,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
         let JournalInput(file: take consumed_file, ..) = take source
         disk_io(host.close(take consumed_file))?
         let _ = scanned?
-        if held.stopped || last {
+        if held.stopped || final_item {
             break
         }
         seq += 1
@@ -182,8 +182,8 @@ type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
 fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
-    let reads: Log[Read] = log.new()
-    let issued: Log[u64] = log.new()
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Log[u64] = log.new()
     let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {

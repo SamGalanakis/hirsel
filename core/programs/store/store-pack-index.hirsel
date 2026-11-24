@@ -100,7 +100,7 @@ fn append_pack_index_frame(mut out: Bytes, context: DiskContext, prev: u64, rows
     Ok(())
 }
 
-fn decode_pack_index(file: String, offset: u64, raw: Bytes, mut last: u64) -> Result[PackIndex, Error] {
+fn decode_pack_index(file: String, offset: u64, raw: Bytes, mut final_item: u64) -> Result[PackIndex, Error] {
     if list.len(raw) > PACK_INDEX_LIMIT {
         return Error(disk_fault(file, offset, Malformed))
     }
@@ -129,7 +129,7 @@ fn decode_pack_index(file: String, offset: u64, raw: Bytes, mut last: u64) -> Re
         if place < 72 || place >= offset || offset - place < len + 16 || stamp == 0 || (kind != 0x21 && kind != 0x22) || (kind == 0x21 && len > PAGE_LIMIT) || (kind == 0x22 && (len < 8 || len > BLOB_LIMIT)) || shared > prior_width || shared + suffix > 4096 || suffix > list.len(raw) - at {
             return Error(disk_fault(file, offset + 16 + row_at, Malformed))
         }
-        if place <= last {
+        if place <= final_item {
             return Error(disk_fault(file, offset + 16 + row_at, Order))
         }
         let mut key: Bytes = list.new()
@@ -139,7 +139,7 @@ fn decode_pack_index(file: String, offset: u64, raw: Bytes, mut last: u64) -> Re
         }
         list.append(mut key, list.slice(raw, at, at + suffix))
         at += suffix
-        last = place
+        final_item = place
         list.push(mut rows, PackIndexRow(offset: place, len: int.truncate(len), kind: int.truncate(kind), collection: int.truncate(collection), stamp: stamp, key: take key))
     }
     if at != list.len(raw) {

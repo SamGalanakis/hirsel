@@ -121,6 +121,7 @@ fn put_collection(mut tree: PageTree, key: Bytes, built: Option[Arc[std.page.Pag
     }
     let record = match kind {
         3 => cell_record(root, None)?,
+        4 => log_record(root, 0, 0, 0)?,
         _ => rooted_collection_record(root, kind, 0)?,
     }
     page_result(std.page.insert(mut tree.root, key, record, Some(take root), tree.inline, private_from, mut ids))

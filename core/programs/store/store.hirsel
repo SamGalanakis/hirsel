@@ -455,7 +455,8 @@ fn push_data_row(mut rows: DataRows, take row: DataOp) {
 type DataOps: shareable + send {
     rows: DataRows,
     slots: Map[Bytes, u64],
-    cells: Map[u32, CellEdit]
+    cells: Map[u32, CellEdit],
+    logs: Map[u32, LogState]
 }
 
 const SCANNED_OPS: u64 = 8
@@ -467,7 +468,7 @@ const NO_FRAME_TAIL: u64 = 18446744073709551615
 const OPEN_FRAME_TAIL: u64 = NO_FRAME_TAIL - 1
 
 fn empty_ops() -> DataOps {
-    DataOps(rows: new_data_rows(), slots: map.new(), cells: map.new())
+    DataOps(rows: new_data_rows(), slots: map.new(), cells: map.new(), logs: map.new())
 }
 
 // What enclosing transactions staged before a callback began, frozen so the
@@ -501,8 +502,8 @@ pub opaque scoped type Tx {
     resident: u64,
     retain_old: bool,
     frame_tail: u64,
-    reads: View[Log[Read]],
-    issued: View[Log[u64]],
+    reads: View[core.Log[Read]],
+    issued: View[core.Log[u64]],
     refusal: Option[Capacity],
     frame_bytes: Option[u64],
     wrote: bool,
@@ -1314,8 +1315,8 @@ fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Op
 
 // The caller keeps owning the record so a refused publication can return it.
 fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[Settlement], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
-    let reads: Log[Read] = log.new()
-    let issued: Log[u64] = log.new()
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Log[u64] = log.new()
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
     let caught = isolate(fn() -> Result[Finished[R, A], OutOfTime] {
         let perform = scoped fn() -> Finished[R, A] {
@@ -1374,7 +1375,7 @@ fn raised_capacity(causes: Causes) -> Option[Capacity] {
     None
 }
 
-fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: Log[Read], issued: Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
+fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Log[u64], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
     let (frame_bytes, initial_tail) = match db.disk {
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
@@ -1471,8 +1472,8 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
 
 type CallDraft {
     finished: Finished[Bytes, ServeReply],
-    reads: Log[Read],
-    issued: Log[u64]
+    reads: core.Log[Read],
+    issued: core.Log[u64]
 }
 
 type DraftedCall {
@@ -1505,8 +1506,8 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
         let perform = scoped fn() -> Result[CallDraft, Capacity] {
             let keep: Option[fn(ServeReply) -> bool] = None
             let draft = bound bytes plan.n_e {
-                let reads: Log[Read] = log.new()
-                let issued: Log[u64] = log.new()
+                let reads: core.Log[Read] = log.new()
+                let issued: core.Log[u64] = log.new()
                 let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, body)
                 })
@@ -1684,11 +1685,8 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
             return Ok(false)
         }
         let collection = list.slice(op.key, 0, 4)
-        if list.len(op.key) == 4 {
-            let Some(descriptor) = std.page.lookup(db.heads[i].roots.collections.root, collection) else { return Ok(false) }
-            if descriptor[52] == 3 {
-                return Ok(false)
-            }
+        if collection_kind(db.heads[i].roots.collections, collection) == Some(3u8) {
+            return Ok(false)
         }
         for prior in 0u64 .. e {
             if list.compare_bytes(list.slice(data_row(ran.edits, prior).key, 0, 4), collection) == Equal {
@@ -2551,13 +2549,24 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut dr
     let order = capacity(data_order(operations))?
     for slot_order in 0u64 .. operations.count {
         let op = ordered_row(operations, order, slot_order)
-        if tree_domain(tree) == CollectionMap && list.len(op.key) == 4 && collection_kind(tree, op.key) == Some(3u8) {
-            match op.value {
-                Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw)?,
-                Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw)?,
-                None => apply_cell(mut tree, op.key, None, None, first, mut draw)?,
+        if tree_domain(tree) == CollectionMap {
+            let kind = collection_kind(tree, list.slice(op.key, 0, 4))
+            if kind == Some(3u8) {
+                match op.value {
+                    Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw)?,
+                    Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw)?,
+                    None => apply_cell(mut tree, op.key, None, None, first, mut draw)?,
+                }
+                continue
             }
-            continue
+            if kind == Some(4u8) {
+                match op.value {
+                    Some(PageValue(raw)) => apply_log_append(mut tree, op.key, raw, None, first, mut draw)?,
+                    Some(BlobBody(raw)) => apply_log_append(mut tree, op.key, raw, Some(view raw), first, mut draw)?,
+                    None => fail("store: Log append has no value"),
+                }
+                continue
+            }
         }
         match op.value {
             Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
@@ -2681,7 +2690,13 @@ fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], ops: DataRo
     for slot_order in 0u64 .. ops.count {
         let op = ordered_row(ops, order, slot_order)
         let prior = match base {
-            Some(head) => stored_prior(get_page_row(head, op.key)),
+            Some(head) => {
+                if collection_kind(head, list.slice(op.key, 0, 4)) == Some(4u8) {
+                    0u32
+                } else {
+                    stored_prior(get_page_row(head, op.key))
+                }
+            },
             None => 0,
         }
         encode_data_op(mut payload, op.key, op.value, Some(prior))?
@@ -3149,7 +3164,7 @@ fn open_range[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse:
         byte_cursor(tree, Included(copied(low)?), high)?
     }
     let rows = PageRows(cursor: take cursor, data: take tree, decoder: table_decoder(t))
-    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse))
+    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse, log_tail: None))
 }
 
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
@@ -3319,8 +3334,8 @@ pub fn scan_next[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], take r:
     if !resume_here(s, t.store, t.id, t.catalog_key, t.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
-    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
-    let cursor = byte_cursor(s.roots.collections, Excluded(take last), high)?
+    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
+    let cursor = byte_cursor(s.roots.collections, Excluded(take final_item), high)?
     Ok(Paged(read_page(s, t.id, take high, table_rows(s, t, take cursor), l)?))
 }
 
@@ -3329,8 +3344,8 @@ pub fn find_next[J, K, V](read_handle: Reader, s: Snapshot, ix: Index[J, K, V], 
     if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
         return Ok(Moved(s.head))
     }
-    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take last) = take r
-    let cursor = byte_cursor(s.roots.collections, Excluded(take last), high)?
+    let Resume(store: _, open: _, branch: _, version: _, source: _, high: take high, last: take final_item) = take r
+    let cursor = byte_cursor(s.roots.collections, Excluded(take final_item), high)?
     Ok(Paged(read_page(s, ix.id, take high, indexed_rows(s.roots.collections, ix, take cursor)?, l)?))
 }
 
@@ -3338,7 +3353,7 @@ fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: PageRo
     let mut cursor = take rows
     let mut page: List[(K, V)] = list.new()
     let mut byte_count = 0u64
-    let mut last: Option[Bytes] = None
+    let mut final_item: Option[Bytes] = None
     while true {
         let found = next_bytes(mut cursor.cursor)?
         let (take key, take raw) = match take found {
@@ -3360,12 +3375,12 @@ fn read_page[K, V](s: Snapshot, source: u32, take high: Bytes, take rows: PageRo
             Some((take value, size)) => {
                 list.push(mut page, take value)
                 byte_count += size
-                last = Some(take key)
+                final_item = Some(take key)
             },
             None => break
         }
     }
-    let resume = match take last {
+    let resume = match take final_item {
         Some(take key) => Some(Resume(store: s.store, open: s.open, branch: s.branch, version: s.head, source: source, high: take high, last: take key)),
         None => None
     }
@@ -3542,58 +3557,58 @@ fn catalog_entry_in(catalog: PageTree, k: Bytes) -> Result[Catalog, Error] {
     }
 }
 
-fn stamp_after(last: u64) -> Result[u64, Error] {
-    let Some(next_stamp) = int.checked_add(last, 1) else {
+fn stamp_after(final_item: u64) -> Result[u64, Error] {
+    let Some(next_stamp) = int.checked_add(final_item, 1) else {
         return Error(Limit(Ids))
     }
     Ok(next_stamp)
 }
 
-fn define_store_collection(mut tree: PageTree, id: u32, kind: u8, mut last: u64) -> Result[(), Error] {
-    let first = stamp_after(last)?
+fn define_store_collection(mut tree: PageTree, id: u32, kind: u8, mut final_item: u64) -> Result[(), Error] {
+    let first = stamp_after(final_item)?
     let mut next_stamp = first
     define_collection(mut tree, id, kind, first, mut next_stamp)?
     canonical_tree(mut tree)?
-    last = next_stamp - 1
+    final_item = next_stamp - 1
     Ok(())
 }
 
-fn bulk_store_collection(mut tree: PageTree, id: u32, kind: u8, rows: List[std.page.Row], mut last: u64) -> Result[(), Error] {
-    let first = stamp_after(last)?
+fn bulk_store_collection(mut tree: PageTree, id: u32, kind: u8, rows: List[std.page.Row], mut final_item: u64) -> Result[(), Error] {
+    let first = stamp_after(final_item)?
     let mut next_stamp = first
     bulk_collection(mut tree, id, kind, rows, first, mut next_stamp)?
     canonical_tree(mut tree)?
-    last = next_stamp - 1
+    final_item = next_stamp - 1
     Ok(())
 }
 
-fn remove_store_row(mut tree: PageTree, key: Bytes, mut last: u64) -> Result[(), Error] {
-    let first = stamp_after(last)?
+fn remove_store_row(mut tree: PageTree, key: Bytes, mut final_item: u64) -> Result[(), Error] {
+    let first = stamp_after(final_item)?
     let mut next_stamp = first
     let _ = remove_page_row(mut tree, key, first, mut next_stamp)?
     canonical_tree(mut tree)?
-    last = next_stamp - 1
+    final_item = next_stamp - 1
     Ok(())
 }
 
-fn remove_store_collection(mut tree: PageTree, id: u32, mut last: u64) -> Result[u64, Error] {
+fn remove_store_collection(mut tree: PageTree, id: u32, mut final_item: u64) -> Result[u64, Error] {
     let key = prefix(id)?
     let charge = match std.page.lookup(tree.root, key) {
         Some(descriptor) => int.saturating_add(126, list.word_le(descriptor, 44)),
         None => 0u64,
     }
-    let first = stamp_after(last)?
+    let first = stamp_after(final_item)?
     let mut next_stamp = first
     let _ = drop_collection(mut tree, id, first, mut next_stamp)?
     canonical_tree(mut tree)?
-    last = next_stamp - 1
+    final_item = next_stamp - 1
     Ok(charge)
 }
 
 pub opaque type Schema {
     store: StoreId,
     catalog: PageTree,
-    bindings: Option[Log[IndexRegistration]]
+    bindings: Option[core.Log[IndexRegistration]]
 }
 
 pub opaque type Migration {
@@ -4324,8 +4339,8 @@ pub type Seen[R] {
 
 pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R) -> Result[Looked[R], Error] waits {
     read_access(r, s)?
-    let reads: Log[Read] = log.new()
-    let issued: Log[u64] = log.new()
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Log[u64] = log.new()
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
@@ -4410,10 +4425,11 @@ pub opaque scoped type TxRows[K, V] {
     rows: PageRows[K, V],
     owner: CallId,
     depth: u64,
-    reads: View[Log[Read]],
+    reads: View[core.Log[Read]],
     low: Bytes,
     high: Bytes,
-    reverse: bool
+    reverse: bool,
+    log_tail: Option[LogRangeTail]
 }
 
 // Before decoding an attempted row, record it and the gap traversed to find it.
@@ -4422,7 +4438,12 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
     if !same(tx.store, r.owner.store) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
         return Error(Foreign)
     }
-    let found = next_bytes(mut r.rows.cursor)?
+    let mut found = next_bytes(mut r.rows.cursor)?
+    if let None = found {
+        if let Some(mut tail) = r.log_tail {
+            found = next_log_range_tail(tx, mut tail)?
+        }
+    }
     match take found {
         Some((take key, take raw)) => {
             if r.reverse {
@@ -4456,7 +4477,7 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
 
 pub scoped type IndexRows[K, V] {
     rows: PageRows[K, V],
-    reads: View[Log[Read]]
+    reads: View[core.Log[Read]]
 }
 
 fn next_row[K, V](mut r: PageRows[K, V], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[(K, V)], Error] {
@@ -4477,7 +4498,7 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
     indexed_advance(mut r.rows, r.reads)
 }
 
-fn indexed_advance[K, V](mut rows: PageRows[K, V], reads: View[Log[Read]]) -> Result[Option[(K, V)], Error] {
+fn indexed_advance[K, V](mut rows: PageRows[K, V], reads: View[core.Log[Read]]) -> Result[Option[(K, V)], Error] {
     next_row(mut rows, fn(key: Bytes) -> Result[(), Error] {
         log.append(reads, Point(copied(key)?))
         Ok(())
@@ -5060,8 +5081,8 @@ pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activati
     if let Some(_) = disk_state(db).lease {
         return Error(AttemptBusy)
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
-    deploy_result(durable(mut db, last))?
+    let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    deploy_result(durable(mut db, final_item))?
     let from = deploy_result(log_directory(db))?
     let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
     let lease_attempt = deploy_result(copied(attempt))?
@@ -5839,8 +5860,8 @@ fn accept_cutover(mut db: Db, request: Cutover) -> Result[Imported, DeployError]
     if !is_disk(db) {
         return Error(ExportMismatch)
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
-    deploy_result(durable(mut db, last))?
+    let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    deploy_result(durable(mut db, final_item))?
     let finished = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> Option[Imported] {
         replace(mut state.imported, None)
     })
@@ -6723,7 +6744,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
         state.since_cut = 0
     })
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     let observe = match timing {
         Some(_) => true,
         None => false,
@@ -6733,7 +6754,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     } else {
         0
     }
-    let drain_groups = durable_groups(mut db, last)?
+    let drain_groups = durable_groups(mut db, final_item)?
     let Some(generation) = int.checked_add(db.checkpointed, 1) else {
         return Error(Limit(Ids))
     }
@@ -6758,7 +6779,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
         Some(low) => low,
         None => disk_state(db).record_cut,
     }
-    let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
+    let attempt = prepare_page_cut(base.locations, mut next_stamp, scoped fn(marks: Map[u64, ()], relocated: Option[View[core.Log[bool]]], mut stamp: u64) -> Result[PreparedDiskCut, Error] waits {
         let planned = {
             let installed = disk_state(db).pages
             plan_page_cut(base, holders, installed.lists, Some(view installed.carried), installed.next_pack, pack_bytes, marks, relocated, mut stamp)?
@@ -7228,7 +7249,7 @@ fn disk_stream_payload(mut input: JournalInput, path: String, context: DiskConte
 
 // Middle segments stop at the next HEADER's prev_end. Only the last segment
 // reads beyond its durable boundary, stopping at the first physically bad frame.
-fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64, boundary: Option[u64], last: bool, mut destination: S, consume: scoped fn(mut S, take JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
+fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64, boundary: Option[u64], final_item: bool, mut destination: S, consume: scoped fn(mut S, take JournalEvent) -> Result[(), Error]) -> Result[(u64, u64), Error] waits {
     let header = disk_read_header(path, journal_prefix(mut input, path, 0, 72)?, 2, Some(seq), Some(id))?
     let durable_end = match boundary {
         Some(d) => d,
@@ -7237,7 +7258,7 @@ fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64,
     if durable_end < 72 || durable_end > input.size {
         return Error(disk_fault(path, input.size, Truncated))
     }
-    let stop = if last {
+    let stop = if final_item {
         input.size
     } else {
         durable_end
@@ -7249,7 +7270,7 @@ fn journal_scan[S](mut input: JournalInput, path: String, id: StoreId, seq: u64,
         let frame = match take received {
             Ok(take valid) => take valid,
             Error(Corrupt(take fault)) => {
-                if !last || at < durable_end || !journal_torn(fault.why) {
+                if !final_item || at < durable_end || !journal_torn(fault.why) {
                     return Error(Corrupt(take fault))
                 }
                 break
@@ -7307,6 +7328,20 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             }
             let Some(kind) = collection_kind(tree, list.slice(op.key, 0, 4)) else {
                 return Error(disk_fault(file, 0, Malformed))
+            }
+            if kind == 4 {
+                let Some(value) = view op.value else { return Error(disk_fault(file, 0, Malformed)) }
+                if list.len(op.key) != 12 || op.prior != 0 || list.len(value) < 2 {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                let seq: u64 = list.word_be(op.key, 4)
+                let id: u32 = list.word_be(op.key, 0)
+                let limits = committed_log_bounds(tree, id)?
+                if seq != limits.next || seq == 18446744073709551615u64 {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                apply_log_append(mut tree, op.key, value, None, 0, mut next_stamp)?
+                continue
             }
             if op.prior != stored_prior(get_page_row(tree, op.key)) {
                 return Error(disk_fault(file, 0, Malformed))
@@ -7436,11 +7471,11 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, flush: bool, take initial: J
             Some(h) => Some(h.prev_end),
             None => disk_end(d, id, seq)?
         }
-        let last = match following {
+        let final_item = match following {
             None => true,
             Some(_) => false
         }
-        let scanned = journal_scan(mut source, path, id, seq, boundary, last, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
+        let scanned = journal_scan(mut source, path, id, seq, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
             journal_apply(path, mut recovered_state, take event)
         })
         let JournalInput(file: take consumed_file, ..) = take source
@@ -7454,7 +7489,7 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, flush: bool, take initial: J
                     None => true,
                     Some(_) => false
                 }
-                if last && no_end && seq == first {
+                if final_item && no_end && seq == first {
                     if let Error(Corrupt(_)) = journal_header(d, id, seq, false) {
                         return Ok(JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
                     }

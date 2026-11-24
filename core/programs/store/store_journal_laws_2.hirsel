@@ -482,11 +482,11 @@ fn journal_sync_count(take db: Db, t: Table[u64, u64], out: Stdout) -> Result[()
     let mut owned = take db
     result.unwrap(stdout.write(out, "ARM"))
     journal_frameless_wakes(owned, 8)?
-    let mut last = journal_put_ticket(mut owned, t, 0)?
+    let mut final_item = journal_put_ticket(mut owned, t, 0)?
     for k in 1u64 .. 4 {
-        last = journal_put_ticket(mut owned, t, k)?
+        final_item = journal_put_ticket(mut owned, t, k)?
     }
-    durable(mut owned, last)?
+    durable(mut owned, final_item)?
     journal_note(out, owned.heads[0].head)
     journal_frameless_wakes(owned, 8)?
     close(take owned)
@@ -775,7 +775,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     }
     let sh = view t
     let head = db.heads[0].head
-    let last = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" || scenario == "journal-place-short" {
+    let final_item = if scenario == "orphan-end" || scenario == "poison-cut" || scenario == "poison-segment" || scenario == "poison-end" || scenario == "poison-pack" || scenario == "poison-write" || scenario == "journal-place-idle" || scenario == "journal-place-split" || scenario == "journal-place-short" {
         2u64
     } else if scenario == "journal" {
         8u64
@@ -784,7 +784,7 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
     } else {
         7u64
     }
-    if head < 1 || head > last || head < minimum {
+    if head < 1 || head > final_item || head < minimum {
         return Ok(false)
     }
     // The independent W2 provider returns wall_ms=phase: genesis0, writes1.

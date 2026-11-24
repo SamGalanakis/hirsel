@@ -28,10 +28,10 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let final_frame = append_transaction(mut db, 0, None, keep_reply, fn(mut tx: Tx) -> Result[(), Error] {
         journal_full_frame(mut tx, rows)
     })?
-    let Committed(last) = final_frame else {
+    let Committed(final_item) = final_frame else {
         return Error(Foreign)
     }
-    durable(mut db, last.ticket)?
+    durable(mut db, final_item.ticket)?
     result.unwrap(bound bytes 1048576 {
         maybe_checkpoint(mut db)
     })?
@@ -156,10 +156,10 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
             journal_full_frame(mut tx, rows)
         })
     }
-    let Ok(Ok(Committed(last))) = crossing else {
+    let Ok(Ok(Committed(final_item))) = crossing else {
         return Error(())
     }
-    result.unwrap(durable(mut db, last.ticket))
+    result.unwrap(durable(mut db, final_item.ticket))
     result.unwrap(result.unwrap(bound bytes 1048576 {
         maybe_checkpoint(mut db)
     }))

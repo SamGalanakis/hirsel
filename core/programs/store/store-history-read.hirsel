@@ -148,14 +148,14 @@ fn history_read_mark(path: String, id: StoreId, reference: HistoryRef, raw: Byte
     let mut retained = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
         Ok(list.with_capacity(row_count))
     })?
-    let mut last = 0u64
+    let mut final_item = 0u64
     for i in 0u64 .. row_count {
         let at = 45 + 32 * i
         let earlier = HistoryRef(seq: read_le(row, at, 8), epoch: read_le(row, at + 8, 8), len: read_le(row, at + 24, 8), digest: read_le(row, at + 16, 8))
-        if earlier.seq <= last || earlier.seq >= reference.seq || !history_entry_range(earlier, reference.epoch) {
+        if earlier.seq <= final_item || earlier.seq >= reference.seq || !history_entry_range(earlier, reference.epoch) {
             return Error(disk_fault(path, 112, Malformed))
         }
-        last = earlier.seq
+        final_item = earlier.seq
         list.push(mut retained, earlier)
     }
     let oldest = if row_count == 0 {

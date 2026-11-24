@@ -613,8 +613,8 @@ pub fn journal_law_recorded_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> b
             return false
         }
     }
-    let last = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
-    result.unwrap(durable(mut db, last))
+    let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    result.unwrap(durable(mut db, final_item))
     if disk_state(db).journaled != 100 || db.heads[0].head != 101 {
         return false
     }

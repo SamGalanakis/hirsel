@@ -22,8 +22,8 @@ fn fetch_threshold[V](tx: Tx, sh: Table[u64, V], k: u64) -> u64 {
 // The log observes admission even when the enclosing bound has no steps left
 // to finish returning. The transaction aborts so every probe starts fresh.
 fn overrun_probe(mut db: Db, t: Table[u64, u64], rows: u64, outer: u64, inner: u64) -> (bool, bool) waits {
-    let entered: Log[u64] = log.new()
-    let returned: Log[u64] = log.new()
+    let entered: core.Log[u64] = log.new()
+    let returned: core.Log[u64] = log.new()
     let line = main_branch(db)
     let keep: Option[fn(Error) -> bool] = None
     let out = result.unwrap(run_on_with_reply(mut db, line, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
@@ -103,7 +103,7 @@ pub fn law_rollback_on_overrun(c: Clock) -> bool waits {
     if overrun_probe(mut db, t, 2, spent, inner) != (true, true) || overrun_probe(mut db, t, 2, spent - 1, inner) != (true, false) {
         return false
     }
-    let wrote: Log[u64] = log.new()
+    let wrote: core.Log[u64] = log.new()
     let line = main_branch(db)
     let keep: Option[fn(Error) -> bool] = None
     let out = result.unwrap(run_on_with_reply(mut db, line, None, keep, scoped fn(mut tx: Tx) -> Result[bool, Error] {

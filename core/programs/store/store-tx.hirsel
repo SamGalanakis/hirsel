@@ -102,8 +102,11 @@ fn fold_own(mut tx: Tx) {
 
 // Stages `newer`'s rows over `ops` in their first-write order.
 fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, take newer: DataOps) {
-    let DataOps(rows: take rows, cells: take cells, ..) = take newer
+    let DataOps(rows: take rows, cells: take cells, logs: take logs, ..) = take newer
     fold_cell_edits(mut ops.cells, below, cells)
+    for (id, state) in logs {
+        map.insert(mut ops.logs, id, state)
+    }
     let DataRows(count: staged, first: take first, rest: take rest) = take rows
     let mut head = take first
     // Moved, not copied: the frame-tail key keeps the spare room it was made with.

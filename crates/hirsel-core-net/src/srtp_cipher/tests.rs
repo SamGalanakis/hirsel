@@ -107,3 +107,85 @@ fn srtp_derives_authenticates_and_encrypts() {
         assert_eq!(salting, hex(expected_salt));
     }
 }
+
+#[test]
+fn srtp_import_direction_matches_libsrtp() {
+    use crate::{ImportUse, SecretPolicy};
+    let direction = |policy| SecretPolicy::parse(policy).unwrap().uses.import().unwrap();
+    let send = direction("srtp_import(send)");
+    let receive = direction("srtp_import(receive)");
+    let master = hex::<30>("e1f97a0d3e018be0d64fa32c06de41390ec675ad498afeebb6960b3aabe6");
+    let tx = SrtpKeys::import(SrtpProfile::Aes128CmHmacSha1_80, send, &master).unwrap();
+    let rx = SrtpKeys::import(SrtpProfile::Aes128CmHmacSha1_80, receive, &master).unwrap();
+    assert!(
+        SrtpKeys::import(
+            SrtpProfile::Aes128CmHmacSha1_80,
+            ImportUse::TrafficSend,
+            &master
+        )
+        .is_err()
+    );
+    assert!(SrtpKeys::import(SrtpProfile::Aes128CmHmacSha1_80, send, &master[..28]).is_err());
+
+    // libSRTP fd08747f, srtp_validate, RTP and SRTCP on SSRC 0xcafebabe.
+    for (space, index, header, extra, ciphertext_and_tag) in [
+        (
+            SrtpSpace::Rtp,
+            0x1234,
+            &hex::<12>("800f1234decafbadcafebabe")[..],
+            [0; 4],
+            hex::<26>("4e55dc4ce79978d88ca4d215949d2402b78d6acc99ea179b8dbb"),
+        ),
+        (
+            SrtpSpace::Rtcp,
+            1,
+            &hex::<8>("81c8000bcafebabe")[..],
+            [0x80, 0, 0, 1],
+            hex::<26>("7128035be487b9bdbef89041f977a5a8993e08cd54d6c1230798"),
+        ),
+    ] {
+        assert!(tx.keys(space, false).is_none());
+        assert!(rx.keys(space, true).is_none());
+        let seal = tx.keys(space, true).unwrap();
+        let seal_nonce = seal.cm_nonce(0xcafebabe, index).unwrap();
+        let seal = seal.expand_cm().unwrap();
+        let open = rx.keys(space, false).unwrap();
+        let open_nonce = open.cm_nonce(0xcafebabe, index).unwrap();
+        let open = open.expand_cm().unwrap();
+        let mut body = [0xab; 16];
+        let tag = seal.seal(seal_nonce, header, &extra, &mut body).unwrap();
+        assert_eq!([&body[..], &tag[..]].concat(), ciphertext_and_tag);
+        let mut received: [u8; 16] = ciphertext_and_tag[..16].try_into().unwrap();
+        open.open(
+            open_nonce,
+            header,
+            &extra,
+            &mut received,
+            ciphertext_and_tag[16..].try_into().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(received, [0xab; 16]);
+    }
+
+    use crate::{
+        packet_cipher::PacketCipher,
+        packet_nonce::{NonceFormat, ReceiverNonce},
+    };
+    let master = hex::<28>("000102030405060708090a0b0c0d0e0fa0a1a2a3a4a5a6a7a8a9aaab");
+    let want = hex::<32>("c5002ede04cfdd2eb91159e0880aa06ed2976826f796b201df3131a127e8a392");
+    let header = hex::<12>("800f1234decafbadcafebabe");
+    let mut material = Vec::from(master);
+    for edge in [0, 2] {
+        material.resize(master.len() + edge, 0);
+        let send = SrtpKeys::import(SrtpProfile::AeadAes128Gcm, send, &material).unwrap();
+        let keys = send.keys(SrtpSpace::Rtp, true).unwrap();
+        let (algorithm, payload, salt) = keys.aead_material().unwrap();
+        let nonce = ReceiverNonce::new(NonceFormat::SrtpRtp, salt)
+            .nonce(0xcafebabe, 0x1234)
+            .unwrap();
+        let cipher = PacketCipher::new(algorithm, payload).unwrap();
+        let mut body = [0xab; 16];
+        let tag = cipher.seal(nonce, &header, &mut body).unwrap();
+        assert_eq!([&body[..], &tag[..]].concat(), want);
+    }
+}

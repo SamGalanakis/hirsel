@@ -281,5 +281,8 @@ impl SrtpCipher {
     }
 }
 
+mod session;
+pub use session::{SrtpKeys, SrtpProfile, SrtpSessionKey, SrtpSpace};
+
 #[cfg(test)]
 mod tests;

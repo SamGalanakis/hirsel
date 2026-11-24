@@ -497,3 +497,47 @@ fn test_l68_replay_overlay_table() -> Result[(), Error] {
     }
     Ok(())
 }
+
+fn l65_ask_pager(requests: Sender[TieredPagerMessage], demand: TieredPagerTarget) -> Result[Arc[TieredFrame], Error] waits {
+    let (answer, delivered): (Sender[Result[Arc[TieredFrame], Error]], Receiver[Result[Arc[TieredFrame], Error]]) = channel.new(1u64)
+    let _ = result.unwrap(channel.send(requests, PagerRead(clone(demand), take answer)))
+    result.unwrap(channel.receive(delivered))
+}
+
+fn l65_pager_exchange(requests: Sender[TieredPagerMessage], ready: TieredPagerTarget) -> Result[(), Error] waits {
+    let loaded = l65_ask_pager(requests, ready)?
+    if loaded.identity.stamp != 40 {
+        fail("L65: the pager read the wrong frame")
+    }
+    let mut misdirected: TieredPagerTarget = clone(ready)
+    misdirected.edge = TieredPage(std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 1, stamp: 40))
+    match l65_ask_pager(requests, misdirected) {
+        Error(Corrupt(Fault(offset: 72, why: Checksum, ..))) => (),
+        _ => fail("L65: the pager accepted an incompatible cached edge"),
+    }
+    let cached = l65_ask_pager(requests, ready)?
+    if cached.identity != loaded.identity {
+        fail("L65: the earlier invalid edge poisoned a later valid waiter")
+    }
+    Ok(())
+}
+
+@test
+fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let path = paged_pack_path(8)?
+    let mut pack_bytes: Bytes = list.with_capacity(196)
+    list.fill(mut pack_bytes, 72, 0u8)
+    list.append(mut pack_bytes, l65_page_wire(7, 0x37bed3f9c4f620ba))
+    list.fill(mut pack_bytes, 28, 0u8)
+    disk_write_synced(fixtures, path, pack_bytes)?
+    let owner = StoreId(hi: 3, lo: 4)
+    let inventory = PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
+    let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
+    let demand = TieredPagerTarget(edge: TieredPage(ptr), direction: TieredPoint, inventory: inventory, object: None, next_stamp: 42, deadline: 0)
+    let (requests, take worker) = start_tiered_pager(tasks, owner, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let verified = l65_pager_exchange(requests, demand)
+    let _ = take requests
+    let _ = result.unwrap(task.join(take worker))
+    verified
+}

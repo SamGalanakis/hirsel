@@ -1,0 +1,114 @@
+type TieredPagerSource: send = PagerDirectory(Dir) | PagerBucket(std.object.Requests)
+
+type TieredPagerInput = PagerLocal(Dir) | PagerObjects(std.object.Client)
+
+type TieredPagerTarget: send {
+    edge: TieredTarget,
+    direction: TieredDirection,
+    inventory: PagePack,
+    object: Option[HistoryRef],
+    next_stamp: u64,
+    deadline: u64
+}
+
+type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerReserve(u64, Sender[Result[(), Error]]) | PagerRelease(u64)
+
+type TieredPagerStart: send {
+    store: StoreId,
+    authority: TieredPagerSource,
+    inbox: Receiver[TieredPagerMessage],
+    shared_bytes: u64
+}
+
+fn start_tiered_pager(tasks: Tasks, owner: StoreId, take authority: TieredPagerSource, shared: u64, task_limit: u64, queue_slots: u64) -> (Sender[TieredPagerMessage], Task[()]) {
+    let (requests, incoming): (Sender[TieredPagerMessage], Receiver[TieredPagerMessage]) = channel.new(queue_slots)
+    let launch = TieredPagerStart(store: owner, authority: take authority, inbox: take incoming, shared_bytes: shared)
+    let worker = task.spawn(tasks, bytes task_limit, take launch, run_tiered_pager)
+    (take requests, take worker)
+}
+
+fn run_tiered_pager(take launch: TieredPagerStart) waits {
+    let TieredPagerStart(store: owner, authority: take authority, inbox: take incoming, shared_bytes: shared) = take launch
+    let mut input = match take authority {
+        PagerDirectory(d) => PagerLocal(d),
+        PagerBucket(take requests) => PagerObjects(std.object.attach(take requests)),
+    }
+    let mut private_cache = new_tiered_cache(shared)
+    while let Ok(take command) = channel.receive(incoming) {
+        match take command {
+            PagerRead(demand, answer) => {
+                let delivered = tiered_pager_frame(mut input, mut private_cache, owner, demand)
+                let _ = channel.send(answer, take delivered)
+            },
+            PagerReserve(amount, answer) => {
+                let reserved = tiered_cache_reserve_reader(mut private_cache, amount)
+                let _ = channel.send(answer, take reserved)
+            },
+            PagerRelease(amount) => tiered_cache_release_reader(mut private_cache, amount),
+        }
+    }
+}
+
+fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPagerTarget) -> Result[Arc[TieredFrame], Error] waits {
+    let expected = tiered_frame_id(demand.edge)
+    let path = match input {
+        PagerLocal(_) => paged_pack_path(expected.pack)?,
+        PagerObjects(_) => {
+            let file = paged_pack_path(expected.pack)?
+            let Some(item) = demand.object else {
+                return Error(disk_fault(file, expected.offset, Dangling(expected.stamp)))
+            }
+            if item.seq != expected.pack || item.len != demand.inventory.payload_bytes {
+                return Error(disk_fault(file, expected.offset, Malformed))
+            }
+            history_key("p-", item)
+        },
+    }
+    let expected_class = if expected.kind == 0x0021 {
+        3u8
+    } else {
+        4u8
+    }
+    if demand.inventory.class != expected_class || expected.stamp == 0 || expected.stamp >= demand.next_stamp {
+        return Error(disk_fault(path, expected.offset, Malformed))
+    }
+    let Some(maximum) = disk_kind_limit(expected.kind) else {
+        fail("store: unknown Tiered frame kind")
+    }
+    if expected.len > maximum {
+        return Error(disk_fault(path, expected.offset, Checksum))
+    }
+    let data_end = demand.inventory.index
+    let width = 16 + expected.len
+    if expected.offset < 72 || expected.offset >= data_end {
+        return Error(disk_fault(path, expected.offset, Dangling(expected.stamp)))
+    }
+    if width > data_end - expected.offset {
+        return Error(disk_fault(path, expected.offset, Checksum))
+    }
+    if let Some(take found) = tiered_cache_lookup(mut private_cache, path, demand.edge)? {
+        return Ok(take found)
+    }
+    let (take raw, start) = match input {
+        PagerLocal(d) => {
+            let mut opened = match host.open(d, path, Read) {
+                Ok(take fd) => take fd,
+                Error(NotFound) => return Error(disk_fault(path, expected.offset, Dangling(expected.stamp))),
+                Error(problem) => return Error(Io(problem)),
+            }
+            let obtained = read_disk_bytes(mut opened, path, expected.offset, width)
+            disk_io(host.close(take opened))?
+            (obtained?, expected.offset)
+        },
+        PagerObjects(mut client) => {
+            let item = option.unwrap(demand.object)
+            let window = tiered_bucket_range(path, demand.edge, item.len, demand.direction)?
+            (read_tiered_bucket_window(mut client, item, window, demand.deadline)?, window.lo)
+        },
+    }
+    let page = disk_allocation(scoped fn() -> Result[Arc[TieredFrame], Error] {
+        read_tiered_frame(path, owner, demand.edge, raw, start, demand.next_stamp)
+    })?
+    tiered_cache_admit(mut private_cache, page)
+    Ok(take page)
+}

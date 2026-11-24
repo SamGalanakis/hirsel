@@ -45,14 +45,28 @@ type TieredPointDelivery: send {
     grant: Option[Arc[TieredReaderGrant]]
 }
 
-type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[TieredPointDelivery, Error]]) | PagerReserve(u64, Sender[Result[Arc[TieredReaderGrant], Error]])
+// PagerKick only wakes a pager blocked on its inbox so that it looks at the
+// writer slot (§13.3a); it carries nothing.
+type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[TieredPointDelivery, Error]]) | PagerReserve(u64, Sender[Result[Arc[TieredReaderGrant], Error]]) | PagerKick
 
 type TieredPagerStart: send {
     store: StoreId,
     opened: u64,
     authority: TieredPagerSource,
     inbox: Receiver[TieredPagerMessage],
+    // The one-slot writer channel and the coalescing park notice (§13.3a).
+    writer: Receiver[TieredPagerMessage],
+    notices: Sender[()],
     shared_bytes: u64
+}
+
+// What the Db task keeps of a started pager: the shared inbox, the writer
+// slot, the park notices and the task (§13.3a).
+type TieredPagerLink {
+    requests: Sender[TieredPagerMessage],
+    writer: Sender[TieredPagerMessage],
+    notices: Receiver[()],
+    worker: Task[()]
 }
 
 type TieredPagerFunding {
@@ -66,6 +80,11 @@ type TieredPagerFunding {
 const TIERED_PAGER_QUEUE: u64 = 4
 
 fn start_tiered_pager(tasks: Tasks, owner: StoreId, opened: u64, take authority: TieredPagerSource, funding: TieredPagerFunding, queue_slots: u64) -> Result[(Sender[TieredPagerMessage], Task[()]), Error] {
+    let TieredPagerLink(requests: take requests, worker: take worker, ..) = start_tiered_pager_link(tasks, owner, opened, take authority, funding, queue_slots)?
+    Ok((take requests, take worker))
+}
+
+fn start_tiered_pager_link(tasks: Tasks, owner: StoreId, opened: u64, take authority: TieredPagerSource, funding: TieredPagerFunding, queue_slots: u64) -> Result[TieredPagerLink, Error] {
     let Some(shared) = int.checked_sub(funding.cache_bytes, funding.writer_pin_bytes) else {
         return Error(Missing("cache_bytes"))
     }
@@ -79,38 +98,59 @@ fn start_tiered_pager(tasks: Tasks, owner: StoreId, opened: u64, take authority:
     let (take requests, take incoming) = disk_allocation(scoped fn() -> Result[(Sender[TieredPagerMessage], Receiver[TieredPagerMessage]), Error] {
         Ok(channel.new(queue_slots))
     })?
-    let launch = TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, shared_bytes: shared)
+    let (take writer, take writer_slot) = disk_allocation(scoped fn() -> Result[(Sender[TieredPagerMessage], Receiver[TieredPagerMessage]), Error] {
+        Ok(channel.new(1))
+    })?
+    let (take notify, take notices) = disk_allocation(scoped fn() -> Result[(Sender[()], Receiver[()]), Error] {
+        Ok(channel.new(1))
+    })?
+    let launch = TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, writer: take writer_slot, notices: take notify, shared_bytes: shared)
     // Frame ownership can leave the pager on delivery. Its allocations
     // still draw on this task's reservation, including the writer's
     // share of the cache and the separate room for cuts.
     match task.try_spawn(tasks, bytes task_limit, take launch, run_tiered_pager) {
-        Ok(take worker) => Ok((take requests, take worker)),
+        Ok(take worker) => Ok(TieredPagerLink(requests: take requests, writer: take writer, notices: take notices, worker: take worker)),
         Error((problem, _)) => Error(Full(Allocation(problem))),
     }
 }
 
 fn run_tiered_pager(take launch: TieredPagerStart) waits {
-    let TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, shared_bytes: shared) = take launch
+    let TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, writer: take writer, notices: take notify, shared_bytes: shared) = take launch
     let mut input = match take authority {
         PagerDirectory(d) => PagerLocal(d),
         PagerBucket(take requests, op_ms) => PagerObjects(std.object.attach(take requests, None), op_ms),
     }
     let mut private_cache = new_tiered_cache(shared)
-    while let Ok(take command) = channel.receive(incoming) {
-        match take command {
-            PagerRead(demand, answer) => {
-                let delivered = tiered_pager_frame(mut input, mut private_cache, owner, demand)
-                let _ = channel.send(answer, take delivered)
-            },
-            PagerPoint(demand, answer) => {
-                let delivered = tiered_pager_point(mut input, mut private_cache, owner, demand)
-                let _ = channel.try_send(answer, take delivered)
-            },
-            PagerReserve(amount, answer) => {
-                let reserved = tiered_cache_reserve_reader(mut private_cache, TieredReaderGrant(store: owner, opened: opened, pin_bytes: amount))
-                let _ = channel.try_send(answer, take reserved)
-            },
+    loop {
+        // The writer slot is looked at before every blocking receive, so a
+        // dropped kick loses no demand (§13.3a).
+        if let Ok(take command) = channel.try_receive(writer) {
+            tiered_pager_handle(mut input, mut private_cache, owner, opened, take command)
+            let _ = channel.try_send(notify, ())
+            continue
         }
+        match channel.receive(incoming) {
+            Ok(take command) => tiered_pager_handle(mut input, mut private_cache, owner, opened, take command),
+            Error(_) => break,
+        }
+    }
+}
+
+fn tiered_pager_handle(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, opened: u64, take command: TieredPagerMessage) waits {
+    match take command {
+        PagerRead(demand, answer) => {
+            let delivered = tiered_pager_frame(mut input, mut private_cache, owner, demand)
+            let _ = channel.send(answer, take delivered)
+        },
+        PagerPoint(demand, answer) => {
+            let delivered = tiered_pager_point(mut input, mut private_cache, owner, demand)
+            let _ = channel.try_send(answer, take delivered)
+        },
+        PagerReserve(amount, answer) => {
+            let reserved = tiered_cache_reserve_reader(mut private_cache, TieredReaderGrant(store: owner, opened: opened, pin_bytes: amount))
+            let _ = channel.try_send(answer, take reserved)
+        },
+        PagerKick => (),
     }
 }
 

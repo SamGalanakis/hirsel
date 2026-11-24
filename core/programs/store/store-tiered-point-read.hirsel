@@ -83,6 +83,16 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
 // an attempt demands it again.
 fn serve_tiered_miss(source: TieredPageSource, root: TieredPinRoot, state: TieredTouchSet, sought: Bytes, direction: TieredDirection,
     take grant: Option[Arc[TieredReaderGrant]], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+    let demand = tiered_miss_demand(source, state, sought, direction, take grant, mut pending)?
+    let delivered = tiered_point_delivery(source.pager, take demand)?
+    let _ = tiered_install_delivery(take delivered, root, state.stamps, mut pins, mut pending)?
+    Ok(())
+}
+
+// The demand for a latched miss, or the failure an earlier delivery of the
+// same target recorded.
+fn tiered_miss_demand(source: TieredPageSource, state: TieredTouchSet, sought: Bytes, direction: TieredDirection,
+    take grant: Option[Arc[TieredReaderGrant]], mut pending: Option[(TieredTarget, Error)]) -> Result[TieredPointDemand, Error] {
     let Some(AttemptMiss(target)) = view state.stopped else {
         fail("store: only a latched miss is delivered")
     }
@@ -94,16 +104,24 @@ fn serve_tiered_miss(source: TieredPageSource, root: TieredPinRoot, state: Tiere
         let (_, take problem) = option.unwrap(replace(mut pending, None))
         return Error(take problem)
     }
-    let demand = TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction,
-        siblings: clone(state.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: take grant)
-    let TieredPointDelivery(frames: take frames, failure: take failure, ..) = tiered_point_delivery(source.pager, take demand)?
+    Ok(TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction,
+        siblings: clone(state.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: take grant))
+}
+
+// Installs a delivered batch in its order and records its failure. It is
+// false when a frame did not fit the map's partition (§13.3a "crowded").
+fn tiered_install_delivery(take delivered: TieredPointDelivery, root: TieredPinRoot, touched: Map[u64, ()], mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[bool, Error] {
+    let TieredPointDelivery(frames: take frames, failure: take failure, ..) = take delivered
+    let mut fit = true
     for frame in frames {
-        let _ = tiered_install_pin(mut pins, root, state.stamps, frame)?
+        if !tiered_install_pin(mut pins, root, touched, frame)? {
+            fit = false
+        }
     }
     if let Some(take refused) = take failure {
         pending = Some(take refused)
     }
-    Ok(())
+    Ok(fit)
 }
 
 // The source a Tx attempt's misses are served from, at the root it reads.

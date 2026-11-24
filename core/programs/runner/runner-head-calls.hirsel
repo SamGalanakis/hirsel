@@ -1,0 +1,83 @@
+// A Head's calls into the store (STORE-SPEC §13.3a): a call is served, settled
+// into its answer, or parked, and a parked call is resumed when its pages land.
+
+type ParkedCall { req: Request, served: store.Parked }
+
+fn parked_stream[G: send, H: shareable + inert + send](hd: Head[G, H], stream: Bytes) -> bool {
+    for entry in hd.parked {
+        if entry.req.stream == stream { return true }
+    }
+    false
+}
+
+// STORE-SPEC §13.3a: poll the store's parked calls and resume each ready one in the order
+// returned. A parked request past its deadline is cancelled and answered Refused(Deadline).
+fn rerun_parked[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain: Option[HeadDrain]) -> Result[bool, store.Error] waits {
+    if list.len(hd.parked) == 0u64 { return Ok(false) }
+    if let Some(control) = drain {
+        let now = host.mono_ns(control.clock)
+        let mut i = 0u64
+        while i < list.len(hd.parked) {
+            if now >= hd.parked[i].req.deadline {
+                let ParkedCall(req: take q, served: take parked_call) = list.remove(mut hd.parked, i)
+                let _ = store.cancel_parked(mut hd.db, take parked_call)
+                commitless(mut hd, take q, Refused(Deadline))?
+            } else {
+                i += 1u64
+            }
+        }
+    }
+    let ready = store.poll_parked(mut hd.db)?
+    let mut resumed = false
+    for id in ready {
+        let mut place: Option[u64] = None
+        for i in 0u64 .. list.len(hd.parked) {
+            if store.park_id(hd.parked[i].served) == id { place = Some(i) }
+        }
+        let Some(i) = place else { continue }
+        let ParkedCall(req: take q, served: take parked_call) = list.remove(mut hd.parked, i)
+        let ran = match map.get(hd.r.slots, q.key) {
+            Some(Transact(_, _, _, _, go)) => (go.resume)(mut hd.db, take parked_call, hd.h, q.caller, q.arg),
+            _ => fail("runner: a parked call's entry is registered"),
+        }
+        settle_served(mut hd, take q, take ran)?
+        resumed = true
+    }
+    Ok(resumed)
+}
+
+fn execute[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take complete: store.Completion) -> Result[(), store.Error] waits {
+    let tried = run_effect(mut hd.db, hd.replay_identity, hd.r, hd.h, q, take complete)
+    let ran = match take tried {
+        Ok(Served(take result)) => take result,
+        Ok(Unregistered(take pending_run)) => return reply_only(mut hd, take q, take pending_run, Failed(Gone)),
+        Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
+        Error(take problem) => return Error(take problem),
+    }
+    settle_served(mut hd, take q, take ran)
+}
+
+fn settle_served[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take ran: Result[store.Served, store.ServeError]) -> Result[(), store.Error] waits {
+    match take ran {
+        Ok(Committed(take receipt)) => answered(mut hd, take q, take receipt),
+        Ok(Kept(take receipt)) => answered(mut hd, take q, take receipt),
+        Ok(Failed(take pending_run, stop)) => reply_only(mut hd, take q, take pending_run, failed_stop(stop)?),
+        Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Ok(Parked(take parked_call)) => {
+            list.push(mut hd.parked, ParkedCall(req: take q, served: take parked_call))
+            Ok(())
+        },
+        Error(Before(Full(_), _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Before(take problem, _)) => Error(take problem),
+        Error(After(take problem)) => Error(take problem),
+    }
+}
+
+fn answered[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take receipt: store.Receipt) -> Result[(), store.Error] {
+    let co: std.codec.Codec[Outcome] = std.codec.of()
+    let version = store.version(store.snapshot(hd.db))
+    match std.codec.decode(co, receipt.reply) {
+        Ok(take outcome) => worker(mut hd, take q, take outcome, receipt.ticket, version),
+        _ => fail("runner: stored reply did not decode"),
+    }
+}

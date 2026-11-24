@@ -49,7 +49,7 @@ fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks
         return Error("group did not commit")
     }
     let empty_registry: Registry[(), ()] = registry()
-    let mut hd: Head[(), ()] = Head(db: take db, r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
+    let mut hd: Head[(), ()] = Head(db: take db, r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new())
     close_group(mut hd)
     let Ok(PubIn(e: Staged(take next))) = channel.try_receive(inbox) else {
         return Error("head did not stage the sealed group")

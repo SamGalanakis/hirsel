@@ -11,6 +11,16 @@ fn relay_syncs(take relay: SyncRelay) -> () waits {
     }
 }
 
+type ParkRelay: send { notices: Receiver[()], to: Sender[HeadInput] }
+
+// One ParkWake per park notice; a full inbox drops it, since the head polls its parked
+// calls before it waits again.
+fn relay_parks(take relay: ParkRelay) -> () waits {
+    while let Ok(()) = channel.receive(relay.notices) {
+        let _ = channel.try_send(relay.to, ParkWake)
+    }
+}
+
 type Forward: send { from: Receiver[HeadInput], to: Sender[HeadInput] }
 
 // A head the caller feeds through its own channel gets one inbox that also carries the
@@ -51,6 +61,13 @@ fn head_wakes[G: send, H: shareable + inert + send](mut hd: Head[G, H], take inb
     let health_setup: Result[(), store.Error] = match store.on_unhealthy(mut hd.db, channel.sender(to), StoreUnhealthy) {
         Error(Missing(_)) => Ok(()),
         other => take other,
+    }
+    // Park notices wake the head to poll its parked calls (STORE-SPEC §13.3a).
+    if let Some(take parks) = store.park_notices(mut hd.db) {
+        let park_relay = ParkRelay(notices: take parks, to: channel.sender(to))
+        if let Ok(take running) = task.try_spawn(tasks, bytes 65536u64, take park_relay, relay_parks) {
+            list.push(mut helpers, take running)
+        }
     }
     let relay = SyncRelay(notices: take notices, to: take to)
     if let Ok(take running) = task.try_spawn(tasks, bytes 65536u64, take relay, relay_syncs) {

@@ -46,6 +46,11 @@ type Ack: send = Journaled(u64, u64) | Broken(IoError) | ObjectJournaled(u64, u6
 pub opaque type Db {
     store: StoreId,
     pager: Option[Sender[TieredPagerMessage]],
+    // The pager's one-slot writer channel, its park notices until the
+    // caller takes them, and the parked calls (§13.3a).
+    pager_writer: Option[Sender[TieredPagerMessage]],
+    park_notices: Option[Receiver[()]],
+    parked: ParkQueue,
     // The writer partition every call's attempt is counted against (§13.2).
     writer_pin_bytes: u64,
     indexes: IndexRegistry,
@@ -592,7 +597,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new())
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, checkpointed: 0, admits: map.new())
 }
 
 pub type Accounts {
@@ -975,7 +980,7 @@ pub opaque type Pending {
     stop: Option[StopKind],
 }
 
-pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity)
+pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity) | Parked(Parked)
 
 type ServeReply = KeptReply(Bytes) | StoreFailure(Error) | BodyStop(Stop)
 
@@ -1082,28 +1087,10 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     let Some(grant) = call_reserves(plan) else {
         return Error(Before(Limit(Transaction), None))
     }
-    let (attempted, take metered) = serve_before(serve_until_decided(mut db, complete, wall, plan, grant, rec, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let first = CallRun(id: None, attempts: 0, pins: empty_tiered_pins(call_pin_root(db, 0), db.writer_pin_bytes), pending: None, crowded: false)
+    drive_served(mut db, take complete, plan, grant, take rec, wall, take first, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         body(mut tx, env)
-    }))?
-    let DraftedCall(stage: take draft, next_id: next_id) = match take metered {
-        Error(AdmissionBytes(problem)) => return Error(Before(Full(Allocation(problem)), None)),
-        Error(DraftStopped(take stop)) => return Ok(stopped_pending(untried(take complete, take rec, attempted), take stop)),
-        Ok(take draft) => take draft,
-    }
-    db.next_node = next_id
-    let pending_run = Pending(completion: take complete, record: take rec, attempted: attempted, stop: None)
-    match take draft {
-        Ran(take staged) => finish_served(mut db, take pending_run, take staged, false),
-        DraftError(take problem) => Error(Before(take problem, None)),
-        Over(Stopped(limit)) => Ok(stopped_pending(take pending_run, OutOfSteps(limit.steps))),
-        Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
-        Over(Failed(Conflict(take name))) => Ok(stopped_pending(take pending_run, Conflict(take name))),
-        Over(Refused(Allocation(problem))) => Ok(stopped_pending(take pending_run, OutOfBytes(problem))),
-        Over(Refused(take problem)) => Ok(NoRoom(take pending_run, take problem)),
-        Over(Aborted(Undone(value: BodyStop(take stop), ..))) => Ok(stopped_pending(take pending_run, take stop)),
-        Over(Aborted(Undone(value: StoreFailure(take problem), ..))) => Error(Before(take problem, None)),
-        _ => fail("store: missing staged reply"),
-    }
+    })
 }
 
 fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, ServeReply], retry: bool) -> Result[Served, ServeError] waits {
@@ -5098,9 +5085,8 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     // running. Its task reserves C + K + P at once (§1.1 "The Tiered plan").
     let pager_task: Option[Task[()]] = if store_has_tiered(db) {
         let funding = TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
-        let (take requests, take worker) = start_tiered_pager(tasks, id, seq, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
-        db.pager = Some(take requests)
-        Some(take worker)
+        let link = start_tiered_pager_link(tasks, id, seq, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
+        Some(attach_tiered_pager(mut db, take link))
     } else {
         None
     }

@@ -1375,7 +1375,10 @@ type Head[G: send, H: shareable + inert + send] {
     // The publisher refused a Release: it has stopped, and R = u64::MAX is published. The
     // head commits nothing more and the place ends with OpenError.PublisherStopped.
     cut: bool,
-    trigger_drive: Option[Box[TriggerDrive[G]]]
+    trigger_drive: Option[Box[TriggerDrive[G]]],
+    // Admitted served calls whose attempt latched a Cold miss, oldest first
+    // (STORE-SPEC §13.3a). Their streams count as running.
+    parked: List[ParkedCall]
 }
 
 type Publish[G: send, H: shareable + inert + send]: send {
@@ -1446,7 +1449,7 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
             return Ok(None)
         }
     }
-    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
+    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new())
     let mut tables: Option[triggers.Tables] = None
     let (take woken, take helpers, take health_setup) = head_wakes(mut hd, take inbox, drain, tasks)
     let served = match take health_setup {
@@ -1529,7 +1532,7 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
     | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64)
     | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle
-    | SyncWake | StoreUnhealthy | InboxEnded
+    | SyncWake | ParkWake | StoreUnhealthy | InboxEnded
 
 pub type CutoverWork: send { request: store.Cutover, result_to: Sender[Result[(u64, bool), store.DeployError]] }
 
@@ -2021,6 +2024,13 @@ fn settle_probe(inbox: Receiver[HeadInput]) -> Option[HeadInput] waits {
 }
 
 fn close_head_admission[G: send, H: shareable + inert + send](mut head: Head[G, H]) -> Result[(), store.Error] waits {
+    // A parked call is cancelled; its position stays Admitted and is re-admitted as Abandoned.
+    let parked = replace(mut head.parked, list.new())
+    for take entry in take parked {
+        let ParkedCall(req: take req, served: take parked_call) = take entry
+        let _ = store.cancel_parked(mut head.db, take parked_call)
+        commitless(mut head, take req, Refused(Overloaded))?
+    }
     let waiting = replace(mut head.waiting, list.new())
     for take entry in take waiting {
         let Waiting(req: take req, ..) = take entry
@@ -2138,7 +2148,7 @@ fn pause_progress[G: send, H: shareable + inert + send](mut head: Head[G, H], mu
 }
 
 fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u64) -> Result[bool, store.Error] waits {
-    if map.len(head.busy) != 0u64 || list.len(head.waiting) != 0u64 || store.export_leased(head.db) { return Ok(false) }
+    if map.len(head.busy) != 0u64 || list.len(head.waiting) != 0u64 || list.len(head.parked) != 0u64 || store.export_leased(head.db) { return Ok(false) }
     if let Some(drive) = head.trigger_drive {
         if map.len(drive.active) != 0u64 { return Ok(false) }
         if let Some(due) = next_trigger_due(head.db, drive.tables)? {
@@ -2276,6 +2286,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
             Some(HeadFinish) => { release_held(mut head, true)?; return Ok(false) },
             Some(SyncWake) => { release_held(mut head, false)?; continue },
+            Some(ParkWake) => continue,
             Some(StoreUnhealthy) => continue,
             Some(InboxEnded) => { ended = true; continue },
             Some(CheckHeadIdle) => {
@@ -2294,6 +2305,8 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             Some(_) => continue,
             None => (),
         }
+        // Ready parked calls rerun before any call not yet started, a write pause included.
+        if rerun_parked(mut head, drain)? { continue }
         if let Some(control) = drain {
             if pause_has_work(pause) {
                 if pause_progress(mut head, mut pause, control, held_write)? {
@@ -2324,7 +2337,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             }
             continue
         }
-        if ended { return Ok(false) }
+        if ended && list.len(head.parked) == 0u64 { return Ok(false) }
         match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
     }
 }
@@ -2398,7 +2411,15 @@ fn route_admission[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
             list.push(mut hd.waiting, Waiting(req: take q, parked: false, held_by_pause: false))
             Ok(())
         },
-        None => if closed { commitless(mut hd, take q, Refused(Overloaded)) } else { begin(mut hd, take q) },
+        None => if closed {
+            commitless(mut hd, take q, Refused(Overloaded))
+        } else if parked_stream(hd, q.stream) {
+            list.push(mut hd.waiting, Waiting(req: take q, parked: false, held_by_pause: false))
+            Ok(())
+        } else {
+            let _ = rerun_parked(mut hd, None)?
+            begin(mut hd, take q)
+        },
     }
 }
 
@@ -2406,7 +2427,7 @@ fn route_admission[G: send, H: shareable + inert + send](mut hd: Head[G, H], tak
 fn next_waiting[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain: Option[HeadDrain]) -> Result[bool, store.Error] waits {
     let mut i = 0u64
     while i < list.len(hd.waiting) {
-        if !hd.waiting[i].parked && !map.contains(hd.busy, hd.waiting[i].req.stream) {
+        if !hd.waiting[i].parked && !map.contains(hd.busy, hd.waiting[i].req.stream) && !parked_stream(hd, hd.waiting[i].req.stream) {
             let Waiting(req: take q, held_by_pause: held, ..) = list.remove(mut hd.waiting, i)
             if held {
                 if let Some(control) = drain {
@@ -2504,34 +2525,6 @@ fn run_effect[G: send, H: shareable + inert + send](mut db: store.Db, identity: 
             let attempted = store.next_call_info(db)
             Ok(Unregistered(store.untried(take complete, None, attempted)))
         },
-    }
-}
-
-fn execute[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take complete: store.Completion) -> Result[(), store.Error] waits {
-    let tried = run_effect(mut hd.db, hd.replay_identity, hd.r, hd.h, q, take complete)
-    let ran = match take tried {
-        Ok(Served(take result)) => take result,
-        Ok(Unregistered(take pending_run)) => return reply_only(mut hd, take q, take pending_run, Failed(Gone)),
-        Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
-        Error(take problem) => return Error(take problem),
-    }
-    match take ran {
-        Ok(Committed(take receipt)) => answered(mut hd, take q, take receipt),
-        Ok(Kept(take receipt)) => answered(mut hd, take q, take receipt),
-        Ok(Failed(take pending_run, stop)) => reply_only(mut hd, take q, take pending_run, failed_stop(stop)?),
-        Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
-        Error(Before(Full(_), _)) => commitless(mut hd, take q, Refused(Overloaded)),
-        Error(Before(take problem, _)) => Error(take problem),
-        Error(After(take problem)) => Error(take problem),
-    }
-}
-
-fn answered[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take receipt: store.Receipt) -> Result[(), store.Error] {
-    let co: std.codec.Codec[Outcome] = std.codec.of()
-    let version = store.version(store.snapshot(hd.db))
-    match std.codec.decode(co, receipt.reply) {
-        Ok(take outcome) => worker(mut hd, take q, take outcome, receipt.ticket, version),
-        _ => fail("runner: stored reply did not decode"),
     }
 }
 
@@ -3131,7 +3124,7 @@ pub fn journal_attempt_gate[H: shareable + inert + send](take db: store.Db, take
     -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
     let mut head = Head(db: take db, r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to,
-        busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None)
+        busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new())
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
     let Head(db: take kept, ..) = take head

@@ -1,0 +1,402 @@
+// The call multiplexer (§13.3a): the Db task's queue of served calls whose
+// attempt latched a miss, the one-slot writer channel their demands go out
+// on, and the attempt loop `serve` and `resume` share.
+
+type ParkEntry {
+    id: u64,
+    ready: bool,
+    attempts: u64,
+    pins: TieredPins,
+    // The touched stamps of the entry's last attempt, which protect the pins
+    // that attempt read.
+    stamps: Map[u64, ()],
+    // The demand not yet sent, and the answer to the one in flight.
+    demand: Option[TieredPointDemand],
+    answer: Option[Receiver[Result[TieredPointDelivery, Error]]],
+    pending: Option[(TieredTarget, Error)],
+    // A failure the next resume returns before it runs anything.
+    failed: Option[Error],
+    crowded: bool
+}
+
+type ParkQueue {
+    // Ascending by id: an id is the entry's place in the queue.
+    entries: List[ParkEntry],
+    next_id: u64,
+    // A detached answer receiver, drained and dropped (§13.3a "Detaching").
+    drain: Option[Receiver[Result[TieredPointDelivery, Error]]]
+}
+
+pub opaque type Parked {
+    id: u64,
+    completion: Completion,
+    record: Option[CallRecord],
+    plan: Plan,
+    grant: CallReserve,
+    // The last attempt's context: its `at` is the call's start, raised to a
+    // later branch `at`, and an untried position settles at it.
+    attempted: CallInfo
+}
+
+// What a call's attempts carry from one attempt to the next.
+type CallRun {
+    // The queue id the call keeps once it has parked (§13.3a "Wake sources").
+    id: Option[u64],
+    attempts: u64,
+    pins: TieredPins,
+    pending: Option[(TieredTarget, Error)],
+    crowded: bool
+}
+
+fn empty_park_queue() -> ParkQueue {
+    ParkQueue(entries: list.new(), next_id: 0, drain: None)
+}
+
+pub fn park_id(p: Parked) -> u64 {
+    p.id
+}
+
+// The coalescing notice the pager posts after each writer answer. It is
+// handed out once, as `sync_notices` is.
+pub fn park_notices(mut db: Db) -> Option[Receiver[()]] {
+    replace(mut db.park_notices, None)
+}
+
+// Starts the pager with its writer slot and hands the Db its ends.
+fn attach_tiered_pager(mut db: Db, take link: TieredPagerLink) -> Task[()] {
+    let TieredPagerLink(requests: take requests, writer: take writer, notices: take notices, worker: take worker) = take link
+    db.pager = Some(take requests)
+    db.pager_writer = Some(take writer)
+    db.park_notices = Some(take notices)
+    take worker
+}
+
+// Ends every parked call and its delivery; their positions stay Admitted.
+fn clear_parked(mut db: Db) {
+    db.parked = empty_park_queue()
+}
+
+fn park_slot(q: ParkQueue, id: u64) -> Option[u64] {
+    for k in 0u64 .. list.len(q.entries) {
+        if q.entries[k].id == id {
+            return Some(k)
+        }
+    }
+    None
+}
+
+// Moves an entry's answer to the drain slot. An older detached receiver is
+// dropped, so the pager's answer into it fails and frees its frames.
+fn detach_answer(mut q: ParkQueue, k: u64) {
+    if let Some(take answer) = replace(mut q.entries[k].answer, None) {
+        q.drain = Some(take answer)
+    }
+}
+
+// A revocation (§13.3a "Wake sources"): the entry loses its pins, its
+// stamps and its demand, and is ready to rerun in its place.
+fn revoke_entry(mut q: ParkQueue, k: u64, root: TieredPinRoot) {
+    detach_answer(mut q, k)
+    q.entries[k].demand = None
+    q.entries[k].pins = empty_tiered_pins(root, q.entries[k].pins.partition)
+    q.entries[k].stamps = map.new()
+    q.entries[k].ready = true
+}
+
+// Entering held mode revokes every parked call.
+fn revoke_parked(mut db: Db) {
+    let root = call_pin_root(db, 0)
+    for k in 0u64 .. list.len(db.parked.entries) {
+        revoke_entry(mut db.parked, k, root)
+    }
+}
+
+fn parked_in_flight(q: ParkQueue) -> bool {
+    if let Some(_) = q.drain {
+        return true
+    }
+    for queued in q.entries {
+        if let Some(_) = queued.answer {
+            return true
+        }
+    }
+    false
+}
+
+// Sends the first unsent demand in id order when no writer demand is in
+// flight, and kicks the pager to look at its writer slot.
+fn send_parked_demand(mut db: Db) {
+    if parked_in_flight(db.parked) {
+        return
+    }
+    let Some(k) = first_unsent(db.parked) else {
+        return
+    }
+    let demand = option.unwrap(replace(mut db.parked.entries[k].demand, None))
+    let made = disk_allocation(fn() -> Result[(Sender[Result[TieredPointDelivery, Error]], Receiver[Result[TieredPointDelivery, Error]]), Error] {
+        Ok(channel.new(1))
+    })
+    let (take answer, take delivered) = match take made {
+        Ok(take ends) => take ends,
+        Error(take problem) => {
+            db.parked.entries[k].failed = Some(take problem)
+            db.parked.entries[k].ready = true
+            return
+        },
+    }
+    let sent = match db.pager_writer {
+        Some(writer) => channel.try_send(writer, PagerPoint(take demand, take answer)),
+        None => Error(Closed(PagerPoint(take demand, take answer))),
+    }
+    match take sent {
+        Ok(()) => {
+            db.parked.entries[k].answer = Some(take delivered)
+            if let Some(requests) = db.pager {
+                let _ = channel.try_send(requests, PagerKick)
+            }
+        },
+        // The slot still holds a detached demand; the pager's answer to it
+        // posts a notice, and the next poll sends this one.
+        Error(Full(PagerPoint(take back, _))) => {
+            db.parked.entries[k].demand = Some(take back)
+        },
+        Error(Full(_)) => fail("store: a writer demand changed kind"),
+        Error(Closed(_)) => {
+            db.parked.entries[k].failed = Some(Io(Closed))
+            db.parked.entries[k].ready = true
+        },
+    }
+}
+
+fn first_unsent(q: ParkQueue) -> Option[u64] {
+    for k in 0u64 .. list.len(q.entries) {
+        if let Some(_) = q.entries[k].demand {
+            return Some(k)
+        }
+    }
+    None
+}
+
+// Installs an arrived answer under the shared partition: Σ retained over
+// the parked entries stays within `writer_pin_bytes`.
+fn install_parked(mut db: Db, k: u64, root: TieredPinRoot, take answer: Result[TieredPointDelivery, Error]) {
+    let delivered = match take answer {
+        Ok(take delivered) => take delivered,
+        Error(take problem) => {
+            db.parked.entries[k].failed = Some(take problem)
+            return
+        },
+    }
+    let mut others = 0u64
+    for j in 0u64 .. list.len(db.parked.entries) {
+        if j != k {
+            others = int.saturating_add(others, db.parked.entries[j].pins.retained)
+        }
+    }
+    db.parked.entries[k].pins.partition = int.saturating_sub(db.writer_pin_bytes, others)
+    let touched = replace(mut db.parked.entries[k].stamps, map.new())
+    let mut pending = replace(mut db.parked.entries[k].pending, None)
+    let installed = tiered_install_delivery(take delivered, root, touched, mut db.parked.entries[k].pins, mut pending)
+    db.parked.entries[k].pending = take pending
+    match take installed {
+        Ok(true) => (),
+        Ok(false) => {
+            db.parked.entries[k].crowded = true
+        },
+        Error(take problem) => {
+            db.parked.entries[k].failed = Some(take problem)
+        },
+    }
+    db.parked.entries[k].stamps = take touched
+}
+
+// One level-triggered scan in id order (§13.3a "Polling"). It returns the
+// ready ids in id order.
+pub fn poll_parked(mut db: Db) -> Result[List[u64], Error] {
+    let drained = match db.parked.drain {
+        Some(receiver) => match channel.try_receive(receiver) {
+            Error(Empty) => false,
+            _ => true,
+        },
+        None => false,
+    }
+    if drained {
+        db.parked.drain = None
+    }
+    let root = call_pin_root(db, 0)
+    let n = list.len(db.parked.entries)
+    for k in 0u64 .. n {
+        if db.parked.entries[k].ready {
+            continue
+        }
+        // A head move: a delivery at the old root would install nothing.
+        if db.parked.entries[k].pins.root != root {
+            revoke_entry(mut db.parked, k, root)
+            continue
+        }
+        let arrived: Option[Result[TieredPointDelivery, Error]] = match db.parked.entries[k].answer {
+            Some(receiver) => match channel.try_receive(receiver) {
+                Ok(take answer) => Some(take answer),
+                Error(Empty) => None,
+                Error(Closed) => Some(Error(Io(Closed))),
+            },
+            None => None,
+        }
+        if let Some(take answer) = arrived {
+            db.parked.entries[k].answer = None
+            install_parked(mut db, k, root, take answer)
+            db.parked.entries[k].ready = true
+        }
+    }
+    send_parked_demand(mut db)
+    let mut ready: List[u64] = list.new()
+    capacity(list.try_reserve(mut ready, n))?
+    for queued in db.parked.entries {
+        if queued.ready {
+            list.push(mut ready, queued.id)
+        }
+    }
+    Ok(take ready)
+}
+
+// Removes a parked call: its delivery is detached and its pins released.
+// The position is handed back untried, to conclude or drop.
+pub fn cancel_parked(mut db: Db, take p: Parked) -> Pending {
+    if let Some(k) = park_slot(db.parked, p.id) {
+        detach_answer(mut db.parked, k)
+        let _ = list.remove(mut db.parked.entries, k)
+    }
+    let Parked(completion: take complete, record: take rec, attempted: attempted, ..) = take p
+    untried(take complete, take rec, attempted)
+}
+
+// Runs a parked call's next attempt once it is ready; a call still parked
+// comes back unchanged.
+pub fn resume_parked[E: inert](mut db: Db, take p: Parked, env: E, body: fn(mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
+    let Some(k) = park_slot(db.parked, p.id) else {
+        return Error(Before(Missing("parked"), None))
+    }
+    if let Error(take problem) = journal_poll(mut db) {
+        let _ = list.remove(mut db.parked.entries, k)
+        return Error(Before(take problem, None))
+    }
+    if let Error(take problem) = healthy(db) {
+        let _ = list.remove(mut db.parked.entries, k)
+        return Error(Before(take problem, None))
+    }
+    if !db.parked.entries[k].ready {
+        return Ok(Parked(take p))
+    }
+    let ParkEntry(attempts: attempts, pins: take pins, pending: take pending, failed: take failed, crowded: crowded, ..) = list.remove(mut db.parked.entries, k)
+    if let Some(take problem) = take failed {
+        return Error(Before(take problem, None))
+    }
+    let Parked(id: id, completion: take complete, record: take rec, plan: plan, grant: grant, attempted: attempted) = take p
+    let carry = CallRun(id: Some(id), attempts: attempts, pins: take pins, pending: take pending, crowded: crowded)
+    drive_served(mut db, take complete, plan, grant, take rec, attempted.at, take carry, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        body(mut tx, env)
+    })
+}
+
+fn call_page_source(db: Db) -> Result[TieredPageSource, Error] {
+    let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
+        Some(requests) => Some(view requests),
+        None => None,
+    }
+    tx_page_source(pager, db.heads[0].roots.collections, int.saturating_add(db.next_node, 1))
+}
+
+// Abort and rerun for serve (§13.3, §13.3a): each attempt drafts at the head
+// as it is now over the call's pin map. A latched miss parks the call on
+// attempts 1 and 2; from attempt 3, or once crowded, the call is held: it
+// revokes every parked call and its misses are delivered inline.
+fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallReserve, take rec: Option[CallRecord], at: u64, take carry: CallRun,
+    body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
+    let mut call = take carry
+    let mut revoked = false
+    loop {
+        let ci = call_info(db.store, 0, db.heads[0].head + 1, at, db.heads[0].at)
+        refresh_call_pins(mut call.pins, mut call.pending, call_pin_root(db, 0))
+        call.attempts += 1
+        let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
+        let metered = metered_draft(db, complete, ci, plan, grant, rec, attempt, call.pins.frames, body)
+        let Some(state) = call_attempt_finish(take attempt) else {
+            return decide_served(mut db, take complete, take rec, ci, take metered)
+        }
+        let refused = match state.stopped {
+            None => return decide_served(mut db, take complete, take rec, ci, take metered),
+            Some(AttemptPinLimit(problem)) => Cache(problem),
+            Some(AttemptAllocation(problem)) => Allocation(problem),
+            Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
+            Some(AttemptMiss(_)) => {
+                let source = serve_before(call_page_source(db))?
+                let root = call_pin_root(db, 0)
+                let room = match list.try_reserve(mut db.parked.entries, 1) {
+                    Ok(()) => true,
+                    Error(_) => false,
+                }
+                if call.attempts >= 3 || call.crowded || !room {
+                    if !revoked {
+                        revoke_parked(mut db)
+                        call.pins.partition = db.writer_pin_bytes
+                        revoked = true
+                    }
+                    let SeekKey(sought) = view state.seek else {
+                        fail("store: a call's miss has no seek key")
+                    }
+                    serve_before(serve_tiered_miss(source, root, state, sought, TieredPoint, None, mut call.pins, mut call.pending))?
+                    continue
+                }
+                let demand = {
+                    let SeekKey(sought) = view state.seek else {
+                        fail("store: a call's miss has no seek key")
+                    }
+                    serve_before(tiered_miss_demand(source, state, sought, TieredPoint, None, mut call.pending))?
+                }
+                let TieredTouchSet(stamps: take stamps, ..) = take state
+                let CallRun(id: kept, attempts: attempts, pins: take pins, pending: take pending, crowded: crowded) = take call
+                let id = match kept {
+                    Some(id) => id,
+                    None => {
+                        let minted = db.parked.next_id
+                        db.parked.next_id += 1
+                        minted
+                    },
+                }
+                let mut place = list.len(db.parked.entries)
+                while place != 0 && db.parked.entries[place - 1].id > id {
+                    place -= 1
+                }
+                list.insert(mut db.parked.entries, place, ParkEntry(id: id, ready: false, attempts: attempts, pins: take pins, stamps: take stamps,
+                    demand: Some(take demand), answer: None, pending: take pending, failed: None, crowded: crowded))
+                send_parked_demand(mut db)
+                return Ok(Parked(Parked(id: id, completion: take complete, record: take rec, plan: plan, grant: grant, attempted: ci)))
+            },
+        }
+        let unchanged = db.next_node
+        return decide_served(mut db, take complete, take rec, ci, Ok(DraftedCall(stage: Over(Refused(refused)), next_id: unchanged)))
+    }
+}
+
+// The deciding attempt's draft, settled as `serve` settles it.
+fn decide_served(mut db: Db, take complete: Completion, take rec: Option[CallRecord], ci: CallInfo, take metered: Result[DraftedCall, DraftRefusal]) -> Result[Served, ServeError] waits {
+    let DraftedCall(stage: take draft, next_id: next_id) = match take metered {
+        Error(AdmissionBytes(problem)) => return Error(Before(Full(Allocation(problem)), None)),
+        Error(DraftStopped(take stop)) => return Ok(stopped_pending(untried(take complete, take rec, ci), take stop)),
+        Ok(take draft) => take draft,
+    }
+    db.next_node = next_id
+    let pending_run = Pending(completion: take complete, record: take rec, attempted: ci, stop: None)
+    match take draft {
+        Ran(take staged) => finish_served(mut db, take pending_run, take staged, false),
+        DraftError(take problem) => Error(Before(take problem, None)),
+        Over(Stopped(limit)) => Ok(stopped_pending(take pending_run, OutOfSteps(limit.steps))),
+        Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
+        Over(Failed(Conflict(take name))) => Ok(stopped_pending(take pending_run, Conflict(take name))),
+        Over(Refused(Allocation(problem))) => Ok(stopped_pending(take pending_run, OutOfBytes(problem))),
+        Over(Refused(take problem)) => Ok(NoRoom(take pending_run, take problem)),
+        Over(Aborted(Undone(value: BodyStop(take stop), ..))) => Ok(stopped_pending(take pending_run, take stop)),
+        Over(Aborted(Undone(value: StoreFailure(take problem), ..))) => Error(Before(take problem, None)),
+        _ => fail("store: missing staged reply"),
+    }
+}

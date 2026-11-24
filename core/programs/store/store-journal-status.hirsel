@@ -73,6 +73,8 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     let DiskState(journal: take frames, acks: take acknowledgements, journal_task: take writer, journal_idle_task: take timer, pager_task: take pager_task, lock: take lock, object: take object_writer, poison: fault, written: take notices, written_send: take notice_to, ..) = option.unwrap(take connection)
     // A Reader may still hold the pager's requests, so the pager is cancelled
     // rather than waited for once the store's sender is dropped.
+    clear_parked(mut owned)
+    owned.pager_writer = None
     owned.pager = None
     if let Some(take running) = take pager_task {
         let mut pager = take running

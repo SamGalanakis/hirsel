@@ -21,6 +21,8 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
             Some(AttemptAllocation(problem)) => return Ok(Over(Refused(Allocation(problem)))),
             Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
             Some(AttemptMiss(_)) => {
+                // An inline call is held from its first miss (§13.3a "Inline calls").
+                revoke_parked(mut db)
                 deliver_call_miss(db, db.heads[i].roots.collections, int.saturating_add(db.next_node, 1), state, mut pins, mut pending)?
             },
         }
@@ -59,7 +61,7 @@ fn deliver_call_miss(db: Db, tree: PageTree, watermark: u64, state: TieredTouchS
     serve_tiered_miss(source, pins.root, state, sought, TieredPoint, None, mut pins, mut pending)
 }
 
-// One serve attempt over the pin map `serve_until_decided` holds. A latched
+// One serve attempt over the pin map `drive_served` holds. A latched
 // attempt's stage is discarded by the driver, so it is not read here.
 fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Option[CallRecord], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> DraftedCall {
     let caught = isolate(fn() -> Result[Result[CallDraft, Capacity], OutOfTime] {
@@ -140,34 +142,6 @@ fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: 
     match take metered {
         Error(limit) => Error(DraftStopped(OutOfSteps(limit.steps))),
         Ok(take drafted) => Ok(take drafted),
-    }
-}
-
-// Abort and rerun for serve (§13.3): each attempt drafts at the head over
-// the call's pin map; a latched miss is delivered into the map and the call
-// drafts again, and a pin-limit latch is `Refused(Cache)`.
-fn serve_until_decided(mut db: Db, complete: Completion, wall: u64, plan: Plan, grant: CallReserve, rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[(CallInfo, Result[DraftedCall, DraftRefusal]), Error] waits {
-    let mut pins = empty_tiered_pins(call_pin_root(db, 0), db.writer_pin_bytes)
-    let mut pending: Option[(TieredTarget, Error)] = None
-    loop {
-        refresh_call_pins(mut pins, mut pending, call_pin_root(db, 0))
-        let ci = call_info(db.store, 0, db.heads[0].head + 1, wall, db.heads[0].at)
-        let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
-        let metered = metered_draft(db, complete, ci, plan, grant, rec, attempt, pins.frames, body)
-        let Some(state) = call_attempt_finish(take attempt) else {
-            return Ok((ci, take metered))
-        }
-        let refused = match state.stopped {
-            None => return Ok((ci, take metered)),
-            Some(AttemptPinLimit(problem)) => Cache(problem),
-            Some(AttemptAllocation(problem)) => Allocation(problem),
-            Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
-            Some(AttemptMiss(_)) => {
-                deliver_call_miss(db, db.heads[0].roots.collections, int.saturating_add(db.next_node, 1), state, mut pins, mut pending)?
-                continue
-            },
-        }
-        return Ok((ci, Ok(DraftedCall(stage: Over(Refused(refused)), next_id: db.next_node))))
     }
 }
 

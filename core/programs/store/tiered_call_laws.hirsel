@@ -19,9 +19,11 @@ fn l63_call_fixture(d: Dir, c: Clock, tasks: Tasks, call: scoped[view] fn(mut Db
     l62_prepare_snapshot_pages(mut db, fixtures, rows.id, 8)?
     db.writer_pin_bytes = 1048576
     let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: db.writer_pin_bytes, pager_task_bytes: 1048576, cut_pins: false)
-    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
-    db.pager = Some(take requests)
+    let link = start_tiered_pager_link(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    let worker = attach_tiered_pager(mut db, take link)
     let answer = call(mut db, (rows, marks))
+    clear_parked(mut db)
+    db.pager_writer = None
     db.pager = None
     let _ = result.unwrap(task.join(take worker))
     answer
@@ -185,7 +187,8 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
     let Abandoned(take again) = admit(mut db, stream, 0, request)? else {
         fail("L63: the refused call is handed back as Abandoned")
     }
-    let Ok(Committed(receipt)) = serve(mut db, take again, plan, None, copy_env(handles), body) else {
+    let parked = serve(mut db, take again, plan, None, copy_env(handles), body)
+    let Ok(Committed(receipt)) = l63_settle(mut db, take parked, handles, body) else {
         fail("L63: the served call commits after the delivered miss")
     }
     if receipt.reply != key_word(3) {
@@ -206,4 +209,167 @@ fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> R
 @test
 fn test_l63_served_miss_reruns_and_commits_once(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     l63_call_fixture(d, c, tasks, l63_serve_rerun)
+}
+
+// Polls and resumes a served call until it is decided, waiting on the park
+// notices while it is parked (§13.3a "Polling").
+fn l63_settle[E: inert](mut db: Db, take first: Result[Served, ServeError], handles: E,
+    body: fn(mut Tx, E) -> Result[Bytes, Bytes]) -> Result[Served, ServeError] waits {
+    let mut served = take first
+    for _ in 0u64 .. 32 {
+        let p = match take served {
+            Ok(Parked(take p)) => take p,
+            Ok(take decided) => return Ok(take decided),
+            Error(take problem) => return Error(take problem),
+        }
+        let ready = result.unwrap(poll_parked(mut db))
+        let mut found = false
+        for id in ready {
+            if id == park_id(p) {
+                found = true
+            }
+        }
+        served = if found {
+            resume_parked(mut db, take p, copy_env(handles), body)
+        } else {
+            let woke = match db.park_notices {
+                Some(notices) => channel.receive(notices),
+                None => fail("L63: the fixture keeps the park notices"),
+            }
+            if let Error(_) = woke {
+                fail("L63: the pager posts a notice after each writer answer")
+            }
+            Ok(Parked(take p))
+        }
+    }
+    fail("L63: a parked call is decided within its resumes")
+}
+
+// Reads Cold row 3 and Hot mark 7, writes their sum as mark `env`'s key 8 and
+// replies with the deciding attempt's version * 1000 + mark 7.
+fn l63_parking_body(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[Bytes, Bytes] {
+    let row = fetch(tx, env.0, 3u64)
+    let mark = match fetch(tx, env.1, 7u64) {
+        Ok(Some(m)) => m,
+        _ => 0u32,
+    }
+    match row {
+        Ok(Some(v)) => {
+            result.unwrap(put(mut tx, env.1, 8u64, v + mark))
+            Ok(key_word(info(mut tx).id.version * 1000 + int.widen(mark)))
+        },
+        _ => Ok(key_word(0)),
+    }
+}
+
+// (g) A served call that misses parks; a Hot write then moves the head
+// before the call reruns. The rerun decides at the moved head: its reply
+// carries the write's value and its own version, which is the write's + 1,
+// and it commits once.
+fn l63_moved_head(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
+    let stream = key_word(29)
+    let request = request_digest(stream, stream)
+    let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
+    let Admitted(take first) = admit(mut db, stream, 0, request)? else {
+        fail("L63: the parking call is admitted")
+    }
+    let parked = serve(mut db, take first, plan, None, copy_env(handles), l63_parking_body)
+    let Ok(Parked(take p)) = take parked else {
+        fail("L63: a served call's first miss parks it")
+    }
+    let Committed(_) = run(mut db, Some(100000), copy_env(handles.1), fn(mut tx: Tx, marks: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, marks, 7u64, 70u32)
+    })? else {
+        fail("L63: the Hot write commits while the call is parked")
+    }
+    let moved = version(snapshot(db))
+    let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take p)), handles, l63_parking_body) else {
+        fail("L63: the parked call commits after the head moved")
+    }
+    if receipt.reply != key_word((moved + 1) * 1000 + 70) {
+        fail("L63: the rerun decides at the moved head and reads its write")
+    }
+    if version(snapshot(db)) != moved + 1 {
+        fail("L63: the parked call commits exactly once")
+    }
+    if l63_mark(mut db, handles.1, 8)? != Some(100) {
+        fail("L63: the committed write is row 3 plus the moved head's mark")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_parked_call_reruns_at_moved_head(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l63_call_fixture(d, c, tasks, l63_moved_head)
+}
+
+// (h) The revocation/pager-wake race. P parks and its delivery arrives (the
+// pager has posted its notice) but no poll has taken it; Q parks behind P,
+// its demand not yet sent. An inline read-only `run` that misses enters held
+// mode and revokes both, leaving the head's root where it was. P's arrived
+// delivery is drained, never installed, so P's next attempt misses again and
+// parks in its old place; then P and Q each rerun and commit once.
+fn l63_revoke_race(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
+    let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
+    let p_stream = key_word(31)
+    let Admitted(take p_first) = admit(mut db, p_stream, 0, request_digest(p_stream, p_stream))? else {
+        fail("L63: P is admitted")
+    }
+    let q_stream = key_word(37)
+    let Admitted(take q_first) = admit(mut db, q_stream, 0, request_digest(q_stream, q_stream))? else {
+        fail("L63: Q is admitted")
+    }
+    let Ok(Parked(take p)) = serve(mut db, take p_first, plan, None, copy_env(handles), l63_parking_body) else {
+        fail("L63: P's first miss parks it")
+    }
+    let Ok(Parked(take q)) = serve(mut db, take q_first, plan, None, copy_env(handles), l63_parking_body) else {
+        fail("L63: Q's first miss parks it")
+    }
+    let woke = match db.park_notices {
+        Some(notices) => channel.receive(notices),
+        None => fail("L63: the fixture keeps the park notices"),
+    }
+    if let Error(_) = woke {
+        fail("L63: the pager answers P's demand")
+    }
+    let before = version(snapshot(db))
+    let held = run(mut db, Some(100000), copy_env(handles.0), fn(mut tx: Tx, rows: Table[u64, u32]) -> Result[Option[u32], Error] {
+        fetch(tx, rows, 5u64)
+    })?
+    let Committed(read) = held else {
+        fail("L63: the held inline read commits")
+    }
+    if read.value != Some(50) {
+        fail("L63: the held inline read is delivered row 5")
+    }
+    let base = version(snapshot(db))
+    if base != before && base != before + 1 {
+        fail("L63: the inline read commits at most one version")
+    }
+    let place = park_id(p)
+    let p_again = resume_parked(mut db, take p, copy_env(handles), l63_parking_body)
+    let Ok(Parked(take p_parked)) = take p_again else {
+        fail("L63: a revoked call's arrived delivery is never installed, so its rerun parks again")
+    }
+    if park_id(p_parked) != place {
+        fail("L63: a revoked call keeps its place in the queue")
+    }
+    let Ok(Committed(p_receipt)) = l63_settle(mut db, Ok(Parked(take p_parked)), handles, l63_parking_body) else {
+        fail("L63: P commits after its revocation")
+    }
+    let Ok(Committed(q_receipt)) = l63_settle(mut db, Ok(Parked(take q)), handles, l63_parking_body) else {
+        fail("L63: Q commits after its revocation")
+    }
+    if p_receipt.reply != key_word((base + 1) * 1000) || q_receipt.reply != key_word((base + 2) * 1000) {
+        fail("L63: each rerun decides at the head it commits on")
+    }
+    if version(snapshot(db)) != base + 2 {
+        fail("L63: P and Q each commit exactly once")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_revocation_races_pager_wake(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l63_call_fixture(d, c, tasks, l63_revoke_race)
 }

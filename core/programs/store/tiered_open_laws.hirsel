@@ -81,9 +81,12 @@ fn l70_reexecute_cold_read(mut db: Db, rows: Table[u64, u32]) -> Result[(), Erro
             _ => Error(key_word(0)),
         }
     }
-    let Ok(Committed(receipt)) = serve(mut db, take complete, plan, Some(take record), (copy_env(rows), read), fn(mut tx: Tx, env: (Table[u64, u32], fn(mut Tx, Table[u64, u32]) -> Result[Bytes, Bytes])) -> Result[Bytes, Bytes] {
+    let body = fn(mut tx: Tx, env: (Table[u64, u32], fn(mut Tx, Table[u64, u32]) -> Result[Bytes, Bytes])) -> Result[Bytes, Bytes] {
         (env.1)(mut tx, env.0)
-    }) else {
+    }
+    // The Cold read parks the call until its delivery lands (§13.3a).
+    let served = serve(mut db, take complete, plan, Some(take record), (copy_env(rows), read), body)
+    let Ok(Committed(receipt)) = l63_settle(mut db, take served, (copy_env(rows), read), body) else {
         fail("L62: serve must record the Tiered read")
     }
     durable(mut db, receipt.ticket)?

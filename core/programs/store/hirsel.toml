@@ -10,6 +10,7 @@ std = { major = 1 }
 "store.hirsel" = "store"
 "store-attempts.hirsel" = "store"
 "store-commit.hirsel" = "store"
+"store-mux.hirsel" = "store"
 "sizes.hirsel" = "store"
 "store-journal-worker.hirsel" = "store"
 "store-journal-status.hirsel" = "store"

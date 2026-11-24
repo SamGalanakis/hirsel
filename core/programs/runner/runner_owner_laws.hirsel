@@ -55,3 +55,70 @@ pub fn fixture_try_receive(owner: FixtureOwner) -> Result[Down, ReceiveError] wa
         Error(e) => Error(e),
     }
 }
+
+@test
+fn leaving_sub_does_not_block_successor(clock: Clock, random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let (head_to, _head_from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
+    let (pub_to, pub_from): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
+    result.unwrap(channel.try_send(pub_to, PubIn(e: Drained)))
+    let mut config = wire_defaults(1048576u64)
+    config.max_subs = 1u64
+    let service: Service[WireSession[(), ()]] = wire_service_seed(random, no_wire(), head_to, clock, tasks, config, string.new())
+    let Service(context: take initial, ..) = take service
+    let mut ctx = take initial
+    ctx.phase = 3u8
+    ctx.publisher = Some(take pub_to)
+    ctx.joined = Some(23u64)
+    ctx.next_sub = 8u64
+    ctx.sub_generation = 1u64
+    ctx.caller = Some(law_caller(1u64))
+    list.push(mut ctx.subs, (7u32, 1u64))
+    list.push(mut ctx.pub_subs, 7u32)
+    let mut work = wire_work()
+    work.check = Some(10u64)
+    let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Unsubscribe(7u32), 0u64)))
+    if !list.contains(ctx.pub_subs, 7u32) { return Error(1u64) }
+    let reg = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
+    list.push(mut ctx.entries, http_law_key(reg.exported[1u64]))
+    list.push(mut ctx.known, 1u8)
+    let next = result.unwrap(wire_plan_subscribe(mut ctx, reg, 8u32, 0u32, b"\x00\x00\x00\x00", None))
+    if let PlannedSubscribe(..) = next {} else { return Error(2u64) }
+    result.unwrap(wire_apply_plan(mut ctx, mut work, take next))
+    let excess = result.unwrap(wire_plan_subscribe(mut ctx, reg, 9u32, 0u32, b"\x00\x00\x00\x00", None))
+    if let SubscriptionRefusal(9u32, Refused(NotAllowed)) = excess {} else { return Error(3u64) }
+    // The first successor owns the outgoing sub's slot. It occupies no PubIn
+    // cell until the writer finishes and the old read set can be removed.
+    if list.len(ctx.deferred_subs) != 1u64 || ctx.deferred_subs[0u64].sub != 8u32 { return Error(4u64) }
+    if !list.contains(ctx.pub_subs, 7u32) || list.contains(ctx.pub_subs, 8u32) { return Error(5u64) }
+    let receiver = task.spawn(tasks, bytes 4096u64, take pub_from, owner_receive_successor)
+    let _ = result.unwrap(wire_step(mut ctx, mut work, WSent))
+    wire_flush_subscriptions(mut ctx, mut work)
+    let (take remaining, exact) = result.unwrap(task.join(take receiver))
+    if !exact || list.len(ctx.deferred_subs) != 0u64 || !list.contains(ctx.pub_subs, 8u32) { return Error(6u64) }
+    if let Error(1002u16) = wire_plan_subscribe(mut ctx, reg, 8u32, 0u32, b"", None) {} else { return Error(8u64) }
+    if let Error(1002u16) = wire_step(mut ctx, mut work, WClient(Set(8u32, None), 0u64)) {} else { return Error(9u64) }
+    if let Error(1002u16) = wire_step(mut ctx, mut work, WClient(Send(10u32, None, b""), 0u64)) {} else { return Error(10u64) }
+    let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Set(7u32, None), 0u64)))
+    let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Send(6u32, None, b""), 0u64)))
+
+    // With an idle writer there will be no Sent to push a lost unsubscribe.
+    result.unwrap(channel.try_send(wire_publisher(ctx), PubIn(e: Drained)))
+    let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Unsubscribe(8u32), 0u64)))
+    let idle = task.spawn(tasks, bytes 4096u64, take remaining, owner_receive_idle_unsubscribe)
+    wire_flush_subscriptions(mut ctx, mut work)
+    if !result.unwrap(task.join(take idle)) || list.len(ctx.pub_subs) != 0u64 { return Error(7u64) }
+    Ok(())
+}
+
+fn owner_receive_successor(take from: Receiver[PubIn]) -> (Receiver[PubIn], bool) waits {
+    let first = match channel.receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
+    let retired = match channel.receive(from) { Ok(PubIn(e: Unsubscribed(23u64, 7u32))) => true, _ => false }
+    let successor = match channel.receive(from) { Ok(PubIn(e: WireSubscribed(23u64, 8u32, 2u64, _))) => true, _ => false }
+    (take from, first && retired && successor)
+}
+
+fn owner_receive_idle_unsubscribe(take from: Receiver[PubIn]) -> bool waits {
+    let first = match channel.receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
+    let retired = match channel.receive(from) { Ok(PubIn(e: Unsubscribed(23u64, 8u32))) => true, _ => false }
+    first && retired
+}

@@ -40,6 +40,7 @@ store = { major = 1, path = "../store" }
 "runner-reexec.hirsel" = "runner"
 "runner-transact.hirsel" = "runner"
 "runner-subscriptions.hirsel" = "runner"
+"runner-owner-subscriptions.hirsel" = "runner"
 "triggers.hirsel" = "triggers"
 "steps.hirsel" = "steps"
 "park.hirsel" = "park"

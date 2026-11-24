@@ -129,13 +129,19 @@ impl SecretPolicy {
     }
 
     /// The requested policy of a derived key. A parent with `kdf` may
-    /// derive keys for MAC, verification or further derivation.
+    /// derive keys for MAC, verification, further derivation and AEAD.
     pub fn derived(&self, requested: &str) -> Option<Self> {
         if !self.uses.permits(SecretUse::KDF) {
             return None;
         }
         let child = Self::parse(requested)?;
-        let allowed = SecretUse(SecretUse::MAC.0 | SecretUse::KDF.0);
+        let allowed = SecretUse(
+            SecretUse::MAC.0
+                | SecretUse::KDF.0
+                | SecretUse::aead(AeadAlg::ChaCha20Poly1305, AeadMode::Seal).0
+                | SecretUse::aead(AeadAlg::Aes128Gcm, AeadMode::Seal).0
+                | SecretUse::aead(AeadAlg::Aes256Gcm, AeadMode::Seal).0,
+        );
         (child.send.is_empty() && allowed.permits(child.uses)).then_some(child)
     }
 

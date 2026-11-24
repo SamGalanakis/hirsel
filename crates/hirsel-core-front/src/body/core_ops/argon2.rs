@@ -9,7 +9,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u = Ty::Scalar(Scalar::U64);
-        let w = Ty::Scalar(Scalar::U32);
         let k = Ty::Scalar(Scalar::U8);
         let mut args = Vec::with_capacity(13);
         for &carrier in &vals[..4] {
@@ -19,17 +18,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Arg::Value(self.read_sequence_word(carrier, 8, u, n)),
             ]);
         }
-        let cost_row = self.runtime_type(cost, n)?;
-        let cost_place = self.address(
-            AddressBase::Value(vals[4]?),
-            &[],
-            PlaceTy::Declared(cost_row),
-            n,
-        );
-        for i in 0..3 {
-            let (_, field) = self.net_field(cost, cost_place, i, n)?;
-            args.push(Arg::Value(self.read_bits(field, w, n)));
-        }
+        args.extend(self.runtime_argon2_cost(cost, vals[4]?, n)?.map(Arg::Value));
         args.extend([Arg::Value(vals[5]?), Arg::Value(vals[6]?)]);
         let [requested, available, error] = self.runtime_outputs(RtOp::Argon2id, &args, n)?;
         let ok = self.runtime_compare(k, error, 0, n)?;
@@ -76,5 +65,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 cx.start(join);
             },
         )
+    }
+    pub(super) fn runtime_argon2_cost(
+        &mut self,
+        cost: TyId,
+        value: ValueId,
+        n: NodeId,
+    ) -> Option<[ValueId; 3]> {
+        let cost_row = self.runtime_type(cost, n)?;
+        let cost_place = self.address(
+            AddressBase::Value(value),
+            &[],
+            PlaceTy::Declared(cost_row),
+            n,
+        );
+        let mut fields = [ValueId(0); 3];
+        for (i, field) in fields.iter_mut().enumerate() {
+            let (_, at) = self.net_field(cost, cost_place, i, n)?;
+            *field = self.read_bits(at, Ty::Scalar(Scalar::U32), n);
+        }
+        Some(fields)
     }
 }

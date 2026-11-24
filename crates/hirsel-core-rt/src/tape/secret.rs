@@ -47,3 +47,41 @@ pub(super) unsafe fn key_args(r: &Request) -> Args {
     parts.push(operand);
     Args::of_parts(&parts)
 }
+
+/// A derivation records designations and public inputs only.
+pub(super) unsafe fn kdf_args(r: &Request) -> Args {
+    // SAFETY: the derivation adapter pins its request for issue.
+    let kdf = unsafe { &*r.path.cast::<crate::secret::kdf::KdfRequest<'_>>() };
+    let (kind, ordinal) = kdf.secret.origin.wire();
+    let policy = kdf.secret.policy.text();
+    let child = kdf.child.text();
+    use hirsel_core_net::secret_kdf::Derivation;
+    let mut head = Vec::new();
+    // Keep the HMAC argument encoding. New mode tags are disjoint
+    // from the origin kinds which begin its arguments.
+    if r.mode != 0 {
+        head.push(r.mode);
+    }
+    head.push(kind);
+    put_varint(&mut head, ordinal);
+    put_varint(&mut head, policy.len() as u64);
+    put_varint(&mut head, child.len() as u64);
+    put_varint(&mut head, kdf.salt_or_prefix.len() as u64);
+    match kdf.derivation.as_ref().unwrap() {
+        Derivation::Hmac => {}
+        Derivation::Hkdf { len } => put_varint(&mut head, *len as u64),
+        Derivation::Argon2id { len, cost, .. } => {
+            put_varint(&mut head, *len as u64);
+            for value in cost {
+                put_varint(&mut head, u64::from(*value));
+            }
+        }
+    }
+    Args::of_parts(&[
+        &head,
+        policy.as_bytes(),
+        child.as_bytes(),
+        kdf.salt_or_prefix,
+        kdf.info_or_data,
+    ])
+}

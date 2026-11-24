@@ -266,7 +266,14 @@ pub(super) unsafe fn replay_out(
             unsafe { crate::resolve::append(&mut r.buffer, &addresses) };
         }
     } else if op == SECRET_KDF {
-        if !ok || out.value != live.schedule.events {
+        if ok {
+            if out.value != live.schedule.events {
+                return Err(Fault::Corrupt);
+            }
+        } else if r.mode != crate::secret::kdf::ARGON2ID_MODE
+            || out.error != (1, 0)
+            || out.value != 0
+        {
             return Err(Fault::Corrupt);
         }
     } else if op == CRED_FETCH && ok {

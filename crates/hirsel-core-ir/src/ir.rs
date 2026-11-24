@@ -1442,7 +1442,10 @@ impl RtOp {
                         vec![V(u64_), V(p), V(u64_), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
-                    HostOp::Resolve | HostOp::CredFetch => {
+                    HostOp::Resolve
+                    | HostOp::CredFetch
+                    | HostOp::UnixConnect
+                    | HostOp::SendPair => {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
                     HostOp::NetNarrowResolve => (vec![V(u64_), V(p)], outcome),
@@ -1450,19 +1453,16 @@ impl RtOp {
                         vec![V(u64_), V(Ty::Scalar(Scalar::U32)), V(p), V(p)],
                         outcome,
                     ),
-                    HostOp::UnixConnect => {
-                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
                     HostOp::UnixListen => (
                         vec![V(u64_), V(p), V(p), V(Ty::Scalar(Scalar::U16))],
                         outcome,
                     ),
-                    HostOp::UnixAccept | HostOp::RecvReady => {
+                    HostOp::UnixAccept | HostOp::RecvReady | HostOp::ExecWait => {
                         (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome)
                     }
-                    HostOp::DatagramOpen => (vec![V(u64_)], outcome),
-                    HostOp::DatagramBind => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::DatagramConnect => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::DatagramBind | HostOp::DatagramConnect => {
+                        (vec![V(u64_), V(p), V(p)], outcome)
+                    }
                     HostOp::DatagramSend | HostOp::DatagramRecv => {
                         (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
@@ -1471,9 +1471,6 @@ impl RtOp {
                         outcome,
                     ),
                     HostOp::NetNarrowUnix => (vec![V(u64_), V(u8_), V(p), V(p)], outcome),
-                    HostOp::SendPair => {
-                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
                     HostOp::NetNarrow => (
                         vec![
                             V(u64_),
@@ -1528,16 +1525,20 @@ impl RtOp {
                         ],
                         outcome,
                     ),
-                    HostOp::ScramFinalLen => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::ScramVerify => (vec![V(u64_), V(p)], outcome),
-                    // The source carrier stays with the caller. Success wipes its
-                    // owned bytes. Tags 1 (invalid) and 2 (capacity) leave it intact.
+                    HostOp::ScramVerify | HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
+                    // The caller retains the carrier, whose owned bytes are wiped on success.
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
-                    HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretDeriveHmac => (vec![V(u64_), V(p), V(p), V(p)], outcome),
-                    HostOp::SecretHmac | HostOp::SecretVerifyHmac | HostOp::SecretUnwrap => {
-                        (vec![V(u64_), V(p), V(p)], outcome)
+                    HostOp::SecretDeriveHkdf => (vec![V(u64_), V(p), V(p), V(u64_), V(p)], outcome),
+                    HostOp::SecretDeriveArgon2id => {
+                        let w = V(Ty::Scalar(Scalar::U32));
+                        (vec![V(u64_), V(p), w, w, w, V(u64_), V(p)], outcome)
                     }
+                    HostOp::SecretHmac
+                    | HostOp::SecretVerifyHmac
+                    | HostOp::SecretUnwrap
+                    | HostOp::ScramFinalLen
+                    | HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SecretWrap => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::SecretSign => (vec![V(u64_), V(u64_), V(p), V(p)], outcome),
                     HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
@@ -1554,7 +1555,8 @@ impl RtOp {
                         ],
                         outcome,
                     ),
-                    HostOp::NetSplit
+                    HostOp::DatagramOpen
+                    | HostOp::NetSplit
                     | HostOp::EnvLen
                     | HostOp::ProvideRandom
                     | HostOp::ClockIdle
@@ -1567,14 +1569,15 @@ impl RtOp {
                     HostOp::ProvideStdout | HostOp::ProvideStderr => {
                         (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
                     }
-                    HostOp::StreamTerminal => (vec![V(u64_), V(u8_)], outcome),
+                    HostOp::StreamTerminal | HostOp::ExecSignal => (vec![V(u64_), V(u8_)], outcome),
                     HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => {
                         (vec![V(u64_), V(u64_)], outcome)
                     }
-                    HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
+                    HostOp::CallPayload | HostOp::PortFill => {
+                        (vec![V(u64_), V(u64_), V(p)], outcome)
+                    }
                     HostOp::CallPayloadPrefix => (vec![V(u64_), V(u64_), V(u64_), V(p)], outcome),
                     HostOp::PortReply => (vec![V(u64_); 9], outcome),
-                    HostOp::PortFill => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
                         (vec![V(u64_), V(u64_)], outcome)
                     }
@@ -1603,12 +1606,9 @@ impl RtOp {
                             results,
                         )
                     }
-                    HostOp::ExecWait => (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome),
-                    HostOp::ExecSignal => (vec![V(u64_), V(u8_)], outcome),
                     HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
                     HostOp::ReadAt | HostOp::WriteAt => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SleepUntil | HostOp::SleepUntilWall => {
                         (vec![V(u64_), V(u64_)], outcome)
                     }

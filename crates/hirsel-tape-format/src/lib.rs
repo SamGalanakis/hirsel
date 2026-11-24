@@ -293,9 +293,6 @@ impl Out {
             return Err(Corrupt);
         }
         let value = c.varint()?;
-        if op == op::SECRET_KDF && (status != OK || value == 0) {
-            return Err(Corrupt);
-        }
         if op == op::SCRAM_VERIFY && (status != OK || value > 1) {
             return Err(Corrupt);
         }
@@ -307,6 +304,11 @@ impl Out {
         } else {
             (0, 0)
         };
+        if op == op::SECRET_KDF
+            && !((status == OK && value != 0) || (status == ERROR && error == (1, 0) && value == 0))
+        {
+            return Err(Corrupt);
+        }
         if op == op::STDIN_READ
             && status != OK
             && (value != 0

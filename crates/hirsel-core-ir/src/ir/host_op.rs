@@ -56,6 +56,8 @@ pub enum HostOp {
     SecretSign = 101,
     SecretAeadSeal = 120,
     SecretAeadOpen = 121,
+    SecretDeriveHkdf = 122,
+    SecretDeriveArgon2id = 123,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     CredFetch = hirsel_core_ids::host_op::CRED_FETCH as isize,
     NetNarrowResolve = 41,
@@ -160,6 +162,8 @@ impl HostOp {
         HostOp::SecretHmac,
         HostOp::SecretVerifyHmac,
         HostOp::SecretDeriveHmac,
+        HostOp::SecretDeriveHkdf,
+        HostOp::SecretDeriveArgon2id,
         HostOp::SecretWrap,
         HostOp::SecretUnwrap,
         HostOp::SecretSign,
@@ -291,6 +295,8 @@ impl HostOp {
             HostOp::SecretNarrow => "secret_narrow",
             HostOp::SecretHmac => "secret_hmac_sha256",
             HostOp::SecretDeriveHmac => "secret_derive_hmac_sha256",
+            HostOp::SecretDeriveHkdf => "secret_derive_hkdf_sha256",
+            HostOp::SecretDeriveArgon2id => "secret_derive_argon2id",
             HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
             HostOp::SecretWrap => "secret_wrap",
             HostOp::SecretUnwrap => "secret_unwrap",
@@ -366,6 +372,8 @@ impl HostOp {
             Self::SecretNarrow => "hirsel_core_secret_narrow",
             Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
             Self::SecretDeriveHmac => "hirsel_core_secret_derive_hmac_sha256",
+            Self::SecretDeriveHkdf => "hirsel_core_secret_derive_hkdf_sha256",
+            Self::SecretDeriveArgon2id => "hirsel_core_secret_derive_argon2id",
             Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
             Self::SecretWrap => "hirsel_core_secret_wrap",
             Self::SecretUnwrap => "hirsel_core_secret_unwrap",
@@ -435,6 +443,8 @@ impl HostOp {
                 | HostOp::SecretNarrow
                 | HostOp::SecretHmac
                 | HostOp::SecretDeriveHmac
+                | HostOp::SecretDeriveHkdf
+                | HostOp::SecretDeriveArgon2id
                 | HostOp::SecretVerifyHmac
                 | HostOp::SecretWrap
                 | HostOp::SecretUnwrap

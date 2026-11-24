@@ -8,8 +8,10 @@ use crate::{
     limit::Payer,
     provider::{Buffer, IoError, Outcome, Provider, Request, STEP_DONE, Step, Wait},
 };
+pub(crate) mod kdf;
 pub(crate) mod key;
 use hirsel_core_net::{Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse};
+pub use kdf::hirsel_core_secret_derive_hmac_sha256;
 use key::key_issue;
 use std::{
     io::Read,
@@ -368,7 +370,10 @@ pub(crate) const INVALID: Outcome = Outcome {
 };
 
 fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome> {
-    let size = SecretGrant::logical_size(policies, len);
+    admit_size(payer, SecretGrant::logical_size(policies, len))
+}
+
+fn admit_size(payer: Payer, size: Option<u64>) -> Result<Charge, Outcome> {
     match payer.admit(size) {
         Ok(()) => Ok(Charge(payer, size.unwrap())),
         Err(c) => Err(Outcome {
@@ -505,39 +510,6 @@ pub(crate) struct MacTape {
     pub(crate) handle: u64,
 }
 
-pub(crate) struct KdfRequest<'a> {
-    pub(crate) secret: &'a Secret,
-    pub(crate) prefix: &'a [u8],
-    pub(crate) data: &'a [u8],
-    #[cfg(feature = "record")]
-    pub(crate) child: &'a SecretPolicy,
-    output: *mut Option<Arc<Zeroizing<Vec<u8>>>>,
-}
-
-pub(crate) const KDF_PROVIDER: Provider = Provider {
-    issue: kdf_issue,
-    ..MAC_PROVIDER
-};
-
-unsafe extern "C" fn kdf_issue(_: *mut u8, request: *mut Request, _: u64) -> Step {
-    // SAFETY: the adapter pins the input and exclusive output slot.
-    unsafe {
-        let args = &*(*request).path.cast::<KdfRequest<'_>>();
-        let key = args.secret.bytes.as_deref().unwrap();
-        args.output
-            .write(Some(Arc::new(hirsel_core_net::derive_hmac_sha256(
-                key,
-                args.prefix,
-                args.data,
-            ))));
-    }
-    Step {
-        kind: STEP_DONE,
-        outcome: Outcome::default(),
-        deadline_ns: 0,
-    }
-}
-
 unsafe fn drive_secret_sink(
     context: *mut Context,
     live: Provider,
@@ -549,72 +521,6 @@ unsafe fn drive_secret_sink(
         return unsafe { crate::provider::drive(context, &tape.provider, request, None) };
     }
     unsafe { crate::provider::drive(context, &live, request, None) }
-}
-
-/// # Safety
-/// The Secret is live and all three input carriers stay pinned through delivery.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_secret_derive_hmac_sha256(
-    context: *mut Context,
-    s: u64,
-    prefix: *const Buffer,
-    data: *const Buffer,
-    uses: *const Buffer,
-    site: u64,
-) -> Outcome {
-    unsafe {
-        crate::process::deny_describe_capability(context);
-        let secret = resolve(context, s);
-        let uses = crate::tls::bytes(&*uses);
-        let Some(child) = std::str::from_utf8(uses)
-            .ok()
-            .and_then(|uses| secret.policy.derived(uses))
-        else {
-            return INVALID;
-        };
-        let charge = match admit((*context).payer(), &child.send, 32) {
-            Ok(charge) => charge,
-            Err(error) => return error,
-        };
-        let mut bytes = None;
-        let args = KdfRequest {
-            secret: &secret,
-            prefix: crate::tls::bytes(&*prefix),
-            data: crate::tls::bytes(&*data),
-            #[cfg(feature = "record")]
-            child: &child,
-            output: &raw mut bytes,
-        };
-        let mut request = Request {
-            operation: crate::provider::SECRET_KDF,
-            mode: 0,
-            handle: 0,
-            path: (&raw const args).cast(),
-            path_len: std::mem::size_of_val(&args),
-            buffer: crate::net::empty_buffer(),
-            site,
-        };
-        let outcome = drive_secret_sink(context, KDF_PROVIDER, &mut request);
-        if outcome.error.tag != 0 {
-            return outcome;
-        }
-        if outcome.status != 0 {
-            return INVALID;
-        }
-        #[cfg(feature = "record")]
-        let ordinal = outcome.value;
-        #[cfg(not(feature = "record"))]
-        let ordinal = 0;
-        // A key derived from a grant is as unknown to the program as the
-        // grant, so `wrap` and served streams treat it alike.
-        let origin = Origin::Derived {
-            ordinal,
-            opaque: secret.origin.opaque(),
-        };
-        // A replay leaves bytes absent. The sinks that can read this key
-        // are themselves replay deliveries.
-        store_sealed(context, child, bytes, charge, Some(origin))
-    }
 }
 
 pub(crate) struct MacRequest<'a> {

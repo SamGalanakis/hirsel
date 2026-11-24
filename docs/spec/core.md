@@ -856,7 +856,9 @@ capability. `recommended` returns RFC 9106 §4's second recommendation, `m = 655
 `p = 4`, which costs `196,609` steps and 64 MiB.
 
 A password sealed as a `Secret` derives a key with `secret.derive_argon2id`
-([TLS-5](tls.md#tls-5-secrets)), under the same parameters, refusals and charge.
+([TLS-5](tls.md#tls-5-secrets)). It uses the same Argon2id parameters, block steps
+and working-memory charge. TLS-5 defines the child policy, storage charge and
+refusal order.
 
 ### Argon2id laws
 

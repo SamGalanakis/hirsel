@@ -507,6 +507,8 @@ tags!(HostOp {
     126 => Mkstemp,
     127 => SecretAeadSeal,
     128 => SecretAeadOpen,
+    129 => SecretDeriveHkdf,
+    130 => SecretDeriveArgon2id,
 });
 
 tags!(RaiseCause {

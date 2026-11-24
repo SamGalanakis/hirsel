@@ -31,7 +31,8 @@ The launcher can grant a `Secret` from the environment or a file. Use
 to restrict the permitted names. `secret.render` always returns `[secret]`.
 A grant or seal whose `to` text enables cryptographic uses also lets the secret key
 HMAC-SHA256 (`mac`/`verify`, `secret.verify_hmac_sha256`, [HMAC](hmac.md#secret-keys)),
-KDF derivation (`secret.derive_hmac_sha256`), AEAD wrap/unwrap (`secret.wrap`/`secret.unwrap`),
+key derivation (`secret.derive_hmac_sha256`, `secret.derive_hkdf_sha256`,
+`secret.derive_argon2id`), AEAD wrap/unwrap (`secret.wrap`/`secret.unwrap`),
 asymmetric signing (`secret.sign`), and SCRAM-SHA-256 (`secret.scram_sha256`,
 `secret.scram_final_len`, `secret.scram_verify`). For dynamic credential grants (`Cred`),
 see [cred.md](cred.md).

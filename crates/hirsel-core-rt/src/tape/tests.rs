@@ -16,13 +16,13 @@ pub(super) const REVISION: [u8; 32] = {
 };
 #[path = "aead_tests.rs"]
 mod aead;
+#[path = "kdf_tests.rs"]
+mod kdf;
 #[path = "rl2_tests.rs"]
 mod rl2;
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
 const MODEL: &[u8] = include_bytes!("testdata/model-f4-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
-
-// ---------- providers ----------
 
 /// Counts every callback that reaches it. `inner: None` refuses everything:
 /// the refuse-all host of the bypass law.

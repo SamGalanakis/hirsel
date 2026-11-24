@@ -198,6 +198,7 @@ pub mod key_wrap;
 pub use cred_grant::{CredGrant, CredSource, StsSource};
 pub mod secret_aead;
 mod secret_grant;
+pub mod secret_kdf;
 pub use secret_grant::{
     SecretGrant, SecretPolicy, SecretSource, SecretUse, derive_hmac_sha256, hmac_sha256,
     verify_hmac_sha256,

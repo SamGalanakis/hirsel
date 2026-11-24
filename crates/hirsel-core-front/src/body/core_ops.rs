@@ -11,6 +11,7 @@ mod flow;
 mod log;
 mod net_error;
 mod provide;
+mod secret_kdf;
 mod secret_key;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -429,6 +430,8 @@ operations! {
     ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
     ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
     ("secret", "derive_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHmac)), "B", "secret-kdf-signer-1816", false),
+    ("secret", "derive_hkdf_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHkdf)), "B", "crypto-derive-2137", false),
+    ("secret", "derive_argon2id", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveArgon2id)), "B", "crypto-derive-2137", false),
     ("secret", "verify_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmac)), "B", "hmac-1504", false),
     ("secret", "scram_sha256", Lane::Runtime(Kernel::Net(HostOp::ScramSha256)), "B", "small-host-impl-1576", false),
     ("secret", "scram_final_len", Lane::Runtime(Kernel::Net(HostOp::ScramFinalLen)), "B", "small-host-impl-1576", false),
@@ -3436,8 +3439,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             return self.runtime_exec(op, f, vals, result, n);
         }
-        if op == HostOp::SecretDeriveHmac {
-            return self.runtime_secret_derive(vals, result, n);
+        if matches!(
+            op,
+            HostOp::SecretDeriveHmac | HostOp::SecretDeriveHkdf | HostOp::SecretDeriveArgon2id
+        ) {
+            return self.runtime_secret_derive(op, f, vals, result, n);
         }
         if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
             return self.runtime_secret_mac(op, vals, result, n);
@@ -3936,45 +3942,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         self.jump(join, &[], n);
         self.start(join);
-    }
-
-    fn runtime_secret_derive(
-        &mut self,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let secret = self.runtime_key(vals[0]?, n);
-        let [value, tag, _, available] = self.runtime_row(
-            RtOp::Host(HostOp::SecretDeriveHmac),
-            &[
-                Arg::Value(secret),
-                Arg::Value(vals[1]?),
-                Arg::Value(vals[2]?),
-                Arg::Value(vals[3]?),
-            ],
-            n,
-        )?;
-        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 0, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-                {
-                    cx.runtime_store(at, &[], Ty::Scalar(Scalar::U64), value, n);
-                }
-            },
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
-                {
-                    cx.runtime_secret_error(at, tag, value, available, n);
-                }
-            },
-        )
     }
 
     fn runtime_secret_mac(

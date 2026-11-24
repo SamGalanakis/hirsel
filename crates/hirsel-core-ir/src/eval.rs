@@ -16,6 +16,7 @@ mod frame;
 mod launch;
 mod map;
 mod provide;
+mod secret_kdf;
 mod secret_key;
 mod sha512;
 mod signature;
@@ -4451,29 +4452,6 @@ impl Machine<'_> {
         )
     }
 
-    fn secret_derive(&mut self, t: &Task, a: &[u64]) -> Vec<u64> {
-        let parent = self.secret(a[0]).unwrap();
-        let policy = std::str::from_utf8(self.carrier_bytes(a[3]))
-            .ok()
-            .and_then(|uses| parent.policy.derived(uses));
-        let Some(policy) = policy else {
-            return vec![0, 1, 0, 0];
-        };
-        let charge = SecretGrant::logical_size(&policy.send, 32).unwrap();
-        let payer = t.limits.last().unwrap();
-        if let Err(available) = self.admit_charge(payer, charge, false) {
-            return vec![charge, 2, 0, available];
-        }
-        let parent = self.secret(a[0]).unwrap();
-        let bytes = hirsel_core_net::derive_hmac_sha256(
-            &parent.bytes,
-            self.carrier_bytes(a[1]),
-            self.carrier_bytes(a[2]),
-        );
-        let key = self.store_sealed(policy, bytes, payer.clone(), charge);
-        vec![key, 0, 0, 0]
-    }
-
     fn secret(&self, key: u64) -> Option<&EvalSecret> {
         let slot = self.world.secrets.get(key as usize)?.as_ref()?;
         Some(&slot.secret)
@@ -4730,7 +4708,9 @@ impl Machine<'_> {
             HostOp::ScramFinalLen => return Ok(self.scram_final_len(a)),
             HostOp::ScramVerify => return Ok(self.scram_verify(a)),
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
-            HostOp::SecretDeriveHmac => return Ok(self.secret_derive(t, a)),
+            HostOp::SecretDeriveHmac | HostOp::SecretDeriveHkdf | HostOp::SecretDeriveArgon2id => {
+                return self.secret_derive(t, op, a);
+            }
             HostOp::SecretHmac | HostOp::SecretVerifyHmac => return Ok(self.secret_mac(op, a)),
             HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign => {
                 return Ok(self.secret_key(t, op, a));
@@ -4791,6 +4771,8 @@ impl Machine<'_> {
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
             | HostOp::SecretDeriveHmac
+            | HostOp::SecretDeriveHkdf
+            | HostOp::SecretDeriveArgon2id
             | HostOp::SecretHmac
             | HostOp::SecretVerifyHmac
             | HostOp::SecretWrap

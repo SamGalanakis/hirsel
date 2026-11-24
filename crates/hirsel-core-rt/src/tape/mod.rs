@@ -1097,22 +1097,7 @@ unsafe fn operands(r: &Request) -> Args {
             return Args::of(&args);
         }
         if r.operation == SECRET_KDF {
-            let kdf = &*r.path.cast::<crate::secret::KdfRequest<'_>>();
-            let (kind, ordinal) = kdf.secret.origin.wire();
-            let policy = kdf.secret.policy.text();
-            let child = kdf.child.text();
-            let mut head = vec![kind];
-            put_varint(&mut head, ordinal);
-            put_varint(&mut head, policy.len() as u64);
-            put_varint(&mut head, child.len() as u64);
-            put_varint(&mut head, kdf.prefix.len() as u64);
-            return Args::of_parts(&[
-                &head,
-                policy.as_bytes(),
-                child.as_bytes(),
-                kdf.prefix,
-                kdf.data,
-            ]);
+            return secret::kdf_args(r);
         }
         if r.operation == SECRET_MAC && r.mode >= crate::secret::key::KEY_WRAP {
             return secret::key_args(r);
@@ -1912,7 +1897,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
             handle: 0,
         },
         SECRET_KDF => Inner {
-            provider: crate::secret::KDF_PROVIDER,
+            provider: crate::secret::kdf::KDF_PROVIDER,
             handle: 0,
         },
         SCRAM_VERIFY => Inner {
@@ -1959,7 +1944,7 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
         return step;
     }
     let mut outcome = step.outcome;
-    if r.operation == SECRET_KDF {
+    if r.operation == SECRET_KDF && outcome.error == IoError::OK && outcome.status == 0 {
         // The new designation follows this delivery's tape position, even if
         // another unit installs its handle in the Secret table first.
         outcome.value = live.schedule.events + 1;

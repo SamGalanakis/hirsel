@@ -1105,8 +1105,10 @@ endpoint by name.
 | **KD6** no derivation bytes in a recording | the parent's or child's bytes reaching a frame | Record KD1's A.1 case and KD5 with the parents from `file:` grants. The tape holds none of the IKM, the password, the OKM or the Argon2 tag, raw, hex or base64. Replayed with the files removed, both runs give the same MAC tags and end `Sealed`. |
 
 TL1 to TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
-loopback, and AE1 to AE8 and KD1 to KD6 against the OS provider. AE5, AE6 and KD5's
-no-call checks also have scripted-provider cases. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
+loopback, and AE1 to AE8 and KD1 to KD6 against the OS provider. KD1–KD3 are in
+`core/core/tests/hkdf_vectors.hirsel`, with KD4–KD5 in `core/std/tests/secret_kdf.hirsel`.
+KD6 and the KD4–KD5 no-call checks are in the runtime tape laws. AE5 and AE6
+also have scripted-provider cases. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
 evaluator is covered. SC9 runs on both engines. CR1 to CR5 run natively against loopback servers. The recording laws of
 TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).
 

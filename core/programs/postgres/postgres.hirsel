@@ -522,7 +522,7 @@ fn authenticate(mut s: Session, mut b: Bytes, password: Secret, nonce: Bytes, un
     let (mechanism, gs2): (Bytes, Bytes) = if plus {
         (b"SCRAM-SHA-256-PLUS", b"p=tls-server-end-point,,n=,r=")
     } else {
-        (b"SCRAM-SHA-256", b"n,,n=,r=")
+        (b"SCRAM-SHA-256", b"y,,n=,r=")
     }
     let mut client: Bytes = list.with_capacity(list.len(gs2) + list.len(nonce))
     list.append(mut client, gs2)

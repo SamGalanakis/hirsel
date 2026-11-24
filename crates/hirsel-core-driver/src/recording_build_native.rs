@@ -3856,14 +3856,14 @@ fn postgres_scripted_peer_laws() {
     const LEAF: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.pem");
     const KEY: &[u8] = include_bytes!("../../hirsel-core-rt/testdata/tls/alpha.key.pem");
     const PASSWORD: &str = "pencil";
-    const FIRST: &[u8] = b"n,,n=,r=rOprNGfwEbeRWgbNEkqO";
+    const FIRST: &[u8] = b"y,,n=,r=rOprNGfwEbeRWgbNEkqO";
     const NONCE: &[u8] = b"r=rOprNGfwEbeRWgbNEkqO,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
     const EXTENDED: &[u8] =
         b"r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
     // RFC 7677's salt, nonce and password with PostgreSQL's empty SCRAM name.
     // Independently derived using PBKDF2, HMAC and SHA-256 from RFC 5802 §3.
-    const PROOF: &[u8] = b"c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=qvT2SWdEH5Q06albL+hjSYuUhCG7VndFyzIb7CK4n9k=";
-    const VERIFIER: &[u8] = b"v=3HO6Qt1M4MKJrmlKaoOqLAI0/0TV0HZe7J9H3MBtSOg=";
+    const PROOF: &[u8] = b"c=eSws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=VpuC5DGQa5ro9tXE9MnKs69NH1nxnuregZZcclqIGfM=";
+    const VERIFIER: &[u8] = b"v=FOmOj9BpTGwvnzwBtWQjBaPmVxT9I8IeHBOhcIPu3us=";
     const SQL_ERROR: &[u8] = b"SERROR\0VERROR\0C22012\0Mdivision by zero\0Dscripted detail\0\0";
     // One int4 column. Table, attribute and modifier are unset. Width is
     // four and statement Describe reports format zero per protocol 3.0.

@@ -93,10 +93,10 @@ fn expect_eof(mut reader: ReadHalf) waits {
 // RFC 5802's transcript and RFC 7677's SHA-256, salt and password.
 fn authenticate(mut reader: ReadHalf, mut writer: WriteHalf) waits {
     send_frame(mut writer, b'R', b"\x00\x00\x00\x0aSCRAM-SHA-256\0\0")
-    expect_frame(mut reader, b'p', b"SCRAM-SHA-256\0\x00\x00\x00\x20n,,n=,r=r80dezmoIOL0Zbmhap54bk9F")
+    expect_frame(mut reader, b'p', b"SCRAM-SHA-256\0\x00\x00\x00\x20y,,n=,r=r80dezmoIOL0Zbmhap54bk9F")
     send_frame(mut writer, b'R', b"\x00\x00\x00\x0br=r80dezmoIOL0Zbmhap54bk9Fserver,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096")
-    expect_frame(mut reader, b'p', b"c=biws,r=r80dezmoIOL0Zbmhap54bk9Fserver,p=IDbuODPYrF/1dQ4/01RNykAXAcDJjZ+E6BT9wOXlykg=")
-    send_frame(mut writer, b'R', b"\x00\x00\x00\x0cv=RbpTzOV+lD7KxlFx93YWzRtM6JnNBL8RwDlfp4Eu5bI=")
+    expect_frame(mut reader, b'p', b"c=eSws,r=r80dezmoIOL0Zbmhap54bk9Fserver,p=LY2b9lfpn5RqWqaU2lXtid80HdtlYDoOV7SwHiKpXJw=")
+    send_frame(mut writer, b'R', b"\x00\x00\x00\x0cv=em6DIq9C4iPIoxN/tOiluHhoB+pdiUzCYdNSkSvrCno=")
     send_frame(mut writer, b'R', b"\x00\x00\x00\x00")
     send_frame(mut writer, b'S', b"client_encoding\0UTF8\0")
     send_frame(mut writer, b'K', b"\x12\x34\x56\x78\x9a\xbc\xde\xf0")

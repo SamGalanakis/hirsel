@@ -1,0 +1,315 @@
+// AV1 RTP payload format Appendix A.8. The input is the RTP extension value.
+pub type Error = Truncated | InvalidStructure | MissingStructure | UnknownTemplate | ExtensionTooLong
+
+pub type Resolution {
+    width: u64,
+    height: u64
+}
+
+type Template {
+    spatial: u8,
+    temporal: u8,
+    indications: u64,
+    refs_start: u64,
+    refs_end: u64,
+    chains: Inline[u64, 4]
+}
+
+pub opaque type Structure {
+    offset: u8,
+    targets: u64,
+    count: u64,
+    chain_count: u64,
+    active: u64,
+    templates: Inline[Template, 64],
+    protectors: Inline[u8, 32],
+    resolutions: Inline[Option[Resolution], 4],
+    // RTP's two-byte extension form limits the value to 255 bytes. Each
+    // template reference takes at least five bits, so 408 entries suffice.
+    refs: Inline[u8, 408]
+}
+
+pub fn empty() -> Structure {
+    let template = Template(spatial: 0, temporal: 0, indications: 0, refs_start: 0, refs_end: 0, chains:[0; 4])
+    Structure(offset: 0, targets: 0, count: 0, chain_count: 0, active: 0, templates:[template; 64], protectors:[0; 32], resolutions:[None; 4], refs:[0; 408])
+}
+
+pub opaque type References = TemplateRefs(u64, u64) | CustomRefs(u64) | NoRefs
+
+pub type Frame {
+    first: bool,
+    last: bool,
+    template_id: u8,
+    number: u16,
+    spatial: u8,
+    temporal: u8,
+    resolution: Option[Resolution],
+    active_targets: u64,
+    decode_target_count: u64,
+    indications: u64,
+    references: References,
+    chain_count: u64,
+    chains: Inline[u64, 4]
+}
+
+pub type Indication = Absent | Discardable | Switch | Required
+
+pub fn decode_target(frame: Frame, index: u64) -> Option[Indication] {
+    if index >= frame.decode_target_count || index >= 32 {
+        return None
+    }
+    let value = (frame.indications >> (2 * index)) & 3
+    Some(if value == 0 {
+        Absent
+    } else if value == 1 {
+        Discardable
+    } else if value == 2 {
+        Switch
+    } else {
+        Required
+    })
+}
+
+pub fn protecting_chain(structure: Structure, target: u64) -> Option[u8] {
+    if target >= structure.targets || structure.chain_count == 0 {
+        return None
+    }
+    Some(structure.protectors[target])
+}
+
+pub fn chain_difference(frame: Frame, index: u64) -> Option[u8] {
+    if index >= frame.chain_count || index >= 32 {
+        return None
+    }
+    Some(int.narrow((frame.chains[index / 8] >> (8 * (index % 8))) & 255))
+}
+
+fn bits(data: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
+    let size = list.len(data)
+    if size > 255 {
+        return Error(ExtensionTooLong)
+    }
+    let end = size * 8
+    if at > end || width > end - at {
+        return Error(Truncated)
+    }
+    let mut value: u64 = 0
+    let mut left = width
+    while left != 0 {
+        let byte: u64 = int.widen(data[at / 8])
+        let available = 8 - at % 8
+        let count = if left < available {
+            left
+        } else {
+            available
+        }
+        value = (value << count) | ((byte >> (available - count)) & ((1u64 << count) - 1))
+        at += count
+        left -= count
+    }
+    Ok(value)
+}
+
+fn nonsymmetric(data: Bytes, mut at: u64, choices: u64) -> Result[u64, Error] {
+    if choices == 1 {
+        return Ok(0)
+    }
+    let mut width: u64 = 1
+    while (1u64 << width) <= choices {
+        width += 1
+    }
+    let split = (1u64 << width) - choices
+    let high = bits(data, mut at, width - 1)?
+    if high < split {
+        return Ok(high)
+    }
+    Ok(2 * high + bits(data, mut at, 1)? - split)
+}
+
+fn indications(data: Bytes, mut at: u64, count: u64) -> Result[u64, Error] {
+    let mut packed: u64 = 0
+    for index in 0u64 .. count {
+        packed |= bits(data, mut at, 2)? << (2 * index)
+    }
+    Ok(packed)
+}
+
+fn chain_diffs(data: Bytes, mut at: u64, count: u64, width: u64) -> Result[Inline[u64, 4], Error] {
+    let mut packed: Inline[u64, 4] =[0; 4]
+    for index in 0u64 .. count {
+        packed[index / 8] |= bits(data, mut at, width)? << (8 * (index % 8))
+    }
+    Ok(packed)
+}
+
+fn read_structure(data: Bytes, mut at: u64) -> Result[Structure, Error] {
+    let mut structure = empty()
+    structure.offset = int.narrow(bits(data, mut at, 6)?)
+    structure.targets = bits(data, mut at, 5)? + 1
+    structure.active = (1u64 << structure.targets) - 1
+    let mut spatial: u8 = 0
+    let mut temporal: u8 = 0
+    let mut next: u64 = 0
+    while next != 3 {
+        if structure.count == 64 || spatial >= 4 || temporal >= 8 {
+            return Error(InvalidStructure)
+        }
+        structure.templates[structure.count].spatial = spatial
+        structure.templates[structure.count].temporal = temporal
+        structure.count += 1
+        next = bits(data, mut at, 2)?
+        if next == 1 {
+            temporal += 1
+        } else if next == 2 {
+            spatial += 1
+            temporal = 0
+        }
+    }
+    for index in 0u64 .. structure.count {
+        structure.templates[index].indications = indications(data, mut at, structure.targets)?
+    }
+    let mut ref_count: u64 = 0
+    for index in 0u64 .. structure.count {
+        structure.templates[index].refs_start = ref_count
+        while bits(data, mut at, 1)? == 1 {
+            let diff = bits(data, mut at, 4)? + 1
+            structure.refs[ref_count] = int.narrow(diff)
+            ref_count += 1
+        }
+        structure.templates[index].refs_end = ref_count
+    }
+    structure.chain_count = nonsymmetric(data, mut at, structure.targets + 1)?
+    if structure.chain_count > 0 {
+        for index in 0u64 .. structure.targets {
+            structure.protectors[index] = int.narrow(nonsymmetric(data, mut at, structure.chain_count)?)
+        }
+        for index in 0u64 .. structure.count {
+            structure.templates[index].chains = chain_diffs(data, mut at, structure.chain_count, 4)?
+        }
+    }
+    if bits(data, mut at, 1)? == 1 {
+        let last_layer: u64 = int.widen(spatial)
+        let layers = last_layer + 1
+        for index in 0u64 .. layers {
+            let width = bits(data, mut at, 16)? + 1
+            let height = bits(data, mut at, 16)? + 1
+            structure.resolutions[index] = Some(Resolution(width: width, height: height))
+        }
+    }
+    Ok(take structure)
+}
+
+fn custom_reference(data: Bytes, mut at: u64) -> Result[Option[u64], Error] {
+    let width = 4 * bits(data, mut at, 2)?
+    if width == 0 {
+        return Ok(None)
+    }
+    Ok(Some(bits(data, mut at, width)? + 1))
+}
+
+// Iterate frame differences with the same input and structure used by parse.
+pub fn next_reference(data: Bytes, structure: Structure, mut cursor: References) -> Result[Option[u64], Error] {
+    match cursor {
+        TemplateRefs(start, end) => {
+            if start == end {
+                return Ok(None)
+            }
+            let diff: u64 = int.widen(structure.refs[start])
+            cursor = TemplateRefs(start + 1, end)
+            Ok(Some(diff))
+        },
+        CustomRefs(start) => {
+            let mut at = start
+            let diff = custom_reference(data, mut at)?
+            cursor = if let Some(_) = diff {
+                CustomRefs(at)
+            } else {
+                NoRefs
+            }
+            Ok(diff)
+        },
+        NoRefs => Ok(None)
+    }
+}
+
+fn read_frame(data: Bytes, structure: Structure, header: u8, flags: u8, mut at: u64) -> Result[Frame, Error] {
+    if structure.count == 0 {
+        return Error(MissingStructure)
+    }
+    let id = header & 63
+    let index: u64 = int.widen((id + 64 - structure.offset) & 63)
+    if index >= structure.count {
+        return Error(UnknownTemplate)
+    }
+    let template = structure.templates[index]
+    let active = if (flags & 8) != 0 {
+        bits(data, mut at, structure.targets)?
+    } else {
+        structure.active
+    }
+    let dtis = if (flags & 4) != 0 {
+        indications(data, mut at, structure.targets)?
+    } else {
+        template.indications
+    }
+    let refs = if (flags & 2) != 0 {
+        let start = at
+        while let Some(_) = custom_reference(data, mut at)? {}
+        CustomRefs(start)
+    } else {
+        TemplateRefs(template.refs_start, template.refs_end)
+    }
+    let chains = if (flags & 1) != 0 {
+        chain_diffs(data, mut at, structure.chain_count, 8)?
+    } else {
+        template.chains
+    }
+    // Appendix A.8.3 requires receivers to ignore zero_padding.
+    let spatial: u64 = int.widen(template.spatial)
+    let number: u16 = list.word_be(data, 1)
+    Ok(Frame(first: (header & 128) != 0, last: (header & 64) != 0, template_id: id, number: number, spatial: template.spatial, temporal: template.temporal, resolution: structure.resolutions[spatial], active_targets: active, decode_target_count: structure.targets, indications: dtis, references: refs, chain_count: structure.chain_count, chains: chains))
+}
+
+// A successful new structure or active-target update affects later descriptors.
+// Keep one Structure per dependency stream. An error preserves the previous state.
+pub fn parse(data: Bytes, mut structure: Structure) -> Result[Frame, Error] {
+    let end = list.len(data)
+    if end < 3 {
+        return Error(Truncated)
+    }
+    if end > 255 {
+        return Error(ExtensionTooLong)
+    }
+    let header = data[0]
+    if end == 3 {
+        let mut at: u64 = 24
+        return read_frame(data, structure, header, 0, mut at)
+    }
+    let flags = data[3] >> 3
+    let mut at: u64 = 29
+    if (flags & 16) != 0 {
+        if (header & 128) == 0 {
+            return Error(InvalidStructure)
+        }
+        let mut next = read_structure(data, mut at)?
+        let parsed = read_frame(data, next, header, flags, mut at)?
+        next.active = parsed.active_targets
+        structure = take next
+        return Ok(take parsed)
+    }
+    let parsed = read_frame(data, structure, header, flags, mut at)?
+    structure.active = parsed.active_targets
+    Ok(take parsed)
+}
+
+// Frame-number translation used when forwarding a stream.
+pub fn rewrite_frame_number(mut data: Bytes, number: u16) -> Result[(), Error] {
+    if list.len(data) < 3 {
+        return Error(Truncated)
+    }
+    if list.len(data) > 255 {
+        return Error(ExtensionTooLong)
+    }
+    list.set_word_be(mut data, 1, number)
+    Ok(())
+}

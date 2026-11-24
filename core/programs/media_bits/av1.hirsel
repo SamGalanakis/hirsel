@@ -1,0 +1,163 @@
+// AV1 bitstream §5.3 and AV1 RTP payload format §4.5.
+pub type Error = Truncated | InvalidHeader | InvalidLength
+
+pub type Obu {
+    kind: u8,
+    temporal: u8,
+    spatial: u8,
+    payload_start: u64,
+    end: u64
+}
+
+fn leb128(data: Bytes, mut at: u64, end: u64) -> Result[u64, Error] {
+    let mut value: u64 = 0
+    for octet in 0u64 .. 8 {
+        if at == end {
+            return Error(Truncated)
+        }
+        let byte = data[at]
+        at += 1
+        let part: u64 = int.widen(byte & 127)
+        value |= part << (7 * octet)
+        if (byte & 128) == 0 {
+            if value > 4294967295 {
+                return Error(InvalidLength)
+            }
+            return Ok(value)
+        }
+    }
+    Error(InvalidLength)
+}
+
+// Parse one OBU beginning at start. The caller supplies exactly one remaining
+// OBU when the header omits obu_size.
+pub fn parse_obu(data: Bytes, start: u64) -> Result[Obu, Error] {
+    let end = list.len(data)
+    if start >= end {
+        return Error(Truncated)
+    }
+    let header = data[start]
+    if (header & 129) != 0 {
+        return Error(InvalidHeader)
+    }
+    let mut at = start + 1
+    let mut temporal: u8 = 0
+    let mut spatial: u8 = 0
+    if (header & 4) != 0 {
+        if at == end {
+            return Error(Truncated)
+        }
+        let extension = data[at]
+        at += 1
+        if (extension & 7) != 0 {
+            return Error(InvalidHeader)
+        }
+        temporal = extension >> 5
+        spatial = (extension >> 3) & 3
+    }
+    let size = if (header & 2) != 0 {
+        leb128(data, mut at, end)?
+    } else {
+        end - at
+    }
+    if size > end - at {
+        return Error(Truncated)
+    }
+    Ok(Obu(kind: (header >> 3) & 15, temporal: temporal, spatial: spatial, payload_start: at, end: at + size))
+}
+
+// Read the state needed to classify a frame from a sequence-header OBU payload.
+pub fn reduced_still_picture(sequence_payload: Bytes) -> Result[bool, Error] {
+    if list.len(sequence_payload) == 0 {
+        return Error(Truncated)
+    }
+    let prefix = sequence_payload[0]
+    let reduced = (prefix & 8) != 0
+    if (prefix >> 5) > 2 || (reduced && (prefix & 16) == 0) {
+        return Error(InvalidHeader)
+    }
+    Ok(reduced)
+}
+
+// Classify the prefix of a frame-header or frame OBU payload, once the
+// sequence header is known. A show_existing_frame carries no new keyframe.
+pub fn is_keyframe(frame_payload: Bytes, reduced: bool) -> Result[bool, Error] {
+    if list.len(frame_payload) == 0 {
+        return Error(Truncated)
+    }
+    Ok(reduced || (frame_payload[0] & 224) == 0)
+}
+
+pub type Aggregation {
+    continues_previous: bool,
+    continues_next: bool,
+    starts_sequence: bool,
+    count: u64
+}
+
+pub type Element {
+    start: u64,
+    end: u64,
+    continues_previous: bool,
+    continues_next: bool
+}
+
+fn aggregation_header(packet: Bytes) -> Result[u8, Error] {
+    if list.len(packet) < 2 {
+        return Error(Truncated)
+    }
+    let header = packet[0]
+    if (header & 136) == 136 {
+        return Error(InvalidHeader)
+    }
+    Ok(header)
+}
+
+fn next_element(packet: Bytes, header: u8, mut at: u64, index: u64) -> Result[Option[Element], Error] {
+    let end = list.len(packet)
+    let fixed: u64 = int.widen((header >> 4) & 3)
+    if at == 0 || at > end {
+        return Error(InvalidLength)
+    }
+    if at == end {
+        if fixed != 0 && index != fixed {
+            return Error(Truncated)
+        }
+        return Ok(None)
+    }
+    if fixed != 0 && index >= fixed {
+        return Error(InvalidLength)
+    }
+    let size = if fixed != 0 && index == fixed - 1 {
+        end - at
+    } else {
+        leb128(packet, mut at, end)?
+    }
+    if size == 0 {
+        return Error(InvalidLength)
+    }
+    if size > end - at {
+        return Error(Truncated)
+    }
+    let start = at
+    at += size
+    Ok(Some(Element(start: start, end: at, continues_previous: index == 0 && (header & 128) != 0, continues_next: at == end && (header & 64) != 0)))
+}
+
+// Validate element lengths and expose the aggregation flags. OBU contents may
+// span packets and can be inspected separately once their header is available.
+pub fn parse_rtp(packet: Bytes) -> Result[Aggregation, Error] {
+    let header = aggregation_header(packet)?
+    let mut at: u64 = 1
+    let mut count: u64 = 0
+    while let Some(_) = next_element(packet, header, mut at, count)? {
+        count += 1
+    }
+    Ok(Aggregation(continues_previous: (header & 128) != 0, continues_next: (header & 64) != 0, starts_sequence: (header & 8) != 0, count: count))
+}
+
+// For the first element, use offset 1 and index 0.
+pub fn rtp_next(packet: Bytes, mut at: u64, index: u64) -> Result[Option[Element], Error] {
+    let header = aggregation_header(packet)?
+    next_element(packet, header, mut at, index)
+}

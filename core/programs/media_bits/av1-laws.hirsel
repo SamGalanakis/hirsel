@@ -1,0 +1,115 @@
+fn check_aggregation() {
+    // Initial OBU(s) from str0m RTP packet 7485. FFmpeg decoded two packets
+    // with this sequence header and frame prefix as a 640x480 keyframe.
+    // The frame element is shortened here because its coded bytes are opaque.
+    let packet = b"\x68\x0b\x08\x00\x00\x00\x24\xc4\xff\xdf\x00\x68\x02\x30\x10\x6b\x74"
+    let aggregation = result.unwrap(av1.parse_rtp(packet))
+    if aggregation.count != 2 || !aggregation.starts_sequence || !aggregation.continues_next || aggregation.continues_previous {
+        fail("captured AV1 aggregation header")
+    }
+    let mut at: u64 = 1
+    let seq = option.unwrap(result.unwrap(av1.rtp_next(packet, mut at, 0)))
+    let seq_header = result.unwrap(av1.parse_obu(list.slice(packet, seq.start, seq.end), 0))
+    if seq.start != 2 || seq.end != 13 || seq_header.kind != 1 || seq_header.payload_start != 1 || seq.continues_previous || seq.continues_next {
+        fail("sequence header offset in the captured keyframe")
+    }
+    let sequence = list.slice(packet, seq.start + seq_header.payload_start, seq.end)
+    let reduced = result.unwrap(av1.reduced_still_picture(sequence))
+    let key = option.unwrap(result.unwrap(av1.rtp_next(packet, mut at, 1)))
+    let key_header = result.unwrap(av1.parse_obu(list.slice(packet, key.start, key.end), 0))
+    if key.start != 13 || key.end != 17 || !key.continues_next || key.continues_previous || key_header.kind != 6 || reduced || !result.unwrap(av1.is_keyframe(list.slice(packet, key.start + key_header.payload_start, key.end), reduced)) {
+        fail("captured keyframe classification")
+    }
+    let resume = result.unwrap(av1.parse_rtp(b"\x90\xfe\xc6\x2c"))
+    let lone_inter = result.unwrap(av1.parse_rtp(b"\x10\x30\x30\xc0"))
+    if !resume.continues_previous || resume.continues_next || resume.count != 1 || lone_inter.starts_sequence || result.unwrap(av1.is_keyframe(b"\x30\xc0", reduced)) {
+        fail("captured continuation or inter frame")
+    }
+    // AV1 §5.3. OBU_METADATA with extension T=3/S=2, explicit length 1 in
+    // a two-byte leb128, then a temporal delimiter with zero payload.
+    let stream = b"\x2e\x70\x81\x00x\x12\x00"
+    let metadata = result.unwrap(av1.parse_obu(stream, 0))
+    let delimiter = result.unwrap(av1.parse_obu(stream, metadata.end))
+    if metadata.kind != 5 || metadata.temporal != 3 || metadata.spatial != 2 || metadata.payload_start != 4 || metadata.end != 5 || delimiter.kind != 2 || delimiter.payload_start != 7 || delimiter.end != 7 {
+        fail("AV1 OBU extension or length")
+    }
+    // W=0 requires lengths for both elements. The reserved bits are ignored.
+    let explicit = result.unwrap(av1.parse_rtp(b"\x07\x81\x00\x28\x01\x30"))
+    if explicit.count != 2 {
+        fail("AV1 W=0 element count")
+    }
+    if let Ok(_) = av1.parse_rtp(b"\x88\x01\x30") {
+        fail("AV1 new sequence and continuation accepted together")
+    }
+    if let Ok(_) = av1.parse_rtp(b"\x20\x01\x08") {
+        fail("AV1 W count exceeds payload")
+    }
+    if let Ok(_) = av1.parse_obu(b"\x0a\xff\xff\xff\xff\x10", 0) {
+        fail("AV1 leb128 greater than 32 bits accepted")
+    }
+}
+
+fn check_dependency() {
+    // str0m's spatial_transitions_chains_resolutions_and_template_wrap.
+    let wire = b"\xc3\xff\xff\x87\xc1\x59\xba\x66\x21\x24\x1f\x41\x14\xda\x00\x22\x44\x66\x88\xab\x01\x3f\x00\xb3\x02\x7f\x01\x67\xff\xff\xff\xff"
+    let mut structure = dependency.empty()
+    if let Ok(_) = dependency.parse(b"\xc3\xff\xff", mut structure) {
+        fail("mandatory-only descriptor accepted without structure")
+    }
+    let frame = result.unwrap(dependency.parse(wire, mut structure))
+    let resolution = option.unwrap(frame.resolution)
+    let mut refs = frame.references
+    if !frame.first || !frame.last || frame.number != 65535 || frame.template_id != 3 || frame.spatial != 2 || frame.temporal != 0 || frame.active_targets != 3 || resolution.width != 65536 || resolution.height != 65536 || option.unwrap(dependency.protecting_chain(structure, 1)) != 1 || option.unwrap(dependency.chain_difference(frame, 0)) != 5 || option.unwrap(dependency.chain_difference(frame, 1)) != 5 || option.unwrap(result.unwrap(dependency.next_reference(wire, structure, mut refs))) != 4 {
+        fail("dependency template layers, references, chains or resolutions")
+    }
+    if let Some(_) = result.unwrap(dependency.next_reference(wire, structure, mut refs)) {
+        fail("extra dependency in the template")
+    }
+    if let Ok(_) = dependency.parse(list.slice(wire, 0, 31), mut structure) {
+        fail("truncated structure accepted")
+    }
+    let cached = result.unwrap(dependency.parse(b"\x40\x00\x01", mut structure))
+    if cached.spatial != 0 || cached.temporal != 2 || cached.first || !cached.last || cached.number != 1 {
+        fail("cached template lookup after frame-number wrap or refused update")
+    }
+    // A.8.2 single template, two targets, one chain protecting both
+    // targets. Then str0m custom_fields_wire_vector overrides all fields.
+    let template = b"\xc0\x00\x01\x80\x01\xe9\x00"
+    let _ = result.unwrap(dependency.parse(template, mut structure))
+    let mut custom = b"\xc0\x12\x34\x7c\xe8\x3f\x08\x5f\xf8\x80\x7f\xfe\x7f\x80"
+    result.unwrap(dependency.rewrite_frame_number(mut custom, 17))
+    let changed = result.unwrap(dependency.parse(custom, mut structure))
+    if changed.number != 17 || changed.active_targets != 2 || option.unwrap(dependency.chain_difference(changed, 0)) != 255 {
+        fail("dependency frame number or custom chain")
+    }
+    if let Some(Discardable) = dependency.decode_target(changed, 0) {} else {
+        fail("custom target zero indication")
+    }
+    if let Some(Required) = dependency.decode_target(changed, 1) {} else {
+        fail("custom target one indication")
+    }
+    let expected: Inline[u64, 6] =[1, 16, 17, 256, 257, 4096]
+    let mut differences = changed.references
+    for diff in expected {
+        let found = result.unwrap(dependency.next_reference(custom, structure, mut differences))
+        if option.unwrap(found) != diff {
+            fail("custom frame differences")
+        }
+    }
+    if let Some(_) = result.unwrap(dependency.next_reference(custom, structure, mut differences)) {
+        fail("extra custom frame difference")
+    }
+    let implicit = result.unwrap(dependency.parse(b"\xc0\x00\x12", mut structure))
+    if implicit.active_targets != 2 || implicit.decode_target_count != 2 || option.unwrap(dependency.chain_difference(implicit, 0)) != 0 {
+        fail("active target update or template fallback")
+    }
+}
+
+/// bug: Lose an OBU boundary or layer field, or apply the wrong Dependency Descriptor template after wrap or a failed update.
+/// oracle: AV1 bitstream section 5.3, AV1 RTP sections 4.4–4.5 and Appendix A, FFmpeg on str0m av1.pcap, and str0m Dependency Descriptor wire vectors.
+@test
+fn av1_rtp_dependencies() -> Result[(), ()] {
+    check_aggregation()
+    check_dependency()
+    Ok(())
+}

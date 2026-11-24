@@ -1,0 +1,111 @@
+const CLIENT_HELLO: u8 = 1
+
+const COOKIE: u64 = 32
+
+const VERIFY_REQUEST_SIZE: u64 = 60
+
+pub type Admission = Verified | Cookie(Inline[u8, 32])
+
+pub type Admit = Reply(u64) | Admitted | Discard
+
+/// Where the cookie sits in a first ClientHello fragment, found without keeping anything.
+type CookieField {
+    sequence: u64,
+    random: u64,
+    cookie: u64,
+    length: u64
+}
+
+fn inline_bytes(a: Inline[u8, 32]) -> Bytes {
+    let mut b: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut b, a[i])
+    }
+    b
+}
+
+/// HMAC-SHA256(key, family ‖ address ‖ port ‖ client_random). The family byte is 4 for
+/// IPv4 (4 address bytes) and 6 for IPv6 (16 address bytes); all fields are big-endian.
+pub fn cookie_for(key: Inline[u8, 32], peer: Addr, client_random: Bytes) -> Inline[u8, 32] {
+    let mut input: Bytes = list.with_capacity(1 + 16 + 2 + 32)
+    match peer.ip {
+        V4(a) => {
+            list.push(mut input, 4)
+            list.put_word_be(mut input, a)
+        },
+        V6(high, low) => {
+            list.push(mut input, 6)
+            list.put_word_be(mut input, high)
+            list.put_word_be(mut input, low)
+        },
+    }
+    list.put_word_be(mut input, peer.port)
+    list.append(mut input, client_random)
+    std.hmac.sha256(inline_bytes(key), input)
+}
+
+pub fn cookie_right(key: Inline[u8, 32], peer: Addr, client_random: Bytes, cookie: Bytes) -> bool {
+    if list.len(cookie) != COOKIE {
+        return false
+    }
+    std.hmac.equal(inline_bytes(cookie_for(key, peer, client_random)), cookie)
+}
+
+/// The first record must be an epoch-0 handshake record holding a ClientHello fragment
+/// at offset 0 that reaches through the cookie. Nothing else earns a reply.
+fn first_hello_cookie(datagram: Bytes) -> Option[CookieField] {
+    let Some(h) = record_header(datagram, 0, ClientHelloOnly) else {
+        return None
+    }
+    if h.kind != HANDSHAKE || h.epoch != 0 || h.end - h.start < HANDSHAKE_HEADER {
+        return None
+    }
+    let at = h.start
+    if datagram[at] != CLIENT_HELLO {
+        return None
+    }
+    let total = read_u24(datagram, at + 1)
+    let offset = read_u24(datagram, at + 6)
+    let count = read_u24(datagram, at + 9)
+    let body = at + HANDSHAKE_HEADER
+    if offset != 0 || count > total || count > h.end - body {
+        return None
+    }
+    // client_version (2), random (32), session_id length (1)
+    if count < 35 {
+        return None
+    }
+    let session: u64 = int.widen(datagram[body + 34])
+    if session > 32 || count < 35 + session + 1 {
+        return None
+    }
+    let cookie_at = body + 35 + session
+    let cookie_length: u64 = int.widen(datagram[cookie_at])
+    if count < 35 + session + 1 + cookie_length {
+        return None
+    }
+    Some(CookieField(sequence: h.sequence, random: body + 2, cookie: cookie_at + 1, length: cookie_length))
+}
+
+/// The stateless gate before any Endpoint exists (DTLS-5 Admission).
+pub fn admit(key: Inline[u8, 32], peer: Addr, datagram: Bytes, mut out: Bytes) -> Admit {
+    let Some(f) = first_hello_cookie(datagram) else {
+        return Discard
+    }
+    let random = list.slice(datagram, f.random, f.random + 32)
+    if cookie_right(key, peer, random, list.slice(datagram, f.cookie, f.cookie + f.length)) {
+        return Admitted
+    }
+    if list.capacity(out) - list.len(out) < VERIFY_REQUEST_SIZE {
+        return Discard
+    }
+    let mut body: Bytes = list.with_capacity(HANDSHAKE_HEADER + 35)
+    fragment_header(mut body, HELLO_VERIFY_REQUEST, 0, 35, 0, 35)
+    list.put_word_be(mut body, 0xfeffu16)
+    list.push(mut body, 32)
+    list.append(mut body, inline_bytes(cookie_for(key, peer, random)))
+    match write_verify_request(f.sequence, body, mut out) {
+        Ok(n) => Reply(n),
+        Error(_) => Discard,
+    }
+}

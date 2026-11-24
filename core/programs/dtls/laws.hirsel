@@ -173,7 +173,8 @@ fn check_write(mut s: schedule.Schedule, suite: schedule.Suite12, zero: Bytes, r
     }
 }
 
-/// bug: advance an epoch-0 replay window, or mark a high epoch-1 record before authenticating it.
+/// bug: advance an epoch-0 replay window, or mark a high epoch-1 record before authenticating it;
+/// mid-handshake, refuse flight 6 after a high epoch-0 copy of a processed message.
 /// oracle: RFC 6347 sections 4.1.2.6, 4.1.2.7 and 4.2.2 with hand-built wire records.
 @test
 fn record_replay_and_discards() -> Result[(), ()] {
@@ -217,6 +218,7 @@ fn record_replay_and_discards() -> Result[(), ()] {
     if chacha_body != unhex("1400000c000500000000000c000102030405060708090a0b") {
         fail("ChaCha20 plaintext")
     }
+    replay_mid_handshake()
     Ok(())
 }
 

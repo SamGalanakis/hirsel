@@ -1,0 +1,239 @@
+fn draw_random(r: Random) -> Bytes {
+    let mut b: Bytes = list.with_capacity(RANDOM)
+    host.random(r, mut b)
+    b
+}
+
+fn key_failure(k: KeyError) -> Failure {
+    match k {
+        Capacity(c) => Retry(c),
+        _ => Alert(HANDSHAKE_FAILURE, Key(k)),
+    }
+}
+
+fn sign_p256(e: Endpoint, r: Random, message: Bytes) -> Result[Bytes, Failure] {
+    let mut raw: Bytes = list.with_capacity(64)
+    match secret.sign(e.id.key, P256, r, message, mut raw) {
+        Ok(_) => Ok(der_signature(raw)),
+        Error(k) => Error(key_failure(k)),
+    }
+}
+
+/// Run the pending flight or key step; a Capacity refusal leaves it pending for the next call.
+fn advance(mut e: Endpoint, now: u64, r: Random) -> Result[(), Failure] {
+    match e.build {
+        Nothing => Ok(()),
+        FirstHello => first_hello(mut e, now, r),
+        ClientFinal => client_final(mut e, now, r),
+        ServerFirst => server_first(mut e, now, r),
+        ServerKeys => server_keys(mut e),
+        ServerFinal => server_final(mut e, now),
+    }
+}
+
+fn first_hello(mut e: Endpoint, now: u64, r: Random) -> Result[(), Failure] {
+    let random = draw_random(r)
+    let body = client_hello_body(random, b"", e.c)
+    record(mut e, CLIENT_HELLO, 0, body)?
+    e.client_random = random
+    list.push(mut e.flight, outgoing(CLIENT_HELLO, 0, false, take body))
+    e.next_seq = 1
+    e.build = Nothing
+    e.deadline = Some(now + e.c.handshake_ns)
+    start_flight(mut e, now, true)
+}
+
+fn client_final_parts(mut e: Endpoint, r: Random) -> Result[(), Failure] {
+    let mut public: Bytes = list.with_capacity(65)
+    let share = match secret.key_share(r, e.group, mut public) {
+        Ok(take s) => s,
+        Error(k) => {
+            return Error(key_failure(k))
+        },
+    }
+    let seq = e.next_seq
+    let certificate = certificate_body(e.id.certificate)
+    let exchange = client_key_exchange_body(public)
+    if let Error(f) = record(mut e, CERTIFICATE, seq, certificate) {
+        drop(take share)
+        return Error(f)
+    }
+    if let Error(f) = record(mut e, CLIENT_KEY_EXCHANGE, seq + 1, exchange) {
+        drop(take share)
+        return Error(f)
+    }
+    let session_hash = suite_hash(e.suite, e.log.data)
+    let verify = match sign_p256(e, r, e.log.data) {
+        Ok(der) => signed_body(b"", der),
+        Error(f) => {
+            drop(take share)
+            return Error(f)
+        },
+    }
+    let keys = match schedule.dtls12(e.suite, Client, 1, take share, e.peer_point, e.client_random, e.server_random, Some(session_hash)) {
+        Ok(take s) => s,
+        Error((x, take rest)) => {
+            drop(take rest)
+            return Error(schedule_failure(x))
+        },
+    }
+    e.keys = Some(take keys)
+    record(mut e, CERTIFICATE_VERIFY, seq + 2, verify)?
+    let mut finished: Bytes = list.with_capacity(12)
+    let hash = suite_hash(e.suite, e.log.data)
+    if let Some(k) = e.keys {
+        match schedule.finished(k, Client, hash, mut finished) {
+            Ok(_) => (),
+            Error(x) => {
+                return Error(schedule_failure(x))
+            },
+        }
+    }
+    record(mut e, FINISHED, seq + 3, finished)?
+    if !sending_protected(e.layer) {
+        if let Some(mut k) = e.keys {
+            if let Error(x) = start_sending_protected(mut e.layer, mut k, e.suite) {
+                return Error(record_failure(x))
+            }
+        }
+    }
+    list.push(mut e.flight, outgoing(CERTIFICATE, seq, false, take certificate))
+    list.push(mut e.flight, outgoing(CLIENT_KEY_EXCHANGE, seq + 1, false, take exchange))
+    list.push(mut e.flight, outgoing(CERTIFICATE_VERIFY, seq + 2, false, take verify))
+    list.push(mut e.flight, cipher_spec())
+    list.push(mut e.flight, outgoing(FINISHED, seq + 3, true, take finished))
+    Ok(())
+}
+
+fn schedule_failure(x: schedule.ScheduleError) -> Failure {
+    match x {
+        Capacity(c) => Retry(c),
+        Invalid => refuse(ILLEGAL_PARAMETER),
+        _ => Alert(HANDSHAKE_FAILURE, Schedule(x)),
+    }
+}
+
+/// Flight 5 (DTLS-5 Client flight). Keys exist only after the server proved its key.
+fn client_final(mut e: Endpoint, now: u64, r: Random) -> Result[(), Failure] {
+    let mark = transcript_mark(e)
+    e.flight = list.new()
+    if let Error(f) = client_final_parts(mut e, r) {
+        transcript_back(mut e, mark)
+        e.flight = list.new()
+        let _ = replace(mut e.keys, None)
+        return Error(f)
+    }
+    e.next_seq += 4
+    e.build = Nothing
+    e.want = CipherSpec
+    start_flight(mut e, now, true)
+}
+
+fn server_first_parts(mut e: Endpoint, r: Random) -> Result[(), Failure] {
+    let random = draw_random(r)
+    let mut public: Bytes = list.with_capacity(65)
+    let share = match secret.key_share(r, e.group, mut public) {
+        Ok(take s) => s,
+        Error(k) => {
+            return Error(key_failure(k))
+        },
+    }
+    let params = key_exchange_params(group_code(e.group), public)
+    let mut signed: Bytes = list.with_capacity(2 * RANDOM + list.len(params))
+    list.append(mut signed, e.client_random)
+    list.append(mut signed, random)
+    list.append(mut signed, params)
+    let exchange = match sign_p256(e, r, signed) {
+        Ok(der) => signed_body(params, der),
+        Error(f) => {
+            drop(take share)
+            return Error(f)
+        },
+    }
+    let profile = match e.profile {
+        Some(p) => Some(profile_code(p)),
+        None => None,
+    }
+    let hello = server_hello_body(random, suite_code(e.suite), profile)
+    let certificate = certificate_body(e.id.certificate)
+    let request = certificate_request_body()
+    let seq = e.next_seq
+    e.share = Some(take share)
+    record(mut e, SERVER_HELLO, seq, hello)?
+    record(mut e, CERTIFICATE, seq + 1, certificate)?
+    record(mut e, SERVER_KEY_EXCHANGE, seq + 2, exchange)?
+    record(mut e, CERTIFICATE_REQUEST, seq + 3, request)?
+    record(mut e, SERVER_HELLO_DONE, seq + 4, b"")?
+    e.server_random = random
+    list.push(mut e.flight, outgoing(SERVER_HELLO, seq, false, take hello))
+    list.push(mut e.flight, outgoing(CERTIFICATE, seq + 1, false, take certificate))
+    list.push(mut e.flight, outgoing(SERVER_KEY_EXCHANGE, seq + 2, false, take exchange))
+    list.push(mut e.flight, outgoing(CERTIFICATE_REQUEST, seq + 3, false, take request))
+    list.push(mut e.flight, outgoing(SERVER_HELLO_DONE, seq + 4, false, list.new()))
+    Ok(())
+}
+
+/// Flight 4 (DTLS-5 Server flight).
+fn server_first(mut e: Endpoint, now: u64, r: Random) -> Result[(), Failure] {
+    let mark = transcript_mark(e)
+    e.flight = list.new()
+    if let Error(f) = server_first_parts(mut e, r) {
+        transcript_back(mut e, mark)
+        e.flight = list.new()
+        let _ = replace(mut e.share, None)
+        return Error(f)
+    }
+    e.next_seq += 5
+    e.build = Nothing
+    e.want = ClientCertificate
+    start_flight(mut e, now, true)
+}
+
+/// Keys only after CertificateVerify has proven the client holds its certificate's key.
+fn server_keys(mut e: Endpoint) -> Result[(), Failure] {
+    let Some(take share) = replace(mut e.share, None) else {
+        return Error(refuse(HANDSHAKE_FAILURE))
+    }
+    match schedule.dtls12(e.suite, Server, 1, take share, e.peer_point, e.client_random, e.server_random, Some(copied(e.session_hash))) {
+        Ok(take s) => {
+            e.keys = Some(take s)
+            e.build = Nothing
+            e.want = CipherSpec
+            Ok(())
+        },
+        Error((Capacity(c), take rest)) => {
+            e.share = take rest
+            Error(Retry(c))
+        },
+        Error((x, take rest)) => {
+            drop(take rest)
+            Error(schedule_failure(x))
+        },
+    }
+}
+
+/// Flight 6, kept after Connected and resent only for an authenticated Finished.
+fn server_final(mut e: Endpoint, now: u64) -> Result[(), Failure] {
+    let mut finished: Bytes = list.with_capacity(12)
+    let hash = suite_hash(e.suite, e.log.data)
+    if let Some(k) = e.keys {
+        if let Error(x) = schedule.finished(k, Server, hash, mut finished) {
+            return Error(schedule_failure(x))
+        }
+    }
+    if !sending_protected(e.layer) {
+        if let Some(mut k) = e.keys {
+            if let Error(x) = start_sending_protected(mut e.layer, mut k, e.suite) {
+                return Error(record_failure(x))
+            }
+        }
+    }
+    let seq = e.next_seq
+    e.flight = list.new()
+    list.push(mut e.flight, cipher_spec())
+    list.push(mut e.flight, outgoing(FINISHED, seq, true, take finished))
+    e.next_seq += 1
+    e.build = Nothing
+    e.want = Done
+    start_flight(mut e, now, false)
+}

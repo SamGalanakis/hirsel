@@ -250,11 +250,16 @@ pub fn append_transcript(mut t: Transcript, kind: u8, sequence: u16, body: Bytes
 /// Write the next fragment into the current datagram. A full datagram can be
 /// emitted and retried with the same offset. True means the message is complete.
 pub fn write_handshake_record(mut r: Records, mtu: u16, kind: u8, sequence: u16, body: Bytes, mut offset: u64, mut out: Bytes) -> Result[bool, HandshakeError] {
+    let protected = sending_protected(r)
+    write_handshake_record_in(mut r, mtu, protected, kind, sequence, body, mut offset, mut out)
+}
+
+pub fn write_handshake_record_in(mut r: Records, mtu: u16, protected: bool, kind: u8, sequence: u16, body: Bytes, mut offset: u64, mut out: Bytes) -> Result[bool, HandshakeError] {
     let total = list.len(body)
     if total > U24_MAX || offset > total {
         return Error(IllegalParameter)
     }
-    let overhead = record_overhead(r) + HANDSHAKE_HEADER
+    let overhead = record_overhead(r, protected) + HANDSHAKE_HEADER
     let room: u64 = int.widen(mtu)
     let used = list.len(out)
     if used > room || room - used < overhead {
@@ -276,7 +281,7 @@ pub fn write_handshake_record(mut r: Records, mtu: u16, kind: u8, sequence: u16,
     handshake_room(mut fragment, HANDSHAKE_HEADER + count)?
     fragment_header(mut fragment, kind, sequence, total, offset, count)
     list.append(mut fragment, list.slice(body, offset, offset + count))
-    match write_record(mut r, mtu, HANDSHAKE, fragment, mut out) {
+    match write_record_in(mut r, mtu, protected, HANDSHAKE, fragment, mut out) {
         Error(e) => Error(Record(e)),
         Ok(_) => {
             offset += count

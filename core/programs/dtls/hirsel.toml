@@ -11,6 +11,11 @@ std = { major = 1 }
 "records.hirsel" = "dtls"
 "handshake.hirsel" = "dtls"
 "identity.hirsel" = "dtls"
+"admit.hirsel" = "dtls"
+"messages.hirsel" = "dtls"
+"endpoint.hirsel" = "dtls"
+"flights.hirsel" = "dtls"
+"receive.hirsel" = "dtls"
 
 [tests]
 limit = 16777216
@@ -18,3 +23,5 @@ limit = 16777216
 [tests.sources]
 "laws.hirsel" = "laws"
 "identity_laws.hirsel" = "laws"
+"handshake_laws.hirsel" = "laws"
+"timer_laws.hirsel" = "laws"

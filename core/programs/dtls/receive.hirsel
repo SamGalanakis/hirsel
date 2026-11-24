@@ -1,0 +1,503 @@
+fn suite_of(code: u16) -> Option[schedule.Suite12] {
+    if code == 0xc02b {
+        Some(Aes128GcmSha256)
+    } else if code == 0xc02c {
+        Some(Aes256GcmSha384)
+    } else if code == 0xcca9 {
+        Some(ChaCha20Poly1305Sha256)
+    } else {
+        None
+    }
+}
+
+fn group_of(code: u16) -> Option[secret.Group] {
+    if code == 0x001d {
+        Some(X25519)
+    } else if code == 0x0017 {
+        Some(P256)
+    } else {
+        None
+    }
+}
+
+fn profile_of(code: u16) -> Option[schedule.SrtpProfile] {
+    if code == 0x0001 {
+        Some(Aes128CmHmacSha1_80)
+    } else if code == 0x0007 {
+        Some(AeadAes128Gcm)
+    } else if code == 0x0008 {
+        Some(AeadAes256Gcm)
+    } else {
+        None
+    }
+}
+
+fn peer_side(s: schedule.Side) -> schedule.Side {
+    match s {
+        Client => Server,
+        Server => Client,
+    }
+}
+
+fn reading_version(e: Endpoint) -> RecordVersion {
+    match e.want {
+        ServerHello => BeforeServerHello,
+        ClientHello => ClientHelloOnly,
+        _ => Fixed,
+    }
+}
+
+/// A Cookie server checks the cookie again on its first datagram (DTLS-5 Admission) and
+/// numbers its records and messages from that ClientHello's.
+fn admitted(mut e: Endpoint, datagram: Bytes) -> bool {
+    if e.proven {
+        return true
+    }
+    let Cookie(key) = e.admission else {
+        e.proven = true
+        return true
+    }
+    let Some(f) = first_hello_cookie(datagram) else {
+        e.layer.dropped.malformed += 1
+        return false
+    }
+    if !cookie_right(key, e.peer, list.slice(datagram, f.random, f.random + RANDOM), list.slice(datagram, f.cookie, f.cookie + f.length)) {
+        e.layer.dropped.malformed += 1
+        return false
+    }
+    // message_seq sits 4 bytes into the handshake header, which starts 12 before the body.
+    let sequence: u16 = list.word_be(datagram, f.random - 2 - HANDSHAKE_HEADER + 4)
+    e.rx = reassembly(sequence, e.c.max_message)
+    e.next_seq = sequence
+    set_plain_sequence(mut e.layer, f.sequence)
+    e.proven = true
+    true
+}
+
+pub fn receive(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut data: Bytes) -> Result[u64, DtlsError] {
+    if now < e.last {
+        return Error(Config)
+    }
+    e.last = now
+    if let Some(c) = e.closed {
+        return Error(Closed(c))
+    }
+    if !admitted(mut e, datagram) {
+        return Ok(0)
+    }
+    match receive_records(mut e, now, r, datagram, mut data) {
+        Ok(n) => {
+            if let Some(c) = e.closed {
+                return Error(Closed(c))
+            }
+            Ok(n)
+        },
+        Error(f) => Error(fail(mut e, f)),
+    }
+}
+
+fn receive_records(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut data: Bytes) -> Result[u64, Failure] {
+    check_pin(mut e)?
+    let mut n = 0u64
+    let mut at = 0u64
+    let mut draining = false
+    while true {
+        let version = reading_version(e)
+        let next = if draining {
+            next_early_record(mut e.layer, mut e.early)
+        } else {
+            next_record(mut e.layer, mut e.early, version, datagram, mut at)
+        }
+        let event = match next {
+            Ok(take x) => x,
+            Error(x) => {
+                return Error(record_failure(x))
+            },
+        }
+        match event {
+            End => {
+                if !draining {
+                    break
+                }
+                draining = false
+            },
+            ChangeCipherSpec => {
+                on_cipher_spec(mut e)?
+                draining = true
+            },
+            AlertClosed(c) => {
+                stop(mut e)
+                e.closed = Some(c)
+                return Ok(n)
+            },
+            HandshakeRecord(h, take body) => on_handshake(mut e, now, r, h.epoch, body)?,
+            ApplicationData(take b) => {
+                n += list.len(b)
+                list.append(mut data, b)
+            },
+            _ => (),
+        }
+        if let Some(_) = e.closed {
+            return Ok(n)
+        }
+    }
+    try_connect(mut e)
+    if e.connected {
+        while true {
+            let Some(b) = next_held_application(e.layer, mut e.early) else {
+                break
+            }
+            n += list.len(b)
+            list.append(mut data, b)
+        }
+    }
+    Ok(n)
+}
+
+fn on_handshake(mut e: Endpoint, now: u64, r: Random, epoch: u16, body: Bytes) -> Result[(), Failure] {
+    let mut at = 0u64
+    while at < list.len(body) {
+        let kind = body[at]
+        match receive_fragment(mut e.rx, mut e.layer, mut e.early, epoch, body, mut at) {
+            Ok(Buffered) => {
+                if kind == CLIENT_HELLO {
+                    if let None = e.deadline {
+                        e.deadline = Some(now + e.c.handshake_ns)
+                    }
+                }
+            },
+            Ok(Retransmission) => retransmitted(mut e, epoch, kind)?,
+            Ok(_) => (),
+            Error(x) => {
+                return Error(handshake_failure(x))
+            },
+        }
+        while true {
+            let Some(m) = next_message(mut e.rx, mut e.early) else {
+                break
+            }
+            on_message(mut e, now, m)?
+            advance(mut e, now, r)?
+            if let Some(_) = e.closed {
+                return Ok(())
+            }
+        }
+    }
+    Ok(())
+}
+
+/// DTLS-5 Final flights: a retransmitted flight 3 resends flight 4 at most once per timer
+/// period, and only an authenticated retransmitted Finished resends flight 6.
+fn retransmitted(mut e: Endpoint, epoch: u16, kind: u8) -> Result[(), Failure] {
+    match e.want {
+        ClientCertificate if kind == CLIENT_HELLO && e.timer.armed && !e.timer.triggered => {
+            e.timer.triggered = true
+            send_flight(mut e)
+        },
+        Done if epoch == 1 && kind == FINISHED && list.len(e.flight) != 0 => send_flight(mut e),
+        _ => Ok(()),
+    }
+}
+
+fn on_cipher_spec(mut e: Endpoint) -> Result[(), Failure] {
+    let CipherSpec = e.want else {
+        return Error(refuse(UNEXPECTED_MESSAGE))
+    }
+    if let Some(k) = e.keys {
+        if let Error(x) = start_receiving_protected(mut e.layer, k, e.suite) {
+            return Error(record_failure(x))
+        }
+    }
+    e.want = PeerFinished
+    Ok(())
+}
+
+fn warn_no_renegotiation(mut e: Endpoint) {
+    let mut d: Bytes = list.with_capacity(int.widen(e.c.mtu))
+    if let Ok(_) = write_record(mut e.layer, e.c.mtu, ALERT, b"\x01\x64", mut d) {
+        let _ = enqueue(mut e.out, take d)
+    }
+}
+
+fn on_message(mut e: Endpoint, now: u64, m: HandshakeMessage) -> Result[(), Failure] {
+    if let Done = e.want {
+        if m.kind == 0 || m.kind == CLIENT_HELLO {
+            warn_no_renegotiation(mut e)
+            return Ok(())
+        }
+    }
+    if (m.kind == FINISHED) != (m.epoch == 1) {
+        return Error(refuse(UNEXPECTED_MESSAGE))
+    }
+    e.timer.armed = false
+    match e.want {
+        ServerHello if m.kind == HELLO_VERIFY_REQUEST => client_verify_request(mut e, now, m),
+        ServerHello if m.kind == SERVER_HELLO => client_server_hello(mut e, m),
+        ServerCertificate if m.kind == CERTIFICATE => certificate_message(mut e, m, ServerKeyExchange),
+        ServerKeyExchange if m.kind == SERVER_KEY_EXCHANGE => client_key_exchange(mut e, m),
+        Request if m.kind == CERTIFICATE_REQUEST => {
+            if let Error(code) = parse_certificate_request(m.body) {
+                return Error(refuse(code))
+            }
+            record(mut e, m.kind, m.sequence, m.body)?
+            e.want = HelloDone
+            Ok(())
+        },
+        HelloDone if m.kind == SERVER_HELLO_DONE => {
+            if list.len(m.body) != 0 {
+                return Error(refuse(ILLEGAL_PARAMETER))
+            }
+            record(mut e, m.kind, m.sequence, m.body)?
+            e.build = ClientFinal
+            Ok(())
+        },
+        ClientHello if m.kind == CLIENT_HELLO => server_client_hello(mut e, m),
+        ClientCertificate if m.kind == CERTIFICATE => certificate_message(mut e, m, ClientKeyExchange),
+        ClientKeyExchange if m.kind == CLIENT_KEY_EXCHANGE => {
+            let point = match parse_client_key_exchange(m.body) {
+                Ok(p) => p,
+                Error(code) => {
+                    return Error(refuse(code))
+                },
+            }
+            record(mut e, m.kind, m.sequence, m.body)?
+            e.session_hash = suite_hash(e.suite, e.log.data)
+            e.peer_point = point
+            e.want = Verify
+            Ok(())
+        },
+        Verify if m.kind == CERTIFICATE_VERIFY => server_verify(mut e, m),
+        PeerFinished if m.kind == FINISHED => peer_finished(mut e, m),
+        _ => Error(refuse(UNEXPECTED_MESSAGE)),
+    }
+}
+
+fn client_verify_request(mut e: Endpoint, now: u64, m: HandshakeMessage) -> Result[(), Failure] {
+    if e.verify_seen {
+        return Error(refuse(UNEXPECTED_MESSAGE))
+    }
+    let (version, cookie) = match parse_verify_request(m.body) {
+        Ok(v) => v,
+        Error(code) => {
+            return Error(refuse(code))
+        },
+    }
+    if version != 0xfeff && version != 0xfefd {
+        return Error(refuse(PROTOCOL_VERSION))
+    }
+    if list.len(cookie) == 0 {
+        return Error(refuse(ILLEGAL_PARAMETER))
+    }
+    e.verify_seen = true
+    clear_transcript(mut e.log)
+    let body = client_hello_body(e.client_random, cookie, e.c)
+    let seq = e.next_seq
+    record(mut e, CLIENT_HELLO, seq, body)?
+    e.cookie = cookie
+    e.flight = list.new()
+    list.push(mut e.flight, outgoing(CLIENT_HELLO, seq, false, take body))
+    e.next_seq += 1
+    start_flight(mut e, now, true)
+}
+
+fn client_server_hello(mut e: Endpoint, m: HandshakeMessage) -> Result[(), Failure] {
+    let mut a = match parse_server_hello(m.body, suite_codes(e.c), profile_codes(e.c)) {
+        Ok(take a) => a,
+        Error(code) => {
+            return Error(refuse(code))
+        },
+    }
+    let Some(suite) = suite_of(a.suite) else {
+        return Error(refuse(ILLEGAL_PARAMETER))
+    }
+    record(mut e, m.kind, m.sequence, m.body)?
+    e.suite = suite
+    e.profile = match a.profile {
+        Some(code) => profile_of(code),
+        None => None,
+    }
+    e.server_random = replace(mut a.random, list.new())
+    e.verify_seen = true
+    e.want = ServerCertificate
+    Ok(())
+}
+
+/// DTLS-7: the peer's leaf must carry a P-256 or P-384 key, and the pin is compared at once.
+fn certificate_message(mut e: Endpoint, m: HandshakeMessage, next: Want) -> Result[(), Failure] {
+    let first = match parse_certificate(m.body) {
+        Ok(take c) => c,
+        Error(code) => {
+            return Error(refuse(code))
+        },
+    }
+    let Some(certificate) = first else {
+        return Error(refuse(BAD_CERTIFICATE))
+    }
+    match std.x509_key.read(certificate) {
+        P256(point) => {
+            e.peer_key = point
+            e.peer_p384 = false
+        },
+        P384(point) => {
+            e.peer_key = point
+            e.peer_p384 = true
+        },
+        Invalid => {
+            return Error(refuse(BAD_CERTIFICATE))
+        },
+    }
+    e.peer_certificate = Some(certificate)
+    check_pin(mut e)?
+    record(mut e, m.kind, m.sequence, m.body)?
+    e.want = next
+    Ok(())
+}
+
+fn peer_verifies(e: Endpoint, algorithm: u16, message: Bytes, signature: Bytes) -> bool {
+    if e.peer_p384 {
+        algorithm == ECDSA_P384_SHA384 && p384.verify_der(e.peer_key, message, signature)
+    } else {
+        algorithm == ECDSA_P256_SHA256 && p256.verify_der(e.peer_key, message, signature)
+    }
+}
+
+/// RFC 8422 section 5.4: the server proves its certificate's key over both randoms.
+fn client_key_exchange(mut e: Endpoint, m: HandshakeMessage) -> Result[(), Failure] {
+    let mut k = match parse_key_exchange(m.body) {
+        Ok(take k) => k,
+        Error(code) => {
+            return Error(refuse(code))
+        },
+    }
+    let Some(group) = group_of(k.group) else {
+        return Error(refuse(ILLEGAL_PARAMETER))
+    }
+    if !has_code(group_codes(e.c), k.group) {
+        return Error(refuse(ILLEGAL_PARAMETER))
+    }
+    if k.algorithm != ECDSA_P256_SHA256 && k.algorithm != ECDSA_P384_SHA384 {
+        return Error(refuse(ILLEGAL_PARAMETER))
+    }
+    let mut signed: Bytes = list.with_capacity(2 * RANDOM + k.params_end)
+    list.append(mut signed, e.client_random)
+    list.append(mut signed, e.server_random)
+    list.append(mut signed, list.slice(m.body, 0, k.params_end))
+    if !peer_verifies(e, k.algorithm, signed, k.signature) {
+        return Error(refuse(DECRYPT_ERROR))
+    }
+    record(mut e, m.kind, m.sequence, m.body)?
+    e.group = group
+    e.peer_point = replace(mut k.point, list.new())
+    e.want = Request
+    Ok(())
+}
+
+fn first_shared_suite(c: Config, offered: List[u16]) -> Option[schedule.Suite12] {
+    for i in 0u64 .. list.len(c.suites) {
+        if has_code(offered, suite_code(c.suites[i])) {
+            return Some(c.suites[i])
+        }
+    }
+    None
+}
+
+fn first_shared_group(c: Config, offered: List[u16]) -> Option[secret.Group] {
+    for i in 0u64 .. list.len(c.groups) {
+        if has_code(offered, group_code(c.groups[i])) {
+            return Some(c.groups[i])
+        }
+    }
+    None
+}
+
+fn first_shared_profile(c: Config, offered: List[u16]) -> Option[schedule.SrtpProfile] {
+    for i in 0u64 .. list.len(c.srtp) {
+        if has_code(offered, profile_code(c.srtp[i])) {
+            return Some(c.srtp[i])
+        }
+    }
+    None
+}
+
+/// DTLS-5 Versions and Server choice.
+fn server_client_hello(mut e: Endpoint, m: HandshakeMessage) -> Result[(), Failure] {
+    let mut o = match parse_client_hello(m.body) {
+        Ok(take o) => o,
+        Error(code) => {
+            return Error(refuse(code))
+        },
+    }
+    let Some(suite) = first_shared_suite(e.c, o.suites) else {
+        return Error(refuse(HANDSHAKE_FAILURE))
+    }
+    let Some(group) = first_shared_group(e.c, o.groups) else {
+        return Error(refuse(HANDSHAKE_FAILURE))
+    }
+    if !o.ems || !o.signs_p256 {
+        return Error(refuse(HANDSHAKE_FAILURE))
+    }
+    let mut profile: Option[schedule.SrtpProfile] = None
+    if list.len(e.c.srtp) != 0 {
+        let Some(p) = first_shared_profile(e.c, o.srtp) else {
+            return Error(refuse(HANDSHAKE_FAILURE))
+        }
+        profile = Some(p)
+    }
+    record(mut e, m.kind, m.sequence, m.body)?
+    e.client_random = replace(mut o.random, list.new())
+    e.suite = suite
+    e.group = group
+    e.profile = profile
+    e.build = ServerFirst
+    Ok(())
+}
+
+/// RFC 5246 section 7.4.8: only CertificateVerify proves the client holds the key.
+fn server_verify(mut e: Endpoint, m: HandshakeMessage) -> Result[(), Failure] {
+    let (algorithm, signature) = match parse_verify(m.body) {
+        Ok(v) => v,
+        Error(code) => {
+            return Error(refuse(code))
+        },
+    }
+    if algorithm != ECDSA_P256_SHA256 && algorithm != ECDSA_P384_SHA384 {
+        return Error(refuse(ILLEGAL_PARAMETER))
+    }
+    if !peer_verifies(e, algorithm, e.log.data, signature) {
+        return Error(refuse(DECRYPT_ERROR))
+    }
+    record(mut e, m.kind, m.sequence, m.body)?
+    e.build = ServerKeys
+    Ok(())
+}
+
+fn peer_finished(mut e: Endpoint, m: HandshakeMessage) -> Result[(), Failure] {
+    let hash = suite_hash(e.suite, e.log.data)
+    let verdict = match e.keys {
+        Some(k) => schedule.verify_finished(k, peer_side(e.side), hash, m.body),
+        None => {
+            return Error(refuse(UNEXPECTED_MESSAGE))
+        },
+    }
+    match verdict {
+        Ok(true) => (),
+        Ok(false) => {
+            return Error(refuse(DECRYPT_ERROR))
+        },
+        Error(x) => {
+            return Error(schedule_failure(x))
+        },
+    }
+    record(mut e, m.kind, m.sequence, m.body)?
+    e.finished = true
+    match e.side {
+        Server => {
+            e.build = ServerFinal
+        },
+        Client => {
+            e.want = Done
+            e.flight = list.new()
+        },
+    }
+    Ok(())
+}

@@ -1,6 +1,13 @@
 hirsel.laws 1
+dtls@1/laws/cookie_bounds_unproven_address src=28fc09394003d6ef sig=9d70b33cc69f38f9 run=acdd7fe37d41c86f bug=3e3c7318814f7f0c oracle=b7ac6ae0a6ce1f16 rows=pending
+dtls@1/laws/exporter_once_after_pin src=17e845a9650f6781 sig=1dd4a932ff727ada run=acdd7fe37d41c86f bug=b6dbf9ebd8fa593e oracle=5c6f98cb2e8e661d rows=pending
+dtls@1/laws/final_flight_resent src=930ae83c17ecd920 sig=f1e04cda03054a95 run=acdd7fe37d41c86f bug=21fd642e34638984 oracle=- rows=pending
 dtls@1/laws/fingerprint_pins_peer src=7cacb77782a11d66 sig=60b9c2ed55b37390 run=acdd7fe37d41c86f bug=e7dc8368c7338530 oracle=2ee23cd4144fb16b rows=pending
+dtls@1/laws/flight_timer_schedule src=9ae1e24b2a9d1ae0 sig=35aedddfa2087de5 run=acdd7fe37d41c86f bug=83724acde7662f9e oracle=- rows=pending
 dtls@1/laws/fragments_reassemble src=982f0e20cd9ac99c sig=d29b25ee00294a28 run=acdd7fe37d41c86f bug=abf59674c58f4427 oracle=a2a510cb20c7741b rows=pending
 dtls@1/laws/identity_shares_key src=c2ab9f1c48293ac5 sig=7e6d38b1cf3d97a2 run=acdd7fe37d41c86f bug=0853948122675f21 oracle=e243a28391ff49a3 rows=pending
-dtls@1/laws/record_replay_and_discards src=0dbcf6543c42172c sig=768864915c094124 run=acdd7fe37d41c86f bug=97bebee183cbe9c1 oracle=bfa2c25b3df5cada rows=pending
+dtls@1/laws/offered_13_negotiates_12 src=ca19b3909379653f sig=fc33e0f786cdba41 run=acdd7fe37d41c86f bug=3651c50719ab88eb oracle=bb77e1af7ab08b37 rows=pending
+dtls@1/laws/possession_before_keys src=497092b93284f776 sig=8aa11637e9108009 run=acdd7fe37d41c86f bug=630dc492bcc01d26 oracle=cca14c11a04dd324 rows=pending
+dtls@1/laws/record_replay_and_discards src=4d25e6dac1a2afcf sig=7141fa9fa79d8213 run=acdd7fe37d41c86f bug=607aaff82d41c798 oracle=bfa2c25b3df5cada rows=pending
+dtls@1/laws/refusals src=545417ccd05018b6 sig=8fb08e99e6cdbbb9 run=acdd7fe37d41c86f bug=af06dd6b7710fec1 oracle=- rows=pending
 dtls@1/laws/setup_roles src=7de8597eb9c2b5cf sig=a4bd1ec3f62ab3d1 run=acdd7fe37d41c86f bug=6fea91f438e18822 oracle=c4f02c85cf20cb2e rows=pending

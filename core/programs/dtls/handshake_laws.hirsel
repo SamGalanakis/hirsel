@@ -1,0 +1,911 @@
+const SECOND: u64 = 1000000000
+
+type Party {
+    id: dtls.Identity,
+    certificate: Bytes
+}
+
+fn party(seed: u64) -> Party {
+    let r = provide.random(seed)
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(r, "sign(p256)", mut point))
+    let start = option.unwrap(std.time.from_unix(1704067200, 0))
+    let end = option.unwrap(std.time.from_unix(2524608000, 0))
+    let der = result.unwrap(std.x509_build.self_signed_p256(key, r, point, seed, "dtls.test", start, end))
+    let mut certificate: Bytes = list.with_capacity(list.len(der))
+    list.append(mut certificate, der)
+    Party(id: result.unwrap(dtls.identity(take key, take der, r)), certificate: take certificate)
+}
+
+fn address(n: u32) -> Addr {
+    Addr(ip: V4(0x0a000000 + n), port: 5000)
+}
+
+/// RFC 8122 section 5: the SHA-256 of the whole certificate DER.
+fn pin_list(certificate: Bytes) -> List[dtls.Fingerprint] {
+    let d = std.sha256.hash(certificate)
+    let mut digest: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut digest, d[i])
+    }
+    let mut out: List[dtls.Fingerprint] = list.new()
+    list.push(mut out, dtls.Fingerprint(hash: Sha256, digest: take digest))
+    out
+}
+
+fn drain(mut e: dtls.Endpoint, r: Random, now: u64) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    while true {
+        let mut d: Bytes = list.with_capacity(70000)
+        match dtls.poll(mut e, now, r, mut d) {
+            Ok(Send(_)) => list.push(mut out, take d),
+            _ => break,
+        }
+    }
+    out
+}
+
+fn deliver(mut e: dtls.Endpoint, r: Random, now: u64, datagrams: List[Bytes]) -> Bytes {
+    let mut data: Bytes = list.new()
+    for i in 0u64 .. list.len(datagrams) {
+        let _ = dtls.receive(mut e, now, r, datagrams[i], mut data)
+    }
+    data
+}
+
+fn is_connected(e: dtls.Endpoint) -> bool {
+    match dtls.state(e) {
+        Connected => true,
+        _ => false,
+    }
+}
+
+/// Exchange flights with no loss until neither side has anything queued.
+fn run(mut client: dtls.Endpoint, rc: Random, mut server: dtls.Endpoint, rs: Random, now: u64) {
+    for _ in 0u64 .. 8 {
+        let to_server = drain(mut client, rc, now)
+        let _ = deliver(mut server, rs, now, to_server)
+        let to_client = drain(mut server, rs, now)
+        let _ = deliver(mut client, rc, now, to_client)
+    }
+}
+
+fn no_srtp() -> dtls.Config {
+    let mut c = dtls.defaults()
+    c.srtp = list.new()
+    c
+}
+
+/// bug: hand out SRTP keys before the pin and Finished, twice, or with no profile.
+/// oracle: DTLS-8 The exporter, by hand: NotConnected, a schedule, Taken, NoSrtp.
+@test
+fn exporter_once_after_pin() -> Result[(), ()] {
+    let a = party(11)
+    let b = party(12)
+    let rc = provide.random(21)
+    let rs = provide.random(22)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, dtls.defaults(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, dtls.defaults(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    if let Error(NotConnected) = dtls.take_srtp(mut client) {} else {
+        fail("SRTP keys before Connected")
+    }
+    run(mut client, rc, mut server, rs, 0)
+    if !is_connected(client) {
+        fail("client did not connect")
+    }
+    if is_connected(server) {
+        fail("server connected before expect")
+    }
+    if let Error(NotConnected) = dtls.take_srtp(mut server) {} else {
+        fail("SRTP keys before the pin")
+    }
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let _ = drain(mut server, rs, 0)
+    if !is_connected(server) {
+        fail("server did not connect after expect")
+    }
+    let sent = result.unwrap(dtls.take_srtp(mut client))
+    let answered = result.unwrap(dtls.take_srtp(mut server))
+    drop(take sent)
+    drop(take answered)
+    if let Error(Taken) = dtls.take_srtp(mut client) {} else {
+        fail("second take_srtp")
+    }
+    let mut wire: Bytes = list.with_capacity(1200)
+    let _ = result.unwrap(dtls.send(mut client, b"media control", mut wire))
+    let mut data: Bytes = list.new()
+    let n = result.unwrap(dtls.receive(mut server, 0, rs, wire, mut data))
+    if n != 13 || data != b"media control" {
+        fail("application data across the pair")
+    }
+    let c = party(13)
+    let d = party(14)
+    let Party(id: take plain_client_id, certificate: plain_client_certificate) = take c
+    let Party(id: take plain_server_id, certificate: plain_server_certificate) = take d
+    let rc2 = provide.random(23)
+    let rs2 = provide.random(24)
+    let mut plain_client = result.unwrap(dtls.client(take plain_client_id, no_srtp(), address(3)))
+    let mut plain_server = result.unwrap(dtls.server(take plain_server_id, no_srtp(), address(4), Verified))
+    result.unwrap(dtls.expect(mut plain_client, pin_list(plain_server_certificate)))
+    result.unwrap(dtls.expect(mut plain_server, pin_list(plain_client_certificate)))
+    run(mut plain_client, rc2, mut plain_server, rs2, 0)
+    if !is_connected(plain_client) || !is_connected(plain_server) {
+        fail("plain pair did not connect")
+    }
+    if let Error(NoSrtp) = dtls.take_srtp(mut plain_client) {} else {
+        fail("exporter without a profile")
+    }
+    Ok(())
+}
+
+fn cookie_key() -> Inline[u8, 32] {
+    std.sha256.hash(b"dtls cookie key")
+}
+
+fn put_u48(mut out: Bytes, value: u64) {
+    for i in 0u64 .. 6 {
+        list.push(mut out, int.narrow((value >> (40 - 8 * i)) & 0xff))
+    }
+}
+
+fn put_u24_be(mut out: Bytes, value: u64) {
+    list.push(mut out, int.narrow((value >> 16) & 0xff))
+    list.push(mut out, int.narrow((value >> 8) & 0xff))
+    list.push(mut out, int.narrow(value & 0xff))
+}
+
+/// An epoch-0 DTLSPlaintext record (RFC 6347 section 4.1) built by hand.
+fn plain_record(kind: u8, sequence: u64, payload: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(13 + list.len(payload))
+    list.push(mut out, kind)
+    list.append(mut out, unhex("fefd0000"))
+    put_u48(mut out, sequence)
+    let n: u16 = int.narrow(list.len(payload))
+    list.put_word_be(mut out, n)
+    list.append(mut out, payload)
+    out
+}
+
+/// A handshake fragment (RFC 6347 section 4.2.2) built by hand.
+fn hs_fragment(kind: u8, total: u64, sequence: u16, offset: u64, part: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(12 + list.len(part))
+    list.push(mut out, kind)
+    put_u24_be(mut out, total)
+    list.put_word_be(mut out, sequence)
+    put_u24_be(mut out, offset)
+    put_u24_be(mut out, list.len(part))
+    list.append(mut out, part)
+    out
+}
+
+fn hello_random() -> Bytes {
+    unhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+}
+
+/// RFC 5246 section 7.4.1.2 with DTLS's cookie: one GCM suite, x25519, 0x0403, SRTP 0x0007,
+/// EMS and empty renegotiation_info.
+fn hello_body(cookie: Bytes) -> Bytes {
+    let mut b: Bytes = list.with_capacity(160)
+    list.append(mut b, unhex("fefd"))
+    list.append(mut b, hello_random())
+    list.push(mut b, 0)
+    list.push(mut b, int.narrow(list.len(cookie)))
+    list.append(mut b, cookie)
+    list.append(mut b, unhex("0002c02b0100"))
+    list.append(mut b, unhex("0028000a00040002001d000b00020100000d000400020403000e0005000200070000170000ff01000100"))
+    b
+}
+
+fn whole_hello(sequence: u64, message_seq: u16, cookie: Bytes) -> Bytes {
+    let body = hello_body(cookie)
+    plain_record(22, sequence, hs_fragment(1, list.len(body), message_seq, 0, body))
+}
+
+/// RFC 6347 section 4.2.1 by hand: {254, 255}, the ClientHello's record number, message_seq 0.
+fn verify_request(sequence: u64, cookie: String) -> Bytes {
+    let mut out: Bytes = list.with_capacity(60)
+    list.append(mut out, unhex("16feff0000"))
+    put_u48(mut out, sequence)
+    list.append(mut out, unhex("002f030000230000000000000023feff20"))
+    list.append(mut out, unhex(cookie))
+    out
+}
+
+fn replies(datagram: Bytes, peer: Addr, want: Bytes) {
+    let mut out: Bytes = list.with_capacity(100)
+    match dtls.admit(cookie_key(), peer, datagram, mut out) {
+        Reply(60) => (),
+        _ => fail("expected a 60-byte HelloVerifyRequest"),
+    }
+    if out != want || list.len(out) > list.len(datagram) {
+        fail("HelloVerifyRequest bytes")
+    }
+}
+
+fn discards_quietly(datagram: Bytes) {
+    let mut out: Bytes = list.with_capacity(100)
+    list.push(mut out, 0xaa)
+    if let Discard = dtls.admit(cookie_key(), address(1), datagram, mut out) {} else {
+        fail("expected Discard")
+    }
+    if out != b"\xaa" {
+        fail("Discard wrote to out")
+    }
+}
+
+/// bug: keep state or reply larger than the input for an unproven address, or accept a
+/// cookie bound to another address; flight 4 numbered from the wrong record or message.
+/// oracle: RFC 6347 section 4.2.1 by hand; cookies from Python hmac over the hand-built
+/// address bytes (family 4, address, port) and client random.
+@test
+fn cookie_bounds_unproven_address() -> Result[(), ()] {
+    let cookies =["04f2690e202c1d9dccc8c5916e24f7446c803507927031dd7093555561acf95b", "a723a71d78aee0e0f7dd968c9882fab317c8caefae99c4daeef0d6abab49a225", "cf8e3002ec5396452cad0ec96fbfb79f84f0419b3aacfda5d3db9288246d1849", "45cd9fbf6812d6aa74421c5506a1e79469cf7c1651dd2d451d9ebf56b56f859d", "87f7ebd386861a49346b3d1c6a040350f75d0d44d0c36830158a0259c9587e65", "e5058de65a74685ea9599d95bd371fdf24495ce12d13403d882018bcbcd3cff0", "df988bbd9ee03f4cbc341cdc6cce77f496742bacb03ab3a95a0f00178772efc4", "305ccfa1bea4aea62ff0c70bdd8365d04dd896d9475c1c50776800c45c3fc5b9", "31c58cb4f7782e5fb4b2b1407d1374f2ba0d62a62d75c94cd4e69a8be201a279", "86cbebae00f41117fb55eebba591b7e11e322223893179357d714771348b455c"]
+    for i in 0u64 .. 10 {
+        let n: u32 = int.narrow(i + 1)
+        replies(whole_hello(i + 1, 0, b""), address(n), verify_request(i + 1, cookies[i]))
+    }
+    // A cookie made for address 2 presented from address 11.
+    replies(whole_hello(40, 1, unhex(cookies[1])), address(11), verify_request(40, "e4b5238687a1467fae21d8374261be08da75ab4fa6b105cf3922c194ceec634f"))
+    let plain = hello_body(b"")
+    let total = list.len(plain)
+    let through_cookie = plain_record(22, 30, hs_fragment(1, total, 0, 0, list.slice(plain, 0, 36)))
+    if list.len(through_cookie) != 61 {
+        fail("61-byte first fragment")
+    }
+    replies(through_cookie, address(1), verify_request(30, cookies[0]))
+    let short = plain_record(22, 31, hs_fragment(1, total, 0, 0, list.slice(plain, 0, 35)))
+    if list.len(short) != 60 {
+        fail("60-byte first fragment")
+    }
+    discards_quietly(short)
+    discards_quietly(plain_record(22, 32, hs_fragment(1, total, 0, 36, list.slice(plain, 36, total))))
+    let body = hello_body(unhex("b7baea18def8e6069d6b2150d3d07f074db708906f540f553b707e968b8dff26"))
+    let size = list.len(body)
+    let first = plain_record(22, 7, hs_fragment(1, size, 1, 0, list.slice(body, 0, 80)))
+    let second = plain_record(22, 8, hs_fragment(1, size, 1, 80, list.slice(body, 80, size)))
+    let mut nothing: Bytes = list.with_capacity(100)
+    if let Admitted = dtls.admit(cookie_key(), address(20), first, mut nothing) {} else {
+        fail("right cookie not admitted")
+    }
+    let a = party(31)
+    let Party(id: take waiting_id, ..) = take a
+    let rw = provide.random(41)
+    let mut waiting = result.unwrap(dtls.server(take waiting_id, dtls.defaults(), address(20), Cookie(cookie_key())))
+    let mut data: Bytes = list.new()
+    let t = 5 * SECOND
+    if result.unwrap(dtls.receive(mut waiting, t, rw, first, mut data)) != 0 {
+        fail("data from a ClientHello fragment")
+    }
+    let mut out: Bytes = list.with_capacity(1200)
+    match dtls.poll(mut waiting, t, rw, mut out) {
+        Ok(WakeAt(at)) if at == t + 60 * SECOND => (),
+        _ => fail("fragment holder must wake at its deadline"),
+    }
+    if let Error(Closed(Timeout)) = dtls.poll(mut waiting, t + 60 * SECOND, rw, mut out) {} else {
+        fail("deadline did not close the fragment holder")
+    }
+    let b = party(32)
+    let Party(id: take whole_id, ..) = take b
+    let rs = provide.random(42)
+    let mut server = result.unwrap(dtls.server(take whole_id, dtls.defaults(), address(20), Cookie(cookie_key())))
+    let _ = result.unwrap(dtls.receive(mut server, 0, rs, first, mut data))
+    let _ = result.unwrap(dtls.receive(mut server, 0, rs, second, mut data))
+    let flight = drain(mut server, rs, 0)
+    if list.len(flight) == 0 {
+        fail("no flight 4 after the admitted ClientHello")
+    }
+    let lead = flight[0]
+    // Record number 7 in bytes 5..11, then ServerHello (2) with message_seq 1 at 17..19.
+    if list.slice(lead, 3, 11) != unhex("0000000000000007") || lead[13] != 2 || list.slice(lead, 17, 19) != unhex("0001") {
+        fail("flight 4 numbering")
+    }
+    let c = party(33)
+    let Party(id: take skipped_id, ..) = take c
+    let rk = provide.random(43)
+    let mut skipped = result.unwrap(dtls.server(take skipped_id, dtls.defaults(), address(1), Cookie(cookie_key())))
+    let _ = dtls.receive(mut skipped, 0, rk, whole_hello(1, 0, b""), mut data)
+    if list.len(drain(mut skipped, rk, 0)) != 0 || dtls.discards(skipped).malformed != 1 {
+        fail("a Cookie server answered without a right cookie")
+    }
+    Ok(())
+}
+
+fn owned(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+/// The records of each datagram, split by the 13-byte DTLS header's length field.
+fn records_in(datagrams: List[Bytes]) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    for i in 0u64 .. list.len(datagrams) {
+        let mut at = 0u64
+        while at + 13 <= list.len(datagrams[i]) {
+            let length: u16 = list.word_be(datagrams[i], at + 11)
+            let n: u64 = int.widen(length)
+            list.push(mut out, owned(list.slice(datagrams[i], at, at + 13 + n)))
+            at += 13 + n
+        }
+    }
+    out
+}
+
+/// Epoch 0 handshake record of message type `kind` (header bytes 0, 3..5 and 13).
+fn is_plain_message(rec: Bytes, kind: u8) -> bool {
+    rec[0] == 22 && rec[3] == 0 && rec[4] == 0 && rec[13] == kind
+}
+
+fn seq_of(rec: Bytes) -> u16 {
+    let n: u16 = list.word_be(rec, 17)
+    n
+}
+
+fn hello_record(version: String, extensions: String) -> Bytes {
+    let ext = unhex(extensions)
+    let mut b: Bytes = list.with_capacity(128)
+    list.append(mut b, unhex(version))
+    list.append(mut b, hello_random())
+    list.append(mut b, unhex("00000002c02b0100"))
+    let n: u16 = int.narrow(list.len(ext))
+    list.put_word_be(mut b, n)
+    list.append(mut b, ext)
+    plain_record(22, 1, hs_fragment(1, list.len(b), 0, 0, b))
+}
+
+fn server_hello_record(suite: String, extensions: String) -> Bytes {
+    let ext = unhex(extensions)
+    let mut b: Bytes = list.with_capacity(96)
+    list.append(mut b, unhex("fefd"))
+    list.append(mut b, hello_random())
+    list.push(mut b, 0)
+    list.append(mut b, unhex(suite))
+    list.push(mut b, 0)
+    let n: u16 = int.narrow(list.len(ext))
+    list.put_word_be(mut b, n)
+    list.append(mut b, ext)
+    plain_record(22, 1, hs_fragment(2, list.len(b), 0, 0, b))
+}
+
+fn single(rec: Bytes) -> List[Bytes] {
+    let mut out: List[Bytes] = list.new()
+    list.push(mut out, owned(rec))
+    out
+}
+
+/// RFC 6347 section 4.1 and RFC 5246 section 7.2: one plaintext fatal alert, then Closed.
+fn refused(mut e: dtls.Endpoint, r: Random, code: u8, take case: String) {
+    let sent = drain(mut e, r, 0)
+    let n = list.len(sent)
+    let mut ok = n != 0
+    if ok {
+        let last = list.len(sent[n - 1])
+        ok = sent[n - 1][0] == 21 && sent[n - 1][last - 2] == 2 && sent[n - 1][last - 1] == code
+    }
+    match dtls.state(e) {
+        Closed(SentAlert(c)) if c == code => (),
+        _ => {
+            ok = false
+        },
+    }
+    if !ok {
+        fail(take case)
+    }
+}
+
+fn hello_refused(seed: u64, hello: Bytes, code: u8, take case: String) {
+    let p = party(seed)
+    let Party(id: take sid, ..) = take p
+    let r = provide.random(seed + 100)
+    let mut server = result.unwrap(dtls.server(take sid, dtls.defaults(), address(1), Verified))
+    let _ = deliver(mut server, r, 0, single(hello))
+    refused(mut server, r, code, take case)
+}
+
+/// The client after sending flight 1; the records of the genuine server flight 4.
+fn client_at_flight_4(seed: u64, mut client: dtls.Endpoint, rc: Random) -> List[Bytes] {
+    let p = party(seed)
+    let Party(id: take sid, ..) = take p
+    let rs = provide.random(seed + 200)
+    let mut server = result.unwrap(dtls.server(take sid, dtls.defaults(), address(1), Verified))
+    let hello = drain(mut client, rc, 0)
+    let _ = deliver(mut server, rs, 0, hello)
+    records_in(drain(mut server, rs, 0))
+}
+
+fn fresh_client(seed: u64) -> dtls.Endpoint {
+    let p = party(seed)
+    let Party(id: take cid, ..) = take p
+    result.unwrap(dtls.client(take cid, dtls.defaults(), address(2)))
+}
+
+/// The server after flight 4; the records of the genuine client flight 5.
+fn server_at_flight_5(seed: u64, mut server: dtls.Endpoint, rs: Random) -> List[Bytes] {
+    let rc = provide.random(seed + 300)
+    let mut client = fresh_client(seed)
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    records_in(drain(mut client, rc, 0))
+}
+
+fn fresh_server(seed: u64) -> dtls.Endpoint {
+    let p = party(seed)
+    let Party(id: take sid, ..) = take p
+    result.unwrap(dtls.server(take sid, dtls.defaults(), address(1), Verified))
+}
+
+/// bug: accept a peer message the DTLS-5 failure table refuses, or answer it with the wrong
+/// alert. oracle: RFC 5246 sections 7.2, 7.4.1.2 and Appendix E.1, RFC 5764 section 4.1.3
+/// and RFC 7627 by hand: 40, 47, 40, 40, 70, 47, 40, 51, 10, 42, 10.
+@test
+fn refusals() -> Result[(), ()] {
+    hello_refused(51, hello_record("fefd", "000a00040002001d000b00020100000d000400020403000e00050002000700ff01000100"), 40, "ClientHello without EMS")
+    hello_refused(52, hello_record("fefd", "000a00040002001d000b00020100000d000400020403000e000600020007010000170000ff01000100"), 47, "non-empty srtp_mki")
+    hello_refused(53, hello_record("fefd", "000a00040002001d000b00020100000d000400020403000e0005000200020000170000ff01000100"), 40, "no shared SRTP profile")
+    hello_refused(54, hello_record("fefd", "000a00040002001d000b00020100000d000400020503000e0005000200070000170000ff01000100"), 40, "no 0x0403")
+    hello_refused(55, hello_record("feff", "000a00040002001d000b00020100000d000400020403000e0005000200070000170000ff01000100"), 70, "client_version {254, 255}")
+    let rc6 = provide.random(61)
+    let mut c6 = fresh_client(61)
+    let _ = drain(mut c6, rc6, 0)
+    let _ = deliver(mut c6, rc6, 0, single(server_hello_record("c030", "00170000ff01000100000e00050002000700")))
+    refused(mut c6, rc6, 47, "ServerHello suite not offered")
+    let rc7 = provide.random(62)
+    let mut c7 = fresh_client(62)
+    let _ = drain(mut c7, rc7, 0)
+    let _ = deliver(mut c7, rc7, 0, single(server_hello_record("c02b", "00170000ff01000100")))
+    refused(mut c7, rc7, 40, "ServerHello without use_srtp")
+    let rc8 = provide.random(63)
+    let mut c8 = fresh_client(63)
+    let flight8 = client_at_flight_4(64, mut c8, rc8)
+    let mut broken: List[Bytes] = list.new()
+    for i in 0u64 .. list.len(flight8) {
+        let mut rec = owned(flight8[i])
+        if is_plain_message(rec, 12) {
+            let last = list.len(rec) - 1
+            let flipped = rec[last] ^ 1
+            let _ = list.set(mut rec, last, flipped)
+        }
+        list.push(mut broken, take rec)
+    }
+    let _ = deliver(mut c8, rc8, 0, broken)
+    refused(mut c8, rc8, 51, "ServerKeyExchange signature")
+    let rc9 = provide.random(65)
+    let mut c9 = fresh_client(65)
+    let flight9 = client_at_flight_4(66, mut c9, rc9)
+    let mut skipped: List[Bytes] = list.new()
+    let mut removed = false
+    for i in 0u64 .. list.len(flight9) {
+        let mut rec = owned(flight9[i])
+        if is_plain_message(rec, 12) {
+            removed = true
+        } else {
+            if removed {
+                let earlier = seq_of(rec) - 1
+                list.set_word_be(mut rec, 17, earlier)
+            }
+            list.push(mut skipped, take rec)
+        }
+    }
+    if !removed {
+        fail("flight 4 had no ServerKeyExchange")
+    }
+    let _ = deliver(mut c9, rc9, 0, skipped)
+    refused(mut c9, rc9, 10, "flight 4 without ServerKeyExchange")
+    let rs10 = provide.random(67)
+    let mut s10 = fresh_server(67)
+    let flight10 = server_at_flight_5(68, mut s10, rs10)
+    let mut empty: List[Bytes] = list.new()
+    for i in 0u64 .. list.len(flight10) {
+        if is_plain_message(flight10[i], 11) {
+            list.push(mut empty, plain_record(22, 90, hs_fragment(11, 3, seq_of(flight10[i]), 0, unhex("000000"))))
+        } else {
+            list.push(mut empty, owned(flight10[i]))
+        }
+    }
+    let _ = deliver(mut s10, rs10, 0, empty)
+    refused(mut s10, rs10, 42, "empty client Certificate")
+    let rs11 = provide.random(69)
+    let mut s11 = fresh_server(69)
+    let flight11 = server_at_flight_5(70, mut s11, rs11)
+    let mut early: List[Bytes] = list.new()
+    let mut finished_seq = 0u16
+    for i in 0u64 .. list.len(flight11) {
+        if is_plain_message(flight11[i], 15) {
+            finished_seq = seq_of(flight11[i]) + 1
+        }
+        if flight11[i][0] == 22 && flight11[i][4] == 1 {
+            list.push(mut early, plain_record(22, 91, hs_fragment(20, 12, finished_seq, 0, unhex("000000000000000000000000"))))
+        } else {
+            list.push(mut early, owned(flight11[i]))
+        }
+    }
+    if finished_seq == 0 {
+        fail("flight 5 had no CertificateVerify")
+    }
+    let _ = deliver(mut s11, rs11, 0, early)
+    refused(mut s11, rs11, 10, "Finished in epoch 0")
+    Ok(())
+}
+
+fn digest_bytes(data: Bytes) -> Bytes {
+    let d = std.sha256.hash(data)
+    let mut out: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut out, d[i])
+    }
+    out
+}
+
+/// RFC 5480 / X9.62 Ecdsa-Sig-Value INTEGER from 32 big-endian bytes at `lo`.
+fn der_int(mut out: Bytes, raw: Bytes, lo: u64) {
+    let mut i = lo
+    while i < lo + 31 && raw[i] == 0 {
+        i += 1
+    }
+    let pad = raw[i] >= 0x80
+    let size = lo + 32 - i
+    list.push(mut out, 2)
+    if pad {
+        list.push(mut out, int.narrow(size + 1))
+        list.push(mut out, 0)
+    } else {
+        list.push(mut out, int.narrow(size))
+    }
+    list.append(mut out, list.slice(raw, i, lo + 32))
+}
+
+fn der_of(raw: Bytes) -> Bytes {
+    let mut ints: Bytes = list.with_capacity(72)
+    der_int(mut ints, raw, 0)
+    der_int(mut ints, raw, 32)
+    let mut out: Bytes = list.with_capacity(74)
+    list.push(mut out, 0x30)
+    list.push(mut out, int.narrow(list.len(ints)))
+    list.append(mut out, ints)
+    out
+}
+
+/// The handshake message of a whole epoch-0 fragment, header included (RFC 6347 section 4.2.6).
+fn message_of(rec: Bytes) -> Bytes {
+    if list.slice(rec, 14, 17) != list.slice(rec, 22, 25) {
+        fail("fragmented flight 4 message")
+    }
+    owned(list.slice(rec, 13, list.len(rec)))
+}
+
+/// A genuine handshake: client A against server S; A's Certificate message body.
+fn certificate_of(seed: u64, take id: dtls.Identity) -> Bytes {
+    let rc = provide.random(seed)
+    let rs = provide.random(seed + 1)
+    let mut client = result.unwrap(dtls.client(take id, dtls.defaults(), address(2)))
+    let mut server = fresh_server(seed + 2)
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    let flight = records_in(drain(mut client, rc, 0))
+    for i in 0u64 .. list.len(flight) {
+        if is_plain_message(flight[i], 11) {
+            return owned(list.slice(flight[i], 25, list.len(flight[i])))
+        }
+    }
+    fail("no Certificate in A's flight 5")
+}
+
+fn not_connected(mut server: dtls.Endpoint) {
+    if let Error(NotConnected) = dtls.take_srtp(mut server) {} else {
+        fail("take_srtp before closing")
+    }
+}
+
+/// Client C: a hand-built flight 5 that presents A's Certificate. `signed` adds a
+/// CertificateVerify under C's own key; without it the Finished takes its message_seq.
+fn impostor(seed: u64, certificate: Bytes, take holder: List[dtls.Fingerprint], signed: bool, code: u8) {
+    let mut server = fresh_server(seed)
+    result.unwrap(dtls.expect(mut server, take holder))
+    let rs = provide.random(seed + 1)
+    let rc = provide.random(seed + 2)
+    let hello = hello_record("fefd", "000a00040002001d000b00020100000d000400020403000e0005000200070000170000ff01000100")
+    let mut log: Bytes = list.with_capacity(4096)
+    list.append(mut log, list.slice(hello, 13, list.len(hello)))
+    let _ = deliver(mut server, rs, 0, single(hello))
+    let flight = records_in(drain(mut server, rs, 0))
+    let mut server_random: Bytes = list.new()
+    let mut server_point: Bytes = list.new()
+    for i in 0u64 .. list.len(flight) {
+        list.append(mut log, message_of(flight[i]))
+        if is_plain_message(flight[i], 2) {
+            server_random = owned(list.slice(flight[i], 27, 59))
+        }
+        // ServerKeyExchange: curve_type 3, x25519 (0x001d), a 32-byte point (RFC 8422 5.4).
+        if is_plain_message(flight[i], 12) && list.slice(flight[i], 25, 29) == unhex("03001d20") {
+            server_point = owned(list.slice(flight[i], 29, 61))
+        }
+    }
+    if list.len(server_random) != 32 || list.len(server_point) != 32 {
+        fail("server flight 4 for C")
+    }
+    let mut public: Bytes = list.with_capacity(32)
+    let share = result.unwrap(secret.key_share(rc, X25519, mut public))
+    let mut exchange: Bytes = list.with_capacity(33)
+    list.push(mut exchange, 32)
+    list.append(mut exchange, public)
+    let certificate_message = hs_fragment(11, list.len(certificate), 1, 0, certificate)
+    let exchange_message = hs_fragment(16, 33, 2, 0, exchange)
+    list.append(mut log, certificate_message)
+    list.append(mut log, exchange_message)
+    let mut keys = result.unwrap(schedule.dtls12(Aes128GcmSha256, Client, 1, take share, server_point, hello_random(), server_random, Some(digest_bytes(log))))
+    let mut w = dtls.records(2)
+    let mut datagrams: List[Bytes] = list.new()
+    for message in[certificate_message, exchange_message] {
+        let mut d: Bytes = list.with_capacity(1200)
+        let _ = result.unwrap(dtls.write_record(mut w, 1200, 22, message, mut d))
+        list.push(mut datagrams, take d)
+    }
+    let mut finished_seq: u16 = 3
+    if signed {
+        let mut point: Bytes = list.with_capacity(65)
+        let own = result.unwrap(secret.p256_key(rc, "sign(p256)", mut point))
+        let mut raw: Bytes = list.with_capacity(64)
+        let _ = result.unwrap(secret.sign(own, P256, rc, log, mut raw))
+        let der = der_of(raw)
+        let mut body: Bytes = list.with_capacity(80)
+        list.append(mut body, unhex("0403"))
+        let n: u16 = int.narrow(list.len(der))
+        list.put_word_be(mut body, n)
+        list.append(mut body, der)
+        let verify = hs_fragment(15, list.len(body), 3, 0, body)
+        list.append(mut log, verify)
+        let mut d: Bytes = list.with_capacity(1200)
+        let _ = result.unwrap(dtls.write_record(mut w, 1200, 22, verify, mut d))
+        list.push(mut datagrams, take d)
+        finished_seq = 4
+    }
+    let mut verify_data: Bytes = list.with_capacity(12)
+    let _ = result.unwrap(schedule.finished(keys, Client, digest_bytes(log), mut verify_data))
+    let mut tail: Bytes = list.with_capacity(1200)
+    let _ = result.unwrap(dtls.write_record(mut w, 1200, 20, b"\x01", mut tail))
+    result.unwrap(dtls.start_sending_protected(mut w, mut keys, Aes128GcmSha256))
+    let _ = result.unwrap(dtls.write_record(mut w, 1200, 22, hs_fragment(20, 12, finished_seq, 0, verify_data), mut tail))
+    // C believes itself connected and seals media under the keys it derived.
+    dtls.records_connected(mut w)
+    let _ = result.unwrap(dtls.write_record(mut w, 1200, 23, b"stolen media", mut tail))
+    list.push(mut datagrams, take tail)
+    let mut delivered = 0u64
+    for i in 0u64 .. list.len(datagrams) {
+        // Datagram 2 is the first one the server must refuse: the CCS in (a), the CV in (b).
+        if i == 2 {
+            not_connected(mut server)
+        }
+        let mut data: Bytes = list.new()
+        let _ = dtls.receive(mut server, 0, rs, datagrams[i], mut data)
+        delivered += list.len(data)
+        if is_connected(server) {
+            fail("impostor connected")
+        }
+    }
+    refused(mut server, rs, code, "impostor flight 5")
+    let mut late: Bytes = list.new()
+    let _ = dtls.receive(mut server, 0, rs, datagrams[list.len(datagrams) - 1], mut late)
+    if delivered + list.len(late) != 0 {
+        fail("impostor application data delivered")
+    }
+    if let Error(Closed(_)) = dtls.take_srtp(mut server) {} else {
+        fail("take_srtp after closing")
+    }
+}
+
+/// bug: treat CertificateVerify as optional, or pin on the presented certificate alone.
+/// oracle: RFC 5246 section 7.4.8 and RFC 8122 section 6.2 by hand: only CertificateVerify
+/// proves possession; a fingerprint is public. (a) alert 10, (b) alert 51.
+@test
+fn possession_before_keys() -> Result[(), ()] {
+    let a = party(81)
+    let Party(id: take a_id, certificate: a_certificate) = take a
+    let recorded = certificate_of(82, take a_id)
+    impostor(85, recorded, pin_list(a_certificate), false, 10)
+    impostor(88, recorded, pin_list(a_certificate), true, 51)
+    Ok(())
+}
+
+fn small_mtu() -> dtls.Config {
+    let mut c = dtls.defaults()
+    c.mtu = 300
+    c
+}
+
+fn record_number(rec: Bytes) -> u64 {
+    let hi: u16 = list.word_be(rec, 5)
+    let lo: u32 = list.word_be(rec, 7)
+    let high: u64 = int.widen(hi)
+    let low: u64 = int.widen(lo)
+    (high << 32) | low
+}
+
+fn epoch_of(rec: Bytes) -> u16 {
+    let e: u16 = list.word_be(rec, 3)
+    e
+}
+
+/// One flight 6 in one datagram: ChangeCipherSpec in epoch 0, then Finished in epoch 1.
+/// Returns the Finished record's number, which must exceed `after`.
+fn one_flight_six(flight: List[Bytes], after: u64) -> u64 {
+    if list.len(flight) != 1 {
+        fail("flight 5 answered by other than one datagram")
+    }
+    let parts = records_in(flight)
+    if list.len(parts) != 2 || parts[0][0] != 20 || epoch_of(parts[0]) != 0 || parts[1][0] != 22 || epoch_of(parts[1]) != 1 {
+        fail("flight 6 shape")
+    }
+    let n = record_number(parts[1])
+    if n <= after {
+        fail("flight 6 reused a record number")
+    }
+    n
+}
+
+/// bug: answer flight 6 per epoch-0 record or per datagram, reuse record numbers in a resent
+/// flight, or answer a replayed record. oracle: RFC 6347 section 4.2.4 by hand.
+@test
+fn final_flight_resent() -> Result[(), ()] {
+    let a = party(91)
+    let b = party(92)
+    let rc = provide.random(93)
+    let rs = provide.random(94)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, small_mtu(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, small_mtu(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let flight4 = drain(mut server, rs, 0)
+    let _ = deliver(mut client, rc, 0, flight4)
+    let flight5 = drain(mut client, rc, 0)
+    // The spec's three datagrams assume a larger certificate; this one packs flight 5 into two.
+    let spread = list.len(flight5)
+    if spread < 2 {
+        fail("flight 5 at mtu 300 spans datagrams")
+    }
+    for i in 0u64 .. spread {
+        if list.len(flight5[i]) > 300 {
+            fail("datagram over mtu")
+        }
+    }
+    let _ = deliver(mut server, rs, 0, flight5)
+    let _ = drain(mut server, rs, 0)
+    if !is_connected(server) {
+        fail("server not Connected after flight 5")
+    }
+    let first = drain(mut client, rc, SECOND)
+    let _ = deliver(mut server, rs, SECOND, first)
+    let dropped_again = one_flight_six(drain(mut server, rs, SECOND), 0)
+    let second = drain(mut client, rc, 3 * SECOND)
+    if list.len(first) != spread || list.len(second) != spread {
+        fail("flight 5 resent whole")
+    }
+    let _ = deliver(mut server, rs, 3 * SECOND, second)
+    let answer = drain(mut server, rs, 3 * SECOND)
+    let _ = one_flight_six(answer, dropped_again)
+    let _ = deliver(mut client, rc, 3 * SECOND, answer)
+    if !is_connected(client) {
+        fail("client did not connect on the resent flight 6")
+    }
+    let sent = records_in(flight5)
+    let before = dtls.discards(server)
+    for i in 0u64 .. list.len(sent) {
+        if is_plain_message(sent[i], 11) || (sent[i][0] == 22 && epoch_of(sent[i]) == 1) {
+            let _ = deliver(mut server, rs, 4 * SECOND, single(sent[i]))
+            if list.len(drain(mut server, rs, 4 * SECOND)) != 0 {
+                fail("replayed record answered")
+            }
+        }
+    }
+    let after = dtls.discards(server)
+    if after.replayed != before.replayed + 1 || after.stale_epoch <= before.stale_epoch || after.tampered != before.tampered {
+        fail("replayed Certificate and Finished discard classes")
+    }
+    let client_before = dtls.discards(client)
+    let flight4_records = records_in(flight4)
+    let _ = deliver(mut client, rc, 4 * SECOND, flight4)
+    if list.len(drain(mut client, rc, 4 * SECOND)) != 0 {
+        fail("retransmitted flight 4 answered")
+    }
+    let client_after = dtls.discards(client)
+    if client_after.stale_epoch != client_before.stale_epoch + list.len(flight4_records) || !is_connected(client) {
+        fail("flight 4 at the connected client")
+    }
+    Ok(())
+}
+
+/// The mid-handshake part of record_replay_and_discards: after flight 4, an injected
+/// ServerHelloDone copy numbered 2^48 - 1, then the genuine flight 6 with low epoch-0 numbers.
+fn replay_mid_handshake() {
+    let a = party(95)
+    let b = party(96)
+    let rc = provide.random(97)
+    let rs = provide.random(98)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, dtls.defaults(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, dtls.defaults(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let flight4 = drain(mut server, rs, 0)
+    let _ = deliver(mut client, rc, 0, flight4)
+    let flight5 = drain(mut client, rc, 0)
+    let parts = records_in(flight4)
+    let mut injected: List[Bytes] = list.new()
+    for i in 0u64 .. list.len(parts) {
+        if is_plain_message(parts[i], 14) {
+            let mut forged = owned(parts[i])
+            list.set_word_be(mut forged, 5, 0xffffu16)
+            list.set_word_be(mut forged, 7, 0xffffffffu32)
+            list.push(mut injected, take forged)
+        }
+    }
+    if list.len(injected) != 1 {
+        fail("one ServerHelloDone in flight 4")
+    }
+    let _ = deliver(mut client, rc, 0, injected)
+    if list.len(drain(mut client, rc, 0)) != 0 {
+        fail("injected ServerHelloDone triggered a retransmission")
+    }
+    let _ = deliver(mut server, rs, 0, flight5)
+    let flight6 = drain(mut server, rs, 0)
+    let _ = deliver(mut client, rc, 0, flight6)
+    if !is_connected(client) || !is_connected(server) {
+        fail("pair did not connect past the injected record")
+    }
+    if list.len(drain(mut client, rc, 0)) != 0 || list.len(drain(mut server, rs, 0)) != 0 {
+        fail("retransmission after the injected record")
+    }
+    if dtls.discards(client).replayed != 0 {
+        fail("epoch-0 record counted as replayed")
+    }
+}
+
+/// bug: answer a DTLS 1.3 offer with 1.3 extensions, or refuse it instead of choosing 1.2.
+/// oracle: RFC 9147 section 5.3 and RFC 6347 by hand: a ServerHello of {254, 253} with no
+/// supported_versions (43) and no key_share (51).
+@test
+fn offered_13_negotiates_12() -> Result[(), ()] {
+    // supported_versions {254, 252} {254, 253}; key_share with one x25519 share.
+    let offer = hello_record("fefd", "000a00040002001d000b00020100000d000400020403000e0005000200070000170000ff01000100002b000504fefcfefd003300260024001d00201111111111111111111111111111111111111111111111111111111111111111")
+    let mut server = fresh_server(111)
+    let rs = provide.random(112)
+    let _ = deliver(mut server, rs, 0, single(offer))
+    let flight = records_in(drain(mut server, rs, 0))
+    let mut answered = false
+    for i in 0u64 .. list.len(flight) {
+        if is_plain_message(flight[i], 2) {
+            answered = true
+            let h = flight[i]
+            // Body at 25: version, random, session_id, suite, compression, extensions.
+            let sid: u64 = int.widen(h[59])
+            let at = 60 + sid
+            let suite: u16 = list.word_be(h, at)
+            let ext_len: u16 = list.word_be(h, at + 3)
+            let ext_end: u64 = int.widen(ext_len)
+            if list.slice(h, 25, 27) != unhex("fefd") || suite != 0xc02b || at + 5 + ext_end != list.len(h) {
+                fail("ServerHello version, suite or length")
+            }
+            let mut x = at + 5
+            while x < list.len(h) {
+                let kind: u16 = list.word_be(h, x)
+                let size: u16 = list.word_be(h, x + 2)
+                if kind == 43 || kind == 51 {
+                    fail("DTLS 1.3 extension in a 1.2 ServerHello")
+                }
+                let skip: u64 = int.widen(size)
+                x += 4 + skip
+            }
+        }
+    }
+    if !answered {
+        fail("no ServerHello for the 1.3 offer")
+    }
+    Ok(())
+}

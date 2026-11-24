@@ -193,15 +193,15 @@ fn alert(mut closed: Option[Close], mut dropped: Discards, payload: Bytes) -> Re
     if list.len(payload) != 2 || (payload[0] != 1 && payload[0] != 2) {
         return malformed(mut dropped)
     }
-    let close = if payload[1] == 0 {
+    let ending = if payload[1] == 0 {
         PeerClosed
     } else if payload[0] == 2 {
         PeerAlert(payload[1])
     } else {
         return Ignored
     }
-    closed = Some(close)
-    AlertClosed(close)
+    closed = Some(ending)
+    AlertClosed(ending)
 }
 
 /// Process one record so the handshake can change state between records in a datagram.
@@ -398,14 +398,32 @@ pub fn write_verify_request(sequence: u64, body: Bytes, mut out: Bytes) -> Resul
     write_plain_record(sequence, HANDSHAKE, body, mut out)
 }
 
-fn record_overhead(r: Records) -> u64 {
+fn record_overhead(r: Records, protected: bool) -> u64 {
     match r.write {
-        Some(k) => RECORD_HEADER + TAG + k.explicit,
-        None => RECORD_HEADER,
+        Some(k) if protected => RECORD_HEADER + TAG + k.explicit,
+        _ => RECORD_HEADER,
+    }
+}
+
+/// A Cookie server learns its first record number from the ClientHello it answers.
+pub fn set_plain_sequence(mut r: Records, sequence: u64) {
+    r.plain_next = sequence
+}
+
+fn sending_protected(r: Records) -> bool {
+    match r.write {
+        Some(_) => true,
+        None => false,
     }
 }
 
 pub fn write_record(mut r: Records, mtu: u16, kind: u8, body: Bytes, mut out: Bytes) -> Result[u64, RecordError] {
+    let protected = sending_protected(r)
+    write_record_in(mut r, mtu, protected, kind, body, mut out)
+}
+
+/// Write in epoch 1 when protected, else in epoch 0, so a resent flight keeps its epochs.
+pub fn write_record_in(mut r: Records, mtu: u16, protected: bool, kind: u8, body: Bytes, mut out: Bytes) -> Result[u64, RecordError] {
     if let Some(c) = r.close {
         return Error(Closed(c))
     }
@@ -416,40 +434,43 @@ pub fn write_record(mut r: Records, mtu: u16, kind: u8, body: Bytes, mut out: By
     if kind == APPLICATION && !r.connected {
         return Error(InvalidRecord)
     }
-    let size = record_overhead(r) + len
+    let size = record_overhead(r, protected) + len
     let at = list.len(out)
     let room: u64 = int.widen(mtu)
     if at > room || size > room - at {
         return Error(DatagramFull)
     }
-    if let Some(mut k) = r.write {
-        if kind == CCS {
-            return Error(InvalidRecord)
+    if protected {
+        if let Some(mut k) = r.write {
+            if kind == CCS {
+                return Error(InvalidRecord)
+            }
+            if k.next > MAX_RECORD_SEQUENCE {
+                return Error(Packet(Range))
+            }
+            output_room(out, size)?
+            let number = record_number(1, k.next)
+            let aad = record_aad(kind, number, int.narrow(len))
+            record_prefix(mut out, kind, 0xfefd, number, int.narrow(len + TAG + k.explicit))
+            if k.explicit != 0 {
+                list.put_word_be(mut out, number)
+            }
+            let start = list.len(out)
+            match packet.seal_into(mut k.cipher, k.next, body, 0, mut out, start, aad) {
+                Ok(_) => {
+                    k.next += 1
+                    return Ok(size)
+                },
+                Error(e) => {
+                    list.truncate(mut out, at)
+                    return match e {
+                        Capacity(c) => Error(Capacity(c)),
+                        _ => Error(Packet(e)),
+                    }
+                },
+            }
         }
-        if k.next > MAX_RECORD_SEQUENCE {
-            return Error(Packet(Range))
-        }
-        output_room(out, size)?
-        let number = record_number(1, k.next)
-        let aad = record_aad(kind, number, int.narrow(len))
-        record_prefix(mut out, kind, 0xfefd, number, int.narrow(len + TAG + k.explicit))
-        if k.explicit != 0 {
-            list.put_word_be(mut out, number)
-        }
-        let start = list.len(out)
-        match packet.seal_into(mut k.cipher, k.next, body, 0, mut out, start, aad) {
-            Ok(_) => {
-                k.next += 1
-                return Ok(size)
-            },
-            Error(e) => {
-                list.truncate(mut out, at)
-                return match e {
-                    Capacity(c) => Error(Capacity(c)),
-                    _ => Error(Packet(e)),
-                }
-            },
-        }
+        return Error(InvalidRecord)
     }
     if kind == APPLICATION {
         return Error(InvalidRecord)

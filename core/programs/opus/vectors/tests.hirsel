@@ -1,0 +1,135 @@
+fn load(d: Dir, stem: String, suffix: String) -> Bytes waits {
+    let mut name: String = string.with_capacity(string.byte_len(stem) + string.byte_len(suffix))
+    string.push(mut name, stem)
+    string.push(mut name, suffix)
+    result.unwrap(std.file.read(d, name))
+}
+
+fn buffer(size: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(size)
+    list.fill(mut b, size, 0)
+    b
+}
+
+// opus_demo bitstreams have a big-endian packet size and range coder state
+// before each payload.
+fn packet_end(bits: Bytes, at: u64) -> u64 {
+    let length: u32 = list.word_be(bits, at)
+    let end = at + 8 + int.widen(length)
+    if end > list.len(bits) {
+        fail("truncated reference packet")
+    }
+    end
+}
+
+fn check_decode(f: Foreign[opus.Opus], bits: Bytes, expected: Bytes, channels: u32) {
+    let mut decoder = result.unwrap(opus.decoder(f, 48000, channels))
+    let channel_count: u64 = int.widen(channels)
+    let stride = 2 * channel_count
+    let mut pcm = buffer(5760 * stride)
+    let mut at = 0u64
+    let mut written = 0u64
+    while at < list.len(bits) {
+        let end = packet_end(bits, at)
+        let frames = result.unwrap(opus.decode(mut decoder, list.slice(bits, at + 8, end), 5760, false, mut pcm))
+        let frame_count: u64 = int.widen(frames)
+        let size = frame_count * stride
+        if written + size > list.len(expected) || list.slice(pcm, 0, size) != list.slice(expected, written, written + size) {
+            fail("vector PCM differs from opus_demo")
+        }
+        written += size
+        at = end
+    }
+    if written == 0 || written != list.len(expected) {
+        fail("wrong decoded vector length")
+    }
+}
+
+fn check_round_trip(f: Foreign[opus.Opus], input: Bytes, packets: Bytes, expected: Bytes, channels: u32) {
+    let mut encoder = result.unwrap(opus.encoder(f, 48000, channels, Voip))
+    result.unwrap(opus.set_bitrate(mut encoder, 48000))
+    result.unwrap(opus.set_complexity(mut encoder, 8))
+    result.unwrap(opus.set_fec(mut encoder, true))
+    result.unwrap(opus.set_packet_loss_percent(mut encoder, 10))
+    result.unwrap(opus.set_dtx(mut encoder, true))
+    let mut decoder = result.unwrap(opus.decoder(f, 48000, channels))
+    let channel_count: u64 = int.widen(channels)
+    let width = 960 * 2 * channel_count
+    let mut packet = buffer(1500)
+    let mut pcm = buffer(width)
+    let mut at = 0u64
+    for offset in 0u64 .. list.len(input) / width {
+        let start = offset * width
+        let end = packet_end(packets, at)
+        let written = result.unwrap(opus.encode(mut encoder, list.slice(input, start, start + width), mut packet))
+        if at + 8 + int.widen(written) != end || list.slice(packet, 0, int.widen(written)) != list.slice(packets, at + 8, end) {
+            fail("encoded packet differs from opus_demo")
+        }
+        let frames = result.unwrap(opus.decode(mut decoder, list.slice(packet, 0, int.widen(written)), 960, false, mut pcm))
+        if frames != 960 || list.slice(pcm, 0, width) != list.slice(expected, start, start + width) {
+            fail("round-trip PCM differs from opus_demo")
+        }
+        at = end
+    }
+    // opus_demo -e emits one zero-padded drain packet after a whole number of frames.
+    let silence = buffer(width)
+    let written = result.unwrap(opus.encode(mut encoder, silence, mut packet))
+    if at + 8 + int.widen(written) != list.len(packets) || list.slice(packet, 0, int.widen(written)) != list.slice(packets, at + 8, list.len(packets)) {
+        fail("drain packet differs from opus_demo")
+    }
+    let frames = result.unwrap(opus.decode(mut decoder, list.slice(packet, 0, int.widen(written)), 960, false, mut pcm))
+    if frames != 960 || list.slice(pcm, 0, width) != list.slice(expected, list.len(input), list.len(expected)) {
+        fail("round-trip drain PCM differs from opus_demo")
+    }
+}
+
+fn check_buffer_bounds(f: Foreign[opus.Opus]) {
+    let mut encoder = result.unwrap(opus.encoder(f, 48000, 1, Audio))
+    let mut decoder = result.unwrap(opus.decoder(f, 48000, 1))
+    let input = buffer(1921)
+    let mut packet = buffer(1500)
+    let mut short_pcm = buffer(1919)
+    let mut pcm = buffer(1920)
+    let Error(e) = opus.encode(mut encoder, list.slice(input, 1, 1921), mut packet) else {
+        fail("misaligned PCM accepted")
+    }
+    if e.code != -1 {
+        fail("wrong error for misaligned PCM")
+    }
+    let n = result.unwrap(opus.encode(mut encoder, list.slice(input, 0, 1920), mut packet))
+    let payload = list.slice(packet, 0, int.widen(n))
+    let Error(short_error) = opus.decode(mut decoder, payload, 960, false, mut short_pcm) else {
+        fail("short PCM buffer accepted")
+    }
+    if short_error.code != -2 {
+        fail("wrong error for short PCM buffer")
+    }
+    let frames = result.unwrap(opus.decode(mut decoder, payload, 960, false, mut pcm))
+    let concealed = result.unwrap(opus.decode(mut decoder, list.slice(packet, 0, 0), 960, false, mut pcm))
+    if frames != 960 || concealed != 960 {
+        fail("wrong number of mono samples")
+    }
+}
+
+@test
+fn rfc_vectors(f: Foreign[opus.Opus], d: Dir, out: Stdout) -> Result[(), ()] waits {
+    check_buffer_bounds(f)
+    for suite in 0u64 .. 2 {
+        let channels: u32 = if suite % 2 == 1 {
+            1
+        } else {
+            2
+        }
+        for vector in 1u64 .. 13 {
+            let mut stem: String = string.with_capacity(12)
+            string.push_u64(mut stem, suite)
+            string.push(mut stem, "-")
+            string.push_u64(mut stem, vector)
+            result.unwrap(stdout.write(out, stem))
+            result.unwrap(stdout.write(out, "\n"))
+            check_decode(f, load(d, stem, ".bit"), load(d, stem, ".demo"), channels)
+            check_round_trip(f, load(d, stem, ".input"), load(d, stem, ".encoded"), load(d, stem, ".roundtrip"), channels)
+        }
+    }
+    Ok(())
+}

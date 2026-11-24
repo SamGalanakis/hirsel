@@ -1,0 +1,133 @@
+pub opaque type Opus {}
+
+pub opaque type EncoderHandle {}
+
+pub opaque type DecoderHandle {}
+
+pub type Application = Voip | Audio | RestrictedLowDelay
+
+/// A negative libopus status code from opus_defines.h.
+pub type OpusError {
+    code: i32
+}
+
+pub opaque resource type Encoder: send {
+    f: Foreign[Opus],
+    p: foreign.Ptr[EncoderHandle],
+    channels: u32
+} drop(e) {
+    native.encoder_destroy(e.f, e.p)
+}
+
+pub opaque resource type Decoder: send {
+    f: Foreign[Opus],
+    p: foreign.Ptr[DecoderHandle],
+    channels: u32
+} drop(d) {
+    native.decoder_destroy(d.f, d.p)
+}
+
+fn valid_config(rate: i32, channels: u32) -> bool {
+    (channels == 1 || channels == 2) && (rate == 8000 || rate == 12000 || rate == 16000 || rate == 24000 || rate == 48000)
+}
+
+pub fn encoder(f: Foreign[Opus], rate: i32, channels: u32, application: Application) -> Result[Encoder, OpusError] {
+    if !valid_config(rate, channels) {
+        return Error(OpusError(code: -1))
+    }
+    let mode = match application {
+        Voip => 2048i32,
+        Audio => 2049i32,
+        RestrictedLowDelay => 2051i32,
+    }
+    match native.encoder_create(f, rate, int.narrow(channels), mode) {
+        None => Error(OpusError(code: -7)),
+        Some(p) => match Encoder(f: f, p: p, channels: channels) {
+            Ok(take e) => Ok(take e),
+            Error((_, (grant, handle, _))) => {
+                native.encoder_destroy(grant, handle)
+                Error(OpusError(code: -7))
+            },
+        },
+    }
+}
+
+pub fn decoder(f: Foreign[Opus], rate: i32, channels: u32) -> Result[Decoder, OpusError] {
+    if !valid_config(rate, channels) {
+        return Error(OpusError(code: -1))
+    }
+    match native.decoder_create(f, rate, int.narrow(channels)) {
+        None => Error(OpusError(code: -7)),
+        Some(p) => match Decoder(f: f, p: p, channels: channels) {
+            Ok(take d) => Ok(take d),
+            Error((_, (grant, handle, _))) => {
+                native.decoder_destroy(grant, handle)
+                Error(OpusError(code: -7))
+            },
+        },
+    }
+}
+
+fn count(rc: i32) -> Result[u32, OpusError] {
+    if rc < 0 {
+        Error(OpusError(code: rc))
+    } else {
+        Ok(int.narrow(rc))
+    }
+}
+
+fn status(rc: i32) -> Result[(), OpusError] {
+    if rc < 0 {
+        Error(OpusError(code: rc))
+    } else {
+        Ok(())
+    }
+}
+
+/// Encodes one frame of interleaved signed 16-bit little-endian PCM.
+/// PCM views must begin at an even byte offset. Returns the byte count written
+/// to the initialized packet buffer. Its length stays the same.
+pub fn encode(mut e: Encoder, pcm: Bytes, mut packet: Bytes) -> Result[u32, OpusError] {
+    count(native.encode(e.f, e.p, e.channels, pcm, mut packet))
+}
+
+/// Decodes into an initialized interleaved signed 16-bit little-endian PCM buffer.
+/// Frames and the return value count samples per channel. For an empty packet
+/// (loss concealment) or FEC, frames must be the missing packet's duration.
+pub fn decode(mut d: Decoder, packet: Bytes, frames: u32, fec: bool, mut pcm: Bytes) -> Result[u32, OpusError] {
+    count(native.decode(d.f, d.p, d.channels, packet, frames, if fec {
+        1
+    } else {
+        0
+    }, mut pcm))
+}
+
+pub fn set_bitrate(mut e: Encoder, bits_per_second: i32) -> Result[(), OpusError] {
+    status(native.set_bitrate(e.f, e.p, bits_per_second))
+}
+
+pub fn set_fec(mut e: Encoder, enabled: bool) -> Result[(), OpusError] {
+    status(native.set_fec(e.f, e.p, if enabled {
+        1
+    } else {
+        0
+    }))
+}
+
+/// Supplies the expected loss rate (0–100). In-band FEC needs a nonzero rate.
+pub fn set_packet_loss_percent(mut e: Encoder, percent: i32) -> Result[(), OpusError] {
+    status(native.set_packet_loss_percent(e.f, e.p, percent))
+}
+
+pub fn set_dtx(mut e: Encoder, enabled: bool) -> Result[(), OpusError] {
+    status(native.set_dtx(e.f, e.p, if enabled {
+        1
+    } else {
+        0
+    }))
+}
+
+/// Selects encoder complexity (0–10).
+pub fn set_complexity(mut e: Encoder, complexity: i32) -> Result[(), OpusError] {
+    status(native.set_complexity(e.f, e.p, complexity))
+}

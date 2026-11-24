@@ -18,3 +18,5 @@ pub fn task(result: u64, limit: u64) -> Option[u64]
 pub fn block(fields: u64, grant: u64) -> Option[u64]
 
 pub fn port(item: u64, capacity: u64) -> Option[u64]
+
+pub fn latest() -> Option[u64]

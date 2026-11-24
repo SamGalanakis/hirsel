@@ -314,6 +314,7 @@ pub fn channel(item: u64, capacity: u64) -> Option[u64]                // 64 + c
 pub fn task(result: u64, limit: u64) -> Option[u64]                    // 256 + result + 32 + limit
 pub fn block(fields: u64, grant: u64) -> Option[u64]                   // a resource value's block: fields + 32 + grant
 pub fn port(item: u64, capacity: u64) -> Option[u64]                   // a flow port
+pub fn latest() -> Option[u64]                                       // a Latest root
 ```
 
 A price is then the recipe applied to the type: `charge.channel(bytes[Ack], 3 * g + 3)`,

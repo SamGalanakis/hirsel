@@ -1,7 +1,7 @@
 use super::*;
 use hirsel_core_layout::charge::{
-    CAUSE_CELL, CHANNEL_BASE, COUNTED_EXTRA, FLOW_PORT_BASE, FLOW_SLOT_EXTRA, MAP_ENTRY_EXTRA,
-    ROUND_MASK, SHARED_NODE, TASK_RECORD,
+    CAUSE_CELL, CHANNEL_BASE, COUNTED_EXTRA, FLOW_PORT_BASE, FLOW_SLOT_EXTRA, LATEST_ROOT,
+    MAP_ENTRY_EXTRA, ROUND_MASK, SHARED_NODE, TASK_RECORD,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,6 +15,7 @@ pub(super) enum Price {
     Task,
     Block,
     Port,
+    Latest,
 }
 
 impl Cx<'_, '_, '_> {
@@ -48,9 +49,9 @@ impl Cx<'_, '_, '_> {
             });
             result
         };
-        let first = args[0]?;
+        let first = || args.first().copied().flatten();
         let (value, round) = match price {
-            Price::Round => (first, true),
+            Price::Round => (first()?, true),
             Price::Counted | Price::Shared => {
                 let header = if price == Price::Counted {
                     COUNTED_EXTRA
@@ -58,21 +59,21 @@ impl Cx<'_, '_, '_> {
                     SHARED_NODE
                 };
                 let header = self.konst(word, header, n)?;
-                (checked(self, ArithOp::Add, first, header), true)
+                (checked(self, ArithOp::Add, first()?, header), true)
             }
-            Price::Seq => (checked(self, ArithOp::Mul, first, args[1]?), true),
+            Price::Seq => (checked(self, ArithOp::Mul, first()?, args[1]?), true),
             Price::Map => {
                 let extra = self.konst(word, MAP_ENTRY_EXTRA, n)?;
-                let pair = checked(self, ArithOp::Add, first, args[1]?);
+                let pair = checked(self, ArithOp::Add, first()?, args[1]?);
                 let entry = checked(self, ArithOp::Add, pair, extra);
                 (checked(self, ArithOp::Mul, entry, args[2]?), true)
             }
             Price::Channel | Price::Port => {
                 let (item, base) = if price == Price::Port {
                     let extra = self.konst(word, FLOW_SLOT_EXTRA, n)?;
-                    (checked(self, ArithOp::Add, first, extra), FLOW_PORT_BASE)
+                    (checked(self, ArithOp::Add, first()?, extra), FLOW_PORT_BASE)
                 } else {
-                    (first, CHANNEL_BASE)
+                    (first()?, CHANNEL_BASE)
                 };
                 let base = self.konst(word, base, n)?;
                 let slots = checked(self, ArithOp::Mul, item, args[1]?);
@@ -85,9 +86,10 @@ impl Cx<'_, '_, '_> {
                     CAUSE_CELL
                 };
                 let header = self.konst(word, header, n)?;
-                let fixed = checked(self, ArithOp::Add, first, header);
+                let fixed = checked(self, ArithOp::Add, first()?, header);
                 (checked(self, ArithOp::Add, fixed, args[1]?), false)
             }
+            Price::Latest => (self.konst(word, LATEST_ROOT, n)?, false),
         };
         let value = if round {
             let extra = self.konst(word, ROUND_MASK, n)?;
@@ -97,7 +99,10 @@ impl Cx<'_, '_, '_> {
         } else {
             value
         };
-        let ok = self.emit_unary(UnaryOp::Not, BOOL, overflow, n)?;
+        let ok = match overflow {
+            Some(flag) => self.emit_unary(UnaryOp::Not, BOOL, Some(flag), n)?,
+            None => self.konst(bool_, 1, n)?,
+        };
         self.numeric_option(result, scalar(Scalar::U64), value, ok, n)
     }
 

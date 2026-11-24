@@ -1,0 +1,25 @@
+// FAIL-16 and MEM-24 charge one 32-byte cause cell for the caught failure.
+// expect: run latest_charge_matches_admission() = true used 32
+fn latest_charge_matches_admission() -> bool {
+    let node = arc.new(1u64)
+    let need = option.unwrap(charge.latest())
+    let Ok(Error(causes)) = isolate(fn() -> Result[bool, Capacity] {
+        let input = arc.share(node)
+        bound bytes need - 1 {
+            let _ = latest.new(take input)
+            true
+        }
+    }) else {
+        fail("expected Latest admission refusal")
+    }
+    let mut refused = false
+    for cause in causes {
+        if let Capacity(c) = cause.kind {
+            refused = c.requested == need && c.available == need - 1
+        }
+    }
+    refused && result.unwrap(bound bytes need {
+        let _ = latest.new(arc.share(node))
+        true
+    })
+}

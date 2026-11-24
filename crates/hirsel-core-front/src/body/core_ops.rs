@@ -1,8 +1,6 @@
 //! Binding of canonical core declarations to their call-site kernels.
 //! Identity is resolved once when the program's declarations are published.
 //! The operation table lists core functions declared without a body.
-mod net_error;
-
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
@@ -11,6 +9,7 @@ mod charge;
 mod conn;
 mod flow;
 mod log;
+mod net_error;
 mod provide;
 mod secret_key;
 
@@ -111,6 +110,7 @@ operations! {
     ("charge", "task", Lane::Charge(charge::Price::Task), "A", "bytes-charge-2132", false),
     ("charge", "block", Lane::Charge(charge::Price::Block), "A", "bytes-charge-2132", false),
     ("charge", "port", Lane::Charge(charge::Price::Port), "A", "bytes-charge-2132", false),
+    ("charge", "latest", Lane::Charge(charge::Price::Latest), "A", "writer-plan-2134", false),
     ("bytebuf", "append_inline", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "freeze", Lane::Value, "A", "http-b1-1204", false),
     ("bytebuf", "as_bytes", Lane::Value, "A", "http-b1-1204", false),

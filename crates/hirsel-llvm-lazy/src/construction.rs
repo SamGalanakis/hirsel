@@ -204,7 +204,6 @@ mod tests {
     // LLVM copies a 1 GiB metadata string past a 256 MiB limit. The source is
     // a read-only anonymous mapping, which the data limit does not count, so
     // only LLVM's own copy can reach the limit.
-    #[cfg(target_os = "linux")]
     #[test]
     fn llvm_out_of_memory_child() {
         if std::env::var_os(CHILD).is_none() {
@@ -230,9 +229,8 @@ mod tests {
         unreachable!("LLVM copied 1 GiB under a 256 MiB limit");
     }
 
-    // On macOS the guard cannot refuse an allocation LLVM makes; it ends the
-    // process at the compiler's next checked allocation instead.
-    #[cfg(target_os = "linux")]
+    // macOS cannot refuse the allocation LLVM makes; the guard's footprint
+    // watcher ends the process once LLVM's copy passes the limit.
     #[test]
     fn an_llvm_allocation_past_the_limit_ends_the_process_with_the_guard_message() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -252,10 +250,15 @@ mod tests {
             Some(hirsel_guard::EXIT_STATUS),
             "{stderr}"
         );
+        let reason = if cfg!(target_os = "macos") {
+            "the process footprint grew to"
+        } else {
+            "LLVM failed to allocate"
+        };
         assert!(
-            stderr.contains(
-                "hirsel: memory limit 256M reached (HIRSEL_MEMORY_LIMIT); LLVM failed to allocate"
-            ),
+            stderr.contains(&format!(
+                "hirsel: memory limit 256M reached (HIRSEL_MEMORY_LIMIT); {reason}"
+            )),
             "{stderr}"
         );
     }

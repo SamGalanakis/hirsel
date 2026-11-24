@@ -88,6 +88,24 @@ fn rig(scripts: &[&str]) -> Rig {
     Rig { dir, launcher }
 }
 
+/// `Launcher::new` once the locks a dropped owner held are free. A child
+/// another test forks shares their descriptors until it execs, so a lock can
+/// outlive its owner by that long.
+fn relaunch<I: Images>(state: &Path, open: impl Fn() -> std::io::Result<I>) -> Launcher<I> {
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        match Launcher::new(state, None, &open) {
+            Ok(launcher) => return launcher,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < end =>
+            {
+                std::thread::sleep(Duration::from_millis(20))
+            }
+            Err(error) => panic!("{error}"),
+        }
+    }
+}
+
 /// A serving stand-in that runs until SIGTERM and then exits 0 with no report.
 const SLEEP: &str = "trap 'exit 0' TERM\nwhile :; do sleep 0.02; done";
 
@@ -346,13 +364,12 @@ int main(int argc, char **argv) {
     let replacement = work.join("replacement");
     fs::write(&replacement, b"#!/bin/sh\ntouch incorrectly-executed\n").unwrap();
     fs::set_permissions(&replacement, fs::Permissions::from_mode(0o500)).unwrap();
-    let launcher = Launcher::new(&state, None, || {
+    let launcher = relaunch(&state, || {
         Ok(SwapImage {
             stores: Stores::open(&state, super::limits().recipe_bytes)?,
-            replacement,
+            replacement: replacement.clone(),
         })
-    })
-    .unwrap();
+    });
     let mut rig = Rig { dir, launcher };
     let address = rig.bind();
     let start = |generation| {
@@ -593,20 +610,7 @@ fn launcher_restart_stateless() {
     assert!(Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))).is_err());
     drop(host);
     drop(launcher);
-    // A child another test forks shares the lock's descriptor until it execs,
-    // so the lock can outlive its launcher by that long.
-    let end = Instant::now() + Duration::from_secs(5);
-    let mut successor = loop {
-        match Launcher::new(&state, None, || Ok(images(&work, &[SINGLE]))) {
-            Ok(successor) => break successor,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < end =>
-            {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            Err(error) => panic!("{error}"),
-        }
-    };
+    let mut successor = relaunch(&state, || Ok(images(&work, &[SINGLE])));
     successor.handle(Request::Hello);
     successor.handle(Request::Bind(
         group(),

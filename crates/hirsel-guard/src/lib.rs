@@ -313,6 +313,37 @@ mod footprint {
         }
     }
 
+    /// Watch the footprint from a thread of its own, so memory no Rust
+    /// allocation accounts for (LLVM's, a foreign library's) still ends the
+    /// process near the limit: macOS lets nothing refuse a C allocation.
+    /// It sleeps as long as the headroom would last growing at 8 GiB/s,
+    /// between 1 and 50 ms.
+    pub(crate) fn watch() {
+        extern "C" fn run(_: *mut libc::c_void) -> *mut libc::c_void {
+            loop {
+                let limit = LIMIT.load(Ordering::Relaxed);
+                let Some(bytes) = footprint() else {
+                    return std::ptr::null_mut();
+                };
+                if bytes > limit {
+                    crate::footprint_exceeded(bytes);
+                }
+                // (limit - bytes) / 8 GiB/s, in microseconds.
+                let micros = ((limit - bytes) / 8_590).clamp(1_000, 50_000);
+                // SAFETY: usleep only suspends this thread.
+                unsafe { libc::usleep(micros as libc::useconds_t) };
+            }
+        }
+        let mut thread: libc::pthread_t = 0;
+        // SAFETY: the thread runs `run`, which takes no argument and
+        // allocates nothing; detached, it ends with the process.
+        unsafe {
+            if libc::pthread_create(&mut thread, std::ptr::null(), run, std::ptr::null_mut()) == 0 {
+                libc::pthread_detach(thread);
+            }
+        }
+    }
+
     /// `task_info(TASK_VM_INFO)`'s phys_footprint: every page the process
     /// owns, as Activity Monitor's memory column counts it.
     fn footprint() -> Option<u64> {
@@ -375,7 +406,12 @@ fn set_limit() {
     };
     unsafe { libc::setrlimit(libc::RLIMIT_DATA, &limited) };
     #[cfg(target_os = "macos")]
-    footprint::LIMIT.store(limited.rlim_cur, Ordering::Relaxed);
+    {
+        footprint::LIMIT.store(limited.rlim_cur, Ordering::Relaxed);
+        if limited.rlim_cur != libc::RLIM_INFINITY {
+            footprint::watch();
+        }
+    }
     STATE.store(SET, Ordering::Release);
 }
 
@@ -646,6 +682,18 @@ fn exhausted(size: usize) -> ! {
     })
 }
 
+/// The footprint watcher saw the process pass its limit (macOS), whoever
+/// allocated the memory.
+#[cfg(target_os = "macos")]
+#[cold]
+fn footprint_exceeded(bytes: u64) -> ! {
+    limit_reached(|line| {
+        line.text(b"the process footprint grew to ")
+            .number(bytes >> 20)
+            .text(b"M");
+    })
+}
+
 /// An allocation a foreign library (`library`, such as LLVM) made failed:
 /// the process ends as it ends when the limit refuses a Rust allocation.
 #[cold]
@@ -852,6 +900,45 @@ mod tests {
         );
         assert!(
             stderr.contains(" more bytes failed with a resident peak of "),
+            "{stderr}"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("allocated"));
+    }
+
+    /// Grows through C's malloc only, as LLVM does, touching every page.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreign_allocation_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        for _ in 0..128 {
+            // SAFETY: a fresh block of 4 MiB, written once and never freed.
+            unsafe {
+                let block = libc::malloc(4 << 20);
+                assert!(!block.is_null());
+                libc::memset(block, 1, 4 << 20);
+            }
+        }
+        // SAFETY: write(2) of a static message.
+        unsafe { libc::write(1, b"allocated\n".as_ptr().cast(), 10) };
+    }
+
+    /// macOS cannot refuse a C allocation, so the footprint watcher ends the
+    /// process once memory no Rust allocation counted passes the limit.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn foreign_memory_past_the_limit_ends_the_process_through_the_watcher() {
+        let output = child(
+            "tests::foreign_allocation_child",
+            &[("HIRSEL_MEMORY_LIMIT", "128M")],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(EXIT_STATUS), "{stderr}");
+        assert!(
+            stderr.contains(
+                "hirsel: memory limit 128M reached (HIRSEL_MEMORY_LIMIT); the process footprint grew to "
+            ),
             "{stderr}"
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("allocated"));

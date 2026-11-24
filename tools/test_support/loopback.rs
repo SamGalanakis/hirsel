@@ -38,8 +38,37 @@ pub fn accept_local(listener: &TcpListener) -> io::Result<TcpStream> {
 
 /// macOS has no /proc: each process's own descriptor table names its TCP
 /// sockets' endpoints (`proc_pidfdinfo`), and `proc_listchildpids` its children.
+/// Loopback connects complete asynchronously there, so a connection not yet
+/// visible in its owner's table is looked for again for up to 100 ms.
 #[cfg(target_os = "macos")]
 pub fn owns_client(pid: u32, client: SocketAddr, server: SocketAddr) -> io::Result<bool> {
+    for _ in 0..20 {
+        if scan_owner(pid, client, server) {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Ok(false)
+}
+
+/// The rows of one `proc_pidinfo` listing, grown until the kernel's fit.
+#[cfg(target_os = "macos")]
+fn listing<T: Copy>(empty: T, fill: impl Fn(*mut T, i32) -> i32) -> Vec<T> {
+    let mut rows = vec![empty; 256];
+    loop {
+        let bytes = (rows.len() * size_of::<T>()) as i32;
+        let filled = usize::try_from(fill(rows.as_mut_ptr(), bytes)).unwrap_or(0);
+        let count = filled / size_of::<T>();
+        if count < rows.len() {
+            rows.truncate(count);
+            return rows;
+        }
+        rows = vec![empty; rows.len() * 4];
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn scan_owner(pid: u32, client: SocketAddr, server: SocketAddr) -> bool {
     // struct socket_fdinfo: its size and the offsets of psi.soi_kind and the
     // TCP in_sockinfo's foreign and local ports, address family flag and
     // foreign and local addresses.
@@ -64,25 +93,15 @@ pub fn owns_client(pid: u32, client: SocketAddr, server: SocketAddr) -> io::Resu
     };
     let mut pending = vec![pid as i32];
     while let Some(pid) = pending.pop() {
-        let mut fds = vec![
-            libc::proc_fdinfo {
-                proc_fd: 0,
-                proc_fdtype: 0
-            };
-            4096
-        ];
-        // SAFETY: the buffer holds `fds.len()` entries for the kernel to fill.
-        let filled = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                libc::PROC_PIDLISTFDS,
-                0,
-                fds.as_mut_ptr().cast(),
-                (fds.len() * size_of::<libc::proc_fdinfo>()) as i32,
-            )
+        let empty = libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
         };
-        let count = usize::try_from(filled).unwrap_or(0) / size_of::<libc::proc_fdinfo>();
-        for fd in &fds[..count] {
+        // SAFETY: each call fills at most `bytes` of the buffer it is given.
+        let fds = listing(empty, |rows, bytes| unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, rows.cast(), bytes)
+        });
+        for fd in &fds {
             if fd.proc_fdtype != PROX_FDTYPE_SOCKET {
                 continue;
             }
@@ -97,21 +116,16 @@ pub fn owns_client(pid: u32, client: SocketAddr, server: SocketAddr) -> io::Resu
             let local = SocketAddr::new(address(&info, LADDR), port(&info, LPORT));
             let foreign = SocketAddr::new(address(&info, FADDR), port(&info, FPORT));
             if local == client && foreign == server {
-                return Ok(true);
+                return true;
             }
         }
-        let mut children = vec![0i32; 1024];
-        // SAFETY: the buffer holds `children.len()` PIDs for the kernel to fill.
-        let filled = unsafe {
-            libc::proc_listchildpids(
-                pid,
-                children.as_mut_ptr().cast(),
-                (children.len() * size_of::<i32>()) as i32,
-            )
-        };
-        pending.extend(&children[..usize::try_from(filled).unwrap_or(0).min(children.len())]);
+        // SAFETY: each call fills at most `bytes` of the buffer it is given.
+        // proc_listchildpids answers a count of PIDs, not bytes.
+        pending.extend(listing(0i32, |rows, bytes| unsafe {
+            libc::proc_listchildpids(pid, rows.cast(), bytes) * size_of::<i32>() as i32
+        }));
     }
-    Ok(false)
+    false
 }
 
 #[cfg(not(target_os = "macos"))]

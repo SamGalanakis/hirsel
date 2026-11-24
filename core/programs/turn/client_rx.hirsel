@@ -264,6 +264,10 @@ fn response(mut c: Client, now: Now, h: stun_ice.Header, packet: Bytes) -> Resul
         if !tx.authed && h.class == Failure {
             return failed(mut c, i, code, now.mono_ns)
         }
+        if tx.authed && code != 400 {
+            c.discards.tampered += 1
+            return Ok(Discarded)
+        }
         return discard_unauthenticated(mut c)
     }
     let have = list.len(c.scratch)

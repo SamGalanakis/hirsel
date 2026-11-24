@@ -928,3 +928,37 @@ fn test_l63_pinned_row_edit_discards_a_missed_candidate() -> Result[(), Error] {
     }
     Ok(())
 }
+
+@test
+fn test_l79_pinned_trim_records_boundary_charge() -> Result[(), Error] {
+    let left_leaf = l63_edit_leaf(1, 2, (6u64, 6u64), 40)?
+    let left = std.page.PagePtr(pack: 8, offset: 72, len: 59, checksum: 11, stamp: 40)
+    let right = std.page.PagePtr(pack: 8, offset: 147, len: 59, checksum: 12, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 2, charge: 172))))
+    list.push(mut branches, std.page.Entry(key: key_word(3), cell: Child(std.page.Branch(child: right, rows: 2, charge: 172))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let root = page_result(std.page.attach_cold(take image))?
+    let target: std.page.Slot = HotPage(arc.share(root))
+    let empty_root = std.page.empty(0, 0, Collection)
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let supplied = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(left)), payload: TieredImage(arc.share(left_leaf))))
+    map.insert(mut visible, (8u64, 72u64), take supplied)
+    let mut ids = 51u64
+    let limits = LogBounds(first: 1, next: 5)
+    let mut attempt = capacity(tiered_touch_set(235, 2))?
+    let (take ready, dropped) = stage_tiered_trim(mut attempt, visible, target, empty_root, limits, 344, 2, mut ids)?
+    let Some(ColdPage(retained)) = std.page.child_slot(ready, 1) else {
+        fail("L79: trim loaded a retained subtree beyond the boundary")
+    }
+    if dropped != 86 || retained != right || attempt.touched_bytes != 235 || std.page.totals(ready) != (3u64, 258u64) {
+        fail("L79: trim must charge the removed row from its two pinned pages")
+    }
+    let mut all_rows = capacity(tiered_touch_set(0, 0))?
+    let stamp_before = ids
+    let (take empty, all_dropped) = stage_tiered_trim(mut all_rows, visible, target, empty_root, limits, 344, 8, mut ids)?
+    if all_dropped != 344 || all_rows.touched_bytes != 0 || ids != stamp_before || std.page.totals(empty) != (0u64, 0u64) {
+        fail("L79: trim past next_seq uses the descriptor's charge without paging")
+    }
+    Ok(())
+}

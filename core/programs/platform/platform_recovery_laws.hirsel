@@ -55,6 +55,28 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
     Ok(())
 }
 
+pub fn inspect_hand_install(root: Dir, argv: Args, input: Stdin) -> Result[(), Exit] waits {
+    let expected = result.unwrap(std.io.read_all(input))
+    let path = option.unwrap(args.get(argv, 0u64))
+    let dir = result.unwrap(host.open_dir(root, path))
+    let opts = result.unwrap(store.sized(Directory, 134217728u64))
+    let source = result.unwrap(store.open_read_only(dir, opts))
+    let at = store.read_only_snapshot(source)
+    expect(store.version(at) == 12, "T1: the native install did not take version 12")
+    let mut schema = store.declare_read_only(source)
+    let codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
+    let releases = result.unwrap(store.declare_release_table(mut schema, codec))
+    let installed_row = option.unwrap(result.unwrap(store.read_only_get(source, releases, 12u64)))
+    expect(installed_row.n_place == 524288 && installed_row.binding == expected, "T1: the native install recorded another release")
+    expect(list.len(installed_row.prepared) == 0, "T1: the native install recorded a prepared witness")
+    let handle = result.unwrap(store.declare_activation_table(mut schema))
+    let raw = option.unwrap(result.unwrap(store.read_only_get(source, handle, 0u8)))
+    let installed = option.unwrap(runner.decode_description(raw))
+    let binding = result.unwrap(runner.identity_digest(installed))
+    expect(installed.n_place == 524288 && binding == expected, "T1: the native install described another release")
+    Ok(())
+}
+
 fn failed_outcome(outcome: DeployOutcome) -> bool {
     match outcome { Failed(why) => why == "not installed after recovery", _ => false }
 }
@@ -205,6 +227,19 @@ fn release_recovery_traces(c: Clock, rnd: Random) waits {
     let without_report = trace_replayed(c, rnd, false)
     expect(failing_cause(without_report, "g") == Some(joined(prefix, "exit status 1")), "T2: an unreported end did not supply its exit status")
     let _ = take without_report
+
+    // The bare, wrong-allowance and misordered native installs all report this identity.
+    let mut unmatched = restart_bare(trace_marked(c, rnd), 4u64)
+    trace_current(mut unmatched, 12u64, trace_read(4u8, 524288u64))
+    expect(rooted_at(unmatched, image(), 3u64), "T1: an unmatched install moved OLD's selection")
+    let marked = option.unwrap(must(group_row(unmatched.h, "g"), "T1: read unmatched group"))
+    if let Some(Unmatched(_, 12u64, id, Some(524288u64))) = marked.recovery {
+        expect(id == bytes_of(32, 4), "T1: Unmatched used another identity")
+    } else { fail("T1: the host did not mark the install Unmatched at 12") }
+    expect(failed_with(unmatched, "not installed after recovery"), "T1: an unmatched install changed the deploy outcome")
+    expect(failing_cause(unmatched, "g") == Some("No recovery candidate matches the store at activation 12: its release identity is 0404040404040404040404040404040404040404040404040404040404040404 at n_place 524288; candidates: 0707070707070707070707070707070707070707070707070707070707070707 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576, 0909090909090909090909090909090909090909090909090909090909090909 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576; last start: NotCurrent: the store is at activation 12; this start requested 3"), "T1: wrong cause after an unmatched install")
+    expect(collection_keeps(mut unmatched, true, true), "T1: collection dropped a candidate after an unmatched install")
+    let _ = take unmatched
 
     let mut probe = trace_probe(c, rnd, false, false)
     trace_current(mut probe, 3u64, list.new())

@@ -14,6 +14,58 @@ from store_tests import inputs
 from store_crash_tests import checked
 
 
+def t1_release_identity(raw, expected_allowance):
+    # Project the native Describe preview onto ReleaseIdentity. T1 registers
+    # three transactions, with no query slots, value schemas or HTTP bindings.
+    offset = 0
+
+    def u32():
+        nonlocal offset
+        value, = struct.unpack_from('<I', raw, offset)
+        offset += 4
+        return value
+
+    def skip_blob():
+        nonlocal offset
+        size = u32()
+        offset += size
+        return size
+
+    skip_blob()  # image digest
+    skip_blob()  # target
+    allowance = raw[offset:offset + 8]
+    assert struct.unpack('<Q', allowance) == (expected_allowance,)
+    offset += 8
+    start = offset
+    assert skip_blob() == 32
+    revision = raw[start:offset]
+    start = offset
+    count = u32()
+    assert count == 3
+    exports = bytearray(raw[start:offset])
+    slots = bytearray(raw[start:offset])
+    for _ in range(count):
+        start = offset
+        assert u32() == 1  # Transact
+        for _ in range(3):
+            skip_blob()  # identity, argument schema, result schema
+        offset += 16  # argument and result fingerprints
+        skip_blob()  # export revision
+        exports.extend(raw[start:offset])
+        start = offset
+        assert u32() == 0  # slot count
+        slots.extend(raw[start:offset])
+        assert skip_blob() == 0  # value schema
+    tables = u32()
+    for _ in range(tables):
+        skip_blob()  # collection name
+        offset += 9  # id, owner, kind
+    start = offset
+    assert u32() == 0 and offset == len(raw)  # HTTP bindings
+    return hashlib.sha256(b'\x12hirsel.identity.v1' + revision + allowance + exports
+                          + raw[start:offset] + slots).digest()
+
+
 def cutover_survives_host_loss(root, work, engine, compiler, state, launch_store, register, deploy,
                                running_host, outcome, ready, welcome_n_place):
     with running_host():
@@ -33,23 +85,14 @@ def cutover_survives_host_loss(root, work, engine, compiler, state, launch_store
     def blob(raw):
         return struct.pack('<I', len(raw)) + raw
 
-    def native(command, case):
-        result = run_case(case, engine, command, cwd=launch_store, capture_output=True)
+    def native(command, case, *, cwd=launch_store, data=None):
+        result = run_case(case, engine, command, cwd=cwd, input=data, capture_output=True)
         assert result.returncode == 0, result.stderr.decode()
         return result.stdout
 
     def identity(exe, n_place):
-        # Describe is two length-prefixed diagnostics, a u64 allowance, then
-        # the revision and export list, both already in value-codec form.
         raw = native([str(exe), f'--hirsel-n-place={n_place}', '--hirsel-describe'], 'T1:describe')
-        offset = 0
-        for _ in range(2):
-            size, = struct.unpack_from('<I', raw, offset)
-            offset += 4 + size
-        allowance, revision_bytes = struct.unpack_from('<QI', raw, offset)
-        assert allowance == n_place and revision_bytes == 32
-        return hashlib.sha256(b'\x12hirsel.identity.v1' + raw[offset + 8:offset + 44]
-                              + raw[offset:offset + 8] + raw[offset + 44:]).digest()
+        return t1_release_identity(raw, n_place)
 
     hosted_id = identity(executable, hosted)
     bare_id = identity(executable, bare)
@@ -65,6 +108,8 @@ def cutover_survives_host_loss(root, work, engine, compiler, state, launch_store
 
     platform_inputs = work / 'recovery-catalog.json'
     platform_inputs.write_text(json.dumps(inputs(root, tests=True, package='platform')))
+    native_install_variants(work, engine, compiler, platform_inputs, launch_store, executable, bare_id, hosted, bare, native)
+
     catalog = work / 'recovery-catalog'
     command = [compiler, 'build', '--inputs', str(platform_inputs), '--source-core',
                '--source-std', '--backend', engine, '--store', str(work / 'publish-cache'),
@@ -85,6 +130,25 @@ def cutover_survives_host_loss(root, work, engine, compiler, state, launch_store
                 adopted = ready()
                 assert adopted['digest'] == old['digest'], adopted
                 assert adopted['n_place'] == hosted and welcome_n_place() == hosted
+
+
+def native_install_variants(work, engine, compiler, platform_inputs, launch_store, executable, bare_id, hosted, bare, native):
+    check_install = work / 'check-hand-install'
+    command = [compiler, 'build', '--inputs', str(platform_inputs), '--source-core',
+               '--source-std', '--backend', engine, '--store', str(work / 'publish-cache'),
+               '--entry', 'platform@1/platform/inspect_hand_install',
+               '--limit', str(134217728), '--dir', str(work), '--grant', 'Stdin',
+               '-o', str(check_install)]
+    checked(command, engine=engine, case='T1:wrong-allowance-build')
+    for label, flags in (
+        ('bare', ['--hirsel-install']),
+        ('wrong-allowance', [f'--hirsel-n-place={bare}', '--hirsel-install']),
+        ('misordered', ['--hirsel-install', f'--hirsel-n-place={hosted}']),
+    ):
+        variant = work / f'T1-{label}'
+        shutil.copytree(launch_store / 'live', variant / 'live')
+        native([str(executable), *flags], f'T1:install-{label}-12', cwd=variant)
+        native([str(check_install), f'{variant.name}/live'], f'T1:read-{label}-12', data=bare_id)
 
 
 def unpinned(tape, copy):

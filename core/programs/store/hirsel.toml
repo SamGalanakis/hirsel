@@ -38,6 +38,7 @@ std = { major = 1 }
 "store-tiered-probe.hirsel" = "store"
 "store-tiered-promote.hirsel" = "store"
 "store-tiered-frees.hirsel" = "store"
+"store-tiered-residency.hirsel" = "store"
 "store-manifest.hirsel" = "store"
 "store-manifest-wire.hirsel" = "store"
 "store-page-recovery.hirsel" = "store"

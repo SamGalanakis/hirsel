@@ -1337,7 +1337,7 @@ pub fn seal_located(mut raw: Bytes, page: Arc[Page], locate: scoped[view] fn(u64
                 ColdBlob(located) => located,
                 HotBlob(_) => {
                     let loc = locate(edge.stamp)
-                    BlobRef(stamp: edge.stamp, len: edge.len, checksum: loc.checksum, pack: loc.pack, offset: loc.offset, body: edge.body)
+                    BlobRef(stamp: loc.stamp, len: edge.len, checksum: loc.checksum, pack: loc.pack, offset: loc.offset, body: edge.body)
                 },
             }
             reference.body = next_body

@@ -1,5 +1,6 @@
 type TieredEmitFrame: send {
     collection: u32,
+    stamp_in_image: u64,
     key: Bytes,
     frame: PackFrame
 }
@@ -33,7 +34,7 @@ fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.pag
                     capacity(map.try_reserve(mut pending.seen, 1))?
                     capacity(list.try_reserve(mut pending.blobs, 1))?
                     map.insert(mut pending.seen, reference.stamp, ())
-                    list.push(mut pending.blobs, TieredEmitFrame(collection: collection, key: take key, frame: take frame))
+                    list.push(mut pending.blobs, TieredEmitFrame(collection: collection, stamp_in_image: reference.stamp, key: take key, frame: take frame))
                 }
             }
         }
@@ -41,7 +42,7 @@ fn tiered_emit_tree(mut pending: TieredCutFrames, collection: u32, root: std.pag
     let key = tiered_page_index_key(collection, image)?
     let frame = PackFrame(stamp: stamp, size: std.page.sealed_size(image), body: PageBody(arc.share(page)))
     capacity(list.try_reserve(mut pending.pages, 1))?
-    list.push(mut pending.pages, TieredEmitFrame(collection: collection, key: take key, frame: take frame))
+    list.push(mut pending.pages, TieredEmitFrame(collection: collection, stamp_in_image: stamp, key: take key, frame: take frame))
     Ok(())
 }
 
@@ -152,7 +153,7 @@ fn encode_tiered_cut_pack(id: StoreId, layout: TieredPackRun, pack: PlannedPack,
         })? else {
             fail("store: Tiered pack layout omitted a frame")
         }
-        map.insert(mut emitted, place.stamp, place)
+        map.insert(mut emitted, item.stamp_in_image, place)
     }
     finish_tiered_pack(take draft)
 }

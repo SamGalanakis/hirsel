@@ -207,6 +207,8 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
 
 fn l79_fold_and_emit(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr, queued_blob: std.page.BlobRef, owner: StoreId) -> Result[(), Error] waits {
     l87_probe_queue_roots(source, parent, right, queued_blob)?
+    l88_memory_load_restamps(source, parent, queued_blob)?
+    l88_tiered_emission_restamps(owner)?
     l87_drain_skips_moved_row(source, parent, right, queued_blob)?
     l64_fold_with_writer_pin(source, base, parent, right)?
     l87_fold_fork_shape(source, parent)?
@@ -395,6 +397,99 @@ fn l87_drain_skips_moved_row(source: TieredPageSource, parent: std.page.PagePtr,
     if list.len(second) != 1 || second[0u64].frame != replaced_page(parent) ||
         std.omap.len(queue.rows) != 3 || queue.next_seq != 5 {
         fail("L87(a): a subsequent cut drains the prior rewrite and appends its two children")
+    }
+    Ok(())
+}
+
+fn l88_memory_load_restamps(source: TieredPageSource, root: std.page.PagePtr, body: std.page.BlobRef) -> Result[(), Error] waits {
+    let mut next_stamp = 100u64
+    let first = resident_page_from_tiered(source, ColdPage(root), mut next_stamp)?
+    let Some(HotPage(found)) = std.page.child_slot(first, 0) else {
+        fail("L88(g): the new Memory tree must have resident children")
+    }
+    if std.page.stamp(std.page.image_of(found)) != 100 || std.page.stamp(std.page.image_of(first)) != 102 ||
+        next_stamp != 103 || std.page.totals(first) != (5u64, 430u64) {
+        fail("L88(g): the old Cold tree must receive new stamps without changing its rows")
+    }
+    let mut queued: List[DeferredFree] = list.new()
+    residency_release(ColdPage(root), 2, mut queued)?
+    if list.len(queued) != 1 {
+        fail("L88(g): releasing the Cold tree must queue only its root")
+    }
+    let DeferredFree(branch_id: 2, target: TieredPage(released)) = queued[0u64] else {
+        fail("L88(g): enqueue the old root for its branch")
+    }
+    if released != root {
+        fail("L88(g): the old Cold location must remain a probe root")
+    }
+
+    let mut rows: List[std.page.Entry] = list.new()
+    list.push(mut rows, std.page.Entry(key: key_word(0), cell: BlobValue(body)))
+    let image = page_result(std.page.encode(rows, 0, 60, Collection))?
+    let mut bodies: List[std.page.BlobSlot] = list.new()
+    list.push(mut bodies, ColdBlob(body))
+    let dirty_root = page_result(std.page.attach(take image, list.new(), take bodies))?
+    let second = resident_page_from_tiered(source, HotPage(arc.share(dirty_root)), mut next_stamp)?
+    let Some(BlobEdge(moved)) = std.page.owning_edge(std.page.image_of(second), 0) else {
+        fail("L88(g): the resident leaf must retain its value body")
+    }
+    if moved.stamp != 103 || moved.pack != 0 || std.page.stamp(std.page.image_of(second)) != 104 || next_stamp != 105 {
+        fail("L88(g): a dirty Tiered leaf and its body must receive fresh stamps")
+    }
+    residency_release(HotPage(take dirty_root), 2, mut queued)?
+    let Some(DeferredFree(branch_id: 2, target: TieredBlob(released_body))) = list.get(queued, 1) else {
+        fail("L88(g): releasing a Hot leaf must queue the Cold BLOB it reached")
+    }
+    if released_body != body || list.len(queued) != 2 {
+        fail("L88(g): the old Cold BLOB must remain a probe root")
+    }
+    Ok(())
+}
+
+fn l88_tiered_emission_restamps(owner: StoreId) -> Result[(), Error] {
+    let mut body: Bytes = list.with_capacity(1025)
+    list.fill(mut body, 1025, 77u8)
+    let stored: Arc[Bytes] = arc.new(clone(body))
+    let mut stamps = 60u64
+    let mut memory_root = std.page.empty(0, 0, Collection)
+    page_result(std.page.insert_shared(mut memory_root, key_word(1), stored, 1024, 60, mut stamps))?
+    let old_page = std.page.stamp(std.page.image_of(memory_root))
+    let Some(BlobEdge(original)) = std.page.owning_edge(std.page.image_of(memory_root), 0) else {
+        fail("L88(g): the Memory leaf must own the large value")
+    }
+
+    let mut draw = 200u64
+    let restamped = restamp_tiered_emission(HotPage(arc.share(memory_root)), 9, mut draw)?
+    let root_stamp = restamped.pages[0u64].frame.stamp
+    let body_stamp = restamped.blobs[0u64].frame.stamp
+    if root_stamp != 201 || body_stamp != 200 || draw != 202 || std.page.stamp(std.page.image_of(memory_root)) != old_page {
+        fail("L88(g): T2 must draw fresh stamps without altering the old Memory holder")
+    }
+    let for_other_holder = restamp_tiered_emission(HotPage(arc.share(memory_root)), 9, mut draw)?
+    if for_other_holder.pages[0u64].frame.stamp != 203 || for_other_holder.blobs[0u64].frame.stamp != 202 {
+        fail("L88(g): independent residency changes must not share stamped frames")
+    }
+
+    let TieredCutFrames(blobs: take cut_blobs, pages: take cut_pages, ..) = take restamped
+    let blob_run = layout_tiered_packs(take cut_blobs, 4, 11, 4096)?
+    let page_run = layout_tiered_packs(take cut_pages, 3, blob_run.next_pack, 4096)?
+    let mut emitted: Map[u64, std.page.PagePtr] = map.new()
+    let (take body_wire, _) = encode_tiered_cut_pack(owner, blob_run, blob_run.packs[0u64], mut emitted)?
+    let (take page_wire, _) = encode_tiered_cut_pack(owner, page_run, page_run.packs[0u64], mut emitted)?
+    let location = option.unwrap(map.get(emitted, old_page))
+    let page = read_tiered_frame("p-12", owner, TieredPage(location), page_wire, 0, draw)?
+    let Some(ColdBlob(reference)) = std.page.blob_slot(fold_page(page), 0) else {
+        fail("L88(g): the Tiered leaf must carry its BLOB's fresh stamp")
+    }
+    if reference.stamp != body_stamp || reference.stamp == original.stamp || reference.pack != 11 {
+        fail("L88(g): the leaf names the old Memory stamp instead of its class-4 frame")
+    }
+    let fetched = read_tiered_frame("p-11", owner, TieredBlob(reference), body_wire, 0, draw)?
+    let TieredValue(bytes_out) = view fetched.payload else {
+        fail("L88(g): the fresh class-4 frame must decode as a BLOB")
+    }
+    if list.compare_bytes(bytes_out, body) != Equal {
+        fail("L88(g): changing residency must preserve the stored row")
     }
     Ok(())
 }

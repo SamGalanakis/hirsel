@@ -526,8 +526,8 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     }
     let (take raw, pack) = finish_tiered_pack(take complete)?
     let mut packed_frames: List[TieredEmitFrame] = list.with_capacity(2)
-    list.push(mut packed_frames, TieredEmitFrame(collection: 9, key: clone(first_key), frame: clone(first)))
-    list.push(mut packed_frames, TieredEmitFrame(collection: 9, key: clone(second_key), frame: clone(second)))
+    list.push(mut packed_frames, TieredEmitFrame(collection: 9, stamp_in_image: first.stamp, key: clone(first_key), frame: clone(first)))
+    list.push(mut packed_frames, TieredEmitFrame(collection: 9, stamp_in_image: second.stamp, key: clone(second_key), frame: clone(second)))
     let layout = layout_tiered_packs(take packed_frames, 4, 8, 238)?
     let expected_pack = planned_tiered_pack(layout, layout.packs[0u64])
     if list.len(layout.packs) != 1 || layout.packs[0u64].size != 238 || expected_pack.payload_bytes != 227 ||

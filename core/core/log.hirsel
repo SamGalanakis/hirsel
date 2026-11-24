@@ -1,6 +1,19 @@
-// Module `log` (MEM-29).
-pub fn new[E]() -> Log[E]
+// Module `log` (MEM-29): an append-only log, a library type over a task-local cell.
+// Outside this module a log can only be appended to through a view and finished by
+// whoever owns it, so no holder of a view can read, remove or replace an entry.
+pub opaque type Log[E: inert] {
+    entries: Cell[List[E]]
+}
 
-pub fn append[E](l: Log[E], take e: E)
+pub fn new[E: inert]() -> Log[E] {
+    Log(entries: cell.new(list.new()))
+}
 
-pub fn finish[E](take l: Log[E]) -> List[E]
+pub fn append[E: inert](l: Log[E], take e: E) {
+    cell.with(l.entries, take e, list.push)
+}
+
+pub fn finish[E: inert](take l: Log[E]) -> List[E] {
+    let Log(entries: take entries) = take l
+    cell.into_inner(take entries)
+}

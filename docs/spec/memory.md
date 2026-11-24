@@ -711,34 +711,40 @@ fn older(a: Unique, b: Unique) -> bool { a < b }            // refused: LANG-21,
 
 ### MEM-29: Append-only logs and task-local cells
 
-A `Log[E]` and a `Cell[T]` are own, task-local, opaque handles of 8 bytes, each to a
-separately admitted node: a log's node owns its entries and a cell's node owns one `T`.
-Neither is ever `send`, `shareable`, `key`, `ordered` or `codec`, and neither is cloned
-([MEM-17](#mem-17-clone)): each holds an opaque owner, and its element's holds. What the
-node owns is state that no view exposes ([OWN-8](ownership.md#own-8-views)): every
-operation takes a view of the handle and writes only the node and what it owns, never the
-handle's 8 bytes, so no byte a view of the handle exposes changes.
+A `Cell[T]` is an own, task-local, opaque handle of 8 bytes to a separately admitted node
+that owns one `T`. It is never `send`, `shareable`, `key`, `ordered` or `codec`, and it is
+never cloned ([MEM-17](#mem-17-clone)): it holds an opaque owner, and its element's holds.
+What the node owns is state that no view exposes ([OWN-8](ownership.md#own-8-views)):
+every operation takes a view of the handle and writes only the node and what it owns,
+never the handle's 8 bytes, so no byte a view of the handle exposes changes.
 
-**The element condition.** A `Log[E]` is accepted only where `E`, and a `Cell[T]` only
-where `T`, holds no resource, no capability, no view, no scoped value and no region
-reference at any depth, as its summary records
-([OWN-2](ownership.md#own-2-type-summaries)), the condition of an owning closure's
+A `Log[E: inert]` is a library type, not a primitive: core's `log` module declares it
+`pub opaque type Log[E: inert] { entries: Cell[List[E]] }`, with ordinary bodies over the
+cell ([PROG-2](programs.md#prog-2-visibility)). It is a cell to everything above, its
+summary included. Outside the module its only operations are `new`, `append` and a
+consuming `finish`, so no holder of a view can read, remove or replace an entry.
+
+**The element condition.** A `Cell[T]` is accepted only where `T` holds no resource, no
+capability, no view, no scoped value and no region reference at any depth, as its summary
+records ([OWN-2](ownership.md#own-2-type-summaries)), the condition of an owning closure's
 captures ([LANG-14](language.md#lang-14-captures)). A rigid type parameter is read from
 its bounds: one bounded by `inert` meets the condition, and an unbounded one, which may
 hold a capability, does not. The condition is checked where the type is formed and at
-every call of a `log` or `cell` operation, inferred and forwarded type arguments
-included, and for `cell.with`'s `A`, which appears in no result. Any other `Log`, `Cell`
-or argument type is refused here, at the type; core's `log` and `cell` modules declare
-their operations over open parameters, and the condition holds where they are called.
+every call of a `cell` operation, inferred and forwarded type arguments included, and for
+`cell.with`'s `A`, which appears in no result. Any other `Cell` or argument type is
+refused here, at the type; core's `cell` module declares its operations over open
+parameters, and the condition holds where they are called. A `Log[E]`'s element is held
+to its `inert` bound (OWN-4) instead, which also refuses an opaque owner such as `Causes`.
 
-**Logs.** A log's node is 24 bytes. No operation reads, counts, clears or iterates its
-entries.
+**Logs.** A log is charged as its cell: the 24-byte node of a `Cell[List[E]]`. No
+operation reads, counts, clears or iterates its entries.
 
 - `log.new() -> Log[E]` admits the node.
-- `log.append(l: Log[E], take e: E)` takes a view of the log.
-  It admits the growth of the entries' storage, as `list.push` grows a `List[E]`
-  ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; a refused growth
-  raises `Capacity`, has not taken `e` and leaves the log unchanged.
+- `log.append(l: Log[E], take e: E)` takes a view of the log and pushes `e` through
+  `cell.with`. It admits the growth of the entries' storage, as `list.push` grows a
+  `List[E]` ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; a
+  refused growth raises `Capacity` and leaves the log unchanged. Its callback is a core
+  function, so the call is one step ([MEM-30](budgets.md#mem-30-step-bounds)).
 - `log.finish(take l: Log[E]) -> List[E]` returns the entries in append order, moving their
   storage into the `List` without admitting, and frees and refunds the node. Dropping a
   log cleans its entries in append order, then frees and refunds the node.
@@ -758,7 +764,8 @@ bytes a `Log[E]` is, and a `Cell[()]` nothing.
   `a` into `f`, and returns `f`'s result. It copies and admits nothing itself; `f` admits
   as any code does, charged to the limit current where it runs
   ([MEM-26](budgets.md#mem-26-growth-charges-the-current-limit)), and entering `f` is a step
-  ([MEM-30](budgets.md#mem-30-step-bounds)).
+  when `f` is user code ([MEM-30](budgets.md#mem-30-step-bounds)); a core function takes
+  none.
 - `cell.into_inner(take c: Cell[T]) -> T` moves the payload out without admitting, its
   blocks keeping their payers, and frees and refunds the node. Dropping a cell drops its
   payload, then frees and refunds the node.
@@ -793,7 +800,7 @@ fn read(m: Map[u64, Row], seen: Log[u64], k: u64) -> Option[View[Row]] in m {
 }
 ```
 ```hirsel
-fn names(l: Log[View[String]]) {}                 // refused: MEM-29, at View[String]
+fn names(l: Log[View[String]]) {}                 // refused: LANG-12, View[String] is not inert
 ```
 ```hirsel
 fn seen(take l: Log[u64]) -> List[u64] {

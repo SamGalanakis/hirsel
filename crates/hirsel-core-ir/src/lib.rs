@@ -675,21 +675,12 @@
 //!
 //! # Logs (FORM #101, MEM-29)
 //!
-//! `Log[E]` adds no form. Its row is `own "Log[E]" { node: box L }` with `L` the
-//! `List[E]` row: the 8-byte handle is a box pointer, the node is the box's 24-byte
-//! payload, the `List` carrier, charged 24 (`log.new`), and the entries' storage is
-//! that carrier's, admitted and grown by the list kernels as `list.push` would, so a
-//! `Log` is cleaned by its existing box and sequence classes (entries in index order,
-//! which is append order, then the node). `log.append` takes `&view` of the handle,
-//! loads the node pointer, and writes only behind it: wf refuses a body that writes
-//! its `view` place, and a node reached through a loaded pointer is not that place
-//! (Loans: places behind the parameter carry no loan). `log.finish` moves the
-//! carrier out of the node and frees the box. `noalias readonly` on the view stays
-//! valid: LLVM's `readonly` is about memory reached through pointers based on the
-//! argument, and a pointer loaded from the handle is not based on it; no write
-//! reaches the handle's 8 bytes during the call, which is all `noalias` claims; and
-//! [`roles::Facts`] gives addresses through a loaded pointer no role, so no alias
-//! scope covers the node. `samples/log.core` is the oracle.
+//! `Log[E]` adds no form and no row: it is the `log` module's opaque library type
+//! over a `Cell[List[E]]`, so its node is the cell's box node (the 24-byte `List`
+//! carrier) and its entries are that carrier's storage, grown as `list.push` grows
+//! it. `log.append` is a `cell.with` whose callback is `list.push`, and
+//! `log.finish` is `cell.into_inner`. `samples/log.core` stays as an oracle for a
+//! write behind a loaded pointer under a `noalias readonly` view.
 //!
 //! # Storage and admission (FORM v1a)
 //!

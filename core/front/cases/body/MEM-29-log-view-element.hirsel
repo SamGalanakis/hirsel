@@ -1,4 +1,6 @@
-// MEM-29: a Log's element holds no view or scoped value.
-// expect: refuse MEM-29 at 4:17
-// expect: compared MEM-29 at 4:17 | View[core@1/core/String] | no resource, capability, view, scoped value or region reference
+// MEM-29: a Log's element holds no view or scoped value (OWN-19, and its `inert` bound).
+// expect: refuse OWN-19 at 6:17
+// expect: refuse LANG-12 at 6:17
+// expect: compared LANG-12 at 6:17 | View[core@1/core/String] | inert
+// expect: compared OWN-19 at 6:17 | View[core@1/core/String] | not scoped
 fn names(l: Log[View[String]]) {}

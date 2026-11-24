@@ -201,7 +201,6 @@ pub enum Role {
     Unique,
     Site,
     Causes,
-    Log,
     Cell,
     StaticFn,
     Socket,
@@ -258,7 +257,6 @@ impl Role {
             "Unique" => Role::Unique,
             "Site" => Role::Site,
             "Causes" => Role::Causes,
-            "Log" => Role::Log,
             "Cell" => Role::Cell,
             "StaticFn" => Role::StaticFn,
             "Flow" => Role::Flow,
@@ -280,7 +278,6 @@ impl Role {
             | Role::SpanBuilder
             | Role::Builder
             | Role::Causes
-            | Role::Log
             | Role::Cell => Kind::Own,
             Role::Rc | Role::Arc | Role::Shared => Kind::Counted,
             Role::View | Role::Region | Role::Dest | Role::Writer => Kind::Scoped,
@@ -497,7 +494,7 @@ pub(crate) enum Pending {
         rule: &'static str,
     },
     /// A type argument of a generic other than Option and Result is not scoped (OWN-19);
-    /// a `Log`'s element meets LANG-14's capture mask with these rigid bounds (MEM-29).
+    /// a `Cell`'s element meets LANG-14's capture mask with these rigid bounds (MEM-29).
     NotScoped {
         ty: TyId,
         site: Site,
@@ -1550,7 +1547,7 @@ impl Program<'_> {
         }
         if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
-                let element = (matches!(role, Some(Role::Log | Role::Cell))
+                let element = (role == Some(Role::Cell)
                     && !crate::element::exempt(self.index, self.modules[at.module as usize].id))
                 .then(|| generics.iter().map(|g| g.bounds).collect());
                 self.pending.push(Pending::NotScoped {
@@ -2346,7 +2343,7 @@ impl Program<'_> {
                 // A builder and `Causes` are owners with no copy contract (OWN-2); a
                 // builder also holds its region's stable blob.
                 Some(Role::SpanBuilder | Role::Builder) => H_REGION | H_OPAQUE,
-                Some(Role::Causes | Role::Log | Role::Cell) => H_OPAQUE,
+                Some(Role::Causes | Role::Cell) => H_OPAQUE,
                 Some(_) => 0,
                 None => match decl.repr {
                     Repr::Resource => H_RESOURCE,

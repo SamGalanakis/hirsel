@@ -69,14 +69,6 @@ pub(super) struct Own {
     pub flag: AddressId,
 }
 
-/// An owner whose storage sits in its body's frame.
-#[derive(Clone, Copy)]
-enum Frame {
-    List(frame_lists::FrameList),
-    /// A log node (frame_logs.rs), with its entry type.
-    Log(frame_logs::FrameLog),
-}
-
 impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The row of a value of `ty` that needs cleanup.
     pub(super) fn drop_id(&mut self, ty: TyId) -> Option<TypeId> {
@@ -360,14 +352,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Owner::Slot(s) => {
                 let v = self.var(s);
                 let Some(own) = v.own else { return };
-                frame = self
-                    .frame_list_at(own.address)
-                    .map(Frame::List)
-                    .or_else(|| {
-                        self.frame_log_owners
-                            .get(&s)
-                            .map(|&frame| Frame::Log(frame))
-                    });
+                frame = self.frame_list_at(own.address);
                 (
                     AddressBase::Address(own.address),
                     own.id,
@@ -375,17 +360,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(own.flag),
                 )
             }
-            Owner::Temp(t) => {
-                // A taken log remains an owner until log.finish consumes it.
-                frame = self.frame_logs.get(&t.value).copied().map(Frame::Log);
-                (
-                    self.temporary_storage(t)
-                        .map_or(AddressBase::Value(t.value), AddressBase::Address),
-                    t.id,
-                    t.avail,
-                    t.flag,
-                )
-            }
+            Owner::Temp(t) => (
+                self.temporary_storage(t)
+                    .map_or(AddressBase::Value(t.value), AddressBase::Address),
+                t.id,
+                t.avail,
+                t.flag,
+            ),
 
             Owner::Drain {
                 data,
@@ -404,11 +385,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match (avail, flag) {
             (Avail::Live, _) => self.drop_owner(base, id, frame, n),
             (Avail::Maybe, Some(flag)) => {
-                let on = if let Some(Frame::Log(frame)) = frame {
-                    self.frame_active(frame.storage, n)
-                } else {
-                    self.read_bits(flag, Ty::Scalar(Scalar::Bool), n)
-                };
+                let on = self.read_bits(flag, Ty::Scalar(Scalar::Bool), n);
                 let yes = self.new_block(&[]);
                 let next = self.new_block(&[]);
                 let (ye, ne) = (self.edge(yes, &[]), self.edge(next, &[]));
@@ -526,13 +503,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(head, &[], n);
         self.start(out);
     }
-    fn drop_owner(&mut self, base: AddressBase, id: TypeId, frame: Option<Frame>, n: NodeId) {
+    fn drop_owner(
+        &mut self,
+        base: AddressBase,
+        id: TypeId,
+        frame: Option<frame_lists::FrameList>,
+        n: NodeId,
+    ) {
         match (frame, base) {
-            (Some(Frame::List(f)), AddressBase::Address(address)) => {
+            (Some(f), AddressBase::Address(address)) => {
                 self.drop_frame_list(f, address, id, n);
-            }
-            (Some(Frame::Log(frame)), _) => {
-                let _ = self.drop_frame_log(frame, n);
             }
             _ => self.emit_drop(base, id, n),
         }

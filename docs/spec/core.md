@@ -122,7 +122,6 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Causes` | own | `send` | 8 | opaque owner |
-| `Log[E]` | own | none | 8 | opaque owner, and E's |
 | `Cell[T]` | own | none | 8 | opaque owner, and T's |
 | `StaticFn[F]` | plain | `shareable`, `send`, `key` | 8 | nothing |
 
@@ -142,8 +141,10 @@ a `Cause`, whose `kind` is a `CauseKind`. The core declarations
 that have bodies (`Option`, `Result`, `Capacity`, `OutOfTime`, the error types) have the summaries OWN-2
 computes, with `Option` and `Result` taking bounds as tuples do. `Task[R]` is never `send`
 ([CONC-2](tasks.md#conc-2-the-send-bound)); its parameter's `R: send` constrains the
-result, not the handle. `Log[E]` and `Cell[T]` are handles to separately admitted nodes
-that own a log's entries and a cell's payload ([MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells)), and `StaticFn[F]` designates static
+result, not the handle. `Cell[T]` is a handle to a separately admitted node that owns a
+cell's payload, and `Log[E: inert]` is the `log` module's opaque library type over a
+`Cell[List[E]]` ([MEM-29](memory.md#mem-29-append-only-logs-and-task-local-cells)), as
+`Deque[T]` and `Heap[T]` are library types over `List`; and `StaticFn[F]` designates static
 identity bytes, a revision and a function ([PROG-9](programs.md#prog-9-code-descriptors)).
 
 ## Contracts the signatures do not state

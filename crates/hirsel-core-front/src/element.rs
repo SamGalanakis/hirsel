@@ -12,11 +12,12 @@ use hirsel_core_resolve::{ModuleId, NameIndex};
 /// reference at any depth.
 pub(crate) const H_CAPTURE: u8 = H_RESOURCE | H_CAPABILITY | H_SCOPED | H_REGION;
 pub(crate) const WANTED: &str = "no resource, capability, view, scoped value or region reference";
-pub(crate) const MESSAGE: &str = "a Log's or Cell's element holds no resource, capability, view, scoped value or region reference";
+pub(crate) const MESSAGE: &str =
+    "a Cell's element holds no resource, capability, view, scoped value or region reference";
 
-/// The core modules whose operations are declared over an open element; the condition
+/// The core module whose operations are declared over an open element; the condition
 /// is checked where they are called, not inside them.
-const MODULES: [&str; 2] = ["log", "cell"];
+const MODULES: [&str; 1] = ["cell"];
 
 /// Whether `ty` breaks the element condition under the rigid bounds `params`.
 pub(crate) fn refused(
@@ -49,8 +50,8 @@ fn holds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16
     }
 }
 
-/// Whether type parameter `i` of the core operation at `path` is an element (a Log's
-/// `E`, a Cell's `T`, `cell.with`'s `A`). `cell.with`'s `R` is not: it is the callback's
+/// Whether type parameter `i` of the core operation at `path` is an element (a Cell's
+/// `T`, `cell.with`'s `A`). `cell.with`'s `R` is not: it is the callback's
 /// result, and a plain callable's result is never scoped (LANG-13 refuses an anchored
 /// one), so no loan of the lent payload escapes.
 pub(crate) fn parameter(path: &DefPath, i: usize) -> bool {
@@ -58,7 +59,7 @@ pub(crate) fn parameter(path: &DefPath, i: usize) -> bool {
     core && MODULES.contains(&path.0.modules[0].as_str()) && !(path.0.name == "with" && i == 2)
 }
 
-/// Whether `module` is one of core's element modules.
+/// Whether `module` is core's element module.
 pub(crate) fn exempt(index: &NameIndex, module: ModuleId) -> bool {
     MODULES
         .iter()

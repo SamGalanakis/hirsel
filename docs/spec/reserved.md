@@ -178,8 +178,8 @@ PROG-7, PROG-8.
 no read/count/clear, and `finish(take Log[E])->OwnedEvents[E]` transfers without
 allocation. E is independently owned inert data, never scoped/region/resource. This does
 not allow writes through ordinary frozen views; queries cannot report success after a
-failed tracking append." *v1:* MEM-29: a `Log[E]` is a handle to a separately admitted
-node whose entries no view exposes, `log.finish` returns them as a `List[E]`, and `E` is
+failed tracking append." *v1:* MEM-29: a `Log[E: inert]` is an opaque library type over a
+task-local `Cell[List[E]]` whose entries no view exposes, `log.finish` returns them as a `List[E]`, and `E` is
 inert at every depth.
 
 **R19.** "Opaque capability facades declare their nominal public authority independently
@@ -280,7 +280,7 @@ raises `Fail(text)`. A later typed reading of a failure is a core function over 
 | F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order; the `codec` bound (OWN-4), decode-only field defaults, the `via` override, tombstones, appended variants and the `u32` tag, schema resolution and the decode contract (SEM-10) | open: how the checker hands a `codec` declaration's traversal to the library that generates its codec; order-preserving key codecs; the schema fingerprint that keys a registered entry (R13) and the content hash of a declaration for stored data |
 | D, code descriptors | code identity; identity bytes of closed named functions (PROG-9), including typed `StaticFn` values passed into generic parameters; no address or order dependence; the revision, `code.revision(s)` (PROG-9), never part of equality | open: for registration (R13), identity bytes for instances, so that each instance of the generic adapter has them |
-| L, append-only log and task-local cell | `Log[E]` and `Cell[T]` (MEM-29): readable and task-local | open: shared cells, which wait for R3 |
+| L, append-only log and task-local cell | `Cell[T]` (MEM-29), readable and task-local; `Log[E]` is a library type over it | open: shared cells, which wait for R3 |
 | I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points (CAP-8); `WriteError`; the sync barriers `host.sync` and `host.sync_dir`, plus `host.random` and `host.stopped` ([core](core.md#contracts-the-signatures-do-not-state)) | socket declarations and owned resources ([Net](net.md)); open: socket OS attempts/readiness; providers for `Stdin` and `Env`; watching, renaming across directories |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1 with flows (CONC-14). Selection, shared limits, mutexes and atomics later. |
 

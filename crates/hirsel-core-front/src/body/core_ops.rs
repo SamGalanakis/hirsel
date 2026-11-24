@@ -9,7 +9,6 @@ mod cell;
 mod charge;
 mod conn;
 mod flow;
-mod log;
 mod net_error;
 mod provide;
 mod secret_kdf;
@@ -65,9 +64,6 @@ pub(crate) enum Kernel {
     TrySend,
     Receive,
     TryReceive,
-    LogNew,
-    LogAppend,
-    LogFinish,
     CodeIdentity,
     CodeRevision,
     CodeCallable,
@@ -133,9 +129,6 @@ operations! {
     ("latest", "read", Lane::Runtime(Kernel::LatestRead), "A", "core-ops-914", false),
     ("shared", "new", Lane::Runtime(Kernel::SharedNew), "A", "conc-shared-1993", false),
     ("shared", "share", Lane::Runtime(Kernel::SharedShare), "A", "conc-shared-1993", false),
-    ("log", "new", Lane::Runtime(Kernel::LogNew), "B", "core-ops-914", false),
-    ("log", "append", Lane::Runtime(Kernel::LogAppend), "B", "core-ops-914", false),
-    ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
     ("cell", "new", Lane::Runtime(Kernel::Cell(cell::CellOp::New)), "B", "cell-2140", false),
     ("cell", "get", Lane::Runtime(Kernel::Cell(cell::CellOp::Get)), "B", "cell-2140", false),
     ("cell", "replace", Lane::Runtime(Kernel::Cell(cell::CellOp::Replace)), "B", "cell-2140", false),
@@ -1008,9 +1001,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Receive => self.runtime_receive(types[0], vals[0]?, result, n),
             Kernel::TryReceive => self.runtime_try_receive(types[0], vals[0]?, result, n),
             Kernel::Join => self.runtime_join(types[0], vals[0]?, result, n),
-            Kernel::LogNew => self.runtime_log_new(types[0], result, n),
-            Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], n),
-            Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
             Kernel::RootLimit => self.runtime_row(RtOp::RootLimit, &[], n).map(|v| v[0]),
             Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
             Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
@@ -1695,9 +1685,6 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::TrySend
             | Kernel::TryReceive
             | Kernel::Receive
-            | Kernel::LogNew
-            | Kernel::LogAppend
-            | Kernel::LogFinish
             | Kernel::RootLimit
             | Kernel::CodeIdentity
             | Kernel::CodeRevision

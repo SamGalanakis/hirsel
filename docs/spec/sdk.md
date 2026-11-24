@@ -28,7 +28,9 @@ expose their representation type.
 `entries.js` exports the Want list, launch identity and `bind(client)`, whose
 result supplies `call.<name>`, `subscribe.<name>` and `subscribeDecoded.<name>`
 entry stubs. Names are the
-percent-decoded final component of an entry's definition identity. Duplicate
+percent-decoded final component of an entry's definition identity `D`, which in the
+identity bytes ends at the first `[` or `(` ([PROG-9](programs.md#prog-9-code-descriptors)).
+So two instances of one generic function have one name. Duplicate
 names cause `DuplicateStubName(a, b)` before any output is written.
 
 The transport implements `call(want, argsBytes, resultDecoder)`, returning

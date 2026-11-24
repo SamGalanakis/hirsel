@@ -215,15 +215,19 @@ only such a part would fix is open. A type parameter of the enclosing definition
 its body is checked once with it rigid (LANG-12) and describes, in each of its own instances,
 the instance at that instance's arguments. When every type parameter is fixed, `f`'s callable
 type at them fixes the open parts of `G`, as any argument does (LANG-11). A type parameter
-named in neither `f`'s parameters nor its result is never fixed. Each type argument must
-have the bounds its parameter declares, or it is refused under LANG-12, at the argument.
-These refusals are PROG-9's, at the argument, with these messages:
+named in neither `f`'s parameters nor its result is never fixed. A type argument may name no
+region: no anchor, region argument or region type at any depth, since a root has no name
+outside the function that holds it. A type argument that lacks a bound its parameter declares
+is refused under LANG-12, at the argument, with LANG-12's message. Every other refusal here is
+PROG-9's, at the argument, with one of these messages, where `T` is the declared name of the
+first such type parameter in declared order and `f` the function's name:
 
 - the argument is not the name of a top-level function: `code.describe requires the name
   of a top-level function`;
 - a type parameter is open: `code.describe leaves type parameter T of f open: the expected
-  StaticFn type must fix it`, with `T` the declared name of the first open parameter in
-  declared order and `f` the function's name.
+  StaticFn type must fix it`;
+- a type argument names a region: `code.describe cannot name an instance whose type
+  parameter T of f names a region`.
 
 `code.identity(s)` returns a view of static bytes, the function's **identity bytes**. Two
 `StaticFn` values are equal exactly when their identity bytes are, and nothing else about a
@@ -246,7 +250,9 @@ this encoding and nothing else, followed by the UTF-8 text `D A S`:
   as `S` writes it, and `]`. A bound only implied by another, as `key` is by `integer`, has
   no text. In v1 a bound has exactly one implementation for each type that has it
   ([OWN-4](ownership.md#own-4-bounds), [SEM-10](semantics.md#sem-10-codecs)), so the text
-  names the dictionary that the checker selects.
+  names the dictionary that the checker selects. These texts are this section's spelling;
+  PROG-10's instance identity has its own dictionary texts, and neither is computed from
+  the other.
 - `S` is the function's header (`fn-header`, [syntax](syntax.md)) with its whole meaning
   and no spelling: parameter names and the generics list are left out; a type parameter
   is written `$0`, `$1`, .. in the order each is first named in the parameters and then the

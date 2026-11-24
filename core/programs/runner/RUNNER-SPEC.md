@@ -24,7 +24,7 @@ The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4*
 
 ## CHANGES-v2.51 (generic entries by PROG-9's instance descriptors; lane generic-descriptor-spec-2041)
 
-Rule 2 no longer says PROG-9 refuses a generic function: `code.describe` now describes an instance of a generic function at closed type arguments, and such a `StaticFn` registers like any other. The key (rule 3) is unchanged in form; its identity bytes name the instance, so two instances are two keys. Identity bytes of functions without type parameters, and so every key registered today, are unchanged. Text only, not yet built.
+Rule 2 no longer says PROG-9 refuses a generic function: `code.describe` now describes an instance of a generic function at closed type arguments, and such a `StaticFn` registers like any other. The key (rule 3) is unchanged in form; its identity bytes name the instance, so two instances are two keys. Identity bytes of functions without type parameters, and so every key registered today, are unchanged. The SDK's stub name is the final component of `D`, which ends at the first `[` or `(` (sdk.md §4), so two instances of one generic registered in one place are `DuplicateStubName`. Text only, not yet built.
 
 ## CHANGES-v2.50 (Bucket backing; with STORE-SPEC v2.66, lane bucket-backing-t1-2022)
 

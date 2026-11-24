@@ -1,7 +1,8 @@
 fn check_rfc_examples() {
     // RFC 7741 §4.6 leaves the codec bytes symbolic. These prefixes supply P
     // and arbitrary remaining bytes, including a clear low bit in fragments.
-    let mut key = b"\x90\x80\x11\x10\x00\x00"
+    // A keyframe carries the RFC 6386 §9.1 start code and four dimension bytes.
+    let mut key = b"\x90\x80\x11\x10\x00\x00\x9d\x01\x2a\x00\x00\x00\x00"
     let descriptor = result.unwrap(vp8.parse(key))
     if let Some(ShortId(17)) = descriptor.picture_id {} else {
         fail("RFC §4.6.1 PictureID 17")
@@ -13,7 +14,7 @@ fn check_rfc_examples() {
     if let Error(PictureIdTooLarge) = vp8.rewrite_picture_id(mut key, 128) {} else {
         fail("seven-bit PictureID accepted 128")
     }
-    if list.compare_bytes(key, b"\x90\x80\x7f\x10\x00\x00") != Equal {
+    if list.compare_bytes(key, b"\x90\x80\x7f\x10\x00\x00\x9d\x01\x2a\x00\x00\x00\x00") != Equal {
         fail("short PictureID rewrite changed another byte")
     }
     let inter = result.unwrap(vp8.parse(b"\x10\x11\x00\x00"))
@@ -141,5 +142,104 @@ fn vp8_descriptor_and_av1_targets() -> Result[(), ()] {
     check_capture()
     check_extension_flags()
     check_target_layers()
+    Ok(())
+}
+
+fn expect_unit(got: unit.Unit, start: bool, end: bool, keyframe: bool, needs: u32, switches: u32, take what: String) {
+    if got.start != start || got.end != end || got.keyframe != keyframe || got.needs != needs || got.switches != switches {
+        fail(take what)
+    }
+}
+
+fn check_vp8_units() {
+    // Chromium packet 32412: S=1, PID=0, TID 0, Y=1, P=0. A keyframe sets
+    // every switch bit; TID 0 is needed by every target.
+    let key = result.unwrap(unit.vp8(b"\x90\xe0\xf8\x61\xef\x20\xd0\x87\x00\x9d\x01\x2a\x80\x02\x68\x01", false))
+    expect_unit(key, true, false, true, 0xffffffff, 0xffffffff, "VP8 keyframe unit")
+    // Chromium packet 32436: TID 1, Y=1, P=1, the frame's last packet.
+    // Targets 1 .. 31 need it, and Y allows target 1 only.
+    let sync = result.unwrap(unit.vp8(b"\xb0\xe0\xf8\x62\xef\x60\x51\x2e\x00", true))
+    expect_unit(sync, true, true, false, 0xfffffffe, 2, "VP8 layer-sync unit")
+    // TID 2 without Y: targets 2 .. 31 need it, and nothing may switch.
+    let upper = result.unwrap(unit.vp8(b"\x90\x60\xff\x9f\x11\x00\x00", false))
+    expect_unit(upper, true, false, false, 0xfffffffc, 0, "VP8 TID 2 unit")
+    // S=1, PID=0 and P=0 with 4 of the keyframe header's 10 bytes
+    // (RFC 6386 §9.1): refused, so it is never a start.
+    if let Ok(_) = unit.vp8(b"\x90\xe0\xf8\x61\xef\x20\xd0\x87\x00\x9d", false) {
+        fail("VP8 truncated first partition taken as a start")
+    }
+}
+
+fn check_vp9_units() {
+    // RFC 9628 §4.2 flexible mode, I/L/F/B set, P=0, PID 5. Layer byte:
+    // TID 0, U=1, SID 2, D=1. Targets 4*S+T with S >= 2 need it: bits 8 .. 15.
+    let dependent = result.unwrap(unit.vp9_frame(b"\xb8\x05\x15\x82", false))
+    // Current target 0 (S 0) never forwarded spatial layer 1, which D=1 references.
+    expect_unit(result.unwrap(unit.vp9_unit(dependent, Some(0u8), unit.vp9_layers())), true, false, false, 0xff00, 0, "VP9 spatial switch over an unforwarded layer")
+    // From target 4 (S 1, T 0), layer 1 was forwarded: target 8 may follow.
+    expect_unit(result.unwrap(unit.vp9_unit(dependent, Some(4u8), unit.vp9_layers())), true, false, false, 0xff00, 0x100, "VP9 spatial up-switch")
+    // The same frame with D=0 references no lower layer.
+    let independent = result.unwrap(unit.vp9_frame(b"\xb8\x05\x14\x82", false))
+    expect_unit(result.unwrap(unit.vp9_unit(independent, Some(0u8), unit.vp9_layers())), true, false, false, 0xff00, 0x100, "VP9 independent spatial layer")
+    // P=1 with one P_DIFF of 1. Picture A: TID 0, U=1, SID 0. Picture B:
+    // TID 1, U=0. From target 0, A keeps target 0 (bit 0); B is the first
+    // frame above T 0 after A, so targets 1 .. 3 may follow it.
+    let a = result.unwrap(unit.vp9_frame(b"\xfc\x05\x10\x02\x86", true))
+    let b = result.unwrap(unit.vp9_frame(b"\xfc\x06\x20\x02\x86", true))
+    let mut layers = unit.vp9_layers()
+    expect_unit(result.unwrap(unit.vp9_unit(a, Some(0u8), layers)), true, true, false, 0xffff, 1, "VP9 picture start at target 0")
+    expect_unit(result.unwrap(unit.vp9_unit(b, Some(0u8), layers)), true, true, false, 0xeeee, 0, "VP9 temporal switch without U")
+    unit.vp9_observe(mut layers, a)
+    expect_unit(result.unwrap(unit.vp9_unit(b, Some(0u8), layers)), true, true, false, 0xeeee, 0xe, "VP9 temporal switch after U")
+    unit.vp9_observe(mut layers, b)
+    expect_unit(result.unwrap(unit.vp9_unit(b, Some(0u8), layers)), true, true, false, 0xeeee, 0, "VP9 temporal switch past its first frame")
+}
+
+fn check_h264_units() {
+    // Captured STAP-A 19249 (h264_rtp_parameter_sets): SPS 0 and PPS 0.
+    // An SPS begins an access unit, and with a usable PPS it leads an IDR.
+    let sets = b"\x78\x00\x10\x67\x42\xc0\x1e\x8c\x8d\x40\xf8\x63\xd4\x44\x03\xc2\x21\x1a\x80\x00\x04\x68\xce\x3c\x80"
+    let mut leg = unit.parameter_sets()
+    expect_unit(result.unwrap(unit.h264(sets, false, true, leg)), true, false, true, 0xffffffff, 0xffffffff, "H.264 parameter sets lead the access unit")
+    result.unwrap(unit.h264_sent(mut leg, sets))
+    // FU-A start of an IDR: indicator 0x7c, header S=1 type 5. Slice header
+    // ue first_mb_in_slice 0 '1', slice_type 7 '0001000', PPS 0 '1'.
+    let idr = b"\x7c\x85\x88\x80"
+    expect_unit(result.unwrap(unit.h264(idr, false, false, leg)), false, false, false, 0xffffffff, 0, "H.264 IDR after its own parameter sets")
+    expect_unit(result.unwrap(unit.h264(idr, false, true, leg)), true, false, true, 0xffffffff, 0xffffffff, "H.264 IDR with sent parameter sets")
+    expect_unit(result.unwrap(unit.h264(idr, false, true, unit.parameter_sets())), true, false, false, 0xffffffff, 0, "H.264 IDR without parameter sets")
+    // The second NAL of that IDR access unit: first_mb_in_slice 10
+    // '0001011', slice_type 7, PPS 0. Only a NAL starts, not an access unit.
+    expect_unit(result.unwrap(unit.h264(b"\x7c\x85\x16\x23", false, true, leg)), false, false, false, 0xffffffff, 0, "H.264 second IDR slice as a start")
+}
+
+fn check_av1_units() {
+    // AV1 RTP §A.8. Structure packet, frame 256, start and end, template 0:
+    // flags 10000, offset 000000, 32 targets 11111, one template '11',
+    // DTIs Required (11) for targets 0 .. 30 and Switch (10) for target 31,
+    // no frame diffs '0', chain_cnt ns(33) = 1 '00001', every target on
+    // chain 0 (ns(1) is 0 bits), template chain diff '0000', no resolutions '0'.
+    let mut structure = dependency.empty()
+    let first = result.unwrap(dependency.parse(b"\xc0\x01\x00\x80\x1f\xff\xff\xff\xff\xff\xff\xff\xff\x81\x00", mut structure))
+    // Frame 258 with custom chain diff 2 (flags 00001): its chain's previous frame is 256.
+    let later = result.unwrap(dependency.parse(b"\xc0\x01\x02\x08\x10", mut structure))
+    // Aggregation headers W=1 with N=1 (a new coded video sequence) and N=0.
+    let sequence = b"\x18\x30"
+    let plain = b"\x10\x30"
+    let mut chains = unit.av1_chains()
+    expect_unit(result.unwrap(unit.av1(sequence, first, view structure, chains)), true, true, true, 0xffffffff, 0xffffffff, "AV1 keyframe unit")
+    expect_unit(result.unwrap(unit.av1(plain, later, view structure, chains)), true, true, false, 0xffffffff, 0, "AV1 switch over a broken chain")
+    unit.av1_forwarded(mut chains, first, view structure)
+    expect_unit(result.unwrap(unit.av1(plain, later, view structure, chains)), true, true, false, 0xffffffff, 0x80000000, "AV1 switch to target 31")
+}
+
+/// bug: Take a truncated VP8 first partition, a VP9 frame over an unforwarded layer, a second H.264 slice, or an AV1 Switch with a broken chain as a switch point, or misplace a mask bit.
+/// oracle: RFC 7741 §4.2, RFC 6386 §9.1, RFC 9628 §4.2, RFC 6184 §§5.7-5.8 with H.264 §7.4.1.2.3, AV1 RTP §§A.5-A.8, and the rtp spec RTP-11 and webrtc spec RTC-6 maps, by hand.
+@test
+fn unit_adapter() -> Result[(), ()] {
+    check_vp8_units()
+    check_vp9_units()
+    check_h264_units()
+    check_av1_units()
     Ok(())
 }

@@ -1,0 +1,426 @@
+// The frame facts a forwarder needs per RTP packet (rtp spec RTP-11), from
+// the codec payload. Target i is bit i of the 32-bit masks:
+// - needs: target i needs this frame;
+// - switches: a decoder may begin to follow target i at this frame.
+// Each codec's target map is the forwarder's (webrtc spec RTC-6): VP8 and
+// H.264 use i = temporal id, VP9 uses i = 4 * spatial + temporal, and AV1
+// uses the dependency descriptor's decode target index.
+pub type Unit {
+    start: bool,
+    end: bool,
+    keyframe: bool,
+    needs: u32,
+    switches: u32
+}
+
+pub type Error = Vp8(vp8.Error) | Vp9(vp9.Error) | H264(h264.Error) | Av1(av1.Error) | Dependency(dependency.Error) | Unmappable
+
+const ALL: u64 = 4294967295
+
+fn mask(value: u64) -> u32 {
+    int.narrow(value & ALL)
+}
+
+// Targets t .. 31 need a frame of temporal layer t.
+fn temporal_needs(temporal: u8) -> u64 {
+    let shift: u64 = int.widen(temporal)
+    (ALL << shift) & ALL
+}
+
+// RFC 7741 §4.2. `payload` is the RTP payload; `marker` is the RTP marker bit,
+// set on the last packet of a frame (§4.1). A first packet whose frame header
+// is truncated is refused, so it is never a start.
+pub fn vp8(payload: Bytes, marker: bool) -> Result[Unit, Error] {
+    let descriptor = match vp8.parse(payload) {
+        Ok(value) => value,
+        Error(e) => return Error(Vp8(e))
+    }
+    let temporal: u8 = match descriptor.temporal {
+        Some(value) => value,
+        None => 0
+    }
+    let switches = if descriptor.keyframe {
+        ALL
+    } else if descriptor.layer_sync {
+        // Y: the frame depends only on the base layer, which every target forwards.
+        let shift: u64 = int.widen(temporal)
+        1u64 << shift
+    } else {
+        0
+    }
+    Ok(Unit(start: descriptor.first, end: marker, keyframe: descriptor.keyframe, needs: mask(temporal_needs(temporal)), switches: mask(switches)))
+}
+
+// One VP9 layer frame's facts (RFC 9628 §4.2), parsed once per packet and
+// shared by every down-track.
+pub type Vp9Frame {
+    begin: bool,
+    end: bool,
+    keyframe: bool,
+    spatial: u8,
+    temporal: u8,
+    predicted: bool,
+    switching_up: bool,
+    inter_layer: bool
+}
+
+pub fn vp9_frame(payload: Bytes, marker: bool) -> Result[Vp9Frame, Error] {
+    let descriptor = match vp9.parse(payload) {
+        Ok(value) => value,
+        Error(e) => return Error(Vp9(e))
+    }
+    let mut spatial: u8 = 0
+    let mut temporal: u8 = 0
+    let mut switching_up = false
+    let mut inter_layer = false
+    if let Some(layer) = descriptor.layer {
+        spatial = layer.spatial
+        temporal = layer.temporal
+        switching_up = layer.switching_up
+        inter_layer = layer.inter_layer_dependency
+    }
+    // RTC-6 maps four spatial and four temporal layers onto targets 0 .. 15.
+    if spatial > 3 || temporal > 3 {
+        return Error(Unmappable)
+    }
+    let mut keyframe = false
+    if descriptor.first && spatial == 0 && !descriptor.predicted {
+        keyframe = match vp9.is_keyframe(list.slice(payload, descriptor.payload_start, list.len(payload))) {
+            Ok(value) => value,
+            Error(e) => return Error(Vp9(e))
+        }
+    }
+    Ok(Vp9Frame(begin: descriptor.first, end: descriptor.last || marker, keyframe: keyframe, spatial: spatial, temporal: temporal, predicted: descriptor.predicted, switching_up: switching_up, inter_layer: inter_layer))
+}
+
+// Per source: bit T is set once a layer frame with U = 1 and TID <= T has
+// passed, and cleared by the next layer frame with TID above T.
+pub type Vp9Layers {
+    armed: u8
+}
+
+pub fn vp9_layers() -> Vp9Layers {
+    Vp9Layers(armed: 0)
+}
+
+// Call once per packet, after every down-track's vp9_unit for it.
+pub fn vp9_observe(mut layers: Vp9Layers, frame: Vp9Frame) {
+    if !frame.begin {
+        return
+    }
+    // The layer frame passes every armed level below its TID.
+    let below: u8 = (1u8 << frame.temporal) - 1
+    layers.armed &= 15 - below
+    if frame.switching_up {
+        layers.armed |= 15 - below
+    }
+}
+
+fn vp9_bit(spatial: u8, temporal: u8) -> u64 {
+    let index: u64 = int.widen(4 * spatial + temporal)
+    1u64 << index
+}
+
+// RTC-6's VP9 rules for one down-track whose current target on this source
+// is `current` (4 * S + T), or None.
+pub fn vp9_unit(frame: Vp9Frame, current: Option[u8], layers: Vp9Layers) -> Result[Unit, Error] {
+    let mut needs: u64 = 0
+    for spatial in frame.spatial .. 4u8 {
+        for temporal in frame.temporal .. 4u8 {
+            needs |= vp9_bit(spatial, temporal)
+        }
+    }
+    let mut switches: u64 = 0
+    if frame.keyframe {
+        switches = ALL
+    } else if let Some(target) = current {
+        if target > 15 {
+            return Error(Unmappable)
+        }
+        let top_spatial = target / 4
+        let top_temporal = target % 4
+        if frame.begin {
+            // Down or same: any picture start, since a lower layer never
+            // references a higher one.
+            if frame.spatial == 0 && frame.temporal <= top_temporal {
+                for spatial in 0u8 .. top_spatial + 1 {
+                    for temporal in frame.temporal .. top_temporal + 1 {
+                        switches |= vp9_bit(spatial, temporal)
+                    }
+                }
+            }
+            // Spatial up to this frame's layer: not inter-picture predicted,
+            // and every lower layer it references (D = 1) was forwarded.
+            if frame.spatial > top_spatial && !frame.predicted && (!frame.inter_layer || frame.spatial - 1 <= top_spatial) && frame.temporal <= top_temporal {
+                for temporal in frame.temporal .. top_temporal + 1 {
+                    switches |= vp9_bit(frame.spatial, temporal)
+                }
+            }
+            // Temporal up: the first layer frame above T after a U = 1 at or below T.
+            if frame.temporal > top_temporal && frame.spatial <= top_spatial && (layers.armed & (1u8 << top_temporal)) != 0 {
+                for spatial in frame.spatial .. top_spatial + 1 {
+                    for temporal in frame.temporal .. 4u8 {
+                        switches |= vp9_bit(spatial, temporal)
+                    }
+                }
+            }
+        }
+    }
+    Ok(Unit(start: frame.begin, end: frame.end, keyframe: frame.keyframe, needs: mask(needs), switches: mask(switches)))
+}
+
+// The H.264 parameter sets one leg has been sent: SPS ids 0 .. 31, and for
+// each PPS id 0 .. 255, the SPS id it names.
+pub type ParameterSets {
+    sequences: u32,
+    pictures: Inline[Option[u8], 256]
+}
+
+pub fn parameter_sets() -> ParameterSets {
+    ParameterSets(sequences: 0, pictures:[None; 256])
+}
+
+pub fn clear_parameter_sets(mut sets: ParameterSets) {
+    sets.sequences = 0
+    sets.pictures =[None; 256]
+}
+
+fn has_sequence(sets: ParameterSets, sequence: u8) -> bool {
+    let bit: u32 = int.widen(sequence)
+    (sets.sequences & (1u32 << bit)) != 0
+}
+
+// A PPS is usable when it and the SPS it names were sent in this packet
+// (`packet`) or earlier on this leg (`leg`).
+fn usable_picture(packet: ParameterSets, leg: ParameterSets, picture: u64) -> bool {
+    let named = match packet.pictures[picture] {
+        Some(sequence) => Some(sequence),
+        None => leg.pictures[picture]
+    }
+    match named {
+        Some(sequence) => has_sequence(packet, sequence) || has_sequence(leg, sequence),
+        None => false
+    }
+}
+
+fn learn(mut sets: ParameterSets, unit: Bytes) -> Result[(), Error] {
+    let header = match h264.nal(unit) {
+        Ok(value) => value,
+        Error(e) => return Error(H264(e))
+    }
+    if header.kind == 7 {
+        let sps = match h264.parse_sps(unit) {
+            Ok(value) => value,
+            Error(e) => return Error(H264(e))
+        }
+        let id: u32 = int.narrow(h264.sequence(sps).id)
+        sets.sequences |= 1u32 << id
+    } else if header.kind == 8 {
+        let (picture, sequence) = match h264.pps_ids(unit) {
+            Ok(value) => value,
+            Error(e) => return Error(H264(e))
+        }
+        let named: u8 = int.narrow(sequence)
+        sets.pictures[picture] = Some(named)
+    }
+    Ok(())
+}
+
+fn stap(payload: Bytes, mut at: u64) -> Result[Option[h264.StapUnit], Error] {
+    match h264.stap_next(payload, mut at) {
+        Ok(value) => Ok(value),
+        Error(e) => Error(H264(e))
+    }
+}
+
+// Record the parameter sets a packet carries, once the caller has sent it on the leg.
+pub fn h264_sent(mut sets: ParameterSets, payload: Bytes) -> Result[(), Error] {
+    match h264.parse_rtp(payload) {
+        Ok(Single(_)) => learn(mut sets, payload),
+        Ok(StapA(_)) => {
+            let mut at: u64 = 1
+            while let Some(unit) = stap(payload, mut at)? {
+                learn(mut sets, list.slice(payload, unit.start, unit.end))?
+            }
+            Ok(())
+        },
+        Ok(FuA(_)) => Ok(()),
+        Error(e) => Error(H264(e))
+    }
+}
+
+fn slice_picture(slice: Bytes) -> Result[u64, Error] {
+    match h264.slice_start(slice) {
+        Ok(header) => Ok(header.picture_id),
+        Error(e) => Error(H264(e))
+    }
+}
+
+// H.264 §7.4.1.2.3: the NAL kinds that begin an access unit, and a slice
+// whose first_mb_in_slice is 0.
+fn begins_unit(kind: u8, slice: Bytes) -> Result[bool, Error] {
+    if kind == 1 || kind == 5 {
+        let header = match h264.slice_start(slice) {
+            Ok(value) => value,
+            Error(e) => return Error(H264(e))
+        }
+        return Ok(header.first_macroblock == 0)
+    }
+    Ok(kind == 6 || kind == 7 || kind == 8 || kind == 9 || (kind >= 14 && kind <= 18))
+}
+
+// RFC 6184 §§5.1, 5.7-5.8. `after_end` is the caller's knowledge that the
+// packet at index - 1 ended an access unit (marker set, or another
+// timestamp). A start packet is a keyframe when it carries an IDR slice whose
+// PPS and SPS are usable, or, as libwebrtc treats it, an SPS with a usable
+// PPS. Usable means sent in this packet or earlier on this leg (`sets`).
+// H.264 without SVC carries one layer, target 0.
+pub fn h264(payload: Bytes, marker: bool, after_end: bool, sets: ParameterSets) -> Result[Unit, Error] {
+    let parsed = match h264.parse_rtp(payload) {
+        Ok(value) => value,
+        Error(e) => return Error(H264(e))
+    }
+    let mut start = false
+    let mut idr_picture: Option[u64] = None
+    let mut carried = parameter_sets()
+    match parsed {
+        Single(nal) => {
+            start = begins_unit(nal.kind, payload)?
+            if nal.idr {
+                idr_picture = Some(slice_picture(payload)?)
+            }
+            learn(mut carried, payload)?
+        },
+        StapA(_) => {
+            let mut at: u64 = 1
+            let mut first = true
+            while let Some(unit) = stap(payload, mut at)? {
+                let nal_bytes = list.slice(payload, unit.start, unit.end)
+                if first {
+                    start = begins_unit(unit.nal.kind, nal_bytes)?
+                    first = false
+                }
+                if unit.nal.idr && idr_picture == None {
+                    idr_picture = Some(slice_picture(nal_bytes)?)
+                }
+                learn(mut carried, nal_bytes)?
+            }
+        },
+        FuA(fragment) => {
+            if fragment.first {
+                // The slice header follows the FU indicator and the FU header.
+                let slice = list.slice(payload, 1, list.len(payload))
+                start = begins_unit(fragment.nal.kind, slice)?
+                if fragment.nal.idr {
+                    idr_picture = Some(slice_picture(slice)?)
+                }
+            }
+        }
+    }
+    start = start && after_end
+    let mut keyframe = false
+    if start {
+        keyframe = match idr_picture {
+            Some(picture) => usable_picture(carried, sets, picture),
+            None => {
+                let mut found = false
+                if carried.sequences != 0 {
+                    for picture in 0u64 .. 256 {
+                        if carried.pictures[picture] != None && usable_picture(carried, sets, picture) {
+                            found = true
+                        }
+                    }
+                }
+                found
+            }
+        }
+    }
+    let switches: u64 = if keyframe {
+        ALL
+    } else {
+        0
+    }
+    Ok(Unit(start: start, end: marker, keyframe: keyframe, needs: mask(ALL), switches: mask(switches)))
+}
+
+// The frame numbers last forwarded on one leg for each chain (AV1 RTP §A.5).
+pub type Av1Chains {
+    last: Inline[Option[u16], 32]
+}
+
+pub fn av1_chains() -> Av1Chains {
+    Av1Chains(last:[None; 32])
+}
+
+// AV1 RTP §A.6 PartOfActiveChain: a chain with an active target, every one of
+// whose targets marks the frame Switch or Required.
+fn in_chain(frame: dependency.Frame, structure: View[dependency.Structure], chain: u64) -> bool {
+    let mut active = false
+    let id: u8 = int.narrow(chain)
+    for target in 0u64 .. frame.decode_target_count {
+        if dependency.protecting_chain(structure, target) == Some(id) {
+            if ((frame.active_targets >> target) & 1) != 0 {
+                active = true
+            }
+            match dependency.decode_target(frame, target) {
+                Some(Absent) => return false,
+                Some(Discardable) => return false,
+                _ => ()
+            }
+        }
+    }
+    active
+}
+
+// Call once the caller forwards a frame on the leg.
+pub fn av1_forwarded(mut chains: Av1Chains, frame: dependency.Frame, structure: View[dependency.Structure]) {
+    for chain in 0u64 .. frame.chain_count {
+        if in_chain(frame, structure, chain) {
+            chains.last[chain] = Some(frame.number)
+        }
+    }
+}
+
+// AV1 RTP Appendix A. `payload` is the RTP payload, whose N bit marks the
+// first packet of a coded video sequence; `frame` is its dependency
+// descriptor, parsed against `structure`. A target needs the frame unless it
+// is Not Present (§A.8.3). A Switch indication allows the target only when
+// its protecting chain is intact (§A.5, §A.7): the chain difference is 0, or
+// the chain's previous frame is the one last forwarded on this leg.
+pub fn av1(payload: Bytes, frame: dependency.Frame, structure: View[dependency.Structure], chains: Av1Chains) -> Result[Unit, Error] {
+    let aggregation = match av1.parse_rtp(payload) {
+        Ok(value) => value,
+        Error(e) => return Error(Av1(e))
+    }
+    let keyframe = frame.first && aggregation.starts_sequence
+    let mut needs: u64 = 0
+    let mut switches: u64 = 0
+    for target in 0u64 .. frame.decode_target_count {
+        match dependency.decode_target(frame, target) {
+            Some(Absent) => (),
+            Some(Switch) => {
+                needs |= 1u64 << target
+                if let Some(chain) = dependency.protecting_chain(structure, target) {
+                    let index: u64 = int.widen(chain)
+                    if let Some(difference) = dependency.chain_difference(frame, index) {
+                        // Frame numbers are 16 bits and wrap (§A.8.3).
+                        let number: u64 = int.widen(frame.number)
+                        let delta: u64 = int.widen(difference)
+                        let previous: u16 = int.narrow((number + 65536 - delta) & 65535)
+                        if difference == 0 || chains.last[index] == Some(previous) {
+                            switches |= 1u64 << target
+                        }
+                    }
+                }
+            },
+            Some(_) => {
+                needs |= 1u64 << target
+            },
+            None => ()
+        }
+    }
+    if keyframe {
+        switches = ALL
+    }
+    Ok(Unit(start: frame.first, end: frame.last, keyframe: keyframe, needs: mask(needs), switches: mask(switches)))
+}

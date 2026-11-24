@@ -79,7 +79,10 @@ pub fn parse(packet: Bytes) -> Result[Descriptor, Error] {
     let partition_start = (flags & 16) != 0
     let partition = flags & 7
     let first = partition_start && partition == 0
-    if at == end || (first && end - at < 3) {
+    // RFC 6386 §9.1: a frame starts with a 3-byte tag, and a keyframe adds a
+    // 3-byte start code and 4 bytes of dimensions. libwebrtc refuses a first
+    // packet without them (video_rtp_depacketizer_vp8.cc:175-191 at 3710345).
+    if at == end || (first && end - at < 3) || (first && (packet[at] & 1) == 0 && end - at < 10) {
         return Error(Truncated)
     }
     Ok(Descriptor(extended: extended, non_reference: (flags & 32) != 0, partition_start: partition_start, partition: partition, picture_id: picture_id, tl0picidx: tl0picidx, temporal: temporal, layer_sync: layer_sync, key_index: key_index, first: first, keyframe: first && (packet[at] & 1) == 0, payload_start: at))

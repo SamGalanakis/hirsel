@@ -311,6 +311,32 @@ fn vui(unit: Bytes, mut cursor: Rbsp) -> Result[(), Error] {
     Ok(())
 }
 
+pub type SliceStart {
+    first_macroblock: u64,
+    picture_id: u64
+}
+
+// H.264 §7.3.3. The unit may stop after pic_parameter_set_id, as the first
+// fragment of an FU-A does. unit[0] is the NAL or FU header and is skipped.
+pub fn slice_start(unit: Bytes) -> Result[SliceStart, Error] {
+    let mut cursor = rbsp()
+    let first = ue(unit, mut cursor, 4294967295)?
+    let _ = ue(unit, mut cursor, 9)?
+    let picture = ue(unit, mut cursor, 255)?
+    Ok(SliceStart(first_macroblock: first, picture_id: picture))
+}
+
+// H.264 §7.3.2.2: the PPS id and the SPS id it names.
+pub fn pps_ids(unit: Bytes) -> Result[(u64, u64), Error] {
+    if nal(unit)?.kind != 8 {
+        return Error(WrongParameterSet)
+    }
+    let mut cursor = rbsp()
+    let id = ue(unit, mut cursor, 255)?
+    let sequence_id = ue(unit, mut cursor, 31)?
+    Ok((id, sequence_id))
+}
+
 pub opaque type Sps {
     id: u64,
     profile: u64,
@@ -341,8 +367,7 @@ pub fn sequence(sps: Sps) -> Sequence {
 
 /// Coded width and height before cropping, and whether the stream is progressive 8-bit 4:2:0.
 pub fn coded_format(sps: Sps) -> (u64, u64, bool) {
-    (sps.width_in_mbs * 16, sps.map_units / sps.width_in_mbs * sps.frame_factor * 16,
-        sps.frame_factor == 1 && sps.chroma == 1 && sps.depth_minus_8 == 0 && sps.chroma_depth_minus_8 == 0)
+    (sps.width_in_mbs * 16, sps.map_units / sps.width_in_mbs * sps.frame_factor * 16, sps.frame_factor == 1 && sps.chroma == 1 && sps.depth_minus_8 == 0 && sps.chroma_depth_minus_8 == 0)
 }
 
 fn extended_profile(profile: u64) -> bool {

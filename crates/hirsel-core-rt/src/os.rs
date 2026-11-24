@@ -753,6 +753,7 @@ pub(crate) mod probe {
         });
     }
 }
+
 /// The Net adapters pin the private extension of each socket request.
 #[inline]
 unsafe fn socket_operations(request: *const Request) -> &'static crate::os_net::Operations {
@@ -835,11 +836,7 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
     match unsafe { (*request).operation } {
         // Waiting is owned by the scheduler; issue completes at once.
         SLEEP_UNTIL | SLEEP_UNTIL_WALL => return Outcome::default(),
-        // A seeded pool never waits; only an early boot's would.
-        RANDOM => match random::request(unsafe { &mut *request }, libc::GRND_NONBLOCK) {
-            Err(error) if error.raw_os_error() == Some(libc::EAGAIN) => {}
-            result => return request_outcome(result),
-        },
+        RANDOM => return random::issue(unsafe { &mut *request }),
         _ => {}
     }
     struct Issue(*mut u8, *mut Request);
@@ -864,7 +861,6 @@ unsafe fn issue_now(state: *mut u8, request: *mut Request) -> Outcome {
     match request.operation {
         STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
         STDERR => write_request(os.stderr_fd(), request),
-        RANDOM => request_outcome(random::request(request, 0)),
         _ => {
             let issue_file = os.issue_file.unwrap();
             // SAFETY: the directory provider was installed before the run issued this request.

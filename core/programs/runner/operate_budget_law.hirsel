@@ -164,8 +164,8 @@ fn exercise_bucket_capture(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[
     Ok(())
 }
 
-@test
-fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+fn exercise_local_budgets(take grants: (Dir, Clock, Random, Tasks, Net)) -> Result[(), String] waits {
+    let (d, c, r, tasks, n) = take grants
     if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
     let expected_share = runtime.root_limit() - BUDGET_RUNNER_BYTES
     let memory = budget_config(Memory, c, r, tasks, n)
@@ -181,7 +181,15 @@ fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) ->
         disk_sizes.resident_limit != planned.resident_limit {
         return Error("L60: Directory share")
     }
-    open_sized_place(take disk)?
+    open_sized_place(take disk)
+}
+
+@test
+fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    // Keep the local executable at 64 MiB. Bucket's exact grant and the
+    // loopback peer instead draw on the enclosing test's reservation.
+    let local = task.spawn(tasks, bytes 67108864u64, (d, c, r, tasks, n), exercise_local_budgets)
+    result.unwrap(task.join(take local))?
     exercise_bucket_budget(c, r, tasks, n)?
     exercise_bucket_capture(c, r, tasks, n)?
     let low = budget_config(Memory, c, r, tasks, n)

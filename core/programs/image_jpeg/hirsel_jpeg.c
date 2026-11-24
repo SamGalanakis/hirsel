@@ -264,7 +264,7 @@ uint32_t hjpg_decoder_height(void *decoder)
 }
 
 static int32_t decode_chunk(struct decoder *d, const uint8_t *input, size_t size,
-                            uint8_t *rgb, size_t stride, size_t rows)
+                            uint8_t *rgb, size_t stride, size_t rows, bool batch)
 {
     source_attach(d, input, size);
     if (setjmp(d->codec.jump))
@@ -273,6 +273,8 @@ static int32_t decode_chunk(struct decoder *d, const uint8_t *input, size_t size
     int32_t result = 0;
     if (d->phase == SCANS) {
         int step = jpeg_consume_input(&d->jpeg);
+        while (batch && step != JPEG_SUSPENDED && step != JPEG_REACHED_EOI)
+            step = jpeg_consume_input(&d->jpeg);
         result = step != JPEG_SUSPENDED;
         if (step == JPEG_REACHED_EOI) {
             jpeg_start_output(&d->jpeg, d->jpeg.input_scan_number);
@@ -318,7 +320,7 @@ static int32_t decode_strip(struct decoder *d, const uint8_t *input, size_t size
     if (rows > capacity)
         rows = capacity;
     if (!batch)
-        return decode_chunk(d, input, size, rgb, stride, minimum);
+        return decode_chunk(d, input, size, rgb, stride, minimum, false);
 
     size_t written = 0;
     do {
@@ -326,7 +328,7 @@ static int32_t decode_strip(struct decoder *d, const uint8_t *input, size_t size
         if (chunk > STRIP_ROWS)
             chunk = STRIP_ROWS;
         uint8_t *next = written ? rgb + written * stride : rgb;
-        int32_t step = decode_chunk(d, input, size, next, stride, chunk);
+        int32_t step = decode_chunk(d, input, size, next, stride, chunk, true);
         if (step == -5 && written)
             return FINAL_ROWS + (int32_t)written;
         if (step < 0)

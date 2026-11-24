@@ -86,6 +86,7 @@ fn reuse_law(mut conn: Conn, clock: Clock, deadline: u64) -> bool waits {
         return false
     }
     let _ = result.unwrap(execute(mut conn, "BEGIN", no_params, clock, deadline))
+    let _ = result.unwrap(execute(mut conn, "SAVEPOINT recover", no_params, clock, deadline))
     if let Some(InTransaction) = transaction(conn) {} else {
         return false
     }
@@ -99,9 +100,21 @@ fn reuse_law(mut conn: Conn, clock: Clock, deadline: u64) -> bool waits {
     if let Some(Failed) = transaction(conn) {} else {
         return false
     }
-    if let Error(RollbackRequired) = execute(mut conn, "SELECT 1", no_params, clock, deadline) {} else {
+    if let Error(Sql(e)) = execute(mut conn, "SELECT 1", no_params, clock, deadline) {
+        if e.sqlstate != "25P02" {
+            return false
+        }
+    } else {
         return false
     }
+    if let Some(Failed) = transaction(conn) {} else {
+        return false
+    }
+    let _ = result.unwrap(execute(mut conn, "ROLLBACK TO SAVEPOINT recover", no_params, clock, deadline))
+    if let Some(InTransaction) = transaction(conn) {} else {
+        return false
+    }
+    let _ = result.unwrap(execute(mut conn, "SELECT 1", no_params, clock, deadline))
     let _ = result.unwrap(execute(mut conn, "ROLLBACK", no_params, clock, deadline))
     if let Some(Idle) = transaction(conn) {} else {
         return false

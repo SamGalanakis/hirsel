@@ -5,7 +5,7 @@ pub(crate) use super::dispatch::{Group, Turn};
 use super::{dispatch::Hooks, *};
 
 impl Group {
-    fn with<R>(self, f: impl FnOnce(&mut Live) -> R) -> Option<R> {
+    pub(super) fn with<R>(self, f: impl FnOnce(&mut Live) -> R) -> Option<R> {
         let mut state = self.cell.state.lock().unwrap();
         if state.generation != self.generation {
             return None;
@@ -21,6 +21,22 @@ impl Group {
 pub(super) struct TapeHooks;
 
 impl Hooks for TapeHooks {
+    fn record_retirement(&self, group: Group, pool: u64) {
+        group.with(|live| {
+            if live.mode == Mode::Record {
+                live.write_input(Frame::Retired {
+                    gap: 0,
+                    task: group.task,
+                    pool,
+                });
+            }
+        });
+    }
+
+    fn replay_retirements(&self, group: Group, payer: crate::limit::Payer) {
+        group.with(|live| live.replay_retirements(group.task, payer));
+    }
+
     fn seal_deadlock(&self, group: Group) -> Result<(), ([u8; 16], Fault)> {
         let id = group.with(|live| live.tape_id).unwrap();
         finish(group.cell, group.generation, Seal::Deadlock)
@@ -231,7 +247,7 @@ impl Schedule {
     }
 }
 impl Live {
-    fn schedule_fault(&mut self, ready: Option<usize>) {
+    pub(super) fn schedule_fault(&mut self, ready: Option<usize>) {
         if self.fault.is_none() {
             let at = self.replayer.as_mut().map_or(1, |r| {
                 if let Some(ready) = ready {
@@ -276,6 +292,7 @@ impl Live {
                 }
                 Frame::Wake { gap, task } => (gap, Turn::Wake(task)),
                 Frame::Cancel { gap, task } => (gap, Turn::Cancel(task)),
+                Frame::Retired { gap, task, .. } => (gap, Turn::Retired(task)),
                 Frame::Done { gap, task, .. } => (gap, Turn::Done(task)),
                 Frame::Choose { gap, index } if self.schedule.chooser == format::CHOOSER_COMMIT => {
                     (gap, Turn::Choose(index))
@@ -345,6 +362,7 @@ impl Live {
             | Frame::Grant { gap: g, .. }
             | Frame::Wake { gap: g, .. }
             | Frame::Cancel { gap: g, .. }
+            | Frame::Retired { gap: g, .. }
             | Frame::Choose { gap: g, .. }
             | Frame::Done { gap: g, .. } => *g = gap,
             _ => unreachable!(),

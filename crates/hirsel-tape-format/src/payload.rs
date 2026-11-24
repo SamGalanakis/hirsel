@@ -25,6 +25,11 @@ pub fn carries_payload(op: u8) -> bool {
             | STAT_FILE
             | EXEC_SPAWN
             | DATAGRAM_RECV
+            | UDP_OPEN
+            | UDP_BIND
+            | UDP_BIND_GROUP
+            | UDP_RECV
+            | UDP_LOCAL_ADDR
     )
 }
 

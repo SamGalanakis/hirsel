@@ -100,7 +100,7 @@ def network_case(case):
 
 
 LIVE_UDP_CASES = ('net:udp_gro_first_truncates', 'net:udp_group_recycles_a_full_member_capture',
-                  'net:udp_pool_charge_outlives_its_helper')
+                  'net:udp_pool_charge_outlives_its_helper', 'net:udp_group_retirement_is_an_input')
 
 
 def unit_socket_case(case):

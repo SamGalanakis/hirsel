@@ -287,6 +287,29 @@ fn udp_room() -> u64 {
     }
 }
 
+// expect: run udp_group_retirement_is_an_input(network) = true
+fn udp_group_retirement_is_an_input(n: Net, clock: Clock, _tasks: Tasks) -> bool waits {
+    let mut members: List[UdpSocket] = list.with_capacity(2)
+    let before = udp_room()
+    let endpoint = Addr(ip: V4(0x7f000001), port: 0)
+    let options = UdpOptions(slots: 1, slot_bytes: 1536)
+    result.unwrap(host.udp_bind_group(n, endpoint, options, 2, Hash, mut members))
+    let charged = udp_room()
+    if charged != before - 4624 {
+        fail("group admitted a different pool charge")
+    }
+    list.clear(mut members)
+    if udp_room() != charged {
+        fail("CLOSE returned the charge before the intake retired")
+    }
+    host.sleep_until(clock, host.mono_ns(clock) + 1000000u64)
+    task.check_cancel()
+    if udp_room() != before {
+        fail("the owning task's next event did not return every pool charge")
+    }
+    true
+}
+
 fn udp_helper_bind(take n: Net) -> UdpSocket waits {
     let (take socket, _) = result.unwrap(host.udp_bind(n, Addr(ip: V4(0x7f000001), port: 0), UdpOptions(slots: 1, slot_bytes: 1536)))
     take socket

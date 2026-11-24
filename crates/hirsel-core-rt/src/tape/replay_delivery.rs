@@ -115,6 +115,18 @@ pub(super) unsafe fn replay_out(
         live.typed_resources.remove(&(object as usize));
         return Ok(Outcome::default());
     }
+    if op == CLOSE && r.mode == crate::udp_net::record::CLOSE_MODE {
+        if out != Out::default()
+            || live
+                .typed_resources
+                .remove(&(object as usize))
+                .is_none_or(|r| r.kind != ResourceKind::Udp)
+        {
+            return Err(Fault::Corrupt);
+        }
+        live.close_udp_pool(object)?;
+        return Ok(Outcome::default());
+    }
     let mut o = Outcome {
         value: out.value,
         error: IoError {
@@ -138,6 +150,46 @@ pub(super) unsafe fn replay_out(
         _ => return Err(Fault::Corrupt),
     }
     let ok = out.status == OK;
+    if udp_operation(op) {
+        if !crate::udp_net::record::creates(op)
+            && live
+                .typed_resources
+                .get(&(object as usize))
+                .is_none_or(|r| r.kind != ResourceKind::Udp)
+        {
+            return Err(Fault::Corrupt);
+        }
+        if op == UDP_RECV && ok {
+            space
+                .ok_or(Fault::Corrupt)?
+                .require([out.written, out.value])?;
+        }
+        // SAFETY: the UDP adapter holds the pinned request and validates every output.
+        let count = unsafe {
+            crate::udp_net::record::replay(
+                r,
+                &out,
+                live.objects.len() as u64 + 1,
+                space.map(|n| n.recorded),
+            )
+        }
+        .map_err(|_| Fault::Corrupt)?;
+        if count != 0 {
+            let mut handles = Vec::new();
+            for _ in 0..count {
+                live.objects.push(Object {
+                    inner: None,
+                    open_resource: false,
+                });
+                handles.push(handle(generation, live.objects.len()));
+                live.typed_resources
+                    .insert(live.objects.len(), Resource::new(ResourceKind::Udp, 0));
+            }
+            // SAFETY: every handle's ordinal passed validation before allocation.
+            unsafe { crate::udp_net::record::replay_handles(r, handles) };
+        }
+        return Ok(o);
+    }
     if clock(op) {
         let prev = live.clocks.get(&(op, object)).copied().unwrap_or(0);
         o.value = prev.wrapping_add(unzz(out.value) as u64);

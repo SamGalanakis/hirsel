@@ -41,7 +41,7 @@ impl Charges {
             if let Some(cell) = weak.upgrade()
                 && let Some(charge) = cell.take_charge(payer)
             {
-                handed.push((weak.clone(), charge.bytes()));
+                handed.push(crate::secret::HandedCharge::new(&cell, charge.bytes()));
                 refunds.push(charge);
             }
         }

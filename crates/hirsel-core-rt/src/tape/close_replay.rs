@@ -1,6 +1,6 @@
 use super::{
-    Args, CLOSE, CLOSE_ENTRIES, Divergence, Fault, Frame, FrameReader, Inner, Mismatch, OpenError,
-    Out, ReplayInput,
+    Args, CLOSE, CLOSE_ENTRIES, Divergence, Fault, Frame, FrameReader, Inner, Live, Mismatch,
+    OpenError, Out, ReplayInput, Request, Step, done, replay_out,
 };
 use std::collections::BTreeMap;
 
@@ -40,6 +40,11 @@ impl CloseKey {
                 args,
                 ..
             } if is_close(*op) => {
+                if *op == CLOSE
+                    && matches!(args, Args::Literal(bytes) if bytes.as_slice() == crate::udp_net::record::CLOSE_ARGS)
+                {
+                    return Ok(None);
+                }
                 if *task != 0 {
                     return Err(Fault::Corrupt);
                 }
@@ -183,4 +188,18 @@ impl Closes {
         }
         Ok(())
     }
+}
+
+pub(super) fn replay_close(
+    live: &mut Live,
+    generation: u32,
+    object: u64,
+    request: &mut Request,
+    args: &Args,
+) -> Result<Step, Fault> {
+    let op = request.operation;
+    let key = CloseKey::new(op, object, args)?;
+    let out = live.replayer.as_mut().unwrap().close(key)?;
+    // SAFETY: a CLOSE has no output carrier and mutates only taped ownership.
+    unsafe { replay_out(live, generation, op, object, request, out, None).map(done) }
 }

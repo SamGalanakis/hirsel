@@ -2,6 +2,8 @@
 
 mod abi;
 mod native;
+#[cfg(feature = "record")]
+pub(crate) mod record;
 pub(crate) mod served;
 
 use crate::{
@@ -12,7 +14,7 @@ use crate::{
     net::{Address, AddressOutcome, DENIED, Rules},
     os_net::{Due, deadline, error, signal},
     provider::*,
-    secret::{Charge, ChargeCell, HandedOver},
+    secret::{Charge, ChargeCell, HandedCharge, HandedOver},
 };
 use hirsel_core_net::UdpMember;
 use hirsel_core_net::udp::{
@@ -76,7 +78,7 @@ impl Allowance {
             if let Some(cell) = weak.upgrade()
                 && let Some(charge) = cell.take_charge(payer)
             {
-                handed.push((weak.clone(), charge.bytes()));
+                handed.push(HandedCharge::new(&cell, charge.bytes()));
                 refunds.push(charge);
             }
         }
@@ -111,13 +113,18 @@ impl Drop for KernelCharge {
     }
 }
 
-struct SocketCharge {
+pub(crate) struct SocketCharge {
     allowance: Arc<Allowance>,
     key: u64,
     _cell: Arc<ChargeCell>,
 }
 
 impl SocketCharge {
+    #[cfg(feature = "record")]
+    pub(crate) fn refund_replayed(&self, payer: Payer) -> bool {
+        self._cell.refund_replayed(payer)
+    }
+
     fn new(allowance: Arc<Allowance>, key: u64, charge: Charge) -> Self {
         let cell = ChargeCell::new(charge);
         allowance
@@ -135,6 +142,8 @@ impl SocketCharge {
 
 impl Drop for SocketCharge {
     fn drop(&mut self) {
+        #[cfg(feature = "record")]
+        self._cell.retire();
         self.allowance.charges.lock().unwrap().remove(&self.key);
     }
 }
@@ -151,6 +160,11 @@ enum Carrier {
     Standalone(Standalone),
     Member(UdpMember),
     Served(served::Socket),
+    #[cfg(feature = "record")]
+    Replayed {
+        _pool: Arc<SocketCharge>,
+        _intake: Option<Arc<SocketCharge>>,
+    },
 }
 
 pub(crate) struct Resource {
@@ -161,6 +175,8 @@ pub(crate) struct Resource {
     v6: bool,
     bound: bool,
     receiving: bool,
+    #[cfg(feature = "record")]
+    tape_id: Option<u64>,
 }
 
 impl Resource {
@@ -169,6 +185,10 @@ impl Resource {
             Carrier::Standalone(socket) => &socket.socket,
             Carrier::Member(member) => member.socket(),
             Carrier::Served(_) => unreachable!("served operations do not use kernel sockets"),
+            #[cfg(feature = "record")]
+            Carrier::Replayed { .. } => {
+                unreachable!("replayed operations do not use kernel sockets")
+            }
         }
     }
 
@@ -210,7 +230,21 @@ impl Resource {
     }
 }
 
-pub(crate) unsafe fn drop_socket(files: *mut Files, key: u64) {
+pub(crate) unsafe fn drop_socket(context: *mut Context, key: u64) {
+    // SAFETY: the destructor owns this key and its context.
+    let files = unsafe { (*context).host_files };
+    #[cfg(feature = "record")]
+    {
+        let resource = unsafe { (&(*files).udp_sockets).get(&key) }.unwrap();
+        if let Some(tape_id) = resource.tape_id {
+            unsafe { record::close(context, files, key, resource.provider, tape_id) };
+            return;
+        }
+    }
+    unsafe { drop_native(files, key) };
+}
+
+unsafe fn drop_native(files: *mut Files, key: u64) {
     // SAFETY: transfer or drop exclusively owns this resource and unit registry.
     let resource = unsafe { (*files).udp_sockets.remove(&key) }.unwrap();
     if let Carrier::Standalone(socket) = &resource.carrier {
@@ -394,6 +428,8 @@ struct Call {
     packets: *mut Buffer,
     progress: usize,
     served: served::Delivery,
+    #[cfg(feature = "record")]
+    tape_start: (usize, usize),
 }
 
 #[derive(Default)]
@@ -584,6 +620,8 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64) -> Step {
                 }
                 Carrier::Member(_) => {}
                 Carrier::Served(_) => unreachable!(),
+                #[cfg(feature = "record")]
+                Carrier::Replayed { .. } => unreachable!(),
             }
         }
         Step {
@@ -679,16 +717,31 @@ unsafe fn create(
         let files = (*context).host_files;
         let provider = *hirsel_core_capability_provider(context, net);
         let served = crate::provide::owns(&provider);
-        if !served && !crate::os::owns(&provider) {
+        #[cfg(feature = "record")]
+        let taped = crate::tape::owns(&provider);
+        #[cfg(not(feature = "record"))]
+        let taped = false;
+        if !served && !taped && !crate::os::owns(&provider) {
             return fail(DENIED);
         }
         let handle = hirsel_core_capability_handle(context, net);
+        #[cfg(feature = "record")]
+        let rules_id = if taped {
+            crate::tape::net_rules(&provider, handle)
+        } else {
+            handle
+        };
+        #[cfg(not(feature = "record"))]
+        let rules_id = handle;
+        if rules_id == 0 {
+            return fail(DENIED);
+        }
         let rules = {
             let mut cache = (*files).registry.run_grants().udp_rules.lock().unwrap();
             cache
-                .entry(handle)
+                .entry(rules_id)
                 .or_insert_with(|| {
-                    let rows = (*(handle as *const Rules)).as_slice();
+                    let rows = (*(rules_id as *const Rules)).as_slice();
                     Arc::new(UdpRules::new(rows.iter().map(|row| row.address)))
                 })
                 .clone()
@@ -741,10 +794,17 @@ unsafe fn create(
             packets: output,
             progress: 0,
             served: served::Delivery::default(),
+            #[cfg(feature = "record")]
+            tape_start: (0, if output.is_null() { 0 } else { (*output).len }),
         };
         let mut outcome = call.run(context, operation, handle, site);
         if served && outcome.status == 0 && outcome.error == IoError::OK {
             outcome = call.install_served(operation);
+        }
+        #[cfg(feature = "record")]
+        if taped && outcome.status == 0 && outcome.error == IoError::OK {
+            call.key = outcome.value;
+            outcome = call.install_recorded(operation);
         }
         AddressOutcome::new(outcome, call.endpoint)
     }
@@ -836,11 +896,18 @@ unsafe fn existing(
             packets,
             progress: 0,
             served: served::Delivery::default(),
+            #[cfg(feature = "record")]
+            tape_start: (
+                if bytes.is_null() { 0 } else { (*bytes).len },
+                if packets.is_null() { 0 } else { (*packets).len },
+            ),
         };
         let port = match &resource.carrier {
             Carrier::Served(socket) => socket.key(),
             _ => key,
         };
+        #[cfg(feature = "record")]
+        let port = resource.tape_id.unwrap_or(port);
         call.served.ingress = !resource.bound;
         if port != key && operation == UDP_SEND {
             call.served.encode(operands(packets));

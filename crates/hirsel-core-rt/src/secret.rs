@@ -161,7 +161,13 @@ impl Drop for Charge {
 /// A charge that the release of its designation, or of the last designation of
 /// sealed bytes, refunds. When the unit whose limit paid it ends first, its owner
 /// takes the charge over (CONC-15).
-pub(crate) struct ChargeCell(Mutex<Option<Charge>>);
+pub(crate) struct ChargeCell {
+    charge: Mutex<Option<Charge>>,
+    #[cfg(feature = "record")]
+    retirement: std::sync::OnceLock<crate::tape::Retirement>,
+    #[cfg(feature = "record")]
+    retired: std::sync::atomic::AtomicBool,
+}
 
 // SAFETY: an outstanding charge pins its payer slot, and a refund settles from
 // any unit (MEM-20).
@@ -171,16 +177,54 @@ unsafe impl Sync for ChargeCell {}
 
 impl ChargeCell {
     pub(crate) fn new(charge: Charge) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(Some(charge))))
+        Arc::new(Self {
+            charge: Mutex::new(Some(charge)),
+            #[cfg(feature = "record")]
+            retirement: std::sync::OnceLock::new(),
+            #[cfg(feature = "record")]
+            retired: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     pub(crate) fn take_charge(&self, payer: Payer) -> Option<Charge> {
-        let mut charge = self.0.lock().unwrap();
+        let mut charge = self.charge.lock().unwrap();
         if charge.as_ref().is_some_and(|c| c.0.same_domain(payer)) {
             charge.take()
         } else {
             None
         }
+    }
+
+    #[cfg(feature = "record")]
+    pub(crate) fn record_retirement(&self, retirement: crate::tape::Retirement) {
+        assert!(self.retirement.set(retirement).is_ok());
+    }
+
+    #[cfg(feature = "record")]
+    pub(crate) fn retire(&self) {
+        let Some(&retirement) = self.retirement.get() else {
+            return;
+        };
+        let mut charge = self.charge.lock().unwrap();
+        self.retired
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let previous = charge.take();
+        drop(charge);
+        if let Some(previous) = previous {
+            previous.retire(retirement);
+        }
+    }
+
+    #[cfg(feature = "record")]
+    pub(crate) fn refund_replayed(&self, payer: Payer) -> bool {
+        let mut charge = self.charge.lock().unwrap();
+        if !charge.as_ref().is_some_and(|c| c.0.is_current_owner(payer)) {
+            return false;
+        }
+        let previous = charge.take();
+        drop(charge);
+        drop(previous);
+        true
     }
 }
 
@@ -197,19 +241,54 @@ impl Charge {
         self.1 -= bytes;
         Self(self.0, bytes)
     }
+
+    #[cfg(feature = "record")]
+    fn retire(self, retirement: crate::tape::Retirement) {
+        let charge = std::mem::ManuallyDrop::new(self);
+        charge.0.post_retirement(charge.1, retirement);
+    }
 }
 
 /// A designation still held when the unit that paid for it ended, and its bytes.
-pub(crate) type HandedOver = Vec<(Weak<ChargeCell>, u64)>;
+pub(crate) type HandedOver = Vec<HandedCharge>;
 
-/// The owner's end take: each designation still held keeps its charge, now
-/// paid by the owner's part of the helper's charge.
+pub(crate) struct HandedCharge {
+    weak: Weak<ChargeCell>,
+    bytes: u64,
+    // A pool can physically retire between the hand-over and the end take.
+    // Keep its pending tape identity until the new payer can receive the input.
+    #[cfg(feature = "record")]
+    retiring: Option<Arc<ChargeCell>>,
+}
+
+impl HandedCharge {
+    pub(crate) fn new(cell: &Arc<ChargeCell>, bytes: u64) -> Self {
+        Self {
+            weak: Arc::downgrade(cell),
+            bytes,
+            #[cfg(feature = "record")]
+            retiring: cell.retirement.get().is_some().then(|| cell.clone()),
+        }
+    }
+}
+
+/// The owner's end take moves each still-held charge to its part of the
+/// helper's reservation.
 pub(crate) fn take_over(handed: &HandedOver, mut payer: impl FnMut(u64) -> Payer) {
-    for (cell, bytes) in handed {
-        if let Some(cell) = cell.upgrade() {
-            let mut charge = cell.0.lock().unwrap();
+    for handed in handed {
+        if let Some(cell) = handed.weak.upgrade() {
+            let mut charge = cell.charge.lock().unwrap();
             if charge.is_none() {
-                *charge = Some(Charge(payer(*bytes), *bytes));
+                let adopted = Charge(payer(handed.bytes), handed.bytes);
+                #[cfg(feature = "record")]
+                if let Some(_retiring) = &handed.retiring
+                    && cell.retired.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    drop(charge);
+                    adopted.retire(*cell.retirement.get().unwrap());
+                    continue;
+                }
+                *charge = Some(adopted);
             }
         }
     }
@@ -293,7 +372,7 @@ impl Secrets {
         for entry in self.entries.iter().flatten() {
             for cell in [&entry.charge, &entry.secret.seal].into_iter().flatten() {
                 if let Some(c) = cell.take_charge(payer) {
-                    handed.push((Arc::downgrade(cell), c.1));
+                    handed.push(HandedCharge::new(cell, c.1));
                     refunds.push(c);
                 }
             }

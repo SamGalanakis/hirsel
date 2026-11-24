@@ -82,6 +82,13 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
             print!("{at} ");
             match frame {
                 Frame::Wait { gap, task } => println!("WAIT gap={gap} task={task}"),
+                Frame::Retired { gap, task, pool } => {
+                    println!(
+                        "RETIRED gap={gap} task={task} ordinal={} intake={}",
+                        pool >> 1,
+                        pool & 1 != 0
+                    );
+                }
                 Frame::Wake { gap, task } => println!("WAKE gap={gap} task={task}"),
                 Frame::Cancel { gap, task } => println!("CANCEL gap={gap} task={task}"),
                 Frame::Choose { gap, index } => println!("CHOOSE gap={gap} index={index}"),

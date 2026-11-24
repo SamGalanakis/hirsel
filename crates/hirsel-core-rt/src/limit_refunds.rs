@@ -8,7 +8,7 @@
 //! the root is linked on one inbox, its live inbox. A root that changes inbox
 //! (`relink`) or a union (`unite`) therefore moves whole lists in O(1), and
 //! never walks another root's slots.
-use super::{Domain, Payer, Slot};
+use super::{Domain, Funding, Payer, Slot};
 use std::{
     cell::{Cell, UnsafeCell},
     collections::HashMap,
@@ -117,6 +117,8 @@ pub(super) struct Remote {
     // routes them under the scheduler's table lease.
     unassigned: Option<NonNull<Slot>>,
     queued: usize,
+    #[cfg(feature = "record")]
+    retirements: HashMap<NonNull<Slot>, Vec<crate::tape::Retirement>>,
 }
 impl Remote {
     pub(super) fn new() -> Self {
@@ -124,6 +126,8 @@ impl Remote {
             inboxes: Inboxes::default(),
             unassigned: None,
             queued: 0,
+            #[cfg(feature = "record")]
+            retirements: HashMap::default(),
         }
     }
     pub(super) fn inbox(&mut self, owner: u64) -> NonNull<Inbox> {
@@ -459,6 +463,8 @@ pub(super) struct Post {
     payer: Payer,
     bytes: u64,
     next: *mut Post,
+    #[cfg(feature = "record")]
+    retirement: Option<crate::tape::Retirement>,
 }
 /// The mailbox head after retirement. Never a node address (Post is 8-aligned).
 pub(super) fn closed() -> *mut Post {
@@ -498,6 +504,14 @@ impl Domain {
             let post = unsafe { Box::from_raw(fifo) };
             fifo = post.next;
             remote.enqueue(post.payer, post.bytes, None);
+            #[cfg(feature = "record")]
+            if let Some(retirement) = post.retirement {
+                remote
+                    .retirements
+                    .entry(post.payer.0)
+                    .or_default()
+                    .push(retirement);
+            }
         }
     }
     /// Whether a bound owner has refunds to fold: its inbox's, or any mail.
@@ -529,12 +543,37 @@ impl Payer {
     /// keeps the Domain alive from the push to this call's last touch.
     #[cold]
     pub(super) fn remote_refund(self, bytes: u64) {
+        self.post_refund(
+            bytes,
+            #[cfg(feature = "record")]
+            None,
+        );
+    }
+
+    #[cfg(feature = "record")]
+    pub(crate) fn is_current_owner(self, local: Payer) -> bool {
+        self.same_domain(local)
+            && self.forest().record(self.root()).live.owner == crate::tasks::current_id()
+    }
+
+    #[cfg(feature = "record")]
+    pub(crate) fn post_retirement(self, bytes: u64, retirement: crate::tape::Retirement) {
+        self.post_refund(bytes, Some(retirement));
+    }
+
+    fn post_refund(
+        self,
+        bytes: u64,
+        #[cfg(feature = "record")] retirement: Option<crate::tape::Retirement>,
+    ) {
         let d = self.domain();
         d.posters.fetch_add(1, Ordering::SeqCst);
         let post = Box::into_raw(Box::new(Post {
             payer: self,
             bytes,
             next: std::ptr::null_mut(),
+            #[cfg(feature = "record")]
+            retirement,
         }));
         let mut head = d.mail.load(Ordering::Acquire);
         loop {
@@ -573,6 +612,88 @@ impl Payer {
             // SAFETY: all handles, zero leases and outstanding bytes are gone.
             unsafe {
                 drop(Box::from_raw(domain.as_ptr()));
+            }
+        }
+    }
+}
+
+impl Funding {
+    /// Apply only the running owner's ordered refunds. No admission.
+    #[inline(always)]
+    pub fn drain(&self) {
+        if self.pending() {
+            self.drain_notified();
+        } else {
+            #[cfg(feature = "record")]
+            self.replay_retirements();
+        }
+    }
+    /// Owner-event delivery only. Routing and folding share the domain mutex.
+    /// A union may move the current representative.
+    #[cold]
+    pub(crate) fn drain_notified(&self) {
+        self.drain_pending();
+        #[cfg(feature = "record")]
+        self.replay_retirements();
+        self.normalize();
+    }
+    #[cfg(feature = "record")]
+    fn replay_retirements(&self) {
+        if let Some(group) = crate::tasks::current_group() {
+            group.replay_retirements(self.payer.get());
+        }
+    }
+
+    #[cold]
+    pub(super) fn drain_pending(&self) {
+        let domain = self.payer.get().domain();
+        // SAFETY: drains run on the owner Unit.
+        let remote = unsafe { &mut *domain.remote() };
+        let batch = domain.mail.swap(std::ptr::null_mut(), Ordering::Acquire);
+        debug_assert!(batch != closed(), "a drain after retirement");
+        Domain::fold(remote, batch);
+        self.drain_locked(remote, false);
+        // Lower, then recheck the mailbox: a post pushed after the swap either
+        // shows here or raises `pending` after this store (both SeqCst).
+        domain.pending.store(remote.pending(), Ordering::SeqCst);
+        if !domain.mail.load(Ordering::SeqCst).is_null() {
+            domain.pending.store(true, Ordering::Relaxed);
+        }
+        remote.reap(domain);
+    }
+    pub(super) fn drain_locked(&self, remote: &mut Remote, retired: bool) {
+        remote.route_unassigned();
+        let owner = (!retired).then(crate::tasks::current_id);
+        let f = self.payer.get().forest();
+        while let Some(slot) = remote.pop(owner) {
+            // SAFETY: the dirty node retains a charge/zero pin until delivery;
+            // pop cleared its intrusive link under the same domain mutex.
+            let payer = Payer(slot);
+            let slot = payer.slot();
+            if let Some(unused) = slot.handover.take() {
+                let original_parent = f.record_mut(payer).parent.take().unwrap();
+                let (winner, loser) = f.merge(payer, original_parent, unused);
+                remote.unite(winner.0, loser.0);
+                f.release(payer);
+            }
+            let bytes = slot.pending.swap(0, Ordering::Relaxed);
+            let zeros = slot.pending_zeros.swap(0, Ordering::Relaxed);
+            if bytes != 0 {
+                f.refund(payer, bytes);
+                if retired {
+                    f.retired_bytes -= bytes;
+                }
+            }
+            for _ in 0..zeros {
+                f.refund(payer, 0);
+            }
+            #[cfg(feature = "record")]
+            if let Some(events) = remote.retirements.remove(&payer.0)
+                && !retired
+            {
+                for event in events {
+                    event.record();
+                }
             }
         }
     }

@@ -823,65 +823,6 @@ impl Funding {
         }
     }
 
-    /// Apply only the running owner's ordered refunds. No admission.
-    #[inline(always)]
-    pub fn drain(&self) {
-        if self.pending() {
-            self.drain_notified();
-        }
-    }
-    /// Owner-event delivery only. Routing and folding share the domain mutex.
-    /// A union may move the current representative.
-    #[cold]
-    pub(crate) fn drain_notified(&self) {
-        self.drain_pending();
-        self.normalize();
-    }
-    #[cold]
-    fn drain_pending(&self) {
-        let domain = self.payer.get().domain();
-        // SAFETY: drains run on the owner Unit.
-        let remote = unsafe { &mut *domain.remote() };
-        let batch = domain.mail.swap(std::ptr::null_mut(), Ordering::Acquire);
-        debug_assert!(batch != closed(), "a drain after retirement");
-        Domain::fold(remote, batch);
-        self.drain_locked(remote, false);
-        // Lower, then recheck the mailbox: a post pushed after the swap either
-        // shows here or raises `pending` after this store (both SeqCst).
-        domain.pending.store(remote.pending(), Ordering::SeqCst);
-        if !domain.mail.load(Ordering::SeqCst).is_null() {
-            domain.pending.store(true, Ordering::Relaxed);
-        }
-        remote.reap(domain);
-    }
-    fn drain_locked(&self, remote: &mut Remote, retired: bool) {
-        remote.route_unassigned();
-        let owner = (!retired).then(crate::tasks::current_id);
-        let f = self.payer.get().forest();
-        while let Some(slot) = remote.pop(owner) {
-            // SAFETY: the dirty node retains a charge/zero pin until delivery;
-            // pop cleared its intrusive link under the same domain mutex.
-            let payer = Payer(slot);
-            let slot = payer.slot();
-            if let Some(unused) = slot.handover.take() {
-                let original_parent = f.record_mut(payer).parent.take().unwrap();
-                let (winner, loser) = f.merge(payer, original_parent, unused);
-                remote.unite(winner.0, loser.0);
-                f.release(payer);
-            }
-            let bytes = slot.pending.swap(0, Ordering::Relaxed);
-            let zeros = slot.pending_zeros.swap(0, Ordering::Relaxed);
-            if bytes != 0 {
-                f.refund(payer, bytes);
-                if retired {
-                    f.retired_bytes -= bytes;
-                }
-            }
-            for _ in 0..zeros {
-                f.refund(payer, 0);
-            }
-        }
-    }
     pub(crate) fn fast(&self) -> *mut LimitRecord {
         self.payer.get().canonical().local()
     }

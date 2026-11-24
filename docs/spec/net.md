@@ -936,9 +936,9 @@ leads to (MEM-20). Dropping cannot wait, so the drop starts retirement and retur
 retirement completes later as an input event of the **refunded unit**: the unit of the live
 limit that the record leads to when the retirement completes
 ([CONC-10](tasks.md#conc-10-event-order), [CONC-15](tasks.md#conc-15-units)). That unit
-records it, as it records any cross-unit refund. It is recorded at its position as
-`Retired(ordinal)`, so an admission
-on replay sees exactly the refunds the recorded run saw. A later open whose admission comes
+folds it at its next semantic event, as it folds any cross-unit refund. The tape records
+`Retired(ordinal)` at that position. A group intake uses its first member's ordinal with
+an intake bit. An admission on replay sees exactly the refunds the recorded run saw. A later open whose admission comes
 before that event sees the old charge still held and can be refused. A pool's credit
 therefore never funds a new pool while the old one's storage is still live.
 

@@ -105,10 +105,14 @@ impl OsProvider {
     }
 
     pub(crate) fn from_streams(stdout: Option<OwnedFd>, stderr: Option<OwnedFd>) -> Self {
+        let epoch = monotonic_ns();
+        if std::env::var("HIRSEL_UDP_MEASURE_CLOCK").as_deref() == Ok("1") {
+            eprintln!("UDP_CLOCK_EPOCH {epoch}");
+        }
         Self {
             issue_file: None,
             sync_file: None,
-            epoch: monotonic_ns(),
+            epoch,
             directories: BTreeMap::new(),
             unix_roots: BTreeMap::new(),
             files: BTreeMap::new(),
@@ -648,6 +652,10 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
     // SAFETY: the tape pins the source's local socket registry in a typed CLOSE.
     unsafe {
         let r = &*request;
+        if r.operation == CLOSE && r.mode == crate::udp_net::record::CLOSE_MODE {
+            crate::udp_net::record::close_source(r);
+            return Step::default();
+        }
         if r.operation == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
             return Step {
                 outcome: Outcome {

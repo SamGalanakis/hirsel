@@ -20,6 +20,9 @@ mod dispatch;
 mod error;
 mod exec;
 mod managed;
+mod record_delivery;
+mod retirement;
+pub(crate) use retirement::{Retirement, register_udp_retirements};
 mod replay_delivery;
 pub mod run;
 pub(crate) mod schedule;
@@ -41,8 +44,9 @@ use crate::{
     unix_net::{UnixOperation, UnixReply},
 };
 use arguments::canonical;
-use close_replay::{CloseKey, Closes, is_close};
+use close_replay::{CloseKey, Closes, is_close, replay_close};
 use format::*;
+use record_delivery::record_out;
 use replay_delivery::{ReadSpace, replay_out};
 use std::{collections::BTreeMap, ptr, sync::Mutex};
 
@@ -189,6 +193,7 @@ struct Live {
     replay_net_rules: BTreeMap<usize, u64>,
     exec_rules: BTreeMap<usize, std::sync::Arc<hirsel_core_net::exec::ExecRules>>,
     typed_resources: BTreeMap<usize, Resource>,
+    udp_retirements: BTreeMap<u64, retirement::Pool>,
 
     /// The previous value of each clock op on each object (section 5.4).
     clocks: BTreeMap<(u8, u64), u64>,
@@ -666,6 +671,7 @@ impl std::fmt::Display for FrameEvidence<'_> {
             | Frame::Done { gap, task, .. }
             | Frame::Wake { gap, task }
             | Frame::Cancel { gap, task } => write!(f, "task={task} gap={gap}"),
+            Frame::Retired { gap, task, pool } => write!(f, "task={task} gap={gap} pool={pool}"),
             Frame::Op {
                 task,
                 op,
@@ -707,6 +713,7 @@ impl FrameEvidence<'_> {
             Frame::Op { .. } => "OP",
             Frame::Wake { .. } => "WAKE",
             Frame::Cancel { .. } => "CANCEL",
+            Frame::Retired { .. } => "RETIRED",
             Frame::Choose { .. } => "CHOOSE",
             Frame::Grant { .. } => "GRANT",
             Frame::Repeat { .. } => "REPEAT",
@@ -890,6 +897,7 @@ enum ResourceKind {
     UnixStream,
     UnixListener,
     Datagram,
+    Udp,
 }
 
 struct Resource {
@@ -941,7 +949,7 @@ fn creates_object(op: u8) -> bool {
 }
 
 fn waiting_io(op: u8) -> bool {
-    socket_op(op) || unix_operation(op) || matches!(op, STDIN_READ | EXEC_WAIT)
+    socket_op(op) || unix_operation(op) || udp_operation(op) || matches!(op, STDIN_READ | EXEC_WAIT)
 }
 
 fn waiting_io_status(error: u8) -> u8 {
@@ -1164,6 +1172,7 @@ impl Tape {
                     replay_net_rules: BTreeMap::new(),
                     exec_rules: BTreeMap::new(),
                     typed_resources: BTreeMap::new(),
+                    udp_retirements: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     recorder: Some(recorder),
                     replayer: None,
@@ -1211,6 +1220,7 @@ impl Tape {
                     replay_net_rules: BTreeMap::new(),
                     exec_rules: BTreeMap::new(),
                     typed_resources: BTreeMap::new(),
+                    udp_retirements: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     recorder: None,
                     replayer: Some(Replayer {
@@ -1373,6 +1383,7 @@ impl Tape {
                             Frame::Grant { kind: k, .. } if k == kind => Mismatch::Schedule,
                             Frame::Wake { .. }
                             | Frame::Cancel { .. }
+                            | Frame::Retired { .. }
                             | Frame::Done { .. }
                             | Frame::Choose { .. }
                             | Frame::Wait { .. } => Mismatch::Schedule,
@@ -1527,6 +1538,7 @@ fn finish(
                         frame,
                         Frame::Wake { .. }
                             | Frame::Cancel { .. }
+                            | Frame::Retired { .. }
                             | Frame::Done { .. }
                             | Frame::Choose { .. }
                             | Frame::Wait { .. }
@@ -1724,7 +1736,8 @@ fn pending() -> Step {
 
 unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     let h = r.handle;
-    let close = is_close(r.operation);
+    let close = is_close(r.operation)
+        && !(r.operation == CLOSE && r.mode == crate::udp_net::record::CLOSE_MODE);
     if !close && schedule::member(cell, generation_of(h)) {
         crate::tasks::before_commit();
     }
@@ -1856,212 +1869,6 @@ unsafe fn issue_in(cell: &Cell, r: &mut Request, token: u64) -> Step {
     done(answer)
 }
 
-/// Normalize a provider outcome and assign newly created object ordinals at
-/// production, before another task can observe the completion.
-unsafe fn record_out(
-    live: &mut Live,
-    generation: u32,
-    r: &Request,
-    before: usize,
-    inner: Inner,
-    mut o: Outcome,
-) -> (Out, Outcome, Delivery) {
-    let ordinal = ordinal_of(r.handle);
-    let ok = o.status == 0 && o.error == IoError::OK;
-    if ok && r.operation == CRED_FETCH {
-        // The fetched key is designated by this delivery's tape position.
-        o.value = live.schedule.events + 1;
-    }
-    let mut out = Out {
-        status: if r.operation == EXEC_WAIT {
-            match o.error.tag {
-                0 => OK,
-                2 => TIMED_OUT,
-                3 => ABORTED,
-                _ => ERROR,
-            }
-        } else if waiting_io(r.operation) {
-            waiting_io_status(o.error.tag)
-        } else if o.error == IoError::OK {
-            OK
-        } else {
-            ERROR
-        },
-        value: o.value,
-        error: (o.error.tag, u64::from(o.error.code)),
-        written: o.written,
-        payload: vec![],
-    };
-    let mut answer = o;
-    let mut created = None;
-    let unix_reply = UnixOperation::describe(r.operation).map(|op| op.reply);
-    let unix_kind = unix_reply.and_then(unix::kind);
-    if ok && (creates_object(r.operation) || unix_kind.is_some()) {
-        live.objects.push(Object {
-            inner: Some(Inner {
-                provider: inner.provider,
-                handle: o.value,
-            }),
-            open_resource: matches!(r.operation, OPEN | ENTRIES | MKSTEMP),
-        });
-        out.value = live.objects.len() as u64;
-        answer.value = handle(generation, live.objects.len());
-        created = Some(answer.value);
-        if let Some(kind) = unix_kind {
-            live.typed_resources
-                .insert(live.objects.len(), Resource::new(kind, 0));
-        }
-    }
-    if ok && r.operation == EXEC_SPAWN {
-        live.typed_resources
-            .insert(live.objects.len(), Resource::new(ResourceKind::Proc, 0));
-        // SAFETY: spawn pins its private output slots through delivery.
-        let call = unsafe {
-            &mut (*r
-                .path
-                .cast_mut()
-                .cast::<crate::exec_runtime::Call<crate::exec_runtime::SpawnCall>>())
-            .data
-        };
-        for (i, pipe) in call.pipes.iter_mut().enumerate() {
-            if *pipe == 0 {
-                put_varint(&mut out.payload, 0);
-                continue;
-            }
-            let part = if i == 0 { 2 } else { 1 };
-            live.objects.push(Object {
-                inner: Some(Inner {
-                    provider: inner.provider,
-                    handle: *pipe & !3,
-                }),
-                open_resource: false,
-            });
-            live.typed_resources
-                .insert(live.objects.len(), Resource::new(ResourceKind::Pipe, part));
-            put_varint(&mut out.payload, live.objects.len() as u64);
-            *pipe = (live.objects.len() as u64) << 2 | u64::from(part);
-        }
-    }
-    if ok && r.operation == CLOSE && r.mode == crate::exec_runtime::PROC_CLOSE {
-        live.typed_resources.remove(&ordinal);
-    }
-    if ok && r.operation == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
-        let entry = live.typed_resources.get_mut(&ordinal).unwrap();
-        entry.parts &= !(1 << (r.mode & 3));
-        if entry.parts == 0 {
-            live.typed_resources.remove(&ordinal);
-        }
-        out.value = 0;
-    }
-    if ok && matches!(r.operation, CLOSE | CLOSE_ENTRIES) {
-        live.objects[ordinal - 1].open_resource = false;
-    }
-    if clock(r.operation) {
-        let prev = live
-            .clocks
-            .insert((r.operation, ordinal as u64), o.value)
-            .unwrap_or(0);
-        out.value = zz(o.value.wrapping_sub(prev) as i64);
-    }
-    if ok && matches!(r.operation, LISTEN | ACCEPT | LOCAL_ADDR | PEER_ADDR) {
-        // SAFETY: the source wrote the address into the pinned network operand.
-        let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
-        out.payload = address_bytes(network.address).to_vec();
-    } else if ok && matches!(r.operation, STAT | STAT_FILE) {
-        out.payload.push(o.kind);
-        out.payload.extend_from_slice(&o.written.to_le_bytes());
-    } else if ok && unix_reply == Some(UnixReply::Packet) {
-        out.payload.push(o.kind);
-        if r.buffer.len > before {
-            // SAFETY: receive initialized exactly its appended bytes.
-            out.payload.extend(unsafe {
-                std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before)
-            });
-        }
-    } else if ok && r.operation == RESOLVE {
-        // SAFETY: the resolve provider initialized these Ip elements in spare.
-        for i in before..r.buffer.len {
-            let ip = unsafe { r.buffer.data.cast::<hirsel_core_net::Ip>().add(i).read() };
-            out.payload
-                .extend_from_slice(&hirsel_core_net::ip_record(std::net::IpAddr::from(ip)));
-        }
-    } else if ok && r.operation == CRED_FETCH {
-        // Received plaintext only: the key id and token. The key stays sealed.
-        // SAFETY: the provider set the pinned extension's success.
-        let fetched = unsafe {
-            (*r.path.cast::<crate::cred::CredRequest>())
-                .fetched
-                .as_ref()
-        };
-        let fetched = fetched.unwrap();
-        put_varint(&mut out.payload, fetched.key_id.len() as u64);
-        out.payload.extend_from_slice(&fetched.key_id);
-        put_varint(&mut out.payload, fetched.token.len() as u64);
-        out.payload.extend_from_slice(&fetched.token);
-        out.payload
-            .extend_from_slice(&fetched.expires_ns.to_le_bytes());
-    } else if ok && r.operation == TLS_CONNECT {
-        // SAFETY: the handshake pins both outputs through delivery.
-        unsafe {
-            let tls = &*r.path.cast::<crate::tls::TlsRequest>();
-            let protocol = buffer_bytes(&*tls.protocol_out);
-            let binding = tls.binding();
-            out.payload.push(protocol.len() as u8);
-            out.payload.extend_from_slice(protocol);
-            out.payload.extend_from_slice(&*tls.peer_out);
-            out.payload.push(binding.len() as u8);
-            out.payload.extend_from_slice(binding);
-        }
-    } else if ok
-        && carries_payload(r.operation)
-        && r.buffer.len.saturating_sub(before) > 256
-        && order_only()
-    {
-        // mc-units-untied order-only variant (not replayable): a payload over
-        // 256 bytes is recorded as its length only (`value`), no bytes, no digest.
-        TAPE_COUNTS[3].fetch_add(
-            (r.buffer.len - before) as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    } else if ok && carries_payload(r.operation) && r.buffer.len > before {
-        // SAFETY: source initialized these bytes in the request's spare carrier.
-        out.payload =
-            unsafe { std::slice::from_raw_parts(r.buffer.data.add(before), r.buffer.len - before) }
-                .to_vec();
-        TAPE_COUNTS[2].fetch_add(
-            out.payload.len() as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-    }
-    if r.operation == NEXT_ENTRIES {
-        out.written = out.payload.len() as u64;
-    }
-    (
-        out,
-        answer,
-        Delivery {
-            inner,
-            outcome: o,
-            created,
-            refused: false,
-        },
-    )
-}
-
-fn replay_close(
-    live: &mut Live,
-    generation: u32,
-    object: u64,
-    request: &mut Request,
-    args: &Args,
-) -> Result<Step, Fault> {
-    let op = request.operation;
-    let key = CloseKey::new(op, object, args)?;
-    let out = live.replayer.as_mut().unwrap().close(key)?;
-    // SAFETY: a CLOSE has no output carrier and mutates only taped ownership.
-    unsafe { replay_out(live, generation, op, object, request, out, None).map(done) }
-}
-
 /// Answer one issue from the next frame (section 4.2's issue check first).
 unsafe fn replay(
     live: &mut Live,
@@ -2123,7 +1930,7 @@ unsafe fn replay(
         Frame::Op { args, .. } | Frame::Issue { args, .. } => args.recorded_spare(),
         _ => None,
     };
-    if op != CRED_FETCH && recorded.is_some_and(|spare| spare[1] != 0) {
+    if !matches!(op, CRED_FETCH | UDP_RECV) && recorded.is_some_and(|spare| spare[1] != 0) {
         return Err(Fault::Corrupt);
     }
     let space = ReadSpace::for_issue(recorded, args.recorded_spare(), rep.taken)?;
@@ -2134,7 +1941,13 @@ unsafe fn replay(
         if secret::inline_sink(op).is_some()
             || matches!(op, EXEC_SPAWN | EXEC_SIGNAL)
             || (unix_operation(op) && !unix::can_park(op))
-            || (op == CLOSE && matches!(r.mode, crate::exec_runtime::PROC_CLOSE | 0x40..=0x42))
+            || (udp_operation(op) && !matches!(op, UDP_RECV | UDP_SEND))
+            || (op == CLOSE
+                && matches!(
+                    r.mode,
+                    crate::exec_runtime::PROC_CLOSE | 0x40
+                        ..=0x42 | crate::udp_net::record::CLOSE_MODE
+                ))
         {
             return Err(Fault::Corrupt);
         }
@@ -2144,7 +1957,7 @@ unsafe fn replay(
         // frame is the divergence `complete` would report.
         if (matches!(
             op,
-            SYNC | SYNC_DIR | RESOLVE | CRED_FETCH | STDIN_READ | EXEC_WAIT
+            SYNC | SYNC_DIR | RESOLVE | CRED_FETCH | STDIN_READ | EXEC_WAIT | UDP_RECV | UDP_SEND
         ) || unix::can_park(op))
             && !crate::tasks::has_provider_task()
         {

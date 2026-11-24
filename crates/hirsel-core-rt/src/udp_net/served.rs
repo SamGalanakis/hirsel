@@ -90,6 +90,8 @@ impl Call {
                         v6: self.endpoint.family == 1,
                         bound: operation != UDP_OPEN,
                         receiving: operation != UDP_OPEN,
+                        #[cfg(feature = "record")]
+                        tape_id: None,
                     },
                 );
                 if operation == UDP_BIND_GROUP {

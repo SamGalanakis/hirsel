@@ -10,11 +10,17 @@ unsafe fn operands(r: &Request) -> Args {
         if r.operation == CLOSE && r.mode == crate::exec_runtime::PROC_CLOSE {
             return Args::of(&[0]);
         }
+        if r.operation == CLOSE && r.mode == crate::udp_net::record::CLOSE_MODE {
+            return Args::of(crate::udp_net::record::CLOSE_ARGS);
+        }
         if r.operation == CLOSE && r.mode & !3 == crate::net::SOCKET_CLOSE {
             return Args::of(&[r.mode & 3]);
         }
         if let Some(op) = UnixOperation::describe(r.operation) {
             return unix::canonical(r, op);
+        }
+        if udp_operation(r.operation) {
+            return crate::udp_net::record::arguments(r);
         }
         if socket_op(r.operation) {
             return socket_args(r);

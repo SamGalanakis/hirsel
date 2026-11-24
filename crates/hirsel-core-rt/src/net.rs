@@ -1214,7 +1214,7 @@ pub unsafe extern "C" fn hirsel_core_net_join(
 pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64) {
     unsafe {
         if crate::udp_net::is_socket(key) {
-            crate::udp_net::drop_socket((*context).host_files, key);
+            crate::udp_net::drop_socket(context, key);
             return;
         }
         if crate::exec_runtime::is_proc(key) {

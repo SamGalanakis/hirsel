@@ -62,6 +62,7 @@ pub const F_END: u8 = 10;
 pub const F_WAIT: u8 = 11;
 /// A positive count of CHOOSE frames, each equal to the one two frames back.
 pub const F_REPEAT: u8 = 12;
+pub const F_RETIRED: u8 = 13;
 /// The head bit saying a task varint follows.
 pub const T: u8 = 0x10;
 
@@ -255,7 +256,7 @@ pub fn writes(op: u8) -> bool {
     use crate::op::*;
     matches!(
         op,
-        WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES | DATAGRAM_RECV
+        WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES | DATAGRAM_RECV | UDP_RECV
     )
 }
 
@@ -395,6 +396,12 @@ impl Out {
                 .ok()
                 .and_then(|count| count.checked_add(1))
                 .ok_or(Corrupt),
+            op::UDP_RECV if self.status == OK => usize::try_from(self.value)
+                .ok()
+                .and_then(|count| count.checked_mul(36))
+                .and_then(|records| records.checked_add(usize::try_from(self.written).ok()?))
+                .ok_or(Corrupt),
+            op::UDP_RECV => Ok(0),
             op::DATAGRAM_RECV | op::RECV_BOUNDED | op::RESOLVE | op::STDIN_READ => Ok(0),
             op::RANDOM | op::NEXT_ENTRIES => usize::try_from(self.written).map_err(|_| Corrupt),
             _ => Ok(self.payload.len()),
@@ -433,6 +440,11 @@ pub enum Frame {
     Cancel {
         gap: u64,
         task: u64,
+    },
+    Retired {
+        gap: u64,
+        task: u64,
+        pool: u64,
     },
     Choose {
         gap: u64,
@@ -567,6 +579,12 @@ impl Encoder {
                 put_varint(out, *gap);
                 self.task(out, start, *task);
             }
+            Frame::Retired { gap, task, pool } => {
+                out.push(F_RETIRED);
+                put_varint(out, *gap);
+                self.task(out, start, *task);
+                put_varint(out, *pool);
+            }
             Frame::Choose { gap, index } => put_choose(out, *gap, *index),
             Frame::Grant { gap, kind, args } => {
                 out.push(F_GRANT);
@@ -639,7 +657,10 @@ impl Decoder {
             if head & 0xe0 != 0 {
                 return Err(Corrupt);
             }
-            let has_task = matches!(kind, F_ISSUE | F_DONE | F_OP | F_WAKE | F_CANCEL | F_WAIT);
+            let has_task = matches!(
+                kind,
+                F_ISSUE | F_DONE | F_OP | F_WAKE | F_CANCEL | F_WAIT | F_RETIRED
+            );
             if head & T != 0 && !has_task {
                 return Err(Corrupt);
             }
@@ -738,6 +759,15 @@ impl Decoder {
                         gap,
                         task: self.task(head, &mut c)?,
                     }
+                }
+                F_RETIRED => {
+                    let gap = c.varint()?;
+                    let task = self.task(head, &mut c)?;
+                    let pool = c.varint()?;
+                    if pool < 2 {
+                        return Err(Corrupt);
+                    }
+                    Frame::Retired { gap, task, pool }
                 }
                 F_CHOOSE => {
                     let (gap, index) = (c.varint()?, c.varint()?);

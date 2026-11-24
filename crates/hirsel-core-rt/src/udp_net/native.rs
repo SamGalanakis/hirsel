@@ -72,6 +72,8 @@ impl Call {
                             v6,
                             bound: true,
                             receiving: true,
+                            #[cfg(feature = "record")]
+                            tape_id: None,
                         },
                     );
                     output.data.cast::<u64>().add(output.len).write(handle);
@@ -103,6 +105,8 @@ impl Call {
                     v6,
                     bound: bind,
                     receiving: bind,
+                    #[cfg(feature = "record")]
+                    tape_id: None,
                 },
             );
             Outcome {
@@ -128,6 +132,8 @@ impl Call {
                 Carrier::Standalone(socket) => socket.pool.front(),
                 Carrier::Member(member) => member.reader().front(),
                 Carrier::Served(_) => unreachable!(),
+                #[cfg(feature = "record")]
+                Carrier::Replayed { .. } => unreachable!(),
             };
             match captured {
                 Some(Captured::Discarded) if budget.dispatch(0) => {
@@ -181,6 +187,8 @@ impl Call {
                             member.measure_delivery(&poller, captured_at);
                         }
                         Carrier::Served(_) => unreachable!(),
+                        #[cfg(feature = "record")]
+                        Carrier::Replayed { .. } => unreachable!(),
                     }
                 }
                 None if n == 0 => {

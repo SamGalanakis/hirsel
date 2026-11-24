@@ -236,15 +236,15 @@ fn http_generated_handler[G: send, H: shareable + inert + send, B: send](req: st
     }
     let sent = match prepare_call(state.registered, context, std.http.copy_bytes(binding.entry), stream_id, position, take payload, binding.deadline_ms) {
         Ok(take send) => take send,
-        Error(take why) => return Ok(Reply(http_refusal(take why)?)),
+        Error(take why) => {
+            let response = if binding.mode == Stream { http_refused_attempt(req, take why)? } else { http_refusal(take why)? }
+            return Ok(Reply(take response))
+        },
     }
     match operation.kind {
         Transact => {
-            let delivered = match relay_call(state.relay, take sent, state.clock, state.tasks, deadline) {
-                Ok(take answer) => take answer,
-                Error(take why) => return Ok(Reply(http_refusal(take why)?)),
-            }
-            Ok(Reply(http_render_stream(req, binding, operation.output, take delivered)?))
+            let delivery = relay_call(state.relay, take sent, state.clock, state.tasks, deadline)
+            Ok(Reply(http_render_delivery(req, binding, operation.output, take delivery)?))
         },
         Compute => match call(state.registered, sent.key, sent.arg) {
             Returned(take data) => Ok(Reply(http_json_reply(binding.ok_status, take data, 0u64, operation.output, operation.output.root, false)?)),

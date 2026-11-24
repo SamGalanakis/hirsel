@@ -175,8 +175,9 @@ fn http_law_raw(req: std.http.Request, _scratch: Region, mut resp: std.http.Resp
         Error(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
     }
     let delivered = match relay_call(state.relay, take send, state.clock, state.tasks, handler_deadline) {
-        Ok(take reply) => take reply,
-        Error(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
+        Answered(take reply) => take reply,
+        RefusedBeforePost(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
+        Unanswered(take why) => return http_law_reply(http_law_refused(why), list.new(), false),
     }
     let RelayOutcome(payload: take body, replayed: replayed) = take delivered
     let codec: std.codec.Codec[Outcome] = std.codec.of()

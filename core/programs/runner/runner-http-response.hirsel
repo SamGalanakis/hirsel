@@ -103,8 +103,39 @@ fn http_render_stream(req: std.http.Request, binding: HttpBinding, plan: Arc[std
             std.http.mark_committed(mut reply, req)?
             Ok(take reply)
         },
-        Refused(take why) => http_refusal(take why),
+        Refused(take why) => http_refused_attempt(req, take why),
         Abandoned => http_reply(409u16, "", false, true, false),
         InDoubt => http_reply(502u16, "{\"outcome\":\"in_doubt\"}", false, false, replayed),
+    }
+}
+
+fn http_refused_attempt(req: std.http.Request, take why: Refusal) -> Result[std.http.Response, std.http.HandlerError] {
+    let kind = match why {
+        NoEntry => b"no_entry",
+        NotAllowed => b"not_allowed",
+        Malformed(_) => b"malformed",
+        Overloaded => b"overloaded",
+        Budget(_) => b"budget",
+        Deadline => b"deadline",
+        RequestMismatch => b"request_mismatch",
+        HistoryUnavailable => b"history_unavailable",
+    }
+    let sample = match why { Malformed(detail) if detail.kind == 7u32 => Some(detail.at), _ => None }
+    let mut response = http_refusal(take why)?
+    if let Some(time) = sample {
+        let mut now = string.new()
+        string.push_u64(mut now, time)
+        std.http.header(mut response, b"Hirsel-Now", string.into_bytes(take now))?
+    }
+    std.http.mark_refused(mut response, req, kind)?
+    Ok(take response)
+}
+
+fn http_render_delivery(req: std.http.Request, binding: HttpBinding, plan: Arc[std.json.JsonPlan],
+    take delivery: RelayDelivery) -> Result[std.http.Response, std.http.HandlerError] {
+    match take delivery {
+        Answered(take delivered) => http_render_stream(req, binding, plan, take delivered),
+        RefusedBeforePost(take why) => http_refused_attempt(req, take why),
+        Unanswered(take why) => http_refusal(take why),
     }
 }

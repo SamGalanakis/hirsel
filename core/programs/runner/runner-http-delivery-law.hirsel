@@ -165,6 +165,37 @@ fn l15_over_capacity(mut state: RelayState, take attempt: Send, occupied: u64) w
     fail("L15 exhausted positions did not refuse the send")
 }
 
+@test
+fn relay_handler_expiry_leaves_ask_queued(tasks: Tasks) -> Result[(), ()] waits {
+    let (take world, time) = std.sim.world.new(15u64, 0u64, 0u64)
+    let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
+    let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
+    let key = http_law_key(reg.exported[0u64])
+    let cfg = RelayConfig(http_max: 1u64, sends_max: 1u64, positions_max: 1u64, arg_max: 1024u64)
+    let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
+    let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
+    let setup = RelayStart(to: take to, head: take head, clock: time, tasks: tasks, config: cfg,
+        inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: relay_key_max(reg))
+    let (take booted, take incoming, take credits) = option.unwrap(relay_boot(take setup))
+    let mut state = take booted
+    let endpoint = result.unwrap(channel.receive(from))
+    let send = l15_send(reg, key, time, 1u32, 0u64, 30u64)
+    let short = std.clock.deadline_after_ms(host.mono_ns(time), 1u64)
+
+    // The relay has not taken the Ask. Only its handler deadline can answer.
+    match relay_call(endpoint, take send, time, tasks, short) {
+        Unanswered(Deadline) => (),
+        _ => fail("an expired handler certified an Ask that the relay can still forward"),
+    }
+    let _ = result.unwrap(channel.try_receive(credits))
+    relay_step(mut state, result.unwrap(channel.try_receive(incoming)))
+    if let Ok(RunRequest(_)) = channel.try_receive(forwarded) {} else {
+        fail("the handler deadline cancelled the still-live send")
+    }
+    let _ = std.task.cancel_join(take clock_task)
+    Ok(())
+}
+
 fn l15_send(reg: Registry[(), HttpLawHandles], key: Bytes, time: Clock, stream_id: u32, position: u64, milliseconds: u64) -> Send {
     l15_send_for(reg, key, time, stream_id, position, milliseconds, 1u64)
 }
@@ -173,7 +204,10 @@ fn l15_send_for(reg: Registry[(), HttpLawHandles], key: Bytes, time: Clock, stre
     let mut allowed: List[Bytes] = list.with_capacity(1u64)
     list.push(mut allowed, std.http.copy_bytes(key))
     let now = host.mono_ns(time)
-    let context = admitted(law_caller(author), take allowed, now, now, 65536u64, 1024u64)
+    let mut subject: Bytes = list.with_capacity(64u64)
+    list.fill(mut subject, 64u64, int.truncate(author))
+    let caller = store.Caller(issuer: 2u8, subject: take subject)
+    let context = admitted(take caller, take allowed, now, now, 65536u64, 1024u64)
     let stamp: u64 = int.widen(stream_id)
     result.unwrap(prepare_call(reg, context, std.http.copy_bytes(key), store.StreamId(t: stamp, n: stamp << 32u64), position, b"\x05\x00\x00\x00saved", milliseconds))
 }
@@ -241,14 +275,14 @@ fn l15_native(take job: L15Drive) waits {
     let server = task.spawn(tasks, bytes 4194304u64, take seed, http_op_serve)
     if reopening {
         for stream_id in 1u32 .. 4u32 {
-            let mut replay = l15_post(net, clock, address, stream_id, true)
+            let mut replay = l15_post(net, clock, address, stream_id, 0u64, true)
             result.unwrap(channel.send(head, l15_head_request(waiting)))
             l15_response(mut replay, int.widen(stream_id), true)
         }
     } else {
         // No argument reached the handler before this peer disconnected.
-        std.http_client.close(l15_post(net, clock, address, 1u32, false))
-        let mut first = l15_post(net, clock, address, 1u32, true)
+        std.http_client.close(l15_post(net, clock, address, 1u32, 0u64, false))
+        let mut first = l15_post(net, clock, address, 1u32, 0u64, true)
         result.unwrap(channel.send(head, l15_head_request(waiting)))
         l15_response(mut first, 1u64, false)
         std.http_client.close(take first)
@@ -256,10 +290,10 @@ fn l15_native(take job: L15Drive) waits {
         {
             // The first request's position is already held by the relay.
             // The retry joins it while the head is still processing that send.
-            let second = l15_post(net, clock, address, 2u32, true)
+            let second = l15_post(net, clock, address, 2u32, 0u64, true)
             let request = l15_head_request(waiting)
             std.http_client.close(take second)
-            let mut recovery = l15_post(net, clock, address, 2u32, true)
+            let mut recovery = l15_post(net, clock, address, 2u32, 0u64, true)
             result.unwrap(channel.receive(joined))
             result.unwrap(channel.send(head, take request))
             l15_response(mut recovery, 2u64, false)
@@ -268,17 +302,21 @@ fn l15_native(take job: L15Drive) waits {
         {
             // Publisher owns Told only after commit. Hold it there, drop the
             // original peer, then release it before issuing the retry.
-            let third = l15_post(net, clock, address, 3u32, true)
+            let third = l15_post(net, clock, address, 3u32, 0u64, true)
             let (result_to, result_from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(1u64)
             let answer_to = l15_forward(head, result_to, l15_head_request(waiting))
             let told = result.unwrap(channel.receive(result_from))
             std.http_client.close(take third)
             result.unwrap(channel.try_send(answer_to, take told))
-            let mut recovery = l15_post(net, clock, address, 3u32, true)
+            let mut recovery = l15_post(net, clock, address, 3u32, 0u64, true)
             result.unwrap(channel.send(head, l15_head_request(waiting)))
             l15_response(mut recovery, 3u64, true)
             std.http_client.close(take recovery)
         }
+        let mut unknown = l15_post(net, clock, address, 4u32, 1u64, true)
+        result.unwrap(channel.send(head, l15_head_request(waiting)))
+        l15_history_marker(mut unknown)
+        std.http_client.close(take unknown)
     }
     let _ = std.task.cancel_join(take server)
     let _ = std.task.cancel_join(take relay_task)
@@ -337,19 +375,37 @@ fn l15_forward(to: Sender[HeadInput], during: Sender[RelayEvent], take msg: Head
     take answer_to
 }
 
-fn l15_post(net: Net, clock: Clock, address: Addr, stream_id: u32, submit: bool) -> std.http_client.Connection waits {
+fn l15_post(net: Net, clock: Clock, address: Addr, stream_id: u32, p: u64, submit: bool) -> std.http_client.Connection waits {
     let mut fields: List[std.http_client.Header] = list.with_capacity(4u64)
     list.push(mut fields, std.http_client.Header(name: "Connection", value: Public(b"close")))
     list.push(mut fields, std.http_client.Header(name: "Content-Type", value: Public(b"application/json")))
     list.push(mut fields, std.http_client.Header(name: "Authorization", value: Public(b"token")))
     let mut header = string.from("\"")
     string.push_uint(mut header, int.widen(stream_id), 16u32, 32u64, '0')
-    string.push(mut header, ".0\"")
+    string.push(mut header, ".")
+    string.push_u64(mut header, p)
+    string.push(mut header, "\"")
     list.push(mut fields, std.http_client.Header(name: "Idempotency-Key", value: Public(string.into_bytes(take header))))
     let req = std.http_client.Request(method: "POST", target: "/old", headers: take fields, body: Fixed(2u64))
     let mut client = result.unwrap(std.http_client.dial(net, address, "a", clock, req, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64)))
     if submit { result.unwrap(std.http_client.write(mut client, b"{}")) }
     take client
+}
+
+fn l15_history_marker(mut client: std.http_client.Connection) waits {
+    result.unwrap(std.http_client.finish_request(mut client, 4096u64))
+    let response = std.http_client.head(client)
+    if std.http_client.status(response) != 410u16 { fail("L15 absent stream with p > 0 must return 410") }
+    let mut refused = false
+    for i in 0u64 .. std.http_client.field_count(response) {
+        if let Some((name, value)) = std.http_client.field_at(response, i) {
+            if std.http1.equal_ascii(name, b"Idempotent-Outcome") { fail("L15 no effect was committed") }
+            if std.http1.equal_ascii(name, b"Hirsel-Refused") {
+                refused = value == b"history_unavailable;key=\"00000000000000000000000000000004.1\""
+            }
+        }
+    }
+    if !refused { fail("L15 a terminal refusal did not echo the attempt key") }
 }
 
 fn l15_response(mut client: std.http_client.Connection, number: u64, replayed: bool) waits {

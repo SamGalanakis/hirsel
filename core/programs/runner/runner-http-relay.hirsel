@@ -11,6 +11,8 @@ pub opaque type Relay: send { inbox: Sender[RelayEvent], credit: Sender[()] }
 
 pub type RelayOutcome: send { payload: Bytes, replayed: bool }
 
+pub type RelayDelivery: send = Answered(RelayOutcome) | RefusedBeforePost(Refusal) | Unanswered(Refusal)
+
 type RelayResult: send = Delivered(RelayOutcome) | HandlerExpired
 
 type RelayEvent: send = RelayAsk(Send, Sender[RelayResult]) | RelayExpired(u64) | RelayTold(u64, RelayOutcome)
@@ -121,22 +123,22 @@ pub fn relay_endpoint(r: Relay) -> Relay {
     Relay(inbox: channel.sender(r.inbox), credit: channel.sender(r.credit))
 }
 
-pub fn relay_call(r: Relay, take send: Send, clock: Clock, tasks: Tasks, handler_deadline: u64) -> Result[RelayOutcome, Refusal] waits {
+pub fn relay_call(r: Relay, take send: Send, clock: Clock, tasks: Tasks, handler_deadline: u64) -> RelayDelivery waits {
     let (to, from): (Sender[RelayResult], Receiver[RelayResult]) = channel.new(1u64)
     let deadline = std.clock.alarm(tasks, clock, handler_deadline, to, HandlerExpired)
     let ask = RelayAsk(take send, take to)
     // The credit queue counts queued and about-to-be-queued Asks. Both sends are
     // nonwaiting, with no allocation or cancellation point between them.
-    channel.try_send(r.credit, ()) ?=> |_| Overloaded
-    channel.try_send(r.inbox, take ask) ?=> |_| Overloaded
+    if let Error(_) = channel.try_send(r.credit, ()) { return RefusedBeforePost(Overloaded) }
+    if let Error(_) = channel.try_send(r.inbox, take ask) { return RefusedBeforePost(Overloaded) }
     let done = channel.receive(from)
     let now = host.mono_ns(clock)
     let _ = std.task.cancel_join(take deadline)
-    if now >= handler_deadline { return Error(Deadline) }
+    if now >= handler_deadline { return Unanswered(Deadline) }
     match take done {
-        Ok(Delivered(take outcome)) => Ok(take outcome),
-        Ok(HandlerExpired) => Error(Deadline),
-        Error(_) => Error(Overloaded),
+        Ok(Delivered(take outcome)) => Answered(take outcome),
+        Ok(HandlerExpired) => Unanswered(Deadline),
+        Error(_) => Unanswered(Overloaded),
     }
 }
 

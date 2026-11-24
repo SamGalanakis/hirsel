@@ -58,8 +58,11 @@ body still sends a complete head.
 `response(status, take body, close)` builds a final response for status 200
 through 599. `header(mut response, take name, take value)` appends a field
 after checking HTTP field syntax. It refuses Content-Length, Transfer-Encoding
-and Connection case-insensitively with `HeaderReserved`. Invalid status and
-field syntax return `StatusInvalid` and `HeaderInvalid` respectively.
+Connection, Idempotent-Outcome and Hirsel-Refused case-insensitively with
+`HeaderReserved`. Invalid status and field syntax return `StatusInvalid` and
+`HeaderInvalid` respectively. Tagged runner routes use `mark_committed` to
+report a committed reply and `mark_refused` to echo the request's
+Idempotency-Key with a terminal refusal kind.
 While encoding the response head, HTTP returns `DateInvalid` at the Date
 field when the clock falls outside `std.time.from_unix_ms`. The refusal
 occurs before the writer appends any part of that field.

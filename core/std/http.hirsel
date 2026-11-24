@@ -119,7 +119,7 @@ fn response_length(r: Response) -> u64 {
 }
 
 fn reserved_field(name: Bytes) -> bool {
-    http1.equal_ascii(name, string.as_bytes("content-length")) || http1.equal_ascii(name, string.as_bytes("transfer-encoding")) || http1.equal_ascii(name, string.as_bytes("connection")) || http1.equal_ascii(name, string.as_bytes("idempotent-outcome"))
+    http1.equal_ascii(name, string.as_bytes("content-length")) || http1.equal_ascii(name, string.as_bytes("transfer-encoding")) || http1.equal_ascii(name, string.as_bytes("connection")) || http1.equal_ascii(name, string.as_bytes("idempotent-outcome")) || http1.equal_ascii(name, b"hirsel-refused")
 }
 
 fn valid_field(name: Bytes, value: Bytes) -> bool {
@@ -689,6 +689,23 @@ pub fn mark_committed(mut reply: Response, request: Request) -> Result[(), Respo
     }
     reply.committed = true
     Ok(())
+}
+
+/// Marks a terminal no-commit decision for a valid stream attempt on a tagged route.
+pub fn mark_refused(mut reply: Response, request: Request, kind: Bytes) -> Result[(), ResponseError] {
+    if request.route_tag == 0u64 || reply.committed {
+        return Error(HeaderReserved)
+    }
+    let Some(key) = field(request, b"idempotency-key") else {
+        return Error(HeaderInvalid)
+    }
+    let mut value = copy_bytes(kind)
+    list.append(mut value, b";key=")
+    list.append(mut value, key)
+    if !valid_field(b"Hirsel-Refused", value) {
+        return Error(HeaderInvalid)
+    }
+    push_field(mut reply, bytebuf.freeze(copy_bytes(b"Hirsel-Refused")), bytebuf.freeze(take value))
 }
 
 pub fn target(r: Request) -> View[Bytes] in r {

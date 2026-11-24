@@ -880,7 +880,7 @@ Every request from any transport passes the same four steps, in this order. WebS
 - checks the entry against `a`'s attenuation (`NotAllowed`);
 - decodes the argument bytes with the entry's real decoder, inside `bound bytes arg_max` and a step bound, so a `via` validator's work is bounded (`Malformed(Bad)`). A gone key has no decoder: its bytes are digested as given, under the byte bounds only (runner.hirsel:5306 at ab5943f6). They are a WebSocket `Call`'s bytes, or for an HTTP alias the bytes B-12 assembles from `previous`'s schema;
 - computes `request_digest(entry key, argument bytes)` (store.hirsel:1303);
-- forms the stream key `caller_key ‖ u32-BE(stream)` from the Caller ingress computed (RUNNER-SPEC v2.15 item 2: the bearer token is never stored);
+- forms the stream key `caller_key ‖ t u64 BE ‖ n u64 BE` from the Caller ingress computed (RUNNER-SPEC v2.15 item 2: the bearer token is never stored);
 - checks the byte budget and the deadline against `a`'s arrival time (`Budget`, `Deadline`).
 
 `Send` holds the entry key, stream key, position, argument bytes, digest, budget and deadline. It is opaque, and made only by `prepare` (and, in Part B, by K-9's `prepare_retired` for a `Retired` binding). So the store never sees a digest the runner did not compute.
@@ -1066,6 +1066,8 @@ The relay knows which `Overloaded` it has, because it made the decision or recei
 | `InDoubt` | 502 `{"outcome": "in_doubt"}`. It never means a fresh key is safe; the client retries with the same key |
 
 **Committed outcomes (decision 55).** Runner adds `Idempotent-Outcome: committed` to every authoritative committed Stream outcome, including an application error. The HTTP writer reserves this response field. Application headers cannot set or override it. The generated client advances the installation's position only on a response carrying this marker. A response without the marker leaves the position open for the pending request. Statuses, bodies and the stored Outcome are unchanged.
+
+**Attempt refusals.** A generated Stream binding adds `Hirsel-Refused: <kind>;key=<the quoted request key>` to a terminal no-commit decision from preparation, an Ask refused before posting, or a delivery that answers with `Refused`. The HTTP writer reserves the field. A handler timeout or a closed relay reply channel can leave an Ask pending, and its response has no marker. The marker proves only what happened to the delivery it answers. A matching marker cannot establish whether an earlier delivery of that key committed.
 
 **Duplicates.** When the head's answer came from a `Duplicate` admission, the relay sets `Idempotent-Replayed: true` beside the stored outcome's status and body (B-8 says how it knows). The saved reply is delivered as it was committed (RUNNER-SPEC v2.19, ruling 73 as amended), and its status is rendered by B-12's rule. So within one registry, equal identities give equal statuses and bodies over any route and transport.
 

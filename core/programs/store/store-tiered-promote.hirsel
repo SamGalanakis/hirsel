@@ -1,0 +1,193 @@
+// A collection's lookup roots include the candidate queue and every earlier
+// promotion of this cut. A queued subtree starts at its own root.
+type TieredPromotionRoot: send = PromotionPage(std.page.Slot) | PromotionBlob(std.page.BlobRef)
+
+type TieredPromotion {
+    installed: TieredPageSource,
+    captured: TieredPageSource,
+    lookup: List[TieredPromotionRoot],
+    probed_through: Map[u64, u64]
+}
+
+type TieredPromotionNeed: key = PromotionPageStamp(u64) | PromotionBlobStamp(u64)
+
+type TieredPromotionHit: shareable + send = PromotedPage(std.page.Slot) | PromotedBlob(std.page.BlobSlot)
+
+fn promotion_collection_root(tree: PageTree, collection: u32) -> Result[Option[std.page.Slot], Error] {
+    let key = prefix(collection)?
+    let Some((edge, descriptor)) = std.page.collection_slot(tree.root, key) else {
+        return Ok(None)
+    }
+    if descriptor[53u64] != 1 {
+        return Ok(None)
+    }
+    Ok(Some(clone(edge)))
+}
+
+fn promotion_page_stamp(edge: std.page.Slot) -> u64 {
+    match edge {
+        ColdPage(ptr) => ptr.stamp,
+        HotPage(page) => std.page.stamp(std.page.image_of(page)),
+    }
+}
+
+fn promotion_load_page(source: TieredPageSource, edge: std.page.Slot) -> Result[Arc[std.page.Page], Error] waits {
+    match edge {
+        ColdPage(ptr) => {
+            let frame = fold_frame_at(source, TieredPage(ptr))?
+            Ok(arc.share(fold_page(frame)))
+        },
+        HotPage(page) => Ok(arc.share(page)),
+    }
+}
+
+fn promotion_find_path(cut: TieredPageSource, root: std.page.Slot, need: TieredPromotionNeed, key: Bytes) -> Result[Option[TieredPromotionHit], Error] waits {
+    let mut edge: std.page.Slot = clone(root)
+    loop {
+        if need == PromotionPageStamp(promotion_page_stamp(edge)) {
+            return Ok(Some(PromotedPage(take edge)))
+        }
+        let page = promotion_load_page(cut, edge)?
+        let image = std.page.image_of(page)
+        if let Some(slot) = std.page.descend(image, key) {
+            edge = clone(option.unwrap(std.page.child_slot(page, slot)))
+            continue
+        }
+        let (slot, found) = std.page.search(image, key)
+        if found {
+            if let Some(BlobEdge(reference)) = std.page.owning_edge(image, slot) {
+                if need == PromotionBlobStamp(reference.stamp) {
+                    let own_body = option.unwrap(std.page.blob_slot(page, reference.body))
+                    return Ok(Some(PromotedBlob(clone(own_body))))
+                }
+            }
+        }
+        return Ok(None)
+    }
+}
+
+fn promotion_find(cut: TieredPromotion, need: TieredPromotionNeed, key: Bytes) -> Result[Option[TieredPromotionHit], Error] waits {
+    for root in cut.lookup {
+        match root {
+            PromotionPage(edge) => {
+                if let Some(take found) = promotion_find_path(cut.installed, edge, need, key)? {
+                    return Ok(Some(take found))
+                }
+            },
+            PromotionBlob(reference) => {
+                if need == PromotionBlobStamp(reference.stamp) {
+                    return Ok(Some(PromotedBlob(ColdBlob(reference))))
+                }
+            },
+        }
+    }
+    Ok(None)
+}
+
+// PACK_INDEX rows are in increasing data-offset order. The last offset
+// reached by the installed probe marks the prefix it may still retire.
+fn promotion_can_keep(cut: TieredPromotion, pack: u64, offset: u64) -> bool {
+    if let None = std.omap.get(cut.installed.packs, pack) {
+        return false
+    }
+    offset > map.get_or(cut.probed_through, pack, 0u64)
+}
+
+fn promotion_resolve_blob(cut: TieredPromotion, reference: std.page.BlobRef, current: std.page.BlobSlot, key: Bytes) -> Result[std.page.BlobSlot, Error] waits {
+    if let Some(PromotedBlob(take found)) = promotion_find(cut, PromotionBlobStamp(reference.stamp), key)? {
+        return Ok(take found)
+    }
+    if let ColdBlob(ptr) = view current {
+        if !promotion_can_keep(cut, ptr.pack, ptr.offset) {
+            let frame = fold_frame_at(cut.captured, TieredBlob(ptr))?
+            let TieredValue(body) = view frame.payload else {
+                fail("store: a BLOB reference resolved to a PAGE")
+            }
+            return disk_allocation(scoped fn() -> Result[std.page.BlobSlot, Error] {
+                Ok(HotBlob(arc.new(copied(body)?)))
+            })
+        }
+    }
+    Ok(clone(current))
+}
+
+fn promotion_ref(reference: std.page.BlobRef, mut slot: std.page.BlobSlot, ordinal: u16) -> std.page.BlobRef {
+    match slot {
+        ColdBlob(mut ptr) => {
+            ptr.body = ordinal
+            ptr
+        },
+        HotBlob(_) => std.page.BlobRef(stamp: reference.stamp, len: reference.len, checksum: reference.checksum, pack: 0, offset: 0, body: ordinal),
+    }
+}
+
+fn promotion_resolve_page(cut: TieredPromotion, collection: u32, root: std.page.Slot) -> Result[std.page.Slot, Error] waits {
+    let stamp = promotion_page_stamp(root)
+    if stamp == 0 {
+        return Ok(clone(root))
+    }
+    let need = PromotionPageStamp(stamp)
+    let page = {
+        let source = promotion_load_page(cut.captured, root)?
+        let key = tiered_page_index_key(collection, std.page.image_of(source))?
+        if let Some(PromotedPage(take found)) = promotion_find(cut, need, list.slice(key, 4, list.len(key)))? {
+            return Ok(take found)
+        }
+        // The walk itself owns the ancestor image. Do not hold a cut pin
+        // across the visits to its children.
+        match root {
+            ColdPage(_) => disk_allocation(scoped fn() -> Result[Arc[std.page.Page], Error] {
+                Ok(std.page.copy_with_stamp(source, stamp))
+            })?,
+            HotPage(_) => arc.share(source),
+        }
+    }
+    let image = std.page.image_of(page)
+    let height = std.page.level(image)
+    let mut children: List[std.page.Slot] = list.new()
+    let mut bodies: List[std.page.BlobSlot] = list.new()
+    let mut rows: List[std.page.Entry] = list.new()
+    let mut reemit = match root {
+        ColdPage(ptr) => !promotion_can_keep(cut, ptr.pack, ptr.offset),
+        HotPage(_) => true,
+    }
+    for slot in 0u64 .. std.page.count(image) {
+        let mut row = disk_allocation(scoped fn() -> Result[std.page.Entry, Error] {
+            Ok(option.unwrap(std.page.entry(image, slot)))
+        })?
+        match row.cell {
+            Child(mut child) => {
+                let original = option.unwrap(std.page.child_slot(page, slot))
+                let resolved = promotion_resolve_page(cut, collection, original)?
+                let place = match resolved {
+                    ColdPage(ptr) => ptr,
+                    HotPage(_) => std.page.unlocated(child.child.stamp),
+                }
+                reemit = reemit || place != child.child
+                child.child = place
+                capacity(list.try_reserve(mut children, 1))?
+                list.push(mut children, take resolved)
+            },
+            BlobValue(mut reference) => {
+                let original = option.unwrap(std.page.blob_slot(page, reference.body))
+                let mut resolved = promotion_resolve_blob(cut, reference, original, row.key)?
+                let place = promotion_ref(reference, mut resolved, int.truncate(list.len(bodies)))
+                reemit = reemit || place != reference
+                reference = place
+                capacity(list.try_reserve(mut bodies, 1))?
+                list.push(mut bodies, take resolved)
+            },
+            InlineValue(_) => (),
+        }
+        capacity(list.try_reserve(mut rows, 1))?
+        list.push(mut rows, take row)
+    }
+    if !reemit {
+        return Ok(clone(root))
+    }
+    disk_allocation(scoped fn() -> Result[std.page.Slot, Error] {
+        let ready = page_result(std.page.encode(rows, height, stamp, Collection))?
+        let winner = page_result(std.page.attach(take ready, clone(children), clone(bodies)))?
+        Ok(HotPage(take winner))
+    })
+}

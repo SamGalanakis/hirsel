@@ -61,6 +61,10 @@ fn bucket_law_sim(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.C
 }
 
 fn bucket_law_sim_plan(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take plan: std.sim.world.Plan) -> BucketSim {
+    bucket_law_sim_holds(tasks, real, seed, cut, take faults, list.new(), take plan)
+}
+
+fn bucket_law_sim_holds(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim.s3.Cut], take faults: List[std.sim.s3.Fault], take holds: List[std.sim.s3.Hold], take plan: std.sim.world.Plan) -> BucketSim {
     let address = Addr(ip: V4(2130706433), port: 8080)
     let mut net_model = std.sim.net.new(std.sim.net.defaults())
     let mut primary: List[Ip] = list.with_capacity(1)
@@ -71,7 +75,7 @@ fn bucket_law_sim_plan(tasks: Tasks, real: Clock, seed: u64, cut: Option[std.sim
     std.sim.net.resolve_as(mut net_model, string.from("bucket.spare.test"), take spare)
     let key = bucket_law_signing_key()
     let verify = result.unwrap(secret.narrow(key, "verify"))
-    let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, holds: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
+    let config = std.sim.s3.Config(address, cut: cut, network: take net_model, after_resolve: None, credential: string.from("AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request"), signing_key: take verify, faults: take faults, holds: take holds, exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
     let (world, time) = std.sim.world.new(seed, 0, 1369353600000)
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let driver = task.spawn(tasks, bytes 65536, BucketSimClock(world: take world, stop: take stopping, real), bucket_law_clock)
@@ -99,16 +103,20 @@ fn bucket_law_client_with(s: BucketSim, tasks: Tasks, host_name: String, seed: u
 }
 
 fn bucket_law_client_lanes(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, typed: bool, lanes: u64) -> Result[std.object.Client, Error] waits {
+    bucket_endpoint_client(s.endpoint, s.network, s.time, tasks, host_name, seed, typed, lanes)
+}
+
+fn bucket_endpoint_client(endpoint: std.sim.s3.Endpoint, network: Net, time: Clock, tasks: Tasks, host_name: String, seed: u64, typed: bool, lanes: u64) -> Result[std.object.Client, Error] waits {
     let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
     let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
     let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
-    let deadline = std.clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(time), BUCKET_LAW_OP_MS)
     let place = bucket_law_place(host_name)
     let random = provide.random(seed)
     let connected = if typed {
-        std.object.start_simulated(s.endpoint, tasks, take place, take credentials_set, s.time, random, bucket_law_lanes(lanes), deadline)
+        std.object.start_simulated(endpoint, tasks, take place, take credentials_set, time, random, bucket_law_lanes(lanes), deadline)
     } else {
-        std.object.start(s.network, tasks, take place, take credentials_set, None, System, s.time, random, bucket_law_lanes(lanes), deadline)
+        std.object.start(network, tasks, take place, take credentials_set, None, System, time, random, bucket_law_lanes(lanes), deadline)
     }
     match take connected {
         Ok(take client) => Ok(take client),
@@ -975,4 +983,13 @@ fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -
     let followed = bucket_m2_law_follow(tasks, r, sim)
     let _ = bucket_law_finish(take sim)
     followed
+}
+
+
+@test
+fn bucket_test_m2_fresh_order(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 571)
+    bucket_order_fresh_case(tasks, c, r, seed, LostReply)?
+    bucket_order_fresh_case(tasks, c, r, seed, Overtaken)?
+    bucket_order_fresh_case(tasks, c, r, seed, FencedAfterRead)
 }

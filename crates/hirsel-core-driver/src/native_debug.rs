@@ -6,7 +6,7 @@ use object::{Object as _, ObjectSection as _};
 mod detached;
 mod elf;
 mod side;
-pub(crate) use detached::{NativeImage, add_source_note};
+pub(crate) use detached::{ImageDigest, NativeImage, add_source_note};
 pub use detached::{SymbolSource, resolve_symbols};
 use elf::error;
 pub(crate) use side::bind as bind_side_products;

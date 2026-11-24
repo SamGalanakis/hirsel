@@ -1,7 +1,22 @@
 //! Final ELF link of the checked native inputs.
-use super::{NativeOptions, NativeStop, command, key};
+use super::{NativeOptions, NativeStop, key};
 use hirsel_core_ids::ContentHash;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
+    let result = command
+        .output()
+        .map_err(|e| NativeStop::Link(format!("launch {command:?}: {e}")))?;
+    if !result.status.success() {
+        return Err(NativeStop::Link(format!(
+            "{command:?}: {}\n{}",
+            result.status,
+            String::from_utf8_lossy(&result.stderr)
+        )));
+    }
+    Ok(result.stdout)
+}
 
 /// The build a recording and its replay share: the executable key without
 /// the entry plan, whose launch policy (grants, directories, replay plan) is

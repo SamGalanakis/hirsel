@@ -6,6 +6,7 @@ use hirsel_core_layout::{Layout, Recipe};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+#[cfg(test)]
 use std::process::Command;
 
 #[path = "entry_cleanup.rs"]
@@ -25,6 +26,7 @@ mod release;
 #[path = "std_release.rs"]
 pub(crate) mod std_release;
 use cleanup::result_cleanup;
+pub(crate) use link::command;
 use link::direct_link;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
@@ -1484,20 +1486,6 @@ pub fn grant_kind(name: &str) -> Option<u8> {
     recipe_build::kind(name)
 }
 
-pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
-    let result = command
-        .output()
-        .map_err(|e| NativeStop::Link(format!("launch {command:?}: {e}")))?;
-    if !result.status.success() {
-        return Err(NativeStop::Link(format!(
-            "{command:?}: {}\n{}",
-            result.status,
-            String::from_utf8_lossy(&result.stderr)
-        )));
-    }
-    Ok(result.stdout)
-}
-
 #[cfg(test)]
 thread_local! {
     /// Runs when the link starts, before it opens or checks any object, with
@@ -1730,26 +1718,31 @@ fn link_objects(
                     recipe,
                 )?;
                 inputs.push(options.runtime.clone());
-                let objects: Vec<_> =
-                    std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
-                        .chain(keys.iter().enumerate().map(|(n, key)| {
-                            crate::incremental_link::Slot::Keyed(*key, (&bundle, n))
-                        }))
-                        .collect();
-                let frame = key(
-                    "hirsel.incremental-link-frame.v2",
-                    &(
-                        &recipe.identity,
-                        &recipe.linker,
-                        &recipe.args,
-                        &archive_pins,
-                        &options.runtime,
-                        &options.target,
-                    ),
-                )?;
-                if incremental {
+                let incremental = incremental
+                    .then(|| {
+                        let objects: Vec<_> =
+                            std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
+                                .chain(keys.iter().enumerate().map(|(n, key)| {
+                                    crate::incremental_link::Slot::Keyed(*key, (&bundle, n))
+                                }))
+                                .collect();
+                        key(
+                            "hirsel.incremental-link-frame.v2",
+                            &(
+                                &recipe.identity,
+                                &recipe.linker,
+                                &recipe.args,
+                                &archive_pins,
+                                &options.runtime,
+                                &options.target,
+                            ),
+                        )
+                        .map(|frame| (frame, objects))
+                    })
+                    .transpose()?;
+                if let Some((frame, objects)) = &incremental {
                     let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
-                    if let Some(image) = resident.patch(frame, &objects)? {
+                    if let Some(image) = resident.patch(*frame, objects)? {
                         patched.set(true);
                         return Ok(image);
                     }
@@ -1764,7 +1757,7 @@ fn link_objects(
                     emit_relocations,
                 )?;
                 let image = std::fs::read(&output)?;
-                if incremental {
+                if let Some((frame, objects)) = incremental {
                     let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
                     resident.remember(frame, &objects, &image)?;
                 }
@@ -1781,7 +1774,7 @@ fn link_objects(
                 run(None, false)
             }
         };
-        let linked = match link(&recipe) {
+        let bytes = match link(&recipe) {
             Ok(image) => image,
             Err(first) => {
                 if matches!(first, NativeStop::Archive(_)) {
@@ -1796,7 +1789,6 @@ fn link_objects(
         };
         counters.link_patched = u64::from(patched.get());
         drop(bundle);
-        let bytes = linked;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         let debug = crate::native_debug::bind_detached(
             &rows,

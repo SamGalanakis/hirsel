@@ -31,8 +31,7 @@ pub struct AssemblyRecord {
 
 impl AssemblyRecord {
     pub(crate) fn new(recipe: ContentHash, toolchain: ContentHash, bytes: &[u8]) -> Self {
-        use sha2::{Digest, Sha256};
-        let digest = ContentHash(Sha256::digest(bytes).into());
+        let digest = crate::native_debug::ImageDigest::Assembly.hash(bytes);
         let frame = [recipe.0, toolchain.0, digest.0].concat();
         let identity = ContentHash::of_parts("hirsel.assembly-record.v1", [frame.as_slice()]);
         Self {

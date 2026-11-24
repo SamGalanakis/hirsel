@@ -2661,9 +2661,7 @@ pub fn edit_collection(mut root: Arc[Page], key: Bytes, private_from: u64, mut n
     }))
 }
 
-/// Restamp a Tiered collection's map path with replay's row totals and bounds.
-/// The collection slot still holds the unchanged base that the overlay reads.
-pub fn replay_collection_totals(mut root: Arc[Page], key: Bytes, rows: u64, charge: u64, bounds: Option[(u64, u64)], mut next: u64) -> Result[(), Error] {
+fn edit_tiered_descriptor(mut root: Arc[Page], key: Bytes, mut next: u64, edit: scoped fn(mut Page, u64, u64) -> Result[(), Error]) -> Result[(), Error] {
     if root.image.domain != CollectionMap {
         return Error(MalformedPage)
     }
@@ -2671,7 +2669,7 @@ pub fn replay_collection_totals(mut root: Arc[Page], key: Bytes, rows: u64, char
     option.unwrap(arc.with_unique(mut revised, scoped fn(mut page: Page) -> Result[(), Error] {
         if let Some(slot) = descend(page.image, key) {
             match page.kids[slot] {
-                HotPage(mut child_page) => replay_collection_totals(mut child_page, key, rows, charge, bounds, mut next)?,
+                HotPage(mut child_page) => edit_tiered_descriptor(mut child_page, key, mut next, edit)?,
                 ColdPage(_) => return Error(MalformedPage),
             }
             refresh_child(mut page, slot)
@@ -2683,6 +2681,16 @@ pub fn replay_collection_totals(mut root: Arc[Page], key: Bytes, rows: u64, char
         }
         let at = entry_at(page.image, slot)
         let descriptor = at + 5 + u16_at(page.image.raw, at)
+        edit(mut page, slot, descriptor)
+    }))?
+    root = take revised
+    Ok(())
+}
+
+/// Restamp a Tiered collection's map path with replay's row totals and bounds.
+/// The collection slot still holds the unchanged base that the overlay reads.
+pub fn replay_collection_totals(mut root: Arc[Page], key: Bytes, rows: u64, charge: u64, bounds: Option[(u64, u64)], mut next: u64) -> Result[(), Error] {
+    edit_tiered_descriptor(mut root, key, mut next, scoped fn(mut page: Page, slot: u64, descriptor: u64) -> Result[(), Error] {
         if let Some((first, following)) = bounds {
             if page.image.raw[descriptor + 52] != 4 || int.checked_sub(following, first) != Some(rows) {
                 return Error(MalformedPage)
@@ -2695,9 +2703,23 @@ pub fn replay_collection_totals(mut root: Arc[Page], key: Bytes, rows: u64, char
         list.set_word_le(mut page.image.raw, descriptor + 36, rows)
         list.set_word_le(mut page.image.raw, descriptor + 44, charge)
         Ok(())
-    }))?
-    root = take revised
-    Ok(())
+    })
+}
+
+/// Give a Tiered descriptor the location its cut sealed. An empty collection
+/// keeps a shared stamp-zero leaf. Earlier captures keep their root slot.
+pub fn install_tiered_root(mut root: Arc[Page], key: Bytes, replacement: Slot, mut next: u64) -> Result[(), Error] {
+    edit_tiered_descriptor(mut root, key, mut next, scoped fn(mut page: Page, slot: u64, descriptor: u64) -> Result[(), Error] {
+        let rows: u64 = list.word_le(page.image.raw, descriptor + 36)
+        let place = match replacement {
+            ColdPage(ptr) if rows > 0 && ptr.stamp != 0 && ptr.pack != 0 && ptr.offset >= 72 && ptr.len != 0 => ptr,
+            HotPage(empty_root) if rows == 0 && empty_root.image.domain == Collection && level(empty_root.image) == 0 && stamp(empty_root.image) == 0 => unlocated(0),
+            _ => return Error(MalformedPage),
+        }
+        put_ptr(mut page.image.raw, descriptor, place)
+        page.kids[slot] = clone(replacement)
+        Ok(())
+    })
 }
 
 // What an inline write needs from its leaf. None sends the write to the

@@ -669,3 +669,85 @@ fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] 
     }
     Ok(())
 }
+
+@test
+fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let value = string.into_bytes(string.from("stored"))
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: list.new(), cell: InlineValue(clone(value))))
+    let leaf_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let leaf = page_result(std.page.attach(take leaf_image, list.new(), list.new()))?
+    let mut map_wire = l68_collection_map_wire()
+    list.copy_from_slice(mut map_wire, 33, std.page.encode_ptr(std.page.unlocated(40)))
+    let image = page_result(std.page.decode(take map_wire, CollectionMap))?
+    let mut children: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut children, HotPage(arc.share(leaf)))
+    let mut roots = empty_roots()
+    roots.collections.root = page_result(std.page.attach(take image, take children, list.new()))?
+    let capture = share_roots(roots)
+
+    let id = prefix(9)?
+    let mut draft = begin_tiered_pack(owner, 8, 3, 4096)?
+    let frame = PackFrame(stamp: 40, size: 37, body: PageBody(arc.share(leaf)))
+    let Some(place) = add_tiered_pack_frame(mut draft, frame, 9, id, scoped fn(stamp: u64) -> std.page.PagePtr {
+        fail("L68: an inline leaf does not resolve a child")
+    })? else {
+        fail("L68: the first PAGE must fit")
+    }
+    let (take payload_bytes, inventory) = finish_tiered_pack(take draft)?
+    let mut ids = 101u64
+    page_result(std.page.install_tiered_root(mut roots.collections.root, id, ColdPage(place), mut ids))?
+    let Some((HotPage(old_leaf), _)) = std.page.collection_slot(capture.collections.root, id) else {
+        fail("L68: install changed the earlier capture")
+    }
+    let Some(old_value) = std.page.lookup(old_leaf, list.new()) else {
+        fail("L68: earlier capture lost its row")
+    }
+    if old_value != value || tree_stamp(roots.collections) != 101 {
+        fail("L68: install changed the prior leaf or failed to restamp the new map")
+    }
+
+    let mut held_roots: List[Roots] = list.with_capacity(1)
+    list.push(mut held_roots, share_roots(roots))
+    let mut holders: List[HeldPage] = list.with_capacity(3)
+    note_held_roots(mut holders, 0, 0, roots)
+    let mut installed = new_page_locations()
+    capacity(disk_index_put(mut installed.packs, 8, inventory, pack_edge_charge))?
+    let base = page_retry_base(installed, map.new(), holders, held_roots)?
+    let planned = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
+    let mut buffers = cut_output_buffers(planned, 1048576, 1048576)?
+    let layout = write_page_cut(fixtures, owner, take planned, mut buffers)?
+    let mut manifest = page_manifest_empty()
+    manifest.next_pack = layout.lists.run_packs.next_pack
+    manifest.next_stamp = ids
+    manifest.next_table = 10
+    manifest.account_memory = 126
+    manifest.account_tiered = 78
+    manifest.pack_root = published_tree_pointer(layout.locations, layout.lists.roots.packs)
+    manifest.branches[0u64].roots = published_page_roots(layout.locations, roots)
+    let manifest_wire = disk_page_manifest_bytes(owner, manifest)?
+    let (_, take opened_manifest) = disk_read_page_manifest("MANIFEST", manifest_wire)?
+    // p-8 is absent: the metadata walk must read only the map and pack list.
+    let validated = validate_directory_graph(fixtures, owner, take opened_manifest, true)?
+    let loaded = rebuild_page_store(take validated)?
+    let Some((ColdPage(found), descriptor)) = std.page.collection_slot(loaded.holders[0u64].collections.root, id) else {
+        fail("L68: recovery lost the installed Cold slot")
+    }
+    if found != place || place.offset != 72 || place.len != 37 || inventory.index != 125 || inventory.payload_bytes != 186 ||
+        read_le(descriptor, 44, 8) != 78 {
+        fail("L68: the reopened descriptor or pack extent differs from the cut")
+    }
+    let verified = read_tiered_frame("p-8", owner, TieredPage(found), payload_bytes, 0, ids)?
+    let TieredImage(ready) = view verified.payload else {
+        fail("L68: the installed pointer must resolve to a PAGE")
+    }
+    let Some(disk_value) = std.page.lookup(ready, list.new()) else {
+        fail("L68: the installed pointer does not resolve to the cut's row")
+    }
+    if disk_value != value {
+        fail("L68: the installed pointer does not resolve to the cut's row")
+    }
+    Ok(())
+}

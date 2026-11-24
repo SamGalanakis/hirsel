@@ -174,3 +174,79 @@ fn f4 = n1 g1 extern
     let err = wf::module(&load("view", &module("view t0 in (0)"))).unwrap_err();
     assert!(err.contains("s1 is used where it may be dropped"), "{err}");
 }
+
+/// A pointer joined from two slots is bound to one of them on each path, and a drop
+/// through it drops only that one. This is `store@1/store/admit_claim`'s
+/// `match take stored { Some(take fixed) => take fixed, None => take offered }`:
+/// `offered` (s1) has drop flag s2, the `None` edge clears it and binds the join to
+/// s1, and the `Some` edge binds it to `fixed` (s0) with s2 still set. Dropping the
+/// join and then, under s2, `offered` drops each slot once. If the `None` edge leaves
+/// s2 set, that second drop is a double drop.
+#[test]
+fn ownership_drops_a_joined_place_only_where_the_join_is_bound() {
+    let module = |clear: &str| {
+        format!(
+            r#"core v1
+type t0 = resource "p@0/m/R" drop f1 {{ id: u64 }}
+sig g0 = (u64, ptr) -> (u64)
+sig g1 = (ptr) -> ()
+inst n0 = p@0/m/f [] []
+inst n1 = p@0/m/R [] []
+fn f0 = n0 g0 {{
+  slot s0 = t0
+  slot s1 = t0
+  slot s2 = bool
+  addr a0 = s0 : t0
+  addr a1 = v1 : t0
+  addr a2 = s1 : t0
+  addr a3 = v4 : t0
+  addr a4 = s2 : bool
+b0(v0: u64, v1: ptr):
+  v6: u64 = const 0
+  v2: bool = eq v0, v6
+  v7: u64 = held_size t0
+  live s1
+  address a2
+  address a1
+  copy a2, a1, v7
+  v5: ptr = pointer a2
+  live s2
+  address a4
+  v8: bool = const true
+  store a4, v8
+  branch v2, b1, b2
+b1:
+  live s0
+  address a0
+  address a1
+  copy a0, a1, v7
+  v3: ptr = pointer a0
+  jump b3(v3)
+b2:
+{clear}  jump b3(v5)
+b3(v4: ptr):
+  address a3
+  drop a3 t0
+  address a4
+  v10: bool = read a4
+  branch v10, b4, b5
+b4:
+  address a2
+  drop a2 t0
+  jump b5
+b5:
+  return v0
+}}
+fn f1 = n1 g1 extern
+"#
+        )
+    };
+    let cleared = "  v9: bool = const false\n  address a4\n  store a4, v9\n";
+    wf::module(&load("cleared", &module(cleared))).expect("each slot is dropped once");
+    let kept = "  v9: bool = const false\n";
+    let err = wf::module(&load("kept", &module(kept))).unwrap_err();
+    assert!(
+        err.contains("drops s1 where it may be dropped already"),
+        "{err}"
+    );
+}

@@ -37,10 +37,11 @@ fn f1 = n1 g1 extern
 /// make the other slot, begun afresh on the next trip, read as dropped. This is
 /// the shape of `store@1/store/put_impl`'s `match` (a field taken into one slot,
 /// `list.new()` into the other). A second drop through it on one trip is still a
-/// double drop.
+/// double drop, and a use through it after a drop of one of its slots is still a use
+/// after drop.
 #[test]
 fn ownership_follows_a_joined_pointer_along_its_edge() {
-    let module = |again: &str| {
+    let module = |entry: &str, join: &str| {
         format!(
             r#"core v1
 type t0 = resource "p@0/m/R" drop f1 {{ id: u64 }}
@@ -59,7 +60,7 @@ b0(v0: u64, v1: ptr):
   v6: u64 = const 0
   v2: bool = eq v0, v6
   v7: u64 = held_size t0
-  jump b1
+{entry}  jump b1
 b1:
   branch v2, b2, b3
 b2:
@@ -77,9 +78,7 @@ b3:
   v5: ptr = pointer a2
   jump b4(v5)
 b4(v4: ptr):
-  address a3
-  drop a3 t0
-{again}  branch v2, b1, b5
+{join}
 b5:
   return v0
 }}
@@ -87,7 +86,16 @@ fn f1 = n1 g1 extern
 "#
         )
     };
-    wf::module(&load("loop", &module(""))).expect("each trip drops what it began");
-    let err = wf::module(&load("twice", &module("  drop a3 t0\n"))).unwrap_err();
+    let drop = "  address a3\n  drop a3 t0\n";
+    let again = "  branch v2, b1, b5\n";
+    let once = format!("{drop}{again}");
+    wf::module(&load("loop", &module("", &once))).expect("each trip drops what it began");
+    let twice = format!("{drop}  drop a3 t0\n{again}");
+    let err = wf::module(&load("twice", &module("", &twice))).unwrap_err();
     assert!(err.contains("may be dropped already"), "{err}");
+    let write = "  live s0\n  address a0\n  address a1\n  copy a0, a1, v7\n";
+    let after =
+        "  address a0\n  drop a0 t0\n  address a3\n  address a1\n  copy a1, a3, v7\n  jump b5\n";
+    let err = wf::module(&load("after", &module(write, after))).unwrap_err();
+    assert!(err.contains("is used where it may be dropped"), "{err}");
 }

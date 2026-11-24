@@ -65,9 +65,9 @@ struct Names {
     vals: Vec<Vec<Pl>>,
 }
 
-/// Spread `vals` through `pointer`s, addresses and, along `edges` (argument,
-/// parameter), block parameters, to a fixpoint.
-fn spread(b: &Body, mut vals: Vec<Vec<Pl>>, edges: &[(usize, usize)]) -> Names {
+/// Spread `vals` (and, when `slots`, the slots) through `pointer`s, addresses and,
+/// along `edges` (argument, parameter), block parameters, to a fixpoint.
+fn spread(b: &Body, mut vals: Vec<Vec<Pl>>, slots: bool, edges: &[(usize, usize)]) -> Names {
     let mut addrs: Vec<Vec<Pl>> = vec![vec![]; b.addresses.len()];
     let mut derefs: Vec<Vec<Pl>> = vec![vec![]; b.addresses.len()];
     let pointers: Vec<(usize, usize)> = b
@@ -92,11 +92,12 @@ fn spread(b: &Body, mut vals: Vec<Vec<Pl>>, edges: &[(usize, usize)]) -> Names {
         let mut grew = false;
         for (i, info) in b.addresses.iter().enumerate() {
             let base = match info.base {
-                AddressBase::Slot(s) => vec![Pl {
+                AddressBase::Slot(s) if slots => vec![Pl {
                     root: s.index(),
                     steps: vec![],
                     cut: false,
                 }],
+                AddressBase::Slot(_) => vec![],
                 AddressBase::Address(x) => addrs[x.index()].clone(),
                 AddressBase::Value(v) => vals[v.index()].clone(),
             };
@@ -157,7 +158,7 @@ fn names(b: &Body, entry: &[ValueId]) -> (Names, Names, Vec<usize>) {
         .flat_map(|e| ptr_args(b, e))
         .map(|(a, p)| (a.index(), p.index()))
         .collect();
-    let under = spread(b, vals, &edges);
+    let under = spread(b, vals, true, &edges);
     let joins: Vec<usize> = b
         .blocks
         .iter()
@@ -176,7 +177,7 @@ fn names(b: &Body, entry: &[ValueId]) -> (Names, Names, Vec<usize>) {
     }
     // An edge into a join's parameter carries no join: every parameter an edge
     // gives a join's pointer to is itself a join, seeded above.
-    let joined = spread(b, seed, &[]);
+    let joined = spread(b, seed, false, &[]);
     (under, joined, joins)
 }
 
@@ -533,6 +534,32 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             }
         }
     }
+    // A join place stands for each place its parameter's edges carry; one that an
+    // address reaches is tracked when one of those is, so a use through the join
+    // after a drop of the slot itself is seen.
+    let roots = b.slots.len() + entry.len();
+    let expand = |tp: &Pl| -> Vec<Pl> {
+        n.vals[joins[tp.root - roots]]
+            .iter()
+            .map(|src| {
+                let mut x = src.clone();
+                x.steps.extend(tp.steps.iter().copied());
+                x
+            })
+            .collect()
+    };
+    for a in (0..b.addresses.len()).filter(|&a| routed[a]) {
+        for r in j.addrs[a].iter().chain(&j.derefs[a]) {
+            let r = Pl {
+                cut: false,
+                ..r.clone()
+            };
+            let under = |x: &Pl| tracked.iter().any(|t| t.root < roots && overlap(x, t));
+            if !tracked.contains(&r) && expand(&r).iter().any(under) {
+                tracked.push(r);
+            }
+        }
+    }
     if tracked.is_empty() && !any_view_drop {
         return Ok(());
     }
@@ -550,16 +577,13 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
     };
     let hits = by_route(&n.addrs, &j.addrs);
     let deref_hits = by_route(&n.derefs, &j.derefs);
-    let roots = b.slots.len() + entry.len();
     let mut shadow: Vec<Vec<usize>> = vec![vec![]; tracked.len()];
     for (t, tp) in tracked
         .iter()
         .enumerate()
         .filter(|(_, tp)| tp.root >= roots)
     {
-        for src in &n.vals[joins[tp.root - roots]] {
-            let mut x = src.clone();
-            x.steps.extend(tp.steps.iter().copied());
+        for x in expand(tp) {
             for (q, tq) in tracked.iter().enumerate() {
                 if overlap(&x, tq) && !shadow[q].contains(&t) {
                     shadow[q].push(t);

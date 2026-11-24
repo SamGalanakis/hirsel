@@ -27,6 +27,9 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `sha1` | [sha1](../../core/core/sha1.hirsel) | SEM-8, MEM-30 |
 | `sha256` | [sha256](../../core/core/sha256.hirsel) | SEM-8, MEM-30 |
 | `ed25519`, `p256` | [ed25519](../../core/core/ed25519.hirsel), [p256](../../core/core/p256.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
+| `sha512` | unbuilt: `blocks`, `block` | SEM-8, MEM-30 |
+| `rsa`, `p384` | unbuilt: `verify_pkcs1_sha256`, `verify_pss_sha256`, `verify`, `verify_der` | SEM-8, MEM-30; [Signature verification](#signature-verification) |
+| `argon2` | unbuilt: `id` | SEM-8, MEM-30; [Argon2id](#argon2id) |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `bytebuf` | [bytebuf](../../core/core/bytebuf.hirsel) | MEM-21, MEM-28 |
@@ -301,6 +304,27 @@ operations it names; nothing else about them may be inferred from an implementat
   engine may use the CPU's SHA-256 instructions; the state words are the same on every
   CPU, so by [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU.
   `std.sha256` extends this module with the streaming hash.
+- **SHA-512 blocks.** `sha512.blocks(mut h, b, at, count)` applies the FIPS 180-4
+  SHA-512 compression function to each of the `count` 128-byte blocks of `b` from `at`,
+  in order, updating the eight `u64` state words `h` (an `Inline[u64, 8]`). A range outside
+  `b`, including an end past `u64`, raises `Bounds` before `h` changes.
+  `sha512.block(mut h, b)` compresses the one block of an `Inline[u8, 128]`. The charge is
+  `sha256.blocks`' charge, unchanged: each call admits no bytes and takes one Step whatever
+  `count` is ([MEM-30](budgets.md#mem-30-step-bounds)). SHA-384 uses the same compression
+  from its own initial words, so there is one kernel for both. The kernel is RustCrypto
+  `sha2` 0.11.1's `compress512`, called directly rather than copied, which selects the CPU's
+  SHA-512 or vector code at run time; the state words are the same on every CPU, so by
+  [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU.
+  `std.sha512` extends this module with the streaming hash, shaped as `std.sha256` is:
+  `Sha512` holds the eight words, a 128-byte pending block, its fill and the total byte
+  count; `start`, `add(mut s, b, lo, hi)`, `add_byte`, `finish` (64 bytes, leaving the state
+  usable) and `hash`, plus `start_from(h)`, which starts from given initial words. `add`
+  compresses all of its complete blocks in one core call, so every operation takes a fixed
+  number of steps whatever the input length, as in `std.sha256`. The length field is the
+  128-bit big-endian bit count of the total, which is exact for every total below 2^64
+  bytes. `std.sha384` is the same streaming hash over a `Sha512` started from the
+  FIPS 180-4 §5.3.4 SHA-384 initial words, and its `finish` and `hash` return the first
+  48 bytes.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
   where `xs[i]` and `list.set` fail with `Bounds`. An element is mutated in place through
   its index place (`xs[i] = x`, or `mut xs[i]` as an argument), including nested places
@@ -540,15 +564,50 @@ ordinal; rendering visits each key at its first ordinal with that last value. A 
 document needs `u64` ordinals or a width error. No operation replaces the source alone or
 takes unchecked offsets, and nothing in the document moves.
 
+## SHA-512
+
+The kernel is the SHA-512 blocks rule above; `std.sha512` and `std.sha384` are library code
+over it. This section holds their laws and the build slices that bring in the RustCrypto
+crates every new kernel here and in [TLS-5](tls.md#tls-5-secrets) uses.
+
+### SHA-512 laws
+
+The CAVP files are `SHA384ShortMsg.rsp`, `SHA384LongMsg.rsp`, `SHA512ShortMsg.rsp` and
+`SHA512LongMsg.rsp` in [shabytetestvectors.zip](https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/shs/shabytetestvectors.zip),
+copied byte for byte.
+
+| law | bug | oracle and setup |
+|---|---|---|
+| **H1** CAVP | a wrong round constant, rotation or initial word, or SHA-384 returning the wrong 48 bytes | Every record of the four files: `sha512.hash` or `sha384.hash` of `Msg` (the first `Len / 8` bytes) equals `MD`. The FIPS 180-4 example messages `abc` and the 896-bit two-block message are among the short and long records. |
+| **H2** padding and streaming | a wrong pad at the 112-byte boundary, a 64-bit length field in the 128-bit slot, or a pending block lost between `add` calls | For every length 0 to 300 of the bytes `i mod 251`, and every split of the input into two `add` calls, `sha512.hash` and `sha384.hash` equal RustCrypto `sha2` 0.11.1's `Sha512` and `Sha384` digests, which the test reads from a checked-in table the Rust crate generated, not from this build. A million `a` bytes streamed 1000 bytes per `add` give the million-`a` digests published with FIPS 180-2's SHA-384 and SHA-512 examples. |
+| **H3** `finish` keeps the state | `finish` mutating the state it was given | After `finish` on the first 100 bytes, adding the remaining 200 and finishing equals the one-shot digest of all 300, for both hashes. |
+| **H4** steps do not grow with the input | a per-block charge, or `add` compressing block by block in user code | On the reference evaluator, let `k` be the least bound under which `bound steps k { let mut s = take st; sha512.add(mut s, b, 0, list.len(b)); s }` succeeds for a 256-byte `b`, with `st` from `start()` and `b` bound outside the scope. The same scope under `k` also succeeds for a 1 MiB `b`, and for a 1 MiB `b` after a 5-byte `add` (so the pending path runs). The invariant is MEM-30's: a core call is one step whatever `count` is, and `add` has no loop over blocks. |
+
+The laws are cases in `core/std/tests/sha512.hirsel`, run by the shared walker with
+`--backend all`.
+
+### SHA-512 build slices
+
+| slice | size | depends on | contents | laws |
+|---|---|---|---|---|
+| **CK** crate set | S | — | the RustCrypto crates at exact versions through `third-party/` and reindeer: `sha2 =0.11.1` (replacing the workspace's 0.10 pins, so one `sha2` is linked), `hmac =0.13.0`, `hkdf =0.13.0`, `aes-gcm =0.11.1`, `chacha20poly1305 =0.11.0`, `rsa =0.10.0`, `p384 =0.14.0` (feature `ecdsa`), `argon2 =0.6.0` (default features off, `alloc` on) and their dependency closure, each with its licence file. No kernel is added in this slice. | builds and lints |
+| **S5** SHA-512 | S | CK | `core/core/sha512.hirsel` (`blocks`, `block`), `RtOp::Sha512Blocks` lowered as `Sha256Blocks` is, its C entry over `sha2::compress512`, the evaluator arm; `core/std/sha512.hirsel` and `core/std/sha384.hirsel` with their API pages. | H1–H4 |
+
 ## Signature verification
 
-The modules `ed25519` and `p256` check signatures. Each provides functions of type
-`(key: Bytes, msg: Bytes, sig: Bytes) -> bool`: `ed25519.verify`, `p256.verify` and
-`p256.verify_der`. Each returns `true` exactly when `sig` is a valid signature of all of
-`msg` under `key` by the rule below, and `false` otherwise. Every input that is not well
-formed gives `false`, including a key or signature of the wrong length, and no input
-makes the call fail. The answer does not say which check failed. That is how ring
-reports it, and a caller checking untrusted bytes needs no failure path for them.
+The modules `ed25519`, `p256`, `p384` and `rsa` check signatures. The curve modules
+provide functions of type `(key: Bytes, msg: Bytes, sig: Bytes) -> bool`: `ed25519.verify`,
+`p256.verify`, `p256.verify_der`, `p384.verify` and `p384.verify_der`. The `rsa` module
+takes the key as its two integers, `(n: Bytes, e: Bytes, msg: Bytes, sig: Bytes) -> bool`:
+`rsa.verify_pkcs1_sha256` and `rsa.verify_pss_sha256`. Each returns `true` exactly when
+`sig` is a valid signature of all of `msg` under the key by the rule below, and `false`
+otherwise. Every input that is not well formed gives `false`, including a key or signature
+of the wrong length, and no input makes the call fail. The answer does not say which check
+failed. That is how ring and RustCrypto report it, and a caller checking untrusted bytes
+needs no failure path for them. Together these verify every signature an OpenID Connect
+provider issues under the algorithms JWS registers for it: `RS256`, `PS256`, `ES256`,
+`ES384` and `EdDSA` with Ed25519 ([RFC 7518 §3.1](https://www.rfc-editor.org/rfc/rfc7518#section-3.1),
+[RFC 8037](https://www.rfc-editor.org/rfc/rfc8037)).
 Signing and key agreement are not provided: they need private-key custody, and the
 `Secret` contract ([TLS-5](tls.md#tls-5-secrets)) does not cover keys.
 
@@ -589,15 +648,56 @@ Signing and key agreement are not provided: they need private-key custody, and t
   Both forms are kernels because the conversion between them is where malleability bugs
   live: Wycheproof's BER cases test exactly that conversion. ring parses strict DER itself
   (`ECDSA_P256_SHA256_ASN1`), and its `r || s` path is `ECDSA_P256_SHA256_FIXED`.
+- **P-384.** `p384.verify` and `p384.verify_der` are the P-256 rule over NIST P-384 with
+  SHA-384, word for word, with these sizes: `e` is the SHA-384 digest mod `n`, `key` is 97
+  bytes `0x04 || X || Y`, and `p384.verify`'s `sig` is 96 bytes `r || s`, each 48 bytes
+  big-endian, the JWS `ES384` form. The same forms give `false` (compressed, hybrid, bare
+  96-byte and infinity keys), only strict DER is accepted, and a high `s` is accepted. The
+  kernel is RustCrypto `p384` 0.14.0 with its `ecdsa` feature (`ecdsa` 0.17).
+  `VerifyingKey::from_sec1_bytes` also decodes compressed points, so the kernel checks the
+  length and the leading `0x04` itself before it decodes, and `Signature::from_der` is the
+  strict DER parser. The verifier takes the prehash it computes with `sha2` 0.11.1, so no
+  digest truncation rule applies: SHA-384's output is the curve's size.
+- **RSA.** `n` and `e` are unsigned big-endian integers: a JWK's `n` and `e` after base64url
+  decoding ([RFC 7518 §6.3.1](https://www.rfc-editor.org/rfc/rfc7518#section-6.3.1)), or
+  the two fields of an X.509 `RSAPublicKey`. Leading zero bytes in either are ignored, as
+  their values are what is specified. Each function returns `false` unless all of these hold:
+  - `n` is odd and has 2048 to 8192 significant bits. A smaller modulus is not a key a
+    verifier should trust, and 8192 bounds the work, as it does for ring.
+  - `e` is odd and `3 ≤ e < 2^33`. That is ring's range, and RustCrypto's upper bound is
+    chosen to match it.
+  - `sig` has exactly `k` bytes, `k` being the byte length of `n`, and read as an integer it
+    is below `n` ([RFC 8017 §8.2.2](https://www.rfc-editor.org/rfc/rfc8017#section-8.2.2)
+    steps 1 and 2a). A shorter signature is not padded with zeros, and `n` is not
+    subtracted from a larger one.
+
+  `rsa.verify_pkcs1_sha256` is RSASSA-PKCS1-v1_5 with SHA-256 (JWS `RS256`). The encoded
+  message `sig^e mod n` must equal, byte for byte, the EMSA-PKCS1-v1_5 encoding of `msg`'s
+  SHA-256 digest ([RFC 8017 §9.2](https://www.rfc-editor.org/rfc/rfc8017#section-9.2)),
+  whose `DigestInfo` carries the SHA-256 OID with a NULL parameter. The check encodes and
+  compares; it never parses the padding, so no BER variant, no garbage after the digest and
+  no `DigestInfo` without its NULL is accepted, though RFC 8017's note permits the last.
+  `rsa.verify_pss_sha256` is RSASSA-PSS with SHA-256, MGF1 with SHA-256 and a salt of
+  exactly 32 bytes (JWS `PS256`, which fixes the salt to the hash length, [RFC 7518 §3.5](https://www.rfc-editor.org/rfc/rfc7518#section-3.5)),
+  verified by EMSA-PSS-VERIFY ([RFC 8017 §9.1.2](https://www.rfc-editor.org/rfc/rfc8017#section-9.1.2)):
+  trailer `0xbc`, the bits above `emBits` zero, the padding `PS` zero then `0x01`, and `H`
+  equal to the recomputed hash. The salt length is not detected from the signature, so a
+  signature made with another salt length gives `false`.
+
+  The kernel is RustCrypto `rsa` 0.10.0: `PublicKey::new_with_size_limits(n, e, 2048..=8192)`
+  after the kernel's own checks that `n` is odd and that `e` is odd and at least 3, then
+  `pkcs1v15::VerifyingKey::<Sha256>::new` or `pss::VerifyingKey::<Sha256>::new`, whose salt
+  length is the digest length, with `sha2` 0.11.1. Verification uses only public values.
 - **Charges.** Each call takes one step ([MEM-30](budgets.md#mem-30-step-bounds)) and admits
   no bytes, whatever the lengths of its arguments. The charge is 1 step per call plus
   0 steps per message byte in the reference count, as `sha256.blocks` charges. The work is bounded
-  by the length of `msg`, which a limit bounds. MEM-30's one per-unit exception,
-  `secret.scram_sha256`, covers work that a peer chooses.
+  by the length of `msg`, which a limit bounds, and by the key size, which the rules above
+  bound: 8192 bits for RSA. MEM-30's per-unit exceptions, `secret.scram_sha256` and
+  Argon2id, cover work that a peer or a stored cost chooses.
 - **Determinism.** The answer is a function of the three byte strings alone. Verification
   is not a host or provider operation, and nothing about it is recorded: replay computes it
   again ([recording](../recording.md#what-a-recording-holds)). An engine may use ring's
-  CPU-specific code. Every path gives the same answer, so by
+  and RustCrypto's CPU-specific code. Every path gives the same answer, so by
   [SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU. The inputs
   are public, so the time a call takes may depend on them.
 
@@ -624,9 +724,18 @@ with key `0x04 || Qx || Qy` and signature `R || S`.
 | **SV8** strict DER | a BER-lenient parser, or a sign bit read as magnitude | In `ecdsa_secp256r1_sha256_test.json`, `p256.verify_der` gives `true` for tcId 5. It gives `false` for tcId 8 (the sequence length in long form) and for tcId 6 (`s` without its leading zero, so negative). |
 | **SV9** P-256 forms and lengths | a compressed or bare key decoded on one engine only, or a wrong length that fails the call | Each of these gives `false` and the call does not fail. With NIST record 4's message and signature: the key compressed (`0x02` or `0x03` by `Qy`'s parity, then `Qx`) and the bare 64-byte `Qx \|\| Qy`. With record 4's key and message: the signature cut to 63 bytes. And `ecdsa_secp256r1_sha256_p1363_test.json` tcId 121, a 2-byte signature. |
 | **SV10** reference charge | a kernel lowered as library code that loops, or a charge per byte or per block | On the reference evaluator, `bound bytes 0 { bound steps 1 { ed25519.verify(k, m, s) } }` gives `Ok(Ok(true))` for TEST 1. The same scope over `p256.verify` gives `Ok(Ok(true))` for NIST record 4, whose message is 128 bytes, and over `p256.verify_der` gives `Ok(Ok(true))` for tcId 5. The arguments are locals bound outside the scopes. The expected value follows by hand from MEM-30: a core call is one step and admits nothing. |
+| **SV11** P-384 accepts and rejects | a wrong curve or hash, a P-256 routine reused, or a Wycheproof case read the other way | Over all of `ecdsa_secp384r1_sha384_p1363_test.json` with `p384.verify` and all of `ecdsa_secp384r1_sha384_test.json` with `p384.verify_der`: each `valid` case gives `true` and each `invalid` case gives `false`. Neither file has an `acceptable` case. With NIST records counted within `[P-384,SHA-384]` of the same `SigVer.rsp`, each record gives `true` exactly when its `Result` is `P`. |
+| **SV12** P-384 forms, DER and high S | a compressed key decoded because the crate accepts one, a BER-lenient parser, or low-S normalisation | In `ecdsa_secp384r1_sha384_test.json`, `p384.verify_der` gives `true` for tcIds 5 (the high-S twin) and 7, and `false` for tcIds 6 (`s` without its leading zero), 8 and 9 (BER sequence lengths). In the P1363 file, tcId 1 (high `s`) gives `true`, and tcIds 164 (`r > n`) and 165 (`s > n`) give `false`. With tcId 1's message and signature, the key compressed by `Qy`'s parity, and the bare 96-byte `Qx \|\| Qy`, give `false`; tcId 1's signature cut to 95 bytes gives `false`. None of them fails the call. |
+| **SV13** RS256 accepts | a wrong DigestInfo, a hash over the wrong bytes, or a big-endian/little-endian slip in `n` or `e` | `rsa_signature_2048_sha256_test.json` tcIds 1 to 7, with `n` and `e` from the group's `publicKey.modulus` and `publicKey.publicExponent`, give `true`. The JWS of [RFC 7515 Appendix A.2](https://www.rfc-editor.org/rfc/rfc7515#appendix-A.2), with `msg` its ASCII JWS Signing Input and `n` and `e` from its JWK, gives `true`, and with the last byte of the signing input changed gives `false`. tcId 1 with one leading zero byte added to `n` gives `true`. |
+| **SV14** PKCS#1 v1.5 is encode-and-compare | a padding parser that accepts BER, trailing garbage or a missing NULL (Bleichenbacher 2006 forgeries against `e = 3`) | Over all of `rsa_signature_2048_sha256_test.json`, each `invalid` case gives `false`, among them tcIds 236 and 237 (the message not hashed), 244 and 245 (`sig ≥ n`) and 246 (two bytes too long). tcId 8, which Wycheproof marks `acceptable` (`MissingNull`), gives `false`: the expected value follows from §9.2's encoding, which the rule compares byte for byte. |
+| **SV15** PS256 with a fixed salt | salt-length auto-detection, a wrong MGF hash, or a wrong `emBits` mask | Over all of `rsa_pss_2048_sha256_mgf1_32_test.json` with `rsa.verify_pss_sha256`, each `valid` case gives `true` (tcIds 73 and 74 among them: salts of all zero and all one bits) and each `invalid` case gives `false`. Each `valid` case of `rsa_pss_2048_sha256_mgf1_0_test.json` gives `false`, since its salt is empty and the rule fixes 32 bytes. |
+| **SV16** RSA key bounds | a small or even key accepted, or a bad key that fails the call | Each gives `false` and none fails the call: every `valid` case of `rsa_pkcs1_1024_sig_gen_test.json` (a 1024-bit modulus, below 2048), SV13's tcId 1 with `e` replaced by `01 00 00` (even) and by `01` (below 3), with `e` given as nine bytes `01 00 00 00 00 00 00 00 01` (≥ 2^33), with its signature cut to 255 bytes, and with `n` given as 1025 bytes (`n` followed by `01`, so 8201 bits and even). |
+| **SV17** reference charge | a per-byte charge, or RSA's modular exponentiation lowered as a loop | On the reference evaluator, `bound bytes 0 { bound steps 1 { rsa.verify_pkcs1_sha256(n, e, m, s) } }` gives `Ok(Ok(true))` for SV13's tcId 1, the same scope over `rsa.verify_pss_sha256` gives `Ok(Ok(true))` for `rsa_pss_2048_sha256_mgf1_32_test.json` tcId 1, and over `p384.verify` for its P1363 tcId 1. The arguments are locals bound outside the scopes. By hand from MEM-30, a core call is one step and admits nothing. |
 
-The laws are cases in the core contract harness, in `core/core/tests/ed25519.hirsel` and
-`core/core/tests/p256.hirsel`. They take no capability, so the shared walker's `--backend all`
+The laws are cases in the core contract harness, in `core/core/tests/ed25519.hirsel`,
+`core/core/tests/p256.hirsel`, `core/core/tests/p384.hirsel` and `core/core/tests/rsa.hirsel`.
+SV11, SV14 and SV15 walk whole Wycheproof files, which are checked in under
+`core/core/tests/vectors/` byte for byte from the pinned commit. They take no capability, so the shared walker's `--backend all`
 runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/std/tests/README.md)).
 
 ### Build slice
@@ -634,6 +743,139 @@ runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
 | **SV** signature verification | S | — | `core/core/ed25519.hirsel` and `core/core/p256.hirsel` with the three bodiless headers, and their rows in `core_ops.rs` as `Lane::Value` kernels. Separate functions in `hirsel-core-net` wrap ring 0.17.14's `ED25519`, `ECDSA_P256_SHA256_FIXED` and `ECDSA_P256_SHA256_ASN1`. The `RtOp`s `Ed25519Verify`, `P256Verify` and `P256VerifyDer` take key, message and signature pointer and length pairs and return a `u64` 0 or 1. The C entries `hirsel_core_ed25519_verify`, `hirsel_core_p256_verify` and `hirsel_core_p256_verify_der` in `hirsel-core-rt` each call the corresponding wrapper, as does the evaluator's `RtOp` arm (its `eval` feature already links `hirsel-core-net`), so compiled code and the evaluator answer from the same code. Cranelift and LLVM lower these as native calls, as `Sha256Blocks` is lowered. There is no `HostOp`, provider path or recording change. The module row's `unbuilt` mark is removed when the slice lands. | SV1–SV10 |
+| **SR** P-384 and RSA | S | SV, CK | `core/core/p384.hirsel` and `core/core/rsa.hirsel` with the four bodiless headers, their `core_ops.rs` rows as `Lane::Value` kernels, the `RtOp`s `P384Verify`, `P384VerifyDer`, `RsaVerifyPkcs1Sha256` and `RsaVerifyPssSha256` (pointer and length pairs in, `u64` 0 or 1 out), wrappers in `hirsel-core-net` beside the ring ones over `p384` 0.14.0 and `rsa` 0.10.0, the C entries in `hirsel-core-rt`, and the evaluator's arms calling the same wrappers. Lowered as native calls, as SV's kernels are. | SV11–SV17 |
+
+## Argon2id
+
+```hirsel core
+pub type Argon2Cost { memory_kib: u32, passes: u32, lanes: u32 }
+pub type Argon2Error = Params | Capacity(Capacity)
+pub fn argon2.id(password: Bytes, salt: Bytes, key: Bytes, data: Bytes, cost: Argon2Cost, len: u64, mut out: Bytes) -> Result[(), Argon2Error]
+```
+
+`argon2.id` computes Argon2id version `0x13`, the function `H` of
+[RFC 9106](https://www.rfc-editor.org/rfc/rfc9106) §3, with `password` as `P`, `salt` as
+`S`, `key` as the secret value `K`, `data` as the associated data `X`, `memory_kib` as `m`,
+`passes` as `t`, `lanes` as `p` and `len` as the tag length `T`. It appends the `len` tag
+bytes to the spare capacity of `out`. `key` and `data` are empty in ordinary password
+hashing; they are there because RFC 9106's own test vector uses them. Lanes are computed
+one after another on the calling thread, which gives the same tag as parallel lanes. Only
+version `0x13` exists here: RFC 9106 specifies no other.
+
+The results, decided in this order:
+
+- `Params` before any work, admitting nothing and taking no step beyond the call's own,
+  when any of these fails: `1 ≤ lanes ≤ 2^24 − 1`, `memory_kib ≥ 8 × lanes`, `passes ≥ 1`,
+  `4 ≤ len ≤ 2^32 − 1`, `8 ≤ len(salt) ≤ 2^32 − 1`, `len(password) ≤ 2^32 − 1`,
+  `len(key) ≤ 2^32 − 1` and `len(data) ≤ 32`. All but the last two bounds are RFC 9106 §3.1's;
+  the eight-byte salt floor and the 32-byte associated-data ceiling are the RustCrypto
+  crate's, refused here explicitly rather than inherited as a hidden failure.
+- `Capacity(c)` before any work, with `len` as `requested`, when the tag does not fit the
+  spare of `out`. Nothing is appended.
+- The work charge, below. When the current bound has too few steps it raises `OutOfTime` at
+  the call, having admitted and computed nothing.
+- `Capacity(c)` when the limit refuses the working memory, below, with nothing computed.
+- `Ok(())` with the tag appended.
+
+**Charge.** The call takes one step, as every core call does, and then one further step
+for each 1 KiB block compression the parameters choose: `passes × m′`, where
+`m′ = 4 × lanes × ⌊memory_kib / (4 × lanes)⌋` is the block count RFC 9106 §3.2 rounds
+`memory_kib` down to. The steps are taken at the call, before the memory is admitted and
+before any work, as `secret.scram_sha256` takes its iteration steps
+([MEM-30](budgets.md#mem-30-step-bounds)). This is MEM-30's per-unit exception and not the
+one step of `sha256.blocks`, because here the work is not bounded by any length a limit
+bounds: `passes` alone can make a call with small arguments run for an hour, and a
+stored hash that names its own cost is outside input. The
+initial and final BLAKE2b hashing is bounded by the argument lengths and is covered by the
+call's own step. The call then admits `1024 × m′` bytes of working memory from the
+current limit ([MEM-24](budgets.md#mem-24-logical-charges)), zeroes it after the tag is
+computed and refunds it before it returns. The tag lands in capacity the caller holds, so
+nothing else is admitted.
+
+**Determinism and timing.** The tag is a function of the arguments alone. The kernel is a
+pure computation: it passes no replay point and replay computes it again. The engine may
+use the crate's vector code; the tag is the same on every CPU (SEM-8). Argon2id's first
+half pass addresses memory independently of the password, and the rest addresses it by
+the data, as RFC 9106 §3.4 designs; no further constant-time property is required or
+claimed. The kernel is RustCrypto `argon2` 0.6.0 with `Algorithm::Argon2id`,
+`Version::V0x13` and `Argon2::new_with_secret` for a nonempty `key`, computing with
+`hash_password_into_with_memory` over the admitted blocks.
+
+**Std.** `std.argon2` is library code over the kernel. It holds a password as a PHC string
+and checks one:
+
+```hirsel unbuilt
+pub type PhcError = Malformed | Argon2(Argon2Error)
+pub fn argon2.hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, PhcError]
+pub fn argon2.verify(password: Bytes, phc: Bytes) -> Result[bool, PhcError]
+pub fn argon2.recommended() -> Argon2Cost
+```
+
+`hash` computes a 32-byte tag and writes
+`$argon2id$v=19$m=<m>,t=<t>,p=<p>$<salt>$<tag>`, the PHC string format that libargon2 and
+RustCrypto write, with decimal parameters without leading zeros and the salt and tag in
+standard base64 without padding. `verify` parses exactly that form, recomputes with the
+decoded salt, the parameters and the decoded tag's length, and compares the tags with
+`hmac.equal`, whose time depends only on the lengths. Any other text is `Malformed`: another
+variant (`argon2i`, `argon2d`), a version other than `19` or none, parameters out of order
+or repeated, a `keyid` or `data` field, base64 with padding or outside the alphabet, and a
+tag shorter than 4 bytes. A well-formed string whose parameters the kernel refuses gives
+`Argon2(Params)`. The salt is the caller's, drawn with `host.random`; `std.argon2` takes no
+capability. `recommended` returns RFC 9106 §4's second recommendation, `m = 65536`, `t = 3`,
+`p = 4`, which costs `196,609` steps and 64 MiB.
+
+A password sealed as a `Secret` derives a key with `secret.derive_argon2id`
+([TLS-5](tls.md#tls-5-secrets)), under the same parameters, refusals and charge.
+
+### Argon2id laws
+
+In the scoped laws, `out` is moved into the scope and returned with the result, since
+MEM-30 refuses a body that lends `mut` a place declared outside it; the other arguments are
+locals bound outside.
+
+| law | bug | oracle and setup |
+|---|---|---|
+| **AR1** RFC vector | a wrong `H0` (missing `K` or `X`, wrong length prefixes), wrong addressing, or Argon2i or Argon2d computed | `argon2.id` with `P` 32 bytes `01`, `S` 16 bytes `02`, `K` 8 bytes `03`, `X` 12 bytes `04`, `m = 32`, `t = 3`, `p = 4` and `len = 32` appends RFC 9106 §5.3's tag. |
+| **AR2** reference vectors and PHC | a lane-count or memory-size slip that only shows at larger `m`, or a PHC encoding that other implementations do not read | The seven `Argon2_id` `hashtest` cases in [phc-winner-argon2](https://github.com/P-H-C/phc-winner-argon2) `src/test.c` (password `password` or `differentpassword`, salt `somesalt`, `m` from 2^8 to 2^18, `t` from 1 to 4, `p` 1 or 2): `argon2.hash` returns each case's PHC string exactly, and `argon2.verify` of it gives `true`. The same string with its tag's last character changed so the decoded tag differs gives `false`. |
+| **AR3** parameter refusals | a refusal after work, or a crate error that fails the call | Each gives `Params`, appends nothing and, under `bound bytes 0 { bound steps 1 { ... } }` with its arguments bound outside, returns `Ok(Ok(Error(Params)))`: `m = 15, p = 2`; `t = 0`; `p = 0`; `p = 2^24`; a 7-byte salt; `len = 3`; 33 bytes of `data`. |
+| **AR4** per-block charge | the work counted as one step, `m` not rounded down, or the steps taken after the work | With AR2's `m = 256, t = 2, p = 2` case (`m′ = 256`, so 512 blocks), `bound steps 513 { ... }` succeeds and `bound steps 512 { ... }` gives `Error(OutOfTime(steps: 512))` with nothing appended to `out`. With `m = 259` and otherwise the same, `m′` is still 256 and the same two bounds give the same two results. By hand from RFC 9106 §3.2 and MEM-30. |
+| **AR5** memory admission | working memory taken from nowhere, kept after return, or admitted before the steps | Under a limit with `262,143` bytes free, AR4's call gives `Capacity(c)` with `c.requested = 262,144`; with `262,144` free it succeeds, and afterwards the limit has `262,144` free again. |
+| **AR6** PHC strictness | a lenient parser that accepts a downgraded variant or version | Starting from AR2's first string, `argon2.verify` gives `Malformed` for `$argon2i$` in its place, `v=16`, `v=` removed, `t=2,m=65536` swapped, `m=065536`, a trailing `=` on the salt, and `,keyid=AAAA` after the parameters. |
+
+The laws are cases in `core/core/tests/argon2.hirsel` and `core/std/tests/argon2.hirsel`
+with `--backend all`. AR2's larger cases take a quarter of a GiB and a fraction of a second
+each on native engines; on the evaluator only the `m = 256` cases run.
+
+### Argon2id build slice
+
+| slice | size | depends on | contents | laws |
+|---|---|---|---|---|
+| **A2** Argon2id | M | CK | `Argon2Cost` and `Argon2Error` in the prelude, `core/core/argon2.hirsel` with `id`, its `core_ops.rs` row, `RtOp::Argon2id` taking the seven arguments as pointer and length pairs and words, the per-block steps in the reference evaluator and in every engine (MEM-30's list), the working-memory admission and refund, the native C entry and the evaluator arm over one wrapper; `core/std/argon2.hirsel` and its API page. | AR1–AR6 |
+
+### Open
+
+*Not normative.* Questions the crypto kernels (SHA-512, P-384, RSA, Argon2id here; the AEAD
+and derivation sinks in [TLS-5](tls.md#tls-5-secrets)) leave for a later decision:
+
+1. **One backend.** Ed25519, P-256, `wrap` and `sign` stay on ring 0.17.14, whose behaviour
+   SV1–SV10 pin; the new kernels are RustCrypto, as ruled. rustls keeps ring linked either
+   way. Moving the four to `ed25519-dalek` and `p256` would make like things alike; the
+   laws would show any drift.
+2. **Argon2 associated data** is capped at 32 bytes, the crate's limit, where RFC 9106
+   allows `2^32 − 1`. No known format needs more.
+3. **No cost floor.** `argon2.id` and `std.argon2.hash` accept any RFC-valid cost, where
+   SCRAM refuses fewer than 4096 iterations. A floor for `hash` alone (OWASP's
+   `m = 19456, t = 2`) would refuse weak new hashes without refusing old stored ones.
+4. **More JWS algorithms.** `RS384`, `RS512`, `PS384`, `PS512` and `ES512` are left out;
+   each is a row in this section and its Wycheproof file when a provider needs it.
+5. **HKDF on program bytes** and HKDF over SHA-384 or SHA-512 are not specified; the first
+   is library code over `std.hmac` with no kernel.
+6. **A pepper under `Secret`.** Argon2's secret value `K` is program bytes in `argon2.id`;
+   a `secret.argon2id_hash` that takes `K` from a `Secret` is not specified.
+7. **Random-nonce AEAD at scale.** XChaCha20-Poly1305 or AES-GCM-SIV would let callers
+   draw nonces without the `2^32` message bound, and let `wrap` drop its per-blob HKDF.
+8. **Crate age.** `rsa` 0.10.0 was released on 2026-11-08. Only its public-key verification
+   is used, which RUSTSEC-2023-0071 (Marvin, private-key timing) does not affect.
 
 ## Provide
 

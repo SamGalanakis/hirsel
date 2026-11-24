@@ -295,17 +295,21 @@ most once:
 | `tls_send(<patterns>)` | `tls.send_secret` and `secret.scram_sha256` on a stream whose verified name one of the comma-separated TLS-3 patterns covers |
 | `mac` | `secret.hmac_sha256` and `secret.verify_hmac_sha256` (the MAC sink, below) |
 | `verify` | `secret.verify_hmac_sha256` only |
-| `kdf` | `secret.derive_hmac_sha256` |
+| `kdf` | `secret.derive_hmac_sha256`, `secret.derive_hkdf_sha256` and `secret.derive_argon2id` with the secret as parent (the derivation sinks, below) |
 | `sign(<alg>)` | `secret.sign` with `<alg>`, one of `ed25519`, `p256` and `rs256` (key operations, below) |
+| `aead(<alg>)` | `secret.aead_seal` and `secret.aead_open` with `<alg>`, one of `chacha20-poly1305`, `aes128-gcm` and `aes256-gcm` (the AEAD sink, below) |
+| `open(<alg>)` | `secret.aead_open` only, with `<alg>` |
 | `wrap` | `secret.wrap` and `secret.unwrap` with the secret as the key-encryption key (KEK) |
 | `mtls_client_id` | use as a TLS client identity |
 
-`mac` includes `verify`, so the two are not written together. A name is a destination
+`mac` includes `verify`, so the two are not written together, and `aead(<alg>)` includes
+`open(<alg>)` for the same `<alg>`, so neither are those. A name is a destination
 only inside `tls_send(...)` and a use word only outside it, so `tls_send(mac)` sends to
 the host `mac` and permits no MAC. A policy with no use, a word given twice, an unknown
 word or a malformed pattern list is `Invalid`. The canonical text, which recordings and
 diagnostics print, writes `tls_send` first, then `mac` or `verify`, `kdf`, the `sign` uses in the
-order above, `wrap` and `mtls_client_id`, with each pattern as TLS-3 prints it. No
+order above, the `aead` and `open` uses with their algorithms in the order above, `wrap` and
+`mtls_client_id`, with each pattern as TLS-3 prints it. No
 operation yet reads `mtls_client_id`: a policy may hold it and `narrow` intersects it, so
 the policy's shape is final.
 
@@ -347,13 +351,14 @@ the policy's shape is final.
 
 `secret.narrow` keeps the uses of `s` that the new policy also permits and designates the
 same bytes. Its `tls_send` patterns are the TLS-3 intersection of the two lists, so
-`tls_send` remains when that is not empty. `mac` against `verify` gives `verify`, and
-every other use remains when both policies hold it. If no use remains, or `uses` is
+`tls_send` remains when that is not empty. `mac` against `verify` gives `verify`,
+`aead(<alg>)` against `open(<alg>)` gives `open(<alg>)`, and every other use remains when
+both policies hold it. If no use remains, or `uses` is
 `Invalid`, the result is `Invalid`. It admits `round_up_8(pattern_bytes + 32)` for the new designation, and a
 refusal returns `Capacity(c)`.
 
 **Holders and release.** Each `Secret` value is one **holder** of a **designation**: the
-bytes it designates together with its policy. `seal`, `derive_hmac_sha256`, `narrow` and `provide.secret`
+bytes it designates together with its policy. `seal`, the three derivations, `narrow` and `provide.secret`
 ([core](core.md#provide)) each make a new designation with one holder.
 `secret.share(s)` returns one more holder of the designation of `s`, as `share` adds a
 holder of an `Rc` ([MEM-16](memory.md#mem-16-counting)): it admits nothing, never fails
@@ -362,7 +367,7 @@ designation is dropped, the designation is **released**: the charge that `narrow
 `provide.secret` admitted for it is refunded. The bytes of a sealed secret stay while
 any designation of them is held, since `narrow` and `provide.secret` designate the same
 bytes. When the last of them is released, the runtime zeroes the bytes and refunds the
-charge that `seal` or `derive_hmac_sha256` admitted. So a program that seals a fresh token every hour and drops
+charge that `seal` or the derivation admitted. So a program that seals a fresh token every hour and drops
 the old one holds the storage of one token, not of every token it has sealed.
 
 A release is not a provider operation: it passes no replay point, takes no step, cannot
@@ -378,8 +383,9 @@ stay with the helper's owner, as the charges of its open connections do
 
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and
-verdict, the SCRAM sink's verdict, `wrap`'s blob (ciphertext under the KEK) and `sign`'s
-signature are the only values computed from them that reach the program. A derivation
+verdict, the SCRAM sink's verdict, `wrap`'s blob (ciphertext under the KEK), `sign`'s
+signature and the AEAD sink's sealed and opened bytes are the only values computed from
+them that reach the program. A derivation
 returns an opaque designation. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
 store or JSON codec encodes one. `secret.render` returns the fixed marker
 `[secret]` for every secret. Every std function that renders, logs or describes a value
@@ -485,7 +491,7 @@ without revealing it. A connector stores an OAuth refresh token as `wrap`'s blob
 primitives; Hirsel has no cryptographic code of its own.
 
 A secret is **opaque** when the program never held its bytes: one from an entry grant, one
-derived (`derive_hmac_sha256`) from an opaque parent, or one unwrapped under an opaque KEK.
+made by a derivation sink from an opaque parent, or one unwrapped under an opaque KEK.
 A sealed secret, and one derived from or unwrapped under one that is not opaque, is not. The program holds a sealed KEK's bytes and could open the blob itself, so
 wrapping an opaque secret under a KEK that is not opaque is `Denied`.
 
@@ -562,15 +568,151 @@ pub fn derive_hmac_sha256(s: Secret, key_prefix: Bytes, data: Bytes, uses: Strin
 
 The runtime computes HMAC-SHA256 over `data` with `key_prefix` followed by the bytes
 of `s` as the key. It keeps the resulting 32 bytes as a new sealed secret. The
-parent must permit `kdf`. The child policy must be nonempty and a subset of
-`mac kdf`, including the `verify` use that `mac` permits. A refused or malformed
-policy gives `Invalid` before issue. The runtime admits 64 bytes for the child
-under the caller's current limit and returns `Capacity(c)` if admission refuses.
+parent and child policies follow the derivation rule below. The runtime admits 64 bytes
+for the child, `round_up_8(32 + 32)` by that rule.
 
 The call never waits. A successful result passes the replay point. A recording
 holds the parent designation, the child policy, `key_prefix` and `data`, and a
 success delivery. Replay makes the child designation without key material.
 The runtime zeroes derived bytes when their last designation is released.
+
+**The HKDF and Argon2id derivation sinks.**
+
+```hirsel core
+pub fn derive_hkdf_sha256(s: Secret, salt: Bytes, info: Bytes, len: u64, uses: String) -> Result[Secret, SecretError]
+pub fn derive_argon2id(s: Secret, salt: Bytes, cost: Argon2Cost, len: u64, uses: String) -> Result[Secret, SecretError]
+```
+
+`derive_hkdf_sha256` is HKDF with SHA-256 ([RFC 5869](https://www.rfc-editor.org/rfc/rfc5869)):
+Extract with `salt` and the bytes of `s` as input keying material, then Expand with `info`
+to `len` bytes. An empty `salt` is the 32 zero bytes of §2.2, which gives the same PRK.
+`derive_argon2id` is `argon2.id` ([core](core.md#argon2id)) with the bytes of `s` as the
+password, `salt`, an empty secret value and associated data, `cost` and `len`. Each keeps
+the `len` result bytes as a new sealed secret. HKDF turns a high-entropy key into keys for
+separate purposes, such as one AEAD key per tenant or per file; Argon2id turns a granted
+passphrase into a key. The runtime is RustCrypto `hkdf` 0.13.0 over `sha2` 0.11.1, and
+`argon2.id`'s wrapper, computing from run-owned memory.
+
+**The derivation rule.** It governs `derive_hmac_sha256`, `derive_hkdf_sha256` and
+`derive_argon2id` alike. The results, in this order:
+
+- `Invalid` before issue, with no effect: the parent does not permit `kdf`; `uses` is not a
+  policy, or holds a use outside `mac`, `verify`, `kdf`, `aead(<alg>)` and `open(<alg>)`;
+  `len` is outside `1` to `8160` (255 SHA-256 blocks, RFC 5869 §2.3) for HKDF; or, for
+  Argon2id, any of `argon2.id`'s `Params` checks fails, `key` and `data` being empty.
+- For Argon2id only, its steps: one for each block compression, taken at the call before
+  issue exactly as `argon2.id` takes them ([MEM-30](budgets.md#mem-30-step-bounds)). If
+  the current bound has fewer left, the call raises `OutOfTime` there, having admitted and
+  derived nothing.
+- `Capacity(c)` before issue: the caller's current limit refuses the child's storage,
+  `round_up_8(len + 32)` bytes, or for Argon2id the `1024 × m′` bytes of working memory,
+  admitted together. Nothing is derived.
+- For Argon2id only, `Invalid` as a delivery when the parent's bytes are longer than
+  `2^32 − 1`, the longest password RFC 9106 allows.
+- The new designation, with one holder and policy `uses`.
+
+The working memory holds blocks computed from the password; the runtime zeroes it before
+it refunds it, at the delivery. A child is opaque exactly when its parent is (key
+operations, above). The child set leaves out `tls_send`, `sign`, `wrap` and
+`mtls_client_id`: a derived key is a fresh symmetric key, which no peer knows as a
+credential and which is not a PKCS#8 private key, and a KEK comes from a grant or a seal so
+its custody is decided where it is made. A derived key's length is the caller's `len`, so
+`aead(chacha20-poly1305)` and `aead(aes256-gcm)` children need `len = 32` and
+`aead(aes128-gcm)` children `len = 16`; any other length is refused at use (the AEAD sink).
+
+Charges are the rule's: one step per call, plus Argon2id's block steps, and the admissions
+above. HKDF's work is bounded by `len`, which the rule bounds, and by the lengths of `salt`
+and `info`, which a limit bounds, so it takes one step whatever they are, as
+`sha256.blocks` does. Neither call waits. A successful result passes the replay point
+([CAP-8](capabilities.md#cap-8-the-replay-point)). A recording holds the parent
+designation, the child policy, `salt`, `info` or `cost`, `len` and the success delivery,
+and never the parent's or the child's bytes. Replay makes the child designation without
+key material, and a later use of it replays from the recording, as for
+`derive_hmac_sha256`.
+
+HKDF, HMAC and Argon2id over the parent's bytes run with no branch or memory index that
+depends on them, except Argon2id's data-dependent addressing after its first half pass,
+which RFC 9106 §3.4 designs in.
+
+**The AEAD sink.**
+
+```hirsel core
+pub type AeadAlg = ChaCha20Poly1305 | Aes128Gcm | Aes256Gcm
+pub fn aead_seal(key: Secret, alg: AeadAlg, nonce: Bytes, aad: Bytes, plain: Bytes, mut out: Bytes) -> Result[u64, KeyError]
+pub fn aead_open(key: Secret, alg: AeadAlg, nonce: Bytes, aad: Bytes, sealed: Bytes, mut out: Bytes) -> Result[u64, KeyError]
+```
+
+`aead_seal` encrypts `plain` and authenticates it with `aad` under the secret as key, and
+appends to the spare of `out` the ciphertext followed by the 16-byte tag, answering
+`len(plain) + 16`. `aead_open` takes `sealed` in that layout, checks the tag over `aad`
+and the ciphertext, and only when it holds appends the plaintext, answering
+`len(sealed) − 16`. That layout is what RFC 8439, JWE (`A128GCM`, `A256GCM`, split at the
+tag) and most file formats store.
+
+| `alg` | construction | key | nonce | tag | longest `plain` |
+| --- | --- | --- | --- | --- | --- |
+| `ChaCha20Poly1305` | [RFC 8439 §2.8](https://www.rfc-editor.org/rfc/rfc8439#section-2.8) | 32 bytes | 12 bytes | 16 bytes | `2^38 − 64` bytes |
+| `Aes128Gcm` | GCM ([NIST SP 800-38D](https://csrc.nist.gov/pubs/sp/800/38/d/final)) with AES-128 | 16 bytes | 12 bytes | 16 bytes | `2^36 − 32` bytes |
+| `Aes256Gcm` | GCM with AES-256 | 32 bytes | 12 bytes | 16 bytes | `2^36 − 32` bytes |
+
+The runtime is RustCrypto `chacha20poly1305` 0.11.0 and `aes-gcm` 0.11.1, computing from
+run-owned memory. AES-192, nonces of other lengths and truncated tags are not offered: GCM
+with a nonce other than 96 bits derives its counter through GHASH, which SP 800-38D
+§8.2 and the attacks on it make the weaker choice, and a short tag weakens every message.
+
+**Nonces are the caller's.** The sink keeps no state, so it cannot see a nonce used twice
+under one key, and reuse is catastrophic: it reveals the XOR of the two plaintexts, and
+under GCM the authentication key, after which an attacker forges at will. A caller either
+counts (a 96-bit counter stored with the key) or draws the 12 bytes with `host.random` and
+seals at most `2^32` messages under one key (SP 800-38D §8.3). Beyond that it derives a key
+per message or per batch with `derive_hkdf_sha256` and a fresh salt, as `wrap` does. The
+nonce is an argument because the formats a program must read and write fix it: JWE,
+age-style files and record protocols each say how theirs is made.
+
+The results, decided in this order:
+
+- `Denied` before issue, with no effect: `aead_seal`'s key lacks `aead(<alg>)`, or
+  `aead_open`'s key lacks both `aead(<alg>)` and `open(<alg>)`, for `<alg>` the spelling of
+  `alg`. The policy fixes the algorithm, as `sign(<alg>)` does, so one key is never used
+  with two constructions.
+- `Invalid` before issue: `nonce` is not 12 bytes; `plain` is longer than `alg`'s longest,
+  or `sealed` is longer than that plus 16.
+- `Capacity(c)` before issue: the result does not fit the spare of `out`, with its length
+  as `requested` (`len(plain) + 16` for a seal; `len(sealed) − 16` for an open, or 0 when
+  `sealed` is shorter than 16) and the spare
+  as `available`; nothing is appended.
+- `Invalid`: the key's length is not `alg`'s. Like `wrap`'s KEK check, this tells the
+  program only whether the length matches, which the grant's author chose.
+- `Tampered`, `aead_open` only: `sealed` is shorter than 16 bytes, or the tag does not
+  verify. A wrong key, nonce, `aad`, ciphertext byte or tag byte gives the same answer, and
+  nothing more: not which byte, and no plaintext. Nothing is appended, and the runtime
+  decrypts nothing before the tag has verified.
+
+The last two are deliveries. Each operation is a provider operation
+([CAP-5](capabilities.md#cap-5-provider-operations)), as the MAC sink is: its issue and its
+delivery pass the replay point. The issue holds the key's designation, `alg`, `nonce`,
+`aad` and `plain` or `sealed`; the delivery holds the appended bytes or the refusal. A
+recording never holds the key. A replay, whose key has no bytes behind it, delivers the
+recorded result. A recording of `aead_open` holds the plaintext it opened, so it is as
+sensitive as that plaintext, as a recording of received TLS plaintext is. To keep opened
+bytes sealed, store them with `wrap` and open them with `unwrap`, which give a `Secret`.
+
+**Charge.** Nothing is admitted: the result lands in capacity the caller holds, and the key
+schedule and working state are run-owned, zeroed after the call and never charged, as
+`send_secret`'s encodings are. Each call takes one step whatever the lengths, the rule of
+`sha256.blocks` and the signature kernels ([core](core.md#signature-verification)): the
+work is bounded by `len(plain)` or `len(sealed)`, which a limit bounds. Neither operation
+waits.
+
+**Constant time.** Nothing the sink computes from the key or the plaintext varies in time
+or memory address with their values. ChaCha20 and Poly1305 are fixed sequences of
+additions, rotations, XORs and multiplications. AES runs on the CPU's AES instructions when
+it has them (AES-NI, ARMv8 AES) and otherwise on the crate's bitsliced software, which
+looks up no table. GHASH runs on carry-less multiply instructions or on the crate's
+constant-time software multiply. The tag comparison is constant time. The time may depend
+on the lengths of `nonce`, `aad` and `plain`, which the program already knows. An engine
+may choose among these paths by CPU; every path gives the same bytes, so by
+[SEM-8](semantics.md#sem-8-determinism) a run behaves the same on every CPU.
 
 ### TLS-6: SCRAM-SHA-256
 
@@ -930,9 +1072,24 @@ endpoint by name.
 | **CR3** the IMDS exchange | a missing IMDSv2 token, a wrong expiry, or a failure that still makes a designation | The server answers only a `PUT` with the TTL header and only `GET`s that carry its token. `Expiration` `2026-11-23T12:00:00Z` gives `1795435200000000000` (`date -ud`). A 404 on the role gives `Status(404)`. A reply without `SecretAccessKey`, with an escaped value, or with `Code` `Expired` gives `Malformed`. A `token` with 3 bytes of room against a 7-byte token gives `Room(20, 7)` with both strings unchanged. A server that never answers, under a 50 ms deadline, gives `Net(TimedOut)`. A grant with source `static` is refused at its spelling. |
 | **CR4** STS web identity | the token sent from a stale read, or the wrong reply element taken as the key | A loopback TLS server as `localhost` with its CA's roots, granted `sts:<arn> at:localhost:<port> roots:<ca> file:<token>`. The server receives `WebIdentityToken` equal to the file's bytes, which it rewrites before each reply, and sees each of three versions once. The reply puts `SessionToken` before `SecretAccessKey`. Its `AssumeRoleWithWebIdentityResponse` gives the fixture's key id and expiry, and the key's MAC matches CR1's oracle. A 403 `AccessDenied` gives `Status(403)`. |
 | **CR5** STS file refusals | a wrong refusal, a blocked fetch, or file contents in output | Against CR4's loopback server, missing and empty tokens give `Token(NotFound)`, a permissions failure gives `Token(Denied)`, an oversized token gives `Malformed`, and a token pipe gives `Token(Other(EINVAL))`. Missing, unreadable, invalid PEM, and pipe roots give `Net(Tls(Roots))`. Output contains only the typed refusal labels and no diagnostics. Only the valid control reaches STS. |
+| **AE1** RFC 8439 | a wrong Poly1305 key, AAD or length block, or the tag placed before the ciphertext | The key of [RFC 8439 §2.8.2](https://www.rfc-editor.org/rfc/rfc8439#section-2.8.2), sealed as `aead(chacha20-poly1305)`, with its nonce, AAD and plaintext: `aead_seal` appends the section's ciphertext followed by its tag and answers 130. With Appendix A.5's key, nonce, AAD, ciphertext and tag, `aead_open` appends A.5's plaintext. |
+| **AE2** CAVP GCM | a wrong GHASH, counter start or key schedule | In `gcmEncryptExtIV128.rsp` and `gcmEncryptExtIV256.rsp` from [gcmtestvectors.zip](https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip), every record under `[IVlen = 96]` and `[Taglen = 128]`, with its key sealed as `aead(aes128-gcm)` or `aead(aes256-gcm)`: `aead_seal` appends `CT` then `Tag`. In `gcmDecrypt128.rsp` and `gcmDecrypt256.rsp` under the same headers, a record marked `FAIL` gives `Tampered` and every other record opens to its `PT`. |
+| **AE3** Wycheproof corpus | an edge of either construction that the RFC and CAVP records miss | Over `aes_gcm_test.json` and `chacha20_poly1305_test.json` at the commit [core](core.md#signature-verification)'s laws pin: in groups with `ivSize` 96 and a key size the algorithm takes, each `valid` case seals to `ct` then `tag` and opens to `msg`, and each `invalid` case gives `Tampered` on open. In groups with any other `ivSize`, every case gives `Invalid` before issue, the `valid` ones included (AES-GCM tcId 69, ChaCha20-Poly1305 tcIds 317 and 318 among them). The 192-bit-key AES groups give `Invalid` under both AES algorithms. |
+| **AE4** a mismatch says nothing | plaintext released before the tag check, or a refusal that tells one failure from another | AES-GCM tcIds 41 to 46 and ChaCha20-Poly1305 tcIds 146 to 149 (tag bits flipped), AE1's A.5 input with one ciphertext byte changed, with one AAD byte changed, and under a different 32-byte key: each gives exactly `Tampered`, and `out`'s length is unchanged. |
+| **AE5** the policy decides | a sink that seals with an open-only key, or uses one key with two algorithms | With a counting provider, each gives `Denied` and the provider sees no call: `aead_seal` under `open(aes256-gcm)`; `aead_open` with `Aes256Gcm` under `aead(chacha20-poly1305)`; either under `mac`; and `aead_seal` under the result of narrowing `aead(aes256-gcm)` by `open(aes256-gcm)`. `aead_open` under `open(aes256-gcm)` opens AE2's first decrypt record. |
+| **AE6** argument refusals | a refusal after issue, a partial append, or a key length not checked | With a counting provider, nonces of 11 and 13 bytes give `Invalid` and the provider sees no call. A spare of `len(plain) + 15` gives `Capacity(c)` with `requested` `len(plain) + 16` and `available` `len(plain) + 15`, nothing appended and no call. A 16-byte key under `Aes256Gcm`, a 32-byte key under `Aes128Gcm` and a 16-byte key under `ChaCha20Poly1305` (each sealed with the matching use) give `Invalid` as a delivery. |
+| **AE7** no key in a recording | the key reaching a frame | Record AE1's run with the key from a `file:` grant. The tape holds none of the key's raw bytes, hex or base64. Replayed with the file removed, the run appends the same bytes and ends `Sealed`. |
+| **AE8** one step, nothing admitted | a per-byte or per-block charge, or the output admitted again | Under the reference count, with `out` reserved for 1 MiB + 16 bytes outside the scopes and moved into them, `bound bytes 0 { bound steps 1 { ... } }` around one `aead_seal` of 1 MiB succeeds, and the seal answers `Ok(1048592)`. By hand from MEM-30 and the charge rule. |
+| **KD1** HKDF vectors | Extract and Expand swapped, salt and IKM swapped, or the empty-salt rule wrong | For [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869) A.1, A.2 and A.3, the IKM sealed as `kdf` and the case's salt, info and `L`, with `uses` `mac`: `secret.hmac_sha256(child, "x")` equals Python's `hmac.new(OKM, b"x", "sha256")` over the case's `OKM`. A.3 has an empty salt and info. |
+| **KD2** HKDF corpus and length bound | an off-by-one at 255 blocks, or the bound checked after work | Over `hkdf_sha256_test.json` at that commit, each `valid` case passes KD1's check against its `okm`, sizes up to 8160 among them. tcIds 25, 48 and 74 (`size` 8161) give `Invalid` before issue. |
+| **KD3** HKDF to AEAD | a child key of the wrong bytes reaching the AEAD sink | A.1's IKM, salt and info with `len = 32` and `uses` `aead(chacha20-poly1305)`, then AE1's nonce, AAD and plaintext sealed under the child: the result equals Python `cryptography`'s `ChaCha20Poly1305(okm[:32]).encrypt(nonce, plain, aad)`, `okm` being A.1's OKM, whose first 32 bytes are the 32-byte output by RFC 5869's construction. |
+| **KD4** child policy and opacity | a derived key escalated to a credential, or a child of a granted key treated as program-held | Each child policy gives `Invalid` before issue for all three derivations: `tls_send(alpha.test)`, `sign(ed25519)`, `wrap`, `mtls_client_id`, and `mac` from a parent without `kdf`. `derive_hmac_sha256` with `uses` `aead(aes256-gcm)` succeeds. A child derived from a granted parent, wrapped under a sealed KEK, gives `Denied`; a child of a sealed parent wraps. |
+| **KD5** Argon2id derivation | the derivation computed differently from `argon2.id`, the steps taken after the work, or working memory not admitted | A secret sealed from `password` as `kdf`, salt `somesalt`, `m = 256`, `t = 2`, `p = 2`, `len = 32`, `uses` `mac`: `secret.hmac_sha256(child, "x")` equals Python `hmac` keyed with the tag of that case in `src/test.c` ([core AR2](core.md#argon2id-laws)). Under `bound steps 513` the call succeeds, and under `bound steps 512` it gives `Error(OutOfTime(steps: 512))` with no child made and the counting provider seeing no call. Under a limit with `262,207` bytes free it gives `Capacity(c)` with `requested` `262,208` (`262,144` working memory and 64 child storage), and with `262,208` free it succeeds, the working memory refunded after. |
+| **KD6** no derivation bytes in a recording | the parent's or child's bytes reaching a frame | Record KD1's A.1 case and KD5 with the parents from `file:` grants. The tape holds none of the IKM, the password, the OKM or the Argon2 tag, raw, hex or base64. Replayed with the files removed, both runs give the same MAC tags and end `Sealed`. |
 
 TL1 to TL11, TL14 to TL16 and SC1 to SC8 run against the OS provider over
-loopback. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
+loopback, and AE1 to AE8 and KD1 to KD6 against the OS provider. AE5, AE6 and KD5's
+no-call checks also have scripted-provider cases. TL5, TL7, TL13, TL15, SC1 and SC5 also have scripted-provider cases, so that the
 evaluator is covered. SC9 runs on both engines. CR1 to CR5 run natively against loopback servers. The recording laws of
 TLS sessions and secrets, RL3 to RL5, are with the tools ([recording](../recording.md#laws)).
 
@@ -951,6 +1108,8 @@ and L (more than three).
 | **T6** STARTTLS | S | T1, T3 | `net.join` and `Unjoined` (NET-7) on both engines and in the evaluator's virtual sockets; TLS-1's unread-bytes peek in the OS provider, and a pre-handshake bytes step in peer scripts | TL14–TL16 |
 | **T7** SCRAM | M | T4, T6 | TLS-1's binding value (`binding_out`, the recording's `TLS_CONNECT` delivery); `Scram`, `ScramError`, `scram_sha256`, `scram_final_len`, `scram_verify`; SASLprep with raw fallback; the per-iteration charge; `SCRAM` and `SCRAM_VERIFY` in the OS, scripted and virtual paths and in a recording | SC1–SC9 |
 | **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR5 |
+| **T9** AEAD sink | M | T4, CK | `AeadAlg`; the `aead(<alg>)` and `open(<alg>)` uses in policy parsing, `narrow` and the canonical text; `aead_seal` and `aead_open` in the OS provider over `chacha20poly1305` 0.11.0 and `aes-gcm` 0.11.1, and in the scripted and virtual paths as the MAC sink is; their issue and delivery frames in a recording | AE1–AE8 |
+| **T10** derivation sinks | M | T4, CK, A2 | `derive_hkdf_sha256` over `hkdf` 0.13.0 and `derive_argon2id` over A2's wrapper, in the OS, scripted and virtual paths; the derivation rule's child set, applied to `derive_hmac_sha256` too; opacity; the child, working-memory and step charges; their frames in a recording | KD1–KD6 |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

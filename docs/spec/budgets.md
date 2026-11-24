@@ -293,6 +293,9 @@ is core's plain record `{ steps: u64 }`.
   step plus any steps taken by the user code it enters. `secret.scram_sha256` takes
   one further step for each PBKDF2 iteration it admits, at the call and before any
   derivation, because an untrusted server chooses the work ([TLS-6](tls.md#tls-6-scram-sha-256)).
+  `argon2.id` and `secret.derive_argon2id` take one further step for each Argon2 block
+  compression their parameters choose, at the call and before any work, because a stored
+  hash or a caller names a cost that no limit bounds ([core](core.md#argon2id)).
   `crc32c.update` and `crc64nvme.update` take one further step before each nonempty
   16 KiB chunk, including a final partial chunk. Code an engine adds for drop, clone and growth
   takes no steps. This is the **reference count**, the count the reference evaluator takes;
@@ -358,8 +361,8 @@ is core's plain record `{ steps: u64 }`.
   across engines or optimisation levels. Every build takes at least one step for each
   iteration of a loop in user code and each call into user code that recursion reaches, and
   the extra steps of
-  `secret.scram_sha256`, `crc32c.update` and `crc64nvme.update` as the reference count
-  does, so code that computes without end exhausts every bound and work an untrusted input
+  `secret.scram_sha256`, `argon2.id`, `secret.derive_argon2id`, `crc32c.update` and
+  `crc64nvme.update` as the reference count does, so code that computes without end exhausts every bound and work an untrusted input
   chooses is bounded by it. A step taken while no bound is current uses nothing and
   ends no slice, so an engine need not count it, even in code that also runs under a bound.
 

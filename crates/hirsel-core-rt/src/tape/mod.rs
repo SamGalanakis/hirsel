@@ -247,7 +247,7 @@ fn cell() -> &'static Cell {
     if let Some(c) = FREE.with_borrow_mut(Vec::pop) {
         return c;
     }
-    let c: &'static mut Cell = Box::leak(Box::new(Cell {
+    let c = Box::into_raw(Box::new(Cell {
         state: Mutex::new(State {
             generation: 0,
             live: None,
@@ -265,8 +265,8 @@ fn cell() -> &'static Cell {
         },
         hooks: &schedule::TapeHooks,
     }));
-    c.provider.state = (c as *mut Cell).cast();
-    c
+    // SAFETY: leaked; writing via `c`, not a `&mut`, keeps `cell_of`'s copy valid.
+    unsafe { ((*c).provider.state = c.cast(), &*c).1 }
 }
 
 enum Seal<'a> {

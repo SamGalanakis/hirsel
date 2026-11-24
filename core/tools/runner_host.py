@@ -329,9 +329,70 @@ def bucket_release_barrier(work, engine, compiler, runtime, cc, manifest_path, l
         assert crash(next_holder) < 0
 
 
+def bucket_claim_race(work, engine, compiler, runtime, cc, manifest_path, limit):
+    """L52: hold each claimant's replace until all final HEAD reads complete."""
+    import queue
+    import threading
+
+    arrived = queue.Queue()
+    applied = queue.Queue()
+    release = threading.Event()
+    candidate_epoch = 0
+
+    def is_claim(method, path, data):
+        if method != b'PUT' or path != b'/bucket-t1/head' or len(data) < 152:
+            return False
+        epoch, = struct.unpack_from('<Q', data, 88)
+        entry_epoch, = struct.unpack_from('<Q', data, 128)
+        return epoch == candidate_epoch and entry_epoch < epoch
+
+    def await_arrivals(method, path, data):
+        if is_claim(method, path, data):
+            arrived.put(data[96:112])
+            release.wait()
+
+    def record_replace(method, path, data, answer):
+        if is_claim(method, path, data):
+            applied.put(answer.startswith(b'HTTP/1.1 200 '))
+        return answer
+
+    with bucket_processes(work, engine, compiler, runtime, cc, manifest_path, limit) as fixture:
+        spawn, line, once, crash, hosted = fixture
+        _, listening = spawn(['--sim'])
+        addr = line(listening, 'L52:sim')
+        assert addr.startswith('PORT '), addr
+        port = int(addr[5:])
+        direct = f'--bucket=http://127.0.0.1:{port}'
+        code, text = once([hosted, '--hirsel-install', direct], 'L52:incumbent')
+        assert code == 0, text
+        for count in (2, 3, 4):
+            candidate_epoch = count
+            release.clear()
+            with bucket_relay(port, before=await_arrivals, after=record_replace) as delayed:
+                try:
+                    trials = [spawn([hosted, '--hold', delayed]) for _ in range(count)]
+                    pairs = {line(arrived, 'L52:claim-arrival') for _ in trials}
+                    assert len(pairs) == count, pairs
+                    release.set()
+                    assert sum(line(applied, 'L52:claim-verdict') for _ in trials) == 1
+                    winners = 0
+                    for process, output in trials:
+                        verdict = line(output, 'L52:open-verdict')
+                        if verdict == 'READY 1 1048576':
+                            winners += 1
+                            assert crash(process) < 0
+                        else:
+                            assert 'the bucket store writer claim was lost' in verdict, verdict
+                            assert process.wait(timeout=60) == 1
+                    assert winners == 1, winners
+                finally:
+                    release.set()
+
+
 BUCKET_HOST_LAWS = {
     'bucket_adopts_and_fences': bucket_adopts_and_fences,
     'bucket_release_barrier': bucket_release_barrier,
+    'bucket_claim_race': bucket_claim_race,
 }
 
 

@@ -1438,10 +1438,10 @@ appending it, 14 bytes of copying on a low-rate stream.
 | **PC10** derivation vectors | Extract and Expand swapped, a PRF split off by one, or the SHA-384 variants wrong | RFC 5869 A.1 to A.3 through `derive_hkdf_extract` then `derive_hkdf_expand`, checked as KD1. RFC 8448 §3's handshake and application traffic keys and IVs for `TLS_AES_128_GCM_SHA256`, from its ECDHE shared secret sealed as `kdf`. For SHA-384, Wycheproof `hkdf_sha384_test.json`. For `derive_tls12_prf`, the TLS 1.2 PRF vectors that ring's and Go's test suites pin, with `skip` 0 and with the output split at 32: the halves equal the whole's bytes. |
 | **PC11** charge and zeroing | state not admitted, admitted twice, or not refunded at drop | Under the reference count, `bound bytes 1023 { packet.cipher(..) }` gives `Capacity` with `requested` 1024, and `bound bytes 1024` succeeds. After the cipher is dropped, the limit is back to where it was. In the native runtime's unit tests, the cipher's storage is all zeros after drop. |
 
-PC1 to PC6 and PC10 are cases in `core/core/tests/packet_vectors.hirsel`, with the vector
-files next to AE's. PC7 and PC8 are in `core/std/tests/secret_agree.hirsel`. PC9 is in the
-runtime tape laws. PC11 is in the reference evaluator's limit laws and the runtime's unit
-tests.
+PC1 to PC6 and PC10 belong in `core/core/tests/packet_vectors.hirsel`<!-- doc-ref: planned -->,
+with the vector files next to AE's. PC7 and PC8 belong in
+`core/std/tests/secret_agree.hirsel`<!-- doc-ref: planned -->. PC9 belongs in the runtime tape
+laws. PC11 belongs in the reference evaluator's limit laws and the runtime's unit tests.
 
 ## Laws
 

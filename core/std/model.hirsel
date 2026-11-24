@@ -513,3 +513,164 @@ pub fn check[S: key, A](m: Model[S, A], b: Bounds) -> Result[(), ()] {
         },
     }
 }
+
+pub type Replayed = Reproduced(Failure) | NoLongerFails
+
+fn bad_replay(step: u64) -> Never {
+    let mut message = string.from("model: config: token does not fit this model at step ")
+    string.push_u64(mut message, step)
+    fail(take message)
+}
+
+fn read_uleb(data: Bytes, mut at: u64) -> Option[u64] {
+    let mut value: u64 = 0
+    for i in 0u64 .. 10 {
+        if at == list.len(data) {
+            return None
+        }
+        let byte = data[at]
+        at += 1
+        if i == 9 && byte > 1 {
+            return None
+        }
+        let bits: u64 = int.widen(byte & 127)
+        value |= bits << (i * 7)
+        if byte < 128 {
+            return if i != 0 && byte == 0 {
+                None
+            } else {
+                Some(value)
+            }
+        }
+    }
+    None
+}
+
+fn replay_tape(text: String) -> List[u64] {
+    let decoded = base64.decode(string.as_bytes(text))
+    let Some(take data) = take decoded else {
+        bad_replay(0)
+    }
+    if list.len(data) < 3 || data[0] != 1 || data[1] != 0 {
+        bad_replay(0)
+    }
+    let mut at: u64 = 2
+    let Some(count) = read_uleb(data, mut at) else {
+        bad_replay(0)
+    }
+    // Each choice takes at least one byte. Reserve only space justified by the input.
+    let mut tape: List[u64] = list.with_capacity(order.min(count, list.len(data) - at))
+    for i in 0u64 .. count {
+        let Some(index) = read_uleb(data, mut at) else {
+            bad_replay(if i == 0 {
+                0
+            } else {
+                i - 1
+            })
+        }
+        list.push(mut tape, index)
+    }
+    if count == 0 || at != list.len(data) {
+        bad_replay(0)
+    }
+    take tape
+}
+
+fn with_replay_state[S: key, R](initial: S, current: Option[S], visit: scoped fn(S) -> R) -> R {
+    match current {
+        None => visit(initial),
+        Some(state) => visit(state),
+    }
+}
+
+pub fn replay[S: key, A](m: Model[S, A], b: Bounds, text: String) -> Replayed {
+    validate(m)
+    let tape = replay_tape(text)
+    let initial = tape[0]
+    if initial >= list.len(m.init) {
+        bad_replay(0)
+    }
+    let mut current: Option[S] = None
+    let mut links: List[Breadcrumb[A]] = list.new()
+    list.push(mut links, Initial(initial))
+    let pseudo = violates(m, b, m.init[initial], m.start, m.init[initial])
+    match take pseudo {
+        Ok(Some(take label)) => return Reproduced(make_failure(m.show, b, links, 0, Violated(take label), None)),
+        Error(take error) => return Reproduced(make_failure(m.show, b, links, 0, Handler, Some(take error))),
+        Ok(None) => {},
+    }
+    let mut counts: List[(String, u64)] = list.new()
+    for law in m.sometimes {
+        list.push(mut counts, (string.from(law.label), 0))
+    }
+    for i in 1u64 .. list.len(tape) {
+        let gathered = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[List[A], HandlerError] {
+            enabled(m, b, state)
+        })
+        let mut actions = match take gathered {
+            Ok(take actions) => take actions,
+            Error(take error) => return Reproduced(make_failure(m.show, b, links, i - 1, Handler, Some(take error))),
+        }
+        let index = tape[i]
+        if index >= list.len(actions) {
+            bad_replay(i - 1)
+        }
+        let action = list.swap_remove(mut actions, index)
+        let stepped = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[Edge[S], HandlerError] {
+            follow(m, b, state, action)
+        })
+        match take stepped {
+            Ok(Rejected(take label)) => {
+                list.push(mut links, Action(i - 1, index, take action))
+                return Reproduced(make_failure(m.show, b, links, i, Violated(take label), None))
+            },
+            Error(take error) => return Reproduced(make_failure(m.show, b, links, i - 1, Handler, Some(take error))),
+            Ok(Accepted(take next)) => {
+                let checked = witness(m, b, next, mut counts)
+                if let Error(take error) = take checked {
+                    return Reproduced(make_failure(m.show, b, links, i - 1, Handler, Some(take error)))
+                }
+                current = Some(take next)
+                list.push(mut links, Action(i - 1, index, take action))
+            },
+        }
+    }
+    let tip = list.len(links) - 1
+    if tip >= b.depth {
+        return NoLongerFails
+    }
+    let gathered = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[List[A], HandlerError] {
+        enabled(m, b, state)
+    })
+    let actions = match take gathered {
+        Ok(take actions) => take actions,
+        Error(take error) => return Reproduced(make_failure(m.show, b, links, tip, Handler, Some(take error))),
+    }
+    if list.len(actions) == 0 {
+        let done = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[bool, HandlerError] {
+            terminal(m, b, state)
+        })
+        return match take done {
+            Ok(true) => NoLongerFails,
+            Ok(false) => Reproduced(make_failure(m.show, b, links, tip, Stuck, None)),
+            Error(take error) => Reproduced(make_failure(m.show, b, links, tip, Handler, Some(take error))),
+        }
+    }
+    // A failing handler on an outgoing edge has a path to this state.
+    for action in actions {
+        let stepped = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[Edge[S], HandlerError] {
+            follow(m, b, state, action)
+        })
+        match take stepped {
+            Ok(Accepted(next)) => {
+                let checked = witness(m, b, next, mut counts)
+                if let Error(take error) = take checked {
+                    return Reproduced(make_failure(m.show, b, links, tip, Handler, Some(take error)))
+                }
+            },
+            Ok(Rejected(_)) => return NoLongerFails,
+            Error(take error) => return Reproduced(make_failure(m.show, b, links, tip, Handler, Some(take error))),
+        }
+    }
+    NoLongerFails
+}

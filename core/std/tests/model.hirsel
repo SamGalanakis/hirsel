@@ -276,3 +276,45 @@ fn explore_handler_timeout() -> bool {
     }
     model.kind(f) == Handler && model.depth(f) == 0 && failure_report(f) == "model: handler: reproduce: model.replay(m, b, \"AQABAA==\"); OutOfTime in actions at depth 0; path: init 0"
 }
+
+// expect: run replay_wrap() = true
+fn replay_wrap() -> bool {
+    let Reproduced(f) = model.replay(counter(true), model_bounds(), "AQAEAAAAAA==") else {
+        return false
+    }
+    model.kind(f) == Violated(string.from("never_wrap")) && model.depth(f) == 3
+}
+
+// expect: run replay_repaired() = true
+fn replay_repaired() -> bool {
+    if let NoLongerFails = model.replay(counter(false), model_bounds(), "AQAEAAAAAA==") {
+        return true
+    }
+    false
+}
+
+// expect: run replay_stuck() = true
+fn replay_stuck() -> bool {
+    let Reproduced(f) = model.replay(network(fn(s: Network) -> bool {
+        false
+    }), model_bounds(), "AQAFAAAAAAA=") else {
+        return false
+    }
+    model.kind(f) == Stuck && model.depth(f) == 4
+}
+
+// expect: run replay_malformed() = true
+fn replay_malformed() -> bool {
+    let run = isolate(fn() {
+        let _ = model.replay(counter(false), model_bounds(), "!")
+    })
+    let Error(causes) = result.unwrap(take run) else {
+        return false
+    }
+    for cause in causes {
+        if let Fail(message) = cause.kind {
+            return message == "model: config: token does not fit this model at step 0"
+        }
+    }
+    false
+}

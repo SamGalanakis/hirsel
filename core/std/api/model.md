@@ -1,6 +1,6 @@
 # Model
 
-[API overview](../API.md). Verification Phases 1.4 and 1.5. The Bag and explorer are implemented.
+[API overview](../API.md). Verification Phases 1.4 and 1.5. The Bag, explorer, and replay are implemented.
 The build list is
 `hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
 

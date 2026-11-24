@@ -607,6 +607,11 @@ fn log_changes_and_tail_window(c: Clock) -> Result[(), Error] waits {
     let mut streamed = open_span_changes(reading, snapshot(db), cell_low, cell_high)?
     cell_law_require(option.unwrap(next_span_change(reading, mut streamed)?).tree_key == cell_low, "streamed inline cell")?
     if let Some(_) = next_span_change(reading, mut streamed)? { return Error(Missing("duplicate streamed cell")) }
+    let mut backwards = reverse_byte_cursor(snapshot(db).roots.collections, cell_low, cell_high)?
+    let Some((reverse_key, _)) = next_bytes(mut backwards)? else {
+        return Error(Missing("inline cell on reverse lower bound"))
+    }
+    cell_law_require(reverse_key == cell_low, "reverse cell key")?
 
     let before_appends = snapshot(db)
     log_diff_write(mut db, None, log_handle, 0, 4, 0, 0)?

@@ -578,7 +578,7 @@ fn range_has_cell(rows: PageRange, key: Bytes) -> bool {
         }
     }
     match rows.stop {
-        Some(stop) => if rows.reverse { key > stop } else { key < stop },
+        Some(stop) => if rows.reverse { key >= stop } else { key < stop },
         None => true,
     }
 }

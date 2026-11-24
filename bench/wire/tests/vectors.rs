@@ -90,9 +90,9 @@ fn frame(name: &str) -> Frame {
             V,
             vec![],
             vec![Group::board(
-                N,
+                7,
                 vec![Row {
-                    slot: 0,
+                    slot: 3,
                     key: bytes("0102030405060708"),
                     value: None,
                 }],
@@ -119,6 +119,27 @@ fn frame(name: &str) -> Frame {
             vec![Group::board(7, (0..1954).map(row).collect())],
             vec![],
         ),
+        "slot_move" => Frame::Batch(
+            V,
+            vec![],
+            vec![Group {
+                sub: 7,
+                value: 19u32.to_le_bytes().to_vec(),
+                rows: vec![
+                    Row {
+                        slot: 0,
+                        key: bytes("0102030405060708"),
+                        value: None,
+                    },
+                    Row {
+                        slot: 2,
+                        key: bytes("0102030405060708"),
+                        value: Some(vec![7]),
+                    },
+                ],
+            }],
+            vec![],
+        ),
         "reset_empty" => Frame::Reset(V, vec![]),
         other => {
             let outcome = match other {
@@ -127,6 +148,7 @@ fn frame(name: &str) -> Frame {
                 "ended_failed_out_of_bytes" => Outcome::Failed(Fault::OutOfBytes(room())),
                 "ended_failed_out_of_time" => Outcome::Failed(Fault::OutOfTime(V)),
                 "ended_failed_gone" => Outcome::Failed(Fault::Gone),
+                "ended_failed_conflict" => Outcome::Failed(Fault::Conflict("unique_value".into())),
                 "ended_refused_no_entry" => Outcome::Refused(Refusal::NoEntry),
                 "ended_refused_malformed" => {
                     Outcome::Refused(Refusal::Malformed(Bad { kind: 6, at: V }))
@@ -217,7 +239,7 @@ fn frame_vectors_match_w3a_and_decode_strictly() -> Result<()> {
             );
         }
     }
-    println!("matched {} canonical W3a v2.11.4 vectors", vectors.len());
+    println!("matched {} canonical hirsel.3 vectors", vectors.len());
     assert!(codec::decode(&[255; 16]).is_err());
     assert!(codec::decode(&bytes("0000000000000000ffffffff")).is_err());
     Ok(())

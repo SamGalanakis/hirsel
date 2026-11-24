@@ -58,9 +58,12 @@ export async function vectors(c,frame,entries) {
   vector({tag:'Placed',value:{tag:'Resolve',values:[3,bytes('07')]}},'05000000 01000000 03000000 01000000 07');
   vector({tag:'Placed',value:{tag:'Gone'}},'05000000 02000000');
   vector({tag:'Batch',values:[2n,[],[],[]]},'06000000 0200000000000000 00000000 00000000 00000000');
-  vector({tag:'Batch',values:[2n,[7],[],[]]},'06000000 0200000000000000 01000000 07000000 00000000 00000000');
-  vector({tag:'Batch',values:[2n,[],[{sub:3,key:bytes('aa'),value:{tag:'None'}}],[{stream:4,p:5n,outcome:{tag:'Returned',value:bytes('')}}]]},'06000000 0200000000000000 00000000 01000000 03000000 01000000 aa 00000000 01000000 04000000 0500000000000000 00000000 00000000');
-  vector({tag:'Batch',values:[2n,[7],[{sub:3,key:bytes('aa'),value:{tag:'Some',value:bytes('bb')}}],[]]},'06000000 0200000000000000 01000000 07000000 01000000 03000000 01000000 aa 01000000 01000000 bb 00000000');
+  vector({tag:'Batch',values:[2n,[7],[{sub:7,value:bytes(''),rows:[]}],[]]},
+    '06000000 0200000000000000 01000000 07000000 01000000 07000000 00000000 00000000 00000000');
+  vector({tag:'Batch',values:[2n,[],[{sub:3,value:bytes(''),rows:[{slot:2,key:bytes('aa'),value:{tag:'None'}}]}],[{stream:4,p:5n,outcome:{tag:'Returned',value:bytes('')}}]]},
+    '06000000 0200000000000000 00000000 01000000 03000000 00000000 01000000 0200 01000000 aa 00000000 01000000 04000000 0500000000000000 00000000 00000000');
+  vector({tag:'Batch',values:[2n,[7],[{sub:7,value:bytes('cc'),rows:[{slot:3,key:bytes('aa'),value:{tag:'Some',value:bytes('bb')}}]}],[]]},
+    '06000000 0200000000000000 01000000 07000000 01000000 07000000 01000000 cc 01000000 0300 01000000 aa 01000000 01000000 bb 00000000');
   vector({tag:'Reset',values:[2n,[]]},'08000000 0200000000000000 00000000');
   vector({tag:'Reset',values:[2n,[{stream:3,p:4n,outcome:{tag:'Refused',value:{tag:'HistoryUnavailable'}}}]]},'08000000 0200000000000000 01000000 03000000 0400000000000000 02000000 07000000');
   for (const [outcome,hex] of [
@@ -70,6 +73,7 @@ export async function vectors(c,frame,entries) {
     [{tag:'Failed',value:{tag:'OutOfBytes',value:{requested:2n,available:3n}}},'01000000 01000000 0200000000000000 0300000000000000'],
     [{tag:'Failed',value:{tag:'OutOfTime',value:5n}},'01000000 02000000 0500000000000000'],
     [{tag:'Failed',value:{tag:'Gone'}},'01000000 03000000'],
+    [{tag:'Failed',value:{tag:'Conflict',value:'ix'}},'01000000 04000000 02000000 6978'],
     [{tag:'Refused',value:{tag:'NoEntry'}},'02000000 00000000'],
     [{tag:'Refused',value:{tag:'Malformed',value:{kind:1,at:2n}}},'02000000 01000000 01000000 0200000000000000'],
     [{tag:'Refused',value:{tag:'Overloaded'}},'02000000 02000000'],
@@ -103,7 +107,7 @@ export function differential(c) {
       case 3: value={tag:'Unsubscribe',value:i}; break;
       case 4: value={tag:'Welcome',values:[{issuer:2,subject:bytes('0102')},4,n,bytes('03'),'t',16777216n]}; break;
       case 5: value={tag:'Placed',value:state%3 === 0 ? {tag:'Ready',value:i} : state%3 === 1 ? {tag:'Resolve',values:[i,bytes('09')]} : {tag:'Gone'}}; break;
-      case 6: value={tag:'Batch',values:[n,state%2 === 0 ? [i] : [],[{sub:1,key:bytes('01'),value:{tag:'Some',value:bytes('03')}}],[{stream:i,p,outcome:{tag:'Returned',value:bytes('04')}}]]}; break;
+      case 6: value={tag:'Batch',values:[n,state%2 === 0 ? [i] : [],[{sub:i,value:bytes(''),rows:[{slot:0,key:bytes('01'),value:{tag:'Some',value:bytes('03')}}]}],[{stream:i,p,outcome:{tag:'Returned',value:bytes('04')}}]]}; break;
       case 7: value={tag:'Ended',values:[i,i%2 === 0 ? {tag:'Failed',value:{tag:'Raised',value:state}} : {tag:'Refused',value:{tag:'Deadline'}}]}; break;
       default: value={tag:'Reset',values:[n,[{stream:i,p,outcome:[{tag:'Abandoned'},{tag:'InDoubt'},{tag:'Refused',value:{tag:'RequestMismatch'}},{tag:'Refused',value:{tag:'HistoryUnavailable'}}][state%4]}]]};
     }

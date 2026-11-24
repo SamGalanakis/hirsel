@@ -63,6 +63,13 @@ fn batch_board() -> runner.Frame {
     Batch(0x0102030405060708u64, one(7u32), one(runner.Group(sub: 7u32, value: list.new(), rows: take rows)), list.new())
 }
 
+fn batch_move() -> runner.Frame {
+    let mut rows: List[runner.Row] = list.new()
+    list.push(mut rows, runner.Row(slot: 0u16, key: b("0102030405060708"), value: None))
+    list.push(mut rows, runner.Row(slot: 2u16, key: b("0102030405060708"), value: Some(b("07"))))
+    Batch(0x0102030405060708u64, list.new(), one(runner.Group(sub: 7u32, value: b("13000000"), rows: take rows)), list.new())
+}
+
 fn vector[T](c: std.codec.Codec[T], x: T, expected: Bytes) -> bool {
     let mut actual: Bytes = list.new()
     result.unwrap(std.codec.encode(c, x, mut actual))

@@ -474,26 +474,80 @@ fn test_l68_replay_overlay_table() -> Result[(), Error] {
     let mut larger = prefix(9)?
     list.push(mut larger, 6u8)
     let value = string.into_bytes(string.from("stored"))
-    replay_overlay_edit(mut main_overlay, "j-1", 72, logical, 4, ReplayPut(arc.new(take value)))?
+    let original = ReplayOrigin(ordinal: 1, branch: 0)
+    let later = ReplayOrigin(ordinal: 3, branch: 1)
+    replay_overlay_edit(mut main_overlay, "j-1", 72, original, logical, 4, ReplayPut(arc.new(take value)))?
     let fork_overlay = arc.share(main_overlay)
-    if main_overlay.charged != 35 {
-        fail("L68: key, value and 24-byte overlay entry")
+    if main_overlay.charged != 47 {
+        fail("L68: key, value and 36-byte overlay entry")
     }
-    let Error(Corrupt(Fault(offset: 80, why: Malformed, ..))) = replay_overlay_edit(mut main_overlay, "j-1", 80, logical, 0, ReplayAbsent) else {
+    let Error(Corrupt(Fault(offset: 80, why: Malformed, ..))) = replay_overlay_edit(mut main_overlay, "j-1", 80, later, logical, 0, ReplayAbsent) else {
         fail("L68: prior contradicted the already-replayed put")
     }
-    if main_overlay.charged != 35 || replay_overlay_count(main_overlay, logical, larger, 2)? != 2 {
+    if main_overlay.charged != 47 || replay_overlay_count(main_overlay, logical, larger, 2)? != 2 {
         fail("L68: a refused prior changed the overlay")
     }
-    replay_overlay_edit(mut main_overlay, "j-1", 80, logical, 7, ReplayAbsent)?
+    replay_overlay_edit(mut main_overlay, "j-1", 80, later, logical, 7, ReplayAbsent)?
     let Some(deleted) = replay_overlay_at(main_overlay, logical) else {
         fail("L68: missing tombstone")
     }
-    let Some(ReplayRow(base: 4, now: ReplayPut(fork_value))) = replay_overlay_at(fork_overlay, logical) else {
+    let Some(ReplayRow(base: 4, now: ReplayPut(fork_value), ..)) = replay_overlay_at(fork_overlay, logical) else {
         fail("L68: changing main changed the fork")
     }
-    if deleted.base != 4 || main_overlay.charged != 29 || list.compare_bytes(fork_value, string.as_bytes("stored")) != Equal || replay_overlay_count(main_overlay, logical, larger, 2)? != 1 || replay_overlay_count(fork_overlay, logical, larger, 2)? != 2 {
+    if deleted.base != 4 || deleted.first != original || main_overlay.charged != 41 || list.compare_bytes(fork_value, string.as_bytes("stored")) != Equal || replay_overlay_count(main_overlay, logical, larger, 2)? != 1 || replay_overlay_count(fork_overlay, logical, larger, 2)? != 2 {
         fail("L68: the first prior must survive a later edit in the branch")
+    }
+    Ok(())
+}
+
+@test
+fn test_l79_overlay_trim_evidence() -> Result[(), Error] {
+    // Three Cold rows and two suffix appends of six bytes each.
+    // Every row costs 62 + round8(12) + round8(6) = 86.
+    let mut edited = empty_replay_overlay()
+    let appended = ReplayOrigin(ordinal: 1, branch: 0)
+    let first_key = replay_log_key(9, 3)?
+    let last_key = replay_log_key(9, 4)?
+    let value = arc.new(string.into_bytes(string.from("stored")))
+    replay_overlay_edit(mut edited, "j-1", 72, appended, first_key, 0, ReplayPut(arc.share(value)))?
+    replay_overlay_edit(mut edited, "j-1", 72, appended, last_key, 0, ReplayPut(take value))?
+    let inherited = arc.share(edited)
+    let initial = ReplayLogHead(first: 0, next: 5, cold_next: 3, row_bytes: 430)
+    let first_cut = ReplayOrigin(ordinal: 3, branch: 1)
+    let second_cut = ReplayOrigin(ordinal: 4, branch: 1)
+    // These have offsetting errors. Keep the separate Cold intervals
+    // and charges so the fold can reject each one.
+    let trimmed = replay_overlay_trim(mut edited, "j-1", 88, first_cut, 9, initial, JournalTrim(floor: 2, dropped: 180))?
+    let retained = replay_overlay_trim(mut edited, "j-1", 104, second_cut, 9, trimmed, JournalTrim(floor: 4, dropped: 164))?
+    {
+        let Some(first_proof) = std.omap.get(edited.trims, 3u64) else {
+            fail("L79: first trim evidence is missing")
+        }
+        let Some(second_proof) = std.omap.get(edited.trims, 4u64) else {
+            fail("L79: second trim evidence is missing")
+        }
+        if first_proof.lo != 0 || first_proof.hi != 2 || first_proof.cold_charge != 180 || first_proof.origin != first_cut {
+            fail("L79: first trim did not keep its interval and recorded charge")
+        }
+        if second_proof.lo != 2 || second_proof.hi != 3 || second_proof.cold_charge != 78 || second_proof.origin != second_cut {
+            fail("L79: the Trim must subtract the masked suffix append's 86 bytes")
+        }
+    }
+    if retained.first != 4 || retained.next != 5 || retained.row_bytes != 86 || edited.floor != Some(4u64) || edited.charged != 126 {
+        fail("L79: descriptor or overlay bytes changed by the wrong amount")
+    }
+    match (replay_overlay_at(edited, first_key), replay_overlay_at(inherited, first_key), replay_overlay_at(edited, last_key)) {
+        (None, Some(_), Some(_)) => (),
+        _ => fail("L79: trim removed the wrong entries or changed the fork source"),
+    }
+    let Error(Corrupt(Fault(offset: 120, why: Malformed, ..))) = replay_overlay_trim(mut edited, "j-1", 120, ReplayOrigin(ordinal: 5, branch: 1), 9, retained, JournalTrim(floor: 5, dropped: 85)) else {
+        fail("L79: trim undercounting known suffix bytes must fail at replay")
+    }
+    if edited.floor != Some(4u64) || edited.charged != 126 {
+        fail("L79: a refused trim changed the overlay")
+    }
+    let Some(_) = replay_overlay_at(edited, last_key) else {
+        fail("L79: a refused trim removed the last row")
     }
     Ok(())
 }

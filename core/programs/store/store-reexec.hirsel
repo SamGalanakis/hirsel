@@ -99,20 +99,11 @@ type BaseReplay {
 // journal replayed up to, not including, the commit after `base`. This is the
 // open path, so the pages are the ones every load path builds (MEM-30). None
 // when the MANIFEST is already past `base`.
-fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] waits {
+fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[(Roots, u64)], Error] waits {
     let d = log_directory(db)?
     let (_, id, take manifest) = read_only_manifest(d)?
-    let validated = validate_page_manifest(d, id, take manifest)?
-    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
-    let mut graph = take resolved
-    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
-        Ok(std.page.empty(0, 0, Collection))
-    })?
-    let pages = attach_page_graph(mut graph, empty_collection)?
-    let state = disk_allocation(scoped fn() -> Result[State, Error] {
-        let holders = attach_manifest_holders(selected, pages, empty_collection)
-        capacity(manifest_state(selected, holders))
-    })?
+    let validated = validate_store_manifest(d, id, take manifest)?
+    let (take selected, take state) = replay_base_state(take validated)?
     let replay = journal_replay_manifest(take state, selected)?
     for tip in replay.state.tips {
         if tip.id == b.id && tip.head > base {
@@ -162,10 +153,38 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
     }
     for tip in held.replay.state.tips {
         if tip.id == b.id && tip.head == base {
-            return Ok(Some(share_roots(tip.roots)))
+            return Ok(Some((share_roots(tip.roots), stamp_after(held.replay.next_node)?)))
         }
     }
     Ok(None)
+}
+
+fn replay_base_state(take validated: ValidatedPageManifest) -> Result[(PageManifest, State), Error] {
+    let mut has_cold = false
+    for (_, pack) in validated.inventory {
+        if pack.class >= 3 {
+            has_cold = true
+            break
+        }
+    }
+    if has_cold {
+        let LoadedPageStore(manifest: take selected, holders: take holders, ..) = rebuild_page_store(take validated, None)?
+        let state = disk_allocation(scoped fn() -> Result[State, Error] {
+            capacity(manifest_state(selected, holders))
+        })?
+        return Ok((take selected, take state))
+    }
+    let ValidatedPageManifest(manifest: take selected, graph: take resolved, ..) = take validated
+    let mut graph = take resolved
+    let empty_collection = disk_allocation(fn() -> Result[Arc[std.page.Page], Error] {
+        Ok(std.page.empty(0, 0, Collection))
+    })?
+    let pages = attach_page_graph(mut graph, empty_collection)?
+    let state = disk_allocation(scoped fn() -> Result[State, Error] {
+        let holders = attach_manifest_holders(selected, pages, empty_collection)
+        capacity(manifest_state(selected, holders))
+    })?
+    Ok((take selected, take state))
 }
 
 fn stop_kind(stop: Stop) -> StopKind {
@@ -182,20 +201,18 @@ type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
 // `serve` bounds it. Nothing is committed; an application error keeps no
 // data writes (F2).
-fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded, body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
+fn rerun_attempt[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Plan, call: Recorded,
+    attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Rerun[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
-    // A re-run has no pins: a Cold touch latches, and the verdict is Unknown.
-    let attempt = call_attempt(base.collections.root, db.writer_pin_bytes)
-    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let caught = isolate(fn() -> Result[Result[Finished[R, R], Capacity], OutOfTime] {
         bound steps plan.s_e {
             let drafted = bound bytes plan.n_e {
                 let keep: Option[fn(R) -> bool] = None
-                let staged = draft_body(db, registry, base, ci, keep, reads, issued, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[R, R] {
+                let staged = draft_body(db, registry, base, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[R, R] {
                     body(call, mut tx)
                 })
-                match prepare_metered_pages(base.collections, attempt, no_pins, take staged) {
+                match prepare_metered_pages(base.collections, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
                     Error(Full(problem)) => RolledBack(Refused(problem)),
                     Error(_) => fail("store: invalid re-run pages"),
@@ -206,10 +223,8 @@ fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Pl
     })
     let _ = log.finish(take reads)
     let _ = cell.into_inner(take issued)
-    if let Some(state) = call_attempt_finish(take attempt) {
-        if let Some(_) = state.stopped {
-            return RoomRefused
-        }
+    if call_attempt_latched(attempt) {
+        return RoomRefused
     }
     let finished = match take caught {
         Error(problem) => return Halted(OutOfBytes(problem)),
@@ -239,6 +254,35 @@ fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, plan: Pl
         },
     }
     RanTo(take output, take writes)
+}
+
+fn rerun[R](db: Db, registry: IndexRegistry, base: Roots, watermark: u64, ci: CallInfo, plan: Plan, call: Recorded,
+    body: scoped[view] fn(Recorded, mut Tx) -> Result[R, R]) -> Result[Rerun[R], Error] waits {
+    let root = tiered_pin_root(open_number(db), ci.id.branch, base.collections)
+    let mut pins = empty_tiered_pins(root, db.writer_pin_bytes)
+    let mut pending: Option[(TieredTarget, Error)] = None
+    loop {
+        let attempt = call_attempt(base.collections.root, db.writer_pin_bytes)
+        let reran = rerun_attempt(db, registry, base, ci, plan, call, attempt, pins.frames, body)
+        let Some(state) = call_attempt_finish(take attempt) else {
+            return Ok(take reran)
+        }
+        match state.stopped {
+            None => return Ok(take reran),
+            Some(AttemptMiss(_)) => {
+                match deliver_call_miss(db, base.collections, watermark, state, mut pins, mut pending) {
+                    Ok(()) => (),
+                    Error(Full(_)) => return Ok(RoomRefused),
+                    Error(Io(_)) => return Ok(RoomRefused),
+                    Error(Remote(_)) => return Ok(RoomRefused),
+                    Error(Reclaimed(_)) => return Ok(RoomRefused),
+                    Error(Corrupt(Fault(why: Absent, ..))) => return Ok(RoomRefused),
+                    Error(take problem) => return Error(take problem),
+                }
+            },
+            Some(_) => return Ok(RoomRefused),
+        }
+    }
 }
 
 // The reply the frame wrote on the record's stream: position 8, digest 32,
@@ -294,7 +338,8 @@ pub opaque type ReplaySource {
     open: u64,
     commit: JournalCommit,
     call: Recorded,
-    base: Roots
+    base: Roots,
+    watermark: u64
 }
 
 fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, UnknownReason], Error] waits {
@@ -310,18 +355,18 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
     if let None = recorded_reply(commit, call.record.stream) {
         return Ok(Error(NotRecorded))
     }
-    let Some(base) = base_roots(db, b, call.base)? else {
+    let Some((take base, watermark)) = base_roots(db, b, call.base)? else {
         return Ok(Error(StateGone))
     }
-    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base)))
+    Ok(Ok(ReplaySource(store: db.store, open: open_number(db), commit: take commit, call: take call, base: take base, watermark: watermark)))
 }
 
 // RUNNER-SPEC §7: run on a private copy of the attempted base, under the
 // original CallInfo, and compare the committed reply and writes.
-fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Result[Bytes, Error], body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan, failed: scoped fn(Stop) -> Result[Bytes, Error], body: scoped[view] fn(Recorded, mut Tx) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let call = view source.call
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
-    let reran = rerun(db, registry, source.base, ci, plan, call, body)
+    let reran = rerun(db, registry, source.base, source.watermark, ci, plan, call, body)?
     let metered: Rerun[Bytes] = match take reran {
         RanTo(output, _) if list.len(output) > plan.reply_max => Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max))),
         take within => take within,
@@ -386,7 +431,7 @@ pub fn replay_record(source: ReplaySource) -> Recorded {
 
 pub fn reexecute_with[Env: inert](db: Db, source: ReplaySource, take selected: Declare, plan: Plan,
     failed: fn(Stop) -> Result[Bytes, Error], env: Env,
-    body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] {
+    body: fn(Recorded, mut Tx, Env) -> Result[Bytes, Bytes]) -> Result[Verdict, Error] waits {
     let Open = selected.mode else { return Error(Foreign) }
     if !same(source.store, db.store) || source.open != open_number(db) || !same_declaration_base(selected.base, replay_declaration_base(source)) {
         return Error(Foreign)
@@ -409,9 +454,9 @@ pub fn project_recorded[E: inert, R](db: Db, b: Branch, v: u64, plan: Plan, env:
     }
     let call = view source.call
     let ci = CallInfo(id: CallId(store: db.store, branch: call.branch.id, version: call.base + 1), at: call.at, seed: call.seed)
-    let projected = rerun(db, db.indexes, source.base, ci, plan, call, scoped fn(call_record: Recorded, mut tx: Tx) -> Result[R, R] {
+    let projected = rerun(db, db.indexes, source.base, source.watermark, ci, plan, call, scoped fn(call_record: Recorded, mut tx: Tx) -> Result[R, R] {
         Ok(body(tx, env))
-    })
+    })?
     match take projected {
         RanTo(take answer, _) => Ok(Projected(take answer)),
         Halted(_) => Ok(ProjectionStopped),

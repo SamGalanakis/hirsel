@@ -1078,11 +1078,11 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     serve_before(healthy(db))?
     registered_completion(db, complete)?
     serve_before(check_completion_record(complete, rec))?
-    let attempted = next_call_info(db)
+    let wall = host.wall_ms(db.clock)
     let Some(grant) = call_reserves(plan) else {
         return Error(Before(Limit(Transaction), None))
     }
-    let metered = serve_before(serve_until_decided(mut db, complete, attempted, plan, grant, rec, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let (attempted, take metered) = serve_before(serve_until_decided(mut db, complete, wall, plan, grant, rec, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         body(mut tx, env)
     }))?
     let DraftedCall(stage: take draft, next_id: next_id) = match take metered {

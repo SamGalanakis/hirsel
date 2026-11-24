@@ -704,7 +704,16 @@ fn test_l62_root_scoped_pins() -> Result[(), Error] {
     if tiered_install_pin(mut pins, old_root, touched, l70_cache_frame(4))? || pins.retained != 2098 {
         fail("L62: the full partition evicted touched pins")
     }
-    tiered_reset_pins(mut pins, new_root)
+    let lost = std.page.BlobRef(stamp: 4, len: 1025, checksum: 0, pack: 7, offset: 8264, body: 0)
+    let mut pending: Option[(TieredTarget, Error)] = Some((TieredBlob(lost), Io(Closed)))
+    refresh_call_pins(mut pins, mut pending, old_root)
+    if let None = pending {
+        fail("L62: the same head keeps its pending delivery result")
+    }
+    refresh_call_pins(mut pins, mut pending, new_root)
+    if let Some(_) = pending {
+        fail("L62: a moved head must discard the previous root's delivery error")
+    }
     if list.len(pins.ordered) != 0 || map.len(pins.frames) != 0 || pins.retained != 0 || tiered_install_pin(mut pins, old_root, touched, l70_cache_frame(4))? {
         fail("L62: a stale delivery installed a pin into the next root")
     }

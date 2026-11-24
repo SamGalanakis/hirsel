@@ -9,6 +9,7 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
     let mut pins = empty_tiered_pins(call_pin_root(db, i), db.writer_pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
+        refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
         let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes)
         let staged = stage(mut db, i, wall, steps, keep_reply, attempt, pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
@@ -20,27 +21,42 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
             Some(AttemptAllocation(problem)) => return Ok(Over(Refused(Allocation(problem)))),
             Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
             Some(AttemptMiss(_)) => {
-                let SeekKey(sought) = view state.seek else {
-                    fail("store: a call's miss has no seek key")
-                }
-                let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
-                    Some(requests) => Some(view requests),
-                    None => None,
-                }
-                let source = tx_page_source(pager, db.heads[i].roots.collections, int.saturating_add(db.next_node, 1))?
-                serve_tiered_miss(source, call_pin_root(db, i), state, sought, TieredPoint, None, mut pins, mut pending)?
+                deliver_call_miss(db, db.heads[i].roots.collections, int.saturating_add(db.next_node, 1), state, mut pins, mut pending)?
             },
         }
     }
 }
 
 fn call_pin_root(db: Db, i: u64) -> TieredPinRoot {
-    let tree = view db.heads[i].roots.collections
+    tiered_pin_root(open_number(db), db.heads[i].id, db.heads[i].roots.collections)
+}
+
+fn tiered_pin_root(opened: u64, branch_id: u32, tree: PageTree) -> TieredPinRoot {
     let generation = match tree.paging {
         Some(inventory) => inventory.generation,
         None => 0,
     }
-    TieredPinRoot(domain: open_number(db), branch: db.heads[i].id, generation: generation, root_stamp: tree_stamp(tree))
+    TieredPinRoot(domain: opened, branch: branch_id, generation: generation, root_stamp: tree_stamp(tree))
+}
+
+fn refresh_call_pins(mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)], root: TieredPinRoot) {
+    if pins.root != root {
+        tiered_reset_pins(mut pins, root)
+        pending = None
+    }
+}
+
+fn deliver_call_miss(db: Db, tree: PageTree, watermark: u64, state: TieredTouchSet,
+    mut pins: TieredPins, mut pending: Option[(TieredTarget, Error)]) -> Result[(), Error] waits {
+    let SeekKey(sought) = view state.seek else {
+        fail("store: a call's miss has no seek key")
+    }
+    let requests: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
+        Some(pager) => Some(view pager),
+        None => None,
+    }
+    let source = tx_page_source(requests, tree, watermark)?
+    serve_tiered_miss(source, pins.root, state, sought, TieredPoint, None, mut pins, mut pending)
 }
 
 // One serve attempt over the pin map `serve_until_decided` holds. A latched
@@ -130,34 +146,28 @@ fn metered_draft(db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: 
 // Abort and rerun for serve (§13.3): each attempt drafts at the head over
 // the call's pin map; a latched miss is delivered into the map and the call
 // drafts again, and a pin-limit latch is `Refused(Cache)`.
-fn serve_until_decided(mut db: Db, complete: Completion, ci: CallInfo, plan: Plan, grant: CallReserve, rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[Result[DraftedCall, DraftRefusal], Error] waits {
+fn serve_until_decided(mut db: Db, complete: Completion, wall: u64, plan: Plan, grant: CallReserve, rec: Option[CallRecord], body: scoped[view] fn(mut Tx) -> Result[Bytes, Bytes]) -> Result[(CallInfo, Result[DraftedCall, DraftRefusal]), Error] waits {
     let mut pins = empty_tiered_pins(call_pin_root(db, 0), db.writer_pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
+        refresh_call_pins(mut pins, mut pending, call_pin_root(db, 0))
+        let ci = call_info(db.store, 0, db.heads[0].head + 1, wall, db.heads[0].at)
         let attempt = call_attempt(db.heads[0].roots.collections.root, db.writer_pin_bytes)
         let metered = metered_draft(db, complete, ci, plan, grant, rec, attempt, pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
-            return Ok(take metered)
+            return Ok((ci, take metered))
         }
         let refused = match state.stopped {
-            None => return Ok(take metered),
+            None => return Ok((ci, take metered)),
             Some(AttemptPinLimit(problem)) => Cache(problem),
             Some(AttemptAllocation(problem)) => Allocation(problem),
             Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
             Some(AttemptMiss(_)) => {
-                let SeekKey(sought) = view state.seek else {
-                    fail("store: a call's miss has no seek key")
-                }
-                let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
-                    Some(requests) => Some(view requests),
-                    None => None,
-                }
-                let source = tx_page_source(pager, db.heads[0].roots.collections, int.saturating_add(db.next_node, 1))?
-                serve_tiered_miss(source, call_pin_root(db, 0), state, sought, TieredPoint, None, mut pins, mut pending)?
+                deliver_call_miss(db, db.heads[0].roots.collections, int.saturating_add(db.next_node, 1), state, mut pins, mut pending)?
                 continue
             },
         }
-        return Ok(Ok(DraftedCall(stage: Over(Refused(refused)), next_id: db.next_node)))
+        return Ok((ci, Ok(DraftedCall(stage: Over(Refused(refused)), next_id: db.next_node))))
     }
 }
 

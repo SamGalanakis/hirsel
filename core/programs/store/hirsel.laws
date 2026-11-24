@@ -165,7 +165,7 @@ store@1/store/test_l62_pager_reads_replayed_points src=0388009ae91d6921 sig=178f
 store@1/store/test_l62_reader_reservation src=e88395a689446be3 sig=b75e102b3e18a638 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l62_replay_stop_precedence src=f14c2a31647b97d9 sig=b30c1b062211b5a0 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_l62_replayed_log_masks_cold_rows src=8477a30212c613b3 sig=0681016b8aa10331 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/test_l62_root_scoped_pins src=d526b2e99a9faa54 sig=e7b2c0c69c54fd06 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/test_l62_root_scoped_pins src=7ee52f1f045c8606 sig=a3882a50337fd782 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l62_slots src=34ab0e493448b6c3 sig=6923ed79a949a882 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l62_snapshot_find_reads_cold_index_and_primary src=88ae5324868ba39e sig=94abb52d7c44b324 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l62_snapshot_get_uses_tiered_pager src=f6a071bf48176727 sig=5decc2e3ba987448 run=a6b003f729117be3 bug=- oracle=- rows=pending
@@ -198,7 +198,7 @@ store@1/store/test_l68_trim_preserves_untouched_cold_slots src=736f78febff76090 
 store@1/store/test_l70_cache_overlap src=d009b9bf0f2e481c sig=6737fe2e362db439 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_dirty_admission src=56d2d07a10ca7144 sig=38c8b8ace482fd03 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_pager_admits_cache_backing src=4b01d80b82d06212 sig=a8eacf65e2a79809 run=722e0e8306f441ca bug=- oracle=- rows=pending
-store@1/store/test_l70_tiered_open_at_floor src=70ca1a2841cd96ed sig=e0e3856326772586 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_l70_tiered_open_at_floor src=3b5593b4c6ef89c1 sig=3ffb87d5f2e8c9f1 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l70_tiered_sizes_include_cut_quota src=7f160b24e77bfcb2 sig=9dec39e515001aeb run=3e6179ff1524b8b6 bug=- oracle=- rows=pending
 store@1/store/test_l79_fold_checks_cold_evidence src=944b2b1664aa6ff5 sig=cea8cc70448588ad run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l79_overlay_trim_evidence src=41983a0ffe21b672 sig=49c17c8e2825f590 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

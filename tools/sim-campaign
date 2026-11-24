@@ -43,6 +43,11 @@ def allocate_ranges(db, campaign, laws):
         PRIMARY KEY (campaign, shard),
         FOREIGN KEY (campaign, shard) REFERENCES shards (campaign, shard)
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS seed_replays (
+        campaign TEXT, seed INTEGER, same_build_nondeterminism INTEGER NOT NULL,
+        status INTEGER NOT NULL, stdout TEXT NOT NULL, stderr TEXT NOT NULL,
+        PRIMARY KEY (campaign, seed)
+    )""")
     with db:
         db.execute("BEGIN IMMEDIATE")
         first = db.execute("SELECT coalesce(max(stop_seed), 1) FROM shards").fetchone()[0]
@@ -58,17 +63,31 @@ def allocate_ranges(db, campaign, laws):
     return ranges
 
 
-def run_seed(executable, seed):
-    with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
-        ran = subprocess.run([executable], cwd=directory, stdin=subprocess.DEVNULL,
-                             env={"HIRSEL_TEST_SIM_SEED": str(seed)}, capture_output=True)
-    return {"seed": seed, "status": ran.returncode, "stdout": ran.stdout.decode(errors="replace"),
+def outcome(ran):
+    return {"status": ran.returncode, "stdout": ran.stdout.decode(errors="replace"),
             "stderr": ran.stderr.decode(errors="replace")}
 
 
-def run_shard(executable, start, stop):
+def run_seed(executable, seed, diagnose_red=False):
+    with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
+        inputs = {"cwd": directory, "stdin": subprocess.DEVNULL,
+                  "env": {"HIRSEL_TEST_SIM_SEED": str(seed)}, "capture_output": True}
+        ran = subprocess.run([executable], **inputs)
+        row = {"seed": seed, **outcome(ran)}
+        if diagnose_red and ran.returncode != 0:
+            # Recreate the empty directory at the same path the first run saw.
+            shutil.rmtree(directory)
+            Path(directory).mkdir(mode=0o700)
+            replay = subprocess.run([executable], **inputs)
+            row["diagnostic_replay"] = outcome(replay)
+            row["same_build_nondeterminism"] = (ran.returncode, ran.stdout, ran.stderr) != (
+                replay.returncode, replay.stdout, replay.stderr)
+    return row
+
+
+def run_shard(executable, start, stop, diagnose_red=False):
     for seed in range(start, stop):
-        row = run_seed(executable, seed)
+        row = run_seed(executable, seed, diagnose_red)
         row["replay"] = shlex.join([sys.argv[0], "run", str(executable), str(seed), str(seed + 1)])
         print(json.dumps(row), flush=True)
 
@@ -93,6 +112,7 @@ def seed_zero_failed(db, campaign, law, results):
 
 def record(db, campaign, ranges, output, results, executable, laws=None):
     observed = {}
+    replays = []
     malformed = False
     stops = [stop for _, stop in ranges]
     for line in output:
@@ -102,6 +122,12 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
             if (type(seed) is not int or type(status) is not int or seed in observed
                     or not ranges[0][0] <= seed < ranges[-1][1]):
                 raise ValueError("unexpected seed result")
+            if "diagnostic_replay" in row:
+                replay = row["diagnostic_replay"]
+                changed = row["same_build_nondeterminism"]
+                if status == 0 or type(changed) is not bool or type(replay["status"]) is not int:
+                    raise ValueError("unexpected diagnostic replay")
+                replays.append((campaign, seed, changed, replay["status"], replay["stdout"], replay["stderr"]))
         except (ValueError, KeyError, TypeError):
             malformed = True
             print(line, end="", file=sys.stderr)
@@ -114,6 +140,7 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
         print(json.dumps(row), file=results, flush=True)
         observed[seed] = status
     with db:
+        db.executemany("INSERT INTO seed_replays VALUES (?, ?, ?, ?, ?, ?)", replays)
         for shard, (start, stop) in enumerate(ranges):
             statuses = [observed[seed] for seed in range(start, stop) if seed in observed]
             db.execute("UPDATE shards SET executed = ?, failed = ? WHERE campaign = ? AND shard = ?",
@@ -158,7 +185,7 @@ def dispatch_campaign(args, executable=None, laws=None):
             shutil.copy2(executable, bundle / "law")
             jobs = [{"lane": f"vopr-{args.campaign}-{shard}", "bundle": "bundle",
                      "seconds": args.shard_seconds,
-                     "command": f"./sim-campaign run ./law {start} {stop}"}
+                     "command": f"./sim-campaign run ./law {start} {stop} --diagnose-red"}
                     for shard, (start, stop) in enumerate(ranges)]
         else:
             ranges = allocate_ranges(db, args.campaign, [(law.name, law.seeds) for law in laws])
@@ -227,6 +254,7 @@ def main():
     run.add_argument("executable", type=Path)
     run.add_argument("start", type=int)
     run.add_argument("stop", type=int)
+    run.add_argument("--diagnose-red", action="store_true", help=argparse.SUPPRESS)
     remote = commands.add_parser("run-batch", help="run prepared ranges inside one VM")
     remote.add_argument("ranges", type=Path)
     campaign = commands.add_parser("dispatch", help="reserve ranges and dispatch a campaign")
@@ -243,11 +271,11 @@ def main():
         if args.command == "run":
             if not 0 <= args.start < args.stop <= 2**64:
                 parser.error("expected a nonempty u64 seed range")
-            run_shard(args.executable.resolve(strict=True), args.start, args.stop)
+            run_shard(args.executable.resolve(strict=True), args.start, args.stop, args.diagnose_red)
             return 0
         if args.command == "run-batch":
             for executable, start, stop in json.loads(args.ranges.read_text()):
-                run_shard(local_executable(args.ranges.parent / executable), start, stop)
+                run_shard(local_executable(args.ranges.parent / executable), start, stop, diagnose_red=True)
             return 0
         if args.command == "batch":
             return dispatch_campaign(args, laws=read_laws(args.manifest))

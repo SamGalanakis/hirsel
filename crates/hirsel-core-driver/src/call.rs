@@ -340,11 +340,7 @@ fn listing(description: &Describe, entries: &[(String, &Exported)]) -> Result<St
 fn result_types(entry: &Exported) -> Result<(String, Vec<Schema>), Error> {
     let name = |schema: &Schema| type_name(&schema.root, &schema.definitions);
     if entry.kind == 2 {
-        let (key, row) = entry.row_schemas()?;
-        Ok((
-            format!("rows[{}, {}]", name(&key), name(&row)),
-            vec![key, row],
-        ))
+        Ok(entry.query_schemas()?.describe_types(name))
     } else {
         let result = Schema::read(&entry.result)?;
         Ok((name(&result), vec![result]))

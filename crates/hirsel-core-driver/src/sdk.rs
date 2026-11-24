@@ -237,21 +237,66 @@ pub struct Exported {
     pub revision: Vec<u8>,
 }
 
+pub(crate) struct QuerySchemas {
+    pub value: Schema,
+    pub slots: Vec<QuerySlot>,
+}
+
+impl QuerySchemas {
+    pub(crate) fn describe_types(self, name: impl Fn(&Schema) -> String) -> (String, Vec<Schema>) {
+        let mut description = name(&self.value);
+        let mut schemas = vec![self.value];
+        for slot in self.slots {
+            description.push_str(&format!(
+                ", {}: rows[{}, {}]",
+                slot.name,
+                name(&slot.key),
+                name(&slot.row)
+            ));
+            schemas.extend([slot.key, slot.row]);
+        }
+        (description, schemas)
+    }
+}
+
+pub(crate) struct QuerySlot {
+    pub name: String,
+    pub key: Schema,
+    pub row: Schema,
+}
+
 impl Exported {
-    pub(crate) fn row_schemas(&self) -> Result<(Schema, Schema), Error> {
+    pub(crate) fn query_schemas(&self) -> Result<QuerySchemas, Error> {
         let mut input = Reader {
             bytes: &self.result,
             at: 0,
         };
-        let key_size = input.count()?;
-        let key = Schema::read(input.take(key_size)?)?;
-        let value_size = input.count()?;
-        let value = Schema::read(input.take(value_size)?)?;
-        input.done()?;
-        if !key.key || value.key {
-            return Err("Malformed: query needs an ordered key schema and a value schema".into());
+        let take_schema = |input: &mut Reader<'_>| {
+            let size = input.count()?;
+            Schema::read(input.take(size)?)
+        };
+        let value = take_schema(&mut input)?;
+        if value.key {
+            return Err("Malformed: query result needs a value schema".into());
         }
-        Ok((key, value))
+        let count = input.count()?;
+        let mut slots = Vec::new();
+        for _ in 0..count {
+            let name = input.name()?;
+            if input.count()? != 0 {
+                return Err("Malformed: query slot kind".into());
+            }
+            let key = take_schema(&mut input)?;
+            let row = take_schema(&mut input)?;
+            if !key.key || row.key {
+                return Err(
+                    "Malformed: table slot needs an ordered key schema and a value schema".into(),
+                );
+            }
+            slots.push(QuerySlot { name, key, row });
+        }
+        input.done()?;
+        Ok(QuerySchemas { value, slots })
     }
 }
 pub struct Describe {
@@ -375,21 +420,24 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         dts.push_str(&args.declarations(&arg_name));
         let name = json!(stub_name(&entry.identity)?);
         if entry.kind == 2 {
-            let (key, row) = entry.row_schemas()?;
-            let key_name = format!("Key{i}");
-            let row_name = format!("RowValue{i}");
-            js.push_str(&key.javascript(&key_name));
-            js.push_str(&row.javascript(&row_name));
-            dts.push_str(&key.declarations(&key_name));
-            dts.push_str(&row.declarations(&row_name));
+            let query = entry.query_schemas()?;
             entries.push_str(&format!("subscribe[{name}] = (args,onRows,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onRows,onEnd);\n"));
             subscriptions.push(format!(
                 "{name}: (args: codec.{arg_name}, onRows: (rows: Row[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
             ));
-            entries.push_str(&format!("subscribeDecoded[{name}] = (args,onRows,onEnd) => subscribe[{name}](args,rows => onRows(rows.map(row => decodeRow(row,codec.{key_name},codec.{row_name}))),onEnd);\n"));
-            decoded.push(format!(
-                "{name}: (args: codec.{arg_name}, onRows: (rows: DecodedRow<codec.{key_name}, codec.{row_name}>[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
-            ));
+            // The current Batch has no slot numbers. A single slot has an unambiguous decoder.
+            if let [slot] = query.slots.as_slice() {
+                let key_name = format!("Key{i}");
+                let row_name = format!("RowValue{i}");
+                js.push_str(&slot.key.javascript(&key_name));
+                js.push_str(&slot.row.javascript(&row_name));
+                dts.push_str(&slot.key.declarations(&key_name));
+                dts.push_str(&slot.row.declarations(&row_name));
+                entries.push_str(&format!("subscribeDecoded[{name}] = (args,onRows,onEnd) => subscribe[{name}](args,rows => onRows(rows.map(row => decodeRow(row,codec.{key_name},codec.{row_name}))),onEnd);\n"));
+                decoded.push(format!(
+                    "{name}: (args: codec.{arg_name}, onRows: (rows: DecodedRow<codec.{key_name}, codec.{row_name}>[]) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+                ));
+            }
         } else {
             let result = Schema::read(&entry.result)?;
             let result_name = format!("Result{i}");
@@ -586,19 +634,32 @@ mod tests {
     fn sdk_generation_preserves_identity_fingerprints_and_entry_kinds() {
         let mut query = entry("m", "rows");
         query.kind = 2;
-        query.result = [6, 0, 0, 0, 4, 0, 0, 0, 0, 6, 6, 0, 0, 0, 3, 0, 0, 0, 0, 13].to_vec();
+        query.result = [
+            6, 0, 0, 0, 3, 0, 0, 0, 0, 0, // Unit value schema
+            1, 0, 0, 0, // One slot
+            4, 0, 0, 0, b'd', b'a', b't', b'a', 0, 0, 0, 0, // Table slot named data
+            6, 0, 0, 0, 4, 0, 0, 0, 0, 6, // Ordered u64 key schema
+            6, 0, 0, 0, 3, 0, 0, 0, 0, 13, // String row schema
+        ]
+        .to_vec();
+        let mut computed = entry("m", "total");
+        computed.kind = 2;
+        computed.result = vec![6, 0, 0, 0, 3, 0, 0, 0, 0, 6, 0, 0, 0, 0];
         let d = Describe {
             digest: vec![1, 2],
             target: "x86_64-unknown-linux-gnu".into(),
             n_place: u64::MAX,
             revision: vec![],
-            exported: vec![entry("m", "toggle"), query],
+            exported: vec![entry("m", "toggle"), query, computed],
         };
         let files = generate(&d).unwrap();
         assert!(files["entries.js"].contains("n_place:18446744073709551615n"));
         assert!(files["entries.js"].contains("args_fp:18446744073709551615n"));
         assert!(files["entries.js"].contains("call[\"toggle\"]"));
         assert!(files["entries.js"].contains("subscribe[\"rows\"]"));
+        assert!(files["entries.js"].contains("subscribeDecoded[\"rows\"]"));
+        assert!(files["entries.js"].contains("subscribe[\"total\"]"));
+        assert!(!files["entries.js"].contains("subscribeDecoded[\"total\"]"));
         assert!(files["codec.d.ts"].contains("export type Args0 = bigint"));
         assert!(files["codec.d.ts"].contains("export type Key1 = bigint"));
         assert!(files["codec.d.ts"].contains("export type RowValue1 = string"));

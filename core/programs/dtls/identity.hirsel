@@ -1,0 +1,33 @@
+pub type DtlsError = Config | Setup | Fingerprint | Closed(Close) | NotConnected | Taken | NoSrtp | Key(KeyError) | Schedule(schedule.ScheduleError) | Packet(packet.PacketError) | Capacity(Capacity)
+
+pub opaque type Identity {
+    key: Secret,
+    certificate: Bytes
+}
+
+pub fn identity(take key: Secret, take certificate: Bytes, r: Random) -> Result[Identity, DtlsError] {
+    let P256(point) = std.x509_key.read(certificate) else {
+        return Error(Config)
+    }
+    let message = b"DTLS identity key check"
+    let mut signature: Bytes = list.with_capacity(64)
+    match secret.sign(key, P256, r, message, mut signature) {
+        Ok(_) => (),
+        Error(Capacity(c)) => {
+            return Error(Capacity(c))
+        },
+        Error(e) => {
+            return Error(Key(e))
+        },
+    }
+    if !p256.verify(point, message, signature) {
+        return Error(Config)
+    }
+    Ok(Identity(key: take key, certificate: take certificate))
+}
+
+pub fn share_identity(i: Identity) -> Identity {
+    let mut certificate: Bytes = list.with_capacity(list.len(i.certificate))
+    list.append(mut certificate, i.certificate)
+    Identity(key: secret.share(i.key), certificate: take certificate)
+}

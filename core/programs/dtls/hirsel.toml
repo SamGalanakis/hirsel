@@ -3,13 +3,18 @@ name = "dtls"
 major = 1
 charge = "charge-v1"
 
+[dependencies]
+std = { major = 1 }
+
 [sources]
 "wire.hirsel" = "dtls"
 "records.hirsel" = "dtls"
 "handshake.hirsel" = "dtls"
+"identity.hirsel" = "dtls"
 
 [tests]
 limit = 16777216
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"identity_laws.hirsel" = "laws"

@@ -1,0 +1,37 @@
+// openssl req -new -x509 -outform DER with the RFC 6979 A.2.5 P-256 key.
+fn identity_certificate() -> Bytes {
+    option.unwrap(std.hex.decode(b"3082016930820110a003020102020101300a06082a8648ce3d04030230143112301006035504030c0964746c732e74657374301e170d3236313132343230333634395a170d3236313132353230333634395a30143112301006035504030c0964746c732e746573743059301306072a8648ce3d020106082a8648ce3d0301070342000460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299a3533051301d0603551d0e041604141a9569579bce329a942d0769c9c0b56431563710301f0603551d230418301680141a9569579bce329a942d0769c9c0b56431563710300f0603551d130101ff040530030101ff300a06082a8648ce3d04030203470030440220425b03397617ebc2867a6098638fd24d87a8288291adc5790ea41437d067dc1d02201bb8d711d66e587e6e8881406cb2a632c19db45a21ec60cca91515234eb13234"))
+}
+
+fn identity_key(r: Random) -> Secret {
+    let mut point: Bytes = list.with_capacity(65)
+    result.unwrap(secret.p256_key(r, "sign(p256)", mut point))
+}
+
+fn identity_random() -> Random {
+    provide.random_tape(option.unwrap(std.hex.decode(b"c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721")))
+}
+
+/// bug: accept a DER certificate that belongs to a different signing key.
+/// oracle: OpenSSL certificate for the RFC 6979 A.2.5 key and TLS-5 share lifetime.
+@test
+fn identity_shares_key() -> Result[(), ()] {
+    let r = identity_random()
+    let id = result.unwrap(dtls.identity(identity_key(r), identity_certificate(), r))
+    let shared = dtls.share_identity(id)
+    drop(take id)
+    drop(dtls.share_identity(shared))
+    let other = provide.random(7)
+    if let Error(Config) = dtls.identity(identity_key(other), identity_certificate(), other) {} else {
+        fail("certificate accepted with another signing key")
+    }
+    let invalid_cert_random = identity_random()
+    if let Error(Config) = dtls.identity(identity_key(invalid_cert_random), b"", invalid_cert_random) {} else {
+        fail("empty certificate accepted")
+    }
+    let denied = result.unwrap(secret.seal(b"", "kdf"))
+    if let Error(Key(Denied)) = dtls.identity(take denied, identity_certificate(), r) {} else {
+        fail("signing refusal lost its key error")
+    }
+    Ok(())
+}

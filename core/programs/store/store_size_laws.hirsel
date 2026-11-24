@@ -39,7 +39,7 @@ fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
     let worker = option.unwrap(charge.task(bytes[Result[(), Error]], group + JOURNAL_WORKER_SLACK))
     let timer = option.unwrap(charge.task(bytes[()], JOURNAL_TIMER_GRANT))
     let fixed = open_charge - worker - timer - (journal_channel_bytes(commits) - journal_ready_bytes())
-    if fixed != GENESIS_WRITER_STATE || fixed != directory_writer_state_bytes() {
+    if fixed != GENESIS_WRITER_STATE || fixed != writer_state_bytes() {
         fail("§1.1: fixed writer state at genesis")
     }
     let codec = std.codec.of_bytes()
@@ -97,22 +97,48 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
     result.unwrap(task.join(take running))
 }
 
+type GrantedBucketOpen: send {
+    endpoint: std.sim.s3.Endpoint,
+    network: Net,
+    c: Clock,
+    r: Random,
+    tasks: Tasks,
+    options: Options
+}
+
+fn granted_bucket_cut(take input: GrantedBucketOpen) -> Result[(), Error] waits {
+    let client = bucket_endpoint_client(input.endpoint, input.network, input.c, input.tasks, "s3.test", 2151, true, 1)?
+    let authority = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    let mut db = open_authority(input.tasks, take authority, input.c, input.r, input.options) ?=> |Refusal(error: take problem, ..)| take problem
+    bucket_law_commit(mut db, 7)?
+    bucket_law_checkpoint(mut db)?
+    close(take db)
+}
+
 // §1.1 and §12.9, one 1 MiB lane with 64 KiB pack and group limits.
-//   journal and frame: (65,536 + 16,777,296) + 16,777,296
-//   pack and PUT buffer: 2 × 65,536
-//   cut: 65,536 + 2 × ceil(1,048,576 / 11) + (4,096 + 16,711,680)
-//   resident and lane: 2 × 1,048,576
-//   entries, heads, key: 2 × round8(65,536 + 112 + 33) + 2 × 65,776 + round8(60)
-//   timer and worker: (4,096 + 288) + (4 × 65,536 + 524,288 + 288 + 64)
-//   reclaim page: round8(1,000 × ((1,024 + 8) + 8 + (64 + 8)))
-//   T_floor = 54,986,476. The place needs T_floor + 80 + 1,098 = 54,987,654.
+// Lifetime before resident:
+//   lane: 1,048,576
+//   history: 2 × round8(65,536 + 112 + 33) + 2 × 65,776 + round8(60) = 262,992
+//   worker: 4 × 65,536 + 524,288 + 1,000 × (1,032 + 8 + 72) + 288 + 64 = 1,898,784
+//   timer: 4,096 + 288 = 4,384. Channels: 416 × 64 + 640 = 27,264. State: 1,872.
+//   lifetime before resident = 3,243,872. Resident adds 1,048,576.
+// Journal holds two 16,777,296 B frames. Recovery holds an entry and
+// decoded frame (33,554,744 B), or one checkpoint entry and one pack.
+// The cut wins at 68,493,460 B:
+//   output: 16,777,640 (MANIFEST file bound)
+//   workspace: round8(189 + 33 + 32 × (32,768 + 255)) for the packet,
+//     16,777,640 for the comparison buffer, 2 × 65,776 for heads and 64 for the key
+//   PUT: max(8 MiB + 24 for one multipart part, 16,777,640 for the encoded MANIFEST)
+//   cut work: 65,536 + 2 × ceil(1,048,576 / 11) + (4,096 + 16,711,680)
+// T_floor = 72,785,908. The place needs T_floor + 80 + 1,098 = 72,787,086.
 @test
-fn bucket_place_plan_at_floor() -> Result[(), Error] {
-    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+fn bucket_place_plan_at_floor(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let lanes = bucket_law_lanes(1)
     let kind: Kind = Bucket(lanes)
     let mut o = group_override(65536)
     o.pack_bytes = Some(65536)
-    let need = 54987654u64
+    let writer_need = 72785908u64
+    let need = 72787086u64
     let place = result.unwrap(planned(kind, need, o))
     if planned_bytes(place) != need || planned_options(place).resident_limit != MIB {
         fail("§1.1: the Bucket place plan at its exact share")
@@ -129,12 +155,21 @@ fn bucket_place_plan_at_floor() -> Result[(), Error] {
         fail("§1.1: the Bucket shortage must name the whole place grant")
     }
     let n = list.len(refused.parts)
-    if n < 2 { fail("§1.1: the Bucket shortage must itemize capture") }
+    if n < 2 {
+        fail("§1.1: the Bucket shortage must itemize capture")
+    }
     let service = view refused.parts[n - 2]
     let starter = view refused.parts[n - 1]
-    if service.0 != "follower_service" || service.1 != follower_service_bytes() ||
-        starter.0 != "follower_starter" || starter.1 != follower_starter_bytes() {
+    if service.0 != "follower_service" || service.1 != follower_service_bytes() || starter.0 != "follower_starter" || starter.1 != follower_starter_bytes() {
         fail("§1.1: the Bucket shortage must itemize both capture terms")
     }
-    Ok(())
+    if writer_bytes(writer) != writer_need {
+        fail("§1.1: the Bucket writer plan at its exact grant")
+    }
+    let sim = bucket_law_sim(tasks, c, 2151, None, list.new())
+    let input = GrantedBucketOpen(endpoint: clone(sim.endpoint), network: sim.network, c: sim.time, r, tasks, options: planned_options(place))
+    let running = task.spawn(tasks, bytes writer_need, take input, granted_bucket_cut)
+    let opened = task.join(take running)
+    let _ = bucket_law_finish(take sim)
+    result.unwrap(take opened)
 }

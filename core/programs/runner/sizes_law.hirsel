@@ -85,7 +85,15 @@ fn derived_budgets() -> Result[(), String] {
         Error(short) => {
             if short.need != floor || short.have != floor - 1 { fail("L60: Bucket floor") }
             expect_size_part(short.parts, "client_lanes", option.unwrap(std.object.lane_reservation(config)))
-            expect_size_part(short.parts, "put_buffer", option.unwrap(opts.pack_bytes))
+            let mut put_room = 0u64
+            for part in short.parts {
+                if part.0 == "put_buffer" {
+                    put_room = part.1
+                }
+            }
+            if put_room < option.unwrap(opts.pack_bytes) {
+                fail("L60: cut shortage must include PUT room")
+            }
             expect_size_part(short.parts, "follower_service", option.unwrap(store.service_bytes(list.new())))
             expect_size_part(short.parts, "follower_starter", store.follower_starter_bytes())
         },

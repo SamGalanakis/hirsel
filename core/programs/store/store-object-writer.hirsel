@@ -79,7 +79,7 @@ fn object_writer_entry_room(group: u64) -> u64 {
 }
 
 fn object_writer_journal_room(group: u64) -> u64 {
-    4 * group + 524288
+    4 * group + 524288 + reclaim_page_bytes()
 }
 
 type ObjectWriterOpen {
@@ -141,7 +141,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         _ => None,
     }
     let actor = ObjectJournalTask(ready: take starting, receive: take queued, acks: take journal_acks, notices: channel.sender(written_send), synced: take synced_send, group_bytes: group_room, group_commits: int.widen(options.group_commits), idle: Some(take idle_send), health_signal: Some(ObjectHealthSignal(value: latest.handle(health_state), terminal: channel.sender(health_tx))))
-    let worker_room = object_writer_journal_room(group_room) + RECLAIM_PAGE_BYTES
+    let worker_room = object_writer_journal_room(group_room)
     let work = match task.try_spawn(tasks, bytes worker_room, take actor, object_journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),

@@ -250,61 +250,24 @@ pub fn writer_bytes(p: WriterPlan) -> u64 {
 }
 
 fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, WriterPlan), Shortage] {
-    if let Directory = kind {
-        return directory_reservation(share, o)
+    if let Memory = kind {
+        let mut parts = writer_parts()
+        let resident = size_or(o.resident_limit, order.max(int.saturating_sub(share, MIB), MIB))
+        writer_add(mut parts, "memory_keep", MIB)
+        writer_add(mut parts, "resident_limit", order.max(resident, MIB))
+        let Some(total) = writer_total(parts) else {
+            return Error(writer_shortage(share, parts))
+        }
+        if resident < MIB || total > share {
+            return Error(writer_shortage(share, parts))
+        }
+        let commits = match o.group_commits {
+            Some(n) => n,
+            None => 64u32
+        }
+        return Ok((make_sized_options(kind, o, commits, 4 * MIB, 0, 0, 0, resident), WriterPlan(total, parts: take parts)))
     }
-    let mut parts = writer_parts()
-    let mut checkpoint_budget = 0u64
-    let mut journal = 0u64
-    let mut pack = 0u64
-    let mut group = 4 * MIB
-    let mut valid = true
-    match kind {
-        Memory => writer_add(mut parts, "memory_keep", MIB),
-        _ => {
-            pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
-            checkpoint_budget = size_or(o.checkpoint_bytes, pack)
-            let floor = int.checked_add(checkpoint_budget, FRAME_LIMIT)
-            let minimum_journal = size_or(floor, 18446744073709551615u64)
-            journal = size_or(o.journal_limit, minimum_journal)
-            group = size_or(o.group_bytes, group)
-            valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64
-            writer_add(mut parts, "journal_limit", order.max(journal, minimum_journal))
-            writer_add(mut parts, "frame", FRAME_LIMIT)
-            writer_add(mut parts, "pack_bytes", pack)
-            writer_add(mut parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
-            writer_add(mut parts, "cut_step", CUT_STEP_BYTES)
-            if let Bucket(config) = kind {
-                let lanes = std.object.lane_reservation(config)
-                let group_room = order.min(group, 4294967295u64)
-                valid = valid && lanes != None
-                writer_add(mut parts, "client_lanes", size_or(lanes, 18446744073709551615u64))
-                writer_add(mut parts, "entry_buffers", 2 * option.unwrap(charge.seq(bytes[u8], object_writer_entry_room(group_room))))
-                writer_add(mut parts, "head_buffers", 2 * option.unwrap(charge.seq(bytes[u8], HISTORY_HEAD_LIMIT)))
-                writer_add(mut parts, "history_key", option.unwrap(charge.seq(bytes[u8], HISTORY_BUFFER_KEY_BYTES)))
-                writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], OBJECT_TIMER_GRANT)))
-                writer_add(mut parts, "journal_worker", option.unwrap(charge.task(bytes[Result[(), Error]], object_writer_journal_room(group_room))))
-                writer_add(mut parts, "reclaim_page", option.unwrap(charge.seq(bytes[std.object.Entry], HISTORY_LIST_PAGE)))
-                writer_add(mut parts, "put_buffer", pack)
-            }
-        },
-    }
-    let fixed = writer_total(parts)
-    let room = match fixed { Some(n) => size_or(int.checked_sub(share, n), 0), None => 0u64 }
-    let derived = match kind { Memory => room, _ => largest_resident(room) }
-    let resident = size_or(o.resident_limit, order.max(derived, MIB))
-    let minimum = order.max(resident, MIB)
-    writer_add(mut parts, "resident_limit", minimum)
-    match kind {
-        Memory => (),
-        _ => writer_add(mut parts, "checkpoint_task_work", cut_work(minimum) - CUT_FIXED_BYTES),
-    }
-    let Some(total) = writer_total(parts) else { return Error(writer_shortage(share, parts)) }
-    if !valid || resident < MIB || total > share {
-        return Error(writer_shortage(share, parts))
-    }
-    let commits = match o.group_commits { Some(n) => n, None => 64u32 }
-    Ok((make_sized_options(kind, o, commits, group, checkpoint_budget, journal, pack, resident), WriterPlan(total, parts: take parts)))
+    disk_reservation(kind, share, o)
 }
 
 fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
@@ -335,7 +298,7 @@ fn journal_channel_bytes(group_count: u64) -> u64 {
         option.unwrap(charge.channel(bytes[()], 1))
 }
 
-fn directory_writer_state_bytes() -> u64 {
+fn writer_state_bytes() -> u64 {
     // The six empty pages at genesis are the collection, stream and catalog
     // roots, the empty collection child and the two pack-list roots.
     // The inline Db and the provider's file bookkeeping take no allocations.
@@ -350,10 +313,40 @@ fn cut_output_bytes(pack: u64) -> u64 {
     order.max(pack, page_manifest_file_size(MANIFEST_LIMIT, 1))
 }
 
-// A Directory writer's grant (§1.1) is what it holds for its whole life, plus
-// the largest of its recovery, write and cut phases, which never overlap.
-// `journal_limit` bounds the uncovered journal on disk and is no memory term.
-fn directory_reservation(share: u64, o: Overrides) -> Result[(Options, WriterPlan), Shortage] {
+fn history_workspace_bytes(packet: u64, compare: u64) -> Option[u64] {
+    let entry_buffers = int.checked_add(charge.seq(bytes[u8], packet)?, charge.seq(bytes[u8], compare)?)?
+    let head_buffers = 2 * option.unwrap(charge.seq(bytes[u8], HISTORY_HEAD_LIMIT))
+    let key = option.unwrap(charge.seq(bytes[u8], HISTORY_BUFFER_KEY_BYTES))
+    int.checked_add(entry_buffers, head_buffers + key)
+}
+
+const CUT_HISTORY_RETAIN_LIMIT: u64 = 255
+
+fn cut_history_packet_room() -> u64 {
+    // CHECKPOINT carries up to one root locator's rows and retain (a u8)
+    // checkpoint references. This also covers one locator chunk.
+    189 + BINDING_BYTES + (4 * bytes[u64]) * (HISTORY_LOCATE_ROWS + CUT_HISTORY_RETAIN_LIMIT)
+}
+
+fn bucket_cut_parts(pack: u64) -> WriterParts {
+    let mut parts = writer_parts()
+    let unbounded = 18446744073709551615u64
+    let output = cut_output_bytes(pack)
+    let manifest = option.unwrap(charge.seq(bytes[u8], cut_output_bytes(0)))
+    let staging = option.unwrap(charge.seq(bytes[u8], order.min(output, HISTORY_PART_BYTES))) + option.unwrap(charge.seq(bytes[Bytes], 1))
+    // PackBuffers.out stays live through the MANIFEST PUT. The cut has
+    // its own history workspace and may grow its comparison buffer to
+    // the output width. The multipart part and the encoded MANIFEST are
+    // from separate upload steps.
+    writer_add(mut parts, "cut_output", size_or(charge.seq(bytes[u8], output), unbounded))
+    writer_add(mut parts, "cut_workspace", size_or(history_workspace_bytes(cut_history_packet_room(), output), unbounded))
+    writer_add(mut parts, "put_buffer", order.max(manifest, staging))
+    take parts
+}
+
+// The journal's fixed grants and workspace live through every phase. A
+// cut drains the outstanding frames before it takes the journal session.
+fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, WriterPlan), Shortage] {
     let unbounded = 18446744073709551615u64
     let pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
     let checkpoint_budget = size_or(o.checkpoint_bytes, pack)
@@ -365,22 +358,44 @@ fn directory_reservation(share: u64, o: Overrides) -> Result[(Options, WriterPla
         Some(n) => n,
         None => 64u32
     }
-    let valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64
+    let mut valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64
     let mut parts = writer_parts()
-    let worker = charge.task(bytes[Result[(), Error]], size_or(int.checked_add(group, JOURNAL_WORKER_SLACK), unbounded))
-    writer_add(mut parts, "journal_worker", size_or(worker, unbounded))
-    writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], JOURNAL_TIMER_GRANT)))
+    let mut cut_parts = writer_parts()
+    let mut recovery = JOURNAL_CHUNK_BYTES + FRAME_LIMIT
+    if let Bucket(config) = kind {
+        let lanes = std.object.lane_reservation(config)
+        valid = valid && lanes != None
+        writer_add(mut parts, "client_lanes", size_or(lanes, unbounded))
+        let group_room = order.min(group, 4294967295u64)
+        let packet = object_writer_entry_room(group_room)
+        writer_add(mut parts, "history_workspace", option.unwrap(history_workspace_bytes(packet, packet)))
+        writer_add(mut parts, "journal_worker", option.unwrap(charge.task(bytes[Result[(), Error]], object_writer_journal_room(group_room))))
+        writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], OBJECT_TIMER_GRANT)))
+        // Recovery reads one object at a time. Replay can hold the fetched
+        // entry beside its decoded frame. The checkpoint can hold its entry
+        // beside a pack read. The growing suffix and location tables remain
+        // charged at the call that allocates them.
+        let fetched_entry = option.unwrap(charge.seq(bytes[u8], object_writer_entry_room(order.max(group_room, FRAME_LIMIT))))
+        let checkpoint_read = int.checked_add(option.unwrap(charge.seq(bytes[u8], cut_history_packet_room())), size_or(charge.seq(bytes[u8], cut_output_bytes(pack)), unbounded))
+        recovery = order.max(fetched_entry + FRAME_LIMIT, size_or(checkpoint_read, unbounded))
+        cut_parts = bucket_cut_parts(pack)
+    } else {
+        let worker = charge.task(bytes[Result[(), Error]], size_or(int.checked_add(group, JOURNAL_WORKER_SLACK), unbounded))
+        writer_add(mut parts, "journal_worker", size_or(worker, unbounded))
+        writer_add(mut parts, "journal_timer", option.unwrap(charge.task(bytes[()], JOURNAL_TIMER_GRANT)))
+        writer_add(mut cut_parts, "cut_output", cut_output_bytes(pack))
+    }
     writer_add(mut parts, "journal_channels", journal_channel_bytes(int.widen(commits)))
-    writer_add(mut parts, "writer_state", directory_writer_state_bytes())
+    writer_add(mut parts, "writer_state", writer_state_bytes())
     let write = 2 * FRAME_LIMIT
-    let recovery = JOURNAL_CHUNK_BYTES + FRAME_LIMIT
-    let output = cut_output_bytes(pack)
-    let cut_fixed = size_or(int.checked_add(output, CUT_FIXED_BYTES + CUT_STEP_BYTES), unbounded)
+    writer_add(mut cut_parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
+    writer_add(mut cut_parts, "cut_step", CUT_STEP_BYTES)
+    let cut_fixed = size_or(writer_total(cut_parts), unbounded)
     let derived = match writer_total(parts) {
         Some(lifetime) => {
-            let steady = size_or(int.checked_sub(share, lifetime), 0)
-            let by_write = size_or(int.checked_sub(steady, order.max(write, recovery)), 0)
-            let by_cut = largest_resident(size_or(int.checked_sub(steady, cut_fixed), 0))
+            let steady = int.saturating_sub(share, lifetime)
+            let by_write = int.saturating_sub(steady, order.max(write, recovery))
+            let by_cut = largest_resident(int.saturating_sub(steady, cut_fixed))
             order.min(by_write, by_cut)
         },
         None => 0u64,
@@ -391,16 +406,21 @@ fn directory_reservation(share: u64, o: Overrides) -> Result[(Options, WriterPla
     let work = cut_work(minimum) - CUT_FIXED_BYTES
     let cut = size_or(int.checked_add(cut_fixed, work), unbounded)
     if cut >= write && cut >= recovery {
-        writer_add(mut parts, "cut_output", output)
-        writer_add(mut parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
+        for i in 0u64 .. cut_parts.count {
+            let (take name, n) = replace(mut cut_parts.terms[i], ("", 0))
+            writer_add(mut parts, take name, n)
+        }
         writer_add(mut parts, "checkpoint_task_work", work)
-        writer_add(mut parts, "cut_step", CUT_STEP_BYTES)
     } else if write >= recovery {
         writer_add(mut parts, "staged_frame", FRAME_LIMIT)
         writer_add(mut parts, "frames_in_flight", FRAME_LIMIT)
     } else {
-        writer_add(mut parts, "journal_chunk", JOURNAL_CHUNK_BYTES)
-        writer_add(mut parts, "recovered_frame", FRAME_LIMIT)
+        if let Directory = kind {
+            writer_add(mut parts, "journal_chunk", JOURNAL_CHUNK_BYTES)
+            writer_add(mut parts, "recovered_frame", FRAME_LIMIT)
+        } else {
+            writer_add(mut parts, "recovery", recovery)
+        }
     }
     let Some(total) = writer_total(parts) else {
         return Error(writer_shortage(share, parts))
@@ -408,9 +428,8 @@ fn directory_reservation(share: u64, o: Overrides) -> Result[(Options, WriterPla
     if !valid || resident < MIB || total > share {
         return Error(writer_shortage(share, parts))
     }
-    Ok((make_sized_options(Directory, o, commits, group, checkpoint_budget, journal, pack, resident), WriterPlan(total, parts: take parts)))
+    Ok((make_sized_options(kind, o, commits, group, checkpoint_budget, journal, pack, resident), WriterPlan(total, parts: take parts)))
 }
-
 
 pub opaque type FollowerPlan: send {
     kind: Kind,

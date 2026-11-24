@@ -207,8 +207,9 @@ fn history_abort_reclaimed_uploads(mut lane: ObjectJournalSession, pass: Reclaim
 
 const HISTORY_LIST_PAGE: u64 = 1000
 
-// One inline object key (1024 bytes plus length), size and inline ETag.
-const RECLAIM_PAGE_BYTES: u64 = HISTORY_LIST_PAGE * (1024 + 8 + 8 + 64 + 8)
+fn reclaim_page_bytes() -> u64 {
+    option.unwrap(charge.seq(bytes[std.object.Entry], HISTORY_LIST_PAGE))
+}
 
 fn sweep_start() -> SweepCursor {
     SweepCursor(position: 0, epoch: 0, digest: 0)

@@ -137,6 +137,9 @@ limit = 134217728
 [tests.runs."store@1/store/directory_grant_covers_journal_worker"]
 limit = 134217728
 
+[tests.runs."store@1/store/bucket_place_plan_at_floor"]
+limit = 134217728
+
 # The pager reserves C + K + P = 80,794,472 B at the Tiered floor,
 # plus the Task allocation and request channel.
 [tests.runs."store@1/store/test_l70_tiered_sizes_include_cut_quota"]

@@ -1,4 +1,4 @@
-pub type Reply: codec + send = Value(Option[Option[u32]], u64) | Missing
+pub type Reply[T: send]: codec + send = Value(Option[Option[T]], u64) | Missing | removed Old(i64, Bytes, Map[u64, String])
 
 type Item: codec + send {
     title: String,
@@ -13,7 +13,7 @@ fn item_codec() -> std.codec.Codec[Item] {
     std.codec.of()
 }
 
-fn packed_reply(take _arg: ()) -> Result[Reply, Capacity] {
+fn packed_reply(take _arg: ()) -> Result[Reply[u32], Capacity] {
     Ok(Value(Some(None), 9007199254740993u64))
 }
 
@@ -95,7 +95,7 @@ fn payload(out: Stdout, clock: Clock, random: Random, tasks: Tasks) -> Result[()
     result.unwrap(runner.place_head(take db, code.describe(place), 1048576u64, None, code.describe(schema), take inbox, take mail, tasks, 1048576u64))
     let batch = result.unwrap(task.join(take job))
     let reply = result.unwrap(packed_reply(()))
-    let codec: std.codec.Codec[Reply] = std.codec.of()
+    let codec: std.codec.Codec[Reply[u32]] = std.codec.of()
     let mut reply_bytes: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, reply, mut reply_bytes))
     let mut encoded: Bytes = list.new()

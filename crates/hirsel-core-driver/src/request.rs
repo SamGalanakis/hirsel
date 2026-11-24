@@ -130,7 +130,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             crate::call::Options::read(invocation)?,
         )?));
     }
-    if command == "sdk" {
+    if matches!(command, "sdk ts" | "sdk json") {
         crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
         return conclude(Outcome::Exit(0));
     }

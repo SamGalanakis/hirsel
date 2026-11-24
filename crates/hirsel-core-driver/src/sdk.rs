@@ -8,9 +8,11 @@ pub const RUNTIME: &str = include_str!("sdk_codec.js");
 const DECLARATIONS: &str = include_str!("sdk_codec.d.ts");
 
 mod http;
+mod manifest;
 mod stubs;
 
 pub use http::HttpBinding;
+pub use manifest::manifest_json;
 use stubs::StubTypes;
 pub(crate) use stubs::{entry_path, stub_paths};
 
@@ -79,6 +81,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[derive(serde::Serialize)]
 pub struct Schema {
     pub(crate) root: Value,
     pub(crate) definitions: Vec<Value>,
@@ -96,9 +99,10 @@ impl Schema {
         let mut definitions = Vec::new();
         for _ in 0..n {
             let name = r.name()?;
-            let args = r.count()?;
-            for _ in 0..args {
-                let _ = r.ty(key)?;
+            let count = r.count()?;
+            let mut arguments = Vec::new();
+            for _ in 0..count {
+                arguments.push(r.ty(key)?);
             }
             let kind = r.byte()?;
             let body = match kind {
@@ -130,7 +134,7 @@ impl Schema {
                 2 => r.ty(key)?,
                 _ => return Err("Malformed: schema definition kind".into()),
             };
-            definitions.push(json!({"name":name,"kind":kind,"body":body}));
+            definitions.push(json!({"name":name,"arguments":arguments,"kind":kind,"body":body}));
         }
         let root = r.ty(key)?;
         r.done()?;
@@ -568,6 +572,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         ),
     ]);
     http::generate(describe, &mut files)?;
+    files.insert("manifest.json".into(), manifest::render(describe, &paths)?);
     Ok(files)
 }
 pub fn write(describe: &Describe, out: &Path) -> Result<(), Error> {

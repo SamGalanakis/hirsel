@@ -29,6 +29,9 @@ pub(super) fn applies(option: &OptionSpec, command: &CommandSpec) -> bool {
         ))
         || option.commands.is_empty()
         || option.commands.contains(&command.name)
+        || (command.name.starts_with("sdk ")
+            && option.commands.contains(&"sdk")
+            && (command.name == "sdk ts" || option.id != OptionId::Output))
         || (option.id == OptionId::Json
             && command.name.starts_with("prof ")
             && !matches!(
@@ -55,7 +58,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
-        if matches!(command.name, "prof" | "lean") {
+        if matches!(command.name, "prof" | "lean" | "sdk") {
             let prefix = format!("{} ", command.name);
             for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with(&prefix)) {
                 result.push_str(&format!(

@@ -194,7 +194,9 @@ commands! {
     "fmt", "fmt [--check] [--signatures] <FILE|DIR|--stdin>", "Format a source file, a source directory, or standard input.";
     "explain", "explain RULE|MODULE|debug-lines|primer | explain --list [--json]", "Explain specification rules and find library declarations.";
     "primer", "primer", "Print the Hirsel primer: the language in one page.";
-    "sdk", "sdk ts <program> -o DIR [options]", "Generate browser and Node ES modules and TypeScript declarations.";
+    "sdk", "sdk <ts|json>", "Export bindings or the schema for a place.";
+    "sdk ts", "sdk ts <program> -o DIR [options]", "Generate TypeScript bindings and manifest.json.";
+    "sdk json", "sdk json <program> [options]", "Write the SDK schema manifest to stdout.";
     "call", "call SERVER --url ws://HOST:PORT/PATH [options] [-- ENTRY [--FLAG VALUE...]]", "List a running place's entries, or call one, typed from the server's Describe.";
 }
 macro_rules! option {
@@ -1211,15 +1213,10 @@ pub struct Invocation {
     pub positional: Option<String>,
     pub arguments: Vec<String>,
 }
-pub enum Action {
-    Help(String),
-    Version,
-    Invoke(Invocation),
-}
 #[path = "cli_help.rs"]
 mod help_text;
 pub use help_text::help;
 pub(crate) use help_text::named;
 #[path = "cli_parse.rs"]
 mod parsing;
-pub use parsing::parse;
+pub use parsing::{Action, parse};

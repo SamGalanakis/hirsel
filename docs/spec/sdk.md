@@ -5,6 +5,7 @@ launch mode. It emits ES modules and `.d.ts` declarations for Node and
 browsers, along with the TypeScript client runtime.
 The output directory has `package.json` with `"type": "module"`, so Node loads
 the same `.js` files even inside a CommonJS project.
+It also contains `manifest.json`, generated from the same Describe response.
 
 A server using `runner` declares `runner = { major = 1 }` under
 `[dependencies]` in `hirsel.toml`.
@@ -170,6 +171,68 @@ program. Describe and generation errors leave the output destination untouched.
 The CLI uses the driver's shared bounded describe child. Capacity and duplicate
 registration errors retain their typed payloads; an expired child reports
 `PlaceTimedOut` after the launcher kills and reaps it.
+
+## Schema manifest
+
+`hirsel sdk json <program>` writes the same `manifest.json` bytes to stdout.
+Both commands accept a program directory or a built executable. They share
+the Describe allowance, timeout, and native build options. Only `sdk ts`
+takes `--output`.
+
+The manifest is a compact UTF-8 JSON object with lexicographically sorted
+object keys and a final newline. It has four fields.
+
+| Field | Contents |
+| --- | --- |
+| `version` | Integer `1` for this manifest format. |
+| `launch` | `digest`, `target`, `n_place`, and `revision` from Describe. |
+| `tables` | Declared collections in Describe order. Each has `name`, `id`, `owner`, and the store catalog's numeric `kind`. |
+| `entries` | Exported entries in registration order. |
+
+Each entry has `module` (an array of decoded module path components) and
+`name` (the decoded function name). Together they give the TypeScript stub
+path from section 4. `identity` retains the full PROG-9 entry identity,
+including the instance and signature. `kind` is `compute`, `transact`,
+`query`, or `granted`. `args_fp`, `result_fp`, and `revision` come from
+Describe. The launch's `n_place` and both fingerprints are decimal strings
+to preserve all 64 bits. `digest`, `identity`, and `revision` are arrays of
+byte integers.
+
+An entry's `args` and `result` are codec ASTs. For a query, `result` is the
+query's value codec, and its `slots` array supplies the rest of the query
+result schema in declaration order. Each slot has `name`, `kind` (`table`,
+`cell`, or `log`), `key` (the ordered key codec), `key_json` (the matching
+value codec for an HTTP JSON projection), and `value` (the row codec). A
+cell has the ordered unit codec for `key`. Calls have an empty `slots` array.
+
+A codec AST has `key` (true for ordered keys, false for values), `root` (a
+type expression), and `definitions` (an array indexed from zero). A nominal
+definition has its full `name`, an ordered `arguments` array of instantiated
+type expressions, a numeric `kind`, and a `body`.
+
+| Definition kind | Body |
+| --- | --- |
+| `0` (record) | Fields in declaration order, each with `name`, `removed`, and `type`. |
+| `1` (sum) | Variants in wire tag order, each with `name`, `removed`, and the ordered `fields` array of payload types. |
+| `2` (`via`) | The representation type expression. |
+
+`removed` is a boolean. Tombstones retain their positions and types.
+A type expression is an array starting with its codec schema opcode.
+
+| Expression | Type |
+| --- | --- |
+| `[0]`, `[1]`, `[2]` | Unit, bool, char |
+| `[3]`, `[4]`, `[5]`, `[6]` | u8, u16, u32, u64 |
+| `[7]`, `[8]`, `[9]`, `[10]` | i8, i16, i32, i64 |
+| `[11]`, `[12]`, `[13]` | f32, f64, String |
+| `[14, T]` | List of `T`, with `[14, [3]]` the codec form of Bytes |
+| `[15, K, V]` | Map with key type `K` and value type `V` |
+| `[16, T]` | Option of `T` |
+| `[17, T, E]` | Result with success type `T` and error type `E` |
+| `[18, [T0, T1, ...]]` | Tuple with its element types in order |
+| `[19, i]` | Reference to definition `i` in this AST |
+| `[20]` | Never |
+| `[21, T]` | Descending ordered key of type `T` |
 
 ## Shared client runtime
 

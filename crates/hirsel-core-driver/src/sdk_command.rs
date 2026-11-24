@@ -1,6 +1,7 @@
 //! Build a server, then generate bindings from its bounded describe launch.
 use crate::cli::{Invocation, OptionId};
-use crate::sdk::{Describe, write_with_frame};
+use crate::sdk::{Describe, manifest_json, write_with_frame};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -9,7 +10,7 @@ type Error = Box<dyn std::error::Error>;
 
 pub struct Options {
     pub program: PathBuf,
-    pub out: PathBuf,
+    pub out: Option<PathBuf>,
     pub timeout: Duration,
     pub n_place: u64,
     pub build: Vec<String>,
@@ -18,7 +19,12 @@ impl Options {
     pub fn read(invocation: Invocation) -> Result<Self, Error> {
         let program = invocation
             .positional
-            .ok_or("sdk ts requires a program directory or built executable")?
+            .ok_or_else(|| {
+                format!(
+                    "{} requires a program directory or built executable",
+                    invocation.command.name
+                )
+            })?
             .into();
         let mut out = None;
         let mut timeout = Duration::from_secs(10);
@@ -65,9 +71,12 @@ impl Options {
                 }
             }
         }
+        if invocation.command.name == "sdk ts" && out.is_none() {
+            return Err("sdk ts requires --output DIR".into());
+        }
         Ok(Self {
             program,
-            out: out.ok_or("sdk ts requires --output DIR")?,
+            out,
             timeout,
             n_place,
             build,
@@ -122,7 +131,13 @@ fn run_with(
     };
     let response = describe(&executable, options.n_place, options.timeout)?;
     let description = Describe::read(&response)?;
-    write_with_frame(&description, FRAME_SCHEMA, &options.out)
+    if let Some(out) = options.out {
+        write_with_frame(&description, FRAME_SCHEMA, &out)
+    } else {
+        let manifest = manifest_json(&description)?;
+        std::io::stdout().lock().write_all(manifest.as_bytes())?;
+        Ok(())
+    }
 }
 
 pub use crate::product::bundled::FRAME_SCHEMA;
@@ -139,7 +154,7 @@ mod tests {
     #[test]
     fn sdk_command_options() {
         let options = parse(&["sdk", "ts", "server", "-o", "bindings"]).unwrap();
-        assert_eq!(options.out, PathBuf::from("bindings"));
+        assert_eq!(options.out, Some(PathBuf::from("bindings")));
         assert!(parse(&["sdk", "ts", "server", "--out", "bindings"]).is_err());
         assert_eq!(options.timeout, Duration::from_secs(10));
         assert_eq!(options.n_place, 16 * 1024 * 1024);
@@ -182,7 +197,7 @@ mod tests {
         let output = dir.path().join("out");
         let options = Options {
             program: server,
-            out: output.clone(),
+            out: Some(output.clone()),
             timeout: Duration::from_secs(10),
             n_place: 7,
             build: vec![],
@@ -210,7 +225,7 @@ mod tests {
             std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
             let options = Options {
                 program: server.clone(),
-                out: output.clone(),
+                out: Some(output.clone()),
                 timeout,
                 n_place,
                 build: vec![],

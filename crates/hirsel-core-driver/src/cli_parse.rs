@@ -1,5 +1,11 @@
 use super::help_text::{applies, is_help, named};
-use super::{Action, CommandSpec, Invocation, OPTIONS, OptionId, help};
+use super::{CommandSpec, Invocation, OPTIONS, OptionId, help};
+
+pub enum Action {
+    Help(String),
+    Version,
+    Invoke(Invocation),
+}
 
 pub(super) fn invocation(
     command: &'static CommandSpec,
@@ -111,7 +117,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             Err("--version takes no arguments".into())
         };
     }
-    if matches!(name.as_str(), "prof" | "laws" | "lean") {
+    if matches!(name.as_str(), "prof" | "laws" | "lean" | "sdk") {
         match arguments.next() {
             None => return Ok(Action::Help(help(Some(named(&name)?)))),
             Some(subcommand) if is_help(&subcommand) => {
@@ -121,13 +127,6 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
         }
     }
     let command = named(&name)?;
-    if name == "sdk" {
-        match arguments.next().as_deref() {
-            Some("ts") => {}
-            Some("--help" | "-h") | None => return Ok(Action::Help(help(Some(command)))),
-            _ => return Err("sdk requires the ts generator".into()),
-        }
-    }
     if name == "help" {
         let target = arguments
             .next()
@@ -135,7 +134,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
                 if is_help(&name) {
                     Ok(command)
                 } else {
-                    if matches!(name.as_str(), "prof" | "laws" | "lean")
+                    if matches!(name.as_str(), "prof" | "laws" | "lean" | "sdk")
                         && let Some(subcommand) = arguments.next()
                     {
                         name.push_str(&format!(" {subcommand}"));

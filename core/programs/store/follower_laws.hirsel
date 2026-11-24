@@ -425,10 +425,30 @@ fn follower_slot_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[
 }
 
 
-fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, funded: bool) -> Result[(), Error] waits {
+fn follower_provision_charge(plan: FollowerPlan) -> u64 {
+    let room = follower_law_room()
+    let (outlet, inbox): (Sender[Result[FollowerSlot, Error]], Receiver[Result[FollowerSlot, Error]]) = channel.new(1)
+    let work = box.new(FollowerProvision(plan: clone(plan), reply: take outlet))
+    let charge = room - follower_law_room()
+    let _ = take work
+    let _ = take inbox
+    charge
+}
+
+fn follower_request_charge(d: Dir) -> u64 {
+    let room = follower_law_room()
+    let (outlet, inbox): (Sender[Result[FollowerResponse, Error]], Receiver[Result[FollowerResponse, Error]]) = channel.new(1)
+    let command = FollowerCommand(request: box.new(Bind(DirectoryFollow(d), None, 0)), reply: take outlet)
+    let charge = room - follower_law_room()
+    let _ = take command
+    let _ = take inbox
+    charge
+}
+
+fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, provision: u64, funded: bool) -> Result[(), Error] waits {
     let initial_room = follower_law_room()
     let service = follower_service(tasks, 80 + plan_bytes(plan))?
-    let service_room = if funded { 746u64 } else { 745u64 }
+    let service_room = if funded { provision } else { provision - 1 }
     if follower_law_room() != service_room { fail("L85: room after service startup") }
     let owner = follower_owner(service)?
     if follower_law_room() != service_room { fail("L85: room after taking the owner endpoint") }
@@ -438,15 +458,15 @@ fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, fu
     if funded {
         let mut ids = followers()
         let mut opened = follower(mut ids, requested?, log_authority(d), c, None)?
-        if follower_law_room() != 746u64 { fail("L85: room after binding the follower") }
+        if follower_law_room() != service_room { fail("L85: room after binding the follower") }
         for _ in 0u64 .. 3u64 {
             let _ = fresh(mut opened, clock.deadline_after_ms(host.mono_ns(c), 30000u64))?
-            if follower_law_room() != 746u64 { fail("L85: room after fresh") }
+            if follower_law_room() != service_room { fail("L85: room after fresh") }
         }
         let _ = take opened
     } else {
         if let Error(Full(Allocation(cause))) = requested {
-            if cause.requested != 746 || cause.available != 745 {
+            if cause.requested != provision || cause.available != service_room {
                 fail("L85: the one-byte-short starter reported the wrong provision charge")
             }
         } else {
@@ -462,12 +482,16 @@ fn follower_starter_trial(d: Dir, c: Clock, tasks: Tasks, plan: FollowerPlan, fu
 fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let directory = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
-    close(open(tasks, directory, c, r, options)?)?
     let plan = follower_law_plan(Directory, options)
-    if follower_starter_bytes() != 1034 { fail("L85: the starter peak differs from 288 + 746") }
-    let limit = 80 + plan_bytes(plan) + 1034
-    capacity(bound bytes limit - 1 { follower_starter_trial(directory, c, tasks, plan, false) })??
-    capacity(bound bytes limit { follower_starter_trial(directory, c, tasks, plan, true) })?
+    let provision = follower_provision_charge(plan)
+    if FOLLOWER_PROVISION_BYTES != provision { fail("L85: FOLLOWER_PROVISION_BYTES differs from the box and reply charge") }
+    let request = follower_request_charge(directory)
+    if FOLLOWER_REQUEST_BYTES != request { fail("L85: FOLLOWER_REQUEST_BYTES differs from the box and reply charge") }
+    if follower_starter_bytes() != 288 + provision { fail("L85: the starter peak differs from the task and provision charges") }
+    close(open(tasks, directory, c, r, options)?)?
+    let limit = 80 + plan_bytes(plan) + 288 + provision
+    capacity(bound bytes limit - 1 { follower_starter_trial(directory, c, tasks, plan, provision, false) })??
+    capacity(bound bytes limit { follower_starter_trial(directory, c, tasks, plan, provision, true) })?
 }
 
 fn follower_law_room() -> u64 {

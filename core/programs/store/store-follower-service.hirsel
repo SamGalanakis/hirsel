@@ -50,7 +50,7 @@ const FOLLOWER_CONTROL_BYTES: u64 = FOLLOWER_ENTRY_BYTES + FOLLOWER_COMMAND_BYTE
 const FOLLOWER_TASK_BYTES: u64 = 288
 const FOLLOWER_SERVICE_BYTES: u64 = 64 + 16
 const FOLLOWER_STARTUP_REPLY_BYTES: u64 = 64 + 8 + 56
-const FOLLOWER_PROVISION_BYTES: u64 = 328 + 64 + 8 + 346
+const FOLLOWER_PROVISION_BYTES: u64 = 360 + 64 + 8 + 378
 const FOLLOWER_REQUEST_BYTES: u64 = 288 + 64 + 8 + 304
 
 pub fn follower_service(tasks: Tasks, budget: u64) -> Result[FollowerService, Error] waits {

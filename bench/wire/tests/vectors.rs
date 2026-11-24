@@ -1,6 +1,7 @@
 use hirsel_wire_bench::Result;
 use hirsel_wire_bench::codec::{
-    self, Bad, Done, Entry, Fault, Frame, Group, Outcome, Refusal, Room, Row, Want,
+    self, Bad, Caller, Done, Entry, Fault, Frame, Group, Outcome, Part, Refusal, Room, Row,
+    StreamId, Want,
 };
 
 const N: u32 = 0x01020304;
@@ -25,11 +26,33 @@ fn room() -> Room {
         available: 0x1112131415161718,
     }
 }
+const STREAM: StreamId = StreamId {
+    t: V,
+    n: 0x2122232425262728,
+};
+const P: u64 = 0x3132333435363738;
+const KEYED_AT: u64 = 0x0000019a6b2c3d4e;
 fn done() -> Done {
     Done {
-        stream: N,
+        stream: STREAM,
         p: V,
         outcome: Outcome::Returned(bytes("0000000001")),
+    }
+}
+fn caller() -> Caller {
+    Caller {
+        issuer: 2,
+        subject: bytes("000102030405060708090a0b0c0d0e0f"),
+    }
+}
+fn budget_refusal() -> Done {
+    Done {
+        stream: STREAM,
+        p: P,
+        outcome: Outcome::Refused(Refusal::Budget(Room {
+            requested: 0x4142434445464748,
+            available: 0x5152535455565758,
+        })),
     }
 }
 // Value construction follows W3a's frame-vector-helpers.hirsel; bytes come from
@@ -54,26 +77,25 @@ fn frame(name: &str) -> Frame {
         "entry_gone" | "placed_gone" => Frame::Placed(Entry::Gone),
         "hello_empty" => Frame::Hello(None, vec![]),
         "hello_credential" => Frame::Hello(Some(bytes("aabb")), vec![want()]),
-        "call" => Frame::Call(N, V, 0x11121314, 0x21222324, bytes("aabb")),
+        "call_streamid" => Frame::Call(STREAM, P, 0x11121314, 0x21222324, bytes("aabb")),
         "subscribe_none" => Frame::Subscribe(N, 7, bytes("aabb"), None),
         "subscribe_some" => Frame::Subscribe(N, 7, bytes("aabb"), Some(bytes("cafe"))),
         "unsubscribe" => Frame::Unsubscribe(N),
-        "welcome" => Frame::Welcome(
-            codec::Caller {
-                issuer: 2,
-                subject: bytes("000102030405060708090a0b0c0d0e0f"),
-            },
+        "welcome_times" => Frame::Welcome(
+            caller(),
             4,
             1048576,
             (0..32).collect(),
             "x86_64-unknown-linux-gnu".to_owned(),
             16777216,
+            KEYED_AT,
+            5184000000,
         ),
         "done" | "reset_outcome" => Frame::Reset(V, vec![done()]),
         "done_refused_request_mismatch" => Frame::Reset(
             V,
             vec![Done {
-                stream: N,
+                stream: STREAM,
                 p: V,
                 outcome: Outcome::Refused(Refusal::RequestMismatch),
             }],
@@ -81,7 +103,7 @@ fn frame(name: &str) -> Frame {
         "done_refused_history_unavailable" => Frame::Reset(
             V,
             vec![Done {
-                stream: N,
+                stream: STREAM,
                 p: V,
                 outcome: Outcome::Refused(Refusal::HistoryUnavailable),
             }],
@@ -141,6 +163,36 @@ fn frame(name: &str) -> Frame {
             vec![],
         ),
         "reset_empty" => Frame::Reset(V, vec![]),
+        "done_refused_budget" => Frame::Reset(V, vec![budget_refusal()]),
+        "batch_one_refusal" => {
+            Frame::Batch(0x6162636465666768, vec![], vec![], vec![budget_refusal()])
+        }
+        "reset_one_refusal" => Frame::Reset(0x6162636465666768, vec![budget_refusal()]),
+        "done_stream_future" => Frame::Reset(
+            V,
+            vec![Done {
+                stream: STREAM,
+                p: 0,
+                outcome: Outcome::Refused(Refusal::Malformed(Bad {
+                    kind: 7,
+                    at: KEYED_AT,
+                })),
+            }],
+        ),
+        "set_state" => Frame::Set(7, Some(bytes("aabb"))),
+        "send_direct" => Frame::Send(7, Some(8), bytes("aabb")),
+        "live_all_fields" => Frame::Live(vec![Part {
+            sub: 7,
+            complete: true,
+            you: Some(8),
+            joined: vec![(9, caller())],
+            states: vec![(9, Some(bytes("aabb")))],
+            msgs: vec![(9, true, bytes("cafe"))],
+            left: vec![10],
+            gap: 11,
+            lost: 12,
+            full: true,
+        }]),
         other => {
             let outcome = match other {
                 "ended_returned" => Outcome::Returned(bytes("0000000001")),
@@ -239,7 +291,7 @@ fn frame_vectors_match_w3a_and_decode_strictly() -> Result<()> {
             );
         }
     }
-    println!("matched {} canonical hirsel.3 vectors", vectors.len());
+    println!("matched {} canonical hirsel.4 vectors", vectors.len());
     assert!(codec::decode(&[255; 16]).is_err());
     assert!(codec::decode(&bytes("0000000000000000ffffffff")).is_err());
     Ok(())

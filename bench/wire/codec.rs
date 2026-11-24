@@ -51,9 +51,15 @@ pub enum Outcome {
     Abandoned,
     InDoubt,
 }
+/// A client-minted stream: its wall-clock mint time in ms and a random nonce.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct StreamId {
+    pub t: u64,
+    pub n: u64,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Done {
-    pub stream: u32,
+    pub stream: StreamId,
     pub p: u64,
     pub outcome: Outcome,
 }
@@ -85,17 +91,34 @@ pub struct Caller {
     pub issuer: u8,
     pub subject: Vec<u8>,
 }
+/// One room's delta in a Live frame (RUNNER-SPEC §3, hirsel.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub sub: u32,
+    pub complete: bool,
+    pub you: Option<u32>,
+    pub joined: Vec<(u32, Caller)>,
+    pub states: Vec<(u32, Option<Vec<u8>>)>,
+    pub msgs: Vec<(u32, bool, Vec<u8>)>,
+    pub left: Vec<u32>,
+    pub gap: u32,
+    pub lost: u32,
+    pub full: bool,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
     Hello(Option<Vec<u8>>, Vec<Want>),
-    Call(u32, u64, u32, u32, Vec<u8>),
+    Call(StreamId, u64, u32, u32, Vec<u8>),
     Subscribe(u32, u32, Vec<u8>, Option<Vec<u8>>),
     Unsubscribe(u32),
-    Welcome(Caller, u32, u64, Vec<u8>, String, u64),
+    Welcome(Caller, u32, u64, Vec<u8>, String, u64, u64, u64),
     Placed(Entry),
     Batch(u64, Vec<u32>, Vec<Group>, Vec<Done>),
     Ended(u32, Outcome),
     Reset(u64, Vec<Done>),
+    Set(u32, Option<Vec<u8>>),
+    Send(u32, Option<u32>, Vec<u8>),
+    Live(Vec<Part>),
 }
 
 trait Wire: Sized {
@@ -168,6 +191,37 @@ impl<T: Wire> Wire for Option<T> {
         }
     }
 }
+impl Wire for bool {
+    fn put(&self, b: &mut Vec<u8>) {
+        b.push(u8::from(*self));
+    }
+    fn get(r: &mut Reader<'_>) -> Result<Self> {
+        match u8::get(r)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err("invalid bool".into()),
+        }
+    }
+}
+impl<A: Wire, B: Wire> Wire for (A, B) {
+    fn put(&self, b: &mut Vec<u8>) {
+        self.0.put(b);
+        self.1.put(b);
+    }
+    fn get(r: &mut Reader<'_>) -> Result<Self> {
+        Ok((A::get(r)?, B::get(r)?))
+    }
+}
+impl<A: Wire, B: Wire, C: Wire> Wire for (A, B, C) {
+    fn put(&self, b: &mut Vec<u8>) {
+        self.0.put(b);
+        self.1.put(b);
+        self.2.put(b);
+    }
+    fn get(r: &mut Reader<'_>) -> Result<Self> {
+        Ok((A::get(r)?, B::get(r)?, C::get(r)?))
+    }
+}
 impl Wire for String {
     fn put(&self, b: &mut Vec<u8>) {
         u32::try_from(self.len())
@@ -198,7 +252,20 @@ record!(Caller { issuer, subject });
 record!(Bad { kind, at });
 record!(Row { slot, key, value });
 record!(Group { sub, value, rows });
+record!(StreamId { t, n });
 record!(Done { stream, p, outcome });
+record!(Part {
+    sub,
+    complete,
+    you,
+    joined,
+    states,
+    msgs,
+    left,
+    gap,
+    lost,
+    full
+});
 macro_rules! sum {
     ($t:ident { $($tag:literal => $variant:ident $(($($field:ident),+))?),* $(,)? }) => { impl Wire for $t {
         fn put(&self, b: &mut Vec<u8>) { match self { $(Self::$variant $(($($field),+))? => { ($tag as u32).put(b); $($($field.put(b);)+)? }),* } }
@@ -212,8 +279,9 @@ sum!(Outcome { 0 => Returned(bytes), 1 => Failed(fault), 2 => Refused(refusal), 
 sum!(Frame {
     0 => Hello(credential, wants), 1 => Call(stream, p, slot, deadline, arg),
     2 => Subscribe(sub, slot, arg, resume), 3 => Unsubscribe(sub),
-    4 => Welcome(caller, q, budget, executable, target, n_place), 5 => Placed(entry),
+    4 => Welcome(caller, q, budget, executable, target, n_place, keyed_at, retention), 5 => Placed(entry),
     6 => Batch(version, complete, groups, done), 7 => Ended(sub, outcome), 8 => Reset(version, done),
+    9 => Set(sub, state), 10 => Send(sub, to, message), 11 => Live(parts),
 });
 
 pub fn encode(frame: &Frame) -> Vec<u8> {

@@ -1,7 +1,7 @@
 mod admission;
 use admission::{Admission, Calls, HeldRefusal, Rates};
 
-use crate::codec::{self, Bad, Done, Entry, Frame, Group, Outcome, Refusal, Row, Want};
+use crate::codec::{self, Bad, Done, Entry, Frame, Group, Outcome, Refusal, Row, StreamId, Want};
 use crate::{BITS, CHUNKS, IMAGE_BYTES, MAX_FRAME, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
@@ -20,12 +20,12 @@ use tokio_tungstenite::tungstenite::{
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
-const WAL_MAGIC: &[u8] = b"WIREW7\0\x01";
-const RECORD: usize = 41;
+const WAL_MAGIC: &[u8] = b"WIREW8\0\x01";
+const RECORD: usize = 53;
 const OUTBOX: usize = 4;
 const MAX_SUBS: usize = 128;
 type Principal = [u8; 16];
-type Stream = (Principal, u32);
+type Stream = (Principal, StreamId);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -144,16 +144,19 @@ impl Wal {
                 break;
             }
             let principal = record[..16].try_into()?;
-            let stream = u32::from_le_bytes(record[16..20].try_into()?);
-            let p = u64::from_le_bytes(record[20..28].try_into()?);
-            let bit = u32::from_le_bytes(record[28..32].try_into()?);
-            let version = u64::from_le_bytes(record[33..41].try_into()?);
-            if bit >= BITS || record[32] > 1 || version != wal.version + 1 {
+            let stream = StreamId {
+                t: u64::from_le_bytes(record[16..24].try_into()?),
+                n: u64::from_le_bytes(record[24..32].try_into()?),
+            };
+            let p = u64::from_le_bytes(record[32..40].try_into()?);
+            let bit = u32::from_le_bytes(record[40..44].try_into()?);
+            let version = u64::from_le_bytes(record[45..53].try_into()?);
+            if bit >= BITS || record[44] > 1 || version != wal.version + 1 {
                 return Err("invalid reference WAL record".into());
             }
             let value = flip(&mut wal.bitmap, bit);
             wal.present.insert(bit >> 9);
-            if value != (record[32] == 1) {
+            if value != (record[44] == 1) {
                 return Err("reference WAL parity differs".into());
             }
             wal.streams
@@ -174,7 +177,7 @@ impl Wal {
     fn toggle(
         &mut self,
         principal: Principal,
-        stream: u32,
+        stream: StreamId,
         p: u64,
         bit: u32,
     ) -> Result<(Outcome, bool)> {
@@ -206,7 +209,8 @@ impl Wal {
         self.version += 1;
         let mut record = Vec::with_capacity(RECORD);
         record.extend(principal);
-        record.extend(stream.to_le_bytes());
+        record.extend(stream.t.to_le_bytes());
+        record.extend(stream.n.to_le_bytes());
         record.extend(p.to_le_bytes());
         record.extend(bit.to_le_bytes());
         record.push(u8::from(value));
@@ -674,8 +678,8 @@ fn handshake(
         .unwrap_or("")
         .split(',')
         .map(str::trim);
-    let selected = if offered.clone().any(|token| token == "hirsel.3") {
-        "hirsel.3"
+    let selected = if offered.clone().any(|token| token == "hirsel.4") {
+        "hirsel.4"
     } else if let Some(token) = offered
         .into_iter()
         .find(|token| matches!(*token, "hirsel.1" | "hirsel.2"))
@@ -720,7 +724,7 @@ async fn session(
     if retired {
         ws.close(Some(CloseFrame {
             code: CloseCode::Size,
-            reason: "hirsel.3".into(),
+            reason: "hirsel.4".into(),
         }))
         .await?;
         return Ok(());
@@ -766,6 +770,12 @@ async fn session(
             digest.to_vec(),
             launch.target.clone(),
             launch.n_place,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis()
+                .try_into()?,
+            // The reference WAL keeps every stream's last call for its whole life.
+            u64::MAX,
         ))
         .into(),
     ))

@@ -1,4 +1,7 @@
 use super::*;
+fn stream(n: u64) -> StreamId {
+    StreamId { t: 0, n }
+}
 fn calls(principal: Principal) -> Arc<Calls> {
     Arc::new(Calls::new(
         principal,
@@ -30,12 +33,13 @@ fn rows_allowance_keeps_the_v211_refusal_reserve() {
             groups.push(Group::board(sub + 1, rows));
         }
         let done = vec![Done {
-            stream: 0,
+            stream: stream(0),
             p: 0,
             outcome: Outcome::Returned(vec![0, 0, 0, 0, 1]),
         }];
         assert!(matches!(
-            peer.calls.admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
+            peer.calls
+                .admit(stream(0), 0, 0, 30000, &0u32.to_le_bytes()),
             Admission::Forward
         ));
         assert!(peer.send(Frame::Batch(1, vec![1], groups, done)));
@@ -79,13 +83,13 @@ fn failed_group_sync_publishes_neither_rows_nor_outcomes() -> Result<()> {
     assert!(matches!(
         head.peers[&1]
             .calls
-            .admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
+            .admit(stream(0), 0, 0, 30000, &0u32.to_le_bytes()),
         Admission::Forward
     ));
     assert!(
         head.execute(vec![Command::Frame(
             1,
-            Frame::Call(0, 0, 0, 30_000, 0u32.to_le_bytes().to_vec())
+            Frame::Call(stream(0), 0, 0, 30_000, 0u32.to_le_bytes().to_vec())
         )])
         .is_err()
     );
@@ -100,7 +104,7 @@ fn wal_recovery_replays_identity_and_truncates_torn_tail() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("wal");
     let mut wal = Wal::open(&path)?;
-    let (o, fresh) = wal.toggle([7; 16], 3, 0, 999_999)?;
+    let (o, fresh) = wal.toggle([7; 16], stream(3), 0, 999_999)?;
     assert!(fresh);
     assert_eq!(o, Outcome::Returned(vec![0, 0, 0, 0, 1]));
     wal.file.sync_data()?;
@@ -112,16 +116,16 @@ fn wal_recovery_replays_identity_and_truncates_torn_tail() -> Result<()> {
     let mut wal = Wal::open(&path)?;
     assert_eq!(wal.bitmap[124999], 128);
     assert_eq!(wal.version, 1);
-    assert_eq!(wal.toggle([7; 16], 3, 0, 999_999)?, (o, false));
+    assert_eq!(wal.toggle([7; 16], stream(3), 0, 999_999)?, (o, false));
     assert_eq!(
-        wal.toggle([7; 16], 3, 0, 0)?,
+        wal.toggle([7; 16], stream(3), 0, 0)?,
         (Outcome::Refused(Refusal::RequestMismatch), false)
     );
     assert_eq!(wal.version, 1);
     assert_eq!(wal.file.metadata()?.len(), 8 + RECORD as u64);
-    assert!(wal.toggle([7; 16], 3, 1, 0)?.1);
+    assert!(wal.toggle([7; 16], stream(3), 1, 0)?.1);
     assert_eq!(
-        wal.toggle([7; 16], 3, 0, 999_999)?,
+        wal.toggle([7; 16], stream(3), 0, 999_999)?,
         (Outcome::Refused(Refusal::HistoryUnavailable), false)
     );
     Ok(())
@@ -145,7 +149,7 @@ fn slow_reader_coalesces_latest_chunk_without_losing_outcomes() {
             value: Some(vec![n as u8]),
         };
         assert!(matches!(
-            p.calls.admit(1, n, 0, 30000, &0u32.to_le_bytes()),
+            p.calls.admit(stream(1), n, 0, 30000, &0u32.to_le_bytes()),
             Admission::Forward
         ));
         assert!(p.send(Frame::Batch(
@@ -153,7 +157,7 @@ fn slow_reader_coalesces_latest_chunk_without_losing_outcomes() {
             vec![],
             vec![Group::board(1, vec![row])],
             vec![Done {
-                stream: 1,
+                stream: stream(1),
                 p: n,
                 outcome: Outcome::Returned(vec![1])
             }]

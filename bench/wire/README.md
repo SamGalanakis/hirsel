@@ -38,10 +38,13 @@ canonical `core/programs/runner/frame-vectors.json`. The Rust convergence driver
 is a smoke test until the W4c/W6 SDK harness is available. A local Rust smoke
 pass does not qualify the Node/browser `converge` acceptance.
 
-The `hirsel.3` Welcome carries the Caller, launch target and `n_place`.
-`hirsel.3` (RUNNER-SPEC v2.45) carries a Batch's rows in groups, one per
-subscription, each with the computed value and rows tagged by slot; the hand
-codec follows it once the wire code lands.
+The hand codec speaks `hirsel.4` (RUNNER-SPEC §3). The Welcome carries the
+Caller, launch target, `n_place`, the server's keyed time and its stream
+retention. A Call names a client-minted stream `(t, n)`: each client mints one
+at the Welcome's keyed time and keeps it across a reconnect that resends a
+call. A Batch carries rows in groups, one per subscription, and the codec also
+decodes the room frames Set, Send and Live. The reference server has no rooms
+and closes a session that sends one with 1007.
 `--n-place` is required;
 `--target` defaults to the host architecture with `unknown-linux-gnu`. These
 identify the run and do not claim that the hand-written Rust registry enforces

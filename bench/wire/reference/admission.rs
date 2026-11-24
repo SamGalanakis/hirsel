@@ -1,5 +1,5 @@
 use super::{Bucket, Limits, Principal};
-use crate::codec::{Bad, Done, Frame, Outcome, Refusal};
+use crate::codec::{Bad, Done, Frame, Outcome, Refusal, StreamId};
 use crate::{BITS, Q};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ struct HeldSend {
     until: Instant,
     settled: bool,
 }
-type Owed = HashMap<(u32, u64), VecDeque<HeldSend>>;
+type Owed = HashMap<(StreamId, u64), VecDeque<HeldSend>>;
 pub(super) type Rates = Arc<Mutex<HashMap<Principal, Bucket>>>;
 
 pub(super) struct Calls {
@@ -53,7 +53,14 @@ impl Calls {
         }
     }
 
-    pub fn admit(&self, stream: u32, p: u64, slot: u32, deadline: u32, arg: &[u8]) -> Admission {
+    pub fn admit(
+        &self,
+        stream: StreamId,
+        p: u64,
+        slot: u32,
+        deadline: u32,
+        arg: &[u8],
+    ) -> Admission {
         let refusal = if self.entries.get(slot as usize) != Some(&Some(0)) {
             Some(Refusal::NoEntry)
         } else if arg.len() != 4 || u32::from_le_bytes(arg.try_into().unwrap()) >= BITS {
@@ -88,7 +95,7 @@ impl Calls {
         Admission::Forward
     }
 
-    fn refuse(&self, stream: u32, p: u64, reason: Refusal) -> Admission {
+    fn refuse(&self, stream: StreamId, p: u64, reason: Refusal) -> Admission {
         let Ok(unit) = self.refusals.clone().try_acquire_owned() else {
             return Admission::Close;
         };
@@ -143,6 +150,9 @@ impl Calls {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn stream(n: u64) -> StreamId {
+        StreamId { t: 0, n }
+    }
     #[test]
     fn writer_delay_does_not_rewrite_a_chosen_outcome() {
         let calls = Calls::new(
@@ -152,7 +162,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
         );
         assert!(matches!(
-            calls.admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
+            calls.admit(stream(0), 0, 0, 30000, &0u32.to_le_bytes()),
             Admission::Forward
         ));
         let answer = Outcome::Returned(vec![0, 0, 0, 0, 1]);
@@ -161,14 +171,14 @@ mod tests {
             vec![],
             vec![],
             vec![Done {
-                stream: 0,
+                stream: stream(0),
                 p: 0,
                 outcome: answer.clone(),
             }],
         );
         // The answer is chosen before expiry, then waits in the outgoing queue.
         calls.settle_at_delivery(&mut frame);
-        calls.owed.lock().unwrap().get_mut(&(0, 0)).unwrap()[0].until =
+        calls.owed.lock().unwrap().get_mut(&(stream(0), 0)).unwrap()[0].until =
             Instant::now() - Duration::from_millis(1);
         calls.hand_to_writer(&mut frame);
         assert_eq!(
@@ -178,7 +188,7 @@ mod tests {
                 vec![],
                 vec![],
                 vec![Done {
-                    stream: 0,
+                    stream: stream(0),
                     p: 0,
                     outcome: answer
                 }]
@@ -195,20 +205,21 @@ mod tests {
         );
         for p in 0..=4 {
             assert!(matches!(
-                calls.admit(0, p, 0, 30000, &0u32.to_le_bytes()),
+                calls.admit(stream(0), p, 0, 30000, &0u32.to_le_bytes()),
                 Admission::Forward
             ));
         }
         let mut held = Vec::new();
         for p in 5..=9 {
-            let Admission::Refused(r) = calls.admit(0, p, 0, 30000, &0u32.to_le_bytes()) else {
+            let Admission::Refused(r) = calls.admit(stream(0), p, 0, 30000, &0u32.to_le_bytes())
+            else {
                 panic!()
             };
             assert_eq!(r.done.outcome, Outcome::Refused(Refusal::Overloaded));
             held.push(r);
         }
         assert!(matches!(
-            calls.admit(0, 10, 0, 30000, &0u32.to_le_bytes()),
+            calls.admit(stream(0), 10, 0, 30000, &0u32.to_le_bytes()),
             Admission::Close
         ));
         let mut frame = Frame::Batch(
@@ -216,7 +227,7 @@ mod tests {
             vec![],
             vec![],
             vec![Done {
-                stream: 0,
+                stream: stream(0),
                 p: 0,
                 outcome: Outcome::Returned(vec![0, 0, 0, 0, 1]),
             }],
@@ -224,12 +235,12 @@ mod tests {
         calls.hand_to_writer(&mut frame);
         // The next send can enter before the writer has flushed its current socket frame.
         assert!(matches!(
-            calls.admit(0, 11, 0, 30000, &0u32.to_le_bytes()),
+            calls.admit(stream(0), 11, 0, 30000, &0u32.to_le_bytes()),
             Admission::Forward
         ));
         drop(held);
         assert!(matches!(
-            calls.admit(0, 12, 99, 30000, &0u32.to_le_bytes()),
+            calls.admit(stream(0), 12, 99, 30000, &0u32.to_le_bytes()),
             Admission::Refused(_)
         ));
     }
@@ -245,10 +256,10 @@ mod tests {
         let a = Calls::new([1; 16], vec![Some(0)], limits, rates.clone());
         let b = Calls::new([1; 16], vec![Some(0)], limits, rates);
         assert!(matches!(
-            a.admit(0, 0, 0, 30000, &0u32.to_le_bytes()),
+            a.admit(stream(0), 0, 0, 30000, &0u32.to_le_bytes()),
             Admission::Forward
         ));
-        let Admission::Refused(r) = b.admit(0, 0, 0, 30000, &0u32.to_le_bytes()) else {
+        let Admission::Refused(r) = b.admit(stream(0), 0, 0, 30000, &0u32.to_le_bytes()) else {
             panic!()
         };
         assert_eq!(r.done.outcome, Outcome::Refused(Refusal::Overloaded));

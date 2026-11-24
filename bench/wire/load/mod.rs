@@ -218,8 +218,8 @@ pub async fn memory(
     for chunks in (0..CHUNKS).step_by(32) {
         let mut writer = Client::connect(url, wants, None).await?;
         for (p, chunk) in (chunks..(chunks + 32).min(CHUNKS)).enumerate() {
-            writer.start_call(0, p as u64, chunk << 9).await?;
-            writer.finish_call(0, p as u64).await?;
+            writer.start_call(p as u64, chunk << 9).await?;
+            writer.finish_call(p as u64).await?;
         }
         writer.socket.close(None).await?;
     }
@@ -382,7 +382,7 @@ async fn caller(
         tokio::select! {
             job = jobs.recv(), if inflight.is_none() => {
                 let Some(job) = job else { return Ok(client.socket); };
-                let socket = client.start_call_timed(0, job.p, job.bit).await?;
+                let socket = client.start_call_timed(job.p, job.bit).await?;
                 events.send(Event::Sent { owner, p: job.p, scheduled: job.scheduled, socket }).await?;
                 inflight = Some(job.p);
             }
@@ -390,7 +390,7 @@ async fn caller(
                 let frame = frame?;
                 let (version, done) = match frame { Frame::Batch(v, _, _, d) | Frame::Reset(v, d) => (v, d), _ => continue };
                 for d in done {
-                    if d.stream != 0 || inflight != Some(d.p) { return Err("load saw an unexpected final outcome".into()); }
+                    if d.stream != client.stream || inflight != Some(d.p) { return Err("load saw an unexpected final outcome".into()); }
                     returned(&d)?;
                     events.send(Event::Returned { owner, p: d.p, version }).await?; inflight = None;
                 }
@@ -556,7 +556,13 @@ pub async fn echo(samples: usize) -> Result<Value> {
         Some(crate::websocket_config()),
     )
     .await?;
-    let payload = codec::encode(&Frame::Call(0, 1, 0, 30_000, 0u32.to_le_bytes().to_vec()));
+    let payload = codec::encode(&Frame::Call(
+        codec::StreamId { t: 0, n: 0 },
+        1,
+        0,
+        30_000,
+        0u32.to_le_bytes().to_vec(),
+    ));
     let start = Instant::now();
     let cpu = cpu_seconds()?;
     let mut timings = Vec::new();

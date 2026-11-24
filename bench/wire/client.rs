@@ -1,4 +1,4 @@
-use crate::codec::{self, Done, Entry, Frame, Outcome, Want};
+use crate::codec::{self, Done, Entry, Frame, Outcome, StreamId, Want};
 use crate::{BITS, IMAGE_BYTES, Result, flip};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
@@ -18,6 +18,8 @@ pub struct Client {
     pub version: u64,
     pub toggle_slot: u32,
     pub board_slot: u32,
+    /// The one stream this principal's calls use. A reconnect that resends a call keeps it.
+    pub stream: StreamId,
     /// `complete`s that replaced a live image: the publisher's repairs (RUNNER-SPEC §3 "Repair").
     pub repairs: usize,
     resubscribes: usize,
@@ -31,7 +33,7 @@ impl Client {
         let mut request = url.into_client_request()?;
         request
             .headers_mut()
-            .insert("Sec-WebSocket-Protocol", "hirsel.3".parse()?);
+            .insert("Sec-WebSocket-Protocol", "hirsel.4".parse()?);
         let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
             request,
             Some(crate::websocket_config()),
@@ -47,8 +49,13 @@ impl Client {
                 codec::encode(&Frame::Hello(Some(credential.clone()), wants.to_vec())).into(),
             ))
             .await?;
-        let Frame::Welcome(_, _, _, _, _, _) = read_frame(&mut socket).await? else {
+        // Mint at the server's keyed time, so the stream is never in its future.
+        let Frame::Welcome(_, _, _, _, _, _, keyed_at, _) = read_frame(&mut socket).await? else {
             return Err("expected Welcome first".into());
+        };
+        let stream = StreamId {
+            t: keyed_at,
+            n: rand::random(),
         };
         let mut slots = Vec::new();
         for _ in wants {
@@ -68,6 +75,7 @@ impl Client {
             version: 0,
             toggle_slot: slots[0],
             board_slot: slots[1],
+            stream,
             repairs: 0,
             resubscribes: 0,
             subscribed: false,
@@ -139,12 +147,12 @@ impl Client {
         }
         Ok((at, frame))
     }
-    pub async fn start_call(&mut self, stream: u32, p: u64, bit: u32) -> Result<()> {
-        self.start_call_timed(stream, p, bit).await.map(|_| ())
+    pub async fn start_call(&mut self, p: u64, bit: u32) -> Result<()> {
+        self.start_call_timed(p, bit).await.map(|_| ())
     }
-    pub async fn start_call_timed(&mut self, stream: u32, p: u64, bit: u32) -> Result<Instant> {
+    pub async fn start_call_timed(&mut self, p: u64, bit: u32) -> Result<Instant> {
         self.send_timed(Frame::Call(
-            stream,
+            self.stream,
             p,
             self.toggle_slot,
             30_000,
@@ -152,7 +160,7 @@ impl Client {
         ))
         .await
     }
-    pub async fn finish_call(&mut self, stream: u32, p: u64) -> Result<bool> {
+    pub async fn finish_call(&mut self, p: u64) -> Result<bool> {
         loop {
             let frame = self.receive().await?;
             let done = outcomes(frame);
@@ -160,7 +168,7 @@ impl Client {
                 return Err("more than one outcome for a single in-flight call".into());
             }
             if let Some(done) = done.first() {
-                if done.stream != stream || done.p != p {
+                if done.stream != self.stream || done.p != p {
                     return Err("unexpected or duplicate final outcome".into());
                 }
                 return returned(done);
@@ -318,20 +326,22 @@ pub async fn converge(
                     (seeded(&mut state) % u64::from(BITS)) as u32
                 };
                 let p = j as u64;
-                client.start_call(0, p, bit).await?;
+                client.start_call(p, bit).await?;
                 if j == reconnect {
                     // Deliberately lose a possible outcome and resend the same p on the same principal.
                     let credential = client.credential.clone();
                     let repairs = client.repairs;
                     let resubscribes = client.resubscribes;
+                    let stream = client.stream;
                     drop(client);
                     client = Client::connect(&url, &wants, Some(credential)).await?;
+                    client.stream = stream;
                     client.repairs = repairs;
                     client.resubscribes = resubscribes;
                     client.snapshot().await?;
-                    client.start_call(0, p, bit).await?;
+                    client.start_call(p, bit).await?;
                 }
-                client.finish_call(0, p).await?;
+                client.finish_call(p).await?;
                 returned_bits.push(bit);
             }
             Ok::<_, crate::Error>((client, returned_bits))

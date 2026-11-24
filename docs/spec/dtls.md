@@ -511,8 +511,11 @@ sender ownership), so `protect_rtp` of an index at or below the highest sent is 
 before issue, with `buf` unchanged and no counter consumed. This is a real constraint on
 callers:
 
-- A forwarder rewrites each outgoing stream's sequence numbers in send order, so a late
-  incoming packet gets the next outgoing number and is sealed normally.
+- A forwarder preserves the packet's mapped media sequence number in source order (RTP-11).
+  For Late(index, ts), send an RFC 4588 repair only if RTX was negotiated for that format.
+  Use the low 16 bits of index as OSN, the mapped timestamp and marker, and the RTX SSRC,
+  payload type and next RTX sequence number. Otherwise drop the packet. Never allocate a new
+  media sequence number to a late packet.
 - A retransmission on the original SSRC resends the bytes already protected (TLS-8: a
   protocol never seals the same number twice); a retransmission that must be sealed again goes
   on a separate retransmission SSRC with its own sequence (RFC 4588).

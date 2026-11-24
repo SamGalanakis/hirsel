@@ -1,7 +1,17 @@
 # WebRTC sessions and the SFU router
 
 Version note (2026-11-24, media-webrtc-sfu-spec-2319): first text of RTC-1 to RTC-8, Wave 1.6
-of the real-time media track. Not yet built; the fences are `unbuilt`. The package is
+of the real-time media track. Not yet built; the fences are `unbuilt`.
+Amended 2026-11-24 (webrtc-spec-amend-2337) for the 15 findings of design review 2333: session
+generations on every queue and an all-writer fence acknowledgement (RTC-7), a proven roster
+across signaling loss (RTC-8, runner slice R1), per-down-track sender reports and wire
+identity (RTC-4, RTC-5), decodable switching with stable target maps (RTC-6), JSEP
+`bundle-only` and `tls-id` (RTC-1, RTC-2), prefix demultiplexing (RTC-3), per-direction RID
+and simulcast (RTC-1, RTC-2), negotiated keyframe requests, bandwidth pause, RFC 6464 `vad`
+per leg, SSRC collision recovery and bounded fence state. JSEP is
+[RFC 9429](https://www.rfc-editor.org/rfc/rfc9429), which obsoletes RFC 8829. BUNDLE is
+[RFC 9143](https://www.rfc-editor.org/rfc/rfc9143), which obsoletes RFC 8843. Section
+numbers cited as RFC 8843 are that text's, as the review read it. The package is
 `webrtc_sfu`, pure Hirsel under core/programs, with no `Foreign` code in its reach, so
 FFI-8 ([foreign](foreign.md)) replay and `hirsel test --sim` cover it end to end.
 
@@ -50,20 +60,20 @@ where this package must use them in a particular way.
 | Requirement | Met by |
 | --- | --- |
 | A standalone, ephemeral media service with no store mount | RTC-5: all state is in units' memory, fixed per room at `open_room`, and gone at `close_room`; nothing is durable |
-| SDP certificate fingerprint from `x509_build`, negotiated DTLS roles | RTC-3 DTLS (one certificate per unit, `expect` pinning); RTC-1 and RTC-2 (`setup:passive` in answers, `actpass` in server offers, roles never change) |
-| Independent SRTP in and out keys, SSRC, ROC, replay window | dtls.md SRTP-2 and SRTP-3; RTC-3 authenticates before state (W19); RTC-4 keeps one SSRC per down-track |
-| BUNDLE with RTP/RTCP demux | RTC-1 BUNDLE rules, RTC-3 `classify` and MID, then SSRC, then payload-type mapping (W3, W4) |
-| Negotiated MID, RID, extmap, payload types; Opus, VP8 and H.264 passed through, no server decode | RTC-1 and RTC-2 (offer's payload types and IDs kept, W1); RTC-5 forwards payloads as bytes; VP8 descriptor is slice S2 |
-| SR/RR, NACK/RTX, PLI/FIR coalescing, TWCC, pacing | rtp RTP-4 to RTP-10; RTC-4 (NACK answered on RTX only), RTC-5 (RTCP terminated), RTC-6 keyframe requests (W10) |
-| Per-subscriber sequence and timestamp continuity | rtp RTP-11 `Rewrite` per down-track; RTC-4 (one SSRC for life, W7) |
+| SDP certificate fingerprint from `x509_build`, negotiated DTLS roles | RTC-3 DTLS (one certificate per unit, `expect` pinning); RTC-1 and RTC-2 (`setup:passive` in answers, `actpass` in server offers, `tls-id` names the association, roles never change) |
+| Independent SRTP in and out keys, SSRC, ROC, replay window | dtls.md SRTP-2 and SRTP-3; RTC-3 authenticates before state (W19); RTC-4 keeps one SSRC per down-track and recovers from a collision |
+| BUNDLE with RTP/RTCP demux | RTC-1 BUNDLE rules, RTC-3 prefix `classify`, then authenticated MID, SSRC and unique payload-type binding (W3, W4) |
+| Negotiated MID, RID, extmap, payload types; Opus, VP8 and H.264 passed through, no server decode | RTC-1 and RTC-2 (offer's payload types and IDs kept, RIDs per direction, W1, W2); RTC-5 writes each subscriber's own PT, MID and extension IDs and forwards payloads as bytes (W8); VP8 descriptor is slice S2 |
+| SR/RR, NACK/RTX, PLI/FIR coalescing, TWCC, pacing | rtp RTP-4 to RTP-10; RTC-4 (per-down-track SRs, NACK answered on RTX only from the egress history), RTC-5 (RTCP terminated, TWCC per outbound transport), RTC-6 negotiated keyframe requests (W6, W8, W10) |
+| Per-subscriber sequence and timestamp continuity | rtp RTP-11 `Rewrite` per down-track; RTC-4 (one SSRC while collision-free, W7); RTC-6's switch timeline |
 | Keyframe-safe simulcast and SVC switching | RTC-6 mapping onto RTP-11 (W9) |
-| RFC 6464 audio level forwarded, for active speakers | RTC-6 active speakers (W12) and audio forwarding with the extension rewritten (W13) |
-| Generic dynacast: per-subscriber `Off` or a layer per video publication; unselected publisher layers paused | RTC-6 `Target`, the wanted mask and `Event.Layers` (W11) |
-| `revoke(room_id, participant_id, epoch)`, one fence per participant | RTC-7, `revoke(r, room, participant, epoch)` |
-| Synchronously stops ingress and egress, cancels queued RTX, invalidates DTLS and ICE | RTC-7 steps 1 to 4 (W14, W15) |
-| Ack only once nothing more can be forwarded for the revoked epoch | RTC-7 acknowledgement: after every unit applies the fence, before any later `udp_send` (W14) |
+| RFC 6464 audio level forwarded, for active speakers | RTC-6 active speakers (W12) and audio forwarding with the level bits kept and `V` per leg (W13) |
+| Generic dynacast: per-subscriber `Off` or a layer per video publication; unselected publisher layers paused | RTC-6 `Target`, the cross-unit wanted mask and `Event.Layers` (W11) |
+| `revoke(room_id, participant_id, epoch)`, one fence per participant | RTC-7, `revoke(r, room, participant, epoch)`, with fence capacity reserved at admission |
+| Synchronously stops ingress and egress, cancels queued RTX, invalidates DTLS and ICE | RTC-7 steps 1 to 5, by session-generation tags on every queue (W14, W15) |
+| Ack only once nothing more can be forwarded for the revoked epoch | RTC-7 acknowledgement: after every unit has applied the fence and every writer has handed off or cancelled its work, with both endpoints rechecked before any later send or retry (W14) |
 | TURN over TLS, or ICE-TCP, for strict firewalls | RTC-8 passive ICE-TCP (slice S8, W17); TURN over TLS is follow-up F3 for `stun_ice` |
-| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the Hirsel room client (F1) and the SDK room API (F2) |
+| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the roster incarnation, revision and snapshot (runner slice R1), the Hirsel room client (F1) and the SDK room API (F2) |
 | Idle lease (contract §4) | not this package's: hirsel4-rooms-2301 reports it. The service holds a room membership for each room it routes, so it is affected only if that membership keeps a Place alive |
 
 ## Session shape
@@ -92,130 +102,206 @@ pub type Setup = Active | Passive | ActPass
 pub type Codec = Opus | Vp8 | Vp9 | H264 | Av1 | Rtx | Red | Ulpfec
 pub type Ext = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportCc | DependencyDescriptor
 pub type Format = Format(pt: u8, codec: Codec, clock: u32, channels: u8, fmtp: Bytes, apt: Option[u8], nack: bool, pli: bool, fir: bool, twcc: bool)
-pub type Extmap = Extmap(id: u8, ext: Ext)
+pub type Vad = VadOn | VadOff
+pub type Extmap = Extmap(id: u8, ext: Ext, dir: Option[Direction], vad: Option[Vad])
 pub type RidDir = RidSend | RidRecv
-pub type Rid = Rid(id: Inline[u8, 16], len: u8, dir: RidDir)
-pub type Section = Section(media: Media, port: u16, mid: Inline[u8, 16], mid_len: u8, dir: Direction, formats: List[Format], extmaps: List[Extmap], rids: List[Rid], simulcast: List[u8], ssrcs: List[u32], rtx_pairs: List[(u32, u32)], msid: Bytes)
-pub type Description = Description(origin_session: u64, origin_version: u64, bundle: List[u8], ice_ufrag: Bytes, ice_pwd: Bytes, ice_lite: bool, fingerprint: Inline[u8, 32], setup: Setup, sections: List[Section], candidates: List[Bytes])
-pub type SdpError = TooLarge | Malformed(u64) | NoBundle | NotBundled(u8) | NoRtcpMux(u8) | NoMid(u8) | NoFingerprint | WrongFingerprint | NoIceCredentials | ExtmapConflict(u8) | PayloadConflict(u8) | TooManySections | TooManyFormats(u8) | TooManyRids(u8) | BadRid(u8) | Capacity(Capacity)
+pub type Rid = Rid(id: Inline[u8, 16], len: u8, dir: RidDir, pts: List[u8], depend: List[u8], restrictions: Bytes)
+pub type Stream = Stream(alternatives: List[u8], paused: List[bool])
+pub type Simulcast = Simulcast(send: List[Stream], recv: List[Stream])
+pub type Port = Rejected | BundleOnly | Port(u16)
+pub type Section = Section(media: Media, port: Port, mid: Inline[u8, 16], mid_len: u8, dir: Direction, formats: List[Format], extmaps: List[Extmap], rids: List[Rid], simulcast: Simulcast, ssrcs: List[u32], rtx_pairs: List[(u32, u32)], msid: Bytes, rtcp_mux: bool)
+pub type Description = Description(origin_session: u64, origin_version: u64, bundle: List[u8], ice_ufrag: Bytes, ice_pwd: Bytes, ice_lite: bool, fingerprint: Inline[u8, 32], setup: Setup, tls_id: Bytes, sections: List[Section], candidates: List[Bytes])
+pub type SdpError = TooLarge | Malformed(u64) | NoBundle | NotBundled(u8) | NoRtcpMux(u8) | NoMid(u8) | NoFingerprint | WrongFingerprint | NoIceCredentials | ExtmapConflict(u8) | PayloadConflict(u8) | TooManySections | TooManyFormats(u8) | TooManyRids(u8) | BadRid(u8) | AnswerMismatch(u8) | AssociationChanged | Capacity(Capacity)
 
 pub fn parse(text: Bytes, mut out: Description) -> Result[(), SdpError]
 pub fn write(d: Description, mut out: Bytes) -> Result[u64, SdpError]
 ```
 
-`parse` reads RFC 8866 SDP as JSEP ([RFC 8829](https://www.rfc-editor.org/rfc/rfc8829))
+`parse` reads RFC 8866 SDP as JSEP ([RFC 9429](https://www.rfc-editor.org/rfc/rfc9429))
 produces it, into a caller-owned `Description` whose lists it clears and refills, so a
 session reuses one description's storage. It is a line parser over `CRLF` or bare `LF` lines,
 with no backtracking.
 
-**Bounds.** These are explicit refusals, never truncation:
+**Bounds.** These are explicit refusals, never truncation. Each limit is accepted exactly
+and refused one past it:
 
 - `TooLarge`: the text is longer than 32,000 bytes. A room message is at most 32,768 bytes
   (`MESSAGE_MAX`, core/programs/runner/runner-room.hirsel), and RTC-8's envelope takes at
   most 768 of the rest.
 - `TooManySections`: more than 64 m-sections.
 - `TooManyFormats(i)`: more than 32 formats in section `i`.
-- `TooManyRids(i)`: more than 4 RIDs.
+- `TooManyRids(i)`: more than 4 RIDs in section `i`, counted over both directions.
 
 **Attributes read.** `v`, `o`, `s`, `t`, `c`, `m` and these `a=` attributes: `group:BUNDLE`,
-`ice-ufrag`, `ice-pwd`, `ice-lite`, `ice-options`, `fingerprint`, `setup`, `mid`, `rtcp-mux`,
-`rtcp-rsize`, `extmap` (with its optional direction), `sendrecv`, `sendonly`, `recvonly`,
-`inactive`, `msid`, `ssrc` (only the `cname` and `msid` forms), `ssrc-group:FID`, `rtpmap`,
-`fmtp`, `rtcp-fb`, `rid`, `simulcast`, `candidate` and `end-of-candidates`. Session-level
-`ice-ufrag`, `ice-pwd`, `fingerprint` and `setup` apply to every section that lacks its own.
-Any other attribute is skipped, as RFC 8866 §5.13 requires of an unknown attribute. An
-extension URI or codec name outside `Ext` or `Codec` is skipped with its payload type or ID.
-The answer never accepts it, so skipping it changes no negotiated behaviour.
+`bundle-only`, `ice-ufrag`, `ice-pwd`, `ice-lite`, `ice-options`, `fingerprint`, `setup`,
+`tls-id`, `mid`, `rtcp-mux`, `rtcp-rsize`, `extmap` (with its optional direction and its
+extension attributes), `sendrecv`, `sendonly`, `recvonly`, `inactive`, `msid`, `ssrc` (only
+the `cname` and `msid` forms), `ssrc-group:FID`, `rtpmap`, `fmtp`, `rtcp-fb`, `rid`,
+`simulcast`, `candidate` and `end-of-candidates`. Session-level `ice-ufrag`, `ice-pwd`,
+`fingerprint`, `setup` and `tls-id` apply to every section that lacks its own. `ice-lite` is
+read and written only at session level. Any other attribute is skipped, as RFC 8866 §5.13
+requires of an unknown attribute. An extension URI or codec name outside `Ext` or `Codec` is
+skipped with its payload type or ID. The answer never accepts it, so skipping it changes no
+negotiated behaviour.
 
 **Codec names.** `opus/48000/2`, `VP8/90000`, `VP9/90000`, `H264/90000`, `AV1/90000`,
 `rtx/90000`, `red/48000/2` and `ulpfec/90000`, compared ASCII case-insensitively
 (RFC 8866 §6.6). The extension URIs are those of RFC 8843 (`mid`), RFC 8852 (`rtp-stream-id`,
 `repaired-rtp-stream-id`), RFC 6464 (`ssrc-audio-level`), `abs-send-time`,
 `transport-wide-cc-extensions-01` and the AV1 RTP specification's `dependency-descriptor`.
+For `ssrc-audio-level`, the extension attribute `vad=on` or `vad=off` is kept in
+`Extmap.vad`, `None` when absent ([RFC 6464](https://www.rfc-editor.org/rfc/rfc6464) §4).
+Other extension attributes are skipped.
 
 **Fingerprint.** Only `sha-256` is read. A description whose fingerprints are all of other
 hashes is `NoFingerprint`. RFC 8122 §5 lets an endpoint offer several. Every browser offers
 `sha-256`, and a weaker hash is not worth the second code path.
 
-**The BUNDLE rules ([RFC 8843](https://www.rfc-editor.org/rfc/rfc8843)).** These are
+**Ports.** A section's port is one of three things, and they are never confused:
+`Rejected` is port 0 without `a=bundle-only`, a section the other side declined or removed.
+`BundleOnly` is port 0 with `a=bundle-only`, an offered section that is live on the BUNDLE
+transport (RFC 9429 §§5.2.1, 5.3.1; RFC 9143 §7.3). `Port(n)` is any other port.
+
+**The BUNDLE rules ([RFC 9143](https://www.rfc-editor.org/rfc/rfc9143)).** These are
 checked at parse, because a description that breaks them cannot be answered:
 
-- a `group:BUNDLE` line names every section with a nonzero port (`NoBundle` when there is no
-  group, `NotBundled(i)` for a section outside it);
-- every bundled RTP section has `rtcp-mux` (`NoRtcpMux(i)`, [RFC 8858](https://www.rfc-editor.org/rfc/rfc8858)) and a `mid`;
+- a `group:BUNDLE` line names every section that is not `Rejected` (`NoBundle` when there is
+  no group, `NotBundled(i)` for a section outside it);
+- the **tagged** section is the first one the group names (RFC 9143 §9.3.1). Transport
+  attributes (`ice-ufrag`, `ice-pwd`, `fingerprint`, `setup`, `tls-id`, `rtcp-mux`,
+  candidates) are resolved on it, and the description's top-level fields hold its values.
+  `rtcp-mux` is required on the tagged section (`NoRtcpMux(i)`,
+  [RFC 8858](https://www.rfc-editor.org/rfc/rfc8858)). A `BundleOnly` section carries no
+  transport attributes of its own and is never refused for lacking them;
+- every bundled section has a `mid` (`NoMid(i)`);
 - one extension URI has one ID in every bundled section, and one ID one URI
   (`ExtmapConflict(id)`, RFC 8843 §9.2);
 - one payload type is one codec configuration in every bundled section where it appears
-  (`PayloadConflict(pt)`). RFC 8843 §9.1 allows a payload type to differ when MID demux
-  separates the sections. This parser refuses the difference anyway. No browser emits it,
-  and refusing it lets RTC-3 demultiplex by payload type when a packet's MID extension is
-  absent.
+  (`PayloadConflict(pt)`). RFC 8843 §9.1.1 requires this of an offerer that reuses a
+  payload type across bundled sections, so the rule refuses only what the RFC already
+  forbids. A payload type may legally appear in two sections with that one configuration.
+  RTC-3 then cannot route by payload type alone, and routes by MID and SSRC binding.
+- with `rtcp-mux`, no RTP section uses payload types 64 to 95
+  ([RFC 5761](https://www.rfc-editor.org/rfc/rfc5761) §4), because their marker-bit form
+  collides with RTCP packet types 192 to 223 in the second octet (`PayloadConflict(pt)`).
 
 **RID and simulcast ([RFC 8851](https://www.rfc-editor.org/rfc/rfc8851),
-[RFC 8853](https://www.rfc-editor.org/rfc/rfc8853)).** A RID is 1 to 16 ASCII
-alphanumeric, `-` or `_` bytes (`BadRid(i)` otherwise). `simulcast` holds the indexes into
-`rids` in the order of the `a=simulcast` line's first list. Alternatives (`,`) and paused
-markers (`~`) are refused as `BadRid(i)`. Browsers emit neither, and the server would have to
-track a stream it cannot see. A section with RIDs and no `a=simulcast` line is refused the
-same way.
+[RFC 8853](https://www.rfc-editor.org/rfc/rfc8853)).** A RID identifier is 1 to 16 ASCII
+alphanumeric, `-` or `_` bytes (`BadRid(i)` otherwise, RFC 8851 §10). Each `a=rid` line
+keeps its direction, its `pt=` list, its `depend=` list (as indexes into `rids`) and the rest
+of its restrictions as bytes, so nothing the offerer said about a RID is lost (RFC 8851
+§§6.2.2 to 6.3). `a=simulcast` keeps its send list and its receive list separately. Each
+list is a sequence of streams. A stream is one or more alternative RIDs separated by `,`,
+each with its own `~` paused marker (RFC 8853 §5.1). Both forms are legal syntax and are
+parsed. What the answer does with each is RTC-2's rule. A list that names a RID absent
+from `rids`, or a RID in the wrong direction, is `BadRid(i)`. So is a section with RIDs and
+no `a=simulcast` line.
 
-**Writing.** `write` emits the attributes above in RFC 8829 §5.2 order, one per line with
-`CRLF`, and returns the bytes appended. `parse(write(d))` gives back `d` for every `d` that
-`write` accepts. That is a property law of the writer. It is not the oracle for what the
-writer must say (RTC-2).
+**`tls-id`.** The `tls-id` attribute ([RFC 8842](https://www.rfc-editor.org/rfc/rfc8842)
+§5.5) is kept as bytes. It names the DTLS association. RTC-2 compares it to decide whether a
+re-offer continues the running association.
+
+**Writing.** `write` emits the attributes above in RFC 9429 §5.2 order, one per line with
+`CRLF`, and returns the bytes appended. `ice-lite` goes at session level only.
+`parse(write(d))` gives back `d` for every `d` that `write` accepts. That is a property law of
+the writer. It is not the oracle for what the writer must say (RTC-2).
 
 ## RTC-2: Offer and answer
 
 ```hirsel unbuilt
 pub type Policy = Policy(audio: List[Codec], video: List[Codec], exts: List[Ext], max_sections: u8, simulcast: bool)
-pub type Negotiated = Negotiated(remote_ufrag: Bytes, remote_pwd: Bytes, remote_fingerprint: Inline[u8, 32], sections: List[Agreed])
-pub type Agreed = Agreed(index: u8, mid: Inline[u8, 16], mid_len: u8, media: Media, recv: bool, send: bool, formats: List[Format], extmaps: List[Extmap], rids: List[Rid])
+pub type Negotiated = Negotiated(remote_ufrag: Bytes, remote_pwd: Bytes, remote_fingerprint: Inline[u8, 32], remote_setup: Setup, tls_id: Bytes, sections: List[Agreed])
+pub type Agreed = Agreed(index: u8, mid: Inline[u8, 16], mid_len: u8, media: Media, recv: bool, send: bool, formats: List[Format], extmaps: List[Extmap], rids: List[Rid], streams: List[Stream])
 pub type Signaling = Stable | HaveLocalOffer(u64) | HaveRemoteOffer(u64)
 
-pub fn answer(policy: Policy, offer: Description, local: LocalEnd, mut out: Description, mut agreed: Negotiated) -> Result[(), SdpError]
+pub fn answer(policy: Policy, current: Option[Negotiated], offer: Description, local: LocalEnd, mut out: Description, mut agreed: Negotiated) -> Result[(), SdpError]
 pub fn offer(policy: Policy, current: Negotiated, local: LocalEnd, adds: List[SendSection], mut out: Description) -> Result[(), SdpError]
 pub fn accept_answer(current: Negotiated, sent: Description, answer: Description, mut agreed: Negotiated) -> Result[(), SdpError]
 ```
 
 `LocalEnd` is the server's half: its ICE ufrag and password (fresh per PeerSession,
-RTC-3), the SHA-256 fingerprint of its home unit's certificate, and the home unit's one
-host candidate. `SendSection` is a down-track the server adds (RTC-5).
+RTC-3), the SHA-256 fingerprint of its home unit's certificate, its `tls-id` (fresh per
+PeerSession), and the home unit's one host candidate. `SendSection` is a down-track the
+server adds (RTC-5).
 
 **`answer`.** The answer mirrors the offer's sections in order. For each section:
 
-1. `Application` (SCTP data channels) is rejected with port 0. Data channels are not in Wave 1
-   (prior art below), and RFC 8829 §5.3.1 rejects a section by its port.
+1. A `Rejected` offered section is answered `Rejected`. `Application` (SCTP data channels)
+   is answered `Rejected`. Data channels are not in Wave 1 (prior art below), and
+   RFC 9429 §5.3.1 rejects a section by port 0 without `bundle-only`. A `BundleOnly`
+   offered section is live and is answered like any other section. Its answer carries the
+   BUNDLE transport's port, since the answerer does not use `bundle-only` (RFC 9143 §7.3).
 2. The direction is the offer's mirror, restricted by what the server does: it receives on an
    offered `sendrecv` or `sendonly` section and sends on an offered `recvonly` section, or on
    one it created with `offer`. A `sendrecv` the client opens is answered `recvonly`.
 3. Formats are the offer's formats whose codec the policy lists, in the offer's order, with
    their payload types, `fmtp` and `rtcp-fb` kept as offered. The answerer keeps the
-   offerer's payload types (RFC 8829 §5.3.1). H.264 formats are kept only with
+   offerer's payload types (RFC 9429 §5.3.1). H.264 formats are kept only with
    `packetization-mode=1`, since FU-A and STAP-A are what `media_bits` reads. An `Rtx`
    format is kept when its `apt` format is kept. A section left with no media format is
-   rejected with port 0.
+   answered `Rejected`.
 4. Extmaps are the offer's for extensions the policy lists, with the offer's IDs (RFC 8285
-   §6). `Mid` is required, and a section without it was refused at parse.
-5. RIDs are answered with the direction flipped, in the same order, and `a=simulcast:recv`
-   with the same list (RFC 8853 §5.3). With `policy.simulcast` false the RID lines are
-   dropped and the section takes only its first encoding.
-6. Every kept section names the server's ICE credentials, `ice-lite`, `setup:passive`, the
-   fingerprint and, in the first bundled section, the candidate and `end-of-candidates`.
+   §6). An extmap with a direction is answered with the complementary direction, and one
+   whose direction does not overlap the section's answered direction is not kept (RFC 8285
+   §6). For `AudioLevel` the answer repeats the offer's `vad` value, so each leg's `V` bit
+   has the meaning that leg negotiated (RTC-6). `Mid` is required, and a section without it
+   was refused at parse.
+5. **RIDs and simulcast, one direction at a time** (RFC 8853 §5.3.2). The server receives
+   simulcast and never sends it. So the offer's `send` list is processed and its `recv`
+   list is declined: the answer carries no `send` list, and every `RidRecv` RID is left out.
+   For the `send` list, each RID is kept only when the intersection of its `pt=` list with
+   the formats kept in step 3 is not empty (an absent `pt=` means every kept format), and
+   when every RID in its `depend=` list is also kept. A kept RID is answered `recv` with its
+   restrictions narrowed to that intersection and otherwise as offered. A RID is never
+   broadened. Each stream of the list keeps the alternatives whose RID was kept, and a
+   stream left with none is removed. A paused alternative (`~`) is removed from the
+   answer: the server does not track a stream it was told not to expect. The answer's
+   `a=simulcast:recv` lists the remaining streams in the offer's order, which is a subset
+   the RFC allows. `Agreed.streams` records them, and the encoding index of RTC-6 is the
+   position in that list, whichever alternative's RID a packet carries. With
+   `policy.simulcast` false, or nothing left, the RID and simulcast lines are dropped and
+   the section takes only its unlabelled encoding. Every removal is counted per reason, so
+   none is silent.
+6. Every kept section names the server's ICE credentials, `setup:passive`, the fingerprint
+   and `tls-id`, and, in the tagged section, the candidate and `end-of-candidates`.
+   `ice-lite` is a session-level line.
 
-The BUNDLE group lists the kept sections' MIDs in the offer's order. `agreed` records the
-result and is what RTC-3 and RTC-5 read.
+The BUNDLE group lists the MIDs of the sections that are not `Rejected`, in the offer's
+order. A `Rejected` section's MID is left out of the group (RFC 9143 §7.3). `agreed` records
+the result and is what RTC-3 and RTC-5 read.
+
+**A re-offer on a running session.** When `current` is `Some`, the offer continues the
+association only if its ICE ufrag and password, its fingerprint and its `tls-id` are
+unchanged and its `setup` keeps the client's role (`active` or `actpass`, answered
+`passive`). Anything else is `AssociationChanged`, the running session is left exactly as
+it was, and the participant rejoins (RTC-7) to restart ICE or DTLS. The offer's sections
+must keep the running sections' count prefix, order, MIDs and media kinds (RFC 9429
+§5.8.3), or the offer is `AnswerMismatch(i)` for the first section that differs.
 
 **`offer`.** After the first exchange the server offers to add or remove down-tracks
-(RTC-5). It reuses every existing section in place (RFC 8829 §5.2.2) and appends one
+(RTC-5). It reuses every existing section in place (RFC 9429 §5.2.2) and appends one
 `recvonly`-for-the-client section per added down-track, with a new MID drawn from the
 session's counter (`"s0"`, `"s1"`, ...), the first matching format from the publication's
 agreed formats, and one SSRC and one RTX SSRC (RTC-4). It marks a removed down-track's section
 `inactive` and reuses it for a later down-track of the same media kind, keeping its MID.
 A server offer carries `a=setup:actpass` as RFC 8842 §5.5 requires of every offer. Its ICE
-credentials, fingerprint and candidate are those of the current session, and none of them
-changes. `accept_answer` then requires the answer's `a=setup:active`, which keeps the roles
-of the association already running, and refuses anything else as `Malformed`. A server
-offer never restarts ICE or DTLS. A participant that needs either rejoins (RTC-7).
+credentials, fingerprint, `tls-id` and candidate are those of the current session, and none
+of them changes. A server offer never restarts ICE or DTLS. A participant that needs either
+rejoins (RTC-7).
+
+**`accept_answer`.** Before it installs anything, it validates the answer against the
+offer it answers (`sent`), and refuses with nothing changed:
+
+- the same number of sections in the same order, each with the offered MID and media kind
+  (`AnswerMismatch(i)`);
+- the same protocol line as offered (`AnswerMismatch(i)`);
+- a direction that is a valid answer to the offered one (`AnswerMismatch(i)`);
+- only formats the offer listed, with the offered payload types (`AnswerMismatch(i)`);
+- the remote ICE credentials, fingerprint and `tls-id` of the running association, and
+  `a=setup:active` (`AssociationChanged`).
+
+Only after all of these pass is `agreed` replaced. A refused answer leaves the running
+session, its agreed sections and its `Signaling` state unchanged.
 
 **Receive-only participants.** A first offer may contain only `recvonly` sections, or none
 that send, for example from a client that only watches. It is answered like any other.
@@ -230,9 +316,10 @@ refuses it with `Signal.Glare(v)` (RTC-8). The client rolls back and answers the
 offer first. This is the "perfect negotiation" split of
 [W3C WebRTC §10.7](https://www.w3.org/TR/webrtc/#perfect-negotiation-example) with the
 server as the impolite peer. One side never rolls back, so two offers in flight always settle
-in one round trip.
+in one round trip. An answer whose version is not the outstanding `v` is stale and is
+refused as `AnswerMismatch(0)` with nothing changed.
 
-**Oracle for answers.** The expected answer for each law is written by hand from RFC 8829
+**Oracle for answers.** The expected answer for each law is written by hand from RFC 9429
 §5.3 and the rules above, against an offer captured from a real browser. A round trip
 through the writer is never the oracle.
 
@@ -242,12 +329,14 @@ through the writer is never the oracle.
 pub opaque type PeerSession
 pub type PeerLimits = PeerLimits(sections: u8, down_tracks: u16, rtx_bytes: u64, pacer_packets: u32)
 pub type PeerError = Sdp(SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(DtlsError) | Srtp(SrtpError) | Rtp(RtpError) | Capacity(Capacity)
-pub type Class = Stun | Dtls | Rtp | Rtcp | Turn | Other
-pub type Input = Nothing | Replied | Media(MediaIn) | Control(ControlIn)
+pub type Class = Stun | Dtls | Rtp | Rtcp | Drop
+pub type Input = Nothing | Replied | Media(MediaIn) | Repair(MediaIn) | Control(ControlIn)
 pub type Poll = Transmit | WakeAt(u64) | Idle
-pub type Outbox = Outbox(data: Bytes, pkts: List[UdpTx])
+pub type Gen = Gen(id: u64, epoch: u64)
+pub type Tag = Tag(src: Option[Gen], dst: Gen, room: RoomId)
+pub type Outbox = Outbox(data: Bytes, pkts: List[UdpTx], tags: List[Tag])
 
-pub fn classify(first: u8) -> Class
+pub fn classify(prefix: Bytes) -> Class
 pub fn open(take local: LocalEnd, take cert: CertKey, limits: PeerLimits, agreed: Negotiated, participant: Participant) -> Result[PeerSession, PeerError]
 pub fn receive(mut p: PeerSession, now: u64, from: Addr, mut slot: Bytes, mut out: Outbox) -> Result[Input, PeerError]
 pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll
@@ -260,28 +349,46 @@ or reads a clock. The home unit (RTC-5) owns it, receives into `slot`, and passe
 `udp_send` as one batch. `out.data` is a TX staging buffer and each `UdpTx` names a span of
 it, so one `udp_send` sends every packet a turn produced.
 
-**Demultiplexing ([RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §7).**
-`classify` reads the first byte:
+**Session generations on every output.** `UdpTx` (NET-16) carries no owner, so the outbox
+keeps one `Tag` beside each `UdpTx`, at the same position in `out.tags`. A tag names the
+destination session's generation `dst` (the subscriber's `(id, epoch)`, RTC-5) and, for
+media and repair, the source publisher's generation `src`. Every other queue of this
+package carries the same pair: pacer entries, the cross-unit `Media` and `RepairReply`
+messages (RTC-5), the uncommitted suffix of a partial `udp_send`, and the TCP write queue of
+an ICE-TCP path (RTC-8). RTC-7 fences by these tags, so it never has to infer an owner from
+an SSRC or an address.
+
+**Demultiplexing ([RFC 9443](https://www.rfc-editor.org/rfc/rfc9443) §3, which updates
+[RFC 7983](https://www.rfc-editor.org/rfc/rfc7983) §7).** `classify` reads a bounded prefix
+of the datagram, at most its first two bytes:
 
 | First byte | Class |
 | --- | --- |
 | 0 to 3 | `Stun` |
+| 16 to 19 (ZRTP) | `Drop` |
 | 20 to 63 | `Dtls` |
-| 64 to 79 | `Turn` |
-| 128 to 191 | `Rtp` or `Rtcp`, split by the second byte: 192 to 223 is `Rtcp` (RFC 5761 §4) |
-| any other | `Other` |
+| 64 to 79 (TURN channel or QUIC) | `Drop` |
+| 80 to 127 (QUIC) | `Drop` |
+| 128 to 191 | `Rtp` or `Rtcp`, split by the second octet: 192 to 223 is `Rtcp` (RFC 5761 §4), any other value is `Rtp` |
+| 192 to 255 (QUIC) | `Drop` |
+| any other | `Drop` |
 
-`Turn` and `Other` datagrams are dropped and counted. The server is no TURN server, and
-16 to 19 (ZRTP) is not spoken. One comparison chain on one byte, then one on the second.
+An empty datagram is `Drop`. A datagram in the 128 to 191 range with fewer than two bytes
+is `Drop`, because its second octet cannot be read. The class only routes. Each reader
+then checks its own minimum (12 bytes for RTP, 8 for RTCP, 20 for STUN, 13 for a DTLS
+record) and drops and counts a shorter datagram. The server speaks no TURN, ZRTP or QUIC,
+so those ranges are the local drop policy, counted. RTC-1 forbids RTP payload types 64 to
+95 under `rtcp-mux`, which is what makes the second octet unambiguous.
 
 **Ingress authority.** A datagram reaches a PeerSession only from its **selected path**,
 except STUN. A STUN Binding request goes to `stun_ice.lite_receive`, which checks
 `MESSAGE-INTEGRITY` under this session's password and the `USERNAME` against its ufrag. A
-request that fails is answered with nothing. One that passes may move the selected path
-(`lite_selected`, NAT rebinding). The home unit keeps a table from remote 5-tuple to session,
-which only that move changes. A DTLS, RTP or RTCP datagram from a 5-tuple outside the table
-reaches no session and is dropped and counted. A source address is unauthenticated (NET-15).
-The ICE password is what binds a path to the participant who received it in the answer.
+request that fails is answered with nothing and changes nothing, the selected path
+included. One that passes may move the selected path (`lite_selected`, NAT rebinding). The
+home unit keeps a table from remote 5-tuple to session, which only that move changes. A
+DTLS, RTP or RTCP datagram from a 5-tuple outside the table reaches no session and is
+dropped and counted. A source address is unauthenticated (NET-15). The ICE password is what
+binds a path to the participant who received it in the answer.
 
 **DTLS.** The session runs the dtls lane's endpoint (docs/spec/dtls.md, DTLS-2 to DTLS-9)
 as `server`, the passive side `negotiate_setup` gives for the offer's `actpass` or `active`.
@@ -297,24 +404,49 @@ no key is.
 
 **Media in.** An `Rtp` datagram is unprotected in place in `slot` by the srtp lane's context
 for its SSRC, under the replay window that context keeps. The session then parses the header
-and extensions in place (rtp lane), maps the packet to an agreed section by its MID
-extension, or by SSRC once the MID has been seen on it (RFC 8843 §9.2), or by unique payload
-type, and to an encoding by RID or the RTX pairing. It returns
+and extensions in place (rtp lane) and binds the packet to an agreed section, only after
+authentication:
+
+1. If the packet carries the MID extension and the MID names a receiving section, the
+   packet's SSRC is bound to that section, or rebound when the MID differs from the SSRC's
+   current binding and this packet is newer than the one that made it. Newer means a
+   higher extended index on that SSRC (RFC 8843 §9.2). An older packet carrying an earlier
+   MID does not rebind it. A MID that names no receiving section drops and counts the
+   packet.
+2. Otherwise, if the SSRC is bound, the packet goes to its bound section.
+3. Otherwise, if the payload type names exactly one receiving section, the packet goes there
+   and binds its SSRC. A payload type that names two or more sections, or none, drops and
+   counts the packet.
+
+The payload type is then checked against the bound section's agreed formats, and a type
+outside them drops and counts the packet. The encoding is found by RID (or repaired RID)
+through `Agreed.streams`, or by the RTX pairing. The session returns
 `Media(MediaIn(section, encoding, header, payload_at, payload_len, audio_level, layer))`,
-with views into `slot`. `layer` is the codec's layer and keyframe facts from `media_bits`. A
-packet whose MID names no receiving section is dropped and counted. RTCP is unprotected and
-parsed the same way, and its feedback returns as `Control`.
+with views into `slot`. `layer` is the codec's layer and keyframe facts from `media_bits`.
+
+**Repair in.** A publisher's RTX packet is authenticated the same way, under the RTX SSRC's
+own SRTP context. Its payload type must be an agreed `Rtx` format, whose `apt` names the
+media format. The media stream it repairs is found by the `ssrc-group:FID` pairing, or by
+the `repaired-rtp-stream-id` extension's RID ([RFC 8852](https://www.rfc-editor.org/rfc/rfc8852)
+§3) mapped to its encoding. `rtx.unwrap` (RTP-7) reads the OSN, and the OSN is extended
+against the **media** stream's highest index. A repair whose OSN extends to `None`, or to an
+index the media stream has already received, is dropped and counted, so a duplicate never
+reaches routing. Otherwise it returns `Repair(MediaIn(...))` with the media stream's
+section, encoding, extended index and the original payload's view, and routing treats it
+as that media packet arriving late.
+
+**RTCP** is unprotected and parsed the same way, and its feedback returns as `Control`.
 
 **Authentication comes before state.** Before SRTP's `open` succeeds, the session may run
 only the rtp lane's stateless readers (`header.parse`, `ext.find`, `rtcp.next` and the value
 readers), because SRTP needs them to find the header and estimate the index. Every stateful
 operation (statistics, loss tracking, NACK, TWCC, `History`, `Rewrite`, BWE, the
-active-speaker score of RTC-6) is called only with the extended index that `open`
-authenticated, and only after it succeeded. A packet that fails `open`, or fails the replay
-window, changes no state anywhere in the stack except a drop counter. The 5-tuple table is
-the one exception with its own gate: only a STUN request that passed `MESSAGE-INTEGRITY`
-under the session's ICE password changes it. The rtp lane states this rule (its Boundaries
-section) and leaves its law here (W19).
+active-speaker score of RTC-6, and the SSRC-to-MID and SSRC-to-RID bindings above) is
+called only with the extended index that `open` authenticated, and only after it succeeded.
+A packet that fails `open`, or fails the replay window, changes no state anywhere in the
+stack except a drop counter. The 5-tuple table is the one exception with its own gate: only a
+STUN request that passed `MESSAGE-INTEGRITY` under the session's ICE password changes it.
+The rtp lane states this rule (its Boundaries section) and leaves its law here (W19).
 
 **Time.** `poll` drives every timer of the stack: DTLS retransmission, ICE consent (as
 `stun_ice` keeps it), RTCP report intervals, TWCC feedback, NACK generation, the pacer and
@@ -339,30 +471,61 @@ TLS-8 fixes three rules for every sealer. These rules decide the egress design:
 
 So:
 
-- **One SSRC per down-track for the session's life.** When a down-track is created (RTC-5), the
-  session draws its media SSRC and, for video, its RTX SSRC from a per-session generator. The
-  generator never repeats a value in the session and never returns an SSRC that the remote
-  end uses, and it issues one sealer for each. Switching layers, going `Off` and back to a
-  layer, and rebinding the down-track to another publication all keep the SSRC and its sealer.
-  The rtp lane's rewriting keeps the sequence number and timestamp continuous across each, so
-  the index keeps rising. A participant that rejoins after a revoke gets a new session with a
-  new DTLS association, so the epoch is new and every SSRC is free again.
+- **One SSRC per down-track while the session has no collision.** When a down-track is
+  created (RTC-5), the session draws its media SSRC and, for video, its RTX SSRC from a
+  per-session generator. The generator never repeats a value in the session and never
+  returns an SSRC that the remote end has used so far, and it issues one sealer for each.
+  Switching layers, going `Off` and back to a layer, and rebinding the down-track to another
+  publication all keep the SSRC and its sealer. The rtp lane's rewriting keeps the sequence
+  number and timestamp continuous across each, so the index keeps rising. A participant
+  that rejoins after a revoke gets a new session with a new DTLS association, so the epoch
+  is new and every SSRC is free again.
+- **SSRC collision ([RFC 3550](https://www.rfc-editor.org/rfc/rfc3550) §8.2).** The
+  generator cannot predict an SSRC the remote end first uses later. A collision is
+  confirmed when an authenticated packet or RTCP report from the remote end uses an SSRC
+  that this session sends on. The session then retires the affected local SSRC: it sends
+  an RTCP BYE for it, calls `end_send` on it (SRTP-3, so its sealers drop and the SSRC
+  stays marked used), draws a fresh SSRC (and RTX SSRC, if the colliding one was either)
+  from the generator, issues new sealers for them, makes a fresh `Rewrite` for the
+  down-track at a new random first index, asks the publisher for a keyframe (RTC-6), and
+  re-offers the section with the new `a=ssrc` and `a=ssrc-group:FID` lines (RTC-2). If the
+  re-offer is refused, the session is closed and the participant renegotiates by rejoining.
+  A retired SSRC is never drawn again in the session, so its sealer is never reissued. The
+  RTX SSRC follows its media SSRC in this, as RFC 4588 §4 pairs them.
 - **Late packets go out as repair, never on the media SSRC.** The rewriter assigns outbound
   sequence numbers in source order and leaves a gap for a source packet that has not arrived.
   When that packet then arrives late, its outbound number is below the sealer's highest, and
-  the rtp lane's `Rewrite.on_packet` answers `Late(index, ts)` (RTP-11). It is
-  sent at once on the down-track's RTX SSRC as an RFC 4588 retransmission, with the outbound
-  number as its OSN, and sealed under the RTX sealer at the RTX stream's next index. A
-  down-track without negotiated RTX drops it and counts it. Audio sections never negotiate
-  RTX, and Opus concealment covers the loss.
-- **NACK repair is RTX only.** A NACK from a subscriber is answered from the rtp lane's RTX ring
-  on the RTX SSRC. A subscriber that negotiated no RTX for the format gets no answer, and the
-  NACK is counted. Its loss is covered by a keyframe request when the rtp lane's rules call for
-  one. Caching sealed media bytes per subscriber to resend them would cost a copy of every
-  packet for every subscriber, so it is not done.
-- **The server's own RTCP.** Each session issues one `Rtcp` sealer for its single RTCP sender
-  SSRC, drawn from the same generator. Every RR, SR, NACK, PLI, FIR and TWCC packet it sends
-  uses it. SRTCP's 31-bit index rises once per packet.
+  the rtp lane's `Rewrite.on_packet` answers `Late(index, ts)` (RTP-11). If RTX was
+  negotiated for the down-track's format, it is sent at once on the down-track's RTX SSRC as
+  an RFC 4588 retransmission: the low 16 bits of `index` as its OSN, the mapped timestamp
+  and marker, the RTX payload type, and the RTX stream's next sequence number, sealed under
+  the RTX sealer. Otherwise it is dropped and counted. A late packet is never given a new
+  media sequence number. Audio sections never negotiate RTX, and Opus concealment covers
+  the loss.
+- **NACK repair is RTX only, from a per-down-track history.** Each video down-track keeps an
+  egress `History` (RTP-7) keyed by its extended outbound index. Each entry holds the source
+  generation (RTC-3 `Gen`), a handle to the plaintext in the publisher's ingress ring, and
+  the **original output rewrite** of that packet: its outbound sequence number, timestamp,
+  marker, payload type, MID value, extension IDs and the rewritten codec descriptor
+  counters. A NACK from a subscriber is looked up there. A hit whose source generation is
+  still current and whose plaintext is still in the ingress ring is rebuilt from the
+  recorded rewrite, never re-derived from the current state, and sent on the RTX SSRC with
+  the recorded sequence number as OSN and a fresh transport sequence number. The history is
+  gated at every source switch (`History.gate` with `Rewrite.switch_index`), so a NACK for a
+  packet from before a switch answers nothing. A subscriber that negotiated no RTX for the
+  format gets no answer, and the NACK is counted. Its loss is covered by a keyframe request
+  when the rtp lane's rules call for one. Caching sealed media bytes per subscriber to resend
+  them would cost a copy of every packet for every subscriber, so it is not done.
+- **Sender reports are per down-track.** An SR describes the RTP packets that its SSRC sent
+  ([RFC 3550](https://www.rfc-editor.org/rfc/rfc3550) §6.4.1), and `protect_rtcp` picks the
+  sealer by the clear sender SSRC (SRTP-3). So each down-track's SR is sent with that
+  down-track's media SSRC as its sender SSRC, sealed under that SSRC's `Rtcp` sealer and
+  SRTCP index. It carries the down-track's own outgoing NTP-to-RTP mapping (RTC-5) and its
+  own sent packet and octet counts (`stats.Sent`, RTP-5). Its report blocks are left empty,
+  since the server's reception reports go under the control SSRC.
+- **The server's own feedback.** Each session issues one `Rtcp` sealer for its control SSRC,
+  drawn from the same generator. Standalone receiver feedback (RR, NACK, PLI, FIR and TWCC)
+  uses it. SRTCP's 31-bit index rises once per packet on each sender SSRC.
 
 `offer` (RTC-2) signals each down-track's two SSRCs with `a=ssrc` and `a=ssrc-group:FID`.
 A browser also accepts unsignaled SSRCs by MID, but signaling them pins the RTX pairing.
@@ -375,8 +538,8 @@ pub type RoomId = RoomId(u64)
 pub type Participant = Participant(room: RoomId, id: u64, epoch: u64)
 pub type PublicationId = PublicationId(u64)
 pub type Target = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
-pub type RoomLimits = RoomLimits(participants: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32)
-pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Exists | Limit(u32) | Peer(PeerError) | Capacity(Capacity)
+pub type RoomLimits = RoomLimits(participants: u16, ids: u16, publications: u16, down_tracks: u32, audio_forward: u8, pause_delay_ms: u32)
+pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Peer(PeerError) | Capacity(Capacity)
 pub type Event = Answer(Participant, Bytes) | Offer(Participant, u64, Bytes) | Glare(Participant, u64) | Published(PublicationId, Participant, Media, u8) | Unpublished(PublicationId) | Layers(PublicationId, u8) | Speakers(RoomId, Inline[u64, 8], u8) | Fenced(Participant)
 
 pub fn router(units: u16, unit: u16, mut inbox: Inbox[RouterIn], peers: List[Sender[RouterIn]]) -> Result[Router, RouterError]
@@ -388,74 +551,114 @@ pub fn set_target(mut r: Router, who: Participant, p: PublicationId, target: Tar
 pub fn unsubscribe(mut r: Router, who: Participant, p: PublicationId) -> Result[(), RouterError] waits
 pub fn leave(mut r: Router, who: Participant) -> Result[(), RouterError] waits
 pub fn revoke(mut r: Router, room: RoomId, participant: u64, epoch: u64) -> Result[(), RouterError] waits
+pub fn suspend(mut r: Router, room: RoomId) -> Result[(), RouterError] waits
+pub fn resume(mut r: Router, room: RoomId) -> Result[(), RouterError] waits
 pub fn close_room(mut r: Router, room: RoomId) -> Result[(), RouterError] waits
 pub fn turn(mut r: Router, now: u64, mut sock: UdpSocket, mut rx: Bytes, mut batch: List[UdpPacket], mut out: Outbox, mut events: List[Event]) -> Result[u64, RouterError] waits
 ```
 
-**Identity.** A participant is `(room, id, epoch)`. `id` is the caller's: RTC-8 uses the
-`runner.room` peer. `epoch` is a value the caller raises each time `id` is admitted again.
-The router never compares `epoch` with anything but itself (RTC-7). A publication is one
-track a participant sends: one agreed receiving section with its encodings. A **down-track**
-is one subscriber's copy of one publication, bound to one sending section of the subscriber's
-session.
+**Identity.** A participant is `(room, id, epoch)`. `id` is the caller's, a number below
+`RoomLimits.ids`. RTC-8 gives it a dense local id that it reuses (RTC-8, Identity).
+`epoch` is a value the caller raises each time `id` is admitted again. The router never
+compares `epoch` with anything but itself (RTC-7). A publication is one track a participant
+sends: one agreed receiving section with its encodings. A **down-track** is one subscriber's
+copy of one publication, bound to one sending section of the subscriber's session. A
+session's **generation** is its participant's `Gen(id, epoch)` (RTC-3), the tag every queue
+entry carries.
 
 **Units and the control order.** Every media unit runs one `Router` over its own socket. The
 unit that runs the signaling adapter (RTC-8) is the **control unit**. Every control call
 (`open_room` to `close_room`) is made on it. It applies the call to its own state, sends the
 change as one `RouterIn` message to every other unit, in one order, and returns when the units
-the change touches have applied it. Each unit takes its inbox's control messages at the start
-of every `turn`, before it reads its socket. So every unit sees one order of control changes,
-and a change is in force on a unit from its first turn after the message.
+the change touches have applied it. So every unit sees one order of control changes.
 
-**A turn.** `turn` drains the control inbox, then the cross-unit media inbox (below), then
-one `udp_recv` batch from the socket. It runs each datagram through its session (RTC-3), routes
-each `Media` (below), drives `poll` for sessions whose deadline has passed, and ends with one
-`udp_send` of `out`. It appends signaling and dynacast output to `events`, which the
-adapter sends (RTC-8). It returns the earliest deadline. A unit's loop is
-`turn` and then `udp_recv`'s wait until that deadline.
+**Waking a unit.** A unit waits in `udp_recv` (NET-16), which no inbox message interrupts.
+So whenever a unit posts one or more messages to another unit's inbox in a turn, it ends
+the turn by sending that unit one zero-length **doorbell** datagram from its own socket to
+the other unit's port, at most one per destination per turn. Each unit's service rules
+allow `UdpSend` to the sibling units' ports. A zero-length datagram from a sibling unit's
+address only wakes the unit, and from any other address it is dropped and counted. A
+forged doorbell costs one turn and nothing else, because it carries no data. A doorbell is
+only a wake. No fence or ordering depends on it arriving, and a unit also never waits
+longer than its next timer deadline.
+
+**A turn.** `turn` drains the control inbox, then the cross-unit media inbox (below). It then
+takes one `udp_recv` batch, and **drains the control inbox again before it routes any
+datagram of that batch**, so a fence that arrived while the unit waited is in force for
+every datagram the wait returned. It runs each datagram through its session (RTC-3), routes
+each `Media` and `Repair` (below), drives `poll` for sessions whose deadline has passed, and
+ends with the send step: it drops every entry of `out` and of the uncommitted suffix whose
+tag names a fenced or suspended generation, then calls `udp_send`. A partial send (NET-16:
+`Ok(k)` with `k` below the count) keeps entries `k` onward as the **uncommitted suffix**,
+which the next turn's send step rechecks against the fences before it retries it. It
+appends signaling and dynacast output to `events`, which the adapter sends (RTC-8). It
+returns the earliest deadline. A unit's loop is `turn` and then `udp_recv`'s wait until that
+deadline.
 
 **Fan-out.** For a `Media` packet of publication `P`, encoding `e`:
 
 1. The home unit decrypts once, in its receive slot (RTC-3).
-2. For each local down-track of `P` whose **current** forwarding layer selects this packet
-   (RTC-6), the rtp lane rewrites a scratch copy of the header: SSRC, sequence number,
-   timestamp, extension IDs to the subscriber's negotiated IDs, and the codec descriptor's
-   picture ID or frame number through `media_bits`. It then calls TLS-8 `seal_into` with the
-   scratch header and the shared payload as source and the subscriber's span of `out.data` as
-   destination. One copy, made by the cipher. Then one `UdpTx`, sent through the
-   subscriber's pacer when the rtp lane paces that down-track.
+2. For each local down-track of `P` whose current or pending layer (RTC-6) is on encoding
+   `e`, the router calls the down-track's `Rewrite.on_packet` (RTP-11), which decides
+   whether the packet is forwarded, and under which layer. For a `Forward`, the rtp lane
+   writes a scratch copy of the header in the subscriber's wire identity: the down-track's
+   SSRC, the rewritten sequence number and timestamp, the subscriber's negotiated payload
+   type for that codec configuration, the subscriber section's MID value in the MID
+   extension, the subscriber's negotiated extension IDs for every extension it keeps, no
+   RID (a down-track is one unlabelled stream), and the codec descriptor's picture ID or
+   frame number through `media_bits`. The publisher's MID, RID, payload type and
+   transport sequence number never reach a subscriber. The packet is then queued, with
+   its `Tag`, for the subscriber's pacer, or straight to `out` when the rtp lane does not
+   pace that down-track. At send, it takes the next transport-wide sequence number of the
+   subscriber's own transport (`twcc.assign`, RTP-8). The router then calls TLS-8
+   `seal_into` with the scratch header and the shared payload as source and the
+   subscriber's span of `out.data` as destination. One copy, made by the cipher. The
+   egress history records the original output rewrite (RTC-4).
 3. For each other unit with at least one down-track of `P`, the home unit posts one
-   `Media(P, epoch, Shared[Bytes])` message. The `Shared[Bytes]` holds the plaintext packet,
-   and every remote unit runs step 2 from it. One plaintext copy per remote unit, whatever
-   its number of subscribers.
+   `Media(P, src, Shared[Bytes])` message, where `src` is the publisher's generation. The
+   `Shared[Bytes]` holds the plaintext packet, and every remote unit runs step 2 from it.
+   One plaintext copy per remote unit, whatever its number of subscribers.
+
+A `Repair` from the publisher (RTC-3) is routed the same way as the media packet whose
+index it carries. Each down-track's `Rewrite` answers it as it answers any packet arriving
+late.
 
 The home unit keeps, per publication, the set of units with down-tracks (a `u64` bitmap, so
-at most 64 units). The RTX ring keeps the plaintext packet as the rtp lane specifies, and
-only on the home unit. A remote unit's NACK is answered by the remote unit asking the home unit
-over the inbox, and the home unit replies with the shared packet. Only units with a
-subscriber pay anything for a publication.
+at most 64 units). The ingress RTX ring keeps the plaintext packet as the rtp lane specifies,
+and only on the home unit. A remote unit's NACK is looked up in that down-track's egress
+history on the remote unit. A hit sends `RepairAsk(P, src, dst, ingress index)` to the home
+unit. The home unit replies `RepairReply(P, src, dst, Shared[Bytes])` if `src` is not fenced
+there, and the remote unit rechecks both `src` and `dst` against its own fences when it
+takes the reply. Only units with a subscriber pay anything for a publication.
 
 **RTCP is terminated.** The router never forwards a subscriber's RR, NACK or TWCC to a
 publisher. Each session answers its own feedback (RTC-4) and estimates its own bandwidth
-(rtp lane). Publisher keyframe requests are the router's (RTC-6). Sender reports to a
-subscriber are generated per down-track from the publisher's SR, with the rewritten
-timestamps (rtp lane).
+(rtp lane). Publisher keyframe requests are the router's (RTC-6). A subscriber's sender
+reports are generated per down-track (RTC-4) from the down-track's own outgoing timeline.
+The router relies on RTP-11's `sr_timestamp` to answer that timeline's RTP timestamp for an
+NTP time, which is correct across a source switch only under RTC-6's switch rule.
 
 **Bounds.** `RoomLimits` fixes every table's size when the room opens, so routing allocates
 nothing:
 
 - `participants` is at most 256, the `runner.room` peer limit (`PEERS_MAX`);
+- `ids` is the fence capacity (RTC-7), at least `participants`. One entry is reserved when a
+  participant id is first admitted and kept until `close_room`;
 - `publications` is at most 8 per participant;
 - `down_tracks` is at most 64 per subscriber;
 - encodings are at most 4 per publication (RTC-1).
 
-A call that would pass a bound is `Limit(bound)`, and nothing changes.
+A call that would pass a bound is `Limit(bound)`, and nothing changes. A `join` with an id
+the room has never admitted, when all `ids` entries are reserved, is `Limit(ids)`: the
+identity is refused explicitly rather than admitted without a fence entry.
 
 ## RTC-6: Layers, dynacast and active speakers
 
 **Layer identity.** A packet's layer is `(encoding, spatial, temporal)`:
 
-- `encoding` is its RID's index in the publication's simulcast list (0 without simulcast);
+- `encoding` is the position of its stream in the publication's agreed simulcast list
+  (`Agreed.streams`, RTC-2), found from its RID or any of the stream's alternatives (0
+  without simulcast);
 - `spatial` and `temporal` come from the AV1 Dependency Descriptor, the VP9 payload
   descriptor or the VP8 `TID` (`media_bits`), and are 0 when the codec carries none.
 
@@ -465,74 +668,135 @@ generic dynacast selector. The subscriber's application decides why it wants a l
 router never knows.
 
 **Mapping onto `rtp`'s rewrite.** The switching itself is the rtp lane's `Rewrite`
-(RTP-11), one per down-track. The router translates:
+(RTP-11), one per down-track, whose masks hold 16 decode targets. The router translates each
+`Layer(e, s, t)` to `rewrite.target(Layer(source, i))`, where `source` is the router's key
+for encoding `e` of the publication and `i` comes from a **stable** per-codec map. The map
+never depends on how many layers a stream has shown so far, so a newly observed layer never
+renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
 
-- `Off` is `rewrite.target(Off)`;
-- `Layer(e, s, t)` is `rewrite.target(Layer(source, i))`, where `source` is the router's key
-  for encoding `e` of the publication, and `i` is the decode-target index of `(s, t)`. For an
-  AV1 Dependency Descriptor, `i` is the index the template structure gives the target with
-  spatial id `s` and temporal id `t` (`media_bits` `decode_target`), clamped to the
-  highest the structure has. For VP8, VP9 and H.264, `i = s · T + t`, where `T` is the
-  number of temporal layers the stream has shown, and `t` is clamped to `T − 1`;
-- for each packet the router fills rtp's `Unit` from `media_bits`: `start` and `end` from
-  the descriptor or the marker bit, `keyframe` from the codec's keyframe test, and `needs`
-  and `switches` by RTP-11's rules (Dependency Descriptor indications; for VP8 and VP9, the
-  temporal id and the `Y` or `U` switching-up bit).
+- **VP8 and H.264.** `i = t`, clamped to 3 (VP8's `TID` has two bits). H.264 without SVC
+  carries no layer, so `i = 0`. `needs` bit `j` is set for a frame of temporal id `t'` when
+  `t' ≤ j`. `switches` has every bit at a keyframe, and, for VP8, bit `t'` at a frame with
+  `Y = 1` (a layer sync frame, which depends only on the base layer,
+  [RFC 7741](https://www.rfc-editor.org/rfc/rfc7741) §4.2).
+- **VP9** ([RFC 9628](https://www.rfc-editor.org/rfc/rfc9628) §4.2). `i = 4 · s + t`, with
+  `s` and `t` each at most 3, so 16 targets cover every structure the map accepts. A stream
+  whose `SID` or `TID` passes 3 is refused for switching, explicitly. It is forwarded only
+  as its current target, and the refusal is counted. `needs` bit `4 · S + T` is set for a
+  layer frame `(s', t')` when `s' ≤ S` and `t' ≤ T`. `switches` follows VP9's own switch
+  facts. Every bit is set at a keyframe. A **temporal** up-switch from `T` to `T'` within
+  spatial `S` is allowed at the first layer frame with `TID` above `T` that follows a
+  picture with `U = 1` and `TID ≤ T`. `U` is the switching-up point, after which no frame
+  of a higher temporal layer references an earlier picture of a layer above it. A
+  **spatial** up-switch to `S'` is allowed at a picture whose layer frame at `S'` has
+  `P = 0` (not inter-picture predicted). Its only references are lower spatial layers of
+  the same picture (`D = 1`), and the target forwards all of those. A down-switch, temporal
+  or spatial, is allowed at any picture start, since a lower layer never references a
+  higher one.
+- **AV1** (Dependency Descriptor, [AV1 RTP §A.8](https://aomediacodec.github.io/av1-rtp-spec/#a8-dependency-descriptor-rtp-header-extension)).
+  `media_bits` `decode_target` answers the indication for a template and a decode-target
+  index, and the router needs the inverse. So at each new template structure it derives,
+  for every decode target `d`, the pair `(S_d, T_d)`: the highest spatial id and the highest
+  temporal id over the templates whose indication for `d` is not Not Present. `Layer(e, s,
+  t)` then maps to the `d` with `(S_d, T_d) = (s, t)`. With no such `d`, it maps to the `d`
+  whose pair is the greatest at or below `(s, t)` in both coordinates. A structure is
+  **unrepresentable**, and refused explicitly with the encoding kept at its current target
+  and the refusal counted, when it has more than 16 decode targets, or when two decode
+  targets share one pair, or when no single greatest pair exists at or below some request.
+  `needs` bit `d` is set unless the indication is Not Present, and `switches` bit `d` is set
+  for `Switch` and at every keyframe (RTP-11). The map is rebuilt only when the structure
+  changes, which happens only at a keyframe.
 
-So the switch points below are RTP-11's rules restated for the router's targets, not a
-second implementation. `Rewrite` answers `Wait` while it has no current layer, and the
-router then asks for a keyframe.
+**Presenting packets.** Each packet of the down-track's **current** source and of its
+**pending** source (the source of a target that has not yet taken effect) goes to
+`Rewrite.on_packet` (RTC-5 step 2). A filter that passed only the current layer would never
+show `Rewrite` the pending layer's keyframe. The router fills rtp's `Unit` per packet from
+`media_bits`: `start` and `end` from the descriptor or the marker bit (a VP8 packet with
+`S = 1` and partition index 0 starts a frame; a nonzero partition with `S = 1` does not),
+`keyframe` from the codec's keyframe test, and `needs` and `switches` from the map above.
+`Rewrite` commits a switch only at a decodable frame start. It forwards the rest of that
+frame under the same decision, and it keeps forwarding the old source until then.
+`Rewrite` answers `Wait` while it has no current layer, and the router then asks for a
+keyframe.
+
+**The timeline at a switch.** The router relies on this RTP-11 operation, which the rtp
+amend after review 2336 specifies. At the accepted frame start of source B, replacing A,
+the down-track keeps its SSRC and sealer, and the first new outbound index is the last
+outbound index plus 1. The new timestamp offset is found by projecting the B packet's
+capture time (from B's SR) into A's RTP clock, subtracting A's current source-to-output
+offset, and clamping the result to at least the last outbound timestamp plus 1. That fixes
+B's offset. Every packet of that frame, including a second packet with the same source
+timestamp, takes the same output timestamp. When either source has no usable SR, the new
+output timestamp is the last outbound timestamp advanced by the elapsed arrival time at the
+negotiated clock rate.
 
 **Selection per down-track.** Each down-track keeps `target`, the layer the subscriber asked
-for, and `current`, the layer it forwards. The **effective target** is the target, lowered
-when the subscriber's bandwidth estimate (rtp lane) cannot carry it, as follows. Each turn
-that the estimate changes, the router sorts the subscriber's video down-tracks by
-publication ID. It starts each at its lowest encoding at or below target, then raises them one
-step at a time in that order, round-robin, while the sum of each encoding's measured ingress
-rate stays within the estimate. Audio is never lowered. This is deterministic and computable
-by hand.
+for, `current`, the layer it forwards, and `pending`, a layer awaiting its switch point. The
+**effective target** is the target lowered to what the subscriber's bandwidth estimate (rtp
+lane) can carry. Each turn that the estimate or a target changes, the router recomputes it
+for that subscriber:
 
-`current` moves to the effective target only at a point where the subscriber can decode
-the switch:
+1. Explicit `Off` targets stay `Off`.
+2. The budget is the estimate minus the measured rate of every audio down-track, which is
+   never lowered.
+3. Every other video down-track starts at `Off`.
+4. In ascending publication ID, round after round, each down-track is raised one step if
+   the step fits in the remaining budget. A step is the next encoding at or below its
+   target, lowest first, starting from `Off`, and costs that encoding's measured ingress
+   rate minus the rate of the level it leaves. A down-track whose step does not fit stays
+   where it is for the rest of the computation. The others go on.
+5. The computation ends when a full round raises nothing.
 
-- **Simulcast** (changing `encoding`): at the first keyframe of the new encoding. On a change
-  of effective target the router asks the publisher for a keyframe of the new encoding
-  (below), and it keeps forwarding the old encoding until one arrives. Going to `Off` takes
-  effect at once.
-- **Spatial** (AV1 DD, VP9): up only at a frame whose decode target indication for the new
-  target is `Switch` or `Required` with a keyframe, down at the next frame start.
-- **Temporal**: up at a frame whose temporal layer is a switching point, for VP8 its
-  `Y` bit and for VP9 its `U` bit. Down at the next frame start.
+A down-track whose first step does not fit is left `Off`, which is the **bandwidth pause**.
+It resumes when a later recomputation admits it. The result is deterministic and
+computable by hand.
 
-A frame is forwarded whole or not at all. Packets of a frame that began before a switch go to
-the old layer's rule.
+`current` moves to the effective target only at a switch point, by the rules of the map
+above, and only through `Rewrite`. A simulcast change (another encoding) happens at the
+first keyframe of the new encoding. On a change of effective target, the router asks the
+publisher for a keyframe of the new encoding (below) and keeps forwarding the old encoding
+until one arrives. Going to `Off` takes effect at once. A frame is forwarded whole or not at
+all.
 
 **Keyframe requests.** A down-track that needs a keyframe (a switch, a subscriber's PLI or
 FIR, a `Wait` from its rewrite, or rtp's `Losses` answering `Reset`) calls `want` on its
 publication's encoding's rtp `Keyframes` (RTP-6), which the home unit keeps, one per
-encoding. The router makes each `Keyframes` with `interval_ns = max(100 ms, rtt)`, where
-`rtt` is the publisher session's round-trip estimate at that time, and remakes it when the
-estimate moves by more than a quarter. `Keyframes` coalesces, so N subscribers asking at once
-cost one request. The kind is `Pli`, or `Fir` for a publisher that negotiated `ccm fir` and
-not `pli`. The router calls `keyframe_seen` at each keyframe it reads.
+encoding. The kind follows what the publisher negotiated for the encoding's payload type:
+`Pli` when it negotiated `nack pli` ([RFC 4585](https://www.rfc-editor.org/rfc/rfc4585)
+§§4.2, 6.3.1), otherwise `Fir` when it negotiated `ccm fir`
+([RFC 5104](https://www.rfc-editor.org/rfc/rfc5104) §4.3.1). With neither, no request is
+ever sent, because RFC 4585 §4.2 allows only negotiated feedback. The down-track waits for
+the next independent frame, and the wait is counted. The throttle interval is
+`max(100 ms, rtt)`, where `rtt` is the publisher session's round-trip estimate. When the
+estimate moves by more than a quarter, the router updates the interval **in place** on the
+same `Keyframes`, keeping its outstanding request and its FIR command sequence number
+(RFC 5104 §4.3.1.1). It never makes a new one. `Keyframes` coalesces, so N subscribers asking
+at once cost one request. The router calls `keyframe_seen` at each keyframe it reads.
 
-**Publisher pause (dynacast).** For each publication the router computes the **wanted
-mask**: bit `e` is set when some down-track's effective target or current layer uses encoding
-`e`. A bit that turns on is published at once. A bit that turns off is published only after
-it has stayed off for `pause_delay_ms` (default 5,000). A target that comes back inside the
-delay costs no restart. Each published change is `Event.Layers(publication, mask)`, which the
-adapter sends to the publisher (RTC-8), so its encoder stops the unwanted encodings. Packets of
-an encoding outside the mask are never forwarded, whether or not the publisher has stopped
-it yet.
+**Publisher pause (dynacast).** For each publication, each unit computes its **local
+wanted mask**: bit `e` is set when one of its down-tracks of the publication has an
+effective target, a current layer or a pending layer on encoding `e`. An old encoding still
+held during a pending switch keeps its bit, and an explicit `Off` sets none. A unit sends its
+local mask to the publication's home unit whenever the mask changes (`Wanted(P, unit,
+mask)`). The home unit keeps the latest mask from every unit, and the **wanted mask** is
+their union. A bit that turns on is published at once. A bit that turns off is published
+only after it has stayed off for `pause_delay_ms` (default 5,000). A target that comes back
+inside the delay costs no restart. Each published change is `Event.Layers(publication,
+mask)`, which the control unit's adapter sends to the publisher (RTC-8), so its encoder stops
+the unwanted encodings. Packets of an encoding outside the mask are never forwarded, whether
+or not the publisher has stopped it yet.
 
 **Active speakers.** For each audio publication that negotiated the RFC 6464 extension, the
 home unit keeps a score in integer arithmetic. This is LiveKit's algorithm
-(pkg/sfu/audio/audiolevel.go in /tmp/ref-livekit at `d210b4d`) with its float steps made exact:
+(pkg/sfu/audio/audiolevel.go in /tmp/ref-livekit at `d210b4d`) with its float steps made exact.
+It reads only the seven level bits. The `V` bit is ignored when the publisher's leg
+negotiated `vad=off`, and the score never reads it in any case.
 
 - `amp(l) = round(65536 · 10^(-l / 20))` for levels `l` 0 to 127, a fixed table of 128 Q16 values;
-- each packet adds its duration `d` (from the RTP timestamp step, at the clock rate) to
-  `observed`, and when its level `l ≤ 35` (-35 dBov), adds `d` to `active` and lowers
-  `loudest` to `l`;
+- each packet whose extended RTP timestamp is above the highest seen adds its duration `d`
+  (the timestamp step, at the clock rate) to `observed`. When its level `l ≤ 35` (-35 dBov),
+  it adds `d` to `active` and lowers `loudest` to `l`. A reordered packet, whose timestamp is
+  not above the highest, adds no duration and changes nothing;
 - when `observed ≥ 400` ms, the window closes. If `active ≥ 160` ms (40 %), then
   `lin = floor(amp(loudest) · active / 400)` and
   `score = score + floor_div((lin − score) · 2, 3)`, which is the smoothing of two intervals.
@@ -545,68 +809,105 @@ home unit keeps a score in integer arithmetic. This is LiveKit's algorithm
 - a publication with no packet for 800 ms has score 0;
 - a publication is **speaking** when `score ≥ amp(35)`.
 
-The speakers are the speaking publications ranked by score, then by lower participant ID.
-Each 400 ms in which the top 8 changed, the control unit emits
-`Event.Speakers(room, top, count)`.
+The speakers are the speaking publications ranked by these integer scores, then by lower
+participant ID. Q16 quantization can tie two scores that LiveKit's floats would order, and
+the tie-break then decides. That is the specified rank. Each 400 ms in which the top 8
+changed, the control unit emits `Event.Speakers(room, top, count)`.
 
 **Audio forwarding.** With `audio_forward = n > 0`, each subscriber's audio down-tracks
 forward only the `n` highest-ranked speakers, excluding the subscriber itself. Other audio
 down-tracks are held at `Off` until they rank again. Opus needs no keyframe, so the gate
-switches at the next packet. The RFC 6464 extension is forwarded, rewritten to the
-subscriber's ID. With `n = 0`, all audio is forwarded. A voice room of N speakers then costs
-`N · n` audio packets per frame interval instead of `N · (N − 1)`.
+switches at the next packet. The RFC 6464 extension is forwarded with the subscriber's ID and
+the seven level bits unchanged ([RFC 6464](https://www.rfc-editor.org/rfc/rfc6464) §3).
+The `V` bit follows each leg's negotiated `vad` (RTC-2 step 4). On a subscriber leg with
+`vad=off`, `V` is written 0 and means nothing. On a leg with `vad` on, `V` is the
+publisher's `V` when the publisher's leg also negotiated it on, and otherwise whether the
+publication is speaking by the score above. So a bit that had no meaning on the way in is
+never given one on the way out. A leg on which the extension was not negotiated, or not in
+a direction toward the subscriber, carries no extension. With `n = 0`, all audio is
+forwarded. A voice room of N speakers then costs `N · n` audio packets per frame interval
+instead of `N · (N − 1)`.
 
 ## RTC-7: Revocation fence
 
 `revoke(r, room, participant, epoch)` stops every forwarding that involves `participant` at
-`epoch` or any lower epoch, on every unit, before it returns.
+`epoch` or any lower epoch, on every unit, in both directions, before it returns.
 
 **Fence state.** Each unit keeps, per room, `fenced[participant]`: the highest revoked epoch,
-initially absent. A unit that applies a revoke sets the entry to
-`max(fenced[participant], epoch)`.
+initially absent. The table has `RoomLimits.ids` entries, fixed at `open_room`. An entry is
+reserved when `join` first admits an id (RTC-5 Bounds), so an admitted identity can always
+be revoked. A unit that applies a revoke sets the entry to `max(fenced[participant],
+epoch)`, so a repeated or older revoke changes nothing. An entry keeps its high-water mark
+until `close_room`. Nothing evicts it, because an evicted entry would let a stale epoch
+rejoin. A caller that churns through ids reuses them with rising epochs, as RTC-8 does, or
+gets `Limit(ids)` for an id beyond the table.
 
-**What a unit does when it applies a revoke.** At the start of its turn, in control order,
-it does each of these before it reads any datagram or media message:
+**What a unit does when it applies a revoke.** A unit applies a revoke at its next fence
+point: the start of its turn, or right after `udp_recv` returns (RTC-5, A turn). The control
+unit's message rings the unit's doorbell, so a waiting unit wakes for it. In control order,
+the unit does each of these before it routes any datagram or media message:
 
 1. **Ingress.** The participant's PeerSessions with epoch at or below the fence are closed
    (RTC-3) without the `close_notify` alert. Their 5-tuple rows go, so their datagrams reach no
    session. Their ICE credentials stop matching, so a Binding request under them gets no
    answer, and their DTLS and SRTP state is erased, so nothing they hold can be unprotected.
-2. **Egress of their media.** Every down-track of their publications is removed. Every
-   `UdpTx` not yet passed to `udp_send` that carries their media, in `out` or in a pacer queue,
-   is cancelled. Their RTX ring entries, and every queued RTX answer drawn from them, are
-   cancelled. These use the rtp lane's non-waiting close operations (RTP-12): `Rewrite.close`
-   on each removed down-track, so every later `on_packet` answers `Drop`; `History.clear` on
-   their publications' histories; and `Pacer.remove(stream)` on every pacer holding one of
-   the streams, with the handed-back entries discarded.
-3. **Egress to them.** Their down-tracks of other publications go with their sessions, in
-   step 1, with every pacer and RTX entry of those sessions.
-4. **In flight between units.** A `Media(P, epoch, ...)` message from the inbox whose
-   publisher is fenced at that epoch is dropped when it is taken. The fence is set first, so
-   a message posted before the revoke and taken after it is dropped.
+2. **Every queue, by tag.** Every entry whose `Tag` (RTC-3) has a fenced `src` or a fenced
+   `dst` is removed: in `out`, in the uncommitted suffix of a partial `udp_send`, in every
+   pacer (`Pacer.remove(stream)` with the handed-back entries discarded), in the ICE-TCP
+   write queues, and among the `RepairAsk` and `RepairReply` messages it holds. This covers
+   media, RTX repair (late-packet RTX and NACK answers), and RTCP addressed to a fenced
+   session.
+3. **Routing state.** Every down-track of their publications, and every down-track they
+   subscribe to, is removed. `Rewrite.close` is called on each, so every later `on_packet`
+   answers `Drop`. `History.clear` is called on their publications' ingress histories and on
+   the egress histories of every removed down-track (RTP-12).
+4. **In flight between units.** A `Media`, `RepairAsk` or `RepairReply` message whose `src`
+   or `dst` is fenced at its epoch is dropped when it is taken. The fence is set first, so a
+   message posted before the revoke and taken after it is dropped.
+5. **Writers.** An ICE-TCP path (RTC-8) whose current frame is partly written and carries a
+   fenced `src` or `dst` cannot drop the rest of the frame without corrupting the RFC 4571
+   stream, so the path is closed. A path whose frame is untouched has that frame removed in
+   step 2. UDP needs no such step. `udp_send` commits whole datagrams (NET-16), and the
+   suffix it did not commit was purged in step 2.
 
 **The acknowledgement.** The control unit applies the revoke, sends it to every other unit
-(not only those it thinks are involved, since a subscription change can be in flight), and
-returns `Ok(())` when every unit has acknowledged it. A unit acknowledges at the end of steps
-1 to 4, before its turn's `udp_send`. So once `revoke` returns:
+(not only those it thinks are involved, since a subscription change can be in flight), rings
+their doorbells, and returns `Ok(())` when every unit has acknowledged it. A unit
+acknowledges only after steps 1 to 5 hold together. Every older admission of the
+participant has stopped routing, and every writer has either finished handing its bytes to
+the kernel before the fence point or had its uncommitted work cancelled. No `udp_send`
+and no TCP write is in progress on a unit at its fence point, because the unit runs them on
+its own task between fence points. So once `revoke` returns:
 
-- no unit will pass to `udp_send` a datagram that carries media of the participant at a fenced
-  epoch, or that is addressed to one of its fenced sessions;
+- no unit will pass to `udp_send`, or write to a TCP path, a datagram that carries media or
+  repair of the participant at a fenced epoch, or that is addressed to one of its fenced
+  sessions. Before every send and every retry of an uncommitted suffix, the unit rechecks
+  both endpoints' tags against the fences;
 - no datagram from the participant's fenced sessions will reach any routing step.
 
-Datagrams already passed to `udp_send` have left the program. The fence is at the send, as
-the kernel cannot recall a datagram. The router emits `Event.Fenced(participant)` after the
-return. RTC-8's adapter turns it into the room message `Signal.Fenced(participant, epoch)`,
-and that is what the controlling application observes.
+Bytes already handed to the kernel before the fence point have left the program and may
+still arrive. The fence is at the send, because the kernel cannot recall a datagram. The
+router emits `Event.Fenced(participant)` after the return. RTC-8's adapter turns it into the
+room message `Signal.Fenced(peer, epoch)`, and that is what the controlling application
+observes.
 
 **Rejoin.** `join` with `epoch ≤ fenced[participant]` is `Fenced`. A rejoin needs a higher
 epoch, and it makes a new PeerSession with fresh ICE credentials, a new DTLS association and a
 new SRTP schedule.
 
-**Cost and liveness.** A revoke waits for at most one turn on each unit, plus one inbox hop.
-A unit's turn is bounded by one `udp_recv` batch and its sessions' due timers, so the
-fence's latency is bounded by the slowest unit's turn. No unit waits for another inside a
-turn, so revokes cannot deadlock.
+**Suspend.** `suspend(r, room)` uses the same machinery for a whole room without revoking
+anyone. Every unit, at its fence point, stops routing media and repair for every session of
+the room, and removes every queued entry whose tag names the room in step 2's queues and
+messages. Ingress stays up, so ICE consent and DTLS keep running and RTCP receiver reports
+continue. The control unit returns when every unit has acknowledged it, under the same rule
+as a revoke. `resume(r, room)` lifts it the same way. A `join`, `subscribe` or `set_target`
+on a suspended room is `Suspended`. RTC-8 uses this for signaling loss.
+
+**Cost and liveness.** A revoke or a suspend waits for each unit's next fence point plus one
+inbox hop. The doorbell wakes a waiting unit at once. A unit inside a turn reaches its next
+fence point when its current `udp_send` returns, and that call waits at most until the turn's
+deadline (NET-16). So the fence's latency is bounded by the slowest unit's turn. No unit
+waits for another inside a turn, so revokes cannot deadlock.
 
 **Leave is not revoke.** `leave` closes the participant's sessions with `close_notify`,
 removes its publications and drains nothing that is already queued. It is for ordinary
@@ -621,11 +922,12 @@ generic over them:
 
 ```hirsel unbuilt
 pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, Target) | Target(u64, Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(Inline[u64, 8], u8) | Fenced(u64, u64) | Refused(u32)
-pub type RoomIn[M] = Joined(u32) | Left(u32) | Message(u32, M) | Lost | Resynced
+pub type Incarnation = Incarnation(Inline[u8, 16])
+pub type RoomIn[M] = Part(Incarnation, u64, bool) | Joined(u32) | Left(u32) | Message(u32, M) | Lost
 pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
 pub type Embed[M] = Embed(wrap: own[send] fn(Signal) -> M, unwrap: own[send] fn(M) -> Option[Signal], publish: own[send] fn(u32) -> bool)
 
-pub fn adapter[M: codec](room: RoomId, take embed: Embed[M]) -> Adapter[M]
+pub fn adapter[M: codec](room: RoomId, limits: RoomLimits, take embed: Embed[M]) -> Adapter[M]
 pub fn room_in[M: codec](mut a: Adapter[M], mut r: Router, input: RoomIn[M], mut out: List[RoomOut[M]]) -> Result[(), RouterError] waits
 pub fn events[M: codec](mut a: Adapter[M], events: List[Event], mut out: List[RoomOut[M]])
 ```
@@ -636,41 +938,107 @@ other caller (`Grant` `Join`). The application wraps `Signal` in its own `M`
 answers whether a peer may publish, and the adapter passes it to `join`. The application
 decides it from its own state (for example the peer's `S`), and the router never reads `S`.
 
-- **Identity.** A participant is the room peer that sent the message: `id` is its peer
-  number, which the relay stamps and a peer cannot forge. The adapter keeps a counter per
-  room and gives each `Joined(peer)` the next value as `epoch`. A slot whose peer changes
-  shows as `Left` and then `Joined`, so a reused number gets a new epoch.
+**The roster the adapter reads.** Each room Part the relay sends begins with a head,
+`Part(incarnation, revision, snapshot)`, followed by that Part's `Joined`, `Left` and
+`Message` entries. These are runner slice R1's fields (below):
+
+- the **incarnation** names one life of the room's roster. It is 16 random bytes, drawn by
+  the relay each time it creates the roster, and again before the first admission after
+  the roster has emptied. So it never repeats across rooms, empty periods or relay
+  restarts;
+- within one incarnation, peer numbers are never reused. The relay resets its peer counter
+  only when it draws a new incarnation. So `(incarnation, peer)` is the **admission
+  identity**: it names exactly one admission;
+- the **revision** is the roster's membership revision. It starts at 1 for each
+  incarnation and rises by one at every admission and every removal;
+- `snapshot` is set on the Part after which the peer's view of the roster is complete at
+  `revision`: every member at that revision has been told, and no change is pending.
+
+- **Identity.** A participant is the room peer that sent the message, whose peer number the
+  relay stamps and a peer cannot forge. The adapter maps each admission identity
+  `(incarnation, peer)` to a router participant `(room, id, epoch)`. `id` is a dense local id
+  below `RoomLimits.ids`: the adapter gives each new admission the lowest id that has no live
+  admission, so ids are reused and never run out while the room has at most `participants`
+  members. `epoch` is the next value of one counter per room that only rises, so a reused id
+  always comes back above its fence. `Fenced`, `Published` and `Speakers` signals name the
+  peer number, never the local id.
 - **Unicast.** An offer, answer, candidate, glare or layer mask goes peer to peer
   (`ToPeer`). Only the peer the answer was sent to learns its ICE password, which is what
   binds the media path to that peer (RTC-3). `Published`, `Unpublished` and `Speakers` go to
   the room (`ToRoom`). `runner.room` permits peer-to-peer sends for `Watch` and `Join` members,
   and room sends for `Join` members (`room_permits`,
   core/programs/runner/runner-room-grants.hirsel).
-- **Revocation from the roster.** `Left(peer)` calls `revoke(room, peer, epoch)`, and
-  then sends `Fenced(peer, epoch)` to the room. The application's own kick withdraws the
-  peer's room grant, and the room's roster then removes it. So a kick is acknowledged to the
-  application's watchers by the `Fenced` message, sent only after RTC-7's fence holds.
-- **Signaling loss fails closed.** On `Lost` (the service's room session ended or reported a
-  gap), the router stops forwarding for the room: ingress is kept, so ICE consent and DTLS
-  stay up, but nothing is forwarded. The service cannot see a kick while it cannot see the
-  roster. On `Resynced` (a complete roster after rejoin), every peer absent from it, or
-  present with a changed slot, is revoked, and forwarding resumes for the rest.
+- **Revocation from the roster.** `Left(peer)` calls `revoke(room, id, epoch)` for that
+  admission, and then sends `Fenced(peer, epoch)` to the room. The application's own kick
+  withdraws the peer's room grant, and the room's roster then removes it. So a kick is
+  acknowledged to the application's watchers by the `Fenced` message, sent only after RTC-7's
+  fence holds.
+- **Signaling loss suspends at once.** On `Lost` (the service's room session ended or
+  reported a gap), the adapter calls `suspend(room)` (RTC-7) before it takes any other
+  input. Every unit stops routing the room's media and repair, and cancels what it has queued
+  for the room. The call returns when every unit has acknowledged it. The service cannot see
+  a kick while it cannot see the roster. Ingress stays up, so ICE consent and DTLS survive a
+  short gap.
+- **Resuming from a proven roster.** After `Lost`, the adapter applies `Joined` and `Left`
+  entries to a scratch roster and resumes only at a Part with `snapshot` set. It then
+  compares the snapshot with what it knew before the gap:
+  - a snapshot whose incarnation equals the pre-gap incarnation and whose revision is below
+    the last revision the adapter applied is **stale**. It is discarded, and the room stays
+    suspended until a current snapshot arrives;
+  - if the incarnation equals the pre-gap incarnation, each pre-gap admission whose
+    `(incarnation, peer)` is in the snapshot continues with its id and epoch. Each one absent
+    from it is revoked and `Fenced` is sent;
+  - if the incarnation differs, the relay restarted or the room emptied during the gap, and
+    no pre-gap admission's continuity can be proved. Every pre-gap admission is revoked, and
+    each present peer must join afresh with a new offer. The same holds when the Part head is
+    absent, so the adapter fails closed against a relay that predates R1;
+  - new peers in the snapshot are admitted as new identities. Then `resume(room)` is called.
+
+  Revoking every pre-gap session on any loss would also be sound. It is not the end state:
+  the relay change costs one 16-byte incarnation, one revision counter and one flag per Part,
+  F1 and F2 are unbuilt, so no consumer migrates, while a blanket revoke would force every
+  participant in the room through a new ICE and DTLS handshake on every reconnect of the
+  service's room session. The proof keeps an unchanged member's media flowing across a gap
+  and still fails closed whenever continuity is not proved.
 - **Refusals.** A `Signal` the router refuses is answered `Refused(code)` to the sender, with
   the `RouterError` tag as `code`. A malformed `M` never reaches the adapter, because the
   room's codec check refuses it first.
 
-**What runner.room must provide.** media-webrtc-sfu-spec-2319 read main at `29c75134`.
-The verdict on each of CONSUMER-CONTRACT §3's items belongs to hirsel4-rooms-2301's report.
+**What runner.room must provide.** media-webrtc-sfu-spec-2319 read main at `29c75134`, and
+this amend reread the relay at `0ea91569`. The verdict on each of CONSUMER-CONTRACT §3's
+items belongs to hirsel4-rooms-2301's report.
 
 | Need | Status on main | Gap |
 | --- | --- | --- |
 | Authenticated addressed unicast | Built. `SendToPeer` exists and the relay checks the sender's grant and membership epoch (core/programs/runner/runner-room-relay.hirsel, `relay_message_target`) | none for the server side |
-| A monotonic membership revision | The relay keeps `member_epoch` and `adm` internally (core/programs/runner/runner-room-grants.hirsel). The adapter needs only joined and left per peer, which the roster diff carries (`RoomDiff.left`, core/programs/runner/runner-room-flush.hirsel) | none, since the adapter's own epoch suffices |
+| A room incarnation, a membership revision and admission identities | **Missing.** The relay mints an `adm` per admission and keeps `member_epoch` internally, but sends neither, and it resets `next_peer` to 1 whenever a room's count reaches 0 (core/programs/runner/runner-room-relay.hirsel, `room_remove_peer` and `room_reconcile_seat`), so a peer number can name two admissions | runner slice R1 |
+| A marked complete roster | **Missing.** A roster diff can span several Parts (`plan.included`, core/programs/runner/runner-room-flush.hirsel) and nothing marks the Part that completes it | runner slice R1 |
 | Targeted kick | The application withdraws the peer's `Grant` in its admission view, and the grant set's revocation path removes it | none |
 | Per-connection expiry | Built for WebSocket sessions by 7e01e2ee (rooms released at expiry, RUNNER-SPEC "Enforcement") | none |
-| A Hirsel-side room client | **Missing.** `std.websocket` has client framing but no `hirsel.4` session or room client | follow-up F1 |
-| Room calls in the generated JS SDK | **Missing.** sdk/client/client.ts has no room API | follow-up F2 |
+| A Hirsel-side room client | **Missing.** `std.websocket` has client framing but no `hirsel.4` session or room client | follow-up F1, which decodes the R1 Part head into `RoomIn.Part` |
+| Room calls in the generated JS SDK | **Missing.** sdk/client/client.ts has no room API | follow-up F2, which exposes the incarnation and revision with the roster |
 
+**Runner slice R1 (the relay's roster identity).** In core/programs/runner:
+
+- `RoomRoster` gains `incarnation: Inline[u8, 16]` and `revision: u64`. `make_room_roster`
+  draws the incarnation from the place's `Random` and sets the revision to 1. `next_peer`
+  is no longer reset when a room's count reaches 0. Instead, the next admission into a
+  roster whose count is 0 draws a fresh incarnation, resets `next_peer` to 1 and the revision
+  to 1. Each admission and each removal raises the revision by one.
+- `room_part_start` writes the head after `you`: the 16 incarnation bytes, the revision as
+  a `u64`, and a `snapshot` byte. `ROOM_PART_FIXED` grows by 25 bytes. The flush sets
+  `snapshot` on a Part after which the member's `told` equals the roster for every slot, with
+  no `changed` entry pending.
+- Law `room_roster_identity`, in runner_owner_laws.hirsel's room harness (`room_law_*`): a
+  watcher disconnects, every other member leaves so the room empties, new members join
+  (taking peer 1 again), and the watcher reconnects. A second case churns 300 sequential
+  admissions through a room with 256 slots on one incarnation. *Oracle:* by hand. The
+  reconnecting watcher sees a different incarnation. No peer number repeats within one
+  incarnation. The revision equals the hand-counted admissions plus removals. `snapshot` is
+  set on exactly the Part that completes the roster. On main before R1 the first case
+  shows peer 1 twice with nothing to tell the two apart, so the law is red.
+
+R1 changes no wire field that a shipped client reads, since F1 and F2 do not exist yet.
 Until F1 lands, the adapter is driven by a test harness that feeds `RoomIn` and reads
 `RoomOut`. Its laws run that way. The browser end-to-end case waits on F1 and F2.
 
@@ -679,11 +1047,16 @@ NET-6) and offer a passive ICE-TCP host candidate
 ([RFC 6544](https://www.rfc-editor.org/rfc/rfc6544), `tcptype passive`). An accepted
 connection carries RFC 4571 framing: each datagram is preceded by its 16-bit big-endian length.
 The unit deframes into the same receive slot and feeds `receive` with the connection as the
-path. It frames and writes the session's output for that path instead of putting it in the UDP
-batch. ICE-Lite permits a passive TCP candidate (RFC 6544 §7.2). A browser behind a firewall
-that passes TCP to the server's port then needs no TURN server. That is slice S8. TURN over TLS
-(RFC 8656 §3.2, for networks that pass only proxied TLS) needs a TURN server and server-side
-TLS. It is follow-up F3 for `stun_ice`, since TLS-4 has no server handshake today.
+path. A zero-length frame consumes only its 2-byte prefix and is dropped. The unit frames the
+session's output for that path into the path's write queue, tagged as in RTC-3, instead of
+putting it in the UDP batch. It writes from the queue on its own task, between fence points,
+with a deadline no later than the turn's. A frame written only in part keeps a cursor, and
+the next turn continues it. Abandoning a fenced frame part-way closes the path (RTC-7
+step 5). ICE-Lite permits a passive TCP candidate (RFC 6544 §7.2). A browser behind a
+firewall that passes TCP to the server's port then needs no TURN server. That is slice S8.
+TURN over TLS (RFC 8656 §3.2, for networks that pass only proxied TLS) needs a TURN server and
+server-side TLS. It is follow-up F3 for `stun_ice`, since TLS-4 has no server handshake
+today.
 
 ## WebRTC build laws
 
@@ -695,100 +1068,178 @@ Harnesses are the package's law module (`laws.hirsel` in `webrtc_sfu`, as `stun_
 unless named otherwise.
 
 - **W1 `sdp_browser_offers`.** *Scenario:* parse a Chromium and a Firefox offer: audio, video
-  with three-RID simulcast, RTX, the seven extensions, and an `application` section. *Oracle:*
-  hand-written `Description` values from reading the captures. *Then* `answer` each with the
-  default policy. *Oracle:* the expected answer text written by hand from RTC-2 and RFC 8829
-  §5.3. It has the same MIDs in BUNDLE, the offer's payload types and extmap IDs,
-  `setup:passive`, `ice-lite`, `a=simulcast:recv` in the offer's order, and the application
-  section at port 0.
-- **W2 `sdp_rfc_examples`.** Parse the SDP examples of RFC 8829 §7 and RFC 8853 §6. *Oracle:*
-  the RFCs' text.
-- **W3 `sdp_refusals`.** One offer per refusal of RTC-1: no BUNDLE, a section outside it, no
-  `rtcp-mux`, no MID, only a `sha-1` fingerprint, one extension URI under two IDs, one payload
-  type as two codecs, a RID with a `~`, 32,001 bytes, 65 sections. *Oracle:* the named
-  `SdpError` with the section index, by hand.
-- **W4 `demux_first_byte`.** `classify` for all 256 first bytes and the RTP/RTCP split on
-  the second byte. *Oracle:* RFC 9443 §7's table and RFC 5761 §4, by hand. Exhaustive.
+  with three-RID simulcast, RTX, the seven extensions, and an `application` section, plus a
+  variant whose second video section is `bundle-only` with port 0. *Oracle:* hand-written
+  `Description` values from reading the captures, `Port.BundleOnly` and `tls-id` included.
+  *Then* `answer` each with the default policy. *Oracle:* the expected answer text written by
+  hand from RTC-2 and RFC 9429 §5.3. It has the kept MIDs in BUNDLE with the rejected
+  application MID left out, the offer's payload types and extmap IDs, `setup:passive`,
+  session-level `ice-lite`, `tls-id`, `a=simulcast:recv` in the offer's order, the
+  `bundle-only` section accepted on the BUNDLE port, and the application section rejected at
+  port 0. The local credentials and the BUNDLE MID list are pinned in the expected text.
+- **W2 `sdp_rfc_examples`.** Parse the SDP examples of RFC 9429 §7 and RFC 8853 §5.6, and
+  answer those that are offers. *Oracle:* for each fixture, the expected fields written by
+  hand from the RFC's text: each section's port kind, MID, direction, formats, RIDs with
+  direction and restrictions, and both simulcast lists. For RFC 8853 §5.6.1 (send and
+  receive simulcast) the answer accepts the send list and declines the receive list. For
+  §5.6.2 (alternatives and paused streams) the answer keeps the alternatives and removes the
+  paused entries. A fixture whose expected result is a refusal names the `SdpError`.
+  Parsing without an error is never the pass condition.
+- **W3 `sdp_refusals`.** One offer per refusal of RTC-1 and RTC-2: no BUNDLE, a section
+  outside it, no `rtcp-mux` on the tagged section, no MID, only a `sha-1` fingerprint, one
+  extension URI under two IDs, one payload type as two codecs, payload type 80 with
+  `rtcp-mux`, an invalid RID identifier, a simulcast list naming an absent RID, 32,001 bytes,
+  65 sections, 33 formats, and five RIDs. Each limit also has an exact-limit fixture
+  (32,000 bytes, 64 sections, 32 formats, four RIDs) that is accepted. Acceptance cases kept
+  distinct from refusals: a paused list entry (accepted, removed from the answer), a RID
+  with a dangling `depend=` (removed), and a RID whose `pt=` list has an empty intersection
+  with the kept formats (removed). *Oracle:* the named `SdpError` with the section index, or
+  the expected answer lines, by hand.
+- **W4 `demux_prefix`.** `classify` over every first byte with a second byte at each
+  boundary: 191, 192, 223 and 224 (RTP, RTCP, RTCP, RTP), plus the empty datagram and a
+  1-byte datagram in the 128 to 191 range (`Drop`). A short RTP, RTCP, STUN and DTLS datagram
+  is each dropped and counted by its reader. A payload type repeated in two sections without a
+  MID extension is dropped. An SSRC rebound to a newer MID is not taken back by an older
+  packet carrying the earlier MID. *Oracle:* RFC 9443 §3's table and RFC 5761 §4, by hand.
+  Exhaustive over the first byte.
 - **W5 `glare_settles_in_one_round`.** The server offers (adding a down-track) while a client
   offer is in flight. *Oracle:* by hand from RTC-2. The client's offer gets `Glare(v)`, the
   client's answer to `v` is accepted, its re-sent offer is answered, and both ends end
-  `Stable` with both changes applied.
+  `Stable` with both changes applied. Then: an answer to an older version is refused as
+  stale, an answer with a changed fingerprint or `tls-id` is `AssociationChanged`, and an
+  answer with a reordered section is `AnswerMismatch`. Each refusal leaves the running
+  session's agreed sections and its forwarding unchanged, shown by the next packet.
 - **W6 `late_answer_goes_out_as_rtx`.** rtp's `rewrite_late` law covers the `Late` answer
-  itself. This law covers what the session does with it. *Scenario:* source sequence 10, 11,
-  13, 12 of one encoding to one down-track with RTX, then the same without RTX. *Oracle:* by
-  hand from RTC-4, with the RTX packet's bytes laid out per RFC 4588 §4. With RTX, the media
-  SSRC carries outbound 1000, 1001, 1003, and packet 12 leaves as one SRTP packet on the RTX
-  SSRC with OSN 1002, at the RTX stream's next sequence number. A harness SRTP receiver opens
-  it. Without RTX, it is dropped and counted. No sealer returns `Reused`, `Retired` or
-  `Range`.
-- **W7 `ssrc_survives_switches`.** One down-track goes Layer(0) → Layer(2) → Off → Layer(1) and is
-  rebound to a second publication. *Oracle:* by hand. The media and RTX SSRCs never change,
-  each sealer is issued exactly once (no `Issued` from TLS-8), and the outbound index rises by
-  one per forwarded packet.
-- **W8 `fanout_across_units`.** One publisher on unit 0, two subscribers on unit 0 and one on
-  unit 1, over `sim.udp`. *Oracle:* hand-derived rewritten headers (SSRC, sequence,
-  timestamp, extension IDs) for 20 packets. Each subscriber's harness session opens every
-  packet to the publisher's plaintext payload. Unit 1 gets exactly one `Media` message per
-  packet.
+  itself. This law covers what the session does with it, and with a NACK. *Scenario:*
+  source sequence 10, 11, 13, 12 of one encoding to one down-track with RTX, the same across
+  the 16-bit rollover (65534, 65535, 1, 0), then the next on-time packet, then the same
+  without RTX. Then two subscribers whose legs use different MIDs, payload types and
+  extension IDs each NACK a packet. One subscriber NACKs a packet from before a source
+  switch. *Oracle:* by hand from RTC-4, with RTX bytes laid out per RFC 4588 §4. With RTX,
+  the media SSRC carries the outbound numbers in source order with no number reused. The late
+  packet leaves as one SRTP packet on the RTX SSRC, with the low 16 bits of its outbound index
+  as OSN, its mapped timestamp and marker, and the RTX stream's next sequence number. The next
+  on-time packet takes the media number after the highest. A harness SRTP receiver opens it.
+  Without RTX, the late packet is dropped and counted. Each NACK answer carries that
+  subscriber's original translated header bytes (OSN, payload type, MID, extension IDs,
+  payload) and a fresh transport sequence number. The pre-switch NACK answers nothing. No
+  sealer returns `Reused`, `Retired` or `Range`.
+- **W7 `ssrc_survives_switches`.** One down-track goes Layer(0) → Layer(2) → Off → Layer(1)
+  and is rebound to a second publication, then to a third: A → B → C. A's output offset is
+  nonzero, the three sources have unrelated sequence and timestamp bases, one switch crosses
+  a sequence wrap, B's first frame is two packets with equal timestamps, and SRs are taken
+  from the publishers' wire. A second run has no SRs and uses the arrival rule. Then an
+  authenticated remote packet arrives on the down-track's media SSRC. *Oracle:* by hand from
+  RTC-4 and RTC-6. Until the collision, the media and RTX SSRCs never change, each sealer is
+  issued exactly once (no `Issued` from TLS-8), the outbound index rises by one per forwarded
+  packet, and at every intended switch the output timestamp equals the hand-projected
+  value, which is strictly above the last. The two packets of B's first frame share one output
+  timestamp. After the collision, a BYE for the old SSRC goes out, the down-track continues on
+  a fresh SSRC with a new sealer, and the retired SSRC's sealer is never issued again.
+- **W8 `fanout_across_units`.** One publisher on unit 0, two subscribers on unit 0 and two on
+  unit 1, over `sim.udp`. The subscribers' legs use different MIDs, payload types and
+  extension IDs from the publisher's and from each other. *Oracle:* hand-derived rewritten
+  headers (SSRC, sequence, timestamp, payload type, MID value, extension IDs, transport
+  sequence number from each subscriber's own transport) for 20 packets. Each subscriber's
+  harness session opens every packet to the publisher's plaintext payload. Unit 1 gets
+  exactly one `Media` message per packet for its two subscribers. A valid NACK from a unit 1
+  subscriber is answered through `RepairAsk` and `RepairReply`. Then two SRs are opened, one
+  per down-track: each is sealed under its own down-track's SSRC, and its sender SSRC,
+  packet and octet counts and RTP timestamp match that subscriber's media.
 - **W9 `router_fills_units`.** rtp's `simulcast_switch` and `svc_masks` laws cover switching
-  given a `Unit`. This law covers how the router builds the `Unit` and the target. *Scenario:*
-  captured VP8 (three encodings, two temporal layers), H.264 (three encodings), VP9 SVC, and an
-  AV1 L3T3 stream with Dependency Descriptors from Chromium. *Oracle:* for each packet, the
-  `(start, end, keyframe, needs, switches)` and the `Layer(e, s, t)` to `(source, i)` mapping,
-  written by hand from RFC 7741, the VP9 RTP payload format and AV1 RTP §A.8 against the
-  captured bytes. For AV1, the decode-target indexes are cross-checked against LiveKit's
-  dependency-descriptor selector (pkg/sfu/videolayerselector in /tmp/ref-livekit) on the same
-  packets.
+  given a `Unit`. This law covers how the router builds the `Unit` and the target, through
+  actual egress. *Scenario:* captured VP8 (three encodings, two temporal layers), H.264
+  (three encodings), VP9 SVC, and an AV1 L3T3 stream with Dependency Descriptors from
+  Chromium. Cases: a target change followed by a keyframe fragmented over several packets,
+  a VP8 packet with `S = 1` and a nonzero partition index, a VP9 `U` picture whose spatial
+  dependency is not yet met, and an AV1 structure whose decode-target table is permuted.
+  *Oracle:* for each packet, the `(start, end, keyframe, needs, switches)` and the
+  `Layer(e, s, t)` to `(source, i)` mapping, written by hand from RFC 7741, RFC 9628 §4.2 and
+  AV1 RTP §A.8 against the captured bytes, and the egress packets a subscriber receives. The
+  switch commits at the first decodable frame start, the whole frame follows, the old source
+  forwards until then, and the permuted AV1 table maps by layer, not by index. For AV1, the
+  decode-target indexes are cross-checked against LiveKit's dependency-descriptor selector
+  (pkg/sfu/videolayerselector in /tmp/ref-livekit) on the same packets.
 - **W10 `keyframe_request_coalesces_across_subscribers`.** Three subscribers switch from
   encoding 0 to encoding 2 in the same 20 ms, and a fourth subscriber's `Losses` answers
   `Reset`. *Oracle:* by hand from RTC-6. Exactly one PLI reaches the publisher before the
   first keyframe of encoding 2. All four down-tracks then forward from that keyframe. A
-  publisher with `ccm fir` and no `pli` gets one FIR whose sequence number rises only for the
-  next new request (RFC 5104 §4.3.1.1).
-- **W11 `dynacast_mask`.** Three subscribers change targets over 12 s of simulated time.
-  *Oracle:* by hand. A bit turns on in the same turn, and a bit turns off after exactly 5,000
-  ms with no event inside the delay when a target returns. Packets outside the mask are never
-  forwarded.
-- **W12 `active_speaker_scores`.** Audio-level traces of four publications, 20 ms packets.
-  *Oracle:* the Q16 formula of RTC-6, computed by hand for each 400 ms window; the ranking
-  must equal LiveKit's `AudioLevel` run on the same trace (Go, /tmp/ref-livekit at `d210b4d`).
-  The scores differ from LiveKit's floats only by rounding.
-- **W13 `audio_forward_gate`.** `audio_forward = 2`, four speakers whose ranks change.
-  *Oracle:* by hand. Each subscriber gets exactly the top two other speakers, at the next
-  packet after a rank change, with continuous outbound sequence numbers per down-track.
-- **W14 `revoke_fence_schedules`.** *Model:* a control unit and two media units. The steps
-  are: unit 0 takes a datagram, routes it locally and posts `Media` to unit 1; the control
-  unit sends the revoke; each unit applies it and acknowledges; unit 1 takes the media
-  message; each unit calls `udp_send`. Every interleaving that keeps each unit's own order is
-  run, through a test-only seam that pauses each step. *Oracle:* exhaustive enumeration
-  against the invariant that no `udp_send` after `revoke` returns carries the participant's
-  media at the fenced epoch or goes to its fenced session. A negative control (apply the fence
-  after taking the inbox) must fail the enumeration.
-- **W15 `revoke_stops_everything`.** Real units over `sim.udp`. The revoked participant
-  publishes video with NACK-driven RTX queued, and subscribes to two publications. After
-  `revoke` returns: *Oracle:* by hand from RTC-7. Across 200 ms of further input, no captured
-  `UdpTx` carries any of its down-tracks' SSRCs or any packet of its publications. A Binding
-  request under its old ufrag gets no response. A DTLS record and an SRTP packet from its old
-  5-tuple are dropped and counted. `join` at the same epoch is `Fenced`, and at a higher epoch
-  it succeeds with new credentials.
-- **W16 `signaling_loss_fails_closed`.** The adapter gets `Lost`, then `Resynced` with one
-  peer gone and one slot replaced. *Oracle:* by hand from RTC-8. Nothing is forwarded between
-  the two. Both changed peers are revoked, `Fenced` is sent for each, and forwarding resumes
-  for the rest.
+  publisher with `ccm fir` and no `pli` gets one FIR. Its round-trip estimate then moves by
+  more than a quarter, and the retry after the new interval carries the same FIR sequence
+  number. A new request after the keyframe carries the next number mod 256 (RFC 5104
+  §4.3.1.1). A publisher that negotiated neither gets no feedback packet at all.
+- **W11 `dynacast_mask`.** Three subscribers change targets over 12 s of simulated time,
+  two of them on a remote unit. One subscriber's budget is below one base layer, and a
+  second subscriber can afford one base but not a second. One down-track holds its old
+  encoding during a pending switch. *Oracle:* by hand from RTC-6. A bit turns on in the same
+  turn, and a bit turns off after exactly 5,000 ms with no event inside the delay when a
+  target returns. The remote unit's demand sets bits. The below-base down-track stays `Off`,
+  the unaffordable second base stays `Off` in publication order, and the held encoding
+  keeps its bit until the switch. Packets outside the mask are never forwarded.
+- **W12 `active_speaker_scores`.** Audio-level traces of four publications, 20 ms packets,
+  with a reordered packet, an 800 ms expiry, and two scores that tie after Q16 quantization.
+  *Oracle:* the Q16 formula of RTC-6, computed by hand for each 400 ms window, and the
+  tie-break for the tie. A second oracle is LiveKit's `AudioLevel`, run on the same traces
+  (Go, /tmp/ref-livekit at `d210b4d`), compared only on traces whose rounding cannot change
+  the order.
+- **W13 `audio_forward_gate`.** `audio_forward = 2`, four speakers whose ranks come from a
+  fixed schedule supplied independently of W12. Legs: one with `vad=on`, one with
+  `vad=off`, one with the extension absent, and one with the extension remapped to another
+  ID. *Oracle:* by hand. Each subscriber gets exactly the top two other speakers, at the next
+  packet after a rank change, with continuous outbound sequence numbers per down-track. The
+  seven level bits arrive unchanged, `V` follows RTC-6's rule per leg, and the absent leg
+  carries no extension.
+- **W14 `revoke_fence_schedules`.** *Model:* a control unit and two media units. Steps: unit 0
+  takes a datagram, routes it locally and posts `Media` to unit 1; unit 1's subscriber NACKs
+  a packet and unit 0 posts a `RepairReply`; unit 0's `udp_send` commits only a prefix of its
+  batch; unit 1 has a partly written ICE-TCP frame; the control unit sends the revoke; each
+  unit applies it and acknowledges; each unit takes its messages, retries its suffix and
+  writes. Every interleaving that keeps each unit's own order is run, through a test-only
+  seam that pauses each step, for the revoked participant as publisher and as subscriber.
+  *Oracle:* exhaustive enumeration against the invariant that no `udp_send` or TCP write
+  after `revoke` returns carries the participant's media or repair at the fenced epoch, or
+  goes to its fenced session. The same enumeration runs `suspend`. A negative control that
+  acknowledges while a writer still holds a fenced packet (the uncommitted suffix kept for
+  retry) must fail the enumeration.
+- **W15 `revoke_stops_everything`.** Real units over `sim.udp` with one ICE-TCP path. The
+  revoked participant publishes video with NACK-driven RTX queued, and subscribes to two
+  publications. At the revoke, an RTX reply, a UDP suffix and a TCP frame are each held across
+  the acknowledgement, in both directions. After `revoke` returns: *Oracle:* by hand from
+  RTC-7, from captures at each writer (UDP and TCP). Across 200 ms of further input, no
+  captured datagram or frame carries any of its down-tracks' SSRCs or any packet of its
+  publications. A Binding request under its old ufrag gets no response. A DTLS record and an
+  SRTP packet from its old 5-tuple are dropped and counted. An unrelated participant's media
+  keeps flowing throughout. `join` at the same epoch is `Fenced`, and at a higher epoch it
+  succeeds with new credentials. A repeated revoke changes nothing. Then ids are churned in
+  sequence up to `RoomLimits.ids`. One more unseen id is `Limit(ids)`, and the oldest
+  fenced epoch is still refused `Fenced`.
+- **W16 `signaling_loss_fails_closed`.** The adapter, driven by a harness, gets `Lost` while
+  units hold queued media and an RTX repair for the room, then Parts with `snapshot`. Cases:
+  the same incarnation with one peer gone and one unchanged; a stale snapshot whose revision
+  is below the last applied; a changed incarnation in which a different admission now holds
+  the same peer number; and a missing Part head. *Oracle:* by hand from RTC-8, with
+  captures at every unit. Nothing is forwarded from `Lost` until resume, the queued repair
+  never leaves, the stale snapshot is discarded and the room stays suspended, the gone peer
+  is revoked with `Fenced` sent, the unchanged peer resumes with its id and epoch, and in
+  the last two cases every pre-gap admission is revoked, the same-number peer included.
 - **W17 `ice_tcp_framing`.** RFC 4571 frames split across reads and joined in one read, plus
-  a 0-length and a 65,535-byte frame. *Oracle:* hand-derived frame boundaries. The passive
-  candidate line in the answer is checked against RFC 6544 §4.5's grammar, by hand.
-- **W18 `forward_allocates_nothing`.** Forwarding one RTP packet to 8 down-tracks on one unit,
+  a 0-length and a 65,535-byte frame. *Oracle:* hand-derived frame boundaries from RFC 4571
+  §2. The null frame consumes only its 2-byte prefix. The passive candidate line in the
+  answer is checked against RFC 6544 §4.5's grammar, by hand.
+- **W18 `forward_allocates_nothing`.** Forwarding RTP packets to 8 down-tracks on one unit,
   after warm-up, runs under a zero-byte allocation bound, as `stun_ice`'s Binding laws do.
-  *Oracle:* the bound.
+  The measured turn must deliver eight packets, so dropping all traffic cannot pass.
+  *Oracle:* the bound and the eight captured packets.
 - **W19 `unauthenticated_changes_nothing`.** On an established session, feed: an SRTP packet
   with one flipped tag bit, a replayed packet, a packet whose index estimate jumps 2^15
-  ahead under a bad tag, an RTCP NACK and a TWCC feedback with bad tags, and a valid packet
-  from a 5-tuple outside the table. *Oracle:* by hand from RTC-3, against a snapshot of every
-  stateful value (statistics, loss window, `History`, `Rewrite` ranges, TWCC log, BWE, speaker
-  score, 5-tuple table, ROC). Each input leaves all of them equal and raises one drop counter.
-  A following valid packet at the next index is accepted. A negative control that runs
-  statistics before `open` must fail.
+  ahead under a bad tag, a bad-tag packet carrying a new MID or RID for a known SSRC, an
+  RTCP NACK and a TWCC feedback with bad tags, a valid packet from a 5-tuple outside the
+  table, and a STUN Binding request from a new address with invalid `MESSAGE-INTEGRITY`.
+  *Oracle:* by hand from RTC-3, against a snapshot of every stateful value (statistics, loss
+  window, `History`, `Rewrite` ranges, TWCC log, BWE, speaker score, SSRC-to-MID and
+  SSRC-to-RID bindings, selected path, 5-tuple table, ROC). Each input leaves all of them
+  equal and raises one drop counter. A following valid packet at the next index is accepted.
+  A negative control that runs statistics before `open` must fail.
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
@@ -821,36 +1272,54 @@ them under the host rules' matched-comparison terms, against mediasoup's
 ## Build slices
 
 Each slice lands on its own with its laws. A Sol lane can run S1 to S6 in order. S7 and S8
-can run beside S5. Reds that may ride a land are the nightly N1 and N2, and any cost target
-not yet met. A red law of a slice's own blocks that slice. A TLS-8 `Reused`, `Issued` or
-`Range` anywhere, or any red in W14, W15 or W19, blocks, because those are soundness reds.
+can run beside S5. R1 is a runner slice and can run at any time. Reds that may ride a land
+are the nightly N1 and N2, and any cost target not yet met. A red law of a slice's own blocks
+that slice. A TLS-8 `Reused`, `Issued` or `Range` anywhere, or any red in W14, W15, W16 or
+W19, blocks, because those are soundness reds.
 
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
-| **S1** SDP | the package skeleton (`webrtc_sfu` with `sdp`, `peer`, `router`, `signal`); RTC-1 `parse` and `write`; RTC-2 `answer`, `offer`, `accept_answer`, glare state; captured browser offers committed as vectors | nothing | W1, W2, W3, W5 |
-| **S2** VP8 descriptor | `media_bits` gains VP8 (RFC 7741): payload descriptor parse (`X`, `I`, `L`, `T`, `K`, `PictureID`, `TL0PICIDX`, `TID`, `Y`, `KEYIDX`), keyframe detection from the payload header's `P` bit, and the rewrites of `PictureID` and `TL0PICIDX` | nothing | in `media_bits`'s own laws: RFC 7741 §4's examples, and captured Chromium VP8 packets, by hand |
-| **S3** PeerSession | RTC-3 over `stun_ice` Lite, the dtls lane's server, the srtp lane's contexts and the rtp lane's parsing; `classify`; the 5-tuple table; RTC-4's SSRC generator, sealers, late-packet RTX and NACK answers | S1; dtls, srtp and rtp lanes' first slices | W4, W6, W7, W19 |
-| **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out, bounds; RTC-6's layer selection, switch points and keyframe-request coalescing | S2, S3 | W9, W10, W18 |
-| **S5** Units and fence | the control order, `Media` messages with `Shared[Bytes]`, remote NACKs; RTC-7 with its test seam | S4 | W8, W14, W15 |
-| **S6** Dynacast and speakers | RTC-6's wanted mask and pause delay, the bandwidth-limited effective target, the Q16 active-speaker scores, `audio_forward` | S4 | W11, W12, W13 |
-| **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, epochs, fail-closed loss; driven by a harness until F1 | S5 | W16 |
-| **S8** ICE-TCP | RTC-8's passive TCP candidate, RFC 4571 framing, TCP paths in the session | S3 | W17 |
+| **S1** SDP | the package skeleton (`webrtc_sfu` with `sdp`, `peer`, `router`, `signal`); RTC-1 `parse` and `write` with port kinds, `tls-id`, per-direction RIDs and simulcast, extmap direction and `vad`; RTC-2 `answer`, `offer`, `accept_answer` with association reuse and answer validation, glare state; captured browser offers committed as vectors | nothing | W1, W2, W3, W5 |
+| **S2** VP8 descriptor | `media_bits` gains VP8 (RFC 7741): payload descriptor parse (`X`, `I`, `L`, `T`, `K`, `PictureID`, `TL0PICIDX`, `TID`, `Y`, `KEYIDX`, `S` and partition index), keyframe detection from the payload header's `P` bit, and the rewrites of `PictureID` and `TL0PICIDX` | nothing | in `media_bits`'s own laws: RFC 7741 §4's examples, and captured Chromium VP8 packets, by hand |
+| **S3** PeerSession | RTC-3 over `stun_ice` Lite, the dtls lane's server, the srtp lane's contexts and the rtp lane's parsing; prefix `classify`; authenticated MID, SSRC and payload-type binding; inbound RTX; the 5-tuple table; the `Tag`ged outbox; RTC-4's SSRC generator, sealers, collision recovery, late-packet RTX, per-down-track egress history and NACK answers, per-down-track SRs | S1; dtls, srtp and rtp lanes' first slices; the rtp amend's RTP-7 history record and RTP-11 switch timeline | W4, W6, W7, W19 |
+| **S4** One-unit router | RTC-5 on a single unit: rooms, publications, down-tracks, fan-out in the subscriber's wire identity, transport sequence numbers at send, bounds and fence capacity; RTC-6's stable target maps, current and pending presentation, switch timeline, and negotiated keyframe requests with in-place intervals | S2, S3; the rtp amend's in-place `Keyframes` interval | W9, W10, W18 |
+| **S5** Units and fence | the control order, doorbells, `Media`, `RepairAsk` and `RepairReply` messages with tags, the uncommitted suffix; RTC-7 with its test seam, `suspend` and `resume` | S4 | W8, W14, W15 |
+| **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with bandwidth pause, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S4 | W11, W12, W13 |
+| **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness until F1 | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
+| **S8** ICE-TCP | RTC-8's passive TCP candidate, RFC 4571 framing, tagged TCP write queues and the close of an abandoned frame | S3, S5 | W17 |
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7; F1, F2 for N1 | the cost targets |
+| **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
 **Follow-ups this spec names.**
 
 - **F1** (runner): a Hirsel-side `hirsel.4` room client, so a Hirsel service can be a room peer
-  and feed `RoomIn`.
-- **F2** (SDK): room calls in the generated JS SDK, for unicast `Message`, the roster and
-  state.
+  and feed `RoomIn`, including R1's Part head.
+- **F2** (SDK): room calls in the generated JS SDK, for unicast `Message`, the roster with its
+  incarnation and revision, and state.
 - **F3** (`stun_ice`): TURN over TLS (RFC 8656) for proxied networks. It needs server-side TLS.
 - **Ownership:** the active-speaker detector is this package's (RTC-6), not the rtp lane's.
   The rtp lane parses the RFC 6464 extension.
 
+**Handed to the rtp amend after review 2336.** This chapter relies on three RTP operations
+that rtp.md does not yet state:
+
+- RTP-11's switch timeline: the SR formula at rtp.md's Timestamps paragraph projects
+  capture time into the old source's clock but omits that source's current offset into the
+  output clock. It must subtract it, clamp, and fix the new offset at the accepted frame
+  start. The no-SR fallback advances by elapsed arrival time at the clock rate (RTC-6).
+- RTP-7's egress history record: an entry maps the extended output index to the source
+  generation, the ingress plaintext handle and the original output rewrite (sequence number,
+  timestamp, marker, payload type, MID, extension IDs, codec counters). The history is gated
+  at each source switch (RTC-4).
+- RTP-6's `Keyframes`: an in-place interval update that keeps the outstanding request and
+  the FIR command sequence number (RTC-6).
+
 ## Prior art
 
 Goose (/tmp/ref-goose at `d5ae5bb`) and LiveKit (/tmp/ref-livekit at `d210b4d`), with str0m
-(/tmp/ref-str0m) consulted for the sans-IO shape.
+(/tmp/ref-str0m) consulted for the sans-IO shape. Review 2333 added mediasoup
+(/tmp/ref-mediasoup at `90ca2ae`) and Janus (/tmp/ref-janus at `2f1e1ca`) for repair,
+switching and timelines.
 
 | Source | Mechanism | Verdict |
 | --- | --- | --- |
@@ -859,7 +1328,10 @@ Goose (/tmp/ref-goose at `d5ae5bb`) and LiveKit (/tmp/ref-livekit at `d210b4d`),
 | LiveKit | Two PeerConnections per participant, one for publishing and one for subscribing (pkg/rtc) | **REPLACED** by one bundled session per participant. One ICE, DTLS and SRTP setup, one 5-tuple and one keepalive. Glare is settled by the impolite-server rule, which LiveKit avoids by separating the directions. |
 | LiveKit | Dynacast: subscribed max quality per track, upgrades at once, downgrades after `DynacastPauseDelay` 5 s (pkg/rtc/dynacast/dynacastmanagervideo.go, pkg/config/config.go) | **ADOPTED**, made generic: `Target` is an encoding and layer, not a named quality, and the mask goes to the publisher as a signal. |
 | LiveKit | Audio level: 400 ms window, -35 dBov threshold, 40 % activity, two-interval EMA (pkg/sfu/audio/audiolevel.go) | **ADAPTED** to exact integer arithmetic (RTC-6), so replay and every engine agree bit for bit. |
-| LiveKit | Forwarder with simulcast switching at keyframes and DD-driven SVC selection (pkg/sfu/forwarder.go, pkg/sfu/videolayerselector) | **ADOPTED** for switch points. Its test vectors are W10's oracle. |
+| LiveKit | Forwarder with simulcast switching at keyframes and DD-driven SVC selection (pkg/sfu/forwarder.go, pkg/sfu/videolayerselector) | **ADOPTED** for switch points. Its dependency-descriptor selector is W9's cross-check for AV1 decode-target indexes. |
+| LiveKit and mediasoup | Late and repaired packets keep their source position: LiveKit's munger returns the earlier mapped sequence and refuses an unavailable mapping (pkg/sfu/rtpmunger.go); mediasoup's `SeqManager` maps input plus base and advances its high-water mark only for newer output, and restores each consumer's header before RTX (worker/src/RTC/SeqManager.cpp, RTP/RtpStreamSend.cpp) | **ADAPTED.** RTC-4 keeps source order and sends a late packet as RFC 4588 RTX, since TLS-8's sealer cannot seal below its highest index. The egress history records each subscriber's own rewrite, as mediasoup restores it. |
+| LiveKit | Bandwidth pause: a track the estimate cannot carry at its lowest layer is paused (pkg/sfu/forwarder.go) | **ADOPTED** in RTC-6's allocation, which starts every video down-track at `Off`. |
+| Janus | Waits for a keyframe of the candidate substream before switching, and rebases sequence and timestamp from elapsed time when it has no SR (src/rtp.c) | **ADOPTED** as RTC-6's pending-source presentation and its no-SR fallback. |
 | LiveKit | NACK answered from a sequencer by resending on the media SSRC or RTX | **REPLACED** by RTX only (RTC-4). TLS-8 never seals twice and never seals below the highest index, so a media-SSRC resend would need sealed copies per subscriber. |
 | LiveKit | Single UDP port with a mux across the node, sessions found by ufrag then 5-tuple | **REPLACED** by one port per unit, so the home unit is a signaling choice and the kernel needs no steering. |
 | LiveKit | Kick through its room service: remove participant, close its PeerConnection | **REPLACED** by RTC-7's fence. LiveKit's removal is asynchronous and gives no point after which no packet is forwarded. |

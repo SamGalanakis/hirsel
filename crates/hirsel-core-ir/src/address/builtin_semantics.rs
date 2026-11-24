@@ -230,6 +230,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("list", "truncate", 1),
     ("list", "try_reserve", 1),
     ("list", "with_capacity", 2),
+    ("list", "with_capacity_aligned", 2),
     ("list", "word_be", 1),
     ("list", "word_le", 1),
     ("map", "advance", 1),

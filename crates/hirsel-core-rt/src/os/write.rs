@@ -1,5 +1,5 @@
 //! File and stream writes report the committed prefix on a failed syscall.
-use crate::provider::{IoError, Outcome, Request, WRITE_AT};
+use crate::provider::{DIRECT_ALIGNMENT, IoError, MODE_DIRECT, Outcome, Request, WRITE_AT};
 
 pub(super) fn write_request(fd: i32, request: &Request) -> Outcome {
     let bytes = if request.buffer.len == 0 {
@@ -9,14 +9,20 @@ pub(super) fn write_request(fd: i32, request: &Request) -> Outcome {
         unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
     };
     let offset = (request.operation == WRITE_AT).then(|| request.offset());
-    write_all_from(fd, bytes, offset, crate::units::uses_file_ring())
+    write_all_from(
+        fd,
+        bytes,
+        offset,
+        crate::units::uses_file_ring(),
+        request.mode == MODE_DIRECT,
+    )
 }
 
 pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
-    write_all_from(fd, bytes, None, false)
+    write_all_from(fd, bytes, None, false, false)
 }
 
-fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>, ring: bool) -> Outcome {
+fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>, ring: bool, direct: bool) -> Outcome {
     let mut written = 0;
     let error = loop {
         let remaining = &bytes[written..];
@@ -36,10 +42,18 @@ fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>, ring: bool) -> Out
         };
         match write_part(fd, remaining, at, ring) {
             Ok(0) => break IoError::from_errno(libc::EIO),
-            Ok(count) => written += count,
+            Ok(count) => {
+                written += count;
+                if direct
+                    && written < bytes.len()
+                    && !(written as u64).is_multiple_of(DIRECT_ALIGNMENT)
+                {
+                    break IoError::from_errno(libc::EIO);
+                }
+            }
             Err(error) => match error.raw_os_error() {
                 Some(libc::EINTR) => continue,
-                Some(libc::EAGAIN) if ring => continue,
+                Some(libc::EAGAIN) if ring || direct => continue,
                 errno => break IoError::from_errno(errno.unwrap_or(libc::EIO)),
             },
         }
@@ -56,7 +70,9 @@ fn write_part(fd: i32, bytes: &[u8], offset: Option<i64>, ring: bool) -> std::io
         let entry = io_uring::opcode::Write::new(
             io_uring::types::Fd(fd),
             bytes.as_ptr(),
-            bytes.len().min(i32::MAX as usize) as u32,
+            bytes
+                .len()
+                .min(i32::MAX as usize & !(DIRECT_ALIGNMENT as usize - 1)) as u32,
         )
         .offset(offset.map_or(u64::MAX, |at| at as u64))
         .build();

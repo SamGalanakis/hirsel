@@ -3,7 +3,7 @@ sqlite@1/example/sum_orders src=282575d3097a194f sig=1a8c7358c052ea30 run=d4a227
 sqlite@1/sqlite/fl20_error_buffer src=a06b7d6f9f10a3bf sig=e05c1da6580e1ade run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 sqlite@1/tests/fl10_ambient_authority src=35bd3bfbbe4404ce sig=54a718a1d6bb7db5 run=d4a2271ba78bbfac bug=- oracle=- rows=pending
 sqlite@1/tests/fl10_random src=1ff43f4977dac5da sig=759023199c315e16 run=91e7b34efc6c2e03 bug=- oracle=- rows=pending
-sqlite@1/tests/fl11_directory_confinement src=a2178d4ac2b3f80c sig=8172a0819b857d01 run=ac0a74d64c8bc08a bug=- oracle=- rows=pending
+sqlite@1/tests/fl11_directory_confinement src=a2178d4ac2b3f80c sig=66c5d927a00a57ab run=ac0a74d64c8bc08a bug=- oracle=- rows=pending
 sqlite@1/tests/fl11_virtual_dir_refused src=eeeea5897d2458f4 sig=57e10e43bad5ca81 run=c1aa892816814eb1 bug=- oracle=- rows=pending
 sqlite@1/tests/fl19_column_checks src=ecf6fa44927384d2 sig=41ce71203b4fa33f run=c1aa892816814eb1 bug=- oracle=- rows=pending
 sqlite@1/tests/fl19_sql_validation src=c9074a5abf69d73d sig=45f8d7179608778c run=d4a2271ba78bbfac bug=- oracle=- rows=-

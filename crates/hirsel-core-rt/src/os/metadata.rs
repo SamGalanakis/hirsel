@@ -46,22 +46,60 @@ fn file_stat(fd: BorrowedFd<'_>) -> io::Result<libc::stat> {
     Ok(unsafe { st.assume_init() })
 }
 
-pub(super) fn stat(fd: BorrowedFd<'_>) -> io::Result<Outcome> {
+pub(super) fn enable_direct(fd: BorrowedFd<'_>, flags: i32) -> io::Result<()> {
+    let align = crate::provider::DIRECT_ALIGNMENT;
+    let Ok(st) = statx_fd(fd, libc::STATX_DIOALIGN) else {
+        return Ok(());
+    };
+    let usable = |n: u32| n != 0 && align.is_multiple_of(u64::from(n));
+    if st.stx_mask & libc::STATX_DIOALIGN != 0
+        && usable(st.stx_dio_mem_align)
+        && usable(st.stx_dio_offset_align)
+    {
+        // SAFETY: fd is the exclusive live OFD returned by open.
+        let rc = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_DIRECT) };
+        if rc < 0 {
+            let error = io::Error::last_os_error();
+            if !matches!(error.raw_os_error(), Some(libc::EINVAL | libc::EOPNOTSUPP)) {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn statx_fd(fd: BorrowedFd<'_>, mask: u32) -> io::Result<libc::statx> {
+    let mut st = std::mem::MaybeUninit::<libc::statx>::zeroed();
     if crate::units::uses_file_ring() {
-        let mut st = std::mem::MaybeUninit::<libc::statx>::zeroed();
         let entry = io_uring::opcode::Statx::new(
             io_uring::types::Fd(fd.as_raw_fd()),
             c"".as_ptr(),
             st.as_mut_ptr().cast(),
         )
         .flags(libc::AT_EMPTY_PATH)
-        .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MTIME)
+        .mask(mask)
         .build();
         // SAFETY: the caller owns fd and statx storage lives through the CQE.
         unsafe { crate::units::file_request(entry) }?;
-        // SAFETY: zero-initialized statx is valid and the successful CQE has
-        // published the kernel's result.
-        let st = unsafe { st.assume_init() };
+    } else {
+        // SAFETY: statx reads the empty name and initializes the pinned output.
+        syscall(unsafe {
+            libc::statx(
+                fd.as_raw_fd(),
+                c"".as_ptr(),
+                libc::AT_EMPTY_PATH,
+                mask,
+                st.as_mut_ptr(),
+            )
+        } as isize)?;
+    }
+    // SAFETY: statx successfully initialized the output.
+    Ok(unsafe { st.assume_init() })
+}
+
+pub(super) fn stat(fd: BorrowedFd<'_>) -> io::Result<Outcome> {
+    if crate::units::uses_file_ring() {
+        let st = statx_fd(fd, libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MTIME)?;
         return stat_outcome(
             st.stx_size,
             i128::from(st.stx_mtime.tv_sec),

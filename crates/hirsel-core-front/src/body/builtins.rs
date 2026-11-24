@@ -36,6 +36,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     vals[0]?,
                     result,
                     AllocPlace::ByteHead,
+                    8,
                     n,
                 )),
                 "from_tail" => Some(self.bytes_from_tail(vals[0]?, vals[1]?, result, n)),
@@ -259,6 +260,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "with_capacity" => {
                 return Some(self.list_with_capacity(item, vals[0]?, result, n));
+            }
+            "with_capacity_aligned" => {
+                let value = vals[1]?;
+                let align = self.open.iter().rev().find_map(|inst| match *inst {
+                    Inst::Const { result, bits } if result == value => Some(bits),
+                    _ => None,
+                });
+                return Some(match align {
+                    Some(align) if align.is_power_of_two() && align <= i64::MAX as u64 => self
+                        .list_with_capacity_at(
+                            item,
+                            vals[0]?,
+                            result,
+                            AllocPlace::Current,
+                            align.max(8),
+                            n,
+                        ),
+                    _ => {
+                        self.refuse("SEM-4", n, "alignment must be a constant power of two");
+                        None
+                    }
+                });
             }
             "len" | "capacity" => {
                 let word = if name == "len" {

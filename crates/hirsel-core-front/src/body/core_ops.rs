@@ -311,6 +311,7 @@ operations! {
     ("list", "slots_free", Lane::Value, "A", "core-collections-918", true),
     ("list", "new", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "with_capacity", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "with_capacity_aligned", Lane::Value, "A", "store-ring-build-2285", false),
     ("list", "len", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "capacity", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "reserve", Lane::Value, "A", "core-check-calls-910", false),
@@ -2572,37 +2573,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64t = Ty::Scalar(Scalar::U64);
         let at = self.address(AddressBase::Value(value), &[], PlaceTy::Value(u64t), n);
         self.read_bits(at, u64t, n)
-    }
-
-    /// A fieldless enum operand (`OpenMode`) passes its case as a u8.
-    fn runtime_mode(
-        &mut self,
-        f: usize,
-        param: usize,
-        value: ValueId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let id = self.runtime_type(self.p.fns[f].params[param].ty, n)?;
-        let at = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
-        let tag = self.value(Ty::Scalar(Scalar::U32));
-        self.inst(
-            Inst::Case {
-                result: tag,
-                address: at,
-            },
-            n,
-        );
-        let mode = self.value(Ty::Scalar(Scalar::U8));
-        self.inst(
-            Inst::Convert {
-                result: mode,
-                flag: None,
-                operand: tag,
-                mode: ConvertMode::Truncate,
-            },
-            n,
-        );
-        Some(mode)
     }
 }
 

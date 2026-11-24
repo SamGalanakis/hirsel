@@ -957,3 +957,31 @@ fn anonymous_startup_scan_keeps_current_open_caller(d: Dir, c: Clock, r: Random,
     result.unwrap(close(take reopened))
     Ok(())
 }
+
+// §3.3b BL3: all three misalignments refuse before any write, even on tmpfs.
+@test
+fn journal_test_direct_alignment(d: Dir) -> Result[(), ()] waits {
+    let mut file = result.unwrap(host.open(d, "direct", Direct))
+    let mut raw: Bytes = list.with_capacity_aligned(8192, 4096)
+    list.fill(mut raw, 8192, 53u8)
+    let bad_offset = host.write_at(mut file, 1, list.slice(raw, 0, 4096))
+    let bad_length = host.write_at(mut file, 0, list.slice(raw, 0, 4095))
+    let bad_address = host.write_at(mut file, 0, list.slice(raw, 1, 4097))
+    for outcome in [bad_offset, bad_length, bad_address] {
+        match outcome {
+            Error(WriteError(written: 0, error: Other(22))) => (),
+            _ => return Error(()),
+        }
+    }
+    if result.unwrap(host.stat_file(mut file)).size != 0 {
+        return Error(())
+    }
+    result.unwrap(host.write_at(mut file, 0, list.slice(raw, 0, 4096)))
+    result.unwrap(host.close(take file))
+    let found = result.unwrap(read_journal_prefix(d, "direct", 4096))
+    if list.len(found) == 4096 && found == list.slice(raw, 0, 4096) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

@@ -1,4 +1,5 @@
 //! Fixed-layout List storage, with portable charges independent of native stride.
+mod allocation;
 use super::*;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
@@ -501,7 +502,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        self.list_with_capacity_at(item, count, result, AllocPlace::Current, n)
+        self.list_with_capacity_at(item, count, result, AllocPlace::Current, 8, n)
     }
 
     pub(super) fn bytes_from_tail(
@@ -519,7 +520,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let null = self.konst(Ty::Ptr, 0, n)?;
         let owns = self.list_compare(CompareOp::Ne, cap, zero, n);
         let key = self.list_choose(owns, data, null, n);
-        self.list_with_capacity_at(item, count, result, AllocPlace::ByteTail(key), n)
+        self.list_with_capacity_at(item, count, result, AllocPlace::ByteTail(key), 8, n)
     }
 
     pub(super) fn list_with_capacity_at(
@@ -528,6 +529,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         count: ValueId,
         result: TyId,
         place: AllocPlace,
+        align: u64,
         n: NodeId,
     ) -> Option<ValueId> {
         let list_id = match self.rep(result) {
@@ -571,7 +573,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
         self.start(allocate);
         let plan = self.list_plan(item, count, None, n)?;
-        let (block, available) = self.list_allocate(&plan, place, n);
+        let (block, available) = self.list_allocate_aligned(&plan, place, align, n);
         let admitted = self.list_compare(CompareOp::Ne, block, null, n);
         self.raise_unless(admitted, plan.charge, available, n);
         self.list_allocated(to, list_id, block, count, n);
@@ -728,34 +730,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             stride,
         })
     }
-    pub(super) fn list_allocate(
-        &mut self,
-        plan: &ListPlan,
-        place: AllocPlace,
-        n: NodeId,
-    ) -> (ValueId, ValueId) {
-        let block = self.value(Ty::Ptr);
-        let available = self.value(Ty::Scalar(Scalar::U64));
-        let kind = AllocKind::Own {
-            edge: plan.edge.clone(),
-        };
-        self.inst(
-            Inst::Alloc {
-                result: block,
-                available,
-                region_entry: None,
-                kind,
-                place,
-                charge: plan.charge,
-                overflow: Some(plan.overflow),
-                size: plan.size,
-                align: 8,
-            },
-            n,
-        );
-        (block, available)
-    }
-
     /// Room for `additional` more elements; a refusal raises `Capacity` and leaves
     /// the list unchanged (MEM-21, MEM-24).
     pub(super) fn list_reserve(

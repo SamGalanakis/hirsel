@@ -294,8 +294,22 @@ unsafe fn admit<const RETURNABLE: bool>(
                 return Some(CANCELLED);
             }
         }
+        if operation == WRITE_AT && (*request).mode == MODE_DIRECT {
+            let request = &*request;
+            let aligned = |n: u64| n.is_multiple_of(DIRECT_ALIGNMENT);
+            if !aligned(request.offset())
+                || !aligned(request.buffer.len as u64)
+                || !aligned(request.buffer.data.addr() as u64)
+            {
+                return Some(Outcome {
+                    error: IoError::from_errno(libc::EINVAL),
+                    ..Outcome::default()
+                });
+            }
+        }
         if (operation == READ_AT && !matches!((*request).mode, 0 | 4))
-            || (operation == WRITE_AT && !matches!((*request).mode, 1 | 3 | 4))
+            || (operation == WRITE_AT
+                && !matches!((*request).mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT))
         {
             return Some(Outcome {
                 error: IoError::from_errno(libc::EACCES),

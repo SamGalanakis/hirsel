@@ -197,9 +197,15 @@ impl OsProvider {
                     2 => libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
                     3 => libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
                     4 => libc::O_RDWR | libc::O_CREAT,
+                    MODE_DURABLE | MODE_DIRECT => {
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_DSYNC
+                    }
                     _ => unreachable!(),
                 };
                 let fd = beneath(self.directories[&request.handle].as_raw_fd(), path, flags)?;
+                if request.mode == MODE_DIRECT {
+                    metadata::enable_direct(fd.as_fd(), flags)?;
+                }
                 let id = self.id();
                 self.files.insert(id, fd);
                 out.value = id;

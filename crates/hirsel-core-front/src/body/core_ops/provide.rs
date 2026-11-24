@@ -184,4 +184,35 @@ impl Cx<'_, '_, '_> {
             _ => unreachable!(),
         }
     }
+
+    /// A fieldless enum operand (`OpenMode`) passes its case as a u8.
+    pub(super) fn runtime_mode(
+        &mut self,
+        f: usize,
+        param: usize,
+        value: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = self.runtime_type(self.p.fns[f].params[param].ty, n)?;
+        let at = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: at,
+            },
+            n,
+        );
+        let mode = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result: mode,
+                flag: None,
+                operand: tag,
+                mode: ConvertMode::Truncate,
+            },
+            n,
+        );
+        Some(mode)
+    }
 }

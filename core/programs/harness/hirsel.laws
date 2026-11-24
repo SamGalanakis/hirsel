@@ -2,8 +2,8 @@ hirsel.laws 1
 harness@1/gateway_laws/test_front_fork_history src=7376204bd339efe1 sig=9e0d5845abf974ff run=3806a14949dd9b41 bug=- oracle=- rows=pending
 harness@1/gateway_laws/test_front_holds_stream src=86845dacaf0c3689 sig=9e0d5845abf974ff run=3806a14949dd9b41 bug=- oracle=- rows=pending
 harness@1/gateway_laws/test_front_shows_tool_progress src=92b7e6674e8fd858 sig=9e0d5845abf974ff run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_gateway_route_acl src=acbf24a9a4861942 sig=1a7063d5e8b8af33 run=3806a14949dd9b41 bug=- oracle=- rows=pending
-harness@1/gateway_laws/test_preview_journal_and_reconnect src=13095a6a2380efe0 sig=7b2443876b1f96c6 run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_gateway_route_acl src=acbf24a9a4861942 sig=a09a1c2c40664faa run=3806a14949dd9b41 bug=- oracle=- rows=pending
+harness@1/gateway_laws/test_preview_journal_and_reconnect src=13095a6a2380efe0 sig=1ccb44e468fb9ca1 run=3806a14949dd9b41 bug=- oracle=- rows=pending
 harness@1/gateway_laws/test_preview_slow_observer_and_retry src=8d012fd6e52f9a5d sig=76968b11c2e3aea2 run=5336b0f3b09409a1 bug=- oracle=- rows=pending
 harness@1/gateway_laws/test_subagent_once_child_crash src=729a11f94d9e5767 sig=6b8ead491d6627a0 run=3806a14949dd9b41 bug=- oracle=- rows=pending
 harness@1/gateway_laws/test_subagent_once_parent_crash src=c1b10b6bb9f0d2d2 sig=6b8ead491d6627a0 run=3806a14949dd9b41 bug=- oracle=- rows=pending

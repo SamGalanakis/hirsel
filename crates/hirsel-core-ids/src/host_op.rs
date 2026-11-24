@@ -126,6 +126,12 @@ host_ops! {
     MEDIA_P256_KEY = 140,
 }
 
+// OpenMode's appended case numbers. Existing cases and tape records keep
+// their ordinals.
+pub const MODE_DURABLE: u8 = 5;
+pub const MODE_DIRECT: u8 = 6;
+pub const DIRECT_ALIGNMENT: u64 = 4096;
+
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.
 pub const DIR_READ_ONLY: u64 = 1 << 62;
 

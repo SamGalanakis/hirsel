@@ -280,7 +280,7 @@ pub type Stat {
     modified_ns: i64
 }
 
-pub type OpenMode = Read | Write | Append | CreateNew | ReadWrite
+pub type OpenMode = Read | Write | Append | CreateNew | ReadWrite | Durable | Direct
 
 pub type Capacity {
     requested: u64,

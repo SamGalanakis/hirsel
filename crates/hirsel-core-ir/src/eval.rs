@@ -36,6 +36,7 @@ mod net;
 use crate::*;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::host_op::{DIR_READ_ONLY, needs_writable_dir};
+use hirsel_core_ids::host_op::{DIRECT_ALIGNMENT, MODE_DIRECT, MODE_DURABLE};
 use hirsel_core_layout::{
     Body as Shaped, Cleanup, FieldTy, Handle, Layout, RecipeRow, Repr, TypeRef, charge,
     cleanup_class, compute, field_size, map_entry,
@@ -655,6 +656,7 @@ type X<T> = Result<T, Stop>;
 
 struct Blk {
     bytes: Vec<u8>,
+    align: u64,
     live: bool,
     /// The limit the block is charged to; None for frame slots and engine records.
     limit: Option<Limit>,
@@ -739,6 +741,7 @@ impl Blocks {
 // check, and cannot create an absent entry.
 static DEAD_BLOCK: Blk = Blk {
     bytes: Vec::new(),
+    align: 8,
     live: false,
     limit: None,
     charge: 0,
@@ -764,85 +767,7 @@ impl std::ops::IndexMut<usize> for Blocks {
 }
 
 #[cfg(test)]
-mod block_table_tests {
-    use super::*;
-
-    fn block() -> Blk {
-        Blk {
-            bytes: vec![42; 8],
-            live: true,
-            limit: None,
-            charge: 0,
-            lent_size: None,
-            res: None,
-            counted: None,
-            class: None,
-            fixed: false,
-            marks: BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn block_storage_follows_liveness_and_never_reuses_an_identity() {
-        let mut blocks = Blocks::default();
-        let pinned = blocks.insert(block());
-        let mut previous = pinned;
-        for _ in 0..10 * BLOCK_CHUNK {
-            let id = blocks.insert(block());
-            assert!(id > previous);
-            previous = id;
-            assert_eq!(blocks[id].bytes, [42; 8]);
-            blocks.remove(id);
-            assert!(!blocks[id].live);
-        }
-        assert_eq!(blocks.entries.len(), 1);
-        assert!(blocks.entries.capacity() <= 256);
-        assert_eq!(blocks.chunks.iter().filter(|c| c.is_some()).count(), 2);
-        assert_eq!(blocks[pinned].bytes, [42; 8]);
-        blocks.remove(pinned);
-        assert!(blocks.chunks[0].is_none());
-        assert!(!blocks[pinned].live);
-    }
-
-    #[test]
-    fn removing_a_record_preserves_the_identity_of_the_moved_record() {
-        let mut blocks = Blocks::default();
-        let ids: Vec<_> = (0..2 * BLOCK_CHUNK)
-            .map(|_| blocks.insert(block()))
-            .collect();
-        for &id in &ids[..BLOCK_CHUNK] {
-            blocks.remove(id);
-        }
-        assert!(blocks.chunks[0].is_none());
-        for &id in &ids[BLOCK_CHUNK..] {
-            assert_eq!(blocks[id].bytes, [42; 8]);
-        }
-        for &id in &ids[BLOCK_CHUNK..] {
-            blocks.remove(id);
-        }
-        assert!(blocks.chunks.iter().all(Option::is_none));
-        assert!(blocks.entries.capacity() <= 256);
-    }
-
-    #[test]
-    fn block_identity_exhaustion_stops_instead_of_wrapping() {
-        let mut blocks = Blocks {
-            next: u32::MAX as usize,
-            ..Blocks::default()
-        };
-        let fault =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| blocks.insert(block())))
-                .unwrap_err();
-        assert_eq!(
-            fault.downcast_ref::<&str>().copied(),
-            Some("evaluator block identity space exhausted (a run stop, not Capacity)")
-        );
-        assert_eq!(blocks.next, u32::MAX as usize);
-        assert!(blocks.entries.is_empty());
-        let last = ptr(u32::MAX as usize - 1, u32::MAX as u64);
-        assert_eq!(split(last), (u32::MAX as usize - 1, u32::MAX as usize));
-    }
-}
+mod block_table_tests;
 
 struct Res {
     grant: u64,
@@ -4822,7 +4747,7 @@ impl Machine<'_> {
                         file
                     }
                 };
-                if mode == 1 {
+                if matches!(mode, 1 | MODE_DURABLE | MODE_DIRECT) {
                     *file.lock().unwrap() = ModelFile {
                         modified_ns: w.clock.min(i64::MAX as u64),
                         ..ModelFile::default()
@@ -4940,8 +4865,23 @@ impl Machine<'_> {
             }
             HostOp::Write | HostOp::WriteAt => {
                 let positioned = op == HostOp::WriteAt;
-                let (bytes, ..) = self.carrier(a[if positioned { 2 } else { 1 }]);
+                let (bytes, data, ..) = self.carrier(a[if positioned { 2 } else { 1 }]);
                 let i = file(a[0]);
+                if positioned
+                    && self.world.files[i]
+                        .as_ref()
+                        .is_some_and(|f| f.mode == MODE_DIRECT)
+                {
+                    let (block, offset) = split(data);
+                    let aligned = |value: u64| value.is_multiple_of(DIRECT_ALIGNMENT);
+                    if !aligned(a[1])
+                        || !aligned(bytes.len() as u64)
+                        || (data != 0
+                            && (!aligned(self.mem[block].align) || !aligned(offset as u64)))
+                    {
+                        return Ok(vec![0, 5, 22, 0]); // Other(EINVAL)
+                    }
+                }
                 if self.world.files[i]
                     .as_ref()
                     .is_some_and(|f| f.read_only_dir)
@@ -4954,7 +4894,7 @@ impl Machine<'_> {
                 let Some(f) = self.world.files[i].as_mut() else {
                     return Ok(error(CLOSED));
                 };
-                if positioned && !matches!(f.mode, 1 | 3 | 4) {
+                if positioned && !matches!(f.mode, 1 | 3 | 4 | MODE_DURABLE | MODE_DIRECT) {
                     return Ok(error(DENIED));
                 }
                 if bytes.is_empty() {
@@ -5114,6 +5054,7 @@ impl Machine<'_> {
         );
         let id = self.mem.insert(Blk {
             bytes: vec![0; size as usize],
+            align: 8,
             live: true,
             limit,
             charge,
@@ -7619,7 +7560,7 @@ impl Machine<'_> {
                 charge,
                 overflow,
                 size,
-                ..
+                align,
             } => {
                 let l = t.limits.last().unwrap().clone();
                 if let Some(token) = region_entry {
@@ -7659,6 +7600,7 @@ impl Machine<'_> {
                             _ => None,
                         };
                         let p = self.block(vals[size.index()], Some(l.clone()), n, res);
+                        self.mem[split(p).0].align = align;
                         if let AllocKind::Environment { ty } = kind {
                             self.store(p, 8, ENV_BASE + u64::from(ty.0));
                         }

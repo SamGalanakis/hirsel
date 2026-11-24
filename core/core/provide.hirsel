@@ -60,6 +60,10 @@ fn open_mode(w: u64) -> OpenMode {
         Append
     } else if w == 3 {
         CreateNew
+    } else if w == 5 {
+        Durable
+    } else if w == 6 {
+        Direct
     } else {
         ReadWrite
     }

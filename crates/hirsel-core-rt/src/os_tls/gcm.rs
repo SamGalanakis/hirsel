@@ -9,6 +9,7 @@
 //! hashed as ciphertext zero-padded to a block.
 #![cfg(target_arch = "x86_64")]
 
+use std::mem::MaybeUninit;
 use zeroize::{Zeroize, Zeroizing};
 
 const BLOCK: usize = 16;
@@ -158,113 +159,213 @@ impl GcmKey {
         xi
     }
 
-    /// Seals `input ‖ [extra]` under `nonce` and `aad` into `out`, which holds
-    /// `input.len() + 1` ciphertext bytes followed by the 16-byte tag. The
-    /// plaintext is read from `input` and written nowhere but `out`.
-    pub(super) fn seal(
+    /// The input and output have identical starting addresses for an in-place
+    /// operation, or are completely disjoint. `tail` is the TLS record's inner
+    /// content type, absent on a packet.
+    unsafe fn seal_raw(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        input: *const u8,
+        len: usize,
+        tail: Option<u8>,
+        output: *mut u8,
+    ) -> [u8; BLOCK] {
+        let (tag_mask, mut counter, mut xi) = self.start(nonce, aad);
+        let whole = len / BLOCK * BLOCK;
+        unsafe {
+            if whole != 0 {
+                // SAFETY: the caller pins complete blocks; ring's vector code
+                // accepts a disjoint destination or an exact in-place alias.
+                gcm_enc(
+                    input,
+                    output,
+                    whole,
+                    &self.aes,
+                    &counter,
+                    &self.table,
+                    &mut xi,
+                );
+                Self::advance(&mut counter, whole);
+            }
+            let bytes = len - whole;
+            let used = bytes + usize::from(tail.is_some());
+            if used != 0 {
+                let mut block = [0; BLOCK];
+                input
+                    .add(whole)
+                    .copy_to_nonoverlapping(block.as_mut_ptr(), bytes);
+                if let Some(tail) = tail {
+                    block[bytes] = tail;
+                }
+                // SAFETY: one initialized block with exactly overlapping input and output.
+                aes_ctr32(block.as_ptr(), block.as_mut_ptr(), 1, &self.aes, &counter);
+                block
+                    .as_ptr()
+                    .copy_to_nonoverlapping(output.add(whole), used);
+                block[used..].fill(0);
+                gcm_ghash(&mut xi, &self.table, block.as_ptr(), BLOCK);
+            }
+        }
+        self.finish(xi, &tag_mask, aad.len(), len + usize::from(tail.is_some()))
+    }
+
+    pub(super) fn seal_record(
         &self,
         nonce: [u8; 12],
         aad: &[u8],
         input: &[u8],
-        extra: u8,
-        out: &mut [u8],
+        tail: u8,
+        output: &mut [u8],
     ) {
-        let len = input.len() + 1;
-        assert_eq!(out.len(), len + BLOCK);
-        let (tag_mask, mut counter, mut xi) = self.start(nonce, aad);
+        assert_eq!(output.len(), input.len() + 1 + BLOCK);
+        let (body, tag) = output.split_at_mut(input.len() + 1);
+        // SAFETY: the two safe borrows are disjoint and carry the required extents.
+        let sealed = unsafe {
+            self.seal_raw(
+                nonce,
+                aad,
+                input.as_ptr(),
+                input.len(),
+                Some(tail),
+                body.as_mut_ptr(),
+            )
+        };
+        tag.copy_from_slice(&sealed);
+    }
 
-        let whole = input.len() / BLOCK * BLOCK;
-        if whole != 0 {
-            // SAFETY: `input` and `out` are distinct and hold `whole` bytes.
-            unsafe {
-                gcm_enc(
-                    input.as_ptr(),
-                    out.as_mut_ptr(),
+    pub(super) fn seal(&self, nonce: [u8; 12], aad: &[u8], body: &mut [u8]) -> [u8; BLOCK] {
+        let at = body.as_mut_ptr();
+        // SAFETY: `body` is initialized, exclusive and both pointers start at its beginning.
+        unsafe { self.seal_raw(nonce, aad, at, body.len(), None, at) }
+    }
+
+    pub(super) fn seal_into(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        input: &[u8],
+        output: &mut [MaybeUninit<u8>],
+    ) -> [u8; BLOCK] {
+        assert_eq!(input.len(), output.len());
+        // SAFETY: disjoint safe input and exclusive writable output of equal length.
+        unsafe {
+            self.seal_raw(
+                nonce,
+                aad,
+                input.as_ptr(),
+                input.len(),
+                None,
+                output.as_mut_ptr().cast(),
+            )
+        }
+    }
+
+    /// `len` initialized ciphertext bytes at `input`, and `len` writable
+    /// bytes at `output`, with exact overlap or disjoint storage.
+    unsafe fn open_raw(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        input: *const u8,
+        len: usize,
+        tag: &[u8; BLOCK],
+        output: *mut u8,
+    ) -> bool {
+        let (tag_mask, mut counter, mut xi) = self.start(nonce, aad);
+        let whole = len / BLOCK * BLOCK;
+        unsafe {
+            if whole != 0 {
+                // SAFETY: full blocks under the caller's raw buffer contract.
+                gcm_dec(
+                    input,
+                    output,
                     whole,
                     &self.aes,
                     &counter,
                     &self.table,
                     &mut xi,
-                )
-            };
-            Self::advance(&mut counter, whole);
+                );
+                Self::advance(&mut counter, whole);
+            }
+            let bytes = len - whole;
+            if bytes != 0 {
+                let mut block = [0; BLOCK];
+                input
+                    .add(whole)
+                    .copy_to_nonoverlapping(block.as_mut_ptr(), bytes);
+                gcm_ghash(&mut xi, &self.table, block.as_ptr(), BLOCK);
+                // SAFETY: one initialized block with exactly overlapping input and output.
+                aes_ctr32(block.as_ptr(), block.as_mut_ptr(), 1, &self.aes, &counter);
+                block
+                    .as_ptr()
+                    .copy_to_nonoverlapping(output.add(whole), bytes);
+            }
         }
-
-        // The partial block (1 to 16 bytes, ending in `extra`) is built in
-        // `out`, whose tag bytes leave room for a whole block.
-        let rest = len - whole;
-        let block = &mut out[whole..whole + BLOCK];
-        block[..rest - 1].copy_from_slice(&input[whole..]);
-        block[rest - 1] = extra;
-        // SAFETY: one in-place block.
-        unsafe {
-            aes_ctr32(
-                block.as_mut_ptr(),
-                block.as_mut_ptr(),
-                1,
-                &self.aes,
-                &counter,
-            )
-        };
-        block[rest..].fill(0);
-        // SAFETY: one block.
-        unsafe { gcm_ghash(&mut xi, &self.table, block.as_ptr(), BLOCK) };
-        out[len..].copy_from_slice(&self.finish(xi, &tag_mask, aad.len(), len));
+        let expected = self.finish(xi, &tag_mask, aad.len(), len);
+        let differ = expected
+            .iter()
+            .zip(tag)
+            .fold(0, |differ, (a, b)| differ | (a ^ b));
+        if std::hint::black_box(differ) == 0 {
+            true
+        } else {
+            // SAFETY: the caller pins the whole decrypted range exclusively.
+            unsafe { output.write_bytes(0, len) };
+            false
+        }
     }
 
-    /// Opens `sealed` (ciphertext, then the 16-byte tag) under `nonce` and
-    /// `aad` into `out`, which holds exactly the ciphertext's length. On a tag
-    /// mismatch `out` is zeroed: unauthenticated plaintext never outlives the
-    /// call.
     pub(super) fn open(
         &self,
         nonce: [u8; 12],
         aad: &[u8],
+        body: &mut [u8],
+        tag: &[u8; BLOCK],
+    ) -> bool {
+        let at = body.as_mut_ptr();
+        // SAFETY: `body` is initialized and exclusive. Both pointers start at its beginning.
+        unsafe { self.open_raw(nonce, aad, at, body.len(), tag, at) }
+    }
+
+    pub(super) fn open_into(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
+        input: &[u8],
+        tag: &[u8; BLOCK],
+        output: &mut [MaybeUninit<u8>],
+    ) -> bool {
+        assert_eq!(input.len(), output.len());
+        // SAFETY: disjoint safe input and exclusive writable output of equal length.
+        unsafe {
+            self.open_raw(
+                nonce,
+                aad,
+                input.as_ptr(),
+                input.len(),
+                tag,
+                output.as_mut_ptr().cast(),
+            )
+        }
+    }
+
+    #[cfg(test)]
+    fn open_record(
+        &self,
+        nonce: [u8; 12],
+        aad: &[u8],
         sealed: &[u8],
-        out: &mut [u8],
+        output: &mut [u8],
     ) -> Result<(), ()> {
         let len = sealed.len().checked_sub(BLOCK).ok_or(())?;
-        assert_eq!(out.len(), len);
-        let (tag_mask, mut counter, mut xi) = self.start(nonce, aad);
-
-        let whole = len / BLOCK * BLOCK;
-        if whole != 0 {
-            // SAFETY: `sealed` and `out` are distinct and hold `whole` bytes.
-            unsafe {
-                gcm_dec(
-                    sealed.as_ptr(),
-                    out.as_mut_ptr(),
-                    whole,
-                    &self.aes,
-                    &counter,
-                    &self.table,
-                    &mut xi,
-                )
-            };
-            Self::advance(&mut counter, whole);
-        }
-
-        let rest = len - whole;
-        if rest != 0 {
-            let mut block = [0; BLOCK];
-            block[..rest].copy_from_slice(&sealed[whole..len]);
-            // SAFETY: one block.
-            unsafe { gcm_ghash(&mut xi, &self.table, block.as_ptr(), BLOCK) };
-            // SAFETY: one in-place block.
-            unsafe { aes_ctr32(block.as_ptr(), block.as_mut_ptr(), 1, &self.aes, &counter) };
-            out[whole..].copy_from_slice(&block[..rest]);
-        }
-
-        let tag = self.finish(xi, &tag_mask, aad.len(), len);
-        let differ = tag
-            .iter()
-            .zip(&sealed[len..])
-            .fold(0, |differ, (a, b)| differ | (a ^ b));
-        if std::hint::black_box(differ) != 0 {
-            out.fill(0);
-            return Err(());
-        }
-        Ok(())
+        let (ciphertext, tag) = sealed.split_at(len);
+        // SAFETY: initialized `u8` storage may be lent for writes as MaybeUninit.
+        let output =
+            unsafe { std::slice::from_raw_parts_mut(output.as_mut_ptr().cast(), output.len()) };
+        self.open_into(nonce, aad, ciphertext, tag.try_into().unwrap(), output)
+            .then_some(())
+            .ok_or(())
     }
 }
 
@@ -303,11 +404,11 @@ mod tests {
     /// zeroed.
     fn open(key: &GcmKey, nonce: [u8; 12], aad: &[u8], sealed: &[u8]) -> Vec<u8> {
         let mut out = vec![0xa5; sealed.len() - 16];
-        key.open(nonce, aad, sealed, &mut out).unwrap();
+        key.open_record(nonce, aad, sealed, &mut out).unwrap();
         let mut forged = sealed.to_vec();
         *forged.last_mut().unwrap() ^= 1;
         let mut zeroed = vec![0xa5; out.len()];
-        assert!(key.open(nonce, aad, &forged, &mut zeroed).is_err());
+        assert!(key.open_record(nonce, aad, &forged, &mut zeroed).is_err());
         assert!(zeroed.iter().all(|&byte| byte == 0));
         out
     }
@@ -355,7 +456,7 @@ mod tests {
             let seal = GcmKey::new(&hex(key)).unwrap();
             let (input, extra) = plain.split_at(plain.len() - 1);
             let mut out = vec![0; plain.len() + 16];
-            seal.seal(nonce, &aad, input, extra[0], &mut out);
+            seal.seal_record(nonce, &aad, input, extra[0], &mut out);
             assert_eq!(out, hex(sealed));
             assert_eq!(open(&seal, nonce, &aad, &out), plain);
         }
@@ -371,7 +472,7 @@ mod tests {
             let msg = hex(msg);
             let (extra, input) = msg.split_last().unwrap();
             let mut out = vec![0; msg.len() + super::BLOCK];
-            seal.seal(
+            seal.seal_record(
                 hex(iv).try_into().unwrap(),
                 &hex(aad),
                 input,
@@ -397,7 +498,7 @@ mod tests {
                 let input: Vec<u8> = (0..len).map(|i| (i * 7 + len) as u8).collect();
                 let nonce = [len as u8; 12];
                 let mut out = vec![0xa5; len + 17];
-                seal.seal(nonce, &header, &input, 23, &mut out);
+                seal.seal_record(nonce, &header, &input, 23, &mut out);
                 let mut expected = input.clone();
                 expected.push(23);
                 let tag = ring

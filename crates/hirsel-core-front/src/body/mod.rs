@@ -180,7 +180,7 @@ impl SourceSignatures {
 pub struct Emitter {
     pub module: Module,
     funcs: HashMap<InstanceKey, FuncId>,
-    callable_adapters: HashMap<(FuncId, SigId), FuncId>,
+    callable_adapters: HashMap<(FuncId, SigId), (FuncId, Option<GenericTemplate>)>,
     #[cfg(test)]
     pub(crate) callable_signature_builds: usize,
     source_signatures: SourceSignatures,

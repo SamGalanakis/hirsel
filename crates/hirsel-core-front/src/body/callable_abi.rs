@@ -237,12 +237,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             key
         });
-        let existing = match &descriptor_key {
-            Some(key) => self.e.funcs.get(key),
-            None => self.e.callable_adapters.get(&(raw, signature)),
-        };
-        if let Some(&row) = existing {
-            return Some(row);
+        match &descriptor_key {
+            Some(key) => {
+                if let Some(&row) = self.e.funcs.get(key) {
+                    return Some(row);
+                }
+            }
+            None => {
+                // Closures are built in their own bodies. A second closure that
+                // reuses a generic adapter needs its template, or its instance
+                // names a row that no instance fills.
+                if let Some((row, template)) = self.e.callable_adapters.get(&(raw, signature)) {
+                    if let Some(template) = template {
+                        self.nested.insert(*row, template.clone());
+                    }
+                    return Some(*row);
+                }
+            }
         }
         let mut child = Cx::new(self.p, self.definition, self.e);
         let mut fd = self.fd.as_ref().clone();
@@ -356,8 +367,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         std::mem::swap(&mut child.t, &mut self.t);
         let out = child.finish();
-        if let Some(template) = out.template {
-            self.nested.insert(row, template);
+        if let Some(template) = &out.template {
+            self.nested.insert(row, template.clone());
         }
         self.out.refusals.extend(out.refusals);
         self.out.gaps.extend(out.gaps);
@@ -365,7 +376,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if out.function.is_none() {
             self.halt();
         } else if !descriptor_instance {
-            self.e.callable_adapters.insert((raw, signature), row);
+            self.e
+                .callable_adapters
+                .insert((raw, signature), (row, out.template));
         }
         out.function
     }

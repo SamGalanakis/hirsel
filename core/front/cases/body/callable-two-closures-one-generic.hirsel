@@ -1,0 +1,33 @@
+// Two closures in one generic body each pass the same generic item as a callable.
+// Each closure's adapter instance must stay reached (store-mux-2189).
+// first(x, 3) = reply(x, 7) = 14; second(x, 3) = reply(x, 13) + 1 = 27.
+// expect: run check() = 41
+fn reply[T: plain](x: T, k: u64) -> u64 {
+    k * 2
+}
+
+fn apply[E](env: E, k: u64, f: fn(E, u64) -> u64) -> u64 {
+    f(env, k)
+}
+
+fn pair[T: plain](x: T) -> u64 {
+    let first = fn(v: T, k: u64) -> u64 {
+        apply(v, k + 4, reply)
+    }
+    let second = fn(v: T, k: u64) -> u64 {
+        apply(v, k + 10, reply) + 1
+    }
+    first(x, 3) + second(x, 3)
+}
+
+pub fn check() -> u64 {
+    pair(true)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if check() == 41 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

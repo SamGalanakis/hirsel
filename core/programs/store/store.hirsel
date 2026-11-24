@@ -4869,42 +4869,6 @@ fn cut_manifest_size(db: Db, delta: HolderDelta) -> u64 {
     page_manifest_file_size(MANIFEST_FIXED_BYTES + records, db.fence)
 }
 
-fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
-    let tables = match delta {
-        ReplaceMain(main, _) => main.tables,
-        _ => db.next_table
-    }
-    let zero = std.page.unlocated(0)
-    let account_tiered = cut_tiered_account(db, delta)?
-    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new())
-    let context = DiskContext(store: db.store, role: 1, seq: generation)
-    begin_page_manifest_file(mut raw, context)?
-    append_page_manifest_fields(mut raw, manifest)?
-    let heads = list.len(db.heads)
-    let branch_count = match delta {
-        AddHead(_, _) => heads + 1,
-        RemoveHead(_) => heads - 1,
-        ReplaceMain(_, Some(_)) => heads - 1,
-        _ => heads,
-    }
-    capacity(le(mut raw, branch_count, 4))?
-    visit_cut_heads(db, delta, mut raw, scoped fn(mut buffer: Bytes, head: Head, roots: Roots, head_version: u64, at: u64) -> Result[(), Error] {
-        append_page_manifest_branch(mut buffer, head.id, head.name, head.parent, head.forked_at, head_version, at, published_page_roots(layout.locations, roots))
-    })?
-    let pins = list.len(db.pins)
-    let pin_count = match delta {
-        AddPin(_) => pins + 1,
-        RemovePin(_) => pins - 1,
-        _ => pins
-    }
-    capacity(le(mut raw, pin_count, 4))?
-    visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
-        append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, held.roots), held.watermark)
-    })?
-    write_seal(mut raw, context, db.fence)?
-    Ok(())
-}
-
 fn cut_retirement(layout: PagedCutLayout, holders: List[HeldPage], lease: Option[Arc[ExportLease]], scrubs: List[Arc[ScrubLease]], first: u64, end: u64) -> Result[(PageDisk, DiskRemovals), Error] {
     let mut locations = share_page_locations(layout.locations)
     let mut packs: List[u64] = list.new()
@@ -5015,12 +4979,9 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
         cut_participants(db, delta)
     })?
     let CutParticipants(holders: take participants_held, roots: take roots) = take participants
-    let mut staged = stage_tiered_cut(id, take roots, disk_state(db).pages.next_pack, pack_bytes)?
-    let holders = if tiered_cut_stage_empty(staged) {
-        take participants_held
-    } else {
-        sealed_cut_holders(participants_held, staged)?
-    }
+    let mut staged = stage_tiered_cut(db, take roots, pack_bytes)?
+    db.next_node = staged.stamp_end - 1
+    let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
     list_tiered_cut(mut base.locations, staged)?
     over_ceiling(base.account, db.ceiling)?
@@ -5051,7 +5012,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
         let (take pages, take removals) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
             cut_retirement(layout, holders, disk_state(db).lease, disk_state(db).scrubs, prev_first, seq)
         })?
-        fill_cut_manifest(mut manifest, db, delta, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
+        fill_cut_manifest(mut manifest, db, delta, staged.roots, generation, seq, prev_first, layout, stamp, base.account, write_seal)?
         Ok(PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest))
     })
     db.next_node = next_stamp - 1

@@ -319,7 +319,7 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         lane.issued_generation = generation
         lane.next_pack = cut_plan.lists.run_packs.next_pack
         let (take layout, take refs) = history_write_page_cut(mut lane.client, old.store, old.pair.epoch, old.authority_kind, take cut_plan, object_state(db).locator, mut buffers, mut workspace, now)?
-        fill_cut_manifest(mut buffers.out, db, delta, generation, seq, seq, layout, stamp, base.account, write_seal)?
+        fill_cut_manifest(mut buffers.out, db, delta, participants.roots, generation, seq, seq, layout, stamp, base.account, write_seal)?
         let (take pages, _) = disk_allocation(scoped fn() -> Result[(PageDisk, DiskRemovals), Error] {
             cut_retirement(layout, participants.holders, None, list.new(), seq, seq)
         })?

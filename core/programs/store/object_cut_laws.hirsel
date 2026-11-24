@@ -472,7 +472,7 @@ fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error]
     if list.len(packed) != 3 || std.page.stamp(std.page.image_of(layout.lists.roots.retired)) != 0 {
         fail("object cut did not emit exactly the three live pack classes")
     }
-    fill_cut_manifest(mut buffers.out, draft, NoHolderChange, 2, 3, 3, layout, next_stamp, base.account, seal_page_manifest_file)?
+    fill_cut_manifest(mut buffers.out, draft, NoHolderChange, participants.roots, 2, 3, 3, layout, next_stamp, base.account, seal_page_manifest_file)?
     let (_, take page_manifest) = disk_read_page_manifest("test manifest", buffers.out)?
     let manifest_ref = history_create_manifest(mut source.client, id, 1, 1, page_manifest, mut workspace, source.deadline)?
     let loc = history_make_locator(mut source.client, id, 3, 1, 1, take packed, mut workspace, source.deadline)?

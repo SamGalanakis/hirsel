@@ -192,12 +192,8 @@ fn test_l68_cut_emits_hot_tiered_write(d: Dir, c: Clock, r: Random, tasks: Tasks
     close(take reopened)
 }
 
-// Production apply over a Cold Tiered root: a served put and a served
-// delete edit the class-3 leaf through the Tiered plan, the cut emits the
-// edited leaf, and a reopen reads the acknowledged rows back.
-@test
-fn test_l68_served_write_to_cold_tiered(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let floor = 182375272u64
+// Rows 1→10, 3→30 and 5→50 in a Tiered table whose root is Cold on disk.
+fn l68_cold_rows(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
@@ -217,32 +213,81 @@ fn test_l68_served_write_to_cold_tiered(d: Dir, c: Clock, r: Random, tasks: Task
     }
     l62_prepare_snapshot_pages(mut db, d, rows.id, pack_seq)?
     let _ = cut_install(mut db, NoHolderChange)?
-    close(take db)?
+    close(take db)
+}
 
-    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let handle_cold = table(mut cold, "rows", std.codec.key_u64(), std.codec.of_u32())?
-    let Committed(_) = run(mut cold, Some(100000), copy_env(handle_cold), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
-        put(mut tx, handle, 3u64, 33u32)?
-        let _ = delete(mut tx, handle, 1u64)?
+fn l68_write_rows(mut db: Db, put_key: u64, put_value: u32, deleted: Option[u64]) -> Result[(), Error] waits {
+    let handle_rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, Some(100000), copy_env((handle_rows, put_key, put_value, deleted)), fn(mut tx: Tx, env: (Table[u64, u32], u64, u32, Option[u64])) -> Result[(), Error] {
+        put(mut tx, env.0, env.1, env.2)?
+        if let Some(removed) = env.3 {
+            let _ = delete(mut tx, env.0, removed)?
+        }
         Ok(())
     })? else {
-        fail("L68: the served write to the Cold Tiered collection commits")
+        fail("L68: the served write to the Tiered collection commits")
     }
-    let _ = checkpoint(mut cold)?
-    close(take cold)?
+    Ok(())
+}
 
-    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
-    let rows_again = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u32())?
-    let Committed(done) = run(mut reopened, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(Option[u32], Option[u32], Option[u32]), Error] {
+fn l68_read_rows(mut db: Db) -> Result[(Option[u32], Option[u32], Option[u32]), Error] waits {
+    let rows_again = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(done) = run(mut db, Some(100000), copy_env(rows_again), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(Option[u32], Option[u32], Option[u32]), Error] {
         Ok((fetch(tx, handle, 1u64)?, fetch(tx, handle, 3u64)?, fetch(tx, handle, 5u64)?))
     })? else {
         fail("L68: a read of the reopened Tiered collection commits")
     }
-    if done.value != (None, Some(33u32), Some(50u32)) {
+    Ok(done.value)
+}
+
+// Production apply over a Cold Tiered root: a served put and a served
+// delete edit the class-3 leaf through the Tiered plan, the cut emits the
+// edited leaf, and a reopen reads the acknowledged rows back.
+@test
+fn test_l68_served_write_to_cold_tiered(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    l68_write_rows(mut cold, 3u64, 33u32, Some(1u64))?
+    let _ = checkpoint(mut cold)?
+    close(take cold)?
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut reopened)? != (None, Some(33u32), Some(50u32)) {
         fail("L68: the served put and delete survive the cut and reopen")
     }
     if accounts(reopened).tiered != 172 {
         fail("L68: the Tiered account covers the two remaining rows")
+    }
+    close(take reopened)
+}
+
+// L68 (e): writes that reach only the journal reopen as a replay overlay.
+// The next write into that collection waits for the fold cut, which applies
+// the overlay to the Cold tree, then reruns; the following checkpoint
+// publishes all three edits and the reopen reads them from class-3 leaves.
+@test
+fn test_l68_fold_cut_publishes_replayed_writes(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    l68_write_rows(mut cold, 3u64, 33u32, Some(1u64))?
+    close(take cold)?
+
+    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut replayed)? != (None, Some(33u32), Some(50u32)) {
+        fail("L68: the overlay reads the journaled put and delete")
+    }
+    l68_write_rows(mut replayed, 5u64, 55u32, None)?
+    let _ = checkpoint(mut replayed)?
+    close(take replayed)?
+
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut reopened)? != (None, Some(33u32), Some(55u32)) {
+        fail("L68: the fold cut publishes the replayed and the rerun writes")
+    }
+    if accounts(reopened).tiered != 172 {
+        fail("L68: the fold cut's Tiered account covers the two remaining rows")
     }
     close(take reopened)
 }

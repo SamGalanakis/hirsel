@@ -327,7 +327,15 @@ fn drive_served(mut db: Db, take complete: Completion, plan: Plan, grant: CallRe
             None => return decide_served(mut db, take complete, take rec, ci, take metered),
             Some(AttemptPinLimit(problem)) => Cache(problem),
             Some(AttemptAllocation(problem)) => Allocation(problem),
-            Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
+            // The fold cut runs before the rerun and does not count as an attempt.
+            Some(AttemptFold(_)) => match cut_install(mut db, NoHolderChange) {
+                Ok(_) => {
+                    call.attempts -= 1
+                    continue
+                },
+                Error(Full(problem)) => problem,
+                Error(take problem) => return Error(Before(take problem, None)),
+            },
             Some(AttemptMiss(_)) => {
                 let source = serve_before(call_page_source(db))?
                 let root = call_pin_root(db, 0)

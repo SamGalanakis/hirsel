@@ -86,3 +86,45 @@ fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error
     })?
     Ok(take participants)
 }
+
+// AP16 item 9's MANIFEST. Each branch and pin names the root the cut
+// published for it: `published` holds the participants' roots in
+// `cut_participants` order, sealed or folded by the Tiered stage.
+fn fill_cut_manifest(mut raw: Bytes, db: Db, delta: HolderDelta, published: List[Roots], generation: u64, seq: u64, prev_first: u64, layout: PagedCutLayout, next_stamp: u64, account: u64, write_seal: scoped fn(mut Bytes, DiskContext, u32) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    let tables = match delta {
+        ReplaceMain(main, _) => main.tables,
+        _ => db.next_table
+    }
+    let zero = std.page.unlocated(0)
+    let account_tiered = cut_tiered_account(db, delta)?
+    let manifest = PageManifest(generation: generation, fence: db.fence, inline: db.heads[0u64].roots.collections.inline, next_stamp: next_stamp, next_branch: db.next_branch, next_table: tables, next_pack: layout.lists.run_packs.next_pack, first_live: seq, prev_first: prev_first, account_memory: account, account_tiered: account_tiered, lineage: zero, deferred_frees: zero, deferred_next: 0, archive_on: 0, archive: zero, archive_drop: 0, sweep: SweepCursor(position: 0, epoch: 0, digest: 0), pack_root: published_tree_pointer(layout.locations, layout.lists.roots.packs), retirement_root: published_tree_pointer(layout.locations, layout.lists.roots.retired), branches: list.new(), pins: list.new())
+    let context = DiskContext(store: db.store, role: 1, seq: generation)
+    begin_page_manifest_file(mut raw, context)?
+    append_page_manifest_fields(mut raw, manifest)?
+    let heads = list.len(db.heads)
+    let branch_count = match delta {
+        AddHead(_, _) => heads + 1,
+        RemoveHead(_) => heads - 1,
+        ReplaceMain(_, Some(_)) => heads - 1,
+        _ => heads,
+    }
+    capacity(le(mut raw, branch_count, 4))?
+    let mut slot = 0u64
+    visit_cut_heads(db, delta, mut raw, scoped fn(mut buffer: Bytes, head: Head, _roots: Roots, head_version: u64, at: u64) -> Result[(), Error] {
+        slot += 1
+        append_page_manifest_branch(mut buffer, head.id, head.name, head.parent, head.forked_at, head_version, at, published_page_roots(layout.locations, published[slot - 1]))
+    })?
+    let pins = list.len(db.pins)
+    let pin_count = match delta {
+        AddPin(_) => pins + 1,
+        RemovePin(_) => pins - 1,
+        _ => pins
+    }
+    capacity(le(mut raw, pin_count, 4))?
+    visit_cut_pins(db, delta, mut raw, scoped fn(mut buffer: Bytes, held: Pin) -> Result[(), Error] {
+        slot += 1
+        append_page_manifest_pin(mut buffer, held.name, held.branch, held.version, published_page_roots(layout.locations, published[slot - 1]), held.watermark)
+    })?
+    write_seal(mut raw, context, db.fence)?
+    Ok(())
+}

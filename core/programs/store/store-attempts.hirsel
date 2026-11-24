@@ -19,7 +19,14 @@ fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64],
             None => return Ok(take staged),
             Some(AttemptPinLimit(problem)) => return Ok(Over(Refused(Cache(problem)))),
             Some(AttemptAllocation(problem)) => return Ok(Over(Refused(Allocation(problem)))),
-            Some(AttemptFold(_)) => fail("store: a call cannot wait for a fold yet"),
+            // A write into a replay overlay waits for the fold cut, then reruns
+            // at the head it publishes (§13.3). A corrupt fold is the store
+            // error path; a refused one refuses the call with its cause.
+            Some(AttemptFold(_)) => match cut_install(mut db, NoHolderChange) {
+                Ok(_) => (),
+                Error(Full(problem)) => return Ok(Over(Refused(problem))),
+                Error(take problem) => return Error(take problem),
+            },
             Some(AttemptMiss(_)) => {
                 // An inline call is held from its first miss (§13.3a "Inline calls").
                 revoke_parked(mut db)

@@ -190,6 +190,9 @@ limit = 268435456
 [tests.runs."store@1/store/test_l68_refused_cut_keeps_acknowledged_write"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_l68_fold_cut_publishes_emptied_table"]
+limit = 268435456
+
 [tests.runs."store@1/store/test_l68_fold_cut_publishes_replayed_writes"]
 limit = 268435456
 

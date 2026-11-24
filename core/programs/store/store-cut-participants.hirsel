@@ -73,16 +73,19 @@ type CutParticipants {
     holders: List[HeldPage],
     roots: List[Roots],
     // Each root's branch, for the rows a fold hands to `deferred_frees`.
-    branches: List[u32]
+    branches: List[u32],
+    // The first `heads` roots are branch heads; the rest are pins.
+    heads: u64
 }
 
 fn cut_participants(db: Db, delta: HolderDelta) -> Result[CutParticipants, Error] {
     let n = list.len(db.heads) + list.len(db.pins) + 1
-    let mut participants = CutParticipants(holders: list.with_capacity(3 * n), roots: list.with_capacity(n), branches: list.with_capacity(n))
+    let mut participants = CutParticipants(holders: list.with_capacity(3 * n), roots: list.with_capacity(n), branches: list.with_capacity(n), heads: 0)
     visit_cut_heads(db, delta, mut participants, scoped fn(mut current: CutParticipants, head: Head, roots: Roots, head_version: u64, at: u64) -> Result[(), Error] {
         note_held_roots(mut current.holders, 0, int.widen(head.id), roots)
         list.push(mut current.roots, share_roots(roots))
         list.push(mut current.branches, head.id)
+        current.heads += 1
         Ok(())
     })?
     visit_cut_pins(db, delta, mut participants, scoped fn(mut current: CutParticipants, held: Pin) -> Result[(), Error] {

@@ -204,6 +204,7 @@ store@1/store/test_l65_tiered_edges src=5beff9f45cbebfa1 sig=ba8f120645d447c7 ru
 store@1/store/test_l68_cut_emits_hot_tiered_write src=b553682dc02c9f04 sig=1269428f60fe3d42 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l68_cut_keeps_cold_inventory_out_of_memory_graph src=6f8e341262202cf3 sig=dde72a2e76195604 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_fold_cut_counts_pinned_cold_root src=f634c291dedd226b sig=c51518386bc80c06 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_l68_fold_cut_publishes_emptied_table src=3940e8e2cb494ae8 sig=fcf9c138f08ece94 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l68_fold_cut_publishes_replayed_writes src=f17cbace9e6b7896 sig=058d34179d66a790 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l68_fold_reuses_cold_edges src=b2fc93dbefcc14b3 sig=ed1bd55460da26b1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_indexed_tiered_pack src=12fe852bfe6ceecd sig=695621102413d3b1 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

@@ -150,15 +150,18 @@ fn drain_tiered_frees(cut: TieredPageSource, mut queue: TieredDeferredQueue, rew
 }
 
 // T8 steps 3 and 4: the rows a cut adds at `deferred_next` onward, in order,
-// and the sequences its drain consumed, installed or added.
+// and the sequences its drain consumed, installed or added. `folded` holds
+// the Cold frames the fold replaced, which step 2 files with the replaced
+// list; `kills` holds the drain's.
 type CutQueue: send {
     added: List[DeferredFree],
     drained: List[u64],
-    kills: List[TieredDrainKill]
+    kills: List[TieredDrainKill],
+    folded: List[TieredDrainKill]
 }
 
 fn no_cut_queue() -> CutQueue {
-    CutQueue(added: list.new(), drained: list.new(), kills: list.new())
+    CutQueue(added: list.new(), drained: list.new(), kills: list.new(), folded: list.new())
 }
 
 fn queued_free(value: Bytes) -> DeferredFree {

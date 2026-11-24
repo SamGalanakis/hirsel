@@ -341,6 +341,47 @@ fn test_l68_fold_cut_publishes_replayed_writes(d: Dir, c: Clock, r: Random, task
     close(take reopened)
 }
 
+// L68, the all-rows-deleted fold: the journal deletes every row of a Cold
+// one-leaf table, and the store reopens with that overlay. The fold cut
+// publishes an empty table, so the reopen reads no row and `account_tiered`
+// is 0. The replaced Cold leaf R is filed dead on main, since no holder
+// reaches it: its pack's `live` loses exactly R's length.
+@test
+fn test_l68_fold_cut_publishes_emptied_table(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = table(mut cold, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let leaf = l69_cold_root(cold, rows.id)?
+    let laid = l69_pack_live(cold, leaf.pack)
+    let Committed(_) = run(mut cold, Some(100000), copy_env(rows), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        for key in [1u64, 3u64, 5u64] {
+            let _ = delete(mut tx, handle, key)?
+        }
+        Ok(())
+    })? else {
+        fail("L68: the served deletes commit")
+    }
+    close(take cold)?
+
+    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if l68_read_rows(mut replayed)? != (None, None, None) || accounts(replayed).tiered != 0 {
+        fail("L68: the overlay reads the emptied table")
+    }
+    let _ = checkpoint(mut replayed)?
+    close(take replayed)?
+
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if accounts(reopened).tiered != 0 || l69_pack_live(reopened, leaf.pack) != laid - int.widen(leaf.len) {
+        fail("L68: the fold cut files the emptied table's Cold leaf dead")
+    }
+    let mut reading = reopened
+    if l68_read_rows(mut reading)? != (None, None, None) {
+        fail("L68: the emptied table reopens with no row")
+    }
+    close(take reading)
+}
+
 // L68: the fold cut publishes X over the roots it publishes. A pin keeps the
 // Cold three-row leaf (3 × 86 = 258) and the head's journaled delete folds
 // into a fresh two-row leaf (172), so X = 430 live and after the reopen. A

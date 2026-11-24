@@ -45,10 +45,31 @@ fn encode_tiered_run(id: StoreId, layout: TieredPackRun, mut emitted: Map[u64, s
 // overlay stays. Each Cold subtree a floor detaches becomes a
 // `deferred_frees` row of its participant's branch (T8 step 3), once per
 // branch and frame, so holders that share one overlaid tree queue it once.
-// The replaced list waits for `lineage`, so the Cold frames a fold replaces
-// stay counted live.
-fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree]) -> Result[bool, Error] waits {
+// Each Cold frame a branch head's fold replaces is filed against that branch
+// (§13.7 "Ownership follows the actual replacements"), once per branch and
+// frame. A pin records nothing. Nor does a branch a journaled FORK made, whose
+// fork row the cut first publishes: its own replacements need the fork-time
+// overlay, so they stay counted live until it is built.
+// The participants whose fold replacements are filed: branch heads (the
+// first `heads` roots) whose fork row the cut does not first publish.
+fn fold_owners(branches: List[u32], heads: u64, forked: List[LineageFork]) -> Result[List[bool], Error] {
+    let mut owners: List[bool] = list.new()
+    capacity(list.try_reserve(mut owners, list.len(branches)))?
+    for slot in 0u64 .. list.len(branches) {
+        let mut owns = slot < heads
+        for fork_row in forked {
+            if fork_row.child == branches[slot] {
+                owns = false
+            }
+        }
+        list.push(mut owners, owns)
+    }
+    Ok(take owners)
+}
+
+fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: List[Roots], branches: List[u32], owners: List[bool], mut next_stamp: u64, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree], mut replaced: List[TieredDrainKill]) -> Result[bool, Error] waits {
     let mut folded = false
+    let mut filed: Map[(u32, u64, u64), ()] = map.new()
     for slot in 0u64 .. list.len(roots) {
         let overlaid = match roots[slot].collections.replay {
             Some(_) => true,
@@ -58,15 +79,26 @@ fn fold_cut_roots(pager: Option[View[Sender[TieredPagerMessage]]], mut roots: Li
             let source = tx_page_source(pager, roots[slot].collections, next_stamp)?
             let effects = fold_page_tree(source, mut roots[slot].collections, mut next_stamp)?
             for effect in effects {
-                if let FoldDropped(target) = effect {
-                    let frame = tiered_frame_id(target)
-                    let key = (branches[slot], frame.pack, frame.offset)
-                    if !map.contains(seen, key) {
-                        capacity(map.try_reserve(mut seen, 1))?
-                        map.insert(mut seen, key, ())
-                        capacity(list.try_reserve(mut queued, 1))?
-                        list.push(mut queued, DeferredFree(branch_id: branches[slot], target: clone(target)))
-                    }
+                match effect {
+                    FoldDropped(target) => {
+                        let frame = tiered_frame_id(target)
+                        let key = (branches[slot], frame.pack, frame.offset)
+                        if !map.contains(seen, key) {
+                            capacity(map.try_reserve(mut seen, 1))?
+                            map.insert(mut seen, key, ())
+                            capacity(list.try_reserve(mut queued, 1))?
+                            list.push(mut queued, DeferredFree(branch_id: branches[slot], target: clone(target)))
+                        }
+                    },
+                    FoldReplaced(frame) => {
+                        let key = (branches[slot], frame.pack, frame.stamp)
+                        if owners[slot] && !map.contains(filed, key) {
+                            capacity(map.try_reserve(mut filed, 1))?
+                            map.insert(mut filed, key, ())
+                            capacity(list.try_reserve(mut replaced, 1))?
+                            list.push(mut replaced, TieredDrainKill(branch_id: branches[slot], frame: frame))
+                        }
+                    },
                 }
             }
             folded = true
@@ -94,7 +126,7 @@ fn queue_live_dropped(dropped: List[DeferredFree], mut seen: Map[(u32, u64, u64)
 // T2 then T4: every Hot Tiered page and blob that a participant reaches is
 // emitted once by stamp, class 4 then class 3, from the installed `next_pack`
 // upward.
-fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32], cap: u64) -> Result[TieredCutStage, Error] waits {
+fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32], heads: u64, cap: u64) -> Result[TieredCutStage, Error] waits {
     let id = db.store
     let first_pack = disk_state(db).pages.next_pack
     let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
@@ -106,8 +138,10 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
     let mut seen: Map[(u32, u64, u64), ()] = map.new()
     let mut queued: List[DeferredFree] = list.new()
     queue_live_dropped(disk_state(db).tiered_dirty.dropped, mut seen, mut queued)?
-    let folded = fold_cut_roots(pager, mut roots, branches, mut next_stamp, mut seen, mut queued)?
-    let queue = drain_cut(db, pager, take queued, next_stamp)?
+    let mut replaced: List[TieredDrainKill] = list.new()
+    let owners = fold_owners(branches, heads, disk_state(db).pages.forked)?
+    let folded = fold_cut_roots(pager, mut roots, branches, owners, mut next_stamp, mut seen, mut queued, mut replaced)?
+    let queue = drain_cut(db, pager, take queued, take replaced, next_stamp)?
     let TieredCutFrames(pages: take pages, blobs: take blobs, ..) = tiered_cut_frames(roots)?
     if list.len(pages) == 0 && !folded {
         return Ok(TieredCutStage(packs: list.new(), roots: take roots, next_pack: first_pack, stamp_end: next_stamp, folded: false, queue: take queue))
@@ -129,8 +163,8 @@ fn stage_tiered_cut(db: Db, take participants: List[Roots], branches: List[u32],
 
 // T8 step 4 reads queued pages through the installed inventory. A cut with
 // an empty queue, or a zero `free_budget`, reads nothing.
-fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added: List[DeferredFree], next_stamp: u64) -> Result[CutQueue, Error] waits {
-    let mut queue = CutQueue(added: take added, drained: list.new(), kills: list.new())
+fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added: List[DeferredFree], take folded: List[TieredDrainKill], next_stamp: u64) -> Result[CutQueue, Error] waits {
+    let mut queue = CutQueue(added: take added, drained: list.new(), kills: list.new(), folded: take folded)
     let installed = disk_state(db).pages
     let budget = disk_state(db).options.free_budget
     if budget == 0 || (std.page.count(std.page.image_of(installed.lists.deferred)) == 0 && list.len(queue.added) == 0) {

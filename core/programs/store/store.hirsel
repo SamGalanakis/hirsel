@@ -4854,13 +4854,13 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     let participants = disk_allocation(scoped fn() -> Result[CutParticipants, Error] {
         cut_participants(db, delta)
     })?
-    let CutParticipants(holders: take participants_held, roots: take roots, branches: take branches) = take participants
-    let mut staged = stage_tiered_cut(db, take roots, branches, pack_bytes)?
+    let CutParticipants(holders: take participants_held, roots: take roots, branches: take branches, heads: heads) = take participants
+    let mut staged = stage_tiered_cut(db, take roots, branches, heads, pack_bytes)?
     db.next_node = staged.stamp_end - 1
     let holders = sealed_cut_holders(take participants_held, staged)?
     let mut base = page_retry_base(disk_state(db).pages.locations, disk_state(db).pages.owners, holders, staged.roots)?
     list_tiered_cut(mut base.locations, staged)?
-    let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue.kills, mut base.locations.packs)?
+    let lineage_rows = settle_lineage_kills(cut_lineage_rows(db, delta, branches, staged.queue.added)?, db, delta, staged.queue, mut base.locations.packs)?
     over_ceiling(base.account, available_resident(db))?
     let manifest_bytes = cut_manifest_size(db, delta)
     let d = log_directory(db)?

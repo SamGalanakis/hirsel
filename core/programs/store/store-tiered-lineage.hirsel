@@ -432,11 +432,11 @@ fn cut_lineage_rows(db: Db, delta: HolderDelta, holders: List[u32], queued: List
 
 // T8 steps 1, 2 and 5 against B_new (T7), derived from the pruned fork rows
 // and this cut's pins: `adopt`'s re-keying, then each live replaced-list row
-// filed as a kill on chain(branch), then the drops. Anchors are empty until
-// the archive is published. The fold's replaced frames stay unfiled, an
-// over-count, until §13.7's ownership rule decides which participant files
-// them. `packs` is the cut's base inventory, settled once ahead of retries.
-fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, drained: List[TieredDrainKill], mut packs: DiskIndex[u64, PagePack]) -> Result[Lineage, Error] {
+// and each frame the fold replaced filed as a kill on chain(branch), then the
+// drain's kills (step 4), then the drops. Anchors are empty until the archive
+// is published. `packs` is the cut's base inventory, settled once ahead of
+// retries.
+fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, queue: CutQueue, mut packs: DiskIndex[u64, PagePack]) -> Result[Lineage, Error] {
     let mut rows = take settled
     let mut pin_marks: List[(u32, u64)] = list.new()
     visit_cut_pins(db, delta, mut pin_marks, scoped fn(mut out: List[(u32, u64)], held: Pin) -> Result[(), Error] {
@@ -453,7 +453,10 @@ fn settle_lineage_kills(take settled: Lineage, db: Db, delta: HolderDelta, drain
             file_lineage_kill(mut rows, chain_holders, mut packs, replaced.branch, frame)?
         }
     }
-    for kill in drained {
+    for kill in queue.folded {
+        file_lineage_kill(mut rows, chain_holders, mut packs, kill.branch_id, kill.frame)?
+    }
+    for kill in queue.kills {
         file_lineage_kill(mut rows, chain_holders, mut packs, kill.branch_id, kill.frame)?
     }
     apply_lineage_drops(mut rows, chain_holders, mut packs)?

@@ -175,3 +175,25 @@ fn c3() -> Result[(), ()] {
         serde_json::json!(["app@1/main/c1 model.explore#1: to depth 1 below closed 3/3/2"])
     );
 }
+
+#[test]
+fn law_lock_of_a_package_stays_beside_its_manifest() {
+    // bug: naming a directory inside a package wrote the package's inventory over that
+    // directory's own lock, dropping its rows (core/programs/opus/vectors).
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"main\"");
+    law.write("app/laws.hirsel", PROP_LAW_PACKAGE);
+    PackageLaw::pass(law.run(&["laws", "write", "app"]));
+    let written = std::fs::read_to_string(law.path("app/hirsel.laws")).unwrap();
+    let staged = "hirsel.laws 1\nopus@1/tests/rfc_vectors src=0000000000000007 sig=0000000000000008 run=0000000000000009 bug=- oracle=- rows=pending\n";
+    law.write("app/vectors/hirsel.laws", staged);
+    PackageLaw::pass(law.run(&["laws", "write", "app/vectors"]));
+    assert_eq!(
+        std::fs::read_to_string(law.path("app/vectors/hirsel.laws")).unwrap(),
+        staged
+    );
+    assert_eq!(
+        std::fs::read_to_string(law.path("app/hirsel.laws")).unwrap(),
+        written
+    );
+}

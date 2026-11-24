@@ -1061,7 +1061,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         return Err("image production takes sources, not an image".into());
     }
     let mut manifest_runs = None;
-    let mut test_owner = None;
+    let (mut test_owner, mut package_root) = (None, None);
     let mut request = if let Some(manifest) = manifest {
         CheckRequest {
             inputs: serde_json::from_slice::<CorpusManifest>(&std::fs::read(&manifest)?)?,
@@ -1086,7 +1086,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 dir.as_deref().ok_or("missing package directory")?,
             )?,
         };
-        test_owner = Some(app.package.package.clone());
+        (test_owner, package_root) = (Some(app.package.package.clone()), app.manifest.clone());
         manifest_runs = app.tests.take();
         let program =
             native_command || installed.is_some() || inspection.is_some() || image.is_some();
@@ -1156,7 +1156,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let selected_entry = request.entry.clone();
     request.capture_sources()?;
     let law_files = (static_laws || test_write_laws).then(|| crate::law_lock::test_files(&request));
-    let law_directory = dir.as_deref().unwrap_or(Path::new("."));
+    let law_directory = &package_root.or_else(|| dir.clone()).unwrap_or_default();
     let sources = crate::SourceFiles::of(&request);
     if let Some(owner) = &test_owner {
         if let Some(image) = image {

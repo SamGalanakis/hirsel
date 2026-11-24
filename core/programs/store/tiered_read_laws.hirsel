@@ -628,3 +628,44 @@ fn test_l63_branch_split_reuses_cold_divider() -> Result[(), Error] {
     }
     Ok(())
 }
+
+@test
+fn test_l68_cut_keeps_cold_inventory_out_of_memory_graph() -> Result[(), Error] {
+    let raw = l68_collection_map_wire()
+    let image = page_result(std.page.decode(clone(raw), CollectionMap))?
+    let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
+    let mut children: List[std.page.Slot] = list.with_capacity(1)
+    list.push(mut children, ColdPage(ptr))
+    let mut roots = empty_roots()
+    roots.collections.root = page_result(std.page.attach(take image, take children, list.new()))?
+    let mut held_roots: List[Roots] = list.with_capacity(1)
+    list.push(mut held_roots, share_roots(roots))
+    let mut holders: List[HeldPage] = list.with_capacity(3)
+    note_held_roots(mut holders, 0, 0, roots)
+
+    let mut installed = new_page_locations()
+    let cold = PagePack(class: 3, frames: 1, live: 0, payload_bytes: 220, index: 168)
+    capacity(disk_index_put(mut installed.packs, 8, cold, pack_edge_charge))?
+    let base = page_retry_base(installed, map.new(), holders, held_roots)?
+    if base.account != 126 || map_has_location(base.locations, 40) {
+        fail("L68: a Tiered root entered the Memory location table or account")
+    }
+    let mut ids = 101u64
+    let mut planned = plan_page_cut(base, holders, empty_paged_lists(), None, 9, 1048576, map.new(), None, mut ids)?
+    if list.len(planned.data_pages.frames) != 1 || list.len(planned.blobs.frames) != 0 || list.len(planned.lists.removals) != 0 {
+        fail("L68: a Memory cut tried to re-emit or retire a Tiered frame")
+    }
+    let Some(kept) = std.page.lookup(planned.lists.roots.packs, key_word(8)) else {
+        fail("L68: a Tiered pack retired without a probe")
+    }
+    if list.len(kept) != 29 || kept[0u64] != 3 || read_le(kept, 5, 8) != 0 || read_le(kept, 13, 8) != 220 || read_le(kept, 21, 8) != 168 {
+        fail("L68: cut changed the Tiered pack inventory")
+    }
+    let owner = StoreId(hi: 3, lo: 4)
+    let mut output: Bytes = list.with_capacity(179)
+    encode_pack(owner, planned.data_pages, planned.data_pages.packs[0u64], mut planned.locations, mut output)?
+    if list.len(output) != 179 || list.slice(output, 88, 179) != raw {
+        fail("L68: the emitted Memory map did not retain the Cold pointer")
+    }
+    Ok(())
+}

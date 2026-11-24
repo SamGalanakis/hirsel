@@ -210,7 +210,7 @@ fn moved_frames(known: PageLocations, lists: bool) -> List[u64] {
     let mut moved: List[u64] = list.new()
     let mut inventory = std.omap.range(known.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
-        if (pack.class == 2) == lists && sparse_pack(pack) {
+        if pack.class < 3 && (pack.class == 2) == lists && sparse_pack(pack) {
             let mut members = std.omap.range(known.members.values, Included((seq, 0u64)), Included((seq, 18446744073709551615u64)))
             while let Some(((_, stamp), _)) = std.omap.next(mut members) {
                 list.push(mut moved, stamp)
@@ -234,7 +234,7 @@ fn encode_pack_row(pack: PagePack) -> Bytes {
     take out
 }
 
-// Apply final class-0 and class-1 counts to the installed pack-list tree.
+// Apply final data-pack counts to the installed pack-list tree.
 // The list is edited in place only on paths private to this candidate.
 fn reserve_list_edit(root: Arc[std.page.Page], mut next_stamp: u64, issued: core.Log[u64]) -> Result[u64, Error] {
     let height: u64 = int.widen(std.page.level(std.page.image_of(root)))
@@ -257,7 +257,8 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, private_fr
             continue
         }
         let key = key_word(seq)
-        if pack.live == 0 {
+        // A Tiered pack stays in the inventory until a probe retires it.
+        if pack.class < 3 && pack.live == 0 {
             let listed = match std.page.lookup(root, key) {
                 Some(_) => true,
                 None => false

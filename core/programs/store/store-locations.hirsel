@@ -248,7 +248,7 @@ fn record_fresh_tree(mut known: PageLocations, root: Arc[std.page.Page], class: 
     for slot in 0u64 .. std.page.count(image) {
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => {
-                if child.stamp != 0 {
+                if child.stamp != 0 && std.page.tiered_root_at(image, slot) == None {
                     let descendant = option.unwrap(std.page.child(root, slot))
                     record_fresh_tree(mut known, descendant, class)?
                     list.push(mut outgoing, child.stamp)
@@ -350,7 +350,7 @@ fn plan_tree_frames(known: PageLocations, marked: Map[u64, ()], root: Arc[std.pa
     for slot in 0u64 .. std.page.count(image) {
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(child)) => {
-                if child.stamp != 0 {
+                if child.stamp != 0 && std.page.tiered_root_at(image, slot) == None {
                     let body = option.unwrap(std.page.child(root, slot))
                     plan_tree_frames(known, marked, body, mut output)
                 }

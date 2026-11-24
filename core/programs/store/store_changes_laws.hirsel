@@ -529,7 +529,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
             fail(string.from(call_env))
         }))
         match take failed {
-            Failed(take cs) => if !has_failure(cs, message) {
+            Failed(take cs, reads) => if list.len(reads) != 0 || !has_failure(cs, message) {
                 return false
             },
             _ => return false
@@ -557,7 +557,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
         })
     })
     match take refused_query {
-        Ok(Refused(Allocation(cap))) => cap.requested == 32 && cap.available == 31 && db.heads[0].head == 0 && db.resident == 0,
+        Ok(Refused(Allocation(cap), reads)) => list.len(reads) == 0 && cap.requested == 32 && cap.available == 31 && db.heads[0].head == 0 && db.resident == 0,
         _ => false
     }
 }

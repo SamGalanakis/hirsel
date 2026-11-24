@@ -3894,7 +3894,7 @@ fn upgrade(k: u64, v: OldAccount) -> Result[Option[(u64, NewAccount)], Capacity]
     Ok(Some((k, NewAccount(balance: v.balance, bonus: v.balance * 10))))
 }
 
-pub type Looked[R] = Seen(Seen[R]) | Failed(Causes) | Refused(StoreCapacity) | Stopped(OutOfTime)
+pub type Looked[R] = Seen(Seen[R]) | Failed(Causes, List[Read]) | Refused(StoreCapacity, List[Read]) | Stopped(OutOfTime, List[Read])
 
 pub type Seen[R] {
     value: R,
@@ -3921,12 +3921,12 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
     })
     let seen = log.finish(take reads)
     match take caught {
-        Error(c) => Ok(Refused(Allocation(c))),
+        Error(c) => Ok(Refused(Allocation(c), take seen)),
         Ok(Error(take cs)) => match raised_capacity(cs) {
-            Some(c) => Ok(Refused(Allocation(c))),
-            None => Ok(Failed(take cs)),
+            Some(c) => Ok(Refused(Allocation(c), take seen)),
+            None => Ok(Failed(take cs, take seen)),
         },
-        Ok(Ok(Error(e))) => Ok(Stopped(e)),
+        Ok(Ok(Error(e))) => Ok(Stopped(e, take seen)),
         Ok(Ok(Ok(take value))) => Ok(Seen(Seen(value: take value, version: s.head, reads: take seen)))
     }
 }

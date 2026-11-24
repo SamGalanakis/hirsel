@@ -166,6 +166,24 @@ fn budget_projection_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u6
         list.len(owed.groups) == 1 && owed.groups[0u64].sub == 8
 }
 
+fn budget_run_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u64) -> bool waits {
+    let (take prepared, take key) = budget_board(db, h, store.snapshot(db), 1048576, steps)
+    let mut b = take prepared
+    let stopped = at_base(mut b, 1, 7, take key, budget_arguments(input))
+    if !budget_ended(stopped, 7, steps, false) || list.len(stopped.rows) != 0 || list.len(stopped.complete) != 0 {
+        return false
+    }
+    let mut fenced = Fenced(sessions: map.new())
+    set(mut db, h.t, 1, 101)
+    b.newest = Some(store.snapshot(db))
+    if list.len(round(mut b, mut fenced)) != 0 || map.contains(fenced.sessions, 1u64) {
+        return false
+    }
+    set(mut db, h.t, input.member, 102)
+    b.newest = Some(store.snapshot(db))
+    list.len(round(mut b, mut fenced)) == 0 && map.contains(fenced.sessions, 1u64)
+}
+
 fn budget_cover_trial(db: store.Db, h: Qh, base: store.Snapshot, newest: store.Snapshot,
     input: BudgetQuery, steps: u64) -> (Board[(), Qh], bool) waits {
     let (take prepared, take key) = budget_board(db, h, base, 1048576, steps)
@@ -279,6 +297,9 @@ fn law_query_budget_split(c: Clock, r: Random) -> Result[(), String] waits {
     }
     if !budget_cover_stop(mut db, h, projection_only, projection_steps) {
         return Error("L8: a Cover-only step stop must retain both sessions' read sets")
+    }
+    if !budget_run_stop(mut db, h, run_only, run_steps - 1) {
+        return Error("L8: a stopped run must retain its Point and fence only on a matching write")
     }
     Ok(())
 }

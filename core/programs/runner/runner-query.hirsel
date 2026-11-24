@@ -81,9 +81,9 @@ fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, 
                 Error(limit) => Faulted(Failed(OutOfTime(limit.steps)), take reads),
             }
         },
-        Ok(Failed(cs)) => Stopped(Failed(Raised(raised(cs)))),
-        Ok(Refused(c)) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
-        Ok(Stopped(e)) => Stopped(Failed(OutOfTime(e.steps))),
+        Ok(Failed(cs, take reads)) => Faulted(Failed(Raised(raised(cs))), take reads),
+        Ok(Refused(c, take reads)) => Faulted(Failed(OutOfBytes(room(store_capacity(c)))), take reads),
+        Ok(Stopped(e, take reads)) => Faulted(Failed(OutOfTime(e.steps)), take reads),
         Error(take problem) => Lost(take problem, list.new()),
     }
 }

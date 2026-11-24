@@ -1,0 +1,252 @@
+// The Hirsel endpoint interop.py runs against OpenSSL and dimpl on loopback UDP.
+// Usage: interop client|server PEER_PORT PIN_HEX MTU verified|cookie
+// A server binds an ephemeral port and prints it; PEER_PORT is the server's port for a
+// client and ignored for a server. PIN_HEX is the SHA-256 of the peer certificate.
+// Stdout lines: `bound <port>`, `connected`, `peer <sha256 hex>`, `profile <code>`,
+// `rtp <hex>` (one protect_rtp packet), `opened <hex>` (the SRTP packet the peer sent
+// as an application line, opened), `done`.
+const SECOND: u64 = 1000000000
+
+const LOOPBACK: u32 = 0x7f000001
+
+const SOCKET: UdpOptions = UdpOptions(slots: 8, slot_bytes: 65536)
+
+const LIMITS: srtp.Limits = srtp.Limits(send_streams: 2, receive_streams: 2, ended_streams: 1)
+
+const SENT_SSRC: u32 = 0x11223344
+
+const SENT_SEQ: u16 = 7
+
+fn say(out: Stdout, tag: String, b: Bytes) waits {
+    let mut line = string.from(tag)
+    if list.len(b) != 0 {
+        string.push(mut line, " ")
+        string.push(mut line, std.hex.encode(b))
+    }
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+fn transmit(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    if result.unwrap(host.udp_send(mut socket, data, tx, Never)) != 1 {
+        fail("datagram not sent")
+    }
+}
+
+/// The next datagram before `until`, or None at the deadline.
+fn arrive(mut socket: UdpSocket, until: Until, mut data: Bytes) -> Option[Addr] waits {
+    list.clear(mut data)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    match host.udp_recv(mut socket, mut data, mut packets, until) {
+        Ok(0) => None,
+        Ok(_) => {
+            let UdpPacket(peer, at, len, truncated, ..) = packets[0]
+            if truncated || at != 0 || len != list.len(data) || list.len(packets) != 1 {
+                fail("datagram truncated or batched")
+            }
+            Some(peer)
+        },
+        Error(TimedOut) => None,
+        Error(_) => fail("UDP receive failed"),
+    }
+}
+
+fn argument(a: Args, i: u64) -> String {
+    let Some(v) = args.get(a, i) else {
+        fail("missing argument")
+    }
+    string.from(v)
+}
+
+fn identity(r: Random) -> dtls.Identity {
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(r, "sign(p256)", mut point))
+    let start = option.unwrap(std.time.from_unix(1704067200, 0))
+    let end = option.unwrap(std.time.from_unix(2524608000, 0))
+    let der = result.unwrap(std.x509_build.self_signed_p256(key, r, point, 1, "hirsel.interop", start, end))
+    result.unwrap(dtls.identity(take key, take der, r))
+}
+
+fn pins(text: String) -> List[dtls.Fingerprint] {
+    let digest = option.unwrap(std.hex.decode(string.as_bytes(text)))
+    let mut out: List[dtls.Fingerprint] = list.new()
+    list.push(mut out, dtls.Fingerprint(hash: Sha256, digest: take digest))
+    out
+}
+
+fn profile_code(p: schedule.SrtpProfile) -> u16 {
+    match p {
+        Aes128CmHmacSha1_80 => 1,
+        AeadAes128Gcm => 7,
+        AeadAes256Gcm => 8,
+    }
+}
+
+/// One RTP packet (RFC 3550 section 5.1): V=2, PT 96, timestamp 1.
+fn rtp_packet(p: schedule.SrtpProfile) -> Bytes {
+    let body = b"hirsel-rtp"
+    let mut out: Bytes = list.with_capacity(12 + list.len(body) + srtp.tag_room(p))
+    list.put_word_be(mut out, 0x8060u16)
+    list.put_word_be(mut out, SENT_SEQ)
+    list.put_word_be(mut out, 1u32)
+    list.put_word_be(mut out, SENT_SSRC)
+    list.append(mut out, body)
+    out
+}
+
+fn is_connected(e: dtls.Endpoint) -> bool {
+    match dtls.state(e) {
+        Connected => true,
+        _ => false,
+    }
+}
+
+/// Wait for the first ClientHello; in Cookie mode answer HelloVerifyRequests until one
+/// carries the right cookie (DTLS-5 Admission).
+fn first_hello(mut socket: UdpSocket, clock: Clock, cookie: Option[Inline[u8, 32]], mut data: Bytes, deadline: u64) -> Addr waits {
+    loop {
+        let Some(from) = arrive(mut socket, At(clock, deadline), mut data) else {
+            fail("no ClientHello")
+        }
+        let Some(key) = cookie else {
+            return from
+        }
+        let mut reply: Bytes = list.with_capacity(256)
+        match dtls.admit(key, from, data, mut reply) {
+            Reply(_) => transmit(mut socket, from, reply),
+            Admitted => return from,
+            Discard => (),
+        }
+    }
+}
+
+pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let client = argument(a, 0) == "client"
+    let port: u16 = result.unwrap(int.parse(argument(a, 1)))
+    let mut c = dtls.defaults()
+    c.mtu = result.unwrap(int.parse(argument(a, 3)))
+    let cookie_mode = argument(a, 4) == "cookie"
+    let (take opened_socket, local) = result.unwrap(host.udp_bind(n, Addr(ip: V4(LOOPBACK), port: 0), SOCKET))
+    let mut socket = take opened_socket
+    let mut port_bytes: Bytes = list.with_capacity(2)
+    list.put_word_be(mut port_bytes, local.port)
+    say(out, "bound", port_bytes)
+    let start = host.mono_ns(clock)
+    let deadline = start + 30 * SECOND
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut have = false
+    let mut peer = Addr(ip: V4(LOOPBACK), port)
+    let mut e = if client {
+        result.unwrap(dtls.client(identity(r), c, peer))
+    } else {
+        let mut key_bytes: Bytes = list.with_capacity(32)
+        host.random(r, mut key_bytes)
+        let key = std.sha256.hash(key_bytes)
+        let cookie = if cookie_mode {
+            Some(key)
+        } else {
+            None
+        }
+        peer = first_hello(mut socket, clock, cookie, mut data, deadline)
+        have = true
+        let admission: dtls.Admission = if cookie_mode {
+            Cookie(key)
+        } else {
+            Verified
+        }
+        result.unwrap(dtls.server(identity(r), c, peer, admission))
+    }
+    result.unwrap(dtls.expect(mut e, pins(argument(a, 2))))
+    let mut session: Option[srtp.Session] = None
+    let mut lines: Bytes = list.new()
+    let mut finished = false
+    while !finished {
+        let now = host.mono_ns(clock) - start
+        if have {
+            have = false
+            let mut got: Bytes = list.new()
+            match dtls.receive(mut e, now, r, data, mut got) {
+                Ok(_) => list.append(mut lines, got),
+                Error(_) => fail("receive refused the peer"),
+            }
+        }
+        let mut wake = now + SECOND / 10
+        loop {
+            let mut d: Bytes = list.with_capacity(65536)
+            match dtls.poll(mut e, now, r, mut d) {
+                Ok(Send(_)) => transmit(mut socket, peer, d),
+                Ok(WakeAt(t)) => {
+                    if t < wake {
+                        wake = t
+                    }
+                    break
+                },
+                Ok(Idle) => break,
+                Error(_) => fail("handshake failed"),
+            }
+        }
+        if is_connected(e) {
+            if let None = session {
+                say(out, "connected", list.new())
+                let certificate = option.unwrap(dtls.peer_certificate(e))
+                let digest = std.sha256.hash(certificate)
+                let mut d: Bytes = list.with_capacity(32)
+                for i in 0u64 .. 32 {
+                    list.push(mut d, digest[i])
+                }
+                say(out, "peer", d)
+                let p = option.unwrap(dtls.srtp_profile(e))
+                let mut code: Bytes = list.with_capacity(2)
+                list.put_word_be(mut code, profile_code(p))
+                say(out, "profile", code)
+                let keys = result.unwrap(dtls.take_srtp(mut e))
+                let mut s = result.unwrap(srtp.session(take keys, p, LIMITS))
+                let mut packet = rtp_packet(p)
+                let _ = result.unwrap(srtp.protect_rtp(mut s, mut packet))
+                say(out, "rtp", packet)
+                session = Some(take s)
+                let mut wire: Bytes = list.with_capacity(2048)
+                let _ = result.unwrap(dtls.send(mut e, b"hirsel-app-data\n", mut wire))
+                transmit(mut socket, peer, wire)
+            }
+        }
+        let mut newline = list.len(lines)
+        for i in 0u64 .. list.len(lines) {
+            if lines[i] == b'\n' {
+                newline = i
+                break
+            }
+        }
+        if newline < list.len(lines) {
+            let mut packet = option.unwrap(std.hex.decode(list.slice(lines, 0, newline)))
+            if let Some(mut s) = session {
+                let opened = result.unwrap(srtp.unprotect_rtp(mut s, mut packet))
+                say(out, "opened", list.slice(packet, 0, opened.length))
+            } else {
+                fail("application line before SRTP keys")
+            }
+            let mut wire: Bytes = list.with_capacity(2048)
+            let _ = result.unwrap(dtls.close(mut e, mut wire))
+            transmit(mut socket, peer, wire)
+            finished = true
+        } else {
+            let now_abs = host.mono_ns(clock)
+            if now_abs >= deadline {
+                fail("interop deadline")
+            }
+            let mut until = start + wake
+            if until > deadline {
+                until = deadline
+            }
+            if let Some(from) = arrive(mut socket, At(clock, until), mut data) {
+                if from == peer {
+                    have = true
+                }
+            }
+        }
+    }
+    say(out, "done", list.new())
+    Ok(())
+}

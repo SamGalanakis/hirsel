@@ -854,7 +854,7 @@ seeds (DTLS-8). `std.sim.udp` (Wave 0.3) has not landed, so the loss law drives 
 in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness is
 `core/programs/dtls/laws.hirsel`<!-- doc-ref: planned --> and the SRTP harness is
 `core/programs/srtp/laws.hirsel`<!-- doc-ref: planned -->. The OpenSSL interop runs from
-`core/programs/dtls/interop.py`<!-- doc-ref: planned --> on loopback.
+`core/programs/dtls/interop.py` on loopback; it also runs the dimpl law.
 
 ### DTLS
 
@@ -874,7 +874,8 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   OpenSSL's certificate.
 - **`interop_dimpl`.** *Scenario:* a Hirsel client against a dimpl 1.2 server and a Hirsel
   server against a dimpl 1.2 client, each for one GCM suite and one GCM SRTP profile, through
-  a Rust driver that exchanges datagrams in memory. *Oracle:* dimpl's wire output and its
+  a Rust driver (`core/programs/dtls/interop_dimpl.rs`) that exchanges datagrams with the
+  Hirsel endpoint over loopback UDP, since the two run as separate processes. *Oracle:* dimpl's wire output and its
   exported keying material, which the driver prints. Both complete, and the SRTP keys cut from
   dimpl's exporter output equal the Hirsel session's, checked by one packet sealed on each
   side and opened on the other.

@@ -74,5 +74,44 @@ fn ogg_opus_reference() -> Result[(), ()] {
     if let Error(BadChecksum) = ogg.read(corrupt, 0) {} else {
         fail("a checksum-mismatched page was accepted")
     }
+    let legacy = result.unwrap(opus.read_head(b"OpusHead\x00\x01\x38\x01\x80\xbb\x00\x00\x00\x00\x00"))
+    if legacy.channels != 1 || legacy.pre_skip != 312 || legacy.input_rate != 48000 {
+        fail("RFC 7845 compatible version-0 header from Mozilla's detodos.opus")
+    }
+    continuation()
     Ok(())
+}
+
+// RFC 3533 exact-multiple-of-255 packet terminated by a zero lace on page 1.
+fn continuation() {
+    let first = b"\x4f\x67\x67\x53\x00\x02\xff\xff\xff\xff\xff\xff\xff\xff\x2c\x00\x00\x00\x00\x00\x00\x00\x4e\x3c\xdd\x93\x01\xff"
+    let second = b"\x4f\x67\x67\x53\x00\x05\xff\x00\x00\x00\x00\x00\x00\x00\x2c\x00\x00\x00\x01\x00\x00\x00\xec\xb1\x55\x53\x01\x00"
+    let mut body: Bytes = list.with_capacity(255)
+    list.fill(mut body, 255, 5)
+    let mut input: Bytes = list.with_capacity(283)
+    list.append(mut input, first)
+    list.append(mut input, body)
+    let mut muxed: Bytes = list.with_capacity(282)
+    let mut stream = ogg.open_stream(44)
+    let mut chunks = 0u64
+    let p = result.unwrap(ogg.demux(mut stream, input, 0, scoped fn(packet: Bytes, begins: bool, ends: bool) {
+        if !begins || ends || packet != body {
+            fail("the first page must lend a 255-byte packet fragment")
+        }
+        chunks += 1
+    }))
+    let _ = result.unwrap(ogg.write_page(mut muxed, ogg.header(p), b"\xff", body))
+    if muxed != first {
+        fail("the first page checksum must match the RFC 3533 polynomial")
+    }
+    let last = result.unwrap(ogg.demux(mut stream, second, 0, scoped fn(packet: Bytes, begins: bool, ends: bool) {
+        if begins || !ends || list.len(packet) != 0 {
+            fail("the zero lace must complete the packet without payload bytes")
+        }
+        chunks += 1
+    }))
+    let _ = result.unwrap(ogg.write_page(mut muxed, ogg.header(last), b"\x00", b""))
+    if chunks != 2 || muxed != second {
+        fail("the last page must match the independent Ogg header")
+    }
 }

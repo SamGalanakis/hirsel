@@ -25,7 +25,7 @@ pub fn read_head(packet: Bytes) -> Result[Head, Error] {
         return Error(InvalidHead)
     }
     let version = packet[8]
-    if version == 0 || version > 15 {
+    if version > 15 {
         return Error(UnsupportedVersion)
     }
     let channels = packet[9]

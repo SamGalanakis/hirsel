@@ -4,8 +4,7 @@ use hirsel_core_ir::eval;
 use hirsel_core_ir::*;
 use hirsel_core_layout::Target;
 use hirsel_core_program_tests::counted_loops::{CollectionShape, SEEDS, choices};
-use hirsel_llvm::core::symbol;
-use hirsel_llvm::core::*;
+use hirsel_llvm::core::{symbol, *};
 use std::{collections::HashMap, fmt::Write as _, path::PathBuf, process::Command};
 hirsel_guard::install!();
 #[path = "../../hirsel-core-rt/testdata/host_memory.rs"]
@@ -13,6 +12,7 @@ mod host_memory;
 include!("../../hirsel-llvm/tests/support/native.rs");
 include!("support/flow.rs");
 include!("support/front_cases.rs");
+include!("support/copy_within.rs");
 #[path = "support/llvm_codegen.rs"]
 mod llvm_codegen;
 

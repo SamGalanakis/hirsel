@@ -426,10 +426,15 @@ fn emit(
     drop(declarations);
     let static_setup = observer.enter("static_setup");
     let mut statics = Vec::new();
+    // A static's local name carries its object's key, so the linked image
+    // holds each once and the resident link can place an edited static's
+    // section by it (incremental_link::locate). A rebuilt object renames
+    // them at the same length.
+    let unit: String = object_key.0.iter().map(|b| format!("{b:02x}")).collect();
     for (i, data) in input.statics.iter().enumerate() {
         let id = object
             .declare_data(
-                &format!("hirsel.core.static.{i}"),
+                &format!("hirsel.core.static.{unit}.{i}"),
                 Linkage::Local,
                 false,
                 false,

@@ -487,9 +487,9 @@ pub fn write_member(w: json.Writer, mut items: Items, key: String) {
 
 /// Appends compact JSON, with members and duplicates in document order. Numbers keep
 /// their original spelling; strings escape controls, quotes and backslashes (RFC 8259).
-/// Fails: Error(Capacity) at the first refused append. Prefix: all earlier appends stay
+/// Raises Capacity at the first refused append. Prefix: all earlier appends stay
 /// in s, possibly an unfinished JSON value; the refused append changes nothing.
-/// Alloc: GROWTH of s. Cost: O(encoded bytes). Ex: std.json.push_json(mut s, doc)?
+/// Alloc: GROWTH of s. Cost: O(encoded bytes). Ex: std.json.push_json(mut s, doc)
 pub fn push_json(mut s: String, x: Json) {
     write(mut s, false, scoped fn(w: json.Writer) {
         write_document(w, x, 0, false)

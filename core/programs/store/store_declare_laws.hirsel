@@ -58,15 +58,50 @@ fn migration_list_staged(mut m: Migration) -> Result[(), Error] {
     Ok(())
 }
 
+fn migration_list_retire(mut m: Migration) -> Result[(), Error] {
+    for item in list_collections(m)? {
+        if item.name == "retired" {
+            return drop_named_table(mut m, item.name)
+        }
+    }
+    Ok(())
+}
+
+fn migration_list_schema(mut d: Declare) -> Result[(u32, u32), Error] {
+    let log = declare_log(mut d, "é", std.codec.of_u64())?
+    let cell = declare_cell(mut d, "a", std.codec.of_u64())?
+    let pair_key: std.codec.Key[(u64, u64)] = std.codec.key_of()
+    let _ = declare_edge(mut d, "Z", "reverse", pair_key, std.codec.key_u64(), std.codec.key_u64())?
+    let (_, log_id) = log_identity(log)
+    let (_, cell_id) = cell_identity(cell)
+    Ok((log_id, cell_id))
+}
+
+// L17: the retirement publishes once and the same migration and schema then open unchanged.
+fn migration_list_retirement(mut db: Db, tasks: Tasks) -> Result[(), Error] waits {
+    let _ = create_table(mut db, spec("retired", std.codec.key_u64(), std.codec.of_u64()))?
+    let committed = version(snapshot(db)) + 1
+    for _ in 0u64 .. 2 {
+        let mut d = declare_migration(db, tasks, code.describe(migration_list_retire))?
+        let _ = migration_list_schema(mut d)?
+        let _ = seal(mut db, take d)?
+        let after = snapshot(db)
+        if has_table(after, "retired")? {
+            fail("L17: the retired collection is still present")
+        }
+        if version(after) != committed {
+            fail("L17: the retirement and its rerun must publish exactly once")
+        }
+    }
+    Ok(())
+}
+
 @test
 fn test_migration_list_collections(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     let mut db = test_db(c, 1073741824)
     let _ = create_table(mut db, spec("hirsel.internal", std.codec.key_u64(), std.codec.of_u64()))?
     let mut d = declare(db, Migrate)?
-    let log = declare_log(mut d, "é", std.codec.of_u64())?
-    let cell = declare_cell(mut d, "a", std.codec.of_u64())?
-    let pair_key: std.codec.Key[(u64, u64)] = std.codec.key_of()
-    let _ = declare_edge(mut d, "Z", "reverse", pair_key, std.codec.key_u64(), std.codec.key_u64())?
+    let (log_id, cell_id) = migration_list_schema(mut d)?
     let _ = seal(mut db, take d)?
     let before = version(snapshot(db))
     run_migration(mut db, tasks, code.describe(migration_list_baseline))?
@@ -74,8 +109,7 @@ fn test_migration_list_collections(c: Clock, tasks: Tasks) -> Result[(), Error] 
         fail("migration listing: a read-only migration published a new version")
     }
     let _ = stage_migration(db, tasks, code.describe(migration_list_staged))?
-    let (_, log_id) = log_identity(log)
-    let (_, cell_id) = cell_identity(cell)
+    migration_list_retirement(mut db, tasks)?
     refusal_attach_descriptors(mut db, log_id, cell_id)?
     if let Error(Tiered(Migrate)) = stage_migration(db, tasks, code.describe(migration_list_baseline)) {
         Ok(())

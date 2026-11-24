@@ -222,7 +222,7 @@ store@1/store/test_look_task src=bae95e1f44357370 sig=54bbe5829f018049 run=c9049
 store@1/store/test_memory_identity src=df5d7dff1ec718cd sig=0e95931a3c7b7616 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 store@1/store/test_memory_no_frame_limit src=59e4f40548b903ea sig=a871322fb9222a1b run=ad14684581476a83 bug=- oracle=- rows=pending
 store@1/store/test_migrate src=fcea4bdd1e379ae1 sig=0b6dae2e64d40541 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_migration_list_collections src=ee4b8d8a044589a2 sig=7e3be8b80a22cd55 run=c9049a952ba23a49 bug=- oracle=- rows=pending
+store@1/store/test_migration_list_collections src=7cccfcadcdbed18d sig=5e6a817714af7e4b run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_migration_preview_conflict src=a61f1e16511ee5e9 sig=4d6fde42c1dc8553 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_model src=6e1f84ec4be1cff1 sig=712804977eef3291 run=579dcac8588fe904 bug=- oracle=- rows=pending
 store@1/store/test_node_ids src=29a8fe7628338b43 sig=a24a0c8ab1f7294b run=aff7b6b8625190d8 bug=- oracle=- rows=pending

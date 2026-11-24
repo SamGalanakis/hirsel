@@ -377,3 +377,53 @@ fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Erro
     let _ = result.unwrap(task.join(take worker))
     checked
 }
+
+@test
+fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
+    let owner = StoreId(hi: 3, lo: 4)
+    let value = arc.new(string.into_bytes(string.from("test")))
+    let locate: scoped[view] fn(u64) -> std.page.PagePtr = scoped fn(stamp: u64) -> std.page.PagePtr {
+        fail("Tiered BLOB encoding does not resolve a child")
+    }
+    // The first frame costs 28 bytes. The worst-case index adds 28 bytes
+    // for its head and prefix and 41 per row, including both 12-byte keys.
+    let first = PackFrame(stamp: 31, size: 12, body: BlobBody(arc.share(value)))
+    let second = PackFrame(stamp: 32, size: 12, body: BlobBody(arc.share(value)))
+    let first_key = log_key(9, 1)?
+    let second_key = log_key(9, 2)?
+    let mut draft = begin_tiered_pack(owner, 7, 4, 237)?
+    let Some(_) = add_tiered_pack_frame(mut draft, first, 9, first_key, locate)? else {
+        fail("L68: the first BLOB did not fit")
+    }
+    if let Some(_) = add_tiered_pack_frame(mut draft, second, 9, second_key, locate)? {
+        fail("L68: pack admission used the front-coded size")
+    }
+    let (_, split) = finish_tiered_pack(take draft)?
+    if split.frames != 1 || split.index != 100 || split.live != 12 || split.payload_bytes != 169 {
+        fail("L68: a refused frame changed the pack")
+    }
+
+    let mut complete = begin_tiered_pack(owner, 8, 4, 238)?
+    let Some(left) = add_tiered_pack_frame(mut complete, first, 9, first_key, locate)? else {
+        fail("L68: the first indexed BLOB did not fit")
+    }
+    let Some(right) = add_tiered_pack_frame(mut complete, second, 9, second_key, locate)? else {
+        fail("L68: the second indexed BLOB should fit at its worst-case size")
+    }
+    let (take raw, pack) = finish_tiered_pack(take complete)?
+    if left.offset != 72 || right.offset != 100 || pack.index != 128 || pack.payload_bytes != 227 || pack.live != 24 || pack.frames != 2 {
+        fail("L68: pack inventory did not describe the frames and full object")
+    }
+    let context = DiskContext(store: owner, role: 3, seq: 8)
+    let trailer = disk_frame_bytes("p-8", context, raw, pack.index)?
+    if trailer.kind != PACK_INDEX_KIND || trailer.end != 227 {
+        fail("L68: pack did not finish with its authenticated index")
+    }
+    let mut last_offset = 0u64
+    let decoded_index = decode_pack_index("p-8", pack.index, list.slice(raw, trailer.payload, trailer.end), mut last_offset)?
+    if decoded_index.prev != 0 || list.len(decoded_index.rows) != 2 || decoded_index.rows[0u64].key != first_key || decoded_index.rows[1u64].key != second_key ||
+        decoded_index.rows[1u64].stamp != 32 || decoded_index.rows[1u64].len != 12 || decoded_index.rows[1u64].kind != 0x22 || decoded_index.rows[1u64].collection != 9 || last_offset != 100 {
+        fail("L68: the index did not describe the second BLOB")
+    }
+    Ok(())
+}

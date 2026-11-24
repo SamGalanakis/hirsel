@@ -98,6 +98,15 @@ fn apply_pack_layout(mut known: PageLocations, layout: PackRun) -> Result[(), Er
 }
 
 fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known: PageLocations) -> Result[std.page.PagePtr, Error] {
+    emit_located_frame(mut out, context, frame, scoped fn(stamp: u64) -> std.page.PagePtr {
+        let Some(location) = disk_index_get(known.frames, stamp) else {
+            fail("store: missing emitted child")
+        }
+        location.place
+    })
+}
+
+fn emit_located_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, locate: scoped[view] fn(u64) -> std.page.PagePtr) -> Result[std.page.PagePtr, Error] {
     let offset = list.len(out)
     let kind: u16 = match frame.body {
         BlobBody(_) => 0x0022,
@@ -116,12 +125,7 @@ fn emit_pack_frame(mut out: Bytes, context: DiskContext, frame: PackFrame, known
         },
         PageBody(page) => {
             // The pack buffer already has room for the planned PAGE.
-            page_result(std.page.seal_located(mut out, page, scoped fn(stamp: u64) -> std.page.PagePtr {
-                let Some(location) = disk_index_get(known.frames, stamp) else {
-                    fail("store: missing emitted child")
-                }
-                location.place
-            }))?
+            page_result(std.page.seal_located(mut out, page, locate))?
             std.check.xxh3(out, offset + 16, list.len(out))
         },
     }

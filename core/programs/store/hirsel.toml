@@ -14,6 +14,7 @@ std = { major = 1 }
 "store-pages.hirsel" = "store"
 "store-tiered.hirsel" = "store"
 "store-tiered-frames.hirsel" = "store"
+"store-tiered-packs.hirsel" = "store"
 "store-tiered-ranges.hirsel" = "store"
 "store-tiered-cache.hirsel" = "store"
 "store-tiered-pager.hirsel" = "store"

@@ -17,6 +17,25 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+/// A run's media state, built by its first media resource.
+#[derive(Default)]
+pub(crate) struct RunState {
+    pub(crate) charges: Arc<Charges>,
+    pub(crate) agreements: Arc<hirsel_core_net::agreement_registry::AgreementRegistry<Payment>>,
+}
+
+impl crate::host_file::RunPart for RunState {
+    fn hand_over(&self, payer: Payer) -> HandedOver {
+        let (handed, refunds) = self.charges.hand_over(payer);
+        drop(refunds);
+        handed
+    }
+}
+
+pub(crate) fn run_state(grants: &crate::host_file::RunGrants) -> &RunState {
+    crate::host_file::run_part(&grants.media)
+}
+
 /// Tracks the charges that still belong to live media resources when a unit ends.
 #[derive(Default)]
 pub(crate) struct Charges(Mutex<BTreeMap<usize, Weak<ChargeCell>>>);
@@ -39,7 +58,7 @@ impl Charges {
         }
     }
 
-    pub(crate) fn hand_over(&self, payer: Payer) -> (HandedOver, Vec<Charge>) {
+    fn hand_over(&self, payer: Payer) -> (HandedOver, Vec<Charge>) {
         let mut handed = Vec::new();
         let mut refunds = Vec::new();
         for weak in self.0.lock().unwrap().values() {

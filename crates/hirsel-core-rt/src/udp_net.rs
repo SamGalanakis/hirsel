@@ -9,7 +9,7 @@ pub(crate) mod served;
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
-    host_file::Files,
+    host_file::{Files, RunGrants, RunPart},
     limit::Payer,
     net::{Address, AddressOutcome, DENIED, Rules},
     os_net::{Due, deadline, error, signal},
@@ -99,8 +99,28 @@ impl Default for Allowance {
     }
 }
 
+/// A run's UDP host state (NET-UDP host allowance), built by its first socket.
+#[derive(Default)]
+pub(crate) struct RunState {
+    rules: Mutex<BTreeMap<u64, Arc<UdpRules>>>,
+    pub(crate) allowance: Arc<Allowance>,
+    pub(crate) waiters: Arc<Waiters>,
+}
+
+impl RunPart for RunState {
+    fn hand_over(&self, payer: Payer) -> HandedOver {
+        let (handed, refunds) = self.allowance.hand_over(payer);
+        drop(refunds);
+        handed
+    }
+}
+
+pub(crate) fn run_state(grants: &RunGrants) -> &RunState {
+    crate::host_file::run_part(&grants.udp)
+}
+
 impl Allowance {
-    pub(crate) fn hand_over(&self, payer: Payer) -> (HandedOver, Vec<Charge>) {
+    fn hand_over(&self, payer: Payer) -> (HandedOver, Vec<Charge>) {
         let charges = self.charges.lock().unwrap();
         let mut handed = Vec::new();
         let mut refunds = Vec::new();
@@ -270,7 +290,7 @@ pub(crate) unsafe fn drop_socket(context: *mut Context, key: u64) {
     let files = unsafe { (*context).host_files };
     #[cfg(feature = "record")]
     {
-        let resource = unsafe { (&(*files).udp_sockets).get(&key) }.unwrap();
+        let resource = unsafe { (*files).udp_sockets.get(&key) }.unwrap();
         if let Some(tape_id) = resource.tape_id {
             unsafe { record::close(context, files, key, resource.provider, tape_id) };
             return;
@@ -576,7 +596,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64) -> Step {
             });
         }
         let sending = request.operation == UDP_SEND;
-        let waiters = &files.registry.run_grants().udp_waiters;
+        let waiters = &run_state(files.registry.run_grants()).waiters;
         resource.cancel_waiter(sending, token, waiters);
         let due = deadline(call.until, token);
         let mut runnable = false;
@@ -688,7 +708,11 @@ pub(crate) unsafe fn abort(request: *mut Request, token: u64, reason: u8) -> Out
         let files = &mut *call.files;
         if let Some(resource) = files.udp_sockets.get_mut(&call.key) {
             let sending = request.operation == UDP_SEND;
-            resource.cancel_waiter(sending, token, &files.registry.run_grants().udp_waiters);
+            resource.cancel_waiter(
+                sending,
+                token,
+                &run_state(files.registry.run_grants()).waiters,
+            );
             if let Carrier::Standalone(socket) = &resource.carrier {
                 files.sockets.disarm(socket.readiness, sending);
             }
@@ -785,7 +809,10 @@ unsafe fn create(
             return fail(DENIED);
         }
         let rules = {
-            let mut cache = (*files).registry.run_grants().udp_rules.lock().unwrap();
+            let mut cache = run_state((*files).registry.run_grants())
+                .rules
+                .lock()
+                .unwrap();
             cache
                 .entry(rules_id)
                 .or_insert_with(|| {
@@ -826,10 +853,8 @@ unsafe fn create(
             rules,
             key: if served {
                 let handles = members.map_or(1, |n| 1 + u64::from(n.get()));
-                let Some(key) = (*files)
-                    .registry
-                    .run_grants()
-                    .udp_allowance
+                let Some(key) = run_state((*files).registry.run_grants())
+                    .allowance
                     .handles(handles)
                 else {
                     return fail(signal(EXHAUSTED));
@@ -875,7 +900,7 @@ unsafe fn existing(
     // SAFETY: the running task owns its socket and pins any carrier through delivery.
     unsafe {
         let files = (*context).host_files;
-        let resource = (&(*files).udp_sockets).get(&key).unwrap();
+        let resource = (*files).udp_sockets.get(&key).unwrap();
         if operation != UDP_SEND && !resource.receiving {
             return fail(DENIED);
         }
@@ -964,7 +989,7 @@ unsafe fn existing(
         }
         let outcome = call.run(context, operation, port, site);
         if port != key && operation == UDP_SEND && outcome.value != 0 {
-            (&mut (*files).udp_sockets).get_mut(&key).unwrap().receiving = true;
+            (*files).udp_sockets.get_mut(&key).unwrap().receiving = true;
         }
         AddressOutcome::new(outcome, call.endpoint)
     }

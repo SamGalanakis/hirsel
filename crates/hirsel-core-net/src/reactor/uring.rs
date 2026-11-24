@@ -338,6 +338,39 @@ impl Uring {
 }
 
 impl Poller {
+    pub(super) fn add_uring(&self, fd: &Arc<OwnedFd>, tag: u64, owner: bool) -> io::Result<()> {
+        let Backend::Uring(ring) = &self.backend else {
+            unreachable!()
+        };
+        ring.add(tag, fd.clone())?;
+        if !owner {
+            self.wake();
+        }
+        Ok(())
+    }
+
+    pub(super) fn remove_uring(
+        &self,
+        fd: i32,
+        tag: u64,
+        closing: bool,
+        owner: bool,
+    ) -> io::Result<()> {
+        let Backend::Uring(ring) = &self.backend else {
+            unreachable!()
+        };
+        if closing {
+            // SAFETY: a live descriptor this process alone holds; a
+            // receive shutdown changes nothing the close that follows
+            // does not.
+            unsafe { libc::shutdown(fd, libc::SHUT_RD) };
+        }
+        if ring.remove(tag) {
+            self.submit_or_wake(owner);
+        }
+        Ok(())
+    }
+
     pub(super) fn poll_uring<'a>(
         &'a self,
         mut events: Turn<'a>,

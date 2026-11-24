@@ -78,7 +78,9 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
             return key::key_capacity(BYTES as usize, refused.available as usize);
         }
         let grants = (*(*context).host_files).registry.run_grants();
-        let charge = grants.media_charges.track(Charge(payer, BYTES));
+        let charge = crate::media::run_state(grants)
+            .charges
+            .track(Charge(payer, BYTES));
         let mut call = Generation {
             random,
             group,
@@ -120,7 +122,7 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
             }
             (Some(outcome.value), request.buffer)
         };
-        let registry = &grants.agreements;
+        let registry = &crate::media::run_state(grants).agreements;
         let ticket = registry
             .new_share()
             .unwrap_or_else(|| crate::process::stop(b"key share count overflow"));

@@ -10,6 +10,7 @@
 //! kernel turn into the same `(tag, flags)` events, so dispatch is shared.
 use std::{
     io,
+    mem::ManuallyDrop,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
 };
@@ -189,9 +190,11 @@ pub fn reactor() -> io::Result<Reactor> {
 
 pub struct Poller {
     backend: Backend,
-    udp_groups: OnceLock<Mutex<udp_group::Groups>>,
+    /// The UDP group state, dropped by `PollOperations::release` with the
+    /// backend: only a program that can build a poller links its teardown.
+    udp_groups: ManuallyDrop<OnceLock<Mutex<udp_group::Groups>>>,
     udp_budget: Mutex<crate::udp::TurnBudget>,
-    udp_deferred: Mutex<udp_group::Deferred>,
+    udp_deferred: ManuallyDrop<Mutex<udp_group::Deferred>>,
     /// The owner's turn: held while a thread submits to or waits in this
     /// poller, which makes it the poller's owner for that turn.
     events: Mutex<Vec<libc::epoll_event>>,
@@ -201,16 +204,26 @@ pub struct Poller {
 enum Backend {
     /// The epoll fd and its wake eventfd, watched edge-triggered and never
     /// read: each write is a fresh edge.
-    Epoll {
-        epoll: OwnedFd,
-        wake: OwnedFd,
-    },
-    Uring(Box<Uring>),
+    Epoll { epoll: OwnedFd, wake: OwnedFd },
+    /// Dropped by `PollOperations::release`.
+    Uring(ManuallyDrop<Box<Uring>>),
 }
 
+/// The backend's operations, installed by its constructor: a program that
+/// never builds a ring links none of its code, though it may still drop a
+/// `Sockets` or a poller handle.
 struct PollOperations {
     poll: for<'a> fn(&'a Poller, Turn<'a>, Option<u64>) -> io::Result<Option<PollEvents<'a>>>,
     wake: fn(&Poller),
+    add: fn(&Poller, &Arc<OwnedFd>, u64, bool) -> io::Result<()>,
+    remove: fn(&Poller, i32, u64, bool, bool) -> io::Result<()>,
+    release: fn(&mut Poller),
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        (self.operations.release)(self)
+    }
 }
 
 /// The driver token: one thread at a time submits, polls and dispatches.
@@ -250,14 +263,23 @@ impl Poller {
     }
     fn from_uring(ring: Uring) -> Arc<Self> {
         Arc::new(Self {
-            backend: Backend::Uring(Box::new(ring)),
-            udp_groups: OnceLock::new(),
+            backend: Backend::Uring(ManuallyDrop::new(Box::new(ring))),
+            udp_groups: ManuallyDrop::new(OnceLock::new()),
             udp_budget: Mutex::default(),
-            udp_deferred: Mutex::default(),
+            udp_deferred: ManuallyDrop::default(),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_uring,
                 wake: Self::wake_ring,
+                add: Self::add_uring,
+                remove: Self::remove_uring,
+                release: |poller| {
+                    if let Backend::Uring(ring) = &mut poller.backend {
+                        // SAFETY: the poller's Drop releases its backend once.
+                        unsafe { ManuallyDrop::drop(ring) }
+                    }
+                    poller.release_udp();
+                },
             },
         })
     }
@@ -270,13 +292,16 @@ impl Poller {
                 epoll,
                 wake: eventfd()?,
             },
-            udp_groups: OnceLock::new(),
+            udp_groups: ManuallyDrop::new(OnceLock::new()),
             udp_budget: Mutex::default(),
-            udp_deferred: Mutex::default(),
+            udp_deferred: ManuallyDrop::default(),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_epoll,
                 wake: Self::wake_eventfd,
+                add: Self::add_epoll,
+                remove: Self::remove_epoll,
+                release: Self::release_udp,
             },
         });
         poller.epoll_ctl(
@@ -311,21 +336,22 @@ impl Poller {
     /// mailbox and armed at the owner's next enter, so an `owner` caller
     /// leaves it there and anyone else wakes the owner for it.
     fn add(&self, fd: &Arc<OwnedFd>, tag: u64, owner: bool) -> io::Result<()> {
-        match &self.backend {
-            Backend::Epoll { .. } => self.epoll_ctl(
-                libc::EPOLL_CTL_ADD,
-                fd.as_raw_fd(),
-                INTEREST | libc::EPOLLET as u32,
-                tag,
-            ),
-            Backend::Uring(ring) => {
-                ring.add(tag, fd.clone())?;
-                if !owner {
-                    self.wake();
-                }
-                Ok(())
-            }
+        (self.operations.add)(self, fd, tag, owner)
+    }
+    fn release_udp(&mut self) {
+        // SAFETY: the poller's Drop releases these once, after its backend.
+        unsafe {
+            ManuallyDrop::drop(&mut self.udp_groups);
+            ManuallyDrop::drop(&mut self.udp_deferred);
         }
+    }
+    fn add_epoll(&self, fd: &Arc<OwnedFd>, tag: u64, _owner: bool) -> io::Result<()> {
+        self.epoll_ctl(
+            libc::EPOLL_CTL_ADD,
+            fd.as_raw_fd(),
+            INTEREST | libc::EPOLLET as u32,
+            tag,
+        )
     }
     /// Stop watching `fd`. `closing` names a listener whose only holder is
     /// about to close it: an io_uring poll holds its own file reference until
@@ -335,21 +361,10 @@ impl Poller {
     /// otherwise wakes the owner, so the file closes (and a socket's FIN
     /// goes out) without waiting for the owner's next turn.
     fn remove(&self, fd: i32, tag: u64, closing: bool, owner: bool) -> io::Result<()> {
-        match &self.backend {
-            Backend::Epoll { .. } => self.epoll_ctl(libc::EPOLL_CTL_DEL, fd, 0, 0),
-            Backend::Uring(ring) => {
-                if closing {
-                    // SAFETY: a live descriptor this process alone holds; a
-                    // receive shutdown changes nothing the close that follows
-                    // does not.
-                    unsafe { libc::shutdown(fd, libc::SHUT_RD) };
-                }
-                if ring.remove(tag) {
-                    self.submit_or_wake(owner);
-                }
-                Ok(())
-            }
-        }
+        (self.operations.remove)(self, fd, tag, closing, owner)
+    }
+    fn remove_epoll(&self, fd: i32, _tag: u64, _closing: bool, _owner: bool) -> io::Result<()> {
+        self.epoll_ctl(libc::EPOLL_CTL_DEL, fd, 0, 0)
     }
     /// io_uring: submit the mailbox now when the caller owns this poller and
     /// its turn is free; otherwise wake the owner to submit it.

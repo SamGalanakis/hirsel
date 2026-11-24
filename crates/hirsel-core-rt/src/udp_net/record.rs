@@ -260,7 +260,9 @@ impl Call {
         // SAFETY: the successful creation pinned this unit and completed its output.
         unsafe {
             let files = &mut *self.files;
-            let allowance = files.registry.run_grants().udp_allowance.clone();
+            let allowance = super::run_state(files.registry.run_grants())
+                .allowance
+                .clone();
             if let Some(mut charge) = self.charge.take() {
                 let count = self.served.ids.len() as u64;
                 let Some(first) = allowance.handles(count + u64::from(self.group.is_some())) else {

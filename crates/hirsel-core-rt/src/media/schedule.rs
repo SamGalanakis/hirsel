@@ -79,10 +79,8 @@ pub(super) fn admit(context: &Context, requested: u64) -> Result<Charge, u64> {
 pub(super) fn track(context: &Context, charge: Charge) -> Paid {
     // SAFETY: the caller entered with a running context.
     unsafe {
-        (*context.host_files)
-            .registry
-            .run_grants()
-            .media_charges
+        super::run_state((*context.host_files).registry.run_grants())
+            .charges
             .track(charge)
     }
 }

@@ -55,7 +55,9 @@ impl Call {
         // SAFETY: the caller still holds the returned virtual handles and the output list.
         unsafe {
             let files = &mut *self.files;
-            let allowance = files.registry.run_grants().udp_allowance.clone();
+            let allowance = super::run_state(files.registry.run_grants())
+                .allowance
+                .clone();
             let mut charge = self.charge.take().unwrap();
             let per_member = self.options.charge(None) + 8;
             let group = if self.group.is_some() {

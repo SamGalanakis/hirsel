@@ -5,7 +5,7 @@ use std::{
     collections::BTreeMap,
     mem::ManuallyDrop,
     ptr,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 #[derive(Clone, Copy)]
@@ -91,6 +91,40 @@ impl<T> Drop for Resources<T> {
     }
 }
 
+/// A run-local resource map built by its first insert. Only insert names the
+/// value destructor, so a run that never holds this kind carries none of it.
+pub(crate) struct LazyMap<T>(Option<Resources<T>>);
+
+impl<T> Default for LazyMap<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> LazyMap<T> {
+    pub(crate) fn get(&self, key: &u64) -> Option<&T> {
+        self.0.as_ref()?.values.get(key)
+    }
+    pub(crate) fn get_mut(&mut self, key: &u64) -> Option<&mut T> {
+        self.0.as_mut()?.values.get_mut(key)
+    }
+    pub(crate) fn contains_key(&self, key: &u64) -> bool {
+        self.get(key).is_some()
+    }
+    pub(crate) fn insert(&mut self, key: u64, value: T) -> Option<T> {
+        self.0
+            .get_or_insert_with(|| Resources::new(|values, _| values.clear()))
+            .values
+            .insert(key, value)
+    }
+    pub(crate) fn remove(&mut self, key: &u64) -> Option<T> {
+        self.0.as_mut()?.values.remove(key)
+    }
+    pub(crate) fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
 fn next_id(next: &mut u64) -> u64 {
     *next += 1;
     if *next == hirsel_core_ids::host_op::DIR_READ_ONLY {
@@ -111,15 +145,15 @@ pub(crate) struct Registry {
 pub(crate) struct RunGrants {
     designations: Mutex<Designations>,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
-    pub(crate) udp_rules: Mutex<BTreeMap<u64, Arc<hirsel_core_net::udp::UdpRules>>>,
-    pub(crate) udp_allowance: Arc<crate::udp_net::Allowance>,
-    pub(crate) udp_waiters: Arc<crate::udp_net::Waiters>,
+    /// The UDP rules cache, host allowance and waiters, built by the run's first UDP
+    /// socket, so a run without UDP carries none of their code.
+    pub(crate) udp: OnceLock<Box<dyn RunPart>>,
     pub(crate) exec_grants: Mutex<Vec<crate::exec::NarrowedGrant>>,
     pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
-    pub(crate) media_charges: Arc<crate::media::Charges>,
-    pub(crate) agreements:
-        Arc<hirsel_core_net::agreement_registry::AgreementRegistry<crate::media::Payment>>,
+    /// Live media charges and key-share agreements, built by the run's first
+    /// media resource (`media::run_state`).
+    pub(crate) media: OnceLock<Box<dyn RunPart>>,
     pub(crate) cells: crate::provide::Cells,
     /// NET-18's `not_public` refusals per provider (its `state` address).
     pub(crate) not_public: Mutex<BTreeMap<usize, u64>>,
@@ -129,14 +163,26 @@ impl RunGrants {
     pub(crate) fn hand_over(&self, payer: crate::limit::Payer) -> crate::secret::HandedOver {
         let (mut charges, refunds) = self.secrets.lock().unwrap().hand_over(payer);
         drop(refunds);
-        let (udp, refunds) = self.udp_allowance.hand_over(payer);
-        charges.extend(udp);
-        drop(refunds);
-        let (media, refunds) = self.media_charges.hand_over(payer);
-        charges.extend(media);
-        drop(refunds);
+        for part in [&self.udp, &self.media] {
+            if let Some(part) = part.get() {
+                charges.extend(part.hand_over(payer));
+            }
+        }
         charges
     }
+}
+
+/// Run state a feature builds on first use. Hand-over reaches it through its
+/// vtable, which only the code that builds it names.
+pub(crate) trait RunPart: std::any::Any + Send + Sync {
+    /// Hand the payer's outstanding charges over (TLS-5) and refund them.
+    fn hand_over(&self, payer: crate::limit::Payer) -> crate::secret::HandedOver;
+}
+
+/// The run part in `slot`, built on first use.
+pub(crate) fn run_part<T: RunPart + Default>(slot: &OnceLock<Box<dyn RunPart>>) -> &T {
+    let part: &dyn std::any::Any = &**slot.get_or_init(|| Box::new(T::default()));
+    part.downcast_ref().unwrap()
 }
 
 // SAFETY: the tables use mutexes and pin the storage behind each designation.
@@ -150,11 +196,11 @@ pub(crate) type TlsSessions = BTreeMap<u64, Box<dyn crate::net::SecureStream>>;
 
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
-    pub(crate) udp_sockets: BTreeMap<u64, crate::udp_net::Resource>,
+    pub(crate) udp_sockets: LazyMap<crate::udp_net::Resource>,
     pub(crate) datagrams: BTreeMap<u64, crate::unix_net::Datagram>,
     pub(crate) exec_pipes: BTreeMap<u64, crate::exec_runtime::HandleCharge>,
     pub(crate) unix_served: BTreeMap<u64, Provider>,
-    pub(crate) tcp_routes: BTreeMap<u64, crate::net::TcpRoute>,
+    pub(crate) tcp_routes: LazyMap<crate::net::TcpRoute>,
     pub(crate) tls_sessions: TlsSessions,
     pub(crate) tls_cache: crate::os_tls::LazyCache,
     #[cfg(feature = "record")]
@@ -298,7 +344,7 @@ impl Files {
     pub(crate) fn with_registry(registry: Registry) -> Self {
         Self {
             sockets: Default::default(),
-            udp_sockets: BTreeMap::new(),
+            udp_sockets: LazyMap::default(),
             datagrams: BTreeMap::new(),
             exec_pipes: BTreeMap::new(),
             unix_served: BTreeMap::new(),

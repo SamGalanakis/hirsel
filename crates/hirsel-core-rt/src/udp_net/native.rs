@@ -5,7 +5,9 @@ impl Call {
         // SAFETY: the request is executing on the owning unit and pins Files.
         unsafe {
             let files = &mut *self.files;
-            let allowance = files.registry.run_grants().udp_allowance.clone();
+            let allowance = super::run_state(files.registry.run_grants())
+                .allowance
+                .clone();
             let keys = self
                 .group
                 .map_or(1, |(members, _)| 1 + u64::from(members.get()));
@@ -43,7 +45,9 @@ impl Call {
                     )));
                 }
                 let charge = SocketCharge::new(allowance, key + n as u64, charge);
-                let waiters = files.registry.run_grants().udp_waiters.clone();
+                let waiters = super::run_state(files.registry.run_grants())
+                    .waiters
+                    .clone();
                 let opened = poller.add_udp_group(
                     socket,
                     self.options,

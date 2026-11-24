@@ -1,4 +1,5 @@
 use crate::secret_aead::{AeadAlg, AeadMode};
+use crate::secret_kdf::{Wiped, sha256_wiped};
 use crate::{Name, Pattern};
 use std::sync::Arc;
 
@@ -357,21 +358,25 @@ pub fn derive_hmac_sha256(key: &[u8], prefix: &[u8], data: &[u8]) -> zeroize::Ze
     // RFC 2104 hashes a key longer than one block before using it in HMAC.
     // Hash the two slices separately so the full prefixed key needs no allocation.
     const BLOCK: usize = 64;
-    let key = if prefix.len() <= BLOCK && key.len() <= BLOCK - prefix.len() {
-        let mut combined = zeroize::Zeroizing::new([0; BLOCK]);
-        combined[..prefix.len()].copy_from_slice(prefix);
-        combined[prefix.len()..prefix.len() + key.len()].copy_from_slice(key);
-        ring::hmac::Key::new(
-            ring::hmac::HMAC_SHA256,
-            &combined[..prefix.len() + key.len()],
-        )
-    } else {
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        digest.update(prefix);
-        digest.update(key);
-        ring::hmac::Key::new(ring::hmac::HMAC_SHA256, digest.finish().as_ref())
-    };
-    zeroize::Zeroizing::new(ring::hmac::sign(&key, data).as_ref().to_vec())
+    let key = Wiped::new(
+        if prefix.len() <= BLOCK && key.len() <= BLOCK - prefix.len() {
+            let mut combined = zeroize::Zeroizing::new([0; BLOCK]);
+            combined[..prefix.len()].copy_from_slice(prefix);
+            combined[prefix.len()..prefix.len() + key.len()].copy_from_slice(key);
+            ring::hmac::Key::new(
+                ring::hmac::HMAC_SHA256,
+                &combined[..prefix.len() + key.len()],
+            )
+        } else {
+            let digest = sha256_wiped(|update| {
+                update(prefix);
+                update(key);
+            });
+            ring::hmac::Key::new(ring::hmac::HMAC_SHA256, digest.as_ref())
+        },
+    );
+    let tag = Wiped::new(ring::hmac::sign(key.get(), data));
+    zeroize::Zeroizing::new(tag.get().as_ref().to_vec())
 }
 
 #[cfg(test)]

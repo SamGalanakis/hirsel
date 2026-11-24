@@ -5,6 +5,7 @@ use crate::tls_kdf::{self, TlsHash};
 use base64ct::{Base64, Encoding as _};
 use md5::{Digest as _, Md5};
 use ring::digest;
+use std::mem::MaybeUninit;
 use zeroize::{Zeroize as _, Zeroizing};
 
 #[derive(Clone, Copy)]
@@ -60,8 +61,11 @@ impl Derivation {
         }
     }
 
+    /// HKDF output of `n` bytes is a prefix of `n + 1`'s and the MAC sinks take any key
+    /// length, so a child shorter than 16 bytes would let a `kdf` holder guess a longer
+    /// child byte by byte through `mac` children.
     pub fn hkdf(len: u64) -> Option<Self> {
-        (1..=255 * 32)
+        (16..=255 * 32)
             .contains(&len)
             .then_some(Self::Hkdf { len: len as usize })
     }
@@ -174,10 +178,51 @@ fn derive_digest(
             derived.as_mut_slice().zeroize();
             out
         }
-        DigestAlg::Sha256 => {
-            let mut hash = digest::Context::new(&digest::SHA256);
-            feed(&mut |bytes| hash.update(bytes));
-            Zeroizing::new(hash.finish().as_ref().to_vec())
-        }
+        DigestAlg::Sha256 => Zeroizing::new(sha256_wiped(feed).to_vec()),
+    }
+}
+
+/// SHA-256 of the pieces `feed` passes, through ring with its context and digest held in
+/// [`Wiped`]: ring zeroes neither its pending block nor its output.
+pub(crate) fn sha256_wiped(feed: impl FnOnce(&mut dyn FnMut(&[u8]))) -> Zeroizing<[u8; 32]> {
+    let mut hash = Wiped::new(digest::Context::new(&digest::SHA256));
+    feed(&mut |bytes| hash.get_mut().update(bytes));
+    let derived = Wiped::new(hash.read().finish());
+    let mut out = Zeroizing::new([0; 32]);
+    out.copy_from_slice(derived.get().as_ref());
+    out
+}
+
+/// A value without drop glue whose bytes are zeroed when the holder drops, for ring's
+/// plain `Copy`/`Clone` hash states, keys and outputs.
+pub(crate) struct Wiped<T>(MaybeUninit<T>);
+
+impl<T> Wiped<T> {
+    pub(crate) fn new(value: T) -> Self {
+        const { assert!(!std::mem::needs_drop::<T>()) };
+        Self(MaybeUninit::new(value))
+    }
+
+    pub(crate) fn get(&self) -> &T {
+        // SAFETY: initialised in `new`; only `drop` clears it.
+        unsafe { self.0.assume_init_ref() }
+    }
+
+    pub(crate) fn get_mut(&mut self) -> &mut T {
+        // SAFETY: as in `get`.
+        unsafe { self.0.assume_init_mut() }
+    }
+
+    /// A bitwise copy for a consuming call; the held bytes are still wiped on drop.
+    pub(crate) fn read(&self) -> T {
+        // SAFETY: as in `get`; `T` has no drop glue, so the copy and the original never
+        // both release anything.
+        unsafe { self.0.assume_init_read() }
+    }
+}
+
+impl<T> Drop for Wiped<T> {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }

@@ -127,8 +127,18 @@ pub fn law_typed_indexes(c: Clock) -> bool waits {
         }
         Ok(total)
     })
+    let mut expected: List[Read] = list.new()
+    list.push(mut expected, Point(law_read_key(t.id, 1, None)))
+    // Bucket two originally holds keys 1, 5, 9, 13, 17 and 21. The code
+    // above moves key 1 to bucket three and deletes key 5.
+    let mut next_low = law_read_key(ix.id, 2, None)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 9)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 13)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 17)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 21)
+    list.push(mut expected, Span(take next_low, law_read_key(ix.id, 3, None)))
     match take reads {
-        Ok(Committed(done)) => if done.value != 163 || list.len(done.reads) != 6 {
+        Ok(Committed(done)) => if done.value != 163 || !equal_reads(done.reads, expected) {
             return false
         },
         _ => return false

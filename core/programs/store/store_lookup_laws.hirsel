@@ -1,0 +1,71 @@
+fn equal_reads(a: List[Read], b: List[Read]) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0u64 .. list.len(a) {
+        let equal = match (a[i], b[i]) {
+            (Point(k), Point(j)) => k == j,
+            (Span(l, h), Span(low, high)) => l == low && h == high,
+            _ => false
+        }
+        if !equal {
+            return false
+        }
+    }
+    true
+}
+
+fn law_read_key(id: u32, first: u64, second: Option[u64]) -> Bytes {
+    let mut raw: Bytes = list.new()
+    list.put_word_be(mut raw, id)
+    list.put_word_be(mut raw, first)
+    if let Some(primary) = second {
+        list.put_word_be(mut raw, primary)
+    }
+    take raw
+}
+
+// The successor of the full (J, K) byte key ends the gap for a row.
+fn law_bucket_two_row(mut expected: List[Read], mut next_low: Bytes, table_id: u32, index_id: u32, primary: u64) {
+    let mut stop = law_read_key(index_id, 2, Some(primary))
+    list.push(mut stop, 0u8)
+    let start = replace(mut next_low, clone(stop))
+    list.push(mut expected, Span(take start, take stop))
+    list.push(mut expected, Point(law_read_key(table_id, primary, None)))
+}
+
+fn look_first_bucket_two(tx: Tx, ix: Index[u64, u64, u64, ()]) -> Result[Option[(u64, u64)], Error] {
+    let mut rows = lookup(tx, ix, Included(2), Included(2))?
+    next_indexed(mut rows)
+}
+
+fn law_lookup_top_one(mut db: Db, t: Table[u64, u64], ix: Index[u64, u64, u64, ()]) -> bool waits {
+    let before = snapshot(db)
+    let read_handle = result.unwrap(reader(db, 0u64))
+    let observed = result.unwrap(look(read_handle, before, None, copy_env(ix), look_first_bucket_two))
+    let Seen(top) = observed else { return false }
+    let mut expected: List[Read] = list.new()
+    let mut next_low = law_read_key(ix.id, 2, None)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 1)
+    let Ok(Some((1, 14))) = view top.value else { return false }
+    if !equal_reads(top.reads, expected) {
+        return false
+    }
+    // (2, 4) enters the same index interval after the only row the cursor saw.
+    if !typed_put(mut db, t, 4, 18) { return false }
+    let after = snapshot(db)
+    let delta = result.unwrap(changes(read_handle, before, after)).rows
+    let inserted = law_read_key(ix.id, 2, Some(4u64))
+    let mut saw_index_row = false
+    for changed in delta {
+        if changed.tree_key == inserted { saw_index_row = true }
+        for dependency in top.reads {
+            if reads_key(dependency, changed.tree_key) { return false }
+        }
+    }
+    let checked = result.unwrap(look(read_handle, after, None, copy_env(ix), look_first_bucket_two))
+    let Seen(same_top) = checked else { return false }
+    let Ok(Some((1, 14))) = view same_top.value else { return false }
+    saw_index_row && equal_reads(same_top.reads, expected)
+}
+

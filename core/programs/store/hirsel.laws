@@ -188,7 +188,7 @@ store@1/store/test_l79_pinned_trim_records_boundary_charge src=13394132f491d6e1 
 store@1/store/test_l84_bucket_window src=0837ad7e5636e207 sig=1be0388a9f5321e1 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l84_parallel_bucket_windows src=576280cdfc007abe sig=5263eed7e4206357 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_local_projector_laws src=69247f07bf78a9df sig=16f7b8f7adbff21f run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/test_look src=a7012b65b42ab447 sig=f2f59e4ae64cb929 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_look src=41970c5b73344465 sig=4a406ff15701f2c8 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_look_faults src=76ea8b43283dc3a3 sig=7b5e2c41975c37e5 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_look_task src=bae95e1f44357370 sig=af54d9543c3a5044 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_memory_identity src=df5d7dff1ec718cd sig=480e382971012191 run=b1818af2b24835d3 bug=- oracle=- rows=pending
@@ -227,7 +227,7 @@ store@1/store/test_step_bounds src=a03f7ebc30f9c2fd sig=2a0c6b77fcf1f979 run=aff
 store@1/store/test_stored_size src=4d978cf0648bf9b4 sig=97325c6e804b10d4 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_streams src=04e6d17c62004c50 sig=60ab363565c240ad run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_foreign src=ad09a39160866d68 sig=43d91a6cd85b95a0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_typed_indexes src=d1e1ca0738b9e277 sig=36179156cbd65489 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_typed_indexes src=e65a1533fe64c4fa sig=510117ac48d39b30 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_model src=a7c51105c83bee58 sig=c095af47386ecad4 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_read_laws src=3c4ebf3838953141 sig=5ec6f7ceb67b09e2 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_resident src=e91858d9691ae86a sig=f266470af9e44958 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

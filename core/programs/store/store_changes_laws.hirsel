@@ -428,24 +428,7 @@ fn look_query(tx: Tx, sh: Table[u64, u64], ix: Index[u64, u64, u64, ()]) -> Resu
     Ok(sum)
 }
 
-fn equal_reads(a: List[Read], b: List[Read]) -> bool {
-    if list.len(a) != list.len(b) {
-        return false
-    }
-    for i in 0u64 .. list.len(a) {
-        let equal = match (a[i], b[i]) {
-            (Point(k), Point(j)) => k == j,
-            (Span(l, h), Span(low, high)) => l == low && h == high,
-            _ => false
-        }
-        if !equal {
-            return false
-        }
-    }
-    true
-}
-
-// L22: 10 + (20+30) + (10+30) = 100; two points and two spans.
+// L22: 10 + (20+30) + (10+30) = 100. The complete index read logs its terminal gap.
 // Wrong implementations: look publishes, omits reads or reports another version.
 pub fn law_look(c: Clock) -> bool waits {
     let mut db = test_db(c, 1073741824)
@@ -475,35 +458,26 @@ pub fn law_look(c: Clock) -> bool waits {
         Ok(100) => {},
         _ => return false
     }
-    if got.version != head || list.len(got.reads) != 7 || db.heads[0].head != head || db.resident != live_bytes || db.next_node != high_water || db.file_end != end {
+    if got.version != head || db.heads[0].head != head || db.resident != live_bytes || db.next_node != high_water || db.file_end != end {
         return false
     }
-    let p1 = match got.reads[0] {
-        Point(k) => k == result.unwrap(logical_key(t.id, key_word(1))),
-        _ => false
-    }
-    let p2 = match got.reads[1] {
-        Point(k) => k == result.unwrap(logical_key(t.id, key_word(9))),
-        _ => false
-    }
+    let mut expected: List[Read] = list.new()
+    list.push(mut expected, Point(law_read_key(t.id, 1, None)))
+    list.push(mut expected, Point(law_read_key(t.id, 9, None)))
     // [table1 || key1 || 00, table1 || key3 || 00) includes precisely 2 and 3.
-    let mut low = result.unwrap(logical_key(t.id, key_word(1)))
+    let mut low = law_read_key(t.id, 1, None)
     list.push(mut low, 0u8)
-    let mut high = result.unwrap(logical_key(t.id, key_word(3)))
+    let mut high = law_read_key(t.id, 3, None)
     list.push(mut high, 0u8)
-    let mut middle = result.unwrap(logical_key(t.id, key_word(2)))
+    let mut middle = law_read_key(t.id, 2, None)
     list.push(mut middle, 0u8)
-    let span = match (got.reads[2], got.reads[3]) {
-        (Span(l, m), Span(n, h)) => l == low && m == middle && n == middle && h == high,
-        _ => false
-    }
-    let ix_low = result.unwrap(logical_key(ix.id, key_word(2)))
-    let ix_high = result.unwrap(logical_key(ix.id, key_word(3)))
-    let index_span = match got.reads[4] {
-        Span(l, h) => l == ix_low && h == ix_high,
-        _ => false
-    }
-    if !p1 || !p2 || !span || !index_span {
+    list.push(mut expected, Span(take low, clone(middle)))
+    list.push(mut expected, Span(take middle, take high))
+    let mut next_low = law_read_key(ix.id, 2, None)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 1)
+    law_bucket_two_row(mut expected, mut next_low, t.id, ix.id, 3)
+    list.push(mut expected, Span(take next_low, law_read_key(ix.id, 3, None)))
+    if !equal_reads(got.reads, expected) {
         return false
     }
     let run_result = run(mut db, None, (copy_env(ix), copy_env(sh)), fn(mut tx, call_env) -> Result[u64, Error] {
@@ -521,13 +495,12 @@ pub fn law_look(c: Clock) -> bool waits {
     let second = result.unwrap(look(result.unwrap(reader(db, 0u64)), snapshot(db), None, (copy_env(ix), copy_env(sh)), fn(tx, call_env) -> Result[u64, Error] {
         look_query(tx, call_env.1, call_env.0)
     }))
-    match take second {
-        Seen(value) => match value.value {
-            Ok(108) => value.version == db.heads[0].head && list.len(value.reads) == 7,
-            _ => false
-        },
-        _ => false
+    let Seen(value) = second else { return false }
+    let Ok(108) = view value.value else { return false }
+    if value.version != db.heads[0].head || !equal_reads(value.reads, expected) {
+        return false
     }
+    law_lookup_top_one(mut db, t, ix)
 }
 
 fn has_failure(cs: Causes, message: String) -> bool {

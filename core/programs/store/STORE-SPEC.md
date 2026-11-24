@@ -1350,8 +1350,8 @@ pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K,
   - RUN: `while let` is accepted, both with owned rows (`cursor_owned`) and with a view-returning `next` (`cursor_view`).
 - `Rows` (from `range`, `scan` and `find`) holds Arc shares, not views, so it is `send` and can outlive the transaction. Reading a dropped transaction's frozen state is harmless. A range's Span is recorded whole up front, so later reads need no log. `lookup`'s `IndexRows` is the exception (J1).
 
-**`lookup`** walks index entries in `J` order and fetches each primary row (J1).
-- It records `Span` over the index keys when it is made, and `next_indexed` records `Point(table id ‖ Key[K])` for each row it returns, when it returns it. The Span covers rows entering or leaving the range. The Points cover the values returned, so a put that changes V at the same J hits a Point.
+**`lookup`** walks index entries in full `(J, K)` order and fetches each primary row (J1, revised in v2.57).
+- Each `next_indexed` records the index gap from the cursor's current lower bound through the returned index key, using that full key followed by `0x00` as the exclusive end. It also records `Point(table id ‖ Key[K])` for the returned primary row. Exhaustion records any remaining gap up to the exclusive upper bound. An unused cursor records no reads. If a body stops after a row, index writes past that row do not hit its recorded gaps. A put that changes a returned value at the same J still hits its primary Point.
 - `IndexRows` is scoped to the Tx (OWN-20): it holds the Tx's read log view, as `Tx` does. It cannot leave the body (LANG-13, RUN `ixrows_escape`), and the Tx cannot be written while it lives (OWN-10, RUN `ixrows_write`). A body that updates the rows it finds collects them first, then writes.
 - `find` on a Snapshot has no read set and keeps a `send` `Rows`.
 
@@ -1454,7 +1454,7 @@ pub fn find_next[J, K, V, P](s: Snapshot, ix: Index[J, K, V, P], take r: Resume,
 
   It then opens the cursor at **Excluded(the full logical key)** and the continuation's upper bound, and makes a page by the same rule. So equal index keys are neither repeated nor skipped, and the page after an index row with J = j and K = k starts at the next (j, k') or the next j.
 - **Moved is the stale result.** In process, the caller holds the Snapshot, so the version a continuation names cannot be gone while the caller still has it. What can happen is that a caller passes another Snapshot, for example a newer `snapshot(db)`. Continuing on it would mix two versions in one listing, so it is refused with `Moved`, which carries the version that was passed, and the caller starts again with `scan_page` or `find_page`. A continuation does not keep a Snapshot alive. The caller decides how long its Snapshot lives, and a retained version across restarts is a pin (§1.9).
-- **Not in a transaction.** Pages read a Snapshot only. A transaction's `range` and `lookup` record their whole Span (I1), so a page in a Tx would record reads beyond the rows it returned. A Tx form, if a use appears, is a later addition with its own read-set rule.
+- **Not in a transaction.** Pages read a Snapshot only. Use `range` or `lookup` in a transaction. Each cursor step records its scanned gap, and `next_indexed` also records a primary Point for each row it returns (§1.3, v2.57). A future Tx page API would need its own read-set rule.
 
 - **M3's `Reader` (lane m3-tiered-spec-1981; v2.59).** M3 gives the Snapshot reads (`get`, `scan`, `find`, `count`, the pages and their resumes, `changes` and `changes_page`) a per-task `r: Reader` first parameter and `waits` (§13.4). DX changes nothing else about them; the signatures above are the pre-M3 forms with `Shape` replaced by `Table`.
 

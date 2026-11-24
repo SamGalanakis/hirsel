@@ -12,6 +12,8 @@ use std::process::Command;
 mod cleanup;
 #[path = "native_link.rs"]
 mod link;
+#[path = "link_input.rs"]
+pub(crate) mod link_input;
 #[path = "recipe_native.rs"]
 pub(crate) mod recipe_build;
 #[path = "recipe_grants.rs"]
@@ -1505,34 +1507,6 @@ pub(crate) fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     Ok(result.stdout)
 }
 
-/// Raise the soft descriptor limit to the hard limit once, as Go does since
-/// 1.19: a link holds one descriptor per object. The limit a link may use.
-fn descriptor_limit() -> u64 {
-    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: getrlimit and setrlimit read and write the struct passed.
-        unsafe {
-            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
-                return 1024;
-            }
-            if limit.rlim_cur < limit.rlim_max {
-                let raised = libc::rlimit {
-                    rlim_cur: limit.rlim_max,
-                    rlim_max: limit.rlim_max,
-                };
-                if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
-                    limit = raised;
-                }
-            }
-        }
-        limit.rlim_cur
-    })
-}
-
 #[cfg(test)]
 thread_local! {
     /// Runs when the link starts, before it opens or checks any object, with
@@ -1548,76 +1522,6 @@ thread_local! {
     /// Runs between the objects' check and the linker's spawn, with their paths.
     pub(crate) static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn FnMut(&[PathBuf])>>> =
         const { std::cell::RefCell::new(None) };
-}
-
-/// One descriptor per object, through which its bytes were checked or
-/// written: an object this request read or emitted brings its own, and a
-/// stored object named by a record is opened once and checked through that
-/// descriptor. The linker names each by `/proc/<pid>/fd/N` of this process,
-/// which resolves to that inode, so no store path is reopened after a check.
-/// Every stored object is checked; each that fails is removed, and the
-/// instances of all of them are returned.
-fn open_objects(
-    objects: &[&ObjectProduct],
-    counters: &mut crate::reach::ReachCounters,
-) -> Result<Result<Vec<std::fs::File>, Vec<Identity>>, NativeStop> {
-    use std::io::Read;
-    let limit = descriptor_limit();
-    if objects.len() as u64 + 64 > limit {
-        return Err(NativeStop::Link(format!(
-            "{} objects exceed the descriptor limit of {limit}",
-            objects.len()
-        )));
-    }
-    #[cfg(test)]
-    BEFORE_OPEN.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().as_mut() {
-            hook(&objects.iter().map(|o| o.path.clone()).collect::<Vec<_>>());
-        }
-    });
-    let mut files = Vec::with_capacity(objects.len());
-    let mut refused = Vec::new();
-    let mut bytes = Vec::new();
-    for object in objects {
-        if let Some(held) = &object.held {
-            files.push(held.try_clone()?);
-            continue;
-        }
-        let mut file = match std::fs::File::open(&object.path) {
-            Ok(file) => file,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                refused.push(object.instance.clone());
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-        crate::meter::count(crate::meter::Count::FilesOpened, 1);
-        crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
-        bytes.clear();
-        file.read_to_end(&mut bytes)?;
-        counters.objects_verified += 1;
-        if crate::store::checksum(&bytes) != object.check {
-            drop(file);
-            match std::fs::remove_file(&object.path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-            refused.push(object.instance.clone());
-            continue;
-        }
-        files.push(file);
-    }
-    if !refused.is_empty() {
-        return Ok(Err(refused));
-    }
-    #[cfg(test)]
-    AFTER_CHECK.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().as_mut() {
-            hook(&objects.iter().map(|o| o.path.clone()).collect::<Vec<_>>());
-        }
-    });
-    Ok(Ok(files))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1768,7 +1672,7 @@ fn link_objects(
                 let (_unit, file, _prelinked) = match crate::image_unit::load(image, unit_key)? {
                     Some((unit, file)) => (unit, file, false),
                     None => {
-                        let files = match open_objects(&in_image, &mut counters)? {
+                        let files = match link_input::open_objects(&in_image, &mut counters)? {
                             Ok(files) => files,
                             Err(refused) => {
                                 return Ok(Linked::Damaged(refused, compiled, counters));
@@ -1784,7 +1688,7 @@ fn link_objects(
                 Some((unit_key, file))
             }
         };
-        let files = match open_objects(&separate, &mut counters)? {
+        let files = match link_input::open_objects(&separate, &mut counters)? {
             Ok(files) => files,
             Err(refused) => return Ok(Linked::Damaged(refused, compiled, counters)),
         };
@@ -1795,10 +1699,12 @@ fn link_objects(
         let pid = std::process::id();
         let mut inputs = Vec::with_capacity(objects.len() + 4);
         inputs.push(entry.clone());
-        inputs.extend(unit.iter().map(|(_, file)| file).chain(&files).map(|file| {
+        let mut linked: Vec<_> = unit.iter().map(|u| &u.1).collect();
+        linked.extend(files.iter().map(|f| &**f));
+        inputs.extend(linked.iter().map(|file| {
             PathBuf::from(format!(
                 "/proc/{pid}/fd/{}",
-                std::os::fd::AsRawFd::as_raw_fd(file)
+                std::os::fd::AsRawFd::as_raw_fd(*file)
             ))
         }));
         // Each input is named by the key its bytes are a function of: the
@@ -1842,54 +1748,51 @@ fn link_objects(
         let incremental = !options.optimize && !options.debug_lines && crate::resident::serving();
         let patched = std::cell::Cell::new(false);
         let link = |recipe: &crate::tool_inputs::LinkRecipe| {
-            let run = |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
-                let entry_bytes = write_entry(live_sites)?;
-                let mut inputs = inputs.clone();
-                link_archives.append_link_inputs(&mut inputs, &options.runtime, recipe)?;
-                inputs.push(options.runtime.clone());
-                let objects: Vec<_> =
-                    std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
-                        .chain(
-                            keys.iter()
-                                .zip(unit.iter().map(|(_, file)| file).chain(&files))
-                                .map(|(key, file)| {
-                                    crate::incremental_link::Slot::Keyed(*key, file)
-                                }),
-                        )
-                        .collect();
-                let frame = key(
-                    "hirsel.incremental-link-frame.v2",
-                    &(
-                        &recipe.identity,
-                        &recipe.linker,
-                        &recipe.args,
-                        &archive_pins,
-                        &options.runtime,
-                        &options.target,
-                    ),
-                )?;
-                if incremental {
-                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
-                    if let Some(image) = resident.patch(frame, &objects)? {
-                        patched.set(true);
-                        return Ok(image);
+            let run =
+                |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
+                    let entry_bytes = write_entry(live_sites)?;
+                    let mut inputs = inputs.clone();
+                    link_archives.append_link_inputs(&mut inputs, &options.runtime, recipe)?;
+                    inputs.push(options.runtime.clone());
+                    let objects: Vec<_> =
+                        std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
+                            .chain(keys.iter().zip(linked.iter().copied()).map(|(key, file)| {
+                                crate::incremental_link::Slot::Keyed(*key, file)
+                            }))
+                            .collect();
+                    let frame = key(
+                        "hirsel.incremental-link-frame.v2",
+                        &(
+                            &recipe.identity,
+                            &recipe.linker,
+                            &recipe.args,
+                            &archive_pins,
+                            &options.runtime,
+                            &options.target,
+                        ),
+                    )?;
+                    if incremental {
+                        let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
+                        if let Some(image) = resident.patch(frame, &objects)? {
+                            patched.set(true);
+                            return Ok(image);
+                        }
                     }
-                }
-                direct_link(
-                    recipe,
-                    &inputs,
-                    &output,
-                    options.optimize,
-                    options.debug_lines,
-                    emit_relocations,
-                )?;
-                let image = std::fs::read(&output)?;
-                if incremental {
-                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
-                    resident.remember(frame, &objects, &image)?;
-                }
-                Ok::<_, NativeStop>(image)
-            };
+                    direct_link(
+                        recipe,
+                        &inputs,
+                        &output,
+                        options.optimize,
+                        options.debug_lines,
+                        emit_relocations,
+                    )?;
+                    let image = std::fs::read(&output)?;
+                    if incremental {
+                        let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
+                        resident.remember(frame, &objects, &image)?;
+                    }
+                    Ok::<_, NativeStop>(image)
+                };
             if options.optimize && !runtime_sources.items.is_empty() {
                 // The probe defines the same symbols and references. Only the
                 // source payload changes between the two links.
@@ -2023,6 +1926,7 @@ pub(crate) mod tests {
     include!("image_unit_native.rs");
     include!("std_release_native.rs");
     include!("reach_native.rs");
+    include!("link_input_native.rs");
     include!("link_closure_native.rs");
     include!("recording_build_native.rs");
     include!("request_sequences.rs");

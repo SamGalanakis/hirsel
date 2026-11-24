@@ -38,6 +38,7 @@ fn put_parts(
     key: ContentHash,
     native: &NativeObject,
 ) -> io::Result<(Bare, Option<ContentHash>, File)> {
+    crate::native::link_input::descriptor_limit();
     let (object, file) = store.put_bare(object_name(key), &native.bytes)?;
     let debug = match &native.debug {
         Some(debug) => {
@@ -80,6 +81,7 @@ pub(crate) fn load(
     store: &Store,
     key: ContentHash,
 ) -> io::Result<Option<(Bare, NativeObject, File)>> {
+    crate::native::link_input::descriptor_limit();
     let Some((object, debug)) = record(store, key)? else {
         return Ok(None);
     };
@@ -126,6 +128,7 @@ pub(crate) fn load_shared(
     store: &Store,
     key: ContentHash,
 ) -> io::Result<Option<(Bare, Option<std::sync::Arc<NativeDebug>>, File)>> {
+    crate::native::link_input::descriptor_limit();
     let shared = crate::resident::OBJECT_RECORDS.get_or(
         Some((store.root().to_owned(), key)),
         || match record(store, key) {

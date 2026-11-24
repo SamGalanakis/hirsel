@@ -71,7 +71,7 @@ pub(crate) fn prelink(
     store: &Store,
     key: ContentHash,
     linker: &std::path::Path,
-    objects: &[File],
+    objects: &[impl std::ops::Deref<Target = File>],
 ) -> Result<(Bare, File), NativeStop> {
     let scratch = store.scratch()?;
     let output = scratch.path().join("unit.o");
@@ -81,7 +81,7 @@ pub(crate) fn prelink(
     for object in objects {
         process.arg(PathBuf::from(format!(
             "/proc/{pid}/fd/{}",
-            std::os::fd::AsRawFd::as_raw_fd(object)
+            std::os::fd::AsRawFd::as_raw_fd(&**object)
         )));
     }
     process.arg("-o").arg(&output);

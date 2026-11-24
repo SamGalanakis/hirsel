@@ -5797,9 +5797,10 @@ fn disk_lock(d: Dir, c: Clock, wait_ms: u64) -> Result[HostFile, Error] waits {
 }
 
 fn disk_session(d: Dir, clock: Clock, r: Random, options: Options) -> Result[DiskSession, Error] waits {
-    // A copied store can lack LOCK. Check its format before creating LOCK.
-    if !disk_exists(d, "LOCK")? && disk_exists(d, "MANIFEST")? {
-        let _ = read_page_manifest_file(d)?
+    if disk_exists(d, "MANIFEST")? {
+        let mut manifest_file = disk_io(host.open(d, "MANIFEST", Read))?
+        check_page_manifest_header(mut manifest_file)?
+        disk_io(host.close(take manifest_file))?
     }
     let lock = disk_lock(d, clock, options.lock_wait_ms)?
     if disk_exists(d, "EXPORT")? {
@@ -7079,8 +7080,8 @@ fn journal_recover(d: Dir, id: StoreId, first: u64, flush: bool, take initial: J
     }
 }
 
-// AP15 counts distinct row versions after replay. A FORK only shares the
-// parent's roots, so its presence alone cannot change the logical account.
+// Replay settles the Memory union from the final roots. A put can make
+// the head and a pin share a row version again, lowering that union.
 fn journal_account(replay: JournalReplay) -> Result[u64, Error] {
     disk_allocation(scoped fn() -> Result[u64, Error] {
         capacity(state_account(replay.state))

@@ -97,6 +97,7 @@ dirs = ["."]
 "store_format4_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
 "store_prior_laws.hirsel" = "store"
+"store_format4_prior_fixtures.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "store"
 "store_packs_disk_laws.hirsel" = "store"
 "store_scrub_laws.hirsel" = "store"
@@ -141,6 +142,9 @@ limit = 536870912
 
 [tests.runs."store@1/store/journal_test_fork_pack_lists"]
 limit = 536870912
+
+[tests.runs."store@1/store/journal_test_v264_recovery"]
+limit = 268435456
 
 [tool.workloads]
 s1 = { module = "main", grants = ["Stdout"] }

@@ -167,9 +167,11 @@ fn one_page_account(roots: PageRoots) -> u64 {
     let (_, streams) = std.page.totals(roots.streams.root)
     let (_, catalog) = std.page.totals(roots.catalog.root)
     let mut charge = int.saturating_add(streams, catalog)
-    let mut collections = std.page.cursor_open(roots.collections.root, None, true, false)
-    while let Some(item) = std.page.cursor_next(mut collections) {
-        let bytes_charge: u64 = list.word_le(item.value, 44)
+    let mut listed = std.page.cursor_open(roots.collections.root, None, true, false)
+    let leading: Bytes = list.new()
+    while let Some((_, slot)) = std.page.cursor_next_key(mut listed, leading) {
+        let descriptor = option.unwrap(std.page.cursor_value(listed, slot))
+        let bytes_charge: u64 = if descriptor[53] == 0 { list.word_le(descriptor, 44) } else { 0 }
         charge = int.saturating_add(charge, int.saturating_add(126, bytes_charge))
     }
     charge
@@ -335,6 +337,14 @@ fn row_version_union(roots: List[Arc[std.page.Page]], prefix_width: u64) -> u64 
     charge
 }
 
+// The collection descriptors live in Memory even when their data is Tiered.
+fn account_collection_key(mut listed: std.page.Walk) -> Option[Bytes] {
+    while let Some(_) = std.page.walk_subtree(listed) {
+        std.page.walk_expand(mut listed)
+    }
+    std.page.walk_key(listed)
+}
+
 fn page_row_account(roots: List[PageRoots]) -> u64 {
     if list.len(roots) == 1 {
         return one_page_account(roots[0u64])
@@ -343,38 +353,43 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
     let mut catalog: List[Arc[std.page.Page]] = list.with_capacity(list.len(roots))
     let mut collections: Map[u32, List[Arc[std.page.Page]]] = map.new()
     let mut cells: Map[u32, List[Arc[Bytes]]] = map.new()
+    let mut descriptors: Map[u32, ()] = map.new()
     for participating in roots {
         list.push(mut streams, arc.share(participating.streams.root))
         list.push(mut catalog, arc.share(participating.catalog.root))
-        let mut listed = std.page.cursor_open(participating.collections.root, None, true, false)
-        while let Some(take item) = std.page.cursor_next(mut listed) {
-            let std.page.CursorRow(key: take key, value: take descriptor, collection: take collection_root) = take item
+        let mut listed = std.page.walk_begin(participating.collections.root)
+        while let Some(take key) = account_collection_key(mut listed) {
             let id: u32 = list.word_be(key, 0)
-            let Some(take child) = take collection_root else {
-                fail("store: missing collection root")
-            }
-            if descriptor[52] == 3 {
-                let value = owned_cell(child, descriptor)
-                map.update_or_insert(mut cells, id, list.new(), fn(mut group: List[Arc[Bytes]]) {
-                    if let Some(raw) = value {
-                        list.push(mut group, arc.share(raw))
+            map.insert(mut descriptors, id, ())
+            {
+                let descriptor = option.unwrap(std.page.walk_value(listed))
+                if descriptor[53] == 0 {
+                    let child = std.page.walk_collection(listed)
+                    if descriptor[52] == 3 {
+                        let value = owned_cell(child, descriptor)
+                        if let Some(raw) = value {
+                            map.update_or_insert(mut cells, id, list.new(), fn(mut group: List[Arc[Bytes]]) {
+                                list.push(mut group, arc.share(raw))
+                            })
+                        }
+                    } else {
+                        map.update_or_insert(mut collections, id, list.new(), fn(mut group: List[Arc[std.page.Page]]) {
+                            list.push(mut group, arc.share(child))
+                        })
                     }
-                })
-                continue
+                }
             }
-            map.update_or_insert(mut collections, id, list.new(), fn(mut group: List[Arc[std.page.Page]]) {
-                list.push(mut group, arc.share(child))
-            })
+            std.page.walk_next(mut listed)
         }
     }
     let mut charge = int.saturating_add(row_version_union(streams, 0), row_version_union(catalog, 0))
+    charge = int.saturating_add(charge, int.saturating_mul(map.len(descriptors), 126))
     for (_, group) in collections {
-        charge = int.saturating_add(charge, int.saturating_add(126, row_version_union(group, 4)))
+        charge = int.saturating_add(charge, row_version_union(group, 4))
     }
     for (_, group) in cells {
         let mut versions: List[Arc[Bytes]] = clone(group)
         list.sort(mut versions, fn(a: Arc[Bytes], b: Arc[Bytes]) -> Order { list.compare_bytes(a, b) })
-        charge = int.saturating_add(charge, 126)
         for i in 0u64 .. list.len(versions) {
             if i == 0 || versions[i - 1] != versions[i] {
                 charge = int.saturating_add(charge, 70 + round8(list.len(versions[i])))

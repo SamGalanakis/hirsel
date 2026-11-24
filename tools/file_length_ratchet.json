@@ -46,9 +46,9 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 7675,
-    "raise_revision": 14,
-    "reason": "m3-s3-slots-2010"
+    "lines": 7368,
+    "raise_revision": 15,
+    "reason": "cell-log-build-2018"
   },
   "core/std/char.hirsel": {
     "lines": 4741

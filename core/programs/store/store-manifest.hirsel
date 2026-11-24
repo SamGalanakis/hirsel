@@ -224,14 +224,18 @@ fn read_disk_bytes(mut handle: HostFile, path: String, offset: u64, size: u64) -
     Ok(take raw)
 }
 
+fn check_page_manifest_header(mut handle: HostFile) -> Result[(), Error] waits {
+    let header = read_disk_bytes(mut handle, "MANIFEST", 0, 72)?
+    let _ = disk_allocation(scoped fn() -> Result[DiskHeader, Error] {
+        disk_read_header("MANIFEST", header, 1, None, None)
+    })?
+    Ok(())
+}
+
 fn read_page_manifest_bytes(d: Dir) -> Result[Bytes, Error] waits {
     let path = "MANIFEST"
     let mut handle = disk_io(host.open(d, path, Read))?
-    let header = read_disk_bytes(mut handle, path, 0, 72)?
-    // Check the format even when an old file is larger than the new bound.
-    let _ = disk_allocation(scoped fn() -> Result[DiskHeader, Error] {
-        disk_read_header(path, header, 1, None, None)
-    })?
+    check_page_manifest_header(mut handle)?
     let size = disk_io(host.stat_file(mut handle))?.size
     if size > PAGE_MANIFEST_FILE_LIMIT {
         return Error(disk_fault(path, PAGE_MANIFEST_FILE_LIMIT, Malformed))

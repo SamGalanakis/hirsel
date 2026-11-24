@@ -80,13 +80,13 @@ fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCap
         return history_probe_head(mut source.client, option.unwrap(capture.remote).tag, mut scratch, source.deadline)
     }
     let outcome = history_fetch(mut source.client, "head", mut scratch, source.deadline)
-    history_qualify(mut source.client, source.deadline)?
     let tag = match take outcome {
         Ok(meta) => meta.etag,
         Error(Remote(NotFound)) => return Error(NotFound),
         Error(take problem) => return Error(take problem),
     }
     let latest = history_decode_head(scratch)?
+    history_qualify(mut source.client, source.deadline)?
     history_check_namespace(latest, source.client)?
     Ok(Some((take latest, tag)))
 }

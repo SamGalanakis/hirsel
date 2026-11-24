@@ -213,14 +213,15 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
     let claim_ms = if options.claim_ms == 0 { op_ms } else { options.claim_ms }
     read_source.deadline = std.object.deadline_after_ms(read_source.client, claim_ms)
     let observed = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)
+    let selected = match take observed {
+        Ok(_) => Some(history_decode_head(workspace.witness)?),
+        Error(Remote(NotFound)) => None,
+        Error(take failure) => return Error(take failure),
+    }
     history_qualify(mut read_source.client, read_source.deadline)?
     let holder = capacity(disk_identity(r))?
-    match take observed {
-        Ok(_) => {
-            let selected = history_decode_head(workspace.witness)?
-            history_open_existing(mut read_source, c, r, holder, take selected, options, requested_level, mut workspace, prepare_writer)
-        },
-        Error(Remote(NotFound)) => history_open_genesis(mut read_source.client, r, holder, options, requested_level, mut workspace, read_source.deadline, prepare_writer),
-        Error(take failure) => Error(take failure),
+    match take selected {
+        Some(take capture) => history_open_existing(mut read_source, c, r, holder, take capture, options, requested_level, mut workspace, prepare_writer),
+        None => history_open_genesis(mut read_source.client, r, holder, options, requested_level, mut workspace, read_source.deadline, prepare_writer),
     }
 }

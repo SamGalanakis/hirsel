@@ -1,0 +1,43 @@
+fn part(mut prefix: Bytes, track: media_container.mp4.Track, number: u32, time: u64, duration: u32, size: u32, sync: bool) -> packager.Part {
+    let mut samples: List[media_container.mp4.Sample] = list.with_capacity(1)
+    list.push(mut samples, sample(duration, size, sync))
+    result.unwrap(packager.write_part(mut prefix, track, number, time, samples, int.widen(size), packager.SegmentLimit(samples: 1, payload_bytes: int.widen(size))))
+}
+
+@test
+fn ll_hls_part_timing() -> Result[(), ()] {
+    let track = media_container.mp4.Track(id: 1, timescale: 1000, media: Video(160, 90))
+    let mut prefix: Bytes = list.with_capacity(120)
+    let mut parts: List[packager.Part] = list.with_capacity(3)
+    list.push(mut parts, part(mut prefix, track, 5, 0, 100, 3, true))
+    list.push(mut parts, part(mut prefix, track, 6, 100, 170, 5, false))
+    list.push(mut parts, part(mut prefix, track, 7, 270, 60, 7, false))
+    let segment = result.unwrap(packager.finish_segment(parts, 42, 200))
+    let mut completed: List[packager.LiveSegment] = list.with_capacity(1)
+    list.push(mut completed, packager.LiveSegment(segment: segment, parts: clone(parts)))
+    let limit = packager.ManifestLimit(octets: 8192, steps: 20000)
+    let mut window = packager.LiveWindow(track: track, first_number: 42, target_seconds: 1, part_target_ticks: 200, completed: take completed, pending: list.new(), ended: true)
+    let rendered = result.unwrap(packager.hls_low_latency(window, limit))
+    // RFC 8216bis permits short independent and final parts. The middle part
+    // lasts exactly 85% of the 200 ms target. Each fragment adds 112 bytes.
+    let expected = "#EXTM3U\n#EXT-X-VERSION:9\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:42\n#EXT-X-SERVER-CONTROL:PART-HOLD-BACK=0.600000000\n#EXT-X-PART-INF:PART-TARGET=0.200000000\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-PART:DURATION=0.100000000,URI=\"42.m4s\",BYTERANGE=\"115@0\",INDEPENDENT=YES\n#EXT-X-PART:DURATION=0.170000000,URI=\"42.m4s\",BYTERANGE=\"117@115\"\n#EXT-X-PART:DURATION=0.060000000,URI=\"42.m4s\",BYTERANGE=\"119@232\"\n#EXTINF:0.330000000,\n42.m4s\n#EXT-X-ENDLIST\n"
+    if rendered != expected {
+        fail("LL-HLS parts differ from the RFC timing and the concatenated byte ranges")
+    }
+    window.part_target_ticks = 201
+    if let Error(InvalidSegment) = packager.hls_low_latency(window, limit) {} else {
+        fail("a short non-independent middle part must be refused")
+    }
+    window.part_target_ticks = 169
+    if let Error(InvalidSegment) = packager.hls_low_latency(window, limit) {} else {
+        fail("a part above the declared target must be refused")
+    }
+    window.completed = list.new()
+    window.pending = take parts
+    window.part_target_ticks = 200
+    window.ended = false
+    if let Error(InvalidSegment) = packager.hls_low_latency(window, limit) {} else {
+        fail("an open parent cannot claim the final-part exception")
+    }
+    Ok(())
+}

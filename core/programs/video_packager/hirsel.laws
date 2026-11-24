@@ -1,3 +1,4 @@
 hirsel.laws 1
 video_packager@1/tests/dash_segment_timeline src=e2052d7265221da1 sig=8fc635d8478f7293 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
 video_packager@1/tests/hls_cmaf src=9f0dfa19bc6ff39f sig=6e805239a45d7b7c run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+video_packager@1/tests/ll_hls_part_timing src=67e644db1190367d sig=631069d074196c16 run=acdd7fe37d41c86f bug=- oracle=- rows=pending

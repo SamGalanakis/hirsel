@@ -75,6 +75,10 @@ fn presentation_time(decode: u64, offset: i32) -> Result[u64, Error] {
 // The caller supplies one closed GOP (or an audio-only run) and the exact
 // length of its payload. Write the returned prefix followed by that payload.
 pub fn write_segment(mut out: Bytes, track: media_container.mp4.Track, number: u32, decode_start: u64, samples: List[media_container.mp4.Sample], payload_bytes: u64, limit: SegmentLimit) -> Result[Segment, Error] {
+    write_chunk(mut out, track, number, decode_start, samples, payload_bytes, limit, true)
+}
+
+fn write_chunk(mut out: Bytes, track: media_container.mp4.Track, number: u32, decode_start: u64, samples: List[media_container.mp4.Sample], payload_bytes: u64, limit: SegmentLimit, require_sync: bool) -> Result[Segment, Error] {
     let count = list.len(samples)
     if count == 0 || number == 0 || track.timescale == 0 {
         return Error(InvalidSegment)
@@ -83,11 +87,12 @@ pub fn write_segment(mut out: Bytes, track: media_container.mp4.Track, number: u
         return Error(BudgetExceeded)
     }
     let first = samples[0]
-    if !independent(track, first) {
+    if require_sync && !independent(track, first) {
         return Error(InvalidSegment)
     }
-    let start = presentation_time(decode_start, first.composition_offset)?
-    let mut end = start
+    let first_time = presentation_time(decode_start, first.composition_offset)?
+    let mut start = first_time
+    let mut end = first_time
     let mut decode = decode_start
     let mut octets = 0u64
     for sample in samples {
@@ -99,7 +104,7 @@ pub fn write_segment(mut out: Bytes, track: media_container.mp4.Track, number: u
         octets += size
         let when = presentation_time(decode, sample.composition_offset)?
         if when < start {
-            return Error(InvalidSegment)
+            start = when
         }
         let stop = add_ticks(when, duration)?
         if stop > end {
@@ -107,7 +112,7 @@ pub fn write_segment(mut out: Bytes, track: media_container.mp4.Track, number: u
         }
         decode = add_ticks(decode, duration)?
     }
-    if octets != payload_bytes || end - start > 0xffffffff {
+    if octets != payload_bytes || end - start > 0xffffffff || (independent(track, first) && start != first_time) {
         return Error(InvalidSegment)
     }
     container(media_container.mp4.write_fragment(mut out, track.id, number, decode_start, samples))?
@@ -160,6 +165,10 @@ fn same_media(a: media_container.mp4.Media, b: media_container.mp4.Media) -> boo
     }
 }
 
+fn same_track(a: media_container.mp4.Track, b: media_container.mp4.Track) -> bool {
+    a.id == b.id && a.timescale == b.timescale && same_media(a.media, b.media)
+}
+
 fn validate(r: Rendition) -> Result[(), Error] {
     if r.id == 0 || r.track.id == 0 || r.track.timescale == 0 || list.len(r.segments) == 0 || !codec_token(r.codec) {
         return Error(InvalidLadder)
@@ -175,7 +184,7 @@ fn validate(r: Rendition) -> Result[(), Error] {
     let mut decode = first.decode_start
     for s in r.segments {
         let n: u64 = int.widen(s.number)
-        if s.track.id != r.track.id || s.track.timescale != r.track.timescale || !same_media(s.track.media, r.track.media) || s.start != next || s.decode_start != decode || n != number {
+        if !same_track(s.track, r.track) || s.start != next || s.decode_start != decode || n != number {
             return Error(InvalidLadder)
         }
         next = s.end

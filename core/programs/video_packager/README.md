@@ -28,3 +28,16 @@ that implementation is available.
 Call `dash_manifest` for `manifest.mpd`. The MPD uses the same init and
 media objects as HLS and records each rendition's integer segment
 timeline and presentation offset.
+
+For LL-HLS, call `write_part` and append each part's framing and payload
+to the parent `.m4s` object. Part boundaries preserve presentation and
+decode continuity. `finish_segment` indexes the concatenation as a
+regular HLS or DASH segment. Keep fragment sequence numbers consecutive
+within each parent and keep them increasing across parents.
+
+Render `hls_low_latency` from the published parts and completed segments.
+Keep the target durations fixed across updates. The host serves the
+published byte ranges of the open object and polls playlist snapshots.
+This renderer supports RFC 8216bis partial segments with polling. The
+Appendix B.1 delivery profile requires additional server and playlist
+features.

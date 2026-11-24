@@ -14,7 +14,10 @@ pub type Shortage: send { need: u64, have: u64, parts: List[(String, u64)] }
 
 const MIB: u64 = 1048576
 const CUT_FIXED_BYTES: u64 = 65536
-const BUCKET_HEAD_BYTES: u64 = 131552
+// MEM-24 charges 288 bytes per task plus its logical result size.
+// The timer returns (), and Result[(), Error] costs 64 bytes.
+const OBJECT_TIMER_TASK_BYTES: u64 = 288
+const OBJECT_JOURNAL_TASK_BYTES: u64 = 352
 
 pub fn derived_sizes() -> Overrides {
     Overrides(resident_limit: None, journal_limit: None,
@@ -65,7 +68,7 @@ pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Short
 // The task starting the store reserves the plan's actual cost. Explicit
 // overrides may leave some of the share unused.
 pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, u64), Shortage] {
-    let mut parts: List[(String, u64)] = list.with_capacity(9)
+    let mut parts: List[(String, u64)] = list.with_capacity(14)
     let mut checkpoint_budget = 0u64
     let mut journal = 0u64
     let mut pack = 0u64
@@ -87,10 +90,14 @@ pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Option
             add_size(mut parts, "checkpoint_task_fixed", CUT_FIXED_BYTES)
             if let Bucket(config) = kind {
                 let lanes = std.object.lane_reservation(config)
+                let group_room = order.min(group, 4294967295u64)
                 valid = valid && lanes != None
                 add_size(mut parts, "client_lanes", size_or(lanes, 18446744073709551615u64))
-                add_size(mut parts, "entry_buffers", 2 * (112 + order.min(group, 4294967295u64)))
-                add_size(mut parts, "head_buffers", BUCKET_HEAD_BYTES)
+                add_size(mut parts, "entry_buffers", 2 * round8(object_writer_entry_room(group_room)))
+                add_size(mut parts, "head_buffers", 2 * round8(HISTORY_HEAD_LIMIT))
+                add_size(mut parts, "history_key", round8(HISTORY_BUFFER_KEY_BYTES))
+                add_size(mut parts, "journal_timer", OBJECT_TIMER_GRANT + OBJECT_TIMER_TASK_BYTES)
+                add_size(mut parts, "journal_worker", object_writer_journal_room(group_room) + OBJECT_JOURNAL_TASK_BYTES)
                 add_size(mut parts, "reclaim_page", RECLAIM_PAGE_BYTES)
                 add_size(mut parts, "put_buffer", pack)
             }

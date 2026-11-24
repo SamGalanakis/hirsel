@@ -67,13 +67,23 @@ fn object_open_checks(options: Options) -> Result[(), Error] {
     Ok(())
 }
 
+const OBJECT_TIMER_GRANT: u64 = 4096
+
+fn object_writer_entry_room(group: u64) -> u64 {
+    order.max(group + 112, 152) + BINDING_BYTES
+}
+
+fn object_writer_journal_room(group: u64) -> u64 {
+    4 * group + 524288
+}
+
 fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
     object_open_checks(options)?
     let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms) = take config
     let mut read_source = history_reader(take client, 0)
     let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(read_source.client), level: string.from(level_name)))?
     let group_room: u64 = int.widen(options.group_bytes)
-    let mut workspace = history_buffers(group_room + 112 + BINDING_BYTES)?
+    let mut workspace = history_buffers(object_writer_entry_room(group_room))?
     let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
         Ok(journal_channels(int.widen(options.group_commits)))
     })?
@@ -84,12 +94,12 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     let (health_tx, health_rx): (Sender[()], Receiver[()]) = channel.new(1)
     let idle_ns = int.saturating_mul(options.head_poll_ms, 1000000)
     let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: idle_ns)
-    let timer = match task.try_spawn(tasks, bytes 4096, take timer_input, journal_idle_timer) {
+    let timer = match task.try_spawn(tasks, bytes OBJECT_TIMER_GRANT, take timer_input, journal_idle_timer) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     let actor = ObjectJournalTask(ready: take starting, receive: take queued, acks: take journal_acks, notices: channel.sender(written_send), synced: take synced_send, group_bytes: group_room, group_commits: int.widen(options.group_commits), idle: Some(take idle_send), health_signal: Some(ObjectHealthSignal(value: latest.handle(health_state), terminal: channel.sender(health_tx))))
-    let worker_room = 4 * group_room + 524288 + RECLAIM_PAGE_BYTES
+    let worker_room = object_writer_journal_room(group_room) + RECLAIM_PAGE_BYTES
     let work = match task.try_spawn(tasks, bytes worker_room, take actor, object_journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),

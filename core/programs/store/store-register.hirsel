@@ -39,6 +39,8 @@ type HistoryRegister: send {
 
 type HistoryTerminal: send = HistoryFault(Error) | HistoryUnknown
 
+const HISTORY_BUFFER_KEY_BYTES: u64 = 60
+
 type HistoryBuffers: send {
     body: Bytes,
     witness: Bytes,
@@ -50,7 +52,7 @@ type HistoryBuffers: send {
 fn history_buffers(packet_bytes: u64) -> Result[HistoryBuffers, Error] {
     let room = order.max(packet_bytes, 152 + BINDING_BYTES)
     disk_allocation(scoped fn() -> Result[HistoryBuffers, Error] {
-        Ok(HistoryBuffers(body: list.with_capacity(HISTORY_HEAD_LIMIT), witness: list.with_capacity(HISTORY_HEAD_LIMIT), packet: list.with_capacity(room), compare: list.with_capacity(room), key: string.with_capacity(60)))
+        Ok(HistoryBuffers(body: list.with_capacity(HISTORY_HEAD_LIMIT), witness: list.with_capacity(HISTORY_HEAD_LIMIT), packet: list.with_capacity(room), compare: list.with_capacity(room), key: string.with_capacity(HISTORY_BUFFER_KEY_BYTES)))
     })
 }
 

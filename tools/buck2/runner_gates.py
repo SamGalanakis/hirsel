@@ -2,6 +2,14 @@
 
 
 def runner_gates(out, call, Raw):
+    out.append("\n" + call("hirsel_script_test", name="core-sdk-recovery", script="core/tools/sdk_recovery.py",
+                            host=True, native_tools=True,
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-sdk-recovery/hirsel",
+                                  "--node", "buck-out/tmp/cargo-bin-exe/core-sdk-recovery/node"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
+                                      "node": "//tools/buck2:sdk-node[bin/node]"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/tests/client*.mjs", "core/programs/runner/tests/client_recovery_place.hirsel", "sdk/client/*.ts"]) + ["core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/tools/store_tests.py", "core/tools/std_native.py", "core/tools/std_contracts.py", "core/tools/case_progress.py", "tools/loopback_peer.py"]')))
     out.append("\n" + call("hirsel_script_test", name="core-runner-frame-schema", script="core/tools/frame_schema.py",
                             production=True, native_tools=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-runner-frame-schema/hirsel", "--check"],

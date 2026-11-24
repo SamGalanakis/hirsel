@@ -1,0 +1,154 @@
+type RecoveryTables: shareable + send { effects: store.Table[u32, u32] }
+
+type RecoveryInput: codec { value: u32 }
+
+const RECOVERY_PLACE_BYTES: u64 = 1048576u64
+
+fn recovery_schema(mut d: store.Declare) -> Result[RecoveryTables, store.Error] {
+    let values: std.codec.Codec[u32] = std.codec.of()
+    let table = store.declare_table(mut d, "effects", std.codec.key_u32(), values)?
+    Ok(RecoveryTables(effects: store.finish(mut d, take table)?))
+}
+
+fn recovery_bump(mut tx: store.Tx, h: RecoveryTables, caller: Caller, take input: RecoveryInput) -> Result[u32, ()] {
+    if caller.issuer != 2u8 || caller.subject != b"sdk-recovery" || input.value < 21u32 || input.value > 23u32 {
+        return Error(())
+    }
+    let prior = match result.unwrap(store.fetch(tx, h.effects, input.value)) { Some(n) => n, None => 0u32 }
+    result.unwrap(store.put(mut tx, h.effects, input.value, prior + 1u32))
+    Ok(input.value)
+}
+
+fn recovery_place(mut entries: Registry[(), RecoveryTables]) -> Result[(), RegisterError] {
+    transact(mut entries, code.describe(recovery_bump), 65536u64, DEFAULT_STEPS)?
+    let entry = {
+        let row = view entries.exported[0u64]
+        entry_key(view row.described.identity, row.args_fp, row.result_fp)
+    }
+    let mut fields: List[FieldSource] = list.new()
+    list.push(mut fields, FieldSource(field: "value", source: Body))
+    bind(mut entries, HttpBinding(op: "bump", method: Post, path: "/bump", entry: take entry, fields: take fields,
+        mode: Stream, ok_status: 201u16, error_status: 422u16, body_max: 1024u64, arg_max: 1024u64,
+        deadline_ms: 2000u64, steps: DEFAULT_STEPS))
+}
+
+fn recovery_binding(_seed: (), credential: Bytes) -> Result[BoundCaller, ()] {
+    if credential != b"" { return Error(()) }
+    Ok(BoundCaller(caller: store.Caller(issuer: 2u8, subject: b"sdk-recovery"), expires_at_ms: None))
+}
+
+fn recovery_wire() -> Option[Wire[(), ()]] {
+    Some(wire((), Some(code.describe(recovery_binding)), 8192u64, DEFAULT_STEPS))
+}
+
+type RecoveryWs: send {
+    listener: Listener, head: Sender[HeadInput], publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks,
+}
+
+fn recovery_ws(take job: RecoveryWs) waits {
+    let RecoveryWs(listener: take listener, head: take head, publisher: take post_to, clock, random, tasks) = take job
+    let mut config = wire_defaults(65536u64)
+    config.n_pool = 4194304u64
+    config.socket.max_frame = 65536u64
+    let make: scoped[view] fn() -> Service[WireSession[(), ()]] = fn() -> Service[WireSession[(), ()]] {
+        wire_target_service(random, recovery_wire(), head, clock, tasks, config, owned_launch_target(launch_env().target))
+    }
+    let allocate: own[send] fn(mut WireSession[(), ()], take ServiceAllocation) -> Result[ServicePlan, u16] = result.unwrap(wire_place_allocator(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
+    result.unwrap(serve_wire(take listener, tasks, clock, post_to, config, 4u64, list.new(), make, take allocate))
+}
+
+type RecoveryHttp: send { listener: Listener, relay: Relay, clock: Clock, random: Random, tasks: Tasks }
+
+fn recovery_http(take job: RecoveryHttp) waits {
+    let RecoveryHttp(listener: take listener, relay: take endpoint, clock, random, tasks) = take job
+    let registered = result.unwrap(placed(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
+    let builder: std.router.Builder[HttpConnection[(), RecoveryTables, ()]] = std.router.builder()
+    let (take routes, take plans) = result.unwrap(http_router(registered, None, take builder))
+    let make: scoped[view] fn() -> HttpConnection[(), RecoveryTables, ()] = fn() -> HttpConnection[(), RecoveryTables, ()] {
+        let reg = result.unwrap(placed(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
+        http_connection(take reg, arc.share(plans), recovery_wire(), relay_endpoint(endpoint), random, clock, tasks, 65536u64)
+    }
+    let mut config = std.http.defaults()
+    config.sockets_max = 2u64
+    config.conns_max = 2u64
+    config.ip_sockets_max = 2u64
+    config.http_max = 2u64
+    config.refuse_max = 1u64
+    config.body_max = 1024u64
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    result.unwrap(http_serve_connections(take listeners, clock, tasks, take config, take routes, 2097152u64, make, None))
+}
+
+type RecoveryServers: send {
+    net: Net, head: Sender[HeadInput], publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks,
+    out: Stdout, input: Stdin,
+}
+
+fn recovery_port(mut line: String, address: Addr) {
+    string.push_u64(mut line, int.widen(address.port))
+    string.push(mut line, "\n")
+}
+
+fn recovery_servers(take job: RecoveryServers) waits {
+    let RecoveryServers(net, head: take head, publisher: take post_to, clock, random, tasks, out, input) = take job
+    let registered = result.unwrap(placed(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
+    let relay_config = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: 1024u64)
+    let (take relay, take relay_task) = result.unwrap(start_relay(registered, head, post_to, clock, tasks, relay_config))
+    let address = Addr(ip: V4(0x7f000001u32), port: 0u16)
+    let (take ws_listener, ws_address) = result.unwrap(host.listen(net, address, 8u16))
+    let (take http_listener, http_address) = result.unwrap(host.listen(net, address, 8u16))
+    let ws = task.spawn(tasks, bytes 33554432u64,
+        RecoveryWs(listener: take ws_listener, head: channel.sender(head), publisher: take post_to, clock, random, tasks), recovery_ws)
+    let http = task.spawn(tasks, bytes 8388608u64, RecoveryHttp(listener: take http_listener, relay: take relay, clock, random, tasks), recovery_http)
+    let mut ports = string.with_capacity(24u64)
+    recovery_port(mut ports, ws_address)
+    recovery_port(mut ports, http_address)
+    result.unwrap(stdout.write(out, ports))
+    let mut stop: Bytes = list.with_capacity(1u64)
+    let _ = stdin.read(input, mut stop, Never)
+    let _ = task.cancel_join(take http)
+    let _ = task.cancel_join(take ws)
+    let _ = task.cancel_join(take relay_task)
+    result.unwrap(channel.send(head, HeadFinish))
+}
+
+fn recovery_inspect(directory: Dir, out: Stdout, options: store.Options) waits {
+    let disk = result.unwrap(store.open_read_only(directory, options))
+    let values: std.codec.Codec[u32] = std.codec.of()
+    let table = result.unwrap(store.read_only_table(disk, "effects", std.codec.key_u32(), values))
+    let mut counts = string.with_capacity(24u64)
+    for key in 21u32 .. 24u32 {
+        let count = match result.unwrap(store.read_only_get(disk, table, key)) { Some(n) => n, None => 0u32 }
+        string.push_u64(mut counts, int.widen(count))
+        string.push(mut counts, "\n")
+    }
+    result.unwrap(stdout.write(out, counts))
+}
+
+pub fn recovery_main(root: Dir, net: Net, clock: Clock, random: Random, tasks: Tasks, argv: Args, input: Stdin, out: Stdout) -> Result[(), Exit] waits {
+    launch_server(argv, clock, code.describe(recovery_place), code.describe(recovery_schema),
+        scoped fn() -> Result[(), Exit] waits {
+            let Some(mode) = args.get(argv, 0u64) else { return Error(Exit(status: 2u8)) }
+            let Some(directory_name) = args.get(argv, 1u64) else { return Error(Exit(status: 2u8)) }
+            let directory = result.unwrap(host.open_dir(root, directory_name))
+            let mut options = result.unwrap(store.sized(Directory, 134217728u64))
+            if mode == "quota-one" {
+                options.streams_per_caller_max = 1u64
+                options.streams_max = 1u64
+            }
+            if mode == "inspect" {
+                recovery_inspect(directory, out, options)
+                return Ok(())
+            }
+            let db = result.unwrap(store.open(tasks, directory, clock, random, options))
+            let (head, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(32u64)
+            let mail = result.unwrap(mailbox(16u64))
+            let work = task.spawn(tasks, bytes 50331648u64,
+                RecoveryServers(net, head: take head, publisher: post(mail), clock, random, tasks, out, input), recovery_servers)
+            result.unwrap(place_head_selected(take db, Reopen, code.describe(recovery_place), RECOVERY_PLACE_BYTES,
+                None, code.describe(recovery_schema), take inbox, take mail, tasks, 4194304u64))
+            result.unwrap(task.join(take work))
+            Ok(())
+        })
+}

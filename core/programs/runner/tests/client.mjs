@@ -7,6 +7,7 @@ import {pathToFileURL, fileURLToPath} from 'node:url';
 import {stripTypeScriptTypes} from 'node:module';
 import {spawn} from 'node:child_process';
 import {optimisticLaws} from './client_mutations.mjs';
+import {realRecoveryLaws} from './client_recovery.mjs';
 
 const source = new URL('../../../../sdk/client/', import.meta.url);
 const bytes = (...values) => Uint8Array.of(...values);
@@ -117,7 +118,7 @@ export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
   try {
     await writeFile(join(dir,'package.json'),'{"type":"module"}');
-    for(const name of ['client','image','persistence','browser','node']) {
+    for(const name of ['client','image','persistence','browser','node','room']) {
       let text=await readFile(new URL(name+'.ts',source),'utf8');
       if(mutant)text=mutant(name,text);
       await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
@@ -133,6 +134,15 @@ export async function loadRuntime(mutant) {
   }
 }
 
+export async function recoveryLaws(compiler, executable, sdk) {
+  const runtime = await loadRuntime();
+  try {
+    await realRecoveryLaws(runtime, compiler, executable, sdk);
+  } finally {
+    await runtime.dispose();
+  }
+}
+
 export async function laws(codec, only, mutant, entries, http) {
   const runtime=await loadRuntime(mutant), tests={};
   const clients=[];
@@ -145,18 +155,6 @@ export async function laws(codec, only, mutant, entries, http) {
     return {client,server,storage,time,events,diagnostics,opts};
   }
   async function ready(h){await h.client.whenReady();h.server.check();}
-  tests.fresh_installations_share_caller=async()=>{
-    const store=new Ledger();
-    const prepare=server=>{server.onCall=(f,s)=>server.answer(s,f.values[0],f.values[1],store.attempt(s.principal,f));};
-    const first=await setup(new Memory(),{prepare});await ready(first);
-    const second=await setup(new Memory(),{prepare});await ready(second);
-    assert.deepEqual(await first.client.call(want,bytes(21),x=>x),returned(21));
-    assert.deepEqual(await second.client.call(want,bytes(22),x=>x),returned(22));
-    assert.notDeepEqual(first.server.calls[0].frame.values[0],second.server.calls[0].frame.values[0]);
-    assert.equal(store.effects,2);
-    assert.deepEqual(store.byValue,new Map([[21,1],[22,1]]));
-    first.server.check();second.server.check();
-  };
   tests.cleared_storage_restarts_under_same_caller=async()=>{
     const store=new Ledger(),storage=new Memory();
     const prepare=server=>{server.onCall=(f,s)=>server.answer(s,f.values[0],f.values[1],store.attempt(s.principal,f));};
@@ -169,75 +167,6 @@ export async function laws(codec, only, mutant, entries, http) {
     assert.notEqual(storage.raw.installation,old);
     assert.notDeepEqual(h.server.calls[0].frame.values[0],reopened.server.calls[0].frame.values[0]);
     assert.deepEqual(store.byValue,new Map([[21,1],[22,1]]));
-  };
-  tests.concurrent_same_caller_bridge=async()=>{
-    const store=new Ledger();
-    let finish;
-    const h=await setup(new Memory(),{prepare:server=>{server.onCall=(f,s)=>{
-      const returned=store.attempt(s.principal,f);
-      finish=()=>server.answer(s,f.values[0],f.values[1],returned);
-    };}});await ready(h);
-    const browser=h.client.call(want,bytes(21),x=>x);
-    await settle();
-    const bridgeId={t:birth,n:crypto.getRandomValues(new BigUint64Array(1))[0]};
-    assert.notDeepEqual(h.server.calls[0].frame.values[0],bridgeId);
-    assert.deepEqual(store.attempt(caller.subject,call(bridgeId,0n,22)),returned(22));
-    finish();
-    assert.deepEqual(await browser,returned(21));
-    assert.deepEqual(store.byValue,new Map([[21,1],[22,1]]));
-  };
-  tests.unmarked_503_after_commit=async()=>{
-    const posts=[],effects=new Map();
-    const http={url:'https://scripted.invalid',fetch:async(_url,request)=>{
-      assert.equal(request.method,'POST');
-      const key=request.headers.get('Idempotency-Key');
-      posts.push(key);
-      if(posts.length===1){
-        effects.set('X',1);
-        return new Response('{}',{status:503});
-      }
-      if(posts.length===2)return new Response('{}',{status:410,headers:{'Hirsel-Refused':`history_unavailable;key=${key}`}});
-      effects.set('X',(effects.get('X')??0)+1);
-      return new Response('{}',{headers:{'Idempotent-Outcome':'committed'}});
-    }};
-    const h=await setup(new Memory(),{http});await ready(h);
-    const result=h.client.callHttp(want,{path:'/.hirsel/op/put',body:'"X"'});
-    await settle();
-    assert.equal(posts.length,1);
-    await h.time.advance(1000);
-    assert.deepEqual(await result,{tag:'LocallyUnknown'});
-    assert.deepEqual(posts,[posts[0],posts[0]]);
-    assert.equal(effects.get('X'),1);
-  };
-  tests.marked_410_after_invisible_delivery_through_reopen=async()=>{
-    const posts=[],effects=new Map(),storage=new Memory();
-    const http={url:'https://scripted.invalid',fetch:async(_url,request)=>{
-      const key=request.headers.get('Idempotency-Key');
-      assert.match(key,/^"[a-f0-9]{32}\.0"$/);
-      posts.push(key);
-      if(posts.length===1){
-        effects.set('X',1);
-        throw new TypeError('connection lost after the effect committed');
-      }
-      if(posts.length===2)return new Response(null,{status:410,headers:{'Hirsel-Refused':`history_unavailable;key=${key}`}});
-      assert.equal(request.body,'"Y"');
-      effects.set('Y',1);
-      return new Response('{}',{headers:{'Idempotent-Outcome':'committed'}});
-    }};
-    const h=await setup(storage,{http});await ready(h);
-    const x=h.client.callHttp(want,{path:'/.hirsel/op/put',body:'"X"'});
-    await settle();
-    assert.equal(posts.length,1);
-    await h.client.close();
-    assert.deepEqual(await x,{tag:'LocallyUnknown'});
-    const replay=await setup(storage,{http});await settle();
-    assert.equal(replay.client.state,'Retired');
-    assert.deepEqual(replay.events,[{tag:'LocallyUnknown'}]);
-    assert.deepEqual(posts,[posts[0],posts[0]]);
-    const fresh=await setup(storage,{http});await ready(fresh);
-    assert.equal((await fresh.client.callHttp(want,{path:'/.hirsel/op/put',body:'"Y"'})).tag,'Returned');
-    assert.notEqual(posts[2],posts[0]);
-    assert.deepEqual(effects,new Map([['X',1],['Y',1]]));
   };
   tests.first_marked_410_can_hide_an_upstream_retry=async()=>{
     let posts=0,effects=0;
@@ -253,26 +182,6 @@ export async function laws(codec, only, mutant, entries, http) {
     assert.deepEqual(await h.client.callHttp(want,{path:'/.hirsel/op/put',body:'"X"'}),{tag:'LocallyUnknown'});
     await h.time.advance(1000);
     assert.equal(posts,1);assert.equal(effects,1);
-  };
-  tests.older_remint_refused_once=async()=>{
-    const store=new Ledger();
-    const h=await setup(new Memory(),{prepare:server=>{server.onCall=(f,s)=>{
-      const [id,p,,,arg]=f.values;
-      // The quota-one victim is ahead of both server samples. This first
-      // workload owns its mint, so the explicit refusal permits one remint.
-      const outcome=arg[0]===21?store.attempt(s.principal,f):refused('HistoryUnavailable');
-      server.answer(s,id,p,outcome);
-    };}});await ready(h);
-    assert.deepEqual(await h.client.call(want,bytes(21),x=>x),returned(21));
-    const x=h.client.call(want,bytes(22),x=>x);
-    await settle();await h.time.advance(1000);
-    assert.deepEqual(await x,refused('HistoryUnavailable'));
-    const [first,aged,replacement]=h.server.calls.map(row=>row.frame.values);
-    assert.deepEqual(aged[0],first[0]);assert.equal(aged[1],1n);
-    assert.notDeepEqual(replacement[0],aged[0]);assert.equal(replacement[1],0n);
-    assert.equal(replacement[0].t,birth);
-    assert.equal(h.server.calls.length,3);assert.equal(h.client.state,'Retired');
-    assert.deepEqual(store.byValue,new Map([[21,1]]));
   };
   tests.copied_storage_never_remints=async()=>{
     // Rows 0 and 6a need this installation as minter. A request committed

@@ -120,10 +120,58 @@ fn lite_reply() -> Bytes {
     b"\x01\x01\x00\x2c\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0b\x00\x20\x00\x08\x00\x01\x95\x06\xe7\x21\xc0\x4e\x00\x08\x00\x14\x31\xb3\x33\x66\x30\xd1\xd9\x97\xce\x0d\xd6\xa4\x55\x97\x0a\xc0\x2c\x6f\x6e\xa4\x80\x28\x00\x04\x70\x07\x19\xbf"
 }
 
+const SOCKET: UdpOptions = UdpOptions(slots: 4, slot_bytes: 1536)
+
+type Datagram {
+    from: Addr,
+    payload: Bytes
+}
+
+fn bind(network: Net, at: Addr) -> UdpSocket waits {
+    let (take socket, actual) = result.unwrap(host.udp_bind(network, at, SOCKET))
+    if actual != at {
+        fail("sim.udp bound a different endpoint")
+    }
+    take socket
+}
+
+fn transmit(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    if result.unwrap(host.udp_send(mut socket, data, tx, Never)) != 1 {
+        fail("sim.udp did not commit the datagram")
+    }
+}
+
+fn arrive(mut socket: UdpSocket, clock: Clock) -> Datagram waits {
+    let mut data: Bytes = list.with_capacity(256)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    let deadline = host.mono_ns(clock) + 1000
+    if result.unwrap(host.udp_recv(mut socket, mut data, mut packets, At(clock, deadline))) != 1 {
+        fail("expected one datagram over sim.udp")
+    }
+    let UdpPacket(peer, ..) = packets[0]
+    Datagram(from: peer, payload: take data)
+}
+
+/// Deliver the next datagram on the base to the agent, then answer its source.
+fn answer(mut agent: stun_ice.Lite, mut socket: UdpSocket, base: Addr, clock: Clock, mut output: Bytes, mut scratch: Bytes) -> Result[Addr, stun_ice.IceError] waits {
+    let check = arrive(mut socket, clock)
+    let attempt = bound bytes 0 {
+        stun_ice.lite_receive(mut agent, base, check.from, check.payload, mut output, mut scratch)
+    }
+    let count = match attempt {
+        Ok(verdict) => verdict?,
+        Error(_) => fail("an ICE-Lite Binding response allocated"),
+    }
+    transmit(mut socket, check.from, list.slice(output, 0, count))
+    Ok(check.from)
+}
+
 /// bug: nominate the peer's original NAT port instead of the source of USE-CANDIDATE.
 /// oracle: RFC 8445 sections 7.3.1.2 and 7.3.2, with independent Binding bytes.
 @test
-fn lite_nat_rebinding() -> Result[(), stun_ice.IceError] {
+fn lite_nat_rebinding(tasks: Tasks) -> Result[(), stun_ice.IceError] waits {
     let local = stun_ice.credentials(b"lite", b"LocalPassword1234567890")?
     let base = Addr(ip: V4(0xc0000201), port: 40000)
     let peer_ip = V4(0xc633640c)
@@ -134,31 +182,41 @@ fn lite_nat_rebinding() -> Result[(), stun_ice.IceError] {
     list.fill(mut scratch, 160, 0)
     let mut output: Bytes = list.with_capacity(128)
     list.fill(mut output, 128, 0)
-    let original = Addr(ip: peer_ip, port: 46000)
-    let rebound = Addr(ip: peer_ip, port: 46100)
-    let probe = lite_probe()
-    let nominate = lite_nominate()
-    let _ = stun_ice.lite_receive(mut agent, base, original, probe, mut output, mut scratch)?
+    // The peer's NAT moves its mapping from port 46000 to 46100 between checks.
+    let (network, take port) = provide.net(bytes 65536)
+    let (take world, clock) = std.sim.world.new(2334, 0, 0)
+    let server = std.sim.udp.Server(config: std.sim.udp.defaults(), plan: std.sim.world.plan(2334), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 1048576, take server, std.sim.udp.serve)
+    let mut lite_socket = bind(network, base)
+    let mut original = bind(network, Addr(ip: peer_ip, port: 46000))
+    let mut rebound = bind(network, Addr(ip: peer_ip, port: 46100))
+    transmit(mut original, base, lite_probe())
+    let first = answer(mut agent, mut lite_socket, base, clock, mut output, mut scratch)?
+    if first.port != 46000 || arrive(mut original, clock).from != base {
+        fail("the probe's reply did not return to the original mapping")
+    }
     if let Some(_) = stun_ice.lite_selected(agent, 1) {
         fail("an ordinary connectivity check nominated a path")
     }
-    let attempt = bound bytes 0 {
-        stun_ice.lite_receive(mut agent, base, rebound, nominate, mut output, mut scratch)
-    }
-    let count = match attempt {
-        Ok(verdict) => verdict?,
-        Error(_) => fail("an ICE-Lite Binding response allocated"),
-    }
-    if list.compare_bytes(list.slice(output, 0, count), lite_reply()) != Equal {
+    transmit(mut rebound, base, lite_nominate())
+    let _ = answer(mut agent, mut lite_socket, base, clock, mut output, mut scratch)?
+    let reply = arrive(mut rebound, clock)
+    if reply.from != base || list.compare_bytes(reply.payload, lite_reply()) != Equal {
         fail("Binding response did not encode the rebound source")
     }
-    let _ = stun_ice.lite_receive(mut agent, base, original, probe, mut output, mut scratch)?
+    transmit(mut original, base, lite_probe())
+    let _ = answer(mut agent, mut lite_socket, base, clock, mut output, mut scratch)?
+    let _ = arrive(mut original, clock)
     let Some(path) = stun_ice.lite_selected(agent, 1) else {
         fail("authenticated USE-CANDIDATE did not nominate a path")
     }
     if path.peer.port != 46100 || path.base.port != 40000 {
         fail("ICE-Lite selected the old NAT mapping")
     }
+    let _ = take lite_socket
+    let _ = take original
+    let _ = take rebound
+    result.unwrap(task.join(take served))
     Ok(())
 }
 

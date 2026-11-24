@@ -14,7 +14,8 @@ std = { major = 1 }
 "ice_checks.hirsel" = "stun_ice"
 
 [tests]
-limit = 1048576
+limit = 16777216
+grants = ["Tasks"]
 
 [tests.sources]
 "laws.hirsel" = "laws"

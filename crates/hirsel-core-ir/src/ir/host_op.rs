@@ -54,6 +54,8 @@ pub enum HostOp {
     SecretWrap = 99,
     SecretUnwrap = 100,
     SecretSign = 101,
+    SecretAeadSeal = 120,
+    SecretAeadOpen = 121,
     Resolve = hirsel_core_ids::host_op::RESOLVE as isize,
     CredFetch = hirsel_core_ids::host_op::CRED_FETCH as isize,
     NetNarrowResolve = 41,
@@ -161,6 +163,8 @@ impl HostOp {
         HostOp::SecretWrap,
         HostOp::SecretUnwrap,
         HostOp::SecretSign,
+        HostOp::SecretAeadSeal,
+        HostOp::SecretAeadOpen,
         HostOp::RecvBounded,
         HostOp::RecvReady,
         HostOp::SendPair,
@@ -291,6 +295,8 @@ impl HostOp {
             HostOp::SecretWrap => "secret_wrap",
             HostOp::SecretUnwrap => "secret_unwrap",
             HostOp::SecretSign => "secret_sign",
+            HostOp::SecretAeadSeal => "secret_aead_seal",
+            HostOp::SecretAeadOpen => "secret_aead_open",
             HostOp::NetSplit => "net_split",
             HostOp::NetJoin => "net_join",
             HostOp::ScramSha256 => "scram_sha256",
@@ -364,6 +370,8 @@ impl HostOp {
             Self::SecretWrap => "hirsel_core_secret_wrap",
             Self::SecretUnwrap => "hirsel_core_secret_unwrap",
             Self::SecretSign => "hirsel_core_secret_sign",
+            Self::SecretAeadSeal => "hirsel_core_secret_aead_seal",
+            Self::SecretAeadOpen => "hirsel_core_secret_aead_open",
             Self::NetSplit => "hirsel_core_net_split",
             Self::NetJoin => "hirsel_core_net_join",
             Self::ScramSha256 => "hirsel_core_scram_sha256",
@@ -431,6 +439,8 @@ impl HostOp {
                 | HostOp::SecretWrap
                 | HostOp::SecretUnwrap
                 | HostOp::SecretSign
+                | HostOp::SecretAeadSeal
+                | HostOp::SecretAeadOpen
                 | HostOp::NetSplit
                 | HostOp::NetJoin
                 | HostOp::ScramFinalLen

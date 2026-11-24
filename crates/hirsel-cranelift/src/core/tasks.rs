@@ -3,9 +3,7 @@
 mod map_placement;
 mod signature;
 
-use super::abi::op_signature;
-use super::function::Function;
-use super::*;
+use super::{abi::op_signature, function::Function, *};
 use cranelift_codegen::ir::{MemFlagsData, Value};
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
@@ -336,6 +334,8 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretWrap
                     | HostOp::SecretUnwrap
                     | HostOp::SecretSign
+                    | HostOp::SecretAeadSeal
+                    | HostOp::SecretAeadOpen
                     | HostOp::StdinRead
                     | HostOp::StreamTerminal
                     | HostOp::EnvGet

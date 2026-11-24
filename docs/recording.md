@@ -192,6 +192,7 @@ environment.
 | `SECRET_MAC` | run-owned sink at object 0; canonical args = mode, secret designation, `data` (and `tag` for verify) | the 32-byte tag or the verdict |
 | `SECRET_KDF` | run-owned sink at object 0; canonical args = parent designation, child policy, `key_prefix`, `data` | the delivery position, with no key bytes |
 | `SECRET_MAC` key operations ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 2 `wrap`, 3 `unwrap`, 4 `sign`; canonical args = mode, the key's designation and policy, then for `wrap` the wrapped secret's designation and policy, for `unwrap` the `uses` text and the blob, for `sign` the algorithm and `msg`, and the spare of `out` | the outcome; for `wrap` and `sign` on success the blob or signature. `Capacity`'s available bytes are the recorded spare. |
+| `SECRET_MAC` AEAD ([TLS-5](spec/tls.md#tls-5-secrets)) | object 0; mode 5 `aead_seal`, 6 `aead_open`; canonical args = mode, key designation and policy, algorithm, nonce, associated data, plaintext or sealed bytes, and output spare | the refusal or the appended bytes, including the authenticated plaintext for open |
 | `SCRAM` | half ordinal; canonical args = secret designation, `client_first`, `server_first`, `before`, `after`, `until` | the outcome, and the committed count on failure. The new `Scram`'s ordinal on success. |
 | `SCRAM_VERIFY` | `Scram` ordinal; canonical args = `server_final` | the verdict |
 

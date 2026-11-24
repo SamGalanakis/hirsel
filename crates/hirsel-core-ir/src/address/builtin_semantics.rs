@@ -272,6 +272,8 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("rc", "try_unwrap", 1),
     ("rc", "with_unique", 1),
     ("result", "unwrap", 1),
+    ("secret", "aead_open", 1),
+    ("secret", "aead_seal", 1),
     ("secret", "hmac_sha256", 1),
     ("secret", "narrow", 2),
     ("secret", "render", 1),

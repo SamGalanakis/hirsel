@@ -358,6 +358,8 @@ HirselCoreHostOutcome hirsel_core_secret_verify_hmac_sha256(HirselCoreContext *,
 HirselCoreHostOutcome hirsel_core_secret_wrap(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_unwrap(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_sign(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_aead_seal(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_aead_open(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow_tls(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint16_t, uint16_t, uint8_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint8_t, uint8_t, uint64_t, uint64_t, uint8_t, uint16_t, uint16_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_join(HirselCoreContext *, uint64_t, uint64_t, uint64_t);

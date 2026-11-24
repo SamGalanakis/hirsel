@@ -1,0 +1,67 @@
+// test-vectors
+// The vector generator supplies the published CAVP and Wycheproof records.
+fn match_vector(alg: AeadAlg, policy: String, mode: u8, key: Bytes, nonce: Bytes, aad: Bytes, plain: Bytes, sealed: Bytes) -> bool {
+    let mut raw: Bytes = list.with_capacity(list.len(key))
+    list.append(mut raw, key)
+    let handle = result.unwrap(secret.seal(take raw, policy))
+    if mode == 0 || mode == 2 {
+        let mut out: Bytes = list.with_capacity(list.len(plain) + 16)
+        let n = result.unwrap(secret.aead_seal(handle, alg, nonce, aad, plain, mut out))
+        if out != sealed || n != list.len(sealed) {
+            return false
+        }
+        if mode == 0 {
+            return true
+        }
+    }
+    let mut opened: Bytes = list.with_capacity(list.len(sealed))
+    let result = secret.aead_open(handle, alg, nonce, aad, sealed, mut opened)
+    match result {
+        Ok(n) => (mode == 1 || mode == 2) && n == list.len(plain) && opened == plain,
+        Error(Tampered) => mode == 3 && list.len(opened) == 0,
+        Error(Invalid) => mode == 4 && list.len(opened) == 0,
+        _ => false
+    }
+}
+
+// Each row has an algorithm, a mode, five little-endian u16 field lengths
+// and the byte fields in order. Return the first failing row, or zero.
+fn check_vectors(data: Bytes) -> u64 {
+    let mut pos: u64 = 0
+    let mut row: u64 = 0
+    while pos < list.len(data) {
+        row += 1
+        let (alg, policy) = match data[pos] {
+            0u8 => (ChaCha20Poly1305, "aead(chacha20-poly1305)"),
+            1u8 => (Aes128Gcm, "aead(aes128-gcm)"),
+            2u8 => (Aes256Gcm, "aead(aes256-gcm)"),
+            _ => {
+                return row
+            }
+        }
+        let mode = data[pos + 1]
+        let start = pos + 12
+        let key_end = start + int.widen(list.word_le[u16](data, pos + 2))
+        let nonce_end = key_end + int.widen(list.word_le[u16](data, pos + 4))
+        let aad_end = nonce_end + int.widen(list.word_le[u16](data, pos + 6))
+        let plain_end = aad_end + int.widen(list.word_le[u16](data, pos + 8))
+        let end = plain_end + int.widen(list.word_le[u16](data, pos + 10))
+        if !match_vector(alg, policy, mode, list.slice(data, start, key_end), list.slice(data, key_end, nonce_end), list.slice(data, nonce_end, aad_end), list.slice(data, aad_end, plain_end), list.slice(data, plain_end, end)) {
+            return row
+        }
+        pos = end
+    }
+    0
+}
+
+// AE2: CAVP AES-128/256-GCM encryption and decryption, including FAIL rows.
+// expect: run ae2_cavp() = 0
+fn ae2_cavp() -> u64 {
+    check_vectors(cavp_data())
+}
+
+// AE3 and AE4: all groups, including invalid IV and AES-192 sizes and flipped tags.
+// expect: run ae3_ae4_wycheproof() = 0
+fn ae3_ae4_wycheproof() -> u64 {
+    check_vectors(wycheproof_data())
+}

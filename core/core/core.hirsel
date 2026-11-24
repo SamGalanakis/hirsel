@@ -169,6 +169,8 @@ pub type KeyError = Denied | Invalid | Tampered | Capacity(Capacity)
 
 pub type SignAlg = Ed25519 | P256 | Rs256
 
+pub type AeadAlg = ChaCha20Poly1305 | Aes128Gcm | Aes256Gcm
+
 pub opaque resource type Socket
 
 pub opaque resource type ReadHalf

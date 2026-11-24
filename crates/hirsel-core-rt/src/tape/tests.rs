@@ -4,7 +4,6 @@ use super::*;
 use crate::os::OsProvider;
 use std::collections::VecDeque;
 use std::{cell::Cell as Shared, io::Read};
-
 /// The code revision the tests open tapes as.
 pub(super) const REVISION: [u8; 32] = {
     let mut b = [0; 32];
@@ -15,9 +14,10 @@ pub(super) const REVISION: [u8; 32] = {
     }
     b
 };
+#[path = "aead_tests.rs"]
+mod aead;
 #[path = "rl2_tests.rs"]
 mod rl2;
-
 const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
 const MODEL: &[u8] = include_bytes!("testdata/model-f4-tape.bin");
 const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");

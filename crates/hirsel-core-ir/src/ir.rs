@@ -1512,14 +1512,14 @@ impl RtOp {
                     HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
                     HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
                     HostOp::SecretDeriveHmac => (vec![V(u64_), V(p), V(p), V(p)], outcome),
-                    HostOp::SecretHmac | HostOp::SecretVerifyHmac => {
+                    HostOp::SecretHmac | HostOp::SecretVerifyHmac | HostOp::SecretUnwrap => {
                         (vec![V(u64_), V(p), V(p)], outcome)
                     }
-                    // `out` is appended in its spare capacity; tag 4 (capacity)
-                    // carries the bytes needed and the spare.
                     HostOp::SecretWrap => (vec![V(u64_), V(u64_), V(p)], outcome),
-                    HostOp::SecretUnwrap => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::SecretSign => (vec![V(u64_), V(u64_), V(p), V(p)], outcome),
+                    HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
+                        (vec![V(u64_), V(u64_), V(p), V(p), V(p), V(p)], outcome)
+                    }
                     HostOp::NetNarrowTls => (
                         vec![
                             V(u64_),

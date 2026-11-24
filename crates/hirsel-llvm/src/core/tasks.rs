@@ -162,6 +162,8 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretWrap
             | HostOp::SecretUnwrap
             | HostOp::SecretSign
+            | HostOp::SecretAeadSeal
+            | HostOp::SecretAeadOpen
             | HostOp::StdinRead
             | HostOp::StreamTerminal
             | HostOp::EnvGet

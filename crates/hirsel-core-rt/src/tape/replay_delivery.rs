@@ -291,10 +291,9 @@ pub(super) unsafe fn replay_out(
             secret: None,
             expires_ns,
         });
-    } else if op == SECRET_MAC && r.mode >= crate::secret::KEY_WRAP {
-        // Key operations: a produced blob or signature is the payload, and
-        // unwrap records its outcome only; no key material is on the tape.
-        let produced = r.mode != crate::secret::KEY_UNWRAP;
+    } else if op == SECRET_MAC && r.mode >= crate::secret::key::KEY_WRAP {
+        // Key operations record appended bytes, or just an outcome for unwrap.
+        let produced = r.mode != crate::secret::key::KEY_UNWRAP;
         if if ok {
             !produced && (out.value != 0 || !out.payload.is_empty())
                 || produced && out.value != out.payload.len() as u64
@@ -308,15 +307,17 @@ pub(super) unsafe fn replay_out(
         }
         if ok && produced {
             space.ok_or(Fault::Corrupt)?.require([out.value, 0])?;
-            // SAFETY: the payload fits the carrier's spare capacity.
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    out.payload.as_ptr(),
-                    r.buffer.data.add(r.buffer.len),
-                    out.payload.len(),
-                );
+            if !out.payload.is_empty() {
+                // SAFETY: the nonempty payload fits the carrier's spare capacity.
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        out.payload.as_ptr(),
+                        r.buffer.data.add(r.buffer.len),
+                        out.payload.len(),
+                    );
+                }
+                r.buffer.len += out.payload.len();
             }
-            r.buffer.len += out.payload.len();
         }
     } else if op == SECRET_MAC {
         if !ok

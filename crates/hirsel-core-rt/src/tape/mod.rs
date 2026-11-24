@@ -22,6 +22,7 @@ mod managed;
 mod replay_delivery;
 pub mod run;
 pub(crate) mod schedule;
+mod secret;
 mod unix;
 pub(crate) mod writer;
 pub(crate) use dispatch::{exec_rules, narrow_exec, narrow_net, net_rules, owns, source};
@@ -1049,45 +1050,6 @@ unsafe fn socket_args(request: &Request) -> Args {
     }
 }
 
-/// A key operation's canonical arguments: each Secret's origin and policy,
-/// never its bytes, then the operation's public operands and the spare.
-unsafe fn key_args(r: &Request) -> Args {
-    use crate::secret::KeyOp;
-    // SAFETY: the key adapter pins its request for the issue.
-    let key = unsafe { &*r.path.cast::<crate::secret::KeyRequest<'_>>() };
-    let mut head = vec![r.mode];
-    let mut texts = Vec::new();
-    let mut secret = |head: &mut Vec<u8>, s: &crate::secret::Secret| {
-        let (kind, ordinal) = s.origin.wire();
-        head.push(kind);
-        put_varint(head, ordinal);
-        texts.push(s.policy.text().into_bytes());
-    };
-    secret(&mut head, key.key);
-    let operand: &[u8] = match &key.op {
-        KeyOp::Wrap(s) => {
-            secret(&mut head, s);
-            &[]
-        }
-        KeyOp::Unwrap { blob, uses, .. } => {
-            texts.push(uses.text().into_bytes());
-            blob
-        }
-        KeyOp::Sign { alg, msg } => {
-            head.push(alg.case());
-            msg
-        }
-    };
-    for text in &texts {
-        put_varint(&mut head, text.len() as u64);
-    }
-    put_varint(&mut head, operand.len() as u64);
-    let mut parts: Vec<&[u8]> = vec![&head];
-    parts.extend(texts.iter().map(Vec::as_slice));
-    parts.push(operand);
-    Args::of_parts(&parts)
-}
-
 /// The canonical argument bytes of an operation (REPLAY-SPEC 4.1; the
 /// per-operation choice is recorded in followups.md for section 5.4).
 unsafe fn operands(r: &Request) -> Args {
@@ -1152,8 +1114,8 @@ unsafe fn operands(r: &Request) -> Args {
                 kdf.data,
             ]);
         }
-        if r.operation == SECRET_MAC && r.mode >= crate::secret::KEY_WRAP {
-            return key_args(r);
+        if r.operation == SECRET_MAC && r.mode >= crate::secret::key::KEY_WRAP {
+            return secret::key_args(r);
         }
         if r.operation == SECRET_MAC {
             let mac = &*r.path.cast::<crate::secret::MacRequest<'_>>();
@@ -1208,7 +1170,15 @@ unsafe fn canonical(r: &Request) -> Args {
         RESOLVE => arguments.buffered([crate::resolve::spare(&r.buffer) as u64, 0]),
         READ | READ_AT | RANDOM | NEXT_ENTRIES | RECV_BOUNDED | DATAGRAM_RECV | STDIN_READ
         | MKSTEMP => arguments.buffered([r.buffer.capacity.saturating_sub(r.buffer.len) as u64, 0]),
-        SECRET_MAC if matches!(r.mode, crate::secret::KEY_WRAP | crate::secret::KEY_SIGN) => {
+        SECRET_MAC
+            if matches!(
+                r.mode,
+                crate::secret::key::KEY_WRAP
+                    | crate::secret::key::KEY_SIGN
+                    | crate::secret::key::KEY_AEAD_SEAL
+                    | crate::secret::key::KEY_AEAD_OPEN
+            ) =>
+        {
             arguments.buffered([r.buffer.capacity.saturating_sub(r.buffer.len) as u64, 0])
         }
         _ => arguments,

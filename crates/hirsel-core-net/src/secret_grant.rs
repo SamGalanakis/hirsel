@@ -1,3 +1,4 @@
+use crate::secret_aead::{AeadAlg, AeadMode};
 use crate::{Name, Pattern};
 use std::sync::Arc;
 
@@ -5,7 +6,7 @@ use std::sync::Arc;
 /// permits verification too, so its set holds `VERIFY` as well, and an
 /// intersection is the bitwise and.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SecretUse(u8);
+pub struct SecretUse(u16);
 
 impl SecretUse {
     pub const VERIFY: Self = Self(1);
@@ -17,15 +18,46 @@ impl SecretUse {
     pub const MTLS_CLIENT_ID: Self = Self(64);
     pub const KDF: Self = Self(128);
 
-    /// Each use word in its canonical order. A set prints `mac` alone for
-    /// `MAC`, which implies `verify`.
-    const WORDS: [(&str, Self); 8] = [
+    pub const fn aead(alg: AeadAlg, mode: AeadMode) -> Self {
+        let open = 1 << (8 + 2 * alg as u32);
+        match mode {
+            AeadMode::Open => Self(open),
+            AeadMode::Seal => Self(open | (open << 1)),
+        }
+    }
+
+    /// Each use word in canonical order, with a use ahead of any it implies.
+    const WORDS: [(&str, Self); 14] = [
         ("mac", Self::MAC),
         ("verify", Self::VERIFY),
         ("kdf", Self::KDF),
         ("sign(ed25519)", Self::SIGN_ED25519),
         ("sign(p256)", Self::SIGN_P256),
         ("sign(rs256)", Self::SIGN_RS256),
+        (
+            "aead(chacha20-poly1305)",
+            Self::aead(AeadAlg::ChaCha20Poly1305, AeadMode::Seal),
+        ),
+        (
+            "aead(aes128-gcm)",
+            Self::aead(AeadAlg::Aes128Gcm, AeadMode::Seal),
+        ),
+        (
+            "aead(aes256-gcm)",
+            Self::aead(AeadAlg::Aes256Gcm, AeadMode::Seal),
+        ),
+        (
+            "open(chacha20-poly1305)",
+            Self::aead(AeadAlg::ChaCha20Poly1305, AeadMode::Open),
+        ),
+        (
+            "open(aes128-gcm)",
+            Self::aead(AeadAlg::Aes128Gcm, AeadMode::Open),
+        ),
+        (
+            "open(aes256-gcm)",
+            Self::aead(AeadAlg::Aes256Gcm, AeadMode::Open),
+        ),
         ("wrap", Self::WRAP),
         ("mtls_client_id", Self::MTLS_CLIENT_ID),
     ];
@@ -47,7 +79,7 @@ impl SecretUse {
 }
 
 /// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `mac`,
-/// `verify`, `kdf`, `sign(<alg>)`, `wrap` and `mtls_client_id`, written in that
+/// `verify`, `kdf`, `sign(<alg>)`, `aead(<alg>)`, `open(<alg>)`, `wrap` and `mtls_client_id`, written in that
 /// order, separated by single spaces. A DNS name appears only inside
 /// `tls_send(...)`, so no name can be read as a use.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -72,7 +104,7 @@ impl SecretPolicy {
                 send = Some(Pattern::parse_list(patterns)?);
             } else {
                 let word = SecretUse::word(token)?;
-                // A word given twice, or `verify` beside `mac`, is not canonical.
+                // Reject duplicate permissions, including implied uses.
                 if uses.0 & word.0 != 0 {
                     return None;
                 }
@@ -190,7 +222,7 @@ impl<'a> SecretSource<'a> {
 }
 
 impl SecretGrant {
-    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, sign(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
+    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, sign(<alg>), aead(<alg>), open(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
 
     pub fn logical_size(patterns: &[Pattern], len: u64) -> Option<u64> {
         Pattern::list_bytes(patterns)

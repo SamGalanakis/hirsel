@@ -47,7 +47,7 @@ type TieredPointDelivery: send {
 
 // PagerKick only wakes a pager blocked on its inbox so that it looks at the
 // writer slot (§13.3a); it carries nothing.
-type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[TieredPointDelivery, Error]]) | PagerReserve(u64, Sender[Result[Arc[TieredReaderGrant], Error]]) | PagerKick
+type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[TieredPointDelivery, Error]]) | PagerReserve(u64, Sender[Result[Arc[TieredReaderGrant], Error]]) | PagerIndex(TieredIndexRequest, Sender[Result[Arc[Bytes], Error]]) | PagerKick
 
 type TieredPagerStart: send {
     store: StoreId,
@@ -149,6 +149,10 @@ fn tiered_pager_handle(mut input: TieredPagerInput, mut private_cache: TieredCac
         PagerReserve(amount, answer) => {
             let reserved = tiered_cache_reserve_reader(mut private_cache, TieredReaderGrant(store: owner, opened: opened, pin_bytes: amount))
             let _ = channel.try_send(answer, take reserved)
+        },
+        PagerIndex(request, answer) => {
+            let delivered = read_tiered_index_frame(mut input, owner, request)
+            let _ = channel.send(answer, take delivered)
         },
         PagerKick => (),
     }

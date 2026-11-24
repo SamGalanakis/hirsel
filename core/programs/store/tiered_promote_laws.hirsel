@@ -86,6 +86,7 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
     let old = l88_leaf_pack(fixtures, owner, 8)?
     let moved = l88_leaf_pack(fixtures, owner, 11)?
     let (parent, sibling) = l79_fold_parent(fixtures, owner, old)?
+    let (probe_pack, probed_leaf) = l88_probe_pack(fixtures, owner)?
     let mut ids = 0u64
     let mut packs: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
     for ptr in[old, moved, parent, sibling] {
@@ -94,11 +95,64 @@ fn test_l88_promotion_converges_tiered_stamps(d: Dir, tasks: Tasks) -> Result[()
         let (take revised, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: metadata, object: None))
         packs = take revised
     }
+    let (take with_probe, _) = std.omap.insert(mut ids, packs, 7u64, TieredPagerPack(inventory: probe_pack, object: None))
     let funding = TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), funding, 4)?
-    let captured = TieredPageSource(pager: take requests, packs: take packs, next_stamp: 43, deadline: 0)
-    let checked = l88_converges_locations(captured, parent, old, moved, sibling)
+    let captured = TieredPageSource(pager: take requests, packs: take with_probe, next_stamp: 43, deadline: 0)
+    let first_check = l88_converges_locations(captured, parent, old, moved, sibling)
+    let checked = match take first_check {
+        Ok(()) => l88_probe_keeps_progress(captured, probe_pack, probed_leaf),
+        Error(take problem) => Error(take problem),
+    }
     let _ = take captured
     let _ = result.unwrap(task.join(take worker))
     checked
+}
+
+fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(PagePack, std.page.PagePtr), Error] waits {
+    let mut draft = begin_tiered_pack(owner, 7, 3, 4096)?
+    let mut first = std.page.unlocated(0)
+    for slot in 0u64 .. 4 {
+        let mut rows: List[std.page.Entry] = list.with_capacity(1)
+        list.push(mut rows, std.page.Entry(key: key_word(slot), cell: InlineValue(key_word(slot))))
+        let image = page_result(std.page.encode(rows, 0, 30 + slot, Collection))?
+        let page = page_result(std.page.attach(take image, list.new(), list.new()))?
+        let width = std.page.sealed_size(std.page.image_of(page))
+        let frame = PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
+        let key = logical_key(9, key_word(slot))?
+        let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr { std.page.unlocated(stamp) })? else {
+            fail("L88(f): the four leaves must fit the fixture pack")
+        }
+        if slot == 0 {
+            first = ptr
+        }
+    }
+    let (take raw, pack) = finish_tiered_pack(take draft)?
+    disk_write_synced(d, paged_pack_path(7)?, raw)?
+    Ok((pack, first))
+}
+
+fn l88_probe_keeps_progress(captured: TieredPageSource, pack: PagePack, original: std.page.PagePtr) -> Result[(), Error] waits {
+    let mut cursor = start_tiered_probe(pack)
+    let mut promotion = TieredPromotion(installed: l88_share_source(captured), captured: l88_share_source(captured), lookup: list.new(), probed_through: map.new())
+    for cut in 0u64 .. 4 {
+        if cut != 0 {
+            let HotPage(take copied_leaf) = promotion_resolve_page(promotion, 9, ColdPage(original))? else {
+                fail("L88(f): a historical pin may not reference the first frame behind the cursor")
+            }
+            list.clear(mut promotion.lookup)
+            list.push(mut promotion.lookup, PromotionPage(HotPage(take copied_leaf)))
+        }
+        let finished = probe_tiered_index(captured, 7, mut cursor, 1, scoped fn(row: PackIndexRow) -> Result[(), Error] {
+            if row.stamp != 30 + cut {
+                fail("L88(f): the probe must visit the next index row after each promotion")
+            }
+            Ok(())
+        })?
+        if finished != (cut == 3) || cursor.rows != cut + 1 {
+            fail("L88(f): a four-row probe at budget one must finish at cut four")
+        }
+        map.insert(mut promotion.probed_through, 7u64, cursor.next_data - 1)
+    }
+    Ok(())
 }

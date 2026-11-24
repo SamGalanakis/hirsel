@@ -38,7 +38,8 @@ fn l63_mark(mut db: Db, marks: Table[u64, u32], k: u64) -> Result[Option[u32], E
 }
 
 // (a) The first attempt misses row 3 and its body, catching the failure in
-// `isolate`, retries forever until the step bound stops it; the driver discards that attempt, delivers the
+// `isolate`, retries forever until the step bound stops it; the driver
+// discards that attempt, delivers the
 // page and reruns, and the rerun hits and commits once. Unbounded, the same call
 // is refused before it runs, since a body that loops on the miss never ends.
 fn l63_retry_until_hit(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
@@ -52,6 +53,17 @@ fn l63_retry_until_hit(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) 
     }
     if what != "steps" {
         fail("L63: an unbounded call names its missing step bound")
+    }
+    // With no pager the first attempt's miss cannot be served, which shows the
+    // fixture's row 3 is Cold and the committed run below really reran.
+    let requests = replace(mut db.pager, None)
+    let unserved = run(mut db, Some(100000), copy_env(handles), fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] {
+        let _ = fetch(tx, env.0, 3u64)?
+        Ok(())
+    })
+    db.pager = take requests
+    let Error(Io(Closed)) = unserved else {
+        fail("L63: a miss with no pager is Io(Closed)")
     }
     let Committed(_) = run(mut db, Some(100000), copy_env(handles), fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] {
         loop {

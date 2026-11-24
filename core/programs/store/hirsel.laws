@@ -175,7 +175,7 @@ store@1/store/test_l62_snapshot_span_resumes_cold_and_replay src=b2d8177c7800a37
 store@1/store/test_l62_tiered_count_uses_overlay_and_interior src=e1a6bc37cd7122ec sig=dd305c5e73f0ca1e run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l62_tiered_point_path src=69da8f14d55fd20d sig=3d2eb429f2198f3e run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_branch_split_reuses_cold_divider src=a04496328fcff499 sig=e3caff59cd31ee60 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/test_l63_caught_miss_reruns_and_commits_once src=b9a5e494d53d24e6 sig=a55882d996a7a25d run=a6b003f729117be3 bug=- oracle=- rows=pending
+store@1/store/test_l63_caught_miss_reruns_and_commits_once src=732fa721104c1b03 sig=a556c677eb507783 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_missed_attempt_fallback_commits_nothing src=12d3afe6d9490e57 sig=8e250133ac60c7c6 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_pinned_row_edit_discards_a_missed_candidate src=7415f28bd0d5fd3d sig=73a77fc4a058dc52 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_plan_prior_uses_deciding_leaf src=7359dbac4ad28063 sig=4c3077bc93f63477 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

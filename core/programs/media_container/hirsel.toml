@@ -35,4 +35,5 @@ grants = []
 "mp4_write_laws.hirsel" = "tests"
 "mp4_faststart_laws.hirsel" = "tests"
 "mp4_clip_laws.hirsel" = "tests"
+"mp4_rotation_laws.hirsel" = "tests"
 "webm_laws.hirsel" = "tests"

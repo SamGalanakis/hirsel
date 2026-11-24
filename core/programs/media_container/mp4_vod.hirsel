@@ -49,6 +49,7 @@ pub type ContentLight {
 }
 
 pub type MasteringDisplay {
+    // In mdcv wire order: green, blue, red.
     primaries: Inline[(u16, u16), 3],
     white_point: (u16, u16),
     max_luminance: u32,
@@ -234,30 +235,80 @@ fn tkhd_fields(input: Bytes, b: BoxHeader) -> Result[(u32, u64, Inline[u32, 9]),
     Ok((id, duration, matrix))
 }
 
-// ffprobe's rotation sign convention for orthogonal display matrices.
+// atan on [0, 1], with argument reduction so the series always converges
+// on [-sqrt(2)+1, sqrt(2)-1].
+fn atan_ratio(ratio: f64) -> f64 {
+    let reduced = float.gt(ratio, 0.41421356237309505)
+    let x = if reduced {
+        (ratio - 1.0) / (ratio + 1.0)
+    } else {
+        ratio
+    }
+    let factor = -x * x
+    let mut sum = x
+    let mut term = x
+    for i in 1u64 .. 22 {
+        term *= factor
+        let denominator: f64 = float.from_int(2 * i + 1)
+        sum += term / denominator
+    }
+    if reduced {
+        0.7853981633974483 + sum
+    } else {
+        sum
+    }
+}
+
 fn matrix_rotation(m: Inline[u32, 9]) -> Option[i32] {
-    if m[2] != 0 || m[5] != 0 || m[8] != 0x40000000 {
+    let a: i32 = int.truncate(m[0])
+    let b: i32 = int.truncate(m[1])
+    let c: i32 = int.truncate(m[3])
+    let d: i32 = int.truncate(m[4])
+    if (a == 0 && c == 0) || (b == 0 && d == 0) {
         return None
     }
-    let one = 0x00010000u32
-    let minus_one = 0xffff0000u32
-    if m[1] == 0 && m[3] == 0 {
-        if m[0] == one && m[4] == one {
-            return Some(0)
-        }
-        if m[0] == minus_one && m[4] == minus_one {
-            return Some(180)
-        }
+    if b == 0 {
+        return Some(if a < 0 {
+            -180
+        } else {
+            0
+        })
     }
-    if m[0] == 0 && m[4] == 0 {
-        if m[1] == minus_one && m[3] == one {
-            return Some(90)
-        }
-        if m[1] == one && m[3] == minus_one {
-            return Some(-90)
-        }
+    if a == 0 {
+        return Some(if b < 0 {
+            90
+        } else {
+            -90
+        })
     }
-    None
+    let ax: f64 = float.from_int(a)
+    let bx: f64 = float.from_int(b)
+    let cx: f64 = float.from_int(c)
+    let dx: f64 = float.from_int(d)
+    let x = float.abs(ax) / float.sqrt(ax * ax + cx * cx)
+    let y = float.abs(bx) / float.sqrt(bx * bx + dx * dx)
+    let acute = if float.le(y, x) {
+        atan_ratio(y / x)
+    } else {
+        1.5707963267948966 - atan_ratio(x / y)
+    }
+    let angle = if a < 0 {
+        3.141592653589793 - acute
+    } else {
+        acute
+    }
+    let direction: f64 = if b < 0 {
+        1.0
+    } else {
+        -1.0
+    }
+    let to_degrees: f64 = 180.0 / 3.141592653589793
+    let degrees = direction * angle * to_degrees
+    let converted: Result[i32, FloatError] = float.to_int(degrees)
+    match converted {
+        Ok(n) => Some(n),
+        Error(_) => None,
+    }
 }
 
 fn entries(input: Bytes, b: BoxHeader, start: u64, stride: u64) -> Result[Table, VodError] {

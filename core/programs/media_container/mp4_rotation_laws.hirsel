@@ -1,0 +1,32 @@
+fn probe_rotation(matrix: Inline[u32, 9], degrees: i32) waits {
+    let mut track = mux_test_track(0)
+    track.matrix = matrix
+    let mut tracks: List[mp4.MuxTrack] = list.with_capacity(1)
+    list.push(mut tracks, take track)
+    let headers = result.unwrap(mp4.write_vod(1000, 125, tracks, 10, mp4.MuxLimits(metadata_bytes: 65536, sample_count: 3)))
+    let size = 46 + list.len(headers.suffix)
+    let input = result.unwrap(mp4.video_probe(size, mp4.VodLimits(metadata_bytes: 65536, top_boxes: 3, tracks: 1), scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        let mut raw: Bytes = list.with_capacity(n)
+        if at == 46 {
+            list.append(mut raw, list.slice(headers.suffix, 0, n))
+        } else {
+            list.append(mut raw, list.slice(headers.prefix, at, at + n))
+        }
+        Ok(take raw)
+    }))
+    let (track_info, _) = result.unwrap(mp4.vod_track(input, 0))
+    if track_info.rotation != Some(degrees) {
+        fail("rotation disagrees with ffprobe")
+    }
+}
+
+/// bug: Drop oblique tkhd rotation or give the half-turn the opposite sign.
+/// oracle: ffprobe Display Matrix on Mozilla's AVC vector remuxed with FFmpeg display_rotation 37 and 180.
+@test
+fn tkhd_display_rotation() -> Result[(), ()] waits {
+    let oblique: Inline[u32, 9] =[52339, 0xffff65f0, 0, 39440, 52339, 0, 0, 0, 0x40000000]
+    let half_turn: Inline[u32, 9] =[0xffff0000, 0, 0, 0, 0xffff0000, 0, 0, 0, 0x40000000]
+    probe_rotation(oblique, 36)
+    probe_rotation(half_turn, -180)
+    Ok(())
+}

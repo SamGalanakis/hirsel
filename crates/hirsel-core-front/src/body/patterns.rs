@@ -1132,8 +1132,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The payload transfer of an owned destructure (OWN-14, OWN-15, T3.7): the bound
     /// parts are owners now, so the source is consumed whole and the omitted fields
     /// are dropped in declaration order.
+    /// The owned subject's omitted fields, and a destructured resource's block, are
+    /// cleaned as owners of their own, so a field drop that fails cleans only the
+    /// fields after it and the block, never the subject again (FAIL-12).
     fn transfer(&mut self, pat: Pat, case: Option<u32>, subject: Subject) {
-        for i in 0..pat.fields.len {
+        if subject.place.is_none() {
+            self.consume(subject.value, pat.site);
+        }
+        let mark = self.owner_mark();
+        // T3.7: the destructured resource's block is freed last.
+        self.free_owner(subject.value, pat.ty, pat.site);
+        // Begun last to first, so they are cleaned in declaration order.
+        for i in (0..pat.fields.len).rev() {
             let child = self.patterns.fields[(pat.fields.start + i) as usize];
             if child != 0 && self.pat_head(child) != Head::Any {
                 continue;
@@ -1143,30 +1153,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             let field = self.pattern_at(subject, case, i, ty, pat.site);
-            self.drop_field(field.value, ty, pat.site);
+            self.temp(ty, field.value);
         }
-        if subject.place.is_none() {
-            self.consume(subject.value, pat.site);
-        }
-        // T3.7: the destructured resource's block (its storage, unused cell and grant)
-        // is freed and refunded; its fields went on with their blocks.
-        if let (Some(value), Ok(Rep::Place(id))) = (subject.value, self.rep(pat.ty))
-            && self.e.is_resource(id)
-            && self.live()
-        {
-            let holder = self.address(
-                AddressBase::Value(value),
-                &[],
-                PlaceTy::Value(Ty::Ptr),
-                pat.site,
-            );
-            let block = self.read_bits(holder, Ty::Ptr, pat.site);
-            if let Some(charge) = self.e.resource_charge(id)
-                && let Some(charge) = self.konst(Ty::Scalar(Scalar::U64), charge, pat.site)
-            {
-                self.inst(Inst::Free { block, charge }, pat.site);
-            }
-        }
+        self.end_owners(mark, None, false, pat.site);
     }
     fn chosen_pattern(&mut self, id: u32, mut subject: Subject, n: NodeId) -> Subject {
         if self.pattern_takes(id) && !subject.owned {

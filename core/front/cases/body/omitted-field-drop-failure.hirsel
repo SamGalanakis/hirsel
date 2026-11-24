@@ -1,0 +1,46 @@
+// A pattern's omitted owned fields are dropped in declaration order, and a field
+// drop that fails has cleaned that field (FAIL-12): cleanup goes on with the fields
+// after it and the destructured resource's block, never the subject again (T3.7).
+// The trace is each finalized resource's `id`; `100 / m.d` fails when `d` is 0.
+// expect: accept
+// expect: run wild(1) = 1 trace 1
+// expect: run wild(0) = fail Division trace 1
+// expect: run split(1,1) = 7 trace 1,2
+// expect: run split(0,1) = fail Division trace 1,2
+// expect: run split(0,0) = fail Division,Division trace 1,2
+resource type Bad {
+    id: u64,
+    d: u64
+} drop(m) {
+    let _ = 100 / m.d
+}
+
+resource type Pair {
+    a: Bad,
+    b: Bad
+} drop(p) {
+    let _ = p.a.id
+}
+
+fn wild(d: u64) -> u64 {
+    match Bad(id: 1, d: d) {
+        Ok(_) => 1,
+        Error(_) => 2,
+    }
+}
+
+fn split(da: u64, db: u64) -> u64 {
+    match Bad(id: 1, d: da) {
+        Ok(x) => match Bad(id: 2, d: db) {
+            Ok(y) => match Pair(a: take x, b: take y) {
+                Ok(p) => {
+                    let Pair(a: _, b: _) = take p
+                    7
+                },
+                Error(_) => 0,
+            },
+            Error(_) => 0,
+        },
+        Error(_) => 0,
+    }
+}

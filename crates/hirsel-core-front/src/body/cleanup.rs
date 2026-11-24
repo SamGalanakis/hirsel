@@ -19,6 +19,9 @@ pub(super) enum Owner {
         end: ValueId,
         elem: TypeId,
     },
+    /// A destructured resource's block, freed with its charge once its omitted
+    /// fields are cleaned (T3.7).
+    Free { block: ValueId, charge: ValueId },
 }
 /// A statement temporary: an own value no consumer has taken yet.
 #[derive(Clone, Copy)]
@@ -390,6 +393,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.clean_drain(data, next, end, elem, n);
                 return;
             }
+            Owner::Free { block, charge } => {
+                self.inst(Inst::Free { block, charge }, n);
+                return;
+            }
         };
         match (avail, flag) {
             (Avail::Live, _) => self.drop_owner(base, id, frame, n),
@@ -419,6 +426,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.start(next);
             }
             _ => {}
+        }
+    }
+    /// When `ty` is a resource destructured from `value`, its block (its storage,
+    /// unused cell and grant) is an owner, freed and refunded when cleaned (T3.7); its
+    /// fields went on with their blocks.
+    pub(super) fn free_owner(&mut self, value: Option<ValueId>, ty: TyId, n: NodeId) {
+        if let (Some(value), Ok(Rep::Place(id))) = (value, self.rep(ty))
+            && self.e.is_resource(id)
+            && self.live()
+        {
+            let holder = self.address(AddressBase::Value(value), &[], PlaceTy::Value(Ty::Ptr), n);
+            let block = self.read_bits(holder, Ty::Ptr, n);
+            if let Some(charge) = self.e.resource_charge(id)
+                && let Some(charge) = self.konst(Ty::Scalar(Scalar::U64), charge, n)
+            {
+                self.owners.push(Owner::Free { block, charge });
+                self.changed();
+            }
         }
     }
     pub(super) fn drain_owner(&mut self, data: ValueId, next: AddressId, end: ValueId, elem: TyId) {
@@ -784,7 +809,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let any = self.owners.iter().any(|&o| match o {
             Owner::Slot(s) => matches!(self.var(s).avail, Avail::Live | Avail::Maybe),
             Owner::Temp(t) => matches!(t.avail, Avail::Live | Avail::Maybe),
-            Owner::Drain { .. } => true,
+            Owner::Drain { .. } | Owner::Free { .. } => true,
         });
         if !any && !self.open_scopes() {
             return None;

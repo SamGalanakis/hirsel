@@ -27,7 +27,7 @@ expose their representation type.
 
 `entries.js` exports the Want list, launch identity and `bind(client)`, whose
 result supplies `call`, `subscribe` and `subscribeDecoded` entry stubs, each
-namespaced by module: `api.call.<module>.<name>`, `api.subscribe.<module>.<name>`
+namespaced by module: `api.call.<module>.<name>(args, options?)`, `api.subscribe.<module>.<name>`
 and `api.subscribeDecoded.<module>.<name>`. Every module is namespaced the same
 way, `main` included, and there is no flat name. Calls (compute, granted and
 transact entries) appear under `call`; queries appear under `subscribe` and
@@ -57,20 +57,23 @@ The transport implements `call(want, argsBytes, resultDecoder)`, returning
 `subscribe(want, argsBytes, onChange, onEnd?)` returns a handle with `value()`,
 `rows(slot)`, `map(slot)`, `get(slot, key)` and `unsubscribe()`. The four reads
 return `Pending` until the current instance completes, `Ready` with the data
-from the last applied Batch, or `Ended` after an `Ended` frame or
-`unsubscribe()`. An absent key in a ready image gives `Ready` with
+from the server plus pending optimistic writes, or `Ended` after an `Ended`
+frame or `unsubscribe()`. `current()` reports whether the instance has a
+server image. An absent key in a ready image gives `Ready` with
 `undefined`.
 
 `value()` reads the query result. `rows(slot)` reads the rows as an array.
-`map(slot)` indexes the same rows by lowercase hex of the full wire key.
+`map(slot)` indexes the same rows by lowercase hex of the slot key.
+Raw subscriptions use the full wire key. Generated decoded subscriptions
+use the ordered key encoding without the store's four-byte collection id.
 `get(slot, key)` reads one row by key. The array and map each keep their
 identity until that slot changes. Reads and deltas share row references. The
 SDK freezes decoded plain objects, arrays and tuples, and exposes
 `ReadonlyMap` and readonly byte types. Mutating a shared map or
 `Uint8Array`, or any data within a map leaf, is undefined behavior.
 
-`onChange(sub, change)` runs after all current groups in the Batch are
-committed. `change.rows` contains typed `RowChange` records with the slot
+`onChange(sub, change)` runs after the client applies the whole Batch or
+recomputes the image for a local change. `change.rows` contains typed `RowChange` records with the slot
 and hex key. An insertion has `new`, a deletion has `old`, and an update
 has both. `change.value` carries the old and new result when its encoded
 bytes change. `change.replaced` marks a completing group. Its rows still
@@ -91,10 +94,39 @@ matching subscription for an `Ended` frame.
 Use `api.subscribeDecoded.<module>.<name>(args, onChange, onEnd?)` for typed
 values, rows and keys. A row holds its slot name, decoded key and present
 value as `Some`. The generated stub uses the appropriate slot's
-`Key<i>_<s>` encoder for `get` and includes the collection prefix in the
-lookup. `codec.js` exports `Value<i>`, `Key<i>_<s>` and `RowValue<i>_<s>`
+`Key<i>_<s>` encoder for `get`. `codec.js` exports `Value<i>`,
+`Key<i>_<s>` and `RowValue<i>_<s>`
 for the query at index `i` and slot `s` in that query. Use
 `api.subscribe.<module>.<name>` for numeric slots and raw byte keys.
+
+### Optimistic writes
+
+Pass `{optimistic(draft) { … }}` as the call options to update subscription
+images while a call is queued or in flight. `draft.get(sub, slot, key)`
+reads the current draft. `put(sub, slot, key, row)`, `delete(sub, slot, key)`
+and `value(sub, result)` edit it. The draft uses the subscription's key type
+and encoder. A row passed to `put` must match its slot and key and carry a
+`Some` value. Custom subscription codecs provide `encodeRow` and
+`encodeValue` for the corresponding writes.
+
+Write synchronous functions that use the draft for reads and writes. The
+client runs them in queue order over the latest server images on every
+commit and whenever optimistic work enters or leaves the queue. A throwing
+function loses its changes and reports its error to `onDiagnostic`. The
+call continues. The functions live in memory and disappear on reload.
+
+The SDK applies a successful outcome's server rows and removes the matching
+optimistic writes in the same commit. Equal encoded rows and values stay
+silent. After loss or Reset, reads remain `Pending` until the fresh instance
+completes. A successful outcome arriving early keeps its overlay until every
+subscription it wrote has completed or ended. Failures remove the overlay
+immediately. If an instance is current and the server delivers a successful
+outcome before its rows in a later Batch, the visible row can revert briefly.
+
+Server rows and Draft writes use the same encoded key in decoded slots,
+so confirmation can keep an optimistically inserted row even when the slot
+was empty. The collection id belongs to the live store and can differ from
+ids in Describe's empty-store declaration run.
 
 For a query, `Described.result` is R's value schema followed by the slot list,
 each slot's name, ordered key schema and value schema, each schema encoded as
@@ -173,9 +205,8 @@ codec and `wants`, and a `storage` adapter. Pass the generated `identity` to
 check the launch digest, target and `n_place`. Optional `credential` bytes go
 in Hello. `deadlineMs` sets the server's call deadline and defaults to 30,000.
 The optional `socket` factory and `clock` override the platform WebSocket and
-time source. `onState`, `onDiagnostic`, `onRecovered`, `onBatch` and
-`onPrediction` observe state changes, diagnostics, recovered call outcomes,
-applied Batch versions and pending predictions, respectively.
+time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
+state changes, diagnostics, recovered call outcomes and applied Batch versions.
 
 Browser storage uses strict IndexedDB transactions and generation-scoped Web
 Locks. Node storage uses durable file

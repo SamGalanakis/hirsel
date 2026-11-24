@@ -59,6 +59,8 @@ applies. `change.rows` carries the old and new rows for changed keys.
 The array and map keep their identity until the slot changes. Mutating shared
 `Uint8Array` or `Map` leaves, or a map returned by `sub.map`, is undefined
 behavior. Use `api.subscribeDecoded.<module>.<name>` for typed keys and values.
+Its map and delta keys are hex of the ordered slot key. Raw subscriptions
+use full wire keys.
 
 Reset, connection loss and terminal client states clear the public images and
 retire their old ids. Each cleared subscription receives a data-free
@@ -70,8 +72,18 @@ Pass `onEnd` after `onChange` to receive the decoded `SubscriptionEnd` reason.
 The client removes the subscription before calling `onEnd` once for its
 `Ended` frame. [SDK subscription contract](../../docs/spec/sdk.md#subscriptions)
 
-Optional predictions supplied as the fourth `call()` argument are removed when a matching outcome row arrives;
-`onPrediction` runs after the complete Batch has been applied.
+Pass `{optimistic(draft) { … }}` as the second argument to a generated call,
+or the fourth argument to `client.call`. The draft's `get`, `put`, `delete`
+and `value` methods operate on your subscription handles. Generated handles
+use the slot's typed key. The client replays these synchronous functions in
+queue order against the latest server image. A successful outcome commits
+its rows and removes its optimistic writes together. Equal bytes keep the
+current row and emit no change. A failure removes its writes immediately.
+After reconnect, a successful outcome can arrive before the subscription is
+current. Its writes remain queued until the affected subscriptions complete or
+end. Public reads still return `Pending` before each subscription completes.
+Reloading loses the functions and recovers only the durable call.
+[SDK optimistic write contract](../../docs/spec/sdk.md#optimistic-writes)
 
 The scripted laws run as part of `runner.codec_frames:ts_frame_vectors` in
 `//:core-evaluator`. They use the generated Frame codec and independent

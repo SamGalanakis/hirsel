@@ -52,7 +52,6 @@
     import {Client, BrowserStorage} from './client.js';
     import {bind, identity, want} from './entries.js';
     import {Frame} from './frame.js';
-    import {values} from './codec.js';
 
     const width = 1000;
     const pixels = width * width;
@@ -68,7 +67,6 @@
     let count = 0;
     let painted = false;
     let busy = false;
-    let prediction;
     let cursor = 0;
     let keyboard = false;
     let draw;
@@ -84,7 +82,7 @@
       const start = chunk * chunkSize * 8;
       const end = Math.min(pixels, start + chunkSize * 8);
       for (let i = start; i < end; i++) {
-        const color = i === prediction || (keyboard && i === cursor) ? 2 : checked(i);
+        const color = keyboard && i === cursor ? 2 : checked(i);
         strip.data.set(colors[color], 4 * (i - start));
         strip.data[4 * (i - start) + 3] = 255;
       }
@@ -103,8 +101,7 @@
       draw = requestAnimationFrame(() => {
         for (const chunk of dirty) paintChunk(chunk);
         dirty.clear();
-        const shown = count + (prediction === undefined ? 0 : 1 - 2 * checked(prediction));
-        counter.value = `${shown.toLocaleString('en-US')} / 1,000,000`;
+        counter.value = `${count.toLocaleString('en-US')} / 1,000,000`;
         draw = undefined;
       });
     }
@@ -155,24 +152,21 @@
         else if (state === 'Ready') status.textContent = 'Loading board…';
         else status.textContent = `Board unavailable (${state}). Reload to reconnect.`;
       },
-      onPrediction: pending => {
-        if (prediction !== undefined) dirty.add(prediction >> 9);
-        prediction = pending.values().next().value;
-        if (prediction !== undefined) dirty.add(prediction >> 9);
-        scheduleDraw();
-      },
     });
-    const api = bind({
-      call: (entry, arg, decode) => client.call(entry, arg, decode, values.u32.decode(arg)),
-      subscribe: client.subscribe.bind(client),
-    });
-    api.subscribeDecoded.main.board(undefined, onChange);
+    const api = bind(client);
+    const board = api.subscribeDecoded.main.board(undefined, onChange);
 
     async function toggle(i) {
       if (!painted || busy || client.state !== 'Ready') return;
       busy = true;
       try {
-        const outcome = await api.call.main.toggle(i);
+        const outcome = await api.call.main.toggle(i, {optimistic(draft) {
+          const key = i >> 9;
+          const row = draft.get(board, 'chunks', key);
+          const data = (row?.value.value ?? empty).slice();
+          data[(i >> 3) & (chunkSize - 1)] ^= 1 << (i & 7);
+          draft.put(board, 'chunks', key, {slot: 'chunks', key, value: {tag: 'Some', value: data}});
+        }});
         if (outcome.tag !== 'Returned' || outcome.value.tag !== 'Ok') {
           status.textContent = `Toggle failed (${outcome.value?.tag ?? outcome.tag}).`;
         }

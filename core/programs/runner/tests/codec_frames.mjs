@@ -11,9 +11,11 @@ export async function vectors(c,frame,entries) {
   assert.deepEqual(entries.identity,{digest:bytes('0102'),target:'t',n_place:16777216n});
   assert.equal(entries.want[0].args_fp,9007199254740993n);
   let unsubscribed = false;
+  const options = {optimistic() {}};
   const client = entries.bind({
-    call(want,args,decode) {
+    call(want,args,decode,receivedOptions) {
       if (want === entries.want[0]) {
+        assert.strictEqual(receivedOptions,options);
         assert.equal(Buffer.from(args).toString('hex'),'0700000000000000');
         return Promise.resolve({tag:'Returned',value:decode(bytes('0800000000000000'))});
       }
@@ -32,6 +34,9 @@ export async function vectors(c,frame,entries) {
         assert.equal(decode.keyPrefixBytes,4);
         const wire={slot:0,key:bytes('00000003 0020000000000001'),value:{tag:'Some',value:bytes('01000000 cd')}};
         assert.deepEqual(decode.row(wire),{slot:'rows',key,value:{tag:'Some',value:bytes('cd')}});
+        assert.deepEqual(decode.encodeRow('rows',suffix,decode.row(wire)),
+          {raw:wire.value.value,decoded:decode.row(wire)});
+        assert.deepEqual(decode.encodeValue(undefined),bytes(''));
       }
       const subscription = {rows: () => ({tag:'Ready',value:[]}), unsubscribe() { unsubscribed = true; }};
       onChange(subscription,{replaced:true,rows:[]});
@@ -39,7 +44,7 @@ export async function vectors(c,frame,entries) {
       return subscription;
     }
   });
-  assert.deepEqual(await client.call.main.toggle(7n),{tag:'Returned',value:8n});
+  assert.deepEqual(await client.call.main.toggle(7n,options),{tag:'Returned',value:8n});
   assert.deepEqual(await client.call.main.commit(1n),{tag:'Returned',value:{tag:'Ok',value:{n:9n}}});
   assert.deepEqual(await client.call.main.commit(0n),{tag:'Returned',value:{tag:'Error',value:{message:'bad'}}});
   let delivered = false;
@@ -103,7 +108,7 @@ export async function vectors(c,frame,entries) {
   assert.throws(() => c.Frame.decode(bytes('070000000000000005000000')),c.Malformed);
   assert.throws(() => c.Frame.decode(bytes('07000000000000000200000008000000')),c.Malformed);
   assert.throws(() => c.Frame.encode({tag:'Ended',values:[3,{tag:'Superseded'}]}),TypeError);
-  cases += (await clientLaws(c.Frame)).cases;
+  cases += (await clientLaws(c.Frame,undefined,undefined,entries)).cases;
   return {cases};
 }
 

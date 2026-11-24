@@ -495,36 +495,47 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             let result_name = format!("Result{i}");
             js.push_str(&result.javascript(&result_name));
             dts.push_str(&result.declarations(&result_name));
-            entries.push_str(&format!("{} = (args) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode);\n", at("call")));
+            entries.push_str(&format!("{} = (args,options) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode,options);\n", at("call")));
             calls.insert(
                 path,
-                format!("(args: codec.{arg_name}) => Promise<Outcome<codec.{result_name}>>"),
+                format!("(args: codec.{arg_name}, options?: CallOptions) => Promise<Outcome<codec.{result_name}>>"),
             );
         }
     }
     entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
     if !decoded.is_empty() {
         entries.push_str(r#"function queryCodec(value,names,keys,rows) {
-    const encoders = new Map(names.map((name, i) => [name, keys[i].encode]));
+    const positions = new Map(names.map((name, i) => [name, i]));
     const slot = position => {
         if (names[position] === undefined) throw new codec.Malformed('unknown row slot');
         return names[position];
     };
+    const decodeRow = (i, key, value) => ({slot:slot(i),key:keys[i].decode(key),
+        value:value.tag === 'Some' ? {tag:'Some',value:rows[i].decode(value.value)} : value});
     return {
         value: value.decode, slot, keyPrefixBytes: 4,
-        key: (name, key) => encoders.get(name)(key),
+        key: (name, key) => keys[positions.get(name)].encode(key),
+        encodeValue: value.encode,
+        encodeRow(name, key, row) {
+            const i = positions.get(name);
+            if (row.slot !== name || row.value.tag !== 'Some') throw new codec.Malformed('invalid Draft row');
+            const actual = keys[i].encode(row.key);
+            if (actual.length !== key.length || actual.some((byte, j) => byte !== key[j])) {
+                throw new codec.Malformed('Draft row key mismatch');
+            }
+            const raw = rows[i].encode(row.value.value);
+            return {raw, decoded:decodeRow(i,key,{tag:'Some',value:raw})};
+        },
         row(row) {
             if (row.key.length < 4) throw new codec.Malformed('truncated collection key');
-            const i = row.slot;
-            return {slot:slot(i),key:keys[i].decode(row.key.subarray(4)),
-                value:row.value.tag === 'Some' ? {tag:'Some',value:rows[i].decode(row.value.value)} : row.value};
+            return decodeRow(row.slot,row.key.subarray(4),row.value);
         },
     };
 }
 "#);
     }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Change, Option, Outcome, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{CallOptions, Change, Option, Outcome, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {} }};\n",
         calls.render(),
         subscriptions.render(),
         decoded.render()
@@ -538,6 +549,10 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         (
             "client.ts".into(),
             include_str!("../../../sdk/client/client.ts").into(),
+        ),
+        (
+            "image.ts".into(),
+            include_str!("../../../sdk/client/image.ts").into(),
         ),
         (
             "browser.ts".into(),
@@ -688,7 +703,7 @@ mod tests {
             assert!(files["entries.js"].contains(line), "{line}");
         }
         assert!(files["entries.d.ts"].contains(
-            "export function bind(client: Transport): {call: { \"a\": { \"get\": (args: codec.Args0) => Promise<Outcome<codec.Result0>> }; \"b\": { \"get\": (args: codec.Args1) => Promise<Outcome<codec.Result1>> }; \"x\": { \"y\": { \"get\": (args: codec.Args2) => Promise<Outcome<codec.Result2>> } } }; subscribe: {  }; subscribeDecoded: {  } };\n"
+            "export function bind(client: Transport): {call: { \"a\": { \"get\": (args: codec.Args0, options?: CallOptions) => Promise<Outcome<codec.Result0>> }; \"b\": { \"get\": (args: codec.Args1, options?: CallOptions) => Promise<Outcome<codec.Result1>> }; \"x\": { \"y\": { \"get\": (args: codec.Args2, options?: CallOptions) => Promise<Outcome<codec.Result2>> } } }; subscribe: {  }; subscribeDecoded: {  } };\n"
         ));
         assert_eq!(
             stub_path(&entry("x", "%74oggle").identity).unwrap(),

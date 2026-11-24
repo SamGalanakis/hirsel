@@ -5,6 +5,7 @@ import {join} from 'node:path';
 import {pathToFileURL, fileURLToPath} from 'node:url';
 import {stripTypeScriptTypes} from 'node:module';
 import {spawn} from 'node:child_process';
+import {optimisticLaws} from './client_mutations.mjs';
 
 const source = new URL('../../../../sdk/client/', import.meta.url);
 const bytes = (...values) => Uint8Array.of(...values);
@@ -108,7 +109,7 @@ export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
   try {
     await writeFile(join(dir,'package.json'),'{"type":"module"}');
-    for(const name of ['client','persistence','browser','node']) {
+    for(const name of ['client','image','persistence','browser','node']) {
       let text=await readFile(new URL(name+'.ts',source),'utf8');
       if(mutant)text=mutant(name,text);
       await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
@@ -124,7 +125,7 @@ export async function loadRuntime(mutant) {
   }
 }
 
-export async function laws(codec, only, mutant) {
+export async function laws(codec, only, mutant, entries) {
   const runtime=await loadRuntime(mutant), tests={};
   const clients=[];
   async function setup(storage=new Memory(),options={}) {
@@ -328,13 +329,12 @@ export async function laws(codec, only, mutant) {
     assert.deepEqual(await a,{tag:'LocallyUnknown'});assert.equal(h.client.state,'Retired');
     assert.equal(h.storage.raw.streams[0].next,0n);assert.deepEqual(h.storage.raw.streams[0].pending.args,bytes(7));
   };
-  tests.batch_complete_and_predictions=async()=>{
-    const h=await setup();await ready(h);const caches=[],predictions=[];
-    h.opts.onPrediction=p=>predictions.push(new Map(p));
+  tests.batch_complete=async()=>{
+    const h=await setup();await ready(h);const caches=[];
     h.client.subscribe(want,bytes(1),(sub,change)=>{if(!change.invalidated)caches.push(sub.rows(0).value);});await settle();
-    const a=h.client.call(want,bytes(7),x=>x,'overlay');await settle();assert.equal(h.client.predictions.size,1);
+    const a=h.client.call(want,bytes(7),x=>x);await settle();
     h.server.emit(h.server.sockets[0],{tag:'Batch',values:[1n,[0],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'Some',value:bytes(2)}}]}],[{stream:0,p:0n,outcome:returned(7)}]]});await settle();await a;
-    assert.equal(h.client.predictions.size,0);assert.equal(caches[0][0].value.value[0],2);
+    assert.equal(caches[0][0].value.value[0],2);
     h.server.emit(h.server.sockets[0],{tag:'Reset',values:[2n,[]]});await settle();assert.equal(caches.length,1);
     h.server.emit(h.server.sockets[0],{tag:'Batch',values:[2n,[],[{sub:0,value:bytes(),rows:[{slot:0,key:bytes(1),value:{tag:'None'}}]}],[]]});await settle();assert.equal(caches.length,1);
     h.server.emit(h.server.sockets[0],{tag:'Batch',values:[2n,[1],[{sub:1,value:bytes(),rows:[]}],[]]});await settle();assert.deepEqual(caches,[caches[0],[]]);
@@ -602,11 +602,11 @@ export async function laws(codec, only, mutant) {
     assert.deepEqual(await a,{tag:'Failed',value:{tag:'Raised',value:1}});assert.equal(h.storage.raw.streams[0].next,1n);
   };
   tests.retryable_outcomes_keep_identity=async()=>{
-    const h=await setup();await ready(h);const a=h.client.call(want,bytes(7),x=>x,'overlay');await settle();
+    const h=await setup();await ready(h);const a=h.client.call(want,bytes(7),x=>x);await settle();
     for(const outcome of [{tag:'Abandoned'},refused('Overloaded'),{tag:'Refused',value:{tag:'Budget',value:{requested:10n,available:0n}}}]) {
       const n=h.server.calls.length;
       h.server.answer(h.server.sockets[0],0,0n,outcome);await settle();
-      assert.equal(h.storage.raw.streams[0].next,0n);assert.equal(h.client.predictions.size,0);
+      assert.equal(h.storage.raw.streams[0].next,0n);
       await h.time.advance(1000);
       assert.equal(h.server.calls.length,n+1);assert.deepEqual(h.server.calls.at(-1).frame,call(0,0n,7));
       assert(h.storage.raw.streams[0].pending.possiblyAdmitted);
@@ -670,6 +670,7 @@ export async function laws(codec, only, mutant) {
       const c=await storage.lock('stream-1-0',true);assert(c);await c.release();
     }finally{await rm(dir,{recursive:true,force:true});}
   };
+  Object.assign(tests,optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,returned,entries}));
   let cases=0;
   try {
     for(const [name,test] of Object.entries(tests)) {

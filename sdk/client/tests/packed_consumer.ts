@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {Client, type Socket} from '@hirsel/client';
+import {Client, type Socket, type Subscription} from '@hirsel/client';
 import {NodeStorage} from '@hirsel/client/node';
 import {Frame} from './generated/frame.js';
 import {bind, identity, tables, want} from './generated/entries.js';
@@ -61,7 +61,7 @@ try {
   assert.deepEqual(tables.map(({name, id, owner, kind}) => [name, id, owner, kind]),
     [['items', 1, 0, 1], ['by_id', 2, 1, 2]]);
   type ItemRow = {slot: 'items'; key: bigint; value: {tag: 'None'} | {tag: 'Some'; value: {title: string; done: boolean}}};
-  const rows = await new Promise<readonly ItemRow[]>((resolve, reject) => {
+  const sub = await new Promise<Subscription<undefined, {items: ItemRow}, {items: bigint}>>((resolve, reject) => {
     diagnostic = reject;
     const sub = api.subscribeDecoded.packed_consumer.packed_rows(undefined, (current, change) => {
       if (change.invalidated) return;
@@ -74,12 +74,26 @@ try {
       const item = rows.value[0];
       assert.deepEqual(current.get('items', 9007199254740993n), {tag: 'Ready', value: item});
       assert.strictEqual(change.rows[0].new, item);
-      resolve(rows.value);
+      resolve(current);
     }, reject);
     assert.deepEqual(sub.value(), {tag: 'Pending'});
   });
-  assert.deepEqual(rows, [{slot: 'items', key: 9007199254740993n,
-    value: {tag: 'Some', value: {title: 'crème', done: true}}}]);
+  const item: ItemRow = {slot: 'items', key: 9007199254740993n,
+    value: {tag: 'Some', value: {title: 'crème', done: true}}};
+  assert.deepEqual(sub.rows('items'), {tag: 'Ready', value: [item]});
+  let ran = false;
+  assert.deepEqual(await api.call.packed_consumer.packed_reply(undefined, {optimistic(draft) {
+    if (false) {
+      // @ts-expect-error The generated slot's key is a bigint.
+      draft.put(sub, 'items', 1, item);
+      // @ts-expect-error The generated slot's key is a bigint.
+      draft.delete(sub, 'items', 1);
+    }
+    ran = true;
+    assert.deepEqual(draft.get(sub, 'items', item.key), item);
+    draft.put(sub, 'items', item.key, item);
+  }}), expected);
+  assert(ran);
 } finally {
   await client.close();
 }

@@ -3483,7 +3483,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // A full inbox bounced this content: a Reset waits and covers it all; otherwise each live sub
 // it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, version: _, generations: take stamps, ended: take ended, reset: reset, read_failed: failed, ..) = take o
+    let Owe(session: who, groups: take groups, ended: take ended, reset: reset, read_failed: failed, ..) = take o
     // A token taken before this bounce never counts after it (§3 "Repair").
     j.progressed = false
     if reset || j.reset {
@@ -3492,8 +3492,8 @@ fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
         j.ended = list.new()
         return
     }
-    for (sub, _) in stamps {
-        if mark_due(mut subs, who, sub) { j.due = true }
+    for group in groups {
+        if mark_due(mut subs, who, group.sub) { j.due = true }
     }
     for take x in ended {
         list.push(mut j.ended, take x)

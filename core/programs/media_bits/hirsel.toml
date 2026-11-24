@@ -1,0 +1,16 @@
+[package]
+name = "media_bits"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"opus.hirsel" = "opus"
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"opus-laws.hirsel" = "opus_laws"

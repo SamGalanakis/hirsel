@@ -164,8 +164,8 @@ fn view_image_rows[G: send, H: shareable + inert + send](b: Board[G, H], key: By
     }
     match take projected {
         Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Error(take problem))) => Error(projection_error(take problem, clone(image.reads))),
-        Ok(Error(limit)) => Error(Stopped(Failed(OutOfTime(limit.steps)))),
+        Ok(Ok(Error(take problem))) => Error(finish_projection(take problem, clone(image.reads))),
+        Ok(Error(limit)) => Error(Faulted(Failed(OutOfTime(limit.steps)), clone(image.reads))),
         Error(problem) => Error(Stopped(Refused(Budget(room(problem))))),
     }
 }

@@ -147,8 +147,10 @@ pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error] {
 
 pub fn log_bounds[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[LogBounds, Error] waits {
     read_access(r, s)?
-    readable_value(s.store, s.roots, l.binding)?
-    committed_log_bounds(s.roots.collections, l.binding.id)
+    disk_allocation(scoped fn() -> Result[LogBounds, Error] {
+        readable_value(s.store, s.roots, l.binding)?
+        committed_log_bounds(s.roots.collections, l.binding.id)
+    })
 }
 
 pub fn log_get[V](r: Reader, s: Snapshot, l: Log[V], seq: u64) -> Result[Option[V], Error] waits {

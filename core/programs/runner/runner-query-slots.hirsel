@@ -215,17 +215,17 @@ fn compare_covers(a: Cover, b: Cover) -> Order {
     }
 }
 
-fn matched_covers[H: send](take c: CoverSet, declared: Slots[H], bindings: List[BoundSlot]) -> Result[List[Cover], Outcome] {
-    let CoverSet(spans: take selections) = take c
-    let mut ordered: List[Cover] = list.with_capacity(list.len(selections))
-    for take selection in take selections {
-        let CoverSelection(name: take name, collection, low: take low, high: take high, tail) = take selection
-        let Some(slot_id) = option.copied(map.get(declared.numbers, name)) else { return Error(Failed(Raised(5u32))) }
+fn matched_covers[H: send](c: CoverSet, declared: Slots[H], bindings: List[BoundSlot]) -> Result[List[Cover], Outcome] {
+    let mut ordered: List[Cover] = list.with_capacity(list.len(c.spans))
+    for selection in c.spans {
+        let Some(slot_id) = option.copied(map.get(declared.numbers, selection.name)) else { return Error(Failed(Raised(5u32))) }
         let expected = bindings[int.widen(slot_id)].collection
-        if collection != expected {
+        if selection.collection != expected {
             return Error(Failed(Raised(5u32)))
         }
-        if low < high { list.push(mut ordered, Cover(slot: slot_id, low: take low, high: take high, tail: tail)) }
+        if selection.low < selection.high {
+            list.push(mut ordered, Cover(slot: slot_id, low: clone(selection.low), high: clone(selection.high), tail: selection.tail))
+        }
     }
     Ok(merge_covers(take ordered))
 }

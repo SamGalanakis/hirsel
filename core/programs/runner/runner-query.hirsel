@@ -8,6 +8,7 @@ type QueryBody[H, A, R] = Plain(StaticFn[fn(store.Tx, H, take A) -> Result[Answe
 type QueryAttempt[H, A, R] {
     body: QueryBody[H, A, R],
     args: std.codec.Codec[A],
+    value: std.codec.Codec[R],
     handles: H,
     caller: Caller,
     arguments: Bytes,
@@ -21,10 +22,13 @@ fn query_body[H, A, R](body: QueryBody[H, A, R], tx: store.Tx, h: H, caller: Cal
     }
 }
 
-fn query_attempt[H: inert, A, R](tx: store.Tx, attempt: QueryAttempt[H, A, R]) -> Result[Answer[R], Outcome] {
-    let ran = isolate(fn() -> Result[Answer[R], Outcome] {
+fn query_attempt[H: inert, A, R](tx: store.Tx, attempt: QueryAttempt[H, A, R]) -> Result[Answer[Bytes], Outcome] {
+    let ran = isolate(fn() -> Result[Answer[Bytes], Outcome] {
         let input = std.codec.decode(attempt.args, attempt.arguments) ?=> |e| Refused(Malformed(bad(e)))
-        Ok(query_body(attempt.body, tx, attempt.handles, attempt.caller, take input) ?=> |f| Failed(OutOfBytes(room(f))))
+        let Answer(value: take value, covers: take selected) =
+            query_body(attempt.body, tx, attempt.handles, attempt.caller, take input) ?=> |f| Failed(OutOfBytes(room(f)))
+        let encoded_answer = encode_query_value(attempt.value, value, attempt.steps)?
+        Ok(Answer(value: take encoded_answer, covers: take selected))
     })
     match take ran {
         Ok(Ok(take output)) => take output,
@@ -32,7 +36,7 @@ fn query_attempt[H: inert, A, R](tx: store.Tx, attempt: QueryAttempt[H, A, R]) -
             for cause in cs {
                 if let OutOfTime = cause.kind { return Error(Failed(OutOfTime(attempt.steps))) }
             }
-            Error(Failed(Raised(raised(cs))))
+            Error(projection_cause(cs))
         },
         Error(problem) => Error(Failed(OutOfBytes(room(problem)))),
     }
@@ -51,38 +55,30 @@ fn encode_query_value[R](codec: std.codec.Codec[R], value: R, steps: u64) -> Res
             for cause in cs {
                 if let OutOfTime = cause.kind { return Error(Failed(OutOfTime(steps))) }
             }
-            Error(Failed(Raised(raised(cs))))
+            Error(projection_cause(cs))
         },
         Error(problem) => Error(Failed(OutOfBytes(room(problem)))),
     }
 }
 
 fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, read_handle: store.Reader, attempt: QueryAttempt[H, A, R],
-    codec: std.codec.Codec[R], declared: Slots[Outer], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
+    declared: Slots[Outer], bindings: List[BoundSlot], newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let steps = attempt.steps
-    match store.look(read_handle, newest, None, attempt, query_attempt) {
+    match store.look(read_handle, newest, Some(steps), attempt, query_attempt) {
         Ok(Seen(take answer)) => {
             let store.Seen(value: take output, reads: take reads, ..) = take answer
             let accepted = match take output {
                 Ok(take received) => take received,
                 Error(take why) => return Faulted(take why, take reads),
             }
-            let Answer(value: take answer_value, covers: take selections) = take accepted
-            let spans = match matched_covers(take selections, declared, bindings) {
-                Ok(take matched) => take matched,
-                Error(take why) => return Faulted(take why, take reads),
-            }
-            let value = match encode_query_value(codec, answer_value, steps) {
-                Ok(take encoded_value) => take encoded_value,
-                Error(take why) => return Faulted(take why, take reads),
-            }
-            let projected = match old {
-                Some(previous) => rerun_rows(access, read_handle, prior, previous, newest, spans, bindings, rows),
-                None => cover_rows(access, read_handle, newest, spans, bindings, rows),
+            let Answer(value: take value, covers: take selections) = take accepted
+            let projected = bound steps steps {
+                project_query_covers(access, read_handle, declared, bindings, newest, prior, rows, old, take selections)
             }
             match take projected {
-                Ok(()) => Covered(Viewed(covers: take spans, value: take value, reads: take reads)),
-                Error(take problem) => projection_error(take problem, take reads),
+                Ok(Ok(take spans)) => Covered(Viewed(covers: take spans, value: take value, reads: take reads)),
+                Ok(Error(take problem)) => finish_projection(take problem, take reads),
+                Error(limit) => Faulted(Failed(OutOfTime(limit.steps)), take reads),
             }
         },
         Ok(Failed(cs)) => Stopped(Failed(Raised(raised(cs)))),
@@ -92,18 +88,39 @@ fn query_projection[H: inert + send, Outer: send, A, R](access: PublisherReads, 
     }
 }
 
+fn project_query_covers[H: send](access: PublisherReads, read_handle: store.Reader, declared: Slots[H], bindings: List[BoundSlot],
+    newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]], take selections: CoverSet) -> Result[List[Cover], ProjectionIssue] waits {
+    let matched = isolate(scoped fn() -> Result[List[Cover], Outcome] {
+        matched_covers(selections, declared, bindings)
+    })
+    let spans = match take matched {
+        Ok(Ok(Ok(take selected))) => take selected,
+        Ok(Ok(Error(take why))) => return Error(ProjectionStopped(take why)),
+        Ok(Error(cs)) => return Error(ProjectionStopped(projection_cause(cs))),
+        Error(problem) => return Error(ProjectionStopped(Failed(OutOfBytes(room(problem))))),
+    }
+    match old {
+        Some(previous) => rerun_rows(access, read_handle, prior, previous, newest, spans, bindings, rows)?,
+        None => cover_rows(access, read_handle, newest, spans, bindings, rows)?,
+    }
+    Ok(take spans)
+}
+
 fn adapt_query[H: inert + send, Outer: send, A, R](body: QueryBody[H, A, R], ca: std.codec.Codec[A], cr: std.codec.Codec[R],
     declared: Slots[Outer], bindings: List[BoundSlot], access: PublisherReads, read_handle: store.Reader, h: Outer, select: fn(Outer) -> H, caller: Caller, arg: Bytes,
     n: u64, steps: u64, newest: store.Snapshot, prior: store.Snapshot, rows: Log[Row], old: Option[View[List[Cover]]]) -> Queried waits {
     let result = bound bytes n {
-        let attempt = QueryAttempt(body: body, args: ca, handles: select(h), caller: store.copy_env(caller), arguments: store.copy_env(arg), steps: steps)
-        bound steps steps {
-            query_projection(access, read_handle, attempt, cr, declared, bindings, newest, prior, rows, old)
+        let prepared = isolate(scoped fn() -> QueryAttempt[H, A, R] {
+            QueryAttempt(body: body, args: ca, value: cr, handles: select(h), caller: store.copy_env(caller), arguments: store.copy_env(arg), steps: steps)
+        })
+        match take prepared {
+            Ok(Ok(take attempt)) => query_projection(access, read_handle, attempt, declared, bindings, newest, prior, rows, old),
+            Ok(Error(cs)) => Stopped(projection_cause(cs)),
+            Error(problem) => Stopped(Failed(OutOfBytes(room(problem)))),
         }
     }
     match take result {
-        Ok(Ok(take output)) => take output,
-        Ok(Error(limit)) => Stopped(Failed(OutOfTime(limit.steps))),
+        Ok(take output) => take output,
         Error(problem) => Stopped(Refused(Budget(room(problem)))),
     }
 }

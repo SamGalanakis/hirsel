@@ -905,15 +905,17 @@ pub fn changes_page(r: Reader, a: Option[Snapshot], b: Snapshot, lo: Bytes, hi: 
             return Error(Foreign)
         }
     }
-    let mut out = change_output(Some(l))
-    if lo < hi {
-        let low: Option[Bytes] = Some(clone(lo))
-        let high: Option[Bytes] = Some(clone(hi))
-        match a {
-            None => walk_page_changes(mut out, None, b.roots.collections, low, high)?,
-            Some(base) => walk_page_changes(mut out, Some(view base.roots.collections), b.roots.collections, low, high)?,
+    disk_allocation(scoped fn() -> Result[ChangePage, Error] {
+        let mut out = change_output(Some(l))
+        if lo < hi {
+            let low: Option[Bytes] = Some(clone(lo))
+            let high: Option[Bytes] = Some(clone(hi))
+            match a {
+                None => walk_page_changes(mut out, None, b.roots.collections, low, high)?,
+                Some(base) => walk_page_changes(mut out, Some(view base.roots.collections), b.roots.collections, low, high)?,
+            }
         }
-    }
-    let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
-    Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
+        let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume, ..) = take out
+        Ok(ChangePage(changes: take rows, trimmed: take trimmed, bounds: take changed_bounds, next: take resume))
+    })
 }

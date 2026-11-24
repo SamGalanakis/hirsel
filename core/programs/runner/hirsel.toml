@@ -66,6 +66,7 @@ dirs = ["."]
 "runner_shared_view_law.hirsel" = "runner"
 "runner_value_group_law.hirsel" = "runner"
 "runner_retired_laws.hirsel" = "runner"
+"runner_query_budget_laws.hirsel" = "runner"
 "runner_read_failure_laws.hirsel" = "runner"
 "runner-staged-round-law.hirsel" = "runner"
 "runner_owner_laws.hirsel" = "runner"

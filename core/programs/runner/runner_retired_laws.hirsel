@@ -934,8 +934,9 @@ pub fn law_projection_isolated(c: Clock, r: Random) -> bool waits {
 }
 
 @test
-fn test_projection_isolated(c: Clock, r: Random) -> Result[(), ()] waits {
-    if law_projection_isolated(c, r) { Ok(()) } else { Error(()) }
+fn test_projection_isolated(c: Clock, r: Random) -> Result[(), String] waits {
+    if !law_projection_isolated(c, r) { return Error("L8: old-schema conversion must end only its subscription") }
+    law_query_budget_split(c, r)
 }
 
 @test

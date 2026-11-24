@@ -78,17 +78,24 @@ pub opaque type SpanRows: send {
 
 pub fn open_span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[SpanRows, Error] waits {
     read_access(r, s)?
-    let captured: Snapshot = clone(s)
-    Ok(SpanRows(capture: take captured, low: copied(lo)?, high: copied(hi)?, last: None, done: hi <= lo))
+    disk_allocation(scoped fn() -> Result[SpanRows, Error] {
+        let captured: Snapshot = clone(s)
+        Ok(SpanRows(capture: take captured, low: copied(lo)?, high: copied(hi)?, last: None, done: hi <= lo))
+    })
 }
 
 pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change], Error] waits {
     read_access(r, rows.capture)?
     if rows.done { return Ok(None) }
-    let mut cursor = resume_data(rows.capture.roots.collections, rows.low, rows.high, rows.last, false)?
-    match next_bytes(mut cursor)? {
-        Some((take key, take value)) => {
-            rows.last = Some(copied(key)?)
+    let selected = disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+        let mut cursor = resume_data(rows.capture.roots.collections, rows.low, rows.high, rows.last, false)?
+        let Some((take key, take value)) = next_bytes(mut cursor)? else { return Ok(None) }
+        let resume = copied(key)?
+        Ok(Some((take key, take value, take resume)))
+    })?
+    match take selected {
+        Some((take key, take value, take resume)) => {
+            rows.last = Some(take resume)
             Ok(Some(Change(tree_key: take key, value: Some(take value))))
         },
         None => {

@@ -453,6 +453,7 @@ operations! {
     ("schedule", "retire", Lane::Runtime(Kernel::Media(HostOp::ScheduleRetire)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "finished", Lane::Runtime(Kernel::Media(HostOp::ScheduleFinished)), "A", "media-w0-crypto-build-2282", false),
     ("schedule", "verify_finished", Lane::Runtime(Kernel::Media(HostOp::ScheduleVerifyFinished)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "dtls12", Lane::Runtime(Kernel::Media(HostOp::ScheduleDtls12)), "A", "media-w0-crypto-build-2282", false),
 }
 
 pub(crate) fn binding(f: &FnDecl) -> Option<u16> {

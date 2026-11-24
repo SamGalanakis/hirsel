@@ -1,10 +1,13 @@
 //! Protocol state holds keys by direction and packet space.
 use crate::{
     ImportUse,
-    packet_epoch::{Epoch, ImportError, IssueError, tls13_labels},
+    packet_epoch::{DirectionKeys, Epoch, ImportError, IssueError, tls13_labels},
     packet_nonce::NonceFormat,
     secret_aead::AeadAlg,
-    tls_kdf::{Side, Tls13Direction, Tls13Handshake, Tls13Traffic, TlsHash},
+    tls_kdf::{
+        Side, Tls13Direction, Tls13Handshake, Tls13PacketKeys, Tls13Traffic, TlsHash,
+        dtls12::Dtls12Keys,
+    },
 };
 
 const HANDSHAKE: usize = 1;
@@ -23,6 +26,10 @@ enum Kind {
         side: Side,
         handshake: Option<Tls13Handshake>,
         application: Option<Tls13Traffic>,
+    },
+    Dtls12 {
+        algorithm: AeadAlg,
+        keys: Option<Dtls12Keys>,
     },
     TrafficImport {
         local: bool,
@@ -67,6 +74,25 @@ impl<C> Schedule<C> {
             handshake,
             application: None,
         };
+        schedule
+    }
+
+    pub fn dtls12(epoch: u16, algorithm: AeadAlg, local: Side, keys: Option<Dtls12Keys>) -> Self {
+        let packet_keys = |side| {
+            keys.as_ref().map_or(DirectionKeys::Opaque, |keys| {
+                DirectionKeys::Live(Tls13PacketKeys::new(keys.payload(side), keys.iv(side)))
+            })
+        };
+        let mut schedule = Self::single(
+            APPLICATION,
+            Epoch::new(
+                NonceFormat::Dtls12 { epoch },
+                algorithm,
+                packet_keys(local),
+                packet_keys(local.peer()),
+            ),
+        );
+        schedule.kind = Kind::Dtls12 { algorithm, keys };
         schedule
     }
 
@@ -178,7 +204,7 @@ impl<C> Schedule<C> {
                 traffic.update_packet_keys(sending, *algorithm)
             }),
             Kind::TrafficImport { traffic, .. } => traffic.as_mut().map(Tls13Direction::key_update),
-            Kind::Fixed => unreachable!("checked key update"),
+            Kind::Fixed | Kind::Dtls12 { .. } => unreachable!("checked key update"),
         };
         self.spaces[APPLICATION]
             .as_mut()
@@ -208,15 +234,21 @@ impl<C> Schedule<C> {
     }
 
     pub fn finished_size(&self, transcript_hash: &[u8]) -> Result<usize, IssueError> {
-        let Kind::Tls13 { algorithm, .. } = self.kind else {
-            return Err(IssueError::Invalid);
+        let (algorithm, dtls12) = match self.kind {
+            Kind::Tls13 { algorithm, .. } => (algorithm, false),
+            Kind::Dtls12 { algorithm, .. } => (algorithm, true),
+            _ => return Err(IssueError::Invalid),
         };
         let size = TlsHash::for_aead(algorithm).output_len();
         if transcript_hash.len() != size {
             return Err(IssueError::Invalid);
         }
-        self.check_retire(HANDSHAKE as u64)?;
-        Ok(size)
+        if dtls12 {
+            Ok(12)
+        } else {
+            self.check_retire(HANDSHAKE as u64)?;
+            Ok(size)
+        }
     }
 
     pub fn verify_finished(&self, of: Side, hash: &[u8], received: &[u8], size: usize) -> bool {
@@ -228,13 +260,19 @@ impl<C> Schedule<C> {
     }
 
     pub fn finished(&self, of: Side, transcript_hash: &[u8], out: &mut [u8]) {
-        let Kind::Tls13 {
-            handshake: Some(handshake),
-            ..
-        } = &self.kind
-        else {
-            unreachable!("Finished is computed with live TLS secrets")
-        };
-        handshake.finished(of, transcript_hash, out).unwrap();
+        match &self.kind {
+            Kind::Tls13 {
+                handshake: Some(handshake),
+                ..
+            } => {
+                handshake.finished(of, transcript_hash, out).unwrap();
+            }
+            Kind::Dtls12 {
+                keys: Some(keys), ..
+            } => {
+                out.copy_from_slice(&keys.finished(of, transcript_hash).unwrap());
+            }
+            _ => unreachable!("Finished uses a live schedule with admitted operands"),
+        }
     }
 }

@@ -79,13 +79,16 @@ pub fn traffic_profile(profile: u64, suite: u64) -> Option<(NonceFormat, AeadAlg
         3 => NonceFormat::QuicMultipath,
         _ => return None,
     };
-    let algorithm = match suite {
+    Some((format, tls_suite(suite)?))
+}
+
+pub fn tls_suite(suite: u64) -> Option<AeadAlg> {
+    Some(match suite {
         0 => AeadAlg::Aes128Gcm,
         1 => AeadAlg::Aes256Gcm,
         2 => AeadAlg::ChaCha20Poly1305,
         _ => return None,
-    };
-    Some((format, algorithm))
+    })
 }
 
 pub fn tls13_labels(format: NonceFormat) -> Option<Tls13Labels> {

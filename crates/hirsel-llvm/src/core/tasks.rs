@@ -186,6 +186,7 @@ impl FunctionEmitter<'_> {
             | HostOp::ScheduleRetire
             | HostOp::ScheduleFinished
             | HostOp::ScheduleVerifyFinished
+            | HostOp::ScheduleDtls12
             | HostOp::ScheduleSealer
             | HostOp::ScheduleOpener
             | HostOp::ScheduleHeaderMask

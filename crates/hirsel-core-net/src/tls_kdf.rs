@@ -190,6 +190,17 @@ pub struct Tls13PacketKeys {
 }
 
 impl Tls13PacketKeys {
+    pub(super) fn new(key: &[u8], iv: [u8; 12]) -> Self {
+        let mut payload = Zeroizing::new([0; 32]);
+        payload[..key.len()].copy_from_slice(key);
+        Self {
+            payload,
+            iv: Zeroizing::new(iv),
+            header: None,
+            key_len: key.len(),
+        }
+    }
+
     pub(super) fn import(labels: Tls13Labels, algorithm: AeadAlg, secret: &[u8]) -> Option<Self> {
         Some(Tls13Direction::new(labels, algorithm, secret)?.packet_keys())
     }

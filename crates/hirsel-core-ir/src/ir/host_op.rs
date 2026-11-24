@@ -132,6 +132,7 @@ pub enum HostOp {
     ScheduleRetire = hirsel_core_ids::host_op::SCHEDULE_RETIRE as isize,
     ScheduleFinished = hirsel_core_ids::host_op::SCHEDULE_FINISHED as isize,
     ScheduleVerifyFinished = hirsel_core_ids::host_op::SCHEDULE_VERIFY_FINISHED as isize,
+    ScheduleDtls12 = hirsel_core_ids::host_op::SCHEDULE_DTLS12 as isize,
     ScheduleSealer = hirsel_core_ids::host_op::SCHEDULE_SEALER as isize,
     ScheduleOpener = hirsel_core_ids::host_op::SCHEDULE_OPENER as isize,
     ScheduleHeaderMask = hirsel_core_ids::host_op::SCHEDULE_HEADER_MASK as isize,
@@ -251,6 +252,7 @@ impl HostOp {
         HostOp::ScheduleRetire,
         HostOp::ScheduleFinished,
         HostOp::ScheduleVerifyFinished,
+        HostOp::ScheduleDtls12,
         HostOp::ScheduleSealer,
         HostOp::ScheduleOpener,
         HostOp::ScheduleHeaderMask,
@@ -526,6 +528,19 @@ impl HostOp {
             HostOp::ScheduleFinished | HostOp::ScheduleVerifyFinished => {
                 (vec![V(u64_), V(u64_), V(p), V(p)], outcome)
             }
+            HostOp::ScheduleDtls12 => (
+                vec![
+                    V(u64_),
+                    V(u64_),
+                    V(Ty::Scalar(Scalar::U16)),
+                    V(u64_),
+                    V(p),
+                    V(p),
+                    V(p),
+                    V(p),
+                ],
+                outcome,
+            ),
             HostOp::ScheduleSealer => (vec![V(u64_), V(u64_), V(u64_), V(u64_)], outcome),
             HostOp::ScheduleOpener => (vec![V(u64_), V(u64_)], outcome),
             HostOp::ScheduleHeaderMask => {
@@ -708,6 +723,7 @@ impl HostOp {
             HostOp::ScheduleRetire => "schedule_retire",
             HostOp::ScheduleFinished => "schedule_finished",
             HostOp::ScheduleVerifyFinished => "schedule_verify_finished",
+            HostOp::ScheduleDtls12 => "schedule_dtls12",
             HostOp::ScheduleSealer => "schedule_sealer",
             HostOp::ScheduleOpener => "schedule_opener",
             HostOp::ScheduleHeaderMask => "schedule_header_mask",
@@ -768,6 +784,7 @@ impl HostOp {
                 | HostOp::ScheduleRetire
                 | HostOp::ScheduleFinished
                 | HostOp::ScheduleVerifyFinished
+                | HostOp::ScheduleDtls12
                 | HostOp::ScheduleSealer
                 | HostOp::ScheduleOpener
                 | HostOp::ScheduleHeaderMask

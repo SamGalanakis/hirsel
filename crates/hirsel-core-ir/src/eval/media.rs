@@ -8,7 +8,7 @@ use hirsel_core_net::{
     packet_nonce::{ReceiverNonce, SenderCounter},
     packet_schedule,
     secret_aead::AeadAlg,
-    tls_kdf::{Side, Tls13Handshake, TlsHash},
+    tls_kdf::{Side, Tls13Handshake, TlsHash, dtls12::Dtls12Keys},
 };
 use std::mem::MaybeUninit;
 
@@ -48,6 +48,16 @@ fn issue_error(error: IssueError) -> Vec<u64> {
             available,
         } => vec![requested, 5, 0, available],
     }
+}
+
+fn return_share(error: IssueError) -> Vec<u64> {
+    let mut row = issue_error(error);
+    row[2] = 1;
+    row
+}
+
+fn sender(tag: u64) -> Side {
+    if tag == 0 { Side::Client } else { Side::Server }
 }
 
 impl Machine<'_> {
@@ -102,6 +112,7 @@ impl Machine<'_> {
             }
             HostOp::ScheduleImportTraffic => Ok(self.import_traffic(payer, a)),
             HostOp::ScheduleTls13 => Ok(self.tls13(payer, a)),
+            HostOp::ScheduleDtls12 => Ok(self.dtls12(payer, a)),
             HostOp::ScheduleApplication | HostOp::ScheduleKeyUpdate | HostOp::ScheduleRetire => {
                 Ok(self.schedule_transition(op, a))
             }
@@ -184,26 +195,65 @@ impl Machine<'_> {
     }
 
     fn tls13(&mut self, payer: Limit, a: &[u64]) -> Vec<u64> {
-        let before_issue = |error| {
-            let mut row = issue_error(error);
-            row[2] = 1;
-            row
-        };
         let Some((format, algorithm)) = packet_epoch::traffic_profile(a[0], a[1]) else {
-            return before_issue(IssueError::Invalid);
+            return return_share(IssueError::Invalid);
         };
         let hash = TlsHash::for_aead(algorithm);
         if self.carrier_bytes(a[5]).len() != hash.output_len() {
-            return before_issue(IssueError::Invalid);
+            return return_share(IssueError::Invalid);
         }
+        let side = sender(a[2]);
+        let shared = match self.agree(&payer, a[3], side, a[4]) {
+            Ok(shared) => shared,
+            Err(error) => return error,
+        };
+        let labels = packet_epoch::tls13_labels(format).unwrap();
+        let handshake =
+            Tls13Handshake::new(hash, labels, &shared, self.carrier_bytes(a[5])).unwrap();
+        let schedule = packet_schedule::Schedule::tls13(format, algorithm, side, Some(handshake));
+        self.media_hold(payer, Payload::Schedule(schedule))
+    }
+
+    fn dtls12(&mut self, payer: Limit, a: &[u64]) -> Vec<u64> {
+        let Some(algorithm) = packet_epoch::tls_suite(a[0]) else {
+            return return_share(IssueError::Invalid);
+        };
+        let (Ok(client), Ok(server)) = (
+            <[u8; 32]>::try_from(self.carrier_bytes(a[5])),
+            <[u8; 32]>::try_from(self.carrier_bytes(a[6])),
+        ) else {
+            return return_share(IssueError::Invalid);
+        };
+        if a[7] != 0 && self.carrier_bytes(a[7]).len() != TlsHash::for_aead(algorithm).output_len()
+        {
+            return return_share(IssueError::Invalid);
+        }
+        let side = sender(a[1]);
+        let shared = match self.agree(&payer, a[3], side, a[4]) {
+            Ok(shared) => shared,
+            Err(error) => return error,
+        };
+        let session = (a[7] != 0).then(|| self.carrier_bytes(a[7]));
+        let keys = Dtls12Keys::new(algorithm, &shared, client, server, session).unwrap();
+        let schedule = packet_schedule::Schedule::dtls12(a[2] as u16, algorithm, side, Some(keys));
+        self.media_hold(payer, Payload::Schedule(schedule))
+    }
+
+    fn agree(
+        &mut self,
+        payer: &Limit,
+        share: u64,
+        side: Side,
+        peer: u64,
+    ) -> Result<zeroize::Zeroizing<[u8; 32]>, Vec<u64>> {
         let requested = packet_epoch::SCHEDULE_CHARGE + REGISTRY_CHARGE;
-        if let Err(available) = self.admit(&payer, requested) {
-            return before_issue(IssueError::Capacity {
+        if let Err(available) = self.admit(payer, requested) {
+            return Err(return_share(IssueError::Capacity {
                 requested,
                 available,
-            });
+            }));
         }
-        let Media { owner, payload } = self.world.media[a[3] as usize].take().unwrap();
+        let Media { owner, payload } = self.world.media[share as usize].take().unwrap();
         let Payload::Share(key_share::Share { key, ticket }) = payload else {
             unreachable!("checked KeyShare");
         };
@@ -212,13 +262,7 @@ impl Machine<'_> {
             payer: payer.clone(),
             queue: self.world.agreement_refunds.clone(),
         };
-        let side = if a[2] == 0 {
-            Side::Client
-        } else {
-            Side::Server
-        };
-        let shared = key.agree(self.carrier_bytes(a[4]));
-        let result = match shared {
+        let result = match key.agree(self.carrier_bytes(peer)) {
             Some(shared) => match ticket.resolve(side, &shared, charge) {
                 RegistryVerdict::Accepted => Ok(shared),
                 RegistryVerdict::Issued => Err(IssueError::Issued),
@@ -229,18 +273,10 @@ impl Machine<'_> {
             }
         };
         self.refund_registry();
-        let shared = match result {
-            Ok(shared) => shared,
-            Err(error) => {
-                self.refund(payer, packet_epoch::SCHEDULE_CHARGE);
-                return issue_error(error);
-            }
-        };
-        let labels = packet_epoch::tls13_labels(format).unwrap();
-        let handshake =
-            Tls13Handshake::new(hash, labels, &shared, self.carrier_bytes(a[5])).unwrap();
-        let schedule = packet_schedule::Schedule::tls13(format, algorithm, side, Some(handshake));
-        self.media_hold(payer, Payload::Schedule(schedule))
+        result.map_err(|error| {
+            self.refund(payer.clone(), packet_epoch::SCHEDULE_CHARGE);
+            issue_error(error)
+        })
     }
 
     fn schedule_transition(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
@@ -286,11 +322,7 @@ impl Machine<'_> {
             Ok(size) => size,
             Err(error) => return issue_error(error),
         };
-        let of = if a[1] == 0 {
-            Side::Client
-        } else {
-            Side::Server
-        };
+        let of = sender(a[1]);
         if op == HostOp::ScheduleVerifyFinished {
             let valid = schedule.verify_finished(of, hash, self.carrier_bytes(a[3]), size);
             return vec![u64::from(valid), 0, 0, 0];

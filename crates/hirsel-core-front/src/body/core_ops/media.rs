@@ -9,7 +9,10 @@ impl Cx<'_, '_, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        if matches!(op, HostOp::ScheduleTls13 | HostOp::ScheduleImportTraffic) {
+        if matches!(
+            op,
+            HostOp::ScheduleTls13 | HostOp::ScheduleDtls12 | HostOp::ScheduleImportTraffic
+        ) {
             return self.runtime_media_constructor(op, f, values, result, n);
         }
         let mut operands: Vec<ValueId> = values.iter().copied().collect::<Option<_>>()?;
@@ -90,6 +93,34 @@ impl Cx<'_, '_, '_> {
         )
     }
 
+    pub(super) fn runtime_optional_carrier(
+        &mut self,
+        ty: TyId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let TyKind::Adt(_, types) = self.t.kind(ty) else {
+            return None;
+        };
+        let item = types[0];
+        let (_, at) = self.runtime_place(ty, value, n)?;
+        let tag = self.net_case(at, n);
+        let some = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 1, n)?;
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[Ty::Ptr]);
+        self.runtime_branch(some, yes, no, n);
+        self.start(yes);
+        let carrier = self.runtime_field(at, &[Step::CaseField { case: 1, field: 0 }], item, n)?;
+        let carrier = self.pointer(carrier, n);
+        self.jump(join, &[carrier], n);
+        self.start(no);
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        self.jump(join, &[null], n);
+        self.start(join);
+        Some(self.block_params(join)[0])
+    }
+
     fn case_as_word(&mut self, place: AddressId, n: NodeId) -> ValueId {
         let case = self.net_case(place, n);
         let word = self.value(Ty::Scalar(Scalar::U64));
@@ -117,40 +148,52 @@ impl Cx<'_, '_, '_> {
         let (_, at) = self.runtime_place(profile_ty, values[0], n)?;
         let word = Ty::Scalar(Scalar::U64);
         let profile = self.case_as_word(at, n);
-        let suite_join = self.new_block(&[word]);
-        for case in 0..4 {
-            let otherwise = if case < 3 {
-                let equal = self.runtime_compare(word, profile, u64::from(case), n)?;
-                let yes = self.new_block(&[]);
-                let otherwise = self.new_block(&[]);
-                self.runtime_branch(equal, yes, otherwise, n);
-                self.start(yes);
-                Some(otherwise)
-            } else {
-                None
-            };
-            let (_, suite) = self.net_case_field(profile_ty, at, case, 0, n)?;
-            let suite = self.case_as_word(suite, n);
-            self.jump(suite_join, &[suite], n);
-            if let Some(otherwise) = otherwise {
-                self.start(otherwise);
+        let mut args = vec![Arg::Value(profile)];
+        if op != HostOp::ScheduleDtls12 {
+            let suite_join = self.new_block(&[word]);
+            for case in 0..4 {
+                let otherwise = if case < 3 {
+                    let equal = self.runtime_compare(word, profile, u64::from(case), n)?;
+                    let yes = self.new_block(&[]);
+                    let otherwise = self.new_block(&[]);
+                    self.runtime_branch(equal, yes, otherwise, n);
+                    self.start(yes);
+                    Some(otherwise)
+                } else {
+                    None
+                };
+                let (_, suite) = self.net_case_field(profile_ty, at, case, 0, n)?;
+                let suite = self.case_as_word(suite, n);
+                self.jump(suite_join, &[suite], n);
+                if let Some(otherwise) = otherwise {
+                    self.start(otherwise);
+                }
             }
+            self.start(suite_join);
+            args.push(Arg::Value(self.block_params(suite_join)[0]));
         }
-        self.start(suite_join);
-        let suite = self.block_params(suite_join)[0];
-        let mut args = vec![Arg::Value(profile), Arg::Value(suite)];
-        let owned_index = if op == HostOp::ScheduleTls13 {
+        let owned_index = if op == HostOp::ScheduleImportTraffic {
+            1
+        } else {
             let (_, at) = self.runtime_place(self.p.fns[f].params[1].ty, values[1], n)?;
             args.push(Arg::Value(self.case_as_word(at, n)));
-            2
-        } else {
-            1
+            if op == HostOp::ScheduleDtls12 {
+                args.push(Arg::Value(values[2]?));
+                3
+            } else {
+                2
+            }
         };
         let input_ty = self.p.fns[f].params[owned_index].ty;
         let input = values[owned_index]?;
         args.push(Arg::Value(self.runtime_key(input, n)));
-        for value in &values[owned_index + 1..] {
-            args.push(Arg::Value((*value)?));
+        for (i, value) in values.iter().enumerate().skip(owned_index + 1) {
+            let value = if op == HostOp::ScheduleDtls12 && i == 7 {
+                self.runtime_optional_carrier(self.p.fns[f].params[i].ty, *value, n)?
+            } else {
+                (*value)?
+            };
+            args.push(Arg::Value(value));
         }
         // The adapter takes custody at the call boundary and returns the
         // same holder on refusals before issue.

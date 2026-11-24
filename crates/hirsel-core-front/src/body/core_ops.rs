@@ -1905,27 +1905,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             HostOp::Entries => {
                 let option = self.p.fns[f].params[1].ty;
-                let TyKind::Adt(_, types) = self.t.kind(option) else {
-                    return None;
-                };
-                let string = types[0];
-                let (_, at) = self.runtime_place(option, vals[1], n)?;
-                let tag = self.net_case(at, n);
-                let some = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 1, n)?;
-                let yes = self.new_block(&[]);
-                let no = self.new_block(&[]);
-                let join = self.new_block(&[Ty::Ptr]);
-                self.runtime_branch(some, yes, no, n);
-                self.start(yes);
-                let path =
-                    self.runtime_field(at, &[Step::CaseField { case: 1, field: 0 }], string, n)?;
-                let path = self.pointer(path, n);
-                self.jump(join, &[path], n);
-                self.start(no);
-                let null = self.konst(Ty::Ptr, 0, n)?;
-                self.jump(join, &[null], n);
-                self.start(join);
-                args[1] = Arg::Value(self.block_params(join)[0]);
+                args[1] = Arg::Value(self.runtime_optional_carrier(option, vals[1], n)?);
                 2
             }
             HostOp::Read

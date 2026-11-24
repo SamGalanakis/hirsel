@@ -142,6 +142,7 @@ host_ops! {
     SCHEDULE_RETIRE = 156,
     SCHEDULE_FINISHED = 157,
     SCHEDULE_VERIFY_FINISHED = 158,
+    SCHEDULE_DTLS12 = 159,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

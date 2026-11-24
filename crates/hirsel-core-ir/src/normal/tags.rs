@@ -548,6 +548,7 @@ tags!(HostOp {
     161 => ScheduleRetire,
     162 => ScheduleFinished,
     163 => ScheduleVerifyFinished,
+    164 => ScheduleDtls12,
 });
 
 tags!(RaiseCause {

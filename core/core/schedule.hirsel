@@ -1,5 +1,7 @@
 pub type Suite13 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
 
+pub type Suite12 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
+
 pub type Profile13 = Quic(Suite13) | Dtls13(Suite13) | Tls13(Suite13) | QuicMultipath(Suite13)
 
 pub opaque resource type Schedule
@@ -11,6 +13,8 @@ pub type ScheduleError = Denied | Invalid | Issued | Spent | Capacity(Capacity)
 pub fn quic_initial(side: Side, dcid: Bytes) -> Result[Schedule, ScheduleError]
 
 pub fn tls13(p: Profile13, side: Side, take k: secret.KeyShare, peer: Bytes, hello_hash: Bytes) -> Result[Schedule, (ScheduleError, Option[secret.KeyShare])]
+
+pub fn dtls12(suite: Suite12, side: Side, epoch: u16, take k: secret.KeyShare, peer: Bytes, client_random: Bytes, server_random: Bytes, session_hash: Option[Bytes]) -> Result[Schedule, (ScheduleError, Option[secret.KeyShare])]
 
 pub fn import_traffic(p: Profile13, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
 

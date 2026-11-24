@@ -90,6 +90,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::ScheduleRetire => &["u64", "u64"],
         HostOp::ScheduleFinished => &["u64", "u64", "ptr", "ptr"],
         HostOp::ScheduleVerifyFinished => &["u64", "u64", "ptr", "ptr"],
+        HostOp::ScheduleDtls12 => &["u64", "u64", "u16", "u64", "ptr", "ptr", "ptr", "ptr"],
         HostOp::ScheduleSealer => &["u64", "u64", "u64", "u64"],
         HostOp::ScheduleOpener => &["u64", "u64"],
         HostOp::ScheduleHeaderMask => &["u64", "u64", "bool"],

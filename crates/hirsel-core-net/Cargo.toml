@@ -13,6 +13,7 @@ libc = { version = "0.2", default-features = false }
 io-uring = { version = "=0.7.16", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ring = "=0.17.14"
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc"] }
 base64 = "=0.23.1"
 stringprep = "=0.1.5"
 subtle = "=2.6.1"

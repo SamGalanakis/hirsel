@@ -13,7 +13,10 @@ Code Hirsel adapts into its own sources is listed in [third-party/NOTICES.md](th
 | `hirsel-core-toolchain.json` | the installation record | Hirsel |
 | `link/*.json` | the bundle-relative link recipe | Hirsel |
 | `link/kit/*` | glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind | `link-kit-glibc`, `link-kit-llvm` |
-| `core-packages/*` | the core and std package images (Hirsel sources and their checked and compiled products) | Hirsel |
+| `core-packages/*` | the core and std package images and the Store source archive | Hirsel |
+| `libexec/hirsel/platform_main` | the Hirsel platform host, linked with the shipped runtime archive | Hirsel |
+| `libexec/hirsel/pin_reader` | the Hirsel offline pin reader, linked with the shipped runtime archive | Hirsel |
+| `libexec/hirsel/.hirsel-debug/*.debug` | detached debug information for the platform executables | Hirsel |
 | `lib/libLLVM.so.23.1` | the compiler's LLVM library (tools/native-toolchain/build-libllvm) | native component `engine_llvm`, below |
 | `bin/ld.lld` | the linker, a static PIE (tools/native-toolchain/build-static-lld) | native component `static_lld`, below |
 | `hirsel.profdata` | the profile a PGO build of the compiler used (PGO builds only) | Hirsel |
@@ -28,17 +31,23 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | allocator-api2-0.2.21 | MIT OR Apache-2.0 | `hirsel` | `683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923` |
 | anyhow-1.0.104 | MIT OR Apache-2.0 | `hirsel` | `330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470` |
 | arbitrary-1.5.0 | MIT OR Apache-2.0 | `hirsel` | `3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed` |
+| argon2-0.6.0 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c` |
 | base64-0.23.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5` |
+| base64ct-1.8.3 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06` |
 | bincode-1.3.3 | MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad` |
 | bitflags-2.13.2 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06` |
+| blake2-0.11.0 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f` |
 | block-buffer-0.10.4 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71` |
+| block-buffer-0.12.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa` |
 | bumpalo-3.20.3 | MIT OR Apache-2.0 | `hirsel` | `72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649` |
 | bytes-1.12.2 | MIT | `hirsel` | `776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c` |
 | cc-1.7.0 | MIT OR Apache-2.0 | none | `50a649af8a827553c29fb0cb4bd4a6f1a0dd695bd3232b9bc98bd9c8a3ffbb8b` |
 | cfg-if-1.0.5 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600` |
+| cmov-0.5.4 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a` |
 | core-foundation-0.10.1 | MIT OR Apache-2.0 | none | `b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6` |
 | core-foundation-sys-0.8.7 | MIT OR Apache-2.0 | none | `773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b` |
 | cpufeatures-0.2.17 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280` |
+| cpufeatures-0.3.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566` |
 | cranelift-assembler-x64-0.136.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `f6d504c8c7ba3f3accaf8e98b7096beb98e1a271404357744c7e9e730c6865ff` |
 | cranelift-assembler-x64-meta-0.136.3 | Apache-2.0 WITH LLVM-exception | none | `c065757905596bc06e82969ebd7b92d691b7fd710a7e9e8181ae0c30dab588d0` |
 | cranelift-bforest-0.136.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `5ca7162cd4d4fc5f9f2f88d1459d939882203d93a8c5a19ef2c405b2e82ef13f` |
@@ -55,7 +64,10 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | cranelift-srcgen-0.136.3 | Apache-2.0 WITH LLVM-exception | none | `fc173168f291ff3b95b5d0769d6a05b1eaef5e6d74c2600affab8396b4e7b420` |
 | crc32fast-1.5.2 | MIT OR Apache-2.0 | `hirsel` | `01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78` |
 | crypto-common-0.1.7 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a` |
+| crypto-common-0.2.2 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453` |
+| ctutils-0.4.8 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f` |
 | digest-0.10.7 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292` |
+| digest-0.11.3 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2` |
 | equivalent-1.0.3 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826` |
 | errno-0.3.14 | MIT OR Apache-2.0 | none | `39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb` |
 | fallible-iterator-0.3.0 | MIT/Apache-2.0 | `hirsel` | `2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649` |
@@ -73,7 +85,9 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | heck-0.5.0 | MIT OR Apache-2.0 | none | `2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea` |
 | http-1.5.0 | MIT OR Apache-2.0 | `hirsel` | `918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0` |
 | httparse-1.10.1 | MIT OR Apache-2.0 | `hirsel` | `6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87` |
+| hybrid-array-0.4.15 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17` |
 | indexmap-2.14.2 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855` |
+| io-uring-0.7.16 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `878c26bc5e45fe089ce2ca25689260c152a87ce1d7de2ca86101efeea6973932` |
 | itoa-1.0.18 | MIT OR Apache-2.0 | `hirsel` | `8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682` |
 | libc-0.2.190 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78` |
 | libm-0.2.16 | MIT | `hirsel` | `b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981` |
@@ -86,7 +100,9 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | object-0.40.0 | Apache-2.0 OR MIT | `hirsel` | `dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c` |
 | once_cell-1.21.4 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50` |
 | openssl-probe-0.2.2 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1` |
+| password-hash-0.6.1 | MIT OR Apache-2.0 | none | `aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b` |
 | percent-encoding-2.3.2 | MIT OR Apache-2.0 | `hirsel` | `9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220` |
+| phc-0.6.1 | Apache-2.0 OR MIT | none | `44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892` |
 | pkg-config-0.3.34 | MIT OR Apache-2.0 | none | `f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548` |
 | proc-macro2-1.0.107 | MIT OR Apache-2.0 | none | `985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9` |
 | quote-1.0.47 | MIT OR Apache-2.0 | none | `1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001` |
@@ -304,9 +320,27 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
+   "checksum": "134c52ddac6d63c576bef8168db10c83c49c26444ecbc68060fef078925a901c",
+   "crate": "argon2-0.6.0",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5",
    "crate": "base64-0.23.1",
    "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06",
+   "crate": "base64ct-1.8.3",
+   "license": "Apache-2.0 OR MIT",
    "linked": [
     "hirsel",
     "runtime/*/*/libhirsel_core_rt.a"
@@ -331,8 +365,26 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
+   "checksum": "5b5d4d889834ee8ecfc0f8426ad30faf7cdcb10f741a8e6d7224d95325479f6f",
+   "crate": "blake2-0.11.0",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71",
    "crate": "block-buffer-0.10.4",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa",
+   "crate": "block-buffer-0.12.1",
    "license": "MIT OR Apache-2.0",
    "linked": [
     "hirsel",
@@ -371,6 +423,15 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
+   "checksum": "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a",
+   "crate": "cmov-0.5.4",
+   "license": "Apache-2.0 OR MIT",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6",
    "crate": "core-foundation-0.10.1",
    "license": "MIT OR Apache-2.0",
@@ -385,6 +446,15 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
   {
    "checksum": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280",
    "crate": "cpufeatures-0.2.17",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566",
+   "crate": "cpufeatures-0.3.1",
    "license": "MIT OR Apache-2.0",
    "linked": [
     "hirsel",
@@ -513,8 +583,35 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
+   "checksum": "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453",
+   "crate": "crypto-common-0.2.2",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "261af4dc7a06ea8a527a8717d8cbba3417530d6ea14e1edb3de6b67806be474f",
+   "crate": "ctutils-0.4.8",
+   "license": "Apache-2.0 OR MIT",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292",
    "crate": "digest-0.10.7",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2",
+   "crate": "digest-0.11.3",
    "license": "MIT OR Apache-2.0",
    "linked": [
     "hirsel",
@@ -659,9 +756,27 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
+   "checksum": "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17",
+   "crate": "hybrid-array-0.4.15",
+   "license": "MIT OR Apache-2.0",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
    "checksum": "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855",
    "crate": "indexmap-2.14.2",
    "license": "Apache-2.0 OR MIT",
+   "linked": [
+    "hirsel",
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
+  },
+  {
+   "checksum": "878c26bc5e45fe089ce2ca25689260c152a87ce1d7de2ca86101efeea6973932",
+   "crate": "io-uring-0.7.16",
+   "license": "MIT OR Apache-2.0",
    "linked": [
     "hirsel",
     "runtime/*/*/libhirsel_core_rt.a"
@@ -768,12 +883,24 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
+   "checksum": "aab41826031698d6ffcd9cff78ef56ef998e39dc7e5067cdfebe373842d4723b",
+   "crate": "password-hash-0.6.1",
+   "license": "MIT OR Apache-2.0",
+   "linked": []
+  },
+  {
    "checksum": "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220",
    "crate": "percent-encoding-2.3.2",
    "license": "MIT OR Apache-2.0",
    "linked": [
     "hirsel"
    ]
+  },
+  {
+   "checksum": "44dc769b75f93afdddd8c7fa12d685292ddeff1e66f7f0f3a234cf1818afe892",
+   "crate": "phc-0.6.1",
+   "license": "Apache-2.0 OR MIT",
+   "linked": []
   },
   {
    "checksum": "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548",
@@ -1304,8 +1431,20 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
-   "contents": "the core and std package images (Hirsel sources and their checked and compiled products)",
+   "contents": "the core and std package images and the Store source archive",
    "path": "core-packages/*"
+  },
+  {
+   "contents": "the Hirsel platform host, linked with the shipped runtime archive",
+   "path": "libexec/hirsel/platform_main"
+  },
+  {
+   "contents": "the Hirsel offline pin reader, linked with the shipped runtime archive",
+   "path": "libexec/hirsel/pin_reader"
+  },
+  {
+   "contents": "detached debug information for the platform executables",
+   "path": "libexec/hirsel/.hirsel-debug/*.debug"
   },
   {
    "contents": "the compiler's LLVM library (tools/native-toolchain/build-libllvm)",

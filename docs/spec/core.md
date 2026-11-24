@@ -187,6 +187,13 @@ operations it names; nothing else about them may be inferred from an implementat
   `len + n`, `try_reserve` returning `Error(c)` and leaving `xs` unchanged where `reserve`
   raises; every other allocating operation grows by
   [MEM-24](budgets.md#mem-24-logical-charges). `string.from` copies a literal or a view.
+- **Aligned initial backing.** `list.with_capacity_aligned(n, A)` is `list.with_capacity(n)`
+  whose initial backing starts at a multiple of `A`, a constant power of two (anything else
+  is refused at compile time). The alignment applies to that backing only: growth and
+  `clone` use the ordinary contract, so the storage of a list grown past `n`, or of a clone,
+  need not be `A`-aligned. A caller that needs the alignment, such as a buffer for `Direct`
+  writes, never grows the list past `n`. The alignment never enters a charge
+  ([MEM-24](budgets.md#mem-24-logical-charges)): the charge is that of `with_capacity(n)`.
 - **Literals.** A string literal has type `String`, is static, allocates nothing and is never
   charged; it has capacity 0, so the first push onto it grows it into new storage. This is
   sound because no operation writes a static `String`'s bytes: growth moves them into new

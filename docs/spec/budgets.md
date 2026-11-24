@@ -200,7 +200,8 @@ and under every layout choice; the bytes a value occupies may be fewer: `Option[
 charges 8 + 8 while an engine may hold it in 8 bytes.
 
 A collection grows to capacity `max(needed, 4, 2 × old capacity)`; the new storage is
-admitted before the old is refunded, so growth briefly holds both. Nothing shrinks
+admitted before the old is refunded, so growth briefly holds both. A push within capacity
+admits nothing. Nothing shrinks
 storage automatically; `with_capacity(n)` admits exactly `n` elements. No allocator
 constant, alignment or chunk size of an engine enters a charge. A later policy has a new
 name; a package states the policy it was written for

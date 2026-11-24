@@ -2664,7 +2664,7 @@ and recovered is a prefix of issued in commit order. Acked means `Synced` covere
   - **The creation block.** The Db task keeps one A-aligned block of A bytes, allocated at open and reused for every segment it creates. It holds the HEADER followed by zeros. The Db task is its only user, so creation allocates nothing new for alignment.
 - **Group buffer.** One A-aligned allocation made at spawn, of G = ⌈`group_bytes`⌉ₐ + A bytes, kept for the task's life.
   - It replaces the buffer v2.80 acquired per group and the single-frame direct write: every group is copied in after the tail image.
-  - The aligned allocation is a core list function (`list.with_capacity_aligned(n, A)`, IMPL). Its callers in Store are the group buffer and the creation block.
+  - The aligned allocation is a core list function (`list.with_capacity_aligned(n, A)`, [core](../../../docs/spec/core.md)). Its alignment holds only until the list grows, so neither caller grows past its initial capacity. Its callers in Store are the group buffer and the creation block.
   - The journal task still allocates nothing after spawn (Q1a). The Z chunk of §3.3a and its 32 KiB in `JOURNAL_WORKER_SLACK` are deleted.
 
 **The op table.** Every operation `execute_file` and `issue_now` serve (`crates/hirsel-core-rt/src/os.rs` ~160-380, ~618-710):

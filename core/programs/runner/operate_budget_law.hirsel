@@ -44,6 +44,37 @@ fn open_sized_place(take config: PlaceConfig[(), (), (), ()]) -> Result[(), Stri
     if let Ok(true) = task.join(take stopper) { Ok(()) } else { Error("L60: place never reached Ready") }
 }
 
+fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), (), ()] {
+    let key = result.unwrap(secret.seal(clone(string.as_bytes("budget fixture")), "mac"))
+    let bucket = BucketBacking(net: n,
+        place: std.object.Bucket(endpoint: "http://127.0.0.1:1", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path),
+        credentials: std.cred.from_secret("access", take key, ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64),
+        level: "bucket", op_ms: 30000u64)
+    let mut config = budget_config(Bucket(take bucket), c, r, tasks, n)
+    config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(65536u64),
+        pack_bytes: Some(65536u64), group_bytes: Some(65536u64), group_commits: None, lock_wait_ms: None)
+    take config
+}
+
+fn bucket_budget_at_limit(take config: PlaceConfig[(), (), (), ()]) -> Result[u64, StartError] waits {
+    let (_, share, total) = place_store(config, None)?
+    if share != 38270700u64 { fail("L60: Bucket share at the floor") }
+    Ok(total)
+}
+
+fn exercise_bucket_budget(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    // The Store floor is 38,270,700 B, including a 1 MiB client, 131,376 B
+    // of entry buffers, 131,552 B of HEAD buffers, 786,784 B for the
+    // journal task and 1,112,000 B for its reclaim page. X is 80 + 1,034.
+    let exact = task.spawn(tasks, bytes 49616253u64, bucket_budget_config(c, r, tasks, n), bucket_budget_at_limit)
+    if let Ok(Ok(38271814u64)) = task.join(take exact) {} else { return Error("L60: Bucket store term must include X") }
+    let short = task.spawn(tasks, bytes 49616252u64, bucket_budget_config(c, r, tasks, n), bucket_budget_at_limit)
+    match task.join(take short) {
+        Ok(Error(Full(cap))) if cap.requested == 49616253u64 && cap.available == 49616252u64 => Ok(()),
+        _ => Error("L60: Bucket limit refusal must name the root requirement"),
+    }
+}
+
 @test
 fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
     if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
@@ -59,6 +90,7 @@ fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) ->
         return Error("L60: Directory share")
     }
     open_sized_place(take disk)?
+    exercise_bucket_budget(c, r, tasks, n)?
     let low = budget_config(Memory, c, r, tasks, n)
     let child = task.spawn(tasks, bytes 12582912u64, take low, refused_budget)
     // The child has 1,238,473 B of share. Memory's keep and minimum require 2 MiB.

@@ -44,24 +44,65 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
     let overhead = operate_bytes(p) ?=> Full
     let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
     let limit = runtime.root_limit()
-    let Some(share) = int.checked_sub(limit, reserved) else {
-        return Error(Full(Capacity(requested: reserved, available: limit)))
-    }
     let kind: store.Kind = match p.backing { Memory => Memory, Bucket(b) => Bucket(b.lanes), _ => Directory }
-    match store.sized_reservation(kind, share, p.sizes) {
-        Ok((take options, reserved_store)) => Ok((take options, share, reserved_store)),
+    let empty: List[store.FollowerPlan] = list.new()
+    let capture = if let Bucket(_) = kind {
+        let Some(service) = store.service_bytes(empty) else {
+            return Error(Full(Capacity(requested: 18446744073709551615u64, available: limit)))
+        }
+        add_place_bytes(service, store.follower_starter_bytes()) ?=> Full
+    } else { 0u64 }
+    let required = add_place_bytes(reserved, capture) ?=> Full
+    let Some(share) = int.checked_sub(limit, required) else {
+        return Error(Full(Capacity(requested: required, available: limit)))
+    }
+    let (take options, reserved_store) = match store.sized_reservation(kind, share, p.sizes) {
+        Ok(take sized) => take sized,
         Error(short) => {
-            if let Some(out) = report {
-                let _ = stderr.write(out, shortage_text(short))
-            }
-            Error(Full(Capacity(requested: short.need, available: short.have)))
+            let cap: Capacity = if let Bucket(_) = kind {
+                Capacity(requested: int.saturating_add(required, short.need), available: limit)
+            } else { Capacity(requested: short.need, available: short.have) }
+            report_store_shortage(report, short, cap)
+            return Error(Full(cap))
         },
+    }
+    if let Bucket(lanes) = kind {
+        let plan = match store.follower_plan(kind, options) {
+            Ok(take made) => take made,
+            Error(short) => {
+                let cap: Capacity = Capacity(requested: short.need, available: short.have)
+                report_store_shortage(report, short, cap)
+                return Error(Full(cap))
+            },
+        }
+        let mut plans: List[store.FollowerPlan] = list.with_capacity(1u64)
+        list.push(mut plans, take plan)
+        let Some(service) = store.service_bytes(plans) else {
+            return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
+        }
+        let Some(client) = std.object.lane_reservation(lanes) else {
+            return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
+        }
+        let peak_bytes = if let Some(transport_and_service) = int.checked_add(client, service) {
+            int.checked_add(transport_and_service, store.follower_starter_bytes())
+        } else { None }
+        let Some(peak) = peak_bytes else {
+            return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
+        }
+        return Ok((take options, share, order.max(reserved_store, peak)))
+    }
+    Ok((take options, share, reserved_store))
+}
+
+fn report_store_shortage(report: Option[Stderr], short: store.Shortage, cap: Capacity) waits {
+    if let Some(out) = report {
+        let _ = stderr.write(out, shortage_text(short, cap))
     }
 }
 
-fn shortage_text(short: store.Shortage) -> String {
+fn shortage_text(short: store.Shortage, cap: Capacity) -> String {
     let mut line = string.from("place store needs ")
-    push_capacity(mut line, Capacity(requested: short.need, available: short.have))
+    push_capacity(mut line, cap)
     for i in 0u64 .. list.len(short.parts) {
         let part = view short.parts[i]
         string.push(mut line, " ")

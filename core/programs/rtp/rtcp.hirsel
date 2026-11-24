@@ -1,0 +1,551 @@
+pub type Mode: key = Compound | Reduced
+
+pub type Error: key = Version | Length | Padding | NotCompound | NoCname | Body(u8) | Buffer | Index
+
+pub type SenderInfo: key {
+    ssrc: u32,
+    ntp: u64,
+    rtp: u32,
+    packets: u32,
+    octets: u32
+}
+
+pub type Block: key {
+    ssrc: u32,
+    fraction: u8,
+    lost: i32,
+    highest: u32,
+    jitter: u32,
+    lsr: u32,
+    dlsr: u32
+}
+
+pub type Item: key = Sr(SenderInfo, u8) | Rr(u32, u8) | Sdes(u8) | Bye(u8, Option[(u64, u64)]) | Nack(u32, u32) | Twcc(u32, u32) | Pli(u32, u32) | Fir(u32) | Other(u8, u8)
+
+// at is the packet's first byte, body the first byte after its 4-byte header,
+// end the end of its unpadded body and len the length of the datagram.
+pub type Packet {
+    item: Item,
+    at: u64,
+    body: u64,
+    end: u64,
+    len: u64
+}
+
+pub type WriteError = Capacity(Capacity) | Unrepresentable
+
+const SR: u8 = 200
+
+const RR: u8 = 201
+
+const SDES: u8 = 202
+
+const BYE: u8 = 203
+
+const RTPFB: u8 = 205
+
+const PSFB: u8 = 206
+
+const CNAME: u8 = 1
+
+const MAX_RC: u64 = 31
+
+const BLOCK: u64 = 24
+
+const LOST_MIN: i32 = -8388608
+
+const LOST_MAX: i32 = 8388607
+
+pub fn is_rtcp(pkt: Bytes) -> bool {
+    list.len(pkt) >= 4 && pkt[1] >= 192 && pkt[1] <= 223
+}
+
+// Everything but TWCC is laid out in 32-bit words, so its padding count is too.
+fn word_bodied(pt: u8, fmt: u8) -> bool {
+    (pt >= SR && pt <= BYE) || (pt == RTPFB && fmt == 1) || (pt == PSFB && (fmt == 1 || fmt == 4))
+}
+
+fn round4(n: u64) -> u64 {
+    (n + 3) / 4 * 4
+}
+
+// Walk an SDES body of count chunks over [body, end). Answers the first CNAME
+// of the chunk whose SSRC is want, if any.
+fn sdes_walk(pkt: Bytes, body: u64, end: u64, count: u8, want: Option[u32]) -> Result[Option[(u64, u64)], Error] {
+    let mut pos = body
+    let mut found: Option[(u64, u64)] = None
+    let mut i = 0u8
+    while i < count {
+        if end - pos < 4 {
+            return Error(Body(SDES))
+        }
+        let ssrc: u32 = list.word_be(pkt, pos)
+        pos += 4
+        let mine = match want {
+            Some(s) => s == ssrc,
+            None => false,
+        }
+        loop {
+            if pos == end {
+                return Error(Body(SDES))
+            }
+            let kind = pkt[pos]
+            if kind == 0 {
+                break
+            }
+            if end - pos < 2 {
+                return Error(Body(SDES))
+            }
+            let size: u64 = int.widen(pkt[pos + 1])
+            pos += 2
+            if size > end - pos || (kind == CNAME && size == 0) {
+                return Error(Body(SDES))
+            }
+            if kind == CNAME && mine {
+                if let None = found {
+                    found = Some((pos, size))
+                }
+            }
+            pos += size
+        }
+        // The END byte, then null octets to the next 32-bit boundary.
+        let stop = body + (pos - body) / 4 * 4 + 4
+        if stop > end {
+            return Error(Body(SDES))
+        }
+        while pos < stop {
+            if pkt[pos] != 0 {
+                return Error(Body(SDES))
+            }
+            pos += 1
+        }
+        i += 1
+    }
+    if pos != end {
+        return Error(Body(SDES))
+    }
+    Ok(found)
+}
+
+fn bye_reason(pkt: Bytes, body: u64, end: u64, count: u8) -> Result[Option[(u64, u64)], Error] {
+    let wide: u64 = int.widen(count)
+    let ssrcs = 4 * wide
+    if ssrcs > end - body {
+        return Error(Body(BYE))
+    }
+    let pos = body + ssrcs
+    if pos == end {
+        return Ok(None)
+    }
+    let size: u64 = int.widen(pkt[pos])
+    let text = pos + 1
+    if size > end - text {
+        return Error(Body(BYE))
+    }
+    let stop = body + round4(text + size - body)
+    if stop != end {
+        return Error(Body(BYE))
+    }
+    let mut z = text + size
+    while z < stop {
+        if pkt[z] != 0 {
+            return Error(Body(BYE))
+        }
+        z += 1
+    }
+    Ok(Some((text, size)))
+}
+
+fn sender_info(pkt: Bytes, at: u64) -> SenderInfo {
+    SenderInfo(ssrc: list.word_be(pkt, at), ntp: list.word_be(pkt, at + 4), rtp: list.word_be(pkt, at + 12), packets: list.word_be(pkt, at + 16), octets: list.word_be(pkt, at + 20))
+}
+
+// The item of one packet whose unpadded body is [body, end).
+fn item(pkt: Bytes, pt: u8, count: u8, padded: bool, body: u64, end: u64) -> Result[Item, Error] {
+    let size = end - body
+    let reports: u64 = BLOCK * int.widen(count)
+    if pt == SR {
+        if size < 24 + reports {
+            return Error(Body(pt))
+        }
+        return Ok(Sr(sender_info(pkt, body), count))
+    }
+    if pt == RR {
+        if size < 4 + reports {
+            return Error(Body(pt))
+        }
+        return Ok(Rr(list.word_be(pkt, body), count))
+    }
+    if pt == SDES {
+        sdes_walk(pkt, body, end, count, None)?
+        return Ok(Sdes(count))
+    }
+    if pt == BYE {
+        return Ok(Bye(count, bye_reason(pkt, body, end, count)?))
+    }
+    let feedback = (pt == RTPFB && (count == 1 || count == 15)) || (pt == PSFB && (count == 1 || count == 4))
+    if !feedback {
+        return Ok(Other(pt, count))
+    }
+    if size < 8 {
+        return Error(Body(pt))
+    }
+    let sender: u32 = list.word_be(pkt, body)
+    let media: u32 = list.word_be(pkt, body + 4)
+    let fci = size - 8
+    if pt == RTPFB && count == 1 {
+        if fci == 0 || fci % 4 != 0 {
+            return Error(Body(pt))
+        }
+        return Ok(Nack(sender, media))
+    }
+    if pt == RTPFB {
+        // The 8-byte prefix of transport-wide feedback; its chunks are RTP-8's.
+        if fci < 8 {
+            return Error(Body(pt))
+        }
+        return Ok(Twcc(sender, media))
+    }
+    if count == 1 {
+        if fci != 0 || padded {
+            return Error(Body(pt))
+        }
+        return Ok(Pli(sender, media))
+    }
+    if fci == 0 || fci % 8 != 0 {
+        return Error(Body(pt))
+    }
+    Ok(Fir(sender))
+}
+
+// Read and check the packet at at. A refusal leaves at unchanged; the end of
+// the datagram answers None.
+pub fn next(pkt: Bytes, mut at: u64) -> Result[Option[Packet], Error] {
+    let len = list.len(pkt)
+    if at == len {
+        return Ok(None)
+    }
+    if at > len || len - at < 4 {
+        return Error(Length)
+    }
+    let words: u16 = list.word_be(pkt, at + 2)
+    let wide: u64 = int.widen(words)
+    let size = 4 * (wide + 1)
+    let left = len - at
+    if size > left {
+        return Error(Length)
+    }
+    let first = pkt[at]
+    if first >> 6 != 2 {
+        return Error(Version)
+    }
+    let count = first & 31
+    let pt = pkt[at + 1]
+    let body = at + 4
+    let mut end = at + size
+    let padded = (first & 32) != 0
+    if padded {
+        if size != left || size == 4 {
+            return Error(Padding)
+        }
+        let pad: u64 = int.widen(pkt[end - 1])
+        if pad == 0 || pad > size - 4 || (word_bodied(pt, count) && pad % 4 != 0) {
+            return Error(Padding)
+        }
+        end -= pad
+    }
+    let it = item(pkt, pt, count, padded, body, end)?
+    let start = at
+    at += size
+    Ok(Some(Packet(item: it, at: start, body: body, end: end, len: len)))
+}
+
+fn sender_ssrc(it: Item) -> Option[u32] {
+    match it {
+        Sr(info, _) => Some(info.ssrc),
+        Rr(ssrc, _) => Some(ssrc),
+        _ => None,
+    }
+}
+
+pub fn check(pkt: Bytes, mode: Mode) -> Result[u64, Error] {
+    let mut at = 0u64
+    let mut packets = 0u64
+    let mut sender: Option[u32] = None
+    let mut named = false
+    while let Some(p) = next(pkt, mut at)? {
+        if packets == 0 {
+            sender = sender_ssrc(p.item)
+            if mode == Compound {
+                if let None = sender {
+                    return Error(NotCompound)
+                }
+            }
+        }
+        if let Some(ssrc) = sender {
+            if !named {
+                if let Sdes(_) = p.item {
+                    if let Some(_) = cname(pkt, p, ssrc)? {
+                        named = true
+                    }
+                }
+            }
+        }
+        packets += 1
+    }
+    if packets == 0 {
+        return Error(Length)
+    }
+    if let Some(_) = sender {
+        if !named {
+            return Error(NoCname)
+        }
+    }
+    Ok(packets)
+}
+
+// A view is bound to its datagram and stays inside its unpadded body.
+fn bounded(pkt: Bytes, p: Packet) -> Result[(), Error] {
+    if list.len(pkt) != p.len || p.end > p.len || p.body > p.end {
+        return Error(Buffer)
+    }
+    Ok(())
+}
+
+pub fn block(pkt: Bytes, p: Packet, i: u8) -> Result[Block, Error] {
+    bounded(pkt, p)?
+    let (first, count) = match p.item {
+        Sr(_, n) => (24u64, n),
+        Rr(_, n) => (4u64, n),
+        _ => return Error(Index),
+    }
+    if i >= count {
+        return Error(Index)
+    }
+    let slot: u64 = int.widen(i)
+    let offset = first + BLOCK * slot
+    if offset > p.end - p.body || BLOCK > p.end - p.body - offset {
+        return Error(Buffer)
+    }
+    let at = p.body + offset
+    let high: u32 = int.widen(pkt[at + 5])
+    let low: u16 = list.word_be(pkt, at + 6)
+    let raw = (high << 16) | int.widen(low)
+    // Sign-extend the 24-bit cumulative loss.
+    let wide = if (raw & 0x800000) != 0 {
+        raw | 0xff000000
+    } else {
+        raw
+    }
+    Ok(Block(ssrc: list.word_be(pkt, at), fraction: pkt[at + 4], lost: int.truncate(wide), highest: list.word_be(pkt, at + 8), jitter: list.word_be(pkt, at + 12), lsr: list.word_be(pkt, at + 16), dlsr: list.word_be(pkt, at + 20)))
+}
+
+pub fn cname(pkt: Bytes, p: Packet, ssrc: u32) -> Result[Option[(u64, u64)], Error] {
+    bounded(pkt, p)?
+    let Sdes(count) = p.item else {
+        return Ok(None)
+    }
+    sdes_walk(pkt, p.body, p.end, count, Some(ssrc))
+}
+
+// The cursor is relative to the start of the FCI, after both SSRCs.
+fn fci_next(pkt: Bytes, p: Packet, pt: u8, entry: u64, mut at: u64) -> Result[Option[u64], Error] {
+    bounded(pkt, p)?
+    if p.end - p.body < 8 {
+        return Error(Buffer)
+    }
+    let fci = p.end - p.body - 8
+    if at >= fci {
+        at = fci
+        return Ok(None)
+    }
+    if entry > fci - at {
+        return Error(Body(pt))
+    }
+    let pos = p.body + 8 + at
+    at += entry
+    Ok(Some(pos))
+}
+
+pub fn nack_next(pkt: Bytes, p: Packet, mut at: u64) -> Result[Option[(u16, u16)], Error] {
+    bounded(pkt, p)?
+    let Nack(_, _) = p.item else {
+        return Ok(None)
+    }
+    let Some(pos) = fci_next(pkt, p, RTPFB, 4, mut at)? else {
+        return Ok(None)
+    }
+    Ok(Some((list.word_be(pkt, pos), list.word_be(pkt, pos + 2))))
+}
+
+pub fn fir_next(pkt: Bytes, p: Packet, mut at: u64) -> Result[Option[(u32, u8)], Error] {
+    bounded(pkt, p)?
+    let Fir(_) = p.item else {
+        return Ok(None)
+    }
+    let Some(pos) = fci_next(pkt, p, PSFB, 8, mut at)? else {
+        return Ok(None)
+    }
+    Ok(Some((list.word_be(pkt, pos), pkt[pos + 4])))
+}
+
+fn spare(out: Bytes, size: u64) -> Result[(), WriteError] {
+    let available = list.capacity(out) - list.len(out)
+    if size > available {
+        return Error(Capacity(Capacity(requested: size, available: available)))
+    }
+    Ok(())
+}
+
+// The common header of a packet of size bytes, which the caller has checked
+// is at most 2^16 words.
+fn put_head(mut out: Bytes, count: u8, pt: u8, size: u64) {
+    list.push(mut out, 0x80u8 | count)
+    list.push(mut out, pt)
+    let words: u16 = int.narrow(size / 4 - 1)
+    list.put_word_be(mut out, words)
+}
+
+fn put_block(mut out: Bytes, b: Block) {
+    list.put_word_be(mut out, b.ssrc)
+    list.push(mut out, b.fraction)
+    let bits: u32 = int.truncate(b.lost)
+    let low: u8 = int.truncate(bits >> 16)
+    list.push(mut out, low)
+    let rest: u16 = int.truncate(bits)
+    list.put_word_be(mut out, rest)
+    list.put_word_be(mut out, b.highest)
+    list.put_word_be(mut out, b.jitter)
+    list.put_word_be(mut out, b.lsr)
+    list.put_word_be(mut out, b.dlsr)
+}
+
+// One SR or RR with up to 31 blocks, then an RR under the same SSRC for each
+// further 31.
+fn write_reports(info: Option[SenderInfo], ssrc: u32, blocks: View[List[Block]], mut out: Bytes) -> Result[u64, WriteError] {
+    let n = list.len(blocks)
+    for b in blocks {
+        if b.lost < LOST_MIN || b.lost > LOST_MAX {
+            return Error(Unrepresentable)
+        }
+    }
+    let head = match info {
+        Some(_) => 28u64,
+        None => 8u64,
+    }
+    let first = if n < MAX_RC {
+        n
+    } else {
+        MAX_RC
+    }
+    let rest = n - first
+    let more = (rest + MAX_RC - 1) / MAX_RC
+    let size = head + BLOCK * first + 8 * more + BLOCK * rest
+    spare(out, size)?
+    let mut i = 0u64
+    let mut packet = 0u64
+    while packet == 0 || i < n {
+        let k = if n - i < MAX_RC {
+            n - i
+        } else {
+            MAX_RC
+        }
+        let count: u8 = int.narrow(k)
+        if packet == 0 {
+            if let Some(s) = info {
+                put_head(mut out, count, SR, 28 + BLOCK * k)
+                list.put_word_be(mut out, s.ssrc)
+                list.put_word_be(mut out, s.ntp)
+                list.put_word_be(mut out, s.rtp)
+                list.put_word_be(mut out, s.packets)
+                list.put_word_be(mut out, s.octets)
+            } else {
+                put_head(mut out, count, RR, 8 + BLOCK * k)
+                list.put_word_be(mut out, ssrc)
+            }
+        } else {
+            put_head(mut out, count, RR, 8 + BLOCK * k)
+            list.put_word_be(mut out, ssrc)
+        }
+        let stop = i + k
+        while i < stop {
+            put_block(mut out, blocks[i])
+            i += 1
+        }
+        packet += 1
+    }
+    Ok(size)
+}
+
+pub fn write_sr(info: SenderInfo, blocks: View[List[Block]], mut out: Bytes) -> Result[u64, WriteError] {
+    write_reports(Some(info), info.ssrc, blocks, mut out)
+}
+
+pub fn write_rr(ssrc: u32, blocks: View[List[Block]], mut out: Bytes) -> Result[u64, WriteError] {
+    write_reports(None, ssrc, blocks, mut out)
+}
+
+// One chunk: the SSRC, the CNAME item, its END byte and null octets to the
+// next 32-bit boundary.
+pub fn write_cname(ssrc: u32, name: Bytes, mut out: Bytes) -> Result[u64, WriteError] {
+    let n = list.len(name)
+    if n == 0 || n > 255 {
+        return Error(Unrepresentable)
+    }
+    let items = 6 + n
+    let chunk = items / 4 * 4 + 4
+    let size = 4 + chunk
+    spare(out, size)?
+    put_head(mut out, 1, SDES, size)
+    list.put_word_be(mut out, ssrc)
+    list.push(mut out, CNAME)
+    let len: u8 = int.narrow(n)
+    list.push(mut out, len)
+    list.append(mut out, name)
+    list.fill(mut out, chunk - items, 0u8)
+    Ok(size)
+}
+
+pub fn write_bye(ssrc: u32, mut out: Bytes) -> Result[u64, WriteError] {
+    spare(out, 8)?
+    put_head(mut out, 1, BYE, 8)
+    list.put_word_be(mut out, ssrc)
+    Ok(8)
+}
+
+pub fn write_nack(sender: u32, media: u32, pairs: View[List[(u16, u16)]], mut out: Bytes) -> Result[u64, WriteError] {
+    let n = list.len(pairs)
+    // A NACK holds at least one entry, and its length word counts 2^16 words.
+    if n == 0 || n > 65533 {
+        return Error(Unrepresentable)
+    }
+    let size = 12 + 4 * n
+    spare(out, size)?
+    put_head(mut out, 1, RTPFB, size)
+    list.put_word_be(mut out, sender)
+    list.put_word_be(mut out, media)
+    for (pid, blp) in pairs {
+        list.put_word_be(mut out, pid)
+        list.put_word_be(mut out, blp)
+    }
+    Ok(size)
+}
+
+pub fn write_pli(sender: u32, media: u32, mut out: Bytes) -> Result[u64, WriteError] {
+    spare(out, 12)?
+    put_head(mut out, 1, PSFB, 12)
+    list.put_word_be(mut out, sender)
+    list.put_word_be(mut out, media)
+    Ok(12)
+}
+
+pub fn write_fir(sender: u32, target: u32, seq: u8, mut out: Bytes) -> Result[u64, WriteError] {
+    spare(out, 20)?
+    put_head(mut out, 4, PSFB, 20)
+    list.put_word_be(mut out, sender)
+    list.put_word_be(mut out, 0u32)
+    list.put_word_be(mut out, target)
+    list.push(mut out, seq)
+    list.fill(mut out, 3, 0u8)
+    Ok(20)
+}

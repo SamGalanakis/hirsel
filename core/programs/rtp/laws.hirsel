@@ -240,8 +240,8 @@ fn index_estimate() -> Result[(), ()] {
     Ok(())
 }
 
-/// bug: Use the wrong packet's view or read past a truncated header, CSRC list or extension element.
-/// oracle: RFC 3550 section 5.1 and RFC 8285 sections 4.2 and 4.3. Chrome's complete header takes 32 bytes.
+/// bug: Use the wrong packet's view or read past a truncated header, CSRC list, extension element, RTCP report block or FCI entry.
+/// oracle: RFC 3550 sections 5.1, 6.1 and 6.4, RFC 5761 section 4 and RFC 8285 sections 4.2 and 4.3. Chrome's complete header takes 32 bytes.
 @test
 fn bounded_views() -> Result[(), ()] {
     let raw = chrome()
@@ -327,5 +327,273 @@ fn bounded_views() -> Result[(), ()] {
     if at != 4 {
         fail("opaque block did not leave a terminal cursor")
     }
+    rtcp_views()
     Ok(())
+}
+
+fn sr_sdes(padded_sr: bool) -> Bytes {
+    // SR, RC 0, SSRC 0x11223344: 28 bytes, length 6. Then an SDES chunk for that
+    // SSRC with CNAME "abc": 4 + 2 + 3 + END = 10, nulls to 12, length 3.
+    let mut b: Bytes = list.with_capacity(64)
+    list.append(mut b, if padded_sr {
+        b"\xa0\xc8\x00\x06"
+    } else {
+        b"\x80\xc8\x00\x06"
+    })
+    list.append(mut b, b"\x11\x22\x33\x44\xaa\xbb\xcc\xdd\x00\x11\x22\x33\x01\x02\x03\x04\x00\x00\x00\x05\x00\x00\x02\x58")
+    list.append(mut b, b"\x81\xca\x00\x03\x11\x22\x33\x44\x01\x03abc\x00\x00\x00")
+    b
+}
+
+fn refused(pkt: Bytes, mode: rtcp.Mode, expected: rtcp.Error) {
+    match rtcp.check(pkt, mode) {
+        Error(e) if e == expected => {},
+        _ => fail("datagram refused with the wrong error or accepted"),
+    }
+}
+
+fn accepted(pkt: Bytes, mode: rtcp.Mode, packets: u64) {
+    if result.unwrap(rtcp.check(pkt, mode)) != packets {
+        fail("valid datagram refused or miscounted")
+    }
+}
+
+fn only(pkt: Bytes) -> rtcp.Packet {
+    let mut at = 0u64
+    let Some(p) = result.unwrap(rtcp.next(pkt, mut at)) else {
+        fail("packet missing")
+    }
+    if at != list.len(pkt) || p.at != 0 || p.body != 4 {
+        fail("packet extent")
+    }
+    p
+}
+
+fn pli() -> Bytes {
+    b"\x81\xce\x00\x02\x00\x00\x00\x01\x00\x00\x00\x02"
+}
+
+fn nack() -> Bytes {
+    b"\x81\xcd\x00\x03\x00\x00\x00\x01\x00\x00\x00\x02\xff\x9c\x80\x09"
+}
+
+fn fir() -> Bytes {
+    b"\x84\xce\x00\x04\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x07\x00\x00\x00"
+}
+
+fn report(i: u64) -> rtcp.Block {
+    let n: u32 = int.narrow(i)
+    let lost: i32 = int.narrow(i)
+    rtcp.Block(ssrc: 0x1000 + n, fraction: int.narrow(i), lost: -lost, highest: 0x10000 + n, jitter: n, lsr: 0xb7050000 + n, dlsr: n << 8)
+}
+
+/// bug: Accept a datagram RFC 3550 or RFC 5506 refuses, misplace padding, or write feedback or report bytes that a receiver misreads.
+/// oracle: RFC 3550 sections 6.1, 6.4, 6.5 and A.2, RFC 4585 sections 6.2.1 and 6.3.1, RFC 5104 section 4.3.1.1, RFC 5506 section 3, RFC 5761 section 4, by hand. The SDES chunk is 4 + 2 + 3 + 1 = 10 bytes, nulls to 12, then 4 bytes of padding; 32 blocks are 8 + 24 * 31 = 752 bytes (length 187), then 8 + 24 = 32 (length 7).
+@test
+fn rtcp_compound_rules() -> Result[(), ()] {
+    let mut padded = sr_sdes(false)
+    list.truncate(mut padded, 28)
+    list.append(mut padded, b"\xa1\xca\x00\x04\x11\x22\x33\x44\x01\x03abc\x00\x00\x00\x00\x00\x00\x04")
+    accepted(padded, Compound, 2)
+    let mut at = 0u64
+    let Some(sr) = result.unwrap(rtcp.next(padded, mut at)) else {
+        fail("SR missing")
+    }
+    let Sr(info, 0) = sr.item else {
+        fail("SR item")
+    }
+    if info.ssrc != 0x11223344 || info.ntp != 0xaabbccdd00112233 || info.rtp != 0x01020304 || info.packets != 5 || info.octets != 600 || sr.end != 28 || at != 28 {
+        fail("SR sender info")
+    }
+    let Some(sdes) = result.unwrap(rtcp.next(padded, mut at)) else {
+        fail("SDES missing")
+    }
+    if sdes.item != Sdes(1) || sdes.body != 32 || sdes.end != 44 || sdes.len != 48 || at != 48 {
+        fail("padded SDES extent")
+    }
+    if result.unwrap(rtcp.cname(padded, sdes, 0x11223344)) != Some((38u64, 3u64)) || result.unwrap(rtcp.cname(padded, sdes, 0x55667788)) != None {
+        fail("CNAME lookup")
+    }
+    accepted(sr_sdes(false), Compound, 2)
+    accepted(pli(), Reduced, 1)
+    accepted(nack(), Reduced, 1)
+    accepted(fir(), Reduced, 1)
+    if only(pli()).item != Pli(1, 2) || only(nack()).item != Nack(1, 2) || only(fir()).item != Fir(1) {
+        fail("feedback items")
+    }
+    let fp = only(fir())
+    let mut cursor = 0u64
+    if result.unwrap(rtcp.fir_next(fir(), fp, mut cursor)) != Some((2u32, 7u8)) || result.unwrap(rtcp.fir_next(fir(), fp, mut cursor)) != None {
+        fail("FIR entry")
+    }
+    refused(sr_sdes(true), Compound, Padding)
+    refused(b"\x80\xc9\x00\x01\x11\x22\x33\x44", Compound, NoCname)
+    refused(b"\x80\xc9\x00\x01\x11\x22\x33\x44", Reduced, NoCname)
+    refused(b"\x80\xc9\x00\x01\x11\x22\x33\x44\x81\xca\x00\x03\x55\x66\x77\x88\x01\x03abc\x00\x00\x00", Compound, NoCname)
+    refused(pli(), Compound, NotCompound)
+    refused(b"\x81\xce\x00\x03\x00\x00\x00\x01\x00\x00\x00\x02", Reduced, Length)
+    refused(b"\x80\xc9\x00\x01\x11\x22\x33\x44\x82\xca\x00\x04\x11\x22\x33\x44\x01\x03abc\x00\x00\x00\x55\x66\x77\x88", Compound, Body(202))
+    refused(b"\x81\xcb\x00\x02\x11\x22\x33\x44\x05abc", Reduced, Body(203))
+    refused(b"\x81\xce\x00\x03\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00", Reduced, Body(206))
+    // Without padding a NACK's FCI is whole words; 6 bytes of FCI need a
+    // 2-byte pad count, which RFC 3550 section 6.4.1 refuses first.
+    refused(b"\xa1\xcd\x00\x04\x00\x00\x00\x01\x00\x00\x00\x02\xff\x9c\x80\x09\x00\x00\x00\x02", Reduced, Padding)
+    refused(b"\x81\xcd\x00\x02\x00\x00\x00\x01\x00\x00\x00\x02", Reduced, Body(205))
+    refused(b"\x84\xce\x00\x05\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x02\x07\x00\x00\x00\x00\x00\x00\x03", Reduced, Body(206))
+    let mut tail = sr_sdes(false)
+    list.append(mut tail, b"\xa0\xc9\x00\x02\x11\x22\x33\x44\x00\x00\x00\x03")
+    refused(tail, Compound, Padding)
+    if !rtcp.is_rtcp(b"\x80\xc0\x00\x00") || !rtcp.is_rtcp(b"\x80\xdf\x00\x00") || rtcp.is_rtcp(b"\x80\xbf\x00\x00") || rtcp.is_rtcp(b"\x80\xe0\x00\x00") {
+        fail("RTP and RTCP demultiplexing")
+    }
+    let mut blocks: List[rtcp.Block] = list.new()
+    let mut i = 0u64
+    while i < 32 {
+        list.push(mut blocks, report(i))
+        i += 1
+    }
+    let mut out: Bytes = list.with_capacity(1024)
+    if result.unwrap(rtcp.write_rr(0x11223344, view blocks, mut out)) != 784 || list.len(out) != 784 || list.slice(out, 0, 8) != b"\x9f\xc9\x00\xbb\x11\x22\x33\x44" || list.slice(out, 752, 760) != b"\x81\xc9\x00\x07\x11\x22\x33\x44" {
+        fail("RR split at 31 blocks")
+    }
+    at = 0
+    let Some(first) = result.unwrap(rtcp.next(out, mut at)) else {
+        fail("first RR")
+    }
+    let Some(second) = result.unwrap(rtcp.next(out, mut at)) else {
+        fail("second RR")
+    }
+    if first.item != Rr(0x11223344, 31) || second.item != Rr(0x11223344, 1) || at != 784 {
+        fail("RR items")
+    }
+    i = 0
+    while i < 32 {
+        let back = if i < 31 {
+            result.unwrap(rtcp.block(out, first, int.narrow(i)))
+        } else {
+            result.unwrap(rtcp.block(out, second, 0))
+        }
+        if back != report(i) {
+            fail("report block did not parse back")
+        }
+        i += 1
+    }
+    let mut cname_out: Bytes = list.with_capacity(512)
+    list.push(mut cname_out, 0xff)
+    let mut long: Bytes = list.new()
+    list.fill(mut long, 256, b'a')
+    let Error(Unrepresentable) = rtcp.write_cname(1, long, mut cname_out) else {
+        fail("256-byte CNAME written")
+    }
+    let mut tight: Bytes = list.with_capacity(15)
+    let Error(Capacity(c)) = rtcp.write_cname(0x11223344, b"abc", mut tight) else {
+        fail("CNAME written without spare")
+    }
+    if c.requested != 16 || c.available != list.capacity(tight) || list.len(tight) != 0 || cname_out != b"\xff" {
+        fail("CNAME refusal appended")
+    }
+    let mut named: Bytes = list.with_capacity(16)
+    if result.unwrap(rtcp.write_cname(0x11223344, b"abc", mut named)) != 16 || named != b"\x81\xca\x00\x03\x11\x22\x33\x44\x01\x03abc\x00\x00\x00" {
+        fail("CNAME bytes")
+    }
+    let mut fb: Bytes = list.with_capacity(64)
+    if result.unwrap(rtcp.write_pli(1, 2, mut fb)) != 12 || fb != pli() {
+        fail("PLI bytes")
+    }
+    list.clear(mut fb)
+    let mut pairs: List[(u16, u16)] = list.new()
+    list.push(mut pairs, (65436u16, 0x8009u16))
+    if result.unwrap(rtcp.write_nack(1, 2, view pairs, mut fb)) != 16 || fb != nack() {
+        fail("NACK bytes")
+    }
+    list.clear(mut fb)
+    if result.unwrap(rtcp.write_fir(1, 2, 7, mut fb)) != 20 || fb != fir() {
+        fail("FIR bytes")
+    }
+    Ok(())
+}
+
+/// bug: Misread a NACK FCI entry, or extend its PID or BLP bits against the wrong cycle.
+/// oracle: str0m src/rtp/rtcp/nack.rs:134-155 and RFC 4585 section 6.2.1. 196618 is cycle 3, sequence 10; 65436 - 10 > 32768, so PID 65436 is cycle 2: 196508, and BLP 0x8009 sets bits 0, 3 and 15: +1, +4 and +16.
+@test
+fn nack_pairs() -> Result[(), ()] {
+    let pkt = nack()
+    let p = only(pkt)
+    let mut at = 0u64
+    let Some((pid, blp)) = result.unwrap(rtcp.nack_next(pkt, p, mut at)) else {
+        fail("NACK pair missing")
+    }
+    if pid != 65436 || blp != 0b1000_0000_0000_1001 || at != 4 {
+        fail("NACK pair")
+    }
+    let Ok(None) = rtcp.nack_next(pkt, p, mut at) else {
+        fail("NACK walk did not end")
+    }
+    let mut lost: List[u64] = list.new()
+    let mut bit = 0u16
+    while bit <= 16 {
+        if bit == 0 || ((blp >> (bit - 1)) & 1) != 0 {
+            let wire = int.wrapping_add(pid, bit)
+            if let Index(i) = seq.estimate(196618, wire) {
+                list.push(mut lost, i)
+            }
+        }
+        bit += 1
+    }
+    if list.len(lost) != 4 || lost[0] != 196508 || lost[1] != 196509 || lost[2] != 196512 || lost[3] != 196524 {
+        fail("NACK expansion")
+    }
+    Ok(())
+}
+
+// The RTP-4 cases of bounded_views. The RR's block decodes by hand as SSRC
+// 0x55667788, fraction 64, lost -2, highest 0x1000D, jitter 42.
+fn rtcp_views() {
+    let rr = b"\x81\xc9\x00\x07\x11\x22\x33\x44\x55\x66\x77\x88\x40\xff\xff\xfe\x00\x01\x00\x0d\x00\x00\x00\x2a\xb7\x05\x20\x00\x00\x05\x40\x00"
+    let p = only(rr)
+    let b = result.unwrap(rtcp.block(rr, p, 0))
+    if b != rtcp.Block(ssrc: 0x55667788, fraction: 64, lost: -2, highest: 0x1000d, jitter: 42, lsr: 0xb7052000, dlsr: 0x54000) {
+        fail("report block fields")
+    }
+    let Error(Index) = rtcp.block(rr, p, 1) else {
+        fail("report block outside the count")
+    }
+    let short = list.slice(rr, 0, 31)
+    let Error(Buffer) = rtcp.block(short, p, 0) else {
+        fail("report block on a mismatched buffer")
+    }
+    let np = only(nack())
+    let mut at = 0u64
+    let Error(Buffer) = rtcp.nack_next(short, np, mut at) else {
+        fail("NACK walk on a mismatched buffer")
+    }
+    let Error(Buffer) = rtcp.cname(short, p, 0) else {
+        fail("CNAME lookup on a mismatched buffer")
+    }
+    if at != 0 {
+        fail("buffer refusal moved the cursor")
+    }
+    let mut n = 0u64
+    while n < 4 {
+        if rtcp.is_rtcp(list.slice(b"\x80\xc8\x00", 0, if n < 3 {
+            n
+        } else {
+            3
+        })) {
+            fail("RTCP shorter than its common header")
+        }
+        n += 1
+    }
+    let Error(Length) = rtcp.next(b"\x00\xc8\x00", mut at) else {
+        fail("version checked before length")
+    }
+    let Error(Length) = rtcp.check(b"\x81\xce\x00", Reduced) else {
+        fail("3-byte datagram")
+    }
+    let Error(Version) = rtcp.next(b"\x41\xce\x00\x02\x00\x00\x00\x01\x00\x00\x00\x02", mut at) else {
+        fail("version")
+    }
+    if at != 0 {
+        fail("refused packet moved the cursor")
+    }
 }

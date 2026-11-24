@@ -69,24 +69,30 @@ type HttpOpPlace = StaticFn[fn(mut Registry[(), HttpLawHandles]) -> Result[(), R
 
 type HttpOpListener: send {
     relay: Relay, listener: Listener, publisher: Sender[PubIn], clock: Clock, random: Random, tasks: Tasks,
-    place: HttpOpPlace, previous: Option[Describe], stage: u8,
+    place: HttpOpPlace, previous: Option[Describe], stage: u8, stop: Option[Receiver[u64]],
 }
 
 fn http_op_serve(take job: HttpOpListener) waits {
     let HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
-        place: definition, previous: take previous, stage) = take job
+        place: definition, previous: take previous, stage, stop: take stop) = take job
     let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
     let builder: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
-    let (take routes, take plans) = result.unwrap(http_router(reg, previous, take builder))
+    let (take generated_routes, take plans) = result.unwrap(http_router(reg, previous, take builder))
+    let routes = if stage == 2u8 {
+        let mut fault_routes: std.router.Builder[HttpConnection[(), HttpLawHandles, ()]] = std.router.builder()
+        result.unwrap(std.router.add_tagged(mut fault_routes, "POST", "/old", 1u64, std.router.raw(http_generated_handler)))
+        result.unwrap(std.router.add_tagged(mut fault_routes, "POST", "/fail", 1u64, std.router.raw(l15_fail_after_call)))
+        result.unwrap(std.router.build(take fault_routes))
+    } else { take generated_routes }
     let reads = http_read_access(pub_to, list.new(), 65536u64)
     let make: scoped[view] fn() -> HttpConnection[(), HttpLawHandles, ()] = fn() -> HttpConnection[(), HttpLawHandles, ()] {
         let registry_copy = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
-        let supplied = if stage == 1u8 {
-            wire((), Some(code.describe(http_op_bind_changed)), 8192u64, DEFAULT_STEPS)
-        } else {
-            wire((), Some(code.describe(http_op_bind_original)), 8192u64, DEFAULT_STEPS)
+        let supplied: Option[Wire[(), ()]] = match stage {
+            1u8 => Some(wire((), Some(code.describe(http_op_bind_changed)), 8192u64, DEFAULT_STEPS)),
+            2u8 => None,
+            _ => Some(wire((), Some(code.describe(http_op_bind_original)), 8192u64, DEFAULT_STEPS)),
         }
-        let mut client_state = http_connection(take registry_copy, arc.share(plans), Some(take supplied),
+        let mut client_state = http_connection(take registry_copy, arc.share(plans), take supplied,
             relay_endpoint(endpoint), random, clock, tasks, 65536u64)
         http_enable_reads(mut client_state, http_read_endpoint(reads))
         take client_state
@@ -95,7 +101,7 @@ fn http_op_serve(take job: HttpOpListener) waits {
     list.push(mut listeners, take listener)
     let mut cfg = http_law_config()
     cfg.reads_max = 1u64
-    result.unwrap(std.http.serve_with_factory(take listeners, clock, tasks, take cfg, take routes, 2097152u64, make, None))
+    result.unwrap(http_serve_connections(take listeners, clock, tasks, take cfg, take routes, 2097152u64, make, take stop))
 }
 
 type HttpOpDrive: send {
@@ -110,7 +116,7 @@ fn http_op_drive(take d: HttpOpDrive) waits {
         RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: 1024u64)))
     let (take listener, address) = result.unwrap(host.listen(d.net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let HttpOpDrive(actions: take actions, publisher: take pub_to, net, clock, random, tasks, place: definition, previous: take prior, stage) = take d
-    let job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: take prior, stage)
+    let job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: take prior, stage, stop: None)
     let server = task.spawn(tasks, bytes 4194304u64, take job, http_op_serve)
     match stage {
         0u8 => {

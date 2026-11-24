@@ -1,4 +1,5 @@
 hirsel.laws 1
+store@1/store/anonymous_startup_scan_keeps_current_open_caller src=c50e73ee86fc3e5c sig=8eec2a9daf2ef533 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/bucket_place_plan_at_floor src=5b7d9f9c13a61d2b sig=2fbbc2a99de1e268 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_test_claim_cut src=428771fc38f1e9e7 sig=93db78560d01c1da run=57538e9471c5f788 bug=- oracle=- rows=pending
 store@1/store/bucket_test_fence src=f679181d0706d7d0 sig=6f491dbb4fee536c run=6677ce756ba8a915 bug=- oracle=- rows=pending

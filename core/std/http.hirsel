@@ -1693,6 +1693,25 @@ resource type Completion: send {
     }
 }
 
+type RetireConnection[R: send]: send {
+    context: R,
+    run: fn(take R) waits,
+    completion: Completion
+}
+
+fn retire_connection[R: send](take job: RetireConnection[R]) waits {
+    let RetireConnection(context: take context, run, completion: take done) = take job
+    let mut completion = take done
+    completion.armed = true
+    run(take context)
+}
+
+fn ignore_retirement(take _context: ()) {}
+
+fn no_connection_retirement(_context: ()) -> bool {
+    false
+}
+
 fn upgraded(take job: UpgradeJob) waits {
     let UpgradeJob(transfer: take transfer, run, notice: take notice, completion: take done) = take job
     let mut completion = take done
@@ -1756,7 +1775,8 @@ type ConnectionStart[S: send]: send {
     inbox: Sender[ConnectionSignal],
     slot: u64,
     stop: Option[DrainSignal],
-    completion: Completion
+    completion: Completion,
+    request_done: Option[fn(S) waits]
 }
 
 fn commit_phase(inbox: Sender[ConnectionSignal], slot: u64, active: bool) -> bool waits {
@@ -1797,13 +1817,13 @@ fn shared_connection[S: shareable + send](take opening: ConnectionStart[S], stat
 }
 
 fn owned_connection[S: send](take opening: ConnectionStart[S], state: S) waits {
-    let ConnectionStart(socket: take socket, c, cfg: take cfg, peer, at: accepted, routes: take routes, inbox: take inbox, slot, stop: take signal, completion: take notice) = take opening
+    let ConnectionStart(socket: take socket, c, cfg: take cfg, peer, at: accepted, routes: take routes, inbox: take inbox, slot, stop: take signal, completion: take notice, request_done) = take opening
     let mut completion = take notice
     completion.armed = true
-    let _ = run_connection(take socket, c, cfg, peer, accepted, routes, state, inbox, slot, signal)
+    let _ = run_connection(take socket, c, cfg, peer, accepted, routes, state, inbox, slot, signal, request_done)
 }
 
-fn run_connection[S: send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, routes: router.Router[S], state: S, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal]) -> u64 waits {
+fn run_connection[S: send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, routes: router.Router[S], state: S, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal], request_done: Option[fn(S) waits]) -> u64 waits {
     let (r, w) = net.split(take socket)
     let mut reader = take r
     let mut writer = take w
@@ -1890,6 +1910,9 @@ fn run_connection[S: send](take socket: Socket, c: Clock, cfg: Config, peer: Ip,
         let (reuse, input_at, scratch_at, offer) = {
             let initial = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, stop: share_signal(signal), body_deadline: clock.deadline_after_ms(completed, cfg.body_ms), handler_deadline: clock.deadline_after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, read_control: ReadControl(inbox: channel.sender(inbox), slot: slot), fault: None, output_failed: false)
             let (step, remaining) = handle(input, parsed, policy, frame, take initial, mut out, cfg, routes, state, mut date)
+            if let Some(finished_request) = request_done {
+                finished_request(state)
+            }
             let mut body = match take remaining {
                 Some(take resumed) => take resumed,
                 None => return completed_replies,
@@ -2022,6 +2045,7 @@ type RefusalSlot {
 
 type HttpSlot {
     child: Task[()],
+    retiring: bool,
     first: bool,
     promoted: bool,
     reading: bool,
@@ -2338,13 +2362,38 @@ fn serve_without_managed[S: send, E: send](take listeners: List[Listener], c: Cl
     }
     let no_retirement: scoped[view] fn() = fn() {}
     let hooks = StreamHooks(enabled: false, make: make_unused, drive: unused_managed, retired: no_retirement)
-    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, take incoming)
+    let factory: scoped[view] fn() -> Result[ConnectionPlan[E, ()], Capacity] = fn() -> Result[ConnectionPlan[E, ()], Capacity] {
+        let state = make()?
+        Ok(ConnectionPlan(state: take state, retire: None))
+    }
+    serve_internal(take listeners, c, tasks, take cfg, take routes, factory, run, hooks, None, no_connection_retirement, ignore_retirement, take incoming)
+}
+
+/// The supervisor retains retirement authority until the connection task ends.
+pub type ConnectionPlan[S: send, R: send]: send {
+    state: S,
+    retire: Option[R]
+}
+
+pub fn serve_with_connection_plan[S: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, plan: scoped[view] fn() -> ConnectionPlan[S, R], request_done: fn(S) waits, needs_retirement: fn(R) -> bool, retire: fn(take R) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    let make: scoped[view] fn() -> Result[ConnectionPlan[S, R], Capacity] = fn() -> Result[ConnectionPlan[S, R], Capacity] {
+        bound bytes state_bytes {
+            plan()
+        }
+    }
+    let make_unused: scoped[view] fn() -> Result[(), Capacity] = fn() -> Result[(), Capacity] {
+        Ok(())
+    }
+    let never: scoped[view] fn() = fn() {}
+    let hooks = StreamHooks(enabled: false, make: make_unused, drive: unused_managed, retired: never)
+    let run: fn(take ConnectionStart[S], S) waits = owned_connection
+    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, Some(request_done), needs_retirement, retire, take incoming)
 }
 
 /// Uses the same HTTP connection loop and starts application subscription
 /// owners only after the supervisor has reserved a stream slot.
-pub fn serve_with_stream_factory[S: send, Q: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, make_state: scoped[view] fn() -> S, stream_bytes: u64, make_stream: scoped[view] fn() -> Q, drive: fn(take stream.Work, take Q) waits, retired: scoped[view] fn(), take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
-    let make: scoped[view] fn() -> Result[S, Capacity] = fn() -> Result[S, Capacity] {
+pub fn serve_with_stream_factory[S: send, Q: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], state_bytes: u64, make_state: scoped[view] fn() -> ConnectionPlan[S, R], request_done: fn(S) waits, needs_retirement: fn(R) -> bool, retire: fn(take R) waits, stream_bytes: u64, make_stream: scoped[view] fn() -> Q, drive: fn(take stream.Work, take Q) waits, retired: scoped[view] fn(), take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    let make: scoped[view] fn() -> Result[ConnectionPlan[S, R], Capacity] = fn() -> Result[ConnectionPlan[S, R], Capacity] {
         bound bytes state_bytes {
             make_state()
         }
@@ -2359,10 +2408,10 @@ pub fn serve_with_stream_factory[S: send, Q: send](take listeners: List[Listener
     }
     let hooks = StreamHooks(enabled: true, make: subscription, drive: drive, retired: cleanup)
     let run: fn(take ConnectionStart[S], S) waits = owned_connection
-    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, take incoming)
+    serve_internal(take listeners, c, tasks, take cfg, take routes, make, run, hooks, Some(request_done), needs_retirement, retire, take incoming)
 }
 
-fn serve_internal[S: send, E: send, Q: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make_state: scoped[view] fn() -> Result[E, Capacity], run: fn(take ConnectionStart[S], E) waits, hooks: StreamHooks[Q], take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+fn serve_internal[S: send, E: send, Q: send, R: send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], make_state: scoped[view] fn() -> Result[ConnectionPlan[E, R], Capacity], run: fn(take ConnectionStart[S], E) waits, hooks: StreamHooks[Q], request_done: Option[fn(S) waits], needs_retirement: fn(R) -> bool, retire: fn(take R) waits, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
     if !valid_config(cfg) {
         return Error(Configuration)
     }
@@ -2384,6 +2433,20 @@ fn serve_internal[S: send, E: send, Q: send](take listeners: List[Listener], c: 
         None => (None, None),
     }
     let http_slots = order.min(settings.http_max, settings.sockets_max)
+    let has_retirement = match request_done {
+        Some(_) => true,
+        None => false
+    }
+    let mut retiring: List[Option[R]] = if has_retirement {
+        list.with_capacity(http_slots)
+    } else {
+        list.new()
+    }
+    if has_retirement {
+        for _ in 0u64 .. http_slots {
+            list.push(mut retiring, None)
+        }
+    }
     let upgrade_slots = order.min(settings.upgrades_max, settings.sockets_max)
     let stream_slots = order.min(settings.streams_max, settings.sockets_max)
     let promoted_slots = int.saturating_add(upgrade_slots, stream_slots)
@@ -2456,13 +2519,6 @@ fn serve_internal[S: send, E: send, Q: send](take listeners: List[Listener], c: 
                 } else if vacant == http_slots || admitted >= settings.sockets_max || from_ip >= settings.ip_sockets_max || in_first_phase >= settings.conns_max {
                     refuse(mut group.refusals, take socket, at)
                 } else {
-                    let completion = match Completion(done: channel.sender(done_tx), wake: channel.sender(tx), slot: HttpChild(vacant), armed: false) {
-                        Ok(take x) => take x,
-                        Error(_) => {
-                            refuse(mut group.refusals, take socket, at)
-                            continue
-                        },
-                    }
                     let owned_state = match make_state() {
                         Ok(take state) => take state,
                         Error(_) => {
@@ -2470,17 +2526,30 @@ fn serve_internal[S: send, E: send, Q: send](take listeners: List[Listener], c: 
                             continue
                         },
                     }
-                    let opening = ConnectionStart(socket: take socket, c, cfg: arc.share(settings), peer, at, routes: arc.share(routing), inbox: channel.sender(tx), slot: vacant, stop: share_signal(signal), completion: take completion)
-                    let job = ConnectionJob(opening: take opening, state: take owned_state, run)
+                    let completion = match Completion(done: channel.sender(done_tx), wake: channel.sender(tx), slot: HttpChild(vacant), armed: true) {
+                        Ok(take x) => take x,
+                        Error(_) => {
+                            refuse(mut group.refusals, take socket, at)
+                            continue
+                        },
+                    }
+                    let ConnectionPlan(state: take connection_state, retire: take retirement) = take owned_state
+                    let opening = ConnectionStart(socket: take socket, c, cfg: arc.share(settings), peer, at, routes: arc.share(routing), inbox: channel.sender(tx), slot: vacant, stop: share_signal(signal), completion: take completion, request_done)
+                    let job = ConnectionJob(opening: take opening, state: take connection_state, run)
                     let run_child: fn(take ConnectionJob[S, E]) waits = connection
                     match task.try_spawn(tasks, bytes child_bytes, take job, run_child) {
                         Ok(take child) => {
-                            group.connections[vacant] = Some(HttpSlot(child: take child, first: true, promoted: false, reading: false, active: false, ip))
+                            if has_retirement {
+                                retiring[vacant] = take retirement
+                            }
+                            group.connections[vacant] = Some(HttpSlot(child: take child, retiring: false, first: true, promoted: false, reading: false, active: false, ip))
                             in_first_phase += 1
                         },
                         Error((_, take refused)) => {
                             let ConnectionJob(opening: take returned, ..) = take refused
-                            let ConnectionStart(socket: take declined, ..) = take returned
+                            let ConnectionStart(socket: take declined, completion: take rejected, ..) = take returned
+                            let mut unarmed = take rejected
+                            unarmed.armed = false
                             refuse(mut group.refusals, take declined, at)
                         },
                     }
@@ -2533,7 +2602,26 @@ fn serve_internal[S: send, E: send, Q: send](take listeners: List[Listener], c: 
                     close_admission(mut group)
                 }
             },
-            StopExpired => return Ok(()),
+            StopExpired => {
+                if !has_retirement {
+                    return Ok(())
+                }
+                // Transport work stops at the deadline. The supervisor still
+                // joins these owners and hands any outstanding fence to its
+                // retirement task before releasing the connection slot.
+                for i in 0u64 .. http_slots {
+                    if let Some(take active) = replace(mut group.connections[i], None) {
+                        let mut live_job = take active
+                        if !live_job.retiring {
+                            task.cancel(mut live_job.child)
+                        }
+                        group.connections[i] = Some(take live_job)
+                    }
+                }
+                for i in 0u64 .. promoted_slots {
+                    let _ = replace(mut group.promoted[i], None)
+                }
+            },
             StreamReady(slot, ticket, take recipient) => {
                 let current = replace(mut group.promoted[slot], None)
                 if let Some(take held) = take current {
@@ -2629,10 +2717,26 @@ fn serve_internal[S: send, E: send, Q: send](take listeners: List[Listener], c: 
                 HttpChild(i) => {
                     let ended = replace(mut group.connections[i], None)
                     if let Some(take s) = take ended {
-                        let HttpSlot(child: take child, first, promoted: _, reading: _, active: _, ip: _) = take s
+                        let HttpSlot(child: take child, first, ip, ..) = take s
+                        let retirement = if has_retirement {
+                            replace(mut retiring[i], None)
+                        } else {
+                            None
+                        }
                         let _ = task.join(take child)
                         if first {
                             in_first_phase -= 1
+                        }
+                        let retirement_work = match take retirement {
+                            Some(take state) if needs_retirement(state) => Some(take state),
+                            _ => None,
+                        }
+                        if let Some(take state) = take retirement_work {
+                            let completion = Completion(done: channel.sender(done_tx), wake: channel.sender(tx), slot: HttpChild(i), armed: false) ?=> |_| Configuration
+                            let job = RetireConnection(context: take state, run: retire, completion: take completion)
+                            let retire_child: fn(take RetireConnection[R]) waits = retire_connection
+                            let retired_child = task.spawn(tasks, bytes 4096u64, take job, retire_child)
+                            group.connections[i] = Some(HttpSlot(child: take retired_child, retiring: true, first: false, promoted: false, reading: false, active: true, ip))
                         }
                     }
                 },

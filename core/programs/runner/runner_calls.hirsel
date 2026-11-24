@@ -715,18 +715,16 @@ pub fn law_calls_duplicate(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool wa
     served(c, r, tasks, n, drive_duplicate)
 }
 
-// The same credential, stream, position and argument must run fresh in the
-// second anonymous session. Each admission and reply commits, so write
-// returns 3 on the first call and 5 on the second.
-fn anonymous_reply(d: Drive) -> Option[u64] waits {
+// A fresh anonymous session runs the same call. Retirement can add an intervening commit.
+fn anonymous_reply(d: Drive, birth: u64) -> Option[u64] waits {
     let requested = client_keys()
     let unbound: Option[runner.Wire[(), ()]] = None
     let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post,
         code.describe(place), requested, Some(clone(d.token)), 0u64, 2097152u64))
-    wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 7u64), 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
+    wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: 7u64), 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
     let observed = match wire_client.next(wire) {
         Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 =>
-            if done[0u64].stream == store.StreamId(t: 0u64, n: 7u64) && done[0u64].p == 0u64 { ok_value(done[0u64].outcome) } else { None },
+            if done[0u64].stream == store.StreamId(t: birth, n: 7u64) && done[0u64].p == 0u64 { ok_value(done[0u64].outcome) } else { None },
         _ => None,
     }
     let _ = wire_client.close(take wire)
@@ -735,8 +733,10 @@ fn anonymous_reply(d: Drive) -> Option[u64] waits {
 }
 
 fn drive_anonymous_fresh(take d: Drive) -> () waits {
-    want(anonymous_reply(d) == Some(3u64), "anonymous sessions: first call commits")
-    want(anonymous_reply(d) == Some(5u64), "anonymous sessions: second call runs fresh")
+    let birth = host.wall_ms(d.clock)
+    want(anonymous_reply(d, birth) == Some(3u64), "anonymous sessions: first call commits")
+    let second = anonymous_reply(d, birth)
+    want(second == Some(5u64) || second == Some(6u64), "anonymous sessions: second call runs fresh")
 }
 
 pub fn law_anonymous_fresh(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {

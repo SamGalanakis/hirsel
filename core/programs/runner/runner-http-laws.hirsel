@@ -205,7 +205,7 @@ fn http_law_serve(take job: HttpLawServer) waits {
             let registry_copy = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
             http_connection(take registry_copy, arc.share(prepared_routes), http_law_bind(), relay_endpoint(endpoint), random, clock, tasks, 65536u64)
         }
-        result.unwrap(std.http.serve_with_factory(take listeners, clock, tasks, http_law_config(), take router, 2097152u64, connection, None))
+        result.unwrap(http_serve_connections(take listeners, clock, tasks, http_law_config(), take router, 2097152u64, connection, None))
         return
     }
     let mut routes: std.router.Builder[HttpLawRoute] = std.router.builder()

@@ -23,6 +23,7 @@ pub opaque type HttpConnection[G: send, H: shareable + inert + send, B: send]: s
     tasks: Tasks,
     budget: u64,
     reads: Option[HttpReadAccess],
+    retire: Latest[Option[Bytes]],
 }
 
 pub fn http_connection[G: send, H: shareable + inert + send, B: send](take registered: Registry[G, H],
@@ -31,7 +32,7 @@ pub fn http_connection[G: send, H: shareable + inert + send, B: send](take regis
     let mut registry_copy = take registered
     for key in routes.gone { result.unwrap(retain_gone(mut registry_copy, std.http.copy_bytes(key))) }
     HttpConnection(registered: take registry_copy, routes: take routes, wire: take supplied, relay: take relay,
-        random: random, clock: clock, tasks: tasks, budget: budget, reads: None)
+        random: random, clock: clock, tasks: tasks, budget: budget, reads: None, retire: latest.new(arc.new(None)))
 }
 
 pub fn http_enable_reads[G: send, H: shareable + inert + send, B: send](mut connection: HttpConnection[G, H, B], take access: HttpReadAccess) {
@@ -243,6 +244,9 @@ fn http_generated_handler[G: send, H: shareable + inert + send, B: send](req: st
     }
     match operation.kind {
         Transact => {
+            if sent.stream.caller.issuer == 1u8 {
+                latest.publish(state.retire, arc.new(Some(clone(sent.stream.caller.subject))))
+            }
             let delivery = relay_call(state.relay, take sent, state.clock, state.tasks, deadline)
             Ok(Reply(http_render_delivery(req, binding, operation.output, take delivery)?))
         },
@@ -271,4 +275,48 @@ fn http_accepts_events(req: std.http.Request) -> bool {
         index += 1u64
     }
     false
+}
+
+fn http_retire_subject(subject: Option[Bytes]) -> Option[Bytes] { clone(subject) }
+
+fn http_retire_request(relay: Relay, register: Latest[Option[Bytes]]) waits {
+    let subject_at_end = http_retire_subject(latest.read(register))
+    if let Some(subject) = subject_at_end {
+        let caller = store.Caller(issuer: 1u8, subject: clone(subject))
+        relay_end(relay, caller)
+        let clear: Option[Bytes] = None
+        latest.publish(register, arc.new(take clear))
+    }
+}
+
+fn http_request_finished[G: send, H: shareable + inert + send, B: send](state: HttpConnection[G, H, B]) waits {
+    http_retire_request(state.relay, state.retire)
+}
+
+type HttpConnectionRetirement: send { relay: Relay, register: Latest[Option[Bytes]] }
+
+fn http_needs_retirement(ended: HttpConnectionRetirement) -> bool {
+    let state: Option[Bytes] = http_retire_subject(latest.read(ended.register))
+    match state { Some(_) => true, None => false }
+}
+
+fn http_retire_connection(take ended: HttpConnectionRetirement) waits {
+    http_retire_request(ended.relay, ended.register)
+}
+
+fn http_connection_plan[G: send, H: shareable + inert + send, B: send](take state: HttpConnection[G, H, B]) -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] {
+    let register = latest.handle(state.retire)
+    let relay = relay_endpoint(state.relay)
+    let cleanup = HttpConnectionRetirement(relay: take relay, register: take register)
+    std.http.ConnectionPlan(state: take state, retire: Some(take cleanup))
+}
+
+pub fn http_serve_connections[G: send, H: shareable + inert + send, B: send](take listeners: List[Listener], clock: Clock, tasks: Tasks,
+    take cfg: std.http.Config, take routes: std.router.Router[HttpConnection[G, H, B]], state_bytes: u64,
+    make_state: scoped[view] fn() -> HttpConnection[G, H, B], take stop: Option[Receiver[u64]]) -> Result[(), std.http.ServeError] waits {
+    let plan: scoped[view] fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] = fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] {
+        http_connection_plan(make_state())
+    }
+    let request_done: fn(HttpConnection[G, H, B]) waits = http_request_finished
+    std.http.serve_with_connection_plan(take listeners, clock, tasks, take cfg, take routes, state_bytes, plan, request_done, http_needs_retirement, http_retire_connection, take stop)
 }

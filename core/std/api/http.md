@@ -28,6 +28,13 @@ value for each admitted connection. The supervisor calls the factory within
 `state_bytes`. Live state allocations stay charged there until they drop.
 `serve` and `serve_with_stop` share one state allocation.
 
+`serve_with_connection_plan` calls `request_done` after handling and writing a
+request. The supervisor keeps a private retirement value for each admitted
+connection. After the owner ends, the supervisor checks that value and, if
+retirement is pending, runs it in a task that keeps the connection slot.
+`serve_with_stream_factory` accepts the same connection lifecycle callbacks
+alongside its stream factory.
+
 Build `routes` with [router](router.md). A raw handler receives an anchored
 `Request`, a scratch `Region`, a mutable `Responder` and a read-only
 view of shared state. The region's allocations

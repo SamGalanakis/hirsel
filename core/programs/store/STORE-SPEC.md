@@ -2011,6 +2011,9 @@ For a missing row at p = 0, apply the Caller's floor before considering admissio
 
 **Retention.** The defaults are 60 days, 256 streams per Caller, and one Place stream per 4 KiB of the sized resident allowance. A bound stream that was deleted cannot admit a new position 0. Expiry raises the Place floor. Eviction raises the Caller floor. When a sweep deletes the Caller floor, the same commit incorporates its time into the Place floor.
 
+Issuer 1 is reserved for anonymous sessions. A head retires an anonymous Caller after its transport fences all forwarders. A quiet retirement deletes its rows and metadata in one commit and adjusts the Place count. At startup, the head walks the issuer-1 range with an in-memory cursor. Each step examines at most eight Callers and reclaims at most one from the prior open. Current-open Callers are skipped. The transport's 128-bit random subject and the binding's issuer-1 refusal prevent a later request from naming a retired anonymous Caller.
+
+
 ### 1.9 Pins and forks (rows 8 and 9)
 
 ```hirsel

@@ -27,7 +27,7 @@ fn rerun_parked[G: send, H: shareable + inert + send](mut hd: Head[G, H], drain:
             if now >= hd.parked[i].req.deadline {
                 let ParkedCall(req: take q, served: take parked_call) = list.remove(mut hd.parked, i)
                 let _ = store.cancel_parked(mut hd.db, take parked_call)
-                commitless(mut hd, take q, Refused(Deadline))?
+                refuse_admitted(mut hd, take q, Deadline)?
             } else {
                 i += 1u64
             }
@@ -61,7 +61,7 @@ fn execute[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Req
     let ran = match take tried {
         Ok(Served(take result)) => take result,
         Ok(Unregistered(take pending_run)) => return reply_only(mut hd, take q, take pending_run, Failed(Gone)),
-        Error(Full(_)) => return commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Full(_)) => return refuse_admitted(mut hd, take q, Overloaded),
         Error(take problem) => return Error(take problem),
     }
     settle_served(mut hd, take q, take ran)
@@ -72,12 +72,12 @@ fn settle_served[G: send, H: shareable + inert + send](mut hd: Head[G, H], take 
         Ok(Committed(take receipt)) => answered(mut hd, take q, take receipt),
         Ok(Kept(take receipt)) => answered(mut hd, take q, take receipt),
         Ok(Failed(take pending_run, stop)) => reply_only(mut hd, take q, take pending_run, failed_stop(stop)?),
-        Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Ok(NoRoom(_, _)) => refuse_admitted(mut hd, take q, Overloaded),
         Ok(Parked(take parked_call)) => {
             list.push(mut hd.parked, ParkedCall(req: take q, served: take parked_call))
             Ok(())
         },
-        Error(Before(Full(_), _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Error(Before(Full(_), _)) => refuse_admitted(mut hd, take q, Overloaded),
         Error(Before(take problem, _)) => Error(take problem),
         Error(After(take problem)) => Error(take problem),
     }
@@ -142,4 +142,10 @@ fn begin[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Reque
         StreamFuture(at) => commitless(mut hd, take q, Refused(Malformed(Bad(kind: 7u32, at: at)))),
         StreamOverloaded => commitless(mut hd, take q, Refused(Overloaded)),
     }
+}
+
+fn refuse_admitted[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: Request, take reason: Refusal) -> Result[(), store.Error] waits {
+    let name = store.StreamKey(caller: clone(q.caller), id: q.stream_id)
+    store.release_stream_admit(mut hd.db, name, q.p)?
+    commitless(mut hd, take q, Refused(take reason))
 }

@@ -146,7 +146,7 @@ fn test_unique_conflict_wire(clock: Clock, random: Random) -> Result[(), String]
     let reply_codec: std.codec.Codec[Result[(), u32]] = std.codec.of()
     let (take key, _) = result.unwrap(described(code.identity(run), code.revision(run), Transact, std.codec.of_u32(), reply_codec))
     let (release_to, releases): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
-    let mut head = Head(db: take db, r: take entries, replay_identity: list.new(),
+    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(),
         h: arc.new(clone(data)), out: take release_to, busy: map.new(), waiting: list.new(),
         group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new())
     let (to, heard): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)

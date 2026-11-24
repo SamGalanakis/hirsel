@@ -164,12 +164,11 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
         for reply_slot in 0u64 .. ran.replies.count {
             let drafted_reply = data_row(ran.replies, reply_slot)
             if map.contains(db.admits, drafted_reply.key) {
-                if let Some(raw) = drafted_reply.value {
-                    let encoded = staged_bytes(raw)
-                    if result.unwrap(stream_state(encoded)).state == 2u8 {
-                        let _ = map.remove(mut db.admits, drafted_reply.key)
-                    }
+                let settled = match drafted_reply.value {
+                    None => true,
+                    Some(raw) => result.unwrap(stream_state(staged_bytes(raw))).state == 2u8,
                 }
+                if settled { let _ = map.remove(mut db.admits, drafted_reply.key) }
             }
         }
     }

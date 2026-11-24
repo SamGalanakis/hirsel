@@ -59,7 +59,9 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     let reads = http_read_access(pub_to, declarations, frame_limit)
     let (relay_to, _relay_in): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(1u64)
     let (credits, _credit_rx): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let relay = Relay(inbox: take relay_to, credit: take credits)
+    let (ends, _ends_rx): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (head, _head_rx): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
+    let relay = Relay(inbox: take relay_to, credit: take credits, end_credit: take ends, head: take head)
     let make: scoped[view] fn() -> HttpConnection[(), SseLawTables, ()] = fn() -> HttpConnection[(), SseLawTables, ()] {
         let registry_copy = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
         let supplied = wire((), Some(code.describe(http_op_bind_original)), 8192u64, DEFAULT_STEPS)

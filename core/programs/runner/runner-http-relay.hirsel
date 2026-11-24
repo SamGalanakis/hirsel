@@ -7,7 +7,9 @@ pub type RelayConfig: send {
     arg_max: u64,
 }
 
-pub opaque type Relay: send { inbox: Sender[RelayEvent], credit: Sender[()] }
+pub opaque type Relay: send {
+    inbox: Sender[RelayEvent], credit: Sender[()], end_credit: Sender[()], head: Sender[HeadInput]
+}
 
 pub type RelayOutcome: send { payload: Bytes, replayed: bool }
 
@@ -15,7 +17,7 @@ pub type RelayDelivery: send = Answered(RelayOutcome) | RefusedBeforePost(Refusa
 
 type RelayResult: send = Delivered(RelayOutcome) | HandlerExpired
 
-type RelayEvent: send = RelayAsk(Send, Sender[RelayResult]) | RelayExpired(u64) | RelayTold(u64, RelayOutcome)
+type RelayEvent: send = RelayAsk(Send, Sender[RelayResult]) | RelayExpired(u64) | RelayTold(u64, RelayOutcome) | RelayEnd(Bytes, Sender[()])
 
 type RelayRecipient: send { to: Sender[RelayEvent], position: u64, backing: Bytes }
 type RelayTell: send { to: Sender[RelayEvent], position: u64, result: RelayOutcome }
@@ -54,7 +56,7 @@ fn relay_key_max[G: send, H: shareable + inert + send](reg: Registry[G, H]) -> u
 }
 
 fn relay_inbox_size(c: RelayConfig) -> Option[u64] {
-    int.checked_add(int.checked_add(c.http_max, c.sends_max)?, c.positions_max)
+    int.checked_add(int.checked_add(int.checked_mul(2u64, c.http_max)?, c.sends_max)?, c.positions_max)
 }
 
 fn head_lease_bytes() -> u64 {
@@ -76,7 +78,7 @@ fn relay_position_bytes(arg_max: u64, key_max: u64) -> Option[u64] {
 
 fn relay_child_bytes(c: RelayConfig, key_max: u64) -> Option[u64] {
     let inbox = charge.channel(bytes[RelayEvent], relay_inbox_size(c)?)?
-    let credits = charge.channel(bytes[()], c.http_max)?
+    let credits = int.checked_mul(2u64, charge.channel(bytes[()], c.http_max)?)?
     let sends = charge.seq(bytes[RelaySend], c.sends_max)?
     let timers = int.checked_mul(c.sends_max, charge.task(bytes[()], 4096u64)?)?
     let records = charge.seq(bytes[RelayPosition], c.positions_max)?
@@ -120,7 +122,7 @@ pub fn start_relay[G: send, H: shareable + inert + send](r: Registry[G, H], head
 }
 
 pub fn relay_endpoint(r: Relay) -> Relay {
-    Relay(inbox: channel.sender(r.inbox), credit: channel.sender(r.credit))
+    Relay(inbox: channel.sender(r.inbox), credit: channel.sender(r.credit), end_credit: channel.sender(r.end_credit), head: channel.sender(r.head))
 }
 
 pub fn relay_call(r: Relay, take send: Send, clock: Clock, tasks: Tasks, handler_deadline: u64) -> RelayDelivery waits {
@@ -142,32 +144,56 @@ pub fn relay_call(r: Relay, take send: Send, clock: Clock, tasks: Tasks, handler
     }
 }
 
+// A resumed retire can find its first end still queued. Waiting for an end
+// credit cannot consume Ask capacity, and publication after the credit does
+// not allocate or wait.
+fn relay_end(r: Relay, caller: Caller) waits {
+    let (to, from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let end = RelayEnd(clone(caller.subject), take to)
+    if let Ok(()) = channel.send(r.end_credit, ()) {
+        if let Ok(()) = channel.try_send(r.inbox, take end) {
+            let _ = channel.receive(from)
+        }
+    }
+    let _ = channel.send(r.head, RetireCaller(clone(caller)))
+}
+
 fn relay_owner(take initial: RelayStart) waits {
-    let Some((take ready, take from, take credits)) = relay_boot(take initial) else { return }
+    let Some((take ready, take from, take credits, take end_credits)) = relay_boot(take initial) else { return }
     let mut state = take ready
     while let Ok(take event) = channel.receive(from) {
-        if let RelayAsk(..) = event { let _ = channel.try_receive(credits) }
+        relay_refund(event, credits, end_credits)
         relay_step(mut state, take event)
     }
 }
 
-fn relay_boot(take initial: RelayStart) -> Option[(RelayState, Receiver[RelayEvent], Receiver[()])] {
+fn relay_boot(take initial: RelayStart) -> Option[(RelayState, Receiver[RelayEvent], Receiver[()], Receiver[()])] {
     let RelayStart(to: take started, head: take head, clock: clock, tasks: tasks, config: c, inbox_size: inbox_size, key_max: key_max) = take initial
     let (inbox, from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(inbox_size)
     let (credit, credits): (Sender[()], Receiver[()]) = channel.new(c.http_max)
-    let owner = result.unwrap(head_lease(LifecycleHead(take head)))
+    let (end_credit, end_credits): (Sender[()], Receiver[()]) = channel.new(c.http_max)
+    let owner = result.unwrap(head_lease(LifecycleHead(channel.sender(head))))
     let mut sends: List[RelaySend] = list.with_capacity(c.sends_max)
     for _ in 0u64 .. c.sends_max { list.push(mut sends, Vacant) }
     let positions: List[RelayPosition] = list.with_capacity(c.positions_max)
     let state = RelayState(sends: take sends, positions: take positions, generation: 0u64, owner: take owner,
         inbox: channel.sender(inbox), clock: clock, tasks: tasks, config: c, key_max: key_max)
-    if let Error(_) = channel.try_send(started, Relay(inbox: take inbox, credit: take credit)) { return None }
-    Some((take state, take from, take credits))
+    if let Error(_) = channel.try_send(started, Relay(inbox: take inbox, credit: take credit, end_credit: take end_credit, head: take head)) { return None }
+    Some((take state, take from, take credits, take end_credits))
+}
+
+fn relay_refund(event: RelayEvent, ask: Receiver[()], ends: Receiver[()]) {
+    match event {
+        RelayAsk(..) => { let _ = channel.try_receive(ask) },
+        RelayEnd(..) => { let _ = channel.try_receive(ends) },
+        _ => (),
+    }
 }
 
 fn relay_step(mut state: RelayState, take event: RelayEvent) waits {
     match take event {
         RelayAsk(take send, take reply) => relay_ask(mut state, take send, take reply),
+        RelayEnd(_, ack) => { let _ = channel.try_send(ack, ()) },
         RelayExpired(id) => {
             for i in 0u64 .. list.len(state.sends) {
                 let active = match state.sends[i] { Active(n, ..) => n == id, _ => false }

@@ -1346,6 +1346,7 @@ type Waiting: send { req: Request, parked: bool, held_by_pause: bool }
 
 type Head[G: send, H: shareable + inert + send] {
     db: store.Db,
+    anonymous: AnonymousStreams,
     r: Registry[G, H],
     replay_identity: Bytes,
     h: Arc[H],
@@ -1438,7 +1439,7 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
             return Ok(None)
         }
     }
-    let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new())
+    let mut hd = Head(db: take owned, anonymous: anonymous_streams(), r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive, parked: list.new())
     let mut tables: Option[triggers.Tables] = None
     let (take woken, take helpers, take health_setup) = head_wakes(mut hd, take inbox, drain, tasks)
     let served = match take health_setup {
@@ -1518,7 +1519,7 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
     }
 }
 
-pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
+pub type HeadInput: send = RunRequest(Req) | RetireCaller(Caller) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
     | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64)
     | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle
     | SyncWake | ParkWake | StoreUnhealthy | InboxEnded
@@ -2267,6 +2268,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                 let _ = channel.try_send(host_result, take kept)
                 continue
             },
+            Some(RetireCaller(take caller)) => { retire_head_caller(mut head, caller); continue },
             Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
             Some(HeadFinish) => { release_held(mut head, true)?; return Ok(false) },
             Some(SyncWake) => { release_held(mut head, false)?; continue },
@@ -2321,6 +2323,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             }
             continue
         }
+        if none(pause) && advance_stream_retirement(mut head)? { continue }
         if ended && list.len(head.parked) == 0u64 { return Ok(false) }
         match head_next(inbox, true) { Some(take message) => { input = Some(take message) }, None => return Ok(false) }
     }
@@ -2330,6 +2333,7 @@ fn head_arrival[G: send, H: shareable + inert + send](mut hd: Head[G, H], take m
     let Req(e: take e) = take message
     match take e {
         Requested(take q) => {
+            see_anonymous(mut hd.anonymous, q.caller)
             refresh_waiting(mut hd, true)
             if latest.read(q.live).active {
                 let mut req = take q
@@ -2498,8 +2502,8 @@ fn reply_only[G: send, H: shareable + inert + send](mut hd: Head[G, H], take q: 
             let version = store.version(store.snapshot(hd.db))
             worker(mut hd, take q, take outcome, receipt.ticket, version)
         },
-        Ok(NoRoom(_, _)) => commitless(mut hd, take q, Refused(Overloaded)),
-        Error(Before(Full(_), _)) => commitless(mut hd, take q, Refused(Overloaded)),
+        Ok(NoRoom(_, _)) => refuse_admitted(mut hd, take q, Overloaded),
+        Error(Before(Full(_), _)) => refuse_admitted(mut hd, take q, Overloaded),
         Error(Before(take problem, _)) => Error(take problem),
         Error(After(take problem)) => Error(take problem),
         _ => fail("runner: invalid conclude outcome"),
@@ -2602,6 +2606,8 @@ fn release_held[G: send, H: shareable + inert + send](mut hd: Head[G, H], wait: 
                     Error(take problem) => return Error(take problem),
                 }
                 refresh_waiting(mut hd, true)
+                hd.anonymous.blocked = false
+                let _ = advance_stream_retirement(mut hd)?
             },
         }
     }
@@ -3090,7 +3096,7 @@ fn trigger_effect[G: send, H: shareable + inert + send](mut hd: Head[G, H], trig
 pub fn journal_attempt_gate[H: shareable + inert + send](take db: store.Db, take registered: Registry[(), H], take handles: H, t: triggers.Tables, a: triggers.Attempt, key: Bytes, arg: Bytes)
     -> (store.Db, u64, Result[Result[Outcome, TriggerCallError], store.Error]) waits {
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(2u64)
-    let mut head = Head(db: take db, r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to,
+    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take registered, replay_identity: list.new(), h: arc.new(take handles), out: take to,
         busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new())
     let response = trigger_effect(mut head, t, store.Caller(issuer: 0u8, subject: list.new()), a, key, arg)
     let at = store.version(store.snapshot(head.db))
@@ -3872,7 +3878,8 @@ pub type Service[C: send]: send {
     step: fn(mut C, mut WireWork, take ServiceInput) -> Result[Option[Frame], u16],
     ready: fn(C) -> bool,
     finish: fn(mut C) -> Option[PubIn],
-    check: fn(C, Frame) -> Option[u16]
+    check: fn(C, Frame) -> Option[u16],
+    retirement: Option[WireRetirement]
 }
 
 pub fn dispatch[C: send](mut service: Service[C], take frame: Frame) -> Result[Option[Frame], u16] {
@@ -4184,35 +4191,6 @@ fn wire_close_payload(code: u16) -> Bytes {
 type WireOwner[C: send]: send { upgraded: std.wsock.Upgraded, service: Box[Service[C]], publisher: Sender[PubIn], config: WireConfig, clock: Clock, tasks: Tasks, managed: Option[OwnerControl], allocate: Option[own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]] }
 
 fn wire_connection_pool_bytes(c: WireConfig) -> u64 { order.min(c.n_pool, wire_variable_peak(c)) }
-
-// W3c constructs the service at Hello and joins the publisher at the first Subscribe.
-pub fn serve_connection[C: send](tasks: Tasks, take upgraded: std.wsock.Upgraded, take service: Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16], to_publisher: Sender[PubIn], c: WireConfig, clock: Clock) -> Result[Task[Result[(), std.wsock.Error]], Capacity] {
-    let boxed = box.new(take service)
-    let x = WireOwner(upgraded: take upgraded, service: take boxed, publisher: channel.sender(to_publisher), config: c, clock: clock, tasks: tasks, managed: None, allocate: Some(take allocate))
-    let run: fn(take WireOwner[C]) -> Result[(), std.wsock.Error] waits = wire_connection_owner
-    let allowance = if wire_configuration(c) {
-        let pool = option.unwrap(charge.task(bytes[()], wire_connection_pool_bytes(c)))
-        let inbox = option.unwrap(charge.channel(bytes[WireAllocation[C]], WIRE_STANDALONE_SLOTS))
-        WIRE_OWNER_FLOOR - wire_owner_task_bytes() + c.n_granted + pool + inbox
-    } else { 0u64 }
-    Ok(task.spawn(tasks, bytes allowance, take x, run))
-}
-
-fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.Error] waits {
-    if !wire_configuration(x.config) { return Error(Configuration) }
-    if let Retired(_) = x.upgraded.protocol {
-        let WireOwner(upgraded: take retired, config: config, clock: clock, ..) = take x
-        return close_retired_upgrade(take retired, config.socket, clock)
-    }
-    let c = x.config
-    let mut owner = take x
-    let allocate = match replace(mut owner.allocate, None) { Some(take a) => take a, None => return Error(Configuration) }
-    let allocated: Result[(Sender[WireAllocation[C]], Task[()]), Capacity] = start_wire_pool(owner.tasks, c, owner.clock, wire_connection_pool_bytes(c), WIRE_STANDALONE_SLOTS, take allocate)
-    let (take to, take holding) = match take allocated {
-        Ok(take pair) => take pair, Error(cap) => return Error(Allocation(cap)),
-    }
-    wire_owner(take owner, take to, Pooled(take holding))
-}
 
 // What the owner holds for whoever started it until it ends: the accept
 // loop's completion, or a lone connection's own allocation pool task.
@@ -4899,7 +4877,7 @@ fn refuse_managed_socket(take seed: ManagedRefusal) -> () waits {
     let _ = take completion
 }
 
-type SessionTask { handle: Task[Result[(), std.wsock.Error]], wake: Option[Sender[WireEvent]] }
+type SessionTask { handle: Task[Result[(), std.wsock.Error]], wake: Option[Sender[WireEvent]], retirement: Option[WireRetirement] }
 
 type ServeTransport {
     listener: Listener, config: WireConfig, tasks: Tasks, clock: Clock,
@@ -5036,7 +5014,10 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
             },
             OwnerEnded(id, count) => {
                 abandoned += count
-                if let Some(SessionTask(handle: take handle, wake: _)) = map.remove(mut owners, id) { let _ = task.join(take handle) }
+                if let Some(SessionTask(handle: take handle, wake: _, retirement: take retirement)) = map.remove(mut owners, id) {
+                    let _ = task.join(take handle)
+                    wire_retire(take retirement)
+                }
                 if let Some(take handle) = map.remove(mut refusing, id) { let _ = task.join(take handle) }
             },
             AcceptedSocket(take socket, peer, at) => {
@@ -5061,7 +5042,9 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                 let prefixes = take copied
                 let made = bound bytes config.n_service { make() }
                 let service = match take made { Ok(take instance) => take instance, Error(_) => { start_socket_refusal(tasks, take socket, time, at, config, to, id, mut refusing); continue } }
-                let boxed = box.new(take service)
+                let mut opening_service = take service
+                let retirement = replace(mut opening_service.retirement, None)
+                let boxed = box.new(take opening_service)
                 let completion = match OwnerCompletion(to: channel.sender(to), id: id, abandoned: 0u64) { Ok(take completion) => take completion, Error(_) => continue }
                 let control: Option[OwnerControl] = match lifecycle {
                     Some(life) => Some(OwnerControl(id: id, to: channel.sender(to), drain: latest.handle(life.window), status: latest.handle(life.status), first_write: copy_write_notice(life.first_write))), _ => None,
@@ -5071,7 +5054,7 @@ fn serve_sockets[C: send](take seed: ServeTransport, take lifecycle: Option[Serv
                     control: take control, completion: take completion, allocation: channel.sender(allocation), report: match lifecycle { Some(life) => life.report, None => None })
                 let run: fn(take WireAccept[C]) -> Result[(), std.wsock.Error] waits = wire_accepted
                 let handle = task.spawn(tasks, bytes (WIRE_OWNER_FLOOR - wire_owner_task_bytes() + config.n_granted), take job, run)
-                map.insert(mut owners, id, SessionTask(handle: take handle, wake: None))
+                map.insert(mut owners, id, SessionTask(handle: take handle, wake: None, retirement: take retirement))
             },
         }
     }
@@ -5138,12 +5121,15 @@ type WireMark: send = Unit(Bytes) | V1 | WriteUnit(Bytes)
 type WireOutput: send { frame: Frame, tapes: List[OwedGroup], marks: List[WireMark], generations: List[(u32, u64)], external: bool, check: Option[u64] }
 type WirePending: send { stream: StreamId, p: u64, wire_slot: u32, deadline: u32, arg: Bytes, at: u64, grows: bool }
 type WireHello[G: send]: send {
-    binding: Option[(BindingJob[G], u64)], random: Random, tasks: Tasks, to: Sender[WireEvent]
+    binding: Option[(BindingJob[G], u64)], anonymous: Caller, tasks: Tasks, to: Sender[WireEvent]
 }
 
 fn wire_bind_hello[G: send](take job: WireHello[G]) -> () waits {
-    let WireHello(binding: take binding, random: random, tasks: tasks, to: take to) = take job
-    let identity = bind_principal(tasks, random, take binding)
+    let WireHello(binding: take binding, anonymous: take anonymous, tasks: tasks, to: take to) = take job
+    let identity = match take binding {
+        Some((take claim_job, allowance)) => bound_caller(tasks, take claim_job, allowance),
+        None => Some(take anonymous),
+    }
     let _ = channel.send(to, wire_event(HelloBound(take identity)))
 }
 
@@ -5207,7 +5193,7 @@ fn copy_wire[G: send, B: send](supplied: Option[Wire[G, B]]) -> Option[Wire[G, B
 }
 
 pub opaque type WireSession[G: send, B: send]: send {
-    random: Random, wire: Option[Wire[G, B]], head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String, n_place: u64,
+    anonymous: Caller, wire: Option[Wire[G, B]], head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, target: String, n_place: u64,
     me: Option[Sender[WireEvent]], publisher: Option[Sender[PubIn]], caller: Option[Caller],
     // known: per entry, 1 registered, 2 gone, 0 neither (set at Hello from the one Registry).
     phase: u8, wants: List[Want], entries: List[Bytes], known: List[u8], launch: Option[GrantedLaunch[G]], placing: u64,
@@ -5231,12 +5217,14 @@ pub fn wire_service[G: send, B: send](random: Random, take session_wire: Option[
 }
 
 fn wire_service_with_head[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
-    let context: WireSession[G, B] = WireSession(random: random, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64,
+    let anonymous = option.unwrap(anonymous_caller(random))
+    let retirement = wire_retirement(head, anonymous)
+    let context: WireSession[G, B] = WireSession(anonymous: take anonymous, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64,
         me: None, publisher: None, caller: None, phase: 0u8, wants: list.new(), entries: list.new(), known: list.new(), launch: None, placing: 0u64,
         pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64,
         joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false,
         holding: false, leaving: list.new(), resubs: list.new(), progress: None, taken: None, completes: 0u64, told_taken: 0u64)
-    Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live)
+    Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live, retirement: Some(take retirement))
 }
 
 fn wire_can_read[G: send, B: send](s: WireSession[G, B]) -> bool {
@@ -5507,7 +5495,7 @@ fn wire_begin_hello[G: send, B: send](s: WireSession[G, B], mut work: WireWork, 
         Some((_, bytes_reserved)) => int.saturating_add(4096u64, bytes_reserved),
         None => 4096u64,
     }
-    let job = WireHello(binding: take binding, random: s.random, tasks: s.tasks, to: take to)
+    let job = WireHello(binding: take binding, anonymous: clone(s.anonymous), tasks: s.tasks, to: take to)
     let run: fn(take WireHello[B]) -> () waits = wire_bind_hello
     let h = task.spawn(s.tasks, bytes allowance, take job, run)
     work.asking = Some(take h)

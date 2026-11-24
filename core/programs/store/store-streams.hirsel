@@ -214,7 +214,7 @@ fn reclaim_front(db: Db, mut edits: StreamChanges, age: Option[u64], protected: 
         let Some(name) = parse_stream_key(key) else {
             return Error(malformed(0))
         }
-        let busy = map.contains(db.admits, key) || protected(name)
+        let busy = stream_admit_held(db, key) || protected(name)
         if reclaimed == 2u64 || !stream_at_or_below(name.id.t, age) || busy {
             return Ok(Some((take key, name.id, busy)))
         }
@@ -255,7 +255,7 @@ pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
         let Some((take key, _)) = next_page_range(mut rows)? else {
             return Error(malformed(0))
         }
-        if map.contains(db.admits, key) {
+        if stream_admit_held(db, key) {
             return Error(Held)
         }
         list.push(mut deletes, take key)
@@ -276,6 +276,44 @@ pub fn reclaim_streams(mut db: Db, caller: Caller) -> Result[u64, Error] waits {
         Aborted(Undone(value: take e, ..)) => Error(take e),
         _ => Error(Missing("anonymous streams")),
     }
+}
+
+pub opaque type AnonymousCursor {
+    key: Bytes
+}
+
+pub fn anonymous_cursor() -> AnonymousCursor {
+    AnonymousCursor(key: clone(b"\x01"))
+}
+
+pub fn reclaim_startup_streams(mut db: Db, cursor: AnonymousCursor, current: scoped[view] fn(Caller) -> bool) -> Result[Option[AnonymousCursor], Error] waits {
+    let mut next_key = copied(cursor.key)?
+    for _ in 0u64 .. 8u64 {
+        let caller = {
+            let mut rows = open_page_range(db.heads[0].roots.streams, Some(clone(next_key)), true, false, Some(clone(b"\x02")))?
+            let Some((take key, _)) = next_page_range(mut rows)? else {
+                return Ok(None)
+            }
+            if list.len(key) < 2u64 {
+                return Error(malformed(0))
+            }
+            let end = 2u64 + int.widen(key[1u64])
+            if end > list.len(key) {
+                return Error(malformed(0))
+            }
+            let caller_key_bytes = list.slice(key, 0u64, end)
+            let Some(take after) = stream_prefix_end(caller_key_bytes) else {
+                return Error(malformed(0))
+            }
+            next_key = take after
+            Caller(issuer: 1u8, subject: copied(list.slice(key, 2u64, end))?)
+        }
+        if !current(caller) {
+            let _ = reclaim_streams(mut db, caller)?
+            break
+        }
+    }
+    Ok(Some(AnonymousCursor(key: take next_key)))
 }
 
 type StreamSweepCursor {
@@ -344,7 +382,7 @@ pub fn sweep_streams(mut db: Db, protected: scoped[view] fn(StreamKey) -> bool) 
         let Some(name) = parse_stream_key(key) else {
             return Error(malformed(0))
         }
-        if !stream_at_or_below(name.id.t, age) || map.contains(db.admits, key) || protected(name) {
+        if !stream_at_or_below(name.id.t, age) || stream_admit_held(db, key) || protected(name) {
             let Some(take next_caller) = stream_prefix_end(caller_prefix) else {
                 break
             }
@@ -553,7 +591,27 @@ pub type Admission = Admitted(Completion) | Duplicate(Stored) | Rejected(u64) | 
 // entry answers nothing.
 type OpenAdmit: shareable + send {
     p: u64,
-    ticket: Option[Ticket]
+    ticket: Option[Ticket],
+    held: bool
+}
+
+fn stream_admit_held(db: Db, key: Bytes) -> bool {
+    match map.get(db.admits, key) {
+        Some(active) => active.held,
+        None => false
+    }
+}
+
+pub fn release_stream_admit(mut db: Db, name: StreamKey, p: u64) -> Result[(), Error] {
+    let key = capacity(stream_key_bytes(name))?
+    if let Some(take prior) = map.remove(mut db.admits, key) {
+        let mut active = take prior
+        if active.p == p {
+            active.held = false
+        }
+        map.insert(mut db.admits, take key, take active)
+    }
+    Ok(())
 }
 
 pub fn admit(mut db: Db, stream: StreamKey, p: u64, d: RequestDigest) -> Result[Admission, Error] waits {
@@ -604,6 +662,8 @@ fn admit_existing(mut db: Db, name: StreamKey, stream: Bytes, p: u64, d: Request
         None => None
     }
     if let Some(t) = mine {
+        let active = OpenAdmit(p: p, ticket: Some(t), held: true)
+        map.insert(mut db.admits, copied(stream)?, active)
         return Ok(Abandoned(Completion(admitted: t, stream: copied(stream)?, p: p, request: d)))
     }
     // An earlier open's admit: re-commit, keeping the digest bound at p.
@@ -650,7 +710,7 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
         Failed(_) => return Error(Missing("admit")),
         Stopped(_) => return Error(Missing("admit"))
     }
-    map.insert(mut db.admits, take key, OpenAdmit(p: p, ticket: Some(admitted)))
+    map.insert(mut db.admits, take key, OpenAdmit(p: p, ticket: Some(admitted), held: true))
     let completion = Completion(admitted: admitted, stream: take held_stream, p: p, request: d)
     Ok(if abandoned {
         Abandoned(take completion)

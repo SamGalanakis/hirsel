@@ -241,16 +241,17 @@ pub fn http_serve[G: send, H: shareable + inert + send, B: send](
         HttpStreamSite(publisher: channel.sender(reads.publisher), tables: arc.share(reads.tables), frame_limit: reads.frame_limit,
             outcome: arc.share(outcome), inbox_size: inbox_size, routes: arc.share(plans))
     }
-    let make_connection: scoped[view] fn() -> HttpConnection[G, H, B] = fn() -> HttpConnection[G, H, B] {
+    let make_connection: scoped[view] fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] = fn() -> std.http.ConnectionPlan[HttpConnection[G, H, B], HttpConnectionRetirement] {
         let mut state = make_state()
         http_enable_reads(mut state, http_read_endpoint(reads))
-        take state
+        http_connection_plan(take state)
     }
     let retire: scoped[view] fn() = fn() {
         let _ = channel.try_send(reads.publisher, PubIn(e: Drained))
     }
+    let request_done: fn(HttpConnection[G, H, B]) waits = http_request_finished
     std.http.serve_with_stream_factory(take listeners, clock, tasks, take cfg, take routes, state_bytes, make_connection,
-        256u64, make, http_stream_drive, retire, take stop)
+        request_done, http_needs_retirement, http_retire_connection, 256u64, make, http_stream_drive, retire, take stop)
 }
 
 fn http_stream_notice(take event: std.stream.Delivery) -> WireEvent {

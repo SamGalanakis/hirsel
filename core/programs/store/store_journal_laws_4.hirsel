@@ -924,3 +924,36 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     result.unwrap(close(take after))
     Ok(())
 }
+
+@test
+fn anonymous_startup_scan_keeps_current_open_caller(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let dir = disk_test_directory(d)
+    let options = journal_crash_options()
+    let mut initial = result.unwrap(open(tasks, dir, c, r, options))
+    let birth = keyed_time(initial)
+    let old = Caller(issuer: 1u8, subject: clone(b"cohort-a-subject"))
+    let later = Caller(issuer: 1u8, subject: clone(b"cohort-z-subject"))
+    let active = Caller(issuer: 1u8, subject: clone(b"cohort-n-subject"))
+    let digest = digest_for("anonymous cohort")
+    for n in 0u64 .. 20u64 {
+        let key = StreamKey(caller: clone(old), id: StreamId(t: birth, n: n))
+        if let Admitted(_) = result.unwrap(admit(mut initial, key, 0u64, digest)) {} else { return Error(1u64) }
+    }
+    let last_old = StreamKey(caller: clone(later), id: StreamId(t: birth, n: 0u64))
+    if let Admitted(_) = result.unwrap(admit(mut initial, last_old, 0u64, digest)) {} else { return Error(2u64) }
+    result.unwrap(close(take initial))
+
+    let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
+    let mut cursor = result.unwrap(reclaim_startup_streams(mut reopened, anonymous_cursor(), fn(_name: Caller) -> bool { false }))
+    if result.unwrap(stream_control(reopened)).count != 1u64 { return Error(3u64) }
+    let current = StreamKey(caller: clone(active), id: StreamId(t: birth, n: 1u64))
+    if let Admitted(_) = result.unwrap(admit(mut reopened, current, 0u64, digest)) {} else { return Error(4u64) }
+    while let Some(take at) = replace(mut cursor, None) {
+        cursor = result.unwrap(reclaim_startup_streams(mut reopened, at, fn(name: Caller) -> bool { name == active }))
+    }
+    if result.unwrap(stream_control(reopened)).count != 1u64 { return Error(5u64) }
+    let key = result.unwrap(stream_key_bytes(current))
+    if stream_now(reopened, key) != (0u64, 1u64) { return Error(6u64) }
+    result.unwrap(close(take reopened))
+    Ok(())
+}

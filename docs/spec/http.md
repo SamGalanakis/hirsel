@@ -1032,6 +1032,8 @@ pub fn bind[G, H](mut r: Registry[G, H], take b: HttpBinding) -> Result[(), Bind
 - The stream key is the WebSocket one: `caller_key ‖ u32-BE(stream)` (RUNNER-SPEC v2.15). A credential the binding maps to one Caller gives the same streams over both transports (RUNNER-SPEC law L29).
 - The generated client sends `Hirsel-Expected-Caller` (decision 56). Its value is padded RFC 4648 base64 of the Caller that Welcome bound: one issuer byte, one subject length byte, and that many subject bytes (maximum 64). Runner compares it to the Caller returned by its HTTP binding before preparing or forwarding. A malformed or repeated header gives 400. A changed Caller gives 403 `{"refused":"fenced"}` and the client treats the pending answer as locally unknown, as F6 does. A raw request may omit the header. It then uses whatever Caller the credential maps to at the time of the request. If that Caller has changed, an old key addresses the new Caller's stream.
 
+Each anonymous Stream request retires its Caller after its response or transport failure. The connection records its subject before the first Ask. After the write, or after the supervisor joins a failed or cancelled owner, it fences the relay with `RelayEnd`. The relay acknowledges after taking the request's Asks. The task sends `RetireCaller` only after this acknowledgement, and holds the connection slot until retirement has been sent. A relay or head that has already ended lets cleanup finish. The next open reclaims unreachable anonymous rows.
+
 **Behaviour.**
 - The send is one send under RUNNER-SPEC V1-V5, held by the relay (B-8): one unit, its own deadline (`deadline_ms` from arrival), and exactly one Outcome.
 - The store's admission is the only memory of the request. There is no HTTP dedup cache and no mapping from opaque keys.
@@ -1109,6 +1111,8 @@ The relay knows which `Overloaded` it has, because it made the decision or recei
 - the head's answer, if the send is still owed when the `Told` arrives (V2).
 
 The relay hands every Outcome by `try_send` into the send's fresh 1-slot reply channel, so handing never waits. A closed channel (the connection ended) makes the hand-over a no-op. Either way the send record is refunded; the position stays until its `Told`.
+
+Anonymous retirement uses a separate credit queue with one credit per HTTP connection. The relay inbox has space for `2 × http_max + sends_max + positions_max` entries. A replacement retirement task waits for an end credit if its predecessor already queued an end. It can never consume or wait on an Ask credit.
 
 **Keyed sends** (§4) are Part B. The local join rule above is for `Stream` sends only. A keyed send is forwarded under its own send id with no local decision, and the head decides liveness from the store (K-5). Its response is released by the Release rule below, at its own connection.
 

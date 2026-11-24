@@ -13,13 +13,6 @@ fn binding_job[G: send, B: send](supplied: Option[Wire[G, B]], take credential: 
     None
 }
 
-fn bind_principal[B: send](tasks: Tasks, random: Random, take binding: Option[(BindingJob[B], u64)]) -> Option[Caller] waits {
-    match take binding {
-        Some((take job, allowance)) => bound_caller(tasks, take job, allowance),
-        None => anonymous_caller(random),
-    }
-}
-
 fn anonymous_caller(random: Random) -> Option[Caller] {
     let mut nonce: Bytes = list.with_capacity(16u64)
     host.random(random, mut nonce)

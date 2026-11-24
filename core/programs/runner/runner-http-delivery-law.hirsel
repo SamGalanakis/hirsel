@@ -7,21 +7,21 @@ fn l15_timers(tasks: Tasks) waits {
     let key = http_law_key(reg.exported[0u64])
     let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
     let reserve = option.unwrap(relay_bytes(reg, cfg))
-    // Ten RelayEvents cost 64 + 10 * 177. The empty credits cost 64.
+    // Twelve RelayEvents cost 64 + 12 * 177. The two empty credit queues cost 128.
     // HeadLease costs 56 fields + 32 cause, two 32-byte roots and three 16-byte Arc nodes.
     // Two send slots cost 2 * 56, and their alarms cost 2 * (288 + 4096).
     // Six positions cost round8(6 * 89) for the records. Each also costs
     // 16 owner seed + 64 subject + 2 * 88 for the widened stream keys
     // + 8192 reply + 1024 argument + the longest rounded registry key.
     // Three delivered buffers cost 3 * 8192. Startup adds 288 for the task record,
-    // 64 + 48 for its ready channel and round8(6 * 65) = 392 for pending tells.
+    // 64 + 96 for its ready channel and round8(6 * 65) = 392 for pending tells.
     let mut longest = 0u64
     for entry in reg.exported {
         // Each key is the exported identity followed by two eight-byte codec fingerprints.
         let length = list.len(entry.described.identity) + 16u64
         longest = order.max(longest, length)
     }
-    let expected = 93714u64 + 6u64 * ((longest + 7u64) / 8u64 * 8u64)
+    let expected = 94180u64 + 6u64 * ((longest + 7u64) / 8u64 * 8u64)
     if reserve != expected { fail("L15 relay allowance differs from its hand derivation") }
     let mut maximum: Bytes = list.with_capacity(MAX_RETURNED_BYTES)
     list.fill(mut maximum, MAX_RETURNED_BYTES, b'x')
@@ -176,7 +176,7 @@ fn relay_handler_expiry_leaves_ask_queued(tasks: Tasks) -> Result[(), ()] waits 
     let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
     let setup = RelayStart(to: take to, head: take head, clock: time, tasks: tasks, config: cfg,
         inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: relay_key_max(reg))
-    let (take booted, take incoming, take credits) = option.unwrap(relay_boot(take setup))
+    let (take booted, take incoming, take credits, take end_credits) = option.unwrap(relay_boot(take setup))
     let mut state = take booted
     let endpoint = result.unwrap(channel.receive(from))
     let send = l15_send(reg, key, time, 1u32, 0u64, 30u64)
@@ -187,12 +187,70 @@ fn relay_handler_expiry_leaves_ask_queued(tasks: Tasks) -> Result[(), ()] waits 
         Unanswered(Deadline) => (),
         _ => fail("an expired handler certified an Ask that the relay can still forward"),
     }
-    let _ = result.unwrap(channel.try_receive(credits))
-    relay_step(mut state, result.unwrap(channel.try_receive(incoming)))
+    let pending_ask = result.unwrap(channel.try_receive(incoming))
+    relay_refund(pending_ask, credits, end_credits)
+    relay_step(mut state, take pending_ask)
     if let Ok(RunRequest(_)) = channel.try_receive(forwarded) {} else {
         fail("the handler deadline cancelled the still-live send")
     }
     let _ = std.task.cancel_join(take clock_task)
+    Ok(())
+}
+
+type EndResume: send { endpoint: Relay, caller: Caller }
+
+fn resume_failed_end(take pending_end: EndResume) waits {
+    relay_end(pending_end.endpoint, pending_end.caller)
+}
+
+@test
+fn http_retire_end_credit_survives_owner_failure(tasks: Tasks) -> Result[(), ()] waits {
+    let (take world, time) = std.sim.world.new(16u64, 0u64, 0u64)
+    let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
+    let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
+    let key = http_law_key(reg.exported[0u64])
+    let cfg = RelayConfig(http_max: 1u64, sends_max: 1u64, positions_max: 1u64, arg_max: 1024u64)
+    let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
+    let setup = RelayStart(to: take to, head: take head, clock: time, tasks: tasks, config: cfg,
+        inbox_size: option.unwrap(relay_inbox_size(cfg)), key_max: relay_key_max(reg))
+    let (take booted, take incoming, take asks, take ends) = option.unwrap(relay_boot(take setup))
+    let mut state = take booted
+    let endpoint = result.unwrap(channel.receive(from))
+    let send = l15_send(reg, key, time, 1u32, 0u64, 30u64)
+    let short = std.clock.deadline_after_ms(host.mono_ns(time), 1u64)
+    if let Unanswered(Deadline) = relay_call(endpoint, take send, time, tasks, short) {} else { return Error(()) }
+
+    // The older Ask is still charged. An anonymous owner publishes End and
+    // fails before consuming its ack. The supervisor resumes that retirement.
+    let caller = store.Caller(issuer: 1u8, subject: clone(b"retired subject!"))
+    let (ack, failed): (Sender[()], Receiver[()]) = channel.new(1u64)
+    result.unwrap(channel.try_send(endpoint.end_credit, ()))
+    result.unwrap(channel.try_send(endpoint.inbox, RelayEnd(clone(caller.subject), take ack)))
+    let _ = take failed
+    let resumed = EndResume(endpoint: relay_endpoint(endpoint), caller: clone(caller))
+    let cleanup = task.spawn(tasks, bytes 4096u64, take resumed, resume_failed_end)
+
+    let first = result.unwrap(channel.receive(incoming))
+    if let RelayAsk(..) = first {} else { fail("the queued Ask was passed by End") }
+    relay_refund(first, asks, ends)
+    relay_step(mut state, take first)
+    if let Ok(RunRequest(_)) = channel.try_receive(forwarded) {} else { return Error(()) }
+
+    for _ in 0u64 .. 2u64 {
+        let end = result.unwrap(channel.receive(incoming))
+        if let RelayEnd(subject, _) = end {
+            if subject != caller.subject { return Error(()) }
+        } else { return Error(()) }
+        if let Error(Empty) = channel.try_receive(forwarded) {} else { fail("retired before the relay acknowledged End") }
+        relay_refund(end, asks, ends)
+        relay_step(mut state, take end)
+    }
+    result.unwrap(task.join(take cleanup))
+    if let Ok(RetireCaller(retired)) = channel.try_receive(forwarded) {
+        if retired != caller { return Error(()) }
+    } else { return Error(()) }
+    let _ = task.cancel_join(take clock_task)
     Ok(())
 }
 
@@ -271,7 +329,7 @@ fn l15_native(take job: L15Drive) waits {
     let (take endpoint, take relay_task, take joined) = l15_start_relay(reg, intercept, pub_to, clock, tasks, cfg)
     let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
     let seed = HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
-        place: code.describe(l15_place), previous: None, stage: 0u8)
+        place: code.describe(l15_place), previous: None, stage: 0u8, stop: None)
     let server = task.spawn(tasks, bytes 4194304u64, take seed, http_op_serve)
     if reopening {
         for stream_id in 1u32 .. 4u32 {
@@ -329,11 +387,11 @@ type L15Relay: send { seed: RelayStart, joined: Sender[()] }
 
 fn l15_relay(take input: L15Relay) waits {
     let L15Relay(seed: take setup, joined: take joined) = take input
-    let (take ready, take from, take credits) = option.unwrap(relay_boot(take setup))
+    let (take ready, take from, take credits, take end_credits) = option.unwrap(relay_boot(take setup))
     let mut state = take ready
     while let Ok(take event) = channel.receive(from) {
+        relay_refund(event, credits, end_credits)
         let existing = if let RelayAsk(request, _) = event {
-            let _ = channel.try_receive(credits)
             list.len(state.positions) == 1u64 && state.positions[0u64].stream == request.stream &&
                 state.positions[0u64].position == request.p
         } else { false }
@@ -375,9 +433,9 @@ fn l15_forward(to: Sender[HeadInput], during: Sender[RelayEvent], take msg: Head
     take answer_to
 }
 
-fn l15_post(net: Net, clock: Clock, address: Addr, stream_id: u32, p: u64, submit: bool) -> std.http_client.Connection waits {
+fn l15_request(stream_id: u32, p: u64, close: bool) -> std.http_client.Request {
     let mut fields: List[std.http_client.Header] = list.with_capacity(4u64)
-    list.push(mut fields, std.http_client.Header(name: "Connection", value: Public(b"close")))
+    if close { list.push(mut fields, std.http_client.Header(name: "Connection", value: Public(b"close"))) }
     list.push(mut fields, std.http_client.Header(name: "Content-Type", value: Public(b"application/json")))
     list.push(mut fields, std.http_client.Header(name: "Authorization", value: Public(b"token")))
     let mut header = string.from("\"")
@@ -386,8 +444,12 @@ fn l15_post(net: Net, clock: Clock, address: Addr, stream_id: u32, p: u64, submi
     string.push_u64(mut header, p)
     string.push(mut header, "\"")
     list.push(mut fields, std.http_client.Header(name: "Idempotency-Key", value: Public(string.into_bytes(take header))))
-    let req = std.http_client.Request(method: "POST", target: "/old", headers: take fields, body: Fixed(2u64))
-    let mut client = result.unwrap(std.http_client.dial(net, address, "a", clock, req, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64)))
+    std.http_client.Request(method: "POST", target: "/old", headers: take fields, body: Fixed(2u64))
+}
+
+fn l15_post(net: Net, clock: Clock, address: Addr, stream_id: u32, p: u64, submit: bool) -> std.http_client.Connection waits {
+    let request = l15_request(stream_id, p, true)
+    let mut client = result.unwrap(std.http_client.dial(net, address, "a", clock, request, std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64)))
     if submit { result.unwrap(std.http_client.write(mut client, b"{}")) }
     take client
 }
@@ -453,5 +515,128 @@ pub fn l15_process(directory: Dir, clock: Clock, random: Random, tasks: Tasks, n
     let phase = option.unwrap(args.get(argv, 0u64))
     if phase != "cut" && phase != "recover" { return Error(Exit(status: 2u8)) }
     l15_disk(directory, clock, random, tasks, net, phase == "recover")
+    Ok(())
+}
+
+type L15RetireDrive: send {
+    drive: L15Drive, retired: Sender[List[store.StreamKey]]
+}
+
+fn l15_fail_after_call(req: std.http.Request, scratch: Region, mut response: std.http.Responder,
+    state: HttpConnection[(), HttpLawHandles, ()]) -> Result[std.http.Outcome, std.http.HandlerError] waits {
+    let _ = http_generated_handler(req, scratch, mut response, state)?
+    fail("connection task fails after the call's response was prepared")
+}
+
+fn l15_retire_drive(take seed: L15RetireDrive) waits {
+    let L15RetireDrive(drive: L15Drive(head: take head, publisher: take pub_to, clock, random, tasks, net, ..), retired: take retired_to) = take seed
+    let reg = result.unwrap(placed(code.describe(l15_place), HTTP_LAW_PLACE_BYTES))
+    let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
+    let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 1u64, arg_max: 1024u64)
+    let (take endpoint, take relay_task, _joined) = l15_start_relay(reg, intercept, pub_to, clock, tasks, cfg)
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let (stop, stop_from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
+    let job = HttpOpListener(relay: take endpoint, listener: take listener, publisher: take pub_to, clock, random, tasks,
+        place: code.describe(l15_place), previous: None, stage: 2u8, stop: Some(take stop_from))
+    let server = task.spawn(tasks, bytes 4194304u64, take job, http_op_serve)
+    let until = std.clock.deadline_after_ms(host.mono_ns(clock), 4000u64)
+    let mut client = result.unwrap(std.http_client.open(net, address, "a", clock, until))
+    let mut retired: List[store.StreamKey] = list.with_capacity(4u64)
+    for id in 1u32 .. 3u32 {
+        result.unwrap(std.http_client.start(mut client, l15_request(id, 0u64, false), until))
+        result.unwrap(std.http_client.write(mut client, b"{}"))
+        let forwarded = l15_head_request(waiting)
+        let name = l15_request_stream(forwarded)
+        if name.caller.issuer != 1u8 || list.len(name.caller.subject) != 16u64 { fail("request did not bind an anonymous Caller") }
+        result.unwrap(channel.send(head, take forwarded))
+        l15_response(mut client, int.widen(id), false)
+        l15_forward_retire(waiting, head, name.caller)
+        list.push(mut retired, take name)
+    }
+    if retired[0u64].caller == retired[1u64].caller { fail("keep-alive reused an anonymous Caller") }
+    // Fail the owner after it has received Told and before it can run the
+    // post-response callback. The supervisor recovers the published subject.
+    let mut fault = l15_request(3u32, 0u64, false)
+    fault.target = "/fail"
+    result.unwrap(std.http_client.start(mut client, fault, until))
+    result.unwrap(std.http_client.write(mut client, b"{}"))
+    let failed_request = l15_head_request(waiting)
+    let failed_caller = l15_request_stream(failed_request)
+    result.unwrap(channel.send(head, take failed_request))
+    l15_forward_retire(waiting, head, failed_caller.caller)
+    list.push(mut retired, take failed_caller)
+    std.http_client.close(take client)
+    client = result.unwrap(std.http_client.open(net, address, "a", clock, until))
+
+    // Stop the next connection while its Ask is already forwarded and it is
+    // still waiting for the head. The supervisor must send End after joining.
+    result.unwrap(std.http_client.start(mut client, l15_request(4u32, 0u64, false), until))
+    result.unwrap(std.http_client.write(mut client, b"{}"))
+    let forwarded = l15_head_request(waiting)
+    let name = l15_request_stream(forwarded)
+    result.unwrap(channel.send(stop, host.mono_ns(clock)))
+    let ended = result.unwrap(channel.receive(waiting))
+    if let RetireCaller(caller) = ended {
+        if caller != name.caller { fail("Stop retired a different Caller") }
+    } else { fail("Stop dropped the connection's pending retirement") }
+    let (result_to, result_from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(1u64)
+    let _ = l15_forward(head, result_to, take forwarded)
+    let replied = result.unwrap(channel.receive(result_from))
+    if let RelayTold(_, answer) = replied {
+        if let Returned(_) = l15_outcome(answer) {} else { fail("after Stop the forwarded Ask lost its effect") }
+    } else { fail("expected the forwarded Ask's outcome") }
+    result.unwrap(channel.send(head, take ended))
+    list.push(mut retired, take name)
+    std.http_client.close(take client)
+    result.unwrap(task.join(take server))
+    let _ = task.cancel_join(take relay_task)
+    result.unwrap(channel.send(retired_to, take retired))
+}
+
+fn l15_request_stream(input: HeadInput) -> store.StreamKey {
+    match input {
+        RunRequest(Req(e: Requested(q))) => store.StreamKey(caller: clone(q.caller), id: q.stream_id),
+        _ => fail("expected anonymous request"),
+    }
+}
+
+fn l15_forward_retire(waiting: Receiver[HeadInput], head: Sender[HeadInput], who: Caller) waits {
+    let ended = result.unwrap(channel.receive(waiting))
+    match ended {
+        RetireCaller(caller) if caller == who => (),
+        _ => fail("retirement did not follow the request"),
+    }
+    result.unwrap(channel.send(head, take ended))
+}
+
+@test
+fn http_request_retire_after_forward(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let mut location = string.with_capacity(32u64)
+    let directory = result.unwrap(host.mkdtemp(parent, mut location))
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.stream_retention_ms = 18446744073709551615u64
+    let db = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let (retired_to, retired_from): (Sender[List[store.StreamKey]], Receiver[List[store.StreamKey]]) = channel.new(1u64)
+    let publisher_in = result.unwrap(mailbox(16u64))
+    let drive = L15Drive(head: take head, publisher: post(publisher_in), clock, random, tasks, net, reopening: false)
+    let caller_task = task.spawn(tasks, bytes 16777216u64, L15RetireDrive(drive: take drive, retired: take retired_to), l15_retire_drive)
+    let started = place_head_selected(take db, Install, code.describe(l15_place), HTTP_LAW_PLACE_BYTES, None, code.describe(http_law_schema),
+        take requests, take publisher_in, tasks, 1048576u64)
+    if let Error(take problem) = started { fail(start_text(Open(take problem))) }
+    match task.join(take caller_task) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+    let mut after = result.unwrap(store.open(tasks, directory, clock, random, options))
+    let fingerprint = store.request_digest(b"", b"")
+    for key in result.unwrap(channel.receive(retired_from)) {
+        if let HistoryUnavailable = result.unwrap(store.admit(mut after, key, 1u64, fingerprint)) {} else {
+            fail("quiet head retained an anonymous stream")
+        }
+    }
+    result.unwrap(store.close(take after))
+    result.unwrap(std.dir.remove_all(parent, location))
     Ok(())
 }

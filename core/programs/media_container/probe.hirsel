@@ -1,0 +1,77 @@
+pub type Error = Mp4(mp4.VodError) | Webm(webm.ProbeError) | ShortRead | Io(IoError)
+
+pub type Format = Mp4Vod(mp4.Vod) | WebmVod(webm.WebmProbe)
+
+pub type Limits {
+    metadata_bytes: u64,
+    top_elements: u64,
+    tracks: u64
+}
+
+// A range reader is suitable for either pread or an immutable HTTP object.
+pub fn video_probe(file_size: u64, limits: Limits, read: scoped fn(u64, u64) -> Result[Bytes, Error] waits) -> Result[Format, Error] waits {
+    if file_size < 4 {
+        return Error(ShortRead)
+    }
+    let prefix = read(0, 4)?
+    if list.len(prefix) != 4 {
+        return Error(ShortRead)
+    }
+    if prefix == b"\x1a\x45\xdf\xa3" {
+        let webm_limits = webm.ProbeLimits(metadata_bytes: limits.metadata_bytes, top_elements: limits.top_elements, tracks: limits.tracks)
+        let mut read_error: Option[Error] = None
+        let answer = webm.video_probe(file_size, webm_limits, scoped fn(at: u64, n: u64) -> Result[Bytes, webm.ProbeError] waits {
+            match read(at, n) {
+                Ok(take raw) => Ok(take raw),
+                Error(e) => {
+                    read_error = Some(e)
+                    Error(ProbeReadFailed)
+                },
+            }
+        })
+        if let Some(e) = read_error {
+            return Error(e)
+        }
+        return match take answer {
+            Ok(take found) => Ok(WebmVod(take found)),
+            Error(e) => Error(Webm(e)),
+        }
+    }
+    let mp4_limits = mp4.VodLimits(metadata_bytes: limits.metadata_bytes, top_boxes: limits.top_elements, tracks: limits.tracks)
+    let mut read_error: Option[Error] = None
+    let answer = mp4.video_probe(file_size, mp4_limits, scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] waits {
+        match read(at, n) {
+            Ok(take raw) => Ok(take raw),
+            Error(e) => {
+                read_error = Some(e)
+                Error(ReadFailed)
+            },
+        }
+    })
+    if let Some(e) = read_error {
+        return Error(e)
+    }
+    match take answer {
+        Ok(take found) => Ok(Mp4Vod(take found)),
+        Error(e) => Error(Mp4(e)),
+    }
+}
+
+pub fn file_probe(mut source: HostFile, limits: Limits) -> Result[Format, Error] waits {
+    let stat = match std.file.stat(mut source) {
+        Ok(s) => s,
+        Error(e) => return Error(Io(e)),
+    }
+    video_probe(stat.size, limits, scoped fn(at: u64, n: u64) -> Result[Bytes, Error] waits {
+        let mut raw: Bytes = list.with_capacity(n)
+        while list.len(raw) < n {
+            let pos = at + list.len(raw)
+            match std.file.read_at(mut source, pos, mut raw) {
+                Ok(0) => return Error(ShortRead),
+                Ok(_) => {},
+                Error(e) => return Error(Io(e)),
+            }
+        }
+        Ok(take raw)
+    })
+}

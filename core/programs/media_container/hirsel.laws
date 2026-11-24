@@ -1,4 +1,5 @@
 hirsel.laws 1
-media_container@1/tests/mp4_reference src=ac4e7592080be97d sig=c8c7acb7980f3d51 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-media_container@1/tests/ogg_opus_reference src=695643450ead342a sig=8a393c45cc5b88a7 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/mp4_reference src=ac4e7592080be97d sig=0591be091fa0e98d run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/ogg_opus_reference src=695643450ead342a sig=02dad00ef06346a9 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/sparse_vod_sample_tables src=dcaee46ae7bba70c sig=228a162818b73f55 run=acdd7fe37d41c86f bug=697898387531a25b oracle=8a2531a56a9946c3 rows=pending
 media_container@1/tests/webm_reference src=51612f5c3d7d809d sig=1e7b41cabc725fa7 run=acdd7fe37d41c86f bug=- oracle=- rows=pending

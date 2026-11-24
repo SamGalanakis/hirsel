@@ -1,0 +1,119 @@
+type Descriptor {
+    tag: u8,
+    start: u64,
+    end: u64
+}
+
+fn descriptor(input: Bytes, at: u64, end: u64) -> Result[Descriptor, VodError] {
+    if end - at < 2 {
+        return Error(BadMovie)
+    }
+    let tag = input[at]
+    let mut pos = at + 1
+    let mut size = 0u64
+    for _ in 0u64 .. 4 {
+        if pos == end {
+            return Error(BadMovie)
+        }
+        let byte = input[pos]
+        pos += 1
+        let part: u64 = int.widen(byte & 127)
+        size = (size << 7) | part
+        if (byte & 128) == 0 {
+            if size > end - pos {
+                return Error(BadMovie)
+            }
+            return Ok(Descriptor(tag: tag, start: pos, end: pos + size))
+        }
+    }
+    Error(BadMovie)
+}
+
+fn find_descriptor(input: Bytes, start: u64, end: u64, tag: u8) -> Result[Descriptor, VodError] {
+    let mut at = start
+    while at < end {
+        let child = descriptor(input, at, end)?
+        if child.tag == tag {
+            return Ok(child)
+        }
+        at = child.end
+    }
+    Error(BadMovie)
+}
+
+fn aac_format(input: Bytes, esds: BoxHeader) -> Result[(u32, u16), VodError] {
+    if esds.next - esds.body < 4 {
+        return Error(BadMovie)
+    }
+    let es = descriptor(input, esds.body + 4, esds.next)?
+    if es.tag != 3 || es.end - es.start < 3 {
+        return Error(BadMovie)
+    }
+    let flags = input[es.start + 2]
+    let mut at = es.start + 3
+    if (flags & 128) != 0 {
+        at += 2
+    }
+    if (flags & 64) != 0 {
+        if at >= es.end {
+            return Error(BadMovie)
+        }
+        let uri_length: u64 = int.widen(input[at])
+        at += uri_length + 1
+    }
+    if (flags & 32) != 0 {
+        at += 2
+    }
+    if at >= es.end {
+        return Error(BadMovie)
+    }
+    let decoder = find_descriptor(input, at, es.end, 4)?
+    if decoder.end - decoder.start < 13 {
+        return Error(BadMovie)
+    }
+    let object_indication = input[decoder.start]
+    if object_indication != 0x40 && (object_indication < 0x66 || object_indication > 0x68) {
+        return Error(UnsupportedVod)
+    }
+    let config = find_descriptor(input, decoder.start + 13, decoder.end, 5)?
+    let asc = match media_bits.aac.parse_asc(list.slice(input, config.start, config.end)) {
+        Ok(c) => c,
+        Error(_) => return Error(UnsupportedVod),
+    }
+    let channels: u16 = if asc.channel_configuration == 7 {
+        8
+    } else if asc.channel_configuration == 1 && asc.parametric_stereo {
+        2
+    } else {
+        int.widen(asc.channel_configuration)
+    }
+    Ok((asc.output_sample_rate, channels))
+}
+
+fn audio_format(input: Bytes, entry: BoxHeader) -> Result[(u32, u16), VodError] {
+    if entry.next - entry.body < 28 {
+        return Error(BadMovie)
+    }
+    let version: u16 = list.word_be(input, entry.body + 8)
+    let header = match version {
+        0 => 28u64,
+        1 => 44u64,
+        _ => return Error(UnsupportedVod),
+    }
+    if entry.next - entry.body < header {
+        return Error(BadMovie)
+    }
+    let children = BoxHeader(kind: entry.kind, body: entry.body + header, next: entry.next)
+    if entry.kind == 0x6d703461 {
+        return aac_format(input, require_child(input, children, 0x65736473)?)
+    }
+    if entry.kind == 0x4f707573 {
+        let dops = require_child(input, children, 0x644f7073)?
+        if dops.next - dops.body < 11 || input[dops.body] != 0 || input[dops.body + 1] == 0 {
+            return Error(BadMovie)
+        }
+        return Ok((48000, int.widen(input[dops.body + 1])))
+    }
+    let fixed: u32 = list.word_be(input, entry.body + 24)
+    Ok((fixed >> 16, list.word_be(input, entry.body + 16)))
+}

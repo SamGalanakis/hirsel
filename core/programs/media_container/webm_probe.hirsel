@@ -1,0 +1,427 @@
+pub type ProbeError = ProbeFraming(Error) | ProbeReadFailed | ProbeLimit
+
+pub type ProbeLimits {
+    metadata_bytes: u64,
+    top_elements: u64,
+    tracks: u64
+}
+
+pub type WebmInfo {
+    file_size: u64,
+    timestamp_scale: u64,
+    duration_ticks: Option[f64]
+}
+
+pub type WebmFormat {
+    track: TrackInfo,
+    width: u64,
+    height: u64,
+    sample_rate: Option[f64],
+    channels: u64
+}
+
+pub type Cue {
+    time: u64,
+    track: u64,
+    cluster_start: u64,
+    cluster_end: u64,
+    relative_position: Option[u64]
+}
+
+type ProbeTrack {
+    format: WebmFormat,
+    codec: Bytes,
+    private_data: Bytes
+}
+
+type ElementRange {
+    start: u64,
+    end: u64
+}
+
+pub opaque type WebmProbe {
+    info: WebmInfo,
+    tracks: List[ProbeTrack],
+    cues: List[Cue]
+}
+
+fn webm_error[T](take value: Result[T, Error]) -> Result[T, ProbeError] {
+    match take value {
+        Ok(take item) => Ok(take item),
+        Error(e) => Error(ProbeFraming(e)),
+    }
+}
+
+fn read_exact(at: u64, n: u64, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[Bytes, ProbeError] waits {
+    let raw = read(at, n)?
+    if list.len(raw) != n {
+        return Error(ProbeReadFailed)
+    }
+    Ok(take raw)
+}
+
+fn read_vint_prefix(at: u64, end: u64, max_width: u64, mut header: Bytes, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[u64, ProbeError] waits {
+    if at >= end {
+        return Error(ProbeFraming(Truncated))
+    }
+    let first = read_exact(at, 1, read)?
+    if first[0] == 0 {
+        return Error(ProbeFraming(InvalidVint))
+    }
+    let mut marker = 128u8
+    let mut width = 1u64
+    while (first[0] & marker) == 0 {
+        marker >>= 1
+        width += 1
+    }
+    if width > max_width || width > end - at {
+        return Error(ProbeFraming(InvalidVint))
+    }
+    list.append(mut header, first)
+    if width > 1 {
+        let rest = read_exact(at + 1, width - 1, read)?
+        list.append(mut header, rest)
+    }
+    Ok(width)
+}
+
+fn sparse_element(at: u64, end: u64, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[Element, ProbeError] waits {
+    let mut header: Bytes = list.with_capacity(12)
+    let id = read_vint_prefix(at, end, 4, mut header, read)?
+    let _ = read_vint_prefix(at + id, end, 8, mut header, read)?
+    let e = webm_error(element_header(header, 0, list.len(header)))?
+    if e.next > end - at {
+        return Error(ProbeFraming(Truncated))
+    }
+    Ok(Element(id: e.id, body: at + e.body, next: if e.known_size {
+        at + e.next
+    } else {
+        end
+    }, known_size: e.known_size))
+}
+
+fn webm_float(input: Bytes, e: Element) -> Result[f64, ProbeError] {
+    let n = e.next - e.body
+    let value = if n == 4 {
+        let single = float.from_bits32(list.word_be(input, e.body))
+        float.widen(single)
+    } else if n == 8 {
+        float.from_bits64(list.word_be(input, e.body))
+    } else {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    if !float.is_finite(value) || float.lt(value, 0.0) {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    Ok(value)
+}
+
+fn webm_duration(input: Bytes, info: Element) -> Result[Option[f64], ProbeError] {
+    let mut at = info.body
+    let mut duration: Option[f64] = None
+    while at < info.next {
+        let e = webm_error(read_element(input, at, info.next))?
+        if !e.known_size {
+            return Error(ProbeFraming(InvalidElement))
+        }
+        if e.id == 0x4489 {
+            if let Some(_) = duration {
+                return Error(ProbeFraming(InvalidElement))
+            }
+            duration = Some(webm_float(input, e)?)
+        }
+        at = e.next
+    }
+    Ok(duration)
+}
+
+fn track_format(input: Bytes, e: Element, info: TrackInfo) -> Result[WebmFormat, ProbeError] {
+    let mut format = WebmFormat(track: info, width: 0, height: 0, sample_rate: None, channels: 0)
+    let mut at = e.body
+    while at < e.next {
+        let parent = webm_error(read_element(input, at, e.next))?
+        if !parent.known_size {
+            return Error(ProbeFraming(InvalidTrack))
+        }
+        if parent.id == 0xe0 || parent.id == 0xe1 {
+            let mut cursor = parent.body
+            let mut output_rate: Option[f64] = None
+            if parent.id == 0xe1 {
+                format.channels = 1
+                format.sample_rate = Some(8000.0)
+            }
+            while cursor < parent.next {
+                let b = webm_error(read_element(input, cursor, parent.next))?
+                if !b.known_size {
+                    return Error(ProbeFraming(InvalidTrack))
+                }
+                if parent.id == 0xe0 {
+                    match b.id {
+                        0xb0 => {
+                            format.width = webm_error(uint(input, b.body, b.next))?
+                        },
+                        0xba => {
+                            format.height = webm_error(uint(input, b.body, b.next))?
+                        },
+                        _ => {},
+                    }
+                } else {
+                    match b.id {
+                        0xb5 => {
+                            format.sample_rate = Some(webm_float(input, b)?)
+                        },
+                        0x78b5 => {
+                            output_rate = Some(webm_float(input, b)?)
+                        },
+                        0x9f => {
+                            format.channels = webm_error(uint(input, b.body, b.next))?
+                        },
+                        _ => {},
+                    }
+                }
+                cursor = b.next
+            }
+            if let Some(rate) = output_rate {
+                format.sample_rate = Some(rate)
+            }
+        }
+        at = parent.next
+    }
+    Ok(format)
+}
+
+fn read_probe_tracks(input: Bytes, tracks: Element, limit: u64) -> Result[List[ProbeTrack], ProbeError] {
+    let mut found: List[ProbeTrack] = list.new()
+    let mut ids: Map[u64, bool] = map.new()
+    let mut at = tracks.body
+    while at < tracks.next {
+        let e = webm_error(read_element(input, at, tracks.next))?
+        if !e.known_size {
+            return Error(ProbeFraming(InvalidTrack))
+        }
+        if e.id == 0xae {
+            if list.len(found) == limit {
+                return Error(ProbeLimit)
+            }
+            let mut parts: Option[(TrackInfo, Bytes, Bytes)] = None
+            webm_error(track_info(input, e, scoped fn(info: TrackInfo, codec: Bytes, data: Bytes) {
+                let mut name: Bytes = list.with_capacity(list.len(codec))
+                let mut config: Bytes = list.with_capacity(list.len(data))
+                list.append(mut name, codec)
+                list.append(mut config, data)
+                parts = Some((info, take name, take config))
+            }))?
+            let Some((info, take codec, take config)) = take parts else {
+                return Error(ProbeFraming(InvalidTrack))
+            }
+            if let Some(_) = map.get(ids, info.number) {
+                return Error(ProbeFraming(InvalidTrack))
+            }
+            map.insert(mut ids, info.number, true)
+            let format = track_format(input, e, info)?
+            list.push(mut found, ProbeTrack(format: format, codec: take codec, private_data: take config))
+        }
+        at = e.next
+    }
+    if list.len(found) == 0 {
+        return Error(ProbeFraming(InvalidTrack))
+    }
+    Ok(take found)
+}
+
+fn segment_metadata(e: Element, mut remaining: u64, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[Bytes, ProbeError] waits {
+    let n = e.next - e.body
+    if n > remaining || !e.known_size {
+        return Error(ProbeLimit)
+    }
+    remaining -= n
+    read_exact(e.body, n, read)
+}
+
+fn find_cluster(clusters: List[ElementRange], at: u64) -> Result[ElementRange, ProbeError] {
+    let mut lo = 0u64
+    let mut hi = list.len(clusters)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        let range = clusters[mid]
+        if at < range.start {
+            hi = mid
+        } else if at > range.start {
+            lo = mid + 1
+        } else {
+            return Ok(range)
+        }
+    }
+    Error(ProbeFraming(InvalidElement))
+}
+
+fn cue_position(input: Bytes, e: Element, base: u64, time: u64, clusters: List[ElementRange]) -> Result[Cue, ProbeError] {
+    let mut cursor = e.body
+    let mut track = 0u64
+    let mut position: Option[u64] = None
+    let mut relative: Option[u64] = None
+    while cursor < e.next {
+        let b = webm_error(read_element(input, cursor, e.next))?
+        if !b.known_size {
+            return Error(ProbeFraming(InvalidElement))
+        }
+        match b.id {
+            0xf7 => {
+                track = webm_error(uint(input, b.body, b.next))?
+            },
+            0xf1 => {
+                position = Some(webm_error(uint(input, b.body, b.next))?)
+            },
+            0xf0 => {
+                relative = Some(webm_error(uint(input, b.body, b.next))?)
+            },
+            _ => {},
+        }
+        cursor = b.next
+    }
+    let Some(offset) = position else {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    let Some(start) = int.checked_add(base, offset) else {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    let span = find_cluster(clusters, start)?
+    if track == 0 {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    Ok(Cue(time: time, track: track, cluster_start: start, cluster_end: span.end, relative_position: relative))
+}
+
+fn read_cues(input: Bytes, segment_base: u64, clusters: List[ElementRange]) -> Result[List[Cue], ProbeError] {
+    let mut cues: List[Cue] = list.new()
+    let limit = list.len(input)
+    let mut at = 0u64
+    while at < limit {
+        let point = webm_error(read_element(input, at, limit))?
+        if !point.known_size {
+            return Error(ProbeFraming(InvalidElement))
+        }
+        if point.id == 0xbb {
+            let mut cursor = point.body
+            let mut time: Option[u64] = None
+            while cursor < point.next {
+                let b = webm_error(read_element(input, cursor, point.next))?
+                if !b.known_size {
+                    return Error(ProbeFraming(InvalidElement))
+                }
+                if b.id == 0xb3 {
+                    time = Some(webm_error(uint(input, b.body, b.next))?)
+                }
+                cursor = b.next
+            }
+            let Some(ticks) = time else {
+                return Error(ProbeFraming(InvalidElement))
+            }
+            cursor = point.body
+            while cursor < point.next {
+                let b = webm_error(read_element(input, cursor, point.next))?
+                if b.id == 0xb7 {
+                    let cue = cue_position(input, b, segment_base, ticks, clusters)?
+                    list.push(mut cues, cue)
+                }
+                cursor = b.next
+            }
+        }
+        at = point.next
+    }
+    Ok(take cues)
+}
+
+// Scans Segment and element headers, Info, Tracks and Cues. Cluster bodies
+// remain unread. Unknown-size Clusters have no sparse skip and are refused.
+pub fn video_probe(file_size: u64, limits: ProbeLimits, read: scoped fn(u64, u64) -> Result[Bytes, ProbeError] waits) -> Result[WebmProbe, ProbeError] waits {
+    let ebml = sparse_element(0, file_size, read)?
+    if ebml.id != 0x1a45dfa3 || !ebml.known_size {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    let mut remaining = limits.metadata_bytes
+    let header = segment_metadata(ebml, mut remaining, read)?
+    webm_error(doctype(header, Element(id: ebml.id, body: 0, next: list.len(header), known_size: true)))?
+    let segment = sparse_element(ebml.next, file_size, read)?
+    if segment.id != SEGMENT {
+        return Error(ProbeFraming(InvalidElement))
+    }
+    let mut timing: Option[(u64, Option[f64])] = None
+    let mut tracks: Option[List[ProbeTrack]] = None
+    let mut cue_data: Option[Bytes] = None
+    let mut clusters: List[ElementRange] = list.new()
+    let mut cursor = segment.body
+    let mut inspected = 0u64
+    while cursor < segment.next {
+        if inspected == limits.top_elements {
+            return Error(ProbeLimit)
+        }
+        inspected += 1
+        let e = sparse_element(cursor, segment.next, read)?
+        if !e.known_size {
+            return Error(ProbeFraming(Unsupported))
+        }
+        match e.id {
+            0x1549a966 => {
+                if let Some(_) = timing {
+                    return Error(ProbeFraming(InvalidElement))
+                }
+                let raw = segment_metadata(e, mut remaining, read)?
+                let info = Element(id: e.id, body: 0, next: list.len(raw), known_size: true)
+                timing = Some((webm_error(timestamp_scale(raw, info))?, webm_duration(raw, info)?))
+            },
+            0x1654ae6b => {
+                if let Some(_) = view tracks {
+                    return Error(ProbeFraming(InvalidTrack))
+                }
+                let raw = segment_metadata(e, mut remaining, read)?
+                let entries = Element(id: e.id, body: 0, next: list.len(raw), known_size: true)
+                let found = read_probe_tracks(raw, entries, limits.tracks)?
+                tracks = Some(take found)
+            },
+            0x1c53bb6b => {
+                if let Some(_) = view cue_data {
+                    return Error(ProbeFraming(InvalidElement))
+                }
+                let raw = segment_metadata(e, mut remaining, read)?
+                cue_data = Some(take raw)
+            },
+            0x1f43b675 => {
+                list.push(mut clusters, ElementRange(start: cursor, end: e.next))
+            },
+            _ => {},
+        }
+        cursor = e.next
+    }
+    let (Some((scale, duration)), Some(take found)) = (timing, take tracks) else {
+        return Error(ProbeFraming(InvalidTrack))
+    }
+    let cues = match take cue_data {
+        Some(take raw) => read_cues(raw, segment.body, clusters)?,
+        None => list.new(),
+    }
+    Ok(WebmProbe(info: WebmInfo(file_size: file_size, timestamp_scale: scale, duration_ticks: duration), tracks: take found, cues: take cues))
+}
+
+pub fn probe_info(probe: WebmProbe) -> WebmInfo {
+    probe.info
+}
+
+pub fn probe_tracks(probe: WebmProbe) -> u64 {
+    list.len(probe.tracks)
+}
+
+pub fn probe_track(probe: WebmProbe, index: u64, receive: scoped fn(WebmFormat, Bytes, Bytes)) -> Result[(), ProbeError] {
+    if index >= list.len(probe.tracks) {
+        return Error(ProbeFraming(InvalidTrack))
+    }
+    let track = view probe.tracks[index]
+    receive(track.format, track.codec, track.private_data)
+    Ok(())
+}
+
+pub fn probe_cues(probe: WebmProbe, receive: scoped fn(Cue)) {
+    for cue in probe.cues {
+        receive(cue)
+    }
+}

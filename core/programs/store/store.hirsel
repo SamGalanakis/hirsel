@@ -783,7 +783,7 @@ pub fn fork(mut db: Db, name: String, from: Snapshot) -> Result[(Branch, Ticket)
     if let Ok(slot) = branch_slot(db, from.branch) {
         let h = db.heads[slot]
         at = h.at
-        if h.head == from.head && tree_stamp(h.roots.collections) == tree_stamp(from.roots.collections) && tree_stamp(h.roots.streams) == tree_stamp(from.roots.streams) && tree_stamp(h.roots.catalog) == tree_stamp(from.roots.catalog) {
+        if capture_matches_head(from, h) {
             live_bytes = Some(slot)
         }
     }

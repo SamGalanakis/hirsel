@@ -156,3 +156,48 @@ fn l88_probe_keeps_progress(captured: TieredPageSource, pack: PagePack, original
     }
     Ok(())
 }
+
+fn l88_assert_current_pin(mut db: Db, name: String, captured: Snapshot, current: std.page.PagePtr) -> Result[(), Error] waits {
+    let _ = pin(mut db, name, captured)?
+    let retained = option.unwrap(pinned(db, name))
+    let key = prefix(9)?
+    let (edge, _) = option.unwrap(std.page.collection_slot(retained.roots.collections.root, key))
+    let ColdPage(found) = edge else {
+        fail("L88(h): a stamp-equal pin must use the sealed head, even when the capture is Hot")
+    }
+    if found != current {
+        fail("L88(h): a stamp-equal pin kept a location behind the installed probe cursor")
+    }
+    if retained.watermark != captured.watermark || retained.head != captured.head {
+        fail("L88(h): pinning the head's shares must retain the capture's identity")
+    }
+    Ok(())
+}
+
+@test
+fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] waits {
+    let mut db = memory_at(c, StoreId(hi: 3, lo: 4), result.unwrap(sized(Memory, 1074790400u64)))
+    let old = std.page.PagePtr(pack: 7, offset: 72, len: 128, checksum: 19, stamp: 40)
+    let current_location = std.page.PagePtr(pack: 11, offset: 72, len: 128, checksum: 19, stamp: 40)
+    let mut draw = 80u64
+    db.heads[0u64].roots = l79_cut_table(old, 3, 258, mut draw)?
+    db.next_node = draw - 1
+    let old_capture = snapshot(db)
+    draw = 80
+    let current = l79_cut_table(current_location, 3, 258, mut draw)?
+    db.heads[0u64].roots = share_roots(current)
+    l88_assert_current_pin(mut db, "relocated", old_capture, current_location)?
+
+    let mut rows: List[std.page.Entry] = list.with_capacity(3)
+    for slot in 0u64 .. 3 {
+        list.push(mut rows, std.page.Entry(key: key_word(slot), cell: InlineValue(string.into_bytes(string.from("stored")))))
+    }
+    let image = page_result(std.page.encode(rows, 0, old.stamp, Collection))?
+    let page = page_result(std.page.attach(take image, list.new(), list.new()))?
+    draw = 80
+    page_result(std.page.install_tiered_root(mut db.heads[0u64].roots.collections.root, prefix(9)?, HotPage(take page), mut draw))?
+    let hot_capture = snapshot(db)
+    db.heads[0u64].roots = take current
+    l88_assert_current_pin(mut db, "sealed", hot_capture, current_location)?
+    close(take db)
+}

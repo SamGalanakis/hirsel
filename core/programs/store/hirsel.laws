@@ -212,6 +212,7 @@ store@1/store/test_l84_pager_coalesces_sibling_demands src=b7c9d90435a13314 sig=
 store@1/store/test_l84_parallel_bucket_windows src=854c68b23ed37a87 sig=885a11e757144d29 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l87_replay_fork_raises_stamp_counter src=879dd700c3edc364 sig=e242db37b1f26ac7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l88_promotion_converges_tiered_stamps src=69b96c28f2b36b4b sig=5ec0fd704e088491 run=722e0e8306f441ca bug=- oracle=- rows=pending
+store@1/store/test_l88_stamp_equal_pin_takes_current_head src=98a15559b548ec58 sig=62b149fd22dd9ac9 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_local_projector_laws src=69247f07bf78a9df sig=ca2753225a79563c run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_look src=41970c5b73344465 sig=a6049ad55916f47e run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_look_faults src=c24a5a5763a938b5 sig=21b7c3d2452fa249 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

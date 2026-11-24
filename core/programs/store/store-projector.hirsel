@@ -431,6 +431,13 @@ fn replace_projector_pin(mut db: Db, name: String, s: Snapshot) -> Result[Ticket
     change_pin(mut db, name, s, true)
 }
 
+fn capture_matches_head(from: Snapshot, head: Head) -> bool {
+    head.head == from.head &&
+        tree_stamp(head.roots.collections) == tree_stamp(from.roots.collections) &&
+        tree_stamp(head.roots.streams) == tree_stamp(from.roots.streams) &&
+        tree_stamp(head.roots.catalog) == tree_stamp(from.roots.catalog)
+}
+
 fn change_pin(mut db: Db, name: String, s: Snapshot, overwrite: bool) -> Result[Ticket, Error] waits {
     journal_poll(mut db)?
     healthy(db)?
@@ -446,7 +453,12 @@ fn change_pin(mut db: Db, name: String, s: Snapshot, overwrite: bool) -> Result[
     let serial = db.next_pin
     let Some(following) = int.checked_add(serial, 1) else { return Error(Limit(Ids)) }
     db.next_pin = following
-    let kept = Pin(name: take owned, branch: s.branch, version: s.head, serial: serial, roots: share_roots(s.roots), watermark: s.watermark)
+    // Equal stamps identify the logical roots. A cut may have moved their frames.
+    let roots = match branch_slot(db, s.branch) {
+        Ok(head_slot) if capture_matches_head(s, db.heads[head_slot]) => share_roots(db.heads[head_slot].roots),
+        _ => share_roots(s.roots),
+    }
+    let kept = Pin(name: take owned, branch: s.branch, version: s.head, serial: serial, roots: take roots, watermark: s.watermark)
     if replacing { return cut_install(mut db, ReplacePin(slot, take kept)) }
     cut_install(mut db, AddPin(take kept))
 }

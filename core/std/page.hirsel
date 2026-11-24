@@ -657,15 +657,7 @@ fn head_word(b: Bytes, end: u64, width: u64) -> u64 {
     int.wrapping_shl(w, int.narrow(64 - 8 * width))
 }
 
-// The first `width` (one to eight) bytes of `b`, which has at least eight, as
-// `head_word` lays them out.
-fn lead_word(b: Bytes, width: u64) -> u64 {
-    let w: u64 = list.word_be(b, 0)
-    let gone = 64 - 8 * width
-    (w >> gone) << gone
-}
-
-// `search`'s bisection over slots [first, n) when key[p, len(key)) has at most
+// `search`'s bisection over u16 slots [first, n) when key[p, len(key)) has at most
 // eight bytes and the key at least eight: the suffix is compared as one word.
 fn search_word(raw: Bytes, start: u64, first: u64, n: u64, key: Bytes, p: u64) -> (u64, bool) {
     let key_width = list.len(key)
@@ -674,11 +666,18 @@ fn search_word(raw: Bytes, start: u64, first: u64, n: u64, key: Bytes, p: u64) -
     let mut lo = first
     let mut hi = n
     while lo < hi {
-        let mid = lo + (hi - lo) / 2
+        let mid = int.wrapping_add(lo, hi) / 2
         let at = u16_at(raw, start + 2 * mid)
-        let width = u16_at(raw, at)
+        // Even the shortest entry has seven bytes left including its slot.
+        // Start one byte earlier to load the width and five suffix bytes together.
+        let packed: u64 = list.word_le(raw, at - 1)
+        let width = (packed >> 8) & 65535
         let probe = if width <= 8 {
-            let cell = head_word(raw, at + 2 + width, width)
+            let cell = if width <= 5 {
+                int.swap_bytes((packed >> 24) & ((1u64 << (8 * width)) - 1))
+            } else {
+                head_word(raw, at + 2 + width, width)
+            }
             if cell != word {
                 order.compare(cell, word)
             } else {
@@ -712,7 +711,9 @@ pub fn search(image: Image, key: Bytes) -> (u64, bool) {
     let common = order.min(p, key_width)
     if common != 0 {
         let head = if common <= 8 && key_width >= 8 {
-            order.compare(head_word(image.raw, HEADER + common, common), lead_word(key, common))
+            let key_head: u64 = list.word_be(key, 0)
+            let gone = 64 - 8 * common
+            order.compare(head_word(image.raw, HEADER + common, common), (key_head >> gone) << gone)
         } else {
             list.compare_bytes(list.slice(image.raw, HEADER, HEADER + common), list.slice(key, 0, common))
         }
@@ -1508,14 +1509,9 @@ fn edge_matches(image: Image, row: Entry, kid: Option[Slot], blob: Option[BlobSl
     }
 }
 
-fn private_put(mut page: Page, incoming: Entry, kid: Option[Slot], blob: Option[BlobSlot]) -> Result[Edit, Error] {
+fn private_put(mut page: Page, incoming: Entry, kid: Option[Slot], blob: Option[BlobSlot], slot: u64, hit: bool) -> Result[Edit, Error] {
     let lvl = level(page.image)
     let n = count(page.image)
-    let (slot, hit) = if lvl != 0 && list.len(incoming.key) == 0 {
-        (0u64, n != 0)
-    } else {
-        search(page.image, incoming.key)
-    }
     valid_entry(page.image.domain, lvl, slot, incoming)?
     if stamp(page.image) == 0 || !edge_matches(page.image, incoming, kid, blob) {
         return Error(MalformedPage)
@@ -2290,7 +2286,12 @@ fn adopt_children(mut page: Page, slot: u64, parts: List[PagePiece], rightmost: 
     for i in 1u64 .. list.len(parts) {
         let piece = view parts[i]
         let row = branch_slot(clone(piece.separator), piece.root)
-        if private_put(mut page, row.row, row.kid, None)? == Split {
+        let (position, hit) = if level(page.image) != 0 && list.len(row.row.key) == 0 {
+            (0u64, count(page.image) != 0)
+        } else {
+            search(page.image, row.row.key)
+        }
+        if private_put(mut page, row.row, row.kid, None, position, hit)? == Split {
             return Ok(Some(replace_children(page, slot, parts, i, rightmost, mut next)?))
         }
     }
@@ -2358,8 +2359,7 @@ fn append_leaf_piece(mut parts: List[PagePiece], take leaf: Arc[Page]) -> Result
     Ok(())
 }
 
-fn split_insert(page: Page, incoming: PageSlot, rightmost: bool, mut next: u64) -> Result[List[PagePiece], Error] {
-    let (slot, hit) = search(page.image, incoming.row.key)
+fn split_insert(page: Page, incoming: PageSlot, slot: u64, hit: bool, rightmost: bool, mut next: u64) -> Result[List[PagePiece], Error] {
     let entries = leaf_edit_slots(page.image, incoming.row, slot, hit)
     let n = list.len(entries)
     let (left, middle) = split_slots(n, 0, rightmost, scoped fn(index: u64) -> u64 {
@@ -2403,9 +2403,9 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmo
     let Some(slot) = descend(page.image, incoming.row.key) else {
         let (position, hit) = search(page.image, incoming.row.key)
         let extends = rightmost && !hit && position == count(page.image)
-        let edit = private_put(mut page, incoming.row, incoming.kid, incoming.blob)?
+        let edit = private_put(mut page, incoming.row, incoming.kid, incoming.blob, position, hit)?
         if edit == Split {
-            return Ok((Some(split_insert(page, incoming, extends, mut next)?), false))
+            return Ok((Some(split_insert(page, incoming, position, hit, extends, mut next)?), false))
         }
         return Ok((None, edit == Shrunk))
     }

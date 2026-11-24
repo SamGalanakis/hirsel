@@ -1288,7 +1288,7 @@ impl Scheduler {
         }
     }
 
-    fn net_idle_wait(&self, timeout: i32) -> (i32, bool) {
+    fn net_idle_wait(&self, timeout: i32) -> (i32, Option<u64>) {
         crate::task_heap::idle_wait(timeout, self.stacks.has_warm_kept() || !self.warm.is_null())
     }
 
@@ -1385,7 +1385,7 @@ impl Scheduler {
                 if !self.net.is_null() {
                     let (timeout, release) = self.net_idle_wait(poll_timeout(Some(deadline)));
                     self.poll_net(timeout);
-                    release
+                    release.is_some_and(|due| crate::os::monotonic_ns() >= due)
                 } else {
                     release_idle(self);
                     std::thread::park_timeout(Duration::from_nanos(
@@ -1404,7 +1404,7 @@ impl Scheduler {
                 if !self.net.is_null() {
                     let (timeout, release) = self.net_idle_wait(-1);
                     self.poll_net(timeout);
-                    release
+                    release.is_some_and(|due| crate::os::monotonic_ns() >= due)
                 } else {
                     release_idle(self);
                     std::thread::park();
@@ -4064,11 +4064,11 @@ impl RunPtr {
                         trim_run_heap(root);
                     }
                     let (timeout, release) = if wait_for_net && untied {
-                        (poll_timeout(run.timers.deadline()), false)
+                        (poll_timeout(run.timers.deadline()), None)
                     } else if wait_for_net {
                         run.net_idle_wait(poll_timeout(run.timers.deadline()))
                     } else {
-                        (0, false)
+                        (0, None)
                     };
                     // mc-units-proto: HIRSEL_XSPIN busy-polls instead of sleeping.
                     let timeout = if crate::units::spin() { 0 } else { timeout };
@@ -4084,7 +4084,7 @@ impl RunPtr {
                     }
                     let task = run.pop();
                     if task.is_null() {
-                        if release {
+                        if release.is_some_and(|due| crate::os::monotonic_ns() >= due) {
                             run.release_net_idle();
                         }
                         if !wait_for_net {

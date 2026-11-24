@@ -47,19 +47,19 @@ pub(crate) const RELEASE_DELAY_MS: i32 = 100;
 static RETAINING: Mutex<Vec<Arc<Heap>>> = Mutex::new(Vec::new());
 static RETAINING_HEAPS: AtomicUsize = AtomicUsize::new(0);
 
-/// The poll timeout for a worker about to wait `timeout` ms (-1: no limit),
-/// and whether it should release retained pages and surplus stacks if that
-/// wait finds nothing.
-pub(crate) fn idle_wait(timeout: i32, warm_stacks: bool) -> (i32, bool) {
+/// The poll timeout for a worker about to wait `timeout` ms (-1: no limit), and the
+/// time after which a wait that finds nothing releases retained pages and stacks.
+pub(crate) fn idle_wait(timeout: i32, warm_stacks: bool) -> (i32, Option<u64>) {
     let retaining = warm_stacks
         || slabs::retaining()
         || returns::orphaned_pending()
         || RETAINING_HEAPS.load(Ordering::Relaxed) != 0
         || crate::fiber::surplus();
     if !retaining || (0..=RELEASE_DELAY_MS).contains(&timeout) {
-        (timeout, false)
+        (timeout, None)
     } else {
-        (RELEASE_DELAY_MS, true)
+        let due = crate::os::monotonic_ns() + RELEASE_DELAY_MS as u64 * 1_000_000;
+        (RELEASE_DELAY_MS, Some(due))
     }
 }
 
@@ -2610,7 +2610,7 @@ mod tests {
         assert_eq!(context.available(), 0);
         free(first);
         assert_eq!(count_resident(&pages), SLABS);
-        assert_eq!(idle_wait(-1, false), (RELEASE_DELAY_MS, true));
+        assert!(matches!(idle_wait(-1, false), (RELEASE_DELAY_MS, Some(_))));
         let second = burst();
         assert_eq!(probes(&second), pages);
         assert_eq!(count_resident(&pages), SLABS);

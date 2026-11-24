@@ -359,6 +359,8 @@ mod host_file_tests;
 #[cfg(test)]
 mod host_ops_tests;
 #[cfg(test)]
+mod net_idle_tests;
+#[cfg(test)]
 mod net_tests;
 
 #[cfg(test)]

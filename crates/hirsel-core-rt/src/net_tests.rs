@@ -10,7 +10,7 @@ use std::{
 fn fds() -> usize {
     std::fs::read_dir("/proc/self/fd").unwrap().count()
 }
-fn isolated(law: &str) {
+pub(crate) fn isolated(law: &str) {
     let output = crate::test_process::command()
         .args(["--exact", "net_tests::net_laws_child", "--nocapture"])
         .env("WIRE_W1A_LAW", law)
@@ -458,7 +458,7 @@ fn net_inherited_listener_checks_bound_address() {
     );
 }
 
-fn carrier(bytes: &mut [u8], len: usize) -> Buffer {
+pub(crate) fn carrier(bytes: &mut [u8], len: usize) -> Buffer {
     Buffer {
         data: bytes.as_mut_ptr(),
         len,
@@ -1036,7 +1036,7 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
             "cancel_beats_ready" | "active_poll" => {
                 scheduler_socket_law(context, law == "cancel_beats_ready")
             }
-            _ => panic!("unknown socket law {law}"),
+            _ => crate::net_idle_tests::socket_law(law, context),
         }
     }
 }

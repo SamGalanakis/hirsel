@@ -20,13 +20,18 @@ v2.92 (store-ring-spec-2208, io_uring roadmap step 3, PLAN.md §3 rank 3 and §1
   - The bytes past a segment's frames are at most T + 4,095, where v2.82 had T. So v2.82's "no per-segment term" is withdrawn, and C-4 gains up to 4 KiB per retained segment.
 - **Window steps** use the new host call `zero_at`, one durable write per step. The Z chunk is deleted.
 - **Live capture is bounded by the END's `d`** (v2.83, v2.84). A direct write's bytes never pass through the reader's page cache as dirty data, so the reader's second sync no longer proves what it read is durable. A Live reader now applies only frames below the terminal END's `d`, on every backend, and its second sync is deleted. A follower can lag the writer by up to 64 groups under load, and by nothing once the queue is idle.
-- **Ring ops.** OPEN, OPEN_DIR, STAT, `stat_file`, CLOSE, READ and WRITE move to the ring, and so do `zero_at`, SYNC and SYNC_DIR. Directory listing, rename, mkdir, remove, temp files, locks and the zero-extension probe stay on the helper (§3.3b, the op table).
+- **Ring ops.** OPEN, OPEN_DIR, STAT, `stat_file`, CLOSE, READ, WRITE, `zero_at`, SYNC, SYNC_DIR, RENAME, MKDIR and REMOVE move to the ring; the last three go through a confined parent fd.
+  - Locks run inline (they never wait).
+  - Directory listing, `remove_tree`, temp names and the zero-extension probe stay on the helper.
+  - The gate's "helper threads = 0" becomes 0 handoffs during commits and reads, and 1 per open (§3.3b, the op table).
+- **The journal task now gets its tail image from the creator.** It is handed each new segment's HEADER bytes: `Rotate` gains a `Bytes`, and so does the spawn input.
+- **END is written before every blocking `receive`** whenever it lags e.
 - **What is deleted.** `os_sync.rs` and `HIRSEL_SYNC_HELPERS` go entirely: on a host without the ring, SYNC and SYNC_DIR take the `off_slot` seam like every other file op. Each slot ring caps io-wq at 2 bounded workers and 1 unbounded.
 - **EIO and short writes.**
   - EIO is reported for the page it hits and never read as zeros.
   - A short direct write continues at the returned offset when that offset is 4 KiB-aligned.
   - Any other short write, a zero-byte write, or an error poisons the store (§3.8).
-- A 22-row self-attack table closes §3.3b.
+- A 23-row self-attack table closes §3.3b.
 
 Reversible: the journal format is unchanged. A pre-v2.92 reader opens a v2.92 directory, and v2.92 opens an older one. Dropping the discipline is a code change.
 
@@ -2546,7 +2551,7 @@ and recovered is a prefix of issued in commit order. Acked means `Synced` covere
   - Nothing a program sees changes: the call's arguments, result, `DirOp`/`DirReply` (`core/core/core.hirsel:245-247`) and tape records are the same on both kinds of host. Old tapes replay unchanged.
 - **Open modes (new).** `OpenMode` gains two values, `Durable` and `Direct` (`core/core/core.hirsel:267`; `docs/spec/core.md` §host files).
   - **`Durable`** is `Write` plus O_DSYNC. The completion of every `write_at` on it means its bytes survive a crash. That is the guarantee `host.sync` would give for those bytes, so no `sync` needs to follow.
-  - **`Direct`** is `Durable` with an alignment contract. Every `write_at` and `zero_at` on the handle must have an offset, a length and (for `write_at`) a buffer address that are multiples of A. Otherwise the host returns `Invalid` without issuing any I/O.
+  - **`Direct`** is `Durable` with an alignment contract. Every `write_at` and `zero_at` on the handle must have an offset, a length and (for `write_at`) a buffer address that are multiples of A. Otherwise the host returns `Other(22)` (EINVAL; `IoError` is `NotFound | Denied | Exists | Closed | Other(u32)`, `core/core/core.hirsel:321`) without issuing any I/O.
   - The host checks that contract itself on every provider, the sim fs and the crash bridge included. It does not rely on the file system to refuse.
   - **What the open asks for.** Where the provider accepts O_DIRECT with `statx` `STATX_DIOALIGN` offset and memory alignments that divide A, the host opens O_DIRECT|O_DSYNC. Otherwise it opens O_DSYNC alone and keeps the same contract.
   - **Why the host checks.** On this host's kernel (7.0.0-43), tmpfs accepts an unaligned O_DIRECT `pwrite` and ext4 refuses it with EINVAL (probe, this lane). Without the host check, laws on `/dev/shm` would never see a padding bug that real disks refuse.
@@ -2554,10 +2559,14 @@ and recovered is a prefix of issued in commit order. Acked means `Synced` covere
   - On a ring host it is one `WRITEV` whose iovecs all point at one read-only, runtime-owned, A-aligned zero region of 64 KiB. A 1 MiB step is 16 iovecs, well under `UIO_MAXIOV`.
   - On a helper host it is `pwritev` with the same iovecs.
   - The sim fs and the crash bridge write zeros.
-- **Tail image.** The journal task keeps the bytes of the open segment in [⌊e⌋ₐ, e), fewer than A of them, at the head of its group buffer. They are the bytes this task last wrote there. A task only ever writes a segment it created, because each open rotates (§3.4 step 8), so the image is exact.
+- **`Durable` and `Direct` in the sim fs and the crash bridge.** A completed write is a synced version: no later crash takes it back. A crash cut while a write is issued and not completed keeps any subset of that write's 512-byte sectors, old or new, and so do cuts between the pieces of a split write. The step-1 law on sim therefore keeps its mid-write cut. Without this rule, sim would make every direct write atomic and hide case (a).
+- **Tail image.** The journal task keeps the bytes of the open segment in [⌊e⌋ₐ, e), fewer than A of them, at the head of its group buffer.
+  - **Its initial value.** The Db task, not the journal task, creates segments (open step 8, cut step 1, `disk_new_segment` `store.hirsel:3803`). So the creator hands the journal task the segment's 72 HEADER bytes, the same `Bytes` value it wrote: in the spawn input for the first segment, and in the rotation message for later ones, which becomes `Rotate(HostFile, HostFile, Bytes)`. On a switch, the task copies those 72 bytes to the buffer head and sets e = 72 and w = A. A wrong image would rewrite [0, 72) with other bytes under a good END, which reads as `Corrupt(Header)`. So the image must be the creator's written value, never a re-encoding.
+  - **Later values.** After each group, the image is the bytes this task just wrote in [⌊e⌋ₐ, e). No other writer touches a live segment: each open rotates (§3.4 step 8), and only the journal task writes after creation. So the image is exact.
+  - **The creation block.** The Db task keeps one A-aligned block of A bytes, allocated at open and reused for every segment it creates. It holds the HEADER followed by zeros. The Db task is its only user, so creation allocates nothing new for alignment.
 - **Group buffer.** One A-aligned allocation made at spawn, of G = ⌈`group_bytes`⌉ₐ + A bytes, kept for the task's life.
   - It replaces the buffer v2.80 acquired per group and the single-frame direct write: every group is copied in after the tail image.
-  - The aligned allocation is a core list function (`list.with_capacity_aligned(n, A)`, IMPL), and the group buffer is its only caller in Store.
+  - The aligned allocation is a core list function (`list.with_capacity_aligned(n, A)`, IMPL). Its callers in Store are the group buffer and the creation block.
   - The journal task still allocates nothing after spawn (Q1a). The Z chunk of §3.3a and its 32 KiB in `JOURNAL_WORKER_SLACK` are deleted.
 
 **The op table.** Every operation `execute_file` and `issue_now` serve (`crates/hirsel-core-rt/src/os.rs` ~160-380, ~618-710):
@@ -2574,11 +2583,19 @@ and recovered is a prefix of issued in commit order. Acked means `Synced` covere
 | SYNC | `FSYNC` with `IORING_FSYNC_DATASYNC` | `fdatasync` via `off_slot` | FSYNC always runs on io-wq (K1), and the cap below bounds it |
 | SYNC_DIR | `FSYNC` | `fsync` via `off_slot` | as SYNC |
 | ENTRIES, NEXT_ENTRIES, CLOSE_ENTRIES | helper (`off_slot`) | helper | there is no getdents ring op |
-| RENAME, MKDIR, REMOVE, REMOVE_TREE, MKDTEMP, MKSTEMP | helper | helper | the ring's `RENAMEAT`, `MKDIRAT` and `UNLINKAT` take no `resolve` flags, so they would drop openat2 confinement for paths of more than one component |
-| TRY_LOCK, UNLOCK | helper | helper | there is no flock ring op |
+| RENAME, MKDIR, REMOVE | `OPENAT2`(O_PATH\|O_DIRECTORY, the `beneath` resolve) of the parent, then `RENAMEAT`/`MKDIRAT`/`UNLINKAT` on that fd with the final component, then `CLOSE` | as today: the parent fd form `os.rs` already uses | the ring ops take no `resolve`. A final component that is validated (no `/`, not `.` or `..`) and acted on through a confined parent fd is not followed (rename, mkdir and unlink never follow a final symlink), so confinement is the parent open's |
+| REMOVE_TREE, MKDTEMP, MKSTEMP | helper | helper | a recursive walk, and a retry loop over random names. Store's open and cut use none of them |
+| TRY_LOCK, UNLOCK | inline on the slot | inline | `flock` with LOCK_NB, and LOCK_UN, never wait. The provider runs them in place, like a nonblocking socket op |
 | ZERO_EXTENSION | helper | helper | reads `statfs` and `/proc` once per open (§3.3a) |
 
-The operations left on the helper run once per open, cut or listing, never once per commit or per page. On a ring host Store's per-commit and per-page path uses no helper thread: the PLAN gate's "helper threads = 0" counts threads `off_slot` starts while R8 commits and reads run.
+**What still uses the helper on a ring host.** Store's opens, cuts, commits and page reads issue no helper call except ZERO_EXTENSION, once per open. Directory listings, `remove_tree` and temp names do, and Store uses them only in export and tooling. So PLAN step 3's gate "helper threads = 0" is stated as: **0 `off_slot` handoffs during R8's commit and read phases, and 1 per Store open.** That is a narrowing of PLAN's wording, said here plainly. Moving ZERO_EXTENSION to ring `OPENAT2` and `READ` of `/proc` plus a `statx` is possible, and it is left for the gate to ask for.
+
+**What still goes through io-wq on a ring host** (a kernel worker, not a Hirsel helper thread):
+- `STATX` always (`io_uring/statx.c:46`, REQ_F_FORCE_ASYNC).
+- `FSYNC` always (`io_uring/sync.c:35-97`).
+- `RENAMEAT`, `UNLINKAT` and `MKDIRAT` always (`io_uring/fs.c:78-279`).
+- `OPENAT2` with O_CREAT or O_TRUNC always (`io_uring/openclose.c:42-50`). Other opens try inline first.
+- Buffered reads complete inline from the page cache, or through task_work (K3).
 
 **Helper deletion.** `crates/hirsel-core-rt/src/os_sync.rs` is deleted, along with `HIRSEL_SYNC_HELPERS` (read at `os_sync.rs:194`) and its uses in `bench/units/scale.py:211`, `bench/units/part3u.py:52` and `bench/units/rust/src/bin/twin.rs:5`.
 - On a ring host, SYNC and SYNC_DIR are ring `FSYNC`s.
@@ -2593,7 +2610,7 @@ The operations left on the helper run once per open, cut or listing, never once 
 
 **The journal's write discipline (every backend).**
 - **Handles.** A segment is opened `Direct` and its END file `Durable`. These are the only Store files in those modes. Packs, MANIFEST and export scratch keep `Write` plus `sync`: each is many writes followed by one sync, where O_DSYNC would pay a flush per write.
-- **Segment creation.** One `write_at(segment, 0, HEADER ‖ zeros)` of A bytes, durable at completion. Then `write_at(end_file, 0, END(72))`, durable at completion. Then `sync_dir`. Then the first frame may be sent.
+- **Segment creation.** One `write_at(segment, 0, creation block)` of A bytes (HEADER ‖ zeros), durable at completion. Then `write_at(end_file, 0, END(72))`, durable at completion. Then `sync_dir`. Then the first frame may be sent.
   - After creation e = 72 and w = A, and the tail image is the HEADER.
   - The file is A bytes long, not 72. HEADER readers bound their read by 72 and are unchanged.
   - The laws that check `j-1` at 72 bytes (`store_format4_laws.hirsel:619`, `store_manifest_page_laws_2.hirsel:613`) read files they wrote themselves under a refused open, so the store's padding does not reach them.
@@ -2617,6 +2634,7 @@ The operations left on the helper run once per open, cut or listing, never once 
 - **Not admitted (amends §3.3a "No admission, no window").** T = 0, so no step ever runs. A group still writes R, whose padded tail extends the file to ⌈e⌉ₐ with zeros written in the same O_DSYNC write.
   - On a direct handle the file system moves i_size only at I/O completion. An extending direct write sets `IOMAP_DIO_COMP_WORK` (`fs/iomap/direct-io.c:755-756`), so a crash mid-write leaves the old size, or a size covering written bytes.
   - That is [D] for providers other than ext4, and it is never worse than the buffered append it replaces, which is the case before v2.92.
+- **END before every blocking `receive` (new rule).** Before v2.92, END was due only when a drain ended on `Empty`, or at the 64th group. A drain that ended on a full group, an oversized frame or a `Barrier` could reach a blocking `receive` with END behind e, and stay there while the writer was quiet. v2.92 adds a rule: before any blocking `receive`, if the last END written is below e, the task writes END(e) first. So once the queue is empty, `d` = e. Live capture depends on that (below). It costs at most one extra END per return to idle, off the ack path.
 - **END.** After the ack: `write_at(end_file, 0, END(d))` on the `Durable` handle, with no `sync`. END stays 96 bytes, unaligned and buffered, because its readers (`disk_read_end`, `store.hirsel:4644`) parse every byte to EOF, and zero padding there would fail them. It reaches io-wq on ext4 (K2) and is off the ack path, as before.
 - **Barrier `Written` (W2).** It is answered when the group's write completes. That now also means durable, which W2 allows.
 
@@ -2644,14 +2662,14 @@ The operations left on the helper run once per open, cut or listing, never once 
 **EIO and short writes.**
 - **Reads.** A ring `READ` returns n > 0 bytes, 0 at EOF, or an error.
   - A short read is not an error: the host returns the bytes it got, as `read`/`read_at` already may (`docs/spec/core.md`).
-  - An unreadable page gives `IoError.Io(EIO)` for the read that reaches it. The host never fills zeros, and never returns bytes from a page the kernel did not read.
+  - An unreadable page gives `Other(5)` (EIO) for the read that reaches it. The host never fills zeros, and never returns bytes from a page the kernel did not read.
   - A Tiered page read or a journal scan that hits it fails like any failed host read. Other pages are unaffected, and a later read of the same page is a new read.
   - This differs from TigerBeetle, which zero-fills an unreadable sector and treats it as a checksum failure (prior art). In Store a zero run is a kind-0 head, the torn tail: a zero-filled page below `d` would read as `Corrupt`, and one past `d` would silently end recovery early.
 - **Writes.** A ring `WRITE`, `WRITEV` or helper `pwrite` that completes with n:
   - n = the requested length: done.
   - 0 < n < length, and (on a `Direct` handle) at + n a multiple of A: the host submits the rest at at + n. Each part is durable at its completion, so the call is durable when the last part completes. This is TigerBeetle's rule (prior art).
-  - 0 < n < length with at + n not a multiple of A on a `Direct` handle: `Io(EIO)`. The rest could not be issued aligned.
-  - n = 0: `Io(EIO)`, as `write_all_from` does today.
+  - 0 < n < length with at + n not a multiple of A on a `Direct` handle: `Other(5)` (EIO). The rest could not be issued aligned.
+  - n = 0: `Other(5)` (EIO), as `write_all_from` does today.
   - −EAGAIN or −EINTR: resubmit the same SQE (TigerBeetle `linux.zig:611-620`).
   - Any other negative result, ENOSPC included: that error.
   - A failed write is a failed write of the segment, so it poisons the store with no retry (§3.8). With O_DSYNC, a write error is also the sync failure: there is no later sync to report it.
@@ -2676,12 +2694,15 @@ The briefed "FSYNC only for `sync_dir`" holds for the journal path. It does not 
 - Middle segments stay bounded by the successor's `prev_end`.
 - The reader reads END, then reads the segment to `d`. A segment shorter than `d` gets v2.83's one size refresh on the same handle, then is `Truncated`. A missing or bad END means `d` = 72.
 - There is no second sync.
+- **A damaged END under Live.** If the terminal END is unreadable, the reader uses `d` = 72 and sees no frame of that segment until the writer's next END rewrites the file whole. This costs freshness, not data. A `Locked` open still reads past `d` to the torn tail (§3.4, "What a damaged END file costs"), so for recovery a damaged END still costs only detection.
+- **Laws to revisit (build lane).** These cases read a live writer's terminal segment and may expect frames past END: `follower_crash_laws.hirsel` (`disk_crash_live_read_main`, `disk_crash_live_read_write`), and the Live cases in `store_crash_laws.hirsel`, `tiered_open_laws.hirsel` and `bucket_laws.hirsel`. Each such expectation becomes "applied at most to `d`", and none is weakened past that.
+- **Scope.** The objects@1 journal (`store-object-journal.hirsel`, `ObjectFresh`) keeps its current write and sync discipline in v2.92. Moving it is a separate step.
 - **Why.** v2.83's argument was that the reader's own sync makes durable every byte it read, because those bytes were dirty pages in the page cache.
   - A direct write puts its bytes on the device before they are durable. A concurrent buffered read can fetch them from the device's volatile cache while the write is still in flight.
   - The reader's later flush covers only commands completed before it was submitted. So the reader could publish a frame that a power cut takes back.
   - `d` names only bytes whose writes completed, and on these handles completed means durable. So the bound needs no claim about device or page-cache order.
 - It applies on both backends, so like readers read alike.
-- **Cost.** A follower trails the writer by the frames since the last END: at most 64 groups under load, and nothing once the writer's queue is idle, when END is written at once. `fresh` and `at_least` wait for that END, inside their deadlines.
+- **Cost.** A follower trails the writer by the frames since the last END: at most 64 groups under load, and nothing once the writer's queue is empty, because END is written before every blocking `receive` (above). `fresh` and `at_least` wait for that END, inside their deadlines.
 - Page-cache coherence for completed writes: a direct write invalidates the range before (`fs/iomap/direct-io.c:765`) and after (`:139`) the I/O, so a buffered read that starts after completion sees the new bytes.
 
 **Every reader of a segment's file size.**
@@ -2699,7 +2720,7 @@ The briefed "FSYNC only for `sync_dir`" holds for the journal path. It does not 
   - **(a) L86, tail-block images.** For a group written over a tail block, build each crash image from every subset of R's 512-byte sectors old or new, and check acked ⊆ recovered ⊆ issued.
     - Bug: a tail image that is not refreshed after a group, which rewrites acked bytes with stale ones.
     - Oracle: the hand-derived image.
-  - **(b) The host contract case in the host file laws.** A `Direct` `write_at` with an unaligned offset, length or address returns `Invalid` on tmpfs and in the sim fs.
+  - **(b) The host contract case in the host file laws.** A `Direct` `write_at` with an unaligned offset, length or address returns `Other(22)` on tmpfs and in the sim fs.
     - Bug: a padding error that tmpfs would accept and ext4 would refuse in production.
   - **(c) A follower image case.** A hand-built directory whose terminal segment holds well-formed frames past its END's `d`. A Live capture applies only the frames below `d`.
     - Bug: a reader that publishes in-flight direct bytes.
@@ -2708,14 +2729,14 @@ The briefed "FSYNC only for `sync_dir`" holds for the journal path. It does not 
 
 **Expected effects [D].**
 - **Group commit inside the window:** a pure direct overwrite with FUA, about 19 µs, against 96 µs for a buffered synced append (K4, measured microbench [M]). The store-level number is [D] until the gate measures it.
-- **R8-open-i0:** workers-never-block-2157 took it from 130 to 180 ms (+38%) by routing every open-path file op through `off_slot`. Ring `OPENAT2`, `STATX`, `READ` and `CLOSE` complete without a helper thread handoff, and buffered reads that hit the page cache complete inline under COOP_TASKRUN. The expectation is that most of the +50 ms comes back (about 135–145 ms). The open's segment syncs and `sync_dir` still run on io-wq. None of this is credited to O_DIRECT: open reads, it does not write frames.
+- **R8-open-i0:** workers-never-block-2157 took it from 130 to 180 ms (+38%) by routing every open-path file op through `off_slot`. Ring `OPENAT2`, `STATX`, `READ` and `CLOSE` complete without a helper thread handoff, and buffered reads that hit the page cache complete inline under COOP_TASKRUN. Path STAT, FSYNC, rename, remove and creating opens still hop to io-wq (the list above), so not all of the +50 ms comes back. The expectation is about 150–165 ms. This is [D], not derived from an op count, and the gate measures it. None of it is credited to O_DIRECT: open reads, and it does not write frames.
 - **R6, R8-load:** small, from the same handoff removal, [D].
 
 **Prior art.**
 - **TigerBeetle** (`/tmp/ref-tigerbeetle` a2a3c70):
   - **O_DSYNC on every data-file write, so completion is durability: ADOPTED.** It is asserted at `src/stdx/io/linux.zig:1563-1564` and set at `:1456`, and `src/storage.zig` ~474 relies on it instead of fsync.
   - **Direct I/O where the file system supports it, probed at open: ADAPTED.** TigerBeetle probes at `linux.zig:1520-1532` and `:1784`, sets DIRECT for block devices at `:1498`, and skips tmpfs. With `direct_io_optional` it warns and falls back to O_DSYNC, otherwise it panics. Hirsel always falls back, because a store on any file system must open. It also enforces the alignment itself, which TigerBeetle gets from the kernel.
-  - **Sector size 4,096: ADOPTED** (`src/constants.zig:493`).
+  - **Sector size 4,096: ADOPTED** (`src/stdx/io/common.zig:17`).
   - **Short writes continue, and EAGAIN/EINTR requeue: ADOPTED** (`storage.zig:409-448`, `linux.zig:611-620`). **A write EIO panics, and a zero-byte write panics: ADAPTED.** Hirsel poisons the store (§3.8), which reports the error and keeps snapshots readable.
   - **A read EIO is bisected by sector and the unreadable sector zero-filled: NOT TAKEN** (`storage.zig:251-310`). In Store, zeros are a frame-reader signal (the torn tail), so a fabricated zero is wrong data.
   - **WAL entries are sector-aligned slots: REPLACED.** Store packs frames and rewrites the tail block, because pad frames would need a new kind (the rewrite section above).
@@ -2733,15 +2754,16 @@ The briefed "FSYNC only for `sync_dir`" holds for the journal path. It does not 
 | 3b | **An END newer than its data** (the converse). The END write reaches the disk while the group write does not. | Impossible. The END write is issued after the group write's completion, and completion of an O_DSYNC write means durable. | Holds |
 | 4 | **Every reader of a segment's file size.** Padding makes a segment longer than e: A bytes when fresh, ⌈e⌉ₐ or w after that. | Every reader is listed in "Every reader of a segment's file size". None treats size as e: recovery bounds and checks `d` ≤ size, the follower is now bounded by `d`, the witness binds its stop, export reads its scratch copy, and C-4 counts frames. The one test that stats a segment (`store_journal_laws_4.hirsel:779`) is the build lane's to check. | Holds. Risk: a size reader missed by the grep (`stat_file` callers in `store*.hirsel`) |
 | 5 | **Live reader sees an in-flight direct write.** A buffered read fetches bytes from the device cache before the write completes, and a power cut then drops them. | Live capture is END-bounded (above): a reader applies nothing past `d`, and `d` follows completion. v2.83's "the reader's sync makes it durable" is withdrawn for every backend. | Holds; costs follower freshness (row 14) |
+| 6a | **Wrong initial tail image** at a new segment. The journal task did not create the segment, and rewrites [0, 72) from bytes it re-encoded or never received. | The creator's written HEADER `Bytes` travels in the spawn input and in `Rotate`. The task copies it and never re-encodes. A mismatch would be `Corrupt(Header)` under a good END, so law case (a) includes the first group of a fresh segment. | Holds if built as written |
 | 6 | **Stale tail image.** After a group, the image is not refreshed, or is refreshed from the wrong bytes, and the next group rewrites acked frames. | The image is taken from the group buffer at completion: the bytes just written. Law case (a) builds the tail-block images. | Holds if built as written; case (a) is the guard |
 | 7 | **The sector-atomicity assumption.** A device tears inside a 512-byte sector during the tail-block rewrite. | Buffered ext4 writeback before v2.92 rewrote the same block, so the exposure is not new. NVMe AWUPF ≥ 1 logical block is the norm. Store states the assumption and does not defend past it. | Risk (stated, not new) |
 | 8 | **The pad on a provider that is not admitted** extends the file. Can a crash expose a stale block at the stop? | The pad is zeros written in the same O_DSYNC write, and a direct extending write moves i_size only at completion (`fs/iomap/direct-io.c:755-756`). On the O_DSYNC-only fallback, the buffered extending write has exactly the pre-v2.92 append exposure. | [D] beyond ext4; no worse than before |
 | 9 | **Unaligned direct writes pass on tmpfs.** | The host checks offset, length and address for every `Direct` handle on every provider (case (b)). The real-worker laws also run on ext4. | Holds |
 | 10 | **`STATX_DIOALIGN` larger than A** (a 64 KiB-sector device), or 0. | The host opens O_DSYNC without O_DIRECT, and the contract and the bytes on disk are the same. | Holds; costs the direct fast path on such devices |
-| 11 | **A short direct write ends unaligned.** | It is `Io(EIO)` and poisons the store. Resubmitting unaligned would be EINVAL, and the bytes already written are past e and unacked. | Holds |
+| 11 | **A short direct write ends unaligned.** | It is `Other(5)` (EIO) and poisons the store. Resubmitting unaligned would be EINVAL, and the bytes already written are past e and unacked. | Holds |
 | 12 | **ENOSPC from the pad.** A group whose frames fit, but whose pad does not. | The write fails, so the store poisons, as v2.80 already accepted for steps. The pad is at most 4,095 bytes per group write. | Holds; earlier poison near a full disk, stated |
 | 13 | **Unit migration.** A unit submits on slot A's ring, parks, and resumes on slot B. Can a CQE be lost, or reaped by the wrong ring? | The CQE carries the `Reply`. Slot A's poller reaps it whatever runs later, and `Reply::complete` wakes the unit wherever it runs. The buffer lives in the parked unit. | Holds. Risk (IMPL): a slot running a long unit reaps late under COOP_TASKRUN, so the poller must reap between units |
-| 14 | **Follower lag** from END-bounded capture under sustained load. | At most 64 groups, and zero at idle. `fresh` and `at_least` wait within their deadlines. | Risk: if a log@1 consumer needs freshness under load, the remedy is a more frequent END. That costs one O_DSYNC END write per group, on io-wq, and is a code change |
+| 14 | **Follower lag** from END-bounded capture under sustained load. | At most 64 groups, and zero once the queue is empty (END before every blocking `receive`). A damaged END stalls a Live reader until the next END. `fresh` and `at_least` wait within their deadlines. | Risk: if a log@1 consumer needs freshness under load, the remedy is a more frequent END. That costs one O_DSYNC END write per group, on io-wq, and is a code change |
 | 15 | **io-wq cap of 2 bounded per slot** holds an FSYNC behind another (open-path syncs, `sync_dir`) and couples units' latency. | No request waits on another request of the same slot, so there is no deadlock. The coupling is latency only, and the constants are IMPL for the gate to tune. | Risk (perf, not safety) |
 | 16 | **Path STAT confinement.** `STATX` takes no `resolve`. | STAT is `OPENAT2`(O_PATH\|O_NOFOLLOW, the `beneath` resolve), then `STATX` on the fd, then `CLOSE`. Confinement is the open's. | Holds; three SQEs, not one |
 | 17 | **Rename, mkdir and remove on the ring** would drop RESOLVE_BENEATH. | They stay on the helper. | Holds |

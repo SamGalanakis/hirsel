@@ -444,7 +444,14 @@ operations it names; nothing else about them may be inferred from an implementat
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
   writing at the end, creating it when absent; `CreateNew` creates a file for writing and
   returns `Exists` when one is present; `ReadWrite` opens for reading and writing, creating
-  the file when absent and never emptying it. `host.read` appends to `buf` at most its spare
+  the file when absent and never emptying it. `Durable` (Store v2.92, not yet built) is `Write` whose every
+  completed write survives a host crash, as if `host.sync` had returned after it. `Direct`
+  is `Durable` whose `write_at` and `host.zero_at(f, at, len)` (write `len` zeros at `at`)
+  take offsets, lengths and buffer addresses that are multiples of 4,096, else `Other(22)`
+  with no effect; the host checks this on every provider. A crash while such a write is
+  issued keeps any subset of its 512-byte sectors old or new, in the sim fs and the crash
+  bridge too. A read never returns bytes the host failed to read: an unreadable page is an
+  error for the read that reaches it, never zeros. `host.read` appends to `buf` at most its spare
   capacity, never changes its capacity, advances the file's cursor by the count and returns it, `Ok(0)` at end of file
   or when `buf` has no spare capacity; a read that returns an error has appended nothing
   and moved no cursor, so a partial read is delivered as `Ok`. A successful `host.write`

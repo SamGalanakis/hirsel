@@ -172,7 +172,7 @@ deterministic simulation and property campaigns.
 `hirsel test app --laws` adds a strength column (held, truncated, vacuous, …) beside pass
 and fail ([law table](laws.md)). `--write-laws` rewrites the rows
 of the tests it ran in `hirsel.laws`; `--laws-baseline FILE`
-compares a full run with the lock exported from the approved ref and exits 1 on a weaker
+compares a full run with a lock from main and exits 1 on a weaker
 row. `hirsel laws check app` checks lock currency without running tests, and
 `hirsel laws write app` refreshes its static columns.
 `--locked` keeps its package meaning.

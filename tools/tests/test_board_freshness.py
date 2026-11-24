@@ -12,24 +12,39 @@ TOOLS = Path(__file__).resolve().parents[1]
 
 
 class BoardFreshnessTest(unittest.TestCase):
-    def test_vopr_runs_after_board_and_preserves_its_verdict(self):
+    def test_laws_and_vopr_run_after_board_and_preserve_its_verdict(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             main = base / "main"
             main.mkdir()
             subprocess.run(["git", "init", "-q", main], check=True)
-            subprocess.run(["git", "-C", main, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
-                            "commit", "--allow-empty", "-qm", "Measured commit"], check=True)
+            for message in ("Previous board", "Measured commit"):
+                subprocess.run(["git", "-C", main, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com",
+                                "commit", "--allow-empty", "-qm", message], check=True)
+            previous = subprocess.check_output(["git", "-C", main, "rev-parse", "HEAD^"], text=True).strip()
             subprocess.run(["git", "-C", main, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+            previous_board = base / "previous-board"
+            previous_board.mkdir()
+            (previous_board / "board.json").write_text(
+                json.dumps({"complete": True, "commit": previous, "exit_status": 0}),
+            )
+            (previous_board / "board.md").write_text("Previous complete board\n")
             taskset = base / "taskset"
             taskset.write_text(r'''#!/bin/bash
 shift 2
 case "$1 $2 $3" in
   git*) exit 0 ;;
   'python3 bench/awfy/screen.py prepare') mkdir -p "$4" ;;
-  'python3 bench/awfy/board.py '*) touch "${HIRSEL_BOARD_BASE}/board-completed" ;;
+  'python3 bench/awfy/board.py '*)
+    mkdir -p "$3"
+    printf '{"complete":true,"commit":"%s","exit_status":0}\n' "$(git rev-parse HEAD)" >"$3/board.json"
+    touch "$3/board.md" "${HIRSEL_BOARD_BASE}/board-completed" ;;
   'python3 tools/buck2/prepare.py ') exit 0 ;;
   '.buck2/bin/buck2 build -j4') echo '{"root//:hirsel-toolchain":"prefix"}' ;;
+  'python3 core/tools/law_board.py nightly')
+    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$6" == --commit && "$7" == "$FIXTURE_PREVIOUS" ]] || exit 90
+    echo "fixture: weaker property row"
+    exit 1 ;;
   'python3 core/tools/sim_campaign.py --compiler') exit 0 ;;
   */tools/boat-dispatch\ *) exit 7 ;;
   */tools/sim-campaign\ batch\ *)
@@ -44,19 +59,25 @@ esac
                     (base / "board-completed").unlink(missing_ok=True)
                     # Keep the existing two setup phases on the stub's first-run path.
                     (base / "last-screen-inputs").unlink(missing_ok=True)
+                    (base / "last-complete.json").unlink(missing_ok=True)
+                    (base / "last-complete.json").symlink_to(previous_board / "board.json")
+                    os.utime(previous_board / "board.json")
                     result = subprocess.run(
                         [TOOLS / "nightly-board.sh"], capture_output=True, text=True,
                         env=os.environ | {"HIRSEL_BOARD_BASE": str(base),
                                           "HIRSEL_BOARD_CURRENT": str(base / "CURRENT-BOARD.md"),
                                           "HIRSEL_VOPR_LEDGER": str(base / "seeds.sqlite"),
                                           "FIXTURE_VOPR_STATUS": str(campaign_status),
+                                          "FIXTURE_PREVIOUS": previous,
                                           "PATH": f"{base}:{os.environ['PATH']}"},
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     current = (base / "CURRENT-BOARD.md").read_text()
                     self.assertIn(" · Success", current)
                     self.assertIn(f"Boat exit 7 · VOPR exit {campaign_status}", current)
+                    self.assertIn("Laws exit 1", current)
                     log = (Path(result.stdout.strip()) / "run.log").read_text()
+                    self.assertIn("fixture: weaker property row", log)
                     if campaign_status == 1:
                         self.assertIn("VOPR campaign exited 1", log)
                     if campaign_status == 75:

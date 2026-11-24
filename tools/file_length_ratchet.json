@@ -201,9 +201,9 @@
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 2071,
-    "raise_revision": 6,
-    "reason": "native-std-mix-2059"
+    "lines": 2074,
+    "raise_revision": 7,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2641,
@@ -222,9 +222,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 2976,
-    "raise_revision": 7,
-    "reason": "native-std-mix-2059"
+    "lines": 2981,
+    "raise_revision": 8,
+    "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,

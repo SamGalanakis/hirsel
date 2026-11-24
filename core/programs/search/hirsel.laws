@@ -1,0 +1,3 @@
+hirsel.laws 1
+search@1/tests/filtered_top_k src=a308d9cfe7b072b5 sig=824c18de3f358031 run=dbf6722727633166 bug=- oracle=- rows=-
+search@1/tests/snapshot_bm25 src=0d805f208096aedf sig=65bc47312a9da67f run=dbf6722727633166 bug=- oracle=- rows=-

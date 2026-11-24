@@ -632,9 +632,12 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         path,
                     )?);
                 }
-                crate::package_lock::Lock::compare(&resolved, package_mode)?
-                    .commit(&resolved.workspace)?;
-                let include_tests = matches!(command, "check" | "test")
+                if !static_laws || package_mode.flag().is_some() {
+                    crate::package_lock::Lock::compare(&resolved, package_mode)?
+                        .commit(&resolved.workspace)?;
+                }
+                let include_tests = static_laws
+                    || matches!(command, "check" | "test")
                     || inspection
                         .as_ref()
                         .is_some_and(|option| option.includes_tests());

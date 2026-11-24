@@ -5,7 +5,8 @@
 rustfmt starts from each target's root file and follows its modules.
 Changed new-language sources are checked, never rewritten, and the primer's copies
 (tools/site_sync.py --check) must match docs/PRIMER.md. Documentation references
-and the std operation index must match the code. Changed source files must fit
+and the std operation index must match the code. Package law locks must be current.
+Changed source files must fit
 their line limits, and production sources must keep test code out. The editor
 parser checks the core and spec corpus. Explicit
 expectation comments exclude refusal/gap fixtures to preserve diagnostic coordinates.
@@ -56,11 +57,14 @@ def build_executable(target):
     return ROOT / json.loads(built)[target]
 
 
-def check_std_index():
+def check_compiler_metadata():
     compiler = build_executable('root//:hirsel-core-driver-bin-hirsel')
     with tempfile.TemporaryDirectory(prefix='hirsel-api-index-') as work:
-        return subprocess.run([sys.executable, str(ROOT / 'core/tools/std_api_index.py'), '--check'],
-                              cwd=work, env=dict(os.environ, HIRSEL=str(compiler))).returncode
+        index = subprocess.run([sys.executable, str(ROOT / 'core/tools/std_api_index.py'), '--check'],
+                               cwd=work, env=dict(os.environ, HIRSEL=str(compiler)))
+    return index.returncode or subprocess.run(
+        [sys.executable, str(ROOT / 'core/tools/law_board.py'), 'check', '--compiler', str(compiler)],
+        cwd=ROOT).returncode
 
 
 def check_cases(paths):
@@ -116,7 +120,7 @@ def main():
         return synced.returncode
     try:
         docs = subprocess.run([sys.executable, str(ROOT / 'tools/check_doc_refs.py')], cwd=ROOT)
-        return docs.returncode or check_std_index() or check_cases(changed_cases())
+        return docs.returncode or check_compiler_metadata() or check_cases(changed_cases())
     except subprocess.CalledProcessError as error:
         return error.returncode
 

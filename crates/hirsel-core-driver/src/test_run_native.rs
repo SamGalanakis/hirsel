@@ -986,10 +986,15 @@ fn step_bound() -> Result[(), ()] {
 
 #[test]
 fn law_lock_checks_static_columns_and_preserves_unselected_lines() {
-    let law = prop_law_package();
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"main\"");
+    law.write("app/laws.hirsel", PROP_LAW_PACKAGE);
     PackageLaw::pass(law.run(&["laws", "write", "app"]));
+    let initial = std::fs::read_to_string(law.path("app/hirsel.laws")).unwrap();
+    assert!(initial.lines().any(|line| line.starts_with("app@1/main/catch_all ")));
+    assert!(!law.path("app/hirsel.lock").exists());
     PackageLaw::pass(law.run(&["laws", "check", "app"]));
-    law.write("app/main.hirsel", PROP_LAW_PACKAGE.replace("c.cases = 5", "c.cases = 6"));
+    law.write("app/laws.hirsel", PROP_LAW_PACKAGE.replace("c.cases = 5", "c.cases = 6"));
     let (status, stdout, stderr) = law.run(&["laws", "check", "app"]);
     assert_eq!(status, Some(1), "{stdout}\n{stderr}");
     let lines = stdout.lines().collect::<Vec<_>>();

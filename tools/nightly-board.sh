@@ -15,10 +15,12 @@ commit=$(git -C "$base/main" rev-parse --verify origin/main 2>/dev/null) || comm
 step="fetch origin/main"
 boat_status=
 vopr_status=
+law_status=
 record() {
   local auxiliary=()
   if [[ -n "$boat_status" ]]; then auxiliary+=(--boat-status "$boat_status"); fi
   if [[ -n "$vopr_status" ]]; then auxiliary+=(--vopr-status "$vopr_status"); fi
+  if [[ -n "$law_status" ]]; then auxiliary+=(--law-status "$law_status"); fi
   python3 "$tools/board-freshness.py" --base "$base" --current "$current" \
     --record "$run" --started "$started" --commit "$commit" --step "$step" "${auxiliary[@]}" "$@"
 }
@@ -81,6 +83,12 @@ baseline=()
 if [[ -e "$base/last-complete.json" || -L "$base/last-complete.json" ]]; then
   baseline=(--baseline "$(realpath -m "$base/last-complete.json")")
 fi
+law_baseline=()
+if previous=$(python3 "$tools/board-freshness.py" --base "$base" --last-complete-commit); then
+  if [[ -n "$previous" ]]; then law_baseline=(--commit "$previous"); fi
+else
+  law_status=$?
+fi
 step=board
 record
 status=0
@@ -106,14 +114,18 @@ elif (( status == 0 )); then
   mv -Tf "$run/complete.json" "$base/last-complete.json"
 fi
 
+build_toolchain() {
+  local output
+  taskset -c 8-11 python3 tools/buck2/prepare.py >&2 || return
+  output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-toolchain) || return
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["root//:hirsel-toolchain"])' <<<"$output"
+}
+
 run_vopr() (
-  local output compiler ledger vopr
+  local ledger vopr
   vopr="$run/vopr"
   ledger=${HIRSEL_VOPR_LEDGER:-/workspace/code/hirsel-briefs/vopr/seeds.sqlite}
   mkdir -p "$vopr" "$(dirname "$ledger")" || return
-  taskset -c 8-11 python3 tools/buck2/prepare.py || return
-  output=$(taskset -c 8-11 .buck2/bin/buck2 build -j4 --show-json-output //:hirsel-toolchain) || return
-  compiler=$(python3 -c 'import json, sys; print(json.load(sys.stdin)["root//:hirsel-toolchain"])' <<<"$output") || return
   taskset -c 8-11 python3 core/tools/sim_campaign.py --compiler "$checkout/$compiler/hirsel" \
     --work "$vopr/prepared" || return
   cd "$vopr" || return
@@ -121,14 +133,29 @@ run_vopr() (
     --ledger "$ledger" --results results.jsonl
 )
 
-vopr_status=0
-run_vopr >>"$run/run.log" 2>&1 || vopr_status=$?
+toolchain_status=0
+compiler=$(build_toolchain 2>>"$run/run.log") || toolchain_status=$?
+if [[ -z "$law_status" ]]; then
+  law_status=$toolchain_status
+  if (( law_status == 0 )); then
+    taskset -c 8-11 python3 core/tools/law_board.py nightly --compiler "$checkout/$compiler/hirsel" \
+      "${law_baseline[@]}" --logs "$run/laws" >>"$run/run.log" 2>&1 || law_status=$?
+  fi
+fi
+if (( law_status != 0 )); then
+  printf 'Law board exited %s. See %s/run.log.\n' "$law_status" "$run" >>"$run/run.log"
+fi
+vopr_status=$toolchain_status
+if (( vopr_status == 0 )); then
+  run_vopr >>"$run/run.log" 2>&1 || vopr_status=$?
+fi
 if (( vopr_status == 75 )); then
   echo "VOPR deferred until a spare Boat start is available." >>"$run/run.log"
 elif (( vopr_status != 0 )); then
   printf 'VOPR campaign exited %s. See %s/vopr.\n' "$vopr_status" "$run" >>"$run/run.log"
 fi
-printf 'Boat exit %s · VOPR exit %s\n' "$boat_status" "$vopr_status" | tee -a "$run/run.log" >&2
+printf 'Boat exit %s · VOPR exit %s · Laws exit %s\n' "$boat_status" "$vopr_status" "$law_status" |
+  tee -a "$run/run.log" >&2
 
 run_w2() (
   local output compiler runtime bridge

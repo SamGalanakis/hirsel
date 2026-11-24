@@ -42,6 +42,10 @@ and rows and comparisons are runner output, never failures.
 `hirsel test --locked` keeps its meaning: it requires a current workspace lock
 ([packages](spec/packages.md)). Nothing in this document adds to it.
 
+Version note (2026-11-24, verify-observer-2037): land lint checks each package
+in `core/programs/hirsel.toml`. The nightly runs those packages and reports law
+regressions in its run log, with per-package results under `laws/`.
+
 ## Pass and fail are unchanged
 
 [PROG-4](spec/programs.md#prog-4-tests) still decides whether a test passed:

@@ -17,14 +17,17 @@ fn refusal(frame: Bytes, cap: u64, expected: proxy.Refusal) -> bool {
 }
 
 // HAProxy proxy-protocol.txt §2.2. Addresses, ports and lengths are in network byte order.
-// expect: run proxy_v2_header() = 0
-fn proxy_v2_header() -> u64 {
+// expect: run proxy_v2_header(tasks) = 0
+fn proxy_v2_header(tasks: Tasks) -> u64 waits {
     let cap = proxy.DEFAULT_HEADER_MAX
     if cap != 536 {
         return 1
     }
     let tcp4 = b"\r\n\r\n\x00\r\nQUIT\n\x21\x11\x00\x0c\xc0\x00\x02\x01\xcb\x00\x71\x02\xc3\x50\x14\xe9"
     let tcp6 = b"\r\n\r\n\x00\r\nQUIT\n\x21\x21\x00\x2e\x20\x01\x0d\xb8\x12\x34\x56\x78\x9a\xbc\xde\xf0\x00\x00\x00\x01\x20\x01\x0d\xb8\xa1\xb2\xc3\xd4\xe5\xf6\x10\x20\x00\x00\x00\x02\x01\xbb\x20\xfb\x03\x00\x04\x00\x00\x00\x00\xef\x00\x00"
+    let mut stream: Bytes = list.with_capacity(31)
+    list.append(mut stream, tcp4)
+    list.append(mut stream, b"\x16\x03\x01")
     for (frame, source, destination, length) in[
     // TCP4 without TLVs, then TCP6 with CRC32C and an unknown empty TLV.
     (tcp4, Addr(ip: V4(0xc0000201), port: 50000), Addr(ip: V4(0xcb007102), port: 5353), 28u64), (tcp6, Addr(ip: V6(0x20010db812345678, 0x9abcdef000000001), port: 443), Addr(ip: V6(0x20010db8a1b2c3d4, 0xe5f6102000000002), port: 8443), 62u64)] {
@@ -80,5 +83,150 @@ fn proxy_v2_header() -> u64 {
     if !refusal(overrun, cap, Malformed) || !refusal(b"\r\n\r\n\x00\r\nQUIT\n\x20\x00\x00\x03\x01\x00\x01", cap, Malformed) || !refusal(b"\r\n\r\n\x00\r\nQUIT\n\x21\x00\x00\x04\x01\x00\x00\x00", cap, Malformed) {
         return 9
     }
+    proxy_accept_cases(tasks, take stream)
+}
+
+// A deterministic Net peer reports the receive bounds and both socket releases.
+type ProxyPeer: send {
+    port: Served[NetOp],
+    ip: Ip,
+    wire: Bytes,
+    reads: Inline[(u64, u64), 4],
+    read_count: u64
+}
+
+fn proxy_peer(take peer: ProxyPeer) -> bool waits {
+    let ProxyPeer(port: take service, ip, wire: take wire, reads, read_count) = take peer
+    let mut port = take service
+    let mut parked: Option[Call[NetOp]] = None
+    let mut received: u64 = 0
+    let mut cursor: u64 = 0
+    let mut exact = true
+    let mut read_closed = false
+    let mut write_closed = false
+    while let Some(take call) = provide.next(mut port) {
+        let mut c = take call
+        match provide.net_op(c) {
+            Listen(addr: addr, ..) => {
+                result.unwrap(provide.reply(mut port, take c, provide.net_reply(Listener(1, Addr(ip: addr.ip, port: 8080)))))
+            },
+            Accept(listener: 1) => {
+                result.unwrap(provide.reply(mut port, take c, provide.net_reply(Socket(2, Addr(ip: ip, port: 12345)))))
+            },
+            Recv(socket: 2, max: maximum, ..) => {
+                let (expected, size) = if received < read_count {
+                    reads[received]
+                } else {
+                    (0u64, 0u64)
+                }
+                exact = exact && maximum == expected
+                received += 1
+                if size == 0 && list.len(wire) == 0 {
+                    parked = Some(take c)
+                } else {
+                    let count = provide.fill(mut port, mut c, list.slice(wire, cursor, cursor + size))
+                    cursor += count
+                    exact = exact && count == size
+                    let _ = provide.reply(mut port, take c, provide.net_reply(Count(count)))
+                }
+            },
+            Released(id: 2, part: part) => match part {
+                Whole => {
+                    read_closed = true
+                    write_closed = true
+                },
+                Read => {
+                    read_closed = true
+                },
+                Write => {
+                    write_closed = true
+                }
+            },
+            Released(id: 1, ..) => break,
+            _ => {
+                exact = false
+                let _ = provide.reply(mut port, take c, provide.net_reply(Failed(Denied)))
+            }
+        }
+    }
+    let _ = take parked
+    exact && received == read_count && read_closed && write_closed
+}
+
+fn proxy_clock(take input: sim.world.World) waits {
+    let mut world = take input
+    sim.world.run(mut world)
+}
+
+fn proxy_accept_cases(tasks: Tasks, take stream: Bytes) -> u64 waits {
+    let trusted_ip = V4(0x7f000001)
+    let mut trusted: List[wsock.Prefix] = list.with_capacity(1)
+    list.push(mut trusted, option.unwrap(wsock.parse_prefix("127.0.0.1/32")))
+    let cap = proxy.DEFAULT_HEADER_MAX
+    if proxy.DEFAULT_HEADER_MS != 3000 {
+        return 10
+    }
+    let empty: List[wsock.Prefix] = list.new()
+    if let Ok(_) = proxy.config(empty, cap, 3) {
+        return 11
+    }
+    for limit in[27u64, 65552u64] {
+        if let Ok(_) = proxy.config(trusted, limit, 3) {
+            return 11
+        }
+    }
+    let config = result.unwrap(proxy.config(trusted, cap, 3))
+    let (world, time) = sim.world.new(0, 0, 0)
+    let driver = task.spawn(tasks, bytes 65536, take world, proxy_clock)
+    let mut cases: List[(Ip, Bytes, Inline[(u64, u64), 4], u64)] = list.with_capacity(5)
+    list.push(mut cases, (V4(0x7f000002), b"",[(0u64, 0u64); 4], 0u64))
+    list.push(mut cases, (trusted_ip, b"PROXY TCP4 192.0.2.1",[(16u64, 12u64), (0u64, 0u64), (0u64, 0u64), (0u64, 0u64)], 1u64))
+    list.push(mut cases, (V6(0, 0x0000ffff7f000001), take stream,[(16u64, 1u64), (15u64, 15u64), (12u64, 12u64), (8u64, 3u64)], 4u64))
+    list.push(mut cases, (trusted_ip, b"",[(16u64, 0u64), (0u64, 0u64), (0u64, 0u64), (0u64, 0u64)], 1u64))
+    list.push(mut cases, (trusted_ip, b"\r\n\r\n",[(16u64, 4u64), (12u64, 0u64), (0u64, 0u64), (0u64, 0u64)], 2u64))
+    for i in 0u64 .. list.len(cases) {
+        let (ip, take wire, reads, read_count) = list.remove(mut cases, 0)
+        let (network, take port) = provide.net(bytes 4096)
+        let fixture = ProxyPeer(port: take port, ip, wire: take wire, reads, read_count)
+        let peer_task = task.spawn(tasks, bytes 65536, take fixture, proxy_peer)
+        let (take incoming, _) = result.unwrap(host.listen(network, Addr(ip: trusted_ip, port: 0), 1))
+        let mut listener = take incoming
+        let (take socket, peer) = result.unwrap(host.accept(mut listener, Never))
+        let accepted_ns = host.mono_ns(time)
+        if i == 3 {
+            host.sleep_until(time, accepted_ns + 1000000)
+        }
+        let got = proxy.accept(take socket, peer, config, time, accepted_ns)
+        let at = host.mono_ns(time)
+        let matches = match take got {
+            Error(Untrusted) => i == 0 && at == accepted_ns,
+            Error(Missing) => i == 1 && at == accepted_ns,
+            Ok((take accepted, header)) => {
+                let (take reader, take writer) = net.split(take accepted)
+                let mut r = take reader
+                let mut data: Bytes = list.with_capacity(8)
+                let count = result.unwrap(host.recv_bounded(mut r, mut data, 8, Never))
+                let joined = result.unwrap(net.join(take r, take writer))
+                let denied = match tls.connect(network, take joined, "front.test", System, list.new(), Never) {
+                    Error(Denied) => true,
+                    _ => false
+                }
+                i == 2 && count == 3 && data == b"\x16\x03\x01" && header.source == Addr(ip: V4(0xc0000201), port: 50000) && header.destination == Addr(ip: V4(0xcb007102), port: 5353) && denied
+            },
+            Error(Silent) => i == 3 && at == accepted_ns + 3000000,
+            Error(Ended) => i == 4 && at == accepted_ns,
+            _ => false
+        }
+        let _ = take listener
+        let exact = result.unwrap(task.join(take peer_task))
+        if !matches || !exact {
+            return 12 + 2 * i + (if matches {
+                1u64
+            } else {
+                0u64
+            })
+        }
+    }
+    result.unwrap(task.join(take driver))
     0
 }

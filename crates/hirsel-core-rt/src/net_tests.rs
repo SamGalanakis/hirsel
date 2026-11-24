@@ -531,13 +531,11 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     (cross.error.tag, cross.value, cross.written),
                     (1, c.value, other.written)
                 );
-                assert_eq!(
-                    (accepted.error.tag, accepted.value, accepted.written),
-                    (1, s.value, s.written)
-                );
+                assert_eq!((accepted.error, accepted.value), (IoError::OK, server));
+                let s = hirsel_core_net_split(context, accepted.value, 6);
                 for (write, read, expected) in [
                     (cross.written, other_peer.value, 0x61),
-                    (accepted.written, cross.value, 0x62),
+                    (s.written, cross.value, 0x62),
                 ] {
                     let mut byte = [expected];
                     let prefix = carrier(&mut byte, 1);

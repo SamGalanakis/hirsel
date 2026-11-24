@@ -107,3 +107,6 @@ configured duration. The idle_probe fixture uses a 250 ms interval to qualify
 fragment activity against real sockets.
 
 `source_for_head(bytes, head, peer, ingress)` applies the same source policy to a parsed head. It borrows the existing head and performs no I/O.
+
+`trusted(peer, ingress)` checks the transport peer against the ingress prefixes,
+including the IPv4 form of an IPv4-mapped IPv6 peer.

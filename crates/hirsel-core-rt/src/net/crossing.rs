@@ -1,10 +1,10 @@
-use super::{Address, Provider};
+use super::TcpRoute;
 
 /// Owns a socket or listener while it is in transit.
 pub(crate) struct CrossedSocket {
     carrier: Option<hirsel_core_net::SocketTransfer>,
     udp: Option<crate::udp_net::Transfer>,
-    connected: Option<(Address, Provider)>,
+    route: Option<TcpRoute>,
 }
 
 // SAFETY: the provider descriptor moves as opaque data and is used only
@@ -21,9 +21,9 @@ impl CrossedSocket {
             || files.tls_sessions.contains_key(&key)
             || files.tls_writes.contains_key(&key)
             || files
-                .connected
+                .tcp_routes
                 .get(&key)
-                .is_some_and(|(_, provider)| crate::provide::owns(provider))
+                .is_some_and(|route| crate::provide::owns(&route.provider))
         {
             // A port owns its served keys. TLS halves own separate stream state.
             crate::process::stop(b"UnitSocket");
@@ -35,7 +35,7 @@ impl CrossedSocket {
             return Self {
                 carrier: None,
                 udp: Some(crate::udp_net::Transfer::detach(files, key)),
-                connected: None,
+                route: None,
             };
         }
         #[cfg(feature = "record")]
@@ -49,7 +49,7 @@ impl CrossedSocket {
         Self {
             carrier: Some(carrier),
             udp: None,
-            connected: files.connected.remove(&key),
+            route: files.tcp_routes.remove(&key),
         }
     }
 
@@ -61,8 +61,8 @@ impl CrossedSocket {
             .sockets
             .attach(self.carrier.take().unwrap())
             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        if let Some(connected) = self.connected.take() {
-            files.connected.insert(key, connected);
+        if let Some(route) = self.route.take() {
+            files.tcp_routes.insert(key, route);
         }
         key
     }

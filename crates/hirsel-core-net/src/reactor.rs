@@ -773,8 +773,8 @@ impl Sockets {
         self.record_mut(key).owners = 6;
         (key | 1, key | 2)
     }
-    /// Restore whole ownership of a known client socket without touching its fd.
-    pub fn rejoin_client(&mut self, key: u64) {
+    /// Restore whole ownership of a TCP socket without touching its fd.
+    pub fn rejoin(&mut self, key: u64) {
         self.record_mut(key).owners = 1;
     }
     pub fn read_drained(&self, key: u64) -> bool {

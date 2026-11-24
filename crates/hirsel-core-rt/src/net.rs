@@ -299,6 +299,19 @@ pub(crate) fn empty_buffer() -> Buffer {
         capacity: 0,
     }
 }
+
+#[derive(Clone, Copy)]
+pub(crate) enum TcpOrigin {
+    Connected(Address),
+    Accepted,
+    Listener,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TcpRoute {
+    pub(crate) provider: Provider,
+    pub(crate) origin: TcpOrigin,
+}
 /// # Safety
 /// Live run, typed Net grant, optional Clock designation and source site.
 #[allow(clippy::too_many_arguments)]
@@ -413,9 +426,18 @@ unsafe fn address_op(
         let ok = outcome.status == 0 && outcome.error == IoError::OK;
         if ok && (op == CONNECT || served) {
             // A served Net's listeners route to it too.
-            (*files)
-                .connected
-                .insert(outcome.value, (address, *provider));
+            let origin = if op == CONNECT {
+                TcpOrigin::Connected(address)
+            } else {
+                TcpOrigin::Listener
+            };
+            (*files).tcp_routes.insert(
+                outcome.value,
+                TcpRoute {
+                    provider: *provider,
+                    origin,
+                },
+            );
         }
         AddressOutcome::new(outcome, network.address)
     }
@@ -434,11 +456,9 @@ pub(crate) struct OwnedNet {
     tail: Buffer,
     provider: Provider,
 }
-/// How an owned operation was routed, which only an accept's delivery reads:
-/// a served listener's port, or the CLI's net tape.
+/// Whether an owned operation used the CLI's net tape.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Routing {
-    served: Option<Provider>,
     #[cfg(feature = "record")]
     taped: bool,
 }
@@ -524,15 +544,13 @@ impl OwnedNet {
                 site,
             });
             Ok(Routing {
-                served,
                 #[cfg(feature = "record")]
                 taped,
             })
         }
     }
     /// The delivered outcome, with the receive length written back to the
-    /// language carrier and a served listener's accepted socket routed to its
-    /// port.
+    /// language carrier and an accepted socket routed to its issuing provider.
     /// # Safety
     /// `operand` is the carrier the operation was built from, pinned and
     /// writable for a receive.
@@ -541,7 +559,7 @@ impl OwnedNet {
         this: *mut Self,
         context: *mut Context,
         operand: *mut Buffer,
-        routing: Routing,
+        _routing: Routing,
         outcome: Outcome,
     ) -> AddressOutcome {
         unsafe {
@@ -549,20 +567,20 @@ impl OwnedNet {
             let files = (*context).host_files;
             #[cfg(feature = "record")]
             let outcome = match (*files).net_tape {
-                Some(tape) if op == ACCEPT && routing.taped => tape.carrier(outcome),
+                Some(tape) if op == ACCEPT && _routing.taped => tape.carrier(outcome),
                 _ => outcome,
             };
             if op == RECV_BOUNDED {
                 (*operand).len = (*this).request.buffer.len;
             }
-            if let Some(provider) = routing.served
-                && op == ACCEPT
-                && outcome.status == 0
-                && outcome.error == IoError::OK
-            {
-                (*files)
-                    .connected
-                    .insert(outcome.value, ((*this).network.address, provider));
+            if op == ACCEPT && outcome.status == 0 && outcome.error == IoError::OK {
+                (*files).tcp_routes.insert(
+                    outcome.value,
+                    TcpRoute {
+                        provider: (*this).provider,
+                        origin: TcpOrigin::Accepted,
+                    },
+                );
             }
             AddressOutcome::new(outcome, (*this).network.address)
         }
@@ -907,9 +925,9 @@ pub(crate) unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Pr
             .copied()
             .or_else(|| {
                 (*(*context).host_files)
-                    .connected
+                    .tcp_routes
                     .get(&(key & !3))
-                    .map(|record| record.1)
+                    .map(|route| route.provider)
             })
             .filter(crate::provide::owns)
     }
@@ -918,9 +936,9 @@ pub(crate) unsafe fn served_socket(context: *mut Context, key: u64) -> Option<Pr
 pub(crate) unsafe fn socket_provider(context: *mut Context, key: u64) -> Provider {
     unsafe {
         (*(*context).host_files)
-            .connected
+            .tcp_routes
             .get(&(key & !3))
-            .map(|record| record.1)
+            .map(|route| route.provider)
             .or_else(|| {
                 (*(*context).host_files)
                     .unix_served
@@ -1099,112 +1117,11 @@ pub(crate) unsafe fn spend_write(files: *mut crate::host_file::Files, key: u64) 
     unsafe { (*files).tls_writes.get_mut(&(key & !3)).unwrap().spent = true };
 }
 
-/// # Safety
-/// Consumes the sole Socket carrier. No allocation, admission or replay point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_net_split(
-    context: *mut Context,
-    key: u64,
-    _site: u64,
-) -> Outcome {
-    unsafe {
-        if let Some(provider) = served_socket(context, key) {
-            crate::provide::split_socket(&provider, key);
-            return Outcome {
-                value: key | 1,
-                written: key | 2,
-                ..Outcome::default()
-            };
-        }
-        let files = (*context).host_files;
-        #[cfg(feature = "record")]
-        let (read, write) = if let Some(tape) = (*files).net_tape {
-            crate::tape::socket_parts(&tape.provider, tape.handle(key), 0b110);
-            if let Some(source) = tape.source(key) {
-                (*files).sockets.split(source);
-            }
-            (key | 1, key | 2)
-        } else {
-            (*files).sockets.split(key)
-        };
-        #[cfg(not(feature = "record"))]
-        let (read, write) = (*files).sockets.split(key);
-        Outcome {
-            value: read,
-            written: write,
-            ..Outcome::default()
-        }
-    }
-}
 mod crossing;
 pub(crate) use crossing::{CrossedSocket, CrossingSockets, SocketCrossing};
 
-/// Reunite the halves of one plain client socket in the run's registry.
-/// # Safety
-/// Both keys are live, uniquely owned halves. Failure returns both unchanged.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_net_join(
-    context: *mut Context,
-    read: u64,
-    write: u64,
-    _site: u64,
-) -> Outcome {
-    let refused = || Outcome {
-        value: read,
-        written: write,
-        error: IoError { tag: 1, code: 0 },
-        ..Outcome::default()
-    };
-    unsafe {
-        // A served socket's halves rejoin at its port; a TLS stream's never.
-        if let Some(provider) = served_socket(context, read) {
-            let unix = {
-                (*(*context).host_files)
-                    .unix_served
-                    .contains_key(&(read & !3))
-            };
-            return if read & !3 == write & !3
-                && !unix
-                && !tls_stream(context, read)
-                && crate::provide::join_socket(&provider, read)
-            {
-                Outcome {
-                    value: read & !3,
-                    ..Outcome::default()
-                }
-            } else {
-                refused()
-            };
-        }
-    }
-    unsafe {
-        let files = (*context).host_files;
-        let key = read & !3;
-        if key != write & !3
-            || (*files).tls_writes.contains_key(&key)
-            || !(*files).connected.contains_key(&key)
-        {
-            return refused();
-        }
-        #[cfg(feature = "record")]
-        let source = match (*files).net_tape {
-            Some(tape) => {
-                crate::tape::socket_parts(&tape.provider, tape.handle(key), 1);
-                tape.source(key)
-            }
-            None => Some(key),
-        };
-        #[cfg(not(feature = "record"))]
-        let source = Some(key);
-        if let Some(source) = source {
-            (*files).sockets.rejoin_client(source);
-        }
-        Outcome {
-            value: key,
-            ..Outcome::default()
-        }
-    }
-}
+mod parts;
+pub use parts::{hirsel_core_net_join, hirsel_core_net_split};
 
 /// # Safety
 /// Consumes one live socket, directional half or listener carrier exactly once.
@@ -1229,7 +1146,7 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
                 let charge = {
                     if answer.value != 0 {
                         (*files).datagrams.remove(&key);
-                        (*files).connected.remove(&(key & !3));
+                        (*files).tcp_routes.remove(&(key & !3));
                     }
                     (*files).exec_pipes.remove(&key)
                 };
@@ -1249,7 +1166,7 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
             if gone {
                 (*files).datagrams.remove(&key);
                 (*files).unix_served.remove(&(key & !3));
-                (*files).connected.remove(&(key & !3));
+                (*files).tcp_routes.remove(&(key & !3));
             }
             return;
         }
@@ -1271,11 +1188,11 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
                 stream.shutdown((*files).sockets.fd(source));
             }
             if (*files).sockets.release(source) {
-                (*files).connected.remove(&(key & !3));
+                (*files).tcp_routes.remove(&(key & !3));
                 (*files).tls_sessions.remove(&(source & !3));
             }
         } else {
-            (*files).connected.remove(&(key & !3));
+            (*files).tcp_routes.remove(&(key & !3));
         }
     }
 }

@@ -1680,8 +1680,8 @@ as any accepted TCP socket (NET-1). The front ends TLS both ways:
   cuts a stream the program still counts as live.
 
 `host.accept`'s `Addr` and `net.peer_addr` stay the kernel's peer, which is the front. The
-client's address is a value that `proxy.accept` returns. *Reversible:* the runtime does not
-change, and moving the decode into the runtime later would only move this code.
+client's address is a value that `proxy.accept` returns. The std implementation splits
+the accepted socket for the bounded read, then rejoins it under NET-7.
 
 ### The header: required, checked, consumed exactly
 

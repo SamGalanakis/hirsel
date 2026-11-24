@@ -86,4 +86,113 @@ impl Machine<'_> {
         }
         Ok(denied)
     }
+
+    fn tls_offer(&self, a: &[u64], port: u16) -> Result<Vec<Vec<u8>>, (u64, u64)> {
+        use hirsel_core_net::{GrantRule, tls};
+        let name = tls::verification_name(self.carrier_bytes(a[2])).ok_or((9, 1))?;
+        let len = self.load(a[5] + 8, 8);
+        if len > 16 {
+            return Err((9, 2));
+        }
+        let data = self.load(a[5], 8);
+        let protocols: Vec<_> = (0..len)
+            .map(|i| self.carrier_bytes(data + i * 24))
+            .collect();
+        if !tls::valid_protocols(&protocols) {
+            return Err((9, 2));
+        }
+        let pem = if a[3] == 1 {
+            self.carrier_bytes(a[4])
+        } else {
+            &[]
+        };
+        let (trust, _) = tls::trust(a[3] as u8, pem).ok_or((9, 3))?;
+        let allowed = self.world.network.grants.get(&a[0]).is_some_and(|rules| {
+            rules.iter().any(
+                |rule| matches!(rule, GrantRule::Tls(rule) if rule.permits(&name, port, trust)),
+            )
+        });
+        if !allowed {
+            return Err((1, 0));
+        }
+        Ok(protocols.into_iter().map(<[u8]>::to_vec).collect())
+    }
+
+    pub(super) fn tls_connect(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
+        let key = a[1];
+        let served = self.world.net_ports.get(&a[0]).copied();
+        if let Some(&(c, _, peer)) = self.world.port_keys.get(&(key & !3)) {
+            return self.port_tls(t, a, c, peer, served);
+        }
+        self.world.network.sockets.release(key);
+        Ok(vec![0, 1, 0, 0, 0, 0, 0, 0])
+    }
+
+    /// `tls.connect` on a served Net's socket (native `tls::connect` through
+    /// the port): the handshake is a call its server answers with Secured,
+    /// and only through that Net (NOTES 32). The Socket is consumed on every
+    /// return: a failure releases it whole.
+    fn port_tls(
+        &mut self,
+        t: &Task,
+        a: &[u64],
+        c: usize,
+        peer: u16,
+        served: Option<usize>,
+    ) -> X<Vec<u64>> {
+        let key = a[1];
+        let failed = |s: &mut Self, tag: u64, code: u64| {
+            s.port_socket_part(key, false);
+            Ok(vec![0, tag, code, 0, 0, 0, 0, 0])
+        };
+        let Some((_, id, true)) = self.port_socket(key, PORT_SOCKET) else {
+            return failed(self, 1, 0);
+        };
+        let VirtualCell::Port { handles, .. } = &self.world.cells[c] else {
+            unreachable!()
+        };
+        if served != Some(c) || !handles[&id].client_socket {
+            return failed(self, 1, 0);
+        }
+        let offered = match self.tls_offer(a, peer) {
+            Ok(offered) => offered,
+            Err((tag, code)) => return failed(self, tag, code),
+        };
+        let name = hirsel_core_net::tls::verification_name(self.carrier_bytes(a[2])).unwrap();
+        let canonical = match &name {
+            hirsel_core_net::Name::Dns(name) => name.as_bytes().to_vec(),
+            hirsel_core_net::Name::Ip(ip) => ip.to_string().into_bytes(),
+        };
+        let wire: Vec<u8> = offered
+            .iter()
+            .flat_map(|p| std::iter::once(p.len() as u8).chain(p.iter().copied()))
+            .collect();
+        let mut w = [0; 9];
+        w[..5].copy_from_slice(&[
+            6,
+            id,
+            canonical.len() as u64,
+            wire.len() as u64,
+            u64::from(a[3] == 0),
+        ]);
+        let row = match self.check_cancel(t).and_then(|()| {
+            let deadline = self.until(a, 6);
+            let fields = vec![vec![], canonical, wire];
+            self.port_call_with(t, c, w, fields, None, true, &mut None, deadline)
+        }) {
+            Ok(row) => row,
+            Err(stop) => {
+                self.port_socket_part(key, false);
+                return Err(stop);
+            }
+        };
+        if row[1] != 0 {
+            return failed(self, row[1], row[2]);
+        }
+        self.port_socket_part(key, true);
+        self.world
+            .tls_writes
+            .insert(key & !3, (name, false, Default::default()));
+        Ok([&[key, 0, 0], &row[3..8]].concat())
+    }
 }

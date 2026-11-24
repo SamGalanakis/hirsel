@@ -7,9 +7,60 @@ pub type Refusal = Untrusted | Missing | Malformed | Local | Family | TooLong | 
 
 pub type Step = Need(u64) | Done(Header, u64)
 
+pub type Config: shareable + send {
+    trusted: List[wsock.Prefix],
+    header_max: u64,
+    header_ms: u64
+}
+
 pub const DEFAULT_HEADER_MAX: u64 = 536
 
+pub const DEFAULT_HEADER_MS: u64 = 3000
+
 const fixed_size: u64 = 16
+
+/// Checks the trusted prefixes and the byte limit for required PROXY v2 headers.
+/// Use DEFAULT_HEADER_MAX and DEFAULT_HEADER_MS for the standard limits.
+pub fn config(trusted: List[wsock.Prefix], header_max: u64, header_ms: u64) -> Result[Config, ()] {
+    let count = list.len(trusted)
+    if count == 0 || header_max < 28 || header_max > 65551 {
+        return Error(())
+    }
+    let mut prefixes: List[wsock.Prefix] = list.with_capacity(count)
+    list.append(mut prefixes, trusted)
+    Ok(Config(trusted: take prefixes, header_max, header_ms))
+}
+
+/// Reads the required PROXY v2 header from an accepted plain TCP socket.
+/// Checks the peer before reading and closes the socket on every refusal.
+/// Waits under one deadline from accepted_ns. Allocates the header buffer.
+pub fn accept(take s: Socket, peer: Addr, c: Config, time: Clock, accepted_ns: u64) -> Result[(Socket, Header), Refusal] waits {
+    if !wsock.trusted(peer.ip, c.trusted) {
+        return Error(Untrusted)
+    }
+    let deadline = clock.deadline_after_ms(accepted_ns, c.header_ms)
+    let (take r, take w) = net.split(take s)
+    let mut read = take r
+    let mut header: Bytes = list.with_capacity(fixed_size)
+    loop {
+        match step(header, c.header_max)? {
+            Done(parsed, _) => return Ok((result.unwrap(net.join(take read, take w)), parsed)),
+            Need(total) => {
+                if host.mono_ns(time) >= deadline {
+                    return Error(Silent)
+                }
+                let remaining = total - list.len(header)
+                list.reserve(mut header, remaining)
+                match host.recv_bounded(mut read, mut header, remaining, At(time, deadline)) {
+                    Ok(0) => return Error(Ended),
+                    Ok(_) => {},
+                    Error(TimedOut) => return Error(Silent),
+                    Error(error) => return Error(Failed(error))
+                }
+            }
+        }
+    }
+}
 
 /// Decodes the PROXY v2 header at the start of b. Need gives the total bytes
 /// to supply next, and Done gives the header length. Alloc: nothing.

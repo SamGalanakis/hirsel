@@ -2,7 +2,7 @@
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
-    net::{self, DENIED, NetworkRequest, Rules, tls_failure},
+    net::{self, DENIED, NetworkRequest, Rules, TcpOrigin, TcpRoute, tls_failure},
     process::View,
     provider::*,
 };
@@ -240,10 +240,14 @@ unsafe fn connect(
             if let Some(tape) = tape {
                 outcome = tape.carrier(outcome);
             }
-            (*files).connected.remove(&key);
-            (*files)
-                .connected
-                .insert(outcome.value, (address, provider));
+            (*files).tcp_routes.remove(&key);
+            (*files).tcp_routes.insert(
+                outcome.value,
+                TcpRoute {
+                    provider,
+                    origin: TcpOrigin::Connected(address),
+                },
+            );
             (*files).tls_writes.insert(
                 outcome.value,
                 crate::secret::TlsWrite {
@@ -254,7 +258,7 @@ unsafe fn connect(
                 },
             );
         } else if state.consumed && !served {
-            (*files).connected.remove(&key);
+            (*files).tcp_routes.remove(&key);
         } else {
             net::hirsel_core_socket_drop(context, key);
         }
@@ -275,7 +279,13 @@ unsafe fn prepare(
     bad_alpn: bool,
 ) -> Result<(net::Address, Provider, HandshakeState), Outcome> {
     unsafe {
-        let (address, provider) = (*files).connected.get(&key).copied().ok_or(DENIED)?;
+        let Some(&TcpRoute {
+            provider,
+            origin: TcpOrigin::Connected(address),
+        }) = (*files).tcp_routes.get(&key)
+        else {
+            return Err(DENIED);
+        };
         // A served Net's sockets handshake through that Net, and only it:
         // never another provider's, which could not answer for them.
         let net_provider = &*hirsel_core_capability_provider(context, n);

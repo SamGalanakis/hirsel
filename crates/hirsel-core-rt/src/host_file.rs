@@ -152,7 +152,7 @@ pub(crate) struct Files {
     pub(crate) datagrams: BTreeMap<u64, crate::unix_net::Datagram>,
     pub(crate) exec_pipes: BTreeMap<u64, crate::exec_runtime::HandleCharge>,
     pub(crate) unix_served: BTreeMap<u64, Provider>,
-    pub(crate) connected: std::collections::BTreeMap<u64, (crate::net::Address, Provider)>,
+    pub(crate) tcp_routes: BTreeMap<u64, crate::net::TcpRoute>,
     pub(crate) tls_sessions: TlsSessions,
     pub(crate) tls_cache: crate::os_tls::LazyCache,
     #[cfg(feature = "record")]
@@ -300,7 +300,7 @@ impl Files {
             datagrams: BTreeMap::new(),
             exec_pipes: BTreeMap::new(),
             unix_served: BTreeMap::new(),
-            connected: Default::default(),
+            tcp_routes: Default::default(),
             tls_sessions: Default::default(),
             tls_cache: Default::default(),
             tls_writes: Default::default(),
@@ -318,7 +318,7 @@ impl Files {
         self.sockets = hirsel_core_net::Sockets::default();
         self.udp_sockets.clear();
         self.tls_sessions.clear();
-        self.connected.clear();
+        self.tcp_routes.clear();
         self.datagrams.clear();
         self.unix_served.clear();
         self.exec_pipes.clear();

@@ -78,7 +78,9 @@ pub fn join(take r: ReadHalf, take w: WriteHalf) -> Result[Socket, Unjoined]
 that socket, with the record `split` divided. It is how a client upgrades an established
 TCP connection to TLS in place (STARTTLS): the program exchanges plaintext over the
 halves, joins them, and passes the socket to `tls.connect`
-([TLS-1](tls.md#tls-1-client-handshake)). The joined socket is the same connection: same
+([TLS-1](tls.md#tls-1-client-handshake)). An accepted TCP socket can also be split for
+an exact pre-protocol read, such as the [PROXY v2 header](launch.md#the-header-required-checked-consumed-exactly),
+then rejoined for the protocol that follows. The joined socket is the same connection: same
 descriptor, peer, issuing provider and object ordinal, with nothing sent, received, shut
 down or buffered by the join. Like `split`, it allocates and admits nothing, takes one step,
 does not wait, passes no replay point, and on a socket of `provide.net` asks the server
@@ -89,8 +91,8 @@ halves unchanged and still usable, and nothing else happens:
 
 1. `r` and `w` are not the two halves of one socket.
 2. The socket is a TLS stream. Its halves stay halves; there is no TLS inside TLS.
-3. The socket was not made by `host.connect` (TLS-1's check 1). A socket from `accept` is
-   never the client side of a handshake, and joining it has no other use.
+3. The socket is outside TCP. `host.connect` and `host.accept` both create TCP sockets
+   whose halves can rejoin. A joined socket retains its origin for TLS-1's check 1.
 
 A STARTTLS client must read the server's go-ahead with `max_receive` equal to the go-ahead's
 length, so that no byte past it reaches program memory as plaintext. Bytes the program

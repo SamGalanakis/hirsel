@@ -129,7 +129,8 @@ fn literal(b: Bytes) -> Option[Ip] {
     Some(normalize(V6(hi, lo)))
 }
 
-fn trusted(peer: Ip, ingress: List[Prefix]) -> bool {
+/// Tests the ingress prefixes against the peer and its IPv4-mapped equivalent.
+pub fn trusted(peer: Ip, ingress: List[Prefix]) -> bool {
     for p in ingress {
         if contains(p, peer) || contains(p, normalize(peer)) {
             return true

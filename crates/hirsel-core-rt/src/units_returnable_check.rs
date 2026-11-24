@@ -497,9 +497,13 @@ fn run_form(returnable: bool) -> (Vec<String>, Vec<usize>, Vec<usize>, u64) {
     let mut out = (Vec::new(), Vec::new(), 0u64);
     let mut context = Context::new(1 << 20);
     let mut files = crate::host_file::Files::default();
-    files
-        .connected
-        .insert(KEY, (crate::net::Address::default(), PROVIDER));
+    files.tcp_routes.insert(
+        KEY,
+        crate::net::TcpRoute {
+            provider: PROVIDER,
+            origin: crate::net::TcpOrigin::Accepted,
+        },
+    );
     context.host_files = &mut files;
     crate::causes::task_start(&mut context).unwrap();
     let mut input = Root {

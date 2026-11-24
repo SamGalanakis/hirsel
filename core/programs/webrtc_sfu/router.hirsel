@@ -1,1 +1,506 @@
-// Room routing is implemented in slices S4 to S6.
+// RTC-5 and RTC-6 on one unit (webrtc spec, slice S4): rooms, fence reservations,
+// publications, down-tracks, fan-out in the subscriber's wire identity, stable
+// target maps and negotiated keyframe requests. Units, inboxes and sockets are S5's.
+pub type RoomLimits {
+    participants: u16,
+    ids: u16,
+    publications: u16,
+    down_tracks: u32,
+    audio_forward: u8,
+    pause_delay_ms: u32
+}
+
+pub type RouterError = NoRoom | NoParticipant | NoPublication | Fenced | Suspended | Exists | Limit(u32) | Peer(peer.PeerError) | Capacity(Capacity)
+
+pub type PublicationId: key = PublicationId(u64)
+
+pub type Target: key = Off | Layer(encoding: u8, spatial: u8, temporal: u8)
+
+/// Router counters: keyframe requests the publisher's negotiation could not carry
+/// (RTC-6: the down-track waits for the next independent frame), and repair asks
+/// whose plaintext had left the ingress ring.
+pub type Counts: key {
+    unrequested: u64,
+    ring_misses: u64,
+    // Packets whose payload descriptor did not parse, so no leg could take them.
+    unparsed: u64,
+    // Leg packets a stream's layer ids put outside the stable map (RTC-6).
+    unmapped: u64
+}
+
+/// The plaintext of one publication's recent packets (the ingress RTX ring), in
+/// fixed slots: `floor(rtx_bytes / 1500)` of them, fixed when the publication opens.
+type Ring {
+    slots: List[Bytes],
+    handles: List[u64],
+    next: u64
+}
+
+type Encoding {
+    ssrc: u32,
+    keyframes: rtp.loss.Keyframes,
+    interval: u64,
+    // VP9's per-source switching-up state (RTC-6), observed once per packet.
+    vp9: media_bits.unit.Vp9Layers
+}
+
+type Publication {
+    id: PublicationId,
+    owner: peer.Gen,
+    room: peer.RoomId,
+    section: u8,
+    codec: sdp.Codec,
+    pli: bool,
+    fir: bool,
+    encodings: List[Encoding],
+    ring: Ring
+}
+
+type Down {
+    sub: peer.Gen,
+    room: peer.RoomId,
+    publication: PublicationId,
+    track: u16,
+    target: Target,
+    // The H.264 parameter sets this leg has sent (media_bits `ParameterSets`).
+    sets: media_bits.unit.ParameterSets,
+    after_end: bool
+}
+
+type Member {
+    who: peer.Participant,
+    session: peer.PeerSession,
+    publications: u16,
+    downs: u32
+}
+
+type Room {
+    id: peer.RoomId,
+    limits: RoomLimits,
+    suspended: bool,
+    // Fence entries (RTC-7): one per admitted id, reserved at its first join and
+    // kept until the room closes. `fenced` is the highest revoked epoch, if any.
+    ids: List[u64],
+    fenced: List[Option[u64]]
+}
+
+pub opaque type Router {
+    random: Random,
+    rooms: List[Room],
+    members: List[Member],
+    publications: List[Publication],
+    downs: List[Down],
+    next_publication: u64,
+    counts: Counts
+}
+
+const PEERS_MAX: u16 = 256
+
+const PUBLICATIONS_MAX: u16 = 8
+
+const DOWN_TRACKS_MAX: u32 = 64
+
+const ENCODINGS_MAX: u64 = 4
+
+const RING_SLOT: u64 = 1500
+
+const MIN_INTERVAL_NS: u64 = 100000000
+
+pub fn router(r: Random) -> Router {
+    Router(random: r, rooms: list.new(), members: list.new(), publications: list.new(), downs: list.new(), next_publication: 1, counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0))
+}
+
+pub fn counts(r: Router) -> Counts {
+    r.counts
+}
+
+fn room_at(r: Router, room: peer.RoomId) -> Option[u64] {
+    for i in 0u64 .. list.len(r.rooms) {
+        if r.rooms[i].id == room {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn member_at(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u64] {
+    for i in 0u64 .. list.len(r.members) {
+        if r.members[i].who.room == room && r.members[i].who.gen == who {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn publication_at(r: Router, room: peer.RoomId, p: PublicationId) -> Option[u64] {
+    for i in 0u64 .. list.len(r.publications) {
+        if r.publications[i].id == p && r.publications[i].room == room {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn down_at(r: Router, room: peer.RoomId, sub: peer.Gen, p: PublicationId) -> Option[u64] {
+    for i in 0u64 .. list.len(r.downs) {
+        let d = r.downs[i]
+        if d.room == room && d.sub == sub && d.publication == p {
+            return Some(i)
+        }
+    }
+    None
+}
+
+pub fn open_room(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), RouterError] {
+    if let Some(_) = room_at(r, room) {
+        return Error(Exists)
+    }
+    if limits.participants > PEERS_MAX {
+        return Error(Limit(int.widen(PEERS_MAX)))
+    }
+    if limits.ids < limits.participants {
+        return Error(Limit(int.widen(limits.participants)))
+    }
+    if limits.publications > PUBLICATIONS_MAX {
+        return Error(Limit(int.widen(PUBLICATIONS_MAX)))
+    }
+    if limits.down_tracks > DOWN_TRACKS_MAX {
+        return Error(Limit(DOWN_TRACKS_MAX))
+    }
+    let n: u64 = int.widen(limits.ids)
+    let mut ids: List[u64] = list.new()
+    let mut fenced: List[Option[u64]] = list.new()
+    list.try_reserve(mut ids, n) ?=> |c| Capacity(c)
+    list.try_reserve(mut fenced, n) ?=> |c| Capacity(c)
+    list.try_reserve(mut r.rooms, 1) ?=> |c| Capacity(c)
+    list.push(mut r.rooms, Room(id: room, limits: limits, suspended: false, ids: take ids, fenced: take fenced))
+    Ok(())
+}
+
+/// Admit an opened session to its room. The id's fence entry is reserved at its
+/// first admission; an id the room has never admitted, when every entry is
+/// reserved, is `Limit(ids)`, and an epoch at or below the id's fence is `Fenced`.
+pub fn join(mut r: Router, take session: peer.PeerSession) -> Result[(), RouterError] {
+    let who = peer.who(session)
+    let Some(ri) = room_at(r, who.room) else {
+        return Error(NoRoom)
+    }
+    if r.rooms[ri].suspended {
+        return Error(Suspended)
+    }
+    let Gen(id: id, epoch: epoch) = who.gen
+    let mut entry: Option[u64] = None
+    for i in 0u64 .. list.len(r.rooms[ri].ids) {
+        if r.rooms[ri].ids[i] == id {
+            entry = Some(i)
+        }
+    }
+    for m in r.members {
+        if m.who.room == who.room {
+            let Gen(id: other, epoch: _) = m.who.gen
+            if other == id {
+                return Error(Exists)
+            }
+        }
+    }
+    if let Some(e) = entry {
+        if let Some(f) = r.rooms[ri].fenced[e] {
+            if epoch <= f {
+                return Error(Fenced)
+            }
+        }
+    }
+    let mut present = 0u64
+    for m in r.members {
+        if m.who.room == who.room {
+            present += 1
+        }
+    }
+    if present >= int.widen(r.rooms[ri].limits.participants) {
+        return Error(Limit(int.widen(r.rooms[ri].limits.participants)))
+    }
+    if entry == None {
+        if list.len(r.rooms[ri].ids) >= int.widen(r.rooms[ri].limits.ids) {
+            return Error(Limit(int.widen(r.rooms[ri].limits.ids)))
+        }
+        list.push(mut r.rooms[ri].ids, id)
+        list.push(mut r.rooms[ri].fenced, None)
+    }
+    list.try_reserve(mut r.members, 1) ?=> |c| Capacity(c)
+    list.push(mut r.members, Member(who: who, session: take session, publications: 0, downs: 0))
+    Ok(())
+}
+
+fn first_format(a: sdp.Agreed) -> Option[sdp.Format] {
+    for f in a.formats {
+        if f.codec != Rtx && f.codec != Red && f.codec != Ulpfec {
+            return Some(clone(f))
+        }
+    }
+    None
+}
+
+fn ring(rtx_bytes: u64) -> Result[Ring, RouterError] {
+    let n = rtx_bytes / RING_SLOT
+    let mut slots: List[Bytes] = list.new()
+    let mut handles: List[u64] = list.new()
+    list.try_reserve(mut slots, n) ?=> |c| Capacity(c)
+    list.try_reserve(mut handles, n) ?=> |c| Capacity(c)
+    for _ in 0u64 .. n {
+        let mut b: Bytes = list.new()
+        list.try_reserve(mut b, RING_SLOT) ?=> |c| Capacity(c)
+        list.push(mut slots, take b)
+        list.push(mut handles, 0xffffffffffffffff)
+    }
+    Ok(Ring(slots: take slots, handles: take handles, next: 0))
+}
+
+/// Make the receiving section `section` of `who`'s session a publication.
+pub fn publish(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8) -> Result[PublicationId, RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
+    }
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    let limit = r.rooms[ri].limits.publications
+    if r.members[mi].publications >= limit {
+        return Error(Limit(int.widen(limit)))
+    }
+    let Some(a) = peer.agreement(r.members[mi].session, section) else {
+        return Error(Peer(Sdp(AnswerMismatch(section))))
+    }
+    if !a.recv {
+        return Error(Peer(Sdp(AnswerMismatch(section))))
+    }
+    for p in r.publications {
+        if p.room == room && p.owner == who && p.section == section {
+            return Error(Exists)
+        }
+    }
+    let Some(f) = first_format(a) else {
+        return Error(Peer(Sdp(AnswerMismatch(section))))
+    }
+    let count = if list.len(a.streams) == 0 {
+        1u64
+    } else {
+        list.len(a.streams)
+    }
+    let mut encodings: List[Encoding] = list.new()
+    list.try_reserve(mut encodings, ENCODINGS_MAX) ?=> |c| Capacity(c)
+    for _ in 0u64 .. count {
+        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(f.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers()))
+    }
+    let held = ring(peer.session_limits(r.members[mi].session).rtx_bytes)?
+    let id = PublicationId(r.next_publication)
+    list.try_reserve(mut r.publications, 1) ?=> |c| Capacity(c)
+    list.push(mut r.publications, Publication(id: id, owner: who, room: room, section: section, codec: f.codec, pli: f.pli, fir: f.fir, encodings: take encodings, ring: take held))
+    r.next_publication += 1
+    r.members[mi].publications += 1
+    Ok(id)
+}
+
+// RTP-11's source key of encoding `e` of publication index `pi`.
+fn source(p: PublicationId, e: u8) -> u32 {
+    let PublicationId(n) = p
+    let wide: u64 = int.widen(e)
+    int.truncate(n * ENCODINGS_MAX + wide)
+}
+
+/// RTC-6's stable target map: `i = t` clamped to 3 for VP8, `i = 4s + t` with each
+/// clamped to 3 for VP9, and 0 for H.264 without SVC and for audio. It never depends
+/// on the layers seen.
+fn rewrite_target(p: Publication, t: Target) -> rtp.rewrite.Target {
+    match t {
+        Off => Off,
+        Layer(encoding: e, spatial: sid, temporal: tid) => {
+            let top_t = if tid > 3 {
+                3u8
+            } else {
+                tid
+            }
+            let top_s = if sid > 3 {
+                3u8
+            } else {
+                sid
+            }
+            let i = match p.codec {
+                Vp8 => top_t,
+                Vp9 => 4 * top_s + top_t,
+                _ => 0u8,
+            }
+            Layer(source: source(p.id, e), target: i)
+        },
+    }
+}
+
+/// Subscribe `who` to a publication on its sending section `section`.
+pub fn subscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, section: u8, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
+    }
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    let Some(pi) = publication_at(r, room, p) else {
+        return Error(NoPublication)
+    }
+    if let Some(_) = down_at(r, room, who, p) {
+        return Error(Exists)
+    }
+    let limit = r.rooms[ri].limits.down_tracks
+    if r.members[mi].downs >= limit {
+        return Error(Limit(limit))
+    }
+    let mut b: Bytes = list.with_capacity(6)
+    host.random(r.random, mut b)
+    let first_seq: u16 = list.word_be(b, 0)
+    let first_ts: u32 = list.word_be(b, 2)
+    let track = peer.add_track(mut r.members[mi].session, section, first_seq, first_ts) ?=> |take e| Peer(e)
+    list.try_reserve(mut r.downs, 1) ?=> |c| Capacity(c)
+    list.push(mut r.downs, Down(sub: who, room: room, publication: p, track: track, target: Off, sets: media_bits.unit.parameter_sets(), after_end: true))
+    r.members[mi].downs += 1
+    set_target(mut r, room, who, p, target, now, mut out)
+}
+
+/// Point a down-track at a layer. A layer on another source asks the publisher for
+/// a keyframe of it (`Switch`), and the old source forwards until it arrives.
+pub fn set_target(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, target: Target, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(di) = down_at(r, room, who, p) else {
+        return Error(NoPublication)
+    }
+    let Some(pi) = publication_at(r, room, p) else {
+        return Error(NoPublication)
+    }
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    if let Layer(encoding: e, spatial: _, temporal: _) = target {
+        let n: u64 = int.widen(e)
+        if n >= list.len(r.publications[pi].encodings) {
+            return Error(Limit(int.narrow(list.len(r.publications[pi].encodings))))
+        }
+    }
+    let t = rewrite_target(r.publications[pi], target)
+    let track = r.downs[di].track
+    if let Error(_) = peer.set_target(mut r.members[mi].session, track, t) {
+        return Error(Limit(32))
+    }
+    r.downs[di].target = target
+    if let Some(_) = peer.pending(r.members[mi].session, track) {
+        if let Layer(encoding: e, spatial: _, temporal: _) = target {
+            keyframe(mut r, now, pi, e, Switch, mut out)?
+        }
+    }
+    Ok(())
+}
+
+pub fn unsubscribe(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Result[(), RouterError] {
+    let Some(di) = down_at(r, room, who, p) else {
+        return Error(NoPublication)
+    }
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    let track = r.downs[di].track
+    let _ = peer.set_target(mut r.members[mi].session, track, Off)
+    let _ = list.remove(mut r.downs, di)
+    r.members[mi].downs -= 1
+    Ok(())
+}
+
+/// A participant leaves: its publications and down-tracks go, and its session is
+/// closed with a DTLS close_notify.
+pub fn leave(mut r: Router, room: peer.RoomId, who: peer.Gen, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    drop_member(mut r, mi, true, mut out)
+    Ok(())
+}
+
+/// Fence `id` at `epoch` and below on this unit (RTC-7 on one unit): its session is
+/// erased without notice, and a later join at or below the epoch is `Fenced`.
+pub fn revoke(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
+    }
+    let mut entry: Option[u64] = None
+    for i in 0u64 .. list.len(r.rooms[ri].ids) {
+        if r.rooms[ri].ids[i] == id {
+            entry = Some(i)
+        }
+    }
+    let Some(e) = entry else {
+        return Error(NoParticipant)
+    }
+    let raised = match r.rooms[ri].fenced[e] {
+        Some(f) if f >= epoch => f,
+        _ => epoch,
+    }
+    r.rooms[ri].fenced[e] = Some(raised)
+    let mut i = 0u64
+    while i < list.len(r.members) {
+        let Gen(id: mid, epoch: mep) = r.members[i].who.gen
+        if r.members[i].who.room == room && mid == id && mep <= raised {
+            drop_member(mut r, i, false, mut out)
+        } else {
+            i += 1
+        }
+    }
+    Ok(())
+}
+
+fn drop_member(mut r: Router, mi: u64, notify: bool, mut out: peer.Outbox) {
+    let who = r.members[mi].who
+    let mut i = 0u64
+    while i < list.len(r.publications) {
+        if r.publications[i].room == who.room && r.publications[i].owner == who.gen {
+            let id = r.publications[i].id
+            let mut d = 0u64
+            while d < list.len(r.downs) {
+                if r.downs[d].room == who.room && r.downs[d].publication == id {
+                    let sub = r.downs[d].sub
+                    if let Some(si) = member_at(r, who.room, sub) {
+                        let _ = peer.set_target(mut r.members[si].session, r.downs[d].track, Off)
+                        r.members[si].downs -= 1
+                    }
+                    let _ = list.remove(mut r.downs, d)
+                } else {
+                    d += 1
+                }
+            }
+            let _ = list.remove(mut r.publications, i)
+        } else {
+            i += 1
+        }
+    }
+    let mut d = 0u64
+    while d < list.len(r.downs) {
+        if r.downs[d].room == who.room && r.downs[d].sub == who.gen {
+            let _ = list.remove(mut r.downs, d)
+        } else {
+            d += 1
+        }
+    }
+    let m = list.remove(mut r.members, mi)
+    let Member(who: _, session: take s, publications: _, downs: _) = take m
+    peer.close(take s, notify, mut out)
+}
+
+/// The media and RTX SSRCs of `who`'s down-track of a publication.
+pub fn track_ssrcs(r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Option[(u32, u32)] {
+    let di = down_at(r, room, who, p)?
+    let mi = member_at(r, room, who)?
+    peer.track_ssrcs(r.members[mi].session, r.downs[di].track)
+}
+
+pub fn session_drops(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[peer.Drops] {
+    let mi = member_at(r, room, who)?
+    Some(peer.drops(r.members[mi].session))
+}
+
+pub fn control_ssrc(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u32] {
+    let mi = member_at(r, room, who)?
+    Some(peer.control_ssrc(r.members[mi].session))
+}

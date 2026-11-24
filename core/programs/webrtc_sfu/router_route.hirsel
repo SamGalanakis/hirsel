@@ -1,0 +1,306 @@
+// RTC-5 fan-out and RTC-6 keyframe requests on one unit.
+const EVERY: u32 = 0xffffffff
+
+/// Take one datagram on `who`'s session and route what it yields: media and
+/// repairs to the publication's down-tracks, feedback to its own answers.
+pub fn receive(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, from: Addr, mut slot: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(mi) = member_at(r, room, who) else {
+        return Error(NoParticipant)
+    }
+    let input = peer.receive(mut r.members[mi].session, now, from, mut slot, mut out) ?=> |take e| Peer(e)
+    match input {
+        Media(m) => route(mut r, now, mi, m, slot, mut out),
+        Repair(m) => route(mut r, now, mi, m, slot, mut out),
+        Control(take c) => control(mut r, now, mi, take c, mut out),
+        _ => Ok(()),
+    }
+}
+
+fn owned(r: Router, room: peer.RoomId, owner: peer.Gen, section: u8) -> Option[u64] {
+    for i in 0u64 .. list.len(r.publications) {
+        let p = r.publications[i]
+        if p.room == room && p.owner == owner && p.section == section {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn rewrite_unit(u: media_bits.unit.Unit) -> rtp.rewrite.Unit {
+    rtp.rewrite.Unit(start: u.start, end: u.end, keyframe: u.keyframe, needs: u.needs, switches: u.switches, frame: 0)
+}
+
+// The packet's RTP-11 facts where they need no per-leg state: VP8 as ingress parsed
+// its payload descriptor, audio as a whole frame that every target needs and that switches.
+fn shared_unit(codec: sdp.Codec, m: peer.MediaIn) -> Option[rtp.rewrite.Unit] {
+    match codec {
+        Vp8 => match m.layer {
+            Some(u) => Some(rewrite_unit(u)),
+            None => None,
+        },
+        Opus => Some(rtp.rewrite.Unit(start: true, end: true, keyframe: true, needs: EVERY, switches: EVERY, frame: 0)),
+        _ => None,
+    }
+}
+
+// Keep the plaintext packet up to the payload's end in the publication's ring, for
+// repairs. The handle names the slot and is never reused.
+fn store(mut g: Ring, packet: Bytes) -> u64 {
+    let handle = g.next
+    g.next += 1
+    let n = list.len(g.slots)
+    if n == 0 || list.len(packet) > RING_SLOT {
+        return handle
+    }
+    let k = handle % n
+    list.clear(mut g.slots[k])
+    list.append(mut g.slots[k], packet)
+    g.handles[k] = handle
+    handle
+}
+
+fn route(mut r: Router, now: u64, mi: u64, m: peer.MediaIn, slot: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let owner = r.members[mi].who
+    let Some(pi) = owned(r, owner.room, owner.gen, m.section) else {
+        return Ok(())
+    }
+    let e: u64 = int.widen(m.encoding)
+    if e >= list.len(r.publications[pi].encodings) {
+        return Ok(())
+    }
+    r.publications[pi].encodings[e].ssrc = m.ssrc
+    let codec = r.publications[pi].codec
+    let id = r.publications[pi].id
+    let end = m.payload_at + m.payload_len
+    let payload = list.slice(slot, m.payload_at, end)
+    let shared = shared_unit(codec, m)
+    if let None = shared {
+        if codec == Vp8 {
+            r.counts.unparsed += 1
+            return Ok(())
+        }
+    }
+    if let Some(u) = shared {
+        if u.keyframe && u.start {
+            rtp.loss.keyframe_seen(mut r.publications[pi].encodings[e].keyframes)
+        }
+    }
+    // VP9 fills `switches` per down-track from its current target (RTC-6).
+    let vp9 = if codec == Vp9 {
+        match media_bits.unit.vp9_frame(payload, m.marker) {
+            Ok(f) => Some(f),
+            Error(_) => {
+                r.counts.unparsed += 1
+                return Ok(())
+            },
+        }
+    } else {
+        None
+    }
+    if let Some(f) = vp9 {
+        if f.keyframe && f.begin {
+            rtp.loss.keyframe_seen(mut r.publications[pi].encodings[e].keyframes)
+        }
+    }
+    if m.reset {
+        keyframe(mut r, now, pi, m.encoding, Loss, mut out)?
+    }
+    let handle = store(mut r.publications[pi].ring, list.slice(slot, 0, end))
+    let src = source(id, m.encoding)
+    let mut waits = false
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room != owner.room || r.downs[d].publication != id {
+            continue
+        }
+        let Some(si) = member_at(r, owner.room, r.downs[d].sub) else {
+            continue
+        }
+        let unit = match shared {
+            Some(u) => u,
+            None => match vp9 {
+                Some(f) => {
+                    let current = peer.current_layer(r.members[si].session, r.downs[d].track, src)
+                    match media_bits.unit.vp9_unit(f, current, r.publications[pi].encodings[e].vp9) {
+                        // A picture's layer frames share its timestamp: the spatial id
+                        // tells them apart (RFC 9628 section 4.2).
+                        Ok(u) => {
+                            let mut w = rewrite_unit(u)
+                            w.frame = int.widen(f.spatial)
+                            w
+                        },
+                        Error(_) => {
+                            r.counts.unmapped += 1
+                            continue
+                        },
+                    }
+                },
+                None => {
+                    if codec != H264 {
+                        continue
+                    }
+                    match media_bits.unit.h264(payload, m.marker, r.downs[d].after_end, r.downs[d].sets) {
+                        Ok(u) => rewrite_unit(u),
+                        Error(_) => {
+                            r.counts.unparsed += 1
+                            continue
+                        },
+                    }
+                },
+            },
+        }
+        let leg = peer.Leg(src: owner.gen, handle: handle, source: src, index: m.index, ts: m.wide, marker: m.marker, codec: codec, padding_only: m.payload_len == 0, unit: unit, level: m.audio_level, voice: m.voice == Some(true), from: m.payload_at, len: m.payload_len)
+        let track = r.downs[d].track
+        let sent = peer.forward(mut r.members[si].session, now, track, leg, slot, mut out) ?=> |take x| Peer(x)
+        if sent == OnMedia && codec == H264 {
+            let _ = media_bits.unit.h264_sent(mut r.downs[d].sets, payload)
+            r.downs[d].after_end = unit.end
+        }
+        if sent == Held && peer.pending(r.members[si].session, track) == Some(src) {
+            waits = true
+        }
+    }
+    if let Some(f) = vp9 {
+        media_bits.unit.vp9_observe(mut r.publications[pi].encodings[e].vp9, f)
+    }
+    // A down-track waiting on this encoding asks for its keyframe (`Switch`).
+    if waits {
+        keyframe(mut r, now, pi, m.encoding, Switch, mut out)?
+    }
+    Ok(())
+}
+
+fn control(mut r: Router, now: u64, mi: u64, take c: peer.ControlIn, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let who = r.members[mi].who
+    for ask in c.repairs {
+        let Some(d) = track_down(r, who, ask.track) else {
+            continue
+        }
+        let Some(pi) = publication_at(r, who.room, r.downs[d].publication) else {
+            continue
+        }
+        let n = list.len(r.publications[pi].ring.slots)
+        if n == 0 || r.publications[pi].ring.handles[ask.handle % n] != ask.handle {
+            r.counts.ring_misses += 1
+            continue
+        }
+        let k = ask.handle % n
+        let _ = peer.resend(mut r.members[mi].session, now, ask, r.publications[pi].ring.slots[k], mut out) ?=> |take x| Peer(x)
+    }
+    for ka in c.keyframes {
+        let Some(d) = track_down(r, who, ka.track) else {
+            continue
+        }
+        let Some(pi) = publication_at(r, who.room, r.downs[d].publication) else {
+            continue
+        }
+        if let Layer(encoding: e, spatial: _, temporal: _) = r.downs[d].target {
+            // RTC-6: a subscriber's PLI is picture loss; its FIR asks for a fresh decoder.
+            keyframe(mut r, now, pi, e, if ka.fir {
+                Switch
+            } else {
+                Loss
+            }, mut out)?
+        }
+    }
+    for info in c.senders {
+        for pi in 0u64 .. list.len(r.publications) {
+            if r.publications[pi].room != who.room || r.publications[pi].owner != who.gen {
+                continue
+            }
+            for e in 0u64 .. list.len(r.publications[pi].encodings) {
+                if r.publications[pi].encodings[e].ssrc != info.ssrc {
+                    continue
+                }
+                let src = source(r.publications[pi].id, int.narrow(e))
+                let id = r.publications[pi].id
+                for d in 0u64 .. list.len(r.downs) {
+                    if r.downs[d].room == who.room && r.downs[d].publication == id {
+                        if let Some(si) = member_at(r, who.room, r.downs[d].sub) {
+                            peer.source_report(mut r.members[si].session, r.downs[d].track, src, info, now)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn track_down(r: Router, who: peer.Participant, track: u16) -> Option[u64] {
+    for d in 0u64 .. list.len(r.downs) {
+        if r.downs[d].room == who.room && r.downs[d].sub == who.gen && r.downs[d].track == track {
+            return Some(d)
+        }
+    }
+    None
+}
+
+/// RTC-6 keyframe requests: one `Keyframes` per publication encoding coalesces every
+/// down-track's ask. `Switch` asks for a FIR when the publisher negotiated `ccm fir`;
+/// otherwise, and for `Loss`, a PLI, sent only when it negotiated `nack pli`.
+fn keyframe(mut r: Router, now: u64, pi: u64, encoding: u8, why: rtp.loss.Why, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let e: u64 = int.widen(encoding)
+    if e >= list.len(r.publications[pi].encodings) {
+        return Ok(())
+    }
+    // No stream yet: nothing to ask about until its first packet names the SSRC.
+    let ssrc = r.publications[pi].encodings[e].ssrc
+    if ssrc == 0 {
+        return Ok(())
+    }
+    let fir = why == Switch && r.publications[pi].fir
+    if !fir && !r.publications[pi].pli {
+        r.counts.unrequested += 1
+        return Ok(())
+    }
+    let room = r.publications[pi].room
+    let Some(oi) = member_at(r, room, r.publications[pi].owner) else {
+        return Ok(())
+    }
+    if let Some(req) = rtp.loss.want(mut r.publications[pi].encodings[e].keyframes, why, now) {
+        peer.request_keyframe(mut r.members[oi].session, ssrc, req, mut out) ?=> |take x| Peer(x)
+    }
+    Ok(())
+}
+
+/// Drive every session's timers, and keep each encoding's keyframe interval at
+/// `max(100 ms, rtt)` of its publisher, updated in place when the estimate moves
+/// by more than a quarter. It answers the earliest deadline.
+pub fn poll(mut r: Router, now: u64, mut out: peer.Outbox) -> Option[u64] {
+    let mut wake: Option[u64] = None
+    for i in 0u64 .. list.len(r.members) {
+        let next = match peer.poll(mut r.members[i].session, now, mut out) {
+            Transmit => Some(now),
+            WakeAt(t) => Some(t),
+            Idle => None,
+        }
+        if let Some(t) = next {
+            wake = match wake {
+                Some(w) if w <= t => Some(w),
+                _ => Some(t),
+            }
+        }
+    }
+    for pi in 0u64 .. list.len(r.publications) {
+        let Some(oi) = member_at(r, r.publications[pi].room, r.publications[pi].owner) else {
+            continue
+        }
+        let rtt = match peer.round_trip(r.members[oi].session) {
+            Some(x) if x > MIN_INTERVAL_NS => x,
+            _ => MIN_INTERVAL_NS,
+        }
+        for e in 0u64 .. list.len(r.publications[pi].encodings) {
+            let old = r.publications[pi].encodings[e].interval
+            let moved = if rtt > old {
+                rtt - old
+            } else {
+                old - rtt
+            }
+            if 4 * moved > old {
+                rtp.loss.set_interval(mut r.publications[pi].encodings[e].keyframes, rtt)
+                r.publications[pi].encodings[e].interval = rtt
+            }
+        }
+    }
+    wake
+}

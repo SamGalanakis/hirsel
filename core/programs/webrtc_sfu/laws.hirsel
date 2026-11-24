@@ -554,10 +554,15 @@ fn to_client(mut c: dtls.Endpoint, rc: Random, now: u64, out: peer.Outbox) {
 }
 
 fn established(seed: u64) -> Rig {
+    established_on(seed, session_offer(), peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7)), client_addr())
+}
+
+/// A session for `who`, from the browser at `client` that sent `offer`.
+fn established_on(seed: u64, offer_bytes: Bytes, who: peer.Participant, client: Addr) -> Rig {
     let Party(id: take server_id, certificate: server_certificate) = party(seed)
     let Party(id: take client_id, certificate: client_certificate) = party(seed + 1)
     let mut offer = sdp.description()
-    result.unwrap(sdp.parse(session_offer(), mut offer))
+    result.unwrap(sdp.parse(offer_bytes, mut offer))
     let mut reply = sdp.description()
     let mut n = sdp.negotiated(rig_local())
     result.unwrap(sdp.answer(sdp.default_policy(), None, offer, rig_local(), mut reply, mut n))
@@ -566,7 +571,6 @@ fn established(seed: u64) -> Rig {
         n.remote_fingerprint[i] = d[i]
     }
     let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64)
-    let who = peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7))
     let mut p = result.unwrap(peer.open(rig_local(), take server_id, provide.random(seed + 2), server_addr(), limits, n, who))
     let mut out = result.unwrap(peer.outbox(65536, 64))
     let mut pkt: Bytes = list.with_capacity(576)
@@ -576,10 +580,10 @@ fn established(seed: u64) -> Rig {
     let check = stun_ice.Check(role: stun_ice.IceRole(role: Controlling, tie: 7), priority: 0x6e0001ff, nominate: true)
     let k = result.unwrap(stun_ice.binding_request(stun_ice.Transaction(high: 1, low: 2), b"server:remote", Some(check), Sha1, true, server_pwd(), mut pkt, mut scratch))
     let mut slot = copy_of(list.slice(pkt, 0, k))
-    if let Ok(Replied) = peer.receive(mut p, 0, client_addr(), mut slot, mut out) {} else {
+    if let Ok(Replied) = peer.receive(mut p, 0, client, mut slot, mut out) {} else {
         fail("nomination not answered")
     }
-    if peer.selected(p) != Some(client_addr()) {
+    if peer.selected(p) != Some(client) {
         fail("nomination did not select the path")
     }
     peer.clear_outbox(mut out)
@@ -591,7 +595,7 @@ fn established(seed: u64) -> Rig {
             let mut f: Bytes = list.with_capacity(1500)
             match dtls.poll(mut c, 0, rc, mut f) {
                 Ok(Send(_)) => {
-                    let _ = result.unwrap(peer.receive(mut p, 0, client_addr(), mut f, mut out))
+                    let _ = result.unwrap(peer.receive(mut p, 0, client, mut f, mut out))
                 },
                 _ => break,
             }
@@ -611,17 +615,21 @@ fn established(seed: u64) -> Rig {
 
 // A browser RTP packet with the one-byte MID element first (RFC 8285 section 4.2).
 fn media(mut cs: srtp.Session, ssrc: u32, seq: u16, mid: Bytes, pt: u8) -> Bytes {
+    let wide: u32 = int.widen(seq)
+    media_carrying(mut cs, ssrc, seq, 3000 * wide, mid, pt, b"\x10\x00\x9d\x01\x2a\x00\x00\x00")
+}
+
+fn media_carrying(mut cs: srtp.Session, ssrc: u32, seq: u16, ts: u32, mid: Bytes, pt: u8, body: Bytes) -> Bytes {
     let mut m = rtp.ext.map(OneOnly)
     result.unwrap(rtp.ext.bind(mut m, 1, Mid))
     let mut w = rtp.ext.writer()
     if list.len(mid) != 0 {
         result.unwrap(rtp.ext.put(mut w, m, Mid, mid, 0, list.len(mid)))
     }
-    let wide: u32 = int.widen(seq)
-    let f = rtp.header.Fields(marker: true, pt: pt, seq: seq, ts: 3000 * wide, ssrc: ssrc)
+    let f = rtp.header.Fields(marker: true, pt: pt, seq: seq, ts: ts, ssrc: ssrc)
     let mut b: Bytes = list.with_capacity(1500)
     let _ = result.unwrap(rtp.header.write(f, view w, mut b))
-    list.append(mut b, b"\x10\x00\x9d\x01\x2a\x00\x00\x00")
+    list.append(mut b, body)
     let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
     b
 }
@@ -815,13 +823,16 @@ fn flip(packet: Bytes, at: u64) -> Bytes {
     b
 }
 
-// The same egress on a twin: a down-track and five sent packets on it.
+// The same egress on a twin: a down-track and five packets of one source frame each,
+// from index 100 and timestamp 0, so the outgoing numbers are 100 to 104.
 fn egress(mut r: Rig, payload: Bytes) {
-    let track = result.unwrap(peer.add_track(mut r.p, 2))
+    let track = result.unwrap(peer.add_track(mut r.p, 2, 100, 0))
+    result.unwrap(peer.set_target(mut r.p, track, Layer(source: 9, target: 0)))
     for i in 0u64 .. 5 {
-        let ts: u32 = int.narrow(3000 * i)
-        let m = peer.Media(src: Gen(id: 9, epoch: 1), handle: i, marker: true, pt: 96, pre: b"", from: 0, len: list.len(payload))
-        if result.unwrap(peer.send(mut r.p, 6 * MS + i * MS, track, OnTime(100 + i, ts), m, payload, mut r.out)) != OnMedia {
+        let ts: i64 = int.narrow(3000 * i)
+        let u = rtp.rewrite.Unit(start: true, end: true, keyframe: i == 0, needs: 1, switches: 0xffffffff, frame: 0)
+        let leg = peer.Leg(src: Gen(id: 9, epoch: 1), handle: i, source: 9, index: 100 + i, ts: ts, marker: true, codec: Vp8, padding_only: false, unit: u, level: None, voice: false, from: 0, len: list.len(payload))
+        if result.unwrap(peer.forward(mut r.p, 6 * MS + i * MS, track, leg, payload, mut r.out)) != OnMedia {
             fail("an on-time packet was not sent on the media SSRC")
         }
     }
@@ -836,8 +847,8 @@ fn control_at(mut r: Rig, now: u64, packet: Bytes) -> peer.ControlIn {
     }
 }
 
-/// bug: let an unauthenticated datagram move statistics, the loss window, the egress history, TWCC, BWE, bindings, the path or the ROC before SRTP or ICE has authenticated it.
-/// oracle: RTC-3 by hand: a twin session fed the same valid traffic, compared on everything it sends and reports; the ROC by the next packet's hand-derived index 65538.
+/// bug: let an unauthenticated datagram move statistics, the loss window, the egress history, TWCC, BWE, bindings, the path or the ROC before SRTP or ICE has authenticated it; or keep the old path after an authenticated rebinding nomination.
+/// oracle: RTC-3 by hand: a twin session fed the same valid traffic, compared on everything it sends and reports; the ROC by the next packet's hand-derived index 65538; after the rebinding, index 65539 on the new source, the old source off-path and every send to the new one.
 @test
 fn unauthenticated_changes_nothing() -> Result[(), peer.PeerError] {
     let mut a = established(51)
@@ -932,6 +943,38 @@ fn unauthenticated_changes_nothing() -> Result[(), peer.PeerError] {
     let db = counts(peer.drops(b.p))
     if da[BAD_SRTP] != db[BAD_SRTP] + 6 || da[OFF_PATH] != db[OFF_PATH] + 1 || da[BAD_STUN] != db[BAD_STUN] + 1 {
         fail("drop counters")
+    }
+    // RTC-3 path move (NAT rebinding): an authenticated nomination from a new source
+    // moves the path, and the DTLS association and SRTP state carry over. Media from
+    // the old source is then off-path, and egress goes to the new source only.
+    peer.clear_outbox(mut a.out)
+    let check2 = stun_ice.Check(role: stun_ice.IceRole(role: Controlling, tie: 7), priority: 0x6e0001ff, nominate: true)
+    let k2 = result.unwrap(stun_ice.binding_request(stun_ice.Transaction(high: 5, low: 6), b"server:remote", Some(check2), Sha1, true, server_pwd(), mut pkt, mut scratch))
+    let mut nominated = copy_of(list.slice(pkt, 0, k2))
+    if let Ok(Replied) = peer.receive(mut a.p, now, stranger(), mut nominated, mut a.out) {} else {
+        fail("the rebinding nomination was not answered")
+    }
+    if peer.selected(a.p) != Some(stranger()) || !peer.connected(a.p) {
+        fail("an authenticated nomination from a new source did not move the path, or dropped DTLS")
+    }
+    peer.clear_outbox(mut a.out)
+    let after = media(mut a.cs, MEDIA_SSRC, 3, b"a", 96)
+    let stale = media(mut a.cs, MEDIA_SSRC, 4, b"a", 96)
+    let mut moved_slot = copy_of(after)
+    match peer.receive(mut a.p, now, stranger(), mut moved_slot, mut a.out) {
+        Ok(Media(m)) if m.index == 65539 => (),
+        _ => fail("media on the moved path was not taken at index 65539"),
+    }
+    dropped(mut a, now, client_addr(), stale, OFF_PATH, "media from the old source after the move")
+    let _ = peer.poll(mut a.p, 6000 * MS, mut a.out)
+    if list.len(a.out.pkts) == 0 {
+        fail("nothing sent after the move")
+    }
+    for tx in a.out.pkts {
+        let UdpTx(to: sent_to, at: _, len: _, ecn: _) = tx
+        if sent_to != stranger() {
+            fail("egress after the move went to the old source")
+        }
     }
     // Negative control: statistics run on the header before open count the replay as
     // received (RFC 3550 appendix A.3), so the twin comparison would see it.

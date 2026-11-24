@@ -124,8 +124,10 @@ fn reply_success(tx: Transaction, peer: Addr, key: Bytes, mut out: Bytes, mut sc
     }
 }
 
-/// Reply to an authenticated Binding check. The first authenticated nomination selects
-/// the path for its component. The caller sends out[0,n) back to peer from base.
+/// Reply to an authenticated Binding check. An authenticated nomination selects the
+/// path for its component, and a later one from another source moves it (NAT
+/// rebinding; mediasoup's IceServer does the same). An ordinary check moves nothing.
+/// The caller sends out[0,n) back to peer from base.
 pub fn lite_receive(mut agent: Lite, base: Addr, peer: Addr, packet: Bytes, mut out: Bytes, mut scratch: Bytes) -> Result[u64, IceError] {
     let Some(component) = local_component(agent.bases, base) else {
         return Error(UnknownBase)
@@ -134,9 +136,7 @@ pub fn lite_receive(mut agent: Lite, base: Addr, peer: Addr, packet: Bytes, mut 
     let n = reply_success(msg.transaction, peer, agent.credentials.password, mut out, mut scratch)?
     if msg.nominate {
         if let Some(i) = selection_index(agent.paths, component) {
-            if let None = agent.paths[i].path {
-                agent.paths[i] = Selection(component: component, path: Some(Path(component: component, base: base, peer: peer)))
-            }
+            agent.paths[i] = Selection(component: component, path: Some(Path(component: component, base: base, peer: peer)))
         }
     }
     Ok(n)

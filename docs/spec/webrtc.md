@@ -1327,6 +1327,42 @@ W19, blocks, because those are soundness reds.
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7; F1, F2 for N1 | the cost targets |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
+**S4 decisions.** Gaps the spec left open, decided while S4 was built:
+
+- **Shape.** The S4 router is sans-IO on one unit. `join` takes an opened `PeerSession`, and
+  `receive(r, now, room, who, from, slot, out)` names the participant whose session the
+  datagram is for: the home unit's 5-tuple table resolves `who` before the router sees it.
+  `poll` drives every session and answers the earliest deadline. `revoke` runs the fence on
+  this one unit; S5 adds the cross-unit order.
+- **Repair ring.** A publication's ring has `floor(rtx_bytes / 1500)` slots of 1500 bytes,
+  reserved at `publish`. A packet longer than a slot is not kept, so a NACK for it misses
+  and counts `ring_misses`.
+- **Down-track start.** `peer.add_track(p, section, first_seq, first_ts)` takes the first
+  outgoing sequence number and timestamp, which the router draws from its `Random`.
+- **Path move.** An authenticated nomination from a new source moves the selected path
+  (`stun_ice.lite_receive`: the latest authenticated nomination wins, as mediasoup's IceServer
+  does; an ordinary check moves nothing). The DTLS association, SRTP contexts and bindings
+  carry over unchanged. DTLS needs no new peer address, because it uses that address only for
+  cookie admission, which a `Verified` server skips. Media from the old source is then
+  off-path (W19's path-move case).
+- **Codec frames.** VP8 per-leg counters are keyed by the extended timestamp. A VP9 picture's
+  layer frames share one timestamp, so the `Rewrite` frame key is the spatial id. The VP9
+  target map is `i = 4s + t` with `s` and `t` clamped to 3 each. A packet whose layer ids
+  `media_bits` cannot map counts `unmapped`.
+- **Counters.** `Counts` holds `unrequested` (a keyframe ask the publisher did not
+  negotiate for), `ring_misses`, `unparsed` (a VP8, VP9 or H.264 payload whose descriptor does
+  not parse, which is dropped) and `unmapped`. An ask counts as `unrequested` only once the
+  encoding's SSRC is known: before its first packet there is nothing to ask about.
+- **Keyframe request buffer.** `peer.request_keyframe` builds a compound RR, SDES CNAME and
+  PLI or FIR with the SRTCP trailer in a 320-byte buffer, allocated per request (off the
+  forward path).
+- **Not closed in S4.** The pacer: `pacer_packets` bounds nothing yet, and egress goes
+  straight to the outbox. AV1 routing needs a dependency-descriptor kind in `rtp.ext` (an rtp
+  amend). A VP9 stream whose `SID` or `TID` passes 3 is dropped from the leg and counted
+  `unmapped`, not yet forwarded as its current target as the VP9 rule above requires. W7
+  needs rebinding a down-track to another publication. W9 waits for captured or reference
+  simulcast and SVC packets. Each is an open red on S4's ticket.
+
 **Follow-ups this spec names.**
 
 - **F1** (runner): a Hirsel-side `hirsel.4` room client, so a Hirsel service can be a room peer

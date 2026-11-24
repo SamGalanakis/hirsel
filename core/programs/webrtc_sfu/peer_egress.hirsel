@@ -58,7 +58,9 @@ fn has_rtx(a: sdp.Agreed) -> bool {
 
 /// Make a down-track on a sending section. It draws its media SSRC and, for video
 /// with RTX agreed, its RTX SSRC; both keep for the track's life while collision-free.
-pub fn add_track(mut p: PeerSession, section: u8) -> Result[u16, PeerError] {
+/// `first_seq` and `first_ts` are the outgoing stream's first number and timestamp
+/// (RFC 3550 section 5.1: the router draws them at random).
+pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32) -> Result[u16, PeerError] {
     let si: u64 = int.widen(section)
     if si >= list.len(p.sections) || !p.sections[si].agreed.send {
         return Error(Sdp(AnswerMismatch(section)))
@@ -78,9 +80,57 @@ pub fn add_track(mut p: PeerSession, section: u8) -> Result[u16, PeerError] {
         0
     }
     let history: rtp.history.History[Record] = rtp.history.history(HISTORY_SLOTS, HISTORY_AGE_NS) ?=> |c| Capacity(c)
+    let rewrite = rtp.rewrite.rewrite(clock, REWRITE_RANGES, REWRITE_FRAMES, int.widen(first_seq), first_ts) ?=> |c| Capacity(c)
+    let pictures = rtp.counter.counter(15, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
+    let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     list.try_reserve(mut p.tracks, 1) ?=> |c| Capacity(c)
-    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, last_ts: 0, sent: rtp.stats.sent(clock), history: take history, src: None))
+    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0))
     Ok(int.narrow(list.len(p.tracks) - 1))
+}
+
+/// Point a down-track at a source layer (RTP-11 `target`). The router owns the map
+/// from `Layer(e, s, t)` to `(source, i)` (RTC-6).
+pub fn set_target(mut p: PeerSession, track: u16, t: rtp.rewrite.Target) -> Result[(), rtp.rewrite.TargetError] {
+    let i: u64 = int.widen(track)
+    if i < list.len(p.tracks) {
+        rtp.rewrite.target(mut p.tracks[i].rewrite, t)?
+    }
+    Ok(())
+}
+
+/// A source's sender report, for the switch timeline (RTP-11 `on_sr`).
+pub fn source_report(mut p: PeerSession, track: u16, source: u32, info: rtp.rtcp.SenderInfo, now: u64) {
+    let i: u64 = int.widen(track)
+    if i < list.len(p.tracks) {
+        rtp.rewrite.on_sr(mut p.tracks[i].rewrite, source, info, now)
+    }
+}
+
+/// The source a down-track waits to switch to, if any (RTP-11 `pending`).
+pub fn pending(p: PeerSession, track: u16) -> Option[u32] {
+    let i: u64 = int.widen(track)
+    if i >= list.len(p.tracks) {
+        return None
+    }
+    rtp.rewrite.pending(p.tracks[i].rewrite)
+}
+
+/// The target index the down-track forwards on `source`, if that is its current source.
+pub fn current_layer(p: PeerSession, track: u16, source: u32) -> Option[u8] {
+    let i: u64 = int.widen(track)
+    if i >= list.len(p.tracks) {
+        return None
+    }
+    rtp.rewrite.current(p.tracks[i].rewrite, source)
+}
+
+fn send_pt(a: sdp.Agreed, codec: sdp.Codec) -> Option[u8] {
+    for f in a.formats {
+        if f.codec == codec {
+            return Some(f.pt)
+        }
+    }
+    None
 }
 
 fn rtx_pt(a: sdp.Agreed, pt: u8) -> Option[u8] {
@@ -92,61 +142,139 @@ fn rtx_pt(a: sdp.Agreed, pt: u8) -> Option[u8] {
     None
 }
 
-fn leg_writer(mut p: PeerSession, now: u64, si: u64, size: u32) -> Result[rtp.ext.ExtWriter, PeerError] {
-    let a = p.sections[si].agreed
+// The subscriber leg's extensions: its MID value and, at send, the next number of
+// its own transport (RTP-8). The publisher's MID, RID and transport number never pass.
+fn leg_writer(mut p: PeerSession, now: u64, si: u64, size: u32, level: Option[u8], voice: bool) -> Result[rtp.ext.ExtWriter, PeerError] {
     let map = p.sections[si].map
     let mut w = rtp.ext.writer()
-    let mut mid: Bytes = list.with_capacity(16)
-    let n: u64 = int.widen(a.mid_len)
-    for i in 0u64 .. n {
-        list.push(mut mid, a.mid[i])
+    let n = list.len(p.sections[si].mid)
+    rtp.ext.put(mut w, map, Mid, p.sections[si].mid, 0, n) ?=> |_| Rtp(Form)
+    if let Some(l) = level {
+        rtp.ext.put_level(mut w, map, voice, l) ?=> |_| Rtp(Form)
     }
-    rtp.ext.put(mut w, map, Mid, mid, 0, n) ?=> |_| Rtp(Form)
-    let mut wants_twcc = false
-    for x in a.extmaps {
-        if x.ext == TransportCc {
-            wants_twcc = true
-        }
-    }
-    if wants_twcc {
+    if p.sections[si].twcc {
         let number = rtp.twcc.assign(mut p.send_log, now, size)
-        let mut v: Bytes = list.with_capacity(2)
-        list.put_word_be(mut v, number)
-        rtp.ext.put(mut w, map, TransportSeq, v, 0, 2) ?=> |_| Rtp(Form)
+        list.clear(mut p.word)
+        list.put_word_be(mut p.word, number)
+        rtp.ext.put(mut w, map, TransportSeq, p.word, 0, 2) ?=> |_| Rtp(Form)
     }
     Ok(w)
 }
 
-fn seal_out(mut p: PeerSession, mut b: Bytes, src: Gen, mut out: Outbox) -> Result[(), PeerError] {
+// Seal the scratch packet in place and copy it into the subscriber's span of `out`.
+fn seal_out(mut p: PeerSession, src: Gen, mut out: Outbox) -> Result[(), PeerError] {
     let Some(to) = p.path else {
         return Error(Closed)
     }
-    seal(mut p, false, mut b)?
-    queue(mut out, to, b, Tag(src: Some(src), dst: p.who.gen, room: p.who.room))
+    let mut b = replace(mut p.pkt, list.new())
+    let sealed = seal(mut p, false, mut b)
+    let queued = match sealed {
+        Ok(_) => queue(mut out, to, b, Tag(src: Some(src), dst: p.who.gen, room: p.who.room)),
+        Error(take e) => Error(take e),
+    }
+    list.clear(mut b)
+    p.pkt = take b
+    queued
 }
 
-fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, marker: bool, pt: u8, pre: Bytes, payload: Bytes, from: u64, len: u64, src: Gen, mut out: Outbox) -> Result[bool, PeerError] {
+// The leg's codec descriptor values for one output frame: VP8's picture ID and
+// TL0PICIDX, counted per down-track and keyed by the source frame (RTP-11 counters).
+fn descriptor(mut p: PeerSession, t: u64, leg: Leg, payload: Bytes) -> (Option[u16], Option[u8]) {
+    if leg.codec != Vp8 {
+        return (None, None)
+    }
+    let Ok(d) = media_bits.vp8.parse(list.slice(payload, leg.from, leg.from + leg.len)) else {
+        return (None, None)
+    }
+    let picture = match d.picture_id {
+        Some(_) => match rtp.counter.forward(mut p.tracks[t].pictures, leg.ts, None, 15) {
+            Ok(v) => {
+                let w: u16 = int.narrow(v)
+                Some(w)
+            },
+            Error(_) => None,
+        },
+        None => None,
+    }
+    let tl0 = match d.tl0picidx {
+        Some(_) => {
+            if d.temporal == Some(0) || d.temporal == None {
+                if let Ok(v) = rtp.counter.forward(mut p.tracks[t].tl0s, leg.ts, None, 8) {
+                    p.tracks[t].tl0 = int.narrow(v)
+                }
+            }
+            Some(p.tracks[t].tl0)
+        },
+        None => None,
+    }
+    (picture, tl0)
+}
+
+// The payload as the leg sends it: the source bytes, with the descriptor's picture ID
+// and TL0PICIDX rewritten in place in the scratch packet from `at`.
+fn put_payload(mut p: PeerSession, at: u64, payload: Bytes, from: u64, len: u64, picture: Option[u16], tl0: Option[u8]) -> Result[(), PeerError] {
+    if list.capacity(p.pkt) - list.len(p.pkt) < len + 16 {
+        return Error(Capacity(Capacity(requested: len + 16, available: list.capacity(p.pkt) - list.len(p.pkt))))
+    }
+    list.append(mut p.pkt, list.slice(payload, from, from + len))
+    if picture == None && tl0 == None {
+        return Ok(())
+    }
+    // RFC 7741 section 4.2: the picture ID follows the two first octets, and TL0PICIDX follows it.
+    let Ok(d) = media_bits.vp8.parse(list.slice(payload, from, from + len)) else {
+        return Ok(())
+    }
+    let mut next = at + 2
+    match d.picture_id {
+        Some(ShortId(_)) => {
+            if let Some(v) = picture {
+                p.pkt[next] = int.narrow(v % 128)
+            }
+            next += 1
+        },
+        Some(LongId(_)) => {
+            if let Some(v) = picture {
+                let high: u8 = int.narrow((v >> 8) & 127)
+                p.pkt[next] = 128 | high
+                p.pkt[next + 1] = int.narrow(v & 255)
+            }
+            next += 2
+        },
+        None => (),
+    }
+    if d.tl0picidx != None {
+        if let Some(v) = tl0 {
+            p.pkt[next] = v
+        }
+    }
+    Ok(())
+}
+
+fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Record, payload: Bytes, mut out: Outbox) -> Result[bool, PeerError] {
     let si: u64 = int.widen(p.tracks[t].section)
-    let Some(rpt) = rtx_pt(p.sections[si].agreed, pt) else {
+    let Some(rpt) = rtx_pt(p.sections[si].agreed, rec.pt) else {
         return Ok(false)
     }
     if p.tracks[t].rtx_ssrc == 0 {
         return Ok(false)
     }
-    let size: u32 = int.narrow(12 + 2 + list.len(pre) + len)
-    let w = leg_writer(mut p, now, si, size)?
-    let f = rtp.header.Fields(marker: marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
-    let mut b: Bytes = list.with_capacity(SLOT + 64)
-    let _ = rtp.rtx.write(f, view w, int.truncate(index), pre, payload, from, len, mut b) ?=> |take x| Rtp(x)
+    let size: u32 = int.narrow(12 + 2 + rec.len)
+    let w = leg_writer(mut p, now, si, size, None, false)?
+    let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
+    let head = rtp.ext.write_header(f, view w, mut p.pkt) ?=> |take x| Rtp(x)
+    list.push(mut p.pkt, int.truncate(index >> 8))
+    list.push(mut p.pkt, int.truncate(index))
+    put_payload(mut p, head + 2, payload, rec.from, rec.len, rec.picture, rec.tl0)?
     p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
-    seal_out(mut p, mut b, src, mut out)?
+    seal_out(mut p, rec.src, mut out)?
     Ok(true)
 }
 
-/// Send one output packet of a down-track. `OnTime` goes on the media SSRC at the
-/// rewriter's index. `Late` goes out at once as an RFC 4588 repair on the RTX SSRC,
-/// or is dropped and counted when the leg negotiated no RTX.
-pub fn send(mut p: PeerSession, now: u64, track: u16, e: Egress, m: Media, payload: Bytes, mut out: Outbox) -> Result[Sent, PeerError] {
+/// Present one source packet to a down-track (RTC-5 fan-out step 2). The track's
+/// `Rewrite` decides: `Forward` goes out on the media SSRC in the subscriber's wire
+/// identity; `Late` goes out at once as an RFC 4588 repair on the RTX SSRC, or is
+/// dropped and counted when the leg negotiated no RTX; `Drop` and `Wait` send nothing.
+pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Bytes, mut out: Outbox) -> Result[Sent, PeerError] {
     if p.closed {
         return Error(Closed)
     }
@@ -154,37 +282,50 @@ pub fn send(mut p: PeerSession, now: u64, track: u16, e: Egress, m: Media, paylo
     if t >= list.len(p.tracks) {
         return Error(Sdp(AnswerMismatch(0)))
     }
-    match e {
-        OnTime(index, ts) => {
-            let si: u64 = int.widen(p.tracks[t].section)
-            let size: u32 = int.narrow(12 + list.len(m.pre) + m.len)
-            let w = leg_writer(mut p, now, si, size)?
-            let f = rtp.header.Fields(marker: m.marker, pt: m.pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
-            let mut b: Bytes = list.with_capacity(SLOT + 64)
-            let _ = rtp.header.write(f, view w, mut b) ?=> |take x| Rtp(x)
-            list.append(mut b, m.pre)
-            list.append(mut b, list.slice(payload, m.from, m.from + m.len))
-            seal_out(mut p, mut b, m.src, mut out)?
-            p.tracks[t].highest = index
-            p.tracks[t].last_ts = ts
-            p.tracks[t].src = Some(m.src)
-            rtp.stats.on_sent(mut p.tracks[t].sent, list.len(m.pre) + m.len)
-            if p.tracks[t].video {
-                let rec = Record(src: m.src, handle: m.handle, from: m.from, len: m.len, ts: ts, marker: m.marker, pt: m.pt, pre: clone(m.pre))
-                drop(rtp.history.put(mut p.tracks[t].history, index, now, take rec))
-            }
-            Ok(OnMedia)
-        },
-        Late(index, ts) => {
-            if !write_rtx(mut p, now, t, index, ts, m.marker, m.pt, m.pre, payload, m.from, m.len, m.src, mut out)? {
-                p.drops.late += 1
-                return Ok(Dropped)
-            }
-            let rec = Record(src: m.src, handle: m.handle, from: m.from, len: m.len, ts: ts, marker: m.marker, pt: m.pt, pre: clone(m.pre))
-            drop(rtp.history.put(mut p.tracks[t].history, index, now, take rec))
-            Ok(AsRepair)
-        },
+    let decision = rtp.rewrite.on_packet(mut p.tracks[t].rewrite, leg.source, leg.index, leg.ts, now, leg.padding_only, leg.unit)
+    // A new switch gates the history: a NACK from before it answers nothing.
+    let switch = rtp.rewrite.switch_index(p.tracks[t].rewrite)
+    if switch != p.tracks[t].gated {
+        if let Some(i) = switch {
+            rtp.history.gate(mut p.tracks[t].history, i)
+        }
+        p.tracks[t].gated = switch
     }
+    let (index, ts, late) = match decision {
+        Forward(i, w) => (i, w, false),
+        Late(i, w) => (i, w, true),
+        _ => return Ok(Held),
+    }
+    let si: u64 = int.widen(p.tracks[t].section)
+    let Some(pt) = send_pt(p.sections[si].agreed, leg.codec) else {
+        p.drops.format += 1
+        return Ok(Dropped)
+    }
+    let (picture, tl0) = descriptor(mut p, t, leg, payload)
+    let rec = Record(src: leg.src, handle: leg.handle, from: leg.from, len: leg.len, ts: ts, marker: leg.marker, pt: pt, picture: picture, tl0: tl0)
+    if late {
+        if !write_rtx(mut p, now, t, index, ts, rec, payload, mut out)? {
+            p.drops.late += 1
+            return Ok(Dropped)
+        }
+        if p.tracks[t].video {
+            drop(rtp.history.put(mut p.tracks[t].history, index, now, rec))
+        }
+        return Ok(AsRepair)
+    }
+    let size: u32 = int.narrow(12 + leg.len)
+    let w = leg_writer(mut p, now, si, size, leg.level, leg.voice)?
+    let f = rtp.header.Fields(marker: leg.marker, pt: pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
+    let head = rtp.ext.write_header(f, view w, mut p.pkt) ?=> |take x| Rtp(x)
+    put_payload(mut p, head, payload, leg.from, leg.len, picture, tl0)?
+    seal_out(mut p, leg.src, mut out)?
+    p.tracks[t].highest = index
+    p.tracks[t].src = Some(leg.src)
+    rtp.stats.on_sent(mut p.tracks[t].sent, leg.len)
+    if p.tracks[t].video {
+        drop(rtp.history.put(mut p.tracks[t].history, index, now, rec))
+    }
+    Ok(OnMedia)
 }
 
 /// Answer a `RepairAsk` with the plaintext its handle names, rebuilt from the
@@ -194,37 +335,21 @@ pub fn resend(mut p: PeerSession, now: u64, ask: RepairAsk, payload: Bytes, mut 
     if p.closed || t >= list.len(p.tracks) {
         return Ok(false)
     }
-    let rec = match rtp.history.entry(p.tracks[t].history, ask.index) {
-        Some(r) => {
-            let c: Record = clone(r)
-            c
-        },
+    let rec: Record = match rtp.history.entry(p.tracks[t].history, ask.index) {
+        Some(r) => r,
         None => return Ok(false),
     }
     if rec.src != ask.src || rec.handle != ask.handle {
         return Ok(false)
     }
-    write_rtx(mut p, now, t, ask.index, rec.ts, rec.marker, rec.pt, rec.pre, payload, rec.from, rec.len, rec.src, mut out)
+    write_rtx(mut p, now, t, ask.index, rec.ts, rec, payload, mut out)
 }
 
-/// Note that a down-track's source switched at output index `index` (RTP-11
-/// `switch_index`): a NACK below it answers nothing.
-pub fn switched(mut p: PeerSession, track: u16, index: u64) {
-    let t: u64 = int.widen(track)
-    if t < list.len(p.tracks) {
-        rtp.history.gate(mut p.tracks[t].history, index)
-    }
-}
-
-/// Ask the publisher of one inbound stream for a keyframe, throttled per stream.
-pub fn request_keyframe(mut p: PeerSession, now: u64, ssrc: u32, why: rtp.loss.Why, mut out: Outbox) -> Result[bool, PeerError] {
-    let Some(i) = find_inbound(p, ssrc) else {
-        return Ok(false)
-    }
-    let Some(req) = rtp.loss.want(mut p.inbound[i].keyframes, why, now) else {
-        return Ok(false)
-    }
-    let mut b: Bytes = list.with_capacity(64)
+/// Send the publisher of one inbound stream a keyframe request the router chose
+/// (RTC-6): a PLI or a FIR with its command sequence number.
+pub fn request_keyframe(mut p: PeerSession, ssrc: u32, req: rtp.loss.Request, mut out: Outbox) -> Result[(), PeerError] {
+    // RR 8, CNAME chunk up to 264, FIR 20 and the SRTCP trailer 14 (RFC 3711 section 3.4).
+    let mut b: Bytes = list.with_capacity(320)
     let empty: List[rtp.rtcp.Block] = list.new()
     let _ = rtp.rtcp.write_rr(p.control, view empty, mut b)
     let _ = rtp.rtcp.write_cname(p.control, p.cname, mut b)
@@ -236,8 +361,12 @@ pub fn request_keyframe(mut p: PeerSession, now: u64, ssrc: u32, why: rtp.loss.W
             let _ = rtp.rtcp.write_fir(p.control, ssrc, n, mut b)
         },
     }
-    seal_rtcp_out(mut p, mut b, mut out)?
-    Ok(true)
+    seal_rtcp_out(mut p, mut b, mut out)
+}
+
+/// The round-trip estimate of this session (RFC 3550 section 6.4.1, from RR blocks).
+pub fn round_trip(p: PeerSession) -> Option[u64] {
+    p.rtt
 }
 
 fn seal_rtcp_out(mut p: PeerSession, mut b: Bytes, mut out: Outbox) -> Result[(), PeerError] {
@@ -266,8 +395,11 @@ fn reports(mut p: PeerSession, now: u64, mut out: Outbox) -> Result[(), PeerErro
         if p.tracks[t].highest == EMPTY {
             continue
         }
+        let Some(ts) = rtp.rewrite.sr_timestamp(mut p.tracks[t].rewrite, now) else {
+            continue
+        }
         let ssrc = p.tracks[t].ssrc
-        let info = rtp.stats.sender_info(p.tracks[t].sent, ssrc, ntp(now), p.tracks[t].last_ts)
+        let info = rtp.stats.sender_info(p.tracks[t].sent, ssrc, ntp(now), ts)
         let mut b: Bytes = list.with_capacity(128)
         let empty: List[rtp.rtcp.Block] = list.new()
         let _ = rtp.rtcp.write_sr(info, view empty, mut b)

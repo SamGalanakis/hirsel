@@ -20,6 +20,7 @@ stun_ice = { major = 1, path = "../stun_ice" }
 "peer_ingress.hirsel" = "peer"
 "peer_egress.hirsel" = "peer"
 "router.hirsel" = "router"
+"router_route.hirsel" = "router"
 "signal.hirsel" = "signal"
 
 [tests]
@@ -27,5 +28,7 @@ limit = 67108864
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"router_laws.hirsel" = "laws"
+"router_keyframe_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"

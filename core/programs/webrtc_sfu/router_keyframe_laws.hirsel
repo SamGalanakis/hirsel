@@ -1,0 +1,410 @@
+// ---- RTC-6 keyframe request law (W10) ----
+const E0: u32 = 0x21000000
+
+const SOLO_SSRC: u32 = 0x22000000
+
+const MUTE_SSRC: u32 = 0x23000000
+
+// RFC 8851 and RFC 8853: the publisher's simulcast section, VP8 with NACK and PLI,
+// MID on extension 1 and RID on extension 2, encodings q, h and f in that order.
+fn simulcast_offer() -> Bytes {
+    let mut b = minimal_head(b" s")
+    list.append(mut b, minimal_video(b"96", b"s", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 nack pli\na=extmap:2 urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id\na=rid:q send\na=rid:h send\na=rid:f send\na=simulcast:send q;h;f\n")
+    take b
+}
+
+// A publisher section `mid` with the given feedback lines, then the receiving sections.
+fn single_offer(mid: Bytes, feedback: Bytes, recv: List[Bytes]) -> Bytes {
+    let mut bundle: Bytes = b" "
+    list.append(mut bundle, mid)
+    for m in recv {
+        list.append(mut bundle, b" ")
+        list.append(mut bundle, m)
+    }
+    let mut b = minimal_head(bundle)
+    list.append(mut b, minimal_video(b"96", mid, true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\n")
+    list.append(mut b, feedback)
+    for m in recv {
+        recv_section(mut b, m, b"96", b"", b"1", b"")
+    }
+    take b
+}
+
+fn receiving(mids: List[Bytes]) -> Bytes {
+    let mut bundle: Bytes = list.new()
+    for m in mids {
+        list.append(mut bundle, b" ")
+        list.append(mut bundle, m)
+    }
+    let mut b = minimal_head(bundle)
+    for m in mids {
+        recv_section(mut b, m, b"96", b"", b"1", b"")
+    }
+    take b
+}
+
+fn rid_media(mut cs: srtp.Session, ssrc: u32, seq: u16, ts: u32, rid: Bytes, body: Bytes) -> Bytes {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    result.unwrap(rtp.ext.bind(mut m, 2, Rid))
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, b"s", 0, 1))
+    result.unwrap(rtp.ext.put(mut w, m, Rid, rid, 0, list.len(rid)))
+    let f = rtp.header.Fields(marker: true, pt: 96, seq: seq, ts: ts, ssrc: ssrc)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, body)
+    let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
+    b
+}
+
+// RFC 6386 section 9.1: a frame tag with P = 1 is an interframe.
+fn vp8_delta() -> Bytes {
+    b"\x10\x01\x02\x00\x00"
+}
+
+/// The keyframe requests one browser received in an outbox: PLIs and FIR sequence
+/// numbers that name `ssrc`, and every datagram it got at all.
+type Asked {
+    plis: u64,
+    firs: List[u8],
+    datagrams: u64
+}
+
+fn asked(mut c: Client, out: peer.Outbox, ssrc: u32) -> Asked {
+    let mut a = Asked(plis: 0, firs: list.new(), datagrams: 0)
+    for tx in out.pkts {
+        let UdpTx(to, at, len, ecn: _) = tx
+        if to != c.at {
+            continue
+        }
+        a.datagrams += 1
+        let mut b = copy_of(list.slice(out.data, at, at + len))
+        if b[1] < 192 || b[1] > 223 {
+            continue
+        }
+        let length = match srtp.unprotect_rtcp(mut c.cs, mut b) {
+            Ok(n) => n,
+            Error(_) => fail("a harness SRTCP receiver could not open a report"),
+        }
+        list.truncate(mut b, length)
+        let mut k = 0u64
+        while let Ok(Some(pkt)) = rtp.rtcp.next(b, mut k) {
+            match pkt.item {
+                Pli(_, named) => {
+                    if named == ssrc {
+                        a.plis += 1
+                    }
+                },
+                Fir(_) => {
+                    let mut f = 0u64
+                    while let Ok(Some((target, n))) = rtp.rtcp.fir_next(b, pkt, mut f) {
+                        if target == ssrc {
+                            list.push(mut a.firs, n)
+                        }
+                    }
+                },
+                _ => (),
+            }
+        }
+    }
+    a
+}
+
+fn send_rid(mut r: router.Router, now: u64, mut p: Client, seq: u16, ts: u32, e: u32, body: Bytes, mut out: peer.Outbox) {
+    let rid = if e == 0 {
+        b"q"
+    } else if e == 1 {
+        b"h"
+    } else {
+        b"f"
+    }
+    let packet = rid_media(mut p.cs, E0 + e, seq, ts, rid, body)
+    feed(mut r, now, p.who, p.at, packet, mut out)
+}
+
+fn send_one(mut r: router.Router, now: u64, mut p: Client, ssrc: u32, mid: Bytes, seq: u16, body: Bytes, mut out: peer.Outbox) {
+    let ts: u32 = int.widen(seq)
+    let packet = media_carrying(mut p.cs, ssrc, seq, 3000 * ts, mid, 96, body)
+    feed(mut r, now, p.who, p.at, packet, mut out)
+}
+
+fn only_key(mut c: Client, out: peer.Outbox, ssrc: u32, take what: String) {
+    let g = one(received(mut c, out), "a switched leg gets the keyframe once")
+    if g.h.ssrc != ssrc || !same(payload_of(g), vp8_key()) {
+        fail(take what)
+    }
+}
+
+/// bug: send one PLI per waiting down-track or per loss, ask a publisher for feedback
+/// it never negotiated, give a FIR retry a new sequence number or the next request
+/// the old one, or keep a stale request interval after the round trip moves.
+/// oracle: W10 and RTC-6 by hand: one `Keyframes` per publication encoding, PLI only
+/// with `nack pli` and FIR only with `ccm fir` (RFC 4585 section 6.3.1, RFC 5104
+/// sections 3.5.1 and 4.3.1.1), retries no sooner than `max(100 ms, rtt)`. The RR's
+/// LSR is 13,108/65,536 s before the middle of NTP 1 s, so the round trip is 200.012 ms.
+@test
+fn keyframe_request_coalesces_across_subscribers() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(90))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p1 = admit(mut r, 91, simulcast_offer(), 1)
+    let mut fb_fir: List[Bytes] = list.new()
+    list.push(mut fb_fir, b"r")
+    let mut p2 = admit(mut r, 93, single_offer(b"t", b"a=rtcp-fb:96 ccm fir\n", fb_fir), 2)
+    let no_recv: List[Bytes] = list.new()
+    let mut p3 = admit(mut r, 95, single_offer(b"u", b"a=rtcp-fb:96 nack\n", no_recv), 3)
+    let mut three: List[Bytes] = list.new()
+    list.push(mut three, b"d")
+    list.push(mut three, b"e")
+    list.push(mut three, b"g")
+    let mut s1 = admit(mut r, 97, receiving(three), 4)
+    let mut one_mid: List[Bytes] = list.new()
+    list.push(mut one_mid, b"d")
+    let mut s2 = admit(mut r, 99, receiving(one_mid), 5)
+    let mut s3 = admit(mut r, 101, receiving(one_mid), 6)
+    let mut s4 = admit(mut r, 103, receiving(one_mid), 7)
+    let pa = result.unwrap(router.publish(mut r, room, p1.who, 0))
+    let low: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let high: router.Target = Layer(encoding: 2, spatial: 0, temporal: 0)
+    let mut now = 10 * MS
+    result.unwrap(router.subscribe(mut r, room, s1.who, pa, 0, low, now, mut out))
+    result.unwrap(router.subscribe(mut r, room, s2.who, pa, 0, low, now, mut out))
+    result.unwrap(router.subscribe(mut r, room, s3.who, pa, 0, low, now, mut out))
+    result.unwrap(router.subscribe(mut r, room, s4.who, pa, 0, high, now, mut out))
+    result.unwrap(router.subscribe(mut r, room, p2.who, pa, 1, low, now, mut out))
+    peer.clear_outbox(mut out)
+    // Keyframes, then a delta, on all three encodings.
+    for e in 0u32 .. 3u32 {
+        send_rid(mut r, now, mut p1, 1000, 90000, e, vp8_key(), mut out)
+    }
+    peer.clear_outbox(mut out)
+    now = 20 * MS
+    for e in 0u32 .. 3u32 {
+        send_rid(mut r, now, mut p1, 1001, 93000, e, vp8_delta(), mut out)
+    }
+    peer.clear_outbox(mut out)
+    // Three subscribers switch to encoding 2 within 20 ms; encoding 2 then jumps 600
+    // packets ahead, so its losses answer Reset (a Loss ask).
+    let mut plis = 0u64
+    let mut firs = 0u64
+    let w1 = s1.who
+    let w2 = s2.who
+    let w3 = s3.who
+    for (at, w) in[(30u64, w1), (35u64, w2), (40u64, w3)] {
+        now = at * MS
+        result.unwrap(router.set_target(mut r, room, w, pa, high, now, mut out))
+        let a = asked(mut p1, out, E0 + 2)
+        plis += a.plis
+        firs += list.len(a.firs)
+        peer.clear_outbox(mut out)
+    }
+    now = 45 * MS
+    send_rid(mut r, now, mut p1, 1601, 96000, 2, vp8_delta(), mut out)
+    let lost = asked(mut p1, out, E0 + 2)
+    plis += lost.plis
+    firs += list.len(lost.firs)
+    if list.len(received(mut s1, out)) != 0 || list.len(received(mut s2, out)) != 0 || list.len(received(mut s3, out)) != 0 {
+        fail("a switching leg forwarded encoding 2 before its keyframe")
+    }
+    peer.clear_outbox(mut out)
+    if plis != 1 || firs != 0 {
+        fail("four asks before the keyframe did not coalesce into one PLI")
+    }
+    // The keyframe: all four down-tracks forward from it, on their own SSRCs.
+    now = 50 * MS
+    send_rid(mut r, now, mut p1, 1602, 99000, 2, vp8_key(), mut out)
+    let (m1, _) = option.unwrap(router.track_ssrcs(r, room, s1.who, pa))
+    let (m2, _) = option.unwrap(router.track_ssrcs(r, room, s2.who, pa))
+    let (m3, _) = option.unwrap(router.track_ssrcs(r, room, s3.who, pa))
+    let (m4, _) = option.unwrap(router.track_ssrcs(r, room, s4.who, pa))
+    only_key(mut s1, out, m1, "subscriber 1 does not forward from the keyframe")
+    only_key(mut s2, out, m2, "subscriber 2 does not forward from the keyframe")
+    only_key(mut s3, out, m3, "subscriber 3 does not forward from the keyframe")
+    only_key(mut s4, out, m4, "subscriber 4 does not forward from the keyframe")
+    if asked(mut p1, out, E0 + 2).plis != 0 {
+        fail("a keyframe drew another request")
+    }
+    peer.clear_outbox(mut out)
+    // A publisher with `ccm fir` and no `nack pli`: one FIR.
+    let pt = result.unwrap(router.publish(mut r, room, p2.who, 0))
+    now = 1000 * MS
+    result.unwrap(router.subscribe(mut r, room, s1.who, pt, 1, low, now, mut out))
+    send_one(mut r, now, mut p2, SOLO_SSRC, b"t", 1, vp8_delta(), mut out)
+    let f0 = asked(mut p2, out, SOLO_SSRC)
+    if f0.plis != 0 || list.len(f0.firs) != 1 || f0.firs[0] != 0 {
+        fail("a FIR-only publisher did not get one FIR numbered 0")
+    }
+    peer.clear_outbox(mut out)
+    // Its round trip moves to 200.012 ms, more than a quarter above 100 ms.
+    let (down, _) = option.unwrap(router.track_ssrcs(r, room, p2.who, pa))
+    let mut blocks: List[rtp.rtcp.Block] = list.new()
+    list.push(mut blocks, rtp.rtcp.Block(ssrc: down, fraction: 0, lost: 0, highest: 0, jitter: 0, lsr: 65536 - 13108, dlsr: 0))
+    let mut rr: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view blocks, mut rr))
+    let _ = result.unwrap(rtp.rtcp.write_cname(CLIENT_SSRC, b"browser", mut rr))
+    let report = sealed_rtcp(mut p2.cs, take rr)
+    feed(mut r, now, p2.who, p2.at, report, mut out)
+    let _ = router.poll(mut r, now, mut out)
+    peer.clear_outbox(mut out)
+    // 150 ms later is inside the new interval, though past the old one.
+    now = 1150 * MS
+    send_one(mut r, now, mut p2, SOLO_SSRC, b"t", 2, vp8_delta(), mut out)
+    if list.len(asked(mut p2, out, SOLO_SSRC).firs) != 0 {
+        fail("a FIR retry came before the moved interval")
+    }
+    peer.clear_outbox(mut out)
+    now = 1210 * MS
+    send_one(mut r, now, mut p2, SOLO_SSRC, b"t", 3, vp8_delta(), mut out)
+    let f1 = asked(mut p2, out, SOLO_SSRC)
+    if list.len(f1.firs) != 1 || f1.firs[0] != 0 {
+        fail("the FIR retry does not repeat sequence number 0")
+    }
+    peer.clear_outbox(mut out)
+    now = 1220 * MS
+    send_one(mut r, now, mut p2, SOLO_SSRC, b"t", 4, vp8_key(), mut out)
+    peer.clear_outbox(mut out)
+    now = 1230 * MS
+    result.unwrap(router.set_target(mut r, room, s1.who, pt, Off, now, mut out))
+    result.unwrap(router.set_target(mut r, room, s1.who, pt, low, now, mut out))
+    let f2 = asked(mut p2, out, SOLO_SSRC)
+    if list.len(f2.firs) != 1 || f2.firs[0] != 1 {
+        fail("a request after the keyframe does not carry the next FIR number")
+    }
+    peer.clear_outbox(mut out)
+    // A publisher that negotiated neither gets no feedback packet at all.
+    let pu = result.unwrap(router.publish(mut r, room, p3.who, 0))
+    let before = router.counts(r).unrequested
+    now = 1300 * MS
+    result.unwrap(router.subscribe(mut r, room, s1.who, pu, 2, low, now, mut out))
+    send_one(mut r, now, mut p3, MUTE_SSRC, b"u", 1, vp8_delta(), mut out)
+    if asked(mut p3, out, MUTE_SSRC).datagrams != 0 {
+        fail("a publisher without PLI or FIR got feedback")
+    }
+    if router.counts(r).unrequested != before + 1 {
+        fail("the unrequested keyframe is not counted")
+    }
+    Ok(())
+}
+
+// ---- RTC-6 VP9 target map (the hand-derived part of W9) ----
+const SVC_SSRC: u32 = 0x24000000
+
+fn vp9_section(mid: Bytes, dir: Bytes) -> Bytes {
+    let mut b = minimal_video(b"98", mid, true)
+    list.append(mut b, dir)
+    list.append(mut b, b"\na=rtpmap:98 VP9/90000\na=rtcp-fb:98 nack\na=rtcp-fb:98 nack pli\n")
+    take b
+}
+
+fn vp9_offer(mid: Bytes, dir: Bytes) -> Bytes {
+    let mut bundle: Bytes = b" "
+    list.append(mut bundle, mid)
+    let mut b = minimal_head(bundle)
+    list.append(mut b, vp9_section(mid, dir))
+    take b
+}
+
+// RFC 9628 section 4.2, non-flexible mode: I|P|L|F|B|E|V|Z, a 7-bit picture ID,
+// TID|U|SID|D, TL0PICIDX, then the payload. A key picture's base frame carries the
+// uncompressed header's frame marker and sync code (82 49 83 42, a keyframe).
+fn svc_packet(predicted: bool, spatial: u8, picture: u8) -> Bytes {
+    let mut b: Bytes = list.new()
+    list.push(mut b, if predicted {
+        0xec
+    } else {
+        0xac
+    })
+    list.push(mut b, picture)
+    // D = 1 for the upper layer: it references the base frame of its own picture.
+    list.push(mut b, if spatial == 0 {
+        0x00
+    } else {
+        0x03
+    })
+    list.push(mut b, 0x00)
+    if spatial == 0 && !predicted {
+        list.append(mut b, b"\x82\x49\x83\x42")
+    } else {
+        list.append(mut b, b"\x86\x00\x40")
+    }
+    b
+}
+
+fn svc_send(mut r: router.Router, now: u64, mut p: Client, seq: u16, ts: u32, frame: Bytes, marker: bool, mut out: peer.Outbox) {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    let mut w = rtp.ext.writer()
+    result.unwrap(rtp.ext.put(mut w, m, Mid, b"x", 0, 1))
+    let f = rtp.header.Fields(marker: marker, pt: 98, seq: seq, ts: ts, ssrc: SVC_SSRC)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, frame)
+    let _ = result.unwrap(srtp.protect_rtp(mut p.cs, mut b))
+    feed(mut r, now, p.who, p.at, b, mut out)
+}
+
+/// bug: map a VP9 `Layer(e, s, t)` by `t` alone or by layers seen, or treat a picture's
+/// layer frames, which share one timestamp, as one frame, so a base-layer leg gets the
+/// upper layer or an upper-layer leg loses it.
+/// oracle: RTC-6 and RFC 9628 section 4.2 by hand: `i = 4s + t`; frame (s', t') is
+/// needed by target i = 4S + T when s' <= S and t' <= T. Layer(0, 1, 0) is i = 4 and
+/// gets both layer frames of each picture; Layer(0, 0, 0) is i = 0 and gets the base
+/// frames only, numbered without gaps.
+@test
+fn router_maps_vp9_layers() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(110))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let room = room_id()
+    let mut p = admit(mut r, 111, vp9_offer(b"x", b"a=sendonly"), 1)
+    let mut both = admit(mut r, 113, vp9_offer(b"y", b"a=recvonly"), 2)
+    let mut base = admit(mut r, 115, vp9_offer(b"y", b"a=recvonly"), 3)
+    let pv = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let now = 10 * MS
+    result.unwrap(router.subscribe(mut r, room, both.who, pv, 0, Layer(encoding: 0, spatial: 1, temporal: 0), now, mut out))
+    result.unwrap(router.subscribe(mut r, room, base.who, pv, 0, Layer(encoding: 0, spatial: 0, temporal: 0), now, mut out))
+    peer.clear_outbox(mut out)
+    let mut seen_both: List[Got] = list.new()
+    let mut seen_base: List[Got] = list.new()
+    let mut seq = 500u16
+    for (picture, ts) in[(5u8, 3000u32), (6u8, 6000u32)] {
+        for spatial in 0u8 .. 2u8 {
+            svc_send(mut r, now, mut p, seq, ts, svc_packet(picture == 6, spatial, picture), spatial == 1, mut out)
+            seq += 1
+            for g in received(mut both, out) {
+                let kept: Got = clone(g)
+                list.push(mut seen_both, take kept)
+            }
+            for g in received(mut base, out) {
+                let kept: Got = clone(g)
+                list.push(mut seen_base, take kept)
+            }
+            peer.clear_outbox(mut out)
+        }
+    }
+    if list.len(seen_both) != 4 || list.len(seen_base) != 2 {
+        fail("VP9 legs do not get the layer frames their targets need")
+    }
+    let a0 = seen_both[0].h
+    let b0 = seen_base[0].h
+    for k in 0u64 .. 4u64 {
+        let step: u16 = int.narrow(k)
+        let pic: u32 = int.narrow(k / 2)
+        let h = seen_both[k].h
+        if h.seq != plus(a0.seq, step) || h.ts != later(a0.ts, 3000 * pic) || h.marker != (k % 2 == 1) {
+            fail("the spatial-layer leg's numbering or picture timestamps")
+        }
+    }
+    let b1 = seen_base[1].h
+    if b1.seq != plus(b0.seq, 1) || b1.ts != later(b0.ts, 3000) {
+        fail("the base-layer leg is not numbered without gaps")
+    }
+    if !same(payload_of(seen_base[0]), svc_packet(false, 0, 5)) || !same(payload_of(seen_both[1]), svc_packet(false, 1, 5)) {
+        fail("a VP9 leg got another layer frame than the one its target needs")
+    }
+    Ok(())
+}

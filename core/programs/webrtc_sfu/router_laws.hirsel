@@ -1,0 +1,363 @@
+// ---- RTC-5 and RTC-6 router laws (W6, W7, W10, W18) ----
+const ROOM: u64 = 7
+
+fn room_id() -> peer.RoomId {
+    RoomId(ROOM)
+}
+
+fn room_limits() -> router.RoomLimits {
+    router.RoomLimits(participants: 16, ids: 16, publications: 8, down_tracks: 8, audio_forward: 0, pause_delay_ms: 5000)
+}
+
+fn gen_of(id: u64) -> peer.Gen {
+    Gen(id: id, epoch: 1)
+}
+
+fn addr_of(n: u32) -> Addr {
+    Addr(ip: V4(0xc6336400 + n), port: 50000)
+}
+
+// One receiving video section of a subscriber's offer: VP8 on `pt`, RTX on `rtx`
+// when given, MID on extension `mid_id` and TWCC on `twcc_id` when nonzero.
+fn recv_section(mut b: Bytes, mid: Bytes, pt: Bytes, rtx: Bytes, mid_id: Bytes, twcc_id: Bytes) {
+    list.append(mut b, b"m=video 9 UDP/TLS/RTP/SAVPF ")
+    list.append(mut b, pt)
+    if list.len(rtx) != 0 {
+        list.append(mut b, b" ")
+        list.append(mut b, rtx)
+    }
+    list.append(mut b, b"\na=mid:")
+    list.append(mut b, mid)
+    list.append(mut b, b"\na=extmap:")
+    list.append(mut b, mid_id)
+    list.append(mut b, b" urn:ietf:params:rtp-hdrext:sdes:mid\na=rtcp-mux\na=recvonly\na=rtpmap:")
+    list.append(mut b, pt)
+    list.append(mut b, b" VP8/90000\na=rtcp-fb:")
+    list.append(mut b, pt)
+    list.append(mut b, b" nack\n")
+    if list.len(rtx) != 0 {
+        list.append(mut b, b"a=rtpmap:")
+        list.append(mut b, rtx)
+        list.append(mut b, b" rtx/90000\na=fmtp:")
+        list.append(mut b, rtx)
+        list.append(mut b, b" apt=")
+        list.append(mut b, pt)
+        list.append(mut b, b"\n")
+    }
+    if list.len(twcc_id) != 0 {
+        list.append(mut b, b"a=extmap:")
+        list.append(mut b, twcc_id)
+        list.append(mut b, b" http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    }
+}
+
+/// A browser session in the router: the participant, its address and its SRTP end.
+type Client {
+    who: peer.Gen,
+    at: Addr,
+    cs: srtp.Session
+}
+
+fn admit(mut r: router.Router, seed: u64, offer: Bytes, id: u64) -> Client {
+    let at = addr_of(int.narrow(id))
+    let who = peer.Participant(gen: gen_of(id), room: room_id())
+    let Rig(p: take p, c: _, cs: take cs, out: _) = established_on(seed, offer, who, at)
+    result.unwrap(router.join(mut r, take p))
+    Client(who: gen_of(id), at: at, cs: take cs)
+}
+
+/// What one browser receives of an outbox, opened by its SRTP session: the header,
+/// the plaintext packet and its length.
+type Got {
+    h: rtp.header.Header,
+    pkt: Bytes
+}
+
+fn received(mut c: Client, out: peer.Outbox) -> List[Got] {
+    let mut got: List[Got] = list.new()
+    for tx in out.pkts {
+        let UdpTx(to, at, len, ecn: _) = tx
+        if to != c.at {
+            continue
+        }
+        let mut b = copy_of(list.slice(out.data, at, at + len))
+        if b[1] >= 192 && b[1] <= 223 {
+            continue
+        }
+        let opened = match srtp.unprotect_rtp(mut c.cs, mut b) {
+            Ok(o) => o,
+            Error(_) => fail("a harness SRTP receiver could not open a forwarded packet"),
+        }
+        list.truncate(mut b, opened.length)
+        let h = result.unwrap(rtp.header.parse(b))
+        list.push(mut got, Got(h: h, pkt: take b))
+    }
+    got
+}
+
+fn ext_value(g: Got, id: u8, k: rtp.ext.Kind) -> Option[Bytes] {
+    let mut m = rtp.ext.map(Mixed)
+    result.unwrap(rtp.ext.bind(mut m, id, k))
+    match rtp.ext.find(m, g.pkt, g.h, k) {
+        Ok(Some(e)) => Some(copy_of(list.slice(g.pkt, e.at, e.at + e.len))),
+        _ => None,
+    }
+}
+
+fn payload_of(g: Got) -> Bytes {
+    copy_of(list.slice(g.pkt, g.h.end, list.len(g.pkt)))
+}
+
+fn feed(mut r: router.Router, now: u64, who: peer.Gen, at: Addr, packet: Bytes, mut out: peer.Outbox) {
+    let mut slot = copy_of(packet)
+    result.unwrap(router.receive(mut r, now, room_id(), who, at, mut slot, mut out))
+}
+
+// The publisher's VP8 payload (RFC 7741 section 4.2, RFC 6386 section 9.1): the
+// descriptor with S=1 and partition 0, a 3-byte keyframe tag (P=0), the start code
+// 9d 01 2a, then 320x240.
+fn vp8_key() -> Bytes {
+    b"\x10\x10\x02\x00\x9d\x01\x2a\x40\x01\xf0\x00"
+}
+
+fn one(got: List[Got], take what: String) -> Got {
+    if list.len(got) != 1 {
+        fail(take what)
+    }
+    clone(got[0])
+}
+
+fn expect_media(g: Got, ssrc: u32, seq: u16, ts: u32, pt: u8, take what: String) {
+    if g.h.ssrc != ssrc || g.h.seq != seq || g.h.ts != ts || g.h.pt != pt || !g.h.marker || !same(payload_of(g), vp8_key()) {
+        fail(take what)
+    }
+}
+
+// RFC 4588 section 4: the OSN in the first two payload bytes, then the original payload.
+fn expect_rtx(g: Got, ssrc: u32, seq: u16, osn: u16, ts: u32, pt: u8, take what: String) {
+    let body = payload_of(g)
+    let o: u16 = list.word_be(body, 0)
+    if g.h.ssrc != ssrc || g.h.seq != seq || g.h.ts != ts || g.h.pt != pt || !g.h.marker || o != osn || !same(list.slice(body, 2, list.len(body)), vp8_key()) {
+        fail(take what)
+    }
+}
+
+fn plus(base: u16, n: u16) -> u16 {
+    int.wrapping_add(base, n)
+}
+
+fn later(base: u32, n: u32) -> u32 {
+    int.wrapping_add(base, n)
+}
+
+/// bug: seal a reordered packet on the media SSRC below an index already sealed, reuse an outbound number, leak the publisher's MID, payload type or transport number, or answer a NACK from the track's current state or from before a switch.
+/// oracle: RTC-4 and RFC 4588 section 4 by hand: outbound numbers are the first one plus the source distance (10 to 14 give n+0, n+1, n+3, RTX for n+2, n+4), timestamps the first plus 3,000 per source step; NACK answers carry the subscriber's own RTX type, MID, next number on that RTX SSRC and next transport number (5 and 10 packets sent before); a resume from Off anchors at the last output timestamp plus the wall clock since (RTP-11).
+@test
+fn late_answer_goes_out_as_rtx() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(70))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pub_ = admit(mut r, 61, session_offer(), 1)
+    let mut one_offer = minimal_head(b" c1 c2")
+    recv_section(mut one_offer, b"c1", b"96", b"97", b"1", b"3")
+    recv_section(mut one_offer, b"c2", b"96", b"97", b"1", b"3")
+    let mut s1 = admit(mut r, 63, one_offer, 2)
+    let mut two_offer = minimal_head(b" v")
+    recv_section(mut two_offer, b"v", b"100", b"101", b"9", b"5")
+    let mut s2 = admit(mut r, 65, two_offer, 3)
+    let mut bare_offer = minimal_head(b" n")
+    recv_section(mut bare_offer, b"n", b"96", b"", b"1", b"")
+    let mut s3 = admit(mut r, 67, bare_offer, 4)
+    let room = room_id()
+    let pa = result.unwrap(router.publish(mut r, room, pub_.who, 0))
+    let pb = result.unwrap(router.publish(mut r, room, pub_.who, 1))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room, s1.who, pa, 0, base, 0, mut out))
+    result.unwrap(router.subscribe(mut r, room, s1.who, pb, 1, base, 0, mut out))
+    result.unwrap(router.subscribe(mut r, room, s2.who, pa, 0, base, 0, mut out))
+    result.unwrap(router.subscribe(mut r, room, s3.who, pa, 0, base, 0, mut out))
+    let (m1, x1) = option.unwrap(router.track_ssrcs(r, room, s1.who, pa))
+    let (m2, x2) = option.unwrap(router.track_ssrcs(r, room, s2.who, pa))
+    let (m3, x3) = option.unwrap(router.track_ssrcs(r, room, s3.who, pa))
+    if x3 != 0 || x1 == 0 || x2 == 0 {
+        fail("RTX SSRCs follow the legs' RTX agreement")
+    }
+    peer.clear_outbox(mut out)
+    // Source 10, 11, 13, 12, 14 on section a.
+    let mut now = 10 * MS
+    let mut n1 = 0u16
+    let mut t1 = 0u32
+    let mut n2 = 0u16
+    let mut t2 = 0u32
+    let mut n3 = 0u16
+    let mut t3 = 0u32
+    // The browser seals in order; the network reorders.
+    let mut wire_a: List[Bytes] = list.new()
+    for seq in 10u16 .. 15u16 {
+        let ts_a: u32 = int.widen(seq)
+        list.push(mut wire_a, media_carrying(mut pub_.cs, MEDIA_SSRC, seq, 3000 * ts_a, b"a", 96, vp8_key()))
+    }
+    for (k, seq) in[(0u16, 10u16), (1u16, 11u16), (3u16, 13u16), (2u16, 12u16), (4u16, 14u16)] {
+        let at_a: u64 = int.widen(k)
+        let sent1: Bytes = clone(wire_a[at_a])
+        feed(mut r, now, pub_.who, pub_.at, sent1, mut out)
+        let wide: u32 = int.widen(k)
+        let g1 = one(received(mut s1, out), "subscriber 1 gets each packet once")
+        let g2 = one(received(mut s2, out), "subscriber 2 gets each packet once")
+        let got3 = received(mut s3, out)
+        if seq == 10 {
+            n1 = g1.h.seq
+            t1 = g1.h.ts
+            n2 = g2.h.seq
+            t2 = g2.h.ts
+            let g3 = one(got3, "subscriber 3 gets the first packet")
+            n3 = g3.h.seq
+            t3 = g3.h.ts
+        }
+        if seq == 12 {
+            expect_rtx(g1, x1, 0, plus(n1, 2), later(t1, 6000), 97, "late 12 goes out on subscriber 1's RTX SSRC")
+            expect_rtx(g2, x2, 0, plus(n2, 2), later(t2, 6000), 101, "late 12 goes out on subscriber 2's RTX SSRC")
+            if list.len(got3) != 0 {
+                fail("a leg without RTX sent the late packet")
+            }
+        } else {
+            expect_media(g1, m1, plus(n1, k), later(t1, 3000 * wide), 96, "subscriber 1 media number")
+            expect_media(g2, m2, plus(n2, k), later(t2, 3000 * wide), 100, "subscriber 2 media number")
+            expect_media(one(got3, "subscriber 3 gets the on-time packet"), m3, plus(n3, k), later(t3, 3000 * wide), 96, "subscriber 3 media number")
+        }
+        if option.unwrap(ext_value(g1, 1, Mid)) != b"c1" || option.unwrap(ext_value(g2, 9, Mid)) != b"v" {
+            fail("a leg carries another MID than its own")
+        }
+        peer.clear_outbox(mut out)
+        now += MS
+    }
+    if option.unwrap(router.session_drops(r, room, s3.who)).late != 1 {
+        fail("the late packet without RTX is not counted")
+    }
+    // The same across the 16-bit wrap on section b: 65534, 65535, 1, 0, 2.
+    let (mb, xb) = option.unwrap(router.track_ssrcs(r, room, s1.who, pb))
+    let mut nb = 0u16
+    let mut tb = 0u32
+    let mut wire_b: List[Bytes] = list.new()
+    for step in 0u16 .. 5u16 {
+        let ts_b: u32 = int.widen(step)
+        list.push(mut wire_b, media_carrying(mut pub_.cs, MEDIA_SSRC + 1, int.wrapping_add(65534u16, step), 3000 * ts_b, b"b", 96, vp8_key()))
+    }
+    for (k, seq) in[(0u16, 65534u16), (1u16, 65535u16), (3u16, 1u16), (2u16, 0u16), (4u16, 2u16)] {
+        let at_b: u64 = int.widen(k)
+        let sent2: Bytes = clone(wire_b[at_b])
+        feed(mut r, now, pub_.who, pub_.at, sent2, mut out)
+        let g = one(received(mut s1, out), "subscriber 1 gets each wrapped packet once")
+        let wide: u32 = int.widen(k)
+        let step: u32 = int.widen(int.wrapping_sub(seq, 65534u16))
+        if seq == 65534 {
+            nb = g.h.seq
+            tb = g.h.ts
+        }
+        if seq == 0 {
+            expect_rtx(g, xb, 0, plus(nb, 2), later(tb, 3000 * step), 97, "late 0 goes out as RTX across the wrap")
+        } else {
+            expect_media(g, mb, plus(nb, k), later(tb, 3000 * step), 96, "wrapped media number")
+        }
+        if wide > 4 {
+            fail("unreachable")
+        }
+        peer.clear_outbox(mut out)
+        now += MS
+    }
+    // NACKs: each answer is the subscriber's own translated packet with its next
+    // transport number: subscriber 1 sent 10 packets, subscriber 2 five.
+    let sent3 = nack(mut s1.cs, m1, plus(n1, 1))
+    feed(mut r, now, s1.who, s1.at, sent3, mut out)
+    let a1 = one(received(mut s1, out), "subscriber 1's NACK is answered once")
+    expect_rtx(a1, x1, 1, plus(n1, 1), later(t1, 3000), 97, "subscriber 1's NACK answer")
+    if option.unwrap(ext_value(a1, 1, Mid)) != b"c1" || option.unwrap(ext_value(a1, 3, TransportSeq)) != b"\x00\x0a" {
+        fail("subscriber 1's NACK answer MID or transport number")
+    }
+    peer.clear_outbox(mut out)
+    let sent4 = nack(mut s2.cs, m2, plus(n2, 1))
+    feed(mut r, now, s2.who, s2.at, sent4, mut out)
+    let a2 = one(received(mut s2, out), "subscriber 2's NACK is answered once")
+    expect_rtx(a2, x2, 1, plus(n2, 1), later(t2, 3000), 101, "subscriber 2's NACK answer")
+    if option.unwrap(ext_value(a2, 9, Mid)) != b"v" || option.unwrap(ext_value(a2, 5, TransportSeq)) != b"\x00\x05" {
+        fail("subscriber 2's NACK answer MID or transport number")
+    }
+    peer.clear_outbox(mut out)
+    // A switch (Off, then the layer again, at source 15's keyframe) gates the history.
+    result.unwrap(router.set_target(mut r, room, s1.who, pa, Off, now, mut out))
+    result.unwrap(router.set_target(mut r, room, s1.who, pa, base, now, mut out))
+    peer.clear_outbox(mut out)
+    let sent5 = media_carrying(mut pub_.cs, MEDIA_SSRC, 15, 45000, b"a", 96, vp8_key())
+    feed(mut r, now, pub_.who, pub_.at, sent5, mut out)
+    // RTP-11: a resume from Off anchors at the last output timestamp (source 14,
+    // t1 + 12000 at 14 ms) plus the wall clock since, 6 ms at 90 kHz: t1 + 12540.
+    expect_media(one(received(mut s1, out), "the switch packet"), m1, plus(n1, 5), later(t1, 12540), 96, "the switch keeps the numbering")
+    peer.clear_outbox(mut out)
+    now += 20 * MS
+    let sent6 = nack(mut s1.cs, m1, plus(n1, 4))
+    feed(mut r, now, s1.who, s1.at, sent6, mut out)
+    if list.len(received(mut s1, out)) != 0 {
+        fail("a NACK from before the switch was answered")
+    }
+    Ok(())
+}
+
+/// bug: allocate on the forwarding path (a header buffer, an outbox slot, a ring
+/// copy, a counter or history entry per packet), or pass the bound by dropping traffic.
+/// oracle: W18 as RTC-5 states it: after warm-up one publisher packet to 8 down-tracks
+/// on one unit runs under `bound bytes 0` and leaves exactly 8 packets, each of which
+/// its subscriber's own SRTP session opens to the publisher's payload.
+@test
+fn forward_allocates_nothing() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(80))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pub_ = admit(mut r, 81, session_offer(), 1)
+    let room = room_id()
+    let pa = result.unwrap(router.publish(mut r, room, pub_.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let mut subs: List[Client] = list.new()
+    for i in 0u64 .. 8u64 {
+        let mut offer = minimal_head(b" d")
+        recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
+        let c = admit(mut r, 83 + 2 * i, offer, 2 + i)
+        let who = c.who
+        list.push(mut subs, take c)
+        result.unwrap(router.subscribe(mut r, room, who, pa, 0, base, 0, mut out))
+    }
+    peer.clear_outbox(mut out)
+    let mut wire: List[Bytes] = list.new()
+    for seq in 100u16 .. 105u16 {
+        let ts: u32 = int.widen(seq)
+        list.push(mut wire, media_carrying(mut pub_.cs, MEDIA_SSRC, seq, 3000 * ts, b"a", 96, vp8_key()))
+    }
+    // Warm-up: the stream's inbound state, each leg's first frame and the ring.
+    let mut now = 10 * MS
+    for k in 0u64 .. 4u64 {
+        let w: Bytes = clone(wire[k])
+        feed(mut r, now, pub_.who, pub_.at, w, mut out)
+        if list.len(out.pkts) != 8 {
+            fail("a warm-up packet does not reach all 8 down-tracks")
+        }
+        peer.clear_outbox(mut out)
+        now += MS
+    }
+    let mut slot: Bytes = clone(wire[4])
+    let attempt = bound bytes 0 {
+        router.receive(mut r, now, room, pub_.who, pub_.at, mut slot, mut out)
+    }
+    match attempt {
+        Ok(verdict) => verdict?,
+        Error(_) => fail("forwarding to 8 down-tracks allocated"),
+    }
+    if list.len(out.pkts) != 8 {
+        fail("the measured packet does not reach all 8 down-tracks")
+    }
+    for i in 0u64 .. 8u64 {
+        let g = one(received(mut subs[i], out), "each subscriber gets the measured packet once")
+        if !same(payload_of(g), vp8_key()) {
+            fail("a subscriber's packet does not open to the publisher's payload")
+        }
+    }
+    Ok(())
+}

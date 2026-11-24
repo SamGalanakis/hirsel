@@ -136,14 +136,14 @@ fn rid_encoding(p: PeerSession, section: u8, pkt: Bytes, e: rtp.ext.Element) -> 
     0
 }
 
-fn new_inbound(ssrc: u32, section: u8, encoding: u8, repair: bool, index: u64, ts: u32, now: u64, clock: u32, nack: bool, fir: bool) -> Result[Inbound, PeerError] {
+fn new_inbound(ssrc: u32, section: u8, encoding: u8, repair: bool, index: u64, ts: u32, now: u64, clock: u32, nack: bool) -> Result[Inbound, PeerError] {
     let losses = rtp.loss.losses(rtp.loss.NackConfig(window: 512, retry_ns: 20000000, tries: 5, max_age_ns: 1000000000), index, now) ?=> |c| Capacity(c)
     let mut received: List[u64] = list.new()
     list.try_reserve(mut received, RECEIVED) ?=> |c| Capacity(c)
     list.fill(mut received, RECEIVED, EMPTY)
     received[index % RECEIVED] = index
     let wide: i64 = int.widen(ts)
-    Ok(Inbound(ssrc: ssrc, section: section, encoding: encoding, repair: repair, bound_at: index, highest: index, ts: wide, stats: rtp.stats.received(clock, index, wide, now), nack: nack, losses: take losses, keyframes: rtp.loss.keyframes(fir, KEYFRAME_NS), received: take received))
+    Ok(Inbound(ssrc: ssrc, section: section, encoding: encoding, repair: repair, bound_at: index, highest: index, ts: wide, stats: rtp.stats.received(clock, index, wide, now), nack: nack, losses: take losses, received: take received))
 }
 
 fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
@@ -252,12 +252,12 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
                 return Ok(Nothing)
             }
             let video = p.sections[si].agreed.media == Video
-            let n = new_inbound(h.ssrc, sec, encoding, false, opened.index, h.ts, now, format.clock, video && format.nack, format.fir)?
+            let n = new_inbound(h.ssrc, sec, encoding, false, opened.index, h.ts, now, format.clock, video && format.nack)?
             list.push(mut p.inbound, take n)
             list.len(p.inbound) - 1
         },
     }
-    arrived(mut p, i, opened.index, h.ts, now, known != None)
+    let (wide, reset) = arrived(mut p, i, opened.index, h.ts, now, known != None)
     if let Some(e) = find_ext(Some(map), slot, h, TransportSeq) {
         if let Ok(n) = rtp.ext.transport_seq(slot, h, e) {
             rtp.twcc.on_packet(mut p.recv_log, n, now)
@@ -272,7 +272,7 @@ fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Res
         None
     }
     let (voice, audio_level) = level
-    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: h.pt, ts: h.ts, marker: h.marker, payload_at: payload_at, payload_len: payload_len, audio_level: audio_level, voice: voice, layer: layer)))
+    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: h.pt, ts: h.ts, wide: wide, reset: reset, marker: h.marker, payload_at: payload_at, payload_len: payload_len, audio_level: audio_level, voice: voice, layer: layer)))
 }
 
 fn find_level(map: rtp.ext.ExtMap, pkt: Bytes, h: rtp.header.Header) -> (Option[bool], Option[u8]) {
@@ -286,17 +286,22 @@ fn find_level(map: rtp.ext.ExtMap, pkt: Bytes, h: rtp.header.Header) -> (Option[
 }
 
 // Every stateful reader of one inbound stream, called with the index open authenticated.
-fn arrived(mut p: PeerSession, i: u64, index: u64, ts: u32, now: u64, counted_before: bool) {
+// It answers the extended timestamp and whether the loss window reset (RTC-6: `Loss`).
+fn arrived(mut p: PeerSession, i: u64, index: u64, ts: u32, now: u64, counted_before: bool) -> (i64, bool) {
     let ext = rtp.seq.estimate32(p.inbound[i].ts, ts)
+    let mut reset = false
     if counted_before {
         let _ = rtp.stats.on_packet(mut p.inbound[i].stats, index, ext, now)
-        let _ = rtp.loss.on_packet(mut p.inbound[i].losses, index, now)
+        reset = rtp.loss.on_packet(mut p.inbound[i].losses, index, now) == Reset
     }
-    p.inbound[i].ts = ext
+    if ext > p.inbound[i].ts {
+        p.inbound[i].ts = ext
+    }
     p.inbound[i].received[index % RECEIVED] = index
     if index > p.inbound[i].highest {
         p.inbound[i].highest = index
     }
+    (ext, reset)
 }
 
 fn media_of_rtx(p: PeerSession, sec: u8, encoding: u8, rtx_ssrc: u32) -> Option[u64] {
@@ -354,11 +359,11 @@ fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: sdp.Fo
     match known {
         Some(_) => (),
         None => {
-            let n = new_inbound(h.ssrc, sec, encoding, true, index, h.ts, now, format.clock, false, false)?
+            let n = new_inbound(h.ssrc, sec, encoding, true, index, h.ts, now, format.clock, false)?
             list.push(mut p.inbound, take n)
         },
     }
-    arrived(mut p, mi, original, h.ts, now, true)
+    let (wide, _) = arrived(mut p, mi, original, h.ts, now, true)
     let ssrc = p.inbound[mi].ssrc
     let enc = p.inbound[mi].encoding
     // The original payload runs from after the OSN to the end of the RTX payload.
@@ -377,7 +382,7 @@ fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: sdp.Fo
     } else {
         None
     }
-    Ok(Repair(MediaIn(section: sec, encoding: enc, ssrc: ssrc, index: original, pt: apt, ts: h.ts, marker: h.marker, payload_at: at, payload_len: payload_len, audio_level: None, voice: None, layer: layer)))
+    Ok(Repair(MediaIn(section: sec, encoding: enc, ssrc: ssrc, index: original, pt: apt, ts: h.ts, wide: wide, reset: false, marker: h.marker, payload_at: at, payload_len: payload_len, audio_level: None, voice: None, layer: layer)))
 }
 
 fn rtcp_mode(p: PeerSession) -> rtp.rtcp.Mode {
@@ -419,7 +424,7 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
         p.drops.malformed += 1
         return Ok(Nothing)
     }
-    let mut c = ControlIn(repairs: list.new(), keyframes: list.new(), collided: replace(mut p.collided, list.new()), reports: 0, acked: 0)
+    let mut c = ControlIn(repairs: list.new(), keyframes: list.new(), collided: replace(mut p.collided, list.new()), senders: list.new(), reports: 0, acked: 0)
     let mut at = 0u64
     while let Ok(Some(pkt)) = rtp.rtcp.next(slot, mut at) {
         match pkt.item {
@@ -427,6 +432,7 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
                 collide(mut p, now, info.ssrc, mut c.collided, mut out)?
                 if let Some(i) = find_inbound(p, info.ssrc) {
                     rtp.stats.on_sr(mut p.inbound[i].stats, info, now)
+                    list.push(mut c.senders, info)
                 }
                 c.reports += 1
             },

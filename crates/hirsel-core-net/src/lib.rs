@@ -188,6 +188,7 @@ pub use signature::{
 };
 mod split_mix;
 pub use split_mix::SplitMix64;
+pub mod argon2id;
 pub mod scram;
 pub mod tls;
 mod tls_rule;

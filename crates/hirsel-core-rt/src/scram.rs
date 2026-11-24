@@ -175,7 +175,7 @@ pub unsafe extern "C" fn hirsel_core_scram_sha256(
             Ok(transcript) => transcript,
             Err(error) => return refusal(error as u8),
         };
-        if !crate::steps::scram_iterations(context, transcript.iterations().into(), site) {
+        if !crate::steps::take_many(context, transcript.iterations().into(), site) {
             return CANCELLED;
         }
         let payer = (*context).payer();

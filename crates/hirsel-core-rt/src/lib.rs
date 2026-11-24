@@ -15,6 +15,7 @@ pub mod abi_tasks;
 #[cfg(feature = "allocation-count")]
 mod allocation_count;
 mod allocator;
+mod argon2id;
 mod backing_observation;
 pub mod block;
 pub mod causes;

@@ -6,6 +6,7 @@ mod net_error;
 use super::*;
 use hirsel_core_ir::{Counted, HostOp, RtOp};
 use hirsel_core_layout::flow::Op as FlowOp;
+mod argon2;
 mod charge;
 mod conn;
 mod flow;
@@ -337,6 +338,7 @@ operations! {
     ("sha256", "block", Lane::Value, "A", "sha256-hardware", false),
     ("sha512", "blocks", Lane::Value, "A", "sha512-hardware", false),
     ("sha512", "block", Lane::Value, "A", "sha512-hardware", false),
+    ("argon2", "id", Lane::Value, "A", "crypto-argon2-2130", false),
     ("ed25519", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify", Lane::Value, "A", "crypto-verify-impl-1595", false),
     ("p256", "verify_der", Lane::Value, "A", "crypto-verify-impl-1595", false),

@@ -29,7 +29,7 @@ fn unknown() -> u64 { missing() }                       // refused: LANG-7, miss
 | `ed25519`, `p256` | [ed25519](../../core/core/ed25519.hirsel), [p256](../../core/core/p256.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
 | `sha512` | [sha512](../../core/core/sha512.hirsel) | SEM-8, MEM-30 |
 | `rsa`, `p384` | [rsa](../../core/core/rsa.hirsel), [p384](../../core/core/p384.hirsel) | SEM-8, MEM-30; [Signature verification](#signature-verification) |
-| `argon2` | unbuilt: `id` | SEM-8, MEM-30; [Argon2id](#argon2id) |
+| `argon2` | [argon2](../../core/core/argon2.hirsel) | SEM-8, MEM-30; [Argon2id](#argon2id) |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
 | `charge` | [charge](../../core/core/charge.hirsel) | MEM-24, MEM-33 |
@@ -835,7 +835,7 @@ claimed. The kernel is RustCrypto `argon2` 0.6.0 with `Algorithm::Argon2id`,
 **Std.** `std.argon2` is library code over the kernel. It holds a password as a PHC string
 and checks one:
 
-```hirsel unbuilt
+```hirsel library
 pub type PhcError = Malformed | Argon2(Argon2Error)
 pub fn hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, PhcError]
 pub fn verify(password: Bytes, phc: Bytes) -> Result[bool, PhcError]
@@ -873,7 +873,7 @@ locals bound outside.
 | **AR5** memory admission | working memory taken from nowhere, kept after return, or admitted before the steps | Under a limit with `262,143` bytes free, AR4's call gives `Capacity(c)` with `c.requested = 262,144`; with `262,144` free it succeeds, and afterwards the limit has `262,144` free again. |
 | **AR6** PHC strictness | a lenient parser that accepts a downgraded variant or version | Starting from AR2's first string, `argon2.verify` gives `Malformed` for `$argon2i$` in its place, `v=16`, `v=` removed, `t=2,m=65536` swapped, `m=065536`, a trailing `=` on the salt, and `,keyid=AAAA` after the parameters. |
 
-The laws are cases in `core/core/tests/argon2.hirsel` <!-- doc-ref: planned --> and `core/std/tests/argon2.hirsel` <!-- doc-ref: planned -->
+The laws are cases in `core/core/tests/argon2.hirsel` and `core/std/tests/argon2.hirsel`
 with `--backend all`. AR2's larger cases take a quarter of a GiB and a fraction of a second
 each on native engines; on the evaluator only the `m = 256` cases run.
 
@@ -882,7 +882,7 @@ each on native engines; on the evaluator only the `m = 256` cases run.
 | slice | size | depends on | contents | laws |
 |---|---|---|---|---|
 | **CK** the `argon2` crate | S | — | `argon2 =0.6.0` (default features off, `alloc` on) through `third-party/` and reindeer, with its dependency closure (`blake2`, which computes RFC 9106's `H` and `H′`, among it), each with its licence file. It is the only RustCrypto crate the kernels use. No kernel is added in this slice. | builds and lints |
-| **A2** Argon2id | M | CK | `Argon2Cost` and `Argon2Error` in the prelude, `core/core/argon2.hirsel` <!-- doc-ref: planned --> with `id`, its `core_ops.rs` row, `RtOp::Argon2id` taking the seven arguments as pointer and length pairs and words, the per-block steps in the reference evaluator and in every engine (MEM-30's list), the working-memory admission and refund, the native C entry and the evaluator arm over one wrapper; `core/std/argon2.hirsel` <!-- doc-ref: planned --> and its API page. | AR1–AR6 |
+| **A2** Argon2id | M | CK | `Argon2Cost` and `Argon2Error` in the prelude, `core/core/argon2.hirsel` with `id`, its `core_ops.rs` row, `RtOp::Argon2id` taking the seven arguments as pointer and length pairs and words, the per-block steps in the reference evaluator and in every engine (MEM-30's list), the working-memory admission and refund, the native C entry and the evaluator arm over one wrapper; `core/std/argon2.hirsel` and its [API page](../../core/std/api/argon2.md). | AR1–AR6 |
 
 ### Open
 

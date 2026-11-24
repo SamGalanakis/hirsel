@@ -1,5 +1,5 @@
-//! Closed runtime rows bind the published task and provider C ABI. Provider
-//! carriers stay run-owned; only waiting host operations observe failure status.
+//! Closed runtime rows bind the published task and provider C ABI.
+mod argon2;
 mod map_placement;
 mod signature;
 
@@ -129,15 +129,10 @@ impl Function<'_, '_, '_> {
         Ok(storage)
     }
     pub fn runtime_call(&mut self, op: RtOp, call: &CallSite) -> Result<()> {
-        let mut args = [Value::from_u32(0); 9];
-        for (i, arg) in call
-            .args
-            .get(&self.body.pools.args)
-            .unwrap()
-            .iter()
-            .enumerate()
-        {
-            args[i] = match *arg {
+        let mut args = [Value::from_u32(0); 13];
+        let inputs = call.args.get(&self.body.pools.args).unwrap();
+        for (operand, arg) in args[..inputs.len()].iter_mut().zip(inputs) {
+            *operand = match *arg {
                 Arg::Value(v) => self.get(v),
                 Arg::Address(a) => self.addr(a),
             };
@@ -713,6 +708,7 @@ impl Function<'_, '_, '_> {
                 outputs[0] = self.signature_call(op, &args)?;
                 1
             }
+            RtOp::Argon2id => self.argon2id(&args, call.fail, &mut outputs)?,
             RtOp::CauseNext | RtOp::CauseValue => {
                 let name = if op == RtOp::CauseNext {
                     "hirsel_core_cause_next"

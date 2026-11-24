@@ -40,6 +40,7 @@ fn runtime_probes() -> Module {
         RtOp::StepLeave,
         RtOp::StepCatch,
         RtOp::RootLimit,
+        RtOp::Argon2id,
         RtOp::LaunchWord,
         RtOp::LaunchTarget { view: ITEM },
         RtOp::DescribeEmit,

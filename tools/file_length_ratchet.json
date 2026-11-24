@@ -255,9 +255,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 4304,
-    "raise_revision": 4,
-    "reason": "crypto-sha512-2121"
+    "lines": 4146,
+    "raise_revision": 5,
+    "reason": "crypto-argon2-2130"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2866,
@@ -318,17 +318,17 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 8512,
-    "raise_revision": 4,
-    "reason": "crypto-sha512-2121"
+    "lines": 8431,
+    "raise_revision": 5,
+    "reason": "crypto-argon2-2130"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2321,
-    "raise_revision": 6,
-    "reason": "crypto-sha512-2121"
+    "lines": 2329,
+    "raise_revision": 7,
+    "reason": "crypto-argon2-2130"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1151,
@@ -345,9 +345,9 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2375,
-    "raise_revision": 4,
-    "reason": "crypto-sha512-2121"
+    "lines": 2376,
+    "raise_revision": 5,
+    "reason": "crypto-argon2-2130"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1905

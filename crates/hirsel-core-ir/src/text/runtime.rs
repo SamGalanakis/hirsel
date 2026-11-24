@@ -57,6 +57,7 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::P384VerifyDer => "rt.p384_verify_der".into(),
         RtOp::RsaVerifyPkcs1Sha256 => "rt.rsa_verify_pkcs1_sha256".into(),
         RtOp::RsaVerifyPssSha256 => "rt.rsa_verify_pss_sha256".into(),
+        RtOp::Argon2id => "rt.argon2id".into(),
         RtOp::CauseNext => "rt.cause_next".into(),
         RtOp::CauseValue => "rt.cause_value".into(),
         RtOp::ArgsLen => "rt.args_len".into(),

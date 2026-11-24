@@ -1,0 +1,121 @@
+pub type PhcError = Malformed | Argon2(Argon2Error)
+
+/// The RFC 9106 second recommendation: 64 MiB, three passes, four lanes.
+pub fn recommended() -> Argon2Cost {
+    Argon2Cost(memory_kib: 65536, passes: 3, lanes: 4)
+}
+
+fn tag(password: Bytes, salt: Bytes, cost: Argon2Cost, len: u64) -> Result[Bytes, PhcError] {
+    let mut out: Bytes = list.with_capacity(len)
+    argon2.id(password, salt, b"", b"", cost, len, mut out) ?=> |error| Argon2(error)
+    Ok(take out)
+}
+
+fn push_base64(mut out: String, input: Bytes) {
+    let encoded = base64.encode_string(input)
+    let padding = (3 - list.len(input) % 3) % 3
+    string.push(mut out, string.slice(encoded, 0, string.byte_len(encoded) - padding))
+}
+
+/// Hash with a caller-supplied salt and encode the 32-byte tag as Argon2id PHC.
+pub fn hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, PhcError] {
+    let digest = tag(password, salt, cost, 32)?
+    let mut phc = "$argon2id$v=19$m="
+    string.push_u64(mut phc, int.widen(cost.memory_kib))
+    string.push(mut phc, ",t=")
+    string.push_u64(mut phc, int.widen(cost.passes))
+    string.push(mut phc, ",p=")
+    string.push_u64(mut phc, int.widen(cost.lanes))
+    string.push(mut phc, "$")
+    push_base64(mut phc, salt)
+    string.push(mut phc, "$")
+    push_base64(mut phc, digest)
+    Ok(take phc)
+}
+
+fn decimal(input: Bytes, lo: u64, hi: u64) -> Result[u64, PhcError] {
+    if lo == hi || (hi - lo > 1 && input[lo] == b'0') {
+        return Error(Malformed)
+    }
+    let mut value: u64 = 0
+    for at in lo .. hi {
+        let byte = input[at]
+        if byte < b'0' || byte > b'9' {
+            return Error(Malformed)
+        }
+        // Keep scanning for syntax errors after exceeding the cost type.
+        if value <= 4294967295 {
+            value = value * 10 + int.widen(byte - b'0')
+        }
+    }
+    Ok(value)
+}
+
+fn require[T](take option: Option[T]) -> Result[T, PhcError] {
+    match take option {
+        Some(take value) => Ok(take value),
+        None => Error(Malformed),
+    }
+}
+
+fn cost_word(value: u64) -> Result[u32, PhcError] {
+    let narrowed: Option[u32] = int.try_narrow(value)
+    match narrowed {
+        Some(word) => Ok(word),
+        None => Error(Argon2(Params)),
+    }
+}
+
+fn decode_unpadded(input: Bytes) -> Result[Bytes, PhcError] {
+    let n = list.len(input)
+    if n % 4 == 1 {
+        return Error(Malformed)
+    }
+    if let Some(_) = list.find_byte(input, 0, n, b'=') {
+        return Error(Malformed)
+    }
+    let pad = (4 - n % 4) % 4
+    if pad == 0 {
+        return require(base64.decode(input))
+    }
+    let mut padded: Bytes = list.with_capacity(n + pad)
+    list.append(mut padded, input)
+    list.fill(mut padded, pad, b'=')
+    require(base64.decode(padded))
+}
+
+/// Verify canonical Argon2id v19 PHC and compare the decoded tag in constant
+/// time for its length. The PHC chooses the cost. Use limits for untrusted PHC.
+pub fn verify(password: Bytes, phc: Bytes) -> Result[bool, PhcError] {
+    let prefix = b"$argon2id$v=19$m="
+    let start = list.len(prefix)
+    let end = list.len(phc)
+    if !list.starts_with(phc, prefix) {
+        return Error(Malformed)
+    }
+    let m_end = require(list.find_byte(phc, start, end, b','))?
+    if !list.starts_with_at(phc, m_end, b",t=") {
+        return Error(Malformed)
+    }
+    let t_end = require(list.find_byte(phc, m_end + 3, end, b','))?
+    if !list.starts_with_at(phc, t_end, b",p=") {
+        return Error(Malformed)
+    }
+    let p_end = require(list.find_byte(phc, t_end + 3, end, b'$'))?
+    let salt_end = require(list.find_byte(phc, p_end + 1, end, b'$'))?
+    let m = decimal(phc, start, m_end)?
+    let t = decimal(phc, m_end + 3, t_end)?
+    let p = decimal(phc, t_end + 3, p_end)?
+    let salt = decode_unpadded(list.slice(phc, p_end + 1, salt_end))?
+    let expected = decode_unpadded(list.slice(phc, salt_end + 1, end))?
+    let len = list.len(expected)
+    if len < 4 {
+        return Error(Malformed)
+    }
+    let memory_kib = cost_word(m)?
+    let passes = cost_word(t)?
+    let lanes = cost_word(p)?
+    let cost = Argon2Cost(memory_kib: memory_kib, passes: passes, lanes: lanes)
+    let actual = tag(password, salt, cost, len)?
+    Ok(hmac.equal(actual, expected))
+}

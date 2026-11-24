@@ -143,6 +143,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             };
         }
+        if module == ["argon2"] && name == "id" {
+            return Some(self.argon2id(g.params[4].ty, vals, result, n));
+        }
         let verifier = match (module, name) {
             ([m], "verify") if m == "ed25519" => Some(hirsel_core_ir::RtOp::Ed25519Verify),
             ([m], "verify") if m == "p256" => Some(hirsel_core_ir::RtOp::P256Verify),

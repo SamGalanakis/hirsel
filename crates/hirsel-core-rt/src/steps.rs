@@ -142,9 +142,9 @@ pub unsafe extern "C" fn hirsel_core_step_catch(context: *mut Context) -> bool {
     caught
 }
 
-/// Charge the bounded SCRAM iterations at their source call, including slice
-/// boundaries. An unbounded task pays no iteration steps.
-pub(crate) unsafe fn scram_iterations(context: *mut Context, mut count: u64, site: u64) -> bool {
+/// Charge work at its source call, including slice boundaries.
+/// An unbounded task pays no additional steps.
+pub(crate) unsafe fn take_many(context: *mut Context, mut count: u64, site: u64) -> bool {
     if unsafe { (*context).step_bounds.is_empty() } {
         return true;
     }

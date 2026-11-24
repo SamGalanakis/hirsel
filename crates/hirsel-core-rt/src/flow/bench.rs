@@ -29,7 +29,7 @@ fn pipeline(stages: usize, items: u64, rounds: u64) -> u64 {
                 move |stage: &mut crate::Context, _, x: &u64| {
                     // Native loops charge a step per round. Debit the same
                     // steps while keeping the Rust mixing loop unchanged.
-                    if !unsafe { crate::steps::scram_iterations(stage, rounds, 0) } {
+                    if !unsafe { crate::steps::take_many(stage, rounds, 0) } {
                         return Err(Halt::OutOfTime);
                     }
                     Ok(Some(mix(*x, rounds)))

@@ -59,6 +59,7 @@ impl RtOp {
             | RtOp::P384VerifyDer
             | RtOp::RsaVerifyPkcs1Sha256
             | RtOp::RsaVerifyPssSha256
+            | RtOp::Argon2id
             | RtOp::CauseNext
             | RtOp::CauseValue
             | RtOp::ArgsLen

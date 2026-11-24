@@ -269,6 +269,14 @@ pub type Capacity {
     available: u64
 }
 
+pub type Argon2Cost {
+    memory_kib: u32,
+    passes: u32,
+    lanes: u32
+}
+
+pub type Argon2Error = Params | Capacity(Capacity)
+
 pub type OutOfTime {
     steps: u64
 }

@@ -331,6 +331,7 @@ impl FunctionEmitter<'_> {
             op,
             RtOp::Join { .. }
                 | RtOp::CheckCancel
+                | RtOp::Argon2id
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
@@ -579,6 +580,27 @@ impl FunctionEmitter<'_> {
                     ],
                 )
             }
+            RtOp::Argon2id => self.native_call(
+                "hirsel_core_argon2id",
+                &[U, U, K, K],
+                &[
+                    ptr(CONTEXT),
+                    p(&args[0]),
+                    u(&args[1]),
+                    p(&args[2]),
+                    u(&args[3]),
+                    p(&args[4]),
+                    u(&args[5]),
+                    p(&args[6]),
+                    u(&args[7]),
+                    arg(Type::I32, args[8].clone()),
+                    arg(Type::I32, args[9].clone()),
+                    arg(Type::I32, args[10].clone()),
+                    u(&args[11]),
+                    p(&args[12]),
+                    u(&at),
+                ],
+            ),
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&args[..4])]
             }

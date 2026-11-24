@@ -21,7 +21,10 @@ pub(super) enum Owner {
     },
     /// A destructured resource's block, freed with its charge once its omitted
     /// fields are cleaned (T3.7).
-    Free { block: ValueId, charge: ValueId },
+    Free {
+        block: ValueId,
+        charge: ValueId,
+    },
 }
 /// A statement temporary: an own value no consumer has taken yet.
 #[derive(Clone, Copy)]

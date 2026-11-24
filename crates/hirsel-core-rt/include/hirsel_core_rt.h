@@ -136,6 +136,15 @@ uint64_t hirsel_core_rsa_verify_pss_sha256(const uint8_t *n, uint64_t n_len,
                                           const uint8_t *msg, uint64_t msg_len,
                                           const uint8_t *sig, uint64_t sig_len);
 
+/* Argon2id uses the current step and byte limits and appends into out's spare.
+   Error: 0 success, 1 Params, 2 Capacity. Status 1 means OutOfTime. */
+typedef struct { uint64_t requested, available; uint8_t error, status; } HirselCoreArgon2Outcome;
+HirselCoreArgon2Outcome hirsel_core_argon2id(
+    HirselCoreContext *, const uint8_t *password, uint64_t password_len,
+    const uint8_t *salt, uint64_t salt_len, const uint8_t *key, uint64_t key_len,
+    const uint8_t *data, uint64_t data_len, uint32_t memory_kib, uint32_t passes,
+    uint32_t lanes, uint64_t len, void *out, uint64_t site);
+
 /* XXH3-64 seed zero for a span of at most 240 bytes. */
 uint64_t hirsel_core_xxh3_short(const uint8_t *data, uint64_t len);
 

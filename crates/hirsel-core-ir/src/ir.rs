@@ -1085,6 +1085,8 @@ pub enum RtOp {
     RsaVerifyPkcs1Sha256,
     /// Verify an RSA-PSS signature with SHA-256 and a 32-byte salt.
     RsaVerifyPssSha256,
+    /// Argon2id v0x13 with block steps and temporary working-memory admission.
+    Argon2id,
     /// The running task's frame record (`crate::returnable`). Takes the area
     /// size and `u8` flags for network and connection-send state. Allocated
     /// on first entry, reused on resume, and freed when the root ends.
@@ -1330,6 +1332,27 @@ impl RtOp {
                 vec![V(p), V(u64_), V(p), V(u64_), V(p), V(u64_), V(p), V(u64_)],
                 vec![u64_],
             ),
+            RtOp::Argon2id => {
+                let u32_ = Ty::Scalar(Scalar::U32);
+                (
+                    vec![
+                        V(p),
+                        V(u64_),
+                        V(p),
+                        V(u64_),
+                        V(p),
+                        V(u64_),
+                        V(p),
+                        V(u64_),
+                        V(u32_),
+                        V(u32_),
+                        V(u32_),
+                        V(u64_),
+                        V(p),
+                    ],
+                    vec![u64_, u64_, u8_],
+                )
+            }
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
@@ -1628,6 +1651,7 @@ impl RtOp {
             RtOp::Join { .. }
                 | RtOp::Spawn { .. }
                 | RtOp::CheckCancel
+                | RtOp::Argon2id
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }

@@ -10,6 +10,7 @@
 //! Sequence storage is cleaned by its carrier; list and map operations are the
 //! producer's code. Provider rows run against a modelled provider ([`World`]).
 
+mod argon2;
 mod conn;
 mod frame;
 mod launch;
@@ -6252,7 +6253,7 @@ impl Machine<'_> {
     fn take_steps(&mut self, t: &mut Task, mut count: u64) -> X<()> {
         while count != 0 {
             let Some(bound) = t.step_bounds.last_mut() else {
-                self.steps += count;
+                self.steps = self.steps.saturating_add(count);
                 break;
             };
             if bound.left == 0 {
@@ -6272,7 +6273,7 @@ impl Machine<'_> {
             bound.left -= amount;
             count -= amount;
             t.slice_steps += amount;
-            self.steps += amount;
+            self.steps = self.steps.saturating_add(amount);
             if t.slice_steps == 65_536 {
                 t.slice_steps = 0;
                 self.event(hirsel_core_layout::event::STEP_SLICE, 0, 65_536);
@@ -6782,6 +6783,7 @@ impl Machine<'_> {
                 }
                 vec![crc ^ mask]
             }
+            RtOp::Argon2id => return self.argon2id(t, a),
             RtOp::Crc32cCombine => vec![crc_combine::<32>(a[0], a[1], a[2], 0x82f63b78)],
             RtOp::Crc64NvmeCombine => vec![crc_combine::<64>(a[0], a[1], a[2], 0x9a6c9329ac4bc9b5)],
             RtOp::Ed25519Verify

@@ -1899,6 +1899,7 @@ impl BodyParser {
                 "p384_verify_der" => RtOp::P384VerifyDer,
                 "rsa_verify_pkcs1_sha256" => RtOp::RsaVerifyPkcs1Sha256,
                 "rsa_verify_pss_sha256" => RtOp::RsaVerifyPssSha256,
+                "argon2id" => RtOp::Argon2id,
                 "cause_next" => RtOp::CauseNext,
                 "cause_value" => RtOp::CauseValue,
                 "args_len" => RtOp::ArgsLen,

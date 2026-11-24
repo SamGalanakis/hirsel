@@ -10,6 +10,7 @@ const BUILTIN_SEMANTICS: &[(&str, &str, u32)] = &[
     ("arc", "share", 1),
     ("arc", "try_unwrap", 1),
     ("arc", "with_unique", 1),
+    ("argon2", "id", 1),
     ("args", "get", 1),
     ("args", "len", 1),
     ("box", "new", 2),

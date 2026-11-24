@@ -398,6 +398,7 @@ tags!(RtOp {
     78 => P384VerifyDer,
     79 => RsaVerifyPkcs1Sha256,
     80 => RsaVerifyPssSha256,
+    81 => Argon2id,
 });
 
 tags!(Wait {

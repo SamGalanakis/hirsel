@@ -557,7 +557,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The case, fields and operands of the construction literal `a` of decl `d`.
     #[allow(clippy::type_complexity)]
     fn literal_parts(
-        &self,
+        &mut self,
         a: NodeId,
         d: DeclId,
     ) -> Option<(
@@ -581,6 +581,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let decl = &p.decls[d.index()];
         match p.target(self.at, callee)? {
             Target::ContextualConstructor { name } => {
+                self.out.constructor_types.insert(decl.path.clone());
                 let text = p.index.symbols.text(*name);
                 match &decl.body {
                     DeclBody::Variant(cs) => {

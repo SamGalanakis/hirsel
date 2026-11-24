@@ -135,6 +135,11 @@ pub struct CoreCheck {
     /// Layout/type relocations for a rigid generic body, checked once.
     pub template: Option<GenericTemplate>,
     pub flow: flow::Facts,
+    /// The types this body's contextual constructors resolved to.
+    pub constructor_types: std::collections::BTreeSet<DefPath>,
+    /// A contextual constructor resolved by searching its whole candidate set
+    /// (no expected type), so every candidate of that name took part.
+    pub constructor_candidates: bool,
 }
 
 /// Source conventions survive physical sealing. Generated fixed-ABI glue has the

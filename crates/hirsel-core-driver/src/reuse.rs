@@ -190,6 +190,9 @@ pub(crate) struct Header {
     // Signature dependencies are already resolved by the producing request.
     pub(crate) reads: Vec<DefinitionId>,
     pub(crate) body_reads: Vec<DefinitionId>,
+    /// The `body_reads` that only a contextual constructor's candidate set
+    /// put there: no body name resolves to them directly.
+    pub(crate) body_candidates: Vec<DefinitionId>,
     pub(crate) has_body: bool,
     pub(crate) header_end: u32,
     pub(crate) site: Site,
@@ -570,6 +573,7 @@ impl Keys {
         let mut makers = vec![];
         let mut reads = Vec::new();
         let mut body_reads = Vec::new();
+        let mut body_candidates = Vec::new();
         for ((m, rows), digests) in modules.iter().zip(resolutions).zip(shape.headers) {
             for (ordinal, ((item, resolution), (end, digest))) in
                 m.syntax.items().zip(rows).zip(digests).enumerate()
@@ -603,18 +607,20 @@ impl Keys {
                 let path = index.definition_path(definition);
                 reads.clear();
                 body_reads.clear();
+                body_candidates.clear();
                 for name in &resolution.names {
-                    let into = if (item.tree.node(name.node).origin.span.start as usize) < end {
-                        &mut reads
-                    } else {
-                        &mut body_reads
-                    };
+                    let header = (item.tree.node(name.node).origin.span.start as usize) < end;
+                    let into = if header { &mut reads } else { &mut body_reads };
                     match name.target {
                         Target::Definition(id) => {
                             into.push(id);
                         }
                         Target::ContextualConstructor { name } => {
-                            into.extend(keys.constructors(index, m.id, name).iter().copied());
+                            let candidates = keys.constructors(index, m.id, name);
+                            if !header {
+                                body_candidates.extend(candidates.iter().copied());
+                            }
+                            into.extend(candidates.iter().copied());
                         }
                         _ => {}
                     }
@@ -623,6 +629,15 @@ impl Keys {
                 reads.dedup();
                 body_reads.sort_unstable();
                 body_reads.dedup();
+                body_candidates.sort_unstable();
+                body_candidates.dedup();
+                for name in &resolution.names {
+                    if let Target::Definition(id) = name.target
+                        && (item.tree.node(name.node).origin.span.start as usize) >= end
+                    {
+                        body_candidates.retain(|&c| c != id);
+                    }
+                }
                 if index.get(definition).kind == DefinitionKind::Clone {
                     hooks.push((definition, reads.clone()));
                 }
@@ -644,6 +659,7 @@ impl Keys {
                     header_end: end as u32,
                     site: index.get(definition).site,
                     body_reads: body_reads.clone(),
+                    body_candidates: body_candidates.clone(),
                     reads: reads.clone(),
                     anchor: (m.id, m.source, ordinal as u32),
                 });

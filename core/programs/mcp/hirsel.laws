@@ -1,4 +1,4 @@
 hirsel.laws 1
-mcp@1/example/read_tool_catalog src=3475c67450a445e0 sig=ae7ce56dfeed2a88 run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending
-mcp@1/laws/jsonrpc_framing src=5c792091e2ee9e57 sig=80f9934fc0589598 run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending
-mcp@1/laws/legacy_session_handshake src=5c02b6449756de2d sig=0e4f9495e5ef883a run=1e4754a4140ac678 bug=- oracle=- rows=pending
+mcp@1/example/read_tool_catalog src=3475c67450a445e0 sig=d3130a3026e8d76f run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending
+mcp@1/laws/jsonrpc_framing src=5c792091e2ee9e57 sig=eb22fe37fbfedcf3 run=a9ad7d4c026c4bbd bug=- oracle=- rows=pending
+mcp@1/laws/legacy_session_handshake src=5c02b6449756de2d sig=69c30dba5fe30ed4 run=e6d81eebfad6f76c bug=- oracle=- rows=pending

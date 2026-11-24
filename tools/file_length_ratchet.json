@@ -170,9 +170,9 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
-    "lines": 1616,
-    "raise_revision": 1,
-    "reason": "verify-observer-2037"
+    "lines": 1617,
+    "raise_revision": 2,
+    "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-driver/src/native.rs": {
     "lines": 2799,
@@ -210,8 +210,9 @@
     "reason": "stale-codec-1910"
   },
   "crates/hirsel-core-driver/src/reuse.rs": {
-    "lines": 1411,
-    "reason": "stale-codec-1910"
+    "lines": 1427,
+    "raise_revision": 1,
+    "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
     "lines": 1180,
@@ -222,9 +223,9 @@
     "lines": 1004
   },
   "crates/hirsel-core-driver/src/test_run_native.rs": {
-    "lines": 2981,
-    "raise_revision": 8,
-    "reason": "verify-observer-2037"
+    "lines": 3009,
+    "raise_revision": 9,
+    "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-driver/src/tests.rs": {
     "lines": 4108,
@@ -266,12 +267,14 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3058,
-    "raise_revision": 2,
-    "reason": "coreir-own-2127: OWN-20 dest view mark"
+    "lines": 3050,
+    "raise_revision": 3,
+    "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
-    "lines": 2578
+    "lines": 2531,
+    "raise_revision": 1,
+    "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-front/src/body/places.rs": {
     "lines": 1861,
@@ -284,12 +287,14 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "crates/hirsel-core-front/src/body/values.rs": {
-    "lines": 1217
+    "lines": 1211,
+    "raise_revision": 1,
+    "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-front/src/body/writers.rs": {
-    "lines": 2532,
-    "raise_revision": 1,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 2533,
+    "raise_revision": 2,
+    "reason": "law-signature-scope-2443"
   },
   "crates/hirsel-core-front/src/decls.rs": {
     "lines": 3821,

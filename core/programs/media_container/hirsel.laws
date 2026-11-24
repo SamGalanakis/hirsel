@@ -1,10 +1,10 @@
 hirsel.laws 1
-media_container@1/tests/clip_vod_uses_preceding_idr src=dd6b7323cb316b6e sig=24507da054ca058d run=acdd7fe37d41c86f bug=804c0270bae90bbd oracle=12c8cfb49526835e rows=pending
-media_container@1/tests/mp4_reference src=ac4e7592080be97d sig=16a0af52faa407d7 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-media_container@1/tests/ogg_opus_reference src=695643450ead342a sig=373c3488ca9beccc run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-media_container@1/tests/relocate_vod_and_segment_index src=060a9c490008e931 sig=0b21f8c2e6e62eba run=acdd7fe37d41c86f bug=0530b3a80303e6ca oracle=cdfe91416364399e rows=pending
-media_container@1/tests/sparse_vod_sample_tables src=dcaee46ae7bba70c sig=228a162818b73f55 run=acdd7fe37d41c86f bug=697898387531a25b oracle=8a2531a56a9946c3 rows=pending
-media_container@1/tests/tkhd_display_rotation src=9025b6861bf2ba3d sig=979577d6c72171c2 run=acdd7fe37d41c86f bug=cf96d6cfc348ea49 oracle=830e5c25af7e2601 rows=pending
-media_container@1/tests/vod_presentation_duration_uses_track_clock src=f8bfe73aa183238c sig=3b7da05f2fead43a run=acdd7fe37d41c86f bug=ae7eaca6c33a753c oracle=29fa1fb63af4880c rows=pending
-media_container@1/tests/webm_reference src=51612f5c3d7d809d sig=1e7b41cabc725fa7 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-media_container@1/tests/write_vod_sample_tables src=d39fe6bc7a2d8f49 sig=0682cdf93849637a run=acdd7fe37d41c86f bug=372fb53c067ac6a4 oracle=e9ac9b3bc2e897a9 rows=pending
+media_container@1/tests/clip_vod_uses_preceding_idr src=dd6b7323cb316b6e sig=08ac5d1ff99aef46 run=acdd7fe37d41c86f bug=804c0270bae90bbd oracle=12c8cfb49526835e rows=pending
+media_container@1/tests/mp4_reference src=ac4e7592080be97d sig=c6f85e8454dc8c44 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/ogg_opus_reference src=695643450ead342a sig=72a62d2162d5cde0 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/relocate_vod_and_segment_index src=060a9c490008e931 sig=547dbacc29890537 run=acdd7fe37d41c86f bug=0530b3a80303e6ca oracle=cdfe91416364399e rows=pending
+media_container@1/tests/sparse_vod_sample_tables src=dcaee46ae7bba70c sig=f3c8a6bba077075e run=acdd7fe37d41c86f bug=697898387531a25b oracle=8a2531a56a9946c3 rows=pending
+media_container@1/tests/tkhd_display_rotation src=9025b6861bf2ba3d sig=2d66e67495af05c5 run=acdd7fe37d41c86f bug=cf96d6cfc348ea49 oracle=830e5c25af7e2601 rows=pending
+media_container@1/tests/vod_presentation_duration_uses_track_clock src=f8bfe73aa183238c sig=889209918bdfc8f3 run=acdd7fe37d41c86f bug=ae7eaca6c33a753c oracle=29fa1fb63af4880c rows=pending
+media_container@1/tests/webm_reference src=51612f5c3d7d809d sig=ffb7d45615fa05be run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+media_container@1/tests/write_vod_sample_tables src=d39fe6bc7a2d8f49 sig=575bb1cd1db07565 run=acdd7fe37d41c86f bug=372fb53c067ac6a4 oracle=e9ac9b3bc2e897a9 rows=pending

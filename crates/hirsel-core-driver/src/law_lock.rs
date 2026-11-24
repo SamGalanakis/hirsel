@@ -153,7 +153,20 @@ fn definition_inputs(
         if test_source {
             let item = source_item(product, header).ok_or_else(|| missing(&path))?;
             source.insert(path.to_string(), item);
-            pending.extend(header.reads.iter().chain(&header.body_reads).copied());
+            pending.extend(header.reads.iter().copied());
+            match resolved_constructors(product, &path) {
+                Some(types) => {
+                    pending.extend(
+                        header
+                            .body_reads
+                            .iter()
+                            .filter(|id| !header.body_candidates.contains(id))
+                            .copied(),
+                    );
+                    pending.extend(types);
+                }
+                None => pending.extend(header.body_reads.iter().copied()),
+            }
         } else {
             signatures.insert(
                 path.to_string(),
@@ -195,6 +208,25 @@ fn definition_inputs(
         short(src.finalize().as_ref()),
         short(sig.finalize().as_ref()),
     ))
+}
+
+/// The types a checked body's contextual constructors resolved to, which stand
+/// in for their candidate sets: an unused same-named constructor elsewhere is
+/// not a dependency. None keeps every candidate: the body was not built, or a
+/// constructor was resolved by searching its whole candidate set.
+fn resolved_constructors(
+    product: &CheckProduct,
+    path: &DefPath,
+) -> Option<Vec<hirsel_core_resolve::DefinitionId>> {
+    let check = &product.definitions.get(path)?.check;
+    if check.function.is_none() || !check.refusals.is_empty() || check.constructor_candidates {
+        return None;
+    }
+    check
+        .constructor_types
+        .iter()
+        .map(|ty| product.headers.id(ty))
+        .collect()
 }
 
 fn part(hash: &mut Sha256, bytes: &[u8]) {

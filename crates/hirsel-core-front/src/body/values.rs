@@ -772,6 +772,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 _ => {
                     let from = p.modules[self.at.module as usize].id;
+                    self.out.constructor_candidates = true;
                     let (d, case) = match p.bare_constructor(from, name) {
                         Ok(found) => found,
                         Err(message) => {
@@ -816,7 +817,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         // FAIL-11, T1.2: a resource literal is itself the `Result`, so under an expected
         // `Result` its name is the resource type's, as with no expected type.
+        self.out.constructor_types.insert(decl.path.clone());
         if found.is_none() && is_core_prelude(&decl.path, &["Result"]) {
+            self.out.constructor_candidates = true;
             let resource = p.index.constructor_candidates(from, name).find_map(|id| {
                 let Some(Def::Type(r)) = p.by_definition[id.0 as usize] else {
                     return None;

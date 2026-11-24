@@ -400,6 +400,8 @@ mod body {
                     function: disk.function.map(hirsel_core_ir::FuncId),
                     template: disk.template,
                     flow: disk.flow,
+                    constructor_types: disk.constructor_types,
+                    constructor_candidates: disk.constructor_candidates,
                     counts: hirsel_core_front::Counts {
                         nodes,
                         uses,
@@ -574,6 +576,8 @@ struct DiskCheckRef<'a> {
     template: &'a Option<hirsel_core_front::GenericTemplate>,
     flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
+    constructor_types: &'a std::collections::BTreeSet<DefPath>,
+    constructor_candidates: bool,
 }
 impl<'a> DiskCheckRef<'a> {
     /// A site is a byte offset from its item's start and the key covers only
@@ -621,6 +625,8 @@ impl<'a> DiskCheckRef<'a> {
             template: &d.check.template,
             flow,
             function: d.check.function.map(|f| f.0),
+            constructor_types: &d.check.constructor_types,
+            constructor_candidates: d.check.constructor_candidates,
         })
     }
 }
@@ -636,6 +642,8 @@ struct DiskCheck {
     template: Option<hirsel_core_front::GenericTemplate>,
     flow: hirsel_core_front::FlowFacts,
     function: Option<u32>,
+    constructor_types: std::collections::BTreeSet<DefPath>,
+    constructor_candidates: bool,
 }
 impl Driver {
     pub fn check(

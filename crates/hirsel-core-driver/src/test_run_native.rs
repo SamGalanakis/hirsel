@@ -1012,6 +1012,34 @@ fn law_lock_checks_static_columns_and_preserves_unselected_lines() {
         format!("hirsel.laws 1\n{SELECTED} rows=all#1:truncated:6/0\n{OTHERS}"));
 }
 
+/// Bug (2443): a law matching a contextual constructor hashed every visible
+/// constructor of that name, so one unused `Malformed` in std.proxy moved 74
+/// lock rows in packages that never use it.
+#[test]
+fn law_signature_covers_the_resolved_constructor_type_only() {
+    let law = PackageLaw::new();
+    law.manifest("app", "app", 1, "[sources]\n\"main.hirsel\" = \"main\"\n\"shapes.hirsel\" = \"shapes\"\n\"decoy.hirsel\" = \"decoy\"\n\n[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"laws\"");
+    law.write("app/main.hirsel", PACKAGE_MAIN);
+    law.write("app/shapes.hirsel", "pub type Shape = Round(u64) | Flat\npub fn flat() -> Shape { Flat }\n");
+    law.write("app/decoy.hirsel", "pub type Other = Bumpy | Lumpy\n");
+    law.write("app/laws.hirsel", "@test\nfn law() -> Result[(), ()] {\n    match shapes.flat() {\n        Flat => Ok(()),\n        _ => Error(()),\n    }\n}\n");
+    let columns = |law: &PackageLaw| {
+        PackageLaw::pass(law.run(&["laws", "write", "app"]));
+        PackageLaw::pass(law.run(&["laws", "check", "app"]));
+        let lock = std::fs::read_to_string(law.path("app/hirsel.laws")).unwrap();
+        let line = lock.lines().find(|line| line.starts_with("app@1/laws/law ")).unwrap_or_else(|| panic!("{lock}")).to_owned();
+        let field = |name: &str| line.split(' ').find_map(|f| f.strip_prefix(name)).unwrap().to_owned();
+        (field("src="), field("sig="))
+    };
+    let (src, sig) = columns(&law);
+    law.write("app/decoy.hirsel", "pub type Other = Bumpy | Lumpy | Flat\n");
+    assert_eq!(columns(&law), (src.clone(), sig.clone()), "an unused same-named constructor moved the law");
+    law.write("app/shapes.hirsel", "pub type Shape = Round(u64) | Flat | Square\npub fn flat() -> Shape { Flat }\n");
+    let (moved_src, moved_sig) = columns(&law);
+    assert_eq!(moved_src, src);
+    assert_ne!(moved_sig, sig, "a variant added to the resolved type kept the law's signature");
+}
+
 #[test]
 fn law_baseline_compares_full_runs_and_keeps_test_results() {
     let law = PackageLaw::new();

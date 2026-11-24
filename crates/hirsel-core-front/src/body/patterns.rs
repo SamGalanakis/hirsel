@@ -273,6 +273,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .any(|def| p.by_definition[def.0 as usize] == Some(Def::Type(d))),
             _ => false,
         };
+        if matches!(target, Some(Target::ContextualConstructor { .. })) {
+            self.out.constructor_types.insert(decl.path.clone());
+        }
         if !visible || decl.opaque && decl.site.module != from {
             let mut refusal = refusal(
                 "LANG-17",

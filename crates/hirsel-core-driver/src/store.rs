@@ -84,7 +84,7 @@ const BODY_HEADER: usize = 28;
 /// module no record carries.
 const IR: &str = "hirsel.core-ir.v1";
 // CoreIR signatures always encode their anchors in a body record, including an empty list.
-const VERSION: u32 = 42;
+const VERSION: u32 = 43;
 pub(crate) const HEADER: usize = 12;
 /// The payload length, the checksum of everything before it, and the address.
 const TRAILER: usize = 48;

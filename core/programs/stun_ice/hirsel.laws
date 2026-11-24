@@ -1,9 +1,9 @@
 hirsel.laws 1
-stun_ice@1/laws/binding_vectors src=33f40781495f75a6 sig=517c5b03e262ed95 run=acdd7fe37d41c86f bug=540b45871b56e1b4 oracle=ea529810f9b4c4b4 rows=pending
-stun_ice@1/laws/full_connectivity src=cac6f3f5d66aa5c0 sig=23496447792197c8 run=acdd7fe37d41c86f bug=f6ecf8ddc0278a7d oracle=3ac8edc0207c93fe rows=pending
-stun_ice@1/laws/kd4_digest_policy src=4b0917e221310d15 sig=96ae07d158192323 run=acdd7fe37d41c86f bug=f512507dde66538b oracle=10bfd83f416287e4 rows=pending
-stun_ice@1/laws/lite_nat_rebinding src=d82b573ce220d680 sig=7472e34be1632bae run=b00081b2ff81edd5 bug=0ead33159350fea1 oracle=840681dcfc946f7e rows=pending
-stun_ice@1/laws/lite_peer_signaling src=26cffcb9b463760b sig=9834a29434062e86 run=acdd7fe37d41c86f bug=2479a3ab4ac27c39 oracle=880d8e19f6335a90 rows=pending
-stun_ice@1/laws/long_term_key_vectors src=c2bbbaa1668d5ae3 sig=6afeda85acdff8c2 run=acdd7fe37d41c86f bug=489b4ee2036841a3 oracle=3d31d87049f7128d rows=pending
-stun_ice@1/laws/minted_credentials src=ce3c44d209e8b7d0 sig=5e38bcf503a5d406 run=acdd7fe37d41c86f bug=65261c7721b51be1 oracle=dbd8c8076b1b7b41 rows=pending
-stun_ice@1/laws/public_class_table src=f155876325da492e sig=5107f2fb916455dc run=acdd7fe37d41c86f bug=7df5a1df22b142d0 oracle=1ffb4e1e46111194 rows=pending
+stun_ice@1/laws/binding_vectors src=33f40781495f75a6 sig=70a90c4df7c9376d run=acdd7fe37d41c86f bug=540b45871b56e1b4 oracle=ea529810f9b4c4b4 rows=pending
+stun_ice@1/laws/full_connectivity src=cac6f3f5d66aa5c0 sig=2bb538f3e0ae9ab3 run=acdd7fe37d41c86f bug=f6ecf8ddc0278a7d oracle=3ac8edc0207c93fe rows=pending
+stun_ice@1/laws/kd4_digest_policy src=4b0917e221310d15 sig=2cd0503e02a344cf run=acdd7fe37d41c86f bug=f512507dde66538b oracle=10bfd83f416287e4 rows=pending
+stun_ice@1/laws/lite_nat_rebinding src=d82b573ce220d680 sig=fdb9ece5c35d820b run=b00081b2ff81edd5 bug=0ead33159350fea1 oracle=840681dcfc946f7e rows=pending
+stun_ice@1/laws/lite_peer_signaling src=26cffcb9b463760b sig=adeb18b171c40ea1 run=acdd7fe37d41c86f bug=2479a3ab4ac27c39 oracle=880d8e19f6335a90 rows=pending
+stun_ice@1/laws/long_term_key_vectors src=c2bbbaa1668d5ae3 sig=ac5f0f72261e5438 run=acdd7fe37d41c86f bug=489b4ee2036841a3 oracle=3d31d87049f7128d rows=pending
+stun_ice@1/laws/minted_credentials src=ce3c44d209e8b7d0 sig=3a0d0c30cc1811df run=acdd7fe37d41c86f bug=65261c7721b51be1 oracle=dbd8c8076b1b7b41 rows=pending
+stun_ice@1/laws/public_class_table src=f155876325da492e sig=5b0ea32fed363b14 run=acdd7fe37d41c86f bug=7df5a1df22b142d0 oracle=1ffb4e1e46111194 rows=pending

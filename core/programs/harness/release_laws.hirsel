@@ -85,7 +85,7 @@ pub fn law_release_proposal_settles(parent: Dir, clock: Clock, random: Random, t
     kick(mut db2, a)
     kick(mut db2, a)
     let parked = match member(mut db2) {
-        Parked => true,
+        Parked(_) => true,
         _ => false
     }
     let reopened = result.unwrap(store.bind_declaration(mut db2, Open, harness.declare_tables))

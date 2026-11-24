@@ -35,8 +35,8 @@ fn mcp_blob_wiring() -> Result[harness.Wiring, harness.Refused] {
     harness.wiring(code.describe(mcp_blob_advance), code.describe(mcp_blob_effect))
 }
 
-fn mcp_blob_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
-    harness.advance(mut tx, h, mcp_blob_agent(), mcp_blob_wiring()?, take wake)
+fn mcp_blob_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
+    harness.advance_park(mut tx, h, mcp_blob_agent(), mcp_blob_wiring()?, take wake)
 }
 
 fn mcp_blob_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
@@ -326,8 +326,8 @@ fn reconcile_wired() -> Result[harness.Wiring, harness.Refused] {
     harness.wiring(code.describe(reconcile_advance), code.describe(reconcile_effect))
 }
 
-fn reconcile_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
-    harness.advance(mut tx, h, reconcile_agent(), reconcile_wired()?, take wake)
+fn reconcile_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
+    harness.advance_park(mut tx, h, reconcile_agent(), reconcile_wired()?, take wake)
 }
 
 fn reconcile_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {

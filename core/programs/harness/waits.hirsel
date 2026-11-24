@@ -43,7 +43,7 @@ pub type PendingWait: codec + send { run: u64, round: u64, ordinal: u64, key: By
 
 pub fn open_wait(k: WaitKey, take w: Wait) -> Option[PendingWait] {
     if k.kind == APPROVAL {
-        if let Open(take key, expires) = take w {
+        if let Open(take key, expires, _) = take w {
             return Some(PendingWait(run: k.run, round: k.generation, ordinal: k.slot, key: take key, expires: expires))
         }
     }

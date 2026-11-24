@@ -39,7 +39,7 @@ fn held_key(mut db: store.Db, round: u64) -> Bytes waits {
     let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
     let key = harness.WaitKey(run: 0u64, slot: 0u64, kind: harness.APPROVAL, generation: round)
     match result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), h.waits, key)) {
-        Some(Open(take approval, _)) => take approval,
+        Some(Open(take approval, _, _)) => take approval,
         _ => fail("expected an MCP approval"),
     }
 }

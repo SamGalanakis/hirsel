@@ -95,7 +95,7 @@ pub type Session: codec + send {
     warm: Option[WarmState],
 }
 
-pub type WarmState: codec + send = Waiting(EffectKey, runner.triggers.Id, u64) | Warming(EffectKey)
+pub type WarmState: codec + send = Waiting(EffectKey, runner.park.ParkId, u64) | Warming(EffectKey)
 
 pub type InboxKey: codec + send {
     caller: store.Caller,
@@ -233,7 +233,7 @@ pub type Receipt: codec + send = Model(Answer) | ModelFailed(ModelFault) | Tool(
 
 // Held waits for an approval; Parked waits for `resume` after an Inside tool
 // returned Later.
-pub type EffectPhase: codec + send = Pending | Held | Parked | Sealed | Dispatched(u64) | Settled(Receipt) | Doubted
+pub type EffectPhase: codec + send = Pending | Held | Parked(runner.park.ParkId) | Sealed | Dispatched(u64) | Settled(Receipt) | Doubted
 
 pub type Effect: codec + send {
     cutoff: Cutoff,
@@ -255,7 +255,7 @@ pub type WaitKey: codec + key + send {
 }
 
 // An open approval holds its key and the wall-clock ms at which it expires.
-pub type Wait: codec + send = Open(Bytes, u64) | Decided(Bytes, bool) | Expired | Revoked
+pub type Wait: codec + send = Open(Bytes, u64, runner.park.ParkId) | Decided(Bytes, bool) | Expired | Revoked
 
 // The public Cover projection. Key 0 is the status row; key p + 1 is the
 // visible line of entry p.
@@ -270,6 +270,7 @@ pub type Handles: shareable + send {
     runs: store.Table[u64, Run],
     effects: store.Table[EffectKey, Effect],
     waits: store.Table[WaitKey, Wait],
+    wakes: runner.park.Tables[Wake],
     views: store.Table[u64, View],
     readers: store.Table[Bytes, bool],
     fork_cuts: store.Table[u64, u64],
@@ -411,6 +412,7 @@ pub fn declare_tables(mut d: store.Declare) -> Result[Handles, store.Error] {
         runs: declare_table(mut d, runs_name(), std.codec.key_u64(), c_run)?,
         effects: declare_table(mut d, effects_name(), effect_key(), c_effect)?,
         waits: declare_table(mut d, waits_name(), wait_key(), c_wait)?,
+        wakes: runner.park.declare_tables(mut d, "harness.wakes", clone(trigger_tables))?,
         views: declare_table(mut d, views_name(), std.codec.key_u64(), c_shown)?,
         readers: declare_table(mut d, "harness.readers", std.codec.key_bytes(), c_reader)?,
         fork_cuts: declare_table(mut d, "harness.fork_cuts", std.codec.key_u64(), std.codec.of_u64())?,
@@ -563,17 +565,17 @@ pub fn inside[G: send, App: inert + send](take name: String, take about: String,
 }
 
 // ---- wiring: the app's trigger targets, rebuilt in each transaction ----
-pub type Wake: codec + send = Kick | Deadline(EffectKey) | Expire(WaitKey) | Warm(u64)
+pub type Wake: codec + send = Kick | EffectDue(EffectKey) | ApprovalDue(WaitKey) | Warm(u64)
 
 pub type Refused: codec + send = NotAllowed | Conflict | TooLarge | Malformed(String) | Storage
 
 pub opaque type Wiring {
     entries: runner.triggers.Entries,
-    advance: runner.triggers.Entry[Wake],
+    advance: runner.triggers.Entry[runner.park.ParkId],
     effect: runner.triggers.Entry[EffectKey]
 }
 
-pub fn wiring[H, G, R, E, W](advance_fn: StaticFn[fn(mut store.Tx, H, store.Caller, take Wake) -> Result[R, E]], effect_fn: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[W, Capacity] waits]) -> Result[Wiring, Refused] {
+pub fn wiring[H, G, R, E, W](advance_fn: StaticFn[fn(mut store.Tx, H, store.Caller, take runner.park.ParkId) -> Result[R, E]], effect_fn: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[W, Capacity] waits]) -> Result[Wiring, Refused] {
     let a = runner.triggers.transact(advance_fn) ?=> |_| Malformed("advance target")
     let e = runner.triggers.granted(effect_fn) ?=> |_| Malformed("effect target")
     let mut allowed = runner.triggers.empty_entries()

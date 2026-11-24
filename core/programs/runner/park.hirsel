@@ -1,0 +1,117 @@
+pub opaque type ParkId: codec + key + send { number: u64 }
+
+pub type Wake[S: send]: send = Due(S) | Completed(S, Bytes)
+
+pub type Error: send = Store(store.Error) | Trigger(triggers.Error) | IdLimit
+
+type Signal: codec + send {
+    due: Option[u64],
+    trigger: Option[triggers.Id],
+    payload: Option[Bytes],
+    completion: Option[triggers.Destination]
+}
+
+pub opaque type Tables[S]: shareable + send {
+    next: store.Table[u64, u64],
+    signals: store.Table[ParkId, Signal],
+    states: store.Table[ParkId, S],
+    triggers: triggers.Tables
+}
+
+fn put_id(id: ParkId, mut raw: Bytes) { std.codec.put_key_u64(id.number, mut raw) }
+
+fn read_id(raw: Bytes, mut at: u64) -> Result[ParkId, std.codec.DecodeError] {
+    Ok(ParkId(number: std.codec.take_key_u64(raw, mut at)?))
+}
+
+fn id_schema(mut schema: std.codec.Schema) -> Result[(), std.codec.EncodeError] {
+    std.codec.schema_u64(mut schema)
+    Ok(())
+}
+
+pub fn key() -> std.codec.Key[ParkId] { std.codec.key_make(put_id, read_id, id_schema) }
+
+fn named(prefix: String, suffix: String) -> String {
+    let mut name: String = clone(prefix)
+    string.push(mut name, suffix)
+    take name
+}
+
+/// Each declaration owns its ParkId namespace. Route its wake entry to these tables.
+pub fn declare_tables[S: codec](mut d: store.Declare, name: String, take pending: triggers.Tables) -> Result[Tables[S], store.Error] {
+    let next = store.declare_table(mut d, named(name, ".next"), std.codec.key_u64(), std.codec.of_u64())?
+    let next_row = store.finish(mut d, take next)?
+    let meta: std.codec.Codec[Signal] = std.codec.of()
+    let signals = store.declare_table(mut d, named(name, ".signals"), key(), meta)?
+    let signal_rows = store.finish(mut d, take signals)?
+    let codec: std.codec.Codec[S] = std.codec.of()
+    let states = store.declare_table(mut d, name, key(), codec)?
+    Ok(Tables(next: take next_row, signals: take signal_rows, states: store.finish(mut d, take states)?, triggers: take pending))
+}
+
+/// Gives a migration the typed state table independently of pending wake arguments.
+pub fn state_table[S](tables: Tables[S]) -> store.Table[ParkId, S] { clone(tables.states) }
+
+fn allocate[S](mut tx: store.Tx, tables: Tables[S]) -> Result[ParkId, Error] {
+    let saved = store.fetch(tx, tables.next, 0u64) ?=> Store
+    let prior = match saved { Some(n) => n, None => 0u64 }
+    let Some(next) = int.checked_add(prior, 1u64) else { return Error(IdLimit) }
+    store.put(mut tx, tables.next, 0u64, next) ?=> Store
+    Ok(ParkId(number: next))
+}
+
+fn defer[S](mut tx: store.Tx, tables: Tables[S], entries: triggers.Entries, wake: triggers.Entry[ParkId], state: S, deadline: Option[u64], completable: bool) -> Result[ParkId, Error] {
+    let id = allocate(mut tx, tables)?
+    let trigger = match deadline {
+        Some(at) => Some(triggers.write(mut tx, tables.triggers, entries, wake, id, At(at)) ?=> Trigger),
+        None => None,
+    }
+    store.put(mut tx, tables.states, id, state) ?=> Store
+    let completion = if completable { Some(triggers.destination(wake)) } else { None }
+    store.put(mut tx, tables.signals, id, Signal(due: deadline, trigger: trigger, payload: None, completion: take completion)) ?=> Store
+    Ok(id)
+}
+
+pub fn until[S](mut tx: store.Tx, tables: Tables[S], entries: triggers.Entries, wake: triggers.Entry[ParkId], state: S, at: u64) -> Result[ParkId, Error] {
+    defer(mut tx, tables, entries, wake, state, Some(at), false)
+}
+
+fn drop_signal[S](mut tx: store.Tx, tables: Tables[S], id: ParkId) -> Result[(), store.Error] {
+    let _ = store.delete(mut tx, tables.states, id)?
+    let _ = store.delete(mut tx, tables.signals, id)?
+    Ok(())
+}
+
+/// Claims the state inside the wake transaction. A duplicate or early wake changes nothing.
+pub fn take_wake[S: send](mut tx: store.Tx, tables: Tables[S], id: ParkId) -> Result[Option[Wake[S]], store.Error] {
+    let Some(take signal) = store.fetch(tx, tables.signals, id)? else { return Ok(None) }
+    if let Some(at) = signal.due {
+        if store.info(mut tx).at < at { return Ok(None) }
+    } else if let None = signal.payload { return Ok(None) }
+    let Some(take state) = store.fetch(tx, tables.states, id)? else { return Ok(None) }
+    drop_signal(mut tx, tables, id)?
+    let Signal(payload: take payload, ..) = take signal
+    Ok(Some(match take payload { Some(take body) => Completed(take state, take body), None => Due(take state) }))
+}
+
+/// Suppresses a wake and discards its state. Returns whether the park was open.
+pub fn cancel[S](mut tx: store.Tx, tables: Tables[S], id: ParkId) -> Result[bool, Error] {
+    let Some(signal) = store.fetch(tx, tables.signals, id) ?=> Store else { return Ok(false) }
+    stop(mut tx, tables.triggers, signal.trigger)?
+    drop_signal(mut tx, tables, id) ?=> Store
+    Ok(true)
+}
+
+fn stop(mut tx: store.Tx, tables: triggers.Tables, trigger: Option[triggers.Id]) -> Result[(), Error] {
+    let Some(id) = trigger else { return Ok(()) }
+    match triggers.request_cancel(mut tx, tables, id) {
+        Ok(()) => Ok(()),
+        Error(StaleAttempt) => Ok(()),
+        Error(take problem) => Error(Trigger(take problem)),
+    }
+}
+
+pub fn pending_trigger[S](reader: store.Reader, snapshot: store.Snapshot, tables: Tables[S], id: ParkId) -> Result[Option[triggers.Id], store.Error] waits {
+    let Some(signal) = store.get(reader, snapshot, tables.signals, id)? else { return Ok(None) }
+    Ok(signal.trigger)
+}

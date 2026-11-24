@@ -61,7 +61,7 @@ fn finish(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, id: u64, take
     kept(store.put(mut tx, h.runs, id, run))?
     s.active_run = None
     if !queue_empty(tx, h)? {
-        let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+        let _ = arm_kick(mut tx, h, w)?
     } else if let Some((config, answered_ms)) = warm {
         s.warm_left = config.requests
         arm_warm(mut tx, h, w, mut s, EffectKey(run: id, round: round, kind: MODEL, ordinal: 0u64), config, answered_ms)?
@@ -108,8 +108,13 @@ fn cancel_effect(mut tx: store.Tx, h: Handles, key: EffectKey, mut spend: Spend)
     let dispatched = match e.phase {
         Settled(_) => return Ok(()),
         Doubted => return Ok(()),
+        Parked(id) => {
+            cancel_wake(mut tx, h, id)?
+            false
+        },
         Held => {
             let wait = WaitKey(run: key.run, slot: key.ordinal, kind: APPROVAL, generation: key.round)
+            if let Some(Open(_, _, id)) = kept(store.fetch(tx, h.waits, wait))? { cancel_wake(mut tx, h, id)? }
             kept(store.put(mut tx, h.waits, wait, Revoked))?
             false
         },
@@ -350,8 +355,8 @@ pub fn decide[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent
             }
         }
     }
-    let (held, expires) = match take found {
-        Open(take k, x) => (take k, x),
+    let (take held, expires, id) = match take found {
+        Open(take k, x, id) => (take k, x, id),
         Decided(take k, allow) => return if k == d.key && allow == d.allow {
             Ok(ruled(allow))
         } else {
@@ -368,10 +373,11 @@ pub fn decide[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent
         _ => return Error(Conflict)
     }
     if now(mut tx) >= expires {
-        lapse(mut tx, h, wait, member_key)?
+        lapse(mut tx, h, wait, member_key, id)?
         advance(mut tx, h, a, w, Kick)?
         return Ok(Lapsed)
     }
+    cancel_wake(mut tx, h, id)?
     member.phase = if d.allow {
         Pending
     } else {
@@ -383,11 +389,12 @@ pub fn decide[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent
     Ok(ruled(d.allow))
 }
 
-fn lapse(mut tx: store.Tx, h: Handles, wait: WaitKey, member_key: EffectKey) -> Result[(), Refused] {
+fn lapse(mut tx: store.Tx, h: Handles, wait: WaitKey, member_key: EffectKey, id: runner.park.ParkId) -> Result[(), Refused] {
     let Some(take m) = kept(store.fetch(tx, h.effects, member_key))? else {
         return Error(Malformed("no such call"))
     }
     let mut member = take m
+    cancel_wake(mut tx, h, id)?
     member.phase = Settled(Tool(Denied("approval expired")))
     kept(store.put(mut tx, h.effects, member_key, member))?
     kept(store.put(mut tx, h.waits, wait, Expired))
@@ -399,13 +406,13 @@ fn expire(mut tx: store.Tx, h: Handles, wait: WaitKey) -> Result[(), Refused] {
     let Some(found) = kept(store.fetch(tx, h.waits, wait))? else {
         return Ok(())
     }
-    let Open(_, expires) = view found else {
+    let Open(_, expires, id) = view found else {
         return Ok(())
     }
     if now(mut tx) < expires {
         return Ok(())
     }
-    lapse(mut tx, h, wait, EffectKey(run: wait.run, round: wait.generation, kind: TOOL, ordinal: wait.slot))
+    lapse(mut tx, h, wait, EffectKey(run: wait.run, round: wait.generation, kind: TOOL, ordinal: wait.slot), id)
 }
 
 // Settles a parked Inside call. The app's own entry calls it from whatever
@@ -416,18 +423,16 @@ pub fn resume[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent
         return Ok(Ignored)
     }
     let mut e = take found
-    match e.phase {
-        Parked => (),
-        _ => return Ok(Ignored)
-    }
+    let Some(id) = parked_id(e.phase) else { return Ok(Ignored) }
     let s = session_of(tx, h)?
     if s.active_run != Some(key.run) {
         return Ok(Ignored)
     }
     if now(mut tx) >= e.deadline {
-        advance(mut tx, h, a, w, Deadline(key))?
+        advance(mut tx, h, a, w, EffectDue(key))?
         return Ok(Ignored)
     }
+    cancel_wake(mut tx, h, id)?
     let shown = match take outcome {
         Returned(Inline(take b)) => if list.len(b) > INLINE_LIMIT {
             Failed("result too large")
@@ -471,7 +476,7 @@ fn narrowed(s: Session, name: String) -> bool {
 fn seal(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey, take e: Effect) -> Result[(), Refused] {
     let mut sealed = take e
     let id = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.effect, key, AfterCommit))?
-    let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(sealed.deadline)))?
+    let _ = arm_wake(mut tx, h, w, EffectDue(key), sealed.deadline)?
     sealed.trigger = Some(id)
     sealed.phase = Sealed
     kept(store.put(mut tx, h.effects, key, sealed))
@@ -490,7 +495,7 @@ pub fn advance[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agen
     if let Warm(frame) = wake {
         return warm_wake(mut tx, h, a, w, mut s, frame)
     }
-    if let Deadline(key) = wake {
+    if let EffectDue(key) = wake {
         if key.kind == WARM {
             return expire_warm(mut tx, h, mut s, key)
         }
@@ -502,10 +507,10 @@ pub fn advance[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agen
         return Ok(())
     }
     match wake {
-        Deadline(key) => if key.run == id {
+        EffectDue(key) => if key.run == id {
             inspect(mut tx, h, w, key)?
         },
-        Expire(wait) => if wait.run == id {
+        ApprovalDue(wait) => if wait.run == id {
             expire(mut tx, h, wait)?
         },
         Kick => (),
@@ -591,8 +596,8 @@ fn derive[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, 
                                 Mcp(fp) => remote_approval(t.name, fp, call.args),
                                 _ => approval_key(t.name, t.rev, call.args),
                             }
-                            kept(store.put(mut tx, h.waits, wait, Open(take approval, expires)))?
-                            let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Expire(wait), At(expires)))?
+                            let park = arm_wake(mut tx, h, w, ApprovalDue(wait), expires)?
+                            kept(store.put(mut tx, h.waits, wait, Open(take approval, expires, park)))?
                             Held
                         },
                     },
@@ -606,7 +611,7 @@ fn derive[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, 
     run.phase = AwaitingRound(round, ordinal)
     kept(store.put(mut tx, h.runs, id, run))?
     status(mut tx, h, "calling tools")?
-    let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+    let _ = arm_kick(mut tx, h, w)?
     Ok(())
 }
 
@@ -630,7 +635,7 @@ fn step_round[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent
                 open = true;
                 false
             },
-            Parked => {
+            Parked(_) => {
                 open = true;
                 false
             },
@@ -667,7 +672,7 @@ fn step_round[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent
         match run {
             Inside(f) => {
                 if ran_inside {
-                    let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+                    let _ = arm_kick(mut tx, h, w)?
                     return Ok(())
                 }
                 ran_inside = true
@@ -676,8 +681,8 @@ fn step_round[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent
                     Parks => {
                         open = true
                         e.deadline = now(mut tx) + a.limits.tool_ms
-                        let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Deadline(key), At(e.deadline)))?
-                        Parked
+                        let park = arm_wake(mut tx, h, w, EffectDue(key), e.deadline)?
+                        Parked(park)
                     },
                 }
                 if call.name == TOOL_SEARCH && tool_search_enabled(a) {
@@ -797,7 +802,7 @@ fn inspect(mut tx: store.Tx, h: Handles, w: Wiring, key: EffectKey) -> Result[()
     let dispatched = match e.phase {
         Dispatched(_) => true,
         Sealed => false,
-        Parked => false,
+        Parked(id) => { cancel_wake(mut tx, h, id)?; false },
         _ => return Ok(()),
     }
     cancel_trigger(mut tx, h, e.trigger)?
@@ -960,7 +965,7 @@ fn register[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H], 
 
 // Registers the application's advance and effect, plus the fenced attempts used by the effect.
 pub fn register_standard[G: send, H: shareable + inert + send](mut r: runner.Registry[G, H],
-    advance_entry: StaticFn[fn(mut store.Tx, H, store.Caller, take Wake) -> Result[(), Refused]],
+    advance_entry: StaticFn[fn(mut store.Tx, H, store.Caller, take runner.park.ParkId) -> Result[(), Refused]],
     effect_entry: StaticFn[fn(G, store.Caller, take EffectKey) -> Result[Worked, Capacity] waits],
     settle_entry: StaticFn[fn(mut store.Tx, H, runner.triggers.Attempt, take Settle) -> Result[Filed, store.Error]],
     select: fn(H) -> Handles, n: u64, effect_n: u64) -> Result[(), runner.RegisterError] {

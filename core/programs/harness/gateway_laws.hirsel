@@ -164,9 +164,9 @@ fn wired() -> Result[harness.Wiring, harness.Refused] {
     harness.wiring(code.describe(advance), code.describe(effect))
 }
 
-fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     let w = wired()?
-    harness.advance(mut tx, h, gated_agent(), w, take wake)
+    harness.advance_park(mut tx, h, gated_agent(), w, take wake)
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {

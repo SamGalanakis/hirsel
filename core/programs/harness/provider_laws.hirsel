@@ -450,7 +450,7 @@ fn retry_entry(clock: Clock, caller: store.Caller, take key: harness.EffectKey) 
     Ok(())
 }
 
-fn retry_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn retry_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     Ok(())
 }
 
@@ -623,7 +623,9 @@ fn warm_answer(mut db: store.Db, h: harness.Handles, w: harness.Wiring, key: har
 }
 
 fn warm_wait(db: store.Db, h: harness.Handles, due: u64) -> runner.triggers.Id waits {
-    let Some(Waiting(_, id, _)) = read_session(db, h).warm else { fail("warm: no timer") }
+    let Some(Waiting(_, park, _)) = read_session(db, h).warm else { fail("warm: no timer") }
+    let reader = result.unwrap(store.reader(db, 0u64))
+    let id = option.unwrap(result.unwrap(runner.park.pending_trigger(reader, store.snapshot(db), h.wakes, park)))
     if runner.triggers.due_time(pending_id(db, h, id)) != due { fail("warm: wrong due time") }
     id
 }
@@ -820,8 +822,8 @@ fn hedge_wire() -> harness.Wiring {
     result.unwrap(harness.wiring(code.describe(hedge_advance), code.describe(hedge_effect)))
 }
 
-fn hedge_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
-    harness.advance(mut tx, h, hedge_agent(true), hedge_wire(), take wake)
+fn hedge_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
+    harness.advance_park(mut tx, h, hedge_agent(true), hedge_wire(), take wake)
 }
 
 fn hedge_effect(g: HedgeGrants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {

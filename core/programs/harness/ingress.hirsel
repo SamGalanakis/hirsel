@@ -86,7 +86,7 @@ fn queue_window(tx: store.Tx, h: Handles, l: Limits) -> Result[List[(u64, Lodged
 fn boundary[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[G, App], w: Wiring, mut s: Session) -> Result[(), Refused] {
     let rows = queue_window(tx, h, a.limits)?
     if list.len(rows) == a.limits.ingress {
-        let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+        let _ = arm_kick(mut tx, h, w)?
     }
     for (seq, row) in rows {
         if let Command(c) = view row.item {

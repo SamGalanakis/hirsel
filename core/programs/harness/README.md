@@ -251,6 +251,9 @@ resume of a parked call in the active run counts. The call expires
 `limits.tool_ms` after it parks. A resume at or after that deadline yields
 `Ignored` and the call settles as `Failed("tool deadline")`.
 
+Harness wake entries take a `runner.park.ParkId`. The action behind that id
+is stored in `harness.wakes` and claimed in the wake transaction.
+
 `harness.cancel(caller, run)` revokes the caller's open approvals and parked
 calls, cancels outstanding effect triggers and releases the session. A
 dispatched effect without a receipt is in doubt. Cancelling a terminal run

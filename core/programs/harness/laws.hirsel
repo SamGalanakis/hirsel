@@ -106,9 +106,9 @@ fn crash_agent() -> harness.Agent[Grants, ()] {
 
 fn wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(advance), code.describe(effect)) }
 
-fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     let w = wired()?
-    harness.advance(mut tx, h, crash_agent(), w, take wake)
+    harness.advance_park(mut tx, h, crash_agent(), w, take wake)
 }
 
 fn effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
@@ -894,7 +894,7 @@ fn hold_case(parent: Dir, clock: Clock, random: Random, tasks: Tasks, hold_ms: u
     a.limits.hold_ms = hold_ms
     let mut db = answered(dir, clock, random, tasks, bump_call("{}"))
     kick(mut db, a)
-    if timer { waking(mut db, a, Expire(wait_zero())) }
+    if timer { waking(mut db, a, ApprovalDue(wait_zero())) }
     let lapsed = denied_expired(member(mut db))
     let right = harness.approval_key("bump", 1u64, Inline(string.into_bytes("{}")))
     let ruling = deciding(mut db, a, alice(), decision(take right, true))
@@ -954,7 +954,7 @@ pub fn law_parked_call_resumes_once(parent: Dir, clock: Clock, random: Random, t
     kick(mut db, a)
     kick(mut db, a)
     kick(mut db, a)
-    let parked = match member(mut db) { Parked => true, _ => false }
+    let parked = match member(mut db) { Parked(_) => true, _ => false }
     let first = match resuming(mut db, a, "woke") { Recorded => true, _ => false }
     let second = match resuming(mut db, a, "again") { Ignored => true, _ => false }
     let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
@@ -1030,11 +1030,11 @@ fn matrix_queue(mut tx: store.Tx, h: harness.Handles, action: MatrixAction) -> R
     Ok(())
 }
 
-fn matrix_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn matrix_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     let previously = store.fetch(tx, h.waits, wait_zero()) ?=> |_| Storage
-    harness.advance(mut tx, h, matrix_agent(), matrix_wired()?, take wake)?
+    harness.advance_park(mut tx, h, matrix_agent(), matrix_wired()?, take wake)?
     if let None = previously {
-        if let Some(Open(_, _)) = store.fetch(tx, h.waits, wait_zero()) ?=> |_| Storage {
+        if let Some(Open(_, _, _)) = store.fetch(tx, h.waits, wait_zero()) ?=> |_| Storage {
             matrix_queue(mut tx, h, Approve)?
         }
     }
@@ -1604,9 +1604,9 @@ fn race_agent() -> harness.Agent[Grants, ()] {
 
 fn race_wired() -> Result[harness.Wiring, harness.Refused] { harness.wiring(code.describe(race_advance), code.describe(race_effect)) }
 
-fn race_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: harness.Wake) -> Result[(), harness.Refused] {
+fn race_advance(mut tx: store.Tx, h: harness.Handles, caller: store.Caller, take wake: runner.park.ParkId) -> Result[(), harness.Refused] {
     let w = race_wired()?
-    harness.advance(mut tx, h, race_agent(), w, take wake)
+    harness.advance_park(mut tx, h, race_agent(), w, take wake)
 }
 
 fn race_effect(g: Grants, caller: store.Caller, take key: harness.EffectKey) -> Result[harness.Worked, Capacity] waits {
@@ -1758,7 +1758,7 @@ fn cancel_park_race(parent: Dir, clock: Clock, random: Random, tasks: Tasks, ord
     kick(mut db, a)
     kick(mut db, a)
     let h = result.unwrap(store.bind_declaration(mut db, Open, harness.declare_tables))
-    let was_parked = match member(mut db) { Parked => true, _ => false }
+    let was_parked = match member(mut db) { Parked(_) => true, _ => false }
     let first = ordering != CancelFirst || match cancelling(mut db, h, alice()) { Ok(Cancelled) => true, _ => false }
     let filed = resuming(mut db, a, "woke")
     let repeated = cancelling(mut db, h, alice())

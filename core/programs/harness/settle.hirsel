@@ -68,7 +68,7 @@ fn settle_in[G: send, App: inert + send](mut tx: store.Tx, h: Handles, a: Agent[
             kept(store.put(mut tx, h.runs, key.run, run))?
             e.phase = Settled(Model(take answer))
             kept(store.put(mut tx, h.effects, key, e))?
-            let _ = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Kick, AfterCommit))?
+            let _ = arm_kick(mut tx, h, w)?
         },
         Some(ModelFailed(take fault)) => settle_model_fault(mut tx, h, w, key, take e, take fault)?,
         Some(Tool(take outcome)) => {

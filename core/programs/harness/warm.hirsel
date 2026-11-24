@@ -14,14 +14,14 @@ fn arm_warm(mut tx: store.Tx, h: Handles, w: Wiring, mut s: Session, model: Effe
     }
     if s.warm_left == 0u64 { return Ok(()) }
     let due = int.saturating_add(answered_ms, delay)
-    let id = armed(runner.triggers.write(mut tx, h.triggers, w.entries, w.advance, Warm(s.frame), At(due)))?
+    let id = arm_wake(mut tx, h, w, Warm(s.frame), due)?
     s.warm = Some(Waiting(model, id, due))
     Ok(())
 }
 
 fn cancel_warm(mut tx: store.Tx, h: Handles, mut s: Session) -> Result[(), Refused] {
     match s.warm {
-        Some(Waiting(_, id, _)) => cancel_trigger(mut tx, h, Some(id))?,
+        Some(Waiting(_, id, _)) => cancel_wake(mut tx, h, id)?,
         Some(Warming(key)) => {
             if let Some(e) = kept(store.fetch(tx, h.effects, key))? {
                 cancel_trigger(mut tx, h, e.trigger)?

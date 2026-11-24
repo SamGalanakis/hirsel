@@ -109,7 +109,7 @@ fn test_l62_pager_point_batch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     list.push(mut branches, std.page.Entry(key: key_word(42), cell: Child(std.page.Branch(child: leaf, rows: 1, charge: 86))))
     let branch_image = page_result(std.page.encode(branches, 1, 50, Collection))?
     let root = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(branch_image))?
-    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576), 4)?
     let delivered = l62_deliver_branch(requests, root, leaf)
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))
@@ -197,7 +197,7 @@ fn test_l62_reader_reservation(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Err
     }
     l62_grant_cache_frames(db.store, false)?
     l62_grant_cache_frames(db.store, true)?
-    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(d), 32 * 1048576, 1048576, 4)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(d), TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576), 4)?
     db.pager = Some(take requests)
     let admitted = l62_reader_grants(db)
     let _ = take db
@@ -247,7 +247,7 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let mut ids = 0u64
     let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, TieredPagerPack(inventory: inventory, object: None))
-    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576), 4)?
     let source = TieredPageSource(pager: take requests, packs: take packs, next_stamp: 41, deadline: 0)
     let checked = l79_fold_checks(source, base)
     let _ = take source
@@ -370,7 +370,7 @@ fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Erro
     let mut ids = 0u64
     let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, TieredPagerPack(inventory: inventory, object: None))
-    let (take pager, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 32 * 1048576, 1048576, 4)
+    let (take pager, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576), 4)?
     let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 41, deadline: 0)
     let checked = l62_read_replayed_point(source, base)
     let _ = take source
@@ -413,7 +413,7 @@ fn test_l62_batch_error_follows_touch(d: Dir, tasks: Tasks) -> Result[(), Error]
     let mut ids = 0u64
     let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 9u64, TieredPagerPack(inventory: inventory, object: None))
-    let (take pager, take worker) = start_tiered_pager(tasks, owner, 1, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let (take pager, take worker) = start_tiered_pager(tasks, owner, 1, PagerDirectory(fixtures), TieredPagerFunding(cache_bytes: 4096, writer_pin_bytes: 0, pager_task_bytes: 1048576), 4)?
     let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 51, deadline: 0)
     let checked = l62_check_batch_error_order(source, owner, base)
     let _ = take source
@@ -791,5 +791,29 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     let Error(Io(Closed)) = read_tiered_point(source, grant, root, tree, log_key(9, 2)?, 2) else {
         fail("L62: masking bypassed the Cold base inside the Log bounds")
     }
+    Ok(())
+}
+
+@test
+fn test_l70_pager_admits_cache_backing(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let owner = StoreId(hi: 3, lo: 4)
+    let funding = TieredPagerFunding(cache_bytes: 12 * 1048576, writer_pin_bytes: 4 * 1048576, pager_task_bytes: 65536)
+    let short = capacity(bound bytes 1048576 {
+        start_tiered_pager(tasks, owner, 1, PagerDirectory(d), funding, 1)
+    })?
+    let Error(Full(Allocation(problem))) = take short else {
+        fail("L70: the pager started without backing its cache")
+    }
+    // 12 MiB (both partitions) plus 64 KiB of task state and MEM-24's
+    // 288-byte Task[()] charge. The request channel has its own payer.
+    if problem.requested != 12648736 || problem.available > 1048576 {
+        fail("L70: pager startup reported the wrong physical reservation")
+    }
+    let funded = capacity(bound bytes 12652544 {
+        start_tiered_pager(tasks, owner, 1, PagerDirectory(d), funding, 1)
+    })?
+    let (take requests, take worker) = funded?
+    let _ = take requests
+    let _ = result.unwrap(task.join(take worker))
     Ok(())
 }

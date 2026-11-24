@@ -389,10 +389,51 @@ def bucket_claim_race(work, engine, compiler, runtime, cc, manifest_path, limit)
                     release.set()
 
 
+def bucket_idle_fence(work, engine, compiler, runtime, cc, manifest_path, limit):
+    """L53: an idle Runner exits on its first successful poll of a rival."""
+    import queue
+    import threading
+
+    first_failure = queue.Queue()
+    reading = threading.Event()
+    claimed = threading.Event()
+
+    def fail_poll(method, path, body, answer):
+        if method != b'GET' or path != b'/bucket-t1/head' or not reading.is_set() or claimed.is_set():
+            return answer
+        head, _, _ = answer.partition(b'\r\n\r\n')
+        proof = next(field for field in head.split(b'\r\n') if field.lower().startswith(b'x-hirsel-sim-proof:'))
+        first_failure.put('FAILED POLL REQUEST')
+        return b'HTTP/1.1 503 SlowDown\r\nContent-Length: 0\r\nConnection: close\r\n' + proof + b'\r\n\r\n'
+
+    with bucket_processes(work, engine, compiler, runtime, cc, manifest_path, limit) as fixture:
+        spawn, line, once, _, hosted = fixture
+        _, listening = spawn(['--sim'])
+        addr = line(listening, 'L53:sim')
+        assert addr.startswith('PORT '), addr
+        port = int(addr[5:])
+        direct = f'--bucket=http://127.0.0.1:{port}'
+        code, text = once([hosted, '--hirsel-install', direct], 'L53:incumbent')
+        assert code == 0, text
+        with bucket_relay(port, after=fail_poll) as delayed:
+            holder, output = spawn([hosted, '--hold', '--idle-fence', delayed])
+            assert line(output, 'L53:ready') == 'READY 1 1048576'
+            reading.set()
+            assert line(first_failure, 'L53:failed-poll') == 'FAILED POLL REQUEST'
+            assert output.empty(), 'L53: a failed poll ended the idle place'
+            code, text = once([hosted, '--hirsel-install', direct], 'L53:rival')
+            assert code == 0, text
+            claimed.set()
+            ended = line(output, 'L53:fenced')
+            assert ended.startswith('ENDED ') and 'another writer' in ended, ended
+            assert holder.wait(timeout=60) == 0, holder.stderr.read()
+
+
 BUCKET_HOST_LAWS = {
     'bucket_adopts_and_fences': bucket_adopts_and_fences,
     'bucket_release_barrier': bucket_release_barrier,
     'bucket_claim_race': bucket_claim_race,
+    'bucket_idle_fence': bucket_idle_fence,
 }
 
 

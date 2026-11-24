@@ -1,0 +1,71 @@
+type SyncRelay: send { notices: Receiver[()], to: Sender[HeadInput] }
+
+// One SyncWake per sync notice, and a last one when the journal worker ends, so a head
+// waiting on its inbox looks at its held groups again. A full inbox drops the wake: the
+// head then has input to take, and it polls the journal before it waits again.
+fn relay_syncs(take relay: SyncRelay) -> () waits {
+    loop {
+        let more = match channel.receive(relay.notices) { Ok(()) => true, Error(_) => false }
+        let _ = channel.try_send(relay.to, SyncWake)
+        if !more { return }
+    }
+}
+
+type Forward: send { from: Receiver[HeadInput], to: Sender[HeadInput] }
+
+// A head the caller feeds through its own channel gets one inbox that also carries the
+// relay's wakes. The caller closing its channel arrives as InboxEnded.
+fn forward_requests(take forward: Forward) -> () waits {
+    loop {
+        match head_next(forward.from, true) {
+            Some(take message) => if let Error(_) = channel.send(forward.to, take message) { return },
+            None => {
+                let _ = channel.send(forward.to, InboxEnded)
+                return
+            },
+        }
+    }
+}
+
+// A journaled store's syncs wake the head through its inbox (Head.wakes). A store
+// without a journal is durable at commit, so its groups release at close.
+fn head_wakes[G: send, H: shareable + inert + send](mut hd: Head[G, H], take inbox: Receiver[HeadInput], drain: Option[HeadDrain], tasks: Tasks) -> (Receiver[HeadInput], List[Task[()]], Result[(), store.Error]) {
+    let mut helpers: List[Task[()]] = list.new()
+    let Some(take notices) = store.sync_notices(mut hd.db) else { return (take inbox, take helpers, Ok(())) }
+    let (to, woken): (Sender[HeadInput], Receiver[HeadInput]) = match drain {
+        Some(control) => (channel.sender(control.head_to), take inbox),
+        None => {
+            let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
+            let forward = Forward(from: take inbox, to: channel.sender(to))
+            match task.try_spawn(tasks, bytes 65536u64, take forward, forward_requests) {
+                Ok(take running) => list.push(mut helpers, take running),
+                Error((problem, take back)) => {
+                    let Forward(from: take original, ..) = take back
+                    let admission: Result[(), store.Error] = if let Ok(_) = store.claim_of(hd.db) { Error(Full(Allocation(problem))) } else { Ok(()) }
+                    return (take original, take helpers, take admission)
+                },
+            }
+            (take to, take from)
+        },
+    }
+    let health_setup: Result[(), store.Error] = match store.on_unhealthy(mut hd.db, channel.sender(to), StoreUnhealthy) {
+        Error(Missing(_)) => Ok(()),
+        other => take other,
+    }
+    let relay = SyncRelay(notices: take notices, to: take to)
+    if let Ok(take running) = task.try_spawn(tasks, bytes 65536u64, take relay, relay_syncs) {
+        list.push(mut helpers, take running)
+        hd.wakes = true
+    }
+    (take woken, take helpers, take health_setup)
+}
+
+fn check_store_health(db: store.Db) -> Result[(), store.Error] {
+    match store.health(db) {
+        Ok(_) => Ok(()),
+        Fenced(epoch) => Error(Fenced(epoch)),
+        Undecided => Error(Undecided),
+        Poisoned(problem) => Error(Poisoned(problem)),
+        Remote(take problem) => Error(Remote(take problem)),
+    }
+}

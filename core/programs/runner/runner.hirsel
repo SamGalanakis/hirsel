@@ -1560,71 +1560,17 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
     }
     let mut hd = Head(db: take owned, r: take r, replay_identity: take replay_identity, h: take shared, out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: take trigger_drive)
     let mut tables: Option[triggers.Tables] = None
-    let (take woken, take helpers) = head_wakes(mut hd, take inbox, drain, tasks)
-    let served = serve_head(mut hd, take woken, take drain, mut tables)
+    let (take woken, take helpers, take health_setup) = head_wakes(mut hd, take inbox, drain, tasks)
+    let served = match take health_setup {
+        Ok(()) => serve_head(mut hd, take woken, take drain, mut tables),
+        Error(take problem) => Error(take problem),
+    }
     for take helper in take helpers {
         let mut stopping = take helper
         task.cancel(mut stopping)
         let _ = task.join(take stopping)
     }
     finish_head(take hd, take publisher_task, take served, take tables)
-}
-
-type SyncRelay: send { notices: Receiver[()], to: Sender[HeadInput] }
-
-// One SyncWake per sync notice, and a last one when the journal worker ends, so a head
-// waiting on its inbox looks at its held groups again. A full inbox drops the wake: the
-// head then has input to take, and it polls the journal before it waits again.
-fn relay_syncs(take relay: SyncRelay) -> () waits {
-    loop {
-        let more = match channel.receive(relay.notices) { Ok(()) => true, Error(_) => false }
-        let _ = channel.try_send(relay.to, SyncWake)
-        if !more { return }
-    }
-}
-
-type Forward: send { from: Receiver[HeadInput], to: Sender[HeadInput] }
-
-// A head the caller feeds through its own channel gets one inbox that also carries the
-// relay's wakes. The caller closing its channel arrives as InboxEnded.
-fn forward_requests(take forward: Forward) -> () waits {
-    loop {
-        match head_next(forward.from, true) {
-            Some(take message) => if let Error(_) = channel.send(forward.to, take message) { return },
-            None => {
-                let _ = channel.send(forward.to, InboxEnded)
-                return
-            },
-        }
-    }
-}
-
-// A journaled store's syncs wake the head through its inbox (Head.wakes). A store
-// without a journal is durable at commit, so its groups release at close.
-fn head_wakes[G: send, H: shareable + inert + send](mut hd: Head[G, H], take inbox: Receiver[HeadInput], drain: Option[HeadDrain], tasks: Tasks) -> (Receiver[HeadInput], List[Task[()]]) {
-    let mut helpers: List[Task[()]] = list.new()
-    let Some(take notices) = store.sync_notices(mut hd.db) else { return (take inbox, take helpers) }
-    let (to, woken): (Sender[HeadInput], Receiver[HeadInput]) = match drain {
-        Some(control) => (channel.sender(control.head_to), take inbox),
-        None => {
-            let (to, from): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(64u64)
-            let forward = Forward(from: take inbox, to: channel.sender(to))
-            match task.try_spawn(tasks, bytes 65536u64, take forward, forward_requests) {
-                Ok(take running) => list.push(mut helpers, take running),
-                Error((_, take back)) => {
-                    let Forward(from: take original, ..) = take back
-                    return (take original, take helpers)
-                },
-            }
-            (take to, take from)
-        },
-    }
-    let relay = SyncRelay(notices: take notices, to: take to)
-    if let Ok(take running) = task.try_spawn(tasks, bytes 65536u64, take relay, relay_syncs) {
-        list.push(mut helpers, take running)
-        hd.wakes = true
-    }
-    (take woken, take helpers)
 }
 
 fn finish_head[G: send, H: shareable + inert + send](take head: Head[G, H], take publishing: Task[()], take served: Result[bool, store.Error], take drained_tables: Option[triggers.Tables]) -> Result[Option[u64], OpenError] waits {
@@ -1698,7 +1644,7 @@ fn idle_vote(to: Sender[LifeEvent], head: bool, idle: bool) -> () waits {
 pub type HeadInput: send = RunRequest(Req) | HeadContinue | HeadClose | HeadFinish | TriggerWake(u64) | TriggerMessage(Box[TriggerInput]) | TriggerDone(triggers.Attempt, Option[Outcome])
     | StartCutover(Box[CutoverWork]) | AbortCutover(Bytes, Option[Bytes], Sender[()]) | PauseDeadline(u64)
     | ExportCommand(Box[ExportCommand]) | ReserveImport(Box[ReserveImport]) | KeepImport(Box[KeepImport]) | CheckHeadIdle
-    | SyncWake | InboxEnded
+    | SyncWake | StoreUnhealthy | InboxEnded
 
 pub type CutoverWork: send { request: store.Cutover, result_to: Sender[Result[(u64, bool), store.DeployError]] }
 
@@ -2426,6 +2372,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
     // The forwarded request channel closed (InboxEnded); the head ends once idle.
     let mut ended = false
     loop {
+        check_store_health(head.db)?
         if head.cut { return Ok(false) }
         if let Some(control) = drain {
             if let Ok(()) = channel.try_receive(control.finish) { release_held(mut head, true)?; return Ok(false) }
@@ -2541,6 +2488,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             Some(HeadClose) => { if !closed { closed = true; close_head_admission(mut head)? }; continue },
             Some(HeadFinish) => { release_held(mut head, true)?; return Ok(false) },
             Some(SyncWake) => { release_held(mut head, false)?; continue },
+            Some(StoreUnhealthy) => continue,
             Some(InboxEnded) => { ended = true; continue },
             Some(CheckHeadIdle) => {
                 if let Some(control) = drain {

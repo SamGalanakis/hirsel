@@ -112,6 +112,10 @@ fn bucket_hold(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Ne
     string.push_char(mut line, ' ')
     string.push_u64(mut line, seen.n_place)
     say(out, take line)
+    if has_flag(argv, "--idle-fence") {
+        say_ended(out, take running)
+        return Ok(())
+    }
     let mut keys: List[Bytes] = list.new()
     list.push(mut keys, body_key(0u64))
     let cn = result.unwrap(runner.wire_client.connect(tasks, n, option.unwrap(seen.addr), c, r, keys, Some(runner.ingress.credential(r)), std.wsock.defaults()))

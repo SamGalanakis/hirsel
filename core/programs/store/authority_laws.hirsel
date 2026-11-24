@@ -112,3 +112,61 @@ fn log_follower_refuses_expired_catch_up(d: Dir, c: Clock, r: Random, tasks: Tas
     }
     Ok(())
 }
+
+fn object_branch_position_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
+    let primary = bucket_law_client_lanes(sim, tasks, "s3.test", 701, true, 1)?
+    let mut options = bucket_law_options(true)
+    options.group_bytes = 65536
+    let mut writer = open_authority(tasks, object_authority(take primary, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options)?
+    let rows = bucket_law_rows_table(mut writer)?
+    let captured = snapshot(writer)
+    let expected = Position(store: identity(writer), branch: 1, version: 2)
+    let mut ids = followers()
+    let early = bucket_law_client_lanes(sim, tasks, "s3.test", 702, true, 1)?
+    let mut observed = follower(mut ids, tasks, object_authority(take early, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    if let Error(Unseen(1)) = at_least(mut observed, expected, 0) {} else {
+        fail("L57: an expired read did not report the future branch as Unseen")
+    }
+    let _ = take observed
+    let (line, _) = fork(mut writer, "child", captured)?
+    let value = bucket_law_value(7)
+    let outcome = run_on(mut writer, line, None, (copy_env(rows), copy_env(value)), fn(mut tx, envs) -> Result[(), Error] {
+        put(mut tx, envs.0, 7, envs.1)
+    })?
+    let Committed(done) = outcome else { fail("L57: the branch write was not committed") }
+    durable(mut writer, done.ticket)?
+    for _ in 0u64 .. 3 {
+        bucket_law_checkpoint(mut writer)?
+    }
+    let saved = position(mut writer, done.ticket)?
+    if !same(saved.store, expected.store) || saved.branch != 1 || saved.version != 2 {
+        fail("L57: the branch ticket changed its Position across cuts")
+    }
+    let cold = bucket_law_client_lanes(sim, tasks, "s3.test", 703, true, 1)?
+    let mut recovered = follower(mut ids, tasks, object_authority(take cold, "bucket", BUCKET_LAW_OP_MS), sim.time, options)?
+    let due = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    let found = at_least(mut recovered, saved, due)?
+    let main_image = fresh(mut recovered, due)?
+    let reading = follower_reader(recovered, 0u64)?
+    if version(found) != 2 || version(main_image) != 1 || get(reading, found, rows, 7)? != Some(clone(value)) || get(reading, main_image, rows, 7)? != None {
+        fail("L57: cold recovery did not contain the branch-only write")
+    }
+    let deleted = delete_branch(mut writer, line)?
+    durable(mut writer, deleted)?
+    let _ = catch_up(mut recovered, due)?
+    if let Error(Gone(1)) = at_least(mut recovered, saved, due) {} else {
+        fail("L57: the deleted branch was still visible")
+    }
+    if get(follower_reader(recovered, 0u64)?, found, rows, 7)? != Some(take value) {
+        fail("L57: deletion changed the earlier follower snapshot")
+    }
+    close(take writer)
+}
+
+@test
+fn bucket_test_m2_branch_position(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 253), None, list.new())
+    let observed = object_branch_position_law(r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    observed
+}

@@ -383,7 +383,7 @@ fn a_body_record_reads_back_only_whole() {
     let (head, ir) = (b"a head".as_slice(), b"the module bytes".as_slice());
     let ir_hash = ContentHash::of_parts("hirsel.core-ir.v1", [ir]);
     let mut expected = b"HBODY\0\0\0".to_vec();
-    expected.extend(39u32.to_le_bytes());
+    expected.extend(42u32.to_le_bytes());
     expected.extend((head.len() as u64).to_le_bytes());
     expected.extend((ir.len() as u64).to_le_bytes());
     expected.extend(head);

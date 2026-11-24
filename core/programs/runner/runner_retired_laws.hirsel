@@ -19,10 +19,19 @@ pub fn law_subs_reset_keeps_diff(c: Clock, r: Random) -> bool waits {
     })
     set(mut db, t, 1u64, 7u64)
     let owes = step(mut b, db)
-    list.len(owes) == 3u64
-        && owes[0].session == 1u64 && list.len(owes[0].rows) == 1u64
-        && owes[1].session == 2u64 && owes[1].reset
-        && owes[2].session == 3u64 && list.len(owes[2].rows) == 1u64
+    if list.len(owes) != 3u64 { return false }
+    let mut first = false
+    let mut second = false
+    let mut third = false
+    for owed in owes {
+        match owed.session {
+            1u64 => { first = !owed.reset && list.len(owed.rows) == 1u64 },
+            2u64 => { second = owed.reset && list.len(owed.rows) == 0u64 },
+            3u64 => { third = !owed.reset && list.len(owed.rows) == 1u64 },
+            _ => return false,
+        }
+    }
+    first && second && third
 }
 
 @test

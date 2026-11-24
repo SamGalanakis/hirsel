@@ -1999,7 +1999,14 @@ fn sqlite_directory_recovery_locking_and_sync() {
     let manifest = fs::read_to_string(fixture.join("hirsel.toml")).unwrap()
         .replace("\"native.hirsel\" = \"native\"", "\"native.hirsel\" = \"native\"\n\"boundary.hirsel\" = \"boundary\"");
     law.write("core/programs/sqlite/hirsel.toml", manifest);
-    for file in ["sqlite.hirsel", "native.hirsel", "libhirsel_sqlite.a", "tests.hirsel"] {
+    for file in [
+        "sqlite.hirsel",
+        "native.hirsel",
+        "libhirsel_sqlite.a",
+        "libhirsel_sqlite.aarch64-apple-darwin.a",
+        "tests.hirsel",
+        "error_buffer_test.hirsel",
+    ] {
         law.write(&format!("core/programs/sqlite/{file}"), fs::read(fixture.join(file)).unwrap());
     }
     law.write("core/programs/sqlite/boundary.hirsel", r#"
@@ -2268,7 +2275,13 @@ fn foreign_archive_refusals_precede_the_linker() {
 
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/ffi_laws");
-    let original = fs::read_to_string(fixture.join("hirsel.toml")).unwrap();
+    // The x86-64 Linux archive alone: the refusals name the targets it has.
+    let original = fs::read_to_string(fixture.join("hirsel.toml"))
+        .unwrap()
+        .lines()
+        .filter(|line| !line.contains("aarch64-apple-darwin"))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
     for file in ["laws.hirsel", "native.hirsel"] {
         law.write(&format!("ffi_laws/{file}"), fs::read(fixture.join(file)).unwrap());
     }

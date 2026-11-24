@@ -44,6 +44,9 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-cranelift", Class::Implementation),
     ("hirsel-llvm", Class::Implementation),
     ("hirsel-llvm-lazy", Class::Implementation),
+    // Group containment and the profiler, both composed by the driver.
+    ("hirsel-contain", Class::Implementation),
+    ("hirsel-prof", Class::Implementation),
     ("hirsel-core-driver", Class::Wiring),
     ("hirsel-core-contract-eval", Class::Tool),
     ("hirsel-core-program-tests", Class::Tool),
@@ -96,6 +99,8 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-guard"
                 | "hirsel-cranelift"
                 | "hirsel-llvm-lazy"
+                | "hirsel-contain"
+                | "hirsel-prof"
         ),
         _ if from == "hirsel-core-materialize" => matches!(
             to,
@@ -216,6 +221,9 @@ fn workspace_edges_respect_the_crate_layering() {
             && NO_EXTERNAL_PRODUCTION.contains(&edge.from.as_str())
             && !(matches!(edge.from.as_str(), "hirsel-core-ir" | "hirsel-core-layout")
                 && edge.to == "serde")
+            // The evaluator's optional `eval` feature hashes with XXH3 (f0e431bb7)
+            // and zeroes secrets (5e6351181).
+            && !(edge.from == "hirsel-core-ir" && matches!(edge.to.as_str(), "twox-hash" | "zeroize"))
         {
             violations.push(format!(
                 "external production dependency {} -> {}",

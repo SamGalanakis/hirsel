@@ -13,6 +13,8 @@ use std::path::Path;
 use std::thread;
 use tempfile::TempDir;
 
+mod foreign;
+
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 const LARGE: u64 = 1 << 20;
 
@@ -301,139 +303,6 @@ fn failure(result: Result<AdmittedRelease<'_>, AdmissionError>) -> AdmissionErro
     result.err().expect("admission must refuse before assembly")
 }
 
-#[test]
-fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
-    use hirsel_core_ir::release_recipe::{
-        ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
-    };
-    use sha2::{Digest, Sha256};
-
-    let harness = Harness::new(LARGE);
-    let local = tempfile::tempdir().unwrap();
-    let store = CodeStore::new(local.path());
-    let archive = store.put(ObjectKind::ForeignArchive, b"abc").unwrap();
-    assert_eq!(
-        crate::call::hex(&archive.hash.0),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-    let mut fixture = Fixture::new("entry");
-    let body = fixture.body("entry", "(u64)", "", "return");
-    fixture.recipe.address = fixture.group(&[(body, vec![])], 0);
-    fixture.recipe.launch.grants.push(GrantBinding {
-        ordinal: 0,
-        kind: GrantKind::Foreign,
-        values: vec!["ffi_laws@1/laws/Laws".into()],
-        archive: Some(archive),
-        policy: None,
-    });
-    let admit = |fixture: &Fixture, archive_bytes: &[u8]| {
-        harness.run(limits(), &NativeSemantics, |peer| {
-            for key in start(peer, fixture) {
-                let bytes = if key.kind == ObjectKind::ForeignArchive {
-                    archive_bytes
-                } else {
-                    &fixture.objects[&key]
-                };
-                send_object(peer, key, bytes);
-            }
-            peer.write_all(&[0]).unwrap();
-        })
-    };
-    assert!(
-        matches!(admit(&fixture, b"abc"), Err(AdmissionError::Missing(hash)) if hash == archive.hash)
-    );
-
-    fixture.recipe.foreign_archives.push(archive);
-    assert!(
-        matches!(admit(&fixture, b"abd"), Err(AdmissionError::Hash(hash)) if hash == archive.hash)
-    );
-    assert!(admit(&fixture, b"abc").is_ok());
-
-    fixture.recipe.launch.grants.clear();
-    assert!(
-        matches!(admit(&fixture, b"abc"), Err(AdmissionError::Extra(hash)) if hash == archive.hash)
-    );
-
-    // The address binds the full table even when the selected archive is unchanged.
-    let grant = GrantBinding {
-        ordinal: 0,
-        kind: GrantKind::Foreign,
-        values: vec!["app@1/main/I".into()],
-        archive: Some(archive),
-        policy: None,
-    };
-    let header = "(core@1/core/Foreign[app@1/main/I])->()";
-    let definition = DefPath::from_full("app@1/native/f").unwrap();
-    let leaf = ForeignLeaf {
-        module: DefPath::from_full("app@1/native").unwrap(),
-        symbols: "hfl_".into(),
-        targets: vec![ForeignTarget {
-            target: TARGET.into(),
-            archive,
-        }],
-        functions: vec![ForeignFunction {
-            identity: Identity::plain(definition),
-            header: header.into(),
-        }],
-    };
-    let mut table = b"\x18x86_64-unknown-linux-gnu".to_vec();
-    table.extend_from_slice(&archive.hash.0);
-    table.push(3);
-    let mut address_frame =
-        b"\x0eapp@1/native/f\0\0\x27(core@1/core/Foreign[app@1/main/I])->()\x05hfl_f".to_vec();
-    address_frame.extend_from_slice(&Sha256::digest(table));
-    let address = ContentHash::of_parts("hirsel.code-foreign.v1", [address_frame.as_slice()]);
-
-    fixture.recipe.launch.grants.push(grant.clone());
-    fixture.recipe.foreign_modules.push(leaf.clone());
-    assert!(matches!(admit(&fixture, b"abc"), Err(AdmissionError::Extra(hash)) if hash == address));
-
-    let mut fixture = Fixture::new("entry");
-    fixture.recipe.launch.grants.push(grant);
-    fixture.recipe.foreign_modules.push(leaf.clone());
-    fixture.recipe.foreign_archives.push(archive);
-    let externs = "inst n1 = app@1/native/f [] []\nfn f1 = n1 g0 extern\n";
-    let body = fixture.body("entry", "(u64)", externs, "call f1 g0 (v0)\nreturn");
-    fixture.recipe.address = fixture.group(&[(body, vec![Binding::External(address)])], 0);
-    let error = failure(admit(&fixture, b"abc")).to_string();
-    assert!(error.ends_with("is not an indexed ar archive"), "{error}");
-
-    // An exact FFI-9 address and matching identity cannot substitute for the
-    // slot's machine signature. A recipe may otherwise make the shared bridge
-    // return through a different register class than its caller expects.
-    let mut wrong_abi = Fixture::new("entry");
-    wrong_abi.recipe.launch.grants = fixture.recipe.launch.grants.clone();
-    wrong_abi.recipe.foreign_modules.push(leaf);
-    wrong_abi.recipe.foreign_archives.push(archive);
-    let body = wrong_abi.body(
-        "entry",
-        "(u64)",
-        "sig g1 = (u64) -> (f64)\ninst n1 = app@1/native/f [] []\nfn f1 = n1 g1 extern\n",
-        "v1: f64 = call f1 g1 (v0)\nreturn",
-    );
-    wrong_abi.recipe.address = wrong_abi.group(&[(body, vec![Binding::External(address)])], 0);
-    assert!(matches!(
-        admit(&wrong_abi, b"abc"),
-        Err(AdmissionError::Binding(
-            "slot signature differs from its bound foreign header"
-        ))
-    ));
-
-    fixture.recipe.foreign_modules[0].targets.insert(
-        0,
-        ForeignTarget {
-            target: "aarch64-unknown-linux-gnu".into(),
-            archive: ObjectRef {
-                hash: ContentHash(Sha256::digest(b"").into()),
-                len: 0,
-            },
-        },
-    );
-    assert!(
-        matches!(admit(&fixture, b"abc"), Err(AdmissionError::Missing(hash)) if hash == address)
-    );
-}
-
 // DESIGN §6.2 M1: the attested hash covers the exact bytes in every object kind.
 #[test]
 fn m1_hashes_every_frame() {
@@ -651,17 +520,17 @@ fn m5_requires_coherent_identities_and_signatures() {
 }
 
 fn annex(fixture: &Fixture, row: BodyRef) -> Annex {
-    let mut budget = DecodeBudget::unlimited();
+    let budget = Debit::unlimited();
     let raw = &fixture.objects[&ObjectKey {
         kind: ObjectKind::Body,
         hash: row.body.hash,
     }];
-    let decoded = normal::decode(raw, &mut budget).unwrap();
+    let decoded = normal::decode(raw, &budget).unwrap();
     let raw = &fixture.objects[&ObjectKey {
         kind: ObjectKind::Annex,
         hash: row.annex.hash,
     }];
-    Annex::decode(raw, &decoded.module, &mut budget).unwrap()
+    Annex::decode(raw, &decoded.module, &budget).unwrap()
 }
 
 // DESIGN §6.2 M6: malformed bytes are refused before map normalization.
@@ -863,7 +732,7 @@ fn a_current_recipe_cannot_admit_an_old_normal_form_body() {
     }));
     assert!(matches!(error, AdmissionError::Unsupported(reason) if reason.contains("Republish")));
     assert_eq!(
-        Recipe::decode_retained(&prior, &mut DecodeBudget::unlimited()).unwrap(),
+        Recipe::decode_retained(&prior, &Debit::unlimited()).unwrap(),
         fixture.recipe
     );
 }
@@ -1032,12 +901,7 @@ fn m8_bounds_and_releases_every_reservation() {
             .unwrap();
         listing.insert(staged, ListedObject::new(content.len() as u64));
         let reservation = store
-            .reserve(
-                ContentHash::default(),
-                listing,
-                1,
-                &mut DecodeBudget::unlimited(),
-            )
+            .reserve(ContentHash::default(), listing, 1, &Debit::unlimited())
             .unwrap();
         fs::write(reservation.staged_path(staged).unwrap(), &content[..1]).unwrap();
         assert!(!store.remove_unreserved(pin).unwrap());
@@ -1065,12 +929,7 @@ fn m8_bounds_and_releases_every_reservation() {
     listing.insert(new_key, ListedObject::new(bytes));
     assert!(
         restarted
-            .reserve(
-                ContentHash::default(),
-                listing,
-                1,
-                &mut DecodeBudget::unlimited()
-            )
+            .reserve(ContentHash::default(), listing, 1, &Debit::unlimited())
             .is_ok(),
         "staging bytes can be reserved again"
     );

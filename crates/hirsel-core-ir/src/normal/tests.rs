@@ -2,7 +2,7 @@ use super::*;
 use crate::{source::SourceMap, text, wf};
 
 fn decode(bytes: &[u8]) -> DecodeResult<Module> {
-    super::decode(bytes, &mut DecodeBudget::unlimited()).map(|body| body.module)
+    super::decode(bytes, &Debit::unlimited()).map(|body| body.module)
 }
 
 fn checked(source: &str) -> Module {
@@ -160,7 +160,7 @@ fn hints_only_change_the_annex() {
         );
         let bytes = annex.encode();
         let decoded_body = round_trip(&b);
-        let decoded = Annex::decode(&bytes, &decoded_body, &mut DecodeBudget::unlimited()).unwrap();
+        let decoded = Annex::decode(&bytes, &decoded_body, &Debit::unlimited()).unwrap();
         assert_eq!(decoded.encode(), bytes);
         let facts = decoded.0[0].as_ref().unwrap();
         assert_eq!(facts.cold_calls, vec![hint == 1]);
@@ -533,13 +533,13 @@ fn source_position_changes_only_the_matching_annex() {
     assert_eq!((line(&sites_a), line(&sites_b)), (1, 2));
     let decoded = round_trip(&b);
     assert_eq!(
-        Annex::decode(&sites_b.encode(), &decoded, &mut DecodeBudget::unlimited()).unwrap(),
+        Annex::decode(&sites_b.encode(), &decoded, &Debit::unlimited()).unwrap(),
         sites_b
     );
     let mut wrong = sites_b;
     wrong.0[0].as_mut().unwrap().cold_calls.clear();
     assert!(
-        Annex::decode(&wrong.encode(), &decoded, &mut DecodeBudget::unlimited()).is_err(),
+        Annex::decode(&wrong.encode(), &decoded, &Debit::unlimited()).is_err(),
         "annex must cover the body's calls"
     );
 }
@@ -841,14 +841,14 @@ fn wrapped_chain(n: usize, depth: usize) -> Vec<u8> {
 /// The fewest decoded bytes `bytes` decodes within.
 fn decode_bytes(bytes: &[u8]) -> usize {
     let within = |limit| {
-        let mut budget = DecodeBudget::new(crate::decode::DecodeLimits {
+        let budget = crate::decode::DecodeBudget::new(crate::decode::DecodeLimits {
             bytes: limit,
             members: usize::MAX,
             slots: usize::MAX,
             depth: usize::MAX,
             deadline: None,
         });
-        super::decode(bytes, &mut budget).is_ok()
+        super::decode(bytes, &budget.debit()).is_ok()
     };
     let (mut low, mut high) = (0, 1 << 30);
     assert!(within(high));

@@ -16,7 +16,7 @@ pub use reservation::AdmissionStore;
 use exchange::Exchange;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::address::Group;
-use hirsel_core_ir::decode::{DecodeBudget, DecodeError, DecodeLimit, DecodeLimits};
+use hirsel_core_ir::decode::{Debit, DecodeBudget, DecodeError, DecodeLimit, DecodeLimits};
 pub use hirsel_core_ir::normal::EngineTag;
 use hirsel_core_ir::normal::{self, Annex, DecodedBody, Slot};
 use hirsel_core_ir::release_recipe::{Backend, ObjectRef, Recipe};
@@ -195,7 +195,7 @@ impl Body {
     fn new(
         mut decoded: DecodedBody,
         annex: Annex,
-        budget: &mut DecodeBudget,
+        budget: &Debit<'_>,
     ) -> Result<Self, AdmissionError> {
         let identity = decoded.identity(FuncId(0), budget)?;
         let signature = decoded.signature(FuncId(0), budget)?;
@@ -320,15 +320,16 @@ pub fn admit_local(
     limits: &AdmissionLimits,
     semantics: &impl BackendSemantics,
 ) -> Result<VerifiedRelease, AdmissionError> {
-    let mut budget = budget(limits, None);
-    let bytes = read_recipe(store, root, limits.recipe_bytes, &budget)?;
-    let recipe = Recipe::decode(&bytes, &mut budget)?;
-    listed_objects(&recipe, limits, &mut budget)?;
+    let budget = budget(limits, None);
+    let held = budget.debit();
+    let bytes = read_recipe(store, root, limits.recipe_bytes, &held)?;
+    let recipe = Recipe::decode(&bytes, &held)?;
+    listed_objects(&recipe, limits, &held.scratch())?;
     verify_release(
         root,
         bytes,
         recipe,
-        &mut budget,
+        &held,
         semantics,
         |kind, object, budget| {
             let file = open_object(store, kind, object.hash)?;
@@ -369,8 +370,9 @@ impl AdmissionStore {
             ));
         }
 
-        let mut budget = budget(limits, Some(deadline));
-        let recipe = Recipe::decode(&recipe_bytes, &mut budget)?;
+        let budget = budget(limits, Some(deadline));
+        let held = budget.debit();
+        let recipe = Recipe::decode(&recipe_bytes, &held)?;
         if recording
             && let Some(reason) = crate::native::recipe_build::foreign_recording_refusal(&recipe)
         {
@@ -390,20 +392,15 @@ impl AdmissionStore {
         } else {
             String::new()
         };
-        let objects = listed_objects(&recipe, limits, &mut budget)?;
-        let mut reservation = self.reserve(root, objects, limits.outstanding, &mut budget)?;
-        transfer(
-            &mut exchange,
-            &mut reservation,
-            limits.object_bytes,
-            &budget,
-        )?;
+        let objects = listed_objects(&recipe, limits, &held)?;
+        let mut reservation = self.reserve(root, objects, limits.outstanding, &held)?;
+        transfer(&mut exchange, &mut reservation, limits.object_bytes, &held)?;
 
         let release = verify_release(
             root,
             recipe_bytes,
             recipe,
-            &mut budget,
+            &held,
             semantics,
             |kind, object, budget| {
                 let key = ObjectKey {
@@ -428,9 +425,9 @@ fn verify_release(
     root: ContentHash,
     recipe_bytes: Vec<u8>,
     recipe: Recipe,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
     semantics: &impl BackendSemantics,
-    mut load: impl FnMut(ObjectKind, &ObjectRef, &DecodeBudget) -> Result<Vec<u8>, AdmissionError>,
+    mut load: impl FnMut(ObjectKind, &ObjectRef, &Debit<'_>) -> Result<Vec<u8>, AdmissionError>,
 ) -> Result<VerifiedRelease, AdmissionError> {
     let groups = decode_rows(&recipe.groups, budget, |object, budget| {
         let raw = load(ObjectKind::Group, object, budget)?;
@@ -445,9 +442,9 @@ fn verify_release(
         Body::new(body, annex, budget)
     })?;
     if recipe.has_foreign() {
-        check_foreign_archive_inventory(&recipe, budget)?;
+        check_foreign_archive_inventory(&recipe, &budget.scratch())?;
     }
-    closure::check(&recipe, &groups, &bodies, semantics, budget)?;
+    closure::check(&recipe, &groups, &bodies, semantics, &budget.scratch())?;
     let mut link_archives = crate::foreign_archive::LinkArchives::default();
     if recipe.has_foreign() {
         charge_rows::<crate::foreign_archive::ArchiveOrigin<'_>>(
@@ -461,11 +458,11 @@ fn verify_release(
                 .binary_search_by(|row| row.target.cmp(target))
                 .expect("the checked archive inventory selects a row for each leaf");
             let archive = leaf.targets[row].archive;
-            link_archives.admit(archive, leaf, target, None, || {
+            link_archives.admit(archive, leaf, target, None, budget, || {
                 load(ObjectKind::ForeignArchive, &archive, budget)
             })?;
         }
-        link_archives.definitions(budget)?;
+        link_archives.definitions(&budget.scratch())?;
         for archive in &recipe.foreign_archives {
             if !link_archives.contains(archive.hash) {
                 load(ObjectKind::ForeignArchive, archive, budget)?;
@@ -485,7 +482,7 @@ fn verify_release(
 
 fn check_foreign_archive_inventory(
     recipe: &Recipe,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<(), AdmissionError> {
     charge_rows::<bool>(budget, recipe.foreign_archives.len())?;
     let mut selected = vec![false; recipe.foreign_archives.len()];
@@ -549,7 +546,7 @@ fn budget(limits: &AdmissionLimits, deadline: Option<Instant>) -> DecodeBudget {
 fn listed_objects(
     recipe: &Recipe,
     limits: &AdmissionLimits,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<Listing, AdmissionError> {
     let count = recipe
         .bodies
@@ -610,7 +607,7 @@ fn transfer(
     exchange: &mut Exchange<'_>,
     reservation: &mut Reservation<'_>,
     max_bytes: u64,
-    budget: &DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<(), AdmissionError> {
     let needs = reservation
         .objects
@@ -653,8 +650,8 @@ fn transfer(
 
 fn decode_rows<T, U>(
     rows: &[T],
-    budget: &mut DecodeBudget,
-    mut decode: impl FnMut(&T, &mut DecodeBudget) -> Result<U, AdmissionError>,
+    budget: &Debit<'_>,
+    mut decode: impl FnMut(&T, &Debit<'_>) -> Result<U, AdmissionError>,
 ) -> Result<Vec<U>, AdmissionError> {
     charge_rows::<U>(budget, rows.len())?;
     let mut decoded = Vec::with_capacity(rows.len());
@@ -669,7 +666,7 @@ fn read_recipe(
     store: &CodeStore,
     root: ContentHash,
     max_bytes: usize,
-    budget: &DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<Vec<u8>, AdmissionError> {
     let file = open_object(store, ObjectKind::Recipe, root)?;
     let len = file.metadata().map_err(AdmissionError::Io)?.len();
@@ -705,7 +702,7 @@ fn read_verified(
     mut file: std::fs::File,
     kind: ObjectKind,
     object: &ObjectRef,
-    budget: &DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<Vec<u8>, AdmissionError> {
     if file.metadata().map_err(AdmissionError::Io)?.len() != object.len {
         return Err(AdmissionError::Hash(object.hash));
@@ -743,7 +740,7 @@ fn check_hash(actual: ContentHash, expected: ContentHash) -> Result<(), Admissio
     Ok(())
 }
 
-fn charge_rows<T>(budget: &mut DecodeBudget, count: usize) -> Result<(), AdmissionError> {
+fn charge_rows<T>(budget: &Debit<'_>, count: usize) -> Result<(), AdmissionError> {
     let size = count
         .checked_mul(size_of::<T>())
         .ok_or(AdmissionError::Limit(Limit::DecodeBytes))?;

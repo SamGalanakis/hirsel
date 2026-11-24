@@ -1,7 +1,7 @@
 //! Canonical release recipes, independent of the native toolchain.
 
 use crate::Identity;
-use crate::decode::{DecodeBudget, DecodeError, DecodeResult};
+use crate::decode::{Debit, DecodeError, DecodeResult};
 use crate::normal::{
     encode_identity, uleb,
     wire::{Read, Wire, invalid},
@@ -321,7 +321,7 @@ impl Recipe {
 
     /// Decode the whole frame before exposing its ordered object lists.
     /// Annexes are decoded against their corresponding bodies at admission.
-    pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<Self> {
+    pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<Self> {
         let mut input = Read::new(bytes, MAGIC, budget)?;
         if u16::read(&mut input)? != NORMAL_FORM {
             return Err(DecodeError::Unsupported(
@@ -335,7 +335,7 @@ impl Recipe {
     /// an executable the host already assembled, whose runtime owns the body
     /// version. The host uses these fields to launch it and retain its objects.
     /// Admission and assembly of code must use `decode`.
-    pub fn decode_retained(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<Self> {
+    pub fn decode_retained(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<Self> {
         let mut input = Read::new(bytes, MAGIC, budget)?;
         u16::read(&mut input)?;
         Self::decode_fields(input)
@@ -446,7 +446,7 @@ impl Recipe {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decode::{DecodeLimit, DecodeLimits};
+    use crate::decode::{DecodeBudget, DecodeLimit, DecodeLimits};
     use hirsel_core_ids::DefPath;
 
     #[test]
@@ -557,7 +557,7 @@ mod tests {
         bytes.extend_from_slice(b"\x01\x02\x02\0\x02\x01a\x01b\x03\x0c\x01\x13lib@1/wrapper/Audit");
         bytes.extend_from_slice(&[8; 32]);
         bytes.push(12);
-        let decode = |bytes: &[u8]| Recipe::decode(bytes, &mut DecodeBudget::unlimited());
+        let decode = |bytes: &[u8]| Recipe::decode(bytes, &Debit::unlimited());
         assert_eq!(recipe.encode(), bytes);
         assert_eq!(decode(&bytes), Ok(recipe.clone()));
 
@@ -590,7 +590,7 @@ mod tests {
             decode(&duplicate.encode()),
             Err(invalid("unordered body references"))
         );
-        let mut budget = DecodeBudget::new(DecodeLimits {
+        let budget = DecodeBudget::new(DecodeLimits {
             bytes: 0,
             members: usize::MAX,
             slots: usize::MAX,
@@ -598,7 +598,7 @@ mod tests {
             deadline: None,
         });
         assert_eq!(
-            Recipe::decode(&bytes, &mut budget),
+            Recipe::decode(&bytes, &budget.debit()),
             Err(DecodeError::Limit(DecodeLimit::Bytes))
         );
     }

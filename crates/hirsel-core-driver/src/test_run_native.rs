@@ -675,7 +675,7 @@ hfl_release waits (take ffi_laws@1/laws/Obj) -> i32\n"
 fn foreign_publication_pins_grants_and_walks_only_reached_functions() {
     use crate::code_admission::{admit_local, NativeSemantics};
     use crate::code_store::{CodeStore, ObjectKind};
-    use hirsel_core_ir::decode::DecodeBudget;
+    use hirsel_core_ir::decode::Debit;
     use hirsel_core_ir::release_recipe::{GrantKind, Recipe};
     use sha2::{Digest, Sha256};
 
@@ -723,7 +723,7 @@ pub fn free(f: Foreign[main.I], take p: foreign.Ptr[main.Obj]) waits\n");
         let root = PackageLaw::pass(law.run(&["publish", "app", "--grant", "Foreign=app@1/main/I"]));
         let root = crate::native::recipe_build::parse_root(root.trim()).unwrap();
         let recipe = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
-        let recipe = Recipe::decode(&recipe, &mut DecodeBudget::unlimited()).unwrap();
+        let recipe = Recipe::decode(&recipe, &Debit::unlimited()).unwrap();
         (root, recipe)
     };
 
@@ -1226,7 +1226,7 @@ fn package_archive_outside_root_explains_workspace() {
 #[test]
 fn foreign_recipe_build_uses_only_selected_sealed_archive() {
     use crate::code_store::{CodeStore, ObjectKind};
-    use hirsel_core_ir::{decode::DecodeBudget, release_recipe::Recipe};
+    use hirsel_core_ir::{decode::Debit, release_recipe::Recipe};
 
     for engine in ["cranelift", "llvm"] {
         let law = PackageLaw::new();
@@ -1282,7 +1282,7 @@ pub fn main() -> Result[(), Exit] {
         assert!(run.stderr.is_empty(), "{run:?}");
         let root = crate::native::recipe_build::parse_root(&second).unwrap();
         let bytes = std::fs::read(store.path(ObjectKind::Recipe, root)).unwrap();
-        let mut recipe = Recipe::decode(&bytes, &mut DecodeBudget::unlimited()).unwrap();
+        let mut recipe = Recipe::decode(&bytes, &Debit::unlimited()).unwrap();
         let [selected] = recipe.foreign_archives.as_slice() else { panic!("one selected target") };
         let selected = *selected;
         recipe.foreign_archives.clear();

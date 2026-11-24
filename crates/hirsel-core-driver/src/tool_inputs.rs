@@ -1520,7 +1520,7 @@ mod tests {
         };
         use hirsel_core_ids::DefPath;
         use hirsel_core_ir::Identity;
-        use hirsel_core_ir::decode::DecodeBudget;
+        use hirsel_core_ir::decode::Debit;
         use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
 
         let target = "x86_64-unknown-linux-gnu";
@@ -1529,7 +1529,14 @@ mod tests {
         let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
         let open = |bytes, hash, len| {
-            SealedArchive::open(bytes, ObjectRef { hash, len }, &module, target, None)
+            SealedArchive::open(
+                bytes,
+                ObjectRef { hash, len },
+                &module,
+                target,
+                None,
+                &Debit::unlimited(),
+            )
         };
         let prefix = |hash: ContentHash| {
             format!(
@@ -1619,9 +1626,14 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         let archive_path = fixture.path().join("laws.a");
         let mut staged = LinkArchives::default();
         staged
-            .admit(valid_object, &leaf, target, Some("laws.a"), || {
-                Ok(std::fs::read(&archive_path)?)
-            })
+            .admit(
+                valid_object,
+                &leaf,
+                target,
+                Some("laws.a"),
+                &Debit::unlimited(),
+                || Ok(std::fs::read(&archive_path)?),
+            )
             .unwrap();
         let second_module = DefPath::from_full("other@1/native").unwrap();
         let origin = ArchiveOrigin {
@@ -1641,7 +1653,7 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
                     },
                 ),
             ],
-            &mut DecodeBudget::unlimited(),
+            &Debit::unlimited(),
         )
         .unwrap();
         let (second, second_object) = build_source(
@@ -1676,7 +1688,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
                     },
                 ),
             ],
-            &mut DecodeBudget::unlimited(),
+            &Debit::unlimited(),
         )
         .err()
         .unwrap();

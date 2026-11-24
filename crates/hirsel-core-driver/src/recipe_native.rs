@@ -10,7 +10,7 @@ use crate::foreign_archive::LinkArchives;
 use hirsel_core_ir::{
     FuncId, ItemId,
     address::{Binding, Group, builtin_semantics_number, foreign_address},
-    decode::DecodeBudget,
+    decode::Debit,
     normal::{self, Annex, Site, Slot},
     release_recipe::{
         self as wire, BodyRef, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding,
@@ -498,13 +498,13 @@ impl Memos {
             ))
         };
         let body = read(ObjectKind::Body, memo.body)?;
-        let mut module = normal::decode(&body, &mut DecodeBudget::unlimited())
+        let mut module = normal::decode(&body, &Debit::unlimited())
             .map_err(refused)?
             .module;
         let annex = Annex::decode(
             &read(ObjectKind::Annex, memo.annex)?,
             &module,
-            &mut DecodeBudget::unlimited(),
+            &Debit::unlimited(),
         )
         .map_err(refused)?;
         let symbol = hirsel_core_ir::symbol(identity.digest());
@@ -721,12 +721,17 @@ impl CheckProduct {
             let (_, capture) = self.foreign_capture(function)?;
             let row = select_archive(&leaf.module, capture, target)?;
             let object = archive_ref(row);
-            sealed.admit(object, leaf, target, Some(&row.path), || {
-                Ok(row.bytes.to_vec())
-            })?;
+            sealed.admit(
+                object,
+                leaf,
+                target,
+                Some(&row.path),
+                &Debit::unlimited(),
+                || Ok(row.bytes.to_vec()),
+            )?;
             selected.insert(object.hash, row);
         }
-        let symbols = sealed.definitions(&mut DecodeBudget::unlimited())?;
+        let symbols = sealed.definitions(&Debit::unlimited())?;
         if let Some((runtime, link)) = link {
             symbols.check_tool_inputs(runtime, link)?;
         }
@@ -1298,12 +1303,11 @@ impl Publication {
             .collect();
         let mut units = BTreeMap::new();
         let mut addresses = BTreeMap::new();
-        let mut budget = DecodeBudget::unlimited();
         for (reference, group) in recipe.groups.iter().zip(groups) {
             for (i, member) in group.members.into_iter().enumerate() {
                 let (code, body, annex) = bodies.remove(&member.body).expect("admitted body");
                 let identity = body
-                    .identity(FuncId(0), &mut budget)
+                    .identity(FuncId(0), &Debit::unlimited())
                     .expect("admitted identity");
                 let address = Group::member_address(reference.hash, i as u32);
                 addresses.insert(identity.clone(), address);
@@ -1318,7 +1322,7 @@ impl Publication {
                         let target = match slot {
                             Slot::Builtin(definition) => Identity::plain(definition.clone()),
                             Slot::External(function) => body
-                                .identity(*function, &mut budget)
+                                .identity(*function, &Debit::unlimited())
                                 .expect("admitted slot identity"),
                         };
                         let address =
@@ -2163,7 +2167,7 @@ impl Publication {
         assert_eq!(old, 1, "B4 modifies the designated inline input");
         assert_eq!(self.recipe.groups.len(), 1);
         let frame = read_object(store, ObjectKind::Group, self.recipe.groups[0]).unwrap();
-        let mut group = Group::decode(&frame, &mut DecodeBudget::unlimited()).unwrap();
+        let mut group = Group::decode(&frame, &Debit::unlimited()).unwrap();
         assert_eq!(group.members.len(), 1);
         let Binding::Builtin(number) = &mut group.members[0].slots[builtin] else {
             panic!("B4 expects the inline widening builtin");

@@ -3,7 +3,7 @@ use crate::foreign_header::Abi;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::Identity;
 use hirsel_core_ir::address::{Binding, Group, foreign_address};
-use hirsel_core_ir::decode::DecodeBudget;
+use hirsel_core_ir::decode::Debit;
 use hirsel_core_ir::normal::{DecodedBody, Slot};
 use hirsel_core_ir::release_recipe::{Backend, ForeignFunction, ObjectRef, Recipe};
 use sha2::{Digest, Sha256};
@@ -46,12 +46,11 @@ struct ForeignSlot<'a> {
 }
 
 impl<'a> ForeignIndex<'a> {
-    fn new(recipe: &'a Recipe, budget: &mut DecodeBudget) -> Result<Self, AdmissionError> {
+    fn new(recipe: &'a Recipe, budget: &Debit<'_>) -> Result<Self, AdmissionError> {
         let mut index = Self {
             addresses: HashMap::new(),
             functions: Vec::new(),
         };
-        let mut rows = Vec::new();
         for leaf in &recipe.foreign_modules {
             if leaf.functions.is_empty() {
                 return Err(AdmissionError::Refused(format!(
@@ -60,13 +59,13 @@ impl<'a> ForeignIndex<'a> {
                 )));
             }
             budget.check()?;
-            rows.clear();
-            charge_rows::<u8>(
-                budget,
-                leaf.targets.iter().map(|row| row.target.len() + 43).sum(),
-            )?;
+            let encoded = budget.scratch();
+            let len = leaf.targets.iter().map(|row| row.target.len() + 43).sum();
+            charge_rows::<u8>(&encoded, len)?;
+            let mut rows = Vec::with_capacity(len);
             leaf.encode_archive_rows(&mut rows);
             let archives = ContentHash(Sha256::digest(&rows).into());
+            drop((rows, encoded));
             let selected = leaf
                 .targets
                 .binary_search_by(|row| row.target.cmp(&recipe.launch.target))
@@ -84,17 +83,14 @@ impl<'a> ForeignIndex<'a> {
                 {
                     return Err(AdmissionError::Binding("duplicate foreign address"));
                 }
-                push_row(
-                    &mut index.functions,
-                    ForeignSlot {
-                        address,
-                        function,
-                        abi,
-                        archive: leaf.targets[selected].archive,
-                        reached: false,
-                    },
-                    budget,
-                )?;
+                budget.reserve(&mut index.functions, 1)?;
+                index.functions.push(ForeignSlot {
+                    address,
+                    function,
+                    abi,
+                    archive: leaf.targets[selected].archive,
+                    reached: false,
+                });
             }
         }
         Ok(index)
@@ -119,7 +115,7 @@ pub(super) fn check(
     groups: &[Group],
     bodies: &[Body],
     semantics: &impl BackendSemantics,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<(), AdmissionError> {
     let GroupIndex { members, addresses } = index(recipe, groups, budget)?;
     let entry = *addresses
@@ -186,7 +182,7 @@ pub(super) fn check(
                             binding.get_or_insert("internal member index is out of range");
                             continue;
                         }
-                        graph.push(member, target, budget)?;
+                        graph.push(member, target)?;
                         MemberIndex {
                             group,
                             member: target,
@@ -228,7 +224,8 @@ pub(super) fn check(
                         if target.group == group {
                             binding.get_or_insert("external binding stays within the group");
                         } else {
-                            push_row(&mut out[group], target.group, budget)?;
+                            budget.reserve(&mut out[group], 1)?;
+                            out[group].push(target.group);
                             indegree[target.group] += 1;
                         }
                         if !std::mem::replace(&mut reached_groups[target.group], true) {
@@ -264,7 +261,7 @@ pub(super) fn check(
                 }
             }
         }
-        if !graph.strongly_connected(budget)? {
+        if !graph.strongly_connected()? {
             binding.get_or_insert("group is not strongly connected");
         }
     }
@@ -345,7 +342,7 @@ pub(super) fn check(
 fn index(
     recipe: &Recipe,
     groups: &[Group],
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<GroupIndex, AdmissionError> {
     charge_rows::<Vec<Member>>(budget, groups.len())?;
     let count = groups.iter().try_fold(0_usize, |count, group| {
@@ -387,7 +384,7 @@ fn record_identity<'a>(
     identity: &'a Identity,
     target: BoundIdentity,
     conflict: &mut Option<&'a Identity>,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<(), AdmissionError> {
     if !matches!(target, BoundIdentity::Member(_)) {
         charge_map::<&Identity, BoundIdentity>(budget, 1)?;
@@ -417,7 +414,7 @@ fn check_launch(
     recipe: &Recipe,
     entry: usize,
     bodies: &[Body],
-    budget: &DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<(), AdmissionError> {
     for (i, body) in bodies.iter().enumerate() {
         budget.check()?;
@@ -468,7 +465,7 @@ fn check_engine_tags(
     body: &DecodedBody,
     backend: Backend,
     semantics: &impl BackendSemantics,
-    budget: &DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<(), AdmissionError> {
     use hirsel_core_ir::normal;
     use hirsel_core_ir::{Callee, RtOp, Wait};
@@ -507,45 +504,47 @@ fn check_engine_tags(
     Ok(())
 }
 
-fn charge_map<K, V>(budget: &mut DecodeBudget, count: usize) -> Result<(), AdmissionError> {
+fn charge_map<K, V>(budget: &Debit<'_>, count: usize) -> Result<(), AdmissionError> {
     // Bound hash-table growth and its control bytes as well as the entries.
     charge_rows::<(K, V, u8)>(budget, count.saturating_mul(4))
 }
 
 // Record each internal edge when resolving the member's slots. The forward and
 // reverse searches then prove strong connectivity without decoding an edge again.
-struct InternalEdges {
+// The edges of one group are given back when the next group is walked.
+struct InternalEdges<'b> {
     forward: Vec<Vec<usize>>,
     reverse: Vec<Vec<usize>>,
+    debit: Debit<'b>,
 }
 
-impl InternalEdges {
-    fn new(members: usize, budget: &mut DecodeBudget) -> Result<Self, AdmissionError> {
-        charge_rows::<Vec<usize>>(budget, members.saturating_mul(2))?;
+impl<'b> InternalEdges<'b> {
+    fn new(members: usize, budget: &Debit<'b>) -> Result<Self, AdmissionError> {
+        let debit = budget.scratch();
+        charge_rows::<Vec<usize>>(&debit, members.saturating_mul(2))?;
         Ok(Self {
             forward: vec![Vec::new(); members],
             reverse: vec![Vec::new(); members],
+            debit,
         })
     }
 
-    fn push(
-        &mut self,
-        source: usize,
-        target: usize,
-        budget: &mut DecodeBudget,
-    ) -> Result<(), AdmissionError> {
-        push_row(&mut self.forward[source], target, budget)?;
-        push_row(&mut self.reverse[target], source, budget)?;
+    fn push(&mut self, source: usize, target: usize) -> Result<(), AdmissionError> {
+        self.debit.reserve(&mut self.forward[source], 1)?;
+        self.forward[source].push(target);
+        self.debit.reserve(&mut self.reverse[target], 1)?;
+        self.reverse[target].push(source);
         Ok(())
     }
 
-    fn strongly_connected(&self, budget: &mut DecodeBudget) -> Result<bool, AdmissionError> {
+    fn strongly_connected(&self) -> Result<bool, AdmissionError> {
         let n = self.forward.len();
         if n <= 1 {
             return Ok(n == 1);
         }
-        charge_rows::<bool>(budget, n)?;
-        charge_rows::<usize>(budget, n)?;
+        let budget = self.debit.scratch();
+        charge_rows::<bool>(&budget, n)?;
+        charge_rows::<usize>(&budget, n)?;
         let mut seen = vec![false; n];
         let mut pending = Vec::with_capacity(n);
         for graph in [&self.forward, &self.reverse] {
@@ -570,28 +569,20 @@ impl InternalEdges {
     }
 }
 
-fn push_row<T>(rows: &mut Vec<T>, row: T, budget: &mut DecodeBudget) -> Result<(), AdmissionError> {
-    if rows.len() == rows.capacity() {
-        let additional = rows.capacity().max(1);
-        charge_rows::<T>(budget, rows.len().saturating_add(additional))?;
-        rows.try_reserve_exact(additional)
-            .map_err(|_| AdmissionError::Limit(Limit::DecodeBytes))?;
-    }
-    rows.push(row);
-    Ok(())
-}
-
 /// Only requested groups need to be ordered. An external address outside
 /// this subset either already lives with the receiver or is its refusal.
 pub(super) fn send_order(
     recipe: &Recipe,
     groups: &[Group],
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<Vec<usize>, AdmissionError> {
-    let GroupIndex { addresses, .. } = index(recipe, groups, budget)?;
+    // Only the order outlives the walk.
+    let work = budget.scratch();
+    let GroupIndex { addresses, .. } = index(recipe, groups, &work)?;
     let count = groups.len();
-    charge_rows::<Vec<usize>>(budget, count)?;
-    charge_rows::<usize>(budget, count.saturating_mul(3))?;
+    charge_rows::<Vec<usize>>(&work, count)?;
+    charge_rows::<usize>(&work, count.saturating_mul(2))?;
+    charge_rows::<usize>(budget, count)?;
     let mut graph = vec![Vec::new(); count];
     let mut indegree = vec![0; count];
     for (group, rows) in groups.iter().enumerate() {
@@ -600,13 +591,14 @@ pub(super) fn send_order(
             if let Binding::External(address) = binding
                 && let Some(target) = addresses.get(address)
             {
-                push_row(&mut graph[target.group], group, budget)?;
+                work.reserve(&mut graph[target.group], 1)?;
+                graph[target.group].push(group);
                 indegree[group] += 1;
             }
         }
     }
     let mut order = Vec::with_capacity(count);
-    if !acyclic(&graph, indegree, Vec::with_capacity(count), budget, |i| {
+    if !acyclic(&graph, indegree, Vec::with_capacity(count), &work, |i| {
         order.push(i)
     })? {
         return Err(AdmissionError::Binding(
@@ -620,7 +612,7 @@ fn acyclic(
     graph: &[Vec<usize>],
     mut indegree: Vec<usize>,
     mut pending: Vec<usize>,
-    budget: &DecodeBudget,
+    budget: &Debit<'_>,
     mut visit: impl FnMut(usize),
 ) -> Result<bool, AdmissionError> {
     pending.extend(

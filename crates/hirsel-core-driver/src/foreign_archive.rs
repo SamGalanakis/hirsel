@@ -2,7 +2,7 @@
 use crate::code_admission::AdmissionError;
 use crate::code_store::ObjectKind;
 use hirsel_core_ids::{ContentHash, DefPath};
-use hirsel_core_ir::decode::DecodeBudget;
+use hirsel_core_ir::decode::{Debit, DecodeResult};
 use hirsel_core_ir::release_recipe::{ForeignLeaf, ObjectRef};
 use object::read::archive::{ArchiveFile, ArchiveKind};
 use object::read::elf::{ElfFile64, FileHeader, SectionHeader, Sym};
@@ -43,12 +43,13 @@ impl LinkArchives {
         leaf: &ForeignLeaf,
         target: &str,
         path: Option<&str>,
+        budget: &Debit<'_>,
         bytes: impl FnOnce() -> Result<Vec<u8>, AdmissionError>,
     ) -> Result<(), AdmissionError> {
         let row = match self.0.entry(object.hash) {
             std::collections::btree_map::Entry::Occupied(at) => at.into_mut(),
             std::collections::btree_map::Entry::Vacant(at) => at.insert(StagedArchive {
-                archive: SealedArchive::open(bytes()?, object, &leaf.module, target, path)?,
+                archive: SealedArchive::open(bytes()?, object, &leaf.module, target, path, budget)?,
                 module: leaf.module.clone(),
                 object,
                 path: path.map(str::to_owned),
@@ -67,13 +68,14 @@ impl LinkArchives {
 
     pub(crate) fn definitions(
         &self,
-        budget: &mut DecodeBudget,
+        budget: &Debit<'_>,
     ) -> Result<ForeignDefinitions<'_>, AdmissionError> {
-        budget.charge_bytes(self.0.len().saturating_mul(size_of::<&StagedArchive>()))?;
-        let mut rows: Vec<_> = self.0.values().collect();
-        rows.sort_unstable_by(|a, b| a.module.cmp(&b.module));
+        let rows = budget.scratch();
+        rows.charge_bytes(self.0.len().saturating_mul(size_of::<&StagedArchive>()))?;
+        let mut sorted: Vec<_> = self.0.values().collect();
+        sorted.sort_unstable_by(|a, b| a.module.cmp(&b.module));
         check_distinct_definitions(
-            rows.into_iter().map(|row| {
+            sorted.into_iter().map(|row| {
                 (
                     &row.archive,
                     ArchiveOrigin {
@@ -98,7 +100,7 @@ impl LinkArchives {
         if self.0.is_empty() {
             return Ok(());
         }
-        let symbols = self.definitions(&mut DecodeBudget::unlimited())?;
+        let symbols = self.definitions(&Debit::unlimited())?;
         symbols.check_tool_inputs(runtime, recipe)?;
         for input in &*inputs {
             symbols.check_link_input(&std::fs::read(input)?, "the generated code")?;
@@ -154,7 +156,7 @@ pub(crate) struct ForeignDefinitions<'a>(BTreeMap<&'a [u8], ArchiveOrigin<'a>>);
 
 pub(crate) fn check_distinct_definitions<'a>(
     archives: impl IntoIterator<Item = (&'a SealedArchive, ArchiveOrigin<'a>)>,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> Result<ForeignDefinitions<'a>, AdmissionError> {
     let mut seen = BTreeSet::new();
     let mut definitions = BTreeMap::<&[u8], ArchiveOrigin<'_>>::new();
@@ -287,6 +289,7 @@ impl SealedArchive {
         module: &DefPath,
         target: &str,
         path: Option<&str>,
+        budget: &Debit<'_>,
     ) -> Result<Self, AdmissionError> {
         let seal_error =
             || AdmissionError::Refused("FFI-3: this host cannot seal staged archives".into());
@@ -334,6 +337,9 @@ impl SealedArchive {
             return Err(bad_ar());
         }
         let indexed = ar.symbols().map_err(|_| bad_ar())?.ok_or_else(bad_ar)?;
+        // The member list lives while the members parse; the index and the
+        // parsed members are held by the sealed archive.
+        let listing = budget.scratch();
         let mut objects = Vec::new();
         for member in ar.members() {
             let member = member.map_err(|_| bad_ar())?;
@@ -350,6 +356,8 @@ impl SealedArchive {
                 .checked_sub(bytes.as_ptr().addr())
                 .ok_or_else(bad_ar)?;
             let data = member.data(bytes.as_slice()).map_err(|_| bad_ar())?;
+            listing.reserve(&mut objects, 1)?;
+            listing.charge_bytes(name.len())?;
             objects.push((
                 offset as u64,
                 String::from_utf8_lossy(name).into_owned(),
@@ -367,14 +375,26 @@ impl SealedArchive {
             {
                 return Err(bad_ar());
             }
-            symbols
-                .entry(entry.name().to_vec())
-                .and_modify(|symbol| symbol.offset = None)
-                .or_insert(IndexedSymbol {
-                    offset: Some(offset),
-                    definition_matches: None,
-                });
+            if let Some(symbol) = symbols.get_mut(entry.name()) {
+                symbol.offset = None;
+            } else {
+                // A B-tree node is at least half full, so an entry holds at
+                // most two slots besides its name.
+                budget.charge_bytes(
+                    size_of::<(Vec<u8>, IndexedSymbol)>()
+                        .saturating_mul(2)
+                        .saturating_add(entry.name().len()),
+                )?;
+                symbols.insert(
+                    entry.name().to_vec(),
+                    IndexedSymbol {
+                        offset: Some(offset),
+                        definition_matches: None,
+                    },
+                );
+            }
         }
+        budget.allocation::<Member>(objects.len())?;
         let mut members = Vec::with_capacity(objects.len());
         for (offset, name, bytes) in objects {
             let bad_member = || {
@@ -383,7 +403,7 @@ impl SealedArchive {
                     format!(": member {name} is not a relocatable object for {target}"),
                 )
             };
-            let member = parse_member(bytes, &name, target).ok_or_else(bad_member)?;
+            let member = parse_member(bytes, &name, target, budget)?.ok_or_else(bad_member)?;
             for symbol in member.symbols.iter().filter(|symbol| symbol.definition) {
                 if let Some(indexed) = symbols.get_mut(&symbol.name) {
                     indexed.definition_matches = Some(
@@ -515,7 +535,22 @@ fn seal(_: &[u8]) -> std::io::Result<File> {
     Err(std::io::ErrorKind::Unsupported.into())
 }
 
-fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
+/// The member `bytes` holds, or `None` when it is not a relocatable object for
+/// `target`. What the member keeps is charged to `budget`.
+fn parse_member(
+    bytes: &[u8],
+    name: &str,
+    target: &str,
+    budget: &Debit<'_>,
+) -> DecodeResult<Option<Member>> {
+    macro_rules! or_none {
+        ($e:expr) => {
+            match $e {
+                Ok(value) => value,
+                Err(_) => return Ok(None),
+            }
+        };
+    }
     let (machine, unwind, irelative) = match target {
         "x86_64-unknown-linux-gnu" => (
             elf::EM_X86_64,
@@ -527,10 +562,10 @@ fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
             elf::SHT_AARCH64_ATTRIBUTES,
             elf::R_AARCH64_IRELATIVE,
         ),
-        _ => return None,
+        _ => return Ok(None),
     };
     let endian = LittleEndian;
-    let file = ElfFile64::<LittleEndian>::parse(bytes).ok()?;
+    let file = or_none!(ElfFile64::<LittleEndian>::parse(bytes));
     let header = file.elf_header();
     if header.e_type(endian) != elf::ET_REL
         || header.e_machine(endian) != machine
@@ -539,8 +574,9 @@ fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
             elf::ELFOSABI_NONE | elf::ELFOSABI_GNU
         )
     {
-        return None;
+        return Ok(None);
     }
+    budget.charge_bytes(name.len())?;
     let mut member = Member {
         name: name.into(),
         symbols: vec![],
@@ -552,8 +588,8 @@ fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
     let mut first_bad_symbol = None;
     for (index, section) in sections.enumerate().skip(1) {
         let kind = section.sh_type(endian);
-        let name = sections.section_name(endian, section).ok()?;
-        let content = section.data(endian, bytes).ok()?;
+        let name = or_none!(sections.section_name(endian, section));
+        let content = or_none!(section.data(endian, bytes));
         if (!matches!(
             kind,
             elf::SHT_NULL
@@ -596,14 +632,15 @@ fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
         }
         if name == b".hirsel_abi" {
             // A non-PROGBITS section with this name cannot supply ABI text.
-            member
-                .abi
-                .push((kind == elf::SHT_PROGBITS).then(|| content.to_vec()));
+            let text = (kind == elf::SHT_PROGBITS).then(|| content.to_vec());
+            budget.charge_bytes(text.as_ref().map_or(0, Vec::len))?;
+            budget.reserve(&mut member.abi, 1)?;
+            member.abi.push(text);
         }
         if matches!(kind, elf::SHT_SYMTAB | elf::SHT_DYNSYM) {
-            let table = sections.symbol_table_by_index(endian, bytes, index).ok()?;
+            let table = or_none!(sections.symbol_table_by_index(endian, bytes, index));
             for (index, symbol) in table.enumerate().skip(1) {
-                let name = table.symbol_name(endian, symbol).ok()?.to_vec();
+                let name = or_none!(table.symbol_name(endian, symbol)).to_vec();
                 let bind = symbol.st_bind();
                 if first_bad_symbol.is_none() {
                     if symbol.st_type() == elf::STT_GNU_IFUNC {
@@ -623,11 +660,11 @@ fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
                 let strong_function = bind == elf::STB_GLOBAL
                     && symbol.st_type() == elf::STT_FUNC
                     && symbol.st_visibility() == elf::STV_DEFAULT
-                    && table
-                        .symbol_section(endian, symbol, index)
-                        .ok()?
+                    && or_none!(table.symbol_section(endian, symbol, index))
                         .is_some_and(|index| sections.section(index).is_ok());
                 // Symbol refusals are decided only after all section checks.
+                budget.charge_bytes(name.len())?;
+                budget.reserve(&mut member.symbols, 1)?;
                 member.symbols.push(Symbol {
                     name,
                     definition,
@@ -642,10 +679,11 @@ fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
             .get_or_insert_with(|| "no .note.GNU-stack".into());
     }
     member.bad_feature = member.bad_feature.or(first_bad_symbol);
+    budget.charge_bytes(member.bad_feature.as_ref().map_or(0, String::len))?;
     if member.bad_feature.is_none() {
         for section in sections.iter().skip(1) {
-            let rel = section.rel(endian, bytes).ok()?;
-            let rela = section.rela(endian, bytes).ok()?;
+            let rel = or_none!(section.rel(endian, bytes));
+            let rela = or_none!(section.rela(endian, bytes));
             if rel.is_some_and(|(rows, _)| rows.iter().any(|r| r.r_type(endian) == irelative))
                 || rela.is_some_and(|(rows, _)| {
                     rows.iter().any(|r| r.r_type(endian, false) == irelative)
@@ -656,7 +694,7 @@ fn parse_member(bytes: &[u8], name: &str, target: &str) -> Option<Member> {
             }
         }
     }
-    Some(member)
+    Ok(Some(member))
 }
 
 fn forbidden_section(name: &[u8]) -> bool {

@@ -180,9 +180,9 @@
     "reason": "verify-observer-2037"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2920,
-    "raise_revision": 2,
-    "reason": "verify-observer-2037"
+    "lines": 2799,
+    "raise_revision": 3,
+    "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1126,
@@ -196,7 +196,9 @@
     "lines": 1001
   },
   "crates/hirsel-core-driver/src/recipe_native.rs": {
-    "lines": 2184
+    "lines": 2187,
+    "raise_revision": 1,
+    "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
     "lines": 4309,
@@ -235,7 +237,9 @@
     "reason": "cs-store-split-1935"
   },
   "crates/hirsel-core-driver/src/tool_inputs.rs": {
-    "lines": 2523
+    "lines": 2532,
+    "raise_revision": 1,
+    "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-front/src/body/calls.rs": {
     "lines": 2619,

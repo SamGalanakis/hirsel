@@ -87,7 +87,7 @@ impl<'order, 'm, 'b> Write<'order, 'm, 'b> {
 }
 
 pub(crate) struct Read<'a, 'b> {
-    pub(super) budget: &'b mut DecodeBudget,
+    pub(super) budget: &'b Debit<'b>,
     depth: usize,
     bytes: &'a [u8],
     pub(super) pools: Pools,
@@ -97,11 +97,7 @@ pub(crate) struct Read<'a, 'b> {
 }
 
 impl<'a, 'b> Read<'a, 'b> {
-    pub(crate) fn new(
-        bytes: &'a [u8],
-        magic: &[u8],
-        budget: &'b mut DecodeBudget,
-    ) -> DecodeResult<Self> {
+    pub(crate) fn new(bytes: &'a [u8], magic: &[u8], budget: &'b Debit<'b>) -> DecodeResult<Self> {
         budget.check_depth(1)?;
         let header_len = magic.len() - 2;
         if bytes.get(..header_len) == Some(&magic[..header_len])
@@ -188,7 +184,10 @@ impl<'a, 'b> Read<'a, 'b> {
         })
     }
 
-    fn nested<T>(&mut self, decode: impl FnOnce(&mut Self) -> DecodeResult<T>) -> DecodeResult<T> {
+    pub(crate) fn nested<T>(
+        &mut self,
+        decode: impl FnOnce(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<T> {
         self.budget.check_depth(self.depth + 1)?;
         self.depth += 1;
         let result = decode(self);
@@ -440,9 +439,17 @@ macro_rules! pools {
             }
 
             fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
-                let items = Vec::<$ty>::read(input)?;
-                input.budget.reserve(&mut input.pools.$pool, items.len())?;
-                Ok(Self::push(&mut input.pools.$pool, items))
+                let len = input.count()?;
+                let start = input.pools.$pool.len();
+                input.nested(|input| {
+                    for _ in 0..len {
+                        let item = <$ty>::read(input)?;
+                        input.budget.reserve(&mut input.pools.$pool, 1)?;
+                        input.pools.$pool.push(item);
+                    }
+                    Ok(())
+                })?;
+                Ok(Self::new(start as u32, len as u32))
             }
         }
     )*};
@@ -555,7 +562,7 @@ impl Wire for DefPath {
             .next()
             .and_then(|p| p.split_once('@'))
             .ok_or_else(|| invalid("missing package version"))?;
-        fn component(text: &str, budget: &mut DecodeBudget) -> DecodeResult<String> {
+        fn component(text: &str, budget: &Debit<'_>) -> DecodeResult<String> {
             budget.charge_bytes(text.len())?;
             let mut input = text.as_bytes().iter().copied();
             let mut bytes = Vec::with_capacity(text.len());
@@ -588,9 +595,8 @@ impl Wire for DefPath {
             name,
         });
         // The canonical spelling may grow its output buffer geometrically.
-        input
-            .budget
-            .charge_bytes(text.len().saturating_mul(4).saturating_add(8))?;
+        let spelling = input.budget.scratch();
+        spelling.charge_bytes(text.len().saturating_mul(4).saturating_add(8))?;
         if path.definition_identity() != text
             || !version.bytes().all(|b| b.is_ascii_digit())
             || version.is_empty()

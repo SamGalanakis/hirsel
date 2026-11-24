@@ -2081,6 +2081,7 @@ pub(crate) mod tests {
     fn shared_foreign_thunk_fixture(profile: bool) {
         use crate::code_store::ObjectKind;
         use crate::foreign_archive::LinkArchives;
+        use hirsel_core_ir::decode::Debit;
         use hirsel_core_ir::release_recipe::{ForeignFunction, ForeignLeaf, ObjectRef};
 
         let dir = tempfile::tempdir().unwrap();
@@ -2180,7 +2181,9 @@ static const char abi[sizeof(ABI) - 1] = ABI;
         };
         let mut archives = LinkArchives::default();
         archives
-            .admit(archive, &leaf, TARGET, None, || Ok(bytes))
+            .admit(archive, &leaf, TARGET, None, &Debit::unlimited(), || {
+                Ok(bytes)
+            })
             .unwrap();
         let mut module = hirsel_core_ir::text::parse(
             r#"

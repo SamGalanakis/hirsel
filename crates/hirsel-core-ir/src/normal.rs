@@ -1,11 +1,10 @@
 //! PROG-10 normal form for checked instance modules.
 
-use crate::decode::{DecodeBudget, DecodeError, DecodeResult};
+use crate::decode::{Debit, DecodeError, DecodeResult};
 use crate::source::SourcePositions;
 use crate::*;
 use hirsel_core_ids::{ContentHash, DefPath, ItemPath, PackageId};
 use hirsel_core_layout::{Case, Field, FieldTy, FuncRef, Handle, Repr, TypeRef, Width};
-use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 
 pub(crate) fn uleb(bytes: &mut Vec<u8>, mut value: u64) {
@@ -36,21 +35,21 @@ pub(crate) fn closure_hash(rows: &[ClosureRow]) -> ContentHash {
 
 pub(crate) fn decoded_closure_hash(
     rows: &[ClosureRow],
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> DecodeResult<ContentHash> {
-    budget.transient(|budget| {
-        let empty = Module::default();
-        let meter = PlanMeter::new(budget);
+    let empty = Module::default();
+    let meter = PlanMeter::new(budget);
+    let bytes = {
         let mut order = ModuleOrder::metered(&empty, Some(&meter));
         let mut out = Write::module(&mut order);
         wire::encode_closure(rows, &mut out);
-        let bytes = out.bytes;
-        meter.finish(budget)?;
-        Ok(ContentHash::of_parts(
-            "hirsel.core-closure.v1",
-            [&bytes[..]],
-        ))
-    })
+        out.bytes
+    };
+    meter.settle()?;
+    Ok(ContentHash::of_parts(
+        "hirsel.core-closure.v1",
+        [&bytes[..]],
+    ))
 }
 
 pub const VERSION: u16 = 3;
@@ -63,6 +62,7 @@ mod results;
 use results::results;
 mod charge;
 pub(crate) mod wire;
+use charge::{PlanMeter, reserve};
 pub(crate) use charge::{charge_identity, charge_shape};
 use wire::{Read, Tagged, Wire, Write};
 
@@ -158,55 +158,6 @@ impl EncodedBody {
     }
 }
 
-/// Canonical traversal also serves the producer. In a decoder, keep the
-/// first refusal and stop descending before more work or allocation.
-struct PlanMeter {
-    budget: RefCell<DecodeBudget>,
-    error: Cell<Option<DecodeError>>,
-    depth: Cell<usize>,
-}
-
-impl PlanMeter {
-    fn new(budget: &mut DecodeBudget) -> Self {
-        Self {
-            budget: RefCell::new(std::mem::replace(budget, DecodeBudget::unlimited())),
-            error: Cell::new(None),
-            depth: Cell::new(0),
-        }
-    }
-
-    fn finish(self, budget: &mut DecodeBudget) -> DecodeResult<()> {
-        *budget = self.budget.into_inner();
-        self.error.into_inner().map_or(Ok(()), Err)
-    }
-
-    fn do_with<T>(&self, action: impl FnOnce(&mut DecodeBudget) -> DecodeResult<T>) -> Option<T> {
-        if self.error.get().is_some() {
-            return None;
-        }
-        match action(&mut self.budget.borrow_mut()) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                self.error.set(Some(error));
-                None
-            }
-        }
-    }
-
-    fn descend<T>(&self, action: impl FnOnce() -> T) -> Option<T> {
-        let depth = self.depth.get() + 1;
-        self.do_with(|budget| budget.check_depth(depth))?;
-        self.depth.set(depth);
-        let result = action();
-        self.depth.set(depth - 1);
-        Some(result)
-    }
-}
-
-fn reserve<T>(meter: Option<&PlanMeter>, vec: &mut Vec<T>, count: usize) -> bool {
-    meter.is_none_or(|meter| meter.do_with(|budget| budget.reserve(vec, count)).is_some())
-}
-
 #[derive(Default)]
 struct Numbers {
     order: Vec<usize>,
@@ -218,7 +169,7 @@ impl Numbers {
         self.number_metered(row, None)
     }
 
-    fn number_metered(&mut self, row: usize, meter: Option<&PlanMeter>) -> (u32, bool) {
+    fn number_metered(&mut self, row: usize, meter: Option<&PlanMeter<'_>>) -> (u32, bool) {
         if row >= self.by_row.len() {
             let additional = row + 1 - self.by_row.len();
             if !reserve(meter, &mut self.by_row, additional) {
@@ -263,7 +214,7 @@ impl Table {
         }
     }
 
-    fn discover(&mut self, row: usize, meter: Option<&PlanMeter>) -> (u32, bool) {
+    fn discover(&mut self, row: usize, meter: Option<&PlanMeter<'_>>) -> (u32, bool) {
         let (number, fresh) = self.numbers.number_metered(row, meter);
         if fresh && reserve(meter, &mut self.bytes, 1) {
             self.bytes.push(Vec::new());
@@ -290,7 +241,7 @@ enum LocalRow {
 
 struct ModuleOrder<'m> {
     module: &'m Module,
-    meter: Option<&'m PlanMeter>,
+    meter: Option<&'m PlanMeter<'m>>,
     types: Table,
     signatures: Table,
     statics: Table,
@@ -312,9 +263,15 @@ impl<'m> ModuleOrder<'m> {
         Self::metered(module, None)
     }
 
-    fn metered(module: &'m Module, meter: Option<&'m PlanMeter>) -> Self {
+    fn metered(module: &'m Module, meter: Option<&'m PlanMeter<'m>>) -> Self {
         let mut live_functions = Vec::new();
-        if reserve(meter, &mut live_functions, module.functions.len()) {
+        if meter.is_none_or(|meter| {
+            meter
+                .paid_by(&meter.live, |live| {
+                    live.reserve(&mut live_functions, module.functions.len())
+                })
+                .is_some()
+        }) {
             live_functions.resize(module.functions.len(), false);
         }
         Self {
@@ -416,18 +373,23 @@ impl<'m> ModuleOrder<'m> {
     }
 
     fn builtin_slot(&mut self, definition: &DefPath) {
-        if self.meter.is_some_and(|meter| {
-            meter
-                .do_with(|budget| charge_identity(definition, &[], budget))
+        let meter = self.meter;
+        // The slot's own identity, kept with the slots if it is new.
+        let identity = meter.map(|meter| meter.slots.scratch());
+        if let (Some(meter), Some(identity)) = (meter, &identity)
+            && meter
+                .paid_by(identity, |identity| {
+                    charge_identity(definition, &[], identity)
+                })
                 .is_none()
-        }) {
+        {
             return;
         }
         let slot = Slot::Builtin(definition.clone());
         if self.seen_slots.contains(&slot) {
             return;
         }
-        if self.meter.is_some_and(|meter| {
+        if meter.is_some_and(|meter| {
             meter
                 .do_with(|budget| {
                     budget.charge_slots(1)?;
@@ -437,12 +399,17 @@ impl<'m> ModuleOrder<'m> {
                     budget.charge_bytes(256)
                 })
                 .is_none()
-        }) || !reserve(self.meter, &mut self.slots, 1)
-        {
+                || meter
+                    .paid_by(&meter.slots, |slots| slots.reserve(&mut self.slots, 1))
+                    .is_none()
+        }) {
             return;
         }
         self.seen_slots.insert(slot.clone());
         self.slots.push(slot);
+        if let (Some(meter), Some(identity)) = (meter, identity) {
+            meter.slots.absorb(identity);
+        }
     }
 }
 
@@ -461,7 +428,7 @@ impl<'m> BodyOrder<'m> {
         Self::metered(body, None)
     }
 
-    fn metered(body: &'m Body, meter: Option<&PlanMeter>) -> Self {
+    fn metered(body: &'m Body, meter: Option<&PlanMeter<'_>>) -> Self {
         let mut blocks = Numbers::default();
         let mut values = Numbers::default();
         let mut pending = Vec::new();
@@ -564,7 +531,7 @@ impl Annex {
     }
 
     /// Read the annex sections and check their shape against the decoded body.
-    pub fn decode(bytes: &[u8], body: &Module, budget: &mut DecodeBudget) -> DecodeResult<Self> {
+    pub fn decode(bytes: &[u8], body: &Module, budget: &Debit<'_>) -> DecodeResult<Self> {
         let mut input = Read::new(bytes, ANNEX_MAGIC, budget)?;
         let len = input.count()?;
         if len != body.functions.len() {
@@ -655,7 +622,7 @@ pub fn prepare_assembly(
     sources: &SourcePositions<'_>,
 ) -> (EncodedBody, Annex, Module) {
     let (body, annex) = encode_with_annex(module, root, sources);
-    let (module, _) = decode_payload(&body.bytes, &mut DecodeBudget::unlimited())
+    let (module, _) = decode_payload(&body.bytes, &Debit::unlimited())
         .expect("the producer's normal form is readable");
     (body, annex, module)
 }
@@ -685,8 +652,8 @@ pub fn prepare_retained_assembly(
             ))
         })
         .collect();
-    let (module, _) = decode_payload(bytes, &mut DecodeBudget::unlimited())
-        .expect("the producer's normal form is readable");
+    let (module, _) =
+        decode_payload(bytes, &Debit::unlimited()).expect("the producer's normal form is readable");
     (Annex(functions, None), module)
 }
 
@@ -695,7 +662,7 @@ pub fn prepare_retained_assembly(
 pub fn retain(module: &Module, root: FuncId) -> (EncodedBody, Module) {
     let sources = crate::source::SourceMap::default();
     let (mut code, annex) = encode_with_annex(module, root, &sources.positions());
-    let mut retained = decode_payload(&code.bytes, &mut DecodeBudget::unlimited())
+    let mut retained = decode_payload(&code.bytes, &Debit::unlimited())
         .expect("our own normal body decodes")
         .0;
     retained.items.clone_from(&module.items);
@@ -798,7 +765,11 @@ fn encode_with_sources(
     (encoded, annex)
 }
 
-fn planned_closure(module: &Module, ty: TypeId, meter: Option<&PlanMeter>) -> Option<ContentHash> {
+fn planned_closure(
+    module: &Module,
+    ty: TypeId,
+    meter: Option<&PlanMeter<'_>>,
+) -> Option<ContentHash> {
     match meter {
         None => Some(module.closure(ty).hash),
         Some(meter) => {
@@ -812,9 +783,10 @@ fn metered_closure_hash(
     module: &Module,
     ty: TypeId,
     kind: ClosureKind,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> DecodeResult<ContentHash> {
-    budget.transient(|budget| Ok(module.closure_impl(ty, kind, Some(budget))?.hash))
+    let work = budget.scratch();
+    Ok(module.closure_impl(ty, kind, Some(&work))?.hash)
 }
 
 fn plan(module: &Module, root: FuncId) -> ModuleOrder<'_> {
@@ -824,7 +796,7 @@ fn plan(module: &Module, root: FuncId) -> ModuleOrder<'_> {
 fn plan_metered<'m>(
     module: &'m Module,
     root: FuncId,
-    meter: Option<&'m PlanMeter>,
+    meter: Option<&'m PlanMeter<'m>>,
 ) -> ModuleOrder<'m> {
     let mut order = ModuleOrder::metered(module, meter);
     order.planning = true;
@@ -1072,7 +1044,7 @@ pub struct DecodedBody {
 impl DecodedBody {
     /// The function's canonical identity. The closure hashes have already
     /// been checked during the decode.
-    pub fn identity(&self, function: FuncId, budget: &mut DecodeBudget) -> DecodeResult<Identity> {
+    pub fn identity(&self, function: FuncId, budget: &Debit<'_>) -> DecodeResult<Identity> {
         let row = self
             .module
             .functions
@@ -1091,7 +1063,7 @@ impl DecodedBody {
     }
 
     /// Resolve the retained slot in its canonical order.
-    pub fn slot_identity(&self, slot: usize, budget: &mut DecodeBudget) -> DecodeResult<Identity> {
+    pub fn slot_identity(&self, slot: usize, budget: &Debit<'_>) -> DecodeResult<Identity> {
         match self.slots.get(slot) {
             Some(Slot::External(function)) => self.identity(*function, budget),
             Some(Slot::Builtin(definition)) => {
@@ -1102,11 +1074,7 @@ impl DecodedBody {
         }
     }
 
-    pub fn signature(
-        &mut self,
-        function: FuncId,
-        budget: &mut DecodeBudget,
-    ) -> DecodeResult<ContentHash> {
+    pub fn signature(&mut self, function: FuncId, budget: &Debit<'_>) -> DecodeResult<ContentHash> {
         let id = self
             .module
             .functions
@@ -1143,18 +1111,17 @@ impl DecodedBody {
                 budget,
             )?;
         }
-        let abi_closures = &self.abi_closures;
-        let hash = budget.transient(|budget| {
-            let meter = PlanMeter::new(budget);
+        let meter = PlanMeter::new(budget);
+        let bytes = {
             let mut order = ModuleOrder::metered(&self.module, Some(&meter));
             let mut out = Write::module(&mut order);
             out.abi = true;
-            out.abi_closures = Some(abi_closures);
+            out.abi_closures = Some(&self.abi_closures);
             signature.write(&mut out);
-            let bytes = out.bytes;
-            meter.finish(budget)?;
-            Ok(ContentHash::of_parts(SIGNATURE_DOMAIN, [&bytes[..]]))
-        })?;
+            out.bytes
+        };
+        meter.settle()?;
+        let hash = ContentHash::of_parts(SIGNATURE_DOMAIN, [&bytes[..]]);
         self.signatures[id] = Some(hash);
         Ok(hash)
     }
@@ -1165,7 +1132,7 @@ fn cached_closure_hash(
     ty: TypeId,
     kind: ClosureKind,
     cached: &mut Vec<Option<ContentHash>>,
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> DecodeResult<ContentHash> {
     if cached.is_empty() {
         budget.reserve(cached, module.types.len())?;
@@ -1181,7 +1148,7 @@ fn cached_closure_hash(
     Ok(hash)
 }
 
-pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBody> {
+pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<DecodedBody> {
     let (module, closures) = decode_payload(bytes, budget)?;
     let malformed = || DecodeError::Malformed("noncanonical body");
     if module.functions.first().is_none_or(|f| f.body.is_none()) {
@@ -1196,8 +1163,9 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
                 budget.check()?;
                 if let Terminator::Switch { arms, .. } = term {
                     let arms = arms.get(&body.pools.arms).unwrap();
+                    let scratch = budget.scratch();
                     let mut values = Vec::new();
-                    budget.reserve(&mut values, arms.len())?;
+                    scratch.reserve(&mut values, arms.len())?;
                     values.extend(arms.iter().map(|arm| arm.value));
                     values.sort_unstable();
                     if values.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -1205,8 +1173,9 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
                     }
                 }
             }
+            let scratch = budget.scratch();
             let mut definitions = Vec::new();
-            budget.reserve(&mut definitions, body.values.len())?;
+            scratch.reserve(&mut definitions, body.values.len())?;
             definitions.resize(body.values.len(), false);
             for block in &body.blocks {
                 let values = block
@@ -1235,10 +1204,10 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
             }
         }
     }
-    // The plan is freed here but for its live-function bitmap and builtin slots, which
-    // are charged again as kept.
-    let (canonical, live_functions, builtins) = budget.transient(|budget| {
-        let meter = PlanMeter::new(budget);
+    // The plan is freed here but for its live-function bitmap and builtin
+    // slots, whose payers outlive it.
+    let meter = PlanMeter::new(budget);
+    let (canonical, live_functions, builtins) = {
         let plan = plan_metered(&module, FuncId(0), Some(&meter));
         let canonical = plan.canonical_locals
             && plan.functions.is_canonical(module.functions.len())
@@ -1249,21 +1218,14 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
                 .is_canonical(module.signatures.len())
             && plan.instances.numbers.is_canonical(module.instances.len())
             && plan.statics.numbers.is_canonical(module.statics.len());
-        let (live_functions, builtins) = (plan.live_functions, plan.slots);
-        meter.finish(budget)?;
-        Ok((canonical, live_functions, builtins))
-    })?;
-    budget.allocation::<bool>(live_functions.capacity())?;
-    budget.allocation::<Slot>(builtins.capacity())?;
-    for slot in &builtins {
-        if let Slot::Builtin(definition) = slot {
-            charge_identity(definition, &[], budget)?;
-        }
-    }
+        (canonical, plan.live_functions, plan.slots)
+    };
+    let (_live, kept_slots) = meter.finish()?;
     if !canonical {
         return Err(malformed());
     }
-    let mut slots = Vec::new();
+    let externals = budget.scratch();
+    let mut external_slots = Vec::new();
     for (row, function) in module.functions.iter().enumerate() {
         if !live_functions[row] && function.versioned {
             return Err(malformed());
@@ -1279,16 +1241,22 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
         }
         if live_functions[row] && function.body.is_none() {
             budget.charge_slots(1)?;
-            budget.reserve(&mut slots, 1)?;
-            slots.push(Slot::External(FuncId(row as u32)));
+            externals.reserve(&mut external_slots, 1)?;
+            external_slots.push(Slot::External(FuncId(row as u32)));
         }
     }
-    budget.reserve(&mut slots, builtins.len())?;
-    slots.extend(builtins);
+    // External slots come first, then the builtins in first-use order.
+    let mut slots = builtins;
+    let builtin_count = slots.len();
+    kept_slots.reserve(&mut slots, external_slots.len())?;
+    slots.append(&mut external_slots);
+    slots.rotate_left(builtin_count);
+    budget.absorb(kept_slots);
+    let hashed = budget.scratch();
     let mut closure_hashes = Vec::new();
     for (key, hashes) in module.instances.iter().zip(&closures) {
         for (&ty, &hash) in key.arguments.iter().zip(hashes) {
-            if cached_closure_hash(&module, ty, ClosureKind::Full, &mut closure_hashes, budget)?
+            if cached_closure_hash(&module, ty, ClosureKind::Full, &mut closure_hashes, &hashed)?
                 != hash
             {
                 return Err(malformed());
@@ -1307,7 +1275,7 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
 
 fn decode_payload(
     bytes: &[u8],
-    budget: &mut DecodeBudget,
+    budget: &Debit<'_>,
 ) -> DecodeResult<(Module, Vec<Vec<ContentHash>>)> {
     let mut input = Read::new(bytes, BODY_MAGIC, budget)?;
     let types = Wire::read(&mut input)?;
@@ -1347,9 +1315,17 @@ fn read_body(input: &mut Read<'_, '_>) -> DecodeResult<Body> {
     let mut body = Body::default();
     for _ in 0..input.count()? {
         let params = Wire::read(input)?;
-        let instructions = Vec::<Inst>::read(input)?;
-        input.budget.reserve(&mut body.insts, instructions.len())?;
-        let insts = PoolRange::push(&mut body.insts, instructions);
+        let len = input.count()?;
+        let start = body.insts.len();
+        input.nested(|input| {
+            for _ in 0..len {
+                let inst = Inst::read(input)?;
+                input.budget.reserve(&mut body.insts, 1)?;
+                body.insts.push(inst);
+            }
+            Ok(())
+        })?;
+        let insts = PoolRange::new(start as u32, len as u32);
         input.budget.reserve(&mut body.blocks, 1)?;
         input.budget.reserve(&mut body.terminators, 1)?;
         body.blocks.push(Block {

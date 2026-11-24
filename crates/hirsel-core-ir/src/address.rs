@@ -1,7 +1,7 @@
 //! PROG-10 code addresses, independent of reuse and native artifacts.
 
 use crate::Identity;
-use crate::decode::{DecodeBudget, DecodeResult};
+use crate::decode::{Debit, DecodeResult};
 use crate::normal::{
     uleb,
     wire::{Read, Wire, invalid},
@@ -94,7 +94,7 @@ impl Group {
 
     /// Read the frame. Admission checks member order against the identities in
     /// the bodies and validates the bindings once it has the whole closure.
-    pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<Self> {
+    pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<Self> {
         let mut input = Read::new(bytes, GROUP_MAGIC, budget)?;
         let count = input.count()?;
         if count == 0 || u32::try_from(count - 1).is_err() {

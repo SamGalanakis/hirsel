@@ -134,10 +134,10 @@ and refused one past it:
 
 **Attributes read.** `v`, `o`, `s`, `t`, `c`, `m` and these `a=` attributes: `group:BUNDLE`,
 `bundle-only`, `ice-ufrag`, `ice-pwd`, `ice-lite`, `ice-options`, `fingerprint`, `setup`,
-`tls-id`, `mid`, `rtcp-mux`, `rtcp-rsize`, `extmap` (with its optional direction and its
-extension attributes), `sendrecv`, `sendonly`, `recvonly`, `inactive`, `msid`, `ssrc` (only
-the `cname` and `msid` forms), `ssrc-group:FID`, `rtpmap`, `fmtp`, `rtcp-fb`, `rid`,
-`simulcast`, `candidate` and `end-of-candidates`. Session-level `ice-ufrag`, `ice-pwd`,
+`tls-id`, `mid`, `rtcp-mux`, `rtcp-rsize`, `extmap-allow-mixed`, `extmap` (with its optional
+direction and its extension attributes), `sendrecv`, `sendonly`, `recvonly`, `inactive`,
+`msid`, `ssrc` (only the `cname` and `msid` forms), `ssrc-group:FID`, `rtpmap`, `fmtp`,
+`rtcp-fb`, `rid`, `simulcast`, `candidate` and `end-of-candidates`. Session-level `ice-ufrag`, `ice-pwd`,
 `fingerprint`, `setup` and `tls-id` apply to every section that lacks its own. `ice-lite` is
 read and written only at session level. Any other attribute is skipped, as RFC 8866 §5.13
 requires of an unknown attribute. An extension URI or codec name outside `Ext` or `Codec` is
@@ -153,6 +153,9 @@ For `ssrc-audio-level`, the extension attribute `vad=on` or `vad=off` is kept in
 `Extmap.vad`, `None` when absent ([RFC 6464](https://www.rfc-editor.org/rfc/rfc6464) §4).
 An absent `vad` means `vad=on`, the RFC's default, everywhere this spec reads it.
 Other extension attributes are skipped.
+
+The negotiated extmap mode maps to `ext.Form` (RTP-3). `extmap-allow-mixed` gives `Mixed`.
+Without it, any negotiated ID above 14 gives `TwoOnly`, and otherwise the form is `OneOnly`.
 
 **Fingerprint.** Only `sha-256` is read. A description whose fingerprints are all of other
 hashes is `NoFingerprint`. RFC 8122 §5 lets an endpoint offer several. Every browser offers
@@ -199,6 +202,7 @@ each with its own `~` paused marker (RFC 8853 §5.1). Both forms are legal synta
 parsed. What the answer does with each is RTC-2's rule. A list that names a RID absent
 from `rids`, or a RID in the wrong direction, is `BadRid(i)`. So is a section with RIDs and
 no `a=simulcast` line.
+A simulcast RID is negotiated only when it is ASCII alphanumeric (RFC 8852 §3 wire grammar).
 
 **`tls-id`.** The `tls-id` attribute ([RFC 8842](https://www.rfc-editor.org/rfc/rfc8842)
 §5.5) is kept as bytes. It names the DTLS association. RTC-2 compares it to decide whether a
@@ -254,9 +258,10 @@ server adds (RTC-5).
    list is declined: the answer carries no `send` list, and every `RidRecv` RID is left out.
    For the `send` list, each RID is kept only when the intersection of its `pt=` list with
    the formats kept in step 3 is not empty (an absent `pt=` means every kept format), and
-   when every RID in its `depend=` list is also kept. A kept RID is answered `recv` with its
-   restrictions narrowed to that intersection and otherwise as offered. A RID is never
-   broadened. Each stream of the list keeps the alternatives whose RID was kept, and a
+   when it meets RTC-1's wire grammar and every RID in its `depend=` list is also kept.
+   A kept RID is answered `recv` with its restrictions narrowed to that intersection and
+   otherwise as offered. A RID is never broadened. Each stream of the list keeps the
+   alternatives whose RID was kept, and a
    stream left with none is removed. A paused alternative (`~`) is removed from the
    answer: the server does not track a stream it was told not to expect. The answer's
    `a=simulcast:recv` lists the remaining streams in the offer's order, which is a subset
@@ -437,12 +442,13 @@ reaches routing. Otherwise it returns `Repair(MediaIn(...))` with the media stre
 section, encoding, extended index and the original payload's view, and routing treats it
 as that media packet arriving late.
 
-**RTCP** is unprotected and parsed the same way, and its feedback returns as `Control`.
+**RTCP** is unprotected the same way. The session walks it with `rtcp.next(pkt, mut at)`
+after `rtcp.check(pkt, mode)` accepts the datagram, and its feedback returns as `Control`.
 
 **Authentication comes before state.** Before SRTP's `open` succeeds, the session may run
-only the rtp lane's stateless readers (`header.parse`, `ext.find`, `rtcp.next` and the value
-readers), because SRTP needs them to find the header and estimate the index. Every stateful
-operation (statistics, loss tracking, NACK, TWCC, `History`, `Rewrite`, BWE, the
+only the rtp lane's stateless readers (`header.parse`, `ext.find`, `rtcp.check`, `rtcp.next`
+and the value readers), because SRTP needs them to find the header and estimate the index.
+Every stateful operation (statistics, loss tracking, NACK, TWCC, `History`, `Rewrite`, BWE, the
 active-speaker score of RTC-6, and the SSRC-to-MID and SSRC-to-RID bindings above) is
 called only with the extended index that `open` authenticated, and only after it succeeded.
 A packet that fails `open`, or fails the replay window, changes no state anywhere in the
@@ -602,10 +608,11 @@ deadline or 50 ms, whichever comes first.
 
 1. The home unit decrypts once, in its receive slot (RTC-3).
 2. For each local down-track of `P` whose current or pending layer (RTC-6) is on encoding
-   `e`, the router calls the down-track's `Rewrite.on_packet` (RTP-11), which decides
-   whether the packet is forwarded, and under which layer. For a `Forward`, the rtp lane
-   writes a scratch copy of the header in the subscriber's wire identity: the down-track's
-   SSRC, the rewritten sequence number and timestamp, the subscriber's negotiated payload
+   `e`, the router calls the down-track's `Rewrite.on_packet` (RTP-11), which takes a
+   signed `ts: i64` extended by RTP-2 and decides whether the packet is forwarded, and under
+   which layer. `Forward` and `Late` carry the `u32` wire timestamp. For a `Forward`, the
+   rtp lane writes a scratch copy of the header in the subscriber's wire identity: the
+   down-track's SSRC, the rewritten sequence number and timestamp, the subscriber's negotiated payload
    type for that codec configuration, the subscriber section's MID value in the MID
    extension, the subscriber's negotiated extension IDs for every extension it keeps, no
    RID (a down-track is one unlabelled stream), and the codec descriptor's picture ID or
@@ -617,10 +624,13 @@ deadline or 50 ms, whichever comes first.
    home unit first copies the payload out of its receive slot into that one `Shared[Bytes]`
    (the copy step 3 makes for a remote unit), so the slot can be reused at the next
    `udp_recv` while the entry waits. At send, it takes the next transport-wide sequence number of the
-   subscriber's own transport (`twcc.assign`, RTP-8). The router then calls TLS-8
-   `seal_into` with the scratch header and the shared payload as source and the
-   subscriber's span of `out.data` as destination. One copy, made by the cipher. The
-   egress history records the original output rewrite (RTC-4).
+   subscriber's own transport (`twcc.assign`, RTP-8). When the payload is unchanged, the
+   router calls TLS-8 `seal_into` with the scratch header in the subscriber's span of
+   `out.data` and the shared payload as source: one copy, made by the cipher. When the
+   codec descriptor was rewritten, it writes header, rewritten descriptor and the rest
+   of the payload into the span and calls `seal` in place from the header's end, so the
+   descriptor is encrypted (rtp RTP-11). The egress history records the original output
+   rewrite (RTC-4).
 3. For each other unit with at least one down-track of `P`, the home unit posts one
    `Media(P, src, speaking, Shared[Bytes])` message, where `src` is the publisher's
    generation and `speaking` is the publication's speaking state (RTC-6) after this packet. The
@@ -629,7 +639,8 @@ deadline or 50 ms, whichever comes first.
 
 A `Repair` from the publisher (RTC-3) is routed the same way as the media packet whose
 index it carries. Each down-track's `Rewrite` answers it as it answers any packet arriving
-late.
+late. For an outbound RTX repair, `rtx.write` takes `pre` (the rewritten descriptor)
+before the shared remainder.
 
 The home unit keeps, per publication, the set of units with down-tracks (a `u64` bitmap, so
 at most 64 units). The ingress RTX ring keeps the plaintext packet as the rtp lane specifies,
@@ -639,9 +650,10 @@ unit. The home unit replies `RepairReply(P, src, dst, Shared[Bytes])` if `src` i
 there, and the remote unit rechecks both `src` and `dst` against its own fences when it
 takes the reply. Only units with a subscriber pay anything for a publication.
 
-**RTCP is terminated.** The router never forwards a subscriber's RR, NACK or TWCC to a
-publisher. Each session answers its own feedback (RTC-4) and estimates its own bandwidth
-(rtp lane). Publisher keyframe requests are the router's (RTC-6). A subscriber's sender
+**RTCP is terminated.** The session walks feedback with `rtcp.next(pkt, mut at)` after
+`rtcp.check(pkt, mode)` accepts the datagram (RTC-3). The router never forwards a subscriber's
+RR, NACK or TWCC to a publisher. Each session answers its own feedback (RTC-4) and estimates
+its own bandwidth (rtp lane). Publisher keyframe requests are the router's (RTC-6). A subscriber's sender
 reports are generated per down-track (RTC-4) from the down-track's own outgoing timeline.
 The router relies on RTP-11's `sr_timestamp` to answer that timeline's RTP timestamp for an
 NTP time, which is correct across a source switch only under RTC-6's switch rule.
@@ -676,10 +688,11 @@ generic dynacast selector. The subscriber's application decides why it wants a l
 router never knows.
 
 **Mapping onto `rtp`'s rewrite.** The switching itself is the rtp lane's `Rewrite`
-(RTP-11), one per down-track, whose masks hold 16 decode targets. The router translates each
-`Layer(e, s, t)` to `rewrite.target(Layer(source, i))`, where `source` is the router's key
-for encoding `e` of the publication and `i` comes from a **stable** per-codec map. The map
-never depends on how many layers a stream has shown so far, so a newly observed layer never
+(RTP-11), one per down-track, whose masks hold 32 decode targets. The router translates each
+`Layer(e, s, t)` to `rewrite.target(Layer(source, i))`, which refuses `i > 31`
+(`Unrepresentable`). `source` is the router's key for encoding `e` of the publication and
+`i` comes from a **stable** per-codec map. The map never depends on how many layers a stream
+has shown so far, so a newly observed layer never
 renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
 
 - **VP8 and H.264.** `i = t`, clamped to 3 (VP8's `TID` has two bits). H.264 without SVC
@@ -712,7 +725,7 @@ renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
   t)` then maps to the `d` with `(S_d, T_d) = (s, t)`. With no such `d`, it maps to the `d`
   whose pair is the greatest at or below `(s, t)` in both coordinates. A structure is
   **unrepresentable**, and refused explicitly with the encoding kept at its current target
-  and the refusal counted, when it has more than 16 decode targets, or when two decode
+  and the refusal counted, when it has more than 32 decode targets, or when two decode
   targets share one pair, or when no single greatest pair exists at or below some request.
   `needs` bit `d` is set unless the indication is Not Present, and `switches` bit `d` is set
   for `Switch` and at every keyframe (RTP-11). The map is rebuilt only when the structure
@@ -724,7 +737,8 @@ renumbers a target that is in use. `Off` is `rewrite.target(Off)`.
 show `Rewrite` the pending layer's keyframe. The router fills rtp's `Unit` per packet from
 `media_bits`: `start` and `end` from the descriptor or the marker bit (a VP8 packet with
 `S = 1` and partition index 0 starts a frame; a nonzero partition with `S = 1` does not),
-`keyframe` from the codec's keyframe test, and `needs` and `switches` from the map above.
+and `keyframe` from the codec's keyframe test. The RTP S9 unit adapter fills the 32-bit
+`needs` and `switches` masks from the map above.
 `Rewrite` commits a switch only at a decodable frame start. It forwards the rest of that
 frame under the same decision, and it keeps forwarding the old source until then.
 `Rewrite` answers `Wait` while it has no current layer, and the router then asks for a
@@ -769,17 +783,17 @@ publisher for a keyframe of the new encoding (below) and keeps forwarding the ol
 until one arrives. Going to `Off` takes effect at once. A frame is forwarded whole or not at
 all.
 
-**Keyframe requests.** A down-track that needs a keyframe (a switch, a subscriber's PLI or
-FIR, a `Wait` from its rewrite, or rtp's `Losses` answering `Reset`) calls `want` on its
-publication's encoding's rtp `Keyframes` (RTP-6), which the home unit keeps, one per
-encoding. The kind follows what the publisher negotiated for the encoding's payload type:
-`Pli` when it negotiated `nack pli` ([RFC 4585](https://www.rfc-editor.org/rfc/rfc4585)
-§§4.2, 6.3.1), otherwise `Fir` when it negotiated `ccm fir`
-([RFC 5104](https://www.rfc-editor.org/rfc/rfc5104) §4.3.1). With neither, no request is
-ever sent, because RFC 4585 §4.2 allows only negotiated feedback. The down-track waits for
-the next independent frame, and the wait is counted. The throttle interval is
-`max(100 ms, rtt)`, where `rtt` is the publisher session's round-trip estimate. When the
-estimate moves by more than a quarter, the router updates the interval **in place** on the
+**Keyframe requests.** A down-track that needs a keyframe calls `Keyframes.want(Loss|Switch, now)`
+(RTP-6). The home unit keeps one `Keyframes` per publication encoding. Picture loss, such
+as a subscriber's PLI or rtp's `Losses` answering `Reset`, is `Loss` and always requests
+PLI. A layer switch, a subscriber's FIR for a fresh decoder, or a `Wait` from the rewrite is
+`Switch`, which requests FIR when the publisher negotiated `ccm fir` for the encoding's
+payload type ([RFC 5104](https://www.rfc-editor.org/rfc/rfc5104) §4.3.1), and PLI otherwise.
+A PLI is sent only when the publisher negotiated `nack pli` for that payload type
+([RFC 4585](https://www.rfc-editor.org/rfc/rfc4585) §§4.2, 6.3.1). If the selected feedback
+was not negotiated, the down-track waits for the next independent frame and counts the wait.
+The throttle interval is `max(100 ms, rtt)`, where `rtt` is the publisher session's round-trip
+estimate. When the estimate moves by more than a quarter, the router updates the interval **in place** on the
 same `Keyframes`, keeping its outstanding request and its FIR command sequence number
 (RFC 5104 §4.3.1.1). It never makes a new one. `Keyframes` coalesces, so N subscribers asking
 at once cost one request. The router calls `keyframe_seen` at each keyframe it reads.
@@ -1266,7 +1280,7 @@ them under the host rules' matched-comparison terms, against mediasoup's
 
 | Target | Bar | Measured as |
 | --- | --- | --- |
-| Fan-out overhead | ≤ 250 ns per forwarded packet per down-track, excluding the cipher and the kernel | `bench/media/sfu_fanout`: 1 publisher, 1 to 64 down-tracks on one unit; instructions and cycles per packet, minus a run with `seal_into` replaced by a copy of the same bytes |
+| Fan-out overhead | ≤ 250 ns per forwarded packet per down-track, excluding the cipher and the kernel | `bench/media/sfu_fanout`: 1 publisher, 1 to 64 down-tracks on one unit; instructions and cycles per packet, subtracting a copy of the same bytes for both paths (`seal_into` and in-place `seal`) |
 | Allocations | 0 per forwarded packet | W18, and the bench's allocation counter |
 | Voice capacity | ≥ 2,000 audio streams per core | 2,000 sessions of 50 packets per second, 200-byte payloads, `audio_forward` 3, one unit; under 100 % of one core, with no drops counted |
 | Forwarding jitter | p99 < 500 µs from `udp_recv` return to `udp_send` issue | the same run, from `trace` timestamps |
@@ -1304,12 +1318,10 @@ W19, blocks, because those are soundness reds.
 - **Ownership:** the active-speaker detector is this package's (RTC-6), not the rtp lane's.
   The rtp lane parses the RFC 6464 extension.
 
-**Handed to the rtp amend after review 2336.** This chapter relies on three RTP operations
-that rtp.md does not yet state:
+**Handoff after review 2336.** All three items are done in [rtp.md](rtp.md):
 
-- RTP-11's switch timeline: the SR formula at rtp.md's Timestamps paragraph projects
-  capture time into the old source's clock but omits that source's current offset into the
-  output clock. It must subtract it, clamp, and fix the new offset at the accepted frame
+- RTP-11's switch timeline projects capture time into the old source's clock, subtracts
+  that source's current offset, clamps, and fixes the new offset at the accepted frame
   start. The no-SR fallback advances by elapsed arrival time at the clock rate (RTC-6).
 - RTP-7's egress history record: an entry maps the extended output index to the source
   generation, the ingress plaintext handle and the original output rewrite (sequence number,

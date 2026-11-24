@@ -721,9 +721,9 @@ bound never costs replay protection.
 3711 Appendix A's three cases, without reduction modulo `2^32`, and `i = 2^16 × v + SEQ`.
 This is exactly `rtp.seq.estimate` ([RTP-2](rtp.md#rtp-2-extended-sequence-numbers)), which
 also does not reduce; once that lands, `srtp` depends on `rtp` and calls it rather than
-keeping a second copy, and sending uses it too. A `v` of `ROC − 1` when ROC is 0
-(`rtp.seq.estimate` answers `None`) is `TooOld`, since no such packet was ever sent, and so
-is `v = 2^32`, whose index passes `2^48 − 1`.
+keeping a second copy, and sending uses it too. `rtp.seq.estimate` answers `Before` (a `v`
+of `ROC − 1` when ROC is 0), which is `TooOld`, or `Beyond` (above `2^48 − 1`), which a
+receiver discards and a sender treats as exhausted.
 
 **Replay.** Before opening, an index more than 127 below the highest authenticated index is
 `TooOld`, and one inside the window already marked is `Replayed`. Both are discards with

@@ -19,7 +19,12 @@ impl Cx<'_, '_, '_> {
         }
         let tag_index = match op {
             HostOp::ScheduleQuicInitial => Some(0),
-            HostOp::ScheduleSealer | HostOp::ScheduleOpener | HostOp::ScheduleHeaderMask => Some(1),
+            HostOp::ScheduleSealer
+            | HostOp::ScheduleOpener
+            | HostOp::ScheduleHeaderMask
+            | HostOp::ScheduleRetire
+            | HostOp::ScheduleFinished
+            | HostOp::ScheduleVerifyFinished => Some(1),
             _ => None,
         };
         if let Some(index) = tag_index {
@@ -55,10 +60,24 @@ impl Cx<'_, '_, '_> {
             ok,
             n,
             |cx, to, ty| {
+                if matches!(
+                    op,
+                    HostOp::ScheduleApplication
+                        | HostOp::ScheduleKeyUpdate
+                        | HostOp::ScheduleRetire
+                ) {
+                    return;
+                }
                 if let Some(out) =
                     cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
                 {
-                    cx.runtime_store(out, &[], word, value, n);
+                    if op == HostOp::ScheduleVerifyFinished {
+                        if let Some(valid) = cx.runtime_compare(word, value, 1, n) {
+                            cx.runtime_store(out, &[], Ty::Scalar(Scalar::Bool), valid, n);
+                        }
+                    } else {
+                        cx.runtime_store(out, &[], word, value, n);
+                    }
                 }
             },
             |cx, to, ty| {

@@ -7,6 +7,7 @@ pub(crate) mod capture;
 mod import;
 mod packet;
 mod schedule;
+mod transitions;
 use crate::{
     limit::Payer,
     secret::{Charge, ChargeCell, HandedOver},

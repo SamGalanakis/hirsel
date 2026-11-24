@@ -10,6 +10,9 @@ pub(crate) enum Delivery {
     Child {
         admits_invalid: bool,
     },
+    Scalar {
+        max: u64,
+    },
     Packet {
         value: u64,
         bytes: usize,
@@ -108,6 +111,7 @@ pub(crate) unsafe fn valid(request: &Request, answer: &Out, event: u64) -> bool 
     let call = unsafe { &*request.path.cast::<Capture<'_>>() };
     match (call.delivery, answer.status) {
         (Delivery::Child { .. }, OK) => answer.value == event && answer.payload.is_empty(),
+        (Delivery::Scalar { max }, OK) => answer.value <= max && answer.payload.is_empty(),
         (
             Delivery::Child {
                 admits_invalid: true,

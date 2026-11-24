@@ -5,7 +5,8 @@ use hirsel_core_net::{
     packet_aead::{self, PacketError, PacketLengths},
     packet_cipher::{HeaderMask, PacketCipher, TAG_LEN},
     packet_epoch::{self, Epoch, IssueError},
-    packet_nonce::{NonceFormat, ReceiverNonce, SenderCounter},
+    packet_nonce::{ReceiverNonce, SenderCounter},
+    packet_schedule,
     secret_aead::AeadAlg,
     tls_kdf::{Side, Tls13Handshake, TlsHash},
 };
@@ -13,11 +14,7 @@ use std::mem::MaybeUninit;
 
 pub(super) enum Payload {
     Share(key_share::Share),
-    Schedule {
-        epoch: Epoch<Limit>,
-        space: u64,
-        _handshake: Option<Tls13Handshake>,
-    },
+    Schedule(packet_schedule::Schedule<Limit>),
     Sealer(SenderCounter, AeadAlg, PacketCipher),
     Opener(ReceiverNonce, AeadAlg, PacketCipher),
     Mask(HeaderMask),
@@ -68,8 +65,8 @@ impl Machine<'_> {
                 self.refund_registry();
                 64
             }
-            Payload::Schedule { epoch, .. } => {
-                for paid in epoch.into_ledger() {
+            Payload::Schedule(schedule) => {
+                for paid in schedule.into_ledger() {
                     self.refund(paid, packet_epoch::DOMAIN_CHARGE);
                 }
                 packet_epoch::SCHEDULE_CHARGE
@@ -100,27 +97,30 @@ impl Machine<'_> {
                     }));
                 }
                 let epoch = Epoch::quic_initial(side, self.carrier_bytes(a[1])).unwrap();
-                Ok(self.media_hold(
-                    payer,
-                    Payload::Schedule {
-                        epoch,
-                        space: 0,
-                        _handshake: None,
-                    },
-                ))
+                let state = packet_schedule::Schedule::single(0, epoch);
+                Ok(self.media_hold(payer, Payload::Schedule(state)))
             }
             HostOp::ScheduleImportTraffic => Ok(self.import_traffic(payer, a)),
             HostOp::ScheduleTls13 => Ok(self.tls13(payer, a)),
+            HostOp::ScheduleApplication | HostOp::ScheduleKeyUpdate | HostOp::ScheduleRetire => {
+                Ok(self.schedule_transition(op, a))
+            }
+            HostOp::ScheduleFinished | HostOp::ScheduleVerifyFinished => {
+                Ok(self.schedule_finished(op, a))
+            }
             HostOp::ScheduleSealer | HostOp::ScheduleOpener | HostOp::ScheduleHeaderMask => {
                 let slot = a[0] as usize;
                 let mut held = self.world.media[slot].take().unwrap();
-                let Payload::Schedule { epoch, space, .. } = &mut held.payload else {
+                let Payload::Schedule(schedule) = &mut held.payload else {
                     unreachable!()
                 };
-                if a[1] != *space {
-                    self.world.media[slot] = Some(held);
-                    return Ok(issue_error(IssueError::Invalid));
-                }
+                let epoch = match schedule.epoch(a[1]) {
+                    Ok(epoch) => epoch,
+                    Err(error) => {
+                        self.world.media[slot] = Some(held);
+                        return Ok(issue_error(error));
+                    }
+                };
                 let child = match op {
                     HostOp::ScheduleSealer => epoch
                         .sealer(a[2], a[3], |n| {
@@ -239,20 +239,75 @@ impl Machine<'_> {
         let labels = packet_epoch::tls13_labels(format).unwrap();
         let handshake =
             Tls13Handshake::new(hash, labels, &shared, self.carrier_bytes(a[5])).unwrap();
-        let format = if format == NonceFormat::QuicMultipath {
-            NonceFormat::Quic
-        } else {
-            format
+        let schedule = packet_schedule::Schedule::tls13(format, algorithm, side, Some(handshake));
+        self.media_hold(payer, Payload::Schedule(schedule))
+    }
+
+    fn schedule_transition(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
+        let slot = a[0] as usize;
+        let mut held = self.world.media[slot].take().unwrap();
+        let Payload::Schedule(schedule) = &mut held.payload else {
+            unreachable!()
         };
-        let epoch = Epoch::traffic(format, algorithm, side, Some(handshake.traffic()));
-        self.media_hold(
-            payer,
-            Payload::Schedule {
-                epoch,
-                space: 1,
-                _handshake: Some(handshake),
-            },
-        )
+        let result = match op {
+            HostOp::ScheduleApplication => {
+                let hash = self.carrier_bytes(a[1]);
+                schedule
+                    .check_application(hash)
+                    .map(|()| schedule.application(hash))
+            }
+            HostOp::ScheduleKeyUpdate => {
+                let local = a[1] != 0;
+                schedule.check_update(local).map(|()| {
+                    for payer in schedule.key_update(local) {
+                        self.refund(payer, packet_epoch::DOMAIN_CHARGE);
+                    }
+                })
+            }
+            HostOp::ScheduleRetire => schedule.check_retire(a[1]).map(|()| {
+                for payer in schedule.retire() {
+                    self.refund(payer, packet_epoch::DOMAIN_CHARGE);
+                }
+            }),
+            _ => unreachable!(),
+        };
+        self.world.media[slot] = Some(held);
+        result.map_or_else(issue_error, |()| vec![0; 4])
+    }
+
+    fn schedule_finished(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
+        let Payload::Schedule(schedule) =
+            &self.world.media[a[0] as usize].as_ref().unwrap().payload
+        else {
+            unreachable!()
+        };
+        let hash = self.carrier_bytes(a[2]);
+        let size = match schedule.finished_size(hash) {
+            Ok(size) => size,
+            Err(error) => return issue_error(error),
+        };
+        let of = if a[1] == 0 {
+            Side::Client
+        } else {
+            Side::Server
+        };
+        if op == HostOp::ScheduleVerifyFinished {
+            let valid = schedule.verify_finished(of, hash, self.carrier_bytes(a[3]), size);
+            return vec![u64::from(valid), 0, 0, 0];
+        }
+        let (_, dst, len, cap) = self.carrier(a[3]);
+        let available = cap - len;
+        if available < size as u64 {
+            return issue_error(IssueError::Capacity {
+                requested: size as u64,
+                available,
+            });
+        }
+        let mut bytes = [0u8; 48];
+        schedule.finished(of, hash, &mut bytes[..size]);
+        self.put(dst + len, &bytes[..size]);
+        self.store(a[3] + 8, 8, len + size as u64);
+        vec![size as u64, 0, 0, 0]
     }
 
     fn import_traffic(&mut self, payer: Limit, args: &[u64]) -> Vec<u64> {
@@ -294,18 +349,12 @@ impl Machine<'_> {
                 return row;
             }
         };
-        let epoch = Epoch::import_traffic(format, algorithm, authority, &bytes);
+        let schedule =
+            packet_schedule::Schedule::import_traffic(format, algorithm, authority, Some(&bytes));
         drop(bytes);
         self.secret_drop(key);
-        match epoch {
-            Ok(epoch) => self.media_hold(
-                payer,
-                Payload::Schedule {
-                    epoch,
-                    space: 2,
-                    _handshake: None,
-                },
-            ),
+        match schedule {
+            Ok(schedule) => self.media_hold(payer, Payload::Schedule(schedule)),
             Err(_) => {
                 self.refund(payer, request);
                 issue_error(IssueError::Invalid)

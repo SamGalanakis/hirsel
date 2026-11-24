@@ -14,6 +14,16 @@ pub fn tls13(p: Profile13, side: Side, take k: secret.KeyShare, peer: Bytes, hel
 
 pub fn import_traffic(p: Profile13, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
 
+pub fn application(mut s: Schedule, finished_hash: Bytes) -> Result[(), ScheduleError]
+
+pub fn key_update(mut s: Schedule, local: bool) -> Result[(), ScheduleError]
+
+pub fn retire(mut s: Schedule, space: packet.Space) -> Result[(), ScheduleError]
+
+pub fn finished(s: Schedule, of: Side, transcript_hash: Bytes, mut out: Bytes) -> Result[u64, ScheduleError]
+
+pub fn verify_finished(s: Schedule, of: Side, transcript_hash: Bytes, received: Bytes) -> Result[bool, ScheduleError]
+
 pub fn sealer(mut s: Schedule, space: packet.Space, domain: u64, floor: u64) -> Result[packet.Sealer, ScheduleError]
 
 pub fn opener(s: Schedule, space: packet.Space) -> Result[packet.Opener, ScheduleError]

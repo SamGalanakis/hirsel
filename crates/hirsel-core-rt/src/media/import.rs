@@ -7,7 +7,8 @@ use crate::{
 };
 use hirsel_core_net::{
     ImportKind, ImportRefusal,
-    packet_epoch::{Epoch, IssueError, SCHEDULE_CHARGE, traffic_profile},
+    packet_epoch::{IssueError, SCHEDULE_CHARGE, traffic_profile},
+    packet_schedule,
 };
 
 /// # Safety
@@ -52,13 +53,15 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
     };
     // SAFETY: the spent mark committed and this consumes the guest holder.
     unsafe { secret::hirsel_core_secret_drop(context, key) };
-    let mut epoch = None;
+    let mut state = None;
     let mut derive = || {
         let Some(bytes) = import.bytes.as_ref() else {
             unreachable!("a replay must supply the opaque delivery")
         };
-        epoch = Epoch::import_traffic(format, algorithm, authority, bytes).ok();
-        if epoch.is_some() {
+        state =
+            packet_schedule::Schedule::import_traffic(format, algorithm, authority, Some(bytes))
+                .ok();
+        if state.is_some() {
             Outcome::default()
         } else {
             refusal(IssueError::Invalid)
@@ -126,15 +129,14 @@ pub unsafe extern "C" fn hirsel_core_schedule_import_traffic(
             0
         }
     };
-    let epoch = epoch
-        .unwrap_or_else(|| Epoch::opaque_traffic_import(format, algorithm, authority).unwrap());
+    let state = state.unwrap_or_else(|| {
+        packet_schedule::Schedule::import_traffic(format, algorithm, authority, None).unwrap()
+    });
     // SAFETY: this call still owns the admitted charge, tied to its running context.
     let charge = track(unsafe { &*context }, charge);
     owned(Schedule {
-        epoch,
-        space: 2,
+        state,
         origin,
-        _handshake: None,
         _charge: charge,
     })
 }

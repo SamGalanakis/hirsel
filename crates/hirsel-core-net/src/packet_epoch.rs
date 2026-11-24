@@ -127,18 +127,27 @@ impl<C> Epoch<C> {
             _ => return Err(ImportError::Denied),
         };
         let labels = tls13_labels(format).ok_or(ImportError::Invalid)?;
-        let live = match secret {
-            Some(secret) => DirectionKeys::Live(
-                Tls13PacketKeys::import(labels, algorithm, secret).ok_or(ImportError::Invalid)?,
-            ),
-            None => DirectionKeys::Opaque,
-        };
+        let keys = secret
+            .map(|secret| {
+                Tls13PacketKeys::import(labels, algorithm, secret).ok_or(ImportError::Invalid)
+            })
+            .transpose()?;
+        Ok(Self::directional(format, algorithm, send, keys))
+    }
+
+    pub(super) fn directional(
+        format: NonceFormat,
+        algorithm: AeadAlg,
+        send: bool,
+        keys: Option<Tls13PacketKeys>,
+    ) -> Self {
+        let live = keys.map_or(DirectionKeys::Opaque, DirectionKeys::Live);
         let (send, receive) = if send {
             (live, DirectionKeys::Missing)
         } else {
             (DirectionKeys::Missing, live)
         };
-        Ok(Self::new(format, algorithm, send, receive))
+        Self::new(format, algorithm, send, receive)
     }
 
     pub fn quic_initial(side: Side, dcid: &[u8]) -> Option<Self> {
@@ -157,16 +166,12 @@ impl<C> Epoch<C> {
         side: Side,
         traffic: Option<&Tls13Traffic>,
     ) -> Self {
-        let peer = match side {
-            Side::Client => Side::Server,
-            Side::Server => Side::Client,
-        };
         let keys = |sender| {
             traffic.map_or(DirectionKeys::Opaque, |traffic| {
                 DirectionKeys::Live(traffic.packet_keys(sender, algorithm))
             })
         };
-        Self::new(format, algorithm, keys(side), keys(peer))
+        Self::new(format, algorithm, keys(side), keys(side.peer()))
     }
 
     /// The evaluator applies refunds through its task scheduler.
@@ -272,9 +277,46 @@ impl<C> Epoch<C> {
         Ok((mask, charge))
     }
 
-    pub fn retire(&mut self) {
+    pub(super) fn key_update(
+        &mut self,
+        local: bool,
+        keys: Option<Tls13PacketKeys>,
+    ) -> impl Iterator<Item = C> {
+        let direction = if local {
+            &mut self.send
+        } else {
+            &mut self.receive
+        };
+        if let Some(mut next) = keys {
+            if matches!(self.format, NonceFormat::Quic | NonceFormat::QuicMultipath)
+                && let DirectionKeys::Live(before) = direction
+            {
+                next.keep_header_of(before);
+            }
+            *direction = DirectionKeys::Live(next);
+        }
+        let ledger = if local {
+            Some(std::mem::take(self.domains.as_mut().unwrap()))
+        } else {
+            None
+        };
+        ledger.into_iter().flat_map(BTreeMap::into_values)
+    }
+
+    pub(super) fn retired(&self) -> bool {
+        self.domains.is_none()
+    }
+
+    pub(super) fn retire_entries(&mut self) -> impl Iterator<Item = C> {
         self.send.erase();
         self.receive.erase();
-        drop(self.domains.take());
+        self.domains
+            .take()
+            .into_iter()
+            .flat_map(BTreeMap::into_values)
+    }
+
+    pub fn retire(&mut self) {
+        drop(self.retire_entries());
     }
 }

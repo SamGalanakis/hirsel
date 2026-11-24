@@ -172,6 +172,15 @@ pub enum Side {
     Server,
 }
 
+impl Side {
+    pub fn peer(self) -> Self {
+        match self {
+            Self::Client => Self::Server,
+            Self::Server => Self::Client,
+        }
+    }
+}
+
 /// The packet keys computed for one send or receive epoch.
 pub struct Tls13PacketKeys {
     payload: Zeroizing<[u8; 32]>,
@@ -182,13 +191,11 @@ pub struct Tls13PacketKeys {
 
 impl Tls13PacketKeys {
     pub(super) fn import(labels: Tls13Labels, algorithm: AeadAlg, secret: &[u8]) -> Option<Self> {
-        let hash = TlsHash::for_aead(algorithm);
-        if secret.len() != hash.output_len() {
-            return None;
-        }
-        let mut bytes = Zeroizing::new([0; MAX_HASH_LEN]);
-        bytes[..secret.len()].copy_from_slice(secret);
-        Some(DigestSecret { hash, bytes }.packet_keys(labels, algorithm))
+        Some(Tls13Direction::new(labels, algorithm, secret)?.packet_keys())
+    }
+
+    pub(super) fn keep_header_of(&mut self, before: &mut Self) {
+        self.header = before.header.take();
     }
 
     pub fn payload(&self) -> &[u8] {
@@ -205,11 +212,16 @@ impl Tls13PacketKeys {
 }
 
 impl DigestSecret {
-    fn packet_keys(&self, labels: Tls13Labels, algorithm: AeadAlg) -> Tls13PacketKeys {
+    fn packet_keys(
+        &self,
+        labels: Tls13Labels,
+        algorithm: AeadAlg,
+        updating: bool,
+    ) -> Tls13PacketKeys {
         let (key_label, iv_label, header_label): (&[u8], &[u8], Option<&[u8]>) = match labels {
             Tls13Labels::Tls => (b"key", b"iv", None),
             Tls13Labels::Dtls => (b"key", b"iv", Some(b"sn")),
-            Tls13Labels::Quic => (b"quic key", b"quic iv", Some(b"quic hp")),
+            Tls13Labels::Quic => (b"quic key", b"quic iv", (!updating).then_some(b"quic hp")),
         };
         let key_len = algorithm.algorithm().key_len();
         let expand = |label, output: &mut [u8]| {
@@ -259,16 +271,59 @@ impl Tls13Traffic {
     }
 
     pub fn packet_keys(&self, sending: Side, alg: AeadAlg) -> Tls13PacketKeys {
-        self.secrets[sending as usize].packet_keys(self.labels, alg)
+        self.secrets[sending as usize].packet_keys(self.labels, alg, false)
     }
 
     pub fn key_update(&mut self, side: Side) {
         let secret = &mut self.secrets[side as usize];
-        let label: &[u8] = match self.labels {
+        *secret = secret.updated(self.labels);
+    }
+
+    pub fn update_packet_keys(&mut self, side: Side, algorithm: AeadAlg) -> Tls13PacketKeys {
+        self.key_update(side);
+        self.secrets[side as usize].packet_keys(self.labels, algorithm, true)
+    }
+}
+
+impl DigestSecret {
+    fn updated(&self, labels: Tls13Labels) -> Self {
+        let label: &[u8] = match labels {
             Tls13Labels::Quic => b"quic ku",
-            _ => b"traffic upd",
+            Tls13Labels::Dtls | Tls13Labels::Tls => b"traffic upd",
         };
-        *secret = secret.expand(self.labels, label, &[]);
+        self.expand(labels, label, &[])
+    }
+}
+
+/// A single imported application traffic direction.
+pub(super) struct Tls13Direction {
+    labels: Tls13Labels,
+    algorithm: AeadAlg,
+    secret: DigestSecret,
+}
+
+impl Tls13Direction {
+    pub(super) fn new(labels: Tls13Labels, algorithm: AeadAlg, secret: &[u8]) -> Option<Self> {
+        let hash = TlsHash::for_aead(algorithm);
+        if secret.len() != hash.output_len() {
+            return None;
+        }
+        let mut bytes = Zeroizing::new([0; MAX_HASH_LEN]);
+        bytes[..secret.len()].copy_from_slice(secret);
+        Some(Self {
+            labels,
+            algorithm,
+            secret: DigestSecret { hash, bytes },
+        })
+    }
+
+    pub(super) fn packet_keys(&self) -> Tls13PacketKeys {
+        self.secret.packet_keys(self.labels, self.algorithm, false)
+    }
+
+    pub(super) fn key_update(&mut self) -> Tls13PacketKeys {
+        self.secret = self.secret.updated(self.labels);
+        self.secret.packet_keys(self.labels, self.algorithm, true)
     }
 }
 
@@ -276,8 +331,9 @@ impl Tls13Traffic {
 /// Traffic secrets are confined to the schedule's protocol operations.
 pub struct Tls13Handshake {
     secret: Option<DigestSecret>,
-    traffic: Tls13Traffic,
-    finished_keys: [DigestSecret; 2],
+    labels: Tls13Labels,
+    traffic: Option<Tls13Traffic>,
+    finished_keys: Option<[DigestSecret; 2]>,
 }
 
 impl Tls13Handshake {
@@ -302,17 +358,25 @@ impl Tls13Handshake {
             .map(|secret| secret.expand(labels, b"finished", &[]));
         Some(Self {
             secret: Some(handshake),
-            traffic: Tls13Traffic { labels, secrets },
-            finished_keys,
+            labels,
+            traffic: Some(Tls13Traffic { labels, secrets }),
+            finished_keys: Some(finished_keys),
         })
     }
 
     pub fn traffic(&self) -> &Tls13Traffic {
-        &self.traffic
+        self.traffic
+            .as_ref()
+            .expect("handshake traffic is available before retirement")
+    }
+
+    pub fn retire(&mut self) {
+        self.traffic = None;
+        self.finished_keys = None;
     }
 
     pub fn finished(&self, side: Side, transcript_hash: &[u8], out: &mut [u8]) -> Option<()> {
-        let secret = &self.finished_keys[side as usize];
+        let secret = &self.finished_keys.as_ref()?[side as usize];
         let hash = secret.hash;
         if transcript_hash.len() != hash.output_len() || out.len() != hash.output_len() {
             return None;
@@ -327,7 +391,7 @@ impl Tls13Handshake {
         if finished_hash.len() != hash.output_len() {
             return None;
         }
-        let labels = self.traffic.labels;
+        let labels = self.labels;
         let derived = self.secret.take()?.derived(labels);
         let zero = &[0; MAX_HASH_LEN][..hash.output_len()];
         let master = DigestSecret::extract(hash, derived.as_bytes(), zero);

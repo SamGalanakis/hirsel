@@ -334,6 +334,11 @@ impl Function<'_, '_, '_> {
                     | HostOp::ScheduleQuicInitial
                     | HostOp::ScheduleImportTraffic
                     | HostOp::ScheduleTls13
+                    | HostOp::ScheduleApplication
+                    | HostOp::ScheduleKeyUpdate
+                    | HostOp::ScheduleRetire
+                    | HostOp::ScheduleFinished
+                    | HostOp::ScheduleVerifyFinished
                     | HostOp::ScheduleSealer
                     | HostOp::ScheduleOpener
                     | HostOp::ScheduleHeaderMask

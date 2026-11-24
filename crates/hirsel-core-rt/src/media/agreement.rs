@@ -9,8 +9,8 @@ use crate::{
     secret::{agreement, key_share::Share},
 };
 use hirsel_core_net::{
-    packet_epoch::{Epoch, IssueError, SCHEDULE_CHARGE, tls13_labels, traffic_profile},
-    packet_nonce::NonceFormat,
+    packet_epoch::{IssueError, SCHEDULE_CHARGE, tls13_labels, traffic_profile},
+    packet_schedule,
     tls_kdf::{Side, Tls13Handshake, TlsHash},
 };
 
@@ -113,22 +113,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_tls13(
     let labels = tls13_labels(format).unwrap();
     let handshake =
         shared.map(|shared| Tls13Handshake::new(hash, labels, &shared, hello_hash).unwrap());
-    let format = if format == NonceFormat::QuicMultipath {
-        NonceFormat::Quic
-    } else {
-        format
-    };
-    let epoch = Epoch::traffic(
-        format,
-        algorithm,
-        side,
-        handshake.as_ref().map(Tls13Handshake::traffic),
-    );
     owned(Schedule {
-        epoch,
-        space: 1,
+        state: packet_schedule::Schedule::tls13(format, algorithm, side, handshake),
         origin: if opaque { answer.written } else { 0 },
-        _handshake: handshake,
         _charge: track(unsafe { &*context }, schedule_charge),
     })
 }

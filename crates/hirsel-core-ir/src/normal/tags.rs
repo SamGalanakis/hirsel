@@ -543,6 +543,11 @@ tags!(HostOp {
     156 => PacketMask,
     157 => ScheduleImportTraffic,
     158 => ScheduleTls13,
+    159 => ScheduleApplication,
+    160 => ScheduleKeyUpdate,
+    161 => ScheduleRetire,
+    162 => ScheduleFinished,
+    163 => ScheduleVerifyFinished,
 });
 
 tags!(RaiseCause {

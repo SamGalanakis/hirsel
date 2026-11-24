@@ -249,6 +249,7 @@ pub mod packet_aead;
 pub mod packet_cipher;
 pub mod packet_epoch;
 pub mod packet_nonce;
+pub mod packet_schedule;
 pub mod random_stream;
 pub mod secret_aead;
 mod secret_grant;

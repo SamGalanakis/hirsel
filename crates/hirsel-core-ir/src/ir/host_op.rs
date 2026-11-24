@@ -127,6 +127,11 @@ pub enum HostOp {
     ScheduleQuicInitial = hirsel_core_ids::host_op::SCHEDULE_QUIC_INITIAL as isize,
     ScheduleImportTraffic = hirsel_core_ids::host_op::SCHEDULE_IMPORT_TRAFFIC as isize,
     ScheduleTls13 = hirsel_core_ids::host_op::SCHEDULE_TLS13 as isize,
+    ScheduleApplication = hirsel_core_ids::host_op::SCHEDULE_APPLICATION as isize,
+    ScheduleKeyUpdate = hirsel_core_ids::host_op::SCHEDULE_KEY_UPDATE as isize,
+    ScheduleRetire = hirsel_core_ids::host_op::SCHEDULE_RETIRE as isize,
+    ScheduleFinished = hirsel_core_ids::host_op::SCHEDULE_FINISHED as isize,
+    ScheduleVerifyFinished = hirsel_core_ids::host_op::SCHEDULE_VERIFY_FINISHED as isize,
     ScheduleSealer = hirsel_core_ids::host_op::SCHEDULE_SEALER as isize,
     ScheduleOpener = hirsel_core_ids::host_op::SCHEDULE_OPENER as isize,
     ScheduleHeaderMask = hirsel_core_ids::host_op::SCHEDULE_HEADER_MASK as isize,
@@ -136,6 +141,8 @@ pub enum HostOp {
     PacketOpenInto = hirsel_core_ids::host_op::PACKET_OPEN_INTO as isize,
     PacketMask = hirsel_core_ids::host_op::PACKET_MASK as isize,
 }
+
+mod symbol;
 
 impl HostOp {
     /// Whether the native adapter returns an IP endpoint with its outcome.
@@ -239,6 +246,11 @@ impl HostOp {
         HostOp::ScheduleQuicInitial,
         HostOp::ScheduleImportTraffic,
         HostOp::ScheduleTls13,
+        HostOp::ScheduleApplication,
+        HostOp::ScheduleKeyUpdate,
+        HostOp::ScheduleRetire,
+        HostOp::ScheduleFinished,
+        HostOp::ScheduleVerifyFinished,
         HostOp::ScheduleSealer,
         HostOp::ScheduleOpener,
         HostOp::ScheduleHeaderMask,
@@ -508,6 +520,12 @@ impl HostOp {
                 vec![V(u64_), V(u64_), V(u64_), V(u64_), V(p), V(p)],
                 outcome,
             ),
+            HostOp::ScheduleApplication => (vec![V(u64_), V(p)], outcome),
+            HostOp::ScheduleKeyUpdate => (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome),
+            HostOp::ScheduleRetire => (vec![V(u64_); 2], outcome),
+            HostOp::ScheduleFinished | HostOp::ScheduleVerifyFinished => {
+                (vec![V(u64_), V(u64_), V(p), V(p)], outcome)
+            }
             HostOp::ScheduleSealer => (vec![V(u64_), V(u64_), V(u64_), V(u64_)], outcome),
             HostOp::ScheduleOpener => (vec![V(u64_), V(u64_)], outcome),
             HostOp::ScheduleHeaderMask => {
@@ -685,6 +703,11 @@ impl HostOp {
             HostOp::ScheduleQuicInitial => "schedule_quic_initial",
             HostOp::ScheduleImportTraffic => "schedule_import_traffic",
             HostOp::ScheduleTls13 => "schedule_tls13",
+            HostOp::ScheduleApplication => "schedule_application",
+            HostOp::ScheduleKeyUpdate => "schedule_key_update",
+            HostOp::ScheduleRetire => "schedule_retire",
+            HostOp::ScheduleFinished => "schedule_finished",
+            HostOp::ScheduleVerifyFinished => "schedule_verify_finished",
             HostOp::ScheduleSealer => "schedule_sealer",
             HostOp::ScheduleOpener => "schedule_opener",
             HostOp::ScheduleHeaderMask => "schedule_header_mask",
@@ -734,126 +757,17 @@ impl HostOp {
         }
     }
     /// C entry of a host operation that has its own adapter.
-    pub const fn adapter_symbol(self) -> &'static str {
-        match self {
-            Self::Connect => "hirsel_core_host_connect",
-            Self::Resolve => "hirsel_core_host_resolve",
-            Self::CredFetch => "hirsel_core_cred_fetch",
-            Self::Listen => "hirsel_core_host_listen",
-            Self::Accept => "hirsel_core_host_accept",
-            Self::LocalAddr => "hirsel_core_net_local_addr",
-            Self::PeerAddr => "hirsel_core_net_peer_addr",
-            Self::RecvBounded => "hirsel_core_host_recv_bounded",
-            Self::RecvReady => "hirsel_core_host_recv_ready",
-            Self::SendPair => "hirsel_core_host_send_pair",
-            Self::NetNarrow => "hirsel_core_net_narrow",
-            Self::ExecNarrow => "hirsel_core_exec_narrow",
-            Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
-            Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",
-            Self::UnixConnect => "hirsel_core_host_connect_unix",
-            Self::UnixListen => "hirsel_core_host_listen_unix",
-            Self::UnixAccept => "hirsel_core_host_accept_unix",
-            Self::DatagramOpen => "hirsel_core_host_open_datagram",
-            Self::DatagramBind => "hirsel_core_host_bind_datagram",
-            Self::DatagramConnect => "hirsel_core_host_connect_datagram",
-            Self::DatagramSend => "hirsel_core_host_send_datagram",
-            Self::DatagramSendTo => "hirsel_core_host_send_to",
-            Self::DatagramRecv => "hirsel_core_host_recv_datagram",
-            Self::UdpOpen => "hirsel_core_host_udp_open",
-            Self::UdpBind => "hirsel_core_host_udp_bind",
-            Self::UdpBindGroup => "hirsel_core_host_udp_bind_group",
-            Self::UdpRecv => "hirsel_core_host_udp_recv",
-            Self::UdpSend => "hirsel_core_host_udp_send",
-            Self::UdpLocalAddr => "hirsel_core_host_udp_local_addr",
-            Self::NetNarrowUnix => "hirsel_core_net_narrow_unix",
-            Self::TlsConnect => "hirsel_core_tls_connect",
-            Self::SendSecret => "hirsel_core_host_send_secret",
-            Self::SecretSeal => "hirsel_core_secret_seal",
-            Self::SecretNarrow => "hirsel_core_secret_narrow",
-            Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
-            Self::SecretDeriveHmac => "hirsel_core_secret_derive_hmac_sha256",
-            Self::SecretDeriveHkdf => "hirsel_core_secret_derive_hkdf_sha256",
-            Self::SecretDeriveArgon2id => "hirsel_core_secret_derive_argon2id",
-            Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
-            Self::SecretHmacSha384 => "hirsel_core_secret_hmac_sha384",
-            Self::SecretHmacSha512 => "hirsel_core_secret_hmac_sha512",
-            Self::SecretVerifyHmacSha384 => "hirsel_core_secret_verify_hmac_sha384",
-            Self::SecretVerifyHmacSha512 => "hirsel_core_secret_verify_hmac_sha512",
-            Self::SecretJwsHmacSign => "hirsel_core_secret_jws_hmac_sign",
-            Self::SecretJwsHmacVerify => "hirsel_core_secret_jws_hmac_verify",
-            Self::SecretWrap => "hirsel_core_secret_wrap",
-            Self::SecretUnwrap => "hirsel_core_secret_unwrap",
-            Self::SecretSign => "hirsel_core_secret_sign",
-            Self::SecretP256Key => "hirsel_core_secret_p256_key",
-            Self::SecretKeyShare => "hirsel_core_secret_key_share",
-            Self::ScheduleQuicInitial => "hirsel_core_schedule_quic_initial",
-            Self::ScheduleImportTraffic => "hirsel_core_schedule_import_traffic",
-            Self::ScheduleTls13 => "hirsel_core_schedule_tls13",
-            Self::ScheduleSealer => "hirsel_core_schedule_sealer",
-            Self::ScheduleOpener => "hirsel_core_schedule_opener",
-            Self::ScheduleHeaderMask => "hirsel_core_schedule_header_mask",
-            Self::PacketSeal => "hirsel_core_packet_seal",
-            Self::PacketSealInto => "hirsel_core_packet_seal_into",
-            Self::PacketOpen => "hirsel_core_packet_open",
-            Self::PacketOpenInto => "hirsel_core_packet_open_into",
-            Self::PacketMask => "hirsel_core_packet_mask",
-            Self::SecretAeadSeal => "hirsel_core_secret_aead_seal",
-            Self::SecretAeadOpen => "hirsel_core_secret_aead_open",
-            Self::NetSplit => "hirsel_core_net_split",
-            Self::NetJoin => "hirsel_core_net_join",
-            Self::ScramSha256 => "hirsel_core_scram_sha256",
-            Self::ScramFinalLen => "hirsel_core_scram_final_len",
-            Self::ScramVerify => "hirsel_core_scram_verify",
-            Self::StdinRead => "hirsel_core_stdin_read",
-            Self::EnvGet => "hirsel_core_env_get",
-            Self::EnvLen => "hirsel_core_env_len",
-            Self::EnvName => "hirsel_core_env_name",
-            Self::EnvNarrow => "hirsel_core_env_narrow",
-            Self::ProvideClock => "hirsel_core_provide_clock",
-            Self::ProvideRandom => "hirsel_core_provide_random",
-            Self::ProvideRandomTape => "hirsel_core_provide_random_tape",
-            Self::ProvideProcess => "hirsel_core_provide_process",
-            Self::ClockAdvance => "hirsel_core_clock_advance_to",
-            Self::ClockSetWall => "hirsel_core_clock_set_wall",
-            Self::ClockIdle => "hirsel_core_clock_idle",
-            Self::ProcessTrigger => "hirsel_core_process_trigger",
-            Self::ProvideStdout => "hirsel_core_provide_stdout",
-            Self::ProvideStderr => "hirsel_core_provide_stderr",
-            Self::PortNext => "hirsel_core_port_next",
-            Self::CallWord => "hirsel_core_call_word",
-            Self::CallSecret => "hirsel_core_call_secret",
-            Self::ExecSpawn => "hirsel_core_exec_spawn",
-            Self::ExecWait => "hirsel_core_exec_wait",
-            Self::ExecSignal => "hirsel_core_exec_signal",
-            Self::CallPayload => "hirsel_core_call_payload",
-            Self::CallPayloadPrefix => "hirsel_core_call_payload_prefix",
-            Self::PortReply => "hirsel_core_port_reply",
-            Self::ProvideDir => "hirsel_core_provide_dir",
-            Self::ProvideNet => "hirsel_core_provide_net",
-            Self::ProvideExec => "hirsel_core_provide_exec",
-            Self::PortFill => "hirsel_core_port_fill",
-            Self::UdpFillPackets => "hirsel_core_udp_fill_packets",
-            Self::StreamTerminal => "hirsel_core_stream_is_terminal",
-            _ => unreachable!(),
-        }
-    }
-
-    /// The adapter for an owned wait that can return its native stack.
-    pub const fn returnable_symbol(self) -> Option<&'static str> {
-        match self {
-            Self::RecvBounded => Some("hirsel_core_host_recv_bounded_rec"),
-            Self::RecvReady => Some("hirsel_core_host_recv_ready_rec"),
-            Self::SendPair => Some("hirsel_core_host_send_pair_rec"),
-            _ => None,
-        }
-    }
-
     pub const fn is_media(self) -> bool {
         matches!(
             self,
             HostOp::ScheduleQuicInitial
                 | HostOp::ScheduleImportTraffic
                 | HostOp::ScheduleTls13
+                | HostOp::ScheduleApplication
+                | HostOp::ScheduleKeyUpdate
+                | HostOp::ScheduleRetire
+                | HostOp::ScheduleFinished
+                | HostOp::ScheduleVerifyFinished
                 | HostOp::ScheduleSealer
                 | HostOp::ScheduleOpener
                 | HostOp::ScheduleHeaderMask
@@ -891,74 +805,64 @@ impl HostOp {
 
     /// Whether the operation waits (a cancellation point, so it can fail).
     pub const fn waits(self) -> bool {
-        !matches!(
-            self,
-            HostOp::WallMs
-                | HostOp::MonoNs
-                | HostOp::Random
-                | HostOp::NetNarrow
-                | HostOp::ExecNarrow
-                | HostOp::NetNarrowTls
-                | HostOp::NetNarrowResolve
-                | HostOp::NetNarrowUnix
-                | HostOp::SecretSeal
-                | HostOp::SecretNarrow
-                | HostOp::SecretHmac
-                | HostOp::SecretHmacSha384
-                | HostOp::SecretHmacSha512
-                | HostOp::SecretVerifyHmacSha384
-                | HostOp::SecretVerifyHmacSha512
-                | HostOp::SecretJwsHmacSign
-                | HostOp::SecretJwsHmacVerify
-                | HostOp::SecretDeriveHmac
-                | HostOp::SecretDeriveHkdf
-                | HostOp::SecretDeriveArgon2id
-                | HostOp::SecretVerifyHmac
-                | HostOp::SecretWrap
-                | HostOp::SecretUnwrap
-                | HostOp::SecretSign
-                | HostOp::SecretP256Key
-                | HostOp::SecretKeyShare
-                | HostOp::ScheduleQuicInitial
-                | HostOp::ScheduleImportTraffic
-                | HostOp::ScheduleTls13
-                | HostOp::ScheduleSealer
-                | HostOp::ScheduleOpener
-                | HostOp::ScheduleHeaderMask
-                | HostOp::PacketSeal
-                | HostOp::PacketSealInto
-                | HostOp::PacketOpen
-                | HostOp::PacketOpenInto
-                | HostOp::PacketMask
-                | HostOp::SecretAeadSeal
-                | HostOp::SecretAeadOpen
-                | HostOp::NetSplit
-                | HostOp::NetJoin
-                | HostOp::ScramFinalLen
-                | HostOp::ScramVerify
-                | HostOp::EnvGet
-                | HostOp::EnvLen
-                | HostOp::EnvName
-                | HostOp::EnvNarrow
-                | HostOp::ProvideClock
-                | HostOp::ProvideRandom
-                | HostOp::ProvideRandomTape
-                | HostOp::ProvideProcess
-                | HostOp::ClockAdvance
-                | HostOp::ClockSetWall
-                | HostOp::ProcessTrigger
-                | HostOp::ProvideStdout
-                | HostOp::ProvideStderr
-                | HostOp::CallWord
-                | HostOp::CallSecret
-                | HostOp::PortReply
-                | HostOp::ProvideDir
-                | HostOp::ProvideNet
-                | HostOp::ProvideExec
-                | HostOp::PortFill
-                | HostOp::UdpFillPackets
-                | HostOp::StreamTerminal
-        )
+        !self.is_media()
+            && !matches!(
+                self,
+                HostOp::WallMs
+                    | HostOp::MonoNs
+                    | HostOp::Random
+                    | HostOp::NetNarrow
+                    | HostOp::ExecNarrow
+                    | HostOp::NetNarrowTls
+                    | HostOp::NetNarrowResolve
+                    | HostOp::NetNarrowUnix
+                    | HostOp::SecretSeal
+                    | HostOp::SecretNarrow
+                    | HostOp::SecretHmac
+                    | HostOp::SecretHmacSha384
+                    | HostOp::SecretHmacSha512
+                    | HostOp::SecretVerifyHmacSha384
+                    | HostOp::SecretVerifyHmacSha512
+                    | HostOp::SecretJwsHmacSign
+                    | HostOp::SecretJwsHmacVerify
+                    | HostOp::SecretDeriveHmac
+                    | HostOp::SecretDeriveHkdf
+                    | HostOp::SecretDeriveArgon2id
+                    | HostOp::SecretVerifyHmac
+                    | HostOp::SecretWrap
+                    | HostOp::SecretUnwrap
+                    | HostOp::SecretSign
+                    | HostOp::SecretP256Key
+                    | HostOp::SecretKeyShare
+                    | HostOp::SecretAeadSeal
+                    | HostOp::SecretAeadOpen
+                    | HostOp::NetSplit
+                    | HostOp::NetJoin
+                    | HostOp::ScramFinalLen
+                    | HostOp::ScramVerify
+                    | HostOp::EnvGet
+                    | HostOp::EnvLen
+                    | HostOp::EnvName
+                    | HostOp::EnvNarrow
+                    | HostOp::ProvideClock
+                    | HostOp::ProvideRandom
+                    | HostOp::ProvideRandomTape
+                    | HostOp::ProvideProcess
+                    | HostOp::ClockAdvance
+                    | HostOp::ClockSetWall
+                    | HostOp::ProcessTrigger
+                    | HostOp::ProvideStdout
+                    | HostOp::ProvideStderr
+                    | HostOp::CallWord
+                    | HostOp::CallSecret
+                    | HostOp::PortReply
+                    | HostOp::ProvideDir
+                    | HostOp::ProvideNet
+                    | HostOp::ProvideExec
+                    | HostOp::PortFill
+                    | HostOp::UdpFillPackets
+                    | HostOp::StreamTerminal
+            )
     }
 }
 

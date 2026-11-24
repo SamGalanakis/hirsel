@@ -137,6 +137,11 @@ host_ops! {
     MEDIA_CAPTURE = 151,
     SCHEDULE_IMPORT_TRAFFIC = 152,
     SCHEDULE_TLS13 = 153,
+    SCHEDULE_APPLICATION = 154,
+    SCHEDULE_KEY_UPDATE = 155,
+    SCHEDULE_RETIRE = 156,
+    SCHEDULE_FINISHED = 157,
+    SCHEDULE_VERIFY_FINISHED = 158,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

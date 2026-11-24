@@ -541,3 +541,48 @@ fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     let _ = result.unwrap(task.join(take worker))
     verified
 }
+
+fn l84_parallel_read(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits {
+    let mut source = bucket_law_client_lanes(model, tasks, "s3.test", 9, true, 2)?
+    let item = HistoryRef(seq: 7, epoch: 1, len: 500000, digest: 23)
+    let missing_pack = HistoryRef(seq: 8, epoch: 1, len: 500000, digest: 24)
+    let mut raw: Bytes = list.with_capacity(500000)
+    list.fill(mut raw, 500000, 0u8)
+    raw[72u64] = 3
+    raw[131143u64] = 4
+    raw[300000u64] = 5
+    raw[431071u64] = 6
+    let until = std.object.deadline_after_ms(source, BUCKET_LAW_OP_MS)
+    let (take stored, _) = std.object.store(mut source, history_key("p-", item), take raw, until)
+    let _ = stored ?=> |problem| Remote(problem)
+    let mut requests: List[TieredBucketGet] = list.new()
+    let near = TieredRange(lo: 72, hi: 131144)
+    list.push(mut requests, TieredBucketGet(pack_ref: item, window: near, deadline: until))
+    list.push(mut requests, TieredBucketGet(pack_ref: missing_pack, window: near, deadline: until))
+    list.push(mut requests, TieredBucketGet(pack_ref: item, window: TieredRange(lo: 300000, hi: 431072), deadline: until))
+    let received = read_tiered_bucket_windows(mut source, requests, 2)?
+    if list.len(received) != 3 {
+        fail("L84: a range response disappeared")
+    }
+    let Ok(first) = received[0u64] else {
+        fail("L84: first range failed")
+    }
+    let Error(HistoryMissing(_, None)) = received[1u64] else {
+        fail("L84: missing pack had the wrong result")
+    }
+    let Ok(last) = received[2u64] else {
+        fail("L84: last range failed")
+    }
+    if list.len(first) != 131072 || first[0u64] != 3 || first[131071u64] != 4 || list.len(last) != 131072 || last[0u64] != 5 || last[131071u64] != 6 {
+        fail("L84: range jobs did not preserve their result order and sizes")
+    }
+    Ok(())
+}
+
+@test
+fn test_l84_parallel_bucket_windows(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let model = bucket_law_sim(tasks, c, 6282, None, list.new())
+    let status = l84_parallel_read(tasks, model)
+    let _ = bucket_law_finish(take model)
+    status
+}

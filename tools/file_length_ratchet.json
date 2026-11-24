@@ -71,9 +71,9 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 2785,
-    "raise_revision": 8,
-    "reason": "m2-authority-1980"
+    "lines": 2820,
+    "raise_revision": 9,
+    "reason": "m3-s3-slots-2010"
   },
   "core/std/omap.hirsel": {
     "lines": 1374

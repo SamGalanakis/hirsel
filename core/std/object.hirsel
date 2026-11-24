@@ -2382,6 +2382,48 @@ pub fn fetch_range(mut c: Client, key: String, lo: u64, hi: u64, take into: Byte
     (as_meta(take result), take data)
 }
 
+pub type GetRange: send {
+    key: String,
+    lo: u64,
+    hi: u64,
+    buffer: Bytes,
+    deadline: u64
+}
+
+/// Fetch ranges concurrently on up to `streams` lanes. Results and their
+/// buffers follow request order, including errors.
+pub fn fetch_ranges(mut c: Client, take ranges: List[GetRange], streams: u64) -> List[(Result[Meta, Error], Bytes)] waits {
+    let n = list.len(ranges)
+    let mut queued: List[Option[Job]] = list.with_capacity(n)
+    let mut slots: List[u64] = list.with_capacity(n)
+    let mut results: List[Option[(Result[Meta, Error], Bytes)]] = list.with_capacity(n)
+    for take range_request in take ranges {
+        let GetRange(key: name, lo: lo, hi: hi, buffer: take into, deadline: until) = take range_request
+        if streams == 0 || lo >= hi {
+            list.push(mut results, Some((Error(Precondition), take into)))
+            continue
+        }
+        let mut request = object_job(mut c, FetchRange, name, take into, until)
+        request.lo = lo
+        request.hi = hi
+        list.push(mut slots, list.len(results))
+        list.push(mut queued, Some(take request))
+        list.push(mut results, None)
+    }
+    let replies = run_batch(c, take queued, streams)
+    let mut at = 0u64
+    for take one in replies {
+        let Reply(result: take status, data: take data, ..) = option.unwrap(take one)
+        let _ = list.set(mut results, slots[at], Some((as_meta(take status), take data)))
+        at += 1
+    }
+    let mut ordered: List[(Result[Meta, Error], Bytes)] = list.with_capacity(n)
+    for take one in take results {
+        list.push(mut ordered, option.unwrap(take one))
+    }
+    take ordered
+}
+
 pub fn store(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
     let mut request = object_job(mut c, Put, key, take body, deadline_ns)
     request.id = Some(fresh_id(c.requests.random, mut c.requests.entropy))
@@ -2601,7 +2643,7 @@ fn dispatch_next(c: Client, lane_index: u64, mut jobs: List[Option[Job]], mut re
     false
 }
 
-fn run_batch(c: Client, take queued: List[Option[Job]]) -> List[Option[Reply]] waits {
+fn run_batch(c: Client, take queued: List[Option[Job]], streams: u64) -> List[Option[Reply]] waits {
     let mut jobs = take queued
     let mut replies: List[Option[Reply]] = list.with_capacity(list.len(jobs))
     for _ in 0u64 .. list.len(jobs) {
@@ -2609,7 +2651,7 @@ fn run_batch(c: Client, take queued: List[Option[Job]]) -> List[Option[Reply]] w
     }
     let mut next = 0u64
     let mut active = 0u64
-    for lane_index in 0u64 .. order.min(list.len(c.requests.lanes), list.len(jobs)) {
+    for lane_index in 0u64 .. order.min(streams, order.min(list.len(c.requests.lanes), list.len(jobs))) {
         if dispatch_next(c, lane_index, mut jobs, mut replies, mut next) {
             active += 1
         }
@@ -2641,7 +2683,7 @@ pub fn parts(mut c: Client, mut u: Upload, take bodies: List[Bytes], deadline_ns
         list.push(mut queued, Some(take request))
     }
     let mut status: Result[(), Error] = Ok(())
-    let rv = run_batch(c, take queued)
+    let rv = run_batch(c, take queued, list.len(c.requests.lanes))
     let mut i = 0u64
     for take slot in rv {
         let Reply(result: take outcome, data: take data, ..) = option.unwrap(take slot)
@@ -2756,7 +2798,7 @@ pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], dea
         list.push(mut queued, Some(take request))
     }
     let mut status: Result[(), Error] = Ok(())
-    let rv = run_batch(c, take queued)
+    let rv = run_batch(c, take queued, list.len(c.requests.lanes))
     let mut i = 0u64
     for take slot in rv {
         let Reply(result: take part, data: take data, ..) = option.unwrap(take slot)

@@ -32,8 +32,10 @@ pub enum Arrival<'a> {
     Settlement(u64, Settlement<'a>),
     HelperEnd(u64, HelperOutcome<'a>, Vec<Survivor>),
     Credits(Vec<Credit>),
-    LastRelease(u64, u64, u64),
-    SharedRelease(u64),
+    /// Making stream, connection ordinal there, retained header, unused room.
+    LastRelease(u32, u64, u64, u64),
+    /// Home stream and node ordinal there.
+    SharedRelease(u32, u64),
     Cancel,
     Refund(Credit),
 }
@@ -368,8 +370,8 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
             Arrival::HelperEnd(ordinal, outcome, survivors)
         }
         5 => Arrival::Credits(credits(c)?),
-        6 => Arrival::LastRelease(c.varint()?, c.u64()?, c.u64()?),
-        7 => Arrival::SharedRelease(c.varint()?),
+        6 => Arrival::LastRelease(c.u32()?, c.varint()?, c.u64()?, c.u64()?),
+        7 => Arrival::SharedRelease(c.u32()?, c.varint()?),
         8 => Arrival::Cancel,
         9 => Arrival::Refund(credit(c)?),
         _ => return Err(Corrupt),

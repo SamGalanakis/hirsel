@@ -57,13 +57,12 @@ impl Index {
                 flags: 0,
             },
         );
-        let mut without_end = 1usize;
         for number in 1.. {
             let location = Location { number, offset };
             match read_block(&mut bytes, number, &mut |buf| next(&mut offset, buf)) {
                 Ok(()) => {}
                 Err(ReadError::Format(Stop::Missing)) => break,
-                Err(ReadError::Format(Stop::Truncated)) if without_end != 0 => {
+                Err(ReadError::Format(Stop::Truncated)) if index.streams[&0].flags != END => {
                     index.partial = true;
                     break;
                 }
@@ -74,6 +73,9 @@ impl Index {
             }
             check_head(&bytes, number)?;
             check_digest(&bytes, &index.tape_id, number)?;
+            if index.streams[&0].flags == END {
+                return Err(Stop::Damaged(number).into());
+            }
             let (id, seq, flags) = (stream(&bytes), sequence(&bytes), bytes[0]);
             let damaged = Stop::Damaged(number);
             if let Some(stream) = index.streams.get_mut(&id) {
@@ -82,9 +84,6 @@ impl Index {
                 }
                 stream.blocks.push(location);
                 stream.flags = flags;
-                if flags == END {
-                    without_end -= 1;
-                }
             } else {
                 if seq != 0 || flags != 0 {
                     return Err(damaged.into());
@@ -103,7 +102,6 @@ impl Index {
                         flags: 0,
                     },
                 );
-                without_end += 1;
             }
         }
         index.check_parents()?;

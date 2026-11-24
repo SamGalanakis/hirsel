@@ -260,6 +260,8 @@ pub const fn is_stream_grant(kind: u8) -> bool {
 }
 
 const SECRET_KIND: u8 = 11;
+/// The nine call words that lead a delivered call's `PORT_NEXT` payload.
+const PORT_CALL_WORDS: usize = 9 * 8;
 const EXEC_KIND: u8 = 13;
 const CRED_KIND: u8 = 14;
 
@@ -274,7 +276,15 @@ pub fn writes(op: u8) -> bool {
     use crate::op::*;
     matches!(
         op,
-        WRITE | WRITE_AT | STDOUT | STDERR | RANDOM | NEXT_ENTRIES | DATAGRAM_RECV | UDP_RECV
+        WRITE
+            | WRITE_AT
+            | STDOUT
+            | STDERR
+            | RANDOM
+            | NEXT_ENTRIES
+            | DATAGRAM_RECV
+            | UDP_RECV
+            | PORT_NEXT
     )
 }
 
@@ -370,6 +380,17 @@ impl Out {
         let port_total = (op == op::PORT_NEXT)
             .then(|| usize::try_from(c.varint()?).map_err(|_| Corrupt))
             .transpose()?;
+        // `written` 0 is a `next` answered `None`; 1 is a call whose payload
+        // leads with its nine words.
+        if let Some(total) = port_total
+            && match written {
+                0 => value != 0 || total != 0,
+                1 => total < PORT_CALL_WORDS,
+                _ => true,
+            }
+        {
+            return Err(Corrupt);
+        }
         let payload = if port_total.is_some() || carries_payload(op) {
             let b = c.bytes()?;
             if b.len() > PAYLOAD_CHUNK

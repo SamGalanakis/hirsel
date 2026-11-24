@@ -435,7 +435,7 @@ constructor. Core's rule that a virtual provider's results are recomputed
   recorded, from the frame alone, with no count read across units;
 - a wait on the cell that is pending at the crossing frame (a `provide.next`, a
   `clock.idle`, a sleep, or a served call's `until` on that clock (`provide.rs:722`), which
-  is issued as `SLEEP_UNTIL`) is issued at that frame: right after the crossing
+  is issued under the code that clock's sleep uses) is issued at that frame: right after the crossing
   frame's own frame, each pending wait is an `ISSUE` with its own operation code
   (`PORT_NEXT`, `CLOCK_IDLE`, `SLEEP_UNTIL`, `SLEEP_UNTIL_WALL`), in the order the waits
   registered, with the task bit of the task that waits. Its completion is a `DONE`
@@ -511,7 +511,7 @@ holds. Its body is one of:
 | settlement of a waiting send | the send's issue position in this stream; `Accepted` with each credit's limit ordinal and amount, `Closed` with the returned item in full, or `Withdrawn` |
 | helper end | the helper handle's ordinal; the result in full with its handle snapshots, or the causes; and each survivor charge the owner keeps ([CONC-15](spec/tasks.md#conc-15-units)): every open connection, `Shared` node, held `Secret` designation, held sealed bytes, live key object or unretired agreement registry entry ([TLS-8](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)), and unretired `UdpSocket` pool or group queue the helper paid for, each with its ordinal and amount |
 | credits | each credit's limit ordinal and amount |
-| last release | the connection's ordinal, its retained header and its unused room |
+| last release | the connection's making stream and its ordinal there, its retained header and its unused room |
 | shared release | the `Shared` node's ordinal in its home unit |
 | cancel | nothing: a cancellation request for this unit's root |
 | refund | the limit ordinal and amount of a refund another unit posted to this unit's mailbox (a key object whose charge this unit paid and whose holder ended elsewhere, among others), or of a charge released by a run-wide count (above): a registry entry, a `Secret` designation or the sealed bytes behind one, at the paying unit's own drop or at a drain. A post that carries a UDP retirement is its `RETIRED` frame, not a refund take |
@@ -560,10 +560,11 @@ host, as every replayed handle does. A socket's `RETIRED` frame is in the stream
 position where that unit folds it, and it names the socket by the stream number and
 ordinal of the unit that dropped it.
 
-**Designations across units.** A designation is its origin kind, the stream number of the
-unit that made it, and that kind's ordinal in that unit's own order, as format 13 counts
-it (`Granted` 0, `Sealed` 1, `Derived` 2, `Unwrapped` 3, `Fetched` 4,
-`GeneratedP256` 5). A designation that arrives keeps its origin. The canonical arguments
+**Designations across units.** A designation is its origin kind (`Granted` 0, `Sealed` 1,
+`Derived` 2, `Unwrapped` 3, `Fetched` 4, `GeneratedP256` 5), the stream number of the unit
+that made it, and that kind's number in that unit's own order: a grant ordinal, the order
+of a seal among that unit's seals or of an unwrap among its unwraps, or the position of the
+`SECRET_KDF`, credential or `MEDIA_P256_KEY` delivery. No count is run-wide. A designation that arrives keeps its origin. The canonical arguments
 of `SEND_SECRET`, `SECRET_MAC` and `SECRET_KDF` bind the full designation.
 
 **Unit operations.** These are frames of the unit that performs them. They are checked on
@@ -682,7 +683,7 @@ stated once, here.
 
 | field | width | value |
 |---|---|---|
-| flags | `u8` | `END` 2, `TRUNCATED` 4, as format 13; any other bit is `Damaged` |
+| flags | `u8` | 0, `END` 2 or `TRUNCATED` 4; any other value is `Damaged` |
 | magic | 3 bytes | `HTB` |
 | stream | `u32` | the stream number: 0 for the root; a helper's is allocated when its spawn starts, unique in the file, and need not be dense or in spawn order. It is not part of the unit's name |
 | seq | `u64` | this block's index among its own stream's blocks, from 0 |
@@ -789,8 +790,8 @@ task bit is 0, because a take names no task. Then:
 | 3 | settlement | the send's `ISSUE` position `varint`; outcome `u8`: 0 `Accepted` and a credit list, 1 `Closed` and the returned item as a value, 2 `Withdrawn` and nothing |
 | 4 | helper end | helper ordinal `varint`; outcome `u8`: 0 a result and the result as a value, 1 `Failed` and its causes, 2 `Cancelled` and its causes; survivor count `varint`, then the survivors |
 | 5 | credits | a credit list |
-| 6 | last release | connection ordinal `varint`; retained header `u64`; unused room `u64` |
-| 7 | shared release | node ordinal `varint` |
+| 6 | last release | making stream `u32`; connection ordinal `varint` in that stream; retained header `u64`; unused room `u64` |
+| 7 | shared release | home stream `u32`; node ordinal `varint` |
 | 8 | cancel | nothing |
 | 9 | refund | limit ordinal `varint`; amount `u64` |
 
@@ -805,9 +806,8 @@ task bit is 0, because a take names no task. Then:
   7), then for kinds 2 and 7 the designation's origin kind `u8`, then its ordinal `varint`
   and its amount `u64`. The ordinal is the object ordinal in the helper's stream, for
   kinds 2 and 7 the designation's ordinal in the helper's stream, and for kinds 3 and 4
-  the position in the helper's stream of the delivery that made it. A kind 0 or 1 survivor
-  also takes the next object ordinal of the owner's stream, in list order, and its
-  `last release` or `shared release` take names that ordinal. Any other kind is `Corrupt`.
+  the position in the helper's stream of the delivery that made it. Any other kind is
+  `Corrupt`.
   The owner that keeps a kind 2, 4 or 7 survivor is its paying unit from then on, and takes
   its refund as above.
 - A settlement's position must name a `CONN_SEND` `ISSUE` of this stream that is still
@@ -829,10 +829,14 @@ operation codes 164, 165, 166 and 167 of `ISSUE`, `DONE` and `OP`, in
 | 166 | `CONN_TRY_SEND` | `OP` | client ordinal | as 165 | 0 `Accepted`, 1 `Full`, 2 `Closed` |
 | 167 | `UNIT_CANCEL` | `OP` | the helper handle's ordinal | the empty literal | 0 |
 
-After its crossing frame a served port's `PORT_NEXT` `DONE` holds status `OK`, the call
-word as `value` and the call's whole payload as its payload. `CALL_WORD`, `CALL_PAYLOAD`
-and `CALL_PAYLOAD_PREFIX` are no frames and are recomputed from it. `PORT_REPLY` is an
-`OP` whose `Args` cover the reply word and bytes. The `PORT_NEXT` payload is its total
+A served port's `PORT_NEXT` is always an `ISSUE` and a `DONE`. Its `DONE` holds status `OK`
+and `written` `varint`: 0 for a `next` answered `None` at quiescence, with `value` 0 and
+total length 0; 1 for a call or a released notice, with the call id as `value` and, as its
+payload, the nine call words as `u64`s then the call's whole payload. Any other `written`,
+or a `written` 1 payload shorter than 72 bytes, is `Corrupt`. `CALL_WORD`, `CALL_PAYLOAD`
+and `CALL_PAYLOAD_PREFIX` are no frames and are answered from it. `PORT_REPLY` and a port
+fill are `OP`s whose `Args` cover the reply word and bytes; `CLOSE_SERVED` and `CLOSE_CALL`
+are checked as `CLOSE` is. The `PORT_NEXT` payload is its total
 length `varint`, then the first `bytes` chunk, then `DATA` continuations as for a carrier.
 The first chunk is empty only when the total length is 0. A nonzero total length with an
 empty first chunk is `Corrupt` in its stream.
@@ -875,19 +879,19 @@ read whole and its head and check verified; then:
   - a helper stream header whose parent is its own stream number, or whose parent and spawn
     index equal those of a stream already indexed: the two would get one unit name.
 
-So a stream may begin anywhere in the file, after the root's `END` included, and the reader
+So a stream may begin anywhere in the file before the root's `END` block, and the reader
 tells a new stream from trailing bytes by these tests alone, never by position. A parent
 may be indexed later than its child. A parent chain that returns to a stream already on
 it is `Damaged`, at the `B` of the header of the lowest-numbered stream of the cycle, when
-the index has no earlier `Damaged`. A chain that ends at an absent stream is an orphan,
+the pass finds no other `Damaged`; with several cycles, the least such `B`. A chain that ends at an absent stream is an orphan,
 not damage.
 
 The writer writes the block flagged `END` of stream 0 last, after every other stream's
 blocks, so a partial block can follow every `END` only in a damaged file.
 
 At the end of the file, a trailing partial block is `Truncated` for each stream without
-`END`. When every indexed stream has its `END`, any byte after them that does not begin a block opening a new
-stream, a partial block included, is `Damaged` at its block number. A `Damaged` index writes
+`END` when stream 0 has no `END`. Any block or byte after stream 0's `END` block, a partial
+block included, is `Damaged` at its block number. A `Damaged` index writes
 its one file line and exits 1, whatever the stream verdicts. A `TRUNCATED` block, with an
 empty payload, ends its own stream `Truncated` and no other. Each stream is decoded with its
 own state: its previous task, its outstanding issues and its open carrier.

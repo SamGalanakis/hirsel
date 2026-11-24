@@ -1,6 +1,6 @@
 use hirsel_tape_format::{
-    Arrival, Corrupt, Credit, Decoder, Encoder, Frame, HelperOutcome, Index, ReadError, Settlement,
-    Stop, TakePoint, Value, block, xxh3,
+    Arrival, Cause, CauseDetail, Corrupt, Credit, Decoder, Encoder, Frame, HelperOutcome, Index,
+    ReadError, Settlement, Stop, TakePoint, Value, block, xxh3,
 };
 use std::convert::Infallible;
 
@@ -109,7 +109,7 @@ fn index_cases() {
     assert_damaged(&[choose.clone(), choose.clone(), last.clone()], 2);
     assert_damaged(&[helper(3, 0, 0), helper(3, 0, 1)], 2);
     assert_damaged(&[root_header()], 1);
-    assert_damaged(&[end.clone(), choose.clone()], 2);
+    assert_damaged(&[end.clone(), wire(0, 2, 0, &[6, 0, 0])], 2);
     assert_damaged(&[wire(0, 1, 4, &[]), last], 2);
     assert_damaged(&[wire(3, 1, 0, &[])], 1);
     assert_damaged(&[helper(3, 3, 0)], 1);
@@ -150,10 +150,11 @@ fn index_cases() {
     assert_damaged(&[wire(0, 1, 6, &[])], 1);
     assert_damaged(&[wire(0, 1, 4, &[0])], 1);
     assert_damaged(&[end.clone(), vec![0]], 2);
+    // No stream opens after the root's END.
+    assert_damaged(&[end, helper(3, 0, 0)], 2);
 
     let source = [
         root_header(),
-        end,
         helper(8, 2, 0),
         helper(3, 0, 10),
         helper(2, 0, 2),
@@ -188,10 +189,39 @@ fn take_cases() {
         (&[2, 5], Arrival::SealAnswer(5)),
         (&[5, 0], Arrival::Credits(vec![])),
         (
-            &[6, 4, 8, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0],
-            Arrival::LastRelease(4, 8, 9),
+            &[
+                6, 3, 0, 0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            Arrival::LastRelease(3, 4, 8, 9),
         ),
-        (&[7, 6], Arrival::SharedRelease(6)),
+        (&[7, 5, 0, 0, 0, 6], Arrival::SharedRelease(5, 6)),
+        (
+            // Helper 3 Failed: a Fail at site 5 saying "no", then a Capacity at
+            // site 6 asking 64 with 16 available; no survivors.
+            &[
+                4, 3, 1, 2, 4, 5, 0, 0, 0, 0, 0, 0, 0, 2, b'n', b'o', 6, 6, 0, 0, 0, 0, 0, 0, 0,
+                64, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            Arrival::HelperEnd(
+                3,
+                HelperOutcome::Failed(vec![
+                    Cause {
+                        kind: 4,
+                        site: 5,
+                        detail: CauseDetail::Fail(b"no"),
+                    },
+                    Cause {
+                        kind: 6,
+                        site: 6,
+                        detail: CauseDetail::Capacity {
+                            requested: 64,
+                            available: 16,
+                        },
+                    },
+                ]),
+                vec![],
+            ),
+        ),
         (&[8], Arrival::Cancel),
         (
             &[9, 2, 48, 0, 0, 0, 0, 0, 0, 0],
@@ -235,20 +265,33 @@ fn take_cases() {
     assert_eq!(val.bytes(), &[1, 0x42, 0]);
 
     let issue = [0x11, 7, 165, 2, 0];
-    let bytes = [issue.as_slice(), &take(1, &[3, 1, 2]), &issue].concat();
-    let decoded = Decoder::default().block(&bytes, false).unwrap();
-    let [
-        Frame::Issue { .. },
-        Frame::Take { body, .. },
-        Frame::Issue { .. },
-    ] = decoded.as_slice()
-    else {
-        panic!("{decoded:?}")
-    };
-    assert_eq!(
-        body.arrival(),
-        Arrival::Settlement(1, Settlement::Withdrawn)
-    );
+    let returned = [1, 0x42, 0];
+    for (settled, expected) in [
+        (&[3, 1, 2][..], Settlement::Withdrawn),
+        (
+            &[3, 1, 0, 1, 2, 48, 0, 0, 0, 0, 0, 0, 0],
+            Settlement::Accepted(vec![Credit {
+                limit: 2,
+                amount: 48,
+            }]),
+        ),
+        (
+            &[3, 1, 1, 1, 0x42, 0],
+            Settlement::Closed(Value::decode(&returned).unwrap()),
+        ),
+    ] {
+        let bytes = [issue.as_slice(), &take(1, settled), &issue].concat();
+        let decoded = Decoder::default().block(&bytes, false).unwrap();
+        let [
+            Frame::Issue { .. },
+            Frame::Take { body, .. },
+            Frame::Issue { .. },
+        ] = decoded.as_slice()
+        else {
+            panic!("{decoded:?}")
+        };
+        assert_eq!(body.arrival(), Arrival::Settlement(1, expected));
+    }
     assert_eq!(
         Decoder::default().block(&take(1, &[3, 1, 2]), false),
         Err(Corrupt)
@@ -258,6 +301,8 @@ fn take_cases() {
         &b"\x0a"[..],
         b"\0\x07\0\x01\x01\x0d\0",
         b"\x04\0\0\0\0\x01\x08\0\0\0\0\0\0\0\0\0",
+        // Cause kind 8 is past OutOfTime.
+        b"\x04\x03\x01\x01\x08\0\0\0\0\0\0\0\0\0",
     ] {
         assert_eq!(
             Decoder::default().block(&take(0, body), false),
@@ -359,10 +404,13 @@ fn unit_ops() {
 
 fn port_delivery() {
     let issue = [0x11, 7, 59, 1, 0];
-    let mut first = vec![2, 0, 0, 42];
+    // Call 42: written 1, then the nine call words 1..=9 lead the payload.
+    let words: Vec<u8> = (1..=9u64).flat_map(u64::to_le_bytes).collect();
+    let mut first = vec![2, 0, 0, 42, 1];
     first.extend(varint(65_539));
     first.extend(varint(65_536));
-    first.extend(vec![0x5a; 65_536]);
+    first.extend(&words);
+    first.extend(vec![0x5a; 65_536 - 72]);
     let data = [9, 3, 6, 7, 8];
     let tape = [
         root_header(),
@@ -384,19 +432,45 @@ fn port_delivery() {
     let [frame @ Frame::Done { task: 7, out, .. }] = frames.as_slice() else {
         panic!("{frames:?}");
     };
-    assert_eq!((out.value, out.status), (42, 0));
-    assert_eq!(out.payload, [vec![0x5a; 65_536], vec![6, 7, 8]].concat());
+    assert_eq!((out.value, out.status, out.written), (42, 0, 1));
+    assert_eq!(
+        out.payload,
+        [words.clone(), vec![0x5a; 65_536 - 72], vec![6, 7, 8]].concat()
+    );
     assert_eq!(encoder.frame(frame), (first, vec![data.to_vec()]));
 
-    let mut decoder = Decoder::default();
-    assert_eq!(
-        decoder.block(&[issue.as_slice(), &[2, 0, 0, 42, 1, 0]].concat(), false),
-        Err(Corrupt)
-    );
-    let empty = Decoder::default()
-        .block(&[issue.as_slice(), &[2, 0, 0, 42, 0, 0]].concat(), false)
+    for done in [
+        // A nonzero total with an empty first chunk.
+        &[2, 0, 0, 42, 1, 72, 0][..],
+        // A call shorter than its nine words.
+        &[[2, 0, 0, 42, 1, 71, 71].as_slice(), &[0; 71]].concat(),
+        // `None` with a call id or a payload.
+        &[2, 0, 0, 42, 0, 0, 0],
+        &[2, 0, 0, 0, 0, 1, 1, 0],
+        // `written` past 1.
+        &[[2, 0, 0, 42, 2, 72, 72].as_slice(), &[0; 72]].concat(),
+    ] {
+        assert_eq!(
+            Decoder::default().block(&[issue.as_slice(), done].concat(), false),
+            Err(Corrupt)
+        );
+    }
+    let none = Decoder::default()
+        .block(&[issue.as_slice(), &[2, 0, 0, 0, 0, 0, 0]].concat(), false)
         .unwrap();
-    assert!(matches!(&empty[1], Frame::Done { out, .. } if out.payload.is_empty()));
+    assert!(matches!(
+        &none[1],
+        Frame::Done { out, .. } if (out.value, out.written) == (0, 0) && out.payload.is_empty()
+    ));
+    // Total 73, a first chunk of 72, then a DATA of 2 overruns it.
+    let mut decoder = Decoder::default();
+    let overrun = [[2, 0, 0, 42, 1, 73, 72].as_slice(), &words].concat();
+    assert!(
+        decoder
+            .block(&[issue.as_slice(), &overrun].concat(), false)
+            .is_ok()
+    );
+    assert_eq!(decoder.block(&[9, 2, 0, 0], false), Err(Corrupt));
 }
 
 fn designation_and_returned_value() {
@@ -439,7 +513,7 @@ fn entry_and_end() {
     let chunks: Vec<_> = joined.chunks(65536).collect();
     first.extend(varint(chunks[0].len()));
     first.extend(chunks[0]);
-    let mut tape = vec![root_header(), EXAMPLE_END.to_vec(), wire(3, 0, 0, &first)];
+    let mut tape = vec![root_header(), wire(3, 0, 0, &first)];
     tape.extend(continued(3, 1, &chunks[1..], 0));
 
     let mut canonical = value[..value.len() - 1].to_vec();
@@ -455,6 +529,8 @@ fn entry_and_end() {
     tape.push(wire(3, end_seq, 0, &first_end));
     let end_chunks: Vec<_> = canonical[65536..].chunks(65536).collect();
     tape.extend(continued(3, end_seq + 1, &end_chunks, 2));
+    // The writer writes the root's END block last.
+    tape.push(EXAMPLE_END.to_vec());
     let tape = tape.concat();
 
     let (mut index, _) = Index::open(read(&tape)).unwrap();

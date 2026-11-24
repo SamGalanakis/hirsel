@@ -588,7 +588,7 @@ The kernel is the SHA-512 blocks rule above; `std.sha512` and `std.sha384` are l
 over it. This section holds their laws and build slice.
 
 **One backend.** Every new kernel here and in [TLS-5](tls.md#tls-5-secrets) runs on ring
-0.17.14, the crate the existing kernels, `wrap`, `sign` and rustls already link, through
+0.17.14, the crate the existing signature kernels, `wrap`, `sign` and rustls already link, through
 wrappers in `hirsel-core-net` beside the existing ones: AES-GCM and ChaCha20-Poly1305
 (`ring::aead`), HKDF-SHA256 (`ring::hkdf`), RSA and P-384 verification
 (`ring::signature`), and the SHA-384 inside P-384 verification. Two things ring lacks are
@@ -914,6 +914,12 @@ linked. The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
 6. **Random-nonce AEAD at scale.** XChaCha20-Poly1305 or AES-GCM-SIV would let callers
    draw nonces without the `2^32` message bound, and let `wrap` drop its per-blob HKDF.
    ring 0.17.14 offers neither, so either would reopen the backend question.
+7. **Key state left after a call.** ring 0.17.14 implements no `Drop` that zeroes its AEAD
+   key schedules (`LessSafeKey`) or its HMAC and HKDF keys (`hmac::Key`, `Prk`), so the
+   AEAD and derivation sinks, like the MAC sink, `wrap` and `sign`, promise run-owned
+   memory and no charge, not zeroing of that state. The secret's own bytes and Argon2id's
+   working memory, which Hirsel holds, are still zeroed as their rules say. Zeroing ring's
+   state would need a ring that does it or an allocator that clears what the sinks free.
 
 ## Provide
 

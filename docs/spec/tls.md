@@ -713,7 +713,7 @@ sensitive as that plaintext, as a recording of received TLS plaintext is. To kee
 bytes sealed, store them with `wrap` and open them with `unwrap`, which give a `Secret`.
 
 **Charge.** Nothing is admitted: the result lands in capacity the caller holds, and the key
-schedule and working state are run-owned, zeroed after the call and never charged, as
+schedule and working state are run-owned and never charged, as
 `send_secret`'s encodings are. Each call takes one step whatever the lengths, the rule of
 `sha256.blocks` and the signature kernels ([core](core.md#signature-verification)): the
 work is bounded by `len(plain)` or `len(sealed)`, which a limit bounds. Neither operation

@@ -508,16 +508,18 @@ fn bucket_test_m2_link_recovery(c: Clock, tasks: Tasks, seed_grant: Env) -> Resu
     let recovered = bucket_m2_law_recover(tasks, sim)
     let _ = bucket_law_finish(take sim)
     recovered?
-    // Payload 16,777,368 plus the 88-byte envelope and 20-byte FENCE.
+    // Format 5 adds 164 fixed bytes to AP14's 152. Add 16 MiB of
+    // records, the 88-byte envelope and the optional 20-byte FENCE.
+    let wire_limit = 152u64 + 164 + 16777216 + 88 + 20
     let test_id = StoreId(hi: 9, lo: 10)
     let mut raw: Bytes = list.with_capacity(1024)
-    let largest = HistoryRef(seq: 1, epoch: 1, len: 16777476, digest: 3)
+    let largest = HistoryRef(seq: 1, epoch: 1, len: wire_limit, digest: 3)
     let fitted = history_genesis_packet(mut raw, test_id, largest)?
     let admitted = history_read_mark("max MANIFEST", test_id, fitted, raw)?
-    if admitted.manifest.len != 16777476 {
+    if admitted.manifest.len != wire_limit {
         fail("the max legal MANIFEST wire length was refused")
     }
-    let excess = HistoryRef(seq: 1, epoch: 1, len: 16777477, digest: 3)
+    let excess = HistoryRef(seq: 1, epoch: 1, len: wire_limit + 1, digest: 3)
     let too_large = history_genesis_packet(mut raw, test_id, excess)?
     if let Error(Corrupt(Fault(why: Malformed, ..))) = history_read_mark("oversize MANIFEST", test_id, too_large, raw) {} else {
         fail("one byte above the wire limit was admitted for GET")

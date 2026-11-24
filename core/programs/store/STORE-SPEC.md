@@ -3736,7 +3736,7 @@ Retirement on objects@1 is reclaim's (§12.6): a pack is garbage when no retaine
 - **Bootstrap.** HEAD names the latest CHECKPOINT entry. Its MARK names the MANIFEST (generation, epoch, length, digest) and the locator depth. Its LOCATE frame gives the root. A cold reader needs no LIST at any step.
 - **Reading, in this order, each allocation bounded and charged before its own GET (Astra #9):**
   1. the CHECKPOINT entry, of HEAD's `c_len` (≤ `ENTRY_READ_LIMIT`);
-  2. the MANIFEST, of MARK's `m_len`. Before GET, refuse lengths above AP14's `MANIFEST_LIMIT` plus 88 bytes for HEADER and the frame envelope and 20 bytes for the optional FENCE. After GET, check the actual envelope and verify that the MANIFEST payload is within AP14's `MANIFEST_LIMIT`;
+  2. the MANIFEST, of MARK's `m_len`. Before GET, refuse lengths above the current format's `MANIFEST_LIMIT` (§13.1) plus 88 bytes for HEADER and the frame envelope and 20 bytes for the optional FENCE. The pre-GET ceiling is 16,777,640 bytes in format 5. After GET, check the actual envelope and verify that the MANIFEST payload is within `MANIFEST_LIMIT`;
   3. the locator's chunks, each of the length its parent row gives, refused above 72 + 16 + 1 MiB;
   4. class-2 packs, the list-page reads of AP21 step 0. Each is one `fetch_range` of the PagePtr's 16 + `len` bytes (bounded at 8,400), then each class-2 pack is streamed once through the 65,536-byte chunk buffer with its whole-object length and digest checked against its row as the stream ends;
   5. class-0/1 packs, each refused before its GET if its row's `len` exceeds AP21 step 1's bound from that pack's `packs` row (its `frames`), then read whole.
@@ -4227,7 +4227,7 @@ A Tiered frame is never written into a class 0, 1 or 2 pack, and a Memory frame 
 | archive_drop | u64 | the requested drop watermark (§13.9); 0 = none |
 | sweep | 3 × u64 | the reclaim sweep cursor (§13.9): (position, epoch, digest) of the last `e-` key fully examined; all zero = before the first |
 
-- The fixed part grows by 164 bytes: 156 for the fields above, plus 8 for the split account. AP4's MANIFEST size expression grows by the same 164 (v2.59; v2.56's four archive scalars are replaced).
+- The fixed part grows by 164 bytes: 156 for the fields above, plus 8 for the split account. AP4's MANIFEST size expression grows by the same 164 (v2.59; v2.56's four archive scalars are replaced). Its 316 fixed bytes plus AP4's 16 MiB record allowance give a `MANIFEST_LIMIT` of 16,777,532 bytes.
 - `lineage`, `deferred_frees` and `archive` are list roots. AP16 keeps their packs, the locator covers them, and AP15 does not count them. `lineage`, `deferred_frees` and the anchor rows of `archive` (§14.10) are also participating roots of the probe (§13.6).
 - Their pages live in class-2 packs and are read and validated with the other list trees (AP21 step 0).
 

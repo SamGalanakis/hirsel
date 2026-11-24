@@ -139,10 +139,28 @@ fn drain_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], take added
     let Some(requests) = pager else {
         return Error(Io(Closed))
     }
-    let paging = recovered_tiered_inventory(installed.locations, None, db.checkpointed)?
-    let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
-    drain_cut_queue(source, installed.lists.deferred, installed.lists.deferred_next, mut queue, budget)?
-    Ok(take queue)
+    let kept = list.len(queue.added)
+    let drained = match recovered_tiered_inventory(installed.locations, None, db.checkpointed) {
+        Ok(paging) => {
+            let source = TieredPageSource(pager: channel.sender(requests), packs: std.omap.snapshot(paging.packs), next_stamp: next_stamp, deadline: 0)
+            drain_cut_queue(source, installed.lists.deferred, installed.lists.deferred_next, mut queue, budget)
+        },
+        Error(take problem) => Error(take problem),
+    }
+    match take drained {
+        Ok(()) => Ok(take queue),
+        // Step 4 is optional (§13.6a T8): a refused drain leaves the queue as
+        // it stands, and the cut publishes the mandatory steps.
+        Error(Full(Allocation(_))) => {
+            while list.len(queue.added) > kept {
+                let _ = list.pop(mut queue.added)
+            }
+            queue.drained = list.new()
+            queue.kills = list.new()
+            Ok(take queue)
+        },
+        Error(take problem) => Error(take problem),
+    }
 }
 
 // `note_held_roots` lists each participant's collection map first.

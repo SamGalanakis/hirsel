@@ -4684,9 +4684,9 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     open_heads(mut db, take state)?
     db.resident = live_bytes
     rebuild_keyed_credit(mut db, uncovered, options.journal_limit)?
-    // The pager starts before the journal tasks, so a refusal here leaves none
-    // running. Its task reserves C + K + P at once (§1.1 "The Tiered plan").
-    let pager_task: Option[Task[()]] = if store_has_tiered(db) {
+    // The pager starts before the journal tasks, so a refusal leaves none. It
+    // reserves C + K + P (§1.1); a queued Cold frame needs it to drain (§13.6).
+    let pager_task: Option[Task[()]] = if store_has_tiered(db) || std.page.count(std.page.image_of(pages.lists.deferred)) != 0 {
         let funding = TieredPagerFunding(cache_bytes: options.cache_bytes, writer_pin_bytes: options.writer_pin_bytes, pager_task_bytes: options.pager_task_bytes, cut_pins: true)
         let link = start_tiered_pager_link(tasks, id, seq, PagerDirectory(d), funding, TIERED_PAGER_QUEUE)?
         Some(attach_tiered_pager(mut db, take link))

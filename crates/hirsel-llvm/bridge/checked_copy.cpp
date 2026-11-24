@@ -1011,6 +1011,12 @@ static BasicBlock *loopCallUnwind(CallInst &Call, const Loop &L) {
 // parser cycles take in each other's whole recursion. A helper's own
 // recursion into a caller outside its cycle keeps the depth bound alone:
 // Queens' search specializes 8 levels into its driver loop.
+// A caller in a call-graph cycle of several functions (the list sorts, the
+// JSON writer) expands helpers on a quarter of the budget: the whole budget
+// cost 1.5G cold compile instructions in the sorts and sped no runtime row.
+// A quarter still takes in the JSON writer's string helper (ParseDom +4%
+// without it). A caller recursive only into itself keeps the whole budget:
+// Towers' disk loop runs 3.4% more instructions on a quarter.
 // A slow path of loop L: between L's header and BB, the dominator chain
 // enters a block only through a two-way edge whose weights make it rarer than
 // one in eight. Those are Hirsel's 2000:1 failure and growth weights and the
@@ -1046,6 +1052,8 @@ static void inlineLoopHelpers(Module &M) {
     auto I = Scc.find(A), J = Scc.find(B);
     return I != Scc.end() && J != Scc.end() && I->second == J->second;
   };
+  DenseMap<unsigned, unsigned> SccSizes;
+  for (auto &[G, N] : Scc) ++SccSizes[N];
   for (Function &F : M) {
     // A lent body is a helper here, never a caller.
     if (F.isDeclaration() || F.hasAvailableExternallyLinkage()) continue;
@@ -1101,7 +1109,8 @@ static void inlineLoopHelpers(Module &M) {
       }
     }
     DenseSet<size_t> ExpandedUnwinds;
-    constexpr unsigned Limit = 2048;
+    auto Cycle = Scc.find(&F);
+    const unsigned Limit = Cycle != Scc.end() && SccSizes[Cycle->second] > 1 ? 512 : 2048;
     unsigned Budget = Limit;
     DenseMap<const DISubprogram *, unsigned> SourceBudgets;
     while (!Pending.empty()) {

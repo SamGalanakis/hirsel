@@ -369,7 +369,7 @@ pub(super) fn emit_release_image(
     // The Core modules and facts are read only until the unit is lowered.
     let mut core = Some((modules, facts));
     // Every part, whichever program reached it, is in the shared parts cache.
-    let shared = Store::new(&options.parts)?;
+    let shared = Store::release_parts(&options.parts)?;
     let emit = |message: String| NativeStop::Emit {
         definition: entry.clone(),
         message,

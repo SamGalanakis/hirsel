@@ -264,9 +264,9 @@ pub(crate) fn std_side(
             })
             .collect(),
     };
-    let shared = Store::new(&options.parts)?;
-    let (key, record, lowered) = lower(&generator, kin, side_units, &shared, Vec::new())?;
-    side(&shared, key, record, lowered)
+    let shared = Store::release_parts(&options.parts)?;
+    let (store, key, record, lowered) = lower(&generator, kin, side_units, &shared, Vec::new())?;
+    side(&store, key, record, lowered)
 }
 
 /// The side `library`'s store holds prebuilt for `kin`, when each unit it
@@ -480,25 +480,21 @@ impl PrebuiltStd {
             recording: false,
         };
         let kin = generator.kin()?;
-        let (key, _, _) = lower(&generator, kin, self.units, &self.store, self.modules)?;
+        let (_, key, _, _) = lower(&generator, kin, self.units, &self.store, self.modules)?;
         self.store.put_keyed(prebuilt_name(kin)?, &encode(&key)?)?;
         Ok(())
     }
 }
 
-/// Join, specialize and lower a side's units, and publish its parts and
-/// record into `store` under the key its content derives in `kin`. Each
-/// part is stored as bitcode, whose object a program generates when it first
-/// links the part; with `objects`, as the object itself, generated here.
-/// Also returns how many units it lowered: none when `store` already holds
-/// the side.
+/// Lower the side into its pinned cache directory, or the installation's
+/// store for a prebuilt side. A hit lowers no units.
 fn lower(
     options: &Generator<'_>,
     kin: ContentHash,
     side: SideUnits,
-    store: &Store,
+    cache: &Store,
     modules: Vec<ModuleRoots>,
-) -> Result<(ContentHash, StdRecord, u64), NativeStop> {
+) -> Result<(Store, ContentHash, StdRecord, u64), NativeStop> {
     let SideUnits {
         roots: requested,
         units,
@@ -509,8 +505,13 @@ fn lower(
         .map(|(identity, unit)| Ok((identity.clone(), unit.owner()?)))
         .collect::<io::Result<Vec<_>>>()?;
     let key = side_key(kin, prebuilt, &requested, &owners)?;
-    if let Some(record) = load_record(store, key, kin)? {
-        return Ok((key, record, 0));
+    let store = if prebuilt {
+        cache.clone()
+    } else {
+        cache.release_side(key)?
+    };
+    if let Some(record) = load_record(&store, key, kin)? {
+        return Ok((store, key, record, 0));
     }
     let lent_key = lent_name(key)?;
     let mut record = StdRecord {
@@ -540,7 +541,7 @@ fn lower(
                 options,
                 module.roots,
                 units,
-                store,
+                &store,
                 key,
                 &mut record,
             )?);
@@ -550,7 +551,7 @@ fn lower(
             options,
             record.requested.clone(),
             units,
-            store,
+            &store,
             key,
             &mut record,
         )?);
@@ -570,13 +571,13 @@ fn lower(
         points.dedup();
     }
     if prebuilt {
-        write_compressed(store, lent_key, &lent)?;
+        write_compressed(&store, lent_key, &lent)?;
     } else {
         store.put_keyed(lent_key, &lent)?;
     }
     store.put_keyed(key, &encode(&record)?)?;
     let lowered = record.units.len() as u64;
-    Ok((key, record, lowered))
+    Ok((store, key, record, lowered))
 }
 
 fn lower_module(
@@ -796,10 +797,7 @@ fn side_key(
     crate::native::key("hirsel.core-std-side.v3", &(kin, prebuilt, roots, units))
 }
 
-/// The std side `record`, stored in the shared cache `store` under `key`,
-/// names: its lent bodies, checked under the name its own key derives, and
-/// its parts, whose objects `store` holds or gets. This build lowered
-/// `lowered` of its units.
+/// Load the side's lent bodies and hold the store through object generation.
 fn side(
     store: &Store,
     key: ContentHash,
@@ -975,8 +973,8 @@ impl StdSide {
         } else {
             let mut named = Vec::new();
             for object in program {
-                let bytes = std::fs::read(&object.path)?;
-                named.extend(hirsel_llvm_lazy::core::undefined_symbols(&bytes).map_err(emit)?);
+                let bytes = object.bytes.as_deref().expect("a held release object");
+                named.extend(hirsel_llvm_lazy::core::undefined_symbols(bytes).map_err(emit)?);
             }
             reach(named)?
         };

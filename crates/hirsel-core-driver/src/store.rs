@@ -20,6 +20,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use twox_hash::XxHash3_64;
 
+#[path = "release_cache.rs"]
+pub(crate) mod release_cache;
+
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
 /// A body record's envelope: `BODY_MAGIC VERSION head_len ir_len head ir_hash
 /// ir prefix_check ir_check address`. The address names everything before
@@ -213,6 +216,7 @@ impl ArchiveWriter {
 pub struct Store {
     root: PathBuf,
     image: bool,
+    release: Option<release_cache::Release>,
 }
 
 pub(crate) fn default_path(directory: &Path) -> PathBuf {
@@ -273,6 +277,7 @@ impl Store {
         let store = Self {
             root: root.to_owned(),
             image: false,
+            release: None,
         };
         store.sweep()?;
         Ok(store)
@@ -373,7 +378,11 @@ impl Store {
         self.publish_to(|file| {
             file.write_all(bytes)?;
             Ok((path, ()))
-        })
+        })?;
+        if let Some(release) = &self.release {
+            release.wrote(bytes.len());
+        }
+        Ok(())
     }
     /// Write a cache file to a locked temporary. The writer names the
     /// destination after it has written the payload.
@@ -388,7 +397,14 @@ impl Store {
             return Err(io::Error::other("the test writer crashed"));
         }
         let result = written.and_then(|(path, value)| {
-            fs::rename(&temporary.path, path)?;
+            let path = path.as_ref();
+            match (&self.release, fs::rename(&temporary.path, path)) {
+                (Some(release), Err(e)) if e.kind() == io::ErrorKind::NotFound => {
+                    release.create_dir(path.parent().expect("a release cache shard"))?;
+                    fs::rename(&temporary.path, path)?;
+                }
+                (_, result) => result?,
+            }
             Ok(value)
         });
         if result.is_err() {
@@ -411,8 +427,12 @@ impl Store {
             name[i * 2] = HEX[(byte >> 4) as usize];
             name[i * 2 + 1] = HEX[(byte & 15) as usize];
         }
-        self.root
-            .join(std::str::from_utf8(&name).expect("hex digits are ASCII"))
+        let name = std::str::from_utf8(&name).expect("hex digits are ASCII");
+        if self.release.is_some() {
+            self.root.join(&name[..2]).join(&name[2..])
+        } else {
+            self.root.join(name)
+        }
     }
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         self.archive(|writer| writer.write_all(bytes))
@@ -642,6 +662,9 @@ impl Store {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(size).map_err(io::Error::other)?;
         file.read_to_end(&mut bytes)?;
+        if self.release.is_some() && bytes.len() == size {
+            release_cache::touch(&file);
+        }
         if let Some(image) = image {
             image.bytes(bytes.len());
         }
@@ -704,7 +727,13 @@ impl Store {
         crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        Ok((checksum(&bytes) == bare.check).then_some(bytes))
+        if checksum(&bytes) != bare.check {
+            return Ok(None);
+        }
+        if self.release.is_some() {
+            release_cache::touch(&file);
+        }
+        Ok(Some(bytes))
     }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
         let bytes = match fs::read(self.root.join(name)) {

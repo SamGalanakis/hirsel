@@ -4,6 +4,7 @@ from copy import deepcopy
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -343,6 +344,38 @@ class QuietCyclePairs(unittest.TestCase):
 
 
 class ProfileSelfCosts(unittest.TestCase):
+    def test_peer_profile_refuses_mismatched_stdout_image_and_event(self):
+        from profile_peer import build_id, check_output, detached_debug, notes, parse_samples, rust_marker
+
+        marker = rust_marker("arena", r"Json::Generate: OK in [0-9.]+s\n")
+        stdout = b"start: 162\nJson::Generate: OK in 0.035s\nSummary: 0.0350s, 1, 1, 0\n"
+        check_output(marker, stdout, "Rust")
+        with self.assertRaisesRegex(ValueError, "stdout differs"):
+            check_output(marker, stdout.replace(b"OK", b"ERR"), "Rust")
+        with self.assertRaisesRegex(ValueError, "stdout differs"):
+            check_output(marker, stdout + b"extra result\n", "Rust")
+
+        data = ("   2370 cycles:u: \n"
+                "        10420 app (/opt/app+0x420)\n"
+                "   6731 instructions:u: \n"
+                "        10512 app (/opt/app+0x512)\n")
+        samples = parse_samples(data.splitlines())
+        self.assertEqual([(s["event"], s["period"], s["stack"][0]["offset"]) for s in samples],
+                         [("cycles:u", 2370, 0x420), ("instructions:u", 6731, 0x512)])
+        with self.assertRaisesRegex(ValueError, "unexpected sample event"):
+            parse_samples(data.replace("instructions:u:", "instructions:k:").splitlines())
+
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            image = out / "program"
+            shutil.copyfile("/bin/true", image)
+            ident = build_id(notes(image))
+            debug = out / ".build-id" / ident[:2] / f"{ident[2:]}.debug"
+            debug.parent.mkdir(parents=True)
+            shutil.copyfile("/bin/false", debug)
+            with self.assertRaisesRegex(ValueError, "detached debug image identity differs"):
+                detached_debug(image, out)
+
     def test_excludes_call_edges_and_keeps_inlined_line(self):
         from profile_diff import self_counts
 

@@ -20,6 +20,7 @@ import build
 from build import sha256
 import elf_census
 import profile_diff
+import profile_peer
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
 from timing_shield import file_locks, hold, measurement_affinity
@@ -440,7 +441,7 @@ def receipt_path(directory):
     return path if path.is_file() else directory / "board.json"
 
 
-def cycle_samples(base, candidate, args, siblings, env, pairs=None):
+def cycle_samples(base, candidate, args, siblings, env, pairs=None, *, user_counters=False):
     kept = []
     limit = args.sibling_busy_threshold
     for attempt in range(1, args.max_attempts + 1):
@@ -456,7 +457,8 @@ def cycle_samples(base, candidate, args, siblings, env, pairs=None):
                 run = pair[side] = row.copy()
                 run.pop("sample", None)
                 run.pop("stdout", None)
-                sample = observe(run, Path(temporary) / side, env, siblings, cycles=True, quiet_window=True)
+                sample = observe(run, Path(temporary) / side, env, siblings, cycles=True,
+                                 quiet_window=not user_counters)
                 sample.pop("directory", None)
                 if sample["status"] != "ok":
                     detail = (Path(temporary) / side / "stderr").read_text().strip()
@@ -581,26 +583,36 @@ def cycle_row(key, source, label, cpu):
     return source | {"affinity": [cpu]}
 
 
-def peer_cycle_pairs(key, hirsel, args, siblings, env, report=None):
+def peer_commands(key, hirsel, upstream):
     suite = hirsel["suite"]
-    if suite != "arena" and args.upstream is None:
+    if suite != "arena" and upstream is None:
         raise ValueError("--upstream is required for AWFY and pool peer commands")
     name = key.split("/", 1)[1]
     cwd = Path(hirsel["cwd"])
     if suite == "arena":
         config, = map(Path, hirsel["fixture_files"])
+        if config.resolve() != (cwd / config.name).resolve():
+            raise ValueError("the arena fixture is outside the workload's cwd")
         cases = dict(awfy_measure.arena_rows(cwd, config))
     else:
-        cases = dict(awfy_measure.runtime_cases(suite, cwd, args.upstream))
+        upstream_config = (upstream / "rebench.conf").resolve()
+        if hirsel["fixture_files"].get(str(upstream_config)) != sha256(upstream_config):
+            raise ValueError("the upstream config differs from the measured fixture")
+        cases = dict(awfy_measure.runtime_cases(suite, cwd, upstream))
     commands = cases[name]
     command, marker = commands["hirsel"]
     argv = [f"./{command[0].name}", *map(str, command[1:])]
     if argv != hirsel["argv"] or marker.decode() != hirsel["marker"]:
         raise ValueError("the peer commands do not match the Hirsel receipt's workload")
+    return commands
+
+
+def peer_cycle_pairs(key, hirsel, args, siblings, env, report=None):
+    commands = peer_commands(key, hirsel, args.upstream)
     status = 0
     for peer in args.peer:
         command, marker = commands[peer]
-        row = {"argv": list(map(str, command)), "cwd": str(cwd), "marker": marker.decode(), "line_marker": True}
+        row = {"argv": list(map(str, command)), "cwd": hirsel["cwd"], "marker": marker.decode(), "line_marker": True}
         status = max(status, run_cycle_pairs(f"{key} Hirsel/{peer}", row, hirsel, args, siblings, env, report, peer=True))
     return status
 
@@ -854,6 +866,16 @@ def profile(args):
     return 0
 
 
+def profile_peer_row(args):
+    rows, refusals = instruction_rows(receipt_path(args.baseline))
+    key, = select_pair_rows(args.row, rows)
+    if key in refusals:
+        raise ValueError(refusals[key])
+    left = cycle_row(key, rows[key], "Hirsel", args.cpu)
+    rust = None if args.aa else peer_commands(key, left, args.upstream)["rust"]
+    return profile_peer.run(args, key, left, rust, cycle_samples, write)
+
+
 def threshold(value):
     try:
         result = Decimal(value)
@@ -924,6 +946,7 @@ def main():
     profiling.add_argument("candidate", type=Path)
     profiling.add_argument("out", type=Path)
     profiling.add_argument("--lock", type=Path, required=True)
+    profile_peer.add_parser(commands)
     census = commands.add_parser("elf-census", help="compare file bytes and symbol owners in two ELF images")
     census.add_argument("baseline", type=Path)
     census.add_argument("candidate", type=Path)
@@ -943,6 +966,8 @@ def main():
             return sample(args)
         if args.action == "profile-diff":
             return profile(args)
+        if args.action == "profile-peer":
+            return profile_peer_row(args)
         if args.action == "cycle-pairs":
             return cycle_pairs(args)
         if args.action == "elf-census":

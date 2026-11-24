@@ -73,7 +73,7 @@ def disassembly(binary, addresses):
     return output
 
 
-def source_locations(binary, addresses):
+def source_locations(binary, addresses, *, short_names=False):
     llvm = build.llvm_path()
     symbolizer = llvm / "bin/llvm-symbolizer"
     env = os.environ.copy()
@@ -85,8 +85,10 @@ def source_locations(binary, addresses):
     else:
         symbolizer = "llvm-symbolizer"
     addresses = sorted(addresses)
+    names = "short" if short_names else "linkage"
     result = subprocess.run(
-        [symbolizer, "--obj", binary, "--inlines", "--no-debuginfod", "--output-style=JSON"], text=True, capture_output=True,
+        [symbolizer, "--obj", binary, "--inlines", "--no-debuginfod", "--output-style=JSON", f"--functions={names}"],
+        text=True, capture_output=True,
         input="".join(f"{pc:#x}\n" for pc in addresses), env=env, check=True,
     )
     return {pc: [

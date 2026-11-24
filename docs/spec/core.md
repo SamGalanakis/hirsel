@@ -765,7 +765,7 @@ runs each on the evaluator, Cranelift dev and LLVM release ([README](../../core/
 ```hirsel core
 pub type Argon2Cost { memory_kib: u32, passes: u32, lanes: u32 }
 pub type Argon2Error = Params | Capacity(Capacity)
-pub fn argon2.id(password: Bytes, salt: Bytes, key: Bytes, data: Bytes, cost: Argon2Cost, len: u64, mut out: Bytes) -> Result[(), Argon2Error]
+pub fn id(password: Bytes, salt: Bytes, key: Bytes, data: Bytes, cost: Argon2Cost, len: u64, mut out: Bytes) -> Result[(), Argon2Error]
 ```
 
 `argon2.id` computes Argon2id version `0x13`, the function `H` of
@@ -821,9 +821,9 @@ and checks one:
 
 ```hirsel unbuilt
 pub type PhcError = Malformed | Argon2(Argon2Error)
-pub fn argon2.hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, PhcError]
-pub fn argon2.verify(password: Bytes, phc: Bytes) -> Result[bool, PhcError]
-pub fn argon2.recommended() -> Argon2Cost
+pub fn hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, PhcError]
+pub fn verify(password: Bytes, phc: Bytes) -> Result[bool, PhcError]
+pub fn recommended() -> Argon2Cost
 ```
 
 `hash` computes a 32-byte tag and writes

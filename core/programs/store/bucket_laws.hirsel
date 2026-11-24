@@ -265,9 +265,9 @@ fn bucket_law_seed(e: Env, fallback: u64) -> u64 {
 @test
 fn bucket_test_l4_cuts(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     for after in 0u64 .. BUCKET_LAW_CUTS {
-        let applied = bucket_law_cut(c, r, tasks, after, bucket_law_wire_cut(after, true), list.new())?
-        let dropped = bucket_law_cut(c, r, tasks, after, bucket_law_wire_cut(after, false), list.new())?
-        if applied && dropped {
+        let finished_applied = bucket_law_cut(c, r, tasks, after, bucket_law_wire_cut(after, true), list.new())?
+        let finished_dropped = bucket_law_cut(c, r, tasks, after, bucket_law_wire_cut(after, false), list.new())?
+        if finished_applied && finished_dropped {
             if after < 4 * BUCKET_LAW_ROUNDS {
                 fail("bucket wire cut: the cut never reached the writer")
             }
@@ -350,8 +350,8 @@ fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error
     if get(before, rows, 2)? != Some(bucket_law_value(2)) || follower_head(reader)?.claim.epoch != 1 {
         fail("the follower missed the durable group or claimed the register")
     }
-    let next = bucket_law_authority(s, tasks, "s3.test", 3)?
-    let mut successor = open_authority(tasks, take next, s.time, r, options)?
+    let successor_grant = bucket_law_authority(s, tasks, "s3.test", 3)?
+    let mut successor = open_authority(tasks, take successor_grant, s.time, r, options)?
     bucket_law_commit(mut successor, 3)?
     close(take successor)?
     let deadline = clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)

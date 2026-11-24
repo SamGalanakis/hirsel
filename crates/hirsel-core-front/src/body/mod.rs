@@ -1249,7 +1249,7 @@ struct Cx<'c, 'a, 'e> {
     /// snapshotted, and the arguments so passed.
     direct_call: Option<(u32, Option<SlotId>)>,
     direct_args: Vec<(usize, TypeId, NodeId)>,
-    callable_signatures: HashMap<TyId, closures::CallableAbi>,
+    callable_signatures: HashMap<TyId, callable_abi::CallableAbi>,
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
     /// Invocation parameters available while a closure header is being read.

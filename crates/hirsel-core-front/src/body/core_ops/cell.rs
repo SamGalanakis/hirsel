@@ -52,16 +52,33 @@ impl Cx<'_, '_, '_> {
                 old
             }
             // The payload is lent in place as the plain callback's `mut` parameter; the
-            // value call takes `a`, steps for the callback's entry and owns the result.
+            // value call takes `a` and owns the result. It steps on the callback's entry
+            // unless the callback is a core function, which is not user code (MEM-30),
+            // so `log.append` over `cell.with` stays one step.
             CellOp::With => {
                 let (a, r) = (types[1], types[2]);
                 let pointer = self.pointer(payload, n);
                 let params = vec![(Mode::Mut, item), (Mode::Take, a)];
                 let callable = self.t.mk(TyKind::Fn(params, r, false, Callable::Plain));
-                self.call_lowered(callable, vals[2]?, &[Some(pointer), vals[1]], n)
+                let entry = if self.core_callback(n) {
+                    crate::body::closures::Entry::Core
+                } else {
+                    crate::body::closures::Entry::Step
+                };
+                self.call_lowered_entry(callable, vals[2]?, &[Some(pointer), vals[1]], n, entry)
             }
             CellOp::New | CellOp::IntoInner => unreachable!(),
         }
+    }
+
+    /// Whether `cell.with`'s callback argument names a core function.
+    fn core_callback(&self, n: NodeId) -> bool {
+        let Some(&f) = self.kids(n).get(3) else {
+            return false;
+        };
+        matches!(self.call_target(f), Some(&Target::Definition(id))
+            if matches!(self.p.by_definition[id.0 as usize],
+                Some(Def::Fn(f)) if self.p.fns[f as usize].path.package_is("core", "1")))
     }
 
     /// The payload at `payload`, moved or copied into a value this body owns.

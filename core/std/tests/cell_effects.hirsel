@@ -31,3 +31,29 @@ fn persists_across_caught_stops() -> u64 {
     }
     cell.into_inner(take c)
 }
+
+// MEM-30: a core function's call is one step plus the steps of the user code it
+// enters, and log.append enters none, so three appends fit `bound steps 3` and the
+// third of a `bound steps 2` stops before it appends. Appends persist past the stop.
+// expect: run log_append_is_one_step() = 12345
+fn log_append_is_one_step() -> u64 {
+    let l: Log[u64] = log.new()
+    let fits = bound steps 3 {
+        log.append(l, 1);
+        log.append(l, 2);
+        log.append(l, 3)
+    }
+    let stops = bound steps 2 {
+        log.append(l, 4);
+        log.append(l, 5);
+        log.append(l, 6)
+    }
+    let mut seen = 0u64
+    for id in log.finish(take l) {
+        seen = 10 * seen + id
+    }
+    match (fits, stops) {
+        (Ok(()), Error(_)) => seen,
+        _ => 0,
+    }
+}

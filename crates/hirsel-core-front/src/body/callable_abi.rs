@@ -1,6 +1,16 @@
 //! Callable payloads use typed addresses, so a rigid generic call and its closed
 //! scalar instance have the same convention. Adapters retain FORM's task/status ABI.
+use super::calls::CallScratch;
 use super::*;
+
+#[derive(Clone, Copy)]
+pub(super) struct CallableAbi {
+    pub(super) signature: SigId,
+    pub(super) params: PoolRange<Rep>,
+    pub(super) result: Rep,
+    pub(super) regions: PoolRange<u32>,
+    pub(super) scoped_result: bool,
+}
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn indirect_signature(
@@ -538,5 +548,136 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         dest.map(|at| self.pointer(at, n)).or(value)
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn value_call_abi(
+        &mut self,
+        callable: TyId,
+        result: TyId,
+        n: NodeId,
+        scratch: &mut CallScratch,
+    ) -> Option<CallableAbi> {
+        let abi = match self.callable_signatures.get(&callable).copied() {
+            Some(abi) => abi,
+            None => {
+                let signature = match self.indirect_signature(
+                    &scratch.params,
+                    result,
+                    &mut scratch.ir_params,
+                ) {
+                    Ok(signature) => signature,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
+                };
+                let start = self.callable_reps.len();
+                for &(_, ty) in &scratch.params {
+                    let rep = match self.rep(ty) {
+                        Ok(rep) => rep,
+                        Err(what) => {
+                            self.gap(n, what);
+                            return None;
+                        }
+                    };
+                    self.callable_reps.push(rep);
+                }
+                let result_ty = result;
+                let result = match self.rep(result) {
+                    Ok(rep) => rep,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
+                };
+                let roots = self.callable_regions.len();
+                for (i, &(_, ty)) in scratch.params.iter().enumerate() {
+                    if self.region_handle(ty)
+                        && (self.parameter_region_result(result_ty, i as u32)
+                            || scratch
+                                .params
+                                .iter()
+                                .any(|&(_, ty)| self.parameter_region_result(ty, i as u32)))
+                    {
+                        self.callable_regions.push(i as u32);
+                    }
+                }
+                let abi = CallableAbi {
+                    signature,
+                    params: PoolRange::new(start as u32, scratch.params.len() as u32),
+                    result,
+                    scoped_result: matches!(
+                        self.type_kind(result_ty),
+                        Kind::Scoped | Kind::Generic
+                    ),
+                    regions: PoolRange::new(
+                        roots as u32,
+                        (self.callable_regions.len() - roots) as u32,
+                    ),
+                };
+                self.callable_signatures.insert(callable, abi);
+                abi
+            }
+        };
+        Some(abi)
+    }
+    pub(super) fn scoped_result_regions_only(
+        &self,
+        ty: TyId,
+        params: &[crate::decls::ParamDecl],
+    ) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Region(Root::Parameter(i)) => self
+                .fd
+                .params
+                .get(*i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            TyKind::Region(Root::CallableParameter { depth: 0, index: i }) => params
+                .get(*i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            TyKind::Region(Root::Local(slot)) => self.vars[*slot as usize]
+                .map(|v| v.ty)
+                .or_else(|| self.captured_root_ty(*slot))
+                .is_some_and(|ty| self.region_handle(ty)),
+            TyKind::Anchored(x, root) => {
+                self.scoped_result_regions_only(*x, params)
+                    && self.scoped_result_regions_only(*root, params)
+            }
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
+                .iter()
+                .all(|&x| self.scoped_result_regions_only(x, params)),
+            TyKind::View(x) | TyKind::Array(x, _) => self.scoped_result_regions_only(*x, params),
+            _ => true,
+        }
+    }
+
+    pub(super) fn parameter_region_result(&self, ty: TyId, parameter: u32) -> bool {
+        self.parameter_region_result_at(ty, parameter, 0)
+    }
+    pub(super) fn parameter_region_result_at(&self, ty: TyId, parameter: u32, depth: u32) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Region(Root::CallableParameter {
+                depth: bound,
+                index: i,
+            }) => *i == parameter && *bound == depth,
+            TyKind::Anchored(inner, root) => {
+                matches!(self.t.kind(*root), TyKind::Region(Root::CallableParameter {depth: bound, index: i}) if *i == parameter && *bound == depth)
+                    || self.parameter_region_result_at(*inner, parameter, depth)
+            }
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
+                .iter()
+                .any(|&x| self.parameter_region_result_at(x, parameter, depth)),
+            TyKind::Array(x, _) | TyKind::View(x) => {
+                self.parameter_region_result_at(*x, parameter, depth)
+            }
+            TyKind::Fn(ps, r, _, _) => {
+                ps.iter()
+                    .any(|&(_, p)| self.parameter_region_result_at(p, parameter, depth + 1))
+                    || self.parameter_region_result_at(*r, parameter, depth + 1)
+            }
+            _ => false,
+        }
     }
 }

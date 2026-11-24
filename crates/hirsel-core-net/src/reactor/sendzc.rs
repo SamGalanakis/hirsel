@@ -416,7 +416,7 @@ impl Uring {
         };
         let entry = &mut table.entries[index as usize];
         if notif {
-            self.completion.release_send(1, 0);
+            self.completion.release_send(1);
             entry.notifs -= 1;
             let copied = result as u32 & ZC_COPIED != 0;
             let (held, tag, busy) = (entry.held, entry.tag, entry.busy());
@@ -429,8 +429,7 @@ impl Uring {
         }
         entry.outstanding -= 1;
         entry.result = Some(result);
-        self.completion
-            .release_send(1 + usize::from(!more), usize::from(!entry.cancel_queued));
+        self.completion.release_send(1 + usize::from(!more));
         if !more {
             // No notification follows a send that failed before taking data.
             entry.notifs -= 1;

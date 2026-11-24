@@ -160,7 +160,10 @@ impl Uring {
     /// NODROP retains completions past this capacity. The owner enters
     /// with GETEVENTS to flush them once reaping has made room.
     const READINESS_ENTRIES: u32 = 4096;
-    pub(super) const COMPLETION_ENTRIES: u32 = 65_536;
+    /// One SQ batch's completions: the most an entry posts is two, a
+    /// zero-copy send's result and notification. More in flight wait on the
+    /// kernel's overflow list (NODROP) until reaping makes room.
+    pub(super) const COMPLETION_ENTRIES: u32 = Self::ENTRIES * 2;
 
     /// A ring whose kernel runs multishot polls, bounded waits and blind
     /// MSG_RING wakes. Any refusal (an old kernel, a seccomp filter,
@@ -264,6 +267,7 @@ impl Uring {
         timeout_ns: Option<u64>,
     ) -> io::Result<usize> {
         self.recover_watches(false);
+        self.completion.check_dropped()?;
         let limit = POLL_BATCH as usize;
         let mut remaining = limit;
         let mut completion_left = limit;
@@ -383,8 +387,8 @@ impl Poller {
 }
 
 impl Poller {
-    /// Queue a one-shot file operation to the slot's completion ring. It keeps its
-    /// place until it can reserve a completion. Epoll leaves the operation to the caller.
+    /// Queue a one-shot file operation to the slot's completion ring. Epoll
+    /// leaves the operation to the caller.
     ///
     /// # Safety
     /// The caller owns the running slot and has at most one file request per

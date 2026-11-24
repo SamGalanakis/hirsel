@@ -1,11 +1,11 @@
 //! One io_uring instance whose ring memory the runtime provides.
 //!
 //! The kernel's own ring allocation (`io_uring_setup` without `NO_MMAP`) wants
-//! physically contiguous pages: a 65,536-entry CQ is 257 pages, so it asks for
-//! an order-9 block and fails with `ENOMEM` once fragmentation has used those
-//! up, with no memory cap reached. `IORING_SETUP_NO_MMAP` makes the kernel pin
-//! and map pages from two ordinary anonymous mappings instead, so setup needs
-//! only order-0 pages. `NO_SQARRAY` drops the SQ index array: the kernel reads
+//! physically contiguous pages: a 4,096-entry readiness CQ is 17 pages, so it
+//! asks for an order-5 block and can fail with `ENOMEM` once fragmentation has
+//! used those up, with no memory cap reached. `IORING_SETUP_NO_MMAP` makes the
+//! kernel pin and map pages from two ordinary anonymous mappings instead, so
+//! setup needs only order-0 pages. `NO_SQARRAY` drops the SQ index array: the kernel reads
 //! SQEs in ring order.
 //!
 //! Only the owner of a ring pushes submissions and pops completions; the
@@ -216,6 +216,7 @@ pub(in crate::reactor) struct Ring {
     cq_tail: *const AtomicU32,
     cq_dropped: *const AtomicU32,
     cq_mask: u32,
+    #[cfg(test)]
     cq_entries: u32,
     cqes: *const cqueue::Entry,
 }
@@ -277,6 +278,7 @@ impl Ring {
             cq_tail: rings.at(c.tail, 1)?,
             cq_dropped: rings.at(c.overflow, 1)?,
             cq_mask,
+            #[cfg(test)]
             cq_entries: p.cq_entries,
             cqes: rings.at(c.cqes, p.cq_entries as usize)?,
             fd,
@@ -285,6 +287,7 @@ impl Ring {
         })
     }
 
+    #[cfg(test)]
     pub(in crate::reactor) fn cq_entries(&self) -> usize {
         self.cq_entries as usize
     }

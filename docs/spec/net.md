@@ -755,6 +755,11 @@ not fit what is left, and reaping counts every completion it examines. Served pa
 staging is paid from the port's room. The receive-mode comparison kept readiness
 receive with `recvmmsg`. The section ends with the [UDP build laws](#udp-build-laws).
 
+Version note (2026-11-24, uring-cq-size-2455): the completion ring's queue is sized to one
+submission batch (128 entries) instead of 65,536, which cost about 1 MB resident per
+poller. Overflow is kept by `IORING_FEAT_NODROP` and drained every turn, file operations no
+longer wait for a completion credit, and a dropped completion on that ring fails the poller.
+
 UDP gives programs IP datagrams for media, QUIC and DNS-like protocols. Its operations
 move **batches**: one call receives or sends many datagrams, so a program pays one call,
 one wait and one host crossing for a burst. The host's segmentation offloads
@@ -846,8 +851,7 @@ pub fn udp_local_addr(s: UdpSocket) -> Result[Addr, NetError] waits
 
 - `Oversize(max: u32)` (below).
 - `Exhausted`, a host resource the provider could not obtain after issue: the UDP host
-  allowance, a descriptor, a socket, or a reservation on the poller's completion ring
-  (NET-17). It is recorded like any delivered error, and
+  allowance, a descriptor or a socket. It is recorded like any delivered error, and
   nothing of the operation remains.
 
 `UdpSocket` is a mechanical resource of logical size 8. It is `send` and `cross`
@@ -1468,33 +1472,33 @@ or a retirement, and a UDP socket adds one readiness watch to its ring and nothi
   loss is recovered.
 - The **completion ring** carries every operation whose completion is the only record of
   its state. That includes one-shot file operations, a TCP zero-copy send and its
-  buffer notification. Its queue **cannot overflow**. Before submitting an operation, the poller
-  reserves the most completions that operation can post. A zero-copy send reserves two data
-  entries, one for the result and one for the possible notification (`sendzc.rs`), and one
-  control entry for a possible cancellation. A file operation reserves one entry. The
-  reservations never exceed the ring's queue entries. Entries return once the poller has
-  reaped the corresponding completion or can prove it will never be posted. A zero-copy
-  result without `IORING_CQE_F_MORE` returns the notification credit with the result. A
-  send result also returns the control entry if it never queued a cancellation.
-  Each io_uring poller opens the ring at the kernel's maximum of 65,536 entries
-  (`IORING_MAX_CQ_ENTRIES`, `io_uring.h:170-171`), and keeps that size. It is not resized,
-  because `IORING_REGISTER_RESIZE_RINGS` requires `IORING_SETUP_DEFER_TASKRUN`
-  (`register.c:510-512`). That flag would post completions only when the owner enters, and
-  the poller reads this queue from shared memory each turn. Zero-copy sends may hold at most
-  4,096 data entries. A zero-copy send that finds no room sends by copying instead,
-  the way `HIRSEL_NET_SEND_ZC` already lets a send copy ([HTTP](http.md)). File operations
-  wait in submission order when they cannot reserve a credit, and at least one credit
-  is available to file operations while sends hold the others. A waiting CLOSE retains
-  ownership of its descriptor through submission and completion.
+  buffer notification. Its queue is sized to one submission batch, and its overflow is
+  kept rather than dropped. Each io_uring poller opens it at the submission depth (64
+  entries) times the most completions one entry posts: two, a zero-copy send's result and
+  its notification. That is 128 entries, 2 KiB of queue. A file operation and a send's
+  cancellation each post one. More completions than that may be outstanding, for example
+  2,048 zero-copy sends at once. The kernel keeps those it cannot post on its overflow list,
+  because the ring requires `IORING_FEAT_NODROP` (`io_uring.c:628-649`). It sets
+  `IORING_SQ_CQ_OVERFLOW`, and an enter with `IORING_ENTER_GETEVENTS` moves them into the
+  room reaping made. Zero-copy sends may hold at most 4,096 data entries, two per send,
+  which bounds the slot bytes the kernel can pin. A zero-copy send that finds no room sends
+  by copying instead, the way `HIRSEL_NET_SEND_ZC` already lets a send copy
+  ([HTTP](http.md)). File operations are submitted when queued, at most one per unit. A
+  CLOSE retains ownership of its descriptor through submission and completion.
 
-The completion ring never reaches the kernel's overflow path (`io_uring.c:628-649`), because
-its unreaped completions never outnumber its queue. So no completion on it is lost, and no
-recovery is needed for it. The readiness ring holds a multishot poll on the completion
-ring's descriptor, which is readable while its queue holds completions
+The poller treats the overflow list as part of the queue. Every turn it reaps what is
+posted, enters with `GETEVENTS` while `IORING_SQ_CQ_OVERFLOW` is set, and does not block
+while the queue is nonempty or the overflow flag is set. So every overflowed completion is
+reaped, in order, and no waiter on it stays parked. The kernel drops a completion only when
+it cannot allocate an overflow entry. On this ring that would lose the only record of an
+operation. The poller reads the ring's `cq_overflow` word every turn, and a nonzero word fails
+the poller with a resource failure, so the process stops as `HostPoll` instead of leaving a
+waiter parked. No recovery is attempted for this ring. The readiness ring holds a multishot
+poll on the completion ring's descriptor, which is readable while its queue holds completions
 (`io_uring.c:2240-2275`). An epoll poller adds that descriptor to its epoll set. A poller
-also reads the completion ring's queue head and tail, which are shared memory, in every
-turn, and it does not block while the queue is nonempty. So the completion ring can be
-reaped even if its readiness edge was lost. The epoll backend has no zero-copy sends.
+also reads the completion ring's queue head and tail and its overflow flag, which are shared
+memory, in every turn. So the completion ring can be reaped even if its readiness edge was
+lost. The epoll backend has no zero-copy sends.
 
 **Lost readiness.** The readiness ring's completion queue is shared by every producer on it.
 When the queue is full, the kernel keeps an overflow entry only while it can allocate one.
@@ -1592,15 +1596,14 @@ as there are runnable sources, each one starts a fresh turn, where its read or c
 busy intake cannot hold the head of every turn, and no source that needs a whole room
 starves behind sources that need less. Runnable sources need no fresh readiness edge. A
 poller does not block while it has a runnable source, a pending member wake (NET-16, Member
-queues), a nonempty completion ring, or an overflow it has not handled: its next wait has a
-zero timeout.
+queues), a nonempty completion ring or completion overflow list, or a readiness overflow it
+has not handled: its next wait has a zero timeout.
 
 **Reaping.** A turn examines at most 128 completions on each ring, the size of the reactor's
 event array. It counts every completion it examines, including those that yield no event: a
 removal's answer, a completion for a retired watch, a transmit completion that readies no
 writer, and a wake. The rest stay queued for the next turn, whose wait then has a zero
-timeout. A completion left queued on the completion ring keeps its reservation, so it cannot
-make that ring overflow. Take 129 removal answers queued at once: a turn examines 128 and
+timeout. Take 129 removal answers queued at once: a turn examines 128 and
 leaves 1.
 
 **Receiving.** The pool is the iovec array of a `recvmmsg`, one slot per message. `MSG_TRUNC`
@@ -1710,20 +1713,15 @@ laws (M1 to M3) are required as well, but each is a single case.
   receive validator accepts both recorded deliveries. *Harness:* the NET law suite
   (`core/std/tests/net.hirsel`), plus one replay of the recording through the receive
   validator.
-- **`completion_ring_never_overflows` (H1).** *Scenario:* a poller whose completion ring is
-  opened at its smallest queue issues zero-copy TCP sends to a loopback peer under
-  `HIRSEL_NET_SEND_ZC=always`. It issues more sends than the queue holds and reaps
-  nothing until they are all issued. *Oracle:* the kernel. The ring's `cq_overflow` word
-  stays 0, and `IORING_SQ_CQ_OVERFLOW` is never set in its `sq_flags`, since the kernel sets
-  it whenever it keeps an overflow entry (`io_uring.c:645-647`). After reaping, every
-  transmit slot recycles, and the sends past the reservation went by copying. On today's
-  shared ring the flag is set, so the law is red. *Harness:* the reactor tests
-  (`crates/hirsel-core-net/src/reactor/tests.rs`), beside
-  `an_answered_slot_is_not_reused_before_its_notification`.
-- **`close_waits_for_completion_credit` (H1).** Fill the completion queue with one-shot
-  file operations and queue CLOSE before reaping. The kernel's `F_GETFD` succeeds for the
-  descriptor while CLOSE is waiting. Reaping releases a file credit, the deferred CLOSE
-  delivers one completion, and `F_GETFD` then reports `EBADF`. *Harness:* the reactor tests.
+- **`a_completion_overflow_burst_loses_no_completion` (H1).** *Scenario:* a production
+  poller issues 1,024 one-byte zero-copy TCP sends to a loopback peer and queues 1,024
+  one-shot file NOPs, one per unit, then enters without reaping until all are submitted.
+  The 3,072 completions are 24 times the 128-entry queue, and `IORING_SQ_CQ_OVERFLOW` is
+  set. *Oracle:* the count of submitted operations. Reaping with one-second turns calls each
+  file reply exactly once, recycles every transmit slot after 1,024 notifications, and ends
+  within five seconds, so no turn slept while the overflow list held completions. The ring's
+  `cq_overflow` word stays 0, and the peer reads the 1,024 sent bytes. *Harness:* the
+  reactor tests (`crates/hirsel-core-net/src/reactor/tests.rs`).
 - **`replaced_watch_leaves_one_poll` (H2).** *Scenario:* register a UDP socket on an io_uring
   poller and run overflow recovery twice in a row without reaping. Then reap everything,
   including the old watches' terminal `-ECANCELED` completions, and tear the socket down.

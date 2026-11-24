@@ -1,12 +1,16 @@
 //! Park a unit until its host operation publishes a completion.
-use super::{Unit, cur, in_unit, park_unit, pool, untied, wake, worker_ix};
+use super::{Unit, cur, in_unit, park_unit, pool, pool_hooks, untied, wake, worker_ix};
 use std::{
     ptr,
     sync::atomic::{AtomicBool, Ordering},
 };
 
+pub(super) fn uses_file_ring_pool() -> bool {
+    in_unit() && pool().uring
+}
+
 pub(crate) fn uses_file_ring() -> bool {
-    untied() && in_unit() && pool().uring
+    untied() && (pool_hooks().uses_file_ring)()
 }
 
 /// Submit on this slot and park until its CQE, with the request still pinned.
@@ -14,7 +18,7 @@ pub(crate) fn uses_file_ring() -> bool {
 /// # Safety
 /// A ring unit is running. Every operand named by the SQE lives through
 /// completion, and the entry generates exactly one CQE.
-pub(crate) unsafe fn file_request(entry: io_uring::squeue::Entry) -> std::io::Result<i32> {
+pub(super) unsafe fn file_request_pool(entry: io_uring::squeue::Entry) -> std::io::Result<i32> {
     use std::sync::atomic::AtomicI32;
 
     struct FileReply {
@@ -54,6 +58,17 @@ pub(crate) unsafe fn file_request(entry: io_uring::squeue::Entry) -> std::io::Re
     } else {
         Ok(result)
     }
+}
+
+/// Submit through the pool's file ring. Callers use this only after
+/// `uses_file_ring`; keeping the pool implementation behind the hook lets
+/// executables without units dead-strip the pool.
+///
+/// # Safety
+/// Same contract as the pool file request.
+pub(crate) unsafe fn file_request(entry: io_uring::squeue::Entry) -> std::io::Result<i32> {
+    // SAFETY: the caller establishes the pool file-ring contract.
+    unsafe { (pool_hooks().file_request)(entry) }
 }
 
 /// A completion a unit parks on while another thread works for it.

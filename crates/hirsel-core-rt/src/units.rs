@@ -24,8 +24,12 @@ pub(crate) use memory::{Memory, SharedMemory};
 #[cfg(test)]
 #[path = "units_check.rs"]
 mod check;
+#[path = "units_hooks.rs"]
+mod hooks;
 #[path = "units_ledger.rs"]
 pub(crate) mod ledger;
+pub(crate) use hooks::untied;
+use hooks::{UNTIED_ON, enable_pool, pool_hooks};
 #[path = "units_reply.rs"]
 mod reply;
 pub(crate) use reply::{Reply, file_request, uses_file_ring};
@@ -170,38 +174,6 @@ pub(crate) const NONE: u32 = u32::MAX;
 const ID_END: u32 = 0xffff;
 const WAKE_TAG: u64 = u64::MAX;
 
-static UNTIED_ON: AtomicBool = AtomicBool::new(false);
-#[inline]
-pub(crate) fn untied() -> bool {
-    UNTIED_ON.load(Ordering::Relaxed)
-}
-
-struct PoolHooks {
-    memory: fn() -> Option<&'static dyn SharedMemory>,
-    park: fn(Option<u64>),
-    maybe_yield: fn(),
-    wake: fn(u32),
-    off_slot: fn(&mut (dyn FnMut() + Send)) -> bool,
-}
-
-static POOL_HOOKS: OnceLock<PoolHooks> = OnceLock::new();
-
-fn enable_pool() {
-    let _ = POOL_HOOKS.set(PoolHooks {
-        memory: pool_memory,
-        park: park_unit,
-        maybe_yield: yield_unit_if_needed,
-        wake: wake_unit_by_id,
-        off_slot: run_off_slot,
-    });
-    UNTIED_ON.store(true, Ordering::SeqCst);
-}
-
-// A launcher installs these callbacks before any worker starts. A tied
-// scheduler does not name the pool's records or queues through its wait path.
-fn pool_hooks() -> &'static PoolHooks {
-    POOL_HOOKS.get().unwrap()
-}
 /// `HIRSEL_UNTIED=W`: run the root unit, and every helper unit it makes, on W
 /// worker threads. Only executables that can spawn a helper unit read it.
 pub(crate) fn workers() -> Option<usize> {
@@ -812,15 +784,15 @@ fn push_arrival(u: &Unit, id: u64, flags: u32) {
     q.push((id, flags));
     u.xpending.store(true, Ordering::Release);
 }
+
 /// Readiness queued for the running unit, as (reactor identity, flags), in
 /// the order it reached the unit. A push after the check wakes the unit, so
 /// it is taken at the unit's next switch. Nobody else takes the readiness of
 /// the slot this unit runs on, so each scheduler turn takes it here first
 /// rather than going dry, parking and resuming for readiness already there.
 pub(crate) fn take_xready(mut each: impl FnMut(u64, u32)) {
-    let (p, ix) = (pool(), worker_ix());
-    if ix < p.w {
-        check_slot(p, ix);
+    if untied() {
+        (pool_hooks().take_slot)();
     }
     // SAFETY: called by the running unit's scheduler.
     let u = unsafe { &*cur() };

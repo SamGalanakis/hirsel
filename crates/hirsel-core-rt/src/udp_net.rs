@@ -449,7 +449,15 @@ struct PacketCarrier {
     ecn: u8,
 }
 
+pub(crate) struct Operations {
+    pub(crate) step: unsafe fn(*mut Request, u64) -> Step,
+    pub(crate) abort: unsafe fn(*mut Request, u64, u8) -> Outcome,
+}
+
+pub(crate) static OPERATIONS: Operations = Operations { step, abort };
+
 struct Call {
+    operations: &'static Operations,
     files: *mut Files,
     provider: Provider,
     until: Option<(Provider, u64, u64)>,
@@ -538,6 +546,11 @@ unsafe fn operands<'a>(carrier: *const Buffer) -> &'a [TxCarrier] {
             std::slice::from_raw_parts((*carrier).data.cast(), (*carrier).len)
         }
     }
+}
+
+pub(crate) unsafe fn operations(request: *const Request) -> &'static Operations {
+    // SAFETY: UDP operations carry a pinned Call.
+    unsafe { (*(*request).path.cast::<Call>()).operations }
 }
 
 pub(crate) unsafe fn step(request: *mut Request, token: u64) -> Step {
@@ -803,6 +816,7 @@ unsafe fn create(
         }
         let charge = Charge::new(payer, bytes);
         let mut call = Call {
+            operations: &OPERATIONS,
             files,
             provider,
             until: None,
@@ -915,6 +929,7 @@ unsafe fn existing(
             )
         });
         let mut call = Call {
+            operations: &OPERATIONS,
             files,
             provider: resource.provider,
             until,

@@ -17,6 +17,9 @@ use std::path::{Path, PathBuf};
 
 mod edit;
 mod github;
+mod paths;
+
+use paths::{find_member, relative_to, root_relative};
 
 type Failure = Box<dyn std::error::Error>;
 
@@ -69,6 +72,7 @@ struct Options {
     expected: Option<Root>,
     store: PackageStore,
     update: bool,
+    workspace: bool,
     dry_run: bool,
     json: bool,
 }
@@ -78,6 +82,7 @@ impl Options {
         let mut expected = None;
         let mut store = None;
         let mut update = false;
+        let mut workspace = false;
         let mut dry_run = false;
         let mut json = false;
         for (id, value) in invocation.options {
@@ -99,6 +104,7 @@ impl Options {
                         )?);
                 }
                 OptionId::AddUpdate => update = true,
+                OptionId::AddWorkspace => workspace = true,
                 OptionId::AddDryRun => dry_run = true,
                 OptionId::Json => json = true,
                 OptionId::PackageStore => store = value.map(PathBuf::from),
@@ -119,6 +125,7 @@ impl Options {
             expected,
             store: PackageStore::new(store),
             update,
+            workspace,
             dry_run,
             json,
         })
@@ -310,75 +317,6 @@ fn acquire(
     Ok((archive, Some(locator), len))
 }
 
-/// `to` spelled relative to `from`; both are workspace-relative directories.
-fn relative_to(from: &Path, to: &Path) -> String {
-    let common = from
-        .components()
-        .zip(to.components())
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut parts = vec![".."; from.components().count() - common];
-    let tail: Vec<_> = to.components().skip(common).collect();
-    parts.extend(tail.iter().map(|part| {
-        part.as_os_str()
-            .to_str()
-            .expect("workspace paths are UTF-8")
-    }));
-    if parts.is_empty() {
-        ".".into()
-    } else {
-        parts.join("/")
-    }
-}
-
-/// The member a directory argument names, matched by directory identity as discovery does.
-fn find_member<'a>(
-    workspace: &'a Workspace,
-    cwd: &Path,
-    path: &str,
-) -> Result<(&'a Id, &'a crate::package_workspace::Member), Failure> {
-    let refuse = || -> Failure { format!("{path} is not a member of this workspace").into() };
-    let typed = Path::new(path);
-    let (from, rest) = if typed.is_absolute() {
-        (
-            PathBuf::new(),
-            typed
-                .strip_prefix(&workspace.directory)
-                .map_err(|_| refuse())?
-                .to_path_buf(),
-        )
-    } else {
-        (
-            cwd.strip_prefix(&workspace.directory)?.to_path_buf(),
-            typed.to_path_buf(),
-        )
-    };
-    let mut components = Vec::new();
-    for component in from.iter().chain(rest.iter()) {
-        match component.to_str().ok_or_else(refuse)? {
-            "" | "." | "/" => {}
-            ".." => {
-                components.pop().ok_or_else(refuse)?;
-            }
-            normal => components.push(normal),
-        }
-    }
-    let wanted = identity(
-        &walk(&workspace.root, Path::new(&components.join("/")))
-            .and_then(|file| file.directory())
-            .map_err(|_| refuse())?,
-    )?;
-    for (id, member) in &workspace.members {
-        let dir = walk(&workspace.root, &member.directory).and_then(|file| file.directory());
-        if let Ok(dir) = dir
-            && identity(&dir)? == wanted
-        {
-            return Ok((id, member));
-        }
-    }
-    Err(refuse())
-}
-
 fn check_source(
     workspace: &Workspace,
     source: &SourceLocation,
@@ -406,14 +344,10 @@ fn check_source(
         let manifest = Manifest::parse(&root.bytes, &workspace.directory.join(MANIFEST))?;
         if let Some(shared) = manifest.workspace {
             for dependency in shared.dependencies.values() {
-                if let Dependency::Published(_, root, Some(locator)) = dependency {
-                    if let SourceLocation::Archive(path) = locator {
-                        if let Some(path) = archive_path(Path::new(""), path) {
-                            check(*root, &SourceLocation::Archive(path))?;
-                        }
-                    } else {
-                        check(*root, locator)?;
-                    }
+                if let Dependency::Published(_, root, Some(locator)) = dependency
+                    && let Some(locator) = root_relative(locator)
+                {
+                    check(*root, &locator)?;
                 }
             }
         }
@@ -452,7 +386,9 @@ fn publish(
 ) -> Result<File, Failure> {
     let file = temp.persist(fd_path(directory).join(name))?;
     report.pending.retain(|pending| *pending != path);
-    report.committed.push(path);
+    if !report.committed.contains(&path) {
+        report.committed.push(path);
+    }
     directory.sync_all()?;
     Ok(file)
 }
@@ -466,11 +402,33 @@ fn current_scope(cwd: &Path, scope: &File) -> Result<Workspace, Failure> {
     Ok(workspace)
 }
 
+/// One manifest operation: the bytes captured before the edit and the bytes
+/// to publish. Each operation leaves a valid workspace by itself.
 struct ManifestWrite<'a> {
     directory: &'a File,
-    relative: &'a Path,
-    before: &'a Captured,
-    proposed: &'a Captured,
+    relative: PathBuf,
+    before: Captured,
+    proposed: Captured,
+}
+
+impl ManifestWrite<'_> {
+    fn path(&self) -> PathBuf {
+        self.relative.join(MANIFEST)
+    }
+
+    fn changes(&self) -> bool {
+        self.before.bytes != self.proposed.bytes
+    }
+
+    /// Whether the directory and manifest on disk are still the captured ones.
+    fn current(&self, workspace: &Path) -> bool {
+        let at = workspace.join(&self.relative);
+        open_directory(&at)
+            .ok()
+            .and_then(|dir| identity(&dir).ok())
+            .is_some_and(|dir| identity(self.directory).ok() == Some(dir))
+            && read_manifest(self.directory, &at).ok().flatten().as_ref() == Some(&self.before)
+    }
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -479,72 +437,125 @@ pub(crate) enum Checkpoint {
     ManifestCommitted,
 }
 
+/// Derives `hirsel.lock` from the committed manifests and commits it.
+fn settle(
+    cwd: &Path,
+    scope: &File,
+    published: Option<(&File, &Captured, &Path)>,
+    store: PackageStore,
+    libraries: BTreeMap<Root, Library>,
+    report: &mut Report,
+) -> Result<(PackageStore, BTreeMap<Root, Library>, Option<String>), Failure> {
+    let actual = current_scope(cwd, scope)?;
+    if let Some((target, published, path)) = published
+        && actual.captured_manifest(target)? != Some(published)
+    {
+        return Err(format!("{} changed while hirsel add ran", path.display()).into());
+    }
+    let resolved =
+        Resolution::resolve_cached(actual, store, false, libraries, &mut report.fetched)?;
+    let prior = Lock::capture(&resolved.workspace)?;
+    let lock = Lock::compare_captured(&resolved, Mode::Update, prior.as_ref())?;
+    let message = match lock.pending() {
+        None => {
+            report.pending.retain(|path| path != Path::new(LOCK));
+            None
+        }
+        Some((bytes, message)) => {
+            let staged = stage(scope, LOCK, bytes.as_bytes())?;
+            if Lock::capture(&resolved.workspace)? != prior {
+                return Err("hirsel.lock changed while hirsel add ran".into());
+            }
+            publish(staged, scope, LOCK, LOCK.into(), report)?;
+            Some(message.to_owned())
+        }
+    };
+    Ok((resolved.store, resolved.libraries, message))
+}
+
+/// Publishes each changed manifest in order, deriving the lock after each.
 fn commit(
     cwd: &Path,
     scope: &File,
-    manifest: ManifestWrite<'_>,
+    writes: &[ManifestWrite<'_>],
     trial: Resolution,
     report: &mut Report,
-    checkpoint: impl FnOnce(Checkpoint),
-) -> Result<Option<String>, Failure> {
-    let ManifestWrite {
-        directory: target,
-        relative,
-        before: captured,
-        proposed: edited,
-    } = manifest;
-    let manifest_path = relative.join(MANIFEST);
+    checkpoint: &mut dyn FnMut(Checkpoint),
+) -> Result<Vec<String>, Failure> {
     let workspace_path = trial.workspace.directory.clone();
-    let changed = || format!("{} changed while hirsel add ran", manifest_path.display());
-    let staged = (captured.bytes != edited.bytes)
-        .then(|| stage(target, MANIFEST, &edited.bytes))
-        .transpose()?;
-    let dir = open_directory(&workspace_path.join(relative))
-        .map_err(|_| format!("{}; nothing was written", changed()))?;
-    if identity(&dir)? != identity(target)?
-        || read_manifest(target, &workspace_path.join(relative))
-            .ok()
-            .flatten()
-            .as_ref()
-            != Some(captured)
-        || (staged.is_some()
-            && !fs::symlink_metadata(fd_path(target).join(MANIFEST)).is_ok_and(|m| m.is_file()))
-    {
-        return Err(format!("{}; nothing was written", changed()).into());
-    }
-    let published = if let Some(staged) = staged {
-        let file = publish(staged, target, MANIFEST, manifest_path.clone(), report)?;
-        checkpoint(Checkpoint::ManifestCommitted);
-        Captured {
-            bytes: edited.bytes.clone(),
-            identity: identity(&file)?,
+    for write in writes {
+        if !write.current(&workspace_path) {
+            return Err(format!(
+                "{} changed while hirsel add ran; nothing was written",
+                write.path().display()
+            )
+            .into());
         }
-    } else {
-        captured.clone()
-    };
-    let actual = current_scope(cwd, scope)?;
-    if actual.captured_manifest(target)? != Some(&published) {
-        return Err(changed().into());
     }
-    let resolved = Resolution::resolve_cached(
-        actual,
-        trial.store,
-        false,
-        trial.libraries,
-        &mut report.fetched,
-    )?;
-    let prior = Lock::capture(&resolved.workspace)?;
-    let lock = Lock::compare_captured(&resolved, Mode::Update, prior.as_ref())?;
-    let Some((bytes, message)) = lock.pending() else {
-        report.pending.retain(|path| path != Path::new(LOCK));
-        return Ok(None);
-    };
-    let staged = stage(scope, LOCK, bytes.as_bytes())?;
-    if Lock::capture(&resolved.workspace)? != prior {
-        return Err("hirsel.lock changed while hirsel add ran".into());
+    let (mut store, mut libraries) = (trial.store, trial.libraries);
+    let mut messages = Vec::new();
+    let changing: Vec<_> = writes.iter().filter(|write| write.changes()).collect();
+    if changing.is_empty() {
+        let (_, _, message) = settle(cwd, scope, None, store, libraries, report)?;
+        messages.extend(message);
+        return Ok(messages);
     }
-    publish(staged, scope, LOCK, LOCK.into(), report)?;
-    Ok(Some(message.to_owned()))
+    for (index, write) in changing.iter().enumerate() {
+        let path = write.path();
+        let staged = stage(write.directory, MANIFEST, &write.proposed.bytes)?;
+        if !write.current(&workspace_path)
+            || !fs::symlink_metadata(fd_path(write.directory).join(MANIFEST))
+                .is_ok_and(|metadata| metadata.is_file())
+        {
+            let written = if report.committed.is_empty() {
+                "; nothing was written"
+            } else {
+                ""
+            };
+            return Err(format!("{} changed while hirsel add ran{written}", path.display()).into());
+        }
+        let file = publish(staged, write.directory, MANIFEST, path.clone(), report)?;
+        checkpoint(Checkpoint::ManifestCommitted);
+        let published = Captured {
+            bytes: write.proposed.bytes.clone(),
+            identity: identity(&file)?,
+        };
+        let message;
+        (store, libraries, message) = settle(
+            cwd,
+            scope,
+            Some((write.directory, &published, &path)),
+            store,
+            libraries,
+            report,
+        )?;
+        messages.extend(message);
+        if index + 1 < changing.len() && !report.pending.iter().any(|p| p == Path::new(LOCK)) {
+            report.pending.push(LOCK.into());
+        }
+    }
+    Ok(messages)
+}
+
+/// The binding a manifest writes: a member path, a published root, or a toolchain name.
+fn form<'a>(
+    path: Option<&'a str>,
+    root: Option<Root>,
+    source: Option<&'a SourceLocation>,
+) -> edit::Form<'a> {
+    match (path, root) {
+        (Some(path), _) => edit::Form::Member(path),
+        (None, Some(root)) => edit::Form::Published(root, source),
+        (None, None) => edit::Form::Toolchain,
+    }
+}
+
+fn spelling(id: &crate::package_content::Id, edge: &Edge) -> String {
+    match edge {
+        Edge::Published(root, _) => format!("{id} {root}"),
+        Edge::Member => format!("{id} member"),
+        Edge::Toolchain => format!("{id} toolchain"),
+    }
 }
 
 pub(crate) fn run(invocation: Invocation) -> Result<i32, Failure> {
@@ -559,20 +570,42 @@ pub(crate) fn run_at(
     let options = Options::read(invocation)?;
     let scope = lock_scope(cwd)?;
     let workspace = current_scope(cwd, &scope)?;
-    let selected = workspace
-        .member
-        .as_ref()
-        .ok_or("no package manifest here; pass --workspace to declare it for the workspace")?;
-    let member = &workspace.members[selected];
-    let relative = &member.directory;
-    let target = open_directory(&fd_path(
-        &walk(&workspace.root, relative)
-            .and_then(|file| file.directory())
-            .map_err(|error| error.explain("workspace", "a directory"))?,
-    ))?;
-    let captured = workspace
-        .captured_manifest(&target)?
-        .expect("the selected manifest was captured");
+    let root_manifest = workspace.directory.join(MANIFEST);
+    let root_captured = workspace
+        .captured_manifest(&scope)?
+        .cloned()
+        .ok_or("the workspace changed while hirsel add ran")?;
+    let selected = workspace.member.clone();
+    if selected.is_none() && !options.workspace {
+        return Err(format!(
+            "{}: no package manifest here; pass --workspace to declare it for the workspace",
+            root_manifest.display()
+        )
+        .into());
+    }
+    let member = selected.as_ref().map(|id| &workspace.members[id]);
+    let shared = if options.workspace {
+        let declared = Manifest::parse(&root_captured.bytes, &root_manifest)?;
+        Some(declared.workspace.ok_or_else(|| {
+            format!(
+                "{}: no [workspace]; hirsel add does not create a workspace boundary",
+                member
+                    .map_or(&root_manifest, |member| &member.manifest_path)
+                    .display()
+            )
+        })?)
+    } else {
+        None
+    };
+    let member_target = member
+        .map(|member| -> Result<File, Failure> {
+            Ok(open_directory(&fd_path(
+                &walk(&workspace.root, &member.directory)
+                    .and_then(|file| file.directory())
+                    .map_err(|error| error.explain("workspace", "a directory"))?,
+            ))?)
+        })
+        .transpose()?;
     let old_lock = Lock::capture(&workspace)?;
 
     let (archive, locator, len, local) = match &options.source {
@@ -584,12 +617,11 @@ pub(crate) fn run_at(
         }
         Source::Member(path) => {
             let (id, found) = find_member(&workspace, cwd, path)?;
-            let spelled = relative_to(relative, &found.directory);
             (
                 None,
                 None,
                 0,
-                Some((id.clone(), Some((spelled, found.directory.clone())))),
+                Some((id.clone(), Some(found.directory.clone()))),
             )
         }
         _ => {
@@ -610,44 +642,194 @@ pub(crate) fn run_at(
         check_source(&workspace, source, root)?;
     }
 
-    let prior = member.package.dependencies.get(&id.name);
-    let previous_root = member.edges.iter().find_map(|(bound, edge)| match edge {
-        Edge::Published(root, _) if bound.name == id.name => Some(root.to_string()),
+    let prior = member.and_then(|member| member.package.dependencies.get(&id.name));
+    let bound =
+        member.and_then(|member| member.edges.iter().find(|(bound, _)| bound.name == id.name));
+    let bound_root = bound.and_then(|(_, edge)| match edge {
+        Edge::Published(root, _) => Some(*root),
         _ => None,
     });
-    let declared = match &locator {
-        Some(SourceLocation::Archive(path)) => Some(SourceLocation::Archive(relative_to(
-            relative,
-            Path::new(path),
-        ))),
-        other => other.clone(),
+    let directory = local
+        .as_ref()
+        .and_then(|(_, directory)| directory.as_deref());
+    let edge = match (directory, root) {
+        (Some(_), _) => Edge::Member,
+        (None, Some(root)) => Edge::Published(root, locator.clone()),
+        (None, None) => Edge::Toolchain,
     };
-    let form = match (&local, root) {
-        (Some((_, Some((spelled, _)))), _) => edit::Form::Member(spelled),
-        (Some((_, None)), _) => edit::Form::Toolchain,
-        (None, Some(root)) => edit::Form::Published(root, declared.as_ref()),
-        (None, None) => unreachable!("an archive source has a head root"),
-    };
-    let unchanged = match &form {
-        edit::Form::Published(root, _) => {
-            matches!(prior, Some(Dependency::Published(..)))
-                && matches!(member.edges.get(&id), Some(Edge::Published(old_root, old_source))
-                    if old_root == root && *old_source == locator)
+    let mut writes = Vec::new();
+    let (updated, previous_root, needs_package);
+    if let Some(shared) = &shared {
+        let entry = shared.dependencies.get(&id.name);
+        let same = match (entry, &edge) {
+            (Some(Dependency::Published(declared, old_root, old_source)), Edge::Published(..)) => {
+                *declared == id
+                    && Some(*old_root) == root
+                    && old_source.as_ref().and_then(root_relative) == locator
+            }
+            (Some(Dependency::Toolchain(declared)), Edge::Toolchain)
+            | (Some(Dependency::Member(declared, _)), Edge::Member) => *declared == id,
+            _ => false,
+        };
+        let own = prior.filter(|dependency| !matches!(dependency, Dependency::Inherited));
+        if let (Some(_), Some(member), Some((name, old))) = (own, member, bound)
+            && !options.update
+        {
+            return Err(format!(
+                "{}: dependencies.{} is bound here and in the workspace; pass --update to replace the local binding with {{ workspace = true }}\n  {} = {}\n  {} = {}",
+                member.manifest_path.display(),
+                id.name,
+                member.manifest_path.display(),
+                spelling(name, old),
+                root_manifest.display(),
+                spelling(&id, &edge),
+            )
+            .into());
         }
-        edit::Form::Toolchain => {
-            matches!(prior, Some(Dependency::Toolchain(_)))
-                && matches!(member.edges.get(&id), Some(Edge::Toolchain))
+        if let Some(entry) = entry
+            && !same
+            && !options.update
+        {
+            let consumers: Vec<String> = workspace
+                .members
+                .iter()
+                .filter(|(other, sibling)| {
+                    Some(*other) != selected.as_ref()
+                        && matches!(
+                            sibling.package.dependencies.get(&id.name),
+                            Some(Dependency::Inherited)
+                        )
+                })
+                .map(|(other, _)| other.to_string())
+                .collect();
+            if !consumers.is_empty() {
+                let declared = match entry {
+                    Dependency::Toolchain(declared)
+                    | Dependency::Member(declared, _)
+                    | Dependency::Published(declared, ..) => declared.to_string(),
+                    Dependency::Inherited => id.name.clone(),
+                };
+                return Err(format!(
+                    "the workspace binds {declared} for {}; pass --update to change it",
+                    consumers.join(", ")
+                )
+                .into());
+            }
         }
-        edit::Form::Member(_) => {
-            matches!(prior, Some(Dependency::Member(..)))
-                && matches!(member.edges.get(&id), Some(Edge::Member))
+        let root_package = member.is_some_and(|member| member.directory.as_os_str().is_empty());
+        let path = directory.map(|directory| relative_to(Path::new(""), directory));
+        let proposed = if same && (!root_package || matches!(prior, Some(Dependency::Inherited))) {
+            root_captured.clone()
+        } else {
+            Captured {
+                bytes: edit::shared(
+                    &root_captured.bytes,
+                    &id,
+                    &form(path.as_deref(), root, locator.as_ref()),
+                    root_package,
+                )?
+                .into_bytes()
+                .into(),
+                identity: root_captured.identity,
+            }
+        };
+        writes.push(ManifestWrite {
+            directory: &scope,
+            relative: PathBuf::new(),
+            before: root_captured.clone(),
+            proposed,
+        });
+        if let (Some(member), Some(target)) = (member, &member_target)
+            && !root_package
+        {
+            let before = workspace
+                .captured_manifest(target)?
+                .expect("the selected manifest was captured")
+                .clone();
+            let proposed = if matches!(prior, Some(Dependency::Inherited)) {
+                before.clone()
+            } else {
+                Captured {
+                    bytes: edit::inherit(&before.bytes, &id.name)?.into_bytes().into(),
+                    identity: before.identity,
+                }
+            };
+            writes.push(ManifestWrite {
+                directory: target,
+                relative: member.directory.clone(),
+                before,
+                proposed,
+            });
         }
-    };
+        let replaced = match entry {
+            Some(Dependency::Published(_, old_root, _)) if !same => Some(*old_root),
+            _ => None,
+        };
+        previous_root = replaced.or(own.and(bound_root));
+        updated = (entry.is_some() && !same) || own.is_some();
+        needs_package = member.is_some();
+    } else {
+        let member = member.expect("a package was selected");
+        let target = member_target.as_ref().expect("a package was selected");
+        let relative = &member.directory;
+        let declared = match &locator {
+            Some(SourceLocation::Archive(path)) => Some(SourceLocation::Archive(relative_to(
+                relative,
+                Path::new(path),
+            ))),
+            other => other.clone(),
+        };
+        let path = directory.map(|directory| relative_to(relative, directory));
+        let inherited = matches!(prior, Some(Dependency::Inherited));
+        let unchanged = matches!(
+            (prior, &edge),
+            (Some(Dependency::Inherited), _)
+                | (Some(Dependency::Published(..)), Edge::Published(..))
+                | (Some(Dependency::Toolchain(_)), Edge::Toolchain)
+                | (Some(Dependency::Member(..)), Edge::Member)
+        ) && member.edges.get(&id) == Some(&edge);
+        if inherited && !unchanged && !options.update {
+            return Err(format!(
+                "{}: dependencies.{} inherits the workspace binding; pass --workspace to change it for the workspace, or --update to bind it here",
+                member.manifest_path.display(),
+                id.name
+            )
+            .into());
+        }
+        let before = workspace
+            .captured_manifest(target)?
+            .expect("the selected manifest was captured")
+            .clone();
+        let proposed = if unchanged {
+            before.clone()
+        } else {
+            Captured {
+                bytes: edit::binding(
+                    &before.bytes,
+                    &id,
+                    &form(path.as_deref(), root, declared.as_ref()),
+                )?
+                .into_bytes()
+                .into(),
+                identity: before.identity,
+            }
+        };
+        writes.push(ManifestWrite {
+            directory: target,
+            relative: relative.clone(),
+            before,
+            proposed,
+        });
+        previous_root = bound_root;
+        updated = prior.is_some();
+        needs_package = true;
+    }
+    let unchanged = writes.iter().all(|write| !write.changes());
 
     let mut report = Report {
         result: if unchanged {
             "unchanged"
-        } else if prior.is_some() {
+        } else if updated {
             "updated"
         } else {
             "added"
@@ -657,7 +839,7 @@ pub(crate) fn run_at(
         source: match (&locator, &local) {
             (Some(locator), _) => locator.to_string(),
             (None, Some((_, None))) => "toolchain".into(),
-            (None, Some((_, Some((_, directory))))) => {
+            (None, Some((_, Some(directory)))) => {
                 let dir = directory.to_str().ok_or("member directory is not UTF-8")?;
                 format!("member:{}", if dir.is_empty() { "." } else { dir })
             }
@@ -665,7 +847,7 @@ pub(crate) fn run_at(
         },
         committed: Vec::new(),
         pending: Vec::new(),
-        previous_root,
+        previous_root: previous_root.map(|root| root.to_string()),
         dry_run: options.dry_run,
         cache: "complete",
         fetched: BTreeSet::new(),
@@ -688,18 +870,13 @@ pub(crate) fn run_at(
         });
         entries.insert(entry_root, library);
     }
-    let edited = if unchanged {
-        captured.clone()
-    } else {
-        Captured {
-            bytes: edit::binding(&captured.bytes, &id, &form)?
-                .into_bytes()
-                .into(),
-            identity: captured.identity,
-        }
-    };
+    let edits: Vec<(&File, &Captured)> = writes
+        .iter()
+        .filter(|write| write.changes())
+        .map(|write| (write.directory, &write.proposed))
+        .collect();
     let overlay = workspace
-        .with_manifest(cwd, &target, edited.clone())?
+        .with_manifests(cwd, &edits, needs_package)?
         .ok_or("the workspace changed while hirsel add ran")?;
     let trial = Resolution::resolve_cached(
         overlay,
@@ -709,7 +886,7 @@ pub(crate) fn run_at(
         &mut report.fetched,
     )
     .map_err(|error| report.with_fetches(error))?;
-    let manifest_path = relative.join(MANIFEST);
+    let manifest_path = writes[0].path();
     if options.dry_run {
         let lock = Lock::compare_captured(&trial, Mode::Update, old_lock.as_ref())?;
         report.print(
@@ -721,19 +898,19 @@ pub(crate) fn run_at(
         return Ok(0);
     }
 
-    if !unchanged {
-        report.pending.push(manifest_path.clone());
+    for write in writes.iter().filter(|write| write.changes()) {
+        report.pending.push(write.path());
     }
     report.pending.push(LOCK.into());
-    let manifest = ManifestWrite {
-        directory: &target,
-        relative,
-        before: captured,
-        proposed: &edited,
-    };
-    match commit(cwd, &scope, manifest, trial, &mut report, checkpoint) {
-        Ok(message) => {
-            report.print(&options, &manifest_path, len, message.as_deref());
+    match commit(cwd, &scope, &writes, trial, &mut report, &mut checkpoint) {
+        Ok(messages) => {
+            let message = messages.join("\nhirsel: ");
+            report.print(
+                &options,
+                &manifest_path,
+                len,
+                (!messages.is_empty()).then_some(message.as_str()),
+            );
             Ok(0)
         }
         Err(error) if report.committed.is_empty() => Err(report.with_fetches(error)),

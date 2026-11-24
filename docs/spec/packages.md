@@ -722,6 +722,7 @@ hold verified entries):
 | add, manifest changed | `hirsel: <manifest> changed while hirsel add ran; nothing was written`<!-- doc-ref: planned --> |
 | add, shared binding | `hirsel: the workspace binds <id> for <members>; pass --update to change it`<!-- doc-ref: planned --> |
 | add, local and workspace | `hirsel: <manifest>: dependencies.<name> is bound here and in the workspace; pass --update to replace the local binding with { workspace = true }`<!-- doc-ref: planned -->, then both bindings |
+| add, inherited | `hirsel: <manifest>: dependencies.<name> inherits the workspace binding; pass --workspace to change it for the workspace, or --update to bind it here`, for a plain `add` of another source or root |
 | add, root absent | `hirsel: sha256:<P> is not in the package store` |
 | add, toolchain | `hirsel: the toolchain does not provide <id>` |
 | add, not a member | `hirsel: <dir> is not a member of the workspace at <root manifest>` |
@@ -847,7 +848,7 @@ library is published by `pack`.
 
 `hirsel add` edits a manifest and updates its lock. The implemented forms accept HTTPS URLs,
 `github:` references, `.hpkg` paths, package-store roots, toolchain names and member
-directories. Workspace placement is planned.
+directories, in a member's own table or, with `--workspace`, in the workspace's.
 
 `hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 
@@ -891,8 +892,11 @@ writes `../../vendor/pkg.hpkg` in its own manifest, or `vendor/pkg.hpkg` in the 
 
 A member that already binds the name and asks for `--workspace`<!-- doc-ref: planned --> is
 refused naming both bindings; `--update`<!-- doc-ref: planned --> replaces the local binding
-with `{ workspace = true }`. Changing a `[workspace.dependencies]` entry that members consume
-needs `--update`<!-- doc-ref: planned --> and prints the consuming members.
+with `{ workspace = true }`. Changing a `[workspace.dependencies]` entry that other members
+consume needs `--update`<!-- doc-ref: planned --> and prints them; the member running `add`
+asked for the change. A plain `add` at a member that inherits the name is `unchanged` when the
+workspace already binds that root and source, and otherwise refuses without `--update`, so a
+member never drifts from the shared binding by accident.
 
 **Transaction.** In this order, and nothing is written before step 8:
 
@@ -1311,8 +1315,9 @@ app` reports now names its site in `json@1/new.hirsel`, and `hirsel publish app`
 prints the R of a cold run with no image, on the warm image path as on the cold one. The law
 catches an image keyed without file names and a producer that synthesises names.
 
-**Laws for `hirsel add`.** L15–L22 cover S6 in `s6_add_protocol`, and L29 covers S9 in `s9_add_forms_that_fetch_nothing`.
-L23–L28 specify the later slices.
+**Laws for `hirsel add`.** L15–L22 cover S6 in `s6_add_protocol`, L25–L28 cover S8 in
+`s8_add_workspace`, and L29 covers S9 in `s9_add_forms_that_fetch_nothing`. L23 and L24 specify
+the later slices.
 X and Y are `jx`'s and `jy`'s roots and W is `wrap@1`'s (L6). Each `add` runs in a workspace
 whose `hirsel.toml` and `hirsel.lock` bytes the law records before it starts.
 

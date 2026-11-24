@@ -16,6 +16,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Accept a changed root at the same source."
     ),
     option!(
+        AddWorkspace,
+        ["--workspace"],
+        None,
+        ["add"],
+        "Declare the binding in the workspace root's [workspace.dependencies]."
+    ),
+    option!(
         AddDryRun,
         ["--dry-run"],
         None,

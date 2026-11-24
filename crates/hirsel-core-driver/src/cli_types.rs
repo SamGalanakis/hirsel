@@ -3,6 +3,7 @@ pub enum OptionId {
     AddRoot,
     AddUpdate,
     AddDryRun,
+    AddWorkspace,
     CoreIr,
     Json,
     Recipe,

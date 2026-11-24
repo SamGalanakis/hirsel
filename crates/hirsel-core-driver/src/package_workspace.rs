@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum Edge {
     Toolchain,
     Member,
@@ -203,15 +203,17 @@ impl Workspace {
         Ok(root.dir)
     }
 
-    pub(crate) fn with_manifest(
+    pub(crate) fn with_manifests(
         &self,
         dir: &Path,
-        target: &File,
-        manifest: Captured,
+        edits: &[(&File, &Captured)],
+        needs_package: bool,
     ) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let mut manifests = self.manifests.clone();
-        manifests.insert(identity(target)?, Some(manifest));
-        Self::discover_with(dir, true, manifests)
+        for (target, manifest) in edits {
+            manifests.insert(identity(target)?, Some((*manifest).clone()));
+        }
+        Self::discover_with(dir, needs_package, manifests)
     }
 
     fn discover_with(

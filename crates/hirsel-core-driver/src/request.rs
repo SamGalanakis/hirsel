@@ -9,6 +9,7 @@ use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
     NativeOptions,
 };
+use hirsel_core_ids::DefPath;
 use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -376,19 +377,15 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::SourceCore => source_core = true,
             Opt::SourceStd => source_std = true,
             Opt::Name => {
-                product_name = Some(
-                    hirsel_core_ids::DefPath::from_full(&value)
-                        .ok_or("invalid --name definition path")?,
-                )
+                product_name =
+                    Some(DefPath::from_full(&value).ok_or("invalid --name definition path")?)
             }
             Opt::CoreProduct => core_product = Some(PathBuf::from(value)),
             Opt::Dir => grants.directories.push(value),
             Opt::Grant => grants.grant(&value)?,
             Opt::Filter => test_filter = Some(value),
-            Opt::TestExact => test_exact.push(
-                hirsel_core_ids::DefPath::from_full(&value)
-                    .ok_or("--exact expects a full definition path")?,
-            ),
+            Opt::TestExact => test_exact
+                .push(DefPath::from_full(&value).ok_or("--exact expects a full definition path")?),
             Opt::TestJobs => {
                 test_jobs = Some(
                     value
@@ -431,10 +428,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 root_limit = value.parse()?;
             }
             Opt::Output => output_path = Some(PathBuf::from(value)),
-            Opt::Entry => {
-                entry =
-                    Some(hirsel_core_ids::DefPath::from_full(&value).ok_or("invalid entry path")?)
-            }
+            Opt::Entry => entry = Some(DefPath::from_full(&value).ok_or("invalid entry path")?),
             Opt::Libraries => libraries = Some(PathBuf::from(value)),
             Opt::Store => store = Some(PathBuf::from(value)),
             Opt::Inputs => manifest = Some(PathBuf::from(value)),
@@ -466,6 +460,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::AddRoot
             | Opt::AddUpdate
             | Opt::AddDryRun
+            | Opt::AddWorkspace
             | Opt::Url
             | Opt::Control
             | Opt::HostState

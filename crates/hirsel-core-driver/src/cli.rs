@@ -29,7 +29,7 @@ commands! {
     "laws check", "laws check [package-dir] [options]", "Check the static columns of the law lock without running tests.";
     "laws write", "laws write [package-dir] [options]", "Refresh the static columns of the law lock without running tests.";
     "fetch", "fetch [package-dir] [options]", "Fetch the pinned libraries a workspace uses.";
-    "add", "add SOURCE [--root sha256:HEX] [--update] [--dry-run] [--package-store DIR] [--json]", "Bind a verified library in the current package.";
+    "add", "add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]", "Bind a verified library in the current package.";
     "pack", "pack [package-dir] -o FILE [options]", "Publish a library and its dependency closure to an archive.";
     "build", "build [package-dir | --recipe HASH] [options]", "Assemble a native executable from a release recipe.";
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";

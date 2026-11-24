@@ -68,4 +68,20 @@ fn describe_two_sites() -> u64 {
         0
     }
 }
+fn waiting_named() -> StaticFn[fn(u64) -> u64 waits] { code.describe(named) }
+fn waiting_pick() -> StaticFn[fn(u64, u64) -> u64 waits] { code.describe(pick) }
+
+// expect: run describe_waits_widening() = 1
+fn describe_waits_widening() -> u64 waits {
+    let pure = waiting_named()
+    let generic = waiting_pick()
+    if code.identity(pure) == code.identity(code.describe(named))
+        && code.identity(generic) == code.identity(d1())
+        && (code.callable(pure))(3) == 3
+        && (code.callable(generic))(4, 5) == 4 {
+        1
+    } else {
+        0
+    }
+}
 pub fn main()->Result[(),Exit] {Ok(())}

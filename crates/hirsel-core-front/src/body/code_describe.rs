@@ -96,7 +96,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         }
-        let result = subst(&mut self.t, result, &[ty]);
+        // LANG-13 permits a non-waiting item where a waiting callable is
+        // expected. The carrier has that type, while its descriptor keeps the
+        // source header and uses the item's own adapter.
+        let carried = if expected.is_some_and(|expected| {
+            matches!(
+                self.t.kind(expected),
+                TyKind::Fn(_, _, true, Callable::Plain)
+            )
+        }) && let TyKind::Fn(params, result, false, kind) = self.t.kind(ty).clone()
+        {
+            self.t.mk(TyKind::Fn(params, result, true, kind))
+        } else {
+            ty
+        };
+        let result = subst(&mut self.t, result, &[carried]);
         if !self.live() {
             return (result, None);
         }

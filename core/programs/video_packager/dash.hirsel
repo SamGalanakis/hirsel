@@ -1,0 +1,110 @@
+pub fn dash_manifest(ladder: List[Rendition], limit: ManifestLimit) -> Result[String, Error] {
+    match (bound bytes limit.octets {
+        bound steps limit.steps {
+            mpd(ladder)
+        }
+    }) {
+        Ok(Ok(take outcome)) => take outcome,
+        _ => Error(BudgetExceeded),
+    }
+}
+
+fn representation_duration(r: Rendition) -> u64 {
+    r.segments[list.len(r.segments) - 1].end - r.segments[0].start
+}
+
+fn time_after(a: u64, scale_a: u64, b: u64, scale_b: u64) -> bool {
+    let whole_a = a / scale_a
+    let whole_b = b / scale_b
+    whole_a > whole_b || (whole_a == whole_b && (a % scale_a) * scale_b > (b % scale_b) * scale_a)
+}
+
+fn dash_bandwidth(r: Rendition) -> Result[u64, Error] {
+    let scale: u64 = int.widen(r.track.timescale)
+    let mut peak = 0u64
+    for segment in r.segments {
+        let rate = bit_rate(segment.octets, segment.end - segment.start, scale)?
+        if rate > peak {
+            peak = rate
+        }
+    }
+    Ok(peak)
+}
+
+fn push_representation(mut out: String, r: Rendition) -> Result[(), Error] {
+    let first = r.segments[0]
+    string.push(mut out, "      <Representation id=\"")
+    string.push_u64(mut out, int.widen(r.id))
+    string.push(mut out, "\" bandwidth=\"")
+    string.push_u64(mut out, dash_bandwidth(r)?)
+    string.push(mut out, "\" codecs=\"")
+    string.push(mut out, r.codec)
+    if let Video(w, h) = r.track.media {
+        string.push(mut out, "\" width=\"")
+        string.push_u64(mut out, int.widen(w))
+        string.push(mut out, "\" height=\"")
+        string.push_u64(mut out, int.widen(h))
+    }
+    string.push(mut out, "\">\n        <SegmentTemplate timescale=\"")
+    string.push_u64(mut out, int.widen(r.track.timescale))
+    string.push(mut out, "\" presentationTimeOffset=\"")
+    string.push_u64(mut out, first.start)
+    string.push(mut out, "\" startNumber=\"")
+    string.push_u64(mut out, int.widen(first.number))
+    string.push(mut out, "\" initialization=\"r$RepresentationID$/init.mp4\" media=\"r$RepresentationID$/$Number$.m4s\">\n          <SegmentTimeline>\n")
+    for s in r.segments {
+        string.push(mut out, "            <S")
+        if s.number == first.number {
+            string.push(mut out, " t=\"")
+            string.push_u64(mut out, s.start)
+            string.push_char(mut out, '"')
+        }
+        string.push(mut out, " d=\"")
+        string.push_u64(mut out, s.end - s.start)
+        string.push(mut out, "\"/>\n")
+    }
+    string.push(mut out, "          </SegmentTimeline>\n        </SegmentTemplate>\n      </Representation>\n")
+    Ok(())
+}
+
+fn push_adaptation(mut out: String, ladder: List[Rendition], is_video: bool) -> Result[(), Error] {
+    let mut opened = false
+    for r in ladder {
+        if video(r) == is_video {
+            if !opened {
+                if is_video {
+                    string.push(mut out, "    <AdaptationSet contentType=\"video\" mimeType=\"video/mp4\" segmentAlignment=\"true\" startWithSAP=\"1\">\n")
+                } else {
+                    string.push(mut out, "    <AdaptationSet contentType=\"audio\" mimeType=\"audio/mp4\">\n")
+                }
+                opened = true
+            }
+            push_representation(mut out, r)?
+        }
+    }
+    if opened {
+        string.push(mut out, "    </AdaptationSet>\n")
+    }
+    Ok(())
+}
+
+fn mpd(ladder: List[Rendition]) -> Result[String, Error] {
+    validate_ladder(ladder)?
+    let mut max_ticks = 0u64
+    let mut max_scale = 1u64
+    for r in ladder {
+        let scale: u64 = int.widen(r.track.timescale)
+        let ticks = representation_duration(r)
+        if time_after(ticks, scale, max_ticks, max_scale) {
+            max_ticks = ticks
+            max_scale = scale
+        }
+    }
+    let mut out = string.from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" type=\"static\" minBufferTime=\"PT1S\" mediaPresentationDuration=\"PT")
+    push_seconds(mut out, max_ticks, max_scale)
+    string.push(mut out, "S\">\n  <Period start=\"PT0S\">\n")
+    push_adaptation(mut out, ladder, true)?
+    push_adaptation(mut out, ladder, false)?
+    string.push(mut out, "  </Period>\n</MPD>\n")
+    Ok(take out)
+}

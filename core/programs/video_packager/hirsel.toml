@@ -10,6 +10,7 @@ media_container = { major = 1, path = "../media_container" }
 [sources]
 "cmaf.hirsel" = "packager"
 "hls.hirsel" = "packager"
+"dash.hirsel" = "packager"
 
 [tests]
 limit = 16777216
@@ -17,3 +18,4 @@ grants = []
 
 [tests.sources]
 "hls_laws.hirsel" = "tests"
+"dash_laws.hirsel" = "tests"

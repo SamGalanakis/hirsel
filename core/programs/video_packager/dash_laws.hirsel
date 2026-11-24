@@ -1,0 +1,31 @@
+@test
+fn dash_segment_timeline() -> Result[(), ()] {
+    let mut prefix: Bytes = list.with_capacity(128)
+    let first = fixture(mut prefix, 1, 1000, 160)
+    let second = fixture(mut prefix, 2, 90000, 320)
+    let track = media_container.mp4.Track(id: 3, timescale: 48000, media: Audio)
+    let mut samples: List[media_container.mp4.Sample] = list.with_capacity(1)
+    list.push(mut samples, sample(144000, 300, true))
+    let segment = result.unwrap(packager.write_segment(mut prefix, track, 11, 48000, samples, 300, packager.SegmentLimit(samples: 1, payload_bytes: 300)))
+    let mut audio: List[packager.Segment] = list.with_capacity(1)
+    list.push(mut audio, segment)
+    let mut ladder: List[packager.Rendition] = list.with_capacity(3)
+    list.push(mut ladder, take first)
+    list.push(mut ladder, take second)
+    list.push(mut ladder, packager.Rendition(id: 3, track: track, codec: string.from("mp4a.40.2"), segments: take audio))
+    let xml = result.unwrap(packager.dash_manifest(ladder, packager.ManifestLimit(octets: 16384, steps: 20000)))
+    let expected: Inline[String, 6] =[
+        string.from("mediaPresentationDuration=\"PT3.000000000S\""),
+        string.from("<AdaptationSet contentType=\"video\" mimeType=\"video/mp4\" segmentAlignment=\"true\" startWithSAP=\"1\">"),
+        string.from("<AdaptationSet contentType=\"audio\" mimeType=\"audio/mp4\">"),
+        string.from("timescale=\"1000\" presentationTimeOffset=\"0\" startNumber=\"7\" initialization=\"r$RepresentationID$/init.mp4\" media=\"r$RepresentationID$/$Number$.m4s\">\n          <SegmentTimeline>\n            <S t=\"0\" d=\"1500\"/>\n            <S d=\"1500\"/>"),
+        string.from("timescale=\"90000\" presentationTimeOffset=\"0\" startNumber=\"7\" initialization=\"r$RepresentationID$/init.mp4\" media=\"r$RepresentationID$/$Number$.m4s\">\n          <SegmentTimeline>\n            <S t=\"0\" d=\"135000\"/>\n            <S d=\"135000\"/>"),
+        string.from("timescale=\"48000\" presentationTimeOffset=\"48000\" startNumber=\"11\" initialization=\"r$RepresentationID$/init.mp4\" media=\"r$RepresentationID$/$Number$.m4s\">\n          <SegmentTimeline>\n            <S t=\"48000\" d=\"144000\"/>"),
+    ]
+    for i in 0u64 .. 6 {
+        if let None = string.find(xml, 0, expected[i]) {
+            fail("MPD is missing a track's exact timeline, shared path or presentation offset")
+        }
+    }
+    Ok(())
+}

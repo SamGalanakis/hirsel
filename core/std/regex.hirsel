@@ -1321,6 +1321,13 @@ type Hir {
     names: List[u32]
 }
 
+// Flags in HIR REPEAT.more. The count pass records them before emission.
+const REPEAT_LAZY: u64 = 1
+
+const REPEAT_NULLABLE: u64 = 2
+
+const REPEAT_STOP_PREFIX: u64 = 4
+
 const EMPTY: u64 = 16
 
 const CHAR_SET: u64 = 17
@@ -1400,7 +1407,7 @@ fn translate(s: String, tree: List[Node], mut nodes: List[Node], mut ranges: Lis
                 // HIR greed is the combination of the suffix and the scope's U flag.
                 let lazy = (n.more != 0) != ((active & SWAP_GREED) != 0)
                 pending[used] = Translate(i: task.i, kind: EXIT_REPEAT, saved: if lazy {
-                    1
+                    REPEAT_LAZY
                 } else {
                     0
                 })
@@ -2228,18 +2235,7 @@ fn size_add(a: Shape, b: Shape, is_alt: bool) -> Result[Shape, Error] {
     Ok(Shape(states, edges, pgroup, can_empty: nullable, can_consume: a.can_consume || b.can_consume))
 }
 
-fn sized_repeat(m: Shape, minimum: u64, maximum: u64) -> Result[Shape, Error] {
-    let zero_width = m.can_empty && !m.can_consume
-    let lo: u64 = if zero_width && minimum > 1 {
-        1
-    } else {
-        minimum
-    }
-    let hi: u64 = if zero_width && maximum > 1 {
-        1
-    } else {
-        maximum
-    }
+fn sized_repeat(m: Shape, lo: u64, hi: u64) -> Result[Shape, Error] {
     if lo == 0 && hi == 0 {
         return Ok(shape(0, 0, true, false))
     }
@@ -2267,8 +2263,8 @@ fn sized_repeat(m: Shape, minimum: u64, maximum: u64) -> Result[Shape, Error] {
     Ok(Shape(states, edges, pgroup: m.pgroup, can_empty: lo == 0 || m.can_empty, can_consume: m.can_consume))
 }
 
-fn sized_atom(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
-    let n = read(h.nodes, i)
+fn sized_atom(mut h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
+    let mut n = read(h.nodes, i)
     if n.kind == EMPTY {
         return Ok(shape(0, 0, true, false))
     }
@@ -2282,9 +2278,26 @@ fn sized_atom(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
         return sized_set(h.ranges, n.a, n.b)
     }
     if n.kind == REPEAT {
-        return sized_repeat(sized_atom(h, n.first, rev)?, n.a, n.b)
+        let child = sized_atom(mut h, n.first, rev)?
+        if !rev {
+            if child.can_empty {
+                n.more |= REPEAT_NULLABLE
+            }
+            // Preserve where prefix extraction stopped before clamping the bounds.
+            if n.a != n.b || n.a > 10 {
+                n.more |= REPEAT_STOP_PREFIX
+            }
+            if child.can_empty && !child.can_consume {
+                if n.a > 1 {
+                    n.a = 1
+                }
+                n.b = 1
+            }
+            write(mut h.nodes, i, n)
+        }
+        return sized_repeat(child, n.a, n.b)
     }
-    let mut m = sized_alts(h, i, rev)?
+    let mut m = sized_alts(mut h, i, rev)?
     if n.kind == CAPTURE && !rev {
         m.states += 2
         if n.a > m.pgroup {
@@ -2294,19 +2307,19 @@ fn sized_atom(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
     Ok(m)
 }
 
-fn sized_seq(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
+fn sized_seq(mut h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
     let mut m = shape(0, 0, true, false)
     let mut successor = i
     while successor != 0 {
-        m = size_add(m, sized_atom(h, successor, rev)?, false)?
+        m = size_add(m, sized_atom(mut h, successor, rev)?, false)?
         successor = read(h.nodes, successor).successor
     }
     Ok(m)
 }
 
-fn sized_alts(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
+fn sized_alts(mut h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
     let n = read(h.nodes, i)
-    let mut total = sized_seq(h, n.first, rev)?
+    let mut total = sized_seq(mut h, n.first, rev)?
     if n.more == 0 {
         return Ok(total)
     }
@@ -2315,7 +2328,7 @@ fn sized_alts(h: Hir, i: u64, rev: bool) -> Result[Shape, Error] {
     let mut other = n.more
     while other != 0 {
         let branch = read(h.nodes, other)
-        total = size_add(total, sized_seq(h, branch.first, rev)?, true)?
+        total = size_add(total, sized_seq(mut h, branch.first, rev)?, true)?
         other = branch.more
         arms += 1
     }
@@ -2644,23 +2657,10 @@ fn ordered_split(mut a: Assembler, lazy: bool, first: u64, second: u64) -> u64 {
 }
 
 fn emit_repeat(h: Hir, mut a: Assembler, n: Node, following: u64) -> u64 {
-    let lazy = n.more != 0
+    let lazy = (n.more & REPEAT_LAZY) != 0
     let mut begin = following
-    let child = sized_atom(h, n.first, a.rev)
-    let zero_width = match child {
-        Ok(m) => m.can_empty && !m.can_consume,
-        Error(_) => false,
-    }
-    let mut mandatory: u64 = if zero_width && n.a > 1 {
-        1
-    } else {
-        n.a
-    }
-    let maximum: u64 = if zero_width && n.b > 1 {
-        1
-    } else {
-        n.b
-    }
+    let mut mandatory = n.a
+    let maximum = n.b
     if maximum == UNBOUNDED {
         let loop_at = emit(mut a, OP_SPLIT, 0, 0, 0)
         let first = emit_atom(h, mut a, n.first, loop_at)
@@ -2676,7 +2676,7 @@ fn emit_repeat(h: Hir, mut a: Assembler, n: Node, following: u64) -> u64 {
         }
         put_op(mut a, loop_at, OP_SPLIT, int.narrow(short), int.narrow(long), 0)
         if mandatory == 0 {
-            if nullable_atom(h, n.first) {
+            if (n.more & REPEAT_NULLABLE) != 0 {
                 return ordered_split(mut a, lazy, first, following)
             }
             return loop_at
@@ -2696,34 +2696,6 @@ fn emit_repeat(h: Hir, mut a: Assembler, n: Node, following: u64) -> u64 {
         mandatory -= 1
     }
     begin
-}
-
-fn nullable_atom(h: Hir, i: u64) -> bool {
-    let n = read(h.nodes, i)
-    if n.kind == EMPTY || n.kind == ASSERT {
-        return true
-    }
-    if n.kind == REPEAT {
-        return n.a == 0 || nullable_atom(h, n.first)
-    }
-    if n.kind == CAPTURE || n.kind == SCOPED {
-        let mut arm = i
-        loop {
-            let branch = read(h.nodes, arm)
-            let mut at = branch.first
-            while at != 0 && nullable_atom(h, at) {
-                at = read(h.nodes, at).successor
-            }
-            if at == 0 {
-                return true
-            }
-            if branch.more == 0 {
-                return false
-            }
-            arm = branch.more
-        }
-    }
-    false
 }
 
 fn emit_atom(h: Hir, mut a: Assembler, i: u64, following: u64) -> u64 {
@@ -3062,7 +3034,7 @@ fn extract_atom(h: Hir, id: u64, mut needles: Needles, first: u64, max_end: u64)
             extract_atom(h, n.first, mut needles, first, max_end)
             i += 1
         }
-        if n.a != n.b || n.a > 10 {
+        if (n.more & REPEAT_STOP_PREFIX) != 0 {
             close_needles(mut needles, first)
         }
     } else if n.kind == CAPTURE || n.kind == SCOPED {
@@ -3363,7 +3335,7 @@ fn linear_atom(h: Hir, id: u64, mut output: Inline[u8, 100], mut width: u64) -> 
             }
             repeated += 1
         }
-        return repeated == n.a && n.a == n.b
+        return (n.more & REPEAT_STOP_PREFIX) == 0
     }
     n.kind == EMPTY || n.kind == ASSERT
 }
@@ -3507,8 +3479,8 @@ fn fixed_capture_offsets(h: Hir, highest_group: u64) -> Option[CaptureOffsets] {
 
 fn compile_new(pattern: String, take input_hir: Hir) -> Result[Regex, Error] {
     let mut hir = take input_hir
-    let f = sized_alts(hir, 0, false)?
-    let r = sized_alts(hir, 0, true)?
+    let f = sized_alts(mut hir, 0, false)?
+    let r = sized_alts(mut hir, 0, true)?
     let nf = FORWARD_BASE + f.states
     let nr = REVERSE_BASE + r.states
     let offsets = fixed_capture_offsets(hir, f.pgroup)

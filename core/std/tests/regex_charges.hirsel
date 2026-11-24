@@ -181,6 +181,36 @@ fn regex_literal_ninety_thousand() -> bool {
     }
 }
 
+// expect: run regex_zero_width_repeat_build() = true
+fn regex_zero_width_repeat_build() -> bool {
+    for depth in[2u64, 4u64, 8u64, 10u64] {
+        let mut p = string.with_capacity(2u64 + 8u64 * depth)
+        for _ in 0u64 .. depth {
+            string.push(mut p, "(?:")
+        }
+        string.push(mut p, "\\A")
+        for _ in 0u64 .. depth {
+            string.push(mut p, "){10}")
+        }
+        let allowance = 4096u64 + 1024u64 * depth
+        let built = bound steps allowance {
+            new(p)
+        }
+        let Ok(Ok(re)) = built else {
+            return false
+        }
+        // One assertion per direction, eight fixed states, and the byte map.
+        if size(re) != 416u64 {
+            return false
+        }
+        let mut c = cache(re, 0u64)
+        if find(re, mut c, "xy", 0u64) != Some(Match(start: 0u64, end: 0u64)) || find(re, mut c, "xy", 1u64) != None {
+            return false
+        }
+    }
+    true
+}
+
 fn walk_bounded(
     re: Regex,
     take c: Cache,

@@ -668,7 +668,9 @@ fn test_l62_attempt_touch_order() -> Result[(), Error] {
     let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let first_frame = l70_cache_target(1)
     let mut refused = capacity(tiered_touch_set(2097, 1))?
-    let _ = tiered_resolve_cold(mut refused, visible, first_frame)?
+    if let Some(_) = tiered_resolve_cold(mut refused, visible, first_frame)? {
+        fail("L62: an empty map has no visible frame")
+    }
     let Some(AttemptMiss(TieredBlob(demanded))) = refused.stopped else {
         fail("L62: a missing pin was not latched")
     }

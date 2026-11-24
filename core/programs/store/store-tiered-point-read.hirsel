@@ -9,32 +9,36 @@ fn tiered_replayed_row(tree: PageTree, logical: Bytes) -> Option[View[ReplayRow]
     replay_overlay_at(overlay, logical)
 }
 
-fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, logical: Bytes, touch_slots: u64) -> Result[Option[Arc[Bytes]], Error] waits {
+fn read_tiered_point[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, logical: Bytes, touch_slots: u64,
+    decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
     if list.len(logical) < 4 {
-        return Ok(None)
+        return decode_row(None)
     }
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) else {
-        return Ok(None)
+        return decode_row(None)
     }
     if descriptor[52u64] == 4 {
         if list.len(logical) != 12 {
-            return Ok(None)
+            return decode_row(None)
         }
         let sequence: u64 = list.word_be(logical, 4)
         let window = descriptor_bounds(descriptor)
         if sequence < window.first || sequence >= window.next {
-            return Ok(None)
+            return decode_row(None)
         }
     }
     if let Some(row) = tiered_replayed_row(tree, logical) {
-        return match row.now {
-            ReplayPut(value) => Ok(Some(arc.share(value))),
-            ReplayAbsent => Ok(None),
+        let stored: Option[View[Bytes]] = match row.now {
+            ReplayPut(value) => Some(view value),
+            ReplayAbsent => None,
         }
+        return decode_row(stored)
     }
     let key = list.slice(logical, 4, list.len(logical))
-    retry_tiered_read(source, root_grant, root, key, None, touch_slots, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[Arc[Bytes]], Error] {
-        tiered_point_path(mut attempt, visible, edge, None, key)
+    retry_tiered_read(source, root_grant, root, key, None, touch_slots, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error] {
+        let backing = TieredBorrowedRoot(edge: view edge, pins: view visible)
+        let stored = tiered_point_bytes(mut attempt, backing, key)?
+        decode_row(stored)
     })
 }
 

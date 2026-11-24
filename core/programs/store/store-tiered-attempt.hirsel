@@ -51,7 +51,7 @@ fn tiered_touch(mut attempt: TieredTouchSet, stamp: u64, payload: u64) -> bool {
     true
 }
 
-fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], target: TieredTarget) -> Result[Option[Arc[TieredFrame]], Error] {
+fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], target: TieredTarget) -> Result[Option[View[Arc[TieredFrame]]], Error] in visible {
     if let Some(_) = attempt.stopped {
         return Ok(None)
     }
@@ -70,7 +70,32 @@ fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey,
     if !was_touched {
         list.push(mut attempt.frames, arc.share(frame))
     }
-    Ok(Some(arc.share(frame)))
+    Ok(Some(frame))
+}
+
+fn tiered_touch_hot_page(mut attempt: TieredTouchSet, page: Arc[std.page.Page]) -> Result[(), Error] {
+    let image = std.page.image_of(page)
+    let id = std.page.stamp(image)
+    if id != 0 && !tiered_touch(mut attempt, id, list.len(std.page.payload(image))) {
+        return Error(Missed)
+    }
+    Ok(())
+}
+
+fn tiered_pinned_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.PagePtr,
+    expected_level: Option[u8]) -> Result[View[Arc[std.page.Page]], Error] in visible {
+    let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredPage(ptr))? else {
+        return Error(Missed)
+    }
+    let TieredImage(page) = view frame.payload else {
+        fail("store: verified PAGE has no image")
+    }
+    if let Some(wanted) = expected_level {
+        if std.page.level(std.page.image_of(page)) != wanted {
+            return Error(disk_fault(paged_pack_path(ptr.pack)?, ptr.offset, Malformed))
+        }
+    }
+    Ok(page)
 }
 
 fn tiered_point_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected_level: Option[u8]) -> Result[Arc[std.page.Page], Error] {
@@ -79,28 +104,31 @@ fn tiered_point_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, A
     }
     match edge {
         HotPage(page) => {
-            let image = std.page.image_of(page)
-            let id = std.page.stamp(image)
-            if id != 0 && !tiered_touch(mut attempt, id, list.len(std.page.payload(image))) {
-                return Error(Missed)
-            }
+            tiered_touch_hot_page(mut attempt, page)?
             Ok(arc.share(page))
         },
         ColdPage(ptr) => {
-            let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredPage(ptr))? else {
-                return Error(Missed)
-            }
-            let TieredImage(page) = view frame.payload else {
-                fail("store: verified PAGE has no image")
-            }
-            if let Some(wanted) = expected_level {
-                if std.page.level(std.page.image_of(page)) != wanted {
-                    return Error(disk_fault(paged_pack_path(ptr.pack)?, ptr.offset, Malformed))
-                }
-            }
+            let page = tiered_pinned_page(mut attempt, visible, ptr, expected_level)?
             Ok(arc.share(page))
         },
     }
+}
+
+fn tiered_touch_hot_blob(mut attempt: TieredTouchSet, reference: std.page.BlobRef, contents: Arc[Bytes]) -> Result[(), Error] {
+    if !tiered_touch(mut attempt, reference.stamp, 8 + list.len(contents)) {
+        return Error(Missed)
+    }
+    Ok(())
+}
+
+fn tiered_pinned_blob(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.BlobRef) -> Result[View[Arc[Bytes]], Error] in visible {
+    let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredBlob(ptr))? else {
+        return Error(Missed)
+    }
+    let TieredValue(contents) = view frame.payload else {
+        fail("store: verified BLOB has no value")
+    }
+    Ok(contents)
 }
 
 fn tiered_point_value(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], page: Arc[std.page.Page], slot: u64) -> Result[Arc[Bytes], Error] {
@@ -115,18 +143,11 @@ fn tiered_point_value(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, 
     }
     match edge {
         HotBlob(contents) => {
-            if !tiered_touch(mut attempt, reference.stamp, 8 + list.len(contents)) {
-                return Error(Missed)
-            }
+            tiered_touch_hot_blob(mut attempt, reference, contents)?
             Ok(arc.share(contents))
         },
         ColdBlob(ptr) => {
-            let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredBlob(ptr))? else {
-                return Error(Missed)
-            }
-            let TieredValue(contents) = view frame.payload else {
-                fail("store: verified BLOB has no value")
-            }
+            let contents = tiered_pinned_blob(mut attempt, visible, ptr)?
             Ok(arc.share(contents))
         },
     }
@@ -277,4 +298,49 @@ fn stage_tiered_trim(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, A
     }
     next_stamp = following_stamp
     Ok((take kept, dropped))
+}
+scoped type TieredBorrowedRoot {
+    edge: View[std.page.Slot],
+    pins: View[Map[TieredCacheKey, Arc[TieredFrame]]]
+}
+
+// Both possible anchors of a returned row are fields of root. The attempt
+// accounts for the visits and retains shares, but it never stores the row's
+// locator in its growable bookkeeping.
+fn tiered_point_bytes(mut attempt: TieredTouchSet, root: TieredBorrowedRoot, key: Bytes) -> Result[Option[View[Bytes]], Error] in root {
+    tiered_point_bytes_at(mut attempt, root, root.edge, None, key)
+}
+
+fn tiered_point_bytes_at(mut attempt: TieredTouchSet, root: TieredBorrowedRoot, edge: View[std.page.Slot] in root,
+    expected: Option[u8], key: Bytes) -> Result[Option[View[Bytes]], Error] in root {
+    if let Some(_) = attempt.stopped {
+        return Error(Missed)
+    }
+    let page: View[Arc[std.page.Page]] in root = match edge {
+        HotPage(hot) => {
+            tiered_touch_hot_page(mut attempt, hot)?
+            view hot
+        },
+        ColdPage(ptr) => tiered_pinned_page(mut attempt, root.pins, ptr, expected)?,
+    }
+    let image = std.page.image_of(page)
+    if let Some(selected) = std.page.descend(image, key) {
+        let child = option.unwrap(std.page.child_slot(page, selected))
+        return tiered_point_bytes_at(mut attempt, root, child, Some(std.page.level(image) - 1), key)
+    }
+    let (selected, hit) = std.page.search(image, key)
+    if !hit {
+        return Ok(None)
+    }
+    if let Some(BlobEdge(reference)) = std.page.owning_edge(image, selected) {
+        let bytes_view: View[Arc[Bytes]] in root = match option.unwrap(std.page.blob_slot(page, reference.body)) {
+            HotBlob(contents) => {
+                tiered_touch_hot_blob(mut attempt, reference, contents)?
+                view contents
+            },
+            ColdBlob(ptr) => tiered_pinned_blob(mut attempt, root.pins, ptr)?,
+        }
+        return Ok(Some(view bytes_view))
+    }
+    Ok(std.page.value_at(page, selected))
 }

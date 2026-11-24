@@ -145,11 +145,7 @@ fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[
         if let Some((_, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) {
             if descriptor[53u64] == 1 {
                 let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
-                let stored = read_tiered_point(source, grant, root, tree, logical, inventory.touch_slots)?
-                return match stored {
-                    Some(raw) => decode_row(Some(view raw)),
-                    None => decode_row(None),
-                }
+                return read_tiered_point(source, grant, root, tree, logical, inventory.touch_slots, decode_row)
             }
         }
     }

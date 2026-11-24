@@ -320,13 +320,23 @@ fn l62_replay_read_tree(base: std.page.PagePtr) -> Result[PageTree, Error] {
     Ok(take tree)
 }
 
+fn l62_read_point_bytes(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree,
+    key: Bytes, slots: u64) -> Result[Option[Bytes], Error] waits {
+    read_tiered_point(source, grant, root, tree, key, slots, fn(raw: Option[View[Bytes]]) -> Result[Option[Bytes], Error] {
+        match raw {
+            Some(value) => Ok(Some(copied(value)?)),
+            None => Ok(None),
+        }
+    })
+}
+
 fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
     let grant = pager_reader_grant(source.pager, VALUE_LIMIT + 1048576)?
     let mut tree = l62_replay_read_tree(base)?
     let key = log_key(9, 1)?
     let mut root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
     for _ in 0u64 .. 2 {
-        let Some(value) = read_tiered_point(source, grant, root, tree, key, 4)? else {
+        let Some(value) = l62_read_point_bytes(source, grant, root, tree, key, 4)? else {
             fail("L62: cold and warm lookup must both find the row")
         }
         if list.compare_bytes(value, string.as_bytes("stored")) != Equal {
@@ -340,13 +350,13 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
     replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before, put_op)?
     root.root_stamp = tree_stamp(tree)
     let overlay_only = TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
-    let Some(replayed) = read_tiered_point(overlay_only, grant, root, tree, key, 4)? else {
+    let Some(replayed) = l62_read_point_bytes(overlay_only, grant, root, tree, key, 4)? else {
         fail("L62: a replay put did not answer without the Cold inventory")
     }
     if list.compare_bytes(replayed, string.as_bytes("second")) != Equal {
         fail("L62: a replay put did not take precedence over its base")
     }
-    let Some(untouched) = read_tiered_point(source, grant, root, tree, log_key(9, 2)?, 4)? else {
+    let Some(untouched) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?, 4)? else {
         fail("L62: an overlay skipped the Cold base for an untouched key")
     }
     if list.compare_bytes(untouched, string.as_bytes("stored")) != Equal {
@@ -355,7 +365,7 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
     let deleted = JournalOp(key: clone(key), value: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 2, branch: 0), before, deleted)?
     root.root_stamp = tree_stamp(tree)
-    if let Some(_) = read_tiered_point(overlay_only, grant, root, tree, key, 4)? {
+    if let Some(_) = l62_read_point_bytes(overlay_only, grant, root, tree, key, 4)? {
         fail("L62: a replay tombstone did not hide the base row")
     }
     Ok(())
@@ -386,14 +396,14 @@ fn l62_check_batch_error_order(source: TieredPageSource, owner: StoreId, base: s
     // Two 54-byte branch entries, an 8-byte separator, a 24-byte page
     // header and two 2-byte slots. The 16-byte frame head makes 160.
     let short = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 160))
-    let Error(Full(Cache(problem))) = read_tiered_point(source, short, root, tree, key, 2) else {
+    let Error(Full(Cache(problem))) = l62_read_point_bytes(source, short, root, tree, key, 2) else {
         fail("L62: a batch tail error escaped the first-touch limit")
     }
     if problem.requested != 216 || problem.available != 160 {
         fail("L62: the touch counts the missing child's 40 bytes and frame head")
     }
     let enough = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 216))
-    let Error(Corrupt(Fault(why: Dangling(48), ..))) = read_tiered_point(source, enough, root, tree, key, 2) else {
+    let Error(Corrupt(Fault(why: Dangling(48), ..))) = l62_read_point_bytes(source, enough, root, tree, key, 2) else {
         fail("L62: a failing edge that passes admission must report its fault")
     }
     Ok(())
@@ -783,13 +793,13 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     let source = TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
     let grant = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
     let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
-    let Ok(None) = read_tiered_point(source, grant, root, tree, log_key(9, 1)?, 2) else {
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 1)?, 2) else {
         fail("L62: a trimmed row must not reach the Cold base")
     }
-    let Ok(None) = read_tiered_point(source, grant, root, tree, log_key(9, 4)?, 2) else {
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 4)?, 2) else {
         fail("L62: a key at next_seq must not reach the Cold base")
     }
-    let Error(Io(Closed)) = read_tiered_point(source, grant, root, tree, log_key(9, 2)?, 2) else {
+    let Error(Io(Closed)) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?, 2) else {
         fail("L62: masking bypassed the Cold base inside the Log bounds")
     }
     Ok(())

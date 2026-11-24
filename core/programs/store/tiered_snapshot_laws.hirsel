@@ -45,8 +45,41 @@ fn l62_snapshot_point_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), 
     Ok(())
 }
 
+fn l62_borrowed_rows_survive_later_touches() -> Result[(), Error] {
+    let mut contents: Bytes = list.with_capacity(1025)
+    list.fill(mut contents, 1025, 0xa7u8)
+    let digest = std.check.xxh3(contents, 0, 1025)
+    let reference = std.page.BlobRef(stamp: 39, len: 1025, checksum: digest, pack: 9, offset: 72, body: 0)
+    let mut leaf_entries: List[std.page.Entry] = list.new()
+    list.push(mut leaf_entries, std.page.Entry(key: key_word(1), cell: InlineValue(string.into_bytes(string.from("inline")))))
+    list.push(mut leaf_entries, std.page.Entry(key: key_word(2), cell: BlobValue(reference)))
+    let image = page_result(std.page.encode(leaf_entries, 0, 40, Collection))?
+    let ptr = {
+        let payload = std.page.payload(image)
+        std.page.PagePtr(pack: 8, offset: 72, len: int.truncate(list.len(payload)), checksum: std.check.xxh3(payload, 0, list.len(payload)), stamp: 40)
+    }
+    let leaf = page_result(std.page.attach_cold(take image))?
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    map.insert(mut visible, (8, 72), arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(ptr)), payload: TieredImage(take leaf))))
+    map.insert(mut visible, (9, 72), arc.new(TieredFrame(identity: tiered_frame_id(TieredBlob(reference)), payload: TieredValue(arc.new(take contents)))))
+    let root_edge: std.page.Slot = ColdPage(ptr)
+    let backing = TieredBorrowedRoot(edge: view root_edge, pins: view visible)
+    let mut attempt = capacity(tiered_touch_set(4096, 1))?
+    let Some(first) = tiered_point_bytes(mut attempt, backing, key_word(1))? else {
+        fail("L62: the inline row must be in the pinned leaf")
+    }
+    let Some(second) = tiered_point_bytes(mut attempt, backing, key_word(2))? else {
+        fail("L62: the overflow row must be in the pinned BLOB")
+    }
+    if first != string.as_bytes("inline") || list.len(second) != 1025 || second[1024u64] != 0xa7 || list.len(attempt.frames) != 2 {
+        fail("L62: growing attempt bookkeeping must preserve both borrowed values")
+    }
+    Ok(())
+}
+
 @test
 fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_borrowed_rows_survive_later_touches()?
     let fixtures = disk_test_directory(d)
     let mut db = test_db(c, 2147483648)
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?

@@ -249,6 +249,9 @@ fn test_l68_served_write_to_cold_tiered(d: Dir, c: Clock, r: Random, tasks: Task
     l68_cold_rows(d, c, r, tasks, floor)?
     let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
     l68_write_rows(mut cold, 3u64, 33u32, Some(1u64))?
+    if accounts(cold).tiered != 172 {
+        fail("L68: the served delete charges the live Tiered account")
+    }
     let _ = checkpoint(mut cold)?
     close(take cold)?
 
@@ -275,11 +278,17 @@ fn test_l68_fold_cut_publishes_replayed_writes(d: Dir, c: Clock, r: Random, task
     close(take cold)?
 
     let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if accounts(replayed).tiered != 172 {
+        fail("L68: replay charges the journaled delete from its prior")
+    }
     if l68_read_rows(mut replayed)? != (None, Some(33u32), Some(50u32)) {
         fail("L68: the overlay reads the journaled put and delete")
     }
     l68_write_rows(mut replayed, 5u64, 55u32, None)?
     let _ = checkpoint(mut replayed)?
+    if accounts(replayed).tiered != 172 {
+        fail("L68: the fold cut settles the live Tiered account")
+    }
     close(take replayed)?
 
     let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
@@ -288,6 +297,34 @@ fn test_l68_fold_cut_publishes_replayed_writes(d: Dir, c: Clock, r: Random, task
     }
     if accounts(reopened).tiered != 172 {
         fail("L68: the fold cut's Tiered account covers the two remaining rows")
+    }
+    close(take reopened)
+}
+
+// L68: the fold cut publishes X over the roots it publishes. A pin keeps the
+// Cold three-row leaf (3 × 86 = 258) and the head's journaled delete folds
+// into a fresh two-row leaf (172), so X = 430 live and after the reopen. A
+// figure taken over the pre-fold roots sees one shared Cold stamp and
+// counts only the head's 172.
+@test
+fn test_l68_fold_cut_counts_pinned_cold_root(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    l68_cold_rows(d, c, r, tasks, floor)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let held = snapshot(cold)
+    let _ = pin(mut cold, string.from("before"), held)?
+    l68_write_rows(mut cold, 3u64, 30u32, Some(1u64))?
+    close(take cold)?
+
+    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = checkpoint(mut replayed)?
+    if accounts(replayed).tiered != 430 {
+        fail("L68: the fold cut counts the pinned leaf and the folded leaf")
+    }
+    close(take replayed)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if accounts(reopened).tiered != 430 {
+        fail("L68: the published account_tiered covers the pin's rows")
     }
     close(take reopened)
 }

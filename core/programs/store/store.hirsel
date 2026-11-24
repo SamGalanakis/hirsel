@@ -5021,7 +5021,7 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
         Error(take problem) => return Error(cut_io_error(mut db, take problem)),
     }
     let PreparedDiskCut(pages: take pages, removals: take removals, manifest: take manifest) = take prepared
-    prepare_tiered_install(mut staged, pages.locations, generation)?
+    let settled_tiered = prepare_tiered_install(mut staged, pages.locations, generation)?
     // The records name exactly the frames reachable from the participants
     // and the two list roots, so their running charge is the AP15 report.
     let resident_pages = resident_location_charge(pages.locations)
@@ -5043,10 +5043,10 @@ fn disk_cut_with_limit(mut db: Db, take delta: HolderDelta, write_seal: scoped f
     })
     db.checkpointed = generation
     db.resident = base.account
+    db.tiered = settled_tiered
     db.page_resident = resident_pages
     db.settled = db.changes
-    let mut held_delta = take delta
-    install_tiered_holders(mut db, mut held_delta, take staged)
+    let held_delta = install_tiered_holders(mut db, take delta, take staged)
     install_holder_delta(mut db, take held_delta)
     let installed = if observe {
         host.mono_ns(db.clock)

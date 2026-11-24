@@ -168,23 +168,24 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
     Ok(())
 }
 
-fn cut_tiered_account(db: Db, delta: HolderDelta) -> Result[u64, Error] {
+// Over the roots the cut publishes, so a fold's fresh roots are counted
+// and an overlaid head never hides a pin that shares its Cold root.
+fn cut_tiered_account(published: List[Roots]) -> Result[u64, Error] {
     let mut seen: Map[u64, ()] = map.new()
     let mut total = 0u64
-    visit_cut_heads(db, delta, mut total, scoped fn(mut sum: u64, head: Head, roots: Roots, head_version: u64, at: u64) -> Result[(), Error] {
-        tiered_map_account(roots.collections.root, mut seen, mut sum)
-    })?
-    visit_cut_pins(db, delta, mut total, scoped fn(mut sum: u64, held: Pin) -> Result[(), Error] {
-        tiered_map_account(held.roots.collections.root, mut seen, mut sum)
-    })?
+    for roots in published {
+        tiered_map_account(roots.collections.root, mut seen, mut total)?
+    }
     Ok(total)
 }
 
 // Step 5's images, built before the rename so the swap allocates nothing.
 // Each sealed tree reads its Cold roots through the new generation's packs.
-fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: PageLocations, generation: u64) -> Result[(), Error] {
+// The cut settles (§13.7): the live Tiered account becomes the published X.
+fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: PageLocations, generation: u64) -> Result[u64, Error] {
+    let settled = cut_tiered_account(cut_stage.roots)?
     if tiered_cut_stage_empty(cut_stage) {
-        return Ok(())
+        return Ok(settled)
     }
     let paging = recovered_tiered_inventory(installed, None, generation)?
     for slot in 0u64 .. list.len(cut_stage.roots) {
@@ -192,7 +193,7 @@ fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: PageLocation
             cut_stage.roots[slot].collections.paging = Some(arc.share(paging))
         }
     }
-    Ok(())
+    Ok(settled)
 }
 
 fn take_sealed(mut sealed: List[Roots], mut at: u64) -> PageTree {
@@ -203,9 +204,10 @@ fn take_sealed(mut sealed: List[Roots], mut at: u64) -> PageTree {
 
 // Step 5: each participant's Tiered images replace its Hot ones, in the
 // order `visit_cut_heads` and `visit_cut_pins` gave them to the stage.
-fn install_tiered_holders(mut db: Db, mut delta: HolderDelta, take cut_stage: TieredCutStage) {
+fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_stage: TieredCutStage) -> HolderDelta {
+    let mut delta = take holder_delta
     if tiered_cut_stage_empty(cut_stage) {
-        return ()
+        return take delta
     }
     let TieredCutStage(roots: take sealed, ..) = take cut_stage
     let mut sealed_roots = take sealed
@@ -260,4 +262,5 @@ fn install_tiered_holders(mut db: Db, mut delta: HolderDelta, take cut_stage: Ti
             added.roots.collections = take_sealed(mut sealed_roots, mut at)
         }
     }
+    take delta
 }

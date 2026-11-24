@@ -293,7 +293,7 @@ def build_checkbox(out, compiler, runtime, *, prefix=(ROOT / "tools/capped",), j
             stdout=log, env=env, entry="shipping_benchmark",
         )
     run([*prefix, compiler, "sdk", "ts", binary, "--output", web,
-         "--n-place", checkbox.N_PLACE, "--runtime", runtime, "--cc", clang], env=env)
+         "--n-place", checkbox.N_PLACE], env=env)
     run(["node", "--input-type=module", "-e", """
 import { writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';

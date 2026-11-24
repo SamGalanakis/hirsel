@@ -112,7 +112,9 @@ and a rule about leading dots belongs to `.gitignore`-style packages. Go's `path
 takes the leftmost match of each chunk after a `*` and never revisits it. That is
 correct within one component, but `**` across components needs alternatives kept open,
 and a backtracking matcher for them can be exponential. REPLACED by the simulation above
-for both levels.
+for both levels. Goose (`/tmp/ref-goose`, d5ae5bb) has no path
+pattern matcher; its nearest is `matches` in `stdlib/regex.goose:1027`, a regex match.
+NOT TAKEN: a regex is not a path pattern, and a glob must not cross `/` except by `**`.
 
 ## Left out
 

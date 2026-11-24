@@ -171,3 +171,8 @@ passes through from the host primitive that failed:
   Hirsel has no permission operations. A program that keeps a file private would see
   `replace` reset it. If permission operations are ever added, `replace` would copy the
   old bits, as Goose does. That change is additive.
+- **Stale temporary files.** A crash between `mkstemp` and `rename` leaves a
+  `.hirsel-tmp-` file that nothing removes. Removing them at start is unsafe, because
+  another process may be mid-replace in the same directory. A program that cares lists
+  the directory and removes old ones itself. A `file.reclaim_temps(d, older_than)` would
+  be additive.

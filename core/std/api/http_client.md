@@ -250,3 +250,8 @@ closes its connection.
 - **Encoded-bytes allowance.** The fixed 131,072-byte framing allowance (HTTP-18) refuses a
   gzip response with larger optional header fields, or with many tiny members. No server
   in common use sends one. Raising the allowance is reversible.
+- **`x-gzip` and raw deflate.** `x-gzip` is accepted as `gzip` (RFC 9110 §8.4.1.3), and
+  `deflate` must be zlib-wrapped (RFC 9110 §8.4.1.2), so raw deflate is refused as
+  `Coding`. Some old servers send raw deflate, and browsers fall back to it. Never
+  offering `deflate` in `Accept-Encoding` would avoid the issue, and that change is
+  reversible.

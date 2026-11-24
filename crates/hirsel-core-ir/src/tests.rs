@@ -4,9 +4,9 @@
 mod frame;
 mod own;
 
+use crate::eval;
 use crate::text::{parse, print};
 use crate::*;
-use crate::eval;
 
 const SAMPLES: &[(&str, &str)] = &[
     ("arith", include_str!("../samples/arith.core")),

@@ -174,7 +174,7 @@ fn dropped(s: u8, strong: bool) -> u8 {
 }
 fn begun(s: u8) -> u8 {
     let (t, f) = halves(s);
-     (if t { ZT } else { 0 }) | (if f { ZF } else { 0 })
+    (if t { ZT } else { 0 }) | (if f { ZF } else { 0 })
 }
 fn flag(s: u8, value: Option<bool>) -> u8 {
     let (z, d) = (s & Z != 0, s & D != 0);
@@ -183,7 +183,7 @@ fn flag(s: u8, value: Option<bool>) -> u8 {
         Some(false) => (ZF, DF),
         None => (Z, D),
     };
-     (if z { zs } else { 0 }) | (if d { ds } else { 0 })
+    (if z { zs } else { 0 }) | (if d { ds } else { 0 })
 }
 
 /// What an instruction does to the tracked places, by address.
@@ -300,7 +300,10 @@ impl Own<'_> {
         match *act {
             Act::Use(a) => {
                 if check {
-                    for &q in self.hits[a.index()].iter().chain(&self.deref_hits[a.index()]) {
+                    for &q in self.hits[a.index()]
+                        .iter()
+                        .chain(&self.deref_hits[a.index()])
+                    {
                         need(!self.may_drop(now, q), || {
                             format!(
                                 "a{}: {} is used where it may be dropped",
@@ -459,9 +462,10 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
                     continue;
                 };
                 for &q in &own.hits[address.index()].clone() {
-                    let paired = own.guards.get(&f).is_some_and(|g| {
-                        g.iter().any(|p| own.pairs[q].contains(p))
-                    });
+                    let paired = own
+                        .guards
+                        .get(&f)
+                        .is_some_and(|g| g.iter().any(|p| own.pairs[q].contains(p)));
                     if !paired {
                         own.pairs[q].push(width);
                         own.guards.entry(f).or_default().push(width);
@@ -491,7 +495,10 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             work.push(t);
         }
     };
-    let mut flow = |start: &mut Vec<Option<Vec<u8>>>, check: bool, bi: usize| -> Result<Vec<(usize, Vec<u8>)>, String> {
+    let mut flow = |start: &mut Vec<Option<Vec<u8>>>,
+                    check: bool,
+                    bi: usize|
+     -> Result<Vec<(usize, Vec<u8>)>, String> {
         let mut now = start[bi].clone().unwrap();
         let mut out = vec![];
         for i in insts(bi) {
@@ -551,5 +558,8 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
 
 /// Whether slot `s` is a `bool` value place (a drop flag's shape).
 pub(super) fn is_flag_slot(b: &Body, s: usize) -> bool {
-    b.slots.get(s) == Some(&PlaceTy::Value(Ty::Scalar(hirsel_core_layout::Scalar::Bool)))
+    b.slots.get(s)
+        == Some(&PlaceTy::Value(Ty::Scalar(
+            hirsel_core_layout::Scalar::Bool,
+        )))
 }

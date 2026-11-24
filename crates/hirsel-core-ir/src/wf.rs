@@ -1520,7 +1520,6 @@ fn place_of(b: &Body, a: AddressId, reads: &mut Vec<Place>) -> Option<Place> {
     }
     at
 }
-
 /// Whether a place of this type has no bytes (`()`, a record of such fields): a
 /// read of it reads nothing, so it needs no write.
 fn no_bytes(m: &Module, ty: PlaceTy) -> bool {
@@ -1543,7 +1542,6 @@ fn no_bytes(m: &Module, ty: PlaceTy) -> bool {
         PlaceTy::Value(_) => false,
     }
 }
-
 fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
     let mut t = Touch::default();
     let read = |t: &mut Touch, a: AddressId| {
@@ -1623,7 +1621,6 @@ fn touch(m: &Module, b: &Body, i: &Inst) -> Touch {
     }
     t
 }
-
 /// Every reachable read of a slot's contents follows, on every path to it from the
 /// entry, a write that overlaps the place read (crate docs, "Values, slots and
 /// addresses"). Writes are a store, copy, `set_case`, `grow`, a call's destination
@@ -1797,7 +1794,10 @@ fn written(m: &Module, b: &Body) -> R {
                     }
                     _ => {
                         for p in &touches[bi][k].writes {
-                            if p.1.is_empty() && guards.get(p.0).is_some() && own::is_flag_slot(b, p.0) {
+                            if p.1.is_empty()
+                                && guards.get(p.0).is_some()
+                                && own::is_flag_slot(b, p.0)
+                            {
                                 meet(p.0, vec![0; words]);
                             }
                         }

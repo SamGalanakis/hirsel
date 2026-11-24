@@ -9,6 +9,8 @@
 
 use crate::*;
 
+mod places;
+
 type R = Result<(), String>;
 
 fn need(ok: bool, msg: impl FnOnce() -> String) -> R {
@@ -433,6 +435,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             need(t.index() < m.types.len(), || "slot of unknown type".into())?;
         }
     }
+    let mut ats = Vec::with_capacity(b.addresses.len());
     for (i, a) in b.addresses.iter().enumerate() {
         match a.base {
             AddressBase::Slot(s) => {
@@ -445,22 +448,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
                 format!("a{i}: base address must come first")
             })?,
         }
-        let steps = a.steps.get(&b.pools.steps).ok_or("steps out of pool")?;
-        for (k, s) in steps.iter().enumerate() {
-            match *s {
-                Step::Index(v) | Step::Element(v) | Step::Byte(v) => {
-                    need(c.ty(v)?.int().is_some(), || {
-                        format!("a{i}: index is not an integer")
-                    })?
-                }
-                // FORM #113: a carrier word is a leaf of its word's type.
-                Step::Seq(w) => need(
-                    k + 1 == steps.len() && a.ty == PlaceTy::Value(w.ty()),
-                    || format!("a{i}: a seq word must be the last step, typed as the word"),
-                )?,
-                _ => {}
-            }
-        }
+        places::address(&c, &mut ats, i, a)?;
     }
     // Entry parameters follow the signature.
     let entry: Vec<Ty> = c

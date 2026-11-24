@@ -39,6 +39,15 @@ pub(super) struct Frame {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// The want of a join's next arm, `if`, `if let`, `match` or a frame's `break`,
+    /// given `first`, the type of the first arm that did not diverge. A Never arm
+    /// constrains nothing (LANG-11); a view want (OWN-7) binds to the first arm, so a
+    /// later arm must match it exactly and a join of views owns nothing (OWN-16).
+    pub(super) fn arm_want(&self, want: Option<Want>, first: Option<TyId>) -> Option<Want> {
+        want.filter(|w| self.fixed_want(*w) && !(w.view && first.is_some()))
+            .or(first.and_then(expect))
+            .or(want)
+    }
     pub(super) fn push_frame(
         &mut self,
         label: Option<String>,
@@ -46,7 +55,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         hint: Option<Want>,
     ) {
         let exit = self.new_join();
-        let ty = hint.filter(|w| self.fixed_want(*w)).map(|w| w.ty);
+        // A view want is fixed by the first `break` instead (OWN-7, OWN-16).
+        let ty = hint
+            .filter(|w| self.fixed_want(*w) && !w.view)
+            .map(|w| w.ty);
         self.frames.push(Frame {
             label,
             kind,
@@ -108,7 +120,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let fixed = self.frames[i].ty;
         let (t, v) = match value {
-            Some(e) => self.expr(e, fixed.and_then(expect).or(self.frames[i].hint)),
+            Some(e) => self.expr(e, self.arm_want(self.frames[i].hint, fixed)),
             None => {
                 if let Some(f) = fixed {
                     self.coerce(

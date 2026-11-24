@@ -1356,7 +1356,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let matrix = self.patterns.matrix.len();
         let edge_mark = self.patterns.edges.len();
         let escape_mark = self.patterns.escaping.len();
-        let mut ty = want.filter(|w| self.fixed_want(*w)).map(|w| w.ty);
+        // A fixed want types the join; a view want, the first arm not diverging.
+        let mut ty = want
+            .filter(|w| self.fixed_want(*w) && !w.view)
+            .map(|w| w.ty);
         for (i, &arm) in c[1..].iter().enumerate() {
             let a = self.kids(arm);
             let id = self.pattern(a[0], subject.ty);
@@ -1410,7 +1413,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.patterns.rebind = false;
             let taken = temp.is_some_and(|i| !self.temp_live(i));
             let body = *a.last().unwrap();
-            let (at, v) = self.result_expr(body, ty.and_then(expect).or(want));
+            let (at, v) = self.result_expr(body, self.arm_want(want, ty));
             if ty.is_none() && at != NEVER {
                 ty = Some(at);
             }
@@ -1743,18 +1746,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.start(no);
         }
         let (ot, ov) = if let Some(&other) = c.get(2) {
-            self.result_expr(
-                other,
-                want.filter(|w| self.fixed_want(*w) && !(w.view && yt != NEVER))
-                    .or_else(|| {
-                        (yt != NEVER).then_some(Want {
-                            ty: yt,
-                            view: false,
-                            payload: 0,
-                        })
-                    })
-                    .or(want),
-            )
+            self.result_expr(other, self.arm_want(want, (yt != NEVER).then_some(yt)))
         } else {
             (UNIT, None)
         };

@@ -509,11 +509,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(no) = no_block {
             self.start(no);
         }
-        // A Never arm constrains nothing (LANG-11); a view want binds to the first arm (OWN-16).
-        let other_want = want
-            .filter(|w| self.fixed_want(*w) && !(w.view && yt != NEVER))
-            .or(if yt == NEVER { None } else { expect(yt) })
-            .or(want);
+        let other_want = self.arm_want(want, (yt != NEVER).then_some(yt));
         let (ot, ov) = self.result_expr(other, other_want);
         let no = self.arm_edge(mark);
         let ty = if yt == NEVER { ot } else { yt };

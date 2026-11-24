@@ -136,20 +136,20 @@ type TieredSizes {
 
 const MIN_WRITER_PINS: u64 = 2 * VALUE_LIMIT + MIB
 
-fn tiered_sizes_at(q: u64, resident_limit: u64, o: Overrides) -> Option[TieredSizes] {
+fn tiered_sizes_at(q: u64, resident_limit: u64, o: Overrides) -> Option[(TieredSizes, u64)] {
     let writer = size_or(o.writer_pin_bytes, q)
     let minimum_cache = int.checked_add(writer, size_or(o.readers, VALUE_LIMIT + MIB))?
-    let cache = size_or(o.cache_bytes, order.max(4 * q, minimum_cache))
+    let cache = size_or(o.cache_bytes, minimum_cache)
     let dirty = size_or(o.dirty_bytes, q)
     let pager = size_or(o.pager_task_bytes, (q + 3) / 4)
-    let with_cut = int.checked_add(cache, CUT_PIN_BYTES)?
-    let with_dirty = int.checked_add(with_cut, dirty)?
-    let with_pager = int.checked_add(with_dirty, pager)?
-    let floor = int.checked_add(with_pager, 64 * MIB)?
-    if writer < MIN_WRITER_PINS || cache < minimum_cache || floor > resident_limit {
+    let after_cut = int.checked_sub(resident_limit, CUT_PIN_BYTES)?
+    let after_dirty = int.checked_sub(after_cut, dirty)?
+    let after_pager = int.checked_sub(after_dirty, pager)?
+    let remainder = int.checked_sub(after_pager, 64 * MIB)?
+    if writer < MIN_WRITER_PINS || cache < minimum_cache || cache > remainder {
         return None
     }
-    Some(TieredSizes(cache: cache, writer: writer, dirty: dirty, pager: pager))
+    Some((TieredSizes(cache: cache, writer: writer, dirty: dirty, pager: pager), remainder))
 }
 
 fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
@@ -169,7 +169,12 @@ fn tiered_sizes(kind: Kind, resident_limit: u64, o: Overrides) -> TieredSizes {
             None => { high = middle - 1 },
         }
     }
-    best
+    let (candidate, remainder) = best
+    let mut sizes = candidate
+    if let None = o.cache_bytes {
+        sizes.cache = order.max(sizes.cache, order.min(4 * low, remainder))
+    }
+    sizes
 }
 
 pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage] {

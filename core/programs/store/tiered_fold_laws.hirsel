@@ -117,27 +117,59 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
 }
 
 @test
-fn test_l70_tiered_sizes_include_cut_quota() -> Result[(), Error] {
+fn test_l70_tiered_sizes_include_cut_quota(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     let mut overrides = derived_sizes()
-    // At q = 34,471,936, the resident floor is 137,887,744 for the
-    // cache, 34,471,936 dirty, 8,617,984 for the pager, 19,944,296 cut
-    // pins and 67,108,864 Memory bytes.
-    overrides.resident_limit = Some(268030823)
+    // W = D = q = 2 * 16,711,680 + 1,048,576 = 34,471,936.
+    // U = 16,711,680 + 1,048,576 = 17,760,256, so C = W + U = 52,232,192.
+    // C + K + D + P + Memory = 52,232,192 + 19,944,296 + 34,471,936
+    // + ceil(34,471,936 / 4) + 67,108,864 = 182,375,272.
+    let floor = 182375272u64
+    overrides.resident_limit = Some(floor - 1)
     let below = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
     if (below.cache_bytes, below.writer_pin_bytes, below.dirty_bytes, below.pager_task_bytes) != (0u64, 0u64, 0u64, 0u64) {
         fail("L70: the default Tiered plan must include the cut quota")
     }
-    overrides.resident_limit = Some(268030824)
+    overrides.resident_limit = Some(floor)
     let exact = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
-    if (exact.cache_bytes, exact.writer_pin_bytes, exact.dirty_bytes, exact.pager_task_bytes) != (137887744u64, 34471936u64, 34471936u64, 8617984u64) {
+    if (exact.cache_bytes, exact.writer_pin_bytes, exact.dirty_bytes, exact.pager_task_bytes) != (52232192u64, 34471936u64, 34471936u64, 8617984u64) {
         fail("L70: the Tiered plan must fit at the exact resident floor")
     }
+    let owner = StoreId(hi: 3, lo: 4)
+    let funding = TieredPagerFunding(cache_bytes: exact.cache_bytes, writer_pin_bytes: exact.writer_pin_bytes,
+        pager_task_bytes: exact.pager_task_bytes, cut_pins: true)
+    let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(d), funding, 1)?
+    let _ = pager_reader_grant(requests, VALUE_LIMIT + MIB)?
+    let _ = take requests
+    let _ = result.unwrap(task.join(take worker))
+
     // W + U now demands one extra cache byte at the same q. K stays fixed.
-    overrides.readers = Some(103415809)
-    overrides.resident_limit = Some(268030825)
+    overrides.readers = Some(VALUE_LIMIT + MIB + 1)
+    overrides.resident_limit = Some(floor + 1)
     let readers_fit = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
-    if readers_fit.cache_bytes != 137887745 || readers_fit.writer_pin_bytes != 34471936 {
+    if readers_fit.cache_bytes != 52232192 + 1 || readers_fit.writer_pin_bytes != 34471936 {
         fail("L70: Reader reservations and the separate cut quota must both fit")
+    }
+
+    overrides.readers = None
+    // At the old floor, 64 MiB fits for both W and D. P is 16 MiB.
+    // 268,030,824 - 19,944,296 - 67,108,864 - 16,777,216 - 67,108,864
+    // leaves 97,091,584 for C, between W + U = 84,869,120 and 4q = 256 MiB.
+    overrides.resident_limit = Some(268030824)
+    let mid = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
+    if (mid.cache_bytes, mid.writer_pin_bytes, mid.dirty_bytes, mid.pager_task_bytes) != (97091584u64, 64 * MIB, 64 * MIB, 16 * MIB) {
+        fail("L70: the cache must use the remainder after maximizing the quotas")
+    }
+    // An 88 MiB override is between W + U and the remainder at this q.
+    overrides.cache_bytes = Some(88 * MIB)
+    let fixed = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
+    if fixed.cache_bytes != 88 * MIB || fixed.writer_pin_bytes != 64 * MIB {
+        fail("L70: the cache override must replace the derived cache")
+    }
+    // The cache at the floor is already exactly W + U.
+    overrides.cache_bytes = Some(52232192 - 1)
+    let short_cache = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
+    if (short_cache.cache_bytes, short_cache.writer_pin_bytes, short_cache.dirty_bytes, short_cache.pager_task_bytes) != (0u64, 0u64, 0u64, 0u64) {
+        fail("L70: the cache override must cover the writer and Reader partitions")
     }
     Ok(())
 }

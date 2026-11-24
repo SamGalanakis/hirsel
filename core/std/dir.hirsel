@@ -6,7 +6,7 @@
 // host primitive, passes the replay point at issue and at delivery (CAP-8) and, being
 // `waits`, is a cancellation point (CONC-7). Field legend: API.md; "Prefix:" says what has
 // happened on the host when the operation fails or is cancelled part way.
-pub type Entry {
+pub type Entry: send {
     name: String,
     kind: Kind
 }
@@ -99,4 +99,152 @@ pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits {
 /// Ex: `let mut name = string.with_capacity(32); let tmp = std.dir.create_temp(d, mut name)?; ..; std.dir.remove_all(d, name)?`
 pub fn create_temp(d: Dir, mut name: String) -> Result[Dir, IoError] waits {
     host.mkdtemp(d, mut name)
+}
+
+type WalkFrame: send {
+    base: u64,
+    entries: List[Entry],
+    next: u64
+}
+
+/// The path and pending siblings of a preorder traversal.
+pub opaque type Walker: send {
+    dir: Dir,
+    path: String,
+    frames: List[WalkFrame],
+    pending: bool,
+    root: bool
+}
+
+/// Reports a directory whose contents could not be listed.
+pub type WalkError {
+    path: String,
+    error: file.Error
+}
+
+/// Starts a walk below at, or below d's root. Listing begins with the first next.
+pub fn walk(d: Dir, at: Option[String]) -> Walker {
+    let (root, p) = match at {
+        None => (true, string.new()),
+        Some(p) => (false, string.from(p)),
+    }
+    Walker(dir: d, path: take p, frames: list.new(), pending: true, root: root)
+}
+
+/// Yields one entry in bytewise sibling order and preorder, without following links.
+/// A listing error is returned once. The next call continues with the next sibling.
+pub fn next(mut w: Walker) -> Result[Option[Entry], WalkError] waits {
+    if w.pending {
+        w.pending = false
+        let at: Option[String] = if w.root {
+            None
+        } else {
+            Some(string.from(w.path))
+        }
+        w.root = false
+        let children = match list(w.dir, at) {
+            Ok(take children) => take children,
+            Error(e) => return Error(WalkError(path: string.from(w.path), error: e)),
+        }
+        if list.len(children) > 0 {
+            list.push(mut w.frames, WalkFrame(base: string.byte_len(w.path), entries: take children, next: 0))
+        }
+    }
+    while list.len(w.frames) > 0 {
+        let top = list.len(w.frames) - 1
+        let i = w.frames[top].next
+        if i == list.len(w.frames[top].entries) {
+            let _ = list.pop(mut w.frames)
+            continue
+        }
+        string.truncate(mut w.path, w.frames[top].base)
+        let entry = list.set(mut w.frames[top].entries, i, Entry(name: string.new(), kind: Other))
+        w.frames[top].next += 1
+        if string.byte_len(w.path) > 0 {
+            string.push(mut w.path, "/")
+        }
+        string.push(mut w.path, entry.name)
+        w.pending = match entry.kind {
+            Directory => true,
+            _ => false
+        }
+        return Ok(Some(Entry(name: string.from(w.path), kind: entry.kind)))
+    }
+    Ok(None)
+}
+
+/// Skips the children of the directory just returned, before any listing is opened.
+pub fn skip(mut w: Walker) {
+    if !w.root && list.len(w.frames) > 0 {
+        w.pending = false
+    }
+}
+
+/// A bad pattern or a directory that could not be listed.
+pub type GlobError = Pattern(path.PatternError) | Walk(WalkError)
+
+/// Returns matching paths in preorder. Validates before any host call and lists
+/// only the literal base and directories whose descendants could match.
+pub fn glob(d: Dir, pattern: String) -> Result[List[String], GlobError] waits {
+    let compiled = match path_pattern.compile(pattern) {
+        Ok(take compiled) => take compiled,
+        Error(e) => return Error(Pattern(e)),
+    }
+    let base = path_pattern.base(compiled)
+    let mut paths: List[String] = list.new()
+    if base == string.byte_len(pattern) {
+        match stat(d, pattern) {
+            Ok(_) => list.push(mut paths, string.from(pattern)),
+            Error(NotFound) => {},
+            Error(e) => return Error(Walk(WalkError(path: string.from(pattern), error: Io(e)))),
+        }
+        return Ok(take paths)
+    }
+    let at: Option[String] = if base == 0 {
+        None
+    } else {
+        Some(string.from(string.slice(pattern, 0, base)))
+    }
+    if let Some(p) = at {
+        let (matched, _) = path_pattern.test(compiled, p)
+        if matched {
+            match stat(d, p) {
+                Ok(s) => {
+                    list.push(mut paths, string.from(p))
+                    match s.kind {
+                        Directory => {},
+                        _ => return Ok(take paths)
+                    }
+                }
+                Error(NotFound) => return Ok(take paths),
+                Error(e) => return Error(Walk(WalkError(path: string.from(p), error: Io(e)))),
+            }
+        }
+    }
+    let mut w = walk(d, at)
+    let mut first = true
+    loop {
+        match next(mut w) {
+            Ok(Some(take entry)) => {
+                let (matched, descend) = path_pattern.test(compiled, entry.name)
+                if !descend {
+                    skip(mut w)
+                }
+                if matched {
+                    let Entry(name: take p, kind: _) = take entry
+                    list.push(mut paths, take p)
+                }
+            }
+            Ok(None) => return Ok(take paths),
+            Error(take problem) => {
+                if first {
+                    if let Io(NotFound) = problem.error {
+                        return Ok(take paths)
+                    }
+                }
+                return Error(Walk(take problem))
+            }
+        }
+        first = false
+    }
 }

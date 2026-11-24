@@ -41,7 +41,7 @@ a caller-narrowed Dir). It matches Rust cap-std's `Dir::open_dir` and WASI's
 pub type Kind = File | Directory | Symlink | Other
 pub fn host.entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
 pub fn host.next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits
-pub type Entry { name: String, kind: Kind }
+pub type Entry: send { name: String, kind: Kind }
 pub fn dir.entries(d: Dir, at: Option[String]) -> Result[HostEntries, IoError] waits
 pub fn dir.next_entries(mut h: HostEntries, mut buf: Bytes) -> Result[u64, IoError] waits
 pub fn dir.list(d: Dir, at: Option[String]) -> Result[List[Entry], file.Error] waits
@@ -127,8 +127,6 @@ is never empty.
 
 ## Walk
 
-*Specified 2026-11-24 (std Group 2), not yet implemented.*
-
 ```
 pub opaque type Walker: send
 pub type WalkError { path: String, error: file.Error }
@@ -195,8 +193,6 @@ directory itself is not returned.
   recorded records, and the sort gives the same order.
 
 ## Glob
-
-*Specified 2026-11-24 (std Group 2), not yet implemented.*
 
 ```
 pub type GlobError = Pattern(path.PatternError) | Walk(WalkError)

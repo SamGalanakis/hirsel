@@ -51,8 +51,6 @@ Validation walks components with `string.next_split(p, at, "/")`.
 
 ## Patterns
 
-*Specified 2026-11-24 (std Group 2), not yet implemented.*
-
 ```
 pub type PatternError = Syntax(u64)
 pub fn path.matches(pattern: String, p: String) -> Result[bool, PatternError]

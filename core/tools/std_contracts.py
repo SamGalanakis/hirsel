@@ -191,6 +191,10 @@ def discover(root, filters):
                 host_op = 2 if words[1:] == ["file"] else 0
             if text == "// host: remove_tree_prefix a":
                 first_write, host_op = 0, 9
+            if text == "// host: replace_faults":
+                first_write, host_op = 0, 119
+            if text == "// host: glob_list_paths":
+                first_write, host_op = 0, 44
             match = re.fullmatch(r'\s*// expect: (reference )?run (.*?) = (.*?)\s*', text)
             if not match:
                 if text.strip().startswith(('// expect: run ', '// expect: reference run ')):

@@ -556,6 +556,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 scratch.mkdir()
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
+                if case.name == 'walkdir_preorder':
+                    (host / 'link').symlink_to('a', target_is_directory=True)
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
                 fixture = case.file.read_text()
@@ -749,7 +751,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     grant = f'Net=UnixRoot parity {host};UnixBind parity packet;UnixSend parity packet'
                     command.extend(['--grant', grant, '--grant', 'Tasks'])
                 if case.first_write is not None:
-                    wrapped = 'hirsel_core_host_op' if case.host_op else 'hirsel_core_host_io'
+                    wrapped = ['hirsel_core_host_op' if case.host_op else 'hirsel_core_host_io']
+                    if case.host_op == 119:
+                        wrapped.extend(['hirsel_core_host_rename', 'getrandom'])
                     scripts.append(('std_host.c', [f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}'],
                                     wrapped))
                 if case.schedule:
@@ -757,7 +761,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     if schedule_runtime is not None:
                         command[command.index('--runtime') + 1] = str(schedule_runtime)
                     scripts.append(('std_schedule.c', [f'-DSEEDS={seeds}'] + ([f'-DMAX_EVENTS={most}u'] if most is not None else []),
-                                    'hirsel_core_os_run_with_sources'))
+                                    ['hirsel_core_os_run_with_sources']))
                 if scripts:
                     (scratch / 'bin').mkdir()
                     linker = scratch / 'bin/scripted-cc'
@@ -773,7 +777,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                                                 *defines, '-o', str(support)], capture_output=True)
                         if built.returncode:
                             raise RuntimeError(f'{source}: {built.stderr.decode()}')
-                        extra += [shlex.quote(str(support)), '-Wl,--wrap=' + wrapped]
+                        extra += [shlex.quote(str(support)), *['-Wl,--wrap=' + symbol for symbol in wrapped]]
                     linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + ' '.join(extra) + '\n')
                     linker.chmod(0o755)
                 if linker:

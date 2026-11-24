@@ -180,3 +180,135 @@ fn read_only_dir_denies_writes(d: Dir) -> bool waits {
     result.unwrap(host.sync_dir(child))
     read == 4 && got == b"kept" && info.size == 4 && count == 1 && string.byte_len(name) == 0
 }
+
+fn walk_tree(d: Dir) -> () waits {
+    result.unwrap(dir.create_dir(d, "b"))
+    result.unwrap(dir.create_dir(d, "a"))
+    result.unwrap(dir.create_dir(d, "a/x"))
+    for p in["b/z", "a.txt", "a/x/q", "b/.hidden"] {
+        result.unwrap(file.write(d, p, string.as_bytes("")))
+    }
+}
+
+// Go filepath.WalkDir at 8eaf19e visits the parent before its sorted children.
+// Omit its starting directory. The native runner supplies link -> a.
+// expect: run walkdir_preorder(dir) = true
+fn walkdir_preorder(d: Dir) -> bool waits {
+    walk_tree(d)
+    let regular: Kind = File
+    let order =[
+        ("a", Directory),
+        ("a/x", Directory),
+        ("a/x/q", regular),
+        ("a.txt", regular),
+        ("b", Directory),
+        ("b/.hidden", regular),
+        ("b/z", regular),
+        ("link", Symlink),
+    ]
+    let mut w = dir.walk(d, None)
+    for (name, kind) in order {
+        let Ok(Some(e)) = dir.next(mut w) else {
+            return false
+        }
+        if e.name != name {
+            return false
+        }
+        match (e.kind, kind) {
+            (Directory, Directory) => {},
+            (File, File) => {},
+            (Symlink, Symlink) => {},
+            _ => return false,
+        }
+    }
+    match dir.next(mut w) {
+        Ok(None) => true,
+        _ => false
+    }
+}
+
+// A skipped directory is never listed. A removed sibling returns one NotFound.
+// expect: run walk_skip_and_resume(dir) = true
+fn walk_skip_and_resume(d: Dir) -> bool waits {
+    walk_tree(d)
+    let mut w = dir.walk(d, None)
+    dir.skip(mut w)
+    let Ok(Some(a)) = dir.next(mut w) else {
+        return false
+    }
+    if a.name != "a" {
+        return false
+    }
+    result.unwrap(dir.remove_all(d, "a"))
+    dir.skip(mut w)
+    dir.skip(mut w)
+    let Ok(Some(txt)) = dir.next(mut w) else {
+        return false
+    }
+    if txt.name != "a.txt" {
+        return false
+    }
+    dir.skip(mut w)
+    let Ok(Some(b)) = dir.next(mut w) else {
+        return false
+    }
+    if b.name != "b" {
+        return false
+    }
+    result.unwrap(dir.remove_all(d, "b"))
+    let Error(problem) = dir.next(mut w) else {
+        return false
+    }
+    let Io(NotFound) = problem.error else {
+        return false
+    }
+    if problem.path != "b" {
+        return false
+    }
+    match dir.next(mut w) {
+        Ok(None) => true,
+        _ => false
+    }
+}
+
+// expect: run glob_matches_walk(dir) = true
+fn glob_matches_walk(d: Dir) -> bool waits {
+    walk_tree(d)
+    for pattern in["**", "a/**", "a/**/q", "a/x", "**/q", "*/*.txt", "**/.*", "?/x/*", "a\\.txt", "missing/*"] {
+        let actual = result.unwrap(dir.glob(d, pattern))
+        let mut index: u64 = 0
+        let mut w = dir.walk(d, None)
+        while let Some(e) = result.unwrap(dir.next(mut w)) {
+            if result.unwrap(path.matches(pattern, e.name)) {
+                if index == list.len(actual) || actual[index] != e.name {
+                    return false
+                }
+                index += 1
+            }
+        }
+        if index != list.len(actual) {
+            return false
+        }
+    }
+    true
+}
+
+// The scripted host refuses any listing outside these patterns' possible bases.
+// host: glob_list_paths
+// expect: run glob_prunes_and_accepts_missing_base(dir) = true
+fn glob_prunes_and_accepts_missing_base(d: Dir) -> bool waits {
+    for p in["base", "base/bad", "base/good", "base/good/deep", "outside"] {
+        result.unwrap(dir.create_dir(d, p))
+    }
+    for p in["base/good/x", "base/good/deep/x", "base/bad/x", "outside/x"] {
+        result.unwrap(file.write(d, p, string.as_bytes("")))
+    }
+    let Error(Pattern(Syntax(8))) = dir.glob(d, "outside/[") else {
+        return false
+    }
+    let hits = result.unwrap(dir.glob(d, "base/g*/**/x"))
+    if list.len(hits) != 2 || hits[0] != "base/good/deep/x" || hits[1] != "base/good/x" {
+        return false
+    }
+    list.len(result.unwrap(dir.glob(d, "missing/*"))) == 0
+}

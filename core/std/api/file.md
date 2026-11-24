@@ -59,9 +59,6 @@ Neither moves the file's position.
 
 ## Replace
 
-`host.mkstemp` is implemented. The std operations in this section are specified for
-Group 2.
-
 ```
 pub fn host.mkstemp(d: Dir, mut name: String) -> Result[HostFile, IoError] waits
 pub fn file.create_temp(d: Dir, mut name: String) -> Result[HostFile, IoError] waits
@@ -100,8 +97,11 @@ gives a new file. It is not removed automatically. `file.create_temp` is the std
 
 1. Refuse before issue, with `NotReplaced(Denied)` and no host effect, a `name` that is not
    a valid path of exactly one component (`path.is_valid` and no `/`).
-2. `host.mkstemp(d, mut tmp)` with the prefix `.hirsel-tmp-`. The prefix is fixed, and the
-   temp name is at most 44 bytes (the 12-byte prefix plus `mkstemp`'s suffix of at most 32), so it fits whatever `name`'s length.
+2. `host.mkstemp(d, mut tmp)` with the prefix `.hirsel-tmp-1` if `name` begins with
+   `.hirsel-tmp-0`, or `.hirsel-tmp-0` otherwise. Neither choice can create the target
+   itself, even when the target is absent and the suffix is predictable. The native host
+   appends 32 hex digits, for a 45-byte name. The same capacity covers every allowed
+   provider suffix.
 3. `host.write` all of `data`, then `host.sync` the file, then `host.close` it.
 4. `host.rename(d, tmp, name)`.
 5. `host.sync_dir(d)`.
@@ -139,7 +139,7 @@ passes through from the host primitive that failed:
 - **Authority.** `d` alone, writable.
 - **Failures.** As above. A refused allocation raises `Capacity` before any host call, and
   cleanup refunds it.
-- **Charging.** `replace` admits the 44-byte temp-name `String` under the current limit and
+- **Charging.** `replace` admits the 45-byte temp-name `String` under the current limit and
   refunds it before it returns. The data is written from the caller's `Bytes`. No copy is
   made. `mkstemp` admits nothing, and its name bytes land in capacity the caller holds.
   Steps: `replace` makes at most seven host calls, each one step (MEM-30), plus O(1) of its

@@ -753,9 +753,9 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="core-closed-pipe", script="tools/tests/core_closed_pipe.py",
         files_env={"HIRSEL_PIPE_COMPILER": "//:hirsel-core-driver-bin-hirsel"},
         data=Raw('glob(["core/core/**", "core/std/**"])')))
-    # The offline replay case opens its tape through the confined OS Dir provider.
     out.append("\n" + call("hirsel_script_test", name="core-store-no-sync", script="tools/tests/core_store_no_sync.py", host=True,
         files_env={"HIRSEL_SYNC_COMPILER": "//:hirsel-core-driver-bin-hirsel",
+                   "HIRSEL_TOOLCHAIN_BUNDLE": "//:hirsel-toolchain",
                    "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives",
                    "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-scripted-record-runtime-pic"},
         data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-driver/src/tape_tls_observe.c", "tools/loopback_peer.py"]')))

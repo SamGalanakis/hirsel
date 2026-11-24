@@ -1,0 +1,177 @@
+type ObjectExportLease: send {
+    names: Map[String, ()],
+    lifetime: Receiver[()]
+}
+
+type ObjectExportCopy: send {
+    journal: Sender[JournalMsg],
+    health: Latest[Health],
+    manifest: HistoryRef,
+    packs: List[HistoryRef],
+    entries: List[HistoryRef],
+}
+
+type ObjectExportFetch: send {
+    key: String,
+    reference: HistoryRef,
+    buffer: Bytes,
+    reply: Sender[Result[Bytes, Error]]
+}
+
+fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: HistoryRef, take buffer: Bytes) -> Result[Bytes, Error] waits {
+    let mut raw = take buffer
+    let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    match history_range(mut lane.client, key, reference, 0, reference.len, mut raw, due) {
+        Ok(()) => Ok(take raw),
+        Error(HistoryMissing(..)) => {
+            history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)?
+            Error(disk_fault(key, 0, Absent))
+        },
+        Error(take problem) => Error(take problem),
+    }
+}
+
+fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: HistoryRef) -> Result[Bytes, Error] waits {
+    let (take key, take buffer) = disk_allocation(scoped fn() -> Result[(String, Bytes), Error] {
+        Ok((history_key(lead, reference), list.with_capacity(reference.len)))
+    })?
+    let (outlet, incoming): (Sender[Result[Bytes, Error]], Receiver[Result[Bytes, Error]]) = channel.new(1)
+    let request = ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet)
+    if let Ok(()) = channel.send(plan.journal, ObjectExportRead(take request)) {
+        if let Ok(take observed) = channel.receive(incoming) { return take observed }
+    }
+    health_result(latest.read(plan.health))?
+    Error(Io(Closed))
+}
+
+fn begin_object_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activation: u64) -> Result[ExportCopy, DeployError] waits {
+    let receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    deploy_result(durable(mut db, receipt))?
+    let (take parked, take resume) = deploy_result(take_object_journal(mut db))?
+    let mut lane = take parked
+    let (lifetime, stop): (Sender[()], Receiver[()]) = channel.new(1)
+    let captured: Result[ExportCopy, DeployError] = match object_export_capture(db, mut lane, scratch, take attempt, activation, take stop) {
+        Error(Store(HistoryMissing(take key, _))) => {
+            let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
+            match history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due) {
+                Ok(()) => Error(Store(disk_fault(key, 0, Absent))),
+                Error(take problem) => Error(Store(take problem)),
+            }
+        },
+        other => take other,
+    }
+    deploy_result(return_object_journal(take lane, resume))?
+    let job = captured?
+    let held = arc.share(job.lease)
+    write_disk(mut db.disk, (take lifetime, take held), scoped fn(mut state: DiskState, take grant: (Sender[()], Arc[ExportLease])) {
+        let (take sending, take lease) = take grant
+        state.lease = Some(take lease)
+        if let Some(mut object_writer) = state.object {
+            object_writer.export_lifetime = Some(take sending)
+        }
+    })
+    Ok(take job)
+}
+
+fn object_export_capture(db: Db, mut lane: ObjectJournalSession, scratch: Dir, take attempt: Bytes, activation: u64, take stop: Receiver[()]) -> Result[ExportCopy, DeployError] waits {
+    let head = lane.register.head
+    if activation != head.activation { return Error(Drift) }
+    let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
+    deploy_result(history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due))?
+    let (take mark, _) = deploy_result(history_checkpoint(mut lane.client, head, due))?
+    let suffix = deploy_result(history_suffix(mut lane.client, head, head.checkpoint, due))?
+    let (take packs, take entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[HistoryRef], List[HistoryRef], Map[String, ()]), Error] {
+        let locator = object_state(db).locator
+        let mut packs: List[HistoryRef] = list.with_capacity(map.len(locator.rows))
+        let mut entries: List[HistoryRef] = list.with_capacity(list.len(suffix))
+        let mut names: Map[String, ()] = map.new()
+        live_reclaim_name(mut names, "m-", mark.manifest)?
+        live_reclaim_name(mut names, "e-", head.checkpoint)?
+        for chunk in locator.chunks { live_reclaim_name(mut names, "l-", chunk)? }
+        for (_, item) in locator.rows {
+            list.push(mut packs, item)
+            live_reclaim_name(mut names, "p-", item)?
+        }
+        for suffix_index in 0u64 .. list.len(suffix) {
+            let item = history_length(suffix[suffix_index], head.checkpoint.seq + 1 + suffix_index)
+            list.push(mut entries, item)
+            live_reclaim_name(mut names, "e-", item)?
+        }
+        Ok((take packs, take entries, take names))
+    }))?
+    let mut journal_end = 72u64
+    for item in entries {
+        let key = history_key("e-", item)
+        if item.len < 128 { return Error(Store(disk_fault(key, 112, Truncated))) }
+        deploy_result(history_range(mut lane.client, key, item, 112, 128, mut lane.buffers.compare, due))?
+        let frame = deploy_result(disk_read_frame_head(key, lane.buffers.compare, 112))?
+        if frame.kind != 0x0040 {
+            let Some(total) = int.checked_add(journal_end, item.len - 112) else { return Error(Store(Limit(Value))) }
+            journal_end = total
+        }
+    }
+    let source = ObjectExportCopy(journal: channel.sender(disk_state(db).journal), health: latest.handle(object_state(db).health), manifest: mark.manifest, packs: take packs, entries: take entries)
+    let retained = deploy_result(copied(attempt))?
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation, terminal: head.checkpoint.seq, end: journal_end)
+    let lease = arc.new(ExportLease(attempt: take retained, packs: list.new(), first: stamp.terminal, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation))
+    lane.export_lease = Some(ObjectExportLease(names: take names, lifetime: take stop))
+    Ok(ExportCopy(source: ExportObject(take source), scratch, stamp: take stamp, lease: take lease))
+}
+
+fn export_write(mut file: HostFile, raw: Bytes) -> Result[(), DeployError] waits {
+    match host.write(mut file, raw) {
+        Ok(()) => Ok(()),
+        Error(problem) => Error(Scratch(Io(problem.error))),
+    }
+}
+
+fn object_export_file(plan: ObjectExportCopy, to: Dir, id: StoreId, lead: String, reference: HistoryRef, role: u8, local: String) -> Result[(), DeployError] waits {
+    let mut raw = deploy_result(object_export_fetch(plan, lead, reference))?
+    let key = history_key(lead, reference)
+    let ctx = deploy_result(history_object_context(key, id, role, reference, raw))?
+    deploy_result(history_object_digest(key, reference, raw))?
+    let header = deploy_result(capacity(disk_header_bytes(ctx, 0, 0)))?
+    for i in 0u64 .. 72 { raw[i] = header[i] }
+    scratch_result(disk_write_synced(to, local, raw))
+}
+
+fn object_export_copy(plan: ObjectExportCopy, to: Dir, stamp: ExportStamp) -> Result[(), DeployError] waits {
+    let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
+    for item in plan.packs {
+        let local = scratch_result(paged_pack_path(item.seq))?
+        object_export_file(plan, to, id, "p-", item, 3, local)?
+    }
+    object_export_file(plan, to, id, "m-", plan.manifest, 1, "MANIFEST")?
+    let local = scratch_result(capacity(disk_path("j-", stamp.terminal, "")))?
+    let ctx = DiskContext(store: id, role: 2, seq: stamp.terminal)
+    let mut output = scratch_result(disk_io(host.open(to, local, Write)))?
+    export_write(mut output, deploy_result(capacity(disk_header_bytes(ctx, 0, 0)))?)?
+    let mut offset = 72u64
+    for item in plan.entries {
+        let key = history_key("e-", item)
+        let mut raw = deploy_result(object_export_fetch(plan, "e-", item))?
+        let (remote, _) = deploy_result(history_entry_context(key, id, item, raw))?
+        deploy_result(history_object_digest(key, item, raw))?
+        let first = deploy_result(disk_frame_bytes(key, remote, raw, 112))?
+        if first.kind == 0x0040 {
+            deploy_result(history_check_claim(key, item, raw, first))?
+            continue
+        }
+        let mut at = 112u64
+        while at < item.len {
+            let frame = deploy_result(disk_frame_bytes(key, remote, raw, at))?
+            if frame.kind == 0x0090 || frame.kind == 0x00C0 {
+                return Error(Store(disk_fault(key, at, Malformed)))
+            }
+            deploy_result(disk_check_frame_kind(key, remote, frame.kind, frame.flags, at))?
+            let check = deploy_result(capacity(disk_check(ctx, offset, list.slice(raw, at, frame.payload), list.slice(raw, frame.payload, frame.end))))?
+            list.set_word_le(mut raw, at + 8, check)
+            offset += frame.end - at
+            at = frame.end
+        }
+        export_write(mut output, list.slice(raw, 112, item.len))?
+    }
+    if offset != stamp.end { return Error(ExportMismatch) }
+    scratch_result(disk_io(host.sync(mut output)))?
+    scratch_result(disk_io(host.close(take output)))
+}

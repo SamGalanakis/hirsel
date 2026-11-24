@@ -269,7 +269,22 @@ fn history_reclaim_prefix(mut lane: ObjectJournalSession, pass: ReclaimPass, lea
 fn history_execute_reclaim(mut lane: ObjectJournalSession, fixed: ObjectReclaimCapture) -> Result[(), Error] waits {
     let deadline = std.object.deadline_after_ms(lane.client, lane.op_ms)
     history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, deadline)?
-    let pass = reclaim_capture(mut lane.client, fixed, deadline)?
+    let mut pass = reclaim_capture(mut lane.client, fixed, deadline)?
+    let released = match lane.export_lease {
+        Some(leased) => {
+            if let Error(Empty) = channel.try_receive(leased.lifetime) {
+                capacity(map.try_reserve(mut pass.leased, map.len(leased.names)))?
+                for (name, _) in leased.names {
+                    map.insert(mut pass.leased, string.from(name), ())
+                }
+                false
+            } else {
+                true
+            }
+        },
+        None => false,
+    }
+    if released { lane.export_lease = None }
     let mut members = disk_allocation(fn() -> Result[List[std.object.Entry], Error] { Ok(list.with_capacity(HISTORY_LIST_PAGE)) })?
     history_sweep_entries(mut lane, pass, mut members, deadline)?
     let start_live = history_entry_cursor(SweepCursor(position: pass.floor, epoch: 0, digest: 0))

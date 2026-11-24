@@ -1,0 +1,221 @@
+pub type ExportStamp: codec + send {
+    attempt: Bytes,
+    store_hi: u64,
+    store_lo: u64,
+    opened: u64,
+    branch: u32,
+    head: u64,
+    next_table: u32,
+    activation: u64,
+    terminal: u64,
+    end: u64
+}
+
+type ExportLease: shareable + send {
+    attempt: Bytes,
+    packs: List[u64],
+    first: u64,
+    terminal: u64,
+    end: u64,
+    head: u64,
+    next_table: u32,
+    activation: u64
+}
+
+pub type Exported: send {
+    dir: Dir,
+    name: String,
+    stamp: ExportStamp
+}
+
+type ExportSource: send = ExportLog(Dir, Bytes) | ExportObject(ObjectExportCopy)
+
+pub opaque type ExportCopy: send {
+    source: ExportSource,
+    scratch: Dir,
+    stamp: ExportStamp,
+    lease: Arc[ExportLease]
+}
+
+pub type DeployError: send = Store(Error) | Scratch(Error) | ExportMismatch | AttemptBusy | ImportMalformed | IdBound | Drift | Expired | FullNew(StoreCapacity)
+
+fn scratch_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
+    match take answer {
+        Ok(take result_value) => Ok(take result_value),
+        Error(take problem) => Error(Scratch(take problem))
+    }
+}
+
+fn deploy_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
+    match take answer {
+        Ok(take result_value) => Ok(take result_value),
+        Error(take problem) => Error(Store(take problem))
+    }
+}
+
+fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Result[(), Error] waits {
+    let mut input = disk_io(host.open(from, name, Read))?
+    let mut output = disk_io(host.open(to, name, Write))?
+    let mut offset = 0u64
+    let mut chunk: Bytes = list.with_capacity(16384)
+    loop {
+        list.clear(mut chunk)
+        if let Some(total) = end {
+            if offset == total {
+                break
+            }
+            if total - offset < list.capacity(chunk) {
+                chunk = list.with_capacity(total - offset)
+            }
+        }
+        let read_size = disk_io(host.read(mut input, mut chunk))?
+        if read_size == 0 {
+            if let Some(_) = end {
+                return Error(disk_fault(name, offset, Truncated))
+            }
+            break
+        }
+        // A provider may round a buffer's capacity up. Keep only the captured
+        // prefix of the terminal segment.
+        let written = if let Some(total) = end {
+            if read_size > total - offset {
+                total - offset
+            } else {
+                read_size
+            }
+        } else {
+            read_size
+        }
+        match host.write(mut output, list.slice(chunk, 0u64, written)) {
+            Ok(()) => (),
+            Error(e) => return Error(Io(e.error)),
+        }
+        offset += written
+    }
+    disk_io(host.close(take input))?
+    disk_io(host.sync(mut output))?
+    disk_io(host.close(take output))
+}
+
+fn export_bytes(stamp: ExportStamp) -> Result[Bytes, Error] {
+    let codec: std.codec.Codec[ExportStamp] = std.codec.of()
+    let ctx = DiskContext(store: StoreId(hi: stamp.store_hi, lo: stamp.store_lo), role: 5, seq: stamp.opened)
+    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    let mut body: Bytes = list.new()
+    std.codec.encode(codec, stamp, mut body) ?=> |_| Limit(Value)
+    list.append(mut raw, capacity(disk_seal(ctx, 72, 0x0080, 1, body))?)
+    Ok(take raw)
+}
+
+pub fn export_copy(take job: ExportCopy) -> Result[Exported, DeployError] waits {
+    let mut name = string.with_capacity(32)
+    let to = scratch_result(disk_io(host.mkdtemp(job.scratch, mut name)))?
+    let raw_stamp = scratch_result(export_bytes(job.stamp))?
+    match job.source {
+        ExportLog(from, raw) => copy_log_export(from, raw, to, job.lease, job.stamp)?,
+        ExportObject(plan) => object_export_copy(plan, to, job.stamp)?,
+    }
+    scratch_result(disk_write_synced(to, "EXPORT", raw_stamp))?
+    scratch_result(disk_io(host.sync_dir(to)))?
+    let ExportCopy(stamp: take stamp, ..) = take job
+    Ok(Exported(dir: to, name: take name, stamp: take stamp))
+}
+
+fn copy_log_export(from: Dir, raw: Bytes, to: Dir, lease: Arc[ExportLease], stamp: ExportStamp) -> Result[(), DeployError] waits {
+    for pack in lease.packs {
+        let path = scratch_result(capacity(disk_path("p-", pack, "")))?
+        scratch_result(copy_export_file(from, to, path, None))?
+    }
+    scratch_result(disk_write_synced(to, "MANIFEST", raw))?
+    for seq in lease.first .. stamp.terminal {
+        let path = scratch_result(capacity(disk_path("j-", seq, "")))?
+        scratch_result(copy_export_file(from, to, path, None))?
+    }
+    let terminal = scratch_result(capacity(disk_path("j-", stamp.terminal, "")))?
+    scratch_result(copy_export_file(from, to, terminal, Some(stamp.end)))?
+    Ok(())
+}
+
+// E1 takes the manifest and the acknowledged extent under the writer's LOCK.
+// An export task copies those immutable names while the head continues.
+pub fn begin_export(mut db: Db, tasks: Tasks, scratch: Dir, take attempt: Bytes, activation: u64, allowance: u64) -> Result[Task[Result[Exported, DeployError]], DeployError] waits {
+    let job = begin_export_copy(mut db, scratch, take attempt, activation)?
+    match task.try_spawn(tasks, bytes allowance, take job, export_copy) {
+        Ok(take copying) => Ok(take copying),
+        Error((cap, take returned)) => {
+            release_export(mut db, returned.stamp.attempt)
+            Error(Store(Full(Allocation(cap))))
+        },
+    }
+}
+
+pub fn begin_export_copy(mut db: Db, scratch: Dir, take attempt: Bytes, activation: u64) -> Result[ExportCopy, DeployError] waits {
+    deploy_result(require_memory_collections(store_has_tiered(db), Export))?
+    deploy_result(healthy(db))?
+    if !is_disk(db) || list.len(attempt) != 16 {
+        return Error(ExportMismatch)
+    }
+    if let Some(_) = disk_state(db).lease {
+        return Error(AttemptBusy)
+    }
+    if object_writer_open(db) { return begin_object_export_copy(mut db, scratch, take attempt, activation) }
+    let final_item = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    deploy_result(durable(mut db, final_item))?
+    let from = deploy_result(log_directory(db))?
+    let raw = deploy_result(disk_read_paged_file(from, "MANIFEST", 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM))?
+    let lease_attempt = deploy_result(copied(attempt))?
+    let stamp = ExportStamp(attempt: take attempt, store_hi: db.store.hi, store_lo: db.store.lo, opened: open_number(db), branch: 0, head: db.heads[0].head, next_table: db.next_table, activation: activation, terminal: db.file_seq, end: db.file_end)
+    let first_live = disk_state(db).record_cut
+    let packs = deploy_result(disk_allocation(scoped fn() -> Result[List[u64], Error] {
+        Ok(live_pack_sequences(disk_state(db).pages.locations))
+    }))?
+    let kept = ExportLease(attempt: take lease_attempt, packs: take packs, first: first_live, terminal: stamp.terminal, end: stamp.end, head: stamp.head, next_table: stamp.next_table, activation: stamp.activation)
+    let lease = arc.new(take kept)
+    let job = ExportCopy(source: ExportLog(from, take raw), scratch, stamp: take stamp, lease: arc.share(lease))
+    write_disk(mut db.disk, take lease, scoped fn(mut state: DiskState, take held: Arc[ExportLease]) {
+        state.lease = Some(take held)
+    })
+    Ok(take job)
+}
+
+pub fn export_leased(db: Db) -> bool {
+    is_disk(db) && (match disk_state(db).lease {
+        Some(_) => true,
+        None => false
+    })
+}
+
+// The owner joins or cancels the copy before it releases the attempt.
+pub fn release_export(mut db: Db, attempt: Bytes) {
+    if is_disk(db) {
+        let releasing = match disk_state(db).lease {
+            Some(lease) => lease.attempt == attempt,
+            None => false
+        }
+        if releasing {
+            forget_import(mut db)
+        }
+    }
+}
+
+// R1 has no LOCK, cleanup, rotation or worker. Only this module has a Db
+// for the recovered export; callers can stage schema operations on it.
+pub opaque type Preparation {
+    db: Db,
+    stamp: ExportStamp
+}
+
+fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
+    let raw = scratch_result(disk_read_file(d, "EXPORT", 216))?
+    let head = deploy_result(disk_read_header("EXPORT", raw, 5, None, None))?
+    let frame = deploy_result(disk_read_frame("EXPORT", head.context, raw, 72))?
+    if frame.kind != 0x0080 || frame.flags != 1 || frame.end != list.len(raw) {
+        return Error(ExportMismatch)
+    }
+    let codec: std.codec.Codec[ExportStamp] = std.codec.of()
+    let stamp = deploy_result(decoded(std.codec.decode(codec, list.slice(raw, frame.payload, frame.end))))?
+    if list.len(stamp.attempt) != 16 || stamp.store_hi != head.context.store.hi || stamp.store_lo != head.context.store.lo || stamp.opened != head.context.seq || stamp.branch != 0 || stamp.terminal == 0 || stamp.end < 72 || stamp.activation > stamp.head {
+        return Error(ExportMismatch)
+    }
+    Ok(take stamp)
+}

@@ -8,6 +8,7 @@ type ObjectJournalStart: send {
     sweep: SweepCursor,
     issued_generation: u64,
     next_pack: u64,
+    export_lease: Option[ObjectExportLease],
     reclaim: Option[ObjectReclaimCapture]
 }
 
@@ -58,18 +59,19 @@ type ObjectJournalSession {
     sweep: SweepCursor,
     issued_generation: u64,
     next_pack: u64,
+    export_lease: Option[ObjectExportLease],
     reclaim: Option[ObjectReclaimCapture]
 }
 
 fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
-    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, reclaim) = take input
-    ObjectJournalSession(client: std.object.attach(take requests), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, reclaim)
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim) = take input
+    ObjectJournalSession(client: std.object.attach(take requests), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, reclaim) = take active
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim) = take active
     let (take requests, _) = std.object.split(take client)
-    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, reclaim)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim)
 }
 
 fn object_journal_advance(mut lane: ObjectJournalSession) -> Result[(), Error] waits {
@@ -187,6 +189,11 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 let terminal = match observed { Error(Fenced(e)) => Some(e), _ => None }
                 let _ = channel.send(destination, take observed)
                 if let Some(e) = terminal { return Error(Fenced(e)) }
+            },
+            ObjectExportRead(take request) => {
+                let ObjectExportFetch(key: take key, reference, buffer: take buffer, reply: take outlet) = take request
+                let read = object_export_read(mut lane, key, reference, take buffer)
+                let _ = channel.send(outlet, take read)
             },
             ObjectPause(take pause_response, take resuming) => {
                 let owner = object_journal_pause(take lane)

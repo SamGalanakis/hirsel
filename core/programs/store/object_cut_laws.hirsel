@@ -285,6 +285,65 @@ fn bucket_test_m2_standalone_import(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     outcome
 }
 
+fn check_object_export(take job: ExportCopy, c: Clock, expected: Option[u64]) -> Result[(u64, u64), DeployError] waits {
+    let image = export_copy(take job)?
+    let mut prepared = open_export(image.dir, c, image.stamp.attempt, disk_crash_options("install"))?
+    let rows = deploy_result(table(mut prepared.db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let image_reader = deploy_result(staged_reader(prepared, 0))?
+    let visible = snapshot(prepared.db)
+    if deploy_result(get(image_reader, visible, rows, 7))? != expected {
+        fail("the ordinary preparation opener recovered the wrong export row")
+    }
+    Ok((version(visible), image.stamp.end))
+}
+
+fn object_export_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), DeployError] waits {
+    let first = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 1))?
+    let mut options = bucket_law_options(true)
+    options.group_bytes = 65536
+    options.retain = 1
+    options.head_poll_ms = 10000
+    let mut writer = deploy_result(open_authority(tasks, take first, c, r, options))?
+    let mut staged = deploy_result(stage_migration(writer, tasks, code.describe(install_old)))?
+    let description = install_fixture_bytes(32, 65)
+    deploy_result(stage_activation(mut staged, 1, None, description, std.codec.of_bytes(), description))?
+    deploy_result(install_bound_activation(mut writer, take staged, 1, description))?
+    let attempt_one = install_fixture_bytes(16, 1)
+    let empty = begin_export_copy(mut writer, d, clone(attempt_one), 1)?
+    let zero_suffix = check_object_export(take empty, c, None)?
+    release_export(mut writer, attempt_one)
+    if zero_suffix != (1u64, 72u64) { fail("the empty suffix wrote journal data") }
+    let rows = deploy_result(table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    if !typed_put(mut writer, rows, 7, 14) { fail("could not write the export fixture group") }
+    let attempt_two = install_fixture_bytes(16, 2)
+    let grouped = begin_export_copy(mut writer, d, clone(attempt_two), 1)?
+    let group_suffix = check_object_export(take grouped, c, Some(14u64))?
+    release_export(mut writer, attempt_two)
+    if group_suffix.0 != 2 || group_suffix.1 <= 72 { fail("the GROUP was absent from the export") }
+    deploy_result(close(take writer))?
+
+    let second = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 2))?
+    options.create = false
+    let mut successor = deploy_result(open_authority(tasks, take second, c, r, options))?
+    let attempt_three = install_fixture_bytes(16, 3)
+    let with_claim = begin_export_copy(mut successor, d, clone(attempt_three), 1)?
+    // The cut drops the prior checkpoint from retention before the copy runs.
+    let _ = deploy_result(checkpoint(mut successor))?
+    deploy_result(reclaim_barrier(successor))?
+    let claim_suffix = check_object_export(take with_claim, c, Some(14u64))?
+    release_export(mut successor, attempt_three)
+    if claim_suffix != group_suffix { fail("CLAIM changed the replayed version or journal extent") }
+    deploy_result(close(take successor))
+}
+
+@test
+fn bucket_test_m2_export_replay(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let sim = bucket_law_sim(tasks, c, 611, None, list.new())
+    let outcome = object_export_law(d, c, r, tasks, sim)
+    let _ = bucket_law_finish(take sim)
+    outcome
+}
+
 fn object_pack_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut source = history_reader(take client, 0)

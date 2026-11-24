@@ -213,15 +213,19 @@ fn history_read_manifest(mut client: std.object.Client, id: StoreId, mark: Histo
     })
 }
 
+fn history_check_claim(path: String, reference: HistoryRef, raw: Bytes, frame: DiskFrame) -> Result[(), Error] {
+    if frame.flags != 1 || frame.end != list.len(raw) || frame.end - frame.payload != 24 || read_le(raw, frame.payload, 8) != reference.epoch {
+        return Error(disk_fault(path, 112, Malformed))
+    }
+    Ok(())
+}
+
 fn history_apply_entry(path: String, id: StoreId, reference: HistoryRef, raw: Bytes, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
     let (ctx, _) = history_entry_context(path, id, reference, raw)?
     history_object_digest(path, reference, raw)?
     let frame = disk_frame_bytes(path, ctx, raw, 112)?
     if frame.kind == 0x0040 {
-        if frame.flags != 1 || frame.end != list.len(raw) || frame.end - frame.payload != 24 || read_le(raw, frame.payload, 8) != reference.epoch {
-            return Error(disk_fault(path, 112, Malformed))
-        }
-        return Ok(())
+        return history_check_claim(path, reference, raw, frame)
     }
     let mut at = 112u64
     let mut frames = 0u64

@@ -21,7 +21,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     }
     let ObjectPackRead(client: take client, ..) = take source
     let (take requests, take lifetime) = std.object.split(take client)
-    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, sweep: sweep_start(), issued_generation: 1, next_pack: 1, reclaim: None)
+    let opened = ObjectJournalStart(requests: take requests, register: take held, authority: take metadata, buffers: take workspace, op_ms: BUCKET_LAW_OP_MS, failed_polls: 0, sweep: sweep_start(), issued_generation: 1, next_pack: 1, export_lease: None, reclaim: None)
     result.unwrap(channel.send(init, take opened))
     let ObjectJournaled(2, observed_bytes, 2) = result.unwrap(channel.receive(delivered)) else {
         fail("the worker did not acknowledge both frames as one group")

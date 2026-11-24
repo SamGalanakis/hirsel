@@ -365,3 +365,83 @@ fn keyed_http_horizon_at_deciding_admission(d: Dir, random: Random, tasks: Tasks
     result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }
+
+type KeyedHeldPost: send {
+    net: Net,
+    clock: Clock,
+    address: Addr,
+    stream: u32,
+    data: Bytes,
+    status: u16,
+    body: Bytes,
+    dedup_until: Bytes
+}
+
+fn keyed_held_post(take job: KeyedHeldPost) waits {
+    let KeyedHeldPost(net, clock, address, stream, data: take data, status, body: take body, dedup_until: take until) = take job
+    let reply = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, data, 1000u32)
+    keyed_http_expect(reply, status, false, body, Some(take until), "a send got another claim's outcome across expiry")
+}
+
+fn keyed_held_drive(take job: KeyedHorizonDrive) waits {
+    let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
+    let mut wall = take clock_hand
+    let definition: HttpOpPlace = code.describe(keyed_http_place)
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let (take relay, take relay_task) = result.unwrap(start_relay(reg, intercept, pub_to, time, tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock: time, random, tasks, place: definition, previous: None, retired: None, stage: 0u8, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    // A commits "1" at 100, expiring at 10100. Its Told is held after the
+    // commit, so A's delivery is still owed when the claim expires.
+    let first = task.spawn(tasks, bytes 1048576u64, KeyedHeldPost(net, clock: time, address, stream: 0u32, data: b"{}", status: 201u16, body: b"\"1\"", dedup_until: b"10100"), keyed_held_post)
+    let (during, held_from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(1u64)
+    let answer_to = l15_forward(head, during, l15_head_request(waiting))
+    let told = result.unwrap(channel.receive(held_from))
+    // At 10100 the same key with other arguments is a new claim: the entry
+    // refuses the name, a committed 422 under error_status, expiring at 20100.
+    clock.set_wall(mut wall, 10100u64)
+    let second = task.spawn(tasks, bytes 1048576u64, KeyedHeldPost(net, clock: time, address, stream: 1u32, data: b"{\"name\":\"other\"}", status: 422u16, body: b"null", dedup_until: b"20100"), keyed_held_post)
+    result.unwrap(channel.send(head, l15_head_request(waiting)))
+    if let Error(_) = task.join(take second) {
+        fail("the new claim after expiry did not get its own outcome")
+    }
+    result.unwrap(channel.try_send(answer_to, take told))
+    if let Error(_) = task.join(take first) {
+        fail("the held reply was not delivered as its own claim's outcome")
+    }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    let _ = take head
+    let _ = take wall
+}
+
+// L19r (http.md H9, K-5): a claim expires while its old reply's delivery is
+// held; the same key is admitted again with other arguments, and each send
+// gets its own claim's outcome.
+@test
+fn keyed_http_held_reply_across_expiry(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (clock, take wall) = provide.clock(0u64, 100u64)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let definition: HttpOpPlace = code.describe(keyed_http_place)
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_held_drive)
+    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    if let Error(take problem) = started {
+        fail(start_text(Open(take problem)))
+    }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}

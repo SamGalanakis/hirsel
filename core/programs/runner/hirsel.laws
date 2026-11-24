@@ -11,6 +11,7 @@ runner@1/runner/journal_test_trigger_granted src=a127b103c583329c sig=168566196e
 runner@1/runner/journal_test_trigger_snapshot src=8d7bf2d74965ca59 sig=7cc9da080f448781 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/journal_test_trigger_transact src=ea540a6f239a4be1 sig=28e6e30f964e71ee run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_claim_route_and_alias src=eacf61e1e494e12e sig=560aa73df8f4f93d run=f59d61459ff3d2d7 bug=- oracle=- rows=pending
+runner@1/runner/keyed_http_held_reply_across_expiry src=5652811db2c78a96 sig=b8a34668b51145e7 run=f59d61459ff3d2d7 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_horizon_at_deciding_admission src=0d4e69976036c7a2 sig=6297b92ee2215e31 run=f59d61459ff3d2d7 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_quota_refuses_with_503 src=0f32c7d3c74a4b91 sig=444fe5fc0a5d745f run=f59d61459ff3d2d7 bug=- oracle=- rows=pending
 runner@1/runner/law_trigger_model src=96051ef040e5a864 sig=8aeff3b07f70536a run=4e2c39d888a20f27 bug=- oracle=- rows=pending

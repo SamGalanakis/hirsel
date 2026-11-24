@@ -17,15 +17,15 @@ key, mints no credential, keeps no allow or deny list, and makes no access
 decision by Caller. There is no badge maker, no Caller-based policy, no per-caller
 grant and no `Arc[G]`. Your application does both:
 
-- **Authentication** is your binding, `runner.wire(grant, Some(bind), ..)`: a
-  function from a copy of your grant and the client's credential bytes (the
+- **Authentication** is your binding, `runner.wire(seed, bind, ..)`: a
+  function from a copy of your plain seed and the client's credential bytes (the
   Hello `credential` or the HTTP `Authorization` value) to
   `Result[BoundCaller, BindRefusal]`. `Rejected` gives Close 1008 or HTTP 401.
   `Unavailable` gives Close 1013 or HTTP 503 with `Retry-After: 5`. The runner
   bounds the application binding and passes the credential bytes through.
   `runner.wire_bind(latest_seed, bind, ..)` reads a `Latest[B]` once per bind,
   where `B: shareable + send`. The binding sees a view of that version. A
-  bind-only wire carries no grant, so its calls to granted entries are refused.
+  `Wire` carries no grant: granted entries get theirs from `PlaceConfig.grants`.
 - **Authorization** is your entry bodies. Transact, query and granted bodies
   receive the Caller and decide access in their own code, for example by reading
   a membership row in the same transaction.
@@ -61,11 +61,17 @@ setting that is zero or too small. (v2.45 deletes `Disagrees`: its only case was
 session `n_place` that differed from the place's, and the session no longer carries one.)
 
 **`PlaceConfig.wire`.** `None` serves anonymous sessions: each Hello gets a fresh
-anonymous Caller and a granted entry is `Refused(NotAllowed)`. `Some(runner.wire(grant,
-bind, bind_bytes, bind_steps))` gives granted entries a copy of `grant`, and with
-`bind = Some(f)` maps the client's credential to a Caller.
-`Some(runner.wire_bind(latest_seed, bind, ..))` binds from the current published
-seed and carries no grant, so granted entries stay `Refused(NotAllowed)`.
+anonymous Caller. `Some(runner.wire(seed, bind, bind_bytes, bind_steps))` maps the
+client's credential to a Caller with a copy of a plain seed;
+`Some(runner.wire_bind(latest_seed, bind, ..))` does it from the current published
+seed.
+
+**`PlaceConfig.grants`.** The place's one grant source: `Grants(seed, attempt, call,
+bytes)`. One grant task owns `seed`. A granted trigger attempt runs with
+`attempt(seed, h, ctx)`; a wire call to a granted entry, and a keyed HTTP claim, with
+`call(seed, h)`, minted fresh for that call. With `call: None` (or `grants: None`) a
+wire call to a granted entry is `Refused(NotAllowed)` and a keyed binding refuses the
+open. Transact and query entries never see `G`.
 
 **Sizing `n_place`.** The serving task builds the place's one Registry under
 `n_place` and every wire session plans against it, so `n_place` counts once in the
@@ -123,11 +129,9 @@ The decoder's peak memory therefore counts against n. `start(r, tasks, g, caller
 arg)` spawns a task under the entry's `bytes n` that holds the grant g and decodes and runs
 the granted entry, a body `fn(G, Caller, take A) -> Result[R, Capacity] waits`. A trigger
 moves its attempt's `G` into `start`. A wire call reaches a granted entry only when the
-place gives `PlaceConfig.wire` a `runner.wire(grant, ..)`, which requires `G: plain + send`
-(Dir, Net, Clock, Random and records of them; a Secret is a resource and is never in a
-wire grant); each wire call then runs with its
-own copy of the grant, so no call consumes it. Without it a wire call to a granted entry
-is `Refused(NotAllowed)`, as it is with a `runner.wire_bind` wire, which binds but carries no grant. A movable `G` stays trigger-only. A spawn the place cannot grant returns `Budget`. `finish` joins
+place's `PlaceConfig.grants` has a `call` mint; each wire call then runs with its own
+freshly minted `G`, so no call consumes or shares another's. Without one a wire call to a
+granted entry is `Refused(NotAllowed)`, whatever the place's `Wire`. A spawn the place cannot grant returns `Budget`. `finish` joins
 that task, and a task that fails or is cancelled gives `Failed(Raised)`. A key that
 names no entry of the kind being asked for gives `NoEntry`.
 

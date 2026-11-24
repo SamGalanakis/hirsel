@@ -1368,7 +1368,7 @@ A query entry returns an `Answer[R]`: a codec value R and an opaque `CoverSet` (
 
 ### K-1: The declaration
 
-`Mode.Keyed(KeyedRule[G])` binds a transact entry (B-3). `Mode.Retired(Retirement[G])` keeps a removed keyed `op` answerable until its claims have expired (K-9). The binding's `op` (B-12) scopes its claims. `G` is the registry's grant type, so a claim function gets the place's wire grant (K-2).
+`Mode.Keyed(KeyedRule[G])` binds a transact entry (B-3). `Mode.Retired(Retirement[G])` keeps a removed keyed `op` answerable until its claims have expired (K-9). The binding's `op` (B-12) scopes its claims. `G` is the registry's grant type, so a claim function gets a `G` from the place's `call` mint (K-2; RUNNER-SPEC v2.67).
 
 ```hirsel unbuilt
 pub type ClaimRequest: send { headers: List[(String, Bytes)], body: Bytes }
@@ -1397,7 +1397,7 @@ pub type Retirement[G: send]: send {
 - a claim header name that is not a lower-case RFC 9110 token, or a name listed twice;
 - a `Retired` binding with an `entry`, `fields` or statuses (it has none: its argument schema, field mapping and statuses are the op record's, K-9). `bind` runs before any store is open, so whether its route's captures are the record's `Path` fields is checked at open (below).
 
-A place with a keyed or retired binding and no wire grant (`PlaceConfig.wire` is `None`, or a `runner.wire_bind` wire, which has no grant half) refuses the open with `KeyedNoWire(op)`, because its claim function has no `G` to run with.
+A place with a keyed or retired binding and no `call` mint (`PlaceConfig.grants` is `None` or its `call` is `None`) refuses the open with `KeyedNoGrant(op)`, because its claim function has no `G` to run with.
 
 **The op record.** A keyed `op`'s policy is fixed at its first admission and kept in the store (K-4 `keyed_ops`): the entry key, the argument schema and the result schema (from describe's `Described.args` and `Described.result`), the field mapping (each field's `FieldSource`: path capture name, query name or body member, in declared field order), the method, `ok_status` and `error_status`, `retention_ms`, `keys_max`, `principal_keys_max`, `arg_max`, the entry's byte and step bounds, `deadline_ms`, and the claim function's **identity bytes** (PROG-9) and header names. It holds no secret and no credential. It never changes. The route is not in it, so a route can move (B-12); a route's captures must still name the record's `Path` fields. At open, the head compares every bound keyed or retired `op` with its record (for a `Retired` binding: method, the claim function's identity bytes and header names, and that its route's captures are exactly the record's `Path` fields); any difference refuses the open with `KeyedOpChanged(op, field)`, and the way to change a policy is a new `op`.
 
@@ -1406,7 +1406,7 @@ A place with a keyed or retired binding and no wire grant (`PlaceConfig.wire` is
 ### K-2: The principal and the key come from application code
 
 A claim is scoped by its principal. The application decides the principal and the key, in its claim function; Hirsel does not authenticate (RUNNER-SPEC v2.24 rule 13). The claim function is `Wire.bind` for a keyed binding: the same kind of value, run at the same point, under the same rules (RUNNER-SPEC §3, "Binding"), and this rule states only what differs.
-- **Its input.** A copy of the place's wire grant `G`, and a `ClaimRequest`: each received header field whose name, compared case-insensitively, is in `claim.headers`, in arrival order, with its name lower-cased and its value as received (so the function sees a repeated header and decides what to do with it); and the body bytes, as read under `body_max`. `Wire.bind` gets the `Authorization` value alone; a keyed binding that wants it lists `authorization`.
+- **Its input.** A `G` the place's `call` mint makes for this claim, and a `ClaimRequest`: each received header field whose name, compared case-insensitively, is in `claim.headers`, in arrival order, with its name lower-cased and its value as received (so the function sees a repeated header and decides what to do with it); and the body bytes, as read under `body_max`. `Wire.bind` gets the `Authorization` value alone; a keyed binding that wants it lists `authorization`.
 - **When.** Once per request, before `prepare`, inside `bound bytes claim_bytes` and `bound steps claim_steps`. It runs in place of `Wire.bind` for that request: a keyed binding's Caller is the claim's, and `Wire.bind` is not called.
 - **Its answer.** `Ok(Claimed{caller, key})` makes the claim (`op`, caller, key). The caller follows RUNNER-SPEC's Caller rules (an issuer from the fixed table, a subject of at most `SUBJECT_MAX` = 64 B), and the key K-3's form. `Error(())`, a fault or an exhausted bound gives 401 and records nothing, as a refused `Wire.bind` does.
 - **Required.** A keyed or retired binding always has a claim function. Without one, each request would get a fresh anonymous Caller (RUNNER-SPEC v2.24), so no claim would ever repeat.

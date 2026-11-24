@@ -44,6 +44,7 @@ store@1/store/bucket_test_read_only_capture src=1c6c0765f986be13 sig=37745946b70
 store@1/store/bucket_test_soak src=cadbaa555574d7a1 sig=c0f77a81bc7626ea run=f6f42b4442e679ab bug=- oracle=- rows=pending
 store@1/store/cell_elision_and_inline_boundary src=fc556c3cb74daf7b sig=8e9d48f382cf0e24 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/cell_log_format_l79_l77_l78 src=b14e4cdcd6fe11ad sig=5b6d050389d961ce run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/directory_grant_covers_journal_worker src=6bd625627517729f sig=80562865c8da6c49 run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/disk_pack_bound src=3031abe6e70c903a sig=85714ecd8a424214 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/disk_test_blob_threshold src=1603be365862436f sig=62cfcdeb3f7d57b2 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_branches src=d8b67fed78a0f33f sig=633bd80a4a007110 run=ea720f3846592392 bug=- oracle=- rows=pending

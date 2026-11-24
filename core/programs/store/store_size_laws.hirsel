@@ -1,0 +1,61 @@
+type GrantedOpen: send {
+    tasks: Tasks,
+    d: Dir,
+    c: Clock,
+    r: Random,
+    options: Options
+}
+
+fn granted_open_commit(take input: GrantedOpen) -> Result[(), Error] waits {
+    let mut db = open(input.tasks, input.d, input.c, input.r, input.options)?
+    let codec = std.codec.of_bytes()
+    let _ = create_table(mut db, spec("values", std.codec.key_u64(), codec))?
+    let t = table(mut db, "values", std.codec.key_u64(), codec)?
+    let saved = run(mut db, None, t, fn(mut tx, call_env) -> Result[(), Error] {
+        let mut value: Bytes = list.with_capacity(64)
+        list.fill(mut value, 64, 7u8)
+        put(mut tx, call_env, 1, value)
+    })?
+    let Committed(done) = saved else {
+        return Error(Foreign)
+    }
+    durable(mut db, done.ticket)?
+    close(take db)
+}
+
+fn group_override(group: u64) -> Overrides {
+    let mut o = derived_sizes()
+    o.group_bytes = Some(group)
+    o
+}
+
+// §1.1: a Directory grant covers the journal worker's own grant. A 64 MiB
+// group (worker 67,174,752 B with its task record) used to size inside a
+// 39,839,262 B share. The hand-derived need at the 1 MiB resident floor:
+//   journal worker 67,108,864 + 65,536 + 288 + 64  = 67,174,752
+//   journal timer  4,096 + 288                      =      4,384
+//   journal channels, 64 commits, 416 x 64 + 640    =     27,264
+//   resident_limit                                  =  1,048,576
+//   write phase, a staged frame and a full frame in flight, 2 x 16,777,296
+//                                                   = 33,554,592
+//   (the cut phase is 16,777,640 + 65,536 + 2 x 95,326 = 17,033,828)
+//   total                                           = 101,809,568
+@test
+fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let o = group_override(67108864)
+    match sized_reservation(Directory, 39839262, o) {
+        Error(short) if short.need == 101809568 && short.have == 39839262 => (),
+        _ => fail("§1.1: a 64 MiB group sized inside a share its journal worker exceeds"),
+    }
+    match sized_reservation(Directory, 101809567, o) {
+        Error(short) if short.need == 101809568 => (),
+        _ => fail("§1.1: one byte below the Directory peak was admitted"),
+    }
+    let (take options, total) = sized_reservation(Directory, 101809568, o) ?=> |_| Missing("directory sizing")
+    if total != 101809568 || options.group_bytes != 67108864u32 || options.resident_limit != 1048576 {
+        fail("§1.1: the Directory peak at its exact share")
+    }
+    let input = GrantedOpen(tasks, d: disk_test_directory(d), c, r, options: take options)
+    let running = task.spawn(tasks, bytes total, take input, granted_open_commit)
+    result.unwrap(task.join(take running))
+}

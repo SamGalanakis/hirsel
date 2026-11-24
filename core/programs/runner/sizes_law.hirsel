@@ -22,10 +22,13 @@ fn derived_budgets() -> Result[(), String] {
         },
         _ => fail("L60: below Memory floor"),
     }
+    // STORE §1.1 v2.75: lifetime 4,291,840 (worker 4,194,304 + 65,536 + 352,
+    // timer 4,384, channels 27,264); the cut phase binds: 16,777,640 + 65,536
+    // + 2 x 8,698,670 with r = 95,685,370 totals 134,217,726.
     let directory = result.unwrap(store.sized(Directory, 134217728u64))
     if directory.pack_bytes != 8388608u64 || directory.checkpoint_bytes != 8388608u64 ||
         directory.journal_limit != 25165904u64 || directory.group_bytes != 4194304u32 ||
-        directory.resident_limit != 70924940u64 {
+        directory.resident_limit != 95685370u64 {
         fail("L60: Directory size formula")
     }
     let config = std.object.LaneConfig(requested_lanes: 3, lane_bytes: 1048576)

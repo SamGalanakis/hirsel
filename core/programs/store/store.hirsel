@@ -5593,12 +5593,12 @@ fn open_started(tasks: Tasks, d: Dir, c: Clock, options: Options, take session: 
     let written_worker = channel.sender(written_send)
     let reserve: u64 = int.widen(options.group_bytes)
     let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: 100000000)
-    let timer = match task.try_spawn(tasks, bytes 4096, take timer_input, journal_idle_timer) {
+    let timer = match task.try_spawn(tasks, bytes JOURNAL_TIMER_GRANT, take timer_input, journal_idle_timer) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
     let input = JournalWorker(store: id, seq: seq, segment: take segment, end_file: take end_file, group_commits: options.group_commits, group_bytes: options.group_bytes, receive: take queued, send: take journal_acks, ready: take ready, written: take written_worker, synced: take synced_send, idle: Some(take idle_send))
-    let writer = match task.try_spawn(tasks, bytes reserve + 65536, take input, journal_worker) {
+    let writer = match task.try_spawn(tasks, bytes reserve + JOURNAL_WORKER_SLACK, take input, journal_worker) {
         Ok(take running) => take running,
         Error((problem, _)) => return Error(Full(Allocation(problem))),
     }
@@ -5838,7 +5838,7 @@ fn disk_cut_timed(mut db: Db, take delta: HolderDelta, write_seal: scoped fn(mut
         Some(wanted) => wanted.pack,
         None => disk_state(db).options.pack_bytes,
     }
-    let limit = order.max(pack_bytes, page_manifest_file_size(MANIFEST_LIMIT, 1))
+    let limit = cut_output_bytes(pack_bytes)
     disk_cut_with_limit(mut db, take delta, write_seal, target, pack_bytes, limit, mut timing)
 }
 
@@ -6269,7 +6269,7 @@ fn journal_input(take file: HostFile, flush: bool) -> Result[JournalInput, Error
     }
     let file_stat = disk_io(host.stat_file(mut opened))?
     let chunk = disk_allocation(fn() -> Result[Bytes, Error] {
-        Ok(list.with_capacity(65536))
+        Ok(list.with_capacity(JOURNAL_CHUNK_BYTES))
     })?
     Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, chunk: take chunk))
 }

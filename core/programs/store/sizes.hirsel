@@ -142,6 +142,9 @@ pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Short
 // The task starting the store reserves the plan's actual cost. Explicit
 // overrides may leave some of the share unused.
 pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, u64), Shortage] {
+    if let Directory = kind {
+        return directory_reservation(share, o)
+    }
     let mut parts: List[(String, u64)] = list.with_capacity(14)
     let mut checkpoint_budget = 0u64
     let mut journal = 0u64
@@ -192,14 +195,97 @@ pub fn sized_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Option
         return Error(shortage(share, take parts))
     }
     let commits = match o.group_commits { Some(n) => n, None => 64u32 }
-    let tiered = tiered_sizes(kind, resident, o)
-    Ok((Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group),
-        checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack,
-        resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer,
-        dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager,
-        authority: Directory(), expect: None, activation: None,
-        binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2), total))
+    Ok((plan_options(kind, o, commits, group, checkpoint_budget, journal, pack, resident), total))
 }
+
+fn plan_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
+    let tiered = tiered_sizes(kind, resident, o)
+    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2)
+}
+
+// The Directory journal worker's grant beyond its group buffer, holding its
+// END scratch and write state (§3.4), and the idle timer's grant.
+const JOURNAL_WORKER_SLACK: u64 = 65536
+
+const JOURNAL_TIMER_GRANT: u64 = 4096
+
+// Recovery reads the journal through one input chunk of this many bytes.
+const JOURNAL_CHUNK_BYTES: u64 = 65536
+
+// MEM-24 charges of `journal_channels` (store.hirsel), each 64 + capacity x item. Items:
+// JournalMsg 112 (ObjectExportRead: 8 + String 24 + HistoryRef 32 + Bytes 24
+// + Sender 24), Ack 64 (ObjectBroken: 8 + Error 56), Result[(), Capacity] 24,
+// WriteNotice 20 (8 + IoError 12) and () 0.
+fn journal_channel_bytes(group_count: u64) -> u64 {
+    (64 + 2 * group_count * 112) + (64 + (3 * group_count + 3) * 64) + (64 + 24) + (64 + 2 * 20) + 64 + 64
+}
+
+// The largest pack or MANIFEST file a cut writes (§3.9).
+fn cut_output_bytes(pack: u64) -> u64 {
+    order.max(pack, page_manifest_file_size(MANIFEST_LIMIT, 1))
+}
+
+fn add_phase(mut parts: List[(String, u64)], first: String, a: u64, second: String, b: u64) -> () {
+    add_size(mut parts, first, a)
+    add_size(mut parts, second, b)
+}
+
+// A Directory writer's grant (§1.1) is what it holds for its whole life, plus
+// the largest of its recovery, write and cut phases, which never overlap.
+// `journal_limit` bounds the uncovered journal on disk and is no memory term.
+fn directory_reservation(share: u64, o: Overrides) -> Result[(Options, u64), Shortage] {
+    let unbounded = 18446744073709551615u64
+    let pack = size_or(o.pack_bytes, order.min(64 * MIB, share / 16))
+    let checkpoint_budget = size_or(o.checkpoint_bytes, pack)
+    let floor = int.checked_add(checkpoint_budget, FRAME_LIMIT)
+    let minimum_journal = size_or(floor, unbounded)
+    let journal = size_or(o.journal_limit, minimum_journal)
+    let group = size_or(o.group_bytes, 4 * MIB)
+    let commits = match o.group_commits {
+        Some(n) => n,
+        None => 64u32
+    }
+    let valid = floor != None && journal >= minimum_journal && group > 0 && group <= 4294967295u64
+    let mut parts: List[(String, u64)] = list.with_capacity(8)
+    let worker = int.checked_add(group, JOURNAL_WORKER_SLACK + OBJECT_JOURNAL_TASK_BYTES)
+    add_size(mut parts, "journal_worker", size_or(worker, unbounded))
+    add_size(mut parts, "journal_timer", JOURNAL_TIMER_GRANT + OBJECT_TIMER_TASK_BYTES)
+    add_size(mut parts, "journal_channels", journal_channel_bytes(int.widen(commits)))
+    let write = 2 * FRAME_LIMIT
+    let recovery = JOURNAL_CHUNK_BYTES + FRAME_LIMIT
+    let output = cut_output_bytes(pack)
+    let cut_fixed = size_or(int.checked_add(output, CUT_FIXED_BYTES), unbounded)
+    let derived = match total_sizes(parts) {
+        Some(lifetime) => {
+            let steady = size_or(int.checked_sub(share, lifetime), 0)
+            let by_write = size_or(int.checked_sub(steady, order.max(write, recovery)), 0)
+            let by_cut = largest_resident(size_or(int.checked_sub(steady, cut_fixed), 0))
+            order.min(by_write, by_cut)
+        },
+        None => 0u64,
+    }
+    let resident = size_or(o.resident_limit, order.max(derived, MIB))
+    let minimum = order.max(resident, MIB)
+    add_size(mut parts, "resident_limit", minimum)
+    let work = cut_work(minimum) - CUT_FIXED_BYTES
+    let cut = size_or(int.checked_add(cut_fixed, work), unbounded)
+    if cut >= write && cut >= recovery {
+        add_size(mut parts, "cut_output", output)
+        add_phase(mut parts, "checkpoint_task_fixed", CUT_FIXED_BYTES, "checkpoint_task_work", work)
+    } else if write >= recovery {
+        add_phase(mut parts, "staged_frame", FRAME_LIMIT, "frames_in_flight", FRAME_LIMIT)
+    } else {
+        add_phase(mut parts, "journal_chunk", JOURNAL_CHUNK_BYTES, "recovered_frame", FRAME_LIMIT)
+    }
+    let Some(total) = total_sizes(parts) else {
+        return Error(shortage(share, take parts))
+    }
+    if !valid || resident < MIB || total > share {
+        return Error(shortage(share, take parts))
+    }
+    Ok((plan_options(Directory, o, commits, group, checkpoint_budget, journal, pack, resident), total))
+}
+
 
 pub opaque type FollowerPlan: send {
     kind: Kind,

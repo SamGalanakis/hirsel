@@ -78,6 +78,13 @@ impl RecipeGraph {
     }
 }
 impl Reachable<'_> {
+    /// A published recipe owns the units it will assemble. Release the
+    /// instance bodies while keeping the request's reach report.
+    pub(crate) fn finish(&mut self) -> crate::reach::ReachCounters {
+        self.materialized = crate::instances::InstanceSet::default();
+        self.counters
+    }
+
     /// The bodyless foreign definitions selected by this entry's checked slot closure.
     pub fn foreign_functions(&self) -> impl Iterator<Item = &DefPath> {
         self.materialized

@@ -37,10 +37,15 @@ fn unit_key(
     inputs: &impl serde::Serialize,
     consumed: &[&[hirsel_core_ir::roles::BodyFacts]],
 ) -> io::Result<ContentHash> {
-    crate::native::key(
-        "hirsel.core-release-unit.v6",
-        &(hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs),
-    )
+    use std::io::Write as _;
+
+    let fields = (hirsel_core_ir::roles::FACTS_SCHEMA, consumed, inputs);
+    let length = bincode::serialized_size(&fields).map_err(io::Error::other)?;
+    ContentHash::of_stream("hirsel.core-release-unit.v6", length, |digest| {
+        let mut buffered = io::BufWriter::new(digest);
+        bincode::serialize_into(&mut buffered, &fields).map_err(io::Error::other)?;
+        buffered.flush()
+    })
 }
 
 /// A part's key: the compiler, libLLVM and target

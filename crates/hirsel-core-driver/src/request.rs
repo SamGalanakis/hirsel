@@ -1377,7 +1377,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
         }
     }
-    let reach = if native_command && !test_command {
+    let mut reach = if native_command && !test_command {
         Some({
             let entry = selected_entry
                 .as_ref()
@@ -1636,7 +1636,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         let entry = selected_entry
             .as_ref()
             .ok_or("build/run requires an entry")?;
-        let reached = reach.as_ref().unwrap();
+        let reached = reach.as_mut().unwrap();
         let grant_lines = command == "run" && !grants.foreign.is_empty();
         let assembled = if recipe_command || grant_lines {
             match product.publish_release(
@@ -1662,7 +1662,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     let recipe = (release_manifest.is_some() || grant_lines)
                         .then(|| publication.recipe.clone());
                     let built =
-                        publication.assemble_with(options, reached.counters, Some(&product), None);
+                        publication.assemble_with(options, reached.finish(), Some(&product), None);
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, &recipe)
                     {

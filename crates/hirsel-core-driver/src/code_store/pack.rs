@@ -32,9 +32,11 @@ use crate::store::{Store, checksum};
 use hirsel_core_ids::ContentHash;
 use rustc_hash::FxHashMap;
 use std::fs::{self, File};
-use std::io;
+use std::hash::Hasher;
+use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use twox_hash::XxHash3_64;
 
 const MAGIC: &[u8; 12] = b"HIRSEL-PACK\0";
 const VERSION: u32 = 1;
@@ -45,6 +47,7 @@ const END: &[u8; 8] = b"HPACKEND";
 const SUFFIX: &str = ".pack";
 const MAX_PACKS: usize = 8;
 const RATIO: u64 = 4;
+type Key = (u8, [u8; 32]);
 
 #[derive(Clone, Copy)]
 struct Entry {
@@ -56,7 +59,7 @@ struct Entry {
 }
 
 impl Entry {
-    fn key(&self) -> (u8, [u8; 32]) {
+    fn key(&self) -> Key {
         (self.kind, self.hash)
     }
 
@@ -113,7 +116,7 @@ impl Pack {
         }))
     }
 
-    fn find(&self, key: (u8, [u8; 32])) -> Option<usize> {
+    fn find(&self, key: Key) -> Option<usize> {
         self.entries.binary_search_by_key(&key, Entry::key).ok()
     }
 
@@ -183,40 +186,61 @@ fn read_index(file: &File, bytes: u64) -> io::Result<Option<Vec<Entry>>> {
     Ok((ordered && inside).then_some(entries))
 }
 
-/// The pack bytes of `rows` (kind code, name, payload), sorted and unique.
-fn encode(rows: &[(u8, [u8; 32], &[u8])]) -> Vec<u8> {
-    let payload = rows.iter().map(|(_, _, bytes)| bytes.len()).sum::<usize>();
-    let mut out = Vec::with_capacity(HEADER + payload + rows.len() * ENTRY + TRAILER);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
-    let mut entries = Vec::with_capacity(rows.len());
-    for &(kind, hash, bytes) in rows {
-        entries.push(Entry {
-            kind,
-            hash,
-            offset: out.len() as u64,
-            len: bytes.len() as u64,
-            check: checksum(bytes),
-        });
-        out.extend_from_slice(bytes);
-    }
-    let index = out.len();
-    let mut checked = out[..HEADER].to_vec();
-    for entry in &entries {
-        entry.encode(&mut out);
-    }
-    checked.extend_from_slice(&out[index..]);
-    out.extend_from_slice(&(index as u64).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u64).to_le_bytes());
-    out.extend_from_slice(&checksum(&checked).to_le_bytes());
-    out.extend_from_slice(END);
-    out
-}
-
-/// A pack name, `<sequence>-<check>.pack`: commits number their packs in
-/// order, and a merged pack takes the sequence of the newest it absorbs.
-fn pack_name(sequence: u64, bytes: &[u8]) -> String {
-    format!("{sequence:016x}-{:016x}{SUFFIX}", checksum(bytes))
+/// Write sorted, unique rows directly to the unpublished pack. Keep the
+/// index in memory and hash the payloads as they are written.
+fn write_pack<B: AsRef<[u8]>>(
+    store: &Store,
+    directory: &Path,
+    sequence: u64,
+    rows: impl Iterator<Item = io::Result<(Key, B)>>,
+) -> io::Result<Pack> {
+    let (name, bytes, entries) = store.publish_to(|file| {
+        let mut file = BufWriter::new(file);
+        let mut hash = XxHash3_64::default();
+        let mut write = |bytes: &[u8]| {
+            file.write_all(bytes)?;
+            hash.write(bytes);
+            Ok::<(), io::Error>(())
+        };
+        let mut index = Vec::new();
+        index.extend_from_slice(MAGIC);
+        index.extend_from_slice(&VERSION.to_le_bytes());
+        write(&index)?;
+        let mut offset = HEADER as u64;
+        let mut entries = Vec::new();
+        for row in rows {
+            let ((kind, hash), bytes) = row?;
+            let bytes = bytes.as_ref();
+            let entry = Entry {
+                kind,
+                hash,
+                offset,
+                len: bytes.len() as u64,
+                check: checksum(bytes),
+            };
+            offset += entry.len;
+            entry.encode(&mut index);
+            entries.push(entry);
+            write(bytes)?;
+        }
+        write(&index[HEADER..])?;
+        write(&offset.to_le_bytes())?;
+        write(&(entries.len() as u64).to_le_bytes())?;
+        write(&checksum(&index).to_le_bytes())?;
+        write(END)?;
+        file.flush()?;
+        let bytes = offset + (index.len() - HEADER + TRAILER) as u64;
+        let name = format!("{sequence:016x}-{:016x}{SUFFIX}", hash.finish());
+        Ok((directory.join(&name), (name, bytes, entries)))
+    })?;
+    let file = File::open(directory.join(&name))?;
+    Ok(Pack {
+        name,
+        file,
+        bytes,
+        checked: vec![true; entries.len()],
+        entries,
+    })
 }
 
 fn sequence(name: &str) -> Option<u64> {
@@ -231,7 +255,7 @@ fn sequence(name: &str) -> Option<u64> {
 /// Objects put since the last commit.
 #[derive(Default)]
 struct Pending {
-    rows: FxHashMap<(u8, [u8; 32]), Vec<u8>>,
+    rows: FxHashMap<Key, Vec<u8>>,
 }
 
 /// The packs of one code store, as this process has read them, and the
@@ -282,7 +306,7 @@ impl Packs {
     }
 
     /// The whole row for `key`, newest pack first: (pack, row).
-    fn find(&mut self, key: (u8, [u8; 32])) -> io::Result<Option<(usize, usize)>> {
+    fn find(&mut self, key: Key) -> io::Result<Option<(usize, usize)>> {
         if !self.listed {
             self.list()?;
         }
@@ -352,36 +376,22 @@ impl Packs {
         fs::create_dir_all(&self.directory)?;
         self.listed = false;
         self.list()?;
-        let pending = std::mem::take(&mut self.pending.rows);
-        let mut rows = pending
-            .iter()
-            .map(|(&(kind, hash), bytes)| (kind, hash, bytes.as_slice()))
-            .collect::<Vec<_>>();
-        rows.sort_unstable_by_key(|&(kind, hash, _)| (kind, hash));
-        let bytes = encode(&rows);
+        let mut rows = self.pending.rows.iter().collect::<Vec<_>>();
+        rows.sort_unstable_by_key(|(key, _)| **key);
         let sequence = self
             .packs
             .iter()
             .filter_map(|pack| sequence(&pack.name))
             .max()
             .map_or(0, |last| last + 1);
-        let name = pack_name(sequence, &bytes);
-        store.publish_to(&self.directory.join(&name), &bytes)?;
-        let file = File::open(self.directory.join(&name))?;
-        let entries = rows
-            .iter()
-            .enumerate()
-            .map(|(at, _)| {
-                Entry::decode(&bytes[bytes.len() - TRAILER - (rows.len() - at) * ENTRY..])
-            })
-            .collect::<Vec<_>>();
-        self.packs.push(Pack {
-            name,
-            file,
-            bytes: bytes.len() as u64,
-            checked: vec![true; entries.len()],
-            entries,
-        });
+        let pack = write_pack(
+            store,
+            &self.directory,
+            sequence,
+            rows.into_iter().map(|(&key, bytes)| Ok((key, bytes))),
+        )?;
+        self.pending.rows.clear();
+        self.packs.push(pack);
         self.merge(store)
     }
 
@@ -394,29 +404,26 @@ impl Packs {
         if from + 1 >= self.packs.len() {
             return Ok(());
         }
-        let mut rows = std::collections::BTreeMap::new();
-        for pack in self.packs[from..].iter_mut().rev() {
-            for row in 0..pack.entries.len() {
-                let key = pack.entries[row].key();
-                if !rows.contains_key(&key)
+        let newest = sequence(&self.packs.last().unwrap().name).unwrap();
+        let packs = &mut self.packs[from..];
+        let keys = packs
+            .iter()
+            .flat_map(|pack| pack.entries.iter().map(Entry::key))
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut payload = |key| {
+            for pack in packs.iter_mut().rev() {
+                if let Some(row) = pack.find(key)
                     && let Some(bytes) = pack.payload(row)?
                 {
-                    rows.insert(key, bytes);
+                    return Ok(Some((key, bytes)));
                 }
             }
-        }
-        let rows = rows
-            .iter()
-            .map(|(&(kind, hash), bytes)| (kind, hash, bytes.as_slice()))
-            .collect::<Vec<_>>();
-        let bytes = encode(&rows);
-        let newest = sequence(&self.packs.last().unwrap().name).unwrap();
-        let name = pack_name(newest, &bytes);
-        store.publish_to(&self.directory.join(&name), &bytes)?;
-        let merged = Pack::open(&self.directory.join(&name), name.clone())?
-            .ok_or_else(|| io::Error::other(format!("merged pack {name} does not read back")))?;
+            Ok(None)
+        };
+        let rows = keys.into_iter().filter_map(|key| payload(key).transpose());
+        let merged = write_pack(store, &self.directory, newest, rows)?;
         for pack in self.packs.drain(from..) {
-            if pack.name != name {
+            if pack.name != merged.name {
                 match fs::remove_file(self.directory.join(&pack.name)) {
                     Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
                     _ => {}

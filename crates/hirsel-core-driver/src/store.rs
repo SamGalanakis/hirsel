@@ -367,29 +367,34 @@ impl Store {
             self.locked(|path| fs::create_dir(path), |path, ()| File::open(path))?;
         Ok(Scratch { path, _lock: lock })
     }
-    /// `publish` to a `path` outside the records, on this store's
-    /// filesystem: a cache code store's pack (`code_store::pack`).
-    pub(crate) fn publish_to(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.publish(path, bytes)
-    }
     /// Write `bytes` to a temporary and rename it to `path`. Nothing is
     /// synced (module documentation).
     fn publish(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.publish_to(|file| {
+            file.write_all(bytes)?;
+            Ok((path, ()))
+        })
+    }
+    /// Write a cache file to a locked temporary. The writer names the
+    /// destination after it has written the payload.
+    pub(crate) fn publish_to<P: AsRef<Path>, T>(
+        &self,
+        write: impl FnOnce(&mut File) -> io::Result<(P, T)>,
+    ) -> io::Result<T> {
         let mut temporary = self.temporary()?;
+        let written = write(&mut temporary.file);
         #[cfg(test)]
-        if crashed(&self.root) {
-            temporary.file.write_all(bytes)?;
+        if written.is_ok() && crashed(&self.root) {
             return Err(io::Error::other("the test writer crashed"));
         }
-        let result = temporary
-            .file
-            .write_all(bytes)
-            .and_then(|()| fs::rename(&temporary.path, path));
-        if let Err(e) = result {
+        let result = written.and_then(|(path, value)| {
+            fs::rename(&temporary.path, path)?;
+            Ok(value)
+        });
+        if result.is_err() {
             let _ = fs::remove_file(&temporary.path);
-            return Err(e);
         }
-        Ok(())
+        result
     }
     /// Whether `path` names a file of this store.
     /// The store's directory.

@@ -218,10 +218,7 @@ fn reaping_counts_every_completion() {
     // Removal completions produce no event in the caller's array.
     let ring = Uring::with_cq_size(512).unwrap();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
-    let pending = || {
-        // SAFETY: this test exclusively owns the ring and does not consume the queue here.
-        unsafe { ring.ring.completion_shared() }.len()
-    };
+    let pending = || ring.ring.cq_len();
     for initial in [129, 100] {
         for submitted in 1..=129 {
             ring.push(PollRemove::new(1).build().user_data(REMOVED), None);
@@ -331,7 +328,7 @@ fn readiness_beyond_the_completion_queue_is_all_reported() {
     let (poller, completion_entries) = match reactor().unwrap() {
         Reactor::IoUring => {
             let ring = Uring::with_cq_size(CQ_ENTRIES).unwrap();
-            let entries = ring.ring.params().cq_entries();
+            let entries = ring.ring.cq_entries() as u32;
             (Poller::from_uring(ring), entries)
         }
         Reactor::Epoll => (Poller::new_epoll().unwrap(), CQ_ENTRIES),
@@ -455,7 +452,7 @@ fn completion_ring_never_overflows() {
     let Backend::Uring(ring) = &poller.backend else {
         unreachable!()
     };
-    let count = ring.completion.ring.params().cq_entries() as usize * 2;
+    let count = ring.completion.ring.cq_entries() * 2;
     let mut copied = 0;
     for _ in 0..count {
         let mut slot = poller.tx_slot(1).unwrap();
@@ -475,17 +472,35 @@ fn completion_ring_never_overflows() {
         }
         ring.enter(Some(0));
     }
-    // SAFETY: the test owns the rings and these observations consume nothing.
-    unsafe {
-        assert!(ring.ring.submission_shared().cq_overflow());
-        assert_eq!(ring.completion.ring.completion_shared().overflow(), 0);
-        assert!(!ring.completion.ring.submission_shared().cq_overflow());
-    }
+    assert!(ring.ring.overflowed());
+    assert_eq!(ring.completion.ring.dropped(), 0);
+    assert!(!ring.completion.ring.overflowed());
     reap_until(&mut sockets, || ring.busy_tx_slots() == 0);
     assert_eq!(poller.tx_notifications(), (21, 21));
     // SAFETY: the registry still owns the socket.
     assert_eq!(unsafe { libc::shutdown(sockets.fd(key), libc::SHUT_WR) }, 0);
     read_all_a(&mut peer, count);
+}
+
+unsafe fn complete(context: *const (), result: i32) {
+    // SAFETY: every test reply stays pinned until all calls finish.
+    let reply = unsafe { &*context.cast::<std::sync::atomic::AtomicI32>() };
+    reply.store(result, std::sync::atomic::Ordering::Release);
+}
+
+/// Queue one NOP file request per reply, unit `i` for `replies[i]`.
+fn submit_nops(poller: &Poller, replies: &[std::sync::atomic::AtomicI32]) {
+    for (unit, reply) in replies.iter().enumerate() {
+        // SAFETY: NOP has one result and the reply is pinned.
+        assert!(unsafe {
+            poller.submit_file(
+                u16::try_from(unit).unwrap(),
+                io_uring::opcode::Nop::new().build(),
+                std::ptr::from_ref(reply).cast(),
+                complete,
+            )
+        });
+    }
 }
 
 #[test]
@@ -495,29 +510,14 @@ fn close_waits_for_completion_credit() {
         sync::atomic::{AtomicI32, Ordering},
     };
 
-    unsafe fn complete(context: *const (), result: i32) {
-        // SAFETY: every test reply stays pinned until all calls finish.
-        unsafe { &*context.cast::<AtomicI32>() }.store(result, Ordering::Release);
-    }
-
     let ring = Uring::with_cq_sizes(64, 64).unwrap();
-    let slots = ring.completion.ring.params().cq_entries() as usize;
+    let slots = ring.completion.ring.cq_entries();
     let poller = Poller::from_uring(ring);
     let Backend::Uring(ring) = &poller.backend else {
         unreachable!()
     };
     let replies: Vec<_> = (0..=slots).map(|_| AtomicI32::new(i32::MIN)).collect();
-    for (unit, reply) in replies[..slots].iter().enumerate() {
-        // SAFETY: NOP has one result and the reply is pinned.
-        assert!(unsafe {
-            poller.submit_file(
-                unit as u16,
-                io_uring::opcode::Nop::new().build(),
-                std::ptr::from_ref(reply).cast(),
-                complete,
-            )
-        });
-    }
+    submit_nops(&poller, &replies[..slots]);
     ring.enter(Some(0));
     let fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
     let close = io_uring::opcode::Close::new(io_uring::types::Fd(fd)).build();
@@ -551,6 +551,41 @@ fn close_waits_for_completion_credit() {
     assert_eq!(
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::EBADF)
+    );
+}
+
+/// A production-size ring opens when the host has no free order-9 block,
+/// which a kernel-allocated 65,536-entry CQ needs (ENOMEM on a fragmented
+/// host), and every completion credit it grants has a CQ entry: with all of
+/// them in flight nothing overflows or drops.
+#[test]
+fn a_production_ring_opens_fragmented_and_holds_every_credit() {
+    use std::sync::atomic::{AtomicI32, Ordering};
+
+    let ring = Uring::open().unwrap();
+    let slots = ring.completion.ring.cq_entries();
+    assert!(slots >= Uring::COMPLETION_ENTRIES as usize);
+    let poller = Poller::from_uring(ring);
+    let Backend::Uring(ring) = &poller.backend else {
+        unreachable!()
+    };
+    let replies: Vec<_> = (0..slots).map(|_| AtomicI32::new(i32::MIN)).collect();
+    submit_nops(&poller, &replies);
+    for _ in 0..=slots / Uring::ENTRIES as usize {
+        ring.enter(Some(0));
+    }
+    let completion = &ring.completion.ring;
+    assert_eq!(completion.cq_len(), slots);
+    assert_eq!(completion.dropped(), 0);
+    assert!(!completion.overflowed());
+    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2 * POLL_BATCH as usize];
+    for _ in 0..=slots / POLL_BATCH as usize {
+        ring.wait(&mut events, Some(0)).unwrap();
+    }
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply.load(Ordering::Acquire) == 0)
     );
 }
 

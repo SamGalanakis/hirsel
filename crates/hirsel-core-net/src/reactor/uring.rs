@@ -10,8 +10,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 mod completion;
+mod ring;
 mod watch;
 use completion::Completion;
+use ring::Ring;
 use watch::{REMOVE, Watches};
 
 pub(super) const COMPLETION_READY: u64 = u64::MAX - 2;
@@ -50,7 +52,7 @@ pub(super) fn msg_ring_wake(fd: i32) -> io::Result<()> {
 /// with a MSG_RING completion. The owner learns of pending task work from
 /// `IORING_SQ_TASKRUN` without a syscall.
 pub(super) struct Uring {
-    pub(super) ring: io_uring::IoUring,
+    pub(super) ring: Ring,
     /// The mailbox: entries for the owner to submit, in order.
     sq: Mutex<Submissions>,
     /// Lock before `tx` and `sq`.
@@ -90,17 +92,10 @@ fn push_entry(sq: &Mutex<Submissions>, entry: io_uring::squeue::Entry, fd: Optio
     pending.entries.push_back(Submission { entry, _fd: fd });
 }
 
-fn queue_due(ring: &io_uring::IoUring, mailbox: &Mutex<Submissions>) -> bool {
-    // SAFETY: the owner is the only completion reader and SQ writer.
-    let cq = unsafe { ring.completion_shared() };
-    if !cq.is_empty() {
-        return true;
-    }
-    drop(cq);
-    // SAFETY: no submissions or completions are read by another thread.
-    let sq = unsafe { ring.submission_shared() };
-    sq.taskrun()
-        || sq.cq_overflow()
+fn queue_due(ring: &Ring, mailbox: &Mutex<Submissions>) -> bool {
+    ring.cq_len() != 0
+        || ring.taskrun()
+        || ring.overflowed()
         || !mailbox
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -110,54 +105,43 @@ fn queue_due(ring: &io_uring::IoUring, mailbox: &Mutex<Submissions>) -> bool {
 
 /// Publish one SQ batch and preserve the unconsumed prefix across short or failed enters.
 fn enter_queue(
-    ring: &io_uring::IoUring,
+    ring: &Ring,
     mailbox: &Mutex<Submissions>,
     timeout_ns: Option<u64>,
     refuse_submit: bool,
 ) -> io::Result<usize> {
     let mut pending = mailbox.lock().unwrap_or_else(|error| error.into_inner());
-    // SAFETY: the owner holds the turn and is the only SQ writer.
-    let mut sq = unsafe { ring.submission_shared() };
     while let Some(submission) = pending.entries.get(pending.published) {
-        // SAFETY: the mailbox pins each fd. Completion callers keep operand storage live
-        // until their result, and zero-copy sends keep it through the notification.
-        if unsafe { sq.push(&submission.entry) }.is_err() {
+        // SAFETY: the owner holds the turn and is the only SQ writer. The mailbox
+        // pins each fd. Completion callers keep operand storage live until their
+        // result, and zero-copy sends keep it through the notification.
+        if !unsafe { ring.push(&submission.entry) } {
             break;
         }
         pending.published += 1;
     }
-    sq.sync();
     drop(pending);
-    if timeout_ns == Some(0) && sq.is_empty() && !sq.taskrun() && !sq.cq_overflow() {
+    if timeout_ns == Some(0) && ring.sq_len() == 0 && !ring.taskrun() && !ring.overflowed() {
         return Ok(0);
     }
-    drop(sq);
-    let submitter = ring.submitter();
     let result = match timeout_ns {
         Some(0) if refuse_submit => Err(io::Error::from_raw_os_error(libc::EBUSY)),
-        Some(0) => submitter.submit(),
-        None => submitter.submit_and_wait(1),
-        Some(ns) => {
-            let ts = io_uring::types::Timespec::new()
-                .sec(ns / 1_000_000_000)
-                .nsec((ns % 1_000_000_000) as u32);
-            submitter.submit_with_args(1, &io_uring::types::SubmitArgs::new().timespec(&ts))
-        }
+        Some(0) => ring.submit(0, None),
+        None => ring.submit(1, None),
+        Some(ns) => ring.submit(1, Some(ns)),
     };
     let mut pending = mailbox.lock().unwrap_or_else(|error| error.into_inner());
-    // SAFETY: only the owner reads how much of this submission batch the kernel consumed.
-    let mut sq = unsafe { ring.submission_shared() };
-    sq.sync();
-    pending.consumed(sq.len());
+    // Only the owner reads how much of this submission batch the kernel consumed.
+    pending.consumed(ring.sq_len());
     result
 }
 
 impl Uring {
-    const ENTRIES: u32 = 64;
+    pub(super) const ENTRIES: u32 = 64;
     /// NODROP retains completions past this capacity. The owner enters
     /// with GETEVENTS to flush them once reaping has made room.
     const READINESS_ENTRIES: u32 = 4096;
-    const COMPLETION_ENTRIES: u32 = 65_536;
+    pub(super) const COMPLETION_ENTRIES: u32 = 65_536;
 
     /// A ring whose kernel runs multishot polls, bounded waits and blind
     /// MSG_RING wakes. Any refusal (an old kernel, a seccomp filter,
@@ -171,30 +155,20 @@ impl Uring {
     }
 
     pub(super) fn with_cq_sizes(readiness: u32, completion: u32) -> io::Result<Uring> {
-        use io_uring::{opcode, register::Probe};
+        use io_uring::opcode;
         let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
-        let ring = io_uring::IoUring::builder()
-            .setup_cqsize(readiness)
-            .setup_clamp()
-            .setup_coop_taskrun()
-            .setup_taskrun_flag()
-            .build(Self::ENTRIES)?;
-        if !ring.params().is_feature_ext_arg() || !ring.params().is_feature_nodrop() {
+        let ring = Ring::new(Self::ENTRIES, readiness, true)?;
+        if !ring.supports(&[
+            opcode::PollAdd::CODE,
+            opcode::PollRemove::CODE,
+            opcode::MsgRingData::CODE,
+            opcode::OpenAt2::CODE,
+            opcode::Statx::CODE,
+            opcode::Close::CODE,
+        ])? {
             return Err(unsupported());
         }
-        let mut probe = Probe::new();
-        ring.submitter().register_probe(&mut probe)?;
-        if !probe.is_supported(opcode::PollAdd::CODE)
-            || !probe.is_supported(opcode::PollRemove::CODE)
-            || !probe.is_supported(opcode::MsgRingData::CODE)
-            || !probe.is_supported(opcode::OpenAt2::CODE)
-            || !probe.is_supported(opcode::Statx::CODE)
-            || !probe.is_supported(opcode::Close::CODE)
-        {
-            return Err(unsupported());
-        }
-        let zc = probe.is_supported(opcode::SendZc::CODE)
-            && probe.is_supported(opcode::AsyncCancel::CODE);
+        let zc = ring.supports(&[opcode::SendZc::CODE, opcode::AsyncCancel::CODE])?;
         let completion = Completion::open(completion, zc)?;
         // SAFETY: the completion ring owns this fd and pins it through the clone.
         let completion_fd = unsafe { BorrowedFd::borrow_raw(completion.ring.as_raw_fd()) };
@@ -212,9 +186,7 @@ impl Uring {
         // Every wake is a blind MSG_RING: it must post its completion.
         msg_ring_wake(uring.ring.as_raw_fd())?;
         // SAFETY: no poller exists yet; this is the only completion reader.
-        let woken = unsafe { uring.ring.completion_shared() }
-            .next()
-            .is_some_and(|cqe| cqe.user_data() == WAKE);
+        let woken = unsafe { uring.ring.next() }.is_some_and(|cqe| cqe.user_data() == WAKE);
         if !woken {
             return Err(unsupported());
         }
@@ -307,12 +279,12 @@ impl Uring {
     /// completion queue overflows, and cancels it when its arming thread exits.
     fn reap(&self, out: &mut [libc::epoll_event], remaining: &mut usize) -> io::Result<usize> {
         let mut watched = self.watches();
-        // SAFETY: the owner holds its turn, the only completion reader.
-        let mut cq = unsafe { self.ring.completion_shared() };
-        cq.sync();
         let mut n = 0;
         while *remaining != 0 && n < out.len() {
-            let Some(cqe) = cq.next() else { break };
+            // SAFETY: the owner holds its turn, the only completion reader.
+            let Some(cqe) = (unsafe { self.ring.next() }) else {
+                break;
+            };
             *remaining -= 1;
             let data = cqe.user_data();
             let (tag, flags) = match data {

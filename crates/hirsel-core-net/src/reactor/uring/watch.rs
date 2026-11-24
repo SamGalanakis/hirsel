@@ -205,8 +205,7 @@ impl Uring {
     }
 
     pub(in crate::reactor) fn recover_watches(&self, dropped: bool) {
-        // SAFETY: the caller owns the ring's turn. Only the overflow counter is read.
-        let overflow = unsafe { self.ring.completion_shared() }.overflow();
+        let overflow = self.ring.dropped();
         self.watches().recover(overflow, dropped);
     }
 

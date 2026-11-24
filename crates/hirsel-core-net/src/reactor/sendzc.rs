@@ -345,13 +345,7 @@ impl Uring {
         };
         // SAFETY: the bytes stay alive and in place until unregistered or
         // leaked with the ring (Table::drop).
-        unsafe {
-            self.completion
-                .ring
-                .submitter()
-                .register_buffers_update(index, &[iov], None)
-        }
-        .is_ok()
+        unsafe { self.completion.ring.update_buffer(index, iov) }.is_ok()
     }
 
     fn unregister(&self, index: u32) {
@@ -360,12 +354,7 @@ impl Uring {
             iov_len: 0,
         };
         // SAFETY: an empty entry names no memory.
-        let _ = unsafe {
-            self.completion
-                .ring
-                .submitter()
-                .register_buffers_update(index, &[iov], None)
-        };
+        let _ = unsafe { self.completion.ring.update_buffer(index, iov) };
     }
 
     /// An entry neither held nor busy keeps its bytes for the next send.

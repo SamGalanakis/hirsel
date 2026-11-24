@@ -1,6 +1,6 @@
 use super::super::REMOVED;
-use super::{Submissions, Uring, enter_queue, push_entry, queue_due};
-use io_uring::{IoUring, squeue};
+use super::{Ring, Submissions, Uring, enter_queue, push_entry, queue_due};
+use io_uring::squeue;
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -34,7 +34,7 @@ struct Credits {
 }
 
 pub(in crate::reactor) struct Completion {
-    pub(in crate::reactor) ring: IoUring,
+    pub(in crate::reactor) ring: Ring,
     pub(in crate::reactor) sparse: bool,
     cq_entries: usize,
     sq: Mutex<Submissions>,
@@ -43,18 +43,10 @@ pub(in crate::reactor) struct Completion {
 
 impl Completion {
     pub(super) fn open(entries: u32, zc: bool) -> io::Result<Self> {
-        let ring = IoUring::builder()
-            .setup_cqsize(entries)
-            .setup_coop_taskrun()
-            .setup_taskrun_flag()
-            .build(Uring::ENTRIES)?;
-        ring.submitter().register_iowq_max_workers(&mut [2, 1])?;
-        let sparse = zc
-            && ring
-                .submitter()
-                .register_buffers_sparse(super::sendzc::REGISTERED)
-                .is_ok();
-        let cq_entries = ring.params().cq_entries() as usize;
+        let ring = Ring::new(Uring::ENTRIES, entries, false)?;
+        ring.iowq_max_workers(2, 1)?;
+        let sparse = zc && ring.buffers_sparse(super::sendzc::REGISTERED).is_ok();
+        let cq_entries = ring.cq_entries();
         Ok(Self {
             ring,
             sparse,
@@ -142,11 +134,12 @@ impl Completion {
         out: &mut [libc::epoll_event],
         left: &mut usize,
     ) -> usize {
-        // SAFETY: only the owner of this poller reads the completion queue.
-        let mut cq = unsafe { self.ring.completion_shared() };
         let mut n = 0;
         while *left != 0 && n < out.len() {
-            let Some(cqe) = cq.next() else { break };
+            // SAFETY: only the owner of this poller reads the completion queue.
+            let Some(cqe) = (unsafe { self.ring.next() }) else {
+                break;
+            };
             *left -= 1;
             match cqe.user_data() {
                 REMOVED => self.release_send(0, 1),

@@ -1,0 +1,286 @@
+pub type Error = Container(media_container.mp4.Error) | InvalidSegment | InvalidLadder | UnsupportedEncryption | BudgetExceeded
+
+// These modes reserve the sample-encryption entry point for TLS-8 PacketCipher.
+pub type Encryption = Clear | Cbcs | Cenc
+
+pub type SegmentLimit {
+    samples: u64,
+    payload_bytes: u64
+}
+
+pub type ManifestLimit {
+    octets: u64,
+    steps: u64
+}
+
+pub opaque type Segment {
+    track: media_container.mp4.Track,
+    number: u32,
+    decode_start: u64,
+    decode_end: u64,
+    start: u64,
+    end: u64,
+    octets: u64,
+    first: media_container.mp4.Sample
+}
+
+pub type Rendition {
+    id: u32,
+    track: media_container.mp4.Track,
+    codec: String,
+    segments: List[Segment]
+}
+
+pub fn write_init(mut out: Bytes, track: media_container.mp4.Track, entry: Bytes, encryption: Encryption) -> Result[(), Error] {
+    match encryption {
+        Clear => container(media_container.mp4.write_init(mut out, track, entry)),
+        _ => Error(UnsupportedEncryption),
+    }
+}
+
+fn container[T](take outcome: Result[T, media_container.mp4.Error]) -> Result[T, Error] {
+    match take outcome {
+        Ok(take value) => Ok(take value),
+        Error(problem) => Error(Container(problem)),
+    }
+}
+
+fn independent(track: media_container.mp4.Track, sample: media_container.mp4.Sample) -> bool {
+    match track.media {
+        Audio => true,
+        Video(_, _) => sample.flags & 0x00010000 == 0 && (sample.flags >> 24) & 3 != 1,
+    }
+}
+
+fn add_ticks(a: u64, b: u64) -> Result[u64, Error] {
+    match int.checked_add(a, b) {
+        Some(value) => Ok(value),
+        None => Error(InvalidSegment),
+    }
+}
+
+fn presentation_time(decode: u64, offset: i32) -> Result[u64, Error] {
+    let wide: i64 = int.widen(offset)
+    if wide < 0 {
+        let magnitude: u64 = int.narrow(-wide)
+        if decode < magnitude {
+            return Error(InvalidSegment)
+        }
+        Ok(decode - magnitude)
+    } else {
+        add_ticks(decode, int.narrow(wide))
+    }
+}
+
+// The caller supplies one closed GOP (or an audio-only run) and the exact
+// length of its payload. Write the returned prefix followed by that payload.
+pub fn write_segment(mut out: Bytes, track: media_container.mp4.Track, number: u32, decode_start: u64, samples: List[media_container.mp4.Sample], payload_bytes: u64, limit: SegmentLimit) -> Result[Segment, Error] {
+    let count = list.len(samples)
+    if count == 0 || number == 0 || track.timescale == 0 {
+        return Error(InvalidSegment)
+    }
+    if count > limit.samples || payload_bytes > limit.payload_bytes {
+        return Error(BudgetExceeded)
+    }
+    let first = samples[0]
+    if !independent(track, first) {
+        return Error(InvalidSegment)
+    }
+    let start = presentation_time(decode_start, first.composition_offset)?
+    let mut end = start
+    let mut decode = decode_start
+    let mut octets = 0u64
+    for sample in samples {
+        let duration: u64 = int.widen(sample.duration)
+        let size: u64 = int.widen(sample.size)
+        if duration == 0 || size == 0 || size > payload_bytes - octets {
+            return Error(InvalidSegment)
+        }
+        octets += size
+        let when = presentation_time(decode, sample.composition_offset)?
+        if when < start {
+            return Error(InvalidSegment)
+        }
+        let stop = add_ticks(when, duration)?
+        if stop > end {
+            end = stop
+        }
+        decode = add_ticks(decode, duration)?
+    }
+    if octets != payload_bytes || end - start > 0xffffffff {
+        return Error(InvalidSegment)
+    }
+    container(media_container.mp4.write_fragment(mut out, track.id, number, decode_start, samples))?
+    let framed = octets + list.len(out)
+    Ok(Segment(track: track, number: number, decode_start: decode_start, decode_end: decode, start: start, end: end, octets: framed, first: first))
+}
+
+pub fn iframe_payload_bytes(segment: Segment) -> u64 {
+    int.widen(segment.first.size)
+}
+
+// Use the same media payload prefix for the trick-play image. Preserve its
+// composition offset and extend its presentation through the next GOP.
+pub fn write_iframe(mut out: Bytes, segment: Segment) -> Result[(), Error] {
+    if let Audio = segment.track.media {
+        return Error(InvalidSegment)
+    }
+    let mut first = segment.first
+    first.duration = int.narrow(segment.end - segment.start)
+    let mut samples: List[media_container.mp4.Sample] = list.with_capacity(1)
+    list.push(mut samples, first)
+    container(media_container.mp4.write_fragment(mut out, segment.track.id, segment.number, segment.decode_start, samples))
+}
+
+fn codec_token(codec: String) -> bool {
+    let octets = string.as_bytes(codec)
+    if list.len(octets) == 0 {
+        return false
+    }
+    for c in octets {
+        if !(c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'.' || c == b'-') {
+            return false
+        }
+    }
+    true
+}
+
+fn video(r: Rendition) -> bool {
+    match r.track.media {
+        Audio => false,
+        Video(_, _) => true,
+    }
+}
+
+fn same_media(a: media_container.mp4.Media, b: media_container.mp4.Media) -> bool {
+    match (a, b) {
+        (Audio, Audio) => true,
+        (Video(w, h), Video(other_w, other_h)) => w == other_w && h == other_h,
+        _ => false,
+    }
+}
+
+fn validate(r: Rendition) -> Result[(), Error] {
+    if r.id == 0 || r.track.id == 0 || r.track.timescale == 0 || list.len(r.segments) == 0 || !codec_token(r.codec) {
+        return Error(InvalidLadder)
+    }
+    if let Video(w, h) = r.track.media {
+        if w == 0 || h == 0 {
+            return Error(InvalidLadder)
+        }
+    }
+    let first = r.segments[0]
+    let mut number: u64 = int.widen(first.number)
+    let mut next = first.start
+    let mut decode = first.decode_start
+    for s in r.segments {
+        let n: u64 = int.widen(s.number)
+        if s.track.id != r.track.id || s.track.timescale != r.track.timescale || !same_media(s.track.media, r.track.media) || s.start != next || s.decode_start != decode || n != number {
+            return Error(InvalidLadder)
+        }
+        next = s.end
+        decode = s.decode_end
+        number += 1
+    }
+    Ok(())
+}
+
+fn time_eq(a: u64, scale_a: u64, b: u64, scale_b: u64) -> bool {
+    a / scale_a == b / scale_b && (a % scale_a) * scale_b == (b % scale_b) * scale_a
+}
+
+fn aligned(a: Rendition, b: Rendition) -> bool {
+    if list.len(a.segments) != list.len(b.segments) {
+        return false
+    }
+    let scale_a: u64 = int.widen(a.track.timescale)
+    let scale_b: u64 = int.widen(b.track.timescale)
+    let start_a = a.segments[0].start
+    let start_b = b.segments[0].start
+    for i in 0u64 .. list.len(a.segments) {
+        if !time_eq(a.segments[i].end - start_a, scale_a, b.segments[i].end - start_b, scale_b) {
+            return false
+        }
+    }
+    true
+}
+
+fn validate_ladder(ladder: List[Rendition]) -> Result[(), Error] {
+    if list.len(ladder) == 0 {
+        return Error(InvalidLadder)
+    }
+    let mut previous = 0u32
+    let mut reference: Option[u64] = None
+    for i in 0u64 .. list.len(ladder) {
+        let r = ladder[i]
+        validate(r)?
+        if r.id <= previous {
+            return Error(InvalidLadder)
+        }
+        previous = r.id
+        if video(r) {
+            if let Some(index) = reference {
+                if !aligned(ladder[index], r) {
+                    return Error(InvalidLadder)
+                }
+            } else {
+                reference = Some(i)
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ceil_div(value: u64, scale: u64) -> u64 {
+    value / scale + if value % scale == 0 {
+        0u64
+    } else {
+        1u64
+    }
+}
+
+fn push_seconds(mut out: String, ticks: u64, scale: u64) {
+    let fraction = ceil_div((ticks % scale) * 1000000000, scale)
+    string.push_u64(mut out, ticks / scale + fraction / 1000000000)
+    string.push_char(mut out, '.')
+    string.push_uint(mut out, fraction % 1000000000, 10, 9, '0')
+}
+
+fn push_directory(mut out: String, id: u32) {
+    string.push(mut out, "r")
+    string.push_u64(mut out, int.widen(id))
+    string.push_char(mut out, '/')
+}
+
+fn iframe_header_bytes(s: Segment) -> u64 {
+    // One trun row and the mdat size used by the MP4 muxer.
+    if iframe_payload_bytes(s) > 0xffffffff - 8 {
+        120
+    } else {
+        112
+    }
+}
+
+fn segment_size(s: Segment, iframe: bool) -> u64 {
+    if iframe {
+        iframe_payload_bytes(s) + iframe_header_bytes(s)
+    } else {
+        s.octets
+    }
+}
+
+fn bit_rate(size: u64, duration: u64, scale: u64) -> Result[u64, Error] {
+    let Some(bits) = int.checked_mul(size, 8u64) else {
+        return Error(BudgetExceeded)
+    }
+    let Some(whole) = int.checked_mul(bits / duration, scale) else {
+        return Error(BudgetExceeded)
+    }
+    let Some(remainder) = int.checked_mul(bits % duration, scale) else {
+        return Error(BudgetExceeded)
+    }
+    match int.checked_add(whole, ceil_div(remainder, duration)) {
+        Some(rate) => Ok(rate),
+        None => Error(BudgetExceeded),
+    }
+}

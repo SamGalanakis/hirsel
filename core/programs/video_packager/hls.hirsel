@@ -1,0 +1,204 @@
+pub fn hls_master(ladder: List[Rendition], limit: ManifestLimit) -> Result[String, Error] {
+    match (bound bytes limit.octets {
+        bound steps limit.steps {
+            master(ladder)
+        }
+    }) {
+        Ok(Ok(take outcome)) => take outcome,
+        _ => Error(BudgetExceeded),
+    }
+}
+
+pub fn hls_media(r: Rendition, iframe: bool, limit: ManifestLimit) -> Result[String, Error] {
+    match (bound bytes limit.octets {
+        bound steps limit.steps {
+            media(r, iframe)
+        }
+    }) {
+        Ok(Ok(take outcome)) => take outcome,
+        _ => Error(BudgetExceeded),
+    }
+}
+
+fn push_resolution(mut out: String, w: u16, h: u16) {
+    string.push(mut out, ",RESOLUTION=")
+    string.push_u64(mut out, int.widen(w))
+    string.push_char(mut out, 'x')
+    string.push_u64(mut out, int.widen(h))
+}
+
+fn master(ladder: List[Rendition]) -> Result[String, Error] {
+    validate_ladder(ladder)?
+    let mut has_video = false
+    let mut audio_rate = 0u64
+    let mut audio_codecs = string.new()
+    let mut out = string.from("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n")
+    for r in ladder {
+        if video(r) {
+            has_video = true
+        } else {
+            let rate = hls_bandwidth(r, false)?
+            if rate > audio_rate {
+                audio_rate = rate
+            }
+            if string.byte_len(audio_codecs) == 0 {
+                string.push(mut audio_codecs, r.codec)
+            } else if audio_codecs != r.codec {
+                return Error(InvalidLadder)
+            }
+        }
+    }
+    if has_video {
+        let mut default_audio = true
+        for r in ladder {
+            if !video(r) {
+                string.push(mut out, "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",AUTOSELECT=")
+                if default_audio {
+                    string.push(mut out, "YES,DEFAULT=YES")
+                    default_audio = false
+                } else {
+                    string.push(mut out, "NO,DEFAULT=NO")
+                }
+                string.push(mut out, ",NAME=\"Audio ")
+                string.push_u64(mut out, int.widen(r.id))
+                string.push(mut out, "\",URI=\"")
+                push_directory(mut out, r.id)
+                string.push(mut out, "media.m3u8\"\n")
+            }
+        }
+    }
+    for r in ladder {
+        if video(r) || !has_video {
+            let rate = hls_bandwidth(r, false)?
+            let Some(peak) = int.checked_add(rate, if has_video {
+                audio_rate
+            } else {
+                0u64
+            }) else {
+                return Error(BudgetExceeded)
+            }
+            string.push(mut out, "#EXT-X-STREAM-INF:BANDWIDTH=")
+            string.push_u64(mut out, peak)
+            string.push(mut out, ",CODECS=\"")
+            string.push(mut out, r.codec)
+            if has_video && audio_rate != 0 {
+                string.push_char(mut out, ',')
+                string.push(mut out, audio_codecs)
+            }
+            string.push_char(mut out, '"')
+            if let Video(w, h) = r.track.media {
+                push_resolution(mut out, w, h)
+            }
+            if has_video && audio_rate != 0 {
+                string.push(mut out, ",AUDIO=\"audio\"")
+            }
+            string.push_char(mut out, '\n')
+            push_directory(mut out, r.id)
+            string.push(mut out, "media.m3u8\n")
+            if let Video(w, h) = r.track.media {
+                string.push(mut out, "#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=")
+                string.push_u64(mut out, hls_bandwidth(r, true)?)
+                string.push(mut out, ",CODECS=\"")
+                string.push(mut out, r.codec)
+                string.push_char(mut out, '"')
+                push_resolution(mut out, w, h)
+                string.push(mut out, ",URI=\"")
+                push_directory(mut out, r.id)
+                string.push(mut out, "iframe.m3u8\"\n")
+            }
+        }
+    }
+    Ok(take out)
+}
+
+// RFC 8216bis 4.1: examine contiguous groups spanning half the target
+// through 1.5 times the target plus half a second.
+fn hls_bandwidth(r: Rendition, iframe: bool) -> Result[u64, Error] {
+    let scale: u64 = int.widen(r.track.timescale)
+    let target = target_duration(r)
+    let shortest = ceil_div(target * scale, 2)
+    let longest = (3 * target + 1) * scale / 2
+    let mut peak = 0u64
+    for i in 0u64 .. list.len(r.segments) {
+        let mut size = 0u64
+        let start = r.segments[i].start
+        for j in i .. list.len(r.segments) {
+            let segment = r.segments[j]
+            let duration = segment.end - start
+            if duration > longest {
+                break
+            }
+            let Some(total) = int.checked_add(size, segment_size(segment, iframe)) else {
+                return Error(BudgetExceeded)
+            }
+            size = total
+            if duration >= shortest {
+                let rate = bit_rate(size, duration, scale)?
+                if rate > peak {
+                    peak = rate
+                }
+            }
+        }
+    }
+    if peak == 0 {
+        // A playlist shorter than half of a one-second target has no
+        // qualifying window. Use the rate of the whole presentation.
+        let mut size = 0u64
+        for segment in r.segments {
+            let Some(total) = int.checked_add(size, segment_size(segment, iframe)) else {
+                return Error(BudgetExceeded)
+            }
+            size = total
+        }
+        return bit_rate(size, r.segments[list.len(r.segments) - 1].end - r.segments[0].start, scale)
+    }
+    Ok(peak)
+}
+
+fn target_duration(r: Rendition) -> u64 {
+    let mut longest = 0u64
+    for s in r.segments {
+        if s.end - s.start > longest {
+            longest = s.end - s.start
+        }
+    }
+    let scale: u64 = int.widen(r.track.timescale)
+    let rounded = (longest + scale / 2) / scale
+    if rounded == 0 {
+        1
+    } else {
+        rounded
+    }
+}
+
+fn push_segment(mut out: String, s: Segment, iframe: bool) {
+    string.push(mut out, "#EXTINF:")
+    push_seconds(mut out, s.end - s.start, int.widen(s.track.timescale))
+    string.push(mut out, ",\n")
+    if iframe {
+        string.push(mut out, "iframe-")
+    }
+    string.push_u64(mut out, int.widen(s.number))
+    string.push(mut out, ".m4s\n")
+}
+
+fn media(r: Rendition, iframe: bool) -> Result[String, Error] {
+    validate(r)?
+    if iframe && !video(r) {
+        return Error(InvalidLadder)
+    }
+    let mut out = string.from("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n")
+    if iframe {
+        string.push(mut out, "#EXT-X-I-FRAMES-ONLY\n")
+    }
+    string.push(mut out, "#EXT-X-TARGETDURATION:")
+    string.push_u64(mut out, target_duration(r))
+    string.push(mut out, "\n#EXT-X-MEDIA-SEQUENCE:")
+    string.push_u64(mut out, int.widen(r.segments[0].number))
+    string.push(mut out, "\n#EXT-X-MAP:URI=\"init.mp4\"\n")
+    for s in r.segments {
+        push_segment(mut out, s, iframe)
+    }
+    string.push(mut out, "#EXT-X-ENDLIST\n")
+    Ok(take out)
+}

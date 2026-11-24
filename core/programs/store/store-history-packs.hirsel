@@ -426,7 +426,7 @@ fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator,
     let ListedPages(packs: take inventory, retired: take retired, live_graph: take graph, ..) = take lists
     let mut ordered = take graph
     history_graph_order(mut ordered)
-    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, graph: take ordered))
+    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, graph: take ordered, allow_tiered: allow_tiered))
 }
 
 fn history_paged_capture(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {
@@ -449,7 +449,7 @@ fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: 
     source.locator = history_locator(mut source.client, head, mark, checkpoint_data, source.deadline)?
     let name = history_key("m-", mark.manifest)
     let validated = history_validate_manifest(mut source.client, source.locator, source.deadline, head.store, name, take manifest)?
-    let loaded = rebuild_page_store(take validated)?
+    let loaded = rebuild_page_store(take validated, Some(view source.locator))?
     let initial = disk_allocation(scoped fn() -> Result[State, Error] {
         capacity(manifest_state(loaded.manifest, loaded.holders))
     })?

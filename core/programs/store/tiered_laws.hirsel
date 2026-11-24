@@ -795,7 +795,7 @@ fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
     // There is no p-8 to read. The root and inventory must come only from
     // the Memory map and list pages.
     let verified = validate_directory_graph(fixtures, owner, clone(manifest), true)?
-    let loaded = rebuild_page_store(take verified)?
+    let loaded = rebuild_page_store(take verified, None)?
     let Some((ColdPage(ptr), row)) = std.page.collection_slot(loaded.holders[0u64].collections.root, prefix(9)?) else {
         fail("L68: recovery forced or discarded the Cold root")
     }
@@ -917,12 +917,25 @@ fn l68_bucket_restore(tasks: Tasks, model: BucketSim) -> Result[(), Error] waits
     // The locator names the Tiered pack, but the test never uploads it.
     map.insert(mut source.locator.rows, 8u64, cold)
     let verified = validate_bucket_graph(mut source.client, source.locator, source.deadline, owner, "MANIFEST", clone(manifest), true)?
-    let loaded = rebuild_page_store(take verified)?
+    let loaded = rebuild_page_store(take verified, Some(view source.locator))?
     let Some((ColdPage(ptr), _)) = std.page.collection_slot(loaded.holders[0].collections.root, prefix(9)?) else {
         fail("L68: Bucket recovery did not preserve the Cold slot")
     }
     if ptr.pack != 8 || ptr.offset != 72 || ptr.stamp != 40 {
         fail("L68: Bucket recovery changed the Cold locator")
+    }
+    let Some(paging) = view loaded.holders[0].collections.paging else {
+        fail("L68: a recovered Tiered Snapshot needs its pack inventory")
+    }
+    let Some(pack) = std.omap.get(paging.packs, 8u64) else {
+        fail("L68: the recovered Reader cannot find the Tiered pack")
+    }
+    let Some(object) = pack.object else {
+        fail("L68: a Bucket pack needs its immutable object name")
+    }
+    if object.seq != 8 || object.epoch != 1 || object.len != 220 || object.digest != 79 ||
+        pack.inventory.index != 168 || paging.generation != 1 {
+        fail("L68: reopening changed the immutable name or pack extent")
     }
     let mut truncated = cold
     truncated.len = 219

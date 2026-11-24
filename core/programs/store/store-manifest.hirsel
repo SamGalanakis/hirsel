@@ -702,7 +702,8 @@ type ValidatedPageManifest {
     manifest: PageManifest,
     inventory: Map[u64, PagePack],
     retired: Map[u64, ()],
-    graph: PageGraph
+    graph: PageGraph,
+    allow_tiered: bool
 }
 
 fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
@@ -748,7 +749,7 @@ fn validate_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, al
         Ok(take candidate)
     })?
     let ListedPages(packs: take inventory, retired: take retired, ..) = take lists
-    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, graph: take resolved))
+    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, graph: take resolved, allow_tiered: allow_tiered))
 }
 
 fn cleanup_page_manifest(d: Dir, validated: ValidatedPageManifest) -> Result[(), Error] waits {

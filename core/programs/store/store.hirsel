@@ -4661,7 +4661,7 @@ type DiskLoaded: send {
 }
 
 fn disk_loaded(id: StoreId, take validated: ValidatedPageManifest) -> Result[DiskLoaded, Error] {
-    let LoadedPageStore(manifest: take manifest, holders: take all, lists: take lists, locations: take locations) = rebuild_page_store(take validated)?
+    let LoadedPageStore(manifest: take manifest, holders: take all, lists: take lists, locations: take locations) = rebuild_page_store(take validated, None)?
     Ok(DiskLoaded(store: id, manifest: take manifest, all: take all, lists: take lists, locations: take locations))
 }
 

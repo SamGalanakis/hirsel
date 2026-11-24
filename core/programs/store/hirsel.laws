@@ -1,7 +1,7 @@
 hirsel.laws 1
 store@1/store/bucket_test_fence src=1736d31f6cd08fcc sig=87eda8f06616e898 run=6677ce756ba8a915 bug=- oracle=- rows=-
 store@1/store/bucket_test_l4_cuts src=ef4b98dc729ba561 sig=8fd919c9cc6ead85 run=6677ce756ba8a915 bug=- oracle=- rows=-
-store@1/store/bucket_test_m2_admitted_claim src=3011602162b2cad3 sig=c81f07c8d344c7b4 run=bc0855e1b21bfb40 bug=- oracle=- rows=-
+store@1/store/bucket_test_m2_admitted_claim src=3011602162b2cad3 sig=6409f64f8d749501 run=bc0855e1b21bfb40 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_binding src=981621cbbf0e7d3e sig=290021a4be5d413e run=dbf6722727633166 bug=- oracle=- rows=-
 store@1/store/bucket_test_m2_branch_position src=7f3f61f3c673726d sig=5a03a41d92844d8f run=8190fe24427e0a0f bug=- oracle=- rows=-
 store@1/store/bucket_test_m2_checkpoint_advance src=44fd9766126e4717 sig=d31e4d8f6d5eac9b run=dbf6722727633166 bug=- oracle=- rows=-
@@ -18,7 +18,7 @@ store@1/store/bucket_test_m2_multipart_restart src=aee0d40e744ffe4a sig=c892f5e7
 store@1/store/bucket_test_m2_object_journal src=be4113506950aa6a sig=c142369877e2ce5b run=dbf6722727633166 bug=- oracle=- rows=-
 store@1/store/bucket_test_m2_object_writer src=9463aebfa6d3685e sig=409a3058e23a34ab run=dbf6722727633166 bug=- oracle=- rows=-
 store@1/store/bucket_test_m2_pack_emission src=f16fd2c4ef84fcb6 sig=7bca398da5c268c4 run=dbf6722727633166 bug=- oracle=- rows=pending
-store@1/store/bucket_test_m2_paged_recovery src=0154420b9d566184 sig=454f01271e10d69f run=bc0855e1b21bfb40 bug=- oracle=- rows=pending
+store@1/store/bucket_test_m2_paged_recovery src=0154420b9d566184 sig=c7d4a18689f268f8 run=bc0855e1b21bfb40 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_prepared_install src=1de8dd724d2bc670 sig=0cde4c08300bbf0e run=ea720f3846592392 bug=- oracle=- rows=-
 store@1/store/bucket_test_m2_reclaim_candidates src=ac9bff8d1925b3f3 sig=c5e45d18f7990c03 run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 store@1/store/bucket_test_m2_reclaim_execution src=483089f23ef11643 sig=5150fb796edbd100 run=dbf6722727633166 bug=- oracle=- rows=-
@@ -48,8 +48,8 @@ store@1/store/disk_test_migrate src=07a4e779db302b67 sig=9fd05a35acfebe35 run=ea
 store@1/store/disk_test_opening src=be16cf1a5e2d3b3b sig=6efb79337c4f8bc7 run=ea720f3846592392 bug=- oracle=- rows=-
 store@1/store/disk_test_page_emission src=2c08486a2b9549d7 sig=ebabab268b73c28d run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 store@1/store/disk_test_page_location_closure src=6a4a89744a851879 sig=2f0f18882e69eeff run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
-store@1/store/disk_test_paged_generation src=26a17344e7b7b044 sig=c9530afc93c83cf1 run=c44758d978325bd3 bug=- oracle=- rows=-
-store@1/store/disk_test_paged_inventory src=a2c7b493642837fd sig=461d34e3239a3bb5 run=c44758d978325bd3 bug=- oracle=- rows=-
+store@1/store/disk_test_paged_generation src=da03a7cb0e330e4d sig=d4b6564c3255e88e run=c44758d978325bd3 bug=- oracle=- rows=pending
+store@1/store/disk_test_paged_inventory src=a2c7b493642837fd sig=ab23efeef53e15f2 run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/disk_test_paged_manifest src=c2f70d2fd41df224 sig=1090cad744bc6903 run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 store@1/store/disk_test_publish_refusal src=1cc5c438be3fc68f sig=51167d8d5d9c85f9 run=ea720f3846592392 bug=- oracle=- rows=-
 store@1/store/disk_test_read_only_snapshot src=7d22b65fe4206e16 sig=b9753cecad4430ae run=ea720f3846592392 bug=- oracle=- rows=-
@@ -158,10 +158,10 @@ store@1/store/test_l65_tiered_edges src=5beff9f45cbebfa1 sig=da554f692516f601 ru
 store@1/store/test_l68_cut_keeps_cold_inventory_out_of_memory_graph src=be95b10018253252 sig=f4e7633f4a3957cc run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 store@1/store/test_l68_fold_reuses_cold_edges src=b2fc93dbefcc14b3 sig=72a99e67b480228c run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 store@1/store/test_l68_indexed_tiered_pack src=7f6a1887ad51146b sig=92a48ec3c8b776e7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
-store@1/store/test_l68_installed_tiered_root_reopens src=d8cfdf1867620bdd sig=a3ee912778044972 run=c44758d978325bd3 bug=- oracle=- rows=pending
-store@1/store/test_l68_lazy_bucket_inventory src=c1a42401c9414625 sig=6ed182798ab8cc0e run=c9049a952ba23a49 bug=- oracle=- rows=-
+store@1/store/test_l68_installed_tiered_root_reopens src=20db20fec2c5a73d sig=34cb52a25e759580 run=c44758d978325bd3 bug=- oracle=- rows=pending
+store@1/store/test_l68_lazy_bucket_inventory src=94bc93930480a8d7 sig=dd3ae3757c8306da run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l68_lazy_collection_root src=4436f663330a803c sig=1d4afe07e4b2631a run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
-store@1/store/test_l68_lazy_directory_inventory src=c92895463e9cd619 sig=76ce11989a9825b2 run=c44758d978325bd3 bug=- oracle=- rows=-
+store@1/store/test_l68_lazy_directory_inventory src=ea47ef1349f76992 sig=cc99391c4796e310 run=c44758d978325bd3 bug=- oracle=- rows=pending
 store@1/store/test_l68_replay_branch_accounts src=cb900cf2d08a0420 sig=53ba03767efbc339 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l68_replay_overlay_table src=4f69d7962c491040 sig=a8f12aac69de4b8b run=c2c0c6612d4cbb79 bug=- oracle=- rows=-
 store@1/store/test_l68_resident_images_ignore_cold_slots src=b2cbb1850a7afc5f sig=2d03142c23d38a42 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

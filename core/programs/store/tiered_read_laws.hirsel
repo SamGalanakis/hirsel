@@ -732,7 +732,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
     let (_, take opened_manifest) = disk_read_page_manifest("MANIFEST", manifest_wire)?
     // p-8 is absent: the metadata walk must read only the map and pack list.
     let validated = validate_directory_graph(fixtures, owner, take opened_manifest, true)?
-    let loaded = rebuild_page_store(take validated)?
+    let loaded = rebuild_page_store(take validated, None)?
     let Some((ColdPage(found), descriptor)) = std.page.collection_slot(loaded.holders[0u64].collections.root, id) else {
         fail("L68: recovery lost the installed Cold slot")
     }

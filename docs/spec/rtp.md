@@ -604,8 +604,8 @@ pub fn clear[P](mut h: History[P]) -> u64
 
 // module rtx
 pub type Rtx = Repair(u16, u64) | Probe
-pub fn unwrap(h: Header, pkt: Bytes, payload_at: u64, payload_len: u64) -> Result[Rtx, header.Error]
-pub fn write(f: Fields, exts: View[ExtWriter], osn: u16, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, WriteError]
+pub fn unwrap(h: Header, pkt: Bytes) -> Result[Rtx, header.Error]
+pub fn write(f: Fields, exts: View[ExtWriter], osn: u16, pre: Bytes, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, WriteError]
 pub fn write_probe(f: Fields, exts: View[ExtWriter], pad: u8, mut out: Bytes) -> Result[u64, WriteError]
 ```
 
@@ -663,9 +663,10 @@ sequence numbers ([RFC 4588 §4](https://www.rfc-editor.org/rfc/rfc4588#section-
 payload is the original sequence number (OSN) in 2 bytes, big-endian, followed by the
 original egress payload without its padding. The timestamp and marker are the original's.
 
-The OSN is **payload**, so SRTP must encrypt it. `rtx.write(f, exts, osn, payload, from, len,
-mut out)` builds the RTX header, then appends the OSN and `payload[from..from + len]` behind
-it into a packet pre-sized in `out`, and answers the header's length. The caller then
+The OSN is **payload**, so SRTP must encrypt it. `rtx.write(f, exts, osn, pre, payload, from,
+len, mut out)` builds the RTX header, then appends the OSN, `pre` (the leg's rewritten codec
+descriptor, or nothing) and `payload[from..from + len]` (the shared remainder) behind it into
+a packet pre-sized in `out`, and answers the header's length. The caller then
 protects the packet in place from the end of the RTP header with TLS-8's
 [`seal`](tls.md#tls-8-packet-ciphers-and-key-agreement): the packet's start as `aad_at` and
 `start + header length` as `at`. So the OSN and any rewritten codec descriptor are encrypted
@@ -675,7 +676,9 @@ receiver can open. (`seal_into` cannot be used here: it treats everything alread
 destination as authenticated data, so an OSN written into the destination would go out in
 the clear.)
 
-`rtx.unwrap` reads a received RTX packet after `header.payload` removed its padding:
+`rtx.unwrap(h, pkt)` reads a received, decrypted RTX packet. It takes the payload range
+from `header.payload`, so it is bound to `pkt` like every RTP-1 accessor (`Buffer`), and
+reads nothing outside that range:
 
 - an empty payload is a `Probe`, the padding-only packet that senders use to probe
   bandwidth. It carries no OSN and repairs nothing;
@@ -880,10 +883,10 @@ holds. `target()` is `min(A, L)`.
 **Probing.** A sender that sends less than it could cannot see more capacity: the increase
 is capped at 1.5 times the acked rate. A forwarder that wants a higher layer must raise the
 estimate first. `probe(want, now)` answers a cluster to send when `want > target()` and no
-cluster is outstanding: `Cluster(id, rate, packets, 15 ms)` with `rate = min(2·target(),
-want)`, `packets = max(5, ceil(rate · 15 ms / (8 · size)) + 1)` with `size` the pacer's
-probe size for that rate ([RTP-10](#rtp-10-pacer)), so first to last spans at least 15 ms,
-and `id` counting up from 0. The caller hands it to the pacer
+cluster is outstanding: `Cluster(id, rate, 5, 15 ms)` with `rate = min(2·target(), want)`
+and `id` counting up from 0. The pacer sends at least 5 probes and keeps going until one is
+sent at least 15 ms after the first ([RTP-10](#rtp-10-pacer)), so the cluster spans 15 ms
+whatever the probe size. The caller hands it to the pacer
 ([RTP-10](#rtp-10-pacer)), which answers `Probe(id, pad)` per packet. The caller sends each
 as a padding-only RTX packet ([RTP-7](#rtp-7-retransmission-history-and-rtx)), assigns that
 datagram its own transport number, and tells the estimator with `probe_sent(id, index)`. The
@@ -899,8 +902,8 @@ the rates are measured on the **distinct received members** only, in send order,
 - receive rate `(bytes − first size) · 8 / (last arrival − first arrival)`;
 - `bytes` is the sum of the received members' sizes. A member reported twice counts once.
 
-Either span below 15 ms, or of zero, gives no result. A result `min(send, receive)` above
-`A` sets `A` to it. The estimate a probe raises is the delay estimate `A`; the public
+A span of zero (fewer than two received members, or all at one time) gives no result. A
+result `min(send, receive)` above `A` sets `A` to it. The estimate a probe raises is the delay estimate `A`; the public
 `target()` is still `min(A, L)`, so a binding loss limit keeps the target at `L`.
 
 Law: on a link whose queue grows, the detector answers `Overuse` and the target falls; on an
@@ -941,7 +944,8 @@ keyframe does not leave as one burst that overflows a bottleneck queue (`str0m`
     queued. The cluster's rate stands in for the pacing rate while it runs. The probe size
     is `max(200, rate · 1 ms / 8)` bytes, capped at `header + 255`, where `header` is the
     RTX probe header length the caller gave; `pad = size − header`, 1 to 255. The cluster
-    ends when it has answered `packets` probes and `min_ns` has passed since its first;
+    ends with the first probe that is at least its `packets`-th and is answered at least
+    `min_ns` after its first;
   - `Pad(pad)` when the queues are empty, a padding rate is set, and the padding debt
     allows it, for the caller to send as one padding-only RTX packet of `header + pad`
     bytes, `pad` 1 to 255;
@@ -1156,9 +1160,11 @@ whatever the source's width was.
 - `lookup(key)` answers an emitted picture's output. A dependent enhancement layer frame
   carries its base picture's mapped TL0PICIDX, from `lookup` of the base's input TL0, so TL0
   advances once per base picture.
-- `restart(first)` at a source switch sets the next output to the last output plus 1 (or
-  `first` when nothing was emitted yet), and for `Translate` sets the offset from the new
-  source's first value.
+- `restart(first)` at a source switch clears the ring, because the old source's keys mean
+  nothing for the new one, sets the next output to the last output plus 1 (or `first` when
+  nothing was emitted yet), and for `Translate` sets the offset from the new source's first
+  value. The egress history keeps each sent packet's own codec rewrite (RTP-7), so clearing
+  the ring loses nothing a repair needs.
 
 Law: the outgoing indices of one stream increase by exactly one per forwarded packet,
 except across real upstream losses. A dropped or padding-only packet of the current
@@ -1263,7 +1269,8 @@ written here and repeated in the law's comment.
   is a lone nonzero id (`Overrun`); a one-byte block where the `Mid` element is followed by an
   element that overruns (`find` answers `Overrun`, not the match); an RR with `RC = 1` read at
   `block` 1 (`Index`); `is_rtcp` on 0 to 3 bytes (false); a 3-byte RTCP datagram (`Length`
-  before `Version`). After each refusal the cursor and the state passed in are unchanged.
+  before `Version`); `rtx.unwrap` of `hb1`'s `Header` with a 47-byte buffer (`Buffer`). The
+  RTP-1 and RTP-3 cases land in S1, the RTP-4 cases in S2, and the RTX case in S4. After each refusal the cursor and the state passed in are unchanged.
   *Oracle:* RFC 3550 §§5.1, 6.4 and RFC 8285 §§4.2–4.3, by hand.
 - **`extension_forms` (RTP-3).** A hand-built two-byte block (`0x1000`): a padding byte, an
   element of id 7 with length 0, an element of id 20 with a 17-byte RID, then an element whose
@@ -1330,7 +1337,9 @@ written here and repeated in the law's comment.
   worked in the law's comment. *Oracle:* RFC 3550 A.3 and A.8. A second interval: `i` 10 to 19
   all arrive, and the missing `i = 3` arrives late among them. Then `expected_interval = 10`,
   received in the interval 11, `lost_interval = −1`, so the fraction is 0; cumulative
-  `lost = 20 − 19 = 1`; `highest = 65,549 = 0x0001000D` (cycle 1, sequence 13). An RTX
+  `lost = 20 − 19 = 1`; `highest = 65,549 = 0x0001000D` (cycle 1, sequence 13). Then index
+  70,549 (5,000 above the highest) is `Held`, and 70,550 is `Restarted`: the next report has
+  `expected = 2`, `lost = 0` and `highest = 70,550`. An RTX
   repair of `i = 7` counts in the RTX SSRC's `Received`, not here. *Oracle:* RFC 3550 A.3 and
   §6.4.1, by hand.
 - **`keyframe_coalesce` (RTP-6).** Interval 200 ms, `fir` set. `want(Switch)` at 0, 10 and
@@ -1366,8 +1375,11 @@ written here and repeated in the law's comment.
   (RFC 3711 §4 AES-CM with HMAC-SHA1-80; RFC 7714 AES-GCM with the 12-byte header as AAD),
   written for the law and run once, its expected wire bytes pinned with the script beside
   the law. The independent opener recovers OSN 0x1234 and `AA BB CC`, and the wire bytes at
-  offsets 12 to 16 differ from `12 34 AA BB CC`. The same packet with the OSN put in the AAD
-  fails the independent opener.
+  offsets 12 to 16 differ from `12 34 AA BB CC`. Negative control, the same packet sealed
+  with the OSN left in the authenticated header (protection from offset 14): under each GCM
+  profile the independent opener's tag check fails; under AES-CM the tag passes, because the
+  HMAC covers the same bytes, but the opener's decryption from offset 12 yields an OSN other
+  than 0x1234.
 - **`twcc_report_bytes` (RTP-8).** Arrivals of transport numbers 10, 11, 12 and 13 at 0, 12,
   23 and 43 ms (the arrivals of str0m's `twcc.rs:1529-1549`). `write` with sender 1 and media
   2 gives the FCI `00 0A 00 04 00 00 00 00 | BC 00 | 00 30 2C 50 | 00 00` and an RTCP length
@@ -1395,7 +1407,8 @@ written here and repeated in the law's comment.
   group under the strict `> 5 ms` rule), so every delay change is 0: every answer is
   `Normal`. The threshold stays 12.5 at the first update (`Δt = 0`), then
   `γ = 12.5 − 0.039 · 12.5 · 10 = 7.625`, then `7.625 · 0.61 = 4.65125`, clamped to 6.0 on
-  the third update. *Oracle:* RTP-9's recurrence, by hand.
+  the third update. *Oracle:* RTP-9's recurrence, by hand; the first update's `Δt = 0` is
+  str0m's (`src/bwe/delay/trendline.rs:234-260`).
 - **`trendline_overuse` (RTP-9).** The input sequence of str0m's `test_overuse`
   (`src/bwe/delay/trendline.rs:323-388`), fed as explicit group deltas, gives the hypotheses
   that test expects after warm-up: `Normal`, `Normal`, `Overuse`. *Oracle:* the peer's test,
@@ -1404,16 +1417,18 @@ written here and repeated in the law's comment.
   `R = 1,000,000` and `t = 1`: `A = 1,080,000` (within the 1.08 rounding of `exp`, which the
   law states to the bit). An `Overuse` with `R = 800,000` gives `A = 680,000`. *Oracle:* RTP-9,
   by hand.
-- **`probe_result` (RTP-9, RTP-10).** Target 1 Mbit/s (`A = L = 1,000,000`), `want`
+- **`probe_result` (RTP-9, RTP-10).** Target 1 Mbit/s (`A = 1,000,000`, `L = 3,000,000`), `want`
   3 Mbit/s: the cluster rate is 2 Mbit/s, the probe size `max(200, 2,000,000 · 0.001 / 8) =
-  250` bytes (a 20-byte header and `pad` 230, representable), and
-  `packets = ceil(2,000,000 · 0.015 / (8 · 250)) + 1 = 16`. The pacer, with empty queues,
+  250` bytes (a 20-byte header and `pad` 230, representable), one every 1 ms, so the cluster
+  ends with its 16th probe, at 15 ms. The pacer, with empty queues,
   answers `Probe` every 1 ms and `Wait` between them, never `Idle`. Feedback reports 13 of the
   16 received (members 5, 9 and 12 missing; 13/16 ≥ 80%), arriving 1.25 ms apart per send
   slot. On the 13 received members, `bytes = 3,250`, the send span 15 ms and the arrival span
   18.75 ms: send rate `(3,250 − 250) · 8 / 0.015 = 1,600,000`, receive rate
-  `(3,250 − 250) · 8 / 0.01875 = 1,280,000`, so `A = 1,280,000`. With `L` held at 1,100,000
-  by a loss limit, `target() = 1,100,000`. With only 12 received (75%), there is no result.
+  `(3,250 − 250) · 8 / 0.01875 = 1,280,000`, so `A = 1,280,000` and `target() = 1,280,000`. A
+  variant with `L = 1,100,000`, a binding loss limit, runs the same cluster and ends with
+  `A = 1,280,000` and `target() = 1,100,000`. With only 12 received (75%), there is no
+  result.
   *Oracle:* RTP-9's rate arithmetic, by hand.
 - **`pacer_spacing` (RTP-10).** Target 400 kbit/s, factor 2.5 (pacing 1 Mbit/s, 125 bytes per
   ms), queue limit 100 ms. *Scenario 1:* three 1,250-byte video packets queued at 0 leave at
@@ -1430,17 +1445,18 @@ written here and repeated in the law's comment.
   `Late(2001, ts)`. A real gap (203 lost, 204 forwarded as 2004) leaves 2003 unsent. *Oracle:*
   TLS-8's sealer rule and RTP-11, by hand.
 - **`simulcast_switch` (RTP-11).** Clock 90,000. *Oracle:* RTP-11's clock rules, by hand.
-  - Source A (sequence base 7,000) is current with offset 81,000: its packet of timestamp
-    90,000 went out as 9,000, outgoing index 500, at arrival `t0`.
+  - Source A (sequence base 7,000) is current with offset 81,000. Its frame of timestamp
+    90,000 is three packets; the first went out as outgoing index 500 with timestamp 9,000.
   - The target moves to B (sequence base 31,000, unrelated). B's packets answer `Drop` until
-    one with `start`, `keyframe` and the target's `switches` bit. Interleaved A packets keep
-    going out as 501, 502, … meanwhile, and B's dropped packets change none of A's offsets.
+    one with `start`, `keyframe` and the target's `switches` bit. A's other two fragments,
+    interleaved with B's dropped packets, go out as 501 and 502 at 9,000, the last at arrival
+    `t0`; B's drops change none of A's offsets.
   - *SR case:* A's SR maps NTP 1000 s to 90,000; B's maps NTP 1000 s to 5,000,000. B's
     keyframe has timestamp 5,000,900, so its capture time is 1000.010 s, which is 90,900 on
     A's timeline, minus A's offset 81,000: 9,900.
   - *No-SR case:* the same keyframe arrives at `t0 + 10 ms`: `9,000 + 900 = 9,900`.
-  - The keyframe is two packets with equal timestamps: both go out as 9,900, at the next two
-    outgoing indices. `switch_index` is the first.
+  - The keyframe is two packets with equal timestamps: both go out as 9,900, as outgoing
+    indices 503 and 504. `switch_index` is 503.
   - B's next frame, at timestamp 5,003,900, goes out as `5,003,900 − 4,991,000 = 12,900` (B's
     offset is `5,000,900 − 9,900`).
   - Then C (timestamp base near the wrap, no SR): its keyframe at timestamp 4,294,967,000
@@ -1461,9 +1477,10 @@ written here and repeated in the law's comment.
   - A: picture 125 (TL0 254, base, in two fragments) → 125 for both fragments, TL0 254;
     picture 126 (an enhancement, filtered) → omitted; 127 (TL0 255) → 126, TL0 255; 0
     (TL0 0) → 127, TL0 0 (TL0 wraps 255 → 0).
-  - A switch to B, whose pictures are 15 bits: keyframe 4000 (TL0 17) → 0 (picture wraps
-    127 → 0), TL0 1; its dependent enhancement 4001 (TL0 17) → 1, with TL0 `lookup(17) = 1`,
-    the base it references is the picture sent as 0.
+  - A switch to B, whose pictures are 15 bits and whose TL0 happens to be 254, a key still
+    in A's ring before `restart`: keyframe 4000 (TL0 254) → 0 (picture wraps 127 → 0), TL0 1,
+    not A's stale 254; its dependent enhancement 4001 (TL0 254) → 1, with TL0
+    `lookup(254) = 1`, so the base it references is the picture sent as 0.
   - A frame-number counter (`Translate`, width 16) restarted so 65,534 → 10: 65,535 → 11,
     0 omitted (a gap at 12), 1 → 13, and frame 1's reference difference 2 points at 11, the
     output of 65,535. An absent field is `Absent`; a 15-bit input into this counter is `Width`.
@@ -1512,10 +1529,10 @@ package. Each law is carried by exactly one slice.
 
 | slice | scope | needs | laws | size | lane |
 |---|---|---|---|---|---|
-| **S1** header and extensions | RTP-1, RTP-2, RTP-3: `core/programs/rtp/` <!-- doc-ref: planned --> with `hirsel.toml`, modules `header`, `seq`, `ext` | nothing | `header_chrome_vector`, `padding_counts`, `extension_forms`, `egress_form`, `index_estimate` | M | Sol |
-| **S2** RTCP | RTP-4: module `rtcp`, `check`, the `Packet` views and the writers | S1 | `rtcp_compound_rules`, `bounded_views`, the parse half of `nack_pairs` | M | Sol |
+| **S1** header and extensions | RTP-1, RTP-2, RTP-3: `core/programs/rtp/` <!-- doc-ref: planned --> with `hirsel.toml`, modules `header`, `seq`, `ext` | nothing | `header_chrome_vector`, `padding_counts`, `extension_forms`, `egress_form`, `index_estimate`, the RTP-1 and RTP-3 cases of `bounded_views` | M | Sol |
+| **S2** RTCP | RTP-4: module `rtcp`, `check`, the `Packet` views and the writers | S1 | `rtcp_compound_rules`, the RTP-4 cases of `bounded_views`, the parse half of `nack_pairs` | M | Sol |
 | **S3** statistics and requests | RTP-5, RTP-6: modules `stats` and `loss` | S2 | `rtt_example`, `reception_report`, `keyframe_coalesce`, the packing half of `nack_pairs` | M | Sol |
-| **S4** history and RTX | RTP-7: modules `history` and `rtx`, plaintext layout and the per-leg contract | S1 | `history_lookup`, `rtx_layout` | S | Sol |
+| **S4** history and RTX | RTP-7: modules `history` and `rtx`, plaintext layout and the per-leg contract | S1 | `history_lookup`, `rtx_layout`, the RTX case of `bounded_views` | S | Sol |
 | **S5** TWCC | RTP-8: module `twcc` | S2 | `twcc_report_bytes`, `twcc_chunks` | M | Sol |
 | **S6** bandwidth estimation | RTP-9: module `bwe` | S5 | `trendline_flat`, `trendline_overuse`, `aimd_steps` | M | Sol |
 | **S7** pacer and probing | RTP-10 and RTP-9's probe | S4, S6 | `pacer_spacing`, `probe_result` | S | Sol |

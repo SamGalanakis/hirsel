@@ -169,10 +169,14 @@ fn cell_log_frame_case() -> bool {
         list.push(mut payload, byte)
     }
     list.append(mut payload, trims)
-    let reply_header: Inline[u8, 15] = [1, 1, 0, 0, 0, 3, 1, 0, 0, 0, b's', 41, 0, 0, 0]
+    // Section 1.8: issuer, subject length and subject, then two BE u64s.
+    let reply_header: Inline[u8, 13] = [1, 1, 0, 0, 0, 3, 19, 0, 0, 0, 0, 1, b's']
     for byte in reply_header {
         list.push(mut payload, byte)
     }
+    list.put_word_be(mut payload, 1u64)
+    list.put_word_be(mut payload, 2u64)
+    list.put_word_le(mut payload, 41u32)
     list.fill(mut payload, 40, 0u8)
     list.push(mut payload, 2u8)
     list.fill(mut payload, 12, 0u8)
@@ -180,7 +184,8 @@ fn cell_log_frame_case() -> bool {
     list.fill(mut payload, 17, 0u8)
     let frame_ops = result.unwrap(journal_decode_commit("frame", payload))
     let Some(call) = view frame_ops.call else { return false }
-    if list.len(frame_ops.data) != 2 || list.len(frame_ops.streams) != 1 || call.record.stream.caller.subject != string.as_bytes("s") ||
+    let stream = StreamKey(caller: Caller(issuer: 0, subject: clone(string.as_bytes("s"))), id: StreamId(t: 1, n: 2))
+    if list.len(frame_ops.data) != 2 || list.len(frame_ops.streams) != 1 || call.record.stream != stream ||
         frame_ops.data[0].key != seven || frame_ops.data[1].key != eight {
         return false
     }

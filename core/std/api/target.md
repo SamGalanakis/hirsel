@@ -8,15 +8,15 @@ is for, so a program can branch on it at compile time:
 ```
 pub type Os = Linux | Macos
 pub type Arch = X86_64 | Aarch64
-// os: Os      a toolchain constant (LANG-20)
-// arch: Arch  a toolchain constant (LANG-20)
+pub const os: Os        // supplied by the toolchain (LANG-20)
+pub const arch: Arch    // supplied by the toolchain (LANG-20)
 pub fn unsupported(why: String) -> Never
 ```
 
 **Values.** `target.os` and `target.arch` are constants whose values the toolchain supplies
 from `--target` ([LANG-20](../../../docs/spec/language.md#lang-20-constants)). They have no
-initialiser in source and are the only constants that do not. Every supported target
-triple maps to one pair:
+initialiser in source and are the only constants that do not. Every target triple the
+module names maps to one pair, whether or not Hirsel supports that target yet:
 
 | target | `target.os` | `target.arch` |
 |---|---|---|
@@ -35,7 +35,7 @@ first keeps every arm. So a foreign call in an arm the target rules out does not
 archive for that target
 ([FFI-3](../../../docs/spec/foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)).
 A constant whose initialiser uses `target.os` or `target.arch` is evaluated for every
-supported target, and a failure on any one refuses it everywhere.
+target in the table above, and a failure on any one refuses it everywhere.
 
 **`unsupported`.** `target.unsupported(why)` has type `Never`, so it fits any arm. `why` must
 be a string literal. A build whose retained code reaches it is refused for that target,

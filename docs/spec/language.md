@@ -729,11 +729,13 @@ charged. A `String` appears in no other constant's type, so `(String, u64)` and 
 with a `String` field are refused here, at the type, and so is every other non-plain type.
 
 **Toolchain constants** (not yet built). The constants of core module `target`, `os` and
-`arch`, have no initialiser in source: the toolchain supplies each value from the build's
-target ([PROG-6](programs.md#prog-6-one-meaning)). They are the only constants of that kind,
-and a constant without an initialiser anywhere else is refused. A constant whose initialiser
-uses a toolchain constant is evaluated once for each supported target, and a failure on any
-one refuses it on every target, so the target never decides acceptance. The checker
+`arch`, end at their type, by the core library's power to leave a declaration to the
+implementation ([core](core.md)): the toolchain supplies each value from the build's target
+([PROG-6](programs.md#prog-6-one-meaning)). They are the only constants of that kind, and a
+constant without an initialiser anywhere else is refused. A constant whose initialiser uses a
+toolchain constant is evaluated once for each target the `target` module names, reserved
+ones included, and a failure on any one refuses it on every target, so the target never
+decides acceptance. The checker
 evaluates no body for it: a constant still calls no function.
 
 ```hirsel

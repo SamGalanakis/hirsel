@@ -195,11 +195,13 @@ check, apply to every target.
 
 **Mach-O members** (`aarch64-apple-darwin`; macOS decision D1, not yet built). For a Mach-O
 target the ELF rows are replaced by these, with the same diagnostics. Names are LLVM's
-`BinaryFormat/MachO.h`.
+`BinaryFormat/MachO.h`. The target's **floor** is macOS 26.0 (macOS decision D2), the first
+release whose kernel enforces `O_RESOLVE_BENEATH`; a Mac law that shows an earlier release
+enforcing it lowers the floor to that release.
 
 | check | ELF row it replaces |
 |---|---|
-| every member is a 64-bit Mach-O relocatable object (`MH_MAGIC_64`, `MH_OBJECT`) with `CPU_TYPE_ARM64` and `CPU_SUBTYPE_ARM64_ALL` (arm64, never arm64e), whose `LC_BUILD_VERSION` names platform macOS and a minimum version no later than the target's floor | the `ET_REL` row |
+| every member is a 64-bit Mach-O relocatable object (`MH_MAGIC_64`, `MH_OBJECT`) with `CPU_TYPE_ARM64` and `CPU_SUBTYPE_ARM64_ALL` (arm64, never arm64e), whose `LC_BUILD_VERSION` names platform macOS and a minimum version no later than the target's floor, macOS 26.0 | the `ET_REL` row |
 | every load command is `LC_SEGMENT_64`, `LC_SYMTAB`, `LC_DYSYMTAB`, `LC_BUILD_VERSION`, `LC_DATA_IN_CODE` or `LC_LINKER_OPTIMIZATION_HINT`. `LC_LINKER_OPTION`, which asks the linker to load a library or framework, is refused like every other command | none; the feature `load command NAME` |
 | each reached symbol S is defined in one member as an external (`N_EXT`) symbol of type `N_SECT` in a section with `S_ATTR_SOME_INSTRUCTIONS` or `S_ATTR_PURE_INSTRUCTIONS`, under its C name with the platform's leading `_`, and the index's entry names that member | the `STB_GLOBAL`/`STT_FUNC` row |
 | each section's type (the low byte of its flags) is `S_REGULAR`, `S_ZEROFILL`, `S_CSTRING_LITERALS`, `S_4BYTE_LITERALS`, `S_8BYTE_LITERALS`, `S_16BYTE_LITERALS`, `S_LITERAL_POINTERS`, `S_COALESCED`, `S_THREAD_LOCAL_REGULAR`, `S_THREAD_LOCAL_ZEROFILL`, `S_THREAD_LOCAL_VARIABLES` or `S_THREAD_LOCAL_VARIABLE_POINTERS`. So `S_MOD_INIT_FUNC_POINTERS`, `S_MOD_TERM_FUNC_POINTERS`, `S_INIT_FUNC_OFFSETS`, `S_THREAD_LOCAL_INIT_FUNCTION_POINTERS`, `S_INTERPOSING` and `S_DTRACE_DOF` are refused, and so is a section in segment `__LLVM` (bitcode). No symbol has `N_SYMBOL_RESOLVER`, the Mach-O indirect function | the object-feature row; `X` adds `section SEG,SECT of type TYPE` and `symbol resolver S` |
@@ -212,11 +214,13 @@ refused by the import check, because no admitted input defines it.
 
 **Imports** (every target; not yet built). Before the linker runs, every symbol a member
 leaves undefined must be defined by another member of the same archive, another admitted
-archive, the runtime, the program's generated objects, or the target's libc stub, and
-nothing else. Otherwise: `FFI-3: archive F of P for T: member N imports S, which no admitted
-input defines`. The libc stub of a Linux target is the toolchain's glibc stub library. The
-libc stub of `aarch64-apple-darwin` is generated from the Hirsel-owned libSystem allowlist
-(macOS decision D3), and it is the only Darwin system library an archive may import from.
+archive, the runtime, the program's generated objects, or another link input of the image
+(the libc and the system libraries the toolchain links, as the collision row reads them),
+and nothing else. Otherwise: `FFI-3: archive F of P for T: member N imports S, which no
+admitted input defines`. On `aarch64-apple-darwin` the only system library is the libSystem
+stub, generated from the Hirsel-owned libSystem allowlist
+(macOS decision D3). The Security and CoreFoundation stubs that the runtime links for
+`Trust.System` define nothing an archive may import.
 That allowlist leaves out `fsync` and `fdatasync`, which on macOS return before the drive
 has flushed. A C library that calls them is refused for Darwin with the symbol named. Its
 recipe answers by defining the call itself, for example with a package function that calls

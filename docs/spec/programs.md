@@ -321,7 +321,8 @@ adapted function for a `$callable` adapter, and the
 builtin address (PROG-10) for a core function the compiler implements, such as `float.widen`.
 Equal revisions mean equal addresses, so Hirsel has one identity for code; the revision only
 keeps the bytes a program holds apart from the keys of a code store. Nothing else enters: not
-the backend, the runtime, the target (except through the arms PROG-6 retains for it), the optimisation level, the root limit, source
+the backend, the runtime, the target (except, once retention is built, through the arms
+PROG-6 retains for it), the optimisation level, the root limit, source
 positions or optimisation hints. So:
 
 - an edit to comments, layout, local or parameter names, item order, or an item the
@@ -421,9 +422,12 @@ owner's generated functions of that kind, in the order the checker emits them. N
 number enters the name, so wrapping an earlier expression in parentheses never renames a later
 closure. A generated adapter that several owners share keeps its one shared identity.
 
-**Retained code.** An instance's **retained code** is its checked IR with the arms that a
-constant expression rules out removed ([PROG-6](#prog-6-one-meaning)); for a build with no
-such branch it is the whole checked IR. Only retained code makes slots, calls and reach.
+**Retained code** (not yet built; macOS decision D1). An instance's **retained code** is its
+checked IR with the arms that a constant expression rules out removed
+([PROG-6](#prog-6-one-meaning)); a body the checker keeps is one that retained code holds.
+Only retained code makes slots, calls and reach. Because the rule covers every constant, not
+only `target`'s, building it takes a new normal-form version: a body whose function branches
+on any constant changes. Until it is built, retained code is the whole checked IR.
 
 **Body.** An instance's **body** is the normal form of its retained code: its own function, the
 functions generated beside it, the shapes, signatures, statics and instance rows they use, and
@@ -597,13 +601,14 @@ which the toolchain supplies (LANG-20). These rules hold:
   has no target, checks them all. Types never differ by target: a foreign module's interface
   is one text for all targets, and only its archive rows differ
   ([FFI-3](foreign.md#ffi-3-archives-are-admitted-by-their-pin-before-linking)).
-- **A constant that depends on `target` is evaluated for every supported target.** A
+- **A constant that depends on `target` is evaluated for every target the module names**,
+  reserved ones included. A
   failure on any one is a refusal on all, so acceptance never depends on the target
   ([LANG-20](language.md#lang-20-constants)).
 - **Retention is decided by form.** A `match` whose scrutinee, or an `if` whose condition,
   is a constant expression keeps only its taken arm in retained code (PROG-10). A constant
-  expression is exactly what LANG-20 admits in a constant's initialiser: literals,
-  operators and constants, with no call and no local. So `match target.os { ... }` keeps one
+  expression is exactly what LANG-20 admits in a plain constant's initialiser (literals,
+  operators, constructions, other constants and `bytes[T]`), so it has no call and no local. So `match target.os { ... }` keeps one
   arm, and `let o = target.os` followed by `match o { ... }` keeps both, on every engine.
   How much an engine folds never decides what is retained. The rule holds for every
   constant, not only `target`'s. Reach ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused))

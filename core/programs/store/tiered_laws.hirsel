@@ -643,18 +643,18 @@ fn test_l84_parallel_bucket_windows(c: Clock, tasks: Tasks) -> Result[(), Error]
 }
 
 fn l62_refusal(pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(), Error] {
-    let mut attempt = capacity(tiered_touch_set(2097, 1))?
+    let attempt = tiered_attempt(2097, 0)
     let first_frame = l70_cache_target(1)
     let second_frame = l70_cache_target(2)
-    let _ = option.unwrap(tiered_resolve_cold(mut attempt, pins, first_frame)?)
-    let _ = option.unwrap(tiered_resolve_cold(mut attempt, pins, first_frame)?)
-    if attempt.touched_bytes != 1049 || list.len(attempt.frames) != 1 {
+    let _ = option.unwrap(tiered_resolve_cold(attempt, pins, first_frame)?)
+    let _ = option.unwrap(tiered_resolve_cold(attempt, pins, first_frame)?)
+    if tiered_attempt_state(attempt).touched_bytes != 1049 || map.len(tiered_attempt_state(attempt).stamps) != 1 {
         fail("L62: a repeated BLOB touch charged a second frame")
     }
-    if let Some(_) = tiered_resolve_cold(mut attempt, pins, second_frame)? {
+    if let Some(_) = tiered_resolve_cold(attempt, pins, second_frame)? {
         fail("L62: a cache hit skipped the first-touch limit")
     }
-    let Some(AttemptPinLimit(refused)) = attempt.stopped else {
+    let Some(AttemptPinLimit(refused)) = tiered_attempt_state(attempt).stopped else {
         fail("L62: the limit must latch before a hit or a miss")
     }
     if refused.requested != 2098 || refused.available != 2097 {
@@ -667,19 +667,20 @@ fn l62_refusal(pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(), Error]
 fn test_l62_attempt_touch_order() -> Result[(), Error] {
     let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let first_frame = l70_cache_target(1)
-    let mut refused = capacity(tiered_touch_set(2097, 1))?
-    if let Some(_) = tiered_resolve_cold(mut refused, visible, first_frame)? {
+    let refused = tiered_attempt(2097, 0)
+    if let Some(_) = tiered_resolve_cold(refused, visible, first_frame)? {
         fail("L62: an empty map has no visible frame")
     }
-    let Some(AttemptMiss(TieredBlob(demanded))) = refused.stopped else {
+    let Some(AttemptMiss(TieredBlob(demanded))) = tiered_attempt_state(refused).stopped else {
         fail("L62: a missing pin was not latched")
     }
-    if demanded.stamp != 1 || refused.touched_bytes != 1049 {
+    if demanded.stamp != 1 || tiered_attempt_state(refused).touched_bytes != 1049 {
         fail("L62: the first miss changed the first-touch charge")
     }
-    if tiered_touch(mut refused, 3, 80) || refused.touched_bytes != 1049 {
+    if tiered_touch(refused, 3, 80, None) || tiered_attempt_state(refused).touched_bytes != 1049 {
         fail("L62: a later operation ran after the miss latch")
     }
+    l62_stop_sweep()?
     map.insert(mut visible, (7, 2120), l70_cache_frame(1))
     l62_refusal(visible)?
     map.insert(mut visible, (7, 4168), l70_cache_frame(2))

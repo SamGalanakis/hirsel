@@ -66,15 +66,14 @@ fn l84_branch_scan_demands(reverse: bool) -> Result[(), Error] {
     let image = page_result(std.page.encode(children, 1, 43, Collection))?
     let root: std.page.Slot = HotPage(page_result(std.page.attach_cold(take image))?)
     let visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
-    let mut attempt = capacity(tiered_touch_set(4096, 4))?
-    attempt.sibling_window = 8
-    let failed = tiered_scan_edge(mut attempt, visible, root, None, key_word(1), None, reverse)
+    let attempt = tiered_attempt(4096, 8)
+    let failed = tiered_scan_edge(attempt, visible, root, None, key_word(1), None, reverse)
     let Error(Missed) = failed else { fail("L84: the selected child is Cold") }
-    let Some(AttemptMiss(target)) = attempt.stopped else { fail("L84: the first miss must name its target") }
+    let Some(AttemptMiss(target)) = tiered_attempt_state(attempt).stopped else { fail("L84: the first miss must name its target") }
     let begin = if reverse { 42u64 } else { 40u64 }
     let end = if reverse { 40u64 } else { 42u64 }
-    if tiered_frame_id(target).stamp != begin || list.len(attempt.siblings) != 2 ||
-        tiered_frame_id(attempt.siblings[0u64]).stamp != 41 || tiered_frame_id(attempt.siblings[1u64]).stamp != end {
+    if tiered_frame_id(target).stamp != begin || list.len(tiered_attempt_state(attempt).siblings) != 2 ||
+        tiered_frame_id(tiered_attempt_state(attempt).siblings[0u64]).stamp != 41 || tiered_frame_id(tiered_attempt_state(attempt).siblings[1u64]).stamp != end {
         fail("L84: the demanded siblings must follow the scan direction")
     }
     Ok(())

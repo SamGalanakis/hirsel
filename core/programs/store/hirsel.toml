@@ -118,6 +118,7 @@ dirs = ["."]
 "tiered_plan_laws.hirsel" = "store"
 "tiered_snapshot_laws.hirsel" = "store"
 "tiered_pager_batch_laws.hirsel" = "store"
+"tiered_attempt_laws.hirsel" = "store"
 "tiered_count_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"

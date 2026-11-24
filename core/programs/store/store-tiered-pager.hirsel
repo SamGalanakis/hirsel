@@ -18,8 +18,7 @@ type TieredPagerPack: shareable + send {
 
 type TieredReadInventory: shareable + send {
     packs: std.omap.OMap[u64, TieredPagerPack],
-    generation: u64,
-    touch_slots: u64
+    generation: u64
 }
 
 type TieredPageSource {

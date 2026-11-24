@@ -23,40 +23,40 @@ fn test_l62_tiered_point_path() -> Result[(), Error] {
     let (take root, take leaf, take cached_blob) = l62_point_path_fixture()?
     let key = key_word(42)
     let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
-    let mut first = capacity(tiered_touch_set(1240, 1))?
-    let Error(Missed) = tiered_point_path(mut first, visible, root, None, key) else {
+    let first = tiered_attempt(1240, 0)
+    let Error(Missed) = tiered_point_path(first, visible, root, None, key) else {
         fail("L62: an unpinned leaf did not miss")
     }
-    let Some(AttemptMiss(TieredPage(ptr))) = first.stopped else {
+    let Some(AttemptMiss(TieredPage(ptr))) = tiered_attempt_state(first).stopped else {
         fail("L62: the first miss did not name a PAGE")
     }
-    if ptr.stamp != 40 || first.touched_bytes != 191 {
+    if ptr.stamp != 40 || tiered_attempt_state(first).touched_bytes != 191 {
         fail("L62: point lookup did not count the Hot parent before the Cold leaf")
     }
     map.insert(mut visible, tiered_cache_key(leaf.identity), take leaf)
-    let mut second = capacity(tiered_touch_set(1240, 1))?
-    let Error(Missed) = tiered_point_path(mut second, visible, root, None, key) else {
+    let second = tiered_attempt(1240, 0)
+    let Error(Missed) = tiered_point_path(second, visible, root, None, key) else {
         fail("L62: an unpinned body did not miss")
     }
-    let Some(AttemptMiss(TieredBlob(reference))) = second.stopped else {
+    let Some(AttemptMiss(TieredBlob(reference))) = tiered_attempt_state(second).stopped else {
         fail("L62: the second miss did not name a BLOB")
     }
-    if reference.stamp != 39 || second.touched_bytes != 1240 {
+    if reference.stamp != 39 || tiered_attempt_state(second).touched_bytes != 1240 {
         fail("L62: point lookup did not count the full BLOB frame")
     }
     map.insert(mut visible, tiered_cache_key(cached_blob.identity), take cached_blob)
-    let mut admitted = capacity(tiered_touch_set(1240, 1))?
-    let Some(value) = tiered_point_path(mut admitted, visible, root, None, key)? else {
+    let admitted = tiered_attempt(1240, 0)
+    let Some(value) = tiered_point_path(admitted, visible, root, None, key)? else {
         fail("L62: an admitted pinned row was not read")
     }
-    if list.len(value) != 1025 || value[1024u64] != 106 || admitted.touched_bytes != 1240 || list.len(admitted.frames) != 2 {
+    if list.len(value) != 1025 || value[1024u64] != 106 || tiered_attempt_state(admitted).touched_bytes != 1240 || map.len(tiered_attempt_state(admitted).stamps) != 3 {
         fail("L62: pin-only lookup did not return the selected BLOB")
     }
-    let mut refused = capacity(tiered_touch_set(1239, 1))?
-    let Error(Missed) = tiered_point_path(mut refused, visible, root, None, key) else {
+    let refused = tiered_attempt(1239, 0)
+    let Error(Missed) = tiered_point_path(refused, visible, root, None, key) else {
         fail("L62: a warm pin bypassed the physical limit")
     }
-    let Some(AttemptPinLimit(problem)) = refused.stopped else {
+    let Some(AttemptPinLimit(problem)) = tiered_attempt_state(refused).stopped else {
         fail("L62: the limit did not take precedence over the pin hit")
     }
     if problem.requested != 1240 || problem.available != 1239 {
@@ -271,8 +271,8 @@ fn l62_replay_read_tree(base: std.page.PagePtr) -> Result[PageTree, Error] {
 }
 
 fn l62_read_point_bytes(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree,
-    key: Bytes, slots: u64) -> Result[Option[Bytes], Error] waits {
-    read_tiered_point(source, grant, root, tree, key, slots, fn(raw: Option[View[Bytes]]) -> Result[Option[Bytes], Error] {
+    key: Bytes) -> Result[Option[Bytes], Error] waits {
+    read_tiered_point(source, grant, root, tree, key, fn(raw: Option[View[Bytes]]) -> Result[Option[Bytes], Error] {
         match raw {
             Some(value) => Ok(Some(copied(value)?)),
             None => Ok(None),
@@ -286,7 +286,7 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
     let key = log_key(9, 1)?
     let mut root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
     for _ in 0u64 .. 2 {
-        let Some(value) = l62_read_point_bytes(source, grant, root, tree, key, 4)? else {
+        let Some(value) = l62_read_point_bytes(source, grant, root, tree, key)? else {
             fail("L62: cold and warm lookup must both find the row")
         }
         if list.compare_bytes(value, string.as_bytes("stored")) != Equal {
@@ -300,13 +300,13 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
     replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before, put_op)?
     root.root_stamp = tree_stamp(tree)
     let overlay_only = TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
-    let Some(replayed) = l62_read_point_bytes(overlay_only, grant, root, tree, key, 4)? else {
+    let Some(replayed) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? else {
         fail("L62: a replay put did not answer without the Cold inventory")
     }
     if list.compare_bytes(replayed, string.as_bytes("second")) != Equal {
         fail("L62: a replay put did not take precedence over its base")
     }
-    let Some(untouched) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?, 4)? else {
+    let Some(untouched) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?)? else {
         fail("L62: an overlay skipped the Cold base for an untouched key")
     }
     if list.compare_bytes(untouched, string.as_bytes("stored")) != Equal {
@@ -315,7 +315,7 @@ fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> 
     let deleted = JournalOp(key: clone(key), value: None, prior: 7, trim: None)
     replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 2, branch: 0), before, deleted)?
     root.root_stamp = tree_stamp(tree)
-    if let Some(_) = l62_read_point_bytes(overlay_only, grant, root, tree, key, 4)? {
+    if let Some(_) = l62_read_point_bytes(overlay_only, grant, root, tree, key)? {
         fail("L62: a replay tombstone did not hide the base row")
     }
     Ok(())
@@ -346,14 +346,14 @@ fn l62_check_batch_error_order(source: TieredPageSource, owner: StoreId, base: s
     // Two 54-byte branch entries, an 8-byte separator, a 24-byte page
     // header and two 2-byte slots. The 16-byte frame head makes 160.
     let short = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 160))
-    let Error(Full(Cache(problem))) = l62_read_point_bytes(source, short, root, tree, key, 2) else {
+    let Error(Full(Cache(problem))) = l62_read_point_bytes(source, short, root, tree, key) else {
         fail("L62: a batch tail error escaped the first-touch limit")
     }
     if problem.requested != 216 || problem.available != 160 {
         fail("L62: the touch counts the missing child's 40 bytes and frame head")
     }
     let enough = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 216))
-    let Error(Corrupt(Fault(why: Dangling(48), ..))) = l62_read_point_bytes(source, enough, root, tree, key, 2) else {
+    let Error(Corrupt(Fault(why: Dangling(48), ..))) = l62_read_point_bytes(source, enough, root, tree, key) else {
         fail("L62: a failing edge that passes admission must report its fault")
     }
     Ok(())
@@ -418,8 +418,8 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     let mut before = l62_replay_read_tree(first_ptr)?
     let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     map.insert(mut visible, (8, 72), take first_frame)
-    let mut initial = capacity(tiered_touch_set(61, 1))?
-    if tiered_plan_prior(mut initial, visible, before, key)? != 7 {
+    let initial = tiered_attempt(61, 0)
+    if tiered_plan_prior(initial, visible, before, key)? != 7 {
         fail("L63: the first root's stored value is six bytes")
     }
 
@@ -432,8 +432,8 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     let mut moved = l62_replay_read_tree(moved_ptr)?
     moved.root = std.page.copy_with_stamp(moved.root, 101)
     map.insert(mut visible, (9, 72), take moved_frame)
-    let mut deciding = capacity(tiered_touch_set(95, 1))?
-    if tiered_plan_prior(mut deciding, visible, moved, key)? != 1026 || deciding.touched_bytes != 95 {
+    let deciding = tiered_attempt(95, 0)
+    if tiered_plan_prior(deciding, visible, moved, key)? != 1026 || tiered_attempt_state(deciding).touched_bytes != 95 {
         fail("L63: a rerun must read the deciding leaf's BLOB length without touching its body")
     }
 
@@ -443,12 +443,12 @@ fn test_l63_plan_prior_uses_deciding_leaf() -> Result[(), Error] {
     let new_bytes = string.into_bytes(string.from("second"))
     let op = JournalOp(key: clone(key), value: Some(take new_bytes), prior: 7, trim: None)
     replay_tiered_op("j-1", mut before, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before_edit, op)?
-    let mut folded = capacity(tiered_touch_set(0, 1))?
-    let Error(Missed) = tiered_plan_prior(mut folded, visible, before, key) else {
+    let folded = tiered_attempt(0, 0)
+    let Error(Missed) = tiered_plan_prior(folded, visible, before, key) else {
         fail("L63: a write tried to plan through an overlay")
     }
-    if let Some(AttemptFold(9)) = folded.stopped {
-        if folded.touched_bytes == 0 {
+    if let Some(AttemptFold(9)) = tiered_attempt_state(folded).stopped {
+        if tiered_attempt_state(folded).touched_bytes == 0 {
             return Ok(())
         }
     }
@@ -743,13 +743,13 @@ fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     let source = TieredPageSource(pager: take requests, packs: std.omap.new(), next_stamp: ids, deadline: 0)
     let grant = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: VALUE_LIMIT + 1048576))
     let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
-    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 1)?, 2) else {
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 1)?) else {
         fail("L62: a trimmed row must not reach the Cold base")
     }
-    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 4)?, 2) else {
+    let Ok(None) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 4)?) else {
         fail("L62: a key at next_seq must not reach the Cold base")
     }
-    let Error(Io(Closed)) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?, 2) else {
+    let Error(Io(Closed)) = l62_read_point_bytes(source, grant, root, tree, log_key(9, 2)?) else {
         fail("L62: masking bypassed the Cold base inside the Log bounds")
     }
     Ok(())
@@ -867,23 +867,23 @@ fn test_l63_pinned_row_edit_discards_a_missed_candidate() -> Result[(), Error] {
     let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let first = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(left)), payload: TieredImage(arc.share(left_leaf))))
     map.insert(mut visible, (8u64, 72u64), take first)
-    let mut attempted = capacity(tiered_touch_set(1379, 3))?
+    let attempted = tiered_attempt(1379, 0)
     let mut ids = 51u64
-    let Error(Missed) = stage_tiered_row(mut attempted, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids) else {
+    let Error(Missed) = stage_tiered_row(attempted, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids) else {
         fail("L63: editing without a required sibling must latch a miss")
     }
-    let Some(AttemptMiss(TieredPage(requested))) = attempted.stopped else {
+    let Some(AttemptMiss(TieredPage(requested))) = tiered_attempt_state(attempted).stopped else {
         fail("L63: missing edit sibling did not become the attempt's demand")
     }
     // 160 bytes for the branch and 1,132 and 87 bytes for its leaves.
-    if requested != right || attempted.touched_bytes != 1379 || ids != 51 || std.page.totals(base) != (4u64, 1408u64) {
+    if requested != right || tiered_attempt_state(attempted).touched_bytes != 1379 || ids != 51 || std.page.totals(base) != (4u64, 1408u64) {
         fail("L63: the missed edit changed the base or counted its path incorrectly")
     }
     let second = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(right)), payload: TieredImage(arc.share(right_leaf))))
     map.insert(mut visible, (8u64, 1204u64), take second)
-    let mut retry = capacity(tiered_touch_set(1379, 3))?
-    let ready = stage_tiered_row(mut retry, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids)?
-    if retry.touched_bytes != 1379 || std.page.lookup(ready, key_word(10)) != None || std.page.totals(ready) != (3u64, 330u64) ||
+    let retry = tiered_attempt(1379, 0)
+    let ready = stage_tiered_row(retry, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids)?
+    if tiered_attempt_state(retry).touched_bytes != 1379 || std.page.lookup(ready, key_word(10)) != None || std.page.totals(ready) != (3u64, 330u64) ||
         std.page.totals(base) != (4u64, 1408u64) {
         fail("L63: the retry must apply once and keep its base intact")
     }
@@ -907,18 +907,18 @@ fn test_l79_pinned_trim_records_boundary_charge() -> Result[(), Error] {
     map.insert(mut visible, (8u64, 72u64), take supplied)
     let mut ids = 51u64
     let limits = LogBounds(first: 1, next: 5)
-    let mut attempt = capacity(tiered_touch_set(235, 2))?
-    let (take ready, dropped) = stage_tiered_trim(mut attempt, visible, target, empty_root, limits, 344, 2, mut ids)?
+    let attempt = tiered_attempt(235, 0)
+    let (take ready, dropped) = stage_tiered_trim(attempt, visible, target, empty_root, limits, 344, 2, mut ids)?
     let Some(ColdPage(retained)) = std.page.child_slot(ready, 1) else {
         fail("L79: trim loaded a retained subtree beyond the boundary")
     }
-    if dropped != 86 || retained != right || attempt.touched_bytes != 235 || std.page.totals(ready) != (3u64, 258u64) {
+    if dropped != 86 || retained != right || tiered_attempt_state(attempt).touched_bytes != 235 || std.page.totals(ready) != (3u64, 258u64) {
         fail("L79: trim must charge the removed row from its two pinned pages")
     }
-    let mut all_rows = capacity(tiered_touch_set(0, 0))?
+    let all_rows = tiered_attempt(0, 0)
     let stamp_before = ids
-    let (take empty, all_dropped) = stage_tiered_trim(mut all_rows, visible, target, empty_root, limits, 344, 8, mut ids)?
-    if all_dropped != 344 || all_rows.touched_bytes != 0 || ids != stamp_before || std.page.totals(empty) != (0u64, 0u64) {
+    let (take empty, all_dropped) = stage_tiered_trim(all_rows, visible, target, empty_root, limits, 344, 8, mut ids)?
+    if all_dropped != 344 || tiered_attempt_state(all_rows).touched_bytes != 0 || ids != stamp_before || std.page.totals(empty) != (0u64, 0u64) {
         fail("L79: trim past next_seq uses the descriptor's charge without paging")
     }
     Ok(())

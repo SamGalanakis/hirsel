@@ -155,7 +155,7 @@ fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[
         if let Some((_, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) {
             if descriptor[53u64] == 1 {
                 let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
-                return read_tiered_point(source, grant, root, tree, logical, inventory.touch_slots, decode_row)
+                return read_tiered_point(source, grant, root, tree, logical, decode_row)
             }
         }
     }
@@ -194,7 +194,7 @@ pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: 
                     return Ok(list.word_le(descriptor, 36))
                 }
                 let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
-                return read_tiered_count(source, grant, root, tree, edge, descriptor, id, low, high, inventory.touch_slots)
+                return read_tiered_count(source, grant, root, tree, edge, descriptor, id, low, high)
             }
         }
     }
@@ -302,7 +302,7 @@ fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: PageTree, invento
         }
     }
     let (take source, take grant, root) = snapshot_pager(r, rows.capture, inventory)?
-    read_tiered_scan(source, grant, root, tree, edge, descriptor, rows.source, take start, take stop, rows.reverse, inventory.touch_slots, rows.decoder)
+    read_tiered_scan(source, grant, root, tree, edge, descriptor, rows.source, take start, take stop, rows.reverse, rows.decoder)
 }
 
 fn decode_snapshot_next[K, V](r: Reader, s: Snapshot, decoder: RowDecoder[K, V], key: Bytes, raw: Bytes) -> Result[(K, V), Error] waits {

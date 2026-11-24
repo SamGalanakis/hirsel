@@ -1,93 +1,198 @@
 type TieredAttemptStop: send = AttemptMiss(TieredTarget) | AttemptFold(u32) | AttemptPinLimit(Capacity) | AttemptAllocation(Capacity)
 
+// The key a miss's demand descends by. Each operation installs its own as
+// its first access, so no stale context outlives the operation that set it.
+type TieredSeek: send = SeekOperation | SeekKey(Bytes) | SeekUpper
+
+// One first touch, committed by a single assignment (§13.3 "The intent").
+type TieredIntent: send {
+    stamp: u64,
+    total: u64,
+    stop: Option[TieredAttemptStop]
+}
+
+type TieredTouch {
+    stamp: u64,
+    payload: u64,
+    miss: Option[TieredTarget]
+}
+
+// The attempt record the driver owns in a core.Cell, outside the body's
+// isolation and step scope. Every access settles the intent first.
 type TieredTouchSet: send {
     stamps: Map[u64, ()],
     touched_bytes: u64,
-    slots: u64,
     partition: u64,
-    frames: List[Arc[TieredFrame]],
-    upper_bound: bool,
-    seek_key: Option[Bytes],
+    seek: TieredSeek,
     sibling_window: u64,
     siblings: List[TieredTarget],
-    stopped: Option[TieredAttemptStop]
+    stopped: Option[TieredAttemptStop],
+    intent: Option[TieredIntent]
 }
 
-fn tiered_touch_set(partition: u64, initial: u64) -> Result[TieredTouchSet, Capacity] {
-    let mut stamps: Map[u64, ()] = map.new()
-    let mut frames: List[Arc[TieredFrame]] = list.new()
-    map.try_reserve(mut stamps, initial)?
-    list.try_reserve(mut frames, initial)?
-    Ok(TieredTouchSet(stamps: take stamps, touched_bytes: 0, slots: initial, partition: partition, frames: take frames, upper_bound: false, seek_key: None,
-        sibling_window: 0, siblings: list.new(), stopped: None))
+fn tiered_touch_set(partition: u64) -> TieredTouchSet {
+    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, sibling_window: 0,
+        siblings: list.new(), stopped: None, intent: None)
 }
 
-fn tiered_touch_grow(mut attempt: TieredTouchSet) -> Result[(), Capacity] {
-    let growth = order.max(attempt.slots, 1u64)
-    map.try_reserve(mut attempt.stamps, growth)?
-    list.try_reserve(mut attempt.frames, growth)?
-    attempt.slots = int.saturating_add(attempt.slots, growth)
-    Ok(())
+fn tiered_attempt(partition: u64, window: u64) -> core.Cell[TieredTouchSet] {
+    let mut state = tiered_touch_set(partition)
+    state.sibling_window = window
+    cell.new(take state)
+}
+
+// Replays an installed intent. Each write is idempotent and the stamp's room
+// was reserved before the intent, so a stop here leaves the intent for the
+// next entry to replay.
+fn tiered_settle(mut a: TieredTouchSet) {
+    let (stamp, total, stop): (u64, u64, Option[TieredAttemptStop]) = match a.intent {
+        Some(i) => (i.stamp, i.total, clone(i.stop)),
+        None => return,
+    }
+    a.touched_bytes = total
+    map.insert(mut a.stamps, stamp, ())
+    if let None = a.stopped {
+        a.stopped = take stop
+    }
+    a.intent = None
+}
+
+// The driver's exit: settle, then read the latch before anything else.
+fn tiered_finish(take attempt: core.Cell[TieredTouchSet]) -> TieredTouchSet {
+    let mut state = cell.into_inner(take attempt)
+    tiered_settle(mut state)
+    take state
+}
+
+fn tiered_touch_entry(mut a: TieredTouchSet, take t: TieredTouch) -> bool {
+    let TieredTouch(stamp: stamp, payload: payload, miss: take miss) = take t
+    tiered_settle(mut a)
+    if let Some(_) = a.stopped {
+        return false
+    }
+    if map.contains(a.stamps, stamp) {
+        return true
+    }
+    if let Error(problem) = map.try_reserve(mut a.stamps, 1) {
+        a.stopped = Some(AttemptAllocation(problem))
+        return false
+    }
+    let total = int.saturating_add(a.touched_bytes, 16 + payload)
+    let stop = if total > a.partition {
+        Some(AttemptPinLimit(Capacity(requested: total, available: a.partition)))
+    } else {
+        match take miss {
+            Some(take target) => Some(AttemptMiss(take target)),
+            None => None,
+        }
+    }
+    let admitted = match stop {
+        Some(_) => false,
+        None => true,
+    }
+    a.intent = Some(TieredIntent(stamp: stamp, total: total, stop: take stop))
+    tiered_settle(mut a)
+    admitted
 }
 
 // Hot and Cold payloads use one first-touch counter. A Hot PAGE passes the
 // image length, a Hot BLOB passes 8 + value length, and Cold uses the edge.
-fn tiered_touch(mut attempt: TieredTouchSet, stamp: u64, payload: u64) -> bool {
-    if let Some(_) = attempt.stopped {
-        return false
-    }
-    if map.contains(attempt.stamps, stamp) {
-        return true
-    }
-    if map.len(attempt.stamps) == attempt.slots {
-        if let Error(problem) = tiered_touch_grow(mut attempt) {
-            attempt.stopped = Some(AttemptAllocation(problem))
-            return false
-        }
-    }
-    map.insert(mut attempt.stamps, stamp, ())
-    attempt.touched_bytes = int.saturating_add(attempt.touched_bytes, 16 + payload)
-    if attempt.touched_bytes > attempt.partition {
-        attempt.stopped = Some(AttemptPinLimit(Capacity(requested: attempt.touched_bytes, available: attempt.partition)))
-        return false
-    }
-    true
+fn tiered_touch(attempt: core.Cell[TieredTouchSet], stamp: u64, payload: u64, take miss: Option[TieredTarget]) -> bool {
+    cell.with(attempt, TieredTouch(stamp: stamp, payload: payload, miss: take miss), tiered_touch_entry)
 }
 
-fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], target: TieredTarget) -> Result[Option[View[Arc[TieredFrame]]], Error] in visible {
-    if let Some(_) = attempt.stopped {
-        return Ok(None)
+fn tiered_stopped_entry(mut a: TieredTouchSet, take nothing: ()) -> bool {
+    tiered_settle(mut a)
+    match a.stopped {
+        Some(_) => true,
+        None => false,
     }
+}
+
+fn tiered_stopped(attempt: core.Cell[TieredTouchSet]) -> bool {
+    cell.with(attempt, (), tiered_stopped_entry)
+}
+
+fn tiered_latch_entry(mut a: TieredTouchSet, take stop: TieredAttemptStop) {
+    tiered_settle(mut a)
+    if let None = a.stopped {
+        a.stopped = Some(take stop)
+    }
+}
+
+// A non-touch stop (a fold demand). The first stop wins.
+fn tiered_latch(attempt: core.Cell[TieredTouchSet], take stop: TieredAttemptStop) {
+    cell.with(attempt, take stop, tiered_latch_entry)
+}
+
+fn tiered_seek_entry(mut a: TieredTouchSet, take seek: TieredSeek) {
+    tiered_settle(mut a)
+    // A latched miss keeps the seek it was latched under.
+    if let None = a.stopped {
+        a.seek = take seek
+    }
+}
+
+fn tiered_seek(attempt: core.Cell[TieredTouchSet], take seek: TieredSeek) {
+    cell.with(attempt, take seek, tiered_seek_entry)
+}
+
+fn tiered_missed_page_entry(mut a: TieredTouchSet, take nothing: ()) -> Option[(std.page.PagePtr, u64)] {
+    tiered_settle(mut a)
+    match a.stopped {
+        Some(AttemptMiss(TieredPage(ptr))) => Some((clone(ptr), a.sibling_window)),
+        _ => None,
+    }
+}
+
+fn tiered_missed_page(attempt: core.Cell[TieredTouchSet]) -> Option[(std.page.PagePtr, u64)] {
+    cell.with(attempt, (), tiered_missed_page_entry)
+}
+
+fn tiered_siblings_entry(mut a: TieredTouchSet, take found: List[TieredTarget]) {
+    tiered_settle(mut a)
+    a.siblings = take found
+}
+
+// Siblings are prefetch hints, set after the latch. A hint list that cannot
+// be reserved is left out and never replaces the latched miss.
+fn tiered_set_siblings(attempt: core.Cell[TieredTouchSet], take found: List[TieredTarget]) {
+    cell.with(attempt, take found, tiered_siblings_entry)
+}
+
+// The visible pin map is looked up before the touch, so the path to the
+// install is the same on a hit and a miss. Nothing miss-specific runs before
+// it; the edge check runs after, so a Cache refusal precedes Corrupt.
+fn tiered_resolve_cold(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], target: TieredTarget) -> Result[Option[View[Arc[TieredFrame]]], Error] in visible {
     let facts = tiered_frame_id(target)
-    let was_touched = map.contains(attempt.stamps, facts.stamp)
-    if !tiered_touch(mut attempt, facts.stamp, facts.len) {
+    let found = map.get(visible, tiered_cache_key(facts))
+    let owned: TieredTarget = clone(target)
+    let miss: Option[TieredTarget] = match found {
+        Some(_) => None,
+        None => Some(take owned),
+    }
+    if !tiered_touch(attempt, facts.stamp, facts.len, take miss) {
         return Ok(None)
     }
-    let Some(frame) = map.get(visible, tiered_cache_key(facts)) else {
-        attempt.stopped = Some(AttemptMiss(clone(target)))
-        return Ok(None)
-    }
+    let frame = option.unwrap(found)
     if frame.identity != facts {
         verify_tiered_edge(paged_pack_path(facts.pack)?, target, frame.identity)?
-    }
-    if !was_touched {
-        list.push(mut attempt.frames, arc.share(frame))
     }
     Ok(Some(frame))
 }
 
-fn tiered_touch_hot_page(mut attempt: TieredTouchSet, page: Arc[std.page.Page]) -> Result[(), Error] {
+fn tiered_touch_hot_page(attempt: core.Cell[TieredTouchSet], page: Arc[std.page.Page]) -> Result[(), Error] {
     let image = std.page.image_of(page)
     let id = std.page.stamp(image)
-    if id != 0 && !tiered_touch(mut attempt, id, list.len(std.page.payload(image))) {
+    if id != 0 && !tiered_touch(attempt, id, list.len(std.page.payload(image)), None) {
         return Error(Missed)
     }
     Ok(())
 }
 
-fn tiered_pinned_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.PagePtr,
+fn tiered_pinned_page(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.PagePtr,
     expected_level: Option[u8]) -> Result[View[Arc[std.page.Page]], Error] in visible {
-    let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredPage(ptr))? else {
+    let Some(frame) = tiered_resolve_cold(attempt, visible, TieredPage(ptr))? else {
         return Error(Missed)
     }
     let TieredImage(page) = view frame.payload else {
@@ -101,31 +206,31 @@ fn tiered_pinned_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, 
     Ok(page)
 }
 
-fn tiered_point_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected_level: Option[u8]) -> Result[Arc[std.page.Page], Error] {
-    if let Some(_) = attempt.stopped {
+fn tiered_point_page(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected_level: Option[u8]) -> Result[Arc[std.page.Page], Error] {
+    if tiered_stopped(attempt) {
         return Error(Missed)
     }
     match edge {
         HotPage(page) => {
-            tiered_touch_hot_page(mut attempt, page)?
+            tiered_touch_hot_page(attempt, page)?
             Ok(arc.share(page))
         },
         ColdPage(ptr) => {
-            let page = tiered_pinned_page(mut attempt, visible, ptr, expected_level)?
+            let page = tiered_pinned_page(attempt, visible, ptr, expected_level)?
             Ok(arc.share(page))
         },
     }
 }
 
-fn tiered_touch_hot_blob(mut attempt: TieredTouchSet, reference: std.page.BlobRef, contents: Arc[Bytes]) -> Result[(), Error] {
-    if !tiered_touch(mut attempt, reference.stamp, 8 + list.len(contents)) {
+fn tiered_touch_hot_blob(attempt: core.Cell[TieredTouchSet], reference: std.page.BlobRef, contents: Arc[Bytes]) -> Result[(), Error] {
+    if !tiered_touch(attempt, reference.stamp, 8 + list.len(contents), None) {
         return Error(Missed)
     }
     Ok(())
 }
 
-fn tiered_pinned_blob(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.BlobRef) -> Result[View[Arc[Bytes]], Error] in visible {
-    let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredBlob(ptr))? else {
+fn tiered_pinned_blob(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.BlobRef) -> Result[View[Arc[Bytes]], Error] in visible {
+    let Some(frame) = tiered_resolve_cold(attempt, visible, TieredBlob(ptr))? else {
         return Error(Missed)
     }
     let TieredValue(contents) = view frame.payload else {
@@ -134,7 +239,7 @@ fn tiered_pinned_blob(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, 
     Ok(contents)
 }
 
-fn tiered_point_value(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], page: Arc[std.page.Page], slot: u64) -> Result[Arc[Bytes], Error] {
+fn tiered_point_value(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], page: Arc[std.page.Page], slot: u64) -> Result[Arc[Bytes], Error] {
     let Some(BlobEdge(reference)) = std.page.owning_edge(std.page.image_of(page), slot) else {
         let Some(value) = std.page.value_at(page, slot) else {
             fail("store: missing selected inline value")
@@ -146,30 +251,30 @@ fn tiered_point_value(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, 
     }
     match edge {
         HotBlob(contents) => {
-            tiered_touch_hot_blob(mut attempt, reference, contents)?
+            tiered_touch_hot_blob(attempt, reference, contents)?
             Ok(arc.share(contents))
         },
         ColdBlob(ptr) => {
-            let contents = tiered_pinned_blob(mut attempt, visible, ptr)?
+            let contents = tiered_pinned_blob(attempt, visible, ptr)?
             Ok(arc.share(contents))
         },
     }
 }
 
-fn tiered_point_path(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected_level: Option[u8], key: Bytes) -> Result[Option[Arc[Bytes]], Error] {
-    let page = tiered_point_page(mut attempt, visible, edge, expected_level)?
+fn tiered_point_path(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected_level: Option[u8], key: Bytes) -> Result[Option[Arc[Bytes]], Error] {
+    let page = tiered_point_page(attempt, visible, edge, expected_level)?
     let image = std.page.image_of(page)
     if let Some(slot) = std.page.descend(image, key) {
         let Some(child_edge) = std.page.child_slot(page, slot) else {
             fail("store: missing attached PAGE")
         }
-        return tiered_point_path(mut attempt, visible, child_edge, Some(std.page.level(image) - 1), key)
+        return tiered_point_path(attempt, visible, child_edge, Some(std.page.level(image) - 1), key)
     }
     let (slot, hit) = std.page.search(image, key)
     if !hit {
         return Ok(None)
     }
-    Ok(Some(tiered_point_value(mut attempt, visible, page, slot)?))
+    Ok(Some(tiered_point_value(attempt, visible, page, slot)?))
 }
 
 fn tiered_leaf_prior(leaf: Arc[std.page.Page], key: Bytes) -> u32 {
@@ -185,34 +290,34 @@ fn tiered_leaf_prior(leaf: Arc[std.page.Page], key: Bytes) -> u32 {
     int.truncate(1 + list.len(stored))
 }
 
-fn tiered_plan_path(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], page: Arc[std.page.Page], key: Bytes) -> Result[Arc[std.page.Page], Error] {
+fn tiered_plan_path(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], page: Arc[std.page.Page], key: Bytes) -> Result[Arc[std.page.Page], Error] {
     let image = std.page.image_of(page)
     let Some(slot) = std.page.descend(image, key) else {
         return Ok(arc.share(page))
     }
     let child_level = Some(std.page.level(image) - 1)
     let edge = option.unwrap(std.page.child_slot(page, slot))
-    let child = tiered_point_page(mut attempt, visible, edge, child_level)?
+    let child = tiered_point_page(attempt, visible, edge, child_level)?
     if slot != 0 {
         let left = option.unwrap(std.page.child_slot(page, slot - 1))
-        let _ = tiered_point_page(mut attempt, visible, left, child_level)?
+        let _ = tiered_point_page(attempt, visible, left, child_level)?
     }
     if let Some(right) = std.page.child_slot(page, slot + 1) {
-        let _ = tiered_point_page(mut attempt, visible, right, child_level)?
+        let _ = tiered_point_page(attempt, visible, right, child_level)?
     }
-    tiered_plan_path(mut attempt, visible, child, key)
+    tiered_plan_path(attempt, visible, child, key)
 }
 
 // The leaf and any siblings that apply can need are resolved before encoding.
 // Reading the old width never resolves the old BLOB.
-fn tiered_plan_prior(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], tree: PageTree, logical: Bytes) -> Result[u32, Error] {
-    if let Some(_) = attempt.stopped {
+fn tiered_plan_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], tree: PageTree, logical: Bytes) -> Result[u32, Error] {
+    if tiered_stopped(attempt) {
         return Error(Missed)
     }
     let collection: u32 = list.word_be(logical, 0)
     if let Some(overlays) = view tree.replay {
         if let Some(_) = std.omap.get(overlays.collections, collection) {
-            attempt.stopped = Some(AttemptFold(collection))
+            tiered_latch(attempt, AttemptFold(collection))
             return Error(Missed)
         }
     }
@@ -220,16 +325,16 @@ fn tiered_plan_prior(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, A
         return Error(Stale(collection))
     }
     let key = list.slice(logical, 4, list.len(logical))
-    let origin = tiered_point_page(mut attempt, visible, edge, None)?
-    let leaf = tiered_plan_path(mut attempt, visible, origin, key)?
+    let origin = tiered_point_page(attempt, visible, edge, None)?
+    let leaf = tiered_plan_path(attempt, visible, origin, key)?
     if descriptor[52u64] == 4 {
         return Ok(0u32)
     }
     Ok(tiered_leaf_prior(leaf, key))
 }
 
-fn tiered_edit_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.PagePtr, mut failure: Option[Error]) -> Result[Arc[std.page.Page], std.page.Error] {
-    match tiered_point_page(mut attempt, visible, ColdPage(ptr), None) {
+fn tiered_edit_page(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.PagePtr, mut failure: Option[Error]) -> Result[Arc[std.page.Page], std.page.Error] {
+    match tiered_point_page(attempt, visible, ColdPage(ptr), None) {
         Ok(take loaded) => Ok(take loaded),
         Error(take problem) => {
             failure = Some(take problem)
@@ -238,21 +343,21 @@ fn tiered_edit_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Ar
     }
 }
 
-fn stage_tiered_row(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], base: std.page.Slot, empty_root: Arc[std.page.Page], key: Bytes, value: ReplayValue, inline: u64, rightmost: bool, private_from: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
-    if let Some(_) = attempt.stopped {
+fn stage_tiered_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], base: std.page.Slot, empty_root: Arc[std.page.Page], key: Bytes, value: ReplayValue, inline: u64, rightmost: bool, private_from: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
+    if tiered_stopped(attempt) {
         return Error(Missed)
     }
     // Pages made by this plan are paid for as dirty images. Only pages
     // inherited from its deciding root spend the attempt's pin partition.
     let mut working = match base {
         HotPage(page) if std.page.stamp(std.page.image_of(page)) >= private_from => arc.share(page),
-        _ => tiered_point_page(mut attempt, visible, base, None)?,
+        _ => tiered_point_page(attempt, visible, base, None)?,
     }
     let mut following_stamp = next_stamp
     let mut failure: Option[Error] = None
     let edited: Result[(), std.page.Error] = {
         let load = scoped fn(ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
-            tiered_edit_page(mut attempt, visible, ptr, mut failure)
+            tiered_edit_page(attempt, visible, ptr, mut failure)
         }
         match value {
             ReplayPut(raw) => std.page.insert_shared_resolved(mut working, key, raw, inline, private_from, rightmost, mut following_stamp, load),
@@ -272,8 +377,8 @@ fn stage_tiered_row(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Ar
     Ok(take working)
 }
 
-fn stage_tiered_trim(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], base: std.page.Slot, empty_root: Arc[std.page.Page], limits: LogBounds, before: u64, floor: u64, mut next_stamp: u64) -> Result[(Arc[std.page.Page], u64), Error] {
-    if let Some(_) = attempt.stopped {
+fn stage_tiered_trim(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], base: std.page.Slot, empty_root: Arc[std.page.Page], limits: LogBounds, before: u64, floor: u64, mut next_stamp: u64) -> Result[(Arc[std.page.Page], u64), Error] {
+    if tiered_stopped(attempt) {
         return Error(Missed)
     }
     if floor < limits.first {
@@ -282,11 +387,11 @@ fn stage_tiered_trim(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, A
     if floor >= limits.next {
         return Ok((arc.share(empty_root), before))
     }
-    let working = tiered_point_page(mut attempt, visible, base, None)?
+    let working = tiered_point_page(attempt, visible, base, None)?
     let mut following_stamp = next_stamp
     let mut failure: Option[Error] = None
     let clipped = std.page.cut_before_resolved(working, key_word(floor), mut following_stamp, scoped fn(ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
-        tiered_edit_page(mut attempt, visible, ptr, mut failure)
+        tiered_edit_page(attempt, visible, ptr, mut failure)
     })
     if let Some(take problem) = take failure {
         return Error(take problem)
@@ -310,26 +415,26 @@ scoped type TieredBorrowedRoot {
 // Both possible anchors of a returned row are fields of root. The attempt
 // accounts for the visits and retains shares, but it never stores the row's
 // locator in its growable bookkeeping.
-fn tiered_point_bytes(mut attempt: TieredTouchSet, root: TieredBorrowedRoot, key: Bytes) -> Result[Option[View[Bytes]], Error] in root {
-    tiered_point_bytes_at(mut attempt, root, root.edge, None, key)
+fn tiered_point_bytes(attempt: core.Cell[TieredTouchSet], root: TieredBorrowedRoot, key: Bytes) -> Result[Option[View[Bytes]], Error] in root {
+    tiered_point_bytes_at(attempt, root, root.edge, None, key)
 }
 
-fn tiered_point_bytes_at(mut attempt: TieredTouchSet, root: TieredBorrowedRoot, edge: View[std.page.Slot] in root,
+fn tiered_point_bytes_at(attempt: core.Cell[TieredTouchSet], root: TieredBorrowedRoot, edge: View[std.page.Slot] in root,
     expected: Option[u8], key: Bytes) -> Result[Option[View[Bytes]], Error] in root {
-    if let Some(_) = attempt.stopped {
+    if tiered_stopped(attempt) {
         return Error(Missed)
     }
     let page: View[Arc[std.page.Page]] in root = match edge {
         HotPage(hot) => {
-            tiered_touch_hot_page(mut attempt, hot)?
+            tiered_touch_hot_page(attempt, hot)?
             view hot
         },
-        ColdPage(ptr) => tiered_pinned_page(mut attempt, root.pins, ptr, expected)?,
+        ColdPage(ptr) => tiered_pinned_page(attempt, root.pins, ptr, expected)?,
     }
     let image = std.page.image_of(page)
     if let Some(selected) = std.page.descend(image, key) {
         let child = option.unwrap(std.page.child_slot(page, selected))
-        return tiered_point_bytes_at(mut attempt, root, child, Some(std.page.level(image) - 1), key)
+        return tiered_point_bytes_at(attempt, root, child, Some(std.page.level(image) - 1), key)
     }
     let (selected, hit) = std.page.search(image, key)
     if !hit {
@@ -338,10 +443,10 @@ fn tiered_point_bytes_at(mut attempt: TieredTouchSet, root: TieredBorrowedRoot, 
     if let Some(BlobEdge(reference)) = std.page.owning_edge(image, selected) {
         let bytes_view: View[Arc[Bytes]] in root = match option.unwrap(std.page.blob_slot(page, reference.body)) {
             HotBlob(contents) => {
-                tiered_touch_hot_blob(mut attempt, reference, contents)?
+                tiered_touch_hot_blob(attempt, reference, contents)?
                 view contents
             },
-            ColdBlob(ptr) => tiered_pinned_blob(mut attempt, root.pins, ptr)?,
+            ColdBlob(ptr) => tiered_pinned_blob(attempt, root.pins, ptr)?,
         }
         return Ok(Some(view bytes_view))
     }

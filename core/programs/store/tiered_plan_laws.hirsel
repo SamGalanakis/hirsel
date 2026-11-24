@@ -22,8 +22,8 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     let mut operations = new_data_rows()
     push_data_row(mut operations, DataOp(key: log_key(9, 3)?, value: Some(PageValue(string.into_bytes(string.from("insert")))), trim: None))
     push_data_row(mut operations, DataOp(key: log_key(9, 2)?, value: Some(PageValue(string.into_bytes(string.from("update")))), trim: None))
-    let mut attempt = capacity(tiered_touch_set(75, 1))?
-    let plan = prepare_tiered_writes(mut attempt, visible, base, operations, 101)?
+    let attempt = tiered_attempt(75, 0)
+    let plan = prepare_tiered_writes(attempt, visible, base, operations, 101)?
     let owner = StoreId(hi: 3, lo: 4)
     let call = CallInfo(id: CallId(store: owner, branch: 0, version: 1), at: 1, seed: 0)
     let wire = capacity(encode_staged(call, Some(view base), Some(view plan.deltas), mut operations, NO_FRAME_TAIL, new_data_rows(), None, None, None, 1, 72))?
@@ -36,7 +36,7 @@ fn test_l63_tiered_plan_writes_deciding_priors() -> Result[(), Error] {
     let Some((HotPage(ready), descriptor)) = std.page.collection_slot(plan.tree.root, prefix(9)?) else {
         fail("L63: the plan must prepare the changed collection")
     }
-    if read_le(descriptor, 36, 8) != 3 || read_le(descriptor, 44, 8) != 258 || attempt.touched_bytes != 75 {
+    if read_le(descriptor, 36, 8) != 3 || read_le(descriptor, 44, 8) != 258 || tiered_attempt_state(attempt).touched_bytes != 75 {
         fail("L63: planning changed the wrong row, charge, or pin usage")
     }
     let Some(revised) = std.page.lookup(ready, key_word(2)) else {

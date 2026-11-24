@@ -90,7 +90,7 @@ fn recovered_tiered_inventory(locations: PageLocations, locator: Option[View[His
         let (take revised, _) = std.omap.insert_owned(mut ids, take packs, seq, TieredPagerPack(inventory: clone(inventory), object: object))
         packs = take revised
     }
-    Ok(arc.new(TieredReadInventory(packs: take packs, generation: generation, touch_slots: 4096)))
+    Ok(arc.new(TieredReadInventory(packs: take packs, generation: generation)))
 }
 
 fn rebuild_page_store(take validated: ValidatedPageManifest, locator: Option[View[HistoryLocator]]) -> Result[LoadedPageStore, Error] {

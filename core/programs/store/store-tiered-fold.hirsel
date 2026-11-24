@@ -154,14 +154,15 @@ fn verify_tiered_fold(cut: TieredPageSource, base: std.page.PagePtr, overlay: Ar
 
 // The paused writer runs one verified edit at a time. These pins are
 // released before it hands the changed path to the pack writer.
-fn retry_fold_edit[R](cut: TieredPageSource, edit: scoped[view] fn(mut TieredTouchSet, Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
+fn retry_fold_edit[R](cut: TieredPageSource, edit: scoped[view] fn(core.Cell[TieredTouchSet], Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let mut pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     loop {
-        let (take stop, take result) = disk_allocation(scoped fn() -> Result[(Option[TieredAttemptStop], Result[R, Error]), Error] {
-            let mut attempt = capacity(tiered_touch_set(CUT_PIN_BYTES, 4))?
-            let observed = edit(mut attempt, pins)
-            Ok((take attempt.stopped, take observed))
-        })?
+        let attempt = tiered_attempt(CUT_PIN_BYTES, 0)
+        let isolated = disk_allocation(scoped fn() -> Result[Result[R, Error], Error] {
+            Ok(edit(attempt, pins))
+        })
+        let TieredTouchSet(stopped: take stop, ..) = tiered_finish(take attempt)
+        let result = (take isolated)?
         match take stop {
             Some(AttemptMiss(take target)) => {
                 capacity(map.try_reserve(mut pins, 1))?
@@ -190,10 +191,10 @@ fn restore_fold_slots(take root: Arc[std.page.Page], first_stamp: u64, visible: 
 
 fn fold_materialize_row(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], logical: Bytes, row: ReplayRow,
     inline: u64, log_rows: bool, private_from: u64, mut next_stamp: u64) -> Result[std.page.Slot, Error] waits {
-    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64), Error] {
+    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64), Error] {
         let mut draw = next_stamp
         let key = list.slice(logical, 4, list.len(logical))
-        let page = stage_tiered_row(mut attempt, visible, current, empty_root, key, row.now, inline, log_rows, private_from, mut draw)?
+        let page = stage_tiered_row(attempt, visible, current, empty_root, key, row.now, inline, log_rows, private_from, mut draw)?
         Ok((restore_fold_slots(take page, next_stamp, visible), draw))
     })?
     next_stamp = following_stamp
@@ -202,9 +203,9 @@ fn fold_materialize_row(cut: TieredPageSource, current: std.page.Slot, empty_roo
 
 fn fold_materialize_trim(cut: TieredPageSource, current: std.page.Slot, empty_root: Arc[std.page.Page], limits: LogBounds, before: u64,
     floor: u64, mut next_stamp: u64) -> Result[std.page.Slot, Error] waits {
-    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64), Error] {
+    let (take ready, following_stamp) = retry_fold_edit(cut, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(std.page.Slot, u64), Error] {
         let mut draw = next_stamp
-        let (take page, _) = stage_tiered_trim(mut attempt, visible, current, empty_root, limits, before, floor, mut draw)?
+        let (take page, _) = stage_tiered_trim(attempt, visible, current, empty_root, limits, before, floor, mut draw)?
         Ok((restore_fold_slots(take page, next_stamp, visible), draw))
     })?
     next_stamp = following_stamp

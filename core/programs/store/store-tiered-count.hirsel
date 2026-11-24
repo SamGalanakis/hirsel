@@ -1,5 +1,5 @@
-fn tiered_page_rank(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected: Option[u8], sought: Bytes) -> Result[u64, Error] {
-    let page = tiered_point_page(mut attempt, visible, edge, expected)?
+fn tiered_page_rank(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected: Option[u8], sought: Bytes) -> Result[u64, Error] {
+    let page = tiered_point_page(attempt, visible, edge, expected)?
     let image = std.page.image_of(page)
     let Some(selected) = std.page.descend(image, sought) else {
         let (rank, _) = std.page.search(image, sought)
@@ -17,7 +17,7 @@ fn tiered_page_rank(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Ar
         skipped = total
     }
     let child = option.unwrap(std.page.child_slot(page, selected))
-    let rank = tiered_page_rank(mut attempt, visible, child, Some(std.page.level(image) - 1), sought)?
+    let rank = tiered_page_rank(attempt, visible, child, Some(std.page.level(image) - 1), sought)?
     let Some(total) = int.checked_add(skipped, rank) else {
         return Error(malformed(0))
     }
@@ -31,7 +31,7 @@ fn tiered_count_overlay(overlay: Option[View[Arc[ReplayOverlay]]], low: Bytes, h
     Ok(base_count)
 }
 
-fn read_tiered_count(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, edge: std.page.Slot, descriptor: Bytes, id: Bytes, low: Bytes, high: Bytes, touch_slots: u64) -> Result[u64, Error] waits {
+fn read_tiered_count(source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, edge: std.page.Slot, descriptor: Bytes, id: Bytes, low: Bytes, high: Bytes) -> Result[u64, Error] waits {
     let start = list.slice(low, 4, list.len(low))
     let end = list.slice(high, 4, list.len(high))
     let collection: u32 = list.word_be(id, 0)
@@ -39,11 +39,11 @@ fn read_tiered_count(source: TieredPageSource, grant: Arc[TieredReaderGrant], ro
         Some(replay) => std.omap.get(replay.collections, collection),
         None => None,
     }
-    retry_tiered_read(source, grant, root, start, Some(end), touch_slots, TieredPoint, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[u64, Error] {
+    retry_tiered_read(source, grant, root, start, Some(end), TieredPoint, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[u64, Error] {
         let before = if low == id {
             0u64
         } else {
-            tiered_page_rank(mut attempt, visible, edge, None, start)?
+            tiered_page_rank(attempt, visible, edge, None, start)?
         }
         if list.slice(high, 0, 4) != id {
             let omitted = tiered_count_overlay(overlay, id, low, before)?
@@ -53,8 +53,8 @@ fn read_tiered_count(source: TieredPageSource, grant: Arc[TieredReaderGrant], ro
             }
             return Ok(total)
         }
-        attempt.upper_bound = true
-        let through = tiered_page_rank(mut attempt, visible, edge, None, end)?
+        tiered_seek(attempt, SeekUpper)
+        let through = tiered_page_rank(attempt, visible, edge, None, end)?
         let Some(base_count) = int.checked_sub(through, before) else {
             return Error(malformed(0))
         }

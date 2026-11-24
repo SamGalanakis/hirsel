@@ -86,22 +86,23 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                     Some(replay) => std.omap.get(replay.collections, source),
                     None => None,
                 }
-                return retry_tiered_read(input, grant, root, hint, None, inventory.touch_slots, TieredForward,
-                    scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Page[K, V], Error] {
-                        read_snapshot_page(s, source, copied(high)?, limits, mut attempt,
-                            scoped fn(mut current: TieredTouchSet, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+                return retry_tiered_read(input, grant, root, hint, None, TieredForward,
+                    scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Page[K, V], Error] {
+                        let mut walk = ()
+                        read_snapshot_page(s, source, copied(high)?, limits, mut walk,
+                            scoped fn(mut _walk: (), previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
                                 if tiered_rows {
                                     if let Some(last_key) = previous {
                                         let after = scan_page_after(last_key)?
-                                        return tiered_scan_row(mut current, visible, edge, source, edits, after, high, false)
+                                        return tiered_scan_row(attempt, visible, edge, source, edits, after, high, false)
                                     }
-                                    return tiered_scan_row(mut current, visible, edge, source, edits, start, high, false)
+                                    return tiered_scan_row(attempt, visible, edge, source, edits, start, high, false)
                                 }
                                 let mut cursor = resume_data(data, start, high, previous, false)?
                                 next_bytes(mut cursor)
                             },
-                            scoped fn(mut current: TieredTouchSet, key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
-                                tiered_snapshot_row(mut current, visible, data, decoder, key, raw, remaining)
+                            scoped fn(mut _walk: (), key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
+                                tiered_snapshot_row(attempt, visible, data, decoder, key, raw, remaining)
                             })
                     })
             }

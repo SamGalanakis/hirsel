@@ -35,7 +35,7 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         None => std.omap.new(),
     }
     let (take packs, _) = std.omap.insert(mut ids, initial, pack_seq, TieredPagerPack(inventory: inventory, object: None))
-    tree.paging = Some(arc.new(TieredReadInventory(packs: take packs, generation: 1, touch_slots: 4)))
+    tree.paging = Some(arc.new(TieredReadInventory(packs: take packs, generation: 1)))
     db.heads[0u64].roots.collections = take tree
     db.next_node = draw - 1
     Ok(())
@@ -151,14 +151,14 @@ fn l62_borrowed_rows_survive_later_touches() -> Result[(), Error] {
     map.insert(mut visible, (9, 72), arc.new(TieredFrame(identity: tiered_frame_id(TieredBlob(reference)), payload: TieredValue(arc.new(take contents)))))
     let root_edge: std.page.Slot = ColdPage(ptr)
     let backing = TieredBorrowedRoot(edge: view root_edge, pins: view visible)
-    let mut attempt = capacity(tiered_touch_set(4096, 1))?
-    let Some(first) = tiered_point_bytes(mut attempt, backing, key_word(1))? else {
+    let attempt = tiered_attempt(4096, 0)
+    let Some(first) = tiered_point_bytes(attempt, backing, key_word(1))? else {
         fail("L62: the inline row must be in the pinned leaf")
     }
-    let Some(second) = tiered_point_bytes(mut attempt, backing, key_word(2))? else {
+    let Some(second) = tiered_point_bytes(attempt, backing, key_word(2))? else {
         fail("L62: the overflow row must be in the pinned BLOB")
     }
-    if first != string.as_bytes("inline") || list.len(second) != 1025 || second[1024u64] != 0xa7 || list.len(attempt.frames) != 2 {
+    if first != string.as_bytes("inline") || list.len(second) != 1025 || second[1024u64] != 0xa7 || map.len(tiered_attempt_state(attempt).stamps) != 2 {
         fail("L62: growing attempt bookkeeping must preserve both borrowed values")
     }
     Ok(())

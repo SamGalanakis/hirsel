@@ -1,0 +1,46 @@
+fn tiered_replayed_row(tree: PageTree, logical: Bytes) -> Option[View[ReplayRow]] in tree {
+    let Some(overlays) = view tree.replay else {
+        return None
+    }
+    let id: u32 = list.word_be(logical, 0)
+    let Some(overlay) = std.omap.get(overlays.collections, id) else {
+        return None
+    }
+    replay_overlay_at(overlay, logical)
+}
+
+fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, logical: Bytes, touch_slots: u64) -> Result[Option[Arc[Bytes]], Error] waits {
+    if list.len(logical) < 4 {
+        return Ok(None)
+    }
+    if let Some(row) = tiered_replayed_row(tree, logical) {
+        return match row.now {
+            ReplayPut(value) => Ok(Some(arc.share(value))),
+            ReplayAbsent => Ok(None),
+        }
+    }
+    let Some((edge, _)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) else {
+        return Ok(None)
+    }
+    let key = list.slice(logical, 4, list.len(logical))
+    let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)
+    loop {
+        let (take attempt, take observed) = disk_allocation(scoped fn() -> Result[(TieredTouchSet, Result[Option[Arc[Bytes]], Error]), Error] {
+            let mut attempt_state = capacity(tiered_touch_set(root_grant.pin_bytes, touch_slots))?
+            let result = tiered_point_path(mut attempt_state, pins.frames, edge, None, key)
+            Ok((take attempt_state, take result))
+        })?
+        match attempt.stopped {
+            Some(AttemptMiss(target)) => {
+                let demand = TieredPointDemand(target: clone(target), key: copied(key)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
+                let delivered = tiered_point_delivery(source.pager, take demand)?
+                for frame in delivered.frames {
+                    let _ = tiered_install_pin(mut pins, root, attempt.stamps, frame)?
+                }
+            },
+            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
+            None => return take observed,
+        }
+    }
+}

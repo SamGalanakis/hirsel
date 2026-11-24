@@ -16,15 +16,28 @@ type TieredPagerPack: shareable + send {
     object: Option[HistoryRef]
 }
 
-type TieredPointDemand: send {
-    target: TieredTarget,
-    key: Bytes,
+type TieredPageSource {
+    pager: Sender[TieredPagerMessage],
     packs: std.omap.OMap[u64, TieredPagerPack],
     next_stamp: u64,
     deadline: u64
 }
 
-type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[List[Arc[TieredFrame]], Error]]) | PagerReserve(u64, Sender[Result[Arc[TieredReaderGrant], Error]])
+type TieredPointDemand: send {
+    target: TieredTarget,
+    key: Bytes,
+    packs: std.omap.OMap[u64, TieredPagerPack],
+    next_stamp: u64,
+    deadline: u64,
+    grant: Option[Arc[TieredReaderGrant]]
+}
+
+type TieredPointDelivery: send {
+    frames: List[Arc[TieredFrame]],
+    grant: Option[Arc[TieredReaderGrant]]
+}
+
+type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[TieredPointDelivery, Error]]) | PagerReserve(u64, Sender[Result[Arc[TieredReaderGrant], Error]])
 
 type TieredPagerStart: send {
     store: StoreId,
@@ -56,7 +69,7 @@ fn run_tiered_pager(take launch: TieredPagerStart) waits {
             },
             PagerPoint(demand, answer) => {
                 let delivered = tiered_pager_point(mut input, mut private_cache, owner, demand)
-                let _ = channel.send(answer, take delivered)
+                let _ = channel.try_send(answer, take delivered)
             },
             PagerReserve(amount, answer) => {
                 let reserved = tiered_cache_reserve_reader(mut private_cache, TieredReaderGrant(store: owner, opened: opened, pin_bytes: amount))
@@ -75,8 +88,8 @@ fn pager_reader_grant(requests: Sender[TieredPagerMessage], pin_bytes: u64) -> R
     channel.receive(granted) ?=> |_| Io(Closed)
 }
 
-fn tiered_point_delivery(requests: Sender[TieredPagerMessage], take demand: TieredPointDemand) -> Result[List[Arc[TieredFrame]], Error] waits {
-    let (answer, delivered) = disk_allocation(fn() -> Result[(Sender[Result[List[Arc[TieredFrame]], Error]], Receiver[Result[List[Arc[TieredFrame]], Error]]), Error] {
+fn tiered_point_delivery(requests: Sender[TieredPagerMessage], take demand: TieredPointDemand) -> Result[TieredPointDelivery, Error] waits {
+    let (answer, delivered) = disk_allocation(fn() -> Result[(Sender[Result[TieredPointDelivery, Error]], Receiver[Result[TieredPointDelivery, Error]]), Error] {
         Ok(channel.new(1))
     })?
     channel.send(requests, PagerPoint(take demand, take answer)) ?=> |_| Io(Closed)
@@ -103,7 +116,7 @@ fn tiered_point_continuation(frame: TieredFrame, key: Bytes, expected_level: Opt
     Ok(Some((TieredPage(child), height - 1)))
 }
 
-fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand) -> Result[List[Arc[TieredFrame]], Error] waits {
+fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand) -> Result[TieredPointDelivery, Error] waits {
     let mut frames: List[Arc[TieredFrame]] = list.new()
     let mut edge: TieredTarget = clone(demand.target)
     let mut expected_level: Option[u8] = None
@@ -118,7 +131,7 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
         capacity(list.try_reserve(mut frames, 1))?
         list.push(mut frames, take frame)
         let Some((take child, height)) = take following else {
-            return Ok(take frames)
+            return Ok(TieredPointDelivery(frames: take frames, grant: clone(demand.grant)))
         }
         edge = take child
         expected_level = Some(height)

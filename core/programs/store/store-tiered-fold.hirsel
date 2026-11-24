@@ -1,22 +1,16 @@
-type TieredFoldSource {
-    pager: Sender[TieredPagerMessage],
-    packs: std.omap.OMap[u64, TieredPagerPack],
-    next_stamp: u64,
-    deadline: u64
-}
-
-fn fold_cold_path(source: TieredFoldSource, base: std.page.PagePtr, key: Bytes) -> Result[List[Arc[TieredFrame]], Error] waits {
+fn fold_cold_path(source: TieredPageSource, base: std.page.PagePtr, key: Bytes) -> Result[List[Arc[TieredFrame]], Error] waits {
     if base.stamp == 0 {
         return Ok(list.new())
     }
-    let demand = TieredPointDemand(target: TieredPage(base), key: copied(key)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline)
+    let demand = TieredPointDemand(target: TieredPage(base), key: copied(key)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
     match tiered_point_delivery(source.pager, take demand) {
         Error(Corrupt(take fault)) => {
             let mut malformed_fault = take fault
             malformed_fault.why = Malformed
             Error(Corrupt(take malformed_fault))
         },
-        take outcome => take outcome,
+        Ok(TieredPointDelivery(frames: take frames, ..)) => Ok(take frames),
+        Error(take problem) => Error(take problem),
     }
 }
 
@@ -27,7 +21,7 @@ fn fold_page(frame: TieredFrame) -> View[Arc[std.page.Page]] in frame {
     page
 }
 
-fn fold_base_prior(source: TieredFoldSource, base: std.page.PagePtr, logical: Bytes) -> Result[u32, Error] waits {
+fn fold_base_prior(source: TieredPageSource, base: std.page.PagePtr, logical: Bytes) -> Result[u32, Error] waits {
     let sought = list.slice(logical, 4, list.len(logical))
     let path = fold_cold_path(source, base, sought)?
     if list.len(path) == 0 {
@@ -50,7 +44,7 @@ fn fold_base_prior(source: TieredFoldSource, base: std.page.PagePtr, logical: By
 
 // Sum the strict prefixes encountered while descending one boundary path.
 // Interior entries carry the charges for every subtree the path passes.
-fn fold_prefix_charge(source: TieredFoldSource, base: std.page.PagePtr, sequence_limit: u64) -> Result[u64, Error] waits {
+fn fold_prefix_charge(source: TieredPageSource, base: std.page.PagePtr, sequence_limit: u64) -> Result[u64, Error] waits {
     let key = key_word(sequence_limit)
     let path = fold_cold_path(source, base, key)?
     let mut total = 0u64
@@ -87,7 +81,7 @@ fn fold_prefix_charge(source: TieredFoldSource, base: std.page.PagePtr, sequence
     Ok(total)
 }
 
-fn verify_tiered_fold(source: TieredFoldSource, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+fn verify_tiered_fold(source: TieredPageSource, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
     let pack_file = paged_pack_path(base.pack)?
     let mut trim_records = std.omap.range(overlay.trims, Unbounded, Unbounded)
     while let Some((_, evidence)) = std.omap.next(mut trim_records) {

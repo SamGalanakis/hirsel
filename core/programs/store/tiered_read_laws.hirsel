@@ -74,8 +74,8 @@ fn l62_deliver_branch(requests: Sender[TieredPagerMessage], target: std.page.Pag
         let (take next_packs, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: inventory, object: None))
         packs = take next_packs
     }
-    let demand = TieredPointDemand(target: TieredPage(target), key: key_word(42), packs: take packs, next_stamp: 51, deadline: 0)
-    let path = tiered_point_delivery(requests, take demand)?
+    let demand = TieredPointDemand(target: TieredPage(target), key: key_word(42), packs: take packs, next_stamp: 51, deadline: 0, grant: None)
+    let TieredPointDelivery(frames: take path, ..) = tiered_point_delivery(requests, take demand)?
     if list.len(path) != 2 || path[0u64].identity.stamp != 50 || path[1u64].identity.stamp != 49 {
         fail("L62: point batch must deliver the parent and selected leaf in order")
     }
@@ -222,7 +222,7 @@ fn l79_fold_trims(first_charge: u64, final_charge: u64) -> Result[Arc[ReplayOver
     Ok(take overlay)
 }
 
-fn l79_fold_checks(source: TieredFoldSource, base: std.page.PagePtr) -> Result[(), Error] waits {
+fn l79_fold_checks(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
     // Each of the three rows costs 62 + round8(12) + round8(6) = 86.
     verify_tiered_fold(source, base, l79_fold_trims(172, 86)?)?
     let Error(Corrupt(Fault(why: Malformed, ..))) = verify_tiered_fold(source, base, l79_fold_trims(180, 78)?) else {
@@ -248,7 +248,7 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
     let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
     let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, TieredPagerPack(inventory: inventory, object: None))
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 4096, 1048576, 4)
-    let source = TieredFoldSource(pager: take requests, packs: take packs, next_stamp: 41, deadline: 0)
+    let source = TieredPageSource(pager: take requests, packs: take packs, next_stamp: 41, deadline: 0)
     let checked = l79_fold_checks(source, base)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))
@@ -304,4 +304,76 @@ fn test_l68_fold_reuses_cold_edges() -> Result[(), Error] {
         fail("L68: sealing changed an unmodified child PAGE location")
     }
     Ok(())
+}
+
+fn l62_replay_read_tree(base: std.page.PagePtr) -> Result[PageTree, Error] {
+    let mut raw = l68_collection_map_wire()
+    list.copy_from_slice(mut raw, 33, std.page.encode_ptr(base))
+    list.set_word_le(mut raw, 69, 3u64)
+    list.set_word_le(mut raw, 77, 258u64)
+    let image = page_result(std.page.decode(take raw, CollectionMap))?
+    let mut slots: List[std.page.Slot] = list.new()
+    list.push(mut slots, ColdPage(base))
+    let mut tree = new_page_tree(CollectionMap, 1024)
+    tree.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    Ok(take tree)
+}
+
+fn l62_read_replayed_point(source: TieredPageSource, base: std.page.PagePtr) -> Result[(), Error] waits {
+    let grant = pager_reader_grant(source.pager, VALUE_LIMIT + 1048576)?
+    let mut tree = l62_replay_read_tree(base)?
+    let key = log_key(9, 1)?
+    let mut root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
+    for _ in 0u64 .. 2 {
+        let Some(value) = read_tiered_point(source, grant, root, tree, key, 4)? else {
+            fail("L62: cold and warm lookup must both find the row")
+        }
+        if list.compare_bytes(value, string.as_bytes("stored")) != Equal {
+            fail("L62: pager lookup changed the row")
+        }
+    }
+    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let mut ids = 101u64
+    let before = ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: None)
+    let put_op = JournalOp(key: clone(key), value: Some(string.into_bytes(string.from("second"))), prior: 7, trim: None)
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 1, branch: 0), before, put_op)?
+    root.root_stamp = tree_stamp(tree)
+    let overlay_only = TieredPageSource(pager: channel.sender(source.pager), packs: std.omap.new(), next_stamp: source.next_stamp, deadline: source.deadline)
+    let Some(replayed) = read_tiered_point(overlay_only, grant, root, tree, key, 4)? else {
+        fail("L62: a replay put did not answer without the Cold inventory")
+    }
+    if list.compare_bytes(replayed, string.as_bytes("second")) != Equal {
+        fail("L62: a replay put did not take precedence over its base")
+    }
+    let Some(untouched) = read_tiered_point(source, grant, root, tree, log_key(9, 2)?, 4)? else {
+        fail("L62: an overlay skipped the Cold base for an untouched key")
+    }
+    if list.compare_bytes(untouched, string.as_bytes("stored")) != Equal {
+        fail("L62: reading past an overlay changed a base row")
+    }
+    let deleted = JournalOp(key: clone(key), value: None, prior: 7, trim: None)
+    replay_tiered_op("j-1", mut tree, mut ids, mut account, ReplayOrigin(ordinal: 2, branch: 0), before, deleted)?
+    root.root_stamp = tree_stamp(tree)
+    if let Some(_) = read_tiered_point(overlay_only, grant, root, tree, key, 4)? {
+        fail("L62: a replay tombstone did not hide the base row")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let base = l79_fold_base(fixtures, owner)?
+    let width: u64 = int.widen(base.len)
+    let inventory = PagePack(class: 3, frames: 1, live: width, payload_bytes: 116 + width, index: 88 + width)
+    let mut ids = 0u64
+    let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take packs, _) = std.omap.insert(mut ids, empty, 8u64, TieredPagerPack(inventory: inventory, object: None))
+    let (take pager, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 32 * 1048576, 1048576, 4)
+    let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 41, deadline: 0)
+    let checked = l62_read_replayed_point(source, base)
+    let _ = take source
+    let _ = result.unwrap(task.join(take worker))
+    checked
 }

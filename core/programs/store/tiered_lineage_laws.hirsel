@@ -1,0 +1,89 @@
+fn l69_pack() -> Result[DiskIndex[u64, PagePack], Error] {
+    let mut packs: DiskIndex[u64, PagePack] = disk_index()
+    capacity(disk_index_put(mut packs, 7, PagePack(class: 3, frames: 3, live: 12000, payload_bytes: 13000, index: 12500), pack_edge_charge))?
+    Ok(take packs)
+}
+
+fn l69_pin(name: String, branch_id: u32, watermark: u64) -> LocatedPin {
+    let zero = std.page.unlocated(0)
+    LocatedPin(name: string.from(name), branch: branch_id, version: 0, roots: LocatedRoots(collections: zero, streams: zero, catalog: zero), watermark: watermark)
+}
+
+fn l69_live(packs: DiskIndex[u64, PagePack]) -> u64 {
+    let Some(pack) = disk_index_get(packs, 7) else {
+        fail("L69: the fixture pack must remain in inventory")
+    }
+    pack.live
+}
+
+@test
+fn test_l69_lineage_last_holder_ghost_and_adopt() -> Result[(), Error] {
+    let frame = ReplacedFrame(pack: 7, len: 4000, stamp: 30)
+    l69_shared_watermark(frame)?
+    l69_ghost_watermark(frame)?
+    l69_adopt_origin(frame)
+}
+
+fn l69_shared_watermark(frame: ReplacedFrame) -> Result[(), Error] {
+    let mut lineage = Lineage(forks: map.new(), cells: map.new())
+    let mut packs = l69_pack()?
+    let mut pins: List[LocatedPin] = list.new()
+    list.push(mut pins, l69_pin("A", 0, 50))
+    list.push(mut pins, l69_pin("B", 0, 50))
+    let holders = lineage_holders(lineage.forks, pins, list.new())
+    file_lineage_kill(mut lineage, holders, mut packs, 0, frame)?
+    let cell = LineageCell(branch: 0, boundary: 50, side: 1, interval: 0, pack: 7)
+    if l69_live(packs) != 12000 || map.get_or(lineage.cells, cell, 0u64) != 4000 {
+        fail("L69(a): the first cut must retain the kill at watermark 50")
+    }
+    let _ = list.pop(mut pins)
+    let one = lineage_holders(lineage.forks, pins, list.new())
+    apply_lineage_drops(mut lineage, one, mut packs)?
+    if l69_live(packs) != 12000 || map.get_or(lineage.cells, cell, 0u64) != 4000 {
+        fail("L69(a): the second pin still owns watermark 50")
+    }
+    let empty = lineage_holders(lineage.forks, list.new(), list.new())
+    apply_lineage_drops(mut lineage, empty, mut packs)?
+    if l69_live(packs) != 8000 || map.len(lineage.cells) != 0 {
+        fail("L69(a): the last unpin must charge one frame")
+    }
+    Ok(())
+}
+
+fn l69_ghost_watermark(frame: ReplacedFrame) -> Result[(), Error] {
+    let mut lineage = Lineage(forks: map.new(), cells: map.new())
+    let mut packs = l69_pack()?
+    let mut pins: List[LocatedPin] = list.new()
+    list.push(mut pins, l69_pin("Q", 1, 70))
+    map.insert(mut lineage.forks, 1u32, LineageFork(child: 1, parent: 0, watermark: 60, adopted: false))
+    let holders = lineage_holders(lineage.forks, pins, list.new())
+    file_lineage_kill(mut lineage, holders, mut packs, 0, frame)?
+    file_lineage_kill(mut lineage, holders, mut packs, 1, frame)?
+    prune_lineage_forks(mut lineage.forks, list.new(), pins, list.new(), list.new())
+    if l69_live(packs) != 12000 || !map.contains(lineage.forks, 1u32) || map.len(lineage.cells) != 2 {
+        fail("L69(b): a pinned ghost keeps both cells and all 12000 bytes")
+    }
+    prune_lineage_forks(mut lineage.forks, list.new(), list.new(), list.new(), list.new())
+    let empty = lineage_holders(lineage.forks, list.new(), list.new())
+    apply_lineage_drops(mut lineage, empty, mut packs)?
+    if l69_live(packs) != 8000 || map.len(lineage.forks) != 0 || map.len(lineage.cells) != 0 {
+        fail("L69(b): dropping the origin must leave only the parent-side charge")
+    }
+    Ok(())
+}
+
+fn l69_adopt_origin(frame: ReplacedFrame) -> Result[(), Error] {
+    let mut lineage = Lineage(forks: map.new(), cells: map.new())
+    let mut packs = l69_pack()?
+    map.insert(mut lineage.forks, 1u32, LineageFork(child: 1, parent: 0, watermark: 60, adopted: false))
+    let holders = lineage_holders(lineage.forks, list.new(), list.new())
+    file_lineage_kill(mut lineage, holders, mut packs, 1, frame)?
+    prune_lineage_forks(mut lineage.forks, list.new(), list.new(), list.new(), list.new())
+    let empty = lineage_holders(lineage.forks, list.new(), list.new())
+    adopt_lineage_cells(mut lineage, empty, mut packs, 1)?
+    apply_lineage_drops(mut lineage, empty, mut packs)?
+    if l69_live(packs) != 8000 || map.len(lineage.forks) != 0 || map.len(lineage.cells) != 0 {
+        fail("L69(c): adopt must file the former origin as a main-chain kill")
+    }
+    Ok(())
+}

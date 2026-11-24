@@ -207,6 +207,7 @@ store@1/store/test_l82_tiered_tail_window_resolves_entering_rows src=393a8af97c4
 store@1/store/test_l84_bucket_window src=2a2021efcec702af sig=2dcaf304f1876b15 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l84_pager_coalesces_sibling_demands src=b7c9d90435a13314 sig=9a35aab2cda6916f run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l84_parallel_bucket_windows src=854c68b23ed37a87 sig=885a11e757144d29 run=c9049a952ba23a49 bug=- oracle=- rows=pending
+store@1/store/test_l87_replay_fork_raises_stamp_counter src=879dd700c3edc364 sig=e242db37b1f26ac7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_local_projector_laws src=69247f07bf78a9df sig=970357067485a438 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_look src=41970c5b73344465 sig=acd6867d278c458a run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_look_faults src=c24a5a5763a938b5 sig=80759854ab01dfab run=aff7b6b8625190d8 bug=- oracle=- rows=pending

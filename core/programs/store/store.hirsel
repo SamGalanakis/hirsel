@@ -6054,36 +6054,6 @@ fn journal_apply(file: String, mut replay: JournalReplay, take event: JournalEve
     }
 }
 
-fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
-    let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, ..) = take encoded
-    let ordinal = stamp_after(replay.tiered.ordinal)?
-    let charge = branch_record_bytes(name)
-    if id < replay.state.next_branch || id == 4294967295 || charge > META_LIMIT - replay.record_bytes || map.contains(replay.names, name) {
-        return Error(disk_fault(file, 0, Malformed))
-    }
-    let (take roots, at, take key) = disk_allocation(scoped fn() -> Result[(Roots, u64, String), Error] {
-        for source in replay.state.tips {
-            if source.id != parent {
-                continue
-            }
-            if source.head != forked_at {
-                return Error(disk_fault(file, 0, Malformed))
-            }
-            return Ok((share_roots(source.roots), source.at, string.from(name)))
-        }
-        Error(disk_fault(file, 0, Malformed))
-    })?
-    capacity(list.try_reserve(mut replay.state.tips, 1))?
-    capacity(map.try_reserve(mut replay.names, 1))?
-    map.insert(mut replay.names, take key, id)
-    list.push(mut replay.state.tips, Tip(id: id, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: forked_at, at: at))
-    replay.record_bytes += charge
-    replay.state.next_branch = id + 1
-    replay.tiered.ordinal = ordinal
-    replay.tiered.exact = false
-    Ok(())
-}
-
 // Replay settles the Memory union from the final roots. A put can make
 // the head and a pin share a row version again, lowering that union.
 fn journal_account(replay: JournalReplay) -> Result[u64, Error] {

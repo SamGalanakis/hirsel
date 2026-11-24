@@ -902,6 +902,27 @@ fn test_l68_replay_branch_accounts() -> Result[(), Error] {
     l68_check_replay_root(q.state.tips[1u64].roots.collections, 3, 258, "second")
 }
 
+@test
+fn test_l87_replay_fork_raises_stamp_counter() -> Result[(), Error] {
+    let mut replay = l68_replay_base()?
+    replay.next_node = 299
+    journal_apply("j-1", mut replay, Fork(JournalFork(id: 1, parent: 0, forked_at: 0, name: "beta", watermark: 500)))?
+    if stamp_after(replay.next_node)? != 500 {
+        fail("L87(e): replay did not reserve the stamps below the fork watermark")
+    }
+    journal_apply("j-1", mut replay, l68_replay_put(1, 1, 7, "second")?)?
+    let edited = tree_stamp(replay.state.tips[1u64].roots.collections)
+    if edited < 500 {
+        fail("L87(e): the child drew an inherited stamp after the fork")
+    }
+    let counter = replay.next_node
+    journal_apply("j-1", mut replay, Fork(JournalFork(id: 2, parent: 0, forked_at: 0, name: "gamma", watermark: 500)))?
+    if counter != replay.next_node {
+        fail("L87(e): replay lowered an already advanced counter")
+    }
+    Ok(())
+}
+
 fn l68_object_pack(mut source: ObjectPackRead, owner: StoreId, seq: u64, stamp: u64, payload_bytes: Bytes) -> Result[std.page.PagePtr, Error] waits {
     let (take raw, ptr) = l68_page_pack(owner, seq, stamp, payload_bytes)?
     let mut object_bytes = take raw

@@ -135,29 +135,74 @@ fn encode_tiered_cut_pack(id: StoreId, layout: TieredPackRun, pack: PlannedPack,
     finish_tiered_pack(take draft)
 }
 
-fn seal_holder_tiered(tree: PageTree, emitted: Map[u64, std.page.PagePtr], mut next_stamp: u64) -> Result[PageTree, Error] {
-    let first = next_stamp
-    let (take sealed, following_stamp) = disk_allocation(scoped fn() -> Result[(PageTree, u64), Error] {
-        let mut ready = share_page_tree(tree)
-        let mut draw = first
-        let mut walk = std.page.walk_begin(tree.root)
-        while let Some(take key) = account_collection_key(mut walk) {
-            let (edge, descriptor) = option.unwrap(std.page.collection_slot(tree.root, key))
-            if descriptor[53u64] == 1 {
-                if let HotPage(page) = view edge {
-                    let stamp = std.page.stamp(std.page.image_of(page))
-                    if stamp != 0 {
-                        let Some(place) = map.get(emitted, stamp) else {
-                            fail("store: the cut omitted a Hot Tiered root")
-                        }
-                        page_result(std.page.install_tiered_root(mut ready.root, key, ColdPage(place), mut draw))?
-                    }
+fn seal_tiered_map_slot(root: Arc[std.page.Page], image: std.page.Image, slot: u64, emitted: Map[u64, std.page.PagePtr]) -> Result[Option[std.page.Slot], Error] {
+    let child = option.unwrap(std.page.child_slot(root, slot))
+    if std.page.level(image) != 0 {
+        let HotPage(page) = view child else {
+            fail("store: a collection map has Hot children")
+        }
+        if let Some(take ready) = seal_tiered_map(page, emitted)? {
+            return Ok(Some(HotPage(take ready)))
+        }
+    } else if let Some(_) = std.page.tiered_root_at(image, slot) {
+        if let HotPage(page) = view child {
+            let stamp = std.page.stamp(std.page.image_of(page))
+            if stamp != 0 {
+                let Some(place) = map.get(emitted, stamp) else {
+                    fail("store: the cut omitted a Hot Tiered root")
+                }
+                return Ok(Some(ColdPage(place)))
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn seal_tiered_map(root: Arc[std.page.Page], emitted: Map[u64, std.page.PagePtr]) -> Result[Option[Arc[std.page.Page]], Error] {
+    let image = std.page.image_of(root)
+    let width = std.page.count(image)
+    let height = std.page.level(image)
+    let mut changed: Map[u64, std.page.Slot] = map.new()
+    for slot in 0u64 .. width {
+        if let Some(take updated) = seal_tiered_map_slot(root, image, slot, emitted)? {
+            capacity(map.try_reserve(mut changed, 1))?
+            map.insert(mut changed, slot, take updated)
+        }
+    }
+    if map.len(changed) == 0 {
+        return Ok(None)
+    }
+    disk_allocation(scoped fn() -> Result[Option[Arc[std.page.Page]], Error] {
+        let mut rows: List[std.page.Entry] = list.with_capacity(width)
+        let mut kids: List[std.page.Slot] = list.with_capacity(width)
+        for slot in 0u64 .. width {
+            let old = option.unwrap(std.page.child_slot(root, slot))
+            let mut row = option.unwrap(std.page.entry(image, slot))
+            let child: std.page.Slot = match map.get(changed, slot) {
+                Some(updated) => clone(updated),
+                None => clone(old),
+            }
+            if let ColdPage(ptr) = view child {
+                if let InlineValue(mut descriptor) = row.cell {
+                    list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(ptr))
+                } else {
+                    fail("store: a Tiered collection map entry must hold its inline descriptor")
                 }
             }
-            std.page.walk_next(mut walk)
+            list.push(mut kids, take child)
+            list.push(mut rows, take row)
         }
-        Ok((take ready, draw))
-    })?
-    next_stamp = following_stamp
-    Ok(take sealed)
+        let ready = page_result(std.page.encode(rows, height, std.page.stamp(image), CollectionMap))?
+        Ok(Some(page_result(std.page.attach(take ready, take kids, list.new()))?))
+    })
+}
+
+// The Memory map frames were already assigned stamps in the cut plan.
+// Installing Tiered locations changes only the physical references.
+fn seal_holder_tiered(tree: PageTree, emitted: Map[u64, std.page.PagePtr]) -> Result[PageTree, Error] {
+    let mut ready = share_page_tree(tree)
+    if let Some(take sealed) = seal_tiered_map(tree.root, emitted)? {
+        ready.root = take sealed
+    }
+    Ok(take ready)
 }

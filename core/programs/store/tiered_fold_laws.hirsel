@@ -115,7 +115,10 @@ fn l79_cut_emits_folded_tree(source: TieredPageSource, base: std.page.PagePtr, o
     let mut emitted: Map[u64, std.page.PagePtr] = map.new()
     let (take blob_wire, blob_pack) = encode_tiered_cut_pack(owner, blob_run, blob_run.packs[0u64], mut emitted)?
     let (take page_wire, page_pack) = encode_tiered_cut_pack(owner, page_run, page_run.packs[0u64], mut emitted)?
-    let sealed = seal_holder_tiered(folded.collections, emitted, mut stamp)?
+    let sealed = seal_holder_tiered(folded.collections, emitted)?
+    if tree_stamp(sealed) != tree_stamp(folded.collections) {
+        fail("T6: publishing a physical location must keep the Memory map's planned stamp")
+    }
     let key = prefix(9)?
     let Some((ColdPage(ptr), descriptor)) = std.page.collection_slot(sealed.root, key) else {
         fail("L79: the prepared holder must name the emitted Tiered root")

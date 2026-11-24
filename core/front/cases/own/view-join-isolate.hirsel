@@ -1,0 +1,91 @@
+// LANG-6, OWN-7, OWN-16, FAIL-8: the view-join matrix for a failure inside `isolate`.
+// boom fails after reading through the join; the failure edge cleans the selected
+// temporary and the locals once, temporary first (4, then b (2), a (1)), and the
+// isolate reports the failure (77). The isolate's own result keeps 32 bytes admitted.
+// expect: run isolated(1) = 77 trace 2,1 used 32
+// expect: run isolated(0) = 77 trace 4,2,1 used 32
+// expect: run isolated_let(1) = 77 trace 2,1 used 32
+// expect: run isolated_let(0) = 77 trace 4,2,1 used 32
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+scoped type Holder {
+    m: View[Mark]
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn me(m: Mark) -> View[Mark] in m {
+    view m
+}
+
+fn mk(i: u64) -> Mark {
+    result.unwrap(Mark(id: i))
+}
+
+fn made(s: String) -> String {
+    string.from(s)
+}
+
+fn last_byte(b: Bytes) -> u64 {
+    int.widen(b[list.len(b) - 1u64])
+}
+
+fn both(x: Mark, y: Mark) -> u64 {
+    x.id * 10 + y.id
+}
+
+fn boom(m: Mark) -> u64 {
+    if m.id > 0 {
+        fail("boom")
+    }
+    m.id
+}
+
+fn h(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    boom(match c {
+        1 => view a,
+        _ => me(mk(4))
+    })
+}
+
+fn h_let(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let v = loop {
+        if c == 1 {
+            break view a
+        }
+        break me(mk(4))
+    }
+    boom(v)
+}
+
+fn isolated(c: u64) -> u64 {
+    let r = isolate(fn() -> u64 {
+        h(c)
+    })
+    match r {
+        Ok(Ok(x)) => x,
+        Ok(Error(_)) => 77,
+        Error(_) => 88
+    }
+}
+
+fn isolated_let(c: u64) -> u64 {
+    let r = isolate(fn() -> u64 {
+        h_let(c)
+    })
+    match r {
+        Ok(Ok(x)) => x,
+        Ok(Error(_)) => 77,
+        Error(_) => 88
+    }
+}

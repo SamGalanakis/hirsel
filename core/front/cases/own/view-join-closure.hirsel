@@ -1,0 +1,207 @@
+// LANG-6, OWN-7, OWN-16: the view-join matrix for an `if` inside a scoped closure: each carrier and
+// position, c == 1 selecting the first arm. a is Mark 1, b Mark 2; a selected
+// temporary (3 or 4) ends before the locals b, a, so each Mark is finalized
+// once, and every run admits nothing at its end.
+// The closure captures a and b; its temporaries end inside the call.
+// expect: run arg_direct(1) = 1 trace 2,1
+// expect: run arg_direct(0) = 2 trace 2,1
+// expect: run arg_temp(1) = 3 trace 3,2,1
+// expect: run arg_temp(0) = 4 trace 4,2,1
+// expect: run arg_local(1) = 1 trace 2,1
+// expect: run arg_local(0) = 2 trace 2,1
+// expect: run arg_bytes(1) = 99
+// expect: run arg_bytes(0) = 101
+// expect: run let_temp(1) = 6 trace 3,2,1
+// expect: run let_temp(0) = 8 trace 4,2,1
+// expect: run field(1) = 1 trace 2,1
+// expect: run field(0) = 4 trace 4,2,1
+// expect: run holder(1) = 1 trace 2,1
+// expect: run holder(0) = 4 trace 4,2,1
+// expect: run two(1) = 13 trace 3,2,1
+// expect: run two(0) = 42 trace 4,2,1
+// expect: run option(1) = 1 trace 2,1
+// expect: run option(0) = 4 trace 4,2,1
+// expect: run pair(1) = 15 trace 2,1
+// expect: run pair(0) = 46 trace 4,2,1
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+scoped type Holder {
+    m: View[Mark]
+}
+
+fn id_of(m: Mark) -> u64 {
+    m.id
+}
+
+fn me(m: Mark) -> View[Mark] in m {
+    view m
+}
+
+fn mk(i: u64) -> Mark {
+    result.unwrap(Mark(id: i))
+}
+
+fn made(s: String) -> String {
+    string.from(s)
+}
+
+fn last_byte(b: Bytes) -> u64 {
+    int.widen(b[list.len(b) - 1u64])
+}
+
+fn both(x: Mark, y: Mark) -> u64 {
+    x.id * 10 + y.id
+}
+
+fn pick(c: u64) -> Option[u64] {
+    if c == 1 {
+        Some(c)
+    } else {
+        None
+    }
+}
+
+fn arg_direct(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        id_of(if k == 1 {
+            view a
+        } else {
+            view b
+        })
+    }
+    g(c)
+}
+
+fn arg_temp(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        id_of(if k == 1 {
+            me(mk(3))
+        } else {
+            me(mk(4))
+        })
+    }
+    g(c)
+}
+
+fn arg_local(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        id_of(if k == 1 {
+            me(a)
+        } else {
+            me(b)
+        })
+    }
+    g(c)
+}
+
+fn arg_bytes(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        last_byte(if k == 1 {
+            string.as_bytes(made("abc"))
+        } else {
+            string.as_bytes(made("abcde"))
+        })
+    }
+    g(c)
+}
+
+fn let_temp(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        let v = if k == 1 {
+            me(mk(3))
+        } else {
+            me(mk(4))
+        }
+        id_of(v) + id_of(v)
+    }
+    g(c)
+}
+
+fn field(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        (if k == 1 {
+            view a
+        } else {
+            me(mk(4))
+        }).id
+    }
+    g(c)
+}
+
+fn holder(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        let h = Holder(m: if k == 1 {
+            view a
+        } else {
+            me(mk(4))
+        })
+        id_of(h.m)
+    }
+    g(c)
+}
+
+fn two(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        both(if k == 1 {
+            view a
+        } else {
+            me(mk(4))
+        }, if k == 1 {
+            me(mk(3))
+        } else {
+            view b
+        })
+    }
+    g(c)
+}
+
+fn option(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        let o = if k == 1 {
+            Some(view a)
+        } else {
+            Some(me(mk(4)))
+        }
+        match o {
+            Some(m) => id_of(m),
+            None => 0
+        }
+    }
+    g(c)
+}
+
+fn pair(c: u64) -> u64 {
+    let a = mk(1)
+    let b = mk(2)
+    let g = scoped fn(k: u64) -> u64 {
+        let t = if k == 1 {
+            (view a, 5u64)
+        } else {
+            (me(mk(4)), 6u64)
+        }
+        id_of(t.0) * 10 + t.1
+    }
+    g(c)
+}

@@ -546,7 +546,7 @@ seal, and `sign(<alg>)` in its policy fixes the algorithm:
 | `alg` | scheme | key | signature |
 | --- | --- | --- | --- |
 | `Ed25519` | Ed25519 (RFC 8032) | PKCS#8 v1 or v2 with the RFC 8410 OID | 64 bytes |
-| `P256` | ECDSA over P-256 with SHA-256 (JWS `ES256`), with a fresh random nonce | PKCS#8 with an RFC 5915 EC key | 64 bytes, `r ‖ s` |
+| `P256` | ECDSA over P-256 with SHA-256 (JWS `ES256`). Host `Random` supplies fresh randomness. Virtual `Random` selects RFC 6979 | PKCS#8 with an RFC 5915 EC key | 64 bytes, `r ‖ s` |
 | `Rs256` | RSASSA-PKCS1-v1_5 with SHA-256 (RFC 8017 §8.2, JWS `RS256`) | PKCS#8 RSA key of 2048 to 4096 bits | the modulus length |
 
 The results, decided in this order:
@@ -567,10 +567,10 @@ The results, decided in this order:
 - `Capacity(c)`: the blob or signature does not fit the spare of `out`, with its length
   as `requested` and the spare as `available`; nothing is appended.
 
-The last four are deliveries. The blob, the signature and the opened designation pass the
-replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)); the key's bytes and the
-opened bytes never do. A recording keeps the blob and the signature as outputs and never
-key material, and a replay delivers them from the tape
+The last four are deliveries. Wrapping and unwrapping pass the replay point
+([CAP-8](capabilities.md#cap-8-the-replay-point)). Signing follows TLS-8's rule
+for the key and `Random`. A recording keeps provider outputs and designation origins.
+A replay delivers the recorded blob, signature or designation from the tape
 ([recording](../recording.md#credentials)). An unwrapped secret is designated by the order
 of its unwrap among the run's unwraps; on replay it has no bytes, like a grant, and every
 use of it replays from the recording. Its charge follows CONC-15 as a seal's does: it is
@@ -1204,7 +1204,8 @@ The results, in this order:
 
 `sign` with the key signs the certificate. The self-signed certificate whose DER WebRTC
 fingerprints ([RFC 8122 §5](https://www.rfc-editor.org/rfc/rfc8122#section-5)) is library
-code, in `std.x509_build` over `secret.sign`. `sign(P256)` answers the fixed-width 64-byte
+code, in [`std.x509_build`](../../core/std/api/x509_build.md) over `secret.sign`.
+`sign(P256)` answers the fixed-width 64-byte
 `r ‖ s`. An X.509 signature value is the DER `ECDSA-Sig-Value` SEQUENCE of two INTEGERs
 ([RFC 3279 §2.2.3](https://www.rfc-editor.org/rfc/rfc3279#section-2.2.3)), so the builder
 re-encodes `r ‖ s` into that form before writing the certificate, and the fingerprint hashes

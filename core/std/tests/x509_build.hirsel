@@ -1,0 +1,13 @@
+// OpenSSL built the TBSCertificate. The signature comes from an independent
+// RFC 6979 HMAC-SHA256 calculation under A.2.5's private key.
+// expect: run self_signed_der_matches_reference() = true
+fn self_signed_der_matches_reference() -> bool {
+    let seed = option.unwrap(hex.decode(b"c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"))
+    let r = provide.random_tape(take seed)
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(r, "sign(p256)", mut point))
+    let start = option.unwrap(time.from_unix(1704067200, 0))
+    let end = option.unwrap(time.from_unix(2524608000, 0))
+    let der = result.unwrap(x509_build.self_signed_p256(key, r, point, 128, "media.test", start, end))
+    der == option.unwrap(hex.decode(b"308201193081c0a00302010202020080300a06082a8648ce3d04030230153113301106035504030c0a6d656469612e746573743020170d3234303130313030303030305a180f32303530303130313030303030305a30153113301106035504030c0a6d656469612e746573743059301306072a8648ce3d020106082a8648ce3d0301070342000460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299300a06082a8648ce3d0403020348003045022100f72fb4433f407738ac2b0f87316c79f22ee01f1fe9e3813a4622f719fac9631a022017955fdebbac90995e828b63e42b7725a406dec11f3091cff5cabdfa5f585f92"))
+}

@@ -1,0 +1,147 @@
+pub type BuildError = Invalid | Sign(KeyError)
+
+fn head(mut out: Bytes, tag: u8, len: u64) {
+    list.push(mut out, tag)
+    if len < 128 {
+        list.push(mut out, int.truncate(len))
+        return
+    }
+    let mut width = 8u64
+    while (len >> ((width - 1) * 8)) == 0 {
+        width -= 1
+    }
+    let count: u8 = int.truncate(width)
+    list.push(mut out, 128u8 | count)
+    for i in 0u64 .. width {
+        list.push(mut out, int.truncate(len >> ((width - i - 1) * 8)))
+    }
+}
+
+fn field(mut out: Bytes, tag: u8, body: Bytes) {
+    head(mut out, tag, list.len(body))
+    list.append(mut out, body)
+}
+
+// A positive DER INTEGER needs one leading zero exactly when its high bit is set.
+fn unsigned(mut out: Bytes, data: Bytes) {
+    let end = list.len(data)
+    let mut at = 0u64
+    while at + 1 < end && data[at] == 0 {
+        at += 1
+    }
+    let prefix = data[at] >= 128u8
+    head(mut out, 0x02, end - at + if prefix {
+        1
+    } else {
+        0
+    })
+    if prefix {
+        list.push(mut out, 0u8)
+    }
+    list.append(mut out, list.slice(data, at, end))
+}
+
+fn digits(mut out: Bytes, value: u16) {
+    list.push(mut out, b'0' + int.truncate(value / 10))
+    list.push(mut out, b'0' + int.truncate(value % 10))
+}
+
+// RFC 5280 §4.1.2.5. Both time forms always include seconds and use UTC.
+fn validity_time(mut out: Bytes, civil: time.Civil) {
+    let date = time.date_of(civil)
+    let year = time.year(date)
+    if year >= 1950 && year < 2050 {
+        head(mut out, 0x17, 13)
+    } else {
+        head(mut out, 0x18, 15)
+        digits(mut out, year / 100)
+    }
+    digits(mut out, year % 100)
+    digits(mut out, int.widen(time.month(date)))
+    digits(mut out, int.widen(time.day(date)))
+    digits(mut out, int.widen(time.hour(civil)))
+    digits(mut out, int.widen(time.minute(civil)))
+    digits(mut out, int.widen(time.second(civil)))
+    list.push(mut out, b'Z')
+}
+
+fn signature_algorithm() -> Bytes {
+    b"\x30\x0a\x06\x08\x2a\x86\x48\xce\x3d\x04\x03\x02"
+}
+
+fn name(common_name: String) -> Bytes {
+    let common_name_bytes = string.as_bytes(common_name)
+    let mut attribute: Bytes = list.with_capacity(7 + list.len(common_name_bytes))
+    list.append(mut attribute, b"\x06\x03\x55\x04\x03")
+    field(mut attribute, 0x0c, common_name_bytes)
+    let mut sequence: Bytes = list.with_capacity(2 + list.len(attribute))
+    field(mut sequence, 0x30, attribute)
+    let mut set: Bytes = list.with_capacity(2 + list.len(sequence))
+    field(mut set, 0x31, sequence)
+    let mut rdn: Bytes = list.with_capacity(2 + list.len(set))
+    field(mut rdn, 0x30, set)
+    take rdn
+}
+
+fn tbs(public: Bytes, serial: u64, common_name: String, start: time.Civil, end: time.Civil) -> Bytes {
+    let owner = name(common_name)
+    let alg = signature_algorithm()
+    let mut fields: Bytes = list.with_capacity(162 + 2 * list.len(owner))
+    // X.509 v3 and the serial, followed by the signature algorithm and issuer.
+    list.append(mut fields, b"\xa0\x03\x02\x01\x02")
+    let mut serial_bytes: Bytes = list.with_capacity(8)
+    list.put_word_be(mut serial_bytes, serial)
+    unsigned(mut fields, serial_bytes)
+    list.append(mut fields, alg)
+    list.append(mut fields, owner)
+    let mut validity: Bytes = list.with_capacity(34)
+    validity_time(mut validity, start)
+    validity_time(mut validity, end)
+    field(mut fields, 0x30, validity)
+    list.append(mut fields, owner)
+    // id-ecPublicKey with secp256r1 parameters and the uncompressed SEC 1 point.
+    list.append(mut fields, b"\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00")
+    list.append(mut fields, public)
+    let mut der: Bytes = list.with_capacity(4 + list.len(fields))
+    field(mut der, 0x30, fields)
+    take der
+}
+
+/// Build a self-signed P-256 X.509 certificate and return its DER bytes.
+/// The serial must be positive. The name must be nonempty. Both times use UTC
+/// with whole seconds. The point must be the uncompressed public key for key.
+pub fn self_signed_p256(key: Secret, r: Random, public: Bytes, serial: u64, common_name: String, not_before: time.Timestamp, not_after: time.Timestamp) -> Result[Bytes, BuildError] {
+    if serial == 0 || list.len(public) != 65 || public[0] != 4 || string.byte_len(common_name) == 0 || time.unix_secs(not_before) > time.unix_secs(not_after) || time.subsec_nanos(not_before) != 0 || time.subsec_nanos(not_after) != 0 {
+        return Error(Invalid)
+    }
+    let start = match time.civil(not_before, 0) {
+        Some(value) => value,
+        None => return Error(Invalid),
+    }
+    let end = match time.civil(not_after, 0) {
+        Some(value) => value,
+        None => return Error(Invalid),
+    }
+    let body = tbs(public, serial, common_name, start, end)
+    let mut raw: Bytes = list.with_capacity(64)
+    match secret.sign(key, P256, r, body, mut raw) {
+        Ok(_) => (),
+        Error(e) => return Error(Sign(e)),
+    }
+    if !p256.verify(public, body, raw) {
+        return Error(Invalid)
+    }
+    let mut integers: Bytes = list.with_capacity(70)
+    unsigned(mut integers, list.slice(raw, 0, 32))
+    unsigned(mut integers, list.slice(raw, 32, 64))
+    let mut bit_string: Bytes = list.with_capacity(73)
+    list.push(mut bit_string, 0u8)
+    field(mut bit_string, 0x30, integers)
+    let mut signed: Bytes = list.with_capacity(list.len(body) + 87)
+    list.append(mut signed, body)
+    list.append(mut signed, signature_algorithm())
+    field(mut signed, 0x03, bit_string)
+    let mut cert: Bytes = list.with_capacity(4 + list.len(signed))
+    field(mut cert, 0x30, signed)
+    Ok(take cert)
+}

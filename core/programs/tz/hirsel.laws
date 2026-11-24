@@ -1,2 +1,2 @@
 hirsel.laws 1
-tz@1/tests/tzif_zoneinfo_conformance src=6a7f3ce87c67802d sig=21d6238011b1a5fd run=df01aea4dcdaea21 bug=6ba2da79bb580868 oracle=69a151d1c2b60fa8 rows=pending
+tz@1/tests/tzif_zoneinfo_conformance src=6a7f3ce87c67802d sig=4a04ad940203e3c7 run=df01aea4dcdaea21 bug=6ba2da79bb580868 oracle=69a151d1c2b60fa8 rows=pending

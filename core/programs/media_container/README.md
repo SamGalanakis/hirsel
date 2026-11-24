@@ -20,3 +20,17 @@ and body. For Ogg Opus, use `opus.write_head` and `opus.write_tags` to write the
 initial mono or stereo identification packet and vendor-only comment packet.
 Pass encoded audio directly as the bodies of later pages. The caller supplies
 granule positions in 48 kHz samples, including pre-skip and any final trim.
+
+## Fragmented MP4
+
+`mp4.read_init` reads an initialization segment and loans each audio or video
+track's sample-entry box with its `trex` defaults. `mp4.write_init` writes a
+single-track initialization segment from that metadata. The caller supplies the
+codec configuration as a sample-entry box with data reference index 1.
+
+`mp4.write_fragment` writes a `moof` and `mdat` header. Send the encoded
+samples after that header in the same order as their duration, size, flags and
+composition offsets. `mp4.read_fragment` accepts one `moof` with a single
+`traf`, followed by its `mdat`, and loans each sample with its timing. It
+supports moof-relative offsets and uses the supplied track defaults if a run
+omits a field. `mp4.read_box` can scan other top-level boxes.

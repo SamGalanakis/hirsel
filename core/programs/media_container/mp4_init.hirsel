@@ -1,0 +1,132 @@
+fn child_box(input: Bytes, parent: BoxHeader, kind: u32) -> Result[BoxHeader, Error] {
+    let mut at = parent.body
+    while at < parent.next {
+        let entry = read_box(input, at, parent.next, true)?
+        if entry.kind == kind {
+            return Ok(entry)
+        }
+        at = entry.next
+    }
+    Error(InvalidTrack)
+}
+
+fn read_versioned_id(input: Bytes, b: BoxHeader) -> Result[u32, Error] {
+    let n = b.next - b.body
+    if n < 16 {
+        return Error(InvalidTrack)
+    }
+    let version = input[b.body]
+    if version == 0 {
+        return Ok(list.word_be(input, b.body + 12))
+    }
+    if version == 1 && n >= 24 {
+        return Ok(list.word_be(input, b.body + 20))
+    }
+    Error(InvalidTrack)
+}
+
+fn track_sample_entry(input: Bytes, mdia: BoxHeader) -> Result[BoxHeader, Error] {
+    let minf = child_box(input, mdia, 0x6d696e66)?
+    let stbl = child_box(input, minf, 0x7374626c)?
+    let stsd = child_box(input, stbl, 0x73747364)?
+    if stsd.next - stsd.body < 8 {
+        return Error(InvalidTrack)
+    }
+    let count: u32 = list.word_be(input, stsd.body + 4)
+    if count != 1 {
+        return Error(Unsupported)
+    }
+    let entry = read_box(input, stsd.body + 8, stsd.next, true)?
+    if entry.next != stsd.next {
+        return Error(InvalidTrack)
+    }
+    // Retain the entry's size and type in the callback's byte loan.
+    Ok(BoxHeader(kind: entry.kind, body: stsd.body + 8, next: entry.next))
+}
+
+fn read_trex(input: Bytes, mvex: BoxHeader, id: u32) -> Result[Defaults, Error] {
+    let mut at = mvex.body
+    while at < mvex.next {
+        let b = read_box(input, at, mvex.next, true)?
+        if b.kind == 0x74726578 {
+            if b.next - b.body != 24 {
+                return Error(InvalidTrack)
+            }
+            let track_id: u32 = list.word_be(input, b.body + 4)
+            if track_id == id {
+                let description: u32 = list.word_be(input, b.body + 8)
+                if description != 1 {
+                    return Error(Unsupported)
+                }
+                return Ok(Defaults(duration: list.word_be(input, b.body + 12), size: list.word_be(input, b.body + 16), flags: list.word_be(input, b.body + 20)))
+            }
+        }
+        at = b.next
+    }
+    Error(InvalidTrack)
+}
+
+fn read_track(input: Bytes, trak: BoxHeader, mvex: BoxHeader, receive: scoped fn(Track, Defaults, Bytes)) -> Result[(), Error] {
+    let tkhd = child_box(input, trak, 0x746b6864)?
+    let id = read_versioned_id(input, tkhd)?
+    let mdia = child_box(input, trak, 0x6d646961)?
+    let mdhd = child_box(input, mdia, 0x6d646864)?
+    let timescale = read_versioned_id(input, mdhd)?
+    if id == 0 || timescale == 0 {
+        return Error(InvalidTrack)
+    }
+    let hdlr = child_box(input, mdia, 0x68646c72)?
+    if hdlr.next - hdlr.body < 12 {
+        return Error(InvalidTrack)
+    }
+    let kind: u32 = list.word_be(input, hdlr.body + 8)
+    let media = if kind == 0x736f756e {
+        Audio
+    } else if kind == 0x76696465 {
+        if tkhd.next - tkhd.body < 84 {
+            return Error(InvalidTrack)
+        }
+        let w: u32 = list.word_be(input, tkhd.next - 8)
+        let h: u32 = list.word_be(input, tkhd.next - 4)
+        Video(int.truncate(w >> 16), int.truncate(h >> 16))
+    } else {
+        return Error(Unsupported)
+    }
+    let entry = track_sample_entry(input, mdia)?
+    let defaults = read_trex(input, mvex, id)?
+    receive(Track(id: id, timescale: timescale, media: media), defaults, list.slice(input, entry.body, entry.next))
+    Ok(())
+}
+
+// Demux the initialization metadata and loan each track's sample-entry box.
+pub fn read_init(input: Bytes, at: u64, eof: bool, receive: scoped fn(Track, Defaults, Bytes)) -> Result[u64, Error] {
+    let limit = list.len(input)
+    let first = read_box(input, at, limit, eof)?
+    if first.kind != FTYP {
+        return Error(InvalidBox)
+    }
+    let mut cursor = first.next
+    let mut movie = read_box(input, cursor, limit, eof)?
+    while movie.kind != MOOV {
+        if movie.kind == MOOF || movie.kind == MDAT {
+            return Error(InvalidTrack)
+        }
+        cursor = movie.next
+        movie = read_box(input, cursor, limit, eof)?
+    }
+    let mvex = child_box(input, movie, 0x6d766578)?
+    cursor = movie.body
+    let mut found = false
+    while cursor < movie.next {
+        let b = read_box(input, cursor, movie.next, true)?
+        if b.kind == 0x7472616b {
+            found = true
+            read_track(input, b, mvex, receive)?
+        }
+        cursor = b.next
+    }
+    if !found {
+        return Error(InvalidTrack)
+    }
+    Ok(movie.next)
+}

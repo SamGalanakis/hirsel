@@ -846,8 +846,8 @@ library is published by `pack`.
 ### Adding a dependency
 
 `hirsel add` edits a manifest and updates its lock. The implemented forms accept HTTPS URLs,
-`github:` references, `.hpkg` paths and package-store roots. Workspace placement, toolchain
-names and member directories are planned.
+`github:` references, `.hpkg` paths, package-store roots, toolchain names and member
+directories. Workspace placement is planned.
 
 `hirsel add SOURCE [--root sha256:HEX] [--workspace] [--update] [--dry-run] [--package-store DIR] [--json]`<!-- doc-ref: planned -->
 
@@ -1311,7 +1311,8 @@ app` reports now names its site in `json@1/new.hirsel`, and `hirsel publish app`
 prints the R of a cold run with no image, on the warm image path as on the cold one. The law
 catches an image keyed without file names and a producer that synthesises names.
 
-**Laws for `hirsel add`.** L15–L22 cover S6 in `s6_add_protocol`. L23–L29 specify the later slices.
+**Laws for `hirsel add`.** L15–L22 cover S6 in `s6_add_protocol`, and L29 covers S9 in `s9_add_forms_that_fetch_nothing`.
+L23–L28 specify the later slices.
 X and Y are `jx`'s and `jy`'s roots and W is `wrap@1`'s (L6). Each `add` runs in a workspace
 whose `hirsel.toml` and `hirsel.lock` bytes the law records before it starts.
 
@@ -1377,6 +1378,8 @@ workspace that `hirsel lock --locked` accepts after one derive, and rerunning th
 completes it. Two members with different local pins of `json@1` (X and Y) refuse through the
 resolver's diamond rule.
 
-**L29 (S9). Forms that fetch nothing.** `hirsel add json@1`<!-- doc-ref: planned --> for a
-toolchain package and `hirsel add ../a`<!-- doc-ref: planned --> for a listed member each write
-a binding that the next `--frozen` build accepts.
+**L29 (S9). Forms that fetch nothing.** `hirsel add std@1` for a toolchain package and, from
+a subdirectory of member `apps/ui`, `hirsel add ../../../libs/a` for a listed member each write
+a binding (`a = { major = 1, path = "../../libs/a" }`, spelled from the declaring manifest) that
+the next `--frozen` build of an entry using both accepts. `std@2`, an unlisted directory and
+`--root` with either form refuse and write nothing.

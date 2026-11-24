@@ -654,6 +654,65 @@ fn store_source_and_post_commit_failure() {
     PackageLaw::pass(law.run(&["lock", "app", "--locked"]));
 }
 
+/// L29 (S9): a toolchain name and a member directory, fetched from nowhere, each write the
+/// binding the next `--frozen` build accepts. The app uses both, so the build cannot pass on
+/// a missing or wrong binding; the path is spelled from the declaring manifest, not the cwd.
+fn forms_that_fetch_nothing() {
+    let law = PackageLaw::new();
+    law.write(
+        "work/hirsel.toml",
+        "[workspace]\nmembers = [\"apps/ui\", \"libs/a\"]\n",
+    );
+    law.library("work/libs/a", "a", 1, "pub fn one() -> u64 { 1u64 }\n", "");
+    law.write("work/vendor/hirsel.toml", "[package]\nname = \"v\"\nmajor = 1\n");
+    law.app("work/apps/ui", "[dependencies]\n");
+    law.write(
+        "work/apps/ui/main.hirsel",
+        "pub fn main() -> Result[(), Exit] {\n    let _ = std.argon2.recommended()\n    let _ = a.one()\n    Ok(())\n}\n",
+    );
+    fs::create_dir(law.path("work/apps/ui/sub")).unwrap();
+    let manifest = law.path("work/apps/ui/hirsel.toml");
+    let before = fs::read_to_string(&manifest).unwrap();
+    let same = || assert_eq!(fs::read_to_string(&manifest).unwrap(), before);
+
+    PackageLaw::refuse(
+        invoke(&law, "work/apps/ui", &["std@2"]),
+        "the toolchain does not provide std@2",
+    );
+    PackageLaw::refuse(
+        invoke(&law, "work/apps/ui", &["std@1", "--root", PACKAGE_X]),
+        "--root applies to a fetched archive",
+    );
+    PackageLaw::refuse(
+        invoke(&law, "work/apps/ui", &["../../vendor"]),
+        "../../vendor is not a member of this workspace",
+    );
+    same();
+
+    PackageLaw::pass(invoke(&law, "work/apps/ui", &["std@1"]));
+    PackageLaw::pass(invoke(&law, "work/apps/ui/sub", &["../../../libs/a"]));
+    let expected = before.replace(
+        "[dependencies]\n",
+        "[dependencies]\na = { major = 1, path = \"../../libs/a\" }\nstd = { major = 1 }\n",
+    );
+    assert_eq!(fs::read_to_string(&manifest).unwrap(), expected);
+    let again: serde_json::Value = serde_json::from_str(&PackageLaw::pass(invoke(
+        &law,
+        "work/apps/ui",
+        &["../../libs/a", "--json"],
+    )))
+    .unwrap();
+    assert_eq!(again["result"], "unchanged");
+    assert_eq!(again["source"], "member:libs/a");
+    assert_eq!(again["root"], serde_json::Value::Null);
+    PackageLaw::pass(law.run(&["build", "work/apps/ui", "--frozen"]));
+}
+
+#[test]
+fn s9_add_forms_that_fetch_nothing() {
+    forms_that_fetch_nothing();
+}
+
 #[test]
 fn s6_add_protocol() {
     refusal_keeps_workspace_and_checks_full_closure();

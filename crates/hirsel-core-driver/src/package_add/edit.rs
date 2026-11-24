@@ -2,12 +2,19 @@ use crate::package_content::{Id, Root};
 use crate::package_manifest::SourceLocation;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, TableLike, Value};
 
-pub(super) fn binding(
-    input: &[u8],
-    id: &Id,
-    root: Root,
-    source: Option<&SourceLocation>,
-) -> Result<String, super::Failure> {
+/// What a binding names beside its major.
+pub(super) enum Form<'a> {
+    Published(Root, Option<&'a SourceLocation>),
+    Toolchain,
+    Member(&'a str),
+}
+
+pub(super) fn binding(input: &[u8], id: &Id, form: &Form<'_>) -> Result<String, super::Failure> {
+    let (root, source, path) = match form {
+        Form::Published(root, source) => (Some(*root), *source, None),
+        Form::Toolchain => (None, None, None),
+        Form::Member(path) => (None, None, Some(*path)),
+    };
     let text = std::str::from_utf8(input)?;
     let mut document = text.parse::<DocumentMut>()?;
     let table = document.as_table_mut();
@@ -31,7 +38,7 @@ pub(super) fn binding(
         .ok_or("dependencies is not a table")?;
     let fields = [
         ("major", Some(Value::from(i64::from(id.major)))),
-        ("root", Some(Value::from(root.to_string()))),
+        ("root", root.map(|root| Value::from(root.to_string()))),
         (
             "url",
             match source {
@@ -46,7 +53,7 @@ pub(super) fn binding(
                 _ => None,
             },
         ),
-        ("path", None),
+        ("path", path.map(Value::from)),
         ("workspace", None),
     ];
     if let Some(existing) = dependencies

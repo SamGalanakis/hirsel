@@ -1,5 +1,5 @@
 use crate::cli::{Invocation, OptionId};
-use crate::package_content::{ARCHIVE_LIMIT, Library, PackageArchive, Root};
+use crate::package_content::{ARCHIVE_LIMIT, Id, Library, PackageArchive, Root, toolchain_major};
 use crate::package_dir::MANIFEST;
 use crate::package_files::{Captured, open_directory, walk};
 use crate::package_lock::{Lock, Mode, NAME as LOCK};
@@ -25,6 +25,8 @@ enum Source {
     Url(String),
     GitHub(github::Reference),
     Store(Root),
+    Toolchain(Id),
+    Member(String),
 }
 
 impl Source {
@@ -37,10 +39,27 @@ impl Source {
             Ok(Self::Store(Root::parse(&text).ok_or(
                 "expected sha256: followed by 64 lowercase hex digits",
             )?))
-        } else if text.ends_with(".hpkg") && !text.contains("://") && !text.starts_with("github:") {
+        } else if text.contains("://") {
+            Err("add SOURCE requires an https:// URL, a github: reference, a .hpkg path, a sha256: root, NAME@MAJOR, or a member directory".into())
+        } else if text.ends_with(".hpkg") {
             Ok(Self::Archive(text))
+        } else if let Some((name, major)) = text.split_once('@')
+            && name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            && !major.is_empty()
+            && major.bytes().all(|b| b.is_ascii_digit())
+        {
+            let major = major
+                .parse()
+                .map_err(|_| format!("{text}: the major does not fit in 32 bits"))?;
+            Ok(Self::Toolchain(Id {
+                name: name.to_owned(),
+                major,
+            }))
         } else {
-            Err("add SOURCE requires an https:// URL, a github: reference, a .hpkg path, or a sha256: root".into())
+            Ok(Self::Member(text))
         }
     }
 }
@@ -87,7 +106,12 @@ impl Options {
             }
         }
         let source = Source::parse(invocation.positional.ok_or("add requires SOURCE")?)?;
-        if expected.is_some() && matches!(source, Source::Store(_)) {
+        if expected.is_some()
+            && matches!(
+                source,
+                Source::Store(_) | Source::Toolchain(_) | Source::Member(_)
+            )
+        {
             return Err("--root applies to a fetched archive".into());
         }
         Ok(Self {
@@ -112,7 +136,7 @@ struct ClosureRow {
 struct Report {
     result: &'static str,
     id: String,
-    root: String,
+    root: Option<String>,
     source: String,
     committed: Vec<PathBuf>,
     pending: Vec<PathBuf>,
@@ -153,9 +177,10 @@ impl Report {
             ("unchanged", _) => "unchanged",
             (verb, _) => verb,
         };
+        let bound = self.root.clone().unwrap_or_else(|| self.source.clone());
         let root = match &self.previous_root {
-            Some(old) if self.result == "updated" => format!("{old} -> {}", self.root),
-            _ => self.root.clone(),
+            Some(old) if self.result == "updated" => format!("{old} -> {bound}"),
+            _ => bound,
         };
         println!("hirsel: {verb} {} {root} in {}", self.id, target.display());
         if archive_len != 0 {
@@ -262,6 +287,9 @@ fn acquire(
                 })?;
             (bytes, SourceLocation::Archive(normalized))
         }
+        Source::Toolchain(_) | Source::Member(_) => {
+            unreachable!("run_at binds the forms that fetch nothing without acquiring")
+        }
     };
     let len = bytes.len();
     let archive = PackageArchive::decode(bytes.into())
@@ -280,6 +308,75 @@ fn acquire(
         .into());
     }
     Ok((archive, Some(locator), len))
+}
+
+/// `to` spelled relative to `from`; both are workspace-relative directories.
+fn relative_to(from: &Path, to: &Path) -> String {
+    let common = from
+        .components()
+        .zip(to.components())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut parts = vec![".."; from.components().count() - common];
+    let tail: Vec<_> = to.components().skip(common).collect();
+    parts.extend(tail.iter().map(|part| {
+        part.as_os_str()
+            .to_str()
+            .expect("workspace paths are UTF-8")
+    }));
+    if parts.is_empty() {
+        ".".into()
+    } else {
+        parts.join("/")
+    }
+}
+
+/// The member a directory argument names, matched by directory identity as discovery does.
+fn find_member<'a>(
+    workspace: &'a Workspace,
+    cwd: &Path,
+    path: &str,
+) -> Result<(&'a Id, &'a crate::package_workspace::Member), Failure> {
+    let refuse = || -> Failure { format!("{path} is not a member of this workspace").into() };
+    let typed = Path::new(path);
+    let (from, rest) = if typed.is_absolute() {
+        (
+            PathBuf::new(),
+            typed
+                .strip_prefix(&workspace.directory)
+                .map_err(|_| refuse())?
+                .to_path_buf(),
+        )
+    } else {
+        (
+            cwd.strip_prefix(&workspace.directory)?.to_path_buf(),
+            typed.to_path_buf(),
+        )
+    };
+    let mut components = Vec::new();
+    for component in from.iter().chain(rest.iter()) {
+        match component.to_str().ok_or_else(refuse)? {
+            "" | "." | "/" => {}
+            ".." => {
+                components.pop().ok_or_else(refuse)?;
+            }
+            normal => components.push(normal),
+        }
+    }
+    let wanted = identity(
+        &walk(&workspace.root, Path::new(&components.join("/")))
+            .and_then(|file| file.directory())
+            .map_err(|_| refuse())?,
+    )?;
+    for (id, member) in &workspace.members {
+        let dir = walk(&workspace.root, &member.directory).and_then(|file| file.directory());
+        if let Ok(dir) = dir
+            && identity(&dir)? == wanted
+        {
+            return Ok((id, member));
+        }
+    }
+    Err(refuse())
 }
 
 fn check_source(
@@ -478,12 +575,37 @@ pub(crate) fn run_at(
         .expect("the selected manifest was captured");
     let old_lock = Lock::capture(&workspace)?;
 
-    let (archive, locator, len) = acquire(&options, &workspace, cwd)?;
+    let (archive, locator, len, local) = match &options.source {
+        Source::Toolchain(id) => {
+            if toolchain_major(&id.name) != Some(id.major) {
+                return Err(format!("the toolchain does not provide {id}").into());
+            }
+            (None, None, 0, Some((id.clone(), None)))
+        }
+        Source::Member(path) => {
+            let (id, found) = find_member(&workspace, cwd, path)?;
+            let spelled = relative_to(relative, &found.directory);
+            (
+                None,
+                None,
+                0,
+                Some((id.clone(), Some((spelled, found.directory.clone())))),
+            )
+        }
+        _ => {
+            let (archive, locator, len) = acquire(&options, &workspace, cwd)?;
+            (Some(archive), locator, len, None)
+        }
+    };
     checkpoint(Checkpoint::ArchiveCaptured);
-    let root = archive.head;
-    let id = archive.entries[&root].content.id.clone();
+    let root = archive.as_ref().map(|archive| archive.head);
+    let id = match (&archive, &local) {
+        (Some(archive), _) => archive.entries[&archive.head].content.id.clone(),
+        (None, Some((id, _))) => id.clone(),
+        (None, None) => unreachable!("every source names an archive or a local package"),
+    };
     if !options.update
-        && let Some(source) = &locator
+        && let (Some(source), Some(root)) = (&locator, root)
     {
         check_source(&workspace, source, root)?;
     }
@@ -494,21 +616,33 @@ pub(crate) fn run_at(
         _ => None,
     });
     let declared = match &locator {
-        Some(SourceLocation::Archive(path)) => {
-            let common = relative
-                .components()
-                .zip(Path::new(path).components())
-                .take_while(|(left, right)| left == right)
-                .count();
-            let up = "../".repeat(relative.components().count() - common);
-            let tail: PathBuf = Path::new(path).components().skip(common).collect();
-            Some(SourceLocation::Archive(format!("{up}{}", tail.display())))
-        }
+        Some(SourceLocation::Archive(path)) => Some(SourceLocation::Archive(relative_to(
+            relative,
+            Path::new(path),
+        ))),
         other => other.clone(),
     };
-    let unchanged = matches!(prior, Some(Dependency::Published(..)))
-        && matches!(member.edges.get(&id), Some(Edge::Published(old_root, old_source))
-            if *old_root == root && *old_source == locator);
+    let form = match (&local, root) {
+        (Some((_, Some((spelled, _)))), _) => edit::Form::Member(spelled),
+        (Some((_, None)), _) => edit::Form::Toolchain,
+        (None, Some(root)) => edit::Form::Published(root, declared.as_ref()),
+        (None, None) => unreachable!("an archive source has a head root"),
+    };
+    let unchanged = match &form {
+        edit::Form::Published(root, _) => {
+            matches!(prior, Some(Dependency::Published(..)))
+                && matches!(member.edges.get(&id), Some(Edge::Published(old_root, old_source))
+                    if old_root == root && *old_source == locator)
+        }
+        edit::Form::Toolchain => {
+            matches!(prior, Some(Dependency::Toolchain(_)))
+                && matches!(member.edges.get(&id), Some(Edge::Toolchain))
+        }
+        edit::Form::Member(_) => {
+            matches!(prior, Some(Dependency::Member(..)))
+                && matches!(member.edges.get(&id), Some(Edge::Member))
+        }
+    };
 
     let mut report = Report {
         result: if unchanged {
@@ -519,10 +653,16 @@ pub(crate) fn run_at(
             "added"
         },
         id: id.to_string(),
-        root: root.to_string(),
-        source: locator
-            .as_ref()
-            .map_or_else(|| "store".into(), ToString::to_string),
+        root: root.map(|root| root.to_string()),
+        source: match (&locator, &local) {
+            (Some(locator), _) => locator.to_string(),
+            (None, Some((_, None))) => "toolchain".into(),
+            (None, Some((_, Some((_, directory))))) => {
+                let dir = directory.to_str().ok_or("member directory is not UTF-8")?;
+                format!("member:{}", if dir.is_empty() { "." } else { dir })
+            }
+            (None, None) => "store".into(),
+        },
         committed: Vec::new(),
         pending: Vec::new(),
         previous_root,
@@ -532,7 +672,7 @@ pub(crate) fn run_at(
         closure: Vec::new(),
     };
     let mut entries = BTreeMap::<Root, Library>::new();
-    for (entry_root, library) in archive.entries {
+    for (entry_root, library) in archive.into_iter().flat_map(|archive| archive.entries) {
         let new = if locator.is_some() {
             options
                 .store
@@ -552,7 +692,7 @@ pub(crate) fn run_at(
         captured.clone()
     } else {
         Captured {
-            bytes: edit::binding(&captured.bytes, &id, root, declared.as_ref())?
+            bytes: edit::binding(&captured.bytes, &id, &form)?
                 .into_bytes()
                 .into(),
             identity: captured.identity,

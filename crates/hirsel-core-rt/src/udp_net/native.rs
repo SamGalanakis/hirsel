@@ -112,10 +112,16 @@ impl Call {
         }
     }
 
-    pub(super) unsafe fn receive(&self, resource: &mut Resource) -> io::Result<Received> {
+    pub(super) unsafe fn receive(
+        &self,
+        resource: &mut Resource,
+        sockets: &mut hirsel_core_net::Sockets,
+    ) -> io::Result<Received> {
         // SAFETY: the current request exclusively owns both typed output carriers.
         let (bytes, packets) = unsafe { (&mut *self.bytes, &mut *self.packets) };
-        let mut budget = TurnBudget::default();
+        let poller = sockets.udp_poller()?;
+        crate::tasks::attach_net(sockets, poller.clone());
+        let mut budget = poller.udp_turn_budget();
         let mut n = 0;
         while packets.len < packets.capacity {
             let captured = match &mut resource.carrier {
@@ -136,6 +142,7 @@ impl Call {
                     ecn,
                     length,
                     payload,
+                    captured_at,
                 }) => {
                     let appended = (bytes.capacity - bytes.len).min(payload.len());
                     if n != 0 && appended != length {
@@ -169,7 +176,10 @@ impl Call {
                     n += 1;
                     match &mut resource.carrier {
                         Carrier::Standalone(socket) => socket.pool.advance(),
-                        Carrier::Member(member) => member.reader().advance(),
+                        Carrier::Member(member) => {
+                            member.reader().advance();
+                            member.measure_delivery(&poller, captured_at);
+                        }
                         Carrier::Served(_) => unreachable!(),
                     }
                 }

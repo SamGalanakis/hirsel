@@ -1,7 +1,7 @@
 use super::Poller;
 use crate::udp::{
     Captured, MemberProducer, MemberReader, Options, ReceivePool, Socket, Steer, TurnBudget,
-    WriterList, member_queue,
+    WriterList, measure, member_queue,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -24,6 +24,7 @@ struct Group {
     tag: u64,
     writers: WriterList,
     ready: Box<dyn Fn(u64) + Send + Sync>,
+    measure: Option<measure::Group>,
 }
 
 pub struct UdpMember {
@@ -43,6 +44,17 @@ impl UdpMember {
 
     pub fn socket(&self) -> &Socket {
         &self.group().socket
+    }
+
+    pub fn measure_delivery(&self, poller: &Arc<Poller>, captured_at: u64) {
+        let group = self.group();
+        if let Some(measure) = &group.measure {
+            measure.delivered(
+                self.index,
+                Weak::as_ptr(&group.poller) == Arc::as_ptr(poller),
+                captured_at,
+            );
+        }
     }
 
     pub fn publish_writer(&self, token: NonZeroU64) {
@@ -70,6 +82,14 @@ impl Drop for UdpMember {
     }
 }
 
+type Retire = Box<dyn FnMut(usize) + Send>;
+
+#[derive(Default)]
+pub(super) struct Deferred {
+    readers: VecDeque<Box<dyn FnOnce() + Send>>,
+    group_first: bool,
+}
+
 struct Intake {
     group: Arc<Group>,
     steer: Steer,
@@ -81,7 +101,7 @@ struct Intake {
     writer_edge: bool,
     writer_cursor: u32,
     queued: bool,
-    retire: Box<dyn FnMut(usize) + Send>,
+    retire: Retire,
 }
 
 impl Intake {
@@ -98,27 +118,15 @@ impl Intake {
                     }
                 }
             }
-            match self.pool.front().unwrap() {
-                Captured::Datagram {
-                    peer,
-                    ecn,
-                    length,
-                    payload,
-                } => {
-                    let index = self.steer.select(self.members, peer, payload);
-                    if !budget.dispatch(length) {
-                        break;
-                    }
-                    if let Some(queue) = &mut self.queues[usize::from(index)]
-                        && queue.push(peer, ecn, length, payload)
-                        && let Some(token) = queue.notify()
-                    {
-                        (self.group.ready)(token.get());
-                    }
-                }
-                Captured::Discarded => {
-                    assert!(budget.dispatch(0));
-                }
+            if !Self::deliver(
+                &self.group,
+                self.steer,
+                self.members,
+                &mut self.queues,
+                self.pool.front().unwrap(),
+                budget,
+            ) {
+                break;
             }
             self.pool.advance();
         }
@@ -138,6 +146,55 @@ impl Intake {
             }
         }
         self.writer_cursor = batch.cursor();
+    }
+
+    fn deliver(
+        group: &Group,
+        steer: Steer,
+        members: NonZeroU16,
+        queues: &mut [Option<MemberProducer>],
+        packet: Captured<'_>,
+        budget: &mut TurnBudget,
+    ) -> bool {
+        match packet {
+            Captured::Datagram {
+                peer,
+                ecn,
+                length,
+                payload,
+                captured_at,
+            } => {
+                let index = steer.select(members, peer, payload);
+                if !budget.dispatch(length) {
+                    return false;
+                }
+                let discarded = match &mut queues[usize::from(index)] {
+                    Some(queue) => {
+                        if queue.push_at(peer, ecn, length, payload, captured_at) {
+                            if let Some(token) = queue.notify() {
+                                (group.ready)(token.get());
+                            }
+                            None
+                        } else {
+                            group.measure.as_ref().map(|m| &m.full)
+                        }
+                    }
+                    None => group.measure.as_ref().map(|m| &m.dropped),
+                };
+                if let Some(counter) = discarded {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            Captured::Discarded => {
+                assert!(budget.dispatch(0));
+                if let Some(measure) = &group.measure {
+                    measure
+                        .capture_discard
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        true
     }
 
     fn due(&self) -> bool {
@@ -175,7 +232,12 @@ impl Groups {
         }
     }
 
-    pub(super) fn turn(&mut self, poller: &Poller, events: &mut [libc::epoll_event]) -> usize {
+    pub(super) fn turn(
+        &mut self,
+        poller: &Poller,
+        events: &mut [libc::epoll_event],
+        budget: &mut TurnBudget,
+    ) -> usize {
         while let Some((tag, index)) = self.retired.pop_front() {
             let intake = self.live.get_mut(&tag).unwrap();
             intake.queues[index] = None;
@@ -200,7 +262,6 @@ impl Groups {
                 Self::enqueue(&mut self.runnable, tag, intake);
             }
         }
-        let mut budget = TurnBudget::default();
         let mut writer_visits = 64;
         let mut revisit_first = None;
         for i in 0..self.runnable.len() {
@@ -212,7 +273,7 @@ impl Groups {
                 continue;
             };
             intake.queued = false;
-            intake.dispatch(&mut budget, &mut writer_visits);
+            intake.dispatch(budget, &mut writer_visits);
             if intake.due() {
                 if i == 0 {
                     revisit_first = Some(tag);
@@ -236,15 +297,55 @@ impl Poller {
     }
 
     pub fn udp_due(&self) -> bool {
-        self.udp_groups
-            .get()
-            .is_some_and(|groups| groups.lock().unwrap().due())
+        !self.udp_deferred.lock().unwrap().readers.is_empty()
+            || self
+                .udp_groups
+                .get()
+                .is_some_and(|groups| groups.lock().unwrap().due())
     }
 
     pub fn dispatch_udp_slot(&self, events: &mut [libc::epoll_event]) -> usize {
-        self.udp_groups.get().map_or(events.len(), |groups| {
-            groups.lock().unwrap().turn(self, events)
-        })
+        let reader = {
+            let mut deferred = self.udp_deferred.lock().unwrap();
+            if deferred.readers.is_empty() {
+                None
+            } else if self.udp_groups.get().is_some() && deferred.group_first {
+                deferred.group_first = false;
+                None
+            } else {
+                deferred.group_first = true;
+                deferred.readers.pop_front()
+            }
+        };
+        let mut budget = self.udp_turn_budget();
+        *budget = TurnBudget::default();
+        let count = self.udp_groups.get().map_or(events.len(), |groups| {
+            let mut paused = TurnBudget::paused();
+            let budget = if reader.is_some() {
+                &mut paused
+            } else {
+                &mut *budget
+            };
+            groups.lock().unwrap().turn(self, events, budget)
+        });
+        drop(budget);
+        if let Some(wake) = reader {
+            wake();
+        }
+        count
+    }
+
+    pub fn defer_udp_reader(&self, wake: impl FnOnce() + Send + 'static) {
+        self.udp_deferred
+            .lock()
+            .unwrap()
+            .readers
+            .push_back(Box::new(wake));
+        self.wake();
+    }
+
+    pub fn udp_turn_budget(&self) -> std::sync::MutexGuard<'_, TurnBudget> {
+        self.udp_budget.lock().unwrap()
     }
 
     pub fn add_udp_group(
@@ -272,6 +373,7 @@ impl Poller {
             tag,
             writers: WriterList::new(members.get()),
             ready: Box::new(ready),
+            measure: measure::Group::new(usize::from(members.get())),
         });
         let count = usize::from(members.get());
         let mut queues = Vec::new();

@@ -39,6 +39,7 @@ fn udp_receive_captures_gro_and_short_slots() {
             ecn,
             length,
             payload,
+            ..
         }) = pool.front()
         else {
             panic!("missing segment");
@@ -89,6 +90,7 @@ fn udp_receive_captures_gro_and_short_slots() {
         ecn,
         length,
         payload,
+        ..
     }) = pool.front()
     else {
         panic!("missing short capture");

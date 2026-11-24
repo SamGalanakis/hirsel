@@ -5,6 +5,7 @@ use std::{io, net::SocketAddr, num::NonZeroU16};
 mod rules;
 pub use rules::UdpRules;
 mod linux;
+pub(crate) mod measure;
 mod members;
 mod receive;
 mod send;
@@ -201,6 +202,13 @@ impl Default for TurnBudget {
 }
 
 impl TurnBudget {
+    pub(crate) fn paused() -> Self {
+        Self {
+            datagrams: 0,
+            bytes: 0,
+        }
+    }
+
     pub fn read_limit(&self, free: usize, options: Options) -> usize {
         free.min(self.datagrams)
             .min(self.bytes / options.payload_room())

@@ -190,6 +190,8 @@ pub fn reactor() -> io::Result<Reactor> {
 pub struct Poller {
     backend: Backend,
     udp_groups: OnceLock<Mutex<udp_group::Groups>>,
+    udp_budget: Mutex<crate::udp::TurnBudget>,
+    udp_deferred: Mutex<udp_group::Deferred>,
     /// The owner's turn: held while a thread submits to or waits in this
     /// poller, which makes it the poller's owner for that turn.
     events: Mutex<Vec<libc::epoll_event>>,
@@ -250,6 +252,8 @@ impl Poller {
         Arc::new(Self {
             backend: Backend::Uring(Box::new(ring)),
             udp_groups: OnceLock::new(),
+            udp_budget: Mutex::default(),
+            udp_deferred: Mutex::default(),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_uring,
@@ -267,6 +271,8 @@ impl Poller {
                 wake: eventfd()?,
             },
             udp_groups: OnceLock::new(),
+            udp_budget: Mutex::default(),
+            udp_deferred: Mutex::default(),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_epoll,
@@ -599,6 +605,7 @@ impl Sockets {
             .map_or(0, |here| here.slot);
         Ok(self.home(home).0.clone())
     }
+
     /// The poller holding registrations homed at `home`, and whether the
     /// calling thread owns it now. A private poller's holder always does.
     fn home(&self, home: usize) -> (&Arc<Poller>, bool) {

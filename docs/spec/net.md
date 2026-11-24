@@ -943,9 +943,8 @@ before that event sees the old charge still held and can be refused. A pool's cr
 therefore never funds a new pool while the old one's storage is still live.
 
 - **Retiring a socket** removes its readiness watch, closes its descriptor and frees its
-  pool (NET-17, Teardown). Under the readiness arm (NET-17, Receive mode), no step waits for
-  a completion, and the kernel holds no pointer into the pool between calls, since both
-  backends receive by `recvmmsg` into it. Datagrams still
+  pool (NET-17, Teardown). No step waits for a completion. The kernel holds no pointer into
+  the pool between `recvmmsg` calls. Datagrams still
   queued in the kernel or the pool are discarded, and there is no linger.
 - **Retiring a member** stops the intake's dispatch to it and frees its queue at the intake's
   next turn. The intake pool retires with the kernel socket, after the last member's
@@ -1174,9 +1173,6 @@ poller's thread: `recvmmsg` into a pool and `sendmmsg` from the caller's `data`.
 tells the poller when a descriptor is ready, by an io_uring multishot poll as for every Net
 socket (NET-7) or by epoll. So no completion queue entry carries a datagram, a send's result
 or a retirement, and a UDP socket adds one readiness watch to its ring and nothing more.
-This is the **readiness arm**. The receive half of it is on trial against the completion arm
-(Receive mode, below) until the build decides. The send half is final: the trial does not
-change how UDP sends.
 
 **Two rings.** On io_uring, each poller has two rings with different loss rules:
 
@@ -1186,13 +1182,10 @@ change how UDP sends.
   loss is recovered.
 - The **completion ring** carries every operation whose completion is the only record of
   its state. That includes one-shot file operations, a TCP zero-copy send and its
-  buffer notification, and a completion-mode UDP receive if the build keeps one
-  (Receive mode). Its queue **cannot overflow**. Before submitting an operation, the poller
+  buffer notification. Its queue **cannot overflow**. Before submitting an operation, the poller
   reserves the most completions that operation can post. A zero-copy send reserves two data
   entries, one for the result and one for the possible notification (`sendzc.rs`), and one
-  control entry for a possible cancellation. A multishot receive reserves its buffer count
-  plus one for its terminal, and separately reserves its cancellation. The receive retains
-  these credits as it cycles its buffers. A file operation reserves one entry. The
+  control entry for a possible cancellation. A file operation reserves one entry. The
   reservations never exceed the ring's queue entries. Entries return once the poller has
   reaped the corresponding completion or can prove it will never be posted. A zero-copy
   result without `IORING_CQE_F_MORE` returns the notification credit with the result. A
@@ -1205,13 +1198,8 @@ change how UDP sends.
   4,096 data entries. A zero-copy send that finds no room sends by copying instead,
   the way `HIRSEL_NET_SEND_ZC` already lets a send copy ([HTTP](http.md)). File operations
   wait in submission order when they cannot reserve a credit, and at least one credit
-  is available to file operations while sends and receives hold the others. A waiting
-  CLOSE retains ownership of its descriptor through submission and completion.
-  Completion-mode receives hold up to 61,440 entries, including cancel credits,
-  as **one run-wide total**, so every poller's ring
-  can take any socket's reservation. A receive that would exceed the total fails its
-  socket's creation with `Exhausted` (NET-16). A move between pollers therefore always finds
-  room on the destination ring.
+  is available to file operations while sends hold the others. A waiting CLOSE retains
+  ownership of its descriptor through submission and completion.
 
 The completion ring never reaches the kernel's overflow path (`io_uring.c:628-649`), because
 its unreaped completions never outnumber its queue. So no completion on it is lost, and no
@@ -1220,8 +1208,7 @@ ring's descriptor, which is readable while its queue holds completions
 (`io_uring.c:2240-2275`). An epoll poller adds that descriptor to its epoll set. A poller
 also reads the completion ring's queue head and tail, which are shared memory, in every
 turn, and it does not block while the queue is nonempty. So the completion ring can be
-reaped even if its readiness edge was lost. The epoll backend has no zero-copy sends. It
-opens a completion ring only for a completion-mode receive.
+reaped even if its readiness edge was lost. The epoll backend has no zero-copy sends.
 
 **Lost readiness.** The readiness ring's completion queue is shared by every producer on it.
 When the queue is full, the kernel keeps an overflow entry only while it can allocate one.
@@ -1338,40 +1325,6 @@ messages, and the record's length and cursor. The rest is payload room. A standa
 socket's waiting `udp_recv` reads on its owner's poller. An intake is read on its home
 poller, by host work under the budget.
 
-**Receive mode.** Linux UDP receive has one end-state path. The build picks it by the
-receive-mode law ([UDP build laws](#udp-build-laws)) and deletes the other. Readiness-only receive is the W0.1
-comparison arm and is not kept as a fallback. The two arms are:
-
-- **Readiness** (above): a readiness watch, then a nonblocking `recvmmsg` into the pool.
-- **Completion**: the socket's pool slots are registered as a provided buffer ring
-  (`IORING_REGISTER_PBUF_RING`), one buffer per slot. One multishot `IORING_OP_RECVMSG` with
-  buffer select runs on the poller's completion ring. Each completion names a slot that
-  holds one record: the kernel's `io_uring_recvmsg_out`, the source address and the control
-  messages in the slot's 256-byte header, then the payload. The record is split, filtered,
-  steered and delivered exactly as a `recvmmsg` record is. A slot returns to the buffer ring
-  when every datagram in it has been delivered. The receive reserves `slots + 1`
-  completions on the completion ring: each unreaped completion holds a distinct slot that has
-  not yet returned to the buffer ring, plus one terminal completion. When the buffer ring is
-  empty, the kernel ends the multishot receive with `ENOBUFS` (`kbuf.c:262-270`). Datagrams
-  then wait in the socket's kernel queue, which is the same backpressure a full pool gives
-  the readiness arm. The poller re-arms once a slot returns. The turn budget applies to the
-  splitting and dispatch of each reaped record. A record the budget cannot reach stays in
-  its slot, as under the readiness arm.
-
-The completion arm puts kernel pointers into the pool. So, if the build keeps it, a
-standalone socket's retirement and move each wait for one completion. That is the terminal
-completion of its multishot receive, after an async cancellation, and only then is the
-buffer ring unregistered. The completion ring cannot drop that completion (Two rings). The
-statements in NET-16 and below that no retirement waits on a completion, and that the kernel
-holds no pointer into the pool, describe the readiness arm. The build that keeps the
-completion arm replaces them with this paragraph.
-
-The decision covers every host where io_uring opens. If the completion arm wins, every
-poller on such a host opens a completion ring for UDP receive, including a slot whose
-readiness backend D5 sets to epoll. A host that refuses io_uring entirely runs the epoll
-backend. Its only receive is `recvmmsg`, as D5 keeps epoll for TCP, and no comparison arm
-is kept for it.
-
 **Sending.** The host validates the whole list first (NET-16) and then sends it in
 **windows**, in order, under one deadline. A message is one GSO train or one single datagram,
 and an empty packet is always a single message. Each packet is one iovec over its slice of
@@ -1416,8 +1369,7 @@ window's first message, and treats it this way:
 
 **Teardown.** Retirement (NET-16) works the same way on both backends. The host removes the
 socket's readiness watch, closes its descriptor and frees its pool, and then emits the
-retirement event. Under the readiness arm none of these waits for a completion (the
-completion arm's one wait is under Receive mode). On io_uring the removal is a
+retirement event. These steps run without waiting for a completion. On io_uring the removal is a
 poll-remove submission, and a cancelled poll gives up its reference to the file through task
 work (`io_uring/poll.c:380-385`). So the kernel socket and its bound endpoint can outlive the
 close briefly. The pool does not depend on them. Retirement therefore does not promise that
@@ -1515,8 +1467,8 @@ laws (M1 to M3) are required as well, but each is a single case.
   per socket, and the second `arm` replaces the first (`reactor.rs`, `Sockets::arm`), so
   the law is red. *Harness:* the reactor tests, beside
   `a_writer_parked_beside_a_waiting_reader_is_woken_alone`.
-- **`udp_receive_mode` (end-state).** *Scenario:* both receive arms (NET-17, Receive mode)
-  run on Linux 7.0 loopback, on the same CPUs, kernel, pool options, `UDP_GRO` setting and
+- **`udp_receive_mode` (build comparison).** *Scenario:* readiness receive and multishot
+  completion receive ran on Linux 7.0 loopback, on the same CPUs, kernel, pool options, `UDP_GRO` setting and
   turn budget, through the same `udp_recv`. Each arm is measured at two shapes:
   - **S1**: the NET-17 Target, one `udp_bind` socket fed 1.0 million 1,200-byte datagrams
     per second in 64-packet sends from one source.
@@ -1530,14 +1482,15 @@ laws (M1 to M3) are required as well, but each is a single case.
   with receive calls and `io_uring_enter` counted apart; instructions and cycles per
   delivered datagram, with cycles from 60 interleaved pairs on shielded CPUs; delivered
   datagrams and each named discard; and the p99 and p99.9 delay from send to `udp_recv`
-  return, or from intake read to member delivery for the group. *Decision:* the completion
+  return for every workload, plus the interval from intake read to member delivery for the group. *Decision:* the completion
   arm wins only if, at S1 and at both runs of S2, it spends at least 3% fewer cycles per
   delivered datagram, delivers no fewer datagrams, and keeps p99 within 1.10× of readiness.
   Every other outcome is a readiness win, including a split between shapes or a difference
   within 3%. The tie goes to the arm that needs no buffer ring and no completion
-  reservation for receive. The same lane deletes the losing arm's code and its text in
-  NET-17, Receive mode. *Harness:* the NET-17 Target bench that the W0.1 build adds, with
-  S2 as its second shape.
+  reservation for receive. **Result:** readiness receive won on S1 and on the group.
+  The group had 23 complete pairs before ring allocation failed. The paired mean completion
+  cost was 24.9% higher, with a 95% confidence interval of 23.6% to 26.3%. The build kept
+  `recvmmsg`. The NET-17 Target bench retains the three workload shapes.
 - **`turn_budget_starts_only_what_fits` (M1).** *Scenario:* the finding's turn: four
   65,507-byte datagrams copied to member queues, then a ready kernel queue with 65,536-byte
   rooms. *Oracle:* by hand. The read asks for 0 messages, a fifth copy waits, and the next

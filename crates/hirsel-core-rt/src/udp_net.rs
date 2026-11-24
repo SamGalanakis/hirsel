@@ -16,7 +16,7 @@ use crate::{
 };
 use hirsel_core_net::UdpMember;
 use hirsel_core_net::udp::{
-    self, Captured, Options, ReceivePool, Socket, Steer, TurnBudget, TxPacket, UdpRules, Window,
+    self, Captured, Options, ReceivePool, Socket, Steer, TxPacket, UdpRules, Window,
 };
 use std::{
     collections::BTreeMap,
@@ -537,7 +537,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64) -> Step {
                 return complete(count(call.progress));
             }
         } else {
-            match call.receive(resource) {
+            match call.receive(resource, &mut files.sockets) {
                 Ok(Received::Batch(n)) => return complete(count(n)),
                 Ok(Received::Empty) => {}
                 Ok(Received::Runnable) => runnable = true,
@@ -555,7 +555,12 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64) -> Step {
             });
         }
         if runnable {
-            crate::tasks::Outside::begin().complete(token);
+            let outside = crate::tasks::Outside::begin();
+            files
+                .sockets
+                .udp_poller()
+                .unwrap()
+                .defer_udp_reader(move || outside.complete(token));
         } else {
             match &mut resource.carrier {
                 Carrier::Standalone(socket) => {
@@ -571,7 +576,7 @@ pub(crate) unsafe fn step(request: *mut Request, token: u64) -> Step {
                         .publish_waiter(NonZeroU64::new(token).unwrap());
                     if !member.reader().recheck_waiter() {
                         drop(waiters.take(token));
-                        if let Ok(Received::Batch(n)) = call.receive(resource) {
+                        if let Ok(Received::Batch(n)) = call.receive(resource, &mut files.sockets) {
                             return complete(count(n));
                         }
                         unreachable!("only this reader removes its queued datagrams");

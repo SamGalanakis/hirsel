@@ -23,6 +23,7 @@ struct Record {
     captured: usize,
     stride: Option<usize>,
     cursor: usize,
+    captured_at: u64,
 }
 
 impl Record {
@@ -39,6 +40,7 @@ pub enum Captured<'a> {
         ecn: u8,
         length: usize,
         payload: &'a [u8],
+        captured_at: u64,
     },
     Discarded,
 }
@@ -120,6 +122,7 @@ impl ReceivePool {
                 std::ptr::null_mut(),
             )
         })? as usize;
+        let captured_at = super::measure::clock();
         for (i, message) in messages[..received].iter().enumerate() {
             let slot = self.free[free - 1 - i];
             let length = message.msg_len as usize;
@@ -146,6 +149,7 @@ impl ReceivePool {
                 captured,
                 stride,
                 cursor: 0,
+                captured_at,
             });
         }
         self.free.truncate(free - received);
@@ -173,6 +177,7 @@ impl ReceivePool {
             ecn: record.ecn,
             length,
             payload,
+            captured_at: record.captured_at,
         })
     }
 

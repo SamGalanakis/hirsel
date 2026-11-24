@@ -18,6 +18,7 @@ struct Header {
     length: usize,
     appended: usize,
     ecn: u8,
+    captured_at: u64,
 }
 
 const _: () = assert!(size_of::<Header>() <= HEADER_BYTES && align_of::<Header>() <= 8);
@@ -80,6 +81,17 @@ pub fn member_queue(options: Options) -> io::Result<(MemberProducer, MemberReade
 impl MemberProducer {
     /// Publish one datagram into a free slot. A full queue keeps its existing prefix.
     pub fn push(&mut self, peer: SocketAddr, ecn: u8, length: usize, payload: &[u8]) -> bool {
+        self.push_at(peer, ecn, length, payload, 0)
+    }
+
+    pub(crate) fn push_at(
+        &mut self,
+        peer: SocketAddr,
+        ecn: u8,
+        length: usize,
+        payload: &[u8],
+        captured_at: u64,
+    ) -> bool {
         let s = &self.storage;
         assert!(payload.len() <= s.options.payload_room() && payload.len() <= length);
         let index = s.written.load(Relaxed);
@@ -95,6 +107,7 @@ impl MemberProducer {
                 length,
                 appended: payload.len(),
                 ecn,
+                captured_at,
             });
             std::ptr::copy_nonoverlapping(payload.as_ptr(), slot.add(HEADER_BYTES), payload.len());
         }
@@ -132,6 +145,7 @@ impl MemberReader {
             ecn: header.ecn,
             length: header.length,
             payload,
+            captured_at: header.captured_at,
         })
     }
 

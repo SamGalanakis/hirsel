@@ -300,19 +300,19 @@ most once:
 | `aead(<alg>)` | `secret.aead_seal` and `secret.aead_open` with `<alg>`, one of `chacha20-poly1305`, `aes128-gcm` and `aes256-gcm` (the AEAD sink, below) |
 | `open(<alg>)` | `secret.aead_open` only, with `<alg>` |
 | `wrap` | `secret.wrap` and `secret.unwrap` with the secret as the key-encryption key (KEK) |
-| `srtp_import` | `schedule.import_srtp`, with the secret as SRTP master key and salt ([TLS-8](#tls-8-packet-ciphers-and-key-agreement)) |
-| `traffic_import` | `schedule.import_traffic`, with the secret as a TLS 1.3 or QUIC traffic secret (TLS-8) |
+| `srtp_import(<dir>)` | `schedule.import_srtp`, with the secret as SRTP master key and salt, making a schedule of direction `<dir>`, `send` or `receive` ([TLS-8](#tls-8-packet-ciphers-and-key-agreement)) |
+| `traffic_import(<dir>)` | `schedule.import_traffic`, with the secret as a TLS 1.3 or QUIC traffic secret, making a schedule of direction `<dir>` (TLS-8) |
 | `mtls_client_id` | use as a TLS client identity |
 
 `mac` includes `verify`, so the two are not written together, and `aead(<alg>)` includes
 `open(<alg>)` for the same `<alg>`, so neither are those. An import use stands alone: a
-policy holding `srtp_import` or `traffic_import` holds no other use (TLS-8). A name is a destination
+policy holding `srtp_import(<dir>)` or `traffic_import(<dir>)` holds no other use (TLS-8). A name is a destination
 only inside `tls_send(...)` and a use word only outside it, so `tls_send(mac)` sends to
 the host `mac` and permits no MAC. A policy with no use, a word given twice, an unknown
 word or a malformed pattern list is `Invalid`. The canonical text, which recordings and
 diagnostics print, writes `tls_send` first, then `mac` or `verify`, `kdf`, the `sign` uses in the
-order above, the `aead` and `open` uses with their algorithms in the order above, `wrap`, `srtp_import`,
-`traffic_import` and `mtls_client_id`, with each pattern as TLS-3 prints it. No
+order above, the `aead` and `open` uses with their algorithms in the order above, `wrap`, `srtp_import(<dir>)`,
+`traffic_import(<dir>)` and `mtls_client_id`, with each pattern as TLS-3 prints it. No
 operation yet reads `mtls_client_id`: a policy may hold it and `narrow` intersects it, so
 the policy's shape is final.
 
@@ -544,7 +544,9 @@ The results, decided in this order:
   the `sign(<alg>)` for `alg`, or `wrap` would put an opaque secret under a KEK that is
   not, or `wrap`'s `s` holds an import use (TLS-8: an unwrap would make fresh bytes that a
   second import could use).
-- `Invalid` before issue: `uses` is not a policy.
+- `Invalid` before issue: `uses` is not a policy, or `unwrap`'s `uses` holds an import use
+  (TLS-8). A program that holds a KEK's bytes can write a blob binding any policy, so this
+  is checked on `uses`, not left to `wrap`'s refusal.
 - `Capacity(c)` before issue: `unwrap`'s admission is refused, with the requested charge
   and the space available.
 - `Invalid`: a KEK shorter than 32 bytes, or a signing key that is not PKCS#8 for `alg`.
@@ -1099,7 +1101,6 @@ pub opaque resource type Opener
 pub opaque resource type HeaderMask
 pub type Group = X25519 | P256
 pub type Side = Client | Server
-pub type Direction = Send | Receive
 pub type Suite13 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
 pub type Suite12 = Aes128GcmSha256 | Aes256GcmSha384 | ChaCha20Poly1305Sha256
 pub type Profile13 = Quic(Suite13) | Dtls13(Suite13) | Tls13(Suite13)
@@ -1117,8 +1118,8 @@ pub fn sign(key: Secret, alg: SignAlg, r: Random, msg: Bytes, mut out: Bytes) ->
 pub fn tls13(p: Profile13, side: Side, take k: KeyShare, peer: Bytes, hello_hash: Bytes) -> Result[Schedule, (ScheduleError, Option[KeyShare])]
 pub fn quic_initial(side: Side, dcid: Bytes) -> Result[Schedule, ScheduleError]
 pub fn dtls12(suite: Suite12, side: Side, epoch: u16, take k: KeyShare, peer: Bytes, client_random: Bytes, server_random: Bytes, session_hash: Option[Bytes]) -> Result[Schedule, (ScheduleError, Option[KeyShare])]
-pub fn import_traffic(p: Profile13, dir: Direction, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
-pub fn import_srtp(p: SrtpProfile, dir: Direction, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
+pub fn import_traffic(p: Profile13, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
+pub fn import_srtp(p: SrtpProfile, take s: Secret) -> Result[Schedule, (ScheduleError, Option[Secret])]
 pub fn application(mut s: Schedule, finished_hash: Bytes) -> Result[(), ScheduleError]
 pub fn key_update(mut s: Schedule, local: bool) -> Result[(), ScheduleError]
 pub fn retire(mut s: Schedule, space: Space) -> Result[(), ScheduleError]
@@ -1200,9 +1201,8 @@ re-encodes `r ‖ s` into that form before writing the certificate, and the fing
 that DER, signature included.
 
 **Randomness.** `key_share`, `p256_key` and `sign` take a `Random`. Every draw happens
-inside the operation, and only its results leave it. No draw can fail. A host draw comes from
-`host.random`'s source, whose failure ends the run as `host.random`'s does (core). A virtual
-stream never fails.
+inside the operation, and only its results leave it. No draw returns a failure to the
+program. A host draw comes from `host.random`'s source, and a virtual stream never fails.
 
 | operation | host `Random` | virtual `Random` ([provide](core.md#provide)) |
 | --- | --- | --- |
@@ -1211,10 +1211,24 @@ stream never fails.
 | `sign(Ed25519)`, `sign(Rs256)` | no draw: both are deterministic (RFC 8032; ring's PKCS#1 v1.5 padding draws nothing) | no draw |
 | `sign(P256)` | ring's `EcdsaKeyPair::sign` with `SystemRandom` | no draw: deterministic ECDSA ([RFC 6979](https://www.rfc-editor.org/rfc/rfc6979)) by `p256` 0.14.0's `SigningKey`, which gives the same `r ‖ s` encoding |
 
-ring's host P-256 generation gives up after 100 refused candidates. That, like a failed
-`getrandom`, is a failure of the host's source, and it ends the run as a failed
-`host.random` source does: `host.random` never fails (core), and a key operation on the same
-source is treated alike.
+**A host source that fails ends the run.** Core promises that `host.random` fills exactly
+the spare it is given and never fails, so it has no result for a source that cannot. TLS-8
+makes the consequence explicit, for `host.random` and for every host draw here. Each of the
+following is a **terminal provider failure**:
+
+- a `getrandom` error, or a read that returns fewer bytes than asked and then an error;
+- ring's P-256 generation rejecting 100 candidates in a row (its `generate` and
+  `generate_pkcs8` return `Unspecified`);
+- ring's `EcdsaKeyPair::sign` failing on its `SystemRandom`.
+
+On a terminal provider failure the runtime stops the run with a diagnostic naming the
+operation and the source error. No task observes a result: neither a short buffer, nor a
+refusal, nor `Invalid`. A recording ends at the last frame written. The native adapter must
+not deliver a `Random` request with fewer bytes than its spare, and the signing wrapper must
+not map a ring failure on a host `Random` to `Invalid`; `Invalid` stays for a key that is not
+PKCS#8 for its algorithm. A virtual tape that runs out is a different thing: it is the
+drawing task's `Bounds` fault (`provide.random_tape`, below). Build law
+`host_random_failure_ends_run`.
 
 A draw of `n` bytes takes `n / 8` steps of the cell's SplitMix64 stream, eight
 little-endian bytes per step, in the order the table gives. So the stream after a TLS-8
@@ -1232,8 +1246,16 @@ operation is exactly where `host.random` calls of those lengths would have left 
   signed with a host `Random`, through ring. The PKCS#8 template is ring's, so ring parses it.
 
 **The simulation backend.** The virtual rows run on RustCrypto `p256` 0.14.0 (features
-`arithmetic`, `ecdh` and `ecdsa`) and `x25519-dalek` 3.0.0 (`static_secrets` and `zeroize`),
-with default features off. Neither consumes ring's `test::rand`: a virtual draw is computed by
+`arithmetic`, `ecdh`, `ecdsa` and `pkcs8`) and `x25519-dalek` 3.0.0 (`static_secrets` and
+`zeroize`), with default features off. A virtual `sign(P256)` takes the same key bytes a
+host one does: any PKCS#8 that ring's `EcdsaKeyPair::from_pkcs8` accepts for
+`ECDSA_P256_SHA256_FIXED_SIGNING`, not only `p256_key`'s 138-byte template. It decodes them
+with `p256`'s `SecretKey::from_pkcs8_der` and applies ring's checks too: PKCS#8 v1, the
+`id-ecPublicKey` algorithm with the P-256 curve OID, an RFC 5915 `ECPrivateKey` of version 1
+with a 32-byte private key, and the embedded public key present and equal to the scalar's
+point. A document that fails any of these is `Invalid`, as on the host path. The X25519
+adapter rejects an all-zero agreement with dalek's `SharedSecret::was_contributory`, and
+`Invalid` follows exactly as on ring. Neither consumes ring's `test::rand`: a virtual draw is computed by
 the provider and handed to the backend as bytes. The host rows stay on ring. Both backends
 compute the same functions, so a simulated peer agrees with a host peer (PC8). The
 `ring::test::rand` route of the first text is withdrawn. Its fixtures repeat one slice or
@@ -1245,24 +1267,47 @@ supplies public values: the peer's key, randoms, connection ids and transcript h
 hash is exactly HashLen bytes (32 for the SHA-256 suites, 48 for SHA-384), each random is
 exactly 32 bytes, and a QUIC connection id is 0 to 20 bytes. Every constructor and
 transition decides its result in this order, each refusal before issue and with no effect
-(a constructor's share or secret is returned): `Invalid` for a wrong length, a profile or
-suite the operation does not take, or a schedule at the wrong stage or of the wrong kind;
-`Spent` for a retired space; `Issued` for a repeated issue; `Capacity(c)` for a refused
-admission. A peer key that is not valid is then `Invalid` as a delivery, with the share
-consumed (key agreement, above). The constructors and transitions:
+(a constructor's share is returned): `Invalid` for a hash, random or connection id of the
+wrong length, a profile or suite the operation does not take, or a schedule of a kind or at
+a stage the operation does not take (the kind table, below); `Spent` for a retired space;
+`Issued` for a repeated issue; `Capacity(c)` for a refused admission. The imports check
+their designation first and keep their own order (imports, below). Once these checks pass,
+`tls13` and `dtls12` **consume the share**: every later result is a delivery, the share is
+gone, and its 64 bytes are refunded. The peer key is checked next. A peer key that is not
+valid, whatever its length, is `Invalid` as a delivery (key agreement, above); a peer key's
+length is never a refusal before issue. Then the agreement registry (sender ownership,
+below) can give `Issued` as a delivery. Each delivered refusal refunds the schedule's and
+the registry entry's admissions.
+
+| operation | takes | anything else |
+| --- | --- | --- |
+| `application` | a `tls13` schedule at `Handshake` | `Invalid` |
+| `key_update` | a `tls13` schedule at `Application`; a `traffic_import` schedule whose direction is `local`'s (`send` for `true`) | `Invalid`, for `dtls12`, SRTP and `quic_initial` schedules too: they have no TLS 1.3 secret to update |
+| `retire` | the `Handshake` space of a `tls13` schedule | `Invalid`; dropping a schedule ends its other spaces |
+| `srtp` | a `dtls12` schedule | `Invalid` |
+| `finished`, `verify_finished` | `tls13` and `dtls12` schedules | `Invalid` |
+| `sealer`, `opener`, `header_mask` | a space the schedule holds, in a direction it holds | `Invalid` |
+
+The constructors and transitions:
 
 - **`tls13(p, side, take k, peer, hello_hash)`** runs the
   [RFC 8446 §7.1](https://www.rfc-editor.org/rfc/rfc8446#section-7.1) schedule with no PSK.
   `hello_hash` is the transcript hash through ServerHello. The early secret is
   `HKDF-Extract(0, 0^HashLen)`. The handshake secret is
   `HKDF-Extract(Derive-Secret(early, "derived", ""), shared)`. The client and server handshake
-  traffic secrets are `Derive-Secret(hs, "c hs traffic" or "s hs traffic", hello_hash)`. The
-  schedule is then at `Handshake`.
+  traffic secrets are `HKDF-Expand-Label(hs, "c hs traffic" or "s hs traffic", hello_hash,
+  HashLen)`. `hello_hash` is already a transcript hash, so it is the context exactly as
+  supplied. RFC 8446's `Derive-Secret(s, l, m)` is `HKDF-Expand-Label(s, l,
+  Transcript-Hash(m), HashLen)`, so passing the hash where `m` goes would hash it a second
+  time and give a key no peer uses (build law `tls13_prehashed_context`). The two
+  `"derived"` steps keep `Derive-Secret(s, "derived", "")`, whose context is the hash of no
+  messages. The schedule is then at `Handshake`.
 - **`application(mut s, finished_hash)`** derives the master secret,
   `HKDF-Extract(Derive-Secret(hs, "derived", ""), 0^HashLen)`, and the application traffic
-  secrets, `Derive-Secret(master, "c ap traffic" or "s ap traffic", finished_hash)`. Here
-  `finished_hash` is the transcript hash through the server's Finished. It is `Invalid`
-  unless the schedule is a `tls13` one at `Handshake`. The handshake traffic secrets stay:
+  secrets, `HKDF-Expand-Label(master, "c ap traffic" or "s ap traffic", finished_hash,
+  HashLen)`, with `finished_hash` as the context as supplied. Here `finished_hash` is the
+  transcript hash through the server's Finished. It is `Invalid` unless the schedule is a
+  `tls13` one at `Handshake`. The handshake traffic secrets stay:
   `finished`, `verify_finished` and the `Handshake` space keep working after `application`,
   because a server sends its first application data before it has the client's Finished,
   and QUIC and DTLS 1.3 keep the handshake keys for retransmission. `retire` ends them.
@@ -1272,14 +1317,15 @@ consumed (key agreement, above). The constructors and transitions:
   header-protection key is not updated (§6). The DTLS 1.3 record-number key is, because
   each key update starts a new epoch with its own `sn` key (RFC 9147 §4.2.3, §8). The
   superseded secret and its keys are zeroed, sealers and openers already issued keep their
-  own copies, and its sender ledger retires (sender ownership, below). It is `Invalid` unless
-  the schedule is at `Application` and, for an import, `local` matches its direction.
+  own copies, and its sender ledger retires (sender ownership, below). The kind table gives
+  the schedules it takes.
 - **`retire(mut s, space)`** erases the secrets and keys of `space`, both directions, and
   retires its ledgers. Sealers, openers and masks already issued keep working until dropped.
   Afterwards `sealer`, `opener`, `header_mask`, `finished` and `verify_finished` for that space
   are `Spent`. A QUIC endpoint retires `Handshake` when the handshake is confirmed
-  ([RFC 9001 §4.9.2](https://www.rfc-editor.org/rfc/rfc9001#section-4.9.2)). `retire` of
-  `Application` is `Invalid`: dropping the schedule ends it.
+  ([RFC 9001 §4.9.2](https://www.rfc-editor.org/rfc/rfc9001#section-4.9.2)). Only that
+  space is retired this way (the kind table); dropping the schedule ends the others. It
+  refunds the retired ledgers' entries at the call, live and on replay alike.
 - **`quic_initial(side, dcid)`** is [RFC 9001 §5.2](https://www.rfc-editor.org/rfc/rfc9001#section-5.2):
   `HKDF-Extract(initial_salt, dcid)`, with salt `0x38762cf7f55934b34d179ae6a4c80cadccbb7f0a`,
   then `"client in"` and `"server in"`, over SHA-256 with AES-128-GCM. Its keys are computable
@@ -1308,8 +1354,8 @@ consumed (key agreement, above). The constructors and transitions:
   It makes a new SRTP schedule with the `dtls12` schedule's opacity. `side`'s master key and
   salt are its sending keys and the other side's are its receiving keys. A second call is
   `Issued`.
-- **`import_srtp(p, dir, take s)`** and **`import_traffic(p, dir, take s)`** take one
-  direction's keys made outside the run (imports, below).
+- **`import_srtp(p, take s)`** and **`import_traffic(p, take s)`** take one direction's
+  keys made outside the run, in the direction the secret's policy names (imports, below).
 
 The TLS 1.2 PRF inputs never alias. Every label is fixed ASCII without a NUL, and every seed
 is fixed in length. Under `shared` the schedule runs one PRF only, the master's. Under the
@@ -1361,10 +1407,15 @@ Two uses join TLS-5's table:
 
 | Use | Permits |
 | --- | --- |
-| `srtp_import` | `schedule.import_srtp`, with the secret as master key followed by master salt |
-| `traffic_import` | `schedule.import_traffic`, with the secret as one traffic secret |
+| `srtp_import(<dir>)` | `schedule.import_srtp`, with the secret as master key followed by master salt, for direction `<dir>` |
+| `traffic_import(<dir>)` | `schedule.import_traffic`, with the secret as one traffic secret, for direction `<dir>` |
 
-An import use is **exclusive**. A policy holding `srtp_import` or `traffic_import` holds no
+`<dir>` is `send` or `receive`. The direction is part of the authority: whoever issues the
+secret decides whether its holder may seal, and the holder cannot change it. A policy
+naming both directions, or two import uses, is `Invalid`. `narrow` of one direction by the
+other leaves no use and is `Invalid`.
+
+An import use is **exclusive**. A policy holding an import use holds no
 other use, so `seal`, a grant or `unwrap` with such a policy and any other use is `Invalid`.
 `narrow` can only remove uses, so it cannot add one. Neither use is in the derivation child
 set, so no derivation makes an import key. `wrap` of a secret holding an import use is
@@ -1374,22 +1425,28 @@ use. The canonical text writes the two uses after `wrap` and before `mtls_client
 An import **spends the bytes**. It consumes the designation it is given. On success, and on
 any refusal after issue, it marks the run-owned bytes behind that designation as spent. The
 mark covers every designation of those bytes, the ones `share` and `narrow` made included,
-in every unit. A later import of spent bytes is `Spent` before issue. The import results, in
-order:
+in every unit. A later import of spent bytes is `Spent` before issue. Checking the mark
+and setting it are one transition of the run, atomic across units and across every
+designation of the bytes, so two imports racing in two units through two aliases give one
+schedule and one `Spent`. The import results, in this order, which is the imports' own and
+takes precedence over the general order above:
 
-- `Denied` before issue: the secret lacks the import use. `Spent` before issue: its bytes
-  are spent. `Invalid` before issue: the profile does not fit the import kind. `Capacity(c)`
-  before issue: the schedule's 512 bytes are refused. Each of these returns the secret, with
-  its holder unchanged.
+- `Denied` before issue: the secret lacks this import's use (`srtp_import(..)` for
+  `import_srtp`, `traffic_import(..)` for `import_traffic`). A spent SRTP designation given
+  to `import_traffic` is therefore `Denied`. `Spent` before issue: its bytes are spent.
+  `Invalid` before issue: the profile does not fit the import kind. `Capacity(c)` before
+  issue: the schedule's 512 bytes are refused. Each of these returns the secret, with its
+  holder unchanged. A spent designation with an unsupported profile is `Spent`.
 - `Invalid` as a delivery, with the bytes spent and the secret consumed. For `import_srtp`
   the length is not the profile's master key length (16, 16 or 32) plus 14, or plus 12 for
   the AEAD profiles. For `import_traffic` it is not the suite's HashLen.
-- The schedule, which holds one direction. A `Send` import is the sending secret, of the
-  `Rtp` and `Rtcp` spaces or of `Application`, and issues sealers and sending masks only. A
-  `Receive` import issues openers and receiving masks only. The other direction's issue is
-  `Invalid`. SDES gives each endpoint its own sending key, so an endpoint imports its key as
-  `Send` and the peer's as `Receive`. A program that imported the peer's key can therefore
-  never seal in the peer's nonce space.
+- The schedule, which holds the one direction the policy names. A `send` import is the
+  sending secret, of the `Rtp` and `Rtcp` spaces or of `Application`, and issues sealers and
+  sending masks only. A `receive` import issues openers and receiving masks only. The other
+  direction's issue is `Invalid`. SDES gives each endpoint its own sending key, so the
+  issuer grants an endpoint its own key as `srtp_import(send)` and the peer's as
+  `srtp_import(receive)`. A program granted only the peer's key can therefore never seal in
+  the peer's nonce space, whatever it passes (build law `import_direction_from_policy`).
 
 The mark covers the bytes of one grant, seal or unwrap within one run. It cannot see equal
 bytes that came in by another route: two grants of one source, the same source in a later
@@ -1421,14 +1478,49 @@ only within one cipher. A schedule enforces this for every key it holds:
   QUIC skips packet numbers. Past its profile's widest counter it is spent.
 - **Retiring.** A ledger retires when its epoch can issue no more: at the `key_update` that
   supersedes it, and when the schedule is dropped. Sealers already issued keep working.
+- **Agreements.** Two schedules can hold one key without sharing any object: the two ends
+  of an exchange made inside the run, or two shares against peers the program scaled so the
+  products meet (share `a` against `c·B` and share `b` against `c·A` both agree on
+  `c·ab·G`, and neither peer key is a share's public key). A ledger cannot see either, so
+  the run keeps one **agreement registry**. Once `tls13` or `dtls12` holds a valid agreed
+  value, it computes the value's **fingerprint**, `SHA-256("hirsel agreement 1" ‖ 0x00 ‖
+  shared)`, and looks up the pair (fingerprint, `side`). When the registry holds the pair,
+  the result is `Issued` as a delivery, the share consumed and every admission refunded.
+  Otherwise the pair is added and the schedule is made. The look-up and the addition are one
+  transition of the run, atomic across units. The two ends of a loopback exchange take
+  different sides and both pass. Two schedules that would send under one key cannot both be
+  made, at the same time or one after the other.
+- **Registry lifetime.** An entry records the run's **share count** at its construction:
+  how many shares `key_share` has issued so far. The entry retires, its fingerprint erased
+  and its 48 bytes refunded to the limit that admitted them, once every share counted by it
+  has been consumed or dropped. No later host share can reach the same agreed value. For
+  an earlier share `x` against the chosen peer `P`, a host share `y` drawn afterwards would
+  need the peer `(x / y)·P`, which only someone who knows `y`'s scalar, and `x`'s or `P`'s,
+  can compute. That is the Diffie–Hellman assumption the agreement already rests on. A
+  later virtual share can reach it when the program knows the agreed value, which is the
+  next case. The registry holds
+  fingerprints only. It never passes the replay point itself (replay, below).
+- **Keys the program can compute.** An agreed value the program can compute is outside
+  this guarantee. That covers one made from a virtual share, from `provide.random` or
+  `provide.random_tape`. It also covers a host share against a peer key whose scalar the
+  program knows: a virtual share's public key, or any `d·G` it made. Its schedules enter the
+  registry like any other and are refused while their entries live. After the entries
+  retire, two things can reach the same value again. A new cell with the same seed draws the
+  same share. A later virtual share can be aimed at it: host `a` against `d·G`, then a tape
+  share `y` against `(d / y)·A`. Such a key protects nothing from the program, as
+  `quic_initial`'s protects nothing from anyone with the `dcid`, and a repeated nonce under
+  it shows nothing the program could not already compute.
 - **Openers.** `opener(s, space)` is open-only authority for the peer's current receive
   secret of `space`. After a receiving `key_update`, an opener issued before it keeps the
   old generation's keys, which a receiver needs for packets reordered across the update. It holds no counter and no per-domain state, and any number may be
   issued.
 
-A key that a schedule derived is never held outside it, and every key is computed at most
-once per schedule. So each nonce is used at most once per key. For imported bytes this holds
-within the mark's reach (imports, above). Protocol lifetime limits are the library's to keep:
+A key that a schedule derived is never held outside it, every key is computed at most once
+per schedule, and the agreement registry keeps two schedules of the run from sending under
+one agreed key. So each nonce is used at most once per key across every schedule of the run.
+That holds for every key not computable from public values (`quic_initial`) or by the
+program (agreements, above). For imported bytes it holds within the mark's reach
+(imports, above). Across runs it rests on fresh shares: every exchange draws new ones. Protocol lifetime limits are the library's to keep:
 
 - QUIC counts the packets sealed under each key, and failed authentications across the
   connection ([RFC 9001 §6.6](https://www.rfc-editor.org/rfc/rfc9001#section-6.6));
@@ -1476,7 +1568,7 @@ sealer and the opener (`Range` when exceeded).
 | profile / space | algorithm | domain field | counter field and width | AAD in `buf[aad_at..at]`, then `extra` | tag |
 | --- | --- | --- | --- | --- | --- |
 | QUIC v1 | the suite's AEAD | path id at bytes 0..3 (32 bits) for multipath, else none | bytes 4..11, `pn < 2^62` | the header from its first byte; `extra` empty | 16 |
-| DTLS 1.3 | the suite's AEAD | none | bytes 4..11, the epoch's sequence number without the epoch, `< 2^48` | the unified header before record-number encryption ([RFC 9147 §4](https://www.rfc-editor.org/rfc/rfc9147#section-4)); `extra` empty | 16 |
+| DTLS 1.3 | the suite's AEAD | none | bytes 4..11, the full 64-bit sequence number of the epoch's protected records, any `u64`. The 48-bit limit belongs to the `DTLSPlaintext` wire field and does not apply here; the suite's usage limits are the library's ([RFC 9147 §4.5.3](https://www.rfc-editor.org/rfc/rfc9147#section-4.5.3)) | the unified header before record-number encryption ([RFC 9147 §4](https://www.rfc-editor.org/rfc/rfc9147#section-4)); `extra` empty | 16 |
 | TLS 1.3 | the suite's AEAD | none | bytes 4..11, 64 bits | the 5-byte record header; `extra` empty | 16 |
 | DTLS 1.2 AES-GCM | AES-GCM | none | bytes 4..11: the explicit nonce. A sealer's `seq` is the 48-bit sequence number (`< 2^48`), and the sealer writes the schedule's `epoch` at bytes 4..5 and `seq` at 6..11; an opener's `seq` is the 8 transmitted bytes read big-endian, any `u64` | none (`aad_at = at`); `extra` the 13 bytes `epoch ‖ seq ‖ type ‖ version ‖ length` from the record ([RFC 6347 §4.1.2.1](https://www.rfc-editor.org/rfc/rfc6347#section-4.1.2.1)) | 16 |
 | DTLS 1.2 ChaCha20 | ChaCha20-Poly1305 | none | bytes 4..11: `epoch ‖ seq`. A sealer's `seq` is the 48-bit sequence number, with the schedule's `epoch` prepended as for AES-GCM; an opener's `seq` is the 8 bytes `epoch ‖ seq` from the record header | as AES-GCM | 16 |
@@ -1495,6 +1587,10 @@ caller seals, then appends the 4 bytes. On receipt it reads the 4 bytes, truncat
 passes them as `extra` to `open`. Under CM `E ‖ index` comes before the tag: the sealer puts
 the tag after the ciphertext, and the caller moves it 4 bytes on. On receipt it moves the tag
 back before calling `open`. That is a 14-byte copy each way on a low-rate stream.
+
+With `E = 0` under CM, nothing is encrypted and the whole RTCP compound packet is
+authenticated and stays clear (RFC 3711 §3.4). The caller passes `at = len(buf)`, so the
+plaintext is empty and `buf[aad_at..]` is all authenticated data.
 
 **Sealing.** `packet.seal(mut c, seq, mut buf, aad_at, at, extra)` seals in place. The bytes
 `buf[aad_at..at]` and then `extra` are authenticated as one byte string, with no padding at
@@ -1574,7 +1670,9 @@ volatile writes of zeros before it releases or reuses that storage. That covers:
   changes `GcmKey::new` to build them in place in the sealer's or opener's run-owned slot,
   through a pointer to that slot, never into a local that is then returned.
 
-Erasure happens at drop, after a refused construction, and when a schedule consumes a share.
+Erasure happens at drop, after a construction refused as a delivery (the share was
+consumed), and when a schedule consumes a share. A construction refused before issue
+returns the share untouched, with its private key intact, and erases nothing.
 PC11 reads the still-allocated slot after erasure and before release.
 
 The rest is not erased. That covers the state of ring values: ChaCha20-Poly1305 and non-VAES
@@ -1595,6 +1693,7 @@ construction refunds everything it admitted before it returns.
 | --- | --- | --- |
 | `KeyShare` | 64 | at drop, or when a constructor consumes it: after the schedule's 512 are admitted, at the same point. A constructor refused before issue returns the share with its 64 still held |
 | `Schedule` (each constructor and `srtp`) | 512 | at drop |
+| an agreement registry entry (`tls13`, `dtls12`) | 48, admitted together with the schedule's 512 | when the entry retires (agreements, above), which may be after the schedule's drop; a refused construction refunds it at once |
 | a ledger entry (each issued sealer) | 16 | when its ledger retires |
 | `Sealer`, `Opener` | 1024 | at drop |
 | `HeaderMask` | 512 | at drop |
@@ -1605,33 +1704,63 @@ Every operation in this section takes one step, whatever its lengths. The work o
 open or mask is bounded by bytes that a limit already bounds, which is the AEAD sink's rule.
 Charges are logical. No measured per-byte step charge is added. No operation here waits.
 
-**Replay and recording.** An operation **passes the replay point**
-([CAP-8](capabilities.md#cap-8-the-replay-point)) exactly when it draws from a host `Random`
-or reads opaque key material: an opaque share, schedule, sealer, opener or mask, or an opaque
-`Secret`. Every other TLS-8 operation is **wholly virtual**. It is recomputed on replay as it
+**Replay and recording.** Whether key material can be recomputed on replay is a property of
+its own, separate from opacity. A `Secret` **has bytes on replay** when the operation that
+made its bytes is recomputed on replay: `seal`, and `p256_key` with a virtual `Random`
+(`share`, `narrow` and `provide.secret` designate the same bytes). A grant, a derivation,
+an `unwrap` and a host `p256_key` make bytes that a replay does not have, whatever their
+opacity (TLS-5 replays every use of them from the recording). An unwrap under a
+program-sealed KEK is not opaque and still has no bytes on replay. A share, schedule,
+sealer, opener or mask has bytes on replay exactly when it is not opaque. Every import reads
+a secret with bytes on replay or an opaque one. No unwrap or derivation can make an import
+use: `unwrap` refuses `uses` holding one, even for a blob the program wrote itself under a
+KEK it sealed, and the derivation child set has none. So every share and schedule, and
+every object made from one, has bytes on replay exactly when it is not opaque.
+
+An operation **passes the replay point**
+([CAP-8](capabilities.md#cap-8-the-replay-point)) exactly when it draws from a host `Random`,
+reads key material without bytes on replay (any opaque object, or a `Secret` as above), or
+is a `tls13` or `dtls12` construction while the agreement registry holds a live entry made
+by an opaque construction. In that last case the registry's verdict depends on a
+fingerprint the replay cannot compute, so the delivery records it. Every other TLS-8
+operation is **wholly virtual**. It is recomputed on replay as it
 was computed live, with no frame, and its virtual draws advance the stream exactly once
 either way. This is core's rule for virtual providers. An operation that does both, such as
 `sign(P256)` of a virtually drawn key with a host `Random`, passes the replay point as a
 whole: its virtual inputs are in the issue frame, and it draws nothing from the virtual
-stream. The one combination that would leave an opaque key's result recomputable,
-`sign(P256)` with an opaque key and a virtual `Random`, is `Denied`. A wholly virtual schedule needs nothing from a recording, because its peer keys,
+stream. So does `sign` of any algorithm with a key that has no bytes on replay and a
+virtual `Random`, such as a key unwrapped under a sealed KEK: live, it signs from the
+run-owned bytes. On replay the signature comes from the delivery, and the virtual stream
+advances as it did live, which is not at all, since RFC 6979, Ed25519 and RS256 draw
+nothing (build law `dark_key_sign_replays`). `sign(P256)` with an opaque key and a virtual
+`Random` stays `Denied`, because an opaque key is signed only with host randomness
+(randomness, above). A wholly virtual schedule needs nothing from a recording, because its peer keys,
 hashes and received packets came through operations that were recorded.
 
 When an operation passes the replay point, it writes one issue frame and one delivery frame,
-and a packet sealed and masked passes it twice. Admissions happen before issue, live and on
-replay alike, so a replay makes the same charges. On replay, the delivery comes from the tape
-and the program state changes as follows:
+and a packet sealed and masked passes it twice. An issue frame holds every argument that can
+change the result, by the canonical-arguments rule ([recording](../recording.md)), and the
+spare of every `mut` buffer the call appends to. A delivery holds the origin of every object
+the call makes. Admissions happen before issue, live and on replay alike, so a replay makes
+the same charges. On replay, the delivery comes from the tape and the program state changes
+as follows. A ledger changes only in the rows that say so.
 
 | operation | issue holds | delivery holds | on replay |
 | --- | --- | --- | --- |
 | `key_share`, host | `Random`'s identity, group, `public`'s spare | the public key and the share's origin, or a refusal | `public` gains the delivered bytes; the share has no key |
 | `p256_key`, host | `Random`, policy, spare | public point and designation origin | as above; the designation has no bytes |
-| `sign` | key designation, algorithm, `Random` identity, `msg` by the canonical-arguments rule | the signature or a refusal | `out` gains the signature |
-| `tls13`, `dtls12` (opaque share) | share origin, profile, suite, side, epoch, `peer`, randoms and hashes | the schedule's origin, or `Invalid` | the share is consumed and its 64 refunded; the schedule has no secrets |
-| `import_*` | designation, profile, side | schedule origin, or a refusal | the bytes are marked spent |
-| `application`, `key_update`, `srtp` | schedule origin, hash or direction | done or a refusal | the schedule's stage, generation and ledgers change as live |
-| `finished`, `verify_finished` | schedule origin, side, hash, `received` | the value or verdict | `out` gains the value |
-| `sealer`, `opener`, `header_mask` | schedule origin, space, domain, floor | the object's origin or a refusal | the ledger gains the domain |
+| `sign` | key designation, algorithm, `Random` identity, `msg` by the canonical-arguments rule, `out`'s spare | the signature or a refusal | `out` gains the signature |
+| `tls13`, `dtls12` | share origin, profile, suite, side, epoch, `peer`, randoms and hashes | the schedule's origin, or `Invalid` or `Issued` | the share is consumed and its 64 refunded. On success the registry gains an entry with the live share count, and the schedule has no secrets when opaque; a virtual one computes its secrets and fingerprint as live. A refusal refunds as live |
+| `import_srtp`, `import_traffic` | designation, profile | schedule origin, or a refusal | the bytes are marked spent where live marked them; the schedule's direction comes from the designation's policy |
+| `application` | schedule origin, `finished_hash` | done or a refusal | the stage changes as live |
+| `key_update` | schedule origin, `local` | done or a refusal | the generation of that direction changes and its old ledger retires, refunding its entries, as live |
+| `retire` | schedule origin, space | done or a refusal | the space is spent and its ledgers retire, refunding their entries, as live |
+| `srtp` | schedule origin, profile | the child schedule's origin, or a refusal | the parent's `srtp` is used; the child has no secrets |
+| `finished` | schedule origin, side, hash, `out`'s spare | the value or a refusal | `out` gains the value |
+| `verify_finished` | schedule origin, side, hash, `received` | the verdict or a refusal | none |
+| `sealer` | schedule origin, space, domain, floor | the sealer's origin or a refusal | on success the current send epoch's ledger gains the domain |
+| `opener` | schedule origin, space | the opener's origin or a refusal | no ledger changes |
+| `header_mask` | schedule origin, space, `local` | the mask's origin or a refusal | no ledger changes |
 | `seal`, `seal_into` | sealer origin, `seq`, offsets, the plaintext and AAD spans and `extra` by the canonical-arguments rule | every byte written (ciphertext and tag), or a refusal | `buf` or `dst` gets the delivered bytes at the same range and length; the high-water mark becomes `seq` |
 | `open`, `open_into` | opener origin, `domain`, `seq`, offsets, the input spans and `extra` by the canonical-arguments rule | the plaintext, or `Tampered` with a reason: short or tag | success: the plaintext replaces the ciphertext and the length drops by the tag, or `dst` gains it; tag failure: `buf[at..len − tag]` is zeroed; short: `buf` unchanged; `dst` unchanged on any refusal |
 | `mask` | mask origin, the 16 sample bytes | the 5 mask bytes | the 5 bytes |
@@ -1662,28 +1791,64 @@ second spelling is added.
 
 | law | bug | oracle and setup |
 | --- | --- | --- |
-| **PC1** QUIC and TLS 1.3 vectors | a wrong label, prefix, nonce placement, AAD or mask | RFC 9001 A.2: `quic_initial(Client, 8394c8f03e515708)`, then seal the listed client Initial payload at packet number 2. That gives the listed protected payload, and `mask` of the listed sample gives `437b9aec36`. RFC 9001 A.5: `import_traffic(Quic(ChaCha20Poly1305Sha256), Send)` of its secret, seal at packet number 654360564: the listed packet, and the mask `aefefe7d03`. RFC 8448 §3: a `provide.random_tape` (below) holding the client's X25519 private key, so `key_share` appends the listed client public key. Then `tls13(Tls13(Aes128GcmSha256), Client, .., server public, hello_hash)` opens the server's listed encrypted handshake record to its listed plaintext. `finished(Server, ..)` equals its verify_data. After `application`, the client's application record seals to the listed bytes. |
-| **PC2** SRTP vectors | a wrong KDF alignment, salt padding, counter block, ROC or index placement | libSRTP `test/srtp_driver.c` at `fd08747f`. `srtp_validate`: `import_srtp(Aes128CmHmacSha1_80, Send)` of the first 30 bytes of `test_key`; sealing `srtp_plaintext_ref` and `rtcp_plaintext_ref` gives the file's protected packets. A `Receive` import of the same bytes, sealed separately as a second secret, opens them back. `srtp_validate_gcm`: the same with `test_key_gcm` (28 bytes, a 12-byte salt) under `AeadAes128Gcm`, over the RTP and RTCP reference packets. RFC 3711 B.3 (14-byte salt, AES-128) and RFC 6188 §7.2 (14-byte salt, AES-256 KDF, imported under `AeadAes256Gcm`): one sealed packet each equals Python `cryptography` over the appendix's derived session keys. That is CTR plus `hmac` for B.3, and AES-GCM with the first 12 bytes of the derived salt for §7.2. A 12-byte and a 14-byte salt `a0..ab ‖ 00 00` import to equal output. |
-| **PC3** one sender per nonce | two sealers on one domain, a counter reused or wrapped into a neighbour, or a refusal that consumes a counter | One `Application` epoch. A second `sealer` for domain 0 gives `Issued`, after the first sealer is dropped too. Designations made by `share` and `narrow` before an import give `Spent` when imported afterwards. `sealer` on a `Receive` import gives `Invalid`. After `retire(Handshake)`, `sealer`, `opener` and `finished` for `Handshake` give `Spent`, and a sealer issued before it still seals its next counter. Two SRTP sealers for SSRCs 1 and 2 each seal index 7 under one key; Python AES-GCM with the hand-built IVs (§8.1) matches both, and the IVs differ. A sealer at index `2^48 − 1` seals, then gives `Range`. Index `2^48` gives `Range` before issue. Seq 7, 6, 0 after 7, and seq below `floor`, give `Reused`. After each refusal `buf` and its length are unchanged, the counting provider saw no call, and the next admissible counter still succeeds. After `key_update(local = true)` a new sealer for domain 0 is issued, and its packet differs from the old generation's. |
-| **PC4** in place, out of place, and lengths | `seal_into` authenticating the wrong `dst` range, an AAD split padded at the boundary, or an off-by-one at a size bound | A schedule from `import_traffic(Quic(Aes128GcmSha256), ..)` of a fixed secret, sealed twice so one copy is imported `Send` and one `Receive`, with Python `cryptography`'s `HKDF` (RFC 8446's `HKDF-Expand-Label`) and `AESGCM` as the oracle. Plaintext lengths 0, 1, 15, 16, 17, 1200 and 65,535 seal in place and out of place to Python's bytes, and open back. The SRTCP rows split the AAD over `buf` and `extra` at every offset 0..12 and match Python over the concatenation. CM: `2^20` plaintext bytes seal; `2^20 + 1` give `TooLong` before issue with no counter consumed. |
-| **PC5** a failed open leaks nothing | unverified plaintext left behind, or a refusal that tells one failure from another | Over PC4's packets, one flipped tag bit, AAD byte or ciphertext byte, and a wrong domain: `Tampered`, `buf`'s length unchanged, its ciphertext range zero, the rest unchanged. An input shorter than `at + tag`: `Tampered`, and `buf` unchanged byte for byte. Through `open_into` with a non-empty `dst`: `Tampered`, and `dst` unchanged. |
-| **PC6** purpose separation | a key, IV or header key used for another purpose, or an import retyped | Each gives a refusal before issue, and the counting provider sees no call. `header_mask` on a `Dtls12`, `Tls13` or SRTP schedule (`Invalid`). `seal` with an `Opener` and `open` with a `Sealer` are type errors (PC6's refused fence). `seal` of policies `srtp_import mac`, `traffic_import kdf` and `srtp_import traffic_import` (`Invalid`). `derive_hkdf_sha256` with child `uses` `srtp_import` (`Invalid`). `wrap` of an import secret (`Denied`). `narrow` of `srtp_import` by `mac` (`Invalid`). `aead_seal` with an import secret (`Denied`). With RFC 9001 A.2's Initial secret, the mask key's AES output differs from the payload key's on the same sample. |
-| **PC7** key agreement | a missing small-order check, an off-curve peer accepted, or a scalar decoded wrongly | Wycheproof `x25519_test.json` and `ecdh_secp256r1_ecpoint_test.json` at the pinned commit. Each case's private key goes through `provide.random_tape`: X25519's 32 bytes, and P-256's unsigned big-endian scalar decoded to exactly 32 bytes first (215 valid cases have a 33-byte encoding with a leading zero). A `valid` case: `tls13(Tls13(Aes128GcmSha256), ..)` with the case's public key and a fixed `hello_hash`, then seal one record. It equals Python `cryptography` computing the same schedule from the case's `shared`. An `invalid` case, and an `acceptable` case flagged `ZeroSharedSecret` or `LowOrderPublic`, gives `Invalid`, with the share consumed and its 64 bytes refunded. A second use of a moved share is refused by OWN rules. |
-| **PC8** simulation determinism and backends | a virtual key read from host entropy, a draw skipped or doubled, a rejected candidate mishandled, or the two backends disagreeing | `provide.random_tape` holding the 32 bytes `ff..ff` (out of range), then a valid scalar, then 8 bytes: `p256_key` gives the valid scalar's public point, which Python `cryptography` derives independently. A following `host.random` of 8 bytes reads exactly the last 8. Two runs with `provide.random(7)` doing `key_share(X25519)`, `p256_key` and `sign(P256)` give byte-identical public keys and signatures, and the signature verifies with `p256.verify`. Separately, `p256_key` from a `random_tape` holding RFC 6979 A.2.5's private key, then `sign(P256)` of `sample`, gives A.2.5's SHA-256 `r ‖ s`. The same program on the evaluator and the native engine gives the same bytes. A simulated `key_share` and a host `key_share` agree through two `tls13` schedules: the host side's sealed record opens on the virtual side. `sign(P256)` with a granted key and `provide.random(7)` gives `Denied`. |
+| **PC1** QUIC and TLS 1.3 vectors | a wrong label, prefix, nonce placement, AAD or mask | RFC 9001 A.2: `quic_initial(Client, 8394c8f03e515708)`, then seal the listed client Initial payload at packet number 2. That gives the listed protected payload, and `mask` of the listed sample gives `437b9aec36`. RFC 9001 A.5: `import_traffic(Quic(ChaCha20Poly1305Sha256), ..)` of its secret sealed as `traffic_import(send)`, seal at packet number 654360564: the listed packet, and the mask `aefefe7d03`. RFC 8448 §3: a `provide.random_tape` (below) holding the client's X25519 private key, so `key_share` appends the listed client public key. Then `tls13(Tls13(Aes128GcmSha256), Client, .., server public, hello_hash)` opens the server's listed encrypted handshake record to its listed plaintext. `finished(Server, ..)` equals its verify_data. After `application`, the client's application record seals to the listed bytes. |
+| **PC2** SRTP vectors | a wrong KDF alignment, salt padding, counter block, ROC or index placement | libSRTP `test/srtp_driver.c` at `fd08747f`. `srtp_validate`: `import_srtp(Aes128CmHmacSha1_80, ..)` of the first 30 bytes of `test_key` sealed as `srtp_import(send)`; sealing `srtp_plaintext_ref` and `rtcp_plaintext_ref` gives the file's protected packets. An import of the same bytes, sealed separately as `srtp_import(receive)`, opens them back. `srtp_validate_gcm`: the same with `test_key_gcm` (28 bytes, a 12-byte salt) under `AeadAes128Gcm`, over the RTP and RTCP reference packets. RFC 3711 B.3 (14-byte salt, AES-128) and RFC 6188 §7.2 (14-byte salt, AES-256 KDF, imported under `AeadAes256Gcm`): one sealed packet each equals Python `cryptography` over the appendix's derived session keys. That is CTR plus `hmac` for B.3, and AES-GCM with the first 12 bytes of the derived salt for §7.2. A 12-byte and a 14-byte salt `a0..ab ‖ 00 00` import to equal output. |
+| **PC3** one sender per nonce | two sealers on one domain, a counter reused or wrapped into a neighbour, or a refusal that consumes a counter | One `Application` epoch. A second `sealer` for domain 0 gives `Issued`, after the first sealer is dropped too. Designations made by `share` and `narrow` before an import give `Spent` when imported afterwards. `sealer` on an `srtp_import(receive)` import gives `Invalid`. After `retire(Handshake)`, `sealer`, `opener` and `finished` for `Handshake` give `Spent`, and a sealer issued before it still seals its next counter. Two SRTP sealers for SSRCs 1 and 2 each seal index 7 under one key; Python AES-GCM with the hand-built IVs (§8.1) matches both, and the IVs differ. A sealer at index `2^48 − 1` seals, then gives `Range`. Index `2^48` gives `Range` before issue. Seq 7, 6, 0 after 7, and seq below `floor`, give `Reused`. After each refusal `buf` and its length are unchanged, the counting provider saw no call, and the next admissible counter still succeeds. After `key_update(local = true)` a new sealer for domain 0 is issued, and its packet differs from the old generation's. |
+| **PC4** in place, out of place, and lengths | `seal_into` authenticating the wrong `dst` range, an AAD split padded at the boundary, or an off-by-one at a size bound | A schedule from `import_traffic(Quic(Aes128GcmSha256), ..)` of a fixed secret, sealed twice, once as `traffic_import(send)` and once as `traffic_import(receive)`, with Python `cryptography`'s `HKDF` (RFC 8446's `HKDF-Expand-Label`) and `AESGCM` as the oracle. Plaintext lengths 0, 1, 15, 16, 17, 1200 and 65,535 seal in place and out of place to Python's bytes, and open back. The SRTCP rows split the AAD over `buf` and `extra` at every offset 0..12 and match Python over the concatenation. CM: `2^20` plaintext bytes seal; `2^20 + 1` give `TooLong` before issue with no counter consumed. |
+| **PC5** a failed open leaks nothing | unverified plaintext left behind, or a refusal that tells one failure from another | Over PC4's packets, one flipped tag bit, AAD byte or ciphertext byte: `Tampered`. A wrong domain that is in range: PC2's `srtp_validate_gcm` RTP packet opened with SSRC `0xcafebabf` in place of its `0xcafebabe` gives `Tampered` (a nonzero domain on PC4's unipath QUIC packet is `Range` before issue, which is a different case). Each `Tampered` leaves `buf`'s length unchanged, its ciphertext range zero, the rest unchanged. An input shorter than `at + tag`: `Tampered`, and `buf` unchanged byte for byte. Through `open_into` with a non-empty `dst`: `Tampered`, and `dst` unchanged. |
+| **PC6** purpose separation | a key, IV or header key used for another purpose, or an import retyped | Each gives a refusal before issue, and the counting provider sees no call. `header_mask` on a `Dtls12`, `Tls13` or SRTP schedule (`Invalid`). `seal` with an `Opener` and `open` with a `Sealer` are type errors (PC6's refused fence). `seal` of policies `srtp_import(send) mac`, `traffic_import(send) kdf`, `srtp_import(send) traffic_import(send)` and `srtp_import(send) srtp_import(receive)` (`Invalid`). `derive_hkdf_sha256` with child `uses` `srtp_import(send)` (`Invalid`). `wrap` of an import secret (`Denied`). `narrow` of `srtp_import(send)` by `mac`, and by `srtp_import(receive)` (`Invalid`). `aead_seal` with an import secret (`Denied`). With RFC 9001 A.2's Initial secret, the mask key's AES output differs from the payload key's on the same sample. |
+| **PC7** key agreement | a missing small-order check, an off-curve peer accepted, or a scalar decoded wrongly | Wycheproof `x25519_test.json` and `ecdh_secp256r1_ecpoint_test.json` at the pinned commit. Each case's private key goes through `provide.random_tape`: X25519's 32 bytes, and P-256's unsigned big-endian scalar decoded to exactly 32 bytes first (215 valid cases have a 33-byte encoding with a leading zero). A `valid` case: `tls13(Tls13(Aes128GcmSha256), ..)` with the case's public key and a fixed `hello_hash`, then seal one record. It equals Python `cryptography` computing the same schedule from the case's `shared`. An `invalid` case, and an `acceptable` X25519 case flagged `ZeroSharedSecret`, gives `Invalid`, with the share consumed and its 64 bytes refunded. Every other `acceptable` X25519 case (flagged `Twist`, `NonCanonicalPublic`, `EdgeCase*`, `SpecialPublicKey` or `SmallPublicKey` with a nonzero `shared`; RFC 7748 §5 masks the top bit and accepts twist points) succeeds as a `valid` one does. The one `acceptable` P-256 case, tcId 2, a compressed point, gives `Invalid`, because TLS-8 takes only the 65-byte uncompressed form; the adapter checks the length and leading `04` before the library's parser, which would accept it. A second use of a moved share is refused by OWN rules. |
+| **PC8** simulation determinism and backends | a virtual key read from host entropy, a draw skipped or doubled, a rejected candidate mishandled, or the two backends disagreeing | `provide.random_tape` holding the 32 bytes `ff..ff` (out of range), then a valid scalar, then 8 bytes: `p256_key` gives the valid scalar's public point, which Python `cryptography` derives independently. A following `host.random` of 8 bytes reads exactly the last 8. Two runs with `provide.random(7)` doing `key_share(X25519)`, `p256_key` and `sign(P256)` give byte-identical public keys and signatures, and the signature verifies with `p256.verify`. Separately, `p256_key` from a `random_tape` holding RFC 6979 A.2.5's private key, then `sign(P256)` of `sample`, gives A.2.5's SHA-256 `r ‖ s`. The same program on the evaluator, Cranelift and LLVM gives the same bytes. Recorded and replayed, a `host.random` draw on the same virtual cell after these operations reads the same bytes on both, so the replay advanced the stream exactly as live did. A host `sign(P256)` signature need not equal the virtual one, but it verifies with `p256.verify`. A simulated `key_share` and a host `key_share`, on opposite sides, agree through two `tls13` schedules for each group: the host side's sealed record opens on the virtual side and the virtual side's on the host side. `sign(P256)` with a granted key and `provide.random(7)` gives `Denied`. |
 | **PC9** no key on a tape; replay effects | key material in a frame, or replay state that differs from live | A run with a host `Random` makes an X25519 share and runs `tls13` against a fixed peer. It issues a sealer and mask, seals and masks one packet, opens one valid and one tampered packet into a non-empty `buf`, and seals again. The key share comes from a host-provider fixture whose private key is a known sentinel. The tape holds the public key and the packets, and holds none of the sentinel, the shared value, the traffic secrets, the key, IV or header key, raw, hex or base64. Those values come from Python over the sentinel. On replay, the same bytes are written, the tampered `buf` has the same zeroed range, the same charges are admitted, the second seal's high-water mark refuses a repeat, a `provide.random(7)` draw after it reads the same bytes as live, and the run ends `Sealed`. |
-| **PC10** DTLS 1.2 schedule | a PRF split off by one, randoms in the wrong order, EMS ignored, or the exporter cut wrongly | The oracle is a Python TLS 1.2 PRF, checked first against the 100-byte SHA-256 and 148-byte SHA-384 PRF fixtures of rustls `rustls-ring/src/tls12.rs` at `a40acf9d`: its first 32 bytes, the bytes at 32..100, and the whole output. With a tape X25519 share and a fixed peer, `dtls12` with and without `session_hash`, for each suite, seals one record whose bytes equal Python AES-GCM or ChaCha20-Poly1305 under the Python key block. An opener accepts that record with an explicit nonce different from its record number. `srtp` then `sealer(Rtp, ssrc)` seals one RTP packet equal to Python over the exporter's cut. Interop: against `openssl s_server -dtls1_2 -use_srtp SRTP_AEAD_AES_128_GCM -keymatexport EXTRACTOR-dtls_srtp -keymatexportlen 56`, the printed exporter bytes give, through Python, the SRTP packet the Hirsel client seals. |
-| **PC11** charge and erasure | state not admitted, admitted twice, not refunded on failure, a ledger that grows without charge, or a slot left with key bytes | Under the reference count: `bound bytes 1023 { sealer(..) }` gives `Capacity` with `requested` 1040 (1024 plus the 16-byte entry), and 1040 succeeds. `bound bytes 63 { key_share(..) }` gives `Capacity` with 64 requested. A `tls13` refused before issue returns the share with the limit unchanged. One refused for an invalid peer leaves the limit where it was before `key_share`. After `key_update`, the old ledger's entries are refunded. After every drop the limit is back where it was. In the native runtime's unit tests, a sealer's slot, and a schedule's secret arrays, read all zeros after erasure and before release. Those tests run on the VAES path, and on a successful consume, a refused construction and an ordinary drop. |
+| **PC10** DTLS 1.2 schedule | a PRF split off by one, randoms in the wrong order, EMS ignored, or the exporter cut wrongly | The oracle is a Python TLS 1.2 PRF, checked first against the 100-byte SHA-256 and 148-byte SHA-384 PRF fixtures of rustls `rustls-ring/src/tls12.rs` at `a40acf9d`: its first 32 bytes, the bytes at 32..100, and the whole output. With a tape X25519 share and a fixed peer, `dtls12` with and without `session_hash`, for each suite, seals one record whose bytes equal Python AES-GCM or ChaCha20-Poly1305 under the Python key block. For each GCM suite, a peer-direction record produced by Python alone, with explicit nonce `0x0000000000001234` under record number 1 in its AAD and its own tag, opens to its plaintext through the opener: a local sealer always writes the record number as the explicit nonce, so it cannot make this case. ChaCha20 has no explicit nonce and no such case. `srtp` then `sealer(Rtp, ssrc)` seals one RTP packet equal to Python over the exporter's cut. Interop: against `openssl s_server -dtls1_2 -use_srtp SRTP_AEAD_AES_128_GCM -keymatexport EXTRACTOR-dtls_srtp -keymatexportlen 56`, the printed exporter bytes give, through Python, the SRTP packet the Hirsel client seals. |
+| **PC11** charge and erasure | state not admitted, admitted twice, not refunded on failure, a ledger that grows without charge, or a slot left with key bytes | Under the reference count: `bound bytes 1023 { sealer(..) }` gives `Capacity` with `requested` 1040 (1024 plus the 16-byte entry), and 1040 succeeds. `bound bytes 63 { key_share(..) }` gives `Capacity` with 64 requested. A `tls13` refused before issue returns the share with the limit unchanged. One refused for an invalid peer leaves the limit where it was before `key_share`. After `key_update`, the old ledger's entries are refunded. `bound bytes 511 { header_mask(..) }` gives `Capacity` with 512 requested. `bound bytes 175 { p256_key(..) }` gives `Capacity` with 176 requested and `public` unchanged, and 176 succeeds. `bound bytes 559 { tls13(..) }` gives `Capacity` with 560 (the schedule's 512 and the registry entry's 48) and returns the share. A sealer moved to another unit and dropped there refunds its 1024 to the limit that admitted it, after the first unit has ended. `p256_key` from a `random_tape` holding `ff..ff` then 16 bytes faults the task with `Bounds`; the limit is back where it was before the call, `public` is unchanged, and a surviving holder of the same `Random` draws next from the 16 bytes. After every drop the limit is back where it was. In the native runtime's unit tests, the live raw storage of a sealer's owned fields (IV, base, and on VAES the key schedule and GHASH table), and of a schedule's secret arrays, reads all zeros after erasure and before release; ring and dalek values are outside the check (erasure, above). Those tests run on the VAES path, and on a successful consume, a refused construction and an ordinary drop. |
 
 `provide.random_tape(take b: Bytes) -> Random` is a virtual `Random`, like `provide.random`,
 that answers each draw with the next bytes of `b` in order. A draw longer than what is left
 faults the drawing task with `Bounds`, as a read past an array does. It is public `provide`
 surface, for vectors that fix a private key. It joins core's `provide` list in T13.
 
+The cell keeps `b` until the last holder of its `Random` drops, then frees it and refunds it
+to the limit that paid for it, after a unit move too (MEM-20). A cursor advances only by
+whole draws. A draw that does not fit consumes nothing.
+
+When a TLS-8 operation faults this way, nothing it started survives. Its owned provisional
+bytes (rejected and accepted candidates, a half-built PKCS#8 document) are zeroed. Everything
+it admitted, such as `p256_key`'s 176 or `key_share`'s 64, is refunded to the payer. `public`
+is unchanged. A holder of the same `Random` in a task that survives finds the cursor after
+the last whole draw, which includes rejected candidates.
+
+How many candidates a draw may reject is bounded differently by source. A tape bounds it by
+its own length, `len(b) / 32`, so the bytes its limit admitted bound the work. A seeded
+stream has no length bound. A P-256 candidate is rejected with probability below `2^-32`,
+and the count for a seed is fixed, so the work is finite. It is not charged per candidate:
+under MEM-30 a core call takes one step. That is a different argument from the seal and open
+one (charge and steps, above), where bytes a limit already admitted bound the work.
+
 PC1 to PC6 and PC10 belong in `core/core/tests/packet_vectors.hirsel`<!-- doc-ref: planned -->,
 with the vector files next to AE's. PC7 and PC8 belong in
 `core/std/tests/secret_agree.hirsel`<!-- doc-ref: planned -->. PC9 belongs in the runtime tape
 laws. PC11 belongs in the reference evaluator's limit laws and the runtime's unit tests. PC6's
 type errors go in a `refused` fence when the module is built.
+
+**Build laws.** These come from the media-crypto-recheck-2252 review, one for each blocker
+and high finding. Each is required. The build must first make it fail on the design before
+media-crypto-amend2-2257, then make it pass. Each is a case in the harness named, alongside
+that harness's PC laws, and none of them adds a harness. No expected value comes from the
+build's own output.
+
+| law | finding | scenario | oracle | harness |
+| --- | --- | --- | --- | --- |
+| `same_agreement_same_side_refused` | B1 | Two host shares `a` and `b`, with public keys `A` and `B`. **(a)** `tls13(Tls13(Aes128GcmSha256), Client, a, B, h)`, then `tls13(.., Client, b, A, h)` with the same `h`. **(b)** The first schedule seals counter 0 and is dropped, its sealer too, and only then is `b` constructed as `Client` against `A`. **(c)** As control, `b` against `A` as `Server`. **(e)** Scaled peers: two X25519 shares from `random_tape`s holding fixed scalars `a` and `b`, constructed as `Client` against `X25519(c, B)` and `X25519(c, A)` for a fixed `c`, the peers precomputed in Python, so neither peer is a share's public key. **(d)** In the tape harness, `a` from a host `Random` and `b` from `provide.random_tape` holding RFC 8448 §3's client private key, recorded and replayed. | (a) and (b): the second construction gives `Issued` as a delivery, `b` is consumed, and the limit is where it was before `key_share` made `b` (its 64, the 512 and the 48 all refunded). Before this amend, both schedules seal counter 0 under one key, and the two records' ciphertexts XOR to their plaintexts' XOR. (c): the server schedule opens the client's record. (e): the second gives `Issued`, as in (a), although no peer key equals a share's public key, which a build matching peer bytes would miss. Once `a` and `b` are both gone, the 48 bytes of the entry are refunded. (d): replay gives the same `Issued` and ends `Sealed`. These follow from the invariant one sending key per side per agreed value (sender ownership), and the charges are worked out by hand from the charge table | `core/core/tests/packet_vectors.hirsel`<!-- doc-ref: planned --> (PC3's cases); (d) in the runtime tape laws (PC9's) |
+| `tls13_prehashed_context` | B2 | RFC 8448 §3's handshake secret `1dc826e9…` and its transcript hash through ServerHello, `860c06ed…`, as `hello_hash`, through `tls13` with the tape share of PC1. | The server's handshake record opens to its listed plaintext, which needs client traffic secret `b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21` (RFC 8448 §3). Hashing `hello_hash` again gives `984a55c80a890cddb73b405064e999fe79bb4af786ffa7e5fd2dcf5aac155515`, and under that key the record does not open (Python HMAC-SHA256, media-crypto-recheck-2252). The same holds for `application`'s `c ap traffic` secret against RFC 8448's listed value | `core/core/tests/packet_vectors.hirsel`<!-- doc-ref: planned --> (PC1) |
+| `dark_key_sign_replays` | B3 | **(a)** `p256_key` from a `random_tape` holding RFC 6979 A.2.5's private key, policy `sign(p256)`. It is wrapped under a KEK sealed as `wrap` and unwrapped with `sign(p256)`. Then `sign(P256)` of `sample` with `provide.random(7)`. **(b)** RFC 8032 §7.1 TEST 1's secret key as RFC 8410 PKCS#8 v1, sealed as `sign(ed25519)`, wrapped and unwrapped the same way, then `sign(Ed25519)` of the empty message with `provide.random(7)`. Each run is recorded and replayed. | (a) gives A.2.5's SHA-256 `r ‖ s` (`efd48b2a…3716 ‖ f7cb1c94…cda8`), and (b) gives TEST 1's signature `e5564300…7a100b`, live and on replay. Both replays end `Sealed`, and a `host.random` draw on the same cell afterwards reads the same bytes live and on replay. Before this amend the replay has no key bytes and cannot sign | the runtime tape laws (PC9's) |
+| `import_direction_from_policy` | H1 | The first 30 bytes of libSRTP `srtp_validate`'s `test_key`, sealed as `srtp_import(receive)`, through `import_srtp(Aes128CmHmacSha1_80, ..)`. Also: `narrow` of that secret by `srtp_import(send)`, and `seal` with policy `srtp_import(send) srtp_import(receive)`. | `sealer(Rtp, 0xcafebabe, 0)` gives `Invalid` before issue, with no ledger entry admitted. An `opener` opens the file's protected RTP packet to `srtp_plaintext_ref`. The `narrow` and the `seal` give `Invalid`. These follow from the libSRTP fixture and the policy rule (imports) | `core/core/tests/packet_vectors.hirsel`<!-- doc-ref: planned --> (PC2 and PC6) |
+| `replay_issue_binds_arguments` | H2 | Opaque schedules from a host share against a fixed peer. **(a)** On a `Quic(Aes128GcmSha256)` `tls13` schedule after `application`, `header_mask(Application, true)`, recorded. The source is changed to `false` and replayed. **(b)** On an opaque `dtls12` schedule, `srtp(s, AeadAes128Gcm)`, recorded, then replayed with `AeadAes256Gcm`. **(c)** `opener(Application)`, then `sealer(Application, 0, 0)`. **(d)** `retire(Handshake)`, then `sealer(Handshake, 0, 0)`. **(e)** A host `p256_key`, then `sign(P256)` with `out` spare 63, recorded, then replayed with spare 64. | (a), (b) and (e): `Diverged(Arg)` at that issue (recording's verdict table). (c): live and replay both issue the sealer and admit the same 1024 and 1040, with no `Issued`. (d): live and replay both give `Spent` with the same charges, and the handshake ledger's entries are refunded at `retire` on both. Worked out by hand from the replay table | the runtime tape laws (PC9's) |
+| `dtls13_seq_beyond_48_bits` | H3 | A fixed 32-byte secret sealed as `traffic_import(send)`, through `import_traffic(Dtls13(Aes128GcmSha256), ..)`, then `sealer(Application, 0, 0)`. Seal at sequence `2^48`, then at `2^64 − 1`, then at `2^64 − 1` again. A copy of the secret sealed as `traffic_import(receive)` gives an opener, which opens the `2^48` record at sequence `2^48`. | The opener authenticates and returns the plaintext, where the design before this amend gave `Range` before authentication. The first two seal, and each equals Python `cryptography` `AESGCM` under key `HKDF-Expand-Label(secret, "key", "", 16)` and IV `HKDF-Expand-Label(secret, "iv", "", 12)` with prefix `"dtls13"`, the nonce being the IV XOR the 64-bit sequence number (RFC 9147 §§4, 5.9). The third gives `Reused`, because the sealer is spent. Neither of the first two gives `Range` | `core/core/tests/packet_vectors.hirsel`<!-- doc-ref: planned --> (PC4) |
+| `host_random_failure_ends_run` | H4 | In the native runtime's unit tests, the `getrandom` call of `os/random.rs` is replaced by a test seam. A `host.random` request with a spare of 32 is issued through the OS provider's issue entry and its `deliver`, the path a native program's call takes. **(a)** The seam fails with `EIO` on the first call. **(b)** It returns 8 of 32 bytes, then fails. | Before this amend, `request_outcome` turns the error into an `Outcome` whose `error` is set and whose status is 0, `deliver` passes it on, and native lowering of `Random` reads the status alone, so the program's call returns with a short buffer. After it, the `probe` records no delivery for either request. Both end the run as a terminal provider failure whose diagnostic names `EIO`. This follows from core's promise that `host.random` fills exactly its spare and never fails, and from TLS-8's terminal rule. ring's 100-rejection and signing failures cannot be injected, because ring's `SecureRandom` is sealed. Their mapping to the same end is therefore a code requirement of T13 and not part of this law | `crates/hirsel-core-rt` unit tests of `os.rs`, with its `probe` module |
+
+The mediums of that review are closed in the text and in PC5, PC7, PC8, PC10 and PC11, and
+they add no build law.
 
 ## Laws
 
@@ -1766,10 +1931,10 @@ and L (more than three).
 | **T8** credential grants | M | T4, T7 | the `Cred` type and grant kind, the `imds` and `sts` sources, `cred.fetch` in the OS provider on a host helper, its frames and grant record in a recording, std `cred` | CR1–CR5 |
 | **T9** AEAD sink | M | T4 | `AeadAlg`; the `aead(<alg>)` and `open(<alg>)` uses in policy parsing, `narrow` and the canonical text; `aead_seal` and `aead_open` in the OS provider over ring 0.17.14's `aead` (`LessSafeKey`, sealing and opening in the spare of `out`), and in the scripted and virtual paths as the MAC sink is; their issue and delivery frames in a recording | AE1–AE8 in the core and recording law harnesses |
 | **T10** derivation sinks | M | T4, A2 | `derive_hkdf_sha256` over ring's `hkdf` and `derive_argon2id` over A2's wrapper, in the OS, scripted and virtual paths; the derivation rule's child set, applied to `derive_hmac_sha256` too; opacity; the child, working-memory and step charges; their frames in a recording | KD1–KD6 |
-| **T11** packet cipher | M | T9, T14 | `packet` module: `Sealer`, `Opener`, `Space`, `PacketError`; `schedule.sealer` and `schedule.opener` with the sender ledgers; `seal`, `seal_into`, `open`, `open_into` per TLS-8's profile table, in the OS provider (AES-GCM over `os_tls/gcm.rs`'s `AesKey` and `HTable` built in place in the slot on VAES, ring's `aead` elsewhere; AES-CM and HMAC-SHA1-80 over ring's AES block and `hmac`); the nonce, domain and counter rules, `Range`, `Reused`, `TooLong`, the AAD scratch, erasure, charges and replay frames | PC1 to PC6, PC10, PC11 |
+| **T11** packet cipher | M | T9, T14 | `packet` module: `Sealer`, `Opener`, `Space`, `PacketError`; `schedule.sealer` and `schedule.opener` with the sender ledgers; `seal`, `seal_into`, `open`, `open_into` per TLS-8's profile table, in the OS provider (AES-GCM over `os_tls/gcm.rs`'s `AesKey` and `HTable` built in place in the slot on VAES, ring's `aead` elsewhere; AES-CM and HMAC-SHA1-80 over ring's AES block and `hmac`); the nonce, domain and counter rules, `Range`, `Reused`, `TooLong`, the AAD scratch, erasure, charges and replay frames | PC1 to PC6, PC10, PC11; build laws `dtls13_seq_beyond_48_bits`, `replay_issue_binds_arguments` |
 | **T12** header mask | S | T11, T14 | `HeaderMask`; `schedule.header_mask` and `packet.mask` (5 bytes) over the AES block and ring's ChaCha20 | PC1's mask cases, PC6 |
-| **T13** key agreement and signing keys | M | T4, T10 | `KeyShare`, `Group`; `key_share`, `p256_key` over ring's `agreement` and `EcdsaKeyPair::generate_pkcs8` with `SystemRandom` for host draws, and over RustCrypto `p256` 0.14.0 and `x25519-dalek` 3.0.0 fed by the provider for virtual draws; `sign` gains its `Random` (all callers cut over, deterministic RFC 6979 signing for virtual keys); `provide.random_tape`; opacity from a host draw; std `x509_build` self-signed P-256 certificate with DER `ECDSA-Sig-Value` | PC7, PC8, PC9 |
-| **T14** key schedules | M | T10, T13 | `schedule` module: `Schedule`, `Side`, `Suite13`, `Suite12`, `Profile13`, `SrtpProfile`, `ScheduleError`; `tls13`, `quic_initial`, `dtls12`, `application`, `key_update`, `srtp`, `finished`, `verify_finished`; the SRTP KDF; `import_srtp`, `import_traffic` and the `srtp_import` and `traffic_import` uses with the spent mark and `wrap`'s refusal, in the OS, scripted and virtual paths | PC1's Finished case, PC6's use cases, PC10's PRF fixtures |
+| **T13** key agreement and signing keys | M | T4, T10 | `KeyShare`, `Group`; `key_share`, `p256_key` over ring's `agreement` and `EcdsaKeyPair::generate_pkcs8` with `SystemRandom` for host draws, and over RustCrypto `p256` 0.14.0 and `x25519-dalek` 3.0.0 fed by the provider for virtual draws; `sign` gains its `Random` (all callers cut over, deterministic RFC 6979 signing for virtual keys, PKCS#8 decoding with ring's checks); `provide.random_tape` with its fault cleanup; opacity and bytes on replay; terminal provider failures for host draws, in the native adapter and the signing wrapper; std `x509_build` self-signed P-256 certificate with DER `ECDSA-Sig-Value` | PC7, PC8, PC9; build laws `dark_key_sign_replays`, `host_random_failure_ends_run` |
+| **T14** key schedules | M | T10, T13 | `schedule` module: `Schedule`, `Side`, `Suite13`, `Suite12`, `Profile13`, `SrtpProfile`, `ScheduleError`; `tls13`, `quic_initial`, `dtls12`, `application`, `key_update`, `srtp`, `finished`, `verify_finished`; the SRTP KDF; `import_srtp`, `import_traffic` and the `srtp_import(<dir>)` and `traffic_import(<dir>)` uses with the atomic spent mark and `wrap`'s refusal; the agreement registry with its share-count retirement and replay rule, in the OS, scripted and virtual paths | PC1's Finished case, PC6's use cases, PC10's PRF fixtures; build laws `tls13_prehashed_context`, `same_agreement_same_side_refused`, `import_direction_from_policy` |
 
 T2 and T3 can run in parallel after T1. T4 waits for T2 because its designation in a
 recording is part of its contract. T5, T6 and T7 run in any order once their dependencies land.

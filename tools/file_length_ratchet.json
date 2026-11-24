@@ -6,7 +6,9 @@
     "lines": 1018
   },
   "core/core/tests/provide.hirsel": {
-    "lines": 2344
+    "lines": 2350,
+    "raise_revision": 1,
+    "reason": "net18-s2-2481"
   },
   "core/programs/harness/laws.hirsel": {
     "lines": 1901,
@@ -118,7 +120,9 @@
     "lines": 1132
   },
   "core/std/tests/provide_parity.hirsel": {
-    "lines": 1439
+    "lines": 1444,
+    "raise_revision": 1,
+    "reason": "net18-s2-2481"
   },
   "core/std/tests/string.hirsel": {
     "lines": 1522,
@@ -154,9 +158,9 @@
     "lines": 1203
   },
   "crates/hirsel-core-driver/src/core_ops_native.rs": {
-    "lines": 2462,
-    "raise_revision": 1,
-    "reason": "net18-s1-2446"
+    "lines": 2467,
+    "raise_revision": 2,
+    "reason": "net18-s2-2481"
   },
   "crates/hirsel-core-driver/src/launcher/laws.rs": {
     "lines": 1410
@@ -196,9 +200,9 @@
     "reason": "run-decode-raii-2112"
   },
   "crates/hirsel-core-driver/src/recording_build_native.rs": {
-    "lines": 4309,
-    "raise_revision": 2,
-    "reason": "verify-observer-2037"
+    "lines": 3938,
+    "raise_revision": 3,
+    "reason": "net18-s2-2481"
   },
   "crates/hirsel-core-driver/src/request.rs": {
     "lines": 2074,
@@ -249,9 +253,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 3287,
-    "raise_revision": 7,
-    "reason": "net18-s1-2446"
+    "lines": 3326,
+    "raise_revision": 8,
+    "reason": "net18-s2-2481"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2866,
@@ -316,9 +320,9 @@
     "lines": 1198
   },
   "crates/hirsel-core-ir/src/eval.rs": {
-    "lines": 7144,
-    "raise_revision": 6,
-    "reason": "net18-s1-2446"
+    "lines": 7168,
+    "raise_revision": 7,
+    "reason": "net18-s2-2481"
   },
   "crates/hirsel-core-ir/src/extent.rs": {
     "lines": 1233
@@ -395,9 +399,9 @@
     "reason": "w3a-b-sized-2009"
   },
   "crates/hirsel-core-rt/src/net.rs": {
-    "lines": 1327,
-    "raise_revision": 1,
-    "reason": "net18-s1-2446"
+    "lines": 1384,
+    "raise_revision": 2,
+    "reason": "net18-s2-2481"
   },
   "crates/hirsel-core-rt/src/net_tests.rs": {
     "lines": 1528,

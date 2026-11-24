@@ -898,7 +898,7 @@ fn unix_reply_validation(tasks: Tasks) -> bool waits {
         let (n, port) = provide.net(bytes 4096)
         let server = task.spawn(tasks, bytes 4096, UnixReplyCase(port: take port, mode: mode), unix_reply_server)
         let caller = if mode == 4 {
-            let only = result.unwrap(net.narrow(n, Unix(dir: UnixListen, root: "root", path: "sock")))
+            let only = result.unwrap(net.narrow(n, one_rule(Unix(dir: UnixListen, root: "root", path: "sock"))))
             let denied = match host.listen_unix(only, "root", "other", 1) {
                 Error(Denied) => true,
                 _ => false
@@ -1435,4 +1435,10 @@ fn exec_spawn_payloads(tasks: Tasks) -> bool waits {
         }
     }
     fields && failed && empty && program == string.as_bytes("parity") && dir == string.as_bytes("work") && path == string.as_bytes("sub") && list.len(args) == 6 && exec_wire_field(args, 0, string.as_bytes("ab")) && list.len(env) == 27 && exec_wire_field(env, 0, string.as_bytes("A")) && exec_wire_field(env, 5, string.as_bytes("first")) && exec_wire_field(env, 14, string.as_bytes("Z")) && exec_wire_field(env, 19, string.as_bytes("last"))
+}
+
+fn one_rule(take r: Rule) -> List[Rule] {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, take r)
+    take rules
 }

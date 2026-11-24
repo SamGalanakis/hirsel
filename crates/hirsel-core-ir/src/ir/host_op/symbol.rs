@@ -16,6 +16,8 @@ impl HostOp {
             Self::NetNarrow => "hirsel_core_net_narrow",
             Self::NetClass => "hirsel_core_net_class",
             Self::NetDenials => "hirsel_core_net_denials",
+            Self::NetNarrowBegin => "hirsel_core_net_narrow_begin",
+            Self::NetNarrowEnd => "hirsel_core_net_narrow_end",
             Self::ExecNarrow => "hirsel_core_exec_narrow",
             Self::NetNarrowTls => "hirsel_core_net_narrow_tls",
             Self::NetNarrowResolve => "hirsel_core_net_narrow_resolve",

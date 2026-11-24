@@ -1204,7 +1204,7 @@ pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow_tls(
-    context: *mut Context,
+    _context: *mut Context,
     n: u64,
     patterns: *const Buffer,
     first: u16,
@@ -1218,40 +1218,96 @@ pub unsafe extern "C" fn hirsel_core_net_narrow_tls(
             0 => TlsTrust::System,
             1 => match crate::tls::bytes(&*digest).try_into() {
                 Ok(digest) => TlsTrust::Roots(digest),
-                Err(_) => return DENIED,
+                Err(_) => return narrow_add(n, None),
             },
-            _ => return DENIED,
+            _ => return narrow_add(n, None),
         };
         let Ok(patterns) = std::str::from_utf8(crate::tls::bytes(&*patterns)) else {
-            return DENIED;
+            return narrow_add(n, None);
         };
-        match TlsRule::new(patterns, first, last, trust) {
-            Some(rule) => narrow(context, n, GrantRule::Tls(rule)),
-            None => DENIED,
-        }
+        narrow_add(
+            n,
+            TlsRule::new(patterns, first, last, trust).map(GrantRule::Tls),
+        )
     }
 }
 /// # Safety
 /// Live run, typed Net grant and its pinned pattern carrier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow_resolve(
-    context: *mut Context,
+    _context: *mut Context,
     net: u64,
     patterns: *const Buffer,
     _site: u64,
 ) -> Outcome {
     // SAFETY: the source pins its String's initialized bytes.
     let patterns = unsafe { crate::tls::bytes(&*patterns) };
-    match std::str::from_utf8(patterns)
+    let rule = std::str::from_utf8(patterns)
         .ok()
-        .and_then(ResolveRule::new)
-    {
-        Some(rule) => unsafe { narrow(context, net, GrantRule::Resolve(rule)) },
-        None => DENIED,
+        .and_then(ResolveRule::new);
+    unsafe { narrow_add(net, rule.map(GrantRule::Resolve)) }
+}
+
+/// `net.narrow`'s list in progress (NET-6): the parent Net, the rules read so
+/// far, and whether one was invalid. The emitted loop begins, adds each rule and
+/// ends with no other operation between, so a builder never outlives its call.
+pub(crate) struct Narrowing {
+    net: u64,
+    rules: Vec<GrantRule>,
+    invalid: bool,
+}
+
+/// # Safety
+/// Live run and typed Net grant.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_narrow_begin(
+    _context: *mut Context,
+    net: u64,
+    _site: u64,
+) -> Outcome {
+    let builder = Box::new(Narrowing {
+        net,
+        rules: Vec::new(),
+        invalid: false,
+    });
+    Outcome {
+        value: Box::into_raw(builder) as u64,
+        ..Outcome::default()
     }
 }
 
-pub(crate) unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> Outcome {
+/// Adds one rule of the list; `None` is a rule that is not valid.
+///
+/// # Safety
+/// `builder` came from `hirsel_core_net_narrow_begin` and has not ended.
+pub(crate) unsafe fn narrow_add(builder: u64, rule: Option<GrantRule>) -> Outcome {
+    // SAFETY: forwarded caller contract.
+    let builder = unsafe { &mut *(builder as *mut Narrowing) };
+    match rule {
+        Some(rule) => builder.rules.push(rule),
+        None => builder.invalid = true,
+    }
+    Outcome::default()
+}
+
+/// # Safety
+/// Live run; `builder` came from `hirsel_core_net_narrow_begin` and has not ended.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_net_narrow_end(
+    context: *mut Context,
+    builder: u64,
+    _site: u64,
+) -> Outcome {
+    // SAFETY: the emitted loop ends each builder exactly once.
+    let builder = unsafe { Box::from_raw(builder as *mut Narrowing) };
+    if builder.invalid {
+        return DENIED;
+    }
+    unsafe { narrow(context, builder.net, &builder.rules) }
+}
+
+/// NET-6: each parent rule intersected with every rule of the list.
+pub(crate) unsafe fn narrow(context: *mut Context, n: u64, list: &[GrantRule]) -> Outcome {
     unsafe {
         crate::process::deny_describe_capability(context);
         let provider = *hirsel_core_capability_provider(context, n);
@@ -1269,7 +1325,8 @@ pub(crate) unsafe fn narrow(context: *mut Context, n: u64, rule: GrantRule) -> O
         let rules = (*(rules_handle as *const Rules)).as_slice();
         let intersections: Vec<_> = rules
             .iter()
-            .filter_map(|r| r.decode()?.intersect(&rule))
+            .filter_map(|r| r.decode())
+            .flat_map(|r| list.iter().filter_map(move |rule| r.intersect(rule)))
             .collect();
         let charge = intersections
             .iter()

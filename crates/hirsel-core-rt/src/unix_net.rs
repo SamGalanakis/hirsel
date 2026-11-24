@@ -242,7 +242,7 @@ unsafe fn call(
 /// Live run and typed Net with borrowed UTF-8 operands.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow_unix(
-    context: *mut Context,
+    _context: *mut Context,
     net: u64,
     direction: u8,
     root: *const Buffer,
@@ -251,12 +251,9 @@ pub unsafe extern "C" fn hirsel_core_net_narrow_unix(
 ) -> Outcome {
     // SAFETY: caller pins both carriers through this call.
     unsafe {
-        let Some(rule) = UnixDirection::from_tag(direction)
-            .and_then(|direction| UnixRule::new(direction, str_operand(root)?, str_operand(path)?))
-        else {
-            return DENIED;
-        };
-        net::narrow(context, net, GrantRule::Unix(rule))
+        let rule = UnixDirection::from_tag(direction)
+            .and_then(|direction| UnixRule::new(direction, str_operand(root)?, str_operand(path)?));
+        net::narrow_add(net, rule.map(GrantRule::Unix))
     }
 }
 

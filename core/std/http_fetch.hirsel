@@ -473,18 +473,25 @@ fn open(n: Net, c: Clock, trust: Trust, site: Arc[Site], deadline: u64) -> Resul
         return result.map_err(connect_ip(n, c, trust, site, ip, deadline), http_error)
     }
     let peers = resolve_peers(n, c, site.host, deadline)?
-    let mut failure: http_client.FetchError = NoAddress
+    // HTTP-18 and NET-18: a dial skips an address the pool's Net denies. The ask
+    // ends Denied only when every address tried was denied, and otherwise with the
+    // last other address's error.
+    let mut failure: Option[http_client.FetchError] = None
     for ip in peers {
         match connect_ip(n, c, trust, site, ip, deadline) {
             Ok(take conn) => return Ok(take conn),
             Error(Deadline) => return Error(Http(Deadline)),
             Error(Cancelled) => return Error(Http(Cancelled)),
+            Error(Connect(Denied)) => (),
             Error(e) => {
-                failure = Http(e)
+                failure = Some(Http(e))
             },
         }
     }
-    Error(failure)
+    match failure {
+        Some(e) => Error(e),
+        None => Error(Http(Connect(Denied))),
+    }
 }
 
 fn dial_task(take job: DialJob) -> Result[http_client.Connection, http_client.FetchError] waits {

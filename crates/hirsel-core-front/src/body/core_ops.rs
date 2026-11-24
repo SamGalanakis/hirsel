@@ -2128,20 +2128,69 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some([values[0], values[1]])
     }
 
+    /// `net.narrow(n, rules)` (NET-6): a builder takes each rule of the list in
+    /// order, and its end intersects every parent rule with every listed rule.
     fn runtime_narrow(
         &mut self,
         net: ValueId,
         ty: TyId,
-        rule: ValueId,
+        rules: ValueId,
         n: NodeId,
     ) -> Option<[ValueId; 8]> {
+        let TyKind::Adt(_, arguments) = self.t.kind(ty).clone() else {
+            return None;
+        };
+        let item = arguments[0];
+        let [builder, ..] =
+            self.runtime_row(RtOp::Host(HostOp::NetNarrowBegin), &[Arg::Value(net)], n)?;
+        let u = Ty::Scalar(Scalar::U64);
+        let carrier = self.list_carrier(item, n)?;
+        let len = self.carrier_word(rules, carrier, SeqWord::Len, n);
+        let zero = self.konst(u, 0, n)?;
+        let one = self.konst(u, 1, n)?;
+        let head = self.new_block(&[u]);
+        let body = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.jump(head, &[zero], n);
+        self.start(head);
+        let index = self.block_params(head)[0];
+        let more = self.list_compare(CompareOp::Lt, index, len, n);
+        self.list_branch(more, body, done, n);
+        self.start(body);
+        let rule = self.list_element(item, rules, index, n)?;
+        self.runtime_narrow_rule(builder, item, rule, n)?;
+        let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n);
+        self.jump(head, &[next], n);
+        self.start(done);
+        let [value, error, code, written] =
+            self.runtime_row(RtOp::Host(HostOp::NetNarrowEnd), &[Arg::Value(builder)], n)?;
+        Some([
+            value,
+            error,
+            code,
+            written,
+            ValueId(0),
+            ValueId(0),
+            ValueId(0),
+            ValueId(0),
+        ])
+    }
+
+    /// Adds one `Rule` to a list narrow's builder.
+    fn runtime_narrow_rule(
+        &mut self,
+        builder: ValueId,
+        ty: TyId,
+        rule: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let net = builder;
         let (_, at) = self.runtime_place(ty, Some(rule), n)?;
         let tag = self.net_case(at, n);
         let address = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 0, n)?;
         let yes = self.new_block(&[]);
         let no = self.new_block(&[]);
-        let signature = RtOp::Host(HostOp::NetNarrow).signature();
-        let join = self.new_block(&signature.results);
+        let join = self.new_block(&[]);
         self.runtime_branch(address, yes, no, n);
         self.start(yes);
         let (_, dir) = self.net_case_field(ty, at, 0, 0, n)?;
@@ -2174,12 +2223,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let [value, error, code, written] = self.runtime_row(
+        self.runtime_row(
             RtOp::Host(HostOp::NetNarrow),
             &[net, d8, family, hi, lo, bits, reach8, first, last].map(Arg::Value),
             n,
         )?;
-        self.jump(join, &[value, error, code, written], n);
+        self.jump(join, &[], n);
         self.start(no);
         let tls = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 1, n)?;
         let tls_rule = self.new_block(&[]);
@@ -2205,20 +2254,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let root = self.net_read_case(ty, at, 3, 1, n)?;
         let path = self.net_read_case(ty, at, 3, 2, n)?;
-        let outputs = self.runtime_row(
+        self.runtime_row(
             RtOp::Host(HostOp::NetNarrowUnix),
             &[net, dir8, root, path].map(Arg::Value),
             n,
         )?;
-        self.jump(join, &outputs, n);
+        self.jump(join, &[], n);
         self.start(resolve_rule);
         let names = self.net_read_case(ty, at, 2, 0, n)?;
-        let outputs = self.runtime_row(
+        self.runtime_row(
             RtOp::Host(HostOp::NetNarrowResolve),
             &[Arg::Value(net), Arg::Value(names)],
             n,
         )?;
-        self.jump(join, &outputs, n);
+        self.jump(join, &[], n);
         self.start(tls_rule);
         let names = self.net_read_case(ty, at, 1, 0, n)?;
         let (pair, ports) = self.net_case_field(ty, at, 1, 1, n)?;
@@ -2226,24 +2275,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let last = self.net_read_field(pair, ports, 1, n)?;
         let (pin, trust) = self.net_case_field(ty, at, 1, 2, n)?;
         let [trust, digest] = self.tls_trust(pin, trust, n)?;
-        let [value, error, code, written] = self.runtime_row(
+        self.runtime_row(
             RtOp::Host(HostOp::NetNarrowTls),
             &[net, names, first, last, trust, digest].map(Arg::Value),
             n,
         )?;
-        self.jump(join, &[value, error, code, written], n);
+        self.jump(join, &[], n);
         self.start(join);
-        let v = self.block_params(join);
-        Some([
-            v[0],
-            v[1],
-            v[2],
-            v[3],
-            ValueId(0),
-            ValueId(0),
-            ValueId(0),
-            ValueId(0),
-        ])
+        Some(())
     }
 
     fn runtime_exec_narrow(

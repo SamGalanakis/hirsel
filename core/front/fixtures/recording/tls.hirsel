@@ -1,6 +1,6 @@
 pub fn main(n: Net, out: Stdout) -> Result[(), Exit] waits {
     let peer = Addr(ip: V4(2130706433u32), port: 12345u16)
-    let child = result.unwrap(net.narrow(n, Tls(names: "alpha.test", ports: (peer.port, peer.port), trust: SystemPin)))
+    let child = result.unwrap(net.narrow(n, one_rule(Tls(names: "alpha.test", ports: (peer.port, peer.port), trust: SystemPin))))
     let socket = result.unwrap(host.connect(n, peer, Never))
     let mut alpn: List[String] = list.new()
     list.push(mut alpn, "h2")
@@ -30,4 +30,10 @@ pub fn main(n: Net, out: Stdout) -> Result[(), Exit] waits {
     string.push_char(mut text, '\n')
     result.unwrap(stdout.write(out, text))
     Ok(())
+}
+
+fn one_rule(take r: Rule) -> List[Rule] {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, take r)
+    take rules
 }

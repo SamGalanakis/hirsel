@@ -1585,7 +1585,7 @@ fn resolve_client(take n: Net) -> bool waits {
         _ => false
     }
     let rule: Rule = Resolve(names: "beta.test")
-    let beta = result.unwrap(net.narrow(n, rule))
+    let beta = result.unwrap(net.narrow(n, one_rule(rule)))
     let narrowed = match host.resolve(beta, string.from("alpha.test"), mut none, Never) {
         Error(Denied) => true,
         _ => false
@@ -1827,7 +1827,7 @@ fn ten_443(a: Addr) -> bool {
 // socket as beta.test.
 fn narrowed_client(take n: Net) -> bool waits {
     let ten: Rule = Rule(dir: Connect, prefix: V4(167772160), bits: 8, ports: (443, 443), reach: Any)
-    let near = result.unwrap(net.narrow(n, ten))
+    let near = result.unwrap(net.narrow(n, one_rule(ten)))
     let refused = match host.connect(near, Addr(ip: V4(2130706433), port: 443), Never) {
         Ok(take s) => {
             let _ = take s
@@ -1837,7 +1837,7 @@ fn narrowed_client(take n: Net) -> bool waits {
         Error(_) => false
     }
     let first = result.unwrap(host.connect(near, Addr(ip: V4(167772161), port: 443), Never))
-    let beta = result.unwrap(net.narrow(n, Tls(names: "beta.test", ports: (443, 443), trust: SystemPin)))
+    let beta = result.unwrap(net.narrow(n, one_rule(Tls(names: "beta.test", ports: (443, 443), trust: SystemPin))))
     let none: List[String] = list.new()
     let other = tls_denied(tls.connect(beta, take first, string.from("alpha.test"), System, none, Never))
     let second = result.unwrap(host.connect(n, Addr(ip: V4(167772161), port: 443), Never))
@@ -2341,4 +2341,10 @@ fn send_between(mut w: WriteHalf, before: Bytes, s: Secret, after: Bytes, until:
     list.push(mut marks, 0)
     list.push(mut marks, 0)
     tls.send_secret(mut w, wire, secrets, marks, until)
+}
+
+fn one_rule(take r: Rule) -> List[Rule] {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, take r)
+    take rules
 }

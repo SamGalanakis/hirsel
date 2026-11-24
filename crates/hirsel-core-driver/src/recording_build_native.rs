@@ -1719,8 +1719,13 @@ fn simd_versions_preserve_run_tape_and_revision() {
 /// Replay must deliver the same list with the resolver disabled.
 #[test]
 fn cli_replays_resolution_without_resolver() {
-    const PROGRAM: &str = r#"pub fn main(n: Net) -> Result[(), Exit] waits {
-    let child = result.unwrap(net.narrow(n, Resolve(names: "dup.test")))
+    const PROGRAM: &str = r#"fn one_rule(take r: Rule) -> List[Rule] {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, take r)
+    take rules
+}
+pub fn main(n: Net) -> Result[(), Exit] waits {
+    let child = result.unwrap(net.narrow(n, one_rule(Resolve(names: "dup.test"))))
     let ips = result.unwrap(std.net.lookup(child, "DUP.TEST.", Never))
     if list.len(ips) != 2 {
         return Error(Exit(status: 31))

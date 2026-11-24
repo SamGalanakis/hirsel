@@ -34,9 +34,10 @@ pub fn main(n: Net, c: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] wai
     let ip = V4(2130706433)
     let (control, stop_addr) = result.unwrap(host.listen(n, Addr(ip: ip, port: 0), 1))
     let rule = Rule(dir: Listen, prefix: ip, bits: 32, ports: (0, 65535), reach: Any)
+    let rules = one_rule(rule)
     let limited = isolate(fn() -> Result[Result[Net, RuleError], Capacity] {
         bound bytes 40 {
-            net.narrow(n, rule)
+            net.narrow(n, rules)
         }
     })
     let Ok(Error(causes)) = take limited else {
@@ -53,15 +54,15 @@ pub fn main(n: Net, c: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] wai
     if !refused {
         return Error(Exit(status: 7))
     }
-    let parent = result.unwrap(net.narrow(n, rule))
+    let parent = result.unwrap(net.narrow(n, rules))
     let sibling_ip = V4(2130706434)
     let sibling = Rule(dir: Listen, prefix: sibling_ip, bits: 32, ports: (0, 65535), reach: Any)
-    let empty = result.unwrap(net.narrow(parent, sibling))
+    let empty = result.unwrap(net.narrow(parent, one_rule(sibling)))
     match host.listen(empty, Addr(ip: sibling_ip, port: 0), 1) {
         Error(Denied) => {},
         _ => return Error(Exit(status: 8)),
     }
-    let narrowed = result.unwrap(net.narrow(parent, rule))
+    let narrowed = result.unwrap(net.narrow(parent, rules))
     let (listener, addr) = result.unwrap(host.listen(narrowed, Addr(ip: ip, port: 0), 8))
     let mut listeners: List[Listener] = list.new()
     list.push(mut listeners, take listener)
@@ -80,4 +81,10 @@ pub fn main(n: Net, c: Clock, tasks: Tasks, out: Stdout) -> Result[(), Exit] wai
     result.unwrap(std.http.serve_with_stop(take listeners, c, tasks, take cfg, take routes, (), take receive))
     let _ = task.join(take stopper)
     Ok(())
+}
+
+fn one_rule(take r: Rule) -> List[Rule] {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, take r)
+    take rules
 }

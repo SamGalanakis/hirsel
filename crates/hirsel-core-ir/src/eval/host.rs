@@ -75,6 +75,8 @@ impl Machine<'_> {
                 | HostOp::NetNarrow
                 | HostOp::NetClass
                 | HostOp::NetDenials
+                | HostOp::NetNarrowBegin
+                | HostOp::NetNarrowEnd
                 | HostOp::NetNarrowTls
                 | HostOp::NetNarrowResolve
                 | HostOp::NetNarrowUnix
@@ -195,20 +197,14 @@ impl Machine<'_> {
                     let path = std::str::from_utf8(self.carrier_bytes(a[3])).ok()?;
                     UnixRule::new(dir, root, path)
                 });
-                match rule {
-                    Some(rule) => self.narrow_net(t, a[0], GrantRule::Unix(rule)),
-                    None => error(1),
-                }
+                self.narrow_add(a[0], rule.map(GrantRule::Unix))
             }
             HostOp::NetNarrowResolve => {
                 use hirsel_core_net::{GrantRule, ResolveRule};
-                match std::str::from_utf8(self.carrier_bytes(a[1]))
+                let rule = std::str::from_utf8(self.carrier_bytes(a[1]))
                     .ok()
-                    .and_then(ResolveRule::new)
-                {
-                    Some(rule) => self.narrow_net(t, a[0], GrantRule::Resolve(rule)),
-                    None => error(1),
-                }
+                    .and_then(ResolveRule::new);
+                self.narrow_add(a[0], rule.map(GrantRule::Resolve))
             }
             HostOp::NetNarrowTls => {
                 use hirsel_core_net::{GrantRule, TlsRule, TlsTrust};
@@ -225,10 +221,7 @@ impl Machine<'_> {
                     let patterns = std::str::from_utf8(self.carrier_bytes(a[1])).ok()?;
                     TlsRule::new(patterns, a[2] as u16, a[3] as u16, trust)
                 });
-                match rule {
-                    Some(rule) => self.narrow_net(t, a[0], GrantRule::Tls(rule)),
-                    None => error(1),
-                }
+                self.narrow_add(a[0], rule.map(GrantRule::Tls))
             }
             HostOp::NetSplit if self.port_socket_part(a[0], true) => {
                 vec![a[0] | 1, 0, 0, a[0] | 2]
@@ -263,23 +256,36 @@ impl Machine<'_> {
                 )
             }
             HostOp::NetNarrow => {
-                let Some(dir) = hirsel_core_net::AddressDirection::from_variant(a[1] as u8) else {
-                    return Ok(error(1));
-                };
-                let r = hirsel_core_net::Rule {
-                    dir: dir as u8,
-                    family: a[2] as u8,
-                    hi: a[3],
-                    lo: a[4],
-                    bits: a[5] as u8,
-                    reach: a[6] as u8,
-                    first: a[7] as u16,
-                    last: a[8] as u16,
-                };
-                if r.valid() {
-                    self.narrow_net(t, a[0], hirsel_core_net::GrantRule::Address(r))
-                } else {
+                let rule = hirsel_core_net::AddressDirection::from_variant(a[1] as u8)
+                    .map(|dir| hirsel_core_net::Rule {
+                        dir: dir as u8,
+                        family: a[2] as u8,
+                        hi: a[3],
+                        lo: a[4],
+                        bits: a[5] as u8,
+                        reach: a[6] as u8,
+                        first: a[7] as u16,
+                        last: a[8] as u16,
+                    })
+                    .filter(|r| r.valid());
+                self.narrow_add(a[0], rule.map(hirsel_core_net::GrantRule::Address))
+            }
+            HostOp::NetNarrowBegin => {
+                let narrowing = &mut self.world.narrowing;
+                let key = narrowing.last_key_value().map_or(1, |(&key, _)| key + 1);
+                narrowing.insert(key, (a[0], Vec::new(), false));
+                ok(key, 0)
+            }
+            HostOp::NetNarrowEnd => {
+                let (parent, rules, invalid) = self
+                    .world
+                    .narrowing
+                    .remove(&a[0])
+                    .expect("a list narrow ends the builder it began");
+                if invalid {
                     error(1)
+                } else {
+                    self.narrow_net(t, parent, &rules)
                 }
             }
             HostOp::StdinRead => {

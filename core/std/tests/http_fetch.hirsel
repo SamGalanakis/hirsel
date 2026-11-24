@@ -589,3 +589,117 @@ fn fetch_endpoint_confined(n: Net, c: Clock, tasks: Tasks) -> bool waits {
     }
     refused && untouched && result.unwrap(task.join(take peer))
 }
+
+type RebindLink: send {
+    port: Served[NetOp],
+    clock: Clock,
+    network: sim.net.Network,
+}
+
+fn rebind_clock(take input: sim.world.World) waits {
+    let mut world = take input
+    sim.world.run(mut world)
+}
+
+fn rebind_link(take input: RebindLink) waits {
+    let RebindLink(port: take port, clock, network: take network) = take input
+    let mut plan = sim.world.plan_from(sim.world.Script(tail_seed: 0, streams: list.new()), 0)
+    let _ = sim.net.serve(network, mut plan, clock, take port)
+}
+
+fn ips(a: Ip, b: Option[Ip]) -> List[Ip] {
+    let mut out: List[Ip] = list.with_capacity(2)
+    list.push(mut out, a)
+    if let Some(second) = b {
+        list.push(mut out, second)
+    }
+    take out
+}
+
+fn site_peer(tasks: Tasks, root: Net, c: Clock, ip: Ip, take response: Bytes, may_close: bool) -> Task[bool] waits {
+    let (site, _) = result.unwrap(host.listen(root, Addr(ip: ip, port: 80), 4))
+    let mut row = wire_exchange("GET", "/", b"", false, false, take response)
+    row.may_close = may_close
+    let mut rows: List[Exchange] = list.new()
+    list.push(mut rows, take row)
+    task.spawn(tasks, bytes 65536, Peer(listener: take site, clock: c, deadline: 18446744073709551615u64, exchanges: take rows), serve)
+}
+
+// A trap listener no dial may reach: after the asks its accept has nothing queued.
+fn untouched(take trap: Listener, c: Clock) -> bool waits {
+    let mut listener = take trap
+    match host.accept(mut listener, At(c, 1)) {
+        Error(TimedOut) => true,
+        _ => false,
+    }
+}
+
+// NET-18 public_fetch_rebinding (HTTP-18). The pool's Net is the served root
+// narrowed to [Connect 0.0.0.0/0 1-65535 public, Resolve *]. rebind.test answers
+// 8.8.8.8, then 127.0.0.1; hop.test (9.9.9.9) redirects to meta.test
+// (169.254.169.254); mixed.test answers [127.0.0.1, 1.1.1.1]; dark.test answers
+// [8.8.4.4, which nothing serves, 127.0.0.1]. Oracle, by hand from NET-18: the
+// first fetch is 200; the second and the redirect end Http(Connect(Denied));
+// mixed.test is 200 from 1.1.1.1; dark.test ends with 8.8.4.4's Refused, not
+// Denied; not_public counts the four refused dials; neither 127.0.0.1:80 nor
+// 169.254.169.254:80 is ever connected.
+// expect: run public_fetch_rebinding(tasks) = true
+fn public_fetch_rebinding(tasks: Tasks) -> bool waits {
+    let loopback = V4(2130706433)
+    let metadata = V4(2852039166)
+    let (world, c) = sim.world.new(1, 0, 0)
+    let (root, port) = provide.net(bytes 65536)
+    let mut network = sim.net.new(sim.net.Config(queue_bytes: 32768, fragment_bytes: 32768, latency_ns: 0))
+    let mut answers: List[List[Ip]] = list.new()
+    list.push(mut answers, ips(V4(134744072), None))
+    list.push(mut answers, ips(loopback, None))
+    sim.net.resolve_sequence(mut network, "rebind.test", take answers)
+    sim.net.resolve_as(mut network, "hop.test", ips(V4(151587081), None))
+    sim.net.resolve_as(mut network, "meta.test", ips(metadata, None))
+    sim.net.resolve_as(mut network, "mixed.test", ips(loopback, Some(V4(16843009))))
+    sim.net.resolve_as(mut network, "dark.test", ips(V4(134743044), Some(loopback)))
+    let driver = task.spawn(tasks, bytes 65536, take world, rebind_clock)
+    let link = task.spawn(tasks, bytes 4194304, RebindLink(port: take port, clock: c, network: take network), rebind_link)
+    let first_site = site_peer(tasks, root, c, V4(134744072), reply(200, "Connection: close\r\n", b"one"), false)
+    let hop_site = site_peer(tasks, root, c, V4(151587081), reply(302, "Location: http://meta.test/\r\n", b""), true)
+    let mixed_site = site_peer(tasks, root, c, V4(16843009), reply(200, "", b"two"), false)
+    let (trap_a, _) = result.unwrap(host.listen(root, Addr(ip: loopback, port: 80), 1))
+    let (trap_b, _) = result.unwrap(host.listen(root, Addr(ip: metadata, port: 80), 1))
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, Rule(dir: Connect, prefix: V4(0), bits: 0, ports: (1, 65535), reach: Public))
+    list.push(mut rules, Resolve(names: "*"))
+    let n = result.unwrap(net.narrow(root, rules))
+    let p = result.unwrap(http_client.pool(n, c, tasks, System, http_client.limits(1024)))
+    let cl = http_client.handle(p)
+    let end = 18446744073709551615u64
+    let mut body: Bytes = list.with_capacity(64)
+    let first = match http_client.get(cl, "http://rebind.test/", mut body, end) {
+        Ok(200) => body == b"one",
+        _ => false,
+    }
+    let second = match http_client.get(cl, "http://rebind.test/", mut body, end) {
+        Error(Http(Connect(Denied))) => true,
+        _ => false,
+    }
+    let redirect = match http_client.get(cl, "http://hop.test/", mut body, end) {
+        Error(Http(Connect(Denied))) => true,
+        _ => false,
+    }
+    list.clear(mut body)
+    let mixed = match http_client.get(cl, "http://mixed.test/", mut body, end) {
+        Ok(200) => body == b"two",
+        _ => false,
+    }
+    let dark = match http_client.get(cl, "http://dark.test/", mut body, end) {
+        Error(Http(Connect(Refused))) => true,
+        _ => false,
+    }
+    let counted = net.denials(n).not_public == 4
+    let local_clean = untouched(take trap_a, c)
+    let metadata_clean = untouched(take trap_b, c)
+    let served = result.unwrap(task.join(take first_site)) && result.unwrap(task.join(take hop_site)) && result.unwrap(task.join(take mixed_site))
+    let _ = take p
+    result.unwrap(task.join(take link))
+    result.unwrap(task.join(take driver))
+    first && second && redirect && mixed && dark && counted && local_clean && metadata_clean && served
+}

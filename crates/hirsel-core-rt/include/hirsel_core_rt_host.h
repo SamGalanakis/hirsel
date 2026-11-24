@@ -403,6 +403,9 @@ HirselCoreHostOutcome hirsel_core_net_narrow(HirselCoreContext *, uint64_t, uint
 /* NET-18: the class of an address (value), and a provider's not_public denials (value). */
 HirselCoreHostOutcome hirsel_core_net_class(HirselCoreContext *, uint8_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_denials(HirselCoreContext *, uint64_t, uint64_t);
+/* NET-6: net.narrow's list. begin(net) gives a builder; each narrow_* call above adds one rule to it in place of a Net; end(builder) gives the narrowed Net or Invalid. */
+HirselCoreHostOutcome hirsel_core_net_narrow_begin(HirselCoreContext *, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_net_narrow_end(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_join(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_net_split(HirselCoreContext *, uint64_t, uint64_t);
 void hirsel_core_socket_drop(HirselCoreContext *, uint64_t);

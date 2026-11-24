@@ -153,8 +153,8 @@ fn ingress_grant(tasks: Tasks) waits {
     let (take second, _) = result.unwrap(host.udp_bind(network, b, normal))
     let mut allowed_a = take first
     let mut allowed_b = take second
-    let only_a = result.unwrap(net.narrow(network, Rule(dir: UdpSend, prefix: loopback, bits: 32, ports: (a.port, a.port), reach: Any)))
-    let both = result.unwrap(net.narrow(network, Rule(dir: UdpSend, prefix: loopback, bits: 32, ports: (a.port, b.port), reach: Any)))
+    let only_a = result.unwrap(net.narrow(network, one_rule(Rule(dir: UdpSend, prefix: loopback, bits: 32, ports: (a.port, a.port), reach: Any))))
+    let both = result.unwrap(net.narrow(network, one_rule(Rule(dir: UdpSend, prefix: loopback, bits: 32, ports: (a.port, b.port), reach: Any))))
     let mut narrow = result.unwrap(host.udp_open(only_a, false, normal))
     let mut broad = result.unwrap(host.udp_open(both, false, normal))
     send_one(mut narrow, a, string.as_bytes("x"), 0)
@@ -277,4 +277,10 @@ fn udp_network_laws(tasks: Tasks) -> bool waits {
     rebinding(tasks)
     capture_law(tasks)
     true
+}
+
+fn one_rule(take r: Rule) -> List[Rule] {
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, take r)
+    take rules
 }

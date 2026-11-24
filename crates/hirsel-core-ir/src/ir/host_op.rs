@@ -150,6 +150,8 @@ pub enum HostOp {
     SecretDeriveDigest = 166,
     NetClass = 168,
     NetDenials = 169,
+    NetNarrowBegin = 170,
+    NetNarrowEnd = 171,
 }
 
 mod symbol;
@@ -285,6 +287,8 @@ impl HostOp {
         HostOp::NetNarrow,
         HostOp::NetClass,
         HostOp::NetDenials,
+        HostOp::NetNarrowBegin,
+        HostOp::NetNarrowEnd,
         HostOp::NetNarrowTls,
         HostOp::NetSplit,
         HostOp::Stopped,
@@ -416,7 +420,9 @@ impl HostOp {
             ),
             HostOp::NetNarrowUnix => (vec![V(u64_), V(u8_), V(p), V(p)], outcome),
             HostOp::NetClass => (vec![V(u8_), V(u64_), V(u64_)], outcome),
-            HostOp::NetDenials => (vec![V(u64_)], outcome),
+            HostOp::NetDenials | HostOp::NetNarrowBegin | HostOp::NetNarrowEnd => {
+                (vec![V(u64_)], outcome)
+            }
             HostOp::NetNarrow => (
                 vec![
                     V(u64_),
@@ -714,6 +720,8 @@ impl HostOp {
             HostOp::NetNarrow => "net_narrow",
             HostOp::NetClass => "net_class",
             HostOp::NetDenials => "net_denials",
+            HostOp::NetNarrowBegin => "net_narrow_begin",
+            HostOp::NetNarrowEnd => "net_narrow_end",
             HostOp::ExecNarrow => "exec_narrow",
             HostOp::NetNarrowTls => "net_narrow_tls",
             HostOp::NetNarrowResolve => "net_narrow_resolve",
@@ -905,6 +913,8 @@ impl HostOp {
                     | HostOp::NetNarrow
                     | HostOp::NetClass
                     | HostOp::NetDenials
+                    | HostOp::NetNarrowBegin
+                    | HostOp::NetNarrowEnd
                     | HostOp::ExecNarrow
                     | HostOp::NetNarrowTls
                     | HostOp::NetNarrowResolve

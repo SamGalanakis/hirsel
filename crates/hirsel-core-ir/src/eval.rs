@@ -191,6 +191,9 @@ struct World {
     /// NET-18's `not_public` refusals per provider: a served Net's port, or
     /// `None` for the run's own provider. Every Net from one provider shares it.
     not_public: BTreeMap<Option<usize>, u64>,
+    /// `net.narrow`'s list in progress, by builder: the parent Net, the rules
+    /// read so far, and whether one was invalid (NET-6).
+    narrowing: BTreeMap<u64, (u64, Vec<hirsel_core_net::GrantRule>, bool)>,
     exec_grants: Vec<(usize, hirsel_core_net::exec::ExecRules)>,
     exec_handles: BTreeMap<u64, Limit>,
     /// A served Net caller's socket and listener keys (direction bits clear):
@@ -4024,13 +4027,34 @@ impl Machine<'_> {
         Ok(vec![0, 1, 0, 0])
     }
 
-    fn narrow_net(&mut self, t: &Task, parent: u64, rule: hirsel_core_net::GrantRule) -> Vec<u64> {
+    /// One rule of a list narrow: an unreadable or invalid rule makes the whole
+    /// narrow `Invalid` at its end.
+    fn narrow_add(&mut self, builder: u64, rule: Option<hirsel_core_net::GrantRule>) -> Vec<u64> {
+        let (_, rules, invalid) = self
+            .world
+            .narrowing
+            .get_mut(&builder)
+            .expect("a list narrow adds to the builder it began");
+        match rule {
+            Some(rule) => rules.push(rule),
+            None => *invalid = true,
+        }
+        vec![0, 0, 0, 0]
+    }
+
+    /// NET-6: each parent rule intersected with every rule of the list.
+    fn narrow_net(
+        &mut self,
+        t: &Task,
+        parent: u64,
+        rules: &[hirsel_core_net::GrantRule],
+    ) -> Vec<u64> {
         let grants = &self.world.network.grants;
         let intersections: Vec<_> = grants
             .get(&parent)
             .into_iter()
             .flatten()
-            .filter_map(|r| r.intersect(&rule))
+            .flat_map(|r| rules.iter().filter_map(move |rule| r.intersect(rule)))
             .collect();
         let charge = intersections
             .iter()

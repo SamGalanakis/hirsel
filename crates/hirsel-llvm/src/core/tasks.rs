@@ -136,6 +136,8 @@ impl FunctionEmitter<'_> {
             | HostOp::NetNarrow
             | HostOp::NetClass
             | HostOp::NetDenials
+            | HostOp::NetNarrowBegin
+            | HostOp::NetNarrowEnd
             | HostOp::ExecNarrow
             | HostOp::NetNarrowTls
             | HostOp::NetNarrowResolve

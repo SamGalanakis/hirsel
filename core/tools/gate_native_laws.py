@@ -88,6 +88,28 @@ def sqlite_laws(args, root, backend):
         return len(first) + len(second)
 
 
+def stun_ice_laws(args, root, backend):
+    # NET-18's address-class law (S1); the package's other laws are not wired here.
+    with tempfile.TemporaryDirectory(prefix='hirsel-stun-ice-laws-') as store:
+        fixture = Path(store) / 'core/programs/stun_ice'
+        shutil.copytree(root / 'core/programs/stun_ice', fixture)
+        command = [
+            str(args.compiler.resolve()), 'test', '.', '--backend', backend,
+            '--runtime', str(args.runtime.resolve()), '--cc', str(args.cc.resolve()),
+            '--libraries', str(root / 'core'), '--source-core', '--source-std',
+            '--store', str(Path(store) / 'build'), '-o', str(Path(store) / 'tests'),
+            '--filter', 'public_class_table', '--test-timeout', '20', '--json',
+        ]
+        env = os.environ | {'XDG_CACHE_HOME': str(Path(store) / 'cache')}
+        output = subprocess.run(command, cwd=fixture, env=env, capture_output=True, text=True, check=False)
+        if output.returncode:
+            raise AssertionError(output.stdout + output.stderr)
+        rows = json.loads(output.stdout)['tests']
+        if [row['definition'].rsplit('/', 1)[-1] for row in rows] != ['public_class_table']:
+            raise AssertionError(rows)
+        return len(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
@@ -116,7 +138,8 @@ def main():
                        evaluator=args.evaluator.resolve(), node=args.node.resolve(),
                        schedule_runtime=args.schedule_runtime.resolve() if args.schedule_runtime else None,
                        record_runtime=args.record_runtime.resolve() if args.record_runtime else None)
-            ffi = sum(ffi_laws(args, root, engine) + sqlite_laws(args, root, engine) for engine in engines)
+            ffi = sum(ffi_laws(args, root, engine) + sqlite_laws(args, root, engine)
+                      + stun_ice_laws(args, root, engine) for engine in engines)
             findings = [f"{row['engine']} {row['file']}:{row['line']} {row['test']}: {row['cause']}"
                         for row in rows if row['applicable'] and not row['passed']]
             # tools/sweep counts this line: one body per law and engine.

@@ -558,6 +558,8 @@ tags!(HostOp {
     171 => SecretDeriveDigest,
     172 => NetClass,
     173 => NetDenials,
+    174 => NetNarrowBegin,
+    175 => NetNarrowEnd,
 });
 
 tags!(RaiseCause {

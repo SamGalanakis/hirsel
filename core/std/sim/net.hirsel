@@ -16,7 +16,8 @@ pub opaque type Network: send {
     config: Config,
     partitions: List[Link],
     source_ip: Option[Ip],
-    dns: Map[String, List[Ip]],
+    // Each name's answers in order (NET-18): a resolve_as name has one.
+    dns: Map[String, List[List[Ip]]],
     tls_outcomes: Map[String, Result[Handshake, TlsFailure]]
 }
 
@@ -50,6 +51,8 @@ type State {
     next_id: u64,
     ephemeral: u64,
     secret_sends: u64,
+    // How many resolves of each scripted name the run has answered.
+    resolves: Map[String, u64],
     listeners: Map[u64, Listening],
     pipes: Map[u64, Pipe]
 }
@@ -86,9 +89,22 @@ pub fn heal(mut n: Network) {
 
 /// Scripts a DNS answer. The caller's spare space limits how many addresses it gets.
 pub fn resolve_as(mut n: Network, take hostname: String, take addrs: List[Ip]) {
+    let mut answers: List[List[Ip]] = list.with_capacity(1)
+    list.push(mut answers, take addrs)
+    resolve_sequence(mut n, take hostname, take answers)
+}
+
+/// Scripts a name's answers in order, one per resolve that `serve` answers, so a
+/// law can rebind a name between resolves (NET-18). Past the last answer, the last
+/// one repeats. `answer_name` keeps no count, so it refuses a name with more than
+/// one answer.
+pub fn resolve_sequence(mut n: Network, take hostname: String, take answers: List[List[Ip]]) {
+    if list.len(answers) == 0 {
+        fail("sim.net.resolve_sequence needs at least one answer")
+    }
     let mut key = take hostname
     string.make_ascii_lower(mut key)
-    map.insert(mut n.dns, take key, take addrs)
+    map.insert(mut n.dns, take key, take answers)
 }
 
 /// Scripts the result of handshakes for one canonical verification name.
@@ -438,15 +454,30 @@ fn record_ip(mut out: Bytes, a: Ip) {
     }
 }
 
-fn resolve(n: Network, len: u64, room: u64, mut s: Served[NetOp], take call: Call[NetOp]) {
+// `counted` is false for `answer_name`, which keeps no per-name count.
+fn resolve(n: Network, mut resolves: Map[String, u64], counted: bool, len: u64, room: u64, mut s: Served[NetOp], take call: Call[NetOp]) {
     let mut c = take call
     let Some(take name) = payload_name(c, 0, len) else {
         let _ = reject(mut s, take c, Denied)
         return
     }
     let mut selected: List[Ip] = list.new()
-    if let Some(addresses) = map.get(n.dns, name) {
-        for addr in addresses {
+    if let Some(answers) = map.get(n.dns, name) {
+        if !counted && list.len(answers) > 1 {
+            let _ = reject(mut s, take c, Denied)
+            return
+        }
+        let turn = map.get_or(resolves, name, 0)
+        let last = list.len(answers) - 1
+        let at = if turn < last {
+            turn
+        } else {
+            last
+        }
+        if counted {
+            map.insert(mut resolves, clone(name), turn + 1)
+        }
+        for addr in answers[at] {
             if list.len(selected) == room / 17 {
                 break
             }
@@ -490,7 +521,10 @@ fn handshake(n: Network, namelen: u64, mut s: Served[NetOp], take c: Call[NetOp]
 /// Answers a name operation using the configured DNS and handshake scripts.
 pub fn answer_name(n: Network, mut served: Served[NetOp], take call: Call[NetOp]) {
     match provide.net_op(call) {
-        Resolve(name: len, room: room) => resolve(n, len, room, mut served, take call),
+        Resolve(name: len, room: room) => {
+            let mut none: Map[String, u64] = map.new()
+            resolve(n, mut none, false, len, room, mut served, take call)
+        },
         Handshake(name: len, ..) => handshake(n, len, mut served, take call),
         _ => {
             let _ = reject(mut served, take call, Denied)
@@ -557,7 +591,7 @@ fn attempt(n: Network, mut state: State, mut plan: sim.world.Plan, clock: Clock,
         Ready(socket: id) => ready(n, state, id, host.mono_ns(clock), mut port, take c),
         Send(socket: id, prefix: prefix, tail: tail) => transmit(n, mut state, mut plan, clock, id, prefix, tail, mut port, take c),
         Resolve(name: len, room: room) => {
-            resolve(n, len, room, mut port, take c);
+            resolve(n, mut state.resolves, true, len, room, mut port, take c);
             None
         },
         Handshake(name: len, ..) => {
@@ -609,7 +643,7 @@ fn same_waiter(old: NetOp, incoming: NetOp) -> bool {
 pub fn serve(n: Network, mut plan: sim.world.Plan, clock: Clock, take served: Served[NetOp]) -> u64 waits {
     let mut port = take served
     let ephemeral = sim.world.pick(mut plan, 64512)
-    let mut state = State(next_id: 1, ephemeral: ephemeral, secret_sends: 0, listeners: map.new(), pipes: map.new())
+    let mut state = State(next_id: 1, ephemeral: ephemeral, secret_sends: 0, resolves: map.new(), listeners: map.new(), pipes: map.new())
     let mut pending: Deque[Call[NetOp]] = deque.new()
     while let Some(take incoming) = provide.next(mut port) {
         let op = provide.net_op(incoming)

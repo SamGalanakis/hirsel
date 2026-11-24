@@ -208,7 +208,7 @@ pub(crate) unsafe fn denial(request: &Request) -> Option<u8> {
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_net_narrow(
-    context: *mut Context,
+    _context: *mut Context,
     n: u64,
     dir: u8,
     family: u8,
@@ -220,21 +220,17 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
     last: u16,
     _site: u64,
 ) -> Outcome {
-    let Some(dir) = AddressDirection::from_variant(dir) else {
-        return DENIED;
-    };
-    let rule = Rule {
-        dir: dir as u8,
-        family,
-        hi,
-        lo,
-        bits,
-        reach,
-        first,
-        last,
-    };
-    if !rule.valid() {
-        return DENIED;
-    }
-    unsafe { narrow(context, n, GrantRule::Address(rule)) }
+    let rule = AddressDirection::from_variant(dir)
+        .map(|dir| Rule {
+            dir: dir as u8,
+            family,
+            hi,
+            lo,
+            bits,
+            reach,
+            first,
+            last,
+        })
+        .filter(|rule| rule.valid());
+    unsafe { narrow_add(n, rule.map(GrantRule::Address)) }
 }

@@ -141,8 +141,10 @@ or an attacker sent.
 
 ### NET-6: Network rules
 
-`net.narrow(n: Net, r: Rule) -> Result[Net, RuleError]` intersects each parent
-rule with `r`, dropping empty intersections. Address rules have `dir: NetDirection`,
+`net.narrow(n: Net, rules: List[Rule]) -> Result[Net, RuleError]` limits `n` to the
+union of `rules`: each parent rule is kept as its intersection with every listed rule of
+its kind, and empty intersections are dropped. A kind the list lacks is dropped, so a
+narrow only removes authority; narrowing by one rule is a list of one. Address rules have `dir: NetDirection`,
 `prefix: Ip`, `bits: u8`, `ports: (u16, u16)`, where
 `NetDirection = Connect | Listen`. A `Tls` rule has name patterns, ports and a pinned trust
 instead ([TLS-3](tls.md#tls-3-authority)), and a `Resolve` rule has name patterns alone
@@ -150,8 +152,8 @@ instead ([TLS-3](tls.md#tls-3-authority)), and a `Resolve` rule has name pattern
 `Tls(names: String, ports: (u16, u16), trust: TlsPin)` with `SystemPin` or
 `Sha256(Bytes)`. The latter holds the 32 raw digest bytes. It permits only a client handshake on a socket
 that a `Connect` rule already allowed. An invalid prefix length, nonzero prefix host
-bits, reversed ports or IPv4-mapped IPv6 prefix returns `Invalid` without changing
-anything; `RuleError` is `Invalid()`. Rule storage is admitted, and a refused admission
+bits, reversed ports or IPv4-mapped IPv6 prefix in any listed rule returns `Invalid`
+without changing anything; `RuleError` is `Invalid()`. Rule storage is admitted, and a refused admission
 raises `Capacity` ([MEM-21](budgets.md#mem-21-admission)). The immutable result storage remains charged to its payer
 until the run ends; plain copies of `Net` add no charge or refund.
 
@@ -443,6 +445,24 @@ Decided in S1 (2026-11-24, net18-s1-2446), where the text above is silent:
   word, so its 23-byte address row is unchanged and reads back as `Any`. Narrowed
   rules are recomputed on replay. S3 encodes the reach when it parses `public`.
 
+Decided in S2 (2026-11-24, net18-s2-2481), where the text above is silent; each is
+reversible before 1.0:
+
+- `net.narrow` takes a rule list (NET-6) rather than one rule, so a `Public` `Connect`
+  rule and a `Resolve` rule narrow one `Net` together. A rule list replaces any
+  `public_only` operation. Each listed rule is checked before any is applied; one invalid
+  rule makes the whole narrow `Invalid`. Charging and the tape are those of the one-rule
+  narrow, over the kept intersections.
+- A dial refused with `Denied` for any reason is skipped, not only a `not_public` one,
+  since every `Denied` means the address is outside the grant. `Deadline` and
+  `Cancelled` end the ask at once; every other error is remembered and the next address
+  tried.
+- `sim.net.resolve_sequence(mut n, name, answers)` takes one address list per resolve.
+  The `k`-th resolve of the name through the served `Net` gets answer `k`, and every
+  resolve past the last gets the last again. An empty answer list fails the world.
+  `sim.net.answer_name`, which keeps no per-name count, refuses a name with more than
+  one answer with `Denied` rather than guess which to give.
+
 The table knows only IANA's ranges. A platform address in public space (Azure
 `168.63.129.16`) or an operator's own NAT64 prefix (RFC 6052 §2.2) is `Public`; an
 operator who must exclude one writes prefixes that leave it out. An operator deny list on
@@ -491,7 +511,7 @@ pool sockets.
   `not_public` 3), and the fourth issued. *Harness:* the NET law suite
   (`core/std/tests/net.hirsel`).
 - **`public_fetch_rebinding`** (S2). *Scenario:* in `std.sim.net`,
-  `sim.net.resolve_sequence`<!-- doc-ref: planned --> answers a name's first resolve with
+  `sim.net.resolve_sequence` answers a name's first resolve with
   a public address and its second with `127.0.0.1`. Two fetches go to that name, with
   the first connection closed in between. A redirect goes to a second name that resolves
   to `169.254.169.254`. A third name resolves to `[127.0.0.1, <public>]`. *Oracle:* by

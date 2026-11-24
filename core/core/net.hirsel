@@ -8,7 +8,9 @@ pub fn peer_addr(s: Socket) -> Result[Addr, NetError] waits
 /// The bound local IP address and port of a TCP listener.
 pub fn listener_addr(l: Listener) -> Result[Addr, NetError] waits
 
-pub fn narrow(n: Net, r: Rule) -> Result[Net, RuleError]
+/// NET-6: `n` limited to the union of `rules`. Each rule of `n` is kept as its
+/// intersection with every listed rule of its kind; a kind the list lacks is dropped.
+pub fn narrow(n: Net, rules: List[Rule]) -> Result[Net, RuleError]
 
 /// The class of an address under NET-18's table, which the `Public` reach reads.
 pub fn class(ip: Ip) -> AddressClass

@@ -1,0 +1,145 @@
+fn check_rfc_examples() {
+    // RFC 7741 §4.6 leaves the codec bytes symbolic. These prefixes supply P
+    // and arbitrary remaining bytes, including a clear low bit in fragments.
+    let mut key = b"\x90\x80\x11\x10\x00\x00"
+    let descriptor = result.unwrap(vp8.parse(key))
+    if let Some(ShortId(17)) = descriptor.picture_id {} else {
+        fail("RFC §4.6.1 PictureID 17")
+    }
+    if !descriptor.extended || !descriptor.first || !descriptor.keyframe || descriptor.payload_start != 3 || descriptor.non_reference {
+        fail("RFC §4.6.1 keyframe")
+    }
+    result.unwrap(vp8.rewrite_picture_id(mut key, 127))
+    if let Error(PictureIdTooLarge) = vp8.rewrite_picture_id(mut key, 128) {} else {
+        fail("seven-bit PictureID accepted 128")
+    }
+    if list.compare_bytes(key, b"\x90\x80\x7f\x10\x00\x00") != Equal {
+        fail("short PictureID rewrite changed another byte")
+    }
+    let inter = result.unwrap(vp8.parse(b"\x10\x11\x00\x00"))
+    if inter.extended || !inter.first || inter.keyframe || inter.non_reference || inter.payload_start != 1 {
+        fail("RFC §4.6.2 non-discardable interframe")
+    }
+    if let Some(_) = inter.picture_id {
+        fail("RFC §4.6.2 PictureID must be absent")
+    }
+    let first = result.unwrap(vp8.parse(b"\x90\x80\x11\x11\x00\x00"))
+    let partition = result.unwrap(vp8.parse(b"\x91\x80\x11\x00"))
+    let continuation = result.unwrap(vp8.parse(b"\x81\x80\x11\x00"))
+    if !first.first || first.keyframe || !partition.partition_start || partition.partition != 1 || partition.first || partition.keyframe || continuation.partition_start || continuation.partition != 1 || continuation.first || continuation.keyframe {
+        fail("RFC §§4.6.3–4.6.4 partition boundaries")
+    }
+    let mut long = b"\x90\x80\x92\x67\x11\x00\x00"
+    let wide = result.unwrap(vp8.parse(long))
+    if let Some(LongId(4711)) = wide.picture_id {} else {
+        fail("RFC §4.6.5 PictureID 4711")
+    }
+    result.unwrap(vp8.rewrite_picture_id(mut long, 0))
+    if let Error(PictureIdTooLarge) = vp8.rewrite_picture_id(mut long, 32768) {} else {
+        fail("fifteen-bit PictureID accepted 32768")
+    }
+    if list.compare_bytes(long, b"\x90\x80\x80\x00\x11\x00\x00") != Equal || wide.payload_start != 4 {
+        fail("long PictureID wrap changed the encoded width")
+    }
+}
+
+fn check_capture() {
+    // Decrypted RTP payload prefixes, Chromium 151.0.7922.10, VP8 L1T2.
+    // SSRC 2440695892, sequence 32412 and 32435, same timestamp.
+    let key = b"\x90\xe0\xf8\x61\xef\x20\xd0\x87\x00\x9d\x01\x2a\x80\x02\x68\x01"
+    let last = b"\x80\xe0\xf8\x61\xef\x20\x0a\x58\xd3"
+    let first = result.unwrap(vp8.parse(key))
+    let continuation = result.unwrap(vp8.parse(last))
+    if let Some(LongId(30817)) = first.picture_id {} else {
+        fail("Chromium keyframe PictureID")
+    }
+    if !first.first || !first.keyframe || first.payload_start != 6 || first.tl0picidx != Some(239u8) || first.temporal != Some(0u8) || !first.layer_sync || continuation.first || continuation.keyframe || continuation.partition != 0 {
+        fail("Chromium fragmented keyframe")
+    }
+    // Sequence 32436: N=1, PictureID + 1, same TL0PICIDX, TID=1, Y=1,
+    // K=0 despite the shared extension octet, P=1.
+    let mut sync = b"\xb0\xe0\xf8\x62\xef\x60\x51\x2e\x00"
+    let delta = result.unwrap(vp8.parse(sync))
+    if let Some(LongId(30818)) = delta.picture_id {} else {
+        fail("Chromium interframe PictureID")
+    }
+    if !delta.first || delta.keyframe || !delta.non_reference || delta.tl0picidx != Some(239u8) || delta.temporal != Some(1u8) || !delta.layer_sync || delta.payload_start != 6 || delta.key_index != None {
+        fail("Chromium layer-sync interframe")
+    }
+    result.unwrap(vp8.rewrite_picture_id(mut sync, 257))
+    result.unwrap(vp8.rewrite_tl0picidx(mut sync, 0))
+    if list.compare_bytes(sync, b"\xb0\xe0\x81\x01\x00\x60\x51\x2e\x00") != Equal {
+        fail("Chromium rewrite changed another byte")
+    }
+    for end in 0u64 .. 9u64 {
+        if let Error(Truncated) = vp8.parse(list.slice(key, 0, end)) {} else {
+            fail("truncated VP8 packet accepted")
+        }
+    }
+}
+
+fn check_extension_flags() {
+    // §4.2 ignores reserved bits. K alone ignores TID but keeps Y.
+    // T alone ignores KEYIDX.
+    let key_only = result.unwrap(vp8.parse(b"\xd8\x1f\xff\x11\x00\x00"))
+    if key_only.temporal != None || !key_only.layer_sync || key_only.key_index != Some(31u8) || key_only.partition != 0 || !key_only.first || key_only.payload_start != 3 {
+        fail("KEYIDX without TID or reserved bits")
+    }
+    let mut no_id = b"\x90\x60\xff\x9f\x11\x00\x00"
+    let layer_only = result.unwrap(vp8.parse(no_id))
+    if layer_only.temporal != Some(2u8) || layer_only.layer_sync || layer_only.key_index != None || layer_only.tl0picidx != Some(255u8) {
+        fail("TID without KEYIDX")
+    }
+    result.unwrap(vp8.rewrite_tl0picidx(mut no_id, 0))
+    if list.compare_bytes(no_id, b"\x90\x60\x00\x9f\x11\x00\x00") != Equal {
+        fail("TL0PICIDX offset without PictureID")
+    }
+    let mut all = b"\x90\xf0\x11\x7e\x7d\x11\x00\x00"
+    let descriptor = result.unwrap(vp8.parse(all))
+    if descriptor.temporal != Some(1u8) || !descriptor.layer_sync || descriptor.key_index != Some(29u8) || descriptor.tl0picidx != Some(126u8) || descriptor.payload_start != 5 {
+        fail("TID and KEYIDX share one byte")
+    }
+    result.unwrap(vp8.rewrite_tl0picidx(mut all, 255))
+    if list.compare_bytes(all, b"\x90\xf0\x11\xff\x7d\x11\x00\x00") != Equal {
+        fail("TL0PICIDX offset after a short PictureID")
+    }
+    if let Error(InvalidDescriptor) = vp8.parse(b"\x90\x40\x00\x11\x00\x00") {} else {
+        fail("TL0PICIDX without TID")
+    }
+}
+
+fn check_target_layers() {
+    // AV1 RTP §A.8.2. Offset 0, five targets. Template transitions are
+    // next temporal, next temporal, next spatial, end. DTIs in wire order:
+    // (0,0) R R R R N
+    // (0,1) S N N D N
+    // (0,2) D N N R N
+    // (1,0) R N R N N
+    // No frame diffs, chains, or resolutions. Target 0 takes its two maxima
+    // from different templates. Target 4 retains the spec's zero defaults.
+    let mut structure = dependency.empty()
+    if dependency.target_layers(view structure, 0) != None {
+        fail("decode target in an empty structure")
+    }
+    let _ = result.unwrap(dependency.parse(b"\xc0\x00\x01\x80\x04\x5b\xff\x20\x44\x33\x30\x00", mut structure))
+    let expected: Inline[(u8, u8), 5] =[(1, 2), (0, 0), (1, 0), (0, 2), (0, 0)]
+    for index in 0u64 .. 5u64 {
+        if dependency.target_layers(view structure, index) != Some(expected[index]) {
+            fail("AV1 decode target maps to the wrong layer")
+        }
+    }
+    if dependency.target_layers(view structure, 5) != None {
+        fail("decode target past the structure")
+    }
+}
+
+/// bug: Misclassify a fragment as a VP8 keyframe, misread optional fields, corrupt a rewrite, or map AV1 decode targets by order.
+/// oracle: RFC 7741 §4.6, hand-decoded Chromium VP8 RTP, and a hand-derived AV1 RTP §A.8.2 template table.
+@test
+fn vp8_descriptor_and_av1_targets() -> Result[(), ()] {
+    check_rfc_examples()
+    check_capture()
+    check_extension_flags()
+    check_target_layers()
+    Ok(())
+}

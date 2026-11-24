@@ -1,0 +1,125 @@
+// RFC 7741 §§4.2–4.3. The input starts after the RTP header.
+pub type Error = Truncated | InvalidDescriptor | MissingPictureId | PictureIdTooLarge | MissingTl0PicIdx
+
+pub type PictureId = ShortId(u8) | LongId(u16)
+
+pub type Descriptor {
+    extended: bool,
+    non_reference: bool,
+    partition_start: bool,
+    partition: u8,
+    picture_id: Option[PictureId],
+    tl0picidx: Option[u8],
+    temporal: Option[u8],
+    layer_sync: bool,
+    key_index: Option[u8],
+    first: bool,
+    keyframe: bool,
+    payload_start: u64
+}
+
+fn octet(packet: Bytes, mut at: u64, end: u64) -> Result[u8, Error] {
+    if at == end {
+        return Error(Truncated)
+    }
+    let value = packet[at]
+    at += 1
+    Ok(value)
+}
+
+pub fn parse(packet: Bytes) -> Result[Descriptor, Error] {
+    let end = list.len(packet)
+    let mut at: u64 = 0
+    let flags = octet(packet, mut at, end)?
+    let extended = (flags & 128) != 0
+    let extensions = if extended {
+        octet(packet, mut at, end)?
+    } else {
+        0
+    }
+    let has_layer = (extensions & 32) != 0
+    if (extensions & 64) != 0 && !has_layer {
+        return Error(InvalidDescriptor)
+    }
+    let picture_id = if (extensions & 128) != 0 {
+        let high = octet(packet, mut at, end)?
+        if (high & 128) != 0 {
+            let high_bits: u16 = int.widen(high & 127)
+            let low_bits: u16 = int.widen(octet(packet, mut at, end)?)
+            Some(LongId((high_bits << 8) | low_bits))
+        } else {
+            Some(ShortId(high))
+        }
+    } else {
+        None
+    }
+    let tl0picidx = if (extensions & 64) != 0 {
+        Some(octet(packet, mut at, end)?)
+    } else {
+        None
+    }
+    let has_key_index = (extensions & 16) != 0
+    let layer_and_key = if has_layer || has_key_index {
+        octet(packet, mut at, end)?
+    } else {
+        0
+    }
+    let temporal = if has_layer {
+        Some(layer_and_key >> 6)
+    } else {
+        None
+    }
+    // RFC 7741 defines Y even with T clear when K supplies the shared byte.
+    let layer_sync = (layer_and_key & 32) != 0
+    let key_index = if has_key_index {
+        Some(layer_and_key & 31)
+    } else {
+        None
+    }
+    let partition_start = (flags & 16) != 0
+    let partition = flags & 7
+    let first = partition_start && partition == 0
+    if at == end || (first && end - at < 3) {
+        return Error(Truncated)
+    }
+    Ok(Descriptor(extended: extended, non_reference: (flags & 32) != 0, partition_start: partition_start, partition: partition, picture_id: picture_id, tl0picidx: tl0picidx, temporal: temporal, layer_sync: layer_sync, key_index: key_index, first: first, keyframe: first && (packet[at] & 1) == 0, payload_start: at))
+}
+
+// Preserve the encoded width and every other byte, including the payload.
+pub fn rewrite_picture_id(mut packet: Bytes, value: u16) -> Result[(), Error] {
+    let descriptor = parse(packet)?
+    match descriptor.picture_id {
+        Some(ShortId(_)) => {
+            if value > 127 {
+                return Error(PictureIdTooLarge)
+            }
+            packet[2] = int.narrow(value)
+        },
+        Some(LongId(_)) => {
+            if value > 32767 {
+                return Error(PictureIdTooLarge)
+            }
+            let high: u8 = int.narrow(value >> 8)
+            packet[2] = 128 | high
+            packet[3] = int.narrow(value & 255)
+        },
+        None => {
+            return Error(MissingPictureId)
+        }
+    }
+    Ok(())
+}
+
+pub fn rewrite_tl0picidx(mut packet: Bytes, value: u8) -> Result[(), Error] {
+    let descriptor = parse(packet)?
+    if let None = descriptor.tl0picidx {
+        return Error(MissingTl0PicIdx)
+    }
+    let at: u64 = match descriptor.picture_id {
+        None => 2,
+        Some(ShortId(_)) => 3,
+        Some(LongId(_)) => 4
+    }
+    packet[at] = value
+    Ok(())
+}

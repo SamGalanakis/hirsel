@@ -14,6 +14,7 @@ std = { major = 1 }
 "h264.hirsel" = "h264"
 "hevc.hirsel" = "hevc"
 "opus.hirsel" = "opus"
+"vp8.hirsel" = "vp8"
 "vp9.hirsel" = "vp9"
 
 [tests]
@@ -24,4 +25,5 @@ limit = 67108864
 "av1-laws.hirsel" = "av1_laws"
 "h264-laws.hirsel" = "h264_laws"
 "opus-laws.hirsel" = "opus_laws"
+"vp8-laws.hirsel" = "vp8_laws"
 "vp9-laws.hirsel" = "vp9_laws"

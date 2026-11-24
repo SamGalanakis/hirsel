@@ -70,6 +70,25 @@ pub fn decode_target(frame: Frame, index: u64) -> Option[Indication] {
     })
 }
 
+// AV1 RTP §A.8.2. The spatial and temporal maxima may come from different
+// templates. Per-frame overrides and active-target changes do not change them.
+pub fn target_layers(structure: View[Structure], target: u64) -> Option[(u8, u8)] {
+    if target >= structure.targets {
+        return None
+    }
+    let mut spatial: u8 = 0
+    let mut temporal: u8 = 0
+    let shift = 2 * target
+    for index in 0u64 .. structure.count {
+        let template = structure.templates[index]
+        if ((template.indications >> shift) & 3) != 0 {
+            spatial = order.max(spatial, template.spatial)
+            temporal = order.max(temporal, template.temporal)
+        }
+    }
+    Some((spatial, temporal))
+}
+
 pub fn protecting_chain(structure: View[Structure], target: u64) -> Option[u8] {
     if target >= structure.targets || structure.chain_count == 0 {
         return None

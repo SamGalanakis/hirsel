@@ -363,12 +363,14 @@ pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
 }
 
 pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
-    // PROG-9: version 01 followed by UTF-8 D S, with S beginning at '('.
+    // PROG-9: version 01 followed by UTF-8 D A S. D ends at the first '[' or '('.
     if identity.first() != Some(&1) {
         return Err("Malformed: entry identity version".into());
     }
     let text = std::str::from_utf8(&identity[1..])?;
-    let (path, _) = text.split_once('(').ok_or("Malformed: entry signature")?;
+    let (path, _) = text
+        .split_once(['[', '('])
+        .ok_or("Malformed: entry signature")?;
     let name = path
         .rsplit('/')
         .next()
@@ -621,6 +623,27 @@ mod tests {
             stub_name(b"\x01runner@1/runner_launch/echo(take u64)->u64").unwrap(),
             "echo"
         );
+        let generic_cases: &[(&[u8], &str)] = &[
+            (b"\x01app@1/main/pick[u64]{plain[u64]}($0,$0)->$0", "pick"),
+            (
+                b"\x01app@1/main/swap[u64,core@1/core/Text]{send[u64]}(take($0,$1))->($1,$0)",
+                "swap",
+            ),
+            (b"\x01app@1/main/a%5Bb(u64)->u64", "a[b"),
+        ];
+        for &(identity, expected) in generic_cases {
+            assert_eq!(stub_name(identity).unwrap(), expected);
+        }
+        let mut d = d;
+        d.exported[0].identity = generic_cases[0].0.to_vec();
+        d.exported[1].identity = b"\x01app@1/main/pick[u32]{plain[u32]}($0,$0)->$0".to_vec();
+        assert!(
+            write(&d, &out)
+                .unwrap_err()
+                .to_string()
+                .starts_with("DuplicateStubName(")
+        );
+        assert!(!out.exists());
         let existing = dir.path().join("existing");
         std::fs::create_dir(&existing).unwrap();
         std::fs::write(existing.join("codec.js"), "original").unwrap();

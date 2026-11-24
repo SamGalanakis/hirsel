@@ -556,7 +556,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 scratch.mkdir()
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
-                if case.name == 'walkdir_preorder':
+                if case.name == 'dir:walkdir_preorder':
                     (host / 'link').symlink_to('a', target_is_directory=True)
                 adapted = scratch / case.file.name
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''

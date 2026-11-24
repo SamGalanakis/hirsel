@@ -228,14 +228,23 @@ pub fn test(m: Pattern, p: String) -> (bool, bool) {
     let mut at: u64 = 0
     while let Some((part, after)) = string.next_split(p, at, "/") {
         let mut i = n
+        // A recursive component consumes into itself. The epsilon pass also
+        // makes the next position live, including the accepting position.
+        let mut stays = false
         while i > 0 {
             i -= 1
-            live[i + 1] = match m.parts[i] {
-                Recursive => live[i + 1] || live[i],
-                Tokens(lo, hi) => live[i] && component_accepts(m, mut scalars, lo, hi, part),
+            match m.parts[i] {
+                Recursive => {
+                    live[i + 1] = stays
+                    stays = live[i]
+                }
+                Tokens(lo, hi) => {
+                    live[i + 1] = stays || (live[i] && component_accepts(m, mut scalars, lo, hi, part))
+                    stays = false
+                }
             }
         }
-        live[0] = false
+        live[0] = stays
         close_components(m, mut live)
         at = after
     }

@@ -170,6 +170,8 @@ pub fn next(mut w: Walker) -> Result[Option[Entry], WalkError] waits {
         }
         return Ok(Some(Entry(name: string.from(w.path), kind: entry.kind)))
     }
+    w.path = string.new()
+    w.frames = list.new()
     Ok(None)
 }
 

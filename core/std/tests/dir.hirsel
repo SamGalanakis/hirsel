@@ -281,13 +281,23 @@ fn glob_matches_walk(d: Dir) -> bool waits {
         while let Some(e) = result.unwrap(dir.next(mut w)) {
             if result.unwrap(path.matches(pattern, e.name)) {
                 if index == list.len(actual) || actual[index] != e.name {
-                    return false
+                    let mut message = string.from("glob differs from walk for ")
+                    string.push(mut message, pattern)
+                    string.push(mut message, ". Walk matched ")
+                    string.push(mut message, e.name)
+                    string.push(mut message, ". Glob returned ")
+                    string.push(mut message, string.join(actual, ", "))
+                    fail(take message)
                 }
                 index += 1
             }
         }
         if index != list.len(actual) {
-            return false
+            let mut message = string.from("glob returned extra paths for ")
+            string.push(mut message, pattern)
+            string.push(mut message, ": ")
+            string.push(mut message, string.join(actual, ", "))
+            fail(take message)
         }
     }
     true

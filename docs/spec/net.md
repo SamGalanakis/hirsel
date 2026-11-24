@@ -594,8 +594,8 @@ another unit, so one unit per core can own its socket. It is move-only and never
 
 **Options.** `slots` is the number of receive slots and `slot_bytes` the size of each; both
 are explained under the receive pool below. `slots` must be a power of two from 1 to 32,768
-and `slot_bytes` a multiple of 8 from 1,536 to 65,792. Any other value returns `Denied`
-before issue, as an invalid address does. Every option has an effect on every provider;
+and `slot_bytes` a multiple of 8 from 1,536 to 65,792. Invalid option values return
+`Other(22)` (`EINVAL`) before issue. Every option has an effect on every provider;
 there is no option a host may ignore. There is no buffer-size option: `SO_RCVBUF` and
 `SO_SNDBUF` are clamped by the kernel to `net.core.rmem_max` and `wmem_max` without telling
 the caller, which a hidden cap may not do. The socket keeps the host's defaults, and the

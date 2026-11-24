@@ -1,4 +1,3 @@
-// test-native-only: the UDP provider, virtual Clock and task scheduler are native.
 // test-env-fixture: {"HIRSEL_UDP_MEASURE_INGRESS": "1"}
 const loopback: Ip = V4(0x7f000001)
 
@@ -27,6 +26,20 @@ fn start(tasks: Tasks, config: sim.udp.Config, seed: u64, take captures: List[si
     let (take world, clock) = sim.world.new(seed, 0, 0)
     let server = sim.udp.Server(config, plan: sim.world.plan(seed), world: take world, clock, tasks, port: take port, captures: take captures)
     (network, clock, task.spawn(tasks, bytes 8388608, take server, sim.udp.serve))
+}
+
+// test-native-only: the served UDP provider and task scheduler are native.
+// expect: run udp_bind_slot_size(tasks) = true
+fn udp_bind_slot_size(tasks: Tasks) -> bool waits {
+    let (network, _, take server) = start(tasks, sim.udp.defaults(), 1, list.new())
+    let endpoint = Addr(ip: loopback, port: 4000)
+    let Error(Other(22)) = host.udp_bind(network, endpoint, UdpOptions(slots: 1, slot_bytes: 1535)) else {
+        fail("1535-byte UDP slot must return EINVAL")
+    }
+    let (take socket, _) = result.unwrap(host.udp_bind(network, endpoint, UdpOptions(slots: 1, slot_bytes: 1536)))
+    let _ = take socket
+    result.unwrap(task.join(take server))
+    true
 }
 
 fn send_one(mut socket: UdpSocket, to: Addr, data: Bytes, ecn: u8) waits {
@@ -249,6 +262,7 @@ fn capture_law(tasks: Tasks) waits {
     result.unwrap(task.join(take server))
 }
 
+// test-native-only: the UDP provider, virtual Clock and task scheduler are native.
 // expect: stderr "UDP_INGRESS_DISCARD 1\n"
 // expect: run udp_network_laws(tasks) = true
 fn udp_network_laws(tasks: Tasks) -> bool waits {

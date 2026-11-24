@@ -741,7 +741,7 @@ unsafe fn create(
     } = create;
     let fail = |outcome| AddressOutcome::new(outcome, Address::default());
     let Some(options) = Options::new(slots, slot_bytes) else {
-        return fail(DENIED);
+        return fail(error(libc::EINVAL));
     };
     if endpoint.family > 1 {
         return fail(DENIED);

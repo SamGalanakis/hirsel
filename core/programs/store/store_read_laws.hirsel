@@ -107,9 +107,9 @@ pub fn law_streams(c: Clock) -> bool waits {
         if let Error(_) = reply(mut tx, call_env, 1, result.unwrap(copied(string.as_bytes("r1")))) {
             return Error(2)
         }
-        // A 95-byte reply frame plus the 5-byte data head and one 29-byte put.
+        // A 95-byte reply frame plus the 5-byte data head and one 33-byte put.
         let ci = info(mut tx)
-        if list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72))) != 129 {
+        if list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, None, 1, 72))) != 133 {
             return Error(3)
         }
         Error(7)
@@ -260,7 +260,7 @@ pub fn law_streams(c: Clock) -> bool waits {
     // L29 by section 2.4: head 16, call info 21, streams section 5 + op
     // (1 + 4 + 1 + 4 + 43) = 58, so 95 with no data section. The CALL
     // is 145 B (four blobs of sizes 32, 16, 32 and 48, and the settle byte).
-    // A 12-byte key and 8-byte value add 34 B for data.
+    // A 12-byte key, 4-byte prior length and 8-byte value add 38 B for data.
     let measured = result.unwrap(run(mut db, None, s, fn(mut tx, call_env) -> Result[(), u64] {
         if let Error(_) = reply_recorded(mut tx, 3, result.unwrap(copied(string.as_bytes("ab"))), call_for(call_env, 32)) {
             return Error(1)
@@ -278,7 +278,7 @@ pub fn law_streams(c: Clock) -> bool waits {
             return Error(5)
         }
         let three = list.len(result.unwrap(encode_sections(ci, mut tx.ops.rows, tx.stream_ops.rows, tx.call, 1, 72)))
-        if three != 274 {
+        if three != 278 {
             return Error(6)
         }
         Ok(())

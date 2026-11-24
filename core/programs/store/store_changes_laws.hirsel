@@ -545,13 +545,14 @@ fn has_failure(cs: Causes, message: String) -> bool {
 pub fn law_look_faults(c: Clock) -> bool waits {
     let db = test_db(c, 1073741824)
     let s = snapshot(db)
+    let read = result.unwrap(reader(db, 0u64))
     for i in 0u64 .. 2 {
         let message = if i == 0 {
             "look body fault"
         } else {
             "another query fault"
         }
-        let failed = result.unwrap(look(result.unwrap(reader(db, 0u64)), s, None, message, fn(tx, call_env) -> u64 {
+        let failed = result.unwrap(look(read, s, None, message, fn(tx, call_env) -> u64 {
             fail(string.from(call_env))
         }))
         match take failed {
@@ -566,7 +567,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
             19u64
         }
         let observed = result.unwrap(result.unwrap(bound bytes 80 {
-            look(result.unwrap(reader(db, 0u64)), s, None, expected, fn(tx, call_env) -> u64 {
+            look(read, s, None, expected, fn(tx, call_env) -> u64 {
                 call_env
             })
         }))
@@ -578,7 +579,7 @@ pub fn law_look_faults(c: Clock) -> bool waits {
         }
     }
     let refused_query = result.unwrap(bound bytes 79 {
-        look(result.unwrap(reader(db, 0u64)), s, None, (), fn(tx, unused_env) -> u64 {
+        look(read, s, None, (), fn(tx, unused_env) -> u64 {
             7u64
         })
     })
@@ -656,8 +657,9 @@ pub fn law_changes(c: Clock) -> bool waits {
     if !check_delta(empty, a, zeros, before) || !check_delta(a, empty, before, zeros) || !check_delta(a, b, before, after) || !check_delta(b, a, after, before) {
         return false
     }
+    let read = result.unwrap(reader(db, 0u64))
     let same_root = result.unwrap(bound bytes 0 {
-        changes(result.unwrap(reader(db, 0u64)), b, b)
+        changes(read, b, b)
     })
     match take same_root {
         Ok(delta) => if list.len(delta.rows) != 0 {

@@ -51,19 +51,19 @@ fn journal_test_fork_preparation(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
     }
 }
 
-// L51(a) and (k). Main is 147 bytes. 43,574 full pins and two
-// 123-byte names take the total to 16,777,069, leaving exactly 147 bytes.
+// L51(a) and (k). Main is 147 bytes. 43,575 full pins and
+// pins named with 143 and 144 bytes bring the total to 16,777,069.
 fn fork_limit_manifest() -> PageManifest {
     let mut manifest = page_manifest_empty()
     manifest.fence = 1
     let roots = manifest.branches[0].roots
     let padding = string.repeat("x", 249)
-    for i in 0u64 .. 43574 {
+    for i in 0u64 .. 43575 {
         let name = result.unwrap(disk_path("", 100000 + i, padding))
         list.push(mut manifest.pins, LocatedPin(name: take name, branch: 0, version: 0, roots: roots, watermark: 1))
     }
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 123), branch: 0, version: 0, roots: roots, watermark: 1))
-    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 123), branch: 0, version: 0, roots: roots, watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("b", 143), branch: 0, version: 0, roots: roots, watermark: 1))
+    list.push(mut manifest.pins, LocatedPin(name: string.repeat("c", 144), branch: 0, version: 0, roots: roots, watermark: 1))
     take manifest
 }
 
@@ -180,7 +180,7 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     deploy_result(close(take db))
 }
 
-// AP17. A 77-byte put and a 38-byte FORK cross 110 bytes. A successful
+// AP17. A 77-byte put and a 46-byte FORK cross 110 bytes. A successful
 // cut covers both. An allocation refusal during planning leaves both in
 // the original segment.
 @test
@@ -215,7 +215,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
             return Error(Foreign)
         }
         let expected_journal = if refuse {
-            115u64
+            123u64
         } else {
             0u64
         }

@@ -949,11 +949,11 @@ fn journal_law_chunked_segment(d: Dir) -> bool waits {
     result.unwrap(le(mut raw, 65536, 4))
     result.unwrap(le(mut raw, 17032182677987914202, 8))
     list.fill(mut raw, 65536, 9u8)
-    // One COMMIT: 42 + put (9 + key 12 + value 65,536) = 65,599.
+    // One COMMIT: 42 + put (9 + key 12 + prior length 4 + value 65,536) = 65,603.
     result.unwrap(le(mut raw, 0x0011, 2))
     result.unwrap(le(mut raw, 1, 2))
-    result.unwrap(le(mut raw, 65583, 4))
-    result.unwrap(le(mut raw, 11866033783025652971, 8))
+    result.unwrap(le(mut raw, 65587, 4))
+    result.unwrap(le(mut raw, 3906595394227617390, 8))
     result.unwrap(le(mut raw, 0, 4))
     result.unwrap(le(mut raw, 1, 8))
     result.unwrap(le(mut raw, 100, 8))
@@ -964,11 +964,12 @@ fn journal_law_chunked_segment(d: Dir) -> bool waits {
     result.unwrap(le(mut raw, 12, 4))
     result.unwrap(append_be(mut raw, 1, 4))
     result.unwrap(append_be(mut raw, 7, 8))
+    result.unwrap(le(mut raw, 0, 4))
     result.unwrap(le(mut raw, 65536, 4))
     list.fill(mut raw, 65536, 17u8)
     list.fill(mut raw, 11, 0u8)
-    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131223), true))
-    if end != 131223 || accepted != 65599 || list.len(events) != 1 {
+    let (end, accepted, take events) = result.unwrap(journal_scan_fixture(d, id, raw, Some(131227), true))
+    if end != 131227 || accepted != 65603 || list.len(events) != 1 {
         return false
     }
     let Commit(commit) = events[0] else {

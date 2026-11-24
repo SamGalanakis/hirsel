@@ -773,7 +773,7 @@ fn page_retired_node_vector() -> Bytes {
 fn check_paged_manifest() -> Result[(), Error] {
     let id = StoreId(hi: 1, lo: 2)
     let encoded = disk_page_manifest_bytes(id, page_manifest_empty())?
-    if list.len(encoded) != 551 || std.check.xxh3(encoded, 0, 551) != 0xe52e64df25612174u64 {
+    if list.len(encoded) != 551 || std.check.xxh3(encoded, 0, 551) != 0x732a9e646096ab11u64 {
         return Error(Foreign)
     }
     match disk_read_page_manifest("MANIFEST", page_old_manifest_vector()) {

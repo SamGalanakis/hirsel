@@ -869,6 +869,9 @@ fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], afte
 }
 
 fn compare_page_collections(before: PageTree, after: PageTree) -> Result[Changes, Error] {
+    if tree_stamp(before) == tree_stamp(after) {
+        return Ok(Changes(rows: list.new(), trimmed: list.new(), bounds: list.new()))
+    }
     let mut out = change_output(None)
     walk_page_changes(mut out, Some(view before), after, None, None)?
     let ChangeOutput(rows: take rows, trimmed: take trimmed, bounds: take changed_bounds, ..) = take out

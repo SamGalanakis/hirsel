@@ -844,7 +844,6 @@ fn journal_test_changes_checkpoint(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
 fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: u64, accepted: bool) -> bool waits {
     let mut options = journal_crash_options()
     options.resident_limit = 134217728
-    options.checkpoint_bytes = 134217728
     let mut db = result.unwrap(open(tasks, d, c, r, options))
     result.unwrap(create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64())))
     let done = result.unwrap(run(mut db, None, final_item, fn(mut tx, call_env) -> Result[u64, Error] {

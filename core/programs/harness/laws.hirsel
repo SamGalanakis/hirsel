@@ -1,9 +1,9 @@
-// Offline laws for the harness. Each law runs a real place on a Disk backing
-// against scripted, test-owned services, so what the services saw survives
-// the place. See README.md for the list and each law's oracle.
+// Offline laws run a real Disk-backed place against scripted services that
+// outlive it. See README.md for the laws and their oracles.
 
 const BYTES: u64 = 131072u64
 const PLACE_BYTES: u64 = 1048576u64
+const LIFE_BYTES: u64 = 52428800u64 // Runner overhead and the Disk Store reservation need 49.63 MiB.
 const IDLE_MS: u64 = 300u64
 
 // ---- scripted services ----
@@ -155,7 +155,7 @@ fn launch(tasks: Tasks, take config: runner.PlaceConfig[Grants, harness.Handles,
     let (stop_to, stop_from): (Sender[()], Receiver[()]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
     let life = Life(config: take config, stop: take stop_from, status: latest.handle(status))
-    let running = task.spawn(tasks, bytes 50331648u64, take life, live)
+    let running = task.spawn(tasks, bytes LIFE_BYTES, take life, live)
     (take running, take stop_to, take status)
 }
 
@@ -1362,7 +1362,7 @@ fn law_blob_results(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net
     let config = blob_settings(first_dir, clock, random, tasks, net, take cut_services)
     let status = result.unwrap(runner.status_root())
     let life = Life(config: take config, stop: take stop_in, status: take status)
-    let first = task.spawn(tasks, bytes 50331648u64, FirstBlobLife(life: take life, checkpoint: take checkpoint), first_blob_life)
+    let first = task.spawn(tasks, bytes LIFE_BYTES, FirstBlobLife(life: take life, checkpoint: take checkpoint), first_blob_life)
     if let PlaceEnded = result.unwrap(channel.receive(checkpoints)) { fail("blob: place ended before the PUT acknowledgement") }
     result.unwrap(channel.send(stop, ()))
     result.unwrap(task.join(take first))

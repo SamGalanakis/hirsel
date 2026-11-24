@@ -15,30 +15,49 @@ pub fn law_owner_takes_queued() -> bool {
     let mut held: Option[WireEvent] = None
     let mut run = 3u64
     let wakes = wire_take_queued(inbox, mut run, 5u64, mut updates, mut held)
-    let held_sent = match take held { Some(WireEvent(e: Dropped)) => true, _ => false }
-    let left = match channel.try_receive(inbox) { Ok(WireEvent(e: FromRunner(Notice(e: Updated(take u))))) => u.version == 4u64, _ => false }
+    let held_sent = match take held {
+        Some(WireEvent(e: Dropped)) => true,
+        _ => false
+    }
+    let left = match channel.try_receive(inbox) {
+        Ok(WireEvent(e: FromRunner(Notice(e: Updated(take u))))) => u.version == 4u64,
+        _ => false
+    }
     let mixed = wakes == 1u64 && run == 1u64 && held_sent && left && queued_versions(updates, 3u64)
-
-    for v in 2u64 .. 7u64 { let _ = channel.try_send(to, queued_update(v)) }
+    for v in 2u64 .. 7u64 {
+        let _ = channel.try_send(to, queued_update(v))
+    }
     let mut full: List[Update] = list.new()
     list.push(mut full, Update(version: 1u64, content: None, outcomes: list.new()))
     let mut kept: Option[WireEvent] = None
     let mut at = 0u64
     let _ = wire_take_queued(inbox, mut at, 5u64, mut full, mut kept)
-    let rest = match channel.try_receive(inbox) { Ok(WireEvent(e: FromRunner(Notice(e: Updated(take u))))) => u.version == 6u64, _ => false }
-    let capped = at == 4u64 && rest && (match kept { None => true, _ => false }) && queued_versions(full, 5u64)
+    let rest = match channel.try_receive(inbox) {
+        Ok(WireEvent(e: FromRunner(Notice(e: Updated(take u))))) => u.version == 6u64,
+        _ => false
+    }
+    let capped = at == 4u64 && rest && (match kept {
+        None => true,
+        _ => false
+    }) && queued_versions(full, 5u64)
     mixed && capped
 }
 
 pub fn law_owner_take_wakes() -> bool {
     let mut run = 0u64
     let mut wakes = 0u64
-    for _ in 0u64 .. 129u64 { if wire_taken(mut run, 64u64) { wakes += 1u64 } }
+    for _ in 0u64 .. 129u64 {
+        if wire_taken(mut run, 64u64) {
+            wakes += 1u64
+        }
+    }
     wakes == 2u64 && run == 1u64
 }
 
 // No wire configuration, for unit drivers whose registry fixes `G` and binds nothing.
-fn no_wire[G: send]() -> Option[Wire[G, ()]] { None }
+fn no_wire[G: send]() -> Option[Wire[G, ()]] {
+    None
+}
 
 fn wire_service_seed[G: send, B: send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
     wire_service_with_head(random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
@@ -49,9 +68,14 @@ pub fn fixture_unsubscribe(owner: FixtureOwner, sub: u32) -> () waits {
 }
 
 pub fn fixture_try_receive(owner: FixtureOwner) -> Result[Down, ReceiveError] waits {
-    if let Ok(take d) = channel.try_receive(owner.from) { return Ok(take d) }
+    if let Ok(take d) = channel.try_receive(owner.from) {
+        return Ok(take d)
+    }
     match channel.try_receive(owner.inbox) {
-        Ok(take e) => { fixture_content(owner, take e); channel.try_receive(owner.from) },
+        Ok(take e) => {
+            fixture_content(owner, take e);
+            channel.try_receive(owner.from)
+        },
         Error(e) => Error(e),
     }
 }
@@ -77,49 +101,83 @@ fn leaving_sub_does_not_block_successor(clock: Clock, random: Random, tasks: Tas
     let mut work = wire_work()
     work.check = Some(10u64)
     let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Unsubscribe(7u32), 0u64)))
-    if !list.contains(ctx.pub_subs, 7u32) { return Error(1u64) }
+    if !list.contains(ctx.pub_subs, 7u32) {
+        return Error(1u64)
+    }
     let reg = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
     list.push(mut ctx.entries, http_law_key(reg.exported[1u64]))
     list.push(mut ctx.known, 1u8)
     let next = result.unwrap(wire_plan_subscribe(mut ctx, reg, 8u32, 0u32, b"\x00\x00\x00\x00", None))
-    if let PlannedSubscribe(..) = next {} else { return Error(2u64) }
+    if let PlannedSubscribe(..) = next {} else {
+        return Error(2u64)
+    }
     result.unwrap(wire_apply_plan(mut ctx, mut work, take next))
     let excess = result.unwrap(wire_plan_subscribe(mut ctx, reg, 9u32, 0u32, b"\x00\x00\x00\x00", None))
-    if let SubscriptionRefusal(9u32, Refused(NotAllowed)) = excess {} else { return Error(3u64) }
+    if let SubscriptionRefusal(9u32, Refused(NotAllowed)) = excess {} else {
+        return Error(3u64)
+    }
     // The first successor owns the outgoing sub's slot. It occupies no PubIn
     // cell until the writer finishes and the old read set can be removed.
-    if list.len(ctx.deferred_subs) != 1u64 || ctx.deferred_subs[0u64].sub != 8u32 { return Error(4u64) }
-    if !list.contains(ctx.pub_subs, 7u32) || list.contains(ctx.pub_subs, 8u32) { return Error(5u64) }
+    if list.len(ctx.deferred_subs) != 1u64 || ctx.deferred_subs[0u64].sub != 8u32 {
+        return Error(4u64)
+    }
+    if !list.contains(ctx.pub_subs, 7u32) || list.contains(ctx.pub_subs, 8u32) {
+        return Error(5u64)
+    }
     let receiver = task.spawn(tasks, bytes 4096u64, take pub_from, owner_receive_successor)
     let _ = result.unwrap(wire_step(mut ctx, mut work, WSent))
     wire_flush_subscriptions(mut ctx, mut work)
     let (take remaining, exact) = result.unwrap(task.join(take receiver))
-    if !exact || list.len(ctx.deferred_subs) != 0u64 || !list.contains(ctx.pub_subs, 8u32) { return Error(6u64) }
-    if let Error(1002u16) = wire_plan_subscribe(mut ctx, reg, 8u32, 0u32, b"", None) {} else { return Error(8u64) }
-    if let Error(1002u16) = wire_step(mut ctx, mut work, WClient(Set(8u32, None), 0u64)) {} else { return Error(9u64) }
-    if let Error(1002u16) = wire_step(mut ctx, mut work, WClient(Send(10u32, None, b""), 0u64)) {} else { return Error(10u64) }
+    if !exact || list.len(ctx.deferred_subs) != 0u64 || !list.contains(ctx.pub_subs, 8u32) {
+        return Error(6u64)
+    }
+    if let Error(1002u16) = wire_plan_subscribe(mut ctx, reg, 8u32, 0u32, b"", None) {} else {
+        return Error(8u64)
+    }
+    if let Error(1002u16) = wire_step(mut ctx, mut work, WClient(Set(8u32, None), 0u64)) {} else {
+        return Error(9u64)
+    }
+    if let Error(1002u16) = wire_step(mut ctx, mut work, WClient(Send(10u32, None, b""), 0u64)) {} else {
+        return Error(10u64)
+    }
     let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Set(7u32, None), 0u64)))
     let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Send(6u32, None, b""), 0u64)))
-
     // With an idle writer there will be no Sent to push a lost unsubscribe.
     result.unwrap(channel.try_send(wire_publisher(ctx), PubIn(e: Drained)))
     let _ = result.unwrap(wire_step(mut ctx, mut work, WClient(Unsubscribe(8u32), 0u64)))
     let idle = task.spawn(tasks, bytes 4096u64, take remaining, owner_receive_idle_unsubscribe)
     wire_flush_subscriptions(mut ctx, mut work)
-    if !result.unwrap(task.join(take idle)) || list.len(ctx.pub_subs) != 0u64 { return Error(7u64) }
+    if !result.unwrap(task.join(take idle)) || list.len(ctx.pub_subs) != 0u64 {
+        return Error(7u64)
+    }
     Ok(())
 }
 
 fn owner_receive_successor(take from: Receiver[PubIn]) -> (Receiver[PubIn], bool) waits {
-    let first = match channel.receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
-    let retired = match channel.receive(from) { Ok(PubIn(e: Unsubscribed(23u64, 7u32))) => true, _ => false }
-    let successor = match channel.receive(from) { Ok(PubIn(e: WireSubscribed(23u64, 8u32, 2u64, _))) => true, _ => false }
+    let first = match channel.receive(from) {
+        Ok(PubIn(e: Drained)) => true,
+        _ => false
+    }
+    let retired = match channel.receive(from) {
+        Ok(PubIn(e: Unsubscribed(23u64, 7u32))) => true,
+        _ => false
+    }
+    let successor = match channel.receive(from) {
+        Ok(PubIn(e: WireSubscribed(23u64, 8u32, 2u64, _))) => true,
+        _ => false
+    }
     (take from, first && retired && successor)
 }
 
 fn owner_receive_idle_unsubscribe(take from: Receiver[PubIn]) -> bool waits {
-    let first = match channel.receive(from) { Ok(PubIn(e: Drained)) => true, _ => false }
-    let retired = match channel.receive(from) { Ok(PubIn(e: Unsubscribed(23u64, 8u32))) => true, _ => false }
+    let first = match channel.receive(from) {
+        Ok(PubIn(e: Drained)) => true,
+        _ => false
+    }
+    let retired = match channel.receive(from) {
+        Ok(PubIn(e: Unsubscribed(23u64, 8u32))) => true,
+        _ => false
+    }
     first && retired
 }
 
@@ -128,32 +186,37 @@ fn room_law_admit(tx: store.Tx, unused: (), author: Caller, take argument: ()) -
 }
 
 fn room_law_entries(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
-    room(mut reg, code.describe(room_law_admit), slots(), std.codec.of_u32(), std.codec.of_u32(),
-        RoomBounds(peers: 2u32, state: 4u32, message: 4u32), 4096u64, 1024u64, DEFAULT_STEPS)?
+    room(mut reg, code.describe(room_law_admit), slots(), std.codec.of_u32(), std.codec.of_u32(), RoomBounds(peers: 2u32, state: 4u32, message: 4u32), 4096u64, 1024u64, DEFAULT_STEPS)?
     compute(mut reg, code.describe(room_law_barrier), 4096u64, DEFAULT_STEPS)
 }
 
-fn room_law_barrier(take v: u32) -> Result[u32, Capacity] { Ok(v) }
+fn room_law_barrier(take v: u32) -> Result[u32, Capacity] {
+    Ok(v)
+}
 
 fn room_law_large_entries(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
     let state: std.codec.Codec[List[Bytes]] = std.codec.of()
-    room(mut reg, code.describe(room_law_admit), slots(), state, std.codec.of_bytes(),
-        RoomBounds(peers: 9u32, state: STATE_MAX, message: MESSAGE_MAX), 4096u64, 1024u64, DEFAULT_STEPS)
+    room(mut reg, code.describe(room_law_admit), slots(), state, std.codec.of_bytes(), RoomBounds(peers: 9u32, state: STATE_MAX, message: MESSAGE_MAX), 4096u64, 1024u64, DEFAULT_STEPS)
 }
 
 fn room_law_settings(c: Clock, random: Random, tasks: Tasks, net: Net, large_room: bool) -> PlaceConfig[(), (), (), ()] {
-    let entries = if large_room { code.describe(room_law_large_entries) } else { code.describe(room_law_entries) }
+    let entries = if large_room {
+        code.describe(room_law_large_entries)
+    } else {
+        code.describe(room_law_entries)
+    }
     let mut config = wire_defaults(262144u64)
     config.n_pool = 33554432u64
     config.n_relay = 4194304u64
-    PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: entries, n_place: 1048576u64,
-        on_migrate: None, schema: code.describe(empty_schema), session: config, max_sessions: 4u64,
-        proxies: list.new(), n_publisher: 4194304u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net, tasks, clock: c, random, stop: Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
+    PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: entries, n_place: 1048576u64, on_migrate: None, schema: code.describe(empty_schema), session: config, max_sessions: 4u64, proxies: list.new(), n_publisher: 4194304u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net, tasks, clock: c, random, stop: Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
 }
 
 fn room_law_socket(tasks: Tasks, net: Net, c: Clock, random: Random, running: fixture.Fixture, large_room: bool) -> wire_client.Conn waits {
-    let entries = if large_room { code.describe(room_law_large_entries) } else { code.describe(room_law_entries) }
+    let entries = if large_room {
+        code.describe(room_law_large_entries)
+    } else {
+        code.describe(room_law_entries)
+    }
     let keys = result.unwrap(fixture.entry_keys(entries))
     let address = option.unwrap(fixture.status(running).addr)
     let session = wire_defaults(262144u64)
@@ -168,7 +231,9 @@ fn room_law_you(connection: wire_client.Conn) -> Option[u32] waits {
             Ok(Live(parts)) => {
                 for part in parts {
                     if part.sub == 0u32 && part.complete {
-                        if let Some(peer) = part.you { return Some(peer) }
+                        if let Some(peer) = part.you {
+                            return Some(peer)
+                        }
                     }
                 }
             },
@@ -204,9 +269,15 @@ fn room_law_count(connection: wire_client.Conn, sender: u32, payload: Bytes, mar
             Ok(Live(parts)) => {
                 for part in parts {
                     for (from, target, message) in part.msgs {
-                        if from != sender { return None }
-                        if !target && message == marker { return Some(count) }
-                        if target != direct || message != payload { return None }
+                        if from != sender {
+                            return None
+                        }
+                        if !target && message == marker {
+                            return Some(count)
+                        }
+                        if target != direct || message != payload {
+                            return None
+                        }
                         count += 1u64
                     }
                 }
@@ -247,24 +318,42 @@ fn first_admission_installs_adm(c: Clock, random: Random, tasks: Tasks, net: Net
     let with_relay = operate_bytes(roomless) ?=> |_| 10u64
     roomless.session.n_relay = 0u64
     let without_relay = operate_bytes(roomless) ?=> |_| 10u64
-    if with_relay != without_relay { return Error(10u64) }
-    room_law_watch() ?=> |why| { 20u64 + why }
+    if with_relay != without_relay {
+        return Error(10u64)
+    }
+    room_law_watch() ?=> |why| {
+        20u64 + why
+    }
     let running = fixture.start(room_law_settings(c, random, tasks, net, false), 5000u64) ?=> |_| 1u64
     let sender = room_law_socket(tasks, net, c, random, running, false)
-    let Some(author) = room_law_you(sender) else { return Error(2u64) }
+    let Some(author) = room_law_you(sender) else {
+        return Error(2u64)
+    }
     let receiver = room_law_socket(tasks, net, c, random, running, false)
-    let Some(other) = room_law_you(receiver) else { return Error(3u64) }
-    if author != 1u32 || other != 2u32 { return Error(4u64) }
+    let Some(other) = room_law_you(receiver) else {
+        return Error(3u64)
+    }
+    if author != 1u32 || other != 2u32 {
+        return Error(4u64)
+    }
     let payload = b"\x11\x00\x00\x00"
     let marker = b"\x12\x00\x00\x00"
     wire_client.send_frame(sender, Send(0u32, None, clone(payload)))
     wire_client.send_frame(sender, Send(0u32, None, clone(marker)))
-    if room_law_count(receiver, author, payload, marker, false) != Some(1u64) { return Error(5u64) }
+    if room_law_count(receiver, author, payload, marker, false) != Some(1u64) {
+        return Error(5u64)
+    }
     let waiter = room_law_socket(tasks, net, c, random, running, false)
-    if !room_law_full(waiter) { return Error(6u64) }
+    if !room_law_full(waiter) {
+        return Error(6u64)
+    }
     wire_client.send_frame(sender, Unsubscribe(0u32))
-    let Some(promoted) = room_law_you(waiter) else { return Error(7u64) }
-    if promoted != 3u32 { return Error(8u64) }
+    let Some(promoted) = room_law_you(waiter) else {
+        return Error(7u64)
+    }
+    if promoted != 3u32 {
+        return Error(8u64)
+    }
     wire_client.send_frame(waiter, Send(0u32, None, clone(payload)))
     wire_client.send_frame(waiter, Send(0u32, None, clone(marker)))
     let observed = room_law_count(receiver, promoted, payload, marker, false)
@@ -272,7 +361,9 @@ fn first_admission_installs_adm(c: Clock, random: Random, tasks: Tasks, net: Net
     let _ = wire_client.close(take receiver)
     let _ = wire_client.close(take waiter)
     let _ = fixture.end(take running, 5000u64)
-    if observed != Some(1u64) { return Error(9u64) }
+    if observed != Some(1u64) {
+        return Error(9u64)
+    }
     Ok(())
 }
 
@@ -281,15 +372,23 @@ fn waiter_set_not_installed_after_promotion(c: Clock, random: Random, tasks: Tas
     let running = fixture.start(room_law_settings(c, random, tasks, net, false), 5000u64) ?=> |_| 1u64
     let leaving = room_law_socket(tasks, net, c, random, running, false)
     let observer = room_law_socket(tasks, net, c, random, running, false)
-    if none(room_law_you(leaving)) || none(room_law_you(observer)) { return Error(2u64) }
+    if none(room_law_you(leaving)) || none(room_law_you(observer)) {
+        return Error(2u64)
+    }
     let waiter = room_law_socket(tasks, net, c, random, running, false)
-    if !room_law_full(waiter) { return Error(3u64) }
+    if !room_law_full(waiter) {
+        return Error(3u64)
+    }
     let before = b"\x01\x00\x00\x00"
     let after = b"\x02\x00\x00\x00"
     wire_client.send_frame(waiter, Set(0u32, Some(clone(before))))
-    if !room_law_reached_barrier(waiter, c) { return Error(4u64) }
+    if !room_law_reached_barrier(waiter, c) {
+        return Error(4u64)
+    }
     wire_client.send_frame(leaving, Unsubscribe(0u32))
-    let Some(peer) = room_law_you(waiter) else { return Error(5u64) }
+    let Some(peer) = room_law_you(waiter) else {
+        return Error(5u64)
+    }
     wire_client.send_frame(waiter, Set(0u32, Some(clone(after))))
     let mut empty = false
     let mut recorded = false
@@ -298,14 +397,22 @@ fn waiter_set_not_installed_after_promotion(c: Clock, random: Random, tasks: Tas
             Ok(Live(parts)) => {
                 for part in parts {
                     for (id, state) in part.states {
-                        if id != peer { continue }
+                        if id != peer {
+                            continue
+                        }
                         if let Some(value) = state {
-                            if !empty || value != after { return Error(6u64) }
+                            if !empty || value != after {
+                                return Error(6u64)
+                            }
                             recorded = true
-                        } else { empty = true }
+                        } else {
+                            empty = true
+                        }
                     }
                 }
-                if recorded { break }
+                if recorded {
+                    break
+                }
             },
             Ok(Batch(..)) => (),
             _ => return Error(7u64),
@@ -315,14 +422,18 @@ fn waiter_set_not_installed_after_promotion(c: Clock, random: Random, tasks: Tas
     let _ = wire_client.close(take observer)
     let _ = wire_client.close(take waiter)
     let _ = fixture.end(take running, 5000u64)
-    if !recorded { return Error(8u64) }
+    if !recorded {
+        return Error(8u64)
+    }
     Ok(())
 }
 
 fn room_law_bytes(len: u64, byte: u8) -> Bytes {
     let mut data: Bytes = list.with_capacity(len + 4u64)
     std.codec.put_u32(int.narrow(len), mut data)
-    for _ in 0u64 .. len { list.push(mut data, byte) }
+    for _ in 0u64 .. len {
+        list.push(mut data, byte)
+    }
     take data
 }
 
@@ -333,10 +444,18 @@ fn direct_destination_survives_full_block(c: Clock, random: Random, tasks: Tasks
     let first = room_law_socket(tasks, net, c, random, running, true)
     let second = room_law_socket(tasks, net, c, random, running, true)
     let other = room_law_socket(tasks, net, c, random, running, true)
-    let Some(author) = room_law_you(sender) else { return Error(2u64) }
-    let Some(p2) = room_law_you(first) else { return Error(3u64) }
-    let Some(p3) = room_law_you(second) else { return Error(4u64) }
-    if none(room_law_you(other)) { return Error(5u64) }
+    let Some(author) = room_law_you(sender) else {
+        return Error(2u64)
+    }
+    let Some(p2) = room_law_you(first) else {
+        return Error(3u64)
+    }
+    let Some(p3) = room_law_you(second) else {
+        return Error(4u64)
+    }
+    if none(room_law_you(other)) {
+        return Error(5u64)
+    }
     let msg = room_law_bytes(32764u64, 0x55u8)
     let marker = room_law_bytes(1u64, 0x66u8)
     wire_client.send_frame(sender, Send(0u32, Some(p2), clone(msg)))
@@ -346,58 +465,66 @@ fn direct_destination_survives_full_block(c: Clock, random: Random, tasks: Tasks
     wire_client.send_frame(sender, Send(0u32, Some(0u32), clone(msg)))
     wire_client.send_frame(sender, Send(0u32, Some(9u32), clone(msg)))
     wire_client.send_frame(sender, Send(0u32, None, clone(marker)))
-    let recipients = (room_law_count(first, author, msg, marker, true), room_law_count(second, author, msg, marker, true),
-        room_law_count(other, author, msg, marker, true))
+    let recipients = (room_law_count(first, author, msg, marker, true), room_law_count(second, author, msg, marker, true), room_law_count(other, author, msg, marker, true))
     let _ = wire_client.close(take sender)
     let _ = wire_client.close(take first)
     let _ = wire_client.close(take second)
     let _ = wire_client.close(take other)
     let _ = fixture.end(take running, 5000u64)
-    if recipients != (Some(1u64), Some(1u64), Some(0u64)) { return Error(6u64) }
+    if recipients != (Some(1u64), Some(1u64), Some(0u64)) {
+        return Error(6u64)
+    }
     Ok(())
 }
 
-fn room_law_seed_desk(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession,
-    relay_to: Sender[RoomRelayIn], relay_in: Receiver[RoomRelayIn], to_owner: Sender[WireEvent],
-    settings: (u32, u64, Grant)) -> RoomOwner {
+fn room_law_seed_desk(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession, relay_to: Sender[RoomRelayIn], relay_in: Receiver[RoomRelayIn], to_owner: Sender[WireEvent], settings: (u32, u64, Grant)) -> RoomOwner {
     let (peers, live_limit, grant) = settings
     let link = RoomLink(relay: channel.sender(relay_to), round_read: latest.handle(rounds), max_message: 32768u64, live_limit)
     let mut owner = result.unwrap(room_owner(take link, id, to_owner))
-    let check = fn(raw: Bytes) -> RoomCodecCheck { ValidRoomValue }
-    let req = RoomRequest(key: RoomKey(entry: 0u32, arg: list.new()),
-        codec: RoomCodecs(state: check, message: check),
-        bounds: RoomBounds(peers, state: STATE_MAX, message: MESSAGE_MAX))
+    let check = fn(raw: Bytes) -> RoomCodecCheck {
+        ValidRoomValue
+    }
+    let req = RoomRequest(key: RoomKey(entry: 0u32, arg: list.new()), codec: RoomCodecs(state: check, message: check), bounds: RoomBounds(peers, state: STATE_MAX, message: MESSAGE_MAX))
     let caller = store.Caller(issuer: 2u8, subject: b"member")
     result.unwrap(room_owner_join(mut owner, 0u32, 1u64, take req, take caller))
     let mut grants = empty_room_grants()
     grants.latest[0u64] = Some(RoomGrant(sub: 0u32, instance: 1u64, grant, member_epoch: 0u32, publish_epoch: 0u32))
     latest.publish(owner.grants, arc.new(take grants))
-    while let Ok(take event) = channel.try_receive(relay_in) { room_relay_event(mut relay, rounds, take event) }
+    while let Ok(take event) = channel.try_receive(relay_in) {
+        room_relay_event(mut relay, rounds, take event)
+    }
     take owner
 }
 
-fn room_law_part(mut relay: RoomRelay, rounds: Latest[RoundAt], mut watcher: RoomOwner,
-    expected_head: Option[Bytes]) -> Option[Part] {
+fn room_law_part(mut relay: RoomRelay, rounds: Latest[RoundAt], mut watcher: RoomOwner, expected_head: Option[Bytes]) -> Option[Part] {
     let id = watcher.id
     room_desk_flush(mut relay, rounds, id)
     room_owner_drain(mut watcher)
     let take filled = room_owner_live(mut watcher)?
     if let Some(head) = expected_head {
         // Live tag and count (8), sub (4), complete (1), Some tag and peer (8).
-        if list.len(filled.data) < 46u64 || list.slice(filled.data, 21u64, 46u64) != head { return None }
+        if list.len(filled.data) < 46u64 || list.slice(filled.data, 21u64, 46u64) != head {
+            return None
+        }
     }
     let formats: std.codec.Codec[Frame] = std.codec.of()
     let decoded = std.codec.decode(formats, filled.data)
     room_relay_event(mut relay, rounds, Back(id, take filled))
-    let Ok(Live(take parts)) = take decoded else { return None }
+    let Ok(Live(take parts)) = take decoded else {
+        return None
+    }
     let mut only = take parts
-    if list.len(only) != 1u64 { return None }
+    if list.len(only) != 1u64 {
+        return None
+    }
     list.pop(mut only)
 }
 
 fn room_law_disconnect(mut relay: RoomRelay, rounds: Latest[RoundAt], inbox: Receiver[RoomRelayIn], mut owner: RoomOwner) {
     room_owner_time_to_leave(mut owner)
-    while let Ok(take event) = channel.try_receive(inbox) { room_relay_event(mut relay, rounds, take event) }
+    while let Ok(take event) = channel.try_receive(inbox) {
+        room_relay_event(mut relay, rounds, take event)
+    }
     room_owner_drain(mut owner)
 }
 
@@ -413,23 +540,33 @@ fn room_law_reconnect_identity() -> Result[(), u64] {
     let mut member = room_law_seed_desk(mut relay, rounds, member_id, to, inbox, owner, (2u32, 65536u64, Join))
     // Hand-written wire head: tape's first 16 bytes, 1 + 2 admissions in little endian, true.
     let head = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x03\x00\x00\x00\x00\x00\x00\x00\x01"
-    let Some(before) = room_law_part(mut relay, rounds, mut watcher, Some(take head)) else { return Error(1u64) }
-    if before.you != Some(1u32) || list.len(before.joined) != 2u64 || before.revision != 3u64 || !before.snapshot { return Error(2u64) }
+    let Some(before) = room_law_part(mut relay, rounds, mut watcher, Some(take head)) else {
+        return Error(1u64)
+    }
+    if before.you != Some(1u32) || list.len(before.joined) != 2u64 || before.revision != 3u64 || !before.snapshot {
+        return Error(2u64)
+    }
     room_law_disconnect(mut relay, rounds, inbox, mut watcher)
     // Stop between removal and waiter selection to observe the retained, empty roster.
     room_drop_desk(mut relay, member_id)
     room_owner_drain(mut member)
-    if relay.rooms[0u64].count != 0u64 || relay.rooms[0u64].next_peer != 3u64 || relay.rooms[0u64].revision != 5u64 { return Error(3u64) }
+    if relay.rooms[0u64].count != 0u64 || relay.rooms[0u64].next_peer != 3u64 || relay.rooms[0u64].revision != 5u64 {
+        return Error(3u64)
+    }
     let replacement_id = RoomSession(low: 3u64, high: 0u64)
     let reconnected_id = RoomSession(low: 4u64, high: 0u64)
     let _replacement = room_law_seed_desk(mut relay, rounds, replacement_id, to, inbox, owner, (2u32, 65536u64, Join))
     let mut reconnected = room_law_seed_desk(mut relay, rounds, reconnected_id, to, inbox, owner, (2u32, 65536u64, Join))
-    let Some(after) = room_law_part(mut relay, rounds, mut reconnected, None) else { return Error(4u64) }
-    if after.incarnation != (0x4847464544434241u64, 0x504f4e4d4c4b4a49u64) ||
-        after.incarnation == before.incarnation || after.you != Some(2u32) ||
-        after.revision != 3u64 || !after.snapshot || list.len(after.joined) != 2u64 { return Error(5u64) }
+    let Some(after) = room_law_part(mut relay, rounds, mut reconnected, None) else {
+        return Error(4u64)
+    }
+    if after.incarnation != (0x4847464544434241u64, 0x504f4e4d4c4b4a49u64) || after.incarnation == before.incarnation || after.you != Some(2u32) || after.revision != 3u64 || !after.snapshot || list.len(after.joined) != 2u64 {
+        return Error(5u64)
+    }
     let (first, _) = after.joined[0u64]
-    if first != 1u32 { return Error(6u64) }
+    if first != 1u32 {
+        return Error(6u64)
+    }
     Ok(())
 }
 
@@ -441,21 +578,33 @@ fn room_law_churn_identity() -> Result[(), u64] {
     let watcher_id = RoomSession(low: 1u64, high: 0u64)
     let member_id = RoomSession(low: 2u64, high: 0u64)
     let mut watcher = room_law_seed_desk(mut relay, rounds, watcher_id, to, inbox, owner, (256u32, 192u64, Watch))
-    let Some(initial) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(10u64) }
+    let Some(initial) = room_law_part(mut relay, rounds, mut watcher, None) else {
+        return Error(10u64)
+    }
     let incarnation = (0x4847464544434241u64, 0x504f4e4d4c4b4a49u64)
-    if initial.incarnation != incarnation || initial.revision != 1u64 || !none(initial.you) || !initial.snapshot { return Error(11u64) }
+    if initial.incarnation != incarnation || initial.revision != 1u64 || !none(initial.you) || !initial.snapshot {
+        return Error(11u64)
+    }
     for i in 0u64 .. 300u64 {
         let mut member = room_law_seed_desk(mut relay, rounds, member_id, to, inbox, owner, (256u32, 65536u64, Join))
-        let Some(joined) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(12u64) }
+        let Some(joined) = room_law_part(mut relay, rounds, mut watcher, None) else {
+            return Error(12u64)
+        }
         let expected: u32 = int.narrow(1u64 + i)
-        if joined.incarnation != incarnation || joined.revision != 2u64 + 2u64 * i || !joined.snapshot ||
-            list.len(joined.joined) != 1u64 || list.len(joined.left) != 0u64 { return Error(13u64) }
+        if joined.incarnation != incarnation || joined.revision != 2u64 + 2u64 * i || !joined.snapshot || list.len(joined.joined) != 1u64 || list.len(joined.left) != 0u64 {
+            return Error(13u64)
+        }
         let (peer, _) = joined.joined[0u64]
-        if peer != expected { return Error(14u64) }
+        if peer != expected {
+            return Error(14u64)
+        }
         latest.publish(member.grants, arc.new(empty_room_grants()))
-        let Some(left) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(15u64) }
-        if left.incarnation != incarnation || left.revision != 3u64 + 2u64 * i || !left.snapshot ||
-            list.len(left.left) != 1u64 || left.left[0u64] != expected || list.len(left.joined) != 0u64 { return Error(16u64) }
+        let Some(left) = room_law_part(mut relay, rounds, mut watcher, None) else {
+            return Error(15u64)
+        }
+        if left.incarnation != incarnation || left.revision != 3u64 + 2u64 * i || !left.snapshot || list.len(left.left) != 1u64 || left.left[0u64] != expected || list.len(left.joined) != 0u64 {
+            return Error(16u64)
+        }
         room_law_disconnect(mut relay, rounds, inbox, mut member)
     }
     let mut members: List[RoomOwner] = list.with_capacity(6u64)
@@ -466,12 +615,18 @@ fn room_law_churn_identity() -> Result[(), u64] {
     }
     // 192 - 8 (Live) - 59 (Part) = 125 bytes. A join and absent state take 23 bytes.
     // The watcher gets five joins on the first Part and the last join on the second.
-    let Some(first) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(17u64) }
-    let Some(last) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(18u64) }
-    if first.incarnation != incarnation || last.incarnation != incarnation ||
-        first.revision != 607u64 || last.revision != 607u64 || first.snapshot || !last.snapshot ||
-        list.len(first.joined) != 5u64 || list.len(last.joined) != 1u64 { return Error(19u64) }
-    if let Some(_) = room_law_part(mut relay, rounds, mut watcher, None) { return Error(20u64) }
+    let Some(first) = room_law_part(mut relay, rounds, mut watcher, None) else {
+        return Error(17u64)
+    }
+    let Some(last) = room_law_part(mut relay, rounds, mut watcher, None) else {
+        return Error(18u64)
+    }
+    if first.incarnation != incarnation || last.incarnation != incarnation || first.revision != 607u64 || last.revision != 607u64 || first.snapshot || !last.snapshot || list.len(first.joined) != 5u64 || list.len(last.joined) != 1u64 {
+        return Error(19u64)
+    }
+    if let Some(_) = room_law_part(mut relay, rounds, mut watcher, None) {
+        return Error(20u64)
+    }
     Ok(())
 }
 
@@ -490,19 +645,34 @@ fn room_law_watch() -> Result[(), u64] {
     let watching = RoomSession(low: 2u64, high: 0u64)
     let mut watcher = room_law_seed_desk(mut relay, rounds, watching, relay_to, relay_in, to_owner, (2u32, 65536u64, Watch))
     let mut member = room_law_seed_desk(mut relay, rounds, watched, relay_to, relay_in, to_owner, (2u32, 65536u64, Join))
-    let Some(joined) = room_law_part(mut relay, rounds, mut member, None) else { return Error(1u64) }
-    let Some(peer) = joined.you else { return Error(2u64) }
-    let Some(snapshot) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(3u64) }
+    let Some(joined) = room_law_part(mut relay, rounds, mut member, None) else {
+        return Error(1u64)
+    }
+    let Some(peer) = joined.you else {
+        return Error(2u64)
+    }
+    let Some(snapshot) = room_law_part(mut relay, rounds, mut watcher, None) else {
+        return Error(3u64)
+    }
     let payload = b"room message"
     room_owner_send(mut watcher, 0u32, Some(peer), payload) ?=> |_| 4u64
-    if let Ok(_) = channel.try_receive(relay_in) { return Error(5u64) }
-    if peer != 1u32 || list.len(joined.joined) != 1u64 || !snapshot.complete || !none(snapshot.you) ||
-        list.len(snapshot.joined) != 1u64 || snapshot.joined[0u64].0 != 1u32 { return Error(6u64) }
+    if let Ok(_) = channel.try_receive(relay_in) {
+        return Error(5u64)
+    }
+    if peer != 1u32 || list.len(joined.joined) != 1u64 || !snapshot.complete || !none(snapshot.you) || list.len(snapshot.joined) != 1u64 || snapshot.joined[0u64].0 != 1u32 {
+        return Error(6u64)
+    }
     room_owner_send(mut member, 0u32, None, payload) ?=> |_| 7u64
-    let Ok(take event) = channel.try_receive(relay_in) else { return Error(8u64) }
+    let Ok(take event) = channel.try_receive(relay_in) else {
+        return Error(8u64)
+    }
     room_relay_event(mut relay, rounds, take event)
-    let Some(delivered) = room_law_part(mut relay, rounds, mut watcher, None) else { return Error(9u64) }
-    if list.len(delivered.msgs) != 1u64 || delivered.msgs[0u64] != (1u32, false, payload) { return Error(10u64) }
+    let Some(delivered) = room_law_part(mut relay, rounds, mut watcher, None) else {
+        return Error(9u64)
+    }
+    if list.len(delivered.msgs) != 1u64 || delivered.msgs[0u64] != (1u32, false, payload) {
+        return Error(10u64)
+    }
     Ok(())
 }
 
@@ -522,40 +692,58 @@ fn message_delivered_under_full_state_churn() -> Result[(), u64] {
     }
     room_desk_flush(mut relay, rounds, id)
     room_owner_drain(mut receiver)
-    let Some(take roster) = room_owner_live(mut receiver) else { return Error(1u64) }
+    let Some(take roster) = room_owner_live(mut receiver) else {
+        return Error(1u64)
+    }
     let formats: std.codec.Codec[Frame] = std.codec.of()
     let initial = std.codec.decode(formats, roster.data) ?=> |_| 2u64
-    let Live(parts) = initial else { return Error(3u64) }
-    if list.len(parts) != 1u64 || list.len(parts[0u64].joined) != 9u64 || parts[0u64].you != Some(1u32) { return Error(4u64) }
+    let Live(parts) = initial else {
+        return Error(3u64)
+    }
+    if list.len(parts) != 1u64 || list.len(parts[0u64].joined) != 9u64 || parts[0u64].you != Some(1u32) {
+        return Error(4u64)
+    }
     // The other prefunded buffer is withheld as if a previous write was blocked.
     let held = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) -> Option[Box[RoomLiveBuffer]] {
         list.pop(mut desk.free)
     })
-    let Some(Some(take blocked)) = take held else { return Error(5u64) }
+    let Some(Some(take blocked)) = take held else {
+        return Error(5u64)
+    }
     let state = room_law_bytes(8188u64, 0x31u8)
     for i in 0u64 .. 8u64 {
         let who = senders[i].id
-        let carrier = box.new(RoomCarrier(room_slot: 0u8, instance: 1u64, admission: i + 2u64, publish_epoch: 0u32,
-            state: clone(state), state_pending: true, state_present: true, lost: 0u32, lost_under: 0u64, leave: false))
+        let carrier = box.new(RoomCarrier(room_slot: 0u8, instance: 1u64, admission: i + 2u64, publish_epoch: 0u32, state: clone(state), state_pending: true, state_present: true, lost: 0u32, lost_under: 0u64, leave: false))
         room_relay_event(mut relay, rounds, RoomPost(who, take carrier))
     }
     let payload = room_law_bytes(32764u64, 0x32u8)
-    let msg = box.new(RoomMsgBlock(instance: 1u64, admission: 2u64, member_epoch: 0u32, publish_epoch: 0u32, to: 0u32,
-        len: 32768u32, data: clone(payload)))
+    let msg = box.new(RoomMsgBlock(instance: 1u64, admission: 2u64, member_epoch: 0u32, publish_epoch: 0u32, to: 0u32, len: 32768u32, data: clone(payload)))
     room_relay_event(mut relay, rounds, RoomMessage(senders[0u64].id, take msg))
     room_desk_flush(mut relay, rounds, id)
-    if let Ok(_) = channel.try_receive(receiver.inbox) { return Error(6u64) }
+    if let Ok(_) = channel.try_receive(receiver.inbox) {
+        return Error(6u64)
+    }
     room_relay_event(mut relay, rounds, Back(id, take blocked))
     room_desk_flush(mut relay, rounds, id)
     room_owner_drain(mut receiver)
-    let Some(take filled) = room_owner_live(mut receiver) else { return Error(7u64) }
+    let Some(take filled) = room_owner_live(mut receiver) else {
+        return Error(7u64)
+    }
     let delivered = std.codec.decode(formats, filled.data) ?=> |_| 8u64
-    let Live(delivery) = delivered else { return Error(9u64) }
-    if list.len(delivery) != 1u64 { return Error(10u64) }
+    let Live(delivery) = delivered else {
+        return Error(9u64)
+    }
+    if list.len(delivery) != 1u64 {
+        return Error(10u64)
+    }
     let part = delivery[0u64]
-    if list.len(part.msgs) != 1u64 || list.len(part.states) != 3u64 { return Error(11u64) }
+    if list.len(part.msgs) != 1u64 || list.len(part.states) != 3u64 {
+        return Error(11u64)
+    }
     let (from, direct, message) = part.msgs[0u64]
-    if from != 2u32 || direct || message != payload || part.gap != 0u32 { return Error(12u64) }
+    if from != 2u32 || direct || message != payload || part.gap != 0u32 {
+        return Error(12u64)
+    }
     Ok(())
 }
 
@@ -566,10 +754,15 @@ fn room_law_flush_once(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSe
     let formats: std.codec.Codec[Frame] = std.codec.of()
     let decoded = std.codec.decode(formats, filled.data)
     room_relay_event(mut relay, rounds, Back(id, take filled))
-    let Ok(Live(parts)) = decoded else { return None }
+    let Ok(Live(parts)) = decoded else {
+        return None
+    }
     let mut states = 0u64
     let mut msgs = 0u64
-    for part in parts { states += list.len(part.states); msgs += list.len(part.msgs) }
+    for part in parts {
+        states += list.len(part.states);
+        msgs += list.len(part.msgs)
+    }
     Some((states, msgs))
 }
 
@@ -589,11 +782,12 @@ fn roster_diffs_served_under_sustained_messages() -> Result[(), u64] {
         let sender = room_law_seed_desk(mut relay, rounds, RoomSession(low: i, high: 0u64), relay_to, relay_in, to_owner, (9u32, 65536u64, Join))
         list.push(mut senders, take sender)
     }
-    if none(room_law_flush_once(mut relay, rounds, id, mut receiver)) { return Error(1u64) }
+    if none(room_law_flush_once(mut relay, rounds, id, mut receiver)) {
+        return Error(1u64)
+    }
     let state = room_law_bytes(8188u64, 0x31u8)
     for i in 0u64 .. 8u64 {
-        let carrier = box.new(RoomCarrier(room_slot: 0u8, instance: 1u64, admission: i + 2u64, publish_epoch: 0u32,
-            state: clone(state), state_pending: true, state_present: true, lost: 0u32, lost_under: 0u64, leave: false))
+        let carrier = box.new(RoomCarrier(room_slot: 0u8, instance: 1u64, admission: i + 2u64, publish_epoch: 0u32, state: clone(state), state_pending: true, state_present: true, lost: 0u32, lost_under: 0u64, leave: false))
         room_relay_event(mut relay, rounds, RoomPost(senders[i].id, take carrier))
     }
     let payload = room_law_bytes(32764u64, 0x32u8)
@@ -602,18 +796,23 @@ fn roster_diffs_served_under_sustained_messages() -> Result[(), u64] {
     let mut pending = 0u64
     for flush in 0u64 .. 3u64 {
         if pending == 0u64 {
-            let msg = box.new(RoomMsgBlock(instance: 1u64, admission: 2u64, member_epoch: 0u32, publish_epoch: 0u32, to: 0u32,
-                len: 32768u32, data: clone(payload)))
+            let msg = box.new(RoomMsgBlock(instance: 1u64, admission: 2u64, member_epoch: 0u32, publish_epoch: 0u32, to: 0u32, len: 32768u32, data: clone(payload)))
             room_relay_event(mut relay, rounds, RoomMessage(senders[0u64].id, take msg))
             pending = 1u64
         }
-        let Some((s, m)) = room_law_flush_once(mut relay, rounds, id, mut receiver) else { return Error(2u64 + flush) }
+        let Some((s, m)) = room_law_flush_once(mut relay, rounds, id, mut receiver) else {
+            return Error(2u64 + flush)
+        }
         states += s
         delivered += m
         pending -= m
-        if flush == 1u64 && states != 8u64 { return Error(10u64 + states) }
+        if flush == 1u64 && states != 8u64 {
+            return Error(10u64 + states)
+        }
     }
-    if delivered != 2u64 { return Error(20u64 + delivered) }
+    if delivered != 2u64 {
+        return Error(20u64 + delivered)
+    }
     Ok(())
 }
 
@@ -621,19 +820,27 @@ fn roster_diffs_served_under_sustained_messages() -> Result[(), u64] {
 fn room_decode_capacity_reports_loss(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] waits {
     let running = fixture.start(room_law_settings(c, random, tasks, net, true), 5000u64) ?=> |_| 1u64
     let sender = room_law_socket(tasks, net, c, random, running, true)
-    if none(room_law_you(sender)) { return Error(2u64) }
+    if none(room_law_you(sender)) {
+        return Error(2u64)
+    }
     let mut raw_value: Bytes = list.with_capacity(8192u64)
     std.codec.put_u32(2047u32, mut raw_value)
-    for _ in 0u64 .. 2047u64 { std.codec.put_u32(0u32, mut raw_value) }
+    for _ in 0u64 .. 2047u64 {
+        std.codec.put_u32(0u32, mut raw_value)
+    }
     wire_client.send_frame(sender, Set(0u32, Some(take raw_value)))
     let mut losses = 0u32
     for _ in 0u64 .. 6u64 {
         match wire_client.next(sender) {
             Ok(Live(parts)) => {
                 for part in parts {
-                    if part.sub == 0u32 { losses += part.lost }
+                    if part.sub == 0u32 {
+                        losses += part.lost
+                    }
                 }
-                if losses != 0u32 { break }
+                if losses != 0u32 {
+                    break
+                }
             },
             Ok(Batch(..)) => (),
             _ => return Error(3u64),
@@ -641,7 +848,9 @@ fn room_decode_capacity_reports_loss(c: Clock, random: Random, tasks: Tasks, net
     }
     let _ = wire_client.close(take sender)
     let _ = fixture.end(take running, 5000u64)
-    if losses != 1u32 { return Error(4u64) }
+    if losses != 1u32 {
+        return Error(4u64)
+    }
     Ok(())
 }
 
@@ -658,33 +867,43 @@ fn room_session_charge_covers_maximum_session() -> Result[(), u64] {
     let rounds = latest.new(arc.new(std.http.ReleaseRound(at: 0u64)))
     let message_max: u64 = int.widen(MESSAGE_MAX)
     let input = room_law_bytes(message_max - 4u64, 0x43u8)
-    let held = bound bytes (reserve + 32u64) { isolate(scoped fn() -> (RoomOwner, RoomCodecCheck) {
-        let link = RoomLink(relay: channel.sender(relay_to), round_read: latest.handle(rounds),
-            max_message: message_max, live_limit: int.widen(LIVE_MAX))
-        let mut owner = result.unwrap(room_owner(take link, RoomSession(low: 0u64, high: 0u64), to_owner))
-        for sub in 0u32 .. 8u32 {
-            let mut arg: Bytes = list.with_capacity(ROOM_ARGS_MAX)
-            list.fill(mut arg, ROOM_ARGS_MAX, 0x41u8)
-            let mut subject: Bytes = list.with_capacity(SUBJECT_MAX)
-            list.fill(mut subject, SUBJECT_MAX, 0x42u8)
-            let state_format: std.codec.Codec[Bytes] = std.codec.of()
-            let message_format: std.codec.Codec[Bytes] = std.codec.of()
-            let req = RoomRequest(key: RoomKey(entry: 0u32, arg: take arg),
-                codec: RoomCodecs(state: fn(raw: Bytes) -> RoomCodecCheck { decode_room_value(state_format, raw) },
-                    message: fn(raw: Bytes) -> RoomCodecCheck { decode_room_value(message_format, raw) }),
-                bounds: RoomBounds(peers: PEERS_MAX, state: STATE_MAX, message: MESSAGE_MAX))
-            result.unwrap(room_owner_join(mut owner, sub, 1u64, take req, store.Caller(issuer: 2u8, subject: take subject)))
-        }
-        let format: std.codec.Codec[Bytes] = std.codec.of()
-        (take owner, decode_room_value(format, input))
-    }) }
-    let Ok(Ok(Ok((take owner, largest)))) = take held else { return Error(1u64) }
-    if let ValidRoomValue = largest {} else { return Error(2u64) }
+    let held = bound bytes (reserve + 32u64) {
+        isolate(scoped fn() -> (RoomOwner, RoomCodecCheck) {
+            let link = RoomLink(relay: channel.sender(relay_to), round_read: latest.handle(rounds), max_message: message_max, live_limit: int.widen(LIVE_MAX))
+            let mut owner = result.unwrap(room_owner(take link, RoomSession(low: 0u64, high: 0u64), to_owner))
+            for sub in 0u32 .. 8u32 {
+                let mut arg: Bytes = list.with_capacity(ROOM_ARGS_MAX)
+                list.fill(mut arg, ROOM_ARGS_MAX, 0x41u8)
+                let mut subject: Bytes = list.with_capacity(SUBJECT_MAX)
+                list.fill(mut subject, SUBJECT_MAX, 0x42u8)
+                let state_format: std.codec.Codec[Bytes] = std.codec.of()
+                let message_format: std.codec.Codec[Bytes] = std.codec.of()
+                let req = RoomRequest(key: RoomKey(entry: 0u32, arg: take arg), codec: RoomCodecs(state: fn(raw: Bytes) -> RoomCodecCheck {
+                    decode_room_value(state_format, raw)
+                }, message: fn(raw: Bytes) -> RoomCodecCheck {
+                    decode_room_value(message_format, raw)
+                }), bounds: RoomBounds(peers: PEERS_MAX, state: STATE_MAX, message: MESSAGE_MAX))
+                result.unwrap(room_owner_join(mut owner, sub, 1u64, take req, store.Caller(issuer: 2u8, subject: take subject)))
+            }
+            let format: std.codec.Codec[Bytes] = std.codec.of()
+            (take owner, decode_room_value(format, input))
+        })
+    }
+    let Ok(Ok(Ok((take owner, largest)))) = take held else {
+        return Error(1u64)
+    }
+    if let ValidRoomValue = largest {} else {
+        return Error(2u64)
+    }
     let mut seats = 0u64
     while let Ok(event) = channel.try_receive(relay_in) {
-        if let Enter(..) = event { seats += 1u64 }
+        if let Enter(..) = event {
+            seats += 1u64
+        }
     }
     let _ = take owner
-    if seats != 8u64 { return Error(3u64) }
+    if seats != 8u64 {
+        return Error(3u64)
+    }
     Ok(())
 }

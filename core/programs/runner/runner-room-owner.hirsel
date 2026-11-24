@@ -1,4 +1,7 @@
-type RoomSession: key + send { low: u64, high: u64 }
+type RoomSession: key + send {
+    low: u64,
+    high: u64
+}
 
 type RoomLink: send {
     relay: Sender[RoomRelayIn],
@@ -7,14 +10,20 @@ type RoomLink: send {
     live_limit: u64,
 }
 
-resource type RoomLease: send { relay: Sender[RoomRelayIn], id: RoomSession, gone: Option[RoomGoneToken] } drop(lease) {
+resource type RoomLease: send {
+    relay: Sender[RoomRelayIn],
+    id: RoomSession,
+    gone: Option[RoomGoneToken]
+} drop(lease) {
     if let Some(token) = lease.gone {
         let _ = channel.try_send(lease.relay, RoomGone(lease.id, token))
     }
 }
 
 type RoomRequest: send {
-    key: RoomKey, codec: RoomCodecs, bounds: RoomBounds,
+    key: RoomKey,
+    codec: RoomCodecs,
+    bounds: RoomBounds,
 }
 
 type RoomPen: send {
@@ -51,7 +60,9 @@ fn room_owner(take link: RoomLink, id: RoomSession, owner: Sender[WireEvent]) ->
     let (out, inbox): (Sender[RoomOut], Receiver[RoomOut]) = channel.new(ROOM_OWNER_TOKENS)
     let grants = latest.new(arc.new(empty_room_grants()))
     let mut free: List[Box[RoomLiveBuffer]] = list.with_capacity(2u64)
-    for _ in 0u64 .. 2u64 { list.push(mut free, box.new(room_live_buffer(link.live_limit))) }
+    for _ in 0u64 .. 2u64 {
+        list.push(mut free, box.new(room_live_buffer(link.live_limit)))
+    }
     let mut seats: List[Option[Box[RoomSeat]]] = list.with_capacity(ROOMS_PER_SESSION)
     let mut pens: List[Option[Box[RoomPen]]] = list.with_capacity(ROOMS_PER_SESSION)
     for _ in 0u64 .. ROOMS_PER_SESSION {
@@ -61,22 +72,21 @@ fn room_owner(take link: RoomLink, id: RoomSession, owner: Sender[WireEvent]) ->
     let mut messages: List[Box[RoomMsgBlock]] = list.with_capacity(ROOM_MSG_BLOCKS)
     for _ in 0u64 .. ROOM_MSG_BLOCKS {
         let data: Bytes = list.with_capacity(link.max_message)
-        list.push(mut messages, box.new(RoomMsgBlock(instance: 0u64, admission: 0u64, member_epoch: 0u32,
-            publish_epoch: 0u32, to: 0u32, len: 0u32, data: take data)))
+        list.push(mut messages, box.new(RoomMsgBlock(instance: 0u64, admission: 0u64, member_epoch: 0u32, publish_epoch: 0u32, to: 0u32, len: 0u32, data: take data)))
     }
-    let desk = RoomDesk(session: id, grants: latest.handle(grants), out: take out, owner: channel.sender(owner),
-        wake: Some(RoomBell(marker: 0u8)), posted: false, ring: Some(room_ring()), free: take free, seats: take seats, cursor: 0u64)
+    let desk = RoomDesk(session: id, grants: latest.handle(grants), out: take out, owner: channel.sender(owner), wake: Some(RoomBell(marker: 0u8)), posted: false, ring: Some(room_ring()), free: take free, seats: take seats, cursor: 0u64)
     let lease = RoomLease(relay: channel.sender(link.relay), id, gone: Some(RoomGoneToken(marker: 0u8))) ?=> |(cap, _)| cap
     let fills: List[Box[RoomLiveBuffer]] = list.with_capacity(2u64)
     let _ = channel.try_send(link.relay, Desk(box.new(take desk)))
-    Ok(RoomOwner(link: take link, lease: take lease, grants: take grants, inbox: take inbox, id,
-        pens: take pens, messages: take messages, fills: take fills, marked: None))
+    Ok(RoomOwner(link: take link, lease: take lease, grants: take grants, inbox: take inbox, id, pens: take pens, messages: take messages, fills: take fills, marked: None))
 }
 
 fn room_owner_slot(owner: RoomOwner, sub: u32) -> Option[u64] {
     for i in 0u64 .. ROOMS_PER_SESSION {
         if let Some(pen) = owner.pens[i] {
-            if pen.sub == sub { return Some(i) }
+            if pen.sub == sub {
+                return Some(i)
+            }
         }
     }
     None
@@ -85,41 +95,51 @@ fn room_owner_slot(owner: RoomOwner, sub: u32) -> Option[u64] {
 fn room_owner_join(mut owner: RoomOwner, sub: u32, generation: u64, take req: RoomRequest, take caller: Caller) -> Result[(), Refusal] {
     let mut available = 0u64
     while available < ROOMS_PER_SESSION {
-        if let None = owner.pens[available] { break }
+        if let None = owner.pens[available] {
+            break
+        }
         available += 1u64
     }
-    if available == ROOMS_PER_SESSION { return Error(NotAllowed) }
+    if available == ROOMS_PER_SESSION {
+        return Error(NotAllowed)
+    }
     let RoomRequest(key: take key, codec: take codec, bounds) = take req
     let state_size: u64 = int.widen(bounds.state)
     let state: Bytes = list.with_capacity(state_size)
     let carried_state: Bytes = list.with_capacity(state_size)
     let room_slot: u8 = int.narrow(available)
-    let carrier = box.new(RoomCarrier(room_slot, instance: generation, admission: 0u64, publish_epoch: 0u32,
-        state: take carried_state, state_pending: false, state_present: false, lost: 0u32, lost_under: 0u64, leave: false))
+    let carrier = box.new(RoomCarrier(room_slot, instance: generation, admission: 0u64, publish_epoch: 0u32, state: take carried_state, state_pending: false, state_present: false, lost: 0u32, lost_under: 0u64, leave: false))
     let grant = RoomGrant(sub, instance: generation, grant: Denied, member_epoch: 0u32, publish_epoch: 0u32)
     let member = room_member(sub, take caller, grant, room_slot, bounds)
     let seat = box.new(RoomSeat(key: take key, member: take member, wait_order: 0u64, roster_slot: None, full_sent: false))
-    let pen = RoomPen(sub, instance: generation, membership: None, codec: take codec, bounds, carrier: Some(take carrier),
-        state: take state, state_pending: false, state_present: false, state_admission: 0u64, state_epoch: 0u32,
-        lost: 0u32, dirty: false, leaving: false, freed: false)
+    let pen = RoomPen(sub, instance: generation, membership: None, codec: take codec, bounds, carrier: Some(take carrier), state: take state, state_pending: false, state_present: false, state_admission: 0u64, state_epoch: 0u32, lost: 0u32, dirty: false, leaving: false, freed: false)
     let _ = list.set(mut owner.pens, available, Some(box.new(take pen)))
     let _ = channel.try_send(owner.link.relay, Enter(owner.id, take seat))
     Ok(())
 }
 
 fn room_post_pen(mut pen: RoomPen, id: RoomSession, relay: Sender[RoomRelayIn]) {
-    if !pen.dirty { return }
-    let Some(take reserved) = replace(mut pen.carrier, None) else { return }
+    if !pen.dirty {
+        return
+    }
+    let Some(take reserved) = replace(mut pen.carrier, None) else {
+        return
+    }
     let mut carrier = take reserved
     carrier.state_pending = pen.state_pending
     carrier.state_present = pen.state_present
     carrier.admission = pen.state_admission
     carrier.publish_epoch = pen.state_epoch
     carrier.lost = pen.lost
-    carrier.lost_under = match pen.membership { Some((_, adm)) => adm, None => 0u64 }
+    carrier.lost_under = match pen.membership {
+        Some((_, adm)) => adm,
+        None => 0u64
+    }
     carrier.leave = pen.leaving
     list.clear(mut carrier.state)
-    if pen.state_pending && pen.state_present { list.append(mut carrier.state, pen.state) }
+    if pen.state_pending && pen.state_present {
+        list.append(mut carrier.state, pen.state)
+    }
     pen.state_pending = false
     pen.lost = 0u32
     pen.dirty = false
@@ -127,7 +147,9 @@ fn room_post_pen(mut pen: RoomPen, id: RoomSession, relay: Sender[RoomRelayIn]) 
 }
 
 fn room_owner_post(mut owner: RoomOwner, i: u64) {
-    let Some(take reserved) = list.set(mut owner.pens, i, None) else { return }
+    let Some(take reserved) = list.set(mut owner.pens, i, None) else {
+        return
+    }
     let mut pen = take reserved
     room_post_pen(mut pen, owner.id, owner.link.relay)
     if !pen.leaving || !pen.freed || none(pen.carrier) {
@@ -136,7 +158,9 @@ fn room_owner_post(mut owner: RoomOwner, i: u64) {
 }
 
 fn room_owner_leave(mut owner: RoomOwner, sub: u32) {
-    let Some(i) = room_owner_slot(owner, sub) else { return }
+    let Some(i) = room_owner_slot(owner, sub) else {
+        return
+    }
     let mut pen = option.unwrap(list.set(mut owner.pens, i, None))
     if !pen.leaving {
         pen.leaving = true
@@ -149,7 +173,9 @@ fn room_owner_leave(mut owner: RoomOwner, sub: u32) {
 fn room_drop_stale_pen(mut pen: RoomPen, grant: Option[RoomGrant]) {
     if let Some((epoch, _)) = pen.membership {
         if let Some(entry) = grant {
-            if entry.instance == pen.instance && epoch == entry.member_epoch && !room_denied(entry.grant) { return }
+            if entry.instance == pen.instance && epoch == entry.member_epoch && !room_denied(entry.grant) {
+                return
+            }
         }
         pen.membership = None
         pen.state_pending = false
@@ -159,16 +185,24 @@ fn room_drop_stale_pen(mut pen: RoomPen, grant: Option[RoomGrant]) {
 
 fn room_owner_regrant(mut owner: RoomOwner) {
     let sample = read_room_grants(owner.link.round_read, owner.grants)
-    let Some((register, at)) = sample else { return }
+    let Some((register, at)) = sample else {
+        return
+    }
     let mark = (register.seq, register.round <= at)
-    if owner.marked == Some(mark) { return }
+    if owner.marked == Some(mark) {
+        return
+    }
     owner.marked = Some(mark)
     for i in 0u64 .. ROOMS_PER_SESSION {
-        let Some(take reserved) = list.set(mut owner.pens, i, None) else { continue }
+        let Some(take reserved) = list.set(mut owner.pens, i, None) else {
+            continue
+        }
         let mut pen = take reserved
         let grant = selected_room_grant(register, at, pen.sub)
         room_drop_stale_pen(mut pen, grant)
-        if !pen.leaving { pen.dirty = true }
+        if !pen.leaving {
+            pen.dirty = true
+        }
         let _ = list.set(mut owner.pens, i, Some(take pen))
         room_owner_post(mut owner, i)
     }
@@ -176,7 +210,9 @@ fn room_owner_regrant(mut owner: RoomOwner) {
 
 fn room_owner_drain(mut owner: RoomOwner) {
     for _ in 0u64 .. ROOM_OWNER_TOKENS {
-        let Ok(take next) = channel.try_receive(owner.inbox) else { return }
+        let Ok(take next) = channel.try_receive(owner.inbox) else {
+            return
+        }
         match take next {
             Fill(take buffer) => list.push(mut owner.fills, take buffer),
             Carried(take carrier) => {
@@ -217,15 +253,21 @@ fn room_owner_finish(take closing: RoomOwner) -> () waits {
     let mut owner = take closing
     room_owner_time_to_leave(mut owner)
     while let Ok(take notice) = channel.receive(owner.inbox) {
-        if let ClosedDesk(_) = notice { return }
+        if let ClosedDesk(_) = notice {
+            return
+        }
     }
 }
 
 fn room_pen_grant(owner: RoomOwner, pen: RoomPen) -> Option[(RoomGrant, u64)] {
-    if pen.leaving { return None }
+    if pen.leaving {
+        return None
+    }
     let current = room_grant_at(owner.link.round_read, owner.grants, pen.sub)?
     let (epoch, adm) = pen.membership?
-    if current.instance != pen.instance || current.member_epoch != epoch || !room_joined(current.grant) { return None }
+    if current.instance != pen.instance || current.member_epoch != epoch || !room_joined(current.grant) {
+        return None
+    }
     Some((current, adm))
 }
 
@@ -238,14 +280,22 @@ fn room_count_loss(mut owner: RoomOwner, index: u64) {
 }
 
 fn room_owner_set(mut owner: RoomOwner, sub: u32, state: Option[Bytes]) -> Result[(), u16] {
-    let Some(index) = room_owner_slot(owner, sub) else { return Ok(()) }
+    let Some(index) = room_owner_slot(owner, sub) else {
+        return Ok(())
+    }
     let (current, adm, validation) = {
         let pen = option.unwrap(list.get(owner.pens, index))
-        let Some(pending) = pen else { return Ok(()) }
-        let Some((grant, adm)) = room_pen_grant(owner, pending) else { return Ok(()) }
+        let Some(pending) = pen else {
+            return Ok(())
+        }
+        let Some((grant, adm)) = room_pen_grant(owner, pending) else {
+            return Ok(())
+        }
         let checked = match state {
             Some(value) => {
-                if list.len(value) > int.widen(pending.bounds.state) { return Error(1002u16) }
+                if list.len(value) > int.widen(pending.bounds.state) {
+                    return Error(1002u16)
+                }
                 (pending.codec.state)(value)
             },
             None => ValidRoomValue,
@@ -254,7 +304,10 @@ fn room_owner_set(mut owner: RoomOwner, sub: u32, state: Option[Bytes]) -> Resul
     }
     match validation {
         MalformedRoomValue => return Error(1002u16),
-        RoomDecodeCapacity => { room_count_loss(mut owner, index); return Ok(()) },
+        RoomDecodeCapacity => {
+            room_count_loss(mut owner, index);
+            return Ok(())
+        },
         ValidRoomValue => (),
     }
     let mut pen = option.unwrap(list.set(mut owner.pens, index, None))
@@ -274,18 +327,31 @@ fn room_owner_set(mut owner: RoomOwner, sub: u32, state: Option[Bytes]) -> Resul
 }
 
 fn room_owner_send(mut owner: RoomOwner, sub: u32, to: Option[u32], message: Bytes) -> Result[(), u16] {
-    let Some(index) = room_owner_slot(owner, sub) else { return Ok(()) }
-    if let Some(0u32) = to { return Ok(()) }
+    let Some(index) = room_owner_slot(owner, sub) else {
+        return Ok(())
+    }
+    if let Some(0u32) = to {
+        return Ok(())
+    }
     let (current, adm, validation) = {
         let pen = option.unwrap(list.get(owner.pens, index))
-        let Some(pending) = pen else { return Ok(()) }
-        let Some((grant, adm)) = room_pen_grant(owner, pending) else { return Ok(()) }
-        if list.len(message) > int.widen(pending.bounds.message) { return Error(1002u16) }
+        let Some(pending) = pen else {
+            return Ok(())
+        }
+        let Some((grant, adm)) = room_pen_grant(owner, pending) else {
+            return Ok(())
+        }
+        if list.len(message) > int.widen(pending.bounds.message) {
+            return Error(1002u16)
+        }
         (grant, adm, (pending.codec.message)(message))
     }
     match validation {
         MalformedRoomValue => return Error(1002u16),
-        RoomDecodeCapacity => { room_count_loss(mut owner, index); return Ok(()) },
+        RoomDecodeCapacity => {
+            room_count_loss(mut owner, index);
+            return Ok(())
+        },
         ValidRoomValue => (),
     }
     let Some(take token) = list.pop(mut owner.messages) else {
@@ -298,7 +364,10 @@ fn room_owner_send(mut owner: RoomOwner, sub: u32, to: Option[u32], message: Byt
     block.member_epoch = current.member_epoch
     block.publish_epoch = current.publish_epoch
     block.len = int.narrow(list.len(message))
-    block.to = match to { Some(target) => target, _ => 0u32 }
+    block.to = match to {
+        Some(target) => target,
+        _ => 0u32
+    }
     list.clear(mut block.data)
     list.append(mut block.data, message)
     let _ = channel.try_send(owner.link.relay, RoomMessage(owner.id, take block))
@@ -310,17 +379,26 @@ fn room_owner_send(mut owner: RoomOwner, sub: u32, to: Option[u32], message: Byt
 // token, so a waiter's Set or Send is dropped and never installed later. Only a
 // Set taken after this acceptance reaches the room.
 fn room_owner_accept(mut owner: RoomOwner, identity: RoomPartIdentity, register: RoomGrantSet, at: u64) -> bool {
-    let Some(index) = room_owner_slot(owner, identity.sub) else { return false }
-    let Some(take owned) = list.set(mut owner.pens, index, None) else { return false }
+    let Some(index) = room_owner_slot(owner, identity.sub) else {
+        return false
+    }
+    let Some(take owned) = list.set(mut owner.pens, index, None) else {
+        return false
+    }
     let mut pen = take owned
     let effective = selected_room_grant(register, at, identity.sub)
     room_drop_stale_pen(mut pen, effective)
     let mut accepted = false
     if let Some(grant) = effective {
         if !pen.leaving {
-            let mut adm = match pen.membership { Some((_, token)) => token, None => 0u64 }
+            let mut adm = match pen.membership {
+                Some((_, token)) => token,
+                None => 0u64
+            }
             accepted = room_accept_part(grant, identity, mut adm)
-            if accepted && adm != 0u64 { pen.membership = Some((grant.member_epoch, adm)) }
+            if accepted && adm != 0u64 {
+                pen.membership = Some((grant.member_epoch, adm))
+            }
         }
     }
     let _ = list.set(mut owner.pens, index, Some(take pen))
@@ -344,12 +422,10 @@ fn room_owner_live(mut owner: RoomOwner) -> Option[Box[RoomLiveBuffer]] {
 }
 
 fn copy_room_link(link: RoomLink) -> RoomLink {
-    RoomLink(relay: channel.sender(link.relay), round_read: latest.handle(link.round_read),
-        max_message: link.max_message, live_limit: link.live_limit)
+    RoomLink(relay: channel.sender(link.relay), round_read: latest.handle(link.round_read), max_message: link.max_message, live_limit: link.live_limit)
 }
 
-fn wire_room_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take request: RoomRequest,
-    take prepared: SubscriptionInput) -> Result[(), u16] {
+fn wire_room_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, sub: u32, take request: RoomRequest, take prepared: SubscriptionInput) -> Result[(), u16] {
     if let None = work.rooms {
         let Some(take link) = copy_configured_room_link(s.room_link) else {
             wire_end(mut s, mut work.output, sub, Refused(Overloaded))
@@ -358,8 +434,13 @@ fn wire_room_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: Wir
         let owner = wire_me(s)
         let id = RoomSession(low: list.word_le(s.anonymous.subject, 0u64), high: list.word_le(s.anonymous.subject, 8u64))
         match room_owner(take link, id, owner) {
-            Ok(take room_owner_state) => { work.rooms = Some(take room_owner_state) },
-            Error(cap) => { wire_end(mut s, mut work.output, sub, Refused(Budget(capacity_room(cap)))); return Ok(()) },
+            Ok(take room_owner_state) => {
+                work.rooms = Some(take room_owner_state)
+            },
+            Error(cap) => {
+                wire_end(mut s, mut work.output, sub, Refused(Budget(capacity_room(cap))));
+                return Ok(())
+            },
         }
     }
     let mut owned = option.unwrap(replace(mut work.rooms, None))
@@ -379,36 +460,66 @@ fn wire_room_subscribe[G: send, B: send](mut s: WireSession[G, B], mut work: Wir
 }
 
 fn wire_room_sync[G: send, B: send](s: WireSession[G, B], mut work: WireWork) {
-    let Some(take state) = replace(mut work.rooms, None) else { return }
+    let Some(take state) = replace(mut work.rooms, None) else {
+        return
+    }
     let mut rooms = take state
     for i in 0u64 .. ROOMS_PER_SESSION {
-        let sub = match rooms.pens[i] { Some(pen) => pen.sub, None => continue }
-        if let Some((pending, _)) = s.subscription { if pending == sub { continue } }
-        if let None = sub_generation(s.subs, sub) { room_owner_leave(mut rooms, sub) }
+        let sub = match rooms.pens[i] {
+            Some(pen) => pen.sub,
+            None => continue
+        }
+        if let Some((pending, _)) = s.subscription {
+            if pending == sub {
+                continue
+            }
+        }
+        if let None = sub_generation(s.subs, sub) {
+            room_owner_leave(mut rooms, sub)
+        }
     }
     work.rooms = Some(take rooms)
 }
 
 fn wire_room_state[G: send, B: send](s: WireSession[G, B], mut work: WireWork, sub: u32, value: Option[Bytes]) -> Result[(), u16] {
-    if let None = sub_generation(s.subs, sub) { return wire_check_room_input(s, sub) }
-    let Some(take previous) = replace(mut work.rooms, None) else { return Error(1002u16) }
+    if let None = sub_generation(s.subs, sub) {
+        return wire_check_room_input(s, sub)
+    }
+    let Some(take previous) = replace(mut work.rooms, None) else {
+        return Error(1002u16)
+    }
     let mut rooms = take previous
-    let handled = if let Some(_) = room_owner_slot(rooms, sub) { room_owner_set(mut rooms, sub, value) } else { Error(1002u16) }
+    let handled = if let Some(_) = room_owner_slot(rooms, sub) {
+        room_owner_set(mut rooms, sub, value)
+    } else {
+        Error(1002u16)
+    }
     work.rooms = Some(take rooms)
     handled
 }
 
 fn wire_room_message[G: send, B: send](s: WireSession[G, B], mut work: WireWork, sub: u32, to: Option[u32], value: Bytes) -> Result[(), u16] {
-    if let None = sub_generation(s.subs, sub) { return wire_check_room_input(s, sub) }
-    let Some(take previous) = replace(mut work.rooms, None) else { return Error(1002u16) }
+    if let None = sub_generation(s.subs, sub) {
+        return wire_check_room_input(s, sub)
+    }
+    let Some(take previous) = replace(mut work.rooms, None) else {
+        return Error(1002u16)
+    }
     let mut rooms = take previous
-    let handled = if let Some(_) = room_owner_slot(rooms, sub) { room_owner_send(mut rooms, sub, to, value) } else { Error(1002u16) }
+    let handled = if let Some(_) = room_owner_slot(rooms, sub) {
+        room_owner_send(mut rooms, sub, to, value)
+    } else {
+        Error(1002u16)
+    }
     work.rooms = Some(take rooms)
     handled
 }
 
 fn copy_configured_room_link(link: Option[RoomLink]) -> Option[RoomLink] {
-    match link { Some(ports) => Some(copy_room_link(ports)), None => None }
+    match link {
+        Some(ports) => Some(copy_room_link(ports)),
+        None => None
+    }
 }
 
 fn wire_room_drain(mut work: WireWork) {
@@ -421,17 +532,23 @@ fn wire_room_drain(mut work: WireWork) {
 }
 
 fn wire_room_bell(work: WireWork, token: RoomBell) {
-    if let Some(rooms) = work.rooms { room_owner_ring(rooms, token) }
+    if let Some(rooms) = work.rooms {
+        room_owner_ring(rooms, token)
+    }
 }
 
 fn wire_room_done(take work: WireWork) -> () waits {
     let WireWork(rooms: take owned, ..) = take work
-    if let Some(take rooms) = take owned { room_owner_finish(take rooms) }
+    if let Some(take rooms) = take owned {
+        room_owner_finish(take rooms)
+    }
 }
 
 fn wire_room_sent[C: send](mut st: WireLoop[C], take writer: Box[std.wsock.Writer], take buffer: Box[RoomLiveBuffer]) waits {
     st.writer = Some(take writer)
-    if let Some(take child) = replace(mut st.wh, None) { let _ = task.join(take child) }
+    if let Some(take child) = replace(mut st.wh, None) {
+        let _ = task.join(take child)
+    }
     st.busy = false
     st.room_pass = None
     if let Some(rooms) = st.work.rooms {
@@ -441,39 +558,62 @@ fn wire_room_sent[C: send](mut st: WireLoop[C], take writer: Box[std.wsock.Write
 
 fn wire_room_pass[C: send](mut st: WireLoop[C], mut service: Box[Service[C]]) -> Option[WireEvent] {
     let left = st.room_pass?
-    if left == 0u64 { return None }
+    if left == 0u64 {
+        return None
+    }
     match channel.try_receive(st.inbox) {
         Ok(take event) => {
             st.room_pass = Some(left - 1u64)
-            if wire_taken(mut st.run, 1u64 + st.c.q) { let _ = (st.apply_input)(mut service.context, mut st.work, WDrained) }
+            if wire_taken(mut st.run, 1u64 + st.c.q) {
+                let _ = (st.apply_input)(mut service.context, mut st.work, WDrained)
+            }
             Some(take event)
         },
-        _ => { st.room_pass = Some(0u64); Some(wire_event(RoomPassDone)) },
+        _ => {
+            st.room_pass = Some(0u64);
+            Some(wire_event(RoomPassDone))
+        },
     }
 }
 
 fn wire_room_offer[C: send](mut st: WireLoop[C]) -> bool waits {
-    let held = match st.work.rooms { Some(rooms) => list.len(rooms.fills), None => 0u64 }
-    if held == 0u64 { st.room_pass = None; return false }
+    let held = match st.work.rooms {
+        Some(rooms) => list.len(rooms.fills),
+        None => 0u64
+    }
+    if held == 0u64 {
+        st.room_pass = None;
+        return false
+    }
     if st.room_pass != Some(0u64) {
-        if let None = st.room_pass { st.room_pass = Some(1u64 + st.c.q); return true }
+        if let None = st.room_pass {
+            st.room_pass = Some(1u64 + st.c.q);
+            return true
+        }
         return false
     }
     let mut owner = option.unwrap(replace(mut st.work.rooms, None))
     let selected = room_owner_live(mut owner)
     st.work.rooms = Some(take owner)
-    let Some(take live) = take selected else { st.room_pass = None; return false }
+    let Some(take live) = take selected else {
+        st.room_pass = None;
+        return false
+    }
     let mut framed = take live
     room_live_frame(mut framed)
     let writer = option.unwrap(replace(mut st.writer, None))
     st.busy = true
     let end = int.saturating_add(host.mono_ns(st.clock), std.wsock.MESSAGE_NS)
-    let job = WireWrite(live: Some(take framed), cursor: 0u64, writer: take writer,
-        to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket,
-        end, can_close: true, close: false, report: None)
+    let job = WireWrite(live: Some(take framed), cursor: 0u64, writer: take writer, to: channel.sender(st.to), out: st.out, clock: st.clock, config: st.c.socket, end, can_close: true, close: false, report: None)
     match wire_start(st.tasks, take job) {
-        Ok(take child) => { st.wh = Some(take child); false },
-        Error(take event) => { st.done = Some(wire_event(take event)); true },
+        Ok(take child) => {
+            st.wh = Some(take child);
+            false
+        },
+        Error(take event) => {
+            st.done = Some(wire_event(take event));
+            true
+        },
     }
 }
 

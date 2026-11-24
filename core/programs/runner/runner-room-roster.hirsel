@@ -26,9 +26,7 @@ fn room_member(sub: u32, take caller: Caller, grant: RoomGrant, room_slot: u8, b
     let mut changed: List[u8] = list.with_capacity(peers)
     list.fill(mut told, peers, 0u32)
     list.fill(mut changed, peers, 0u8)
-    RoomMember(sub, caller: take caller, grant, peer: 0u32, admission: 0u64, room_slot,
-        state: take state_bytes, state_present: false, told: take told, changed: take changed,
-        cursor: 0u64, state_turn: false, complete: false, gap: 0u32, lost: 0u32)
+    RoomMember(sub, caller: take caller, grant, peer: 0u32, admission: 0u64, room_slot, state: take state_bytes, state_present: false, told: take told, changed: take changed, cursor: 0u64, state_turn: false, complete: false, gap: 0u32, lost: 0u32)
 }
 
 fn room_install_member(mut member: RoomMember, peer: u32, admission: u64) {
@@ -50,8 +48,7 @@ fn same_room_membership(a: RoomGrant, b: RoomGrant) -> bool {
 }
 
 fn room_accept_state(member: RoomMember, effective: RoomGrant, admission: u64, publish_epoch: u32) -> bool {
-    member.admission != 0u64 && member.admission == admission && same_room_membership(member.grant, effective) &&
-        effective.publish_epoch == publish_epoch && room_joined(effective.grant)
+    member.admission != 0u64 && member.admission == admission && same_room_membership(member.grant, effective) && effective.publish_epoch == publish_epoch && room_joined(effective.grant)
 }
 
 fn room_update_state(mut member: RoomMember, value: Option[View[Bytes]]) {
@@ -77,8 +74,11 @@ type RoomPartIdentity: key + send {
 }
 
 fn room_accept_part(effective: RoomGrant, part: RoomPartIdentity, mut held_admission: u64) -> bool {
-    if effective.sub != part.sub || effective.instance != part.instance ||
-        effective.member_epoch != part.member_epoch || room_denied(effective.grant) { return false }
-    if held_admission == 0u64 { held_admission = part.admission }
+    if effective.sub != part.sub || effective.instance != part.instance || effective.member_epoch != part.member_epoch || room_denied(effective.grant) {
+        return false
+    }
+    if held_admission == 0u64 {
+        held_admission = part.admission
+    }
     held_admission == part.admission
 }

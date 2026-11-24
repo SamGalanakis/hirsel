@@ -1,20 +1,25 @@
 const ROOM_MSG_BLOCKS: u64 = 4u64
+
 const ROOM_RELAY_TOKENS: u64 = 2u64 * ROOMS_PER_SESSION + ROOM_MSG_BLOCKS + 5u64
+
 const ROOM_OWNER_TOKENS: u64 = 2u64 * ROOMS_PER_SESSION + ROOM_MSG_BLOCKS + 3u64
 
-type RoomKey: key + send { entry: u32, arg: Bytes }
+type RoomKey: key + send {
+    entry: u32,
+    arg: Bytes
+}
 
-type RoomRelayIn: send =
-    Desk(Box[RoomDesk]) | Enter(RoomSession, Box[RoomSeat]) | RoomPost(RoomSession, Box[RoomCarrier])
-    | Back(RoomSession, Box[RoomLiveBuffer]) | RoomMessage(RoomSession, Box[RoomMsgBlock])
-    | Ring(RoomSession, RoomBell) | RoomGone(RoomSession, RoomGoneToken)
+type RoomRelayIn: send = Desk(Box[RoomDesk]) | Enter(RoomSession, Box[RoomSeat]) | RoomPost(RoomSession, Box[RoomCarrier]) | Back(RoomSession, Box[RoomLiveBuffer]) | RoomMessage(RoomSession, Box[RoomMsgBlock]) | Ring(RoomSession, RoomBell) | RoomGone(RoomSession, RoomGoneToken)
 
-type RoomOut: send =
-    Fill(Box[RoomLiveBuffer]) | Carried(Box[RoomCarrier]) | Spent(Box[RoomMsgBlock])
-    | Freed(Box[RoomSeat]) | ClosedDesk(Box[RoomDesk])
+type RoomOut: send = Fill(Box[RoomLiveBuffer]) | Carried(Box[RoomCarrier]) | Spent(Box[RoomMsgBlock]) | Freed(Box[RoomSeat]) | ClosedDesk(Box[RoomDesk])
 
-type RoomBell: send { marker: u8 }
-type RoomGoneToken: send { marker: u8 }
+type RoomBell: send {
+    marker: u8
+}
+
+type RoomGoneToken: send {
+    marker: u8
+}
 
 type RoomSeat: send {
     key: RoomKey,
@@ -23,15 +28,27 @@ type RoomSeat: send {
     roster_slot: Option[u64],
     full_sent: bool,
 }
+
 type RoomCarrier: send {
-    room_slot: u8, instance: u64, admission: u64, publish_epoch: u32,
-    state: Bytes, state_pending: bool, state_present: bool,
-    lost: u32, lost_under: u64, leave: bool,
+    room_slot: u8,
+    instance: u64,
+    admission: u64,
+    publish_epoch: u32,
+    state: Bytes,
+    state_pending: bool,
+    state_present: bool,
+    lost: u32,
+    lost_under: u64,
+    leave: bool,
 }
 
 type RoomMsgBlock: send {
-    instance: u64, admission: u64, member_epoch: u32, publish_epoch: u32,
-    to: u32, len: u32,
+    instance: u64,
+    admission: u64,
+    member_epoch: u32,
+    publish_epoch: u32,
+    to: u32,
+    len: u32,
     data: Bytes,
 }
 
@@ -48,7 +65,11 @@ type RoomDesk: send {
     cursor: u64,
 }
 
-type RoomPeer: send { session: RoomSession, seat: u8 }
+type RoomPeer: send {
+    session: RoomSession,
+    seat: u8
+}
+
 type RoomRoster {
     key: RoomKey,
     peers: List[Option[RoomPeer]],
@@ -75,10 +96,16 @@ fn room_relay_state(random: Random, room_bytes: u64, owners: u64) -> RoomRelay {
 }
 
 fn notify_room_owner(mut desk: RoomDesk) {
-    let Some(bell) = replace(mut desk.wake, None) else { return }
+    let Some(bell) = replace(mut desk.wake, None) else {
+        return
+    }
     match channel.try_send(desk.owner, wire_event(BellRoom(bell))) {
-        Ok(()) => { desk.posted = false },
-        Error(Full(WireEvent(e: BellRoom(returned)))) => { desk.wake = Some(returned) },
+        Ok(()) => {
+            desk.posted = false
+        },
+        Error(Full(WireEvent(e: BellRoom(returned)))) => {
+            desk.wake = Some(returned)
+        },
         _ => (),
     }
 }
@@ -92,30 +119,37 @@ fn room_out(mut desk: RoomDesk, take event: RoomOut) {
 
 fn find_room(rooms: List[RoomRoster], sought: RoomKey) -> Option[u64] {
     for i in 0u64 .. list.len(rooms) {
-        if rooms[i].key == sought { return Some(i) }
+        if rooms[i].key == sought {
+            return Some(i)
+        }
     }
     None
 }
 
 fn room_roster_bytes(args: u64, peers: u64) -> u64 {
     // list growth may hold both old and new roster slots while it moves them.
-    3u64 * bytes[RoomRoster] + option.unwrap(charge.seq(bytes[Option[RoomPeer]], peers)) +
-        option.unwrap(charge.seq(bytes[u8], args))
+    3u64 * bytes[RoomRoster] + option.unwrap(charge.seq(bytes[Option[RoomPeer]], peers)) + option.unwrap(charge.seq(bytes[u8], args))
 }
 
 fn draw_room_incarnation(random: Random) -> Inline[u8, 16] {
     let mut raw: Bytes = list.with_capacity(16u64)
     host.random(random, mut raw)
-    let mut incarnation: Inline[u8, 16] = [0u8; 16]
-    for i in 0u64 .. 16u64 { incarnation[i] = raw[i] }
+    let mut incarnation: Inline[u8, 16] =[0u8; 16]
+    for i in 0u64 .. 16u64 {
+        incarnation[i] = raw[i]
+    }
     incarnation
 }
 
 fn make_room_roster(mut relay: RoomRelay, take key: RoomKey, peers: u64) -> Option[u64] {
     let charge = room_roster_bytes(list.len(key.arg), peers)
-    if charge > relay.room_bytes - relay.used_room_bytes { return None }
+    if charge > relay.room_bytes - relay.used_room_bytes {
+        return None
+    }
     let mut members: List[Option[RoomPeer]] = list.with_capacity(peers)
-    for _ in 0u64 .. peers { list.push(mut members, None) }
+    for _ in 0u64 .. peers {
+        list.push(mut members, None)
+    }
     let index = list.len(relay.rooms)
     let incarnation = draw_room_incarnation(relay.random)
     list.push(mut relay.rooms, RoomRoster(key: take key, peers: take members, incarnation, revision: 1u64, next_peer: 1u64, count: 0u64, watching: 0u64))
@@ -124,9 +158,13 @@ fn make_room_roster(mut relay: RoomRelay, take key: RoomKey, peers: u64) -> Opti
 }
 
 fn first_room_vacancy(room_index: RoomRoster) -> Option[u64] {
-    if (room_index.count != 0u64 || room_index.watching != 0u64) && room_index.next_peer >= 4294967295u64 { return None }
+    if (room_index.count != 0u64 || room_index.watching != 0u64) && room_index.next_peer >= 4294967295u64 {
+        return None
+    }
     for i in 0u64 .. list.len(room_index.peers) {
-        if let None = room_index.peers[i] { return Some(i) }
+        if let None = room_index.peers[i] {
+            return Some(i)
+        }
     }
     None
 }
@@ -134,7 +172,13 @@ fn first_room_vacancy(room_index: RoomRoster) -> Option[u64] {
 fn room_desk_slot(relay: RoomRelay, id: RoomSession, position: u8) -> Option[View[RoomSeat]] in relay {
     let desk = map.get(relay.desks, id)?
     let at: u64 = int.widen(position)
-    match desk.seats[at] { Some(seat) => { let borrowed: View[RoomSeat] = seat; Some(borrowed) }, None => None }
+    match desk.seats[at] {
+        Some(seat) => {
+            let borrowed: View[RoomSeat] = seat;
+            Some(borrowed)
+        },
+        None => None
+    }
 }
 
 fn room_remove_member(mut relay: RoomRelay, index: u64, position: Option[u64]) {
@@ -149,7 +193,9 @@ fn room_remove_member(mut relay: RoomRelay, index: u64, position: Option[u64]) {
 }
 
 fn room_watching(relay: RoomRelay, room_index: u64, id: RoomSession, index: u8) -> bool {
-    let Some(seat) = room_desk_slot(relay, id, index) else { return false }
+    let Some(seat) = room_desk_slot(relay, id, index) else {
+        return false
+    }
     seat.member.admission != 0u64 && seat.member.peer == 0u32 && seat.key == relay.rooms[room_index].key
 }
 
@@ -170,7 +216,9 @@ fn room_mark_changed(mut relay: RoomRelay, room_index: u64, peer_index: u64) {
             room_mark_seat(mut relay, peer.session, int.widen(peer.seat), peer_index)
         }
     }
-    if relay.rooms[room_index].watching == 0u64 { return }
+    if relay.rooms[room_index].watching == 0u64 {
+        return
+    }
     for i in 0u64 .. list.len(relay.owners) {
         let id = relay.owners[i]
         for at in 0u64 .. ROOMS_PER_SESSION {
@@ -183,20 +231,24 @@ fn room_mark_changed(mut relay: RoomRelay, room_index: u64, peer_index: u64) {
 
 fn room_reconcile_seat(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession, index: u8) {
     let (effective, applied, admission, peer_index, room_index) = {
-        let Some(desk) = map.get(relay.desks, id) else { return }
-        let Some(seat) = room_desk_slot(relay, id, index) else { return }
-        (room_grant_at(rounds, desk.grants, seat.member.sub), seat.member.grant,
-            seat.member.admission, seat.roster_slot, find_room(relay.rooms, seat.key))
+        let Some(desk) = map.get(relay.desks, id) else {
+            return
+        }
+        let Some(seat) = room_desk_slot(relay, id, index) else {
+            return
+        }
+        (room_grant_at(rounds, desk.grants, seat.member.sub), seat.member.grant, seat.member.admission, seat.roster_slot, find_room(relay.rooms, seat.key))
     }
     let next = match effective {
         Some(entry) if entry.instance == applied.instance => entry,
-        _ => RoomGrant(sub: applied.sub, instance: applied.instance, grant: Denied,
-            member_epoch: applied.member_epoch, publish_epoch: applied.publish_epoch),
+        _ => RoomGrant(sub: applied.sub, instance: applied.instance, grant: Denied, member_epoch: applied.member_epoch, publish_epoch: applied.publish_epoch),
     }
     let same = same_room_membership(applied, next)
     let at: u64 = int.widen(index)
     let _ = map.update(mut relay.desks, id, scoped fn(mut held: Box[RoomDesk]) {
-        let Some(take opaque_seat) = list.set(mut held.seats, at, None) else { return }
+        let Some(take opaque_seat) = list.set(mut held.seats, at, None) else {
+            return
+        }
         let mut member_seat = take opaque_seat
         if !same {
             member_seat.roster_slot = None
@@ -212,34 +264,51 @@ fn room_reconcile_seat(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSe
         let _ = list.set(mut held.seats, at, Some(take member_seat))
     })
     if !same && admission != 0u64 {
-        if let Some(roster) = room_index { room_remove_member(mut relay, roster, peer_index) }
+        if let Some(roster) = room_index {
+            room_remove_member(mut relay, roster, peer_index)
+        }
     }
 }
 
 fn room_admit_seat(mut relay: RoomRelay, id: RoomSession, index: u8) -> bool {
     let (found, take allocate, peers, joining) = {
-        let Some(seat) = room_desk_slot(relay, id, index) else { return false }
-        if room_denied(seat.member.grant.grant) || seat.member.admission != 0u64 { return false }
+        let Some(seat) = room_desk_slot(relay, id, index) else {
+            return false
+        }
+        if room_denied(seat.member.grant.grant) || seat.member.admission != 0u64 {
+            return false
+        }
         let found = find_room(relay.rooms, seat.key)
         let peers = list.len(seat.member.told)
         let alloc_key: Option[RoomKey] = if let None = found {
-            if room_roster_bytes(list.len(seat.key.arg), peers) > relay.room_bytes - relay.used_room_bytes { return false }
+            if room_roster_bytes(list.len(seat.key.arg), peers) > relay.room_bytes - relay.used_room_bytes {
+                return false
+            }
             Some(clone(seat.key))
-        } else { None }
+        } else {
+            None
+        }
         (found, take alloc_key, peers, room_joined(seat.member.grant.grant))
     }
     let roster = match take allocate {
         Some(take key) => make_room_roster(mut relay, take key, peers),
         None => found,
     }
-    let Some(room_index) = roster else { return false }
+    let Some(room_index) = roster else {
+        return false
+    }
     let position: Option[u64] = if joining {
-        let Some(peer_index) = first_room_vacancy(relay.rooms[room_index]) else { return false }
+        let Some(peer_index) = first_room_vacancy(relay.rooms[room_index]) else {
+            return false
+        }
         Some(peer_index)
-    } else { None }
-    let Some(next) = int.checked_add(relay.next_admission, 1u64) else { return false }
-    if relay.rooms[room_index].count == 0u64 && relay.rooms[room_index].watching == 0u64 &&
-        relay.rooms[room_index].next_peer != 1u64 {
+    } else {
+        None
+    }
+    let Some(next) = int.checked_add(relay.next_admission, 1u64) else {
+        return false
+    }
+    if relay.rooms[room_index].count == 0u64 && relay.rooms[room_index].watching == 0u64 && relay.rooms[room_index].next_peer != 1u64 {
         relay.rooms[room_index].incarnation = draw_room_incarnation(relay.random)
         relay.rooms[room_index].next_peer = 1u64
         relay.rooms[room_index].revision = 1u64
@@ -259,14 +328,18 @@ fn room_admit_seat(mut relay: RoomRelay, id: RoomSession, index: u8) -> bool {
     }
     let at: u64 = int.widen(index)
     let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
-        let Some(take this) = list.set(mut desk.seats, at, None) else { return }
+        let Some(take this) = list.set(mut desk.seats, at, None) else {
+            return
+        }
         let mut active = take this
         active.roster_slot = position
         active.wait_order = 0u64
         room_install_member(mut active.member, peer, adm)
         let _ = list.set(mut desk.seats, at, Some(take active))
     })
-    if let Some(peer_index) = position { room_mark_changed(mut relay, room_index, peer_index) }
+    if let Some(peer_index) = position {
+        room_mark_changed(mut relay, room_index, peer_index)
+    }
     true
 }
 
@@ -299,7 +372,9 @@ fn room_leave_seat(mut relay: RoomRelay, id: RoomSession, index: u8) {
     })
     if let Some(take seat) = take removed {
         if seat.member.admission != 0u64 {
-            if let Some(roster) = find_room(relay.rooms, seat.key) { room_remove_member(mut relay, roster, seat.roster_slot) }
+            if let Some(roster) = find_room(relay.rooms, seat.key) {
+                room_remove_member(mut relay, roster, seat.roster_slot)
+            }
         }
         let mut seat_to_return = Some(take seat)
         let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
@@ -313,35 +388,50 @@ fn room_relay_state_update(mut relay: RoomRelay, id: RoomSession, carrier: RoomC
     let at: u64 = int.widen(carrier.room_slot)
     let mut dirty: Option[(u64, u64)] = None
     let selected = {
-        let Some(seat) = room_desk_slot(relay, id, carrier.room_slot) else { return }
+        let Some(seat) = room_desk_slot(relay, id, carrier.room_slot) else {
+            return
+        }
         find_room(relay.rooms, seat.key)
     }
     let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
-        let Some(take parked) = list.set(mut desk.seats, at, None) else { return }
+        let Some(take parked) = list.set(mut desk.seats, at, None) else {
+            return
+        }
         let mut member_seat = take parked
         let effective = member_seat.member.grant
         if carrier.instance == effective.instance {
             room_accept_loss(mut member_seat.member, carrier.lost_under, carrier.lost)
             if carrier.state_pending && room_accept_state(member_seat.member, effective, carrier.admission, carrier.publish_epoch) {
-                let state: Option[View[Bytes]] = if carrier.state_present { Some(view carrier.state) } else { None }
+                let state: Option[View[Bytes]] = if carrier.state_present {
+                    Some(view carrier.state)
+                } else {
+                    None
+                }
                 room_update_state(mut member_seat.member, state)
                 if let Some(room_index) = selected {
-                    if let Some(position) = member_seat.roster_slot { dirty = Some((room_index, position)) }
+                    if let Some(position) = member_seat.roster_slot {
+                        dirty = Some((room_index, position))
+                    }
                 }
             }
         }
         let _ = list.set(mut desk.seats, at, Some(take member_seat))
     })
-    if let Some((room_index, position)) = dirty { room_mark_changed(mut relay, room_index, position) }
+    if let Some((room_index, position)) = dirty {
+        room_mark_changed(mut relay, room_index, position)
+    }
 }
 
 fn locate_message_sender(relay: RoomRelay, id: RoomSession, block: RoomMsgBlock) -> Option[(u8, u64, u64, u32)] {
     let desk = map.get(relay.desks, id)?
     for i in 0u64 .. ROOMS_PER_SESSION {
-        let Some(seat) = desk.seats[i] else { continue }
+        let Some(seat) = desk.seats[i] else {
+            continue
+        }
         let grant = seat.member.grant
-        if block.instance != grant.instance || block.admission != seat.member.admission || block.admission == 0u64 ||
-            block.member_epoch != grant.member_epoch || !room_joined(grant.grant) { continue }
+        if block.instance != grant.instance || block.admission != seat.member.admission || block.admission == 0u64 || block.member_epoch != grant.member_epoch || !room_joined(grant.grant) {
+            continue
+        }
         let peer_index = seat.roster_slot?
         let room_index = find_room(relay.rooms, seat.key)?
         return Some((int.narrow(i), room_index, peer_index, seat.member.peer))
@@ -355,17 +445,21 @@ fn relay_message_target(relay: RoomRelay, rounds: Latest[RoundAt], from: RoomPee
     let send_seat = room_desk_slot(relay, from.session, from.seat)?
     let recv_seat = room_desk_slot(relay, to.session, to.seat)?
     let (accepted, recipient_grant) = room_grant_pair(rounds, sender.grants, send_seat.member.sub, recipient.grants, recv_seat.member.sub)?
-    let targets_peer = if block.to == 0u32 { recv_seat.member.peer != send_seat.member.peer }
-        else { recv_seat.member.peer == block.to }
-    if !targets_peer || !same_room_membership(accepted, send_seat.member.grant) ||
-        !same_room_membership(recipient_grant, recv_seat.member.grant) ||
-        !room_joined(accepted.grant) { return None }
+    let targets_peer = if block.to == 0u32 {
+        recv_seat.member.peer != send_seat.member.peer
+    } else {
+        recv_seat.member.peer == block.to
+    }
+    if !targets_peer || !same_room_membership(accepted, send_seat.member.grant) || !same_room_membership(recipient_grant, recv_seat.member.grant) || !room_joined(accepted.grant) {
+        return None
+    }
     Some(recv_seat.member.admission)
 }
 
-fn room_deliver_message(mut relay: RoomRelay, rounds: Latest[RoundAt], from: RoomPeer, to: RoomPeer,
-    from_peer: u32, from_slot: u16, block: RoomMsgBlock) {
-    let Some(adm) = relay_message_target(relay, rounds, from, to, block) else { return }
+fn room_deliver_message(mut relay: RoomRelay, rounds: Latest[RoundAt], from: RoomPeer, to: RoomPeer, from_peer: u32, from_slot: u16, block: RoomMsgBlock) {
+    let Some(adm) = relay_message_target(relay, rounds, from, to, block) else {
+        return
+    }
     let _ = map.update(mut relay.desks, to.session, scoped fn(mut desk: Box[RoomDesk]) {
         let width: u64 = int.widen(block.len)
         let payload = list.slice(block.data, 0u64, width)
@@ -383,7 +477,9 @@ fn room_deliver_message(mut relay: RoomRelay, rounds: Latest[RoundAt], from: Roo
 }
 
 fn room_relay_message(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession, block: RoomMsgBlock) {
-    let Some((sender, room_index, peer_index, from_peer)) = locate_message_sender(relay, id, block) else { return }
+    let Some((sender, room_index, peer_index, from_peer)) = locate_message_sender(relay, id, block) else {
+        return
+    }
     let from = RoomPeer(session: id, seat: sender)
     let from_slot: u16 = int.narrow(peer_index)
     for i in 0u64 .. list.len(relay.rooms[room_index].peers) {
@@ -391,7 +487,9 @@ fn room_relay_message(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSes
             room_deliver_message(mut relay, rounds, from, to, from_peer, from_slot, block)
         }
     }
-    if block.to != 0u32 || relay.rooms[room_index].watching == 0u64 { return }
+    if block.to != 0u32 || relay.rooms[room_index].watching == 0u64 {
+        return
+    }
     for i in 0u64 .. list.len(relay.owners) {
         let watcher = relay.owners[i]
         for at in 0u64 .. ROOMS_PER_SESSION {
@@ -409,13 +507,20 @@ fn room_ready_waiter(relay: RoomRelay) -> Option[(RoomSession, u8)] {
     for id in relay.owners {
         for i in 0u64 .. ROOMS_PER_SESSION {
             let index: u8 = int.narrow(i)
-            let Some(seat) = room_desk_slot(relay, id, index) else { continue }
-            if seat.wait_order == 0u64 || seat.wait_order >= oldest || room_denied(seat.member.grant.grant) { continue }
+            let Some(seat) = room_desk_slot(relay, id, index) else {
+                continue
+            }
+            if seat.wait_order == 0u64 || seat.wait_order >= oldest || room_denied(seat.member.grant.grant) {
+                continue
+            }
             let ready = match find_room(relay.rooms, seat.key) {
                 Some(room_index) => !room_joined(seat.member.grant.grant) || !none(first_room_vacancy(relay.rooms[room_index])),
                 None => room_roster_bytes(list.len(seat.key.arg), list.len(seat.member.told)) <= relay.room_bytes - relay.used_room_bytes,
             }
-            if ready { oldest = seat.wait_order; chosen = Some((id, index)) }
+            if ready {
+                oldest = seat.wait_order;
+                chosen = Some((id, index))
+            }
         }
     }
     chosen
@@ -425,7 +530,9 @@ fn room_has_waiter(relay: RoomRelay, key: RoomKey) -> bool {
     for id in relay.owners {
         for i in 0u64 .. ROOMS_PER_SESSION {
             if let Some(seat) = room_desk_slot(relay, id, int.narrow(i)) {
-                if seat.wait_order != 0u64 && seat.key == key { return true }
+                if seat.wait_order != 0u64 && seat.key == key {
+                    return true
+                }
             }
         }
     }
@@ -447,7 +554,9 @@ fn room_collect_empty(mut relay: RoomRelay) {
 fn room_select_waiters(mut relay: RoomRelay) {
     room_collect_empty(mut relay)
     while let Some((who, position)) = room_ready_waiter(relay) {
-        if !room_admit_seat(mut relay, who, position) { return }
+        if !room_admit_seat(mut relay, who, position) {
+            return
+        }
     }
 }
 
@@ -457,7 +566,9 @@ fn rooms_owned(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSession) {
 }
 
 fn room_drop_desk(mut relay: RoomRelay, id: RoomSession) {
-    for i in 0u64 .. ROOMS_PER_SESSION { room_leave_seat(mut relay, id, int.narrow(i)) }
+    for i in 0u64 .. ROOMS_PER_SESSION {
+        room_leave_seat(mut relay, id, int.narrow(i))
+    }
     for i in 0u64 .. list.len(relay.owners) {
         if relay.owners[i] == id {
             let _ = list.remove(mut relay.owners, i)
@@ -488,8 +599,11 @@ fn room_relay_event(mut relay: RoomRelay, rounds: Latest[RoundAt], take event: R
         },
         RoomPost(id, take input) => {
             room_refresh(mut relay, rounds, id)
-            if input.leave { room_leave_seat(mut relay, id, input.room_slot) }
-            else { room_relay_state_update(mut relay, id, input) }
+            if input.leave {
+                room_leave_seat(mut relay, id, input.room_slot)
+            } else {
+                room_relay_state_update(mut relay, id, input)
+            }
             let mut returned = Some(take input)
             let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
                 room_out(mut desk, Carried(option.unwrap(replace(mut returned, None))))
@@ -515,7 +629,9 @@ fn room_relay_event(mut relay: RoomRelay, rounds: Latest[RoundAt], take event: R
         Ring(id, bell) => {
             let _ = map.update(mut relay.desks, id, scoped fn(mut desk: Box[RoomDesk]) {
                 desk.wake = Some(bell)
-                if desk.posted { notify_room_owner(mut desk) }
+                if desk.posted {
+                    notify_room_owner(mut desk)
+                }
             })
             rooms_owned(mut relay, rounds, id)
         },
@@ -527,7 +643,11 @@ fn room_relay_event(mut relay: RoomRelay, rounds: Latest[RoundAt], take event: R
 }
 
 type RoomRelaySeed: send {
-    inbox: Receiver[RoomRelayIn], rounds: Latest[RoundAt], random: Random, room_bytes: u64, max_sessions: u64,
+    inbox: Receiver[RoomRelayIn],
+    rounds: Latest[RoundAt],
+    random: Random,
+    room_bytes: u64,
+    max_sessions: u64,
 }
 
 fn room_relay_run(take seed: RoomRelaySeed) -> () waits {

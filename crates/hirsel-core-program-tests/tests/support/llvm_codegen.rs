@@ -40,6 +40,7 @@ b0(v0: i64):
 }
 "#;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn masked_cell_loops_match_the_evaluator_in_release() {
     // CoreIR isolates the release loop from source-level step charging. The trip
@@ -264,6 +265,7 @@ const PINS: &[(Body, Metric, Bound)] = &[
     (DIVIDE_ARM, Stack, AtMost(0)),
 ];
 
+#[cfg(target_os = "linux")]
 #[test]
 fn release_machine_code_pins() {
     let program = hirsel_core_ir::text::parse(KERNELS).unwrap();

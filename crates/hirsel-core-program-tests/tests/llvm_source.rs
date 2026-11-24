@@ -1,5 +1,7 @@
 //! Source LLVM agreement uses independently checked definition units.
 #![allow(dead_code)]
+// Most helpers serve the Linux-only native tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 use hirsel_core_ir::eval;
 use hirsel_core_ir::*;
 use hirsel_core_layout::Target;
@@ -212,6 +214,7 @@ fn unaligned_word(b: Bytes, at: u64) -> u64 { list.word_le(b, at) }
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_list_fills_use_memset_and_preserve_the_source_step() {
     let source = r#"
@@ -289,6 +292,7 @@ fn exercise(budget: u64, count: u64) -> u64 {
 // count taken as bytes leaves 0xAB words or a lost prefix here. The expected
 // value is the spec's: fill appends n copies after the existing elements, so
 // every element matches and the length is prefix + count.
+#[cfg(target_os = "linux")]
 #[test]
 fn large_zero_fills_overwrite_written_storage() {
     let source = r#"
@@ -360,6 +364,7 @@ fn fresh(n: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_list_fill_slices_use_memset_after_the_range_check() {
     let source = r#"
@@ -413,6 +418,7 @@ fn exercise_slice(at: u64, count: u64) -> u32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn scalar_record_calls_agree_with_evaluator() {
     let source = r#"
@@ -521,6 +527,7 @@ fn probe(s: u64, divisor: u64) -> u64 {
 /// fail (`failure::constant_safe`): a signed quotient by -1 still raises
 /// Overflow at its type's minimum, also at a narrow width, and a zero divisor
 /// still raises Division. Both native engines agree with the evaluator.
+#[cfg(target_os = "linux")]
 #[test]
 fn constant_divisors_keep_reachable_failures() {
     let source = r#"
@@ -602,6 +609,7 @@ fn by_seven(x: i64) -> i64 { x / 7i64 + x % 7i64 }
 /// the evaluator; variants that reach the boundary (an extra trip, a trip count
 /// only data decides, an overflow at the type's top bit) still fail with the
 /// evaluator's text and site.
+#[cfg(target_os = "linux")]
 #[test]
 fn proven_loop_checks_keep_reachable_failures() {
     let source = r#"
@@ -755,6 +763,7 @@ fn unknown(j: u64, n: u64) -> u64 {
 /// `guarded` and `from_zero` run their loop without the check when the trips
 /// fit and keep it, failing at the same trip, when they do not; `twice` grows
 /// faster than its trips and keeps its checks.
+#[cfg(target_os = "linux")]
 #[test]
 fn counter_resets_keep_reachable_failures() {
     let source = r#"
@@ -1015,6 +1024,7 @@ fn {name}(budget: u64, trips: u64) -> u64 {{
     .unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn seeded_scalar_counted_loops_agree_across_engines() {
     // SEM-1 and MEM-30: the shift by 7 succeeds, a shift by 8 or -1 fails,
@@ -1447,6 +1457,7 @@ fn check_collection_counted_loops() {
 // pipeline turns an element-repeat fill into the memset that gives a closed
 // object `init` only in the first looped function it meets, so a case that
 // shares a program with another may never reach the cell rule it pins.
+#[cfg(target_os = "linux")]
 #[test]
 fn closed_cells_keep_reachable_failures() {
     const TYPES: &str = r#"
@@ -1755,6 +1766,7 @@ fn copy_unflushed(n: u64, k: u64) -> i32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn native_flow_corpus_agrees_with_the_owner_laws() {
     let (program, names) = hirsel_core_program_tests::SourceProgram::lower(FLOW_SOURCE, None);
@@ -1784,6 +1796,7 @@ fn native_flow_corpus_agrees_with_the_owner_laws() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn viewed_carrier_headers_thaw_after_success_error_and_failure() {
     let source = r#"
@@ -1851,6 +1864,7 @@ fn probe(mode: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn plain_list_drop_makes_one_runtime_free_at_both_lengths() {
     let source = include_str!("../../../core/front/cases/rules/MEM-32-plain-drop.hirsel");
@@ -1889,6 +1903,7 @@ void __wrap_hirsel_core_free_value(const HirselCoreContext *ctx, void *block, ui
 /// (MEM-24); four roots in a list of capacity 4 add 4 × 16. Nothing is retained;
 /// each chain deeper than a few boxes traces one hand-over, a single box none.
 /// A million deep chain overflows any native recursion over its boxes.
+#[cfg(target_os = "linux")]
 #[test]
 fn deep_box_chains_drop_with_one_drain_hand_over_each() {
     let source = r#"
@@ -2033,6 +2048,7 @@ fn verify_ir(ir: &str) {
         assert!(valid, "{message}\n{ir}");
     }
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn every_front_run_case_matches_the_evaluator() {
     fn files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
@@ -2586,6 +2602,7 @@ fn site_fixture(target: Target) {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn failure_sites_and_relative_debug_rows_match_the_evaluator() {
     site_fixture(Target::X86_64Linux);
@@ -2658,6 +2675,7 @@ fn growth_shadow_words(target: Target) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn growth_shadow_copies_back_data_and_capacity() {
     growth_shadow_words(Target::X86_64Linux);
@@ -2669,6 +2687,7 @@ fn aarch64_growth_shadow_copies_back_data_and_capacity() {
     growth_shadow_words(Target::Aarch64Linux);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_program_cases(Target::X86_64Linux);
@@ -2683,6 +2702,7 @@ fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
     cancelled_cold_word_call(Target::Aarch64Linux, true);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn step_counter_survives_inlined_mutations_and_exact_exhaustion() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
@@ -2735,6 +2755,7 @@ fn probe(s: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn fallible_step_regions_refund_partial_work_and_check_strided_remainders() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
@@ -3059,6 +3080,7 @@ fn strided(s: u64, stride: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_reference_regions_keep_exact_bounds_and_mutation_prefixes() {
     let source = r#"
@@ -3201,6 +3223,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn hot_loop_helper_mutations_and_early_returns_keep_exact_steps() {
     let source = r#"
@@ -3299,6 +3322,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn element_stores_keep_a_shrinking_sibling_bound_and_failure_site() {
     // `pop` through `xs[j]` shrinks the same carrier that `xs[k]` reads when
@@ -3384,6 +3408,7 @@ fn probe(n: u64, extra: u64, k: u64) -> u64 {
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn exposed_loop_helpers_keep_failure_sites() {
     let source = r#"
@@ -3459,6 +3484,7 @@ fn probe(n: u64, d: u64) -> u64 {
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn exposed_scanner_loops_keep_exact_steps_and_early_prefixes() {
     let source = r#"
@@ -3553,6 +3579,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn branched_regions_refund_the_unexecuted_effect_suffix() {
     let source = r#"
@@ -3645,6 +3672,7 @@ fn probe(s: u64, mode: u64, repeats: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn data_dependent_cycles_refund_exact_step_prefixes() {
     let source = r#"
@@ -3776,6 +3804,7 @@ fn failing(s: u64, n: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_breaks_refund_the_partial_trip_and_unused_iterations() {
     let source = r#"
@@ -3880,6 +3909,7 @@ fn probe(s: u64, n: u64, at: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cheap_loop_traces_refund_before_expensive_effects_and_resume_once() {
     let source = r#"
@@ -4001,6 +4031,7 @@ fn probe(s: u64, n: u64, at: u64, mode: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn shifted_loop_headers_keep_exact_tails_and_checked_header_overflow() {
     let run = r#"
@@ -4144,6 +4175,7 @@ fn probe(s: u64, n: u64, at: u64, base: u64) -> u64 {
 
 use hirsel_core_program_tests::wire_socket;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {
     let source = wire_socket::SOURCE;
@@ -4164,6 +4196,7 @@ fn wire_socket_loopback_carries_addresses_deadlines_and_bytes() {
     assert_eq!(reports[0].used, 0);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn direct_and_indirect_recursive_calls_keep_exact_steps_and_failure_sites() {
     let source = r#"
@@ -4258,6 +4291,7 @@ fn probe(s: u64, n: u64, d: u64, mode: u64) -> u64 {
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn captured_cursor_and_writer_state_keep_exact_prefixes() {
     let source = r#"
@@ -4472,6 +4506,7 @@ fn scan_prefixed(s: u64, n: u64, stop: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn writer_bookkeeping_preserves_payloads_overflow_poisoning_and_step_prefixes() {
     let indexed = include_str!("../../../core/front/cases/stream-indexed-span.hirsel");
@@ -4614,6 +4649,7 @@ fn metered(s: u64, n: u64, cap: u64) -> u64 {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn static_bytes_preserve_budget_law() {
     let source = include_str!("../../../core/front/cases/rules/MEM-28-static-bytes.hirsel");
@@ -4645,6 +4681,7 @@ fn static_bytes_preserve_budget_law() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn simd_llvm_matches_evaluator() {
     let target = if std::env::var_os("HIRSEL_TEST_SIMD_AARCH64").is_some() {

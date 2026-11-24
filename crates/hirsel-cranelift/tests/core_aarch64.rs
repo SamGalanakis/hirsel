@@ -1,4 +1,6 @@
 //! AArch64 execution through the declared QEMU/sysroot and a real C caller.
+// These link and run Linux ELF programs with ld.lld.
+#![cfg(target_os = "linux")]
 #![allow(dead_code)] // The shared harness also serves the wider x86 fixture matrix.
 const NATIVE_TARGET: &str = "aarch64-unknown-linux-gnu";
 hirsel_guard::install!();

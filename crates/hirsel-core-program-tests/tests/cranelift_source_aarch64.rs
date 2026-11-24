@@ -1,4 +1,6 @@
 //! AArch64 source agreement through production definition units.
+// These link and run Linux ELF programs with ld.lld.
+#![cfg(target_os = "linux")]
 #![allow(dead_code)]
 const NATIVE_TARGET: &str = "aarch64-unknown-linux-gnu";
 hirsel_guard::install!();

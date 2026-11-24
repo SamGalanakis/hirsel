@@ -1,7 +1,13 @@
 use crate::{FuncId, eval, text, wf};
 use std::os::{fd::OwnedFd, unix::net::UnixStream};
 fn fds() -> usize {
-    std::fs::read_dir("/proc/self/fd").unwrap().count()
+    // macOS has no /proc; its /dev/fd lists the same descriptors.
+    let dir = if cfg!(target_os = "macos") {
+        "/dev/fd"
+    } else {
+        "/proc/self/fd"
+    };
+    std::fs::read_dir(dir).unwrap().count()
 }
 const SOURCE: &str = include_str!("../samples/net.core");
 fn isolate(law: &str) {

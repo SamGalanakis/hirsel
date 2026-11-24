@@ -1,4 +1,6 @@
 //! Executed C ABI oracle, including padding, mixed classes and ARM HFAs.
+// Most helpers serve the Linux-only native tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 use super::*;
 use hirsel_core_layout::Target;
 use std::path::PathBuf;
@@ -32,6 +34,7 @@ fn run(command: &mut Command) {
     assert!(output.status.success(), "{command:?}: {output:?}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::Result<(), String> {
     let arm_cc = native_input("HIRSEL_AARCH64_CC")?;
@@ -251,6 +254,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn checked_arithmetic_preserves_status_context_and_cause_copies() -> std::result::Result<(), String>
 {

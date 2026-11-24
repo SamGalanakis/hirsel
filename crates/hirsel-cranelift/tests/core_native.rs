@@ -1,4 +1,6 @@
 //! CoreIR native conformance through an independently compiled C caller.
+// These link and run Linux ELF programs with ld.lld.
+#![cfg(target_os = "linux")]
 const NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
 hirsel_guard::install!();
 include!("support/native.rs");

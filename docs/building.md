@@ -81,8 +81,10 @@ macOS provides the Linux mechanisms these features use in its own way:
   threads' registers. `hirsel prof replay` works as on Linux; `hirsel prof attach` and
   `--mem` are not available.
 - **Memory limit.** macOS refuses every `RLIMIT_DATA` change, so the guard checks
-  `HIRSEL_MEMORY_LIMIT` against the process's physical footprint (which counts LLVM's
-  allocations too) after every MiB a thread allocates and before any larger allocation.
+  `HIRSEL_MEMORY_LIMIT` against the process's physical footprint after every MiB a thread
+  allocates through Rust and before any larger Rust allocation. The footprint counts LLVM's
+  memory too, but macOS lets no zone replace the C allocator, so an LLVM allocation itself is
+  never refused: an LLVM blow-up ends the process at the compiler's next checked allocation.
   Guarded children inherit the variable; other children are not limited.
 - **Failure positions.** ld64 keeps no relocations to show which failure sites a release
   link kept, so a release executable carries every site's source position, as a

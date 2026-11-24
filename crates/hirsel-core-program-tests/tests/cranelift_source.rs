@@ -1,4 +1,6 @@
 //! Source agreement through reached definition units and a C caller.
+// These link and run Linux ELF programs with ld.lld.
+#![cfg(target_os = "linux")]
 #![allow(dead_code)]
 const NATIVE_TARGET: &str = "x86_64-unknown-linux-gnu";
 hirsel_guard::install!();

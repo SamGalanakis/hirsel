@@ -307,7 +307,15 @@ fn terminal_prefix_is_derived_after_generic_substitution() {
     let mut checked = 0;
     for function in &module.functions {
         let key = &module.instances[function.instance.index()];
-        if !matches!(key.definition.0.name.as_str(), "wrap" | "buffered")
+        // Growth past the first allocation runs in core's cold `list.grow_by`,
+        // instantiated for the fixture's u64 and String elements.
+        let grow_by = key.definition.0.modules == ["list"]
+            && key.definition.0.name == "grow_by"
+            && matches!(
+                module.argument_names(key).as_slice(),
+                [t] if *t == "u64" || *t == "core@1/core/String"
+            );
+        if !(matches!(key.definition.0.name.as_str(), "wrap" | "buffered") || grow_by)
             || module.argument_names(key).is_empty()
         {
             continue;
@@ -848,35 +856,45 @@ fn f{entry} = n{instance} g{g} {{
         } else if source.contains("Map[u64,u64]") {
             let mut addresses = String::new();
             let mut build = String::new();
-            // SipHash-1-3 under the evaluator's zero key, with the matching
-            // private index words after the entry rows and metadata.
-            for (i, (offset, bits)) in [
-                (0, 0x6634b0bda4fe8a7bu64),
-                (8, 1),
-                (16, 7),
-                (24, 70),
-                (32, 0x157dbcb1260ec7ee),
-                (40, 0),
-                (48, 11),
-                (56, 110),
-                (64, 0x53d1166d79c4dddf),
-                (72, 1),
-                (80, 13),
-                (88, 130),
-                (96, 2),  // live count differs from the three occupied slots
-                (104, 8), // cached index length, independent of capacity=3
-                (112, 0),
-                (120, 0),
+            // Normal form 3 (docs/internal/map-index.md) for capacity 3 under the
+            // evaluator's zero key: three 24-byte entry slots (meta, key, value),
+            // the 32-byte header, then one group of 16 control bytes and 16 u32
+            // entry indices. Slot 1 (key 11) is dead, so the live count is 2.
+            let (s0, _, _) = hirsel_core_layout::map_index::derive(&[0; 16]);
+            let place = |k: u64| hirsel_core_layout::map_index::fast_word(k, s0);
+            let (p7, p13) = (place(7), place(13));
+            // Buckets 0 and 1 hold the live slots' tags; every other byte is EMPTY.
+            let control = |tags: [u8; 8]| u64::from_le_bytes(tags);
+            let empty = 0xffu8;
+            let mut low = [empty; 8];
+            low[0] = (p7 >> 57) as u8;
+            low[1] = (p13 >> 57) as u8;
+            let words: Vec<(u64, u64)> = vec![
+                (0, p7 | 1 << 56),
+                (8, 7),
+                (16, 70),
+                (24, 0),
+                (32, 11),
+                (40, 110),
+                (48, p13 | 1 << 56),
+                (56, 13),
+                (64, 130),
+                (72, 2), // live count, below the three initialized slots
+                (80, 0), // group mask: one group
+                (88, 0), // mode: fast, u32 entry indices
+                (96, 0),
+                (104, control(low)),
+                (112, control([empty; 8])),
+                (120, 2 << 32), // entry indices: bucket 0 -> slot 0, bucket 1 -> slot 2
                 (128, 0),
-                (136, 0x6634b0bda4fe8a79),
+                (136, 0),
                 (144, 0),
                 (152, 0),
-                (160, 0x157dbcb1260ec7ea),
-                (168, 0x53d1166d79c4dddb),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+                (160, 0),
+                (168, 0),
+                (176, 0),
+            ];
+            for (i, (offset, bits)) in words.into_iter().enumerate() {
                 let a = 7 + i;
                 let v = 12 + 2 * i;
                 addresses.push_str(&format!("addr a{a} = v4 byte v{v} : u64\n"));
@@ -885,7 +903,7 @@ fn f{entry} = n{instance} g{g} {{
             fixture
                 .replace(
                     "v0: u64 = const 24",
-                    "v0: u64 = const 96\n  v11: u64 = const 176",
+                    "v0: u64 = const 96\n  v11: u64 = const 184",
                 )
                 .replace(
                     &format!("alloc for {edge} v0 align 8 charge v0"),

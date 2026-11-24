@@ -1,4 +1,6 @@
 //! Release bridge rewrites must preserve every partial update, failure order and raised cause.
+// Most helpers serve the Linux-only native tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 use crate::context::{Context, Module, TargetMachine};
 use std::{fmt::Write as _, path::PathBuf, process::Command};
 
@@ -115,6 +117,7 @@ failed_b:
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn guarded_copy_preserves_partial_writes_and_first_failure() {
     let (ir, object) = optimized(COPY);
@@ -191,6 +194,7 @@ fn guarded_copy_requires_buffer_and_carrier_alias_proofs() {
 /// runtime with the kind and site its bytes hold: two zero words, the kind word
 /// `1 << 63 | kind`, then the site, whichever raise entry the release passes
 /// leave in place.
+#[cfg(target_os = "linux")]
 #[test]
 fn stack_built_cause_keeps_its_kind_and_site() {
     let source = r#"
@@ -261,6 +265,7 @@ int main(void) {
 /// stores i32::MAX through o + 12k + (2^63 - 8) = o + 8 (mod 2^64) for
 /// k = (2^63 + 16) / 12 and reads +8; a8 reads FLT_MAX's bits 0x7f7fffff at +40
 /// and adds 8388609, past i32::MAX.
+#[cfg(target_os = "linux")]
 #[test]
 fn closed_cells_keep_admitted_failures() {
     let source = r#"

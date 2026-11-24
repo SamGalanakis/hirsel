@@ -8490,12 +8490,15 @@ fn ended_byte_limits_release_their_records() {
 
     let module = Module::default();
     let mut machine = Machine::new(&module, vec![], 64, &WorldInput::default());
+    let root = machine.root().clone();
+    // macOS boxes a std Mutex's pthread mutex at its first lock: take the
+    // root's before measuring, as its records exist before the scopes do.
+    machine.admit(&root, 0).unwrap();
     let meter = Owner::new(OwnerKind::Ledger);
     let measure = meter.enter();
     let mut peak = 0;
     // MEM-20: each zero-byte scope has ended with no surviving reference.
     // Only the root and the current scope need records, regardless of count.
-    let root = machine.root().clone();
     for _ in 0..4096 {
         machine.admit(&root, 0).unwrap();
         let scope = Limit::new(0, Some(root.clone()), 0);

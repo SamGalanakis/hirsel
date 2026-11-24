@@ -1,3 +1,5 @@
+// Most helpers serve the Linux-only native tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 use super::*;
 use hirsel_core_ir::{eval, text, wf};
 use std::fs;
@@ -8,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cleared_scalar_carriers_do_not_drop_saved_storage_but_keep_finalizers() {
     let module = text::parse(include_str!(
@@ -59,6 +62,7 @@ fn cleared_scalar_carriers_do_not_drop_saved_storage_but_keep_finalizers() {
 /// homes (`%s…`) carry markers of their own.
 const SHADOW_START: &str = "call void @llvm.lifetime.start.p0(ptr %t";
 
+#[cfg(target_os = "linux")]
 #[test]
 fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return() {
     let source = include_str!("../../tests/core_runtime/carrier-shadow.core");
@@ -148,6 +152,7 @@ fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return(
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn exposed_helpers_keep_imported_carrier_facts() {
     let module = text::parse(include_str!("../../tests/core_runtime/carrier-shadow.core")).unwrap();
@@ -237,6 +242,7 @@ b0(v0: u64):
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn storage_roles_keep_moved_buffers_in_one_scope() {
     let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
@@ -268,6 +274,7 @@ fn storage_roles_keep_moved_buffers_in_one_scope() {
     agree(&module, &[(FuncId(0), vec![])]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn loan_facts_and_diagnostic_off_preserve_abi_and_legal_aliases() {
     let module = text::parse(include_str!("../../tests/core_runtime/loans.core")).unwrap();
@@ -402,6 +409,7 @@ b2:
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
     let mut source = String::from("core v1\n");
@@ -433,6 +441,7 @@ fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
     agree(&module, &cases);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn native_allocator_refusals_are_reported_run_stops() {
     host_memory::check_with_site(
@@ -441,7 +450,10 @@ fn native_allocator_refusals_are_reported_run_stops() {
     );
 }
 
+// The native agreement tests below link and run Linux ELF programs with
+// ld.lld, so they are compiled only on Linux.
 include!("../../tests/support/native.rs");
+#[cfg(target_os = "linux")]
 #[test]
 fn compare_convert_sample_matches_evaluator() {
     let source = include_str!("../../../hirsel-core-ir/samples/compare-convert.core");
@@ -470,6 +482,7 @@ fn compare_convert_sample_matches_evaluator() {
     agree(&module, &cases);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn infallible_arithmetic_sample_matches_evaluator() {
     let module = text::parse(include_str!("../../../hirsel-core-ir/samples/arith.core")).unwrap();
@@ -494,6 +507,7 @@ fn infallible_arithmetic_sample_matches_evaluator() {
 /// unreduced places Map keys in other buckets without changing any program output.
 /// The evaluator's `rotl` is checked against Rust's `rotate_left` in the Cranelift
 /// integer differential.
+#[cfg(target_os = "linux")]
 #[test]
 fn rotl_matches_evaluator_at_every_width() {
     let mut text = String::from("core v0\n");
@@ -524,6 +538,7 @@ fn rotl_matches_evaluator_at_every_width() {
 /// The range check reads the operand untruncated: a strict bound one below the minimum
 /// where that is representable, else the minimum itself. A wrong choice rejects
 /// -128.5 as an i8 or accepts -2^31 - 1 as an i32 (f64), or misjudges an f32 bound.
+#[cfg(target_os = "linux")]
 #[test]
 fn float_to_int_matches_evaluator_at_every_width() {
     let mut text = String::from("core v0\n");
@@ -571,6 +586,7 @@ fn float_to_int_matches_evaluator_at_every_width() {
     agree(&module, &cases);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn c_results_and_indirect_calls_match_evaluator() {
     let module = text::parse(
@@ -631,6 +647,7 @@ b0(v0: u64, v1: u64, v2: u64):
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn failure_edges_precede_later_scalar_and_address_definitions() {
     let module = text::parse(
@@ -678,6 +695,7 @@ b4():
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn local_homes_keep_ssa_addresses_across_blocks_and_entry_back_edges() {
     let module = text::parse(
@@ -767,6 +785,7 @@ b2():
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn loop_edges_transfer_parameters_in_parallel() {
     let module = text::parse(
@@ -811,6 +830,7 @@ b3:
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn float_intrinsics_preserve_nan_and_signed_zero() {
     let mut source = String::from("core v0\n");
@@ -862,6 +882,7 @@ fn float_intrinsics_preserve_nan_and_signed_zero() {
     agree(&module, &cases);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn numerical_returns_keep_failure_status_and_canonical_bits() {
     let module = text::parse(include_str!("../../tests/core_runtime/numeric-status.core")).unwrap();
@@ -922,6 +943,7 @@ fn numerical_returns_keep_failure_status_and_canonical_bits() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn numerical_chains_observe_bits_after_memory_copies_and_calls() {
     let mut source = String::from("core v1\n");
@@ -1050,6 +1072,7 @@ fn sample_cases(module: &Module, source: &str) -> Vec<Case> {
         })
         .collect()
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn every_whole_v0_sample_matches_the_evaluator() {
     let mut count = 0;
@@ -1237,6 +1260,7 @@ fn carrier_ir(
 /// every byte is refunded. The evaluator runs a child at its spawn, before any
 /// cancel, so the expected run is derived by hand.
 
+#[cfg(target_os = "linux")]
 #[test]
 fn carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_sret_case(Target::X86_64Linux);
@@ -1248,6 +1272,7 @@ fn aarch64_carrier_twins_match_the_evaluator_in_program_builds() {
     carrier_sret_case(Target::Aarch64Linux);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn every_whole_v1_memory_sample_matches_the_evaluator() {
     let mut count = 0;
@@ -1305,6 +1330,7 @@ fn metered_kernel_marks_and_unmarks_do_not_change_exposure() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn every_guarded_admission_refusal_matches_the_evaluator() {
     let admission = include_str!("../../../hirsel-core-ir/samples/admission.core");
@@ -1347,6 +1373,7 @@ fn every_guarded_admission_refusal_matches_the_evaluator() {
     println!("guarded injected executions: {executions}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn every_compact_sequence_sample_matches_the_evaluator() {
     let source = include_str!("../../../hirsel-core-ir/samples/sequences.core");
@@ -1357,6 +1384,7 @@ fn every_compact_sequence_sample_matches_the_evaluator() {
     agree_cases(&module, &cases, true);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn owning_callable_and_failure_message_transfer_match_the_evaluator() {
     let source = include_str!("../../tests/core_runtime/callable.core");
@@ -1425,6 +1453,7 @@ fn owning_callable_and_failure_message_transfer_match_the_evaluator() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_sequences_destroy_deep_chains_with_constant_stack() {
     let source = include_str!("../../tests/core_runtime/counted_sequence.core");
@@ -1456,6 +1485,7 @@ fn counted_sequences_destroy_deep_chains_with_constant_stack() {
 /// whose field owns the next resource 10^6 deep, completes under the default
 /// stack, and every block is refunded (hand-derived: n + 1 boxes, n
 /// environments, n buffers, n resources and their n boxes).
+#[cfg(target_os = "linux")]
 #[test]
 fn box_chain_releases_with_constant_stack() {
     for (source, boxes, links) in [
@@ -1513,6 +1543,7 @@ fn box_chain_releases_with_constant_stack() {
 /// last published first (hand-derived: m (n + 1) + 1 admissions, Toks traced
 /// m..1, nothing used). The small rows and every admission refusal agree
 /// with the evaluator.
+#[cfg(target_os = "linux")]
 #[test]
 fn receiver_chain_releases_with_constant_stack() {
     let source = include_str!("../../../hirsel-core-ir/samples/receiver-chain.core");
@@ -1552,6 +1583,7 @@ fn receiver_chain_releases_with_constant_stack() {
 /// A suspended fixed block is found again only through its record: an array
 /// element reuses one record, and two cases of one enum suspend at the same
 /// cursor with different offsets.
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_frames_recover_the_block_from_the_record() {
     let source = include_str!("../../../hirsel-core-ir/samples/counted-frames.core");
@@ -1569,6 +1601,7 @@ fn counted_frames_recover_the_block_from_the_record() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn text_fixed_span_and_pointer_views_use_packed_unaligned_bytes() {
     let source = include_str!("../../tests/core_runtime/text_span.core");
@@ -1591,6 +1624,7 @@ fn text_fixed_span_and_pointer_views_use_packed_unaligned_bytes() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_strings_release_their_dynamic_byte_buffer() {
     let source = include_str!("../../tests/core_runtime/callable.core")
@@ -1610,6 +1644,7 @@ fn counted_strings_release_their_dynamic_byte_buffer() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn address_shapes_do_not_depend_on_block_emission_order() {
     let source = r#"core v1
@@ -1639,6 +1674,7 @@ b2:
     agree(&module, &[(FuncId(0), vec![123])]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn aggregate_destination_precedes_parameters_and_returns_failure_status() {
     let source = r#"core v1
@@ -1688,6 +1724,7 @@ b2:
     agree(&module, &[(FuncId(0), vec![123]), (FuncId(0), vec![0])]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn terminal_results_forward_without_abandoning_cleanup_or_local_arguments() {
     let module = text::parse(include_str!("../../tests/core_runtime/forward.core")).unwrap();
@@ -1755,6 +1792,7 @@ fn terminal_results_forward_without_abandoning_cleanup_or_local_arguments() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn every_memory_sample_admission_refusal_matches_the_evaluator() {
     let mut executions = 0;
@@ -1795,6 +1833,7 @@ fn every_memory_sample_admission_refusal_matches_the_evaluator() {
     println!("whole memory sample executions including every admission refusal: {executions}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn infallible_direct_calls_keep_the_external_and_indirect_failure_abi() {
     let module = text::parse(include_str!("../../tests/core_runtime/infallible.core")).unwrap();
@@ -1825,6 +1864,7 @@ fn infallible_direct_calls_keep_the_external_and_indirect_failure_abi() {
     agree(&module, &cases);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn maps_clean_live_entries_in_order_and_continue_after_both_failures() {
     let module = text::parse(include_str!("../../tests/core_runtime/map.core")).unwrap();
@@ -1871,6 +1911,7 @@ fn maps_clean_live_entries_in_order_and_continue_after_both_failures() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn counted_maps_skip_removed_entries_and_destroy_deep_chains_with_constant_stack() {
     let module = text::parse(include_str!("../../tests/core_runtime/counted_map.core")).unwrap();
@@ -1891,6 +1932,7 @@ fn counted_maps_skip_removed_entries_and_destroy_deep_chains_with_constant_stack
 #[path = "fast_tests.rs"]
 mod fast_tests;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
     let source = include_str!("../../../hirsel-core-ir/samples/strings.core");
@@ -1923,6 +1965,7 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn hash_read_facts_observe_intervening_writes() {
     let module = text::parse(include_str!("../../tests/core_runtime/hash-writes.core")).unwrap();
@@ -1997,6 +2040,7 @@ fn hash_read_facts_observe_intervening_writes() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn map_placement_operations_match_prog_11() {
     mod vectors {
@@ -2032,6 +2076,7 @@ fn map_placement_operations_match_prog_11() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn string_literals_growth_and_byte_order_match_the_evaluator() {
     let source = include_str!("../../../hirsel-core-ir/samples/strings.core");
@@ -2062,6 +2107,7 @@ fn string_literals_growth_and_byte_order_match_the_evaluator() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn task_custody_samples_and_admission_refusals_match_the_evaluator() {
     let source = include_str!("../../../hirsel-core-ir/samples/custody.core");
@@ -2086,6 +2132,7 @@ fn task_custody_samples_and_admission_refusals_match_the_evaluator() {
     agree_cases(&module, &cases, true);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn isolate_sample_and_admission_refusals_match_the_evaluator() {
     let source = include_str!("../../../hirsel-core-ir/samples/isolate.core");
@@ -2250,6 +2297,7 @@ int main(void) {{
     output(&mut executable);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cancelled_child_inside_isolate_passes_through_and_refunds_cell() {
     cancelled_child_inside_isolate_fixture(Target::X86_64Linux);
@@ -2261,6 +2309,7 @@ fn aarch64_cancelled_child_inside_isolate_passes_through_and_refunds_cell() {
     cancelled_child_inside_isolate_fixture(Target::Aarch64Linux);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn channel_fifo_clone_full_and_closed_match_the_evaluator() {
     let module = text::parse(include_str!("channel_tests.core")).unwrap();
@@ -2287,6 +2336,7 @@ fn channel_fifo_clone_full_and_closed_match_the_evaluator() {
     agree_cases(&module, &cases, true);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn provider_extern_uses_form_results_and_failure_status() {
     let module = text::parse(
@@ -2632,6 +2682,7 @@ fn log_append_facts_on_and_off_never_store_through_the_handle() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn native_provider_samples_and_refusals_match_the_hand_oracle() {
     let module = text::parse(include_str!(
@@ -2702,6 +2753,7 @@ fn native_provider_samples_and_refusals_match_the_hand_oracle() {
     println!("native provider sample/refusal executions: {executions}");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn provider_error_payload_and_nonwaiting_clocks_use_the_c_abi() {
     let module = text::parse(include_str!("provider_abi_tests.core")).unwrap();
@@ -2737,6 +2789,7 @@ fn provider_error_payload_and_nonwaiting_clocks_use_the_c_abi() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn joined_cause_views_use_core_layout() {
     let module = text::parse(include_str!("../../../hirsel-core-ir/samples/custody.core")).unwrap();
@@ -2778,6 +2831,7 @@ fn lazy_component_preserves_exact_core_objects() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
     let module = text::parse(include_str!(
@@ -2841,6 +2895,7 @@ fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
     println!("null-Like native admission cases: {}", null_cases.len());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn private_register_results_keep_the_public_destination_and_failure_abi() {
     // A 24-byte destination plus status keeps the ordinary destination ABI.
@@ -3092,6 +3147,7 @@ b0(v0: u64):
     println!("caller inheritance observations: 16");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn caller_sites_follow_core_generated_direct_and_indirect_inheritance() {
     inheritance_fixture(Target::X86_64Linux);
@@ -3174,6 +3230,7 @@ fn check_consuming_growth(target: Target) {
         cases.len()
     );
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
     check_consuming_growth(Target::X86_64Linux);
@@ -3215,6 +3272,7 @@ fn verify_ir(ir: &str) {
     llvm.verify().unwrap_or_else(|e| panic!("{e}\n{ir}"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn wire_socket_drop_and_split_execute_through_native_cleanup() {
     let source = format!(

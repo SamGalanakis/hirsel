@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
 #[test]
 fn empty_bounds_keep_refusal_and_injection_without_a_payer_identity() {
     let module = text::parse(
@@ -52,6 +53,7 @@ b4:
     agree_cases(&module, &cases, true);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn region_bumps_refill_and_fully_trimmed_entries_keep_the_original_payer() {
     let module = text::parse(
@@ -145,6 +147,7 @@ b8:
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
     let mut source = String::from(
@@ -285,6 +288,7 @@ fn f1 = n1 g0 extern
     assert!(!definition.contains("@hirsel_core_"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn arc_initialization_share_release_and_unwrap_preserve_provider_events() {
     let source = include_str!("../../../hirsel-core-ir/samples/counted.core");
@@ -330,6 +334,7 @@ fn arc_initialization_share_release_and_unwrap_preserve_provider_events() {
 /// FAIL-15 (docs/spec/failure.md): sharing a node whose holder count is
 /// `2^64 - 1` stops the run with CountOverflow. The inline share adds before it
 /// tests, so this is the wrapped-word case the runtime's own share never sees.
+#[cfg(target_os = "linux")]
 #[test]
 fn inlined_count_increment_overflow_is_the_runtime_stop() {
     let scratch = tempfile::tempdir().unwrap();

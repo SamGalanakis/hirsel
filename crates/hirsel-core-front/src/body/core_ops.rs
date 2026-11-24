@@ -147,6 +147,7 @@ operations! {
     ("char", "to_u32", Lane::Numeric, "A", "core-check-index-912", false),
     ("core", "fail", Lane::Language, "A", "core-check-895", false),
     ("core", "replace", Lane::Value, "A", "core-check-calls-910", false),
+    ("core", "site_word", Lane::Value, "A", "property-corpus-sites-1fd44b742", false),
     ("core", "clone", Lane::Language, "A", "core-check-895", false),
     ("core", "clone_in", Lane::Language, "A", "core-check-895", false),
     ("core", "build_in", Lane::Language, "A", "core-check-895", false),

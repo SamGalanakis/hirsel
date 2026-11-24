@@ -400,6 +400,8 @@ b0(v0: ptr):
         }
     }
 
+    // Reads /proc/self/maps.
+    #[cfg(target_os = "linux")]
     #[test]
     fn llvm_is_unmapped_until_first_object_and_loaded_once() {
         let maps = || std::fs::read_to_string("/proc/self/maps").unwrap();

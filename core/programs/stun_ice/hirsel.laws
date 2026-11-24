@@ -1,2 +1,3 @@
 hirsel.laws 1
 stun_ice@1/laws/binding_vectors src=e05f6fc9d2f391a1 sig=a1f04b356a6d5f5c run=e8009a636892fb4a bug=540b45871b56e1b4 oracle=ea529810f9b4c4b4 rows=pending
+stun_ice@1/laws/lite_nat_rebinding src=534776ea82f9ef7b sig=f95e21d6c84fec47 run=e8009a636892fb4a bug=0ead33159350fea1 oracle=840681dcfc946f7e rows=pending

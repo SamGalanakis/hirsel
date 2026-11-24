@@ -9,7 +9,7 @@ pub type Transaction: key {
     low: u64
 }
 
-pub type Class = Request | Indication | Success | Failure
+pub type Class: key = Request | Indication | Success | Failure
 
 pub type Role: key = Controlling | Controlled
 

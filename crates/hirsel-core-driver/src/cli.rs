@@ -146,6 +146,10 @@ commands! {
     "help", "help [command]", "Show commands or help for one command.";
     "check", "check [package-dir] [options]", "Check a package or an explicit input manifest.";
     "lock", "lock [package-dir] [options]", "Resolve a workspace and write or verify its lock.";
+    "lean", "lean <extract|status|probe>", "Extract checked functions for optional Lean proofs.";
+    "lean extract", "lean extract MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Generate Lean definitions from checked Hirsel source.";
+    "lean status", "lean status MODULE --inputs MANIFEST --store DIRECTORY -o FILE -- FUNCTION...", "Report whether a saved extraction is stale.";
+    "lean probe", "lean probe DEFINITION --inputs MANIFEST --store DIRECTORY", "Report instructions the Lean extractor excludes.";
     "laws", "laws <check|write> [package-dir] [options]", "Check or refresh the generated law lock.";
     "laws check", "laws check [package-dir] [options]", "Check the static columns of the law lock without running tests.";
     "laws write", "laws write [package-dir] [options]", "Refresh the static columns of the law lock without running tests.";
@@ -1054,7 +1058,16 @@ static OPTIONS: &[OptionSpec] = &[
         Output,
         ["-o", "--output"],
         Some("PATH"),
-        ["build", "run", "replay", "test", "pack", "sdk"],
+        [
+            "build",
+            "run",
+            "replay",
+            "test",
+            "pack",
+            "sdk",
+            "lean extract",
+            "lean status"
+        ],
         "Write the command output to this path."
     ),
     option!(
@@ -1102,7 +1115,10 @@ static OPTIONS: &[OptionSpec] = &[
             "serve",
             "dry-run",
             "laws check",
-            "laws write"
+            "laws write",
+            "lean extract",
+            "lean status",
+            "lean probe"
         ],
         "Select the database for dry-run, or the request or product store."
     ),
@@ -1118,7 +1134,17 @@ static OPTIONS: &[OptionSpec] = &[
         ["--inputs"],
         Some("MANIFEST"),
         [
-            "check", "image", "build", "publish", "run", "replay", "test", "sdk"
+            "check",
+            "image",
+            "build",
+            "publish",
+            "run",
+            "replay",
+            "test",
+            "sdk",
+            "lean extract",
+            "lean status",
+            "lean probe"
         ],
         "Read an explicit CorpusManifest JSON file."
     ),
@@ -1186,7 +1212,9 @@ pub enum Action {
 mod help_text;
 pub use help_text::help;
 pub(crate) use help_text::named;
-use help_text::{applies, is_help};
+#[path = "cli_parse.rs"]
+mod parsing;
+use help_text::is_help;
 
 pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, String> {
     let mut arguments = arguments.into_iter().peekable();
@@ -1203,7 +1231,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             Err("--version takes no arguments".into())
         };
     }
-    if matches!(name.as_str(), "prof" | "laws") {
+    if matches!(name.as_str(), "prof" | "laws" | "lean") {
         match arguments.next() {
             None => return Ok(Action::Help(help(Some(named(&name)?)))),
             Some(subcommand) if is_help(&subcommand) => {
@@ -1227,7 +1255,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
                 if is_help(&name) {
                     Ok(command)
                 } else {
-                    if matches!(name.as_str(), "prof" | "laws")
+                    if matches!(name.as_str(), "prof" | "laws" | "lean")
                         && let Some(subcommand) = arguments.next()
                     {
                         name.push_str(&format!(" {subcommand}"));
@@ -1248,85 +1276,5 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
             _ => return Err(format!("expected: hirsel {}", command.usage)),
         }
     }
-    let mut invocation = Invocation {
-        command,
-        options: Vec::new(),
-        positional: None,
-        arguments: Vec::new(),
-    };
-    while let Some(argument) = arguments.next() {
-        if name == "prof attach" && (argument == "--mem" || argument.starts_with("--mem=")) {
-            return Err(
-                "attach cannot see earlier allocations; use 'hirsel prof run --mem'".into(),
-            );
-        }
-        if matches!(name.as_str(), "prof run" | "prof replay")
-            && (argument == "--mem" || argument.starts_with("--mem="))
-        {
-            let value = if let Some((_, value)) = argument.split_once('=') {
-                value.to_owned()
-            } else if arguments
-                .peek()
-                .is_some_and(|v| matches!(v.as_str(), "exact" | "sampled"))
-            {
-                arguments.next().unwrap()
-            } else {
-                "sampled".to_owned()
-            };
-            if !matches!(value.as_str(), "exact" | "sampled") {
-                return Err("--mem requires exact or sampled".into());
-            }
-            invocation.options.push((OptionId::ProfMem, Some(value)));
-            continue;
-        }
-        if argument == "--"
-            && matches!(
-                name.as_str(),
-                "run" | "prof run" | "call" | "register" | "dry-run" | "dev"
-            )
-        {
-            invocation.arguments.extend(arguments);
-            break;
-        }
-        if argument.starts_with('-')
-            && !(name == "prof sql"
-                && argument.starts_with("--")
-                && argument.chars().any(char::is_whitespace)
-                && invocation.positional.is_some()
-                && invocation.arguments.is_empty())
-        {
-            let option = OPTIONS
-                .iter()
-                .find(|o| o.names.contains(&argument.as_str()) && applies(o, command))
-                .ok_or_else(|| {
-                    format!("unknown option `{argument}` for {name}; use help {name}")
-                })?;
-            if option.id == OptionId::Help {
-                return Ok(Action::Help(help(Some(command))));
-            }
-            let value = option
-                .value
-                .map(|value| {
-                    arguments
-                        .next()
-                        .ok_or_else(|| format!("{argument} requires {value}"))
-                })
-                .transpose()?;
-            invocation.options.push((option.id, value));
-        } else if invocation.positional.is_none()
-            && !matches!(name.as_str(), "core-product" | "std-product" | "env")
-        {
-            invocation.positional = Some(argument);
-        } else if invocation.arguments.is_empty()
-            && matches!(
-                name.as_str(),
-                "prof annotate" | "prof callers" | "prof callees" | "prof diff" | "prof sql"
-            )
-        {
-            invocation.arguments.push(argument);
-        } else {
-            return Err(format!("unexpected argument `{argument}` for {name}"));
-        }
-    }
-    Ok(Action::Invoke(invocation))
+    parsing::invocation(command, arguments)
 }

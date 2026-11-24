@@ -55,8 +55,9 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
-        if command.name == "prof" {
-            for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with("prof ")) {
+        if matches!(command.name, "prof" | "lean") {
+            let prefix = format!("{} ", command.name);
+            for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with(&prefix)) {
                 result.push_str(&format!(
                     "  {}\n    {}\n",
                     subcommand.usage, subcommand.description
@@ -76,10 +77,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
     } else {
         let mut result =
             "Usage: hirsel <command> [options]\n       hirsel --version\n\nCommands:\n".to_owned();
-        for command in COMMANDS
-            .iter()
-            .filter(|c| !c.name.starts_with("prof ") && !c.name.starts_with("laws "))
-        {
+        for command in COMMANDS.iter().filter(|c| !c.name.contains(' ')) {
             result.push_str(&format!("  {:<16} {}\n", command.name, command.description));
         }
         result.push_str("\nUse help <command>, <command> --help, or <command> -h for options.\n");

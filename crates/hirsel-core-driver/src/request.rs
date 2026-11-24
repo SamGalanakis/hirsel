@@ -14,6 +14,8 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod lean;
+
 #[derive(Serialize)]
 struct Output<'a> {
     accepted: bool,
@@ -81,6 +83,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             return conclude(Outcome::Exit(0));
         }
         _ => {}
+    }
+    if invocation.command.name.starts_with("lean ") {
+        lean::run(invocation)?;
+        return conclude(Outcome::Exit(0));
     }
     let profile = matches!(invocation.command.name, "prof run" | "prof replay")
         .then(|| crate::prof_command::Run::read(&mut invocation))
@@ -1996,25 +2002,7 @@ pub enum Outcome {
 #[path = "request_launch.rs"]
 mod launch;
 pub use launch::Launch;
-
-/// End a request with `outcome`. A one-shot process exits here, running the
-/// program first for a launch: the in-memory graphs are the OS's to reclaim,
-/// with no teardown. A resident compiler answers its client here, before the
-/// request's frames unwind, and the request returns its outcome to the server.
-fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
-    if crate::resident::serving() {
-        crate::resident::answer(&outcome);
-        return Ok(outcome);
-    }
-    match outcome {
-        Outcome::Exit(code) => std::process::exit(code),
-        Outcome::Launch(launch) => {
-            let code = Launch::execute(&launch.argv, &launch.env)?;
-            drop(launch);
-            std::process::exit(code)
-        }
-    }
-}
+use launch::conclude;
 
 /// Run the request `args` names (the arguments after the program name) and
 /// exit with its status, through a resident compiler when one serves the

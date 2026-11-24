@@ -1,3 +1,5 @@
+use super::Outcome;
+
 /// The program a `run` or `replay` request built: its argument vector (the
 /// runner's, then the executable's, then the request's), the variables it runs
 /// with besides the caller's environment, and the scratch directory that holds
@@ -30,3 +32,22 @@ impl Launch {
 pub(super) mod dev;
 #[path = "dry_run.rs"]
 pub(super) mod dry_run;
+
+/// End a request with `outcome`. A one-shot process exits here, running the
+/// program first for a launch: the in-memory graphs are the OS's to reclaim,
+/// with no teardown. A resident compiler answers its client here, before the
+/// request's frames unwind, and the request returns its outcome to the server.
+pub(super) fn conclude(outcome: Outcome) -> Result<Outcome, Box<dyn std::error::Error>> {
+    if crate::resident::serving() {
+        crate::resident::answer(&outcome);
+        return Ok(outcome);
+    }
+    match outcome {
+        Outcome::Exit(code) => std::process::exit(code),
+        Outcome::Launch(launch) => {
+            let code = Launch::execute(&launch.argv, &launch.env)?;
+            drop(launch);
+            std::process::exit(code)
+        }
+    }
+}

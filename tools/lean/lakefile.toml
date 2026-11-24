@@ -1,0 +1,29 @@
+name = "hirsel-proofs"
+defaultTargets = ["Hirsel", "Store", "Generated", "TriggersProofs", "OMapProofs", "RegisterProofs", "diffrunner", "diffprojections"]
+
+[[lean_lib]]
+name = "Hirsel"
+
+[[lean_lib]]
+name = "Store"
+
+[[lean_lib]]
+name = "Generated"
+globs = ["Generated.+"]
+
+[[lean_lib]]
+name = "TriggersProofs"
+
+[[lean_exe]]
+name = "diffrunner"
+root = "DiffRunner"
+
+[[lean_lib]]
+name = "OMapProofs"
+
+[[lean_lib]]
+name = "RegisterProofs"
+
+[[lean_exe]]
+name = "diffprojections"
+root = "DiffProjections"

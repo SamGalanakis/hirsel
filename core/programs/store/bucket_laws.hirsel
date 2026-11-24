@@ -227,11 +227,16 @@ fn bucket_law_recover(tasks: Tasks, r: Random, s: BucketSim, host_name: String, 
 }
 
 fn bucket_law_finish(take s: BucketSim) -> std.sim.s3.Report waits {
+    let report = bucket_law_report(take s)
+    result.unwrap(bucket_law_head_history(report))
+    take report
+}
+
+fn bucket_law_report(take s: BucketSim) -> std.sim.s3.Report waits {
     let BucketSim(server: take server, driver: take driver, stop: take stop, ..) = take s
     result.unwrap(channel.send(stop, ()))
     let report = result.unwrap(task.join(take server))
     result.unwrap(task.join(take driver))
-    result.unwrap(bucket_law_head_history(report))
     take report
 }
 

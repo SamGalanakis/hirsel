@@ -245,12 +245,16 @@ fn check_frozen_bucket_open(sim: BucketSim, r: Random, tasks: Tasks, mut workspa
     }
 }
 
-fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[u64, Error] waits {
+fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(u64, Bytes, Bytes), Error] waits {
     let mut client = bucket_law_client_with(sim, tasks, "s3.test", 5, true)?
     let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut workspace = history_buffers(65536)?
     let frozen = frozen_format4_bucket()
+    let mut first_head: Bytes = list.new()
     for (path, raw) in frozen {
+        if path == "head" {
+            first_head = copied(raw)?
+        }
         if string.starts_with(path, "e-00000000000000000006-") {
             check_overlapping_put(list.slice(raw, 128, list.len(raw)))?
         }
@@ -259,7 +263,9 @@ fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[u64, 
         history_create(mut client, path, mut workspace.packet, mut workspace.compare, deadline)?
     }
     let initial = history_fetch(mut client, "head", mut workspace.body, deadline)?
-    let first_head = copied(workspace.body)?
+    if workspace.body != first_head {
+        return Error(Missing("legacy fixture head bytes"))
+    }
     check_frozen_bucket_open(sim, r, tasks, mut workspace)?
     let after_old = history_fetch(mut client, "head", mut workspace.body, deadline)?
     if initial.etag != after_old.etag || first_head != workspace.body {
@@ -267,15 +273,9 @@ fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[u64, 
     }
 
     // The current head still names both frozen format-4 entries.
-    let owner = StoreId(hi: read_le(workspace.body, 32, 8), lo: read_le(workspace.body, 40, 8))
-    let context = DiskContext(store: owner, role: 7, seq: 6)
-    let mut header: Bytes = list.with_capacity(72 + BINDING_BYTES)
-    list.append(mut header, list.slice(workspace.body, 0, 72))
-    list.set_word_le(mut header, 24, 5u32)
-    capacity(history_seal(mut header, context, 0, 0x0001))?
-    let tail = copied(list.slice(workspace.body, 72, list.len(workspace.body)))?
-    list.append(mut header, tail)
-    workspace.body = take header
+    // Only the HEADER's version and §2.1 checksum change (libxxhash).
+    list.set_word_le(mut workspace.body, 24, 5u32)
+    list.set_word_le(mut workspace.body, 8, 0x1a6842b17e6df626u64)
     let expected = copied(workspace.body)?
     let HistoryApplied(replaced) = history_write_head(mut client, Match(initial.etag), mut workspace.body, mut workspace.witness, deadline) else {
         return Error(Missing("replace fixture head"))
@@ -293,7 +293,7 @@ fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[u64, 
             }
         }
     }
-    Ok(list.len(frozen) + 1)
+    Ok((list.len(frozen) + 1, take first_head, take expected))
 }
 
 fn covering_prior_key(k: u64, old_value: u32) -> Result[List[u64], Capacity] {
@@ -493,9 +493,18 @@ fn journal_test_v264_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     refuse_frozen_directory(d, c, r, tasks)?
     let sim = bucket_law_sim(tasks, c, 401, None, list.new())
     let expected = refuse_frozen_bucket(sim, r, tasks)
-    let trace = bucket_law_finish(take sim)
-    if trace.writes != expected? {
+    let trace = bucket_law_report(take sim)
+    let (writes, take original, take current) = expected?
+    // Both applied HEADs are fixture writes. The refused product opens apply none.
+    if trace.writes != writes || list.len(trace.head_writes) != 2 {
         return Error(Missing("legacy bucket published an object"))
+    }
+    let first = view trace.head_writes[0u64]
+    let second = view trace.head_writes[1u64]
+    let Some(predecessor) = second.if_match else { return Error(Missing("legacy fixture HEAD precondition")) }
+    if first.key != "head" || first.data != original || first.if_match != None || first.if_none_match != Some("*") ||
+        second.key != "head" || second.data != current || first.etag == second.etag || predecessor != first.etag || second.if_none_match != None {
+        return Error(Missing("legacy fixture HEAD history"))
     }
     covering_prior_case(d, c, r, tasks)?
     retained_replay_case(d, c, r, tasks)?

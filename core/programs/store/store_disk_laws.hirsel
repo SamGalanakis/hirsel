@@ -125,9 +125,9 @@ pub fn law_frame_size(c: Clock) -> bool {
         let mut expected: u64 = 16 + 4 + 8 + 8 + 1 + 1 + 4
         for row in model {
             if row.op == 1 {
-                expected += 1 + 4 + row.key_size + 4 + row.size
+                expected += 1 + 4 + row.key_size + 4 + 4 + row.size
             } else if row.op == 2 {
-                expected += 1 + 4 + row.key_size
+                expected += 1 + 4 + row.key_size + 4
             }
         }
         let raw = result.unwrap(encode_commit(ci, mut ops.rows, 1, 72))
@@ -154,7 +154,7 @@ fn test_memory_no_frame_limit(c: Clock) -> Result[(), Error] {
     let wrote = execute(mut db, 0, 17, None, fn(mut tx: Tx) -> Result[(), Error] {
         for k in 0u64 .. 16 {
             let size = if k == 15 {
-                1048279u64
+                1048215u64
             } else {
                 1048576u64
             }

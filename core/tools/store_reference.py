@@ -34,14 +34,14 @@ def reference():
     frames = []
     for hi, lo, branch, version, at, seq, offset in contexts:
         payload = struct.pack('<IQQBBIBI', branch, version, at, 1, 0, 1, 1, len(key))
-        payload += key + struct.pack('<I', len(value)) + value
-        assert len(payload) == 81
+        payload += key + struct.pack('<II', 0, len(value)) + value
+        assert len(payload) == 85
         head = struct.pack('<HHI', 0x11, 1, len(payload))
         binding = struct.pack('<QQBQQ', hi, lo, 2, seq, offset)
         covered = binding + head + payload
         check = lib.XXH3_64bits(covered, len(covered))
         frame = head + struct.pack('<Q', check) + payload
-        assert len(frame) == 97
+        assert len(frame) == 101
         frames.append(list(frame))
     versions = [1, 256, 257, 258]
     return dict(contexts=contexts, frames=frames, versions=versions,

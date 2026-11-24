@@ -1,0 +1,198 @@
+fn prior_fixture_value(width: u64) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(width)
+    list.fill(mut raw, width, 0u8)
+    take raw
+}
+
+fn prior_fixture_frame(wire: Bytes, at: u64, tag: u8, length: u64, prior: u64) -> bool {
+    // 16 (frame) + 21 (COMMIT) + 5 (data section) gives the op tag.
+    // The 12-byte logical key follows its u32 length, then the prior.
+    read_le(wire, at + 4, 4) == length - 16 && wire[at + 42] == tag &&
+        read_le(wire, at + 43, 4) == 12 && read_le(wire, at + 59, 4) == prior
+}
+
+// Pre-prior format 4, frozen from the format tables with libxxhash. The
+// MANIFEST has one empty branch and the journal has no COMMITs.
+fn legacy4_header(role: u8, bucketed: bool) -> Bytes {
+    let mut wire: Bytes = list.with_capacity(72)
+    list.put_word_le(mut wire, 0x0000003800010001u64)
+    let checksum: u64 = match role {
+        1 => if bucketed { 0x5c6ae52a18ccd6b2u64 } else { 0xe0f2a21e936a02feu64 },
+        2 => 0x1b4139a107227ef7,
+        _ => 0xc07ca99a378f2a2f,
+    }
+    list.put_word_le(mut wire, checksum)
+    list.append(mut wire, string.as_bytes("HIRSTORE"))
+    list.put_word_le(mut wire, 4u32)
+    list.push(mut wire, role)
+    list.push(mut wire, if bucketed { 1u8 } else { 0u8 })
+    list.put_word_le(mut wire, 0u16)
+    list.put_word_le(mut wire, 1u64)
+    list.put_word_le(mut wire, 2u64)
+    list.put_word_le(mut wire, if bucketed { 1u64 } else { 0u64 })
+    list.put_word_le(mut wire, 1u64)
+    list.put_word_le(mut wire, 0u64)
+    take wire
+}
+
+fn legacy4_manifest(bucketed: bool) -> Bytes {
+    let mut wire = legacy4_header(1, bucketed)
+    let words: Inline[u64, 10] = [
+        0x000001cf00010031, 0xb51851a0c4a366ff, 1,
+        0x0000100000001000, 0x0100004000000400, 1,
+        0x0000000100000001, 1, 1, 1,
+    ]
+    for word in words {
+        list.put_word_le(mut wire, word)
+    }
+    list.fill(mut wire, 244, 0u8)
+    list.put_word_le(mut wire, 1u32)
+    list.put_word_le(mut wire, 0u32)
+    list.put_word_le(mut wire, 4u16)
+    list.append(mut wire, string.as_bytes("main"))
+    list.fill(mut wire, 141, 0u8)
+    take wire
+}
+
+fn refuse_legacy4_directory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let manifest = legacy4_manifest(false)
+    let segment = legacy4_header(2, false)
+    let mut ending = legacy4_header(4, false)
+    list.put_word_le(mut ending, 0x0000000800010012u64)
+    list.put_word_le(mut ending, 0x215e84b9326bf203u64)
+    list.put_word_le(mut ending, 72u64)
+    let debris = string.as_bytes("unselected temporary")
+    disk_write_synced(directory, "MANIFEST", manifest)?
+    disk_write_synced(directory, "j-1", segment)?
+    disk_write_synced(directory, "j-1.end", ending)?
+    disk_write_synced(directory, "MANIFEST.tmp", debris)?
+    match open(tasks, directory, c, r, journal_crash_options()) {
+        Error(Unsupported(4)) => (),
+        _ => return Error(Missing("format 4 directory refusal")),
+    }
+    if disk_exists(directory, "LOCK")? || disk_exists(directory, "j-2")? ||
+        disk_read_file(directory, "MANIFEST", 551)? != manifest ||
+        disk_read_file(directory, "j-1", 72)? != segment ||
+        disk_read_file(directory, "j-1.end", 96)? != ending ||
+        disk_read_file(directory, "MANIFEST.tmp", 20)? != debris {
+        return Error(Missing("format 4 directory changed"))
+    }
+    Ok(())
+}
+
+fn refuse_legacy4_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 5, true)?
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut workspace = history_buffers(65536)?
+    let id = StoreId(hi: 1, lo: 2)
+    workspace.packet = legacy4_manifest(true)
+    let manifest = history_new_ref(1, 1, workspace.packet)
+    history_create(mut client, history_key("m-", manifest), mut workspace.packet, mut workspace.compare, deadline)?
+    // Use a current checkpoint envelope to exercise the old MANIFEST's
+    // refusal itself, even when the enclosing entry passes its format check.
+    let base = history_genesis_packet(mut workspace.packet, id, manifest)?
+    history_create(mut client, history_key("e-", base), mut workspace.packet, mut workspace.compare, deadline)?
+    let head = HistoryHead(store: id, pair: HistoryPair(epoch: 1, holder: id), activation: 0, entry: base, checkpoint: base, floor: 1, binding: [0; 32])
+    let place = std.object.bucket_config(client)
+    let authority = history_config_bytes(HistoryConfig(place: take place, level: "bucket"))?
+    history_encode_head(mut workspace.body, head, authority)?
+    let expected = copied(workspace.body)?
+    match history_write_head(mut client, Absent, mut workspace.body, mut workspace.witness, deadline) {
+        HistoryApplied(_) => (),
+        _ => return Error(Missing("format 4 bucket setup")),
+    }
+    let opener = bucket_law_client_with(sim, tasks, "s3.test", 6, true)?
+    let mut source = history_reader(take opener, 0)
+    let options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    match history_open_register(mut source, sim.time, r, options, "bucket", mut workspace, BUCKET_LAW_OP_MS) {
+        Error(Unsupported(4)) => (),
+        _ => return Error(Missing("format 4 bucket refusal")),
+    }
+    let _ = history_fetch(mut client, "head", mut workspace.witness, deadline)?
+    if expected != workspace.witness {
+        return Error(Missing("format 4 bucket head changed"))
+    }
+    Ok(())
+}
+
+@test
+fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    if !law_frames(c) {
+        return Error(Missing("ordered data wire vectors"))
+    }
+    if !journal_law_payload() {
+        return Error(Missing("data and reply parser vectors"))
+    }
+    if !journal_law_call_vector() {
+        return Error(Missing("recorded call wire vectors"))
+    }
+    refuse_legacy4_directory(d, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, 399, None, list.new())
+    let refused = refuse_legacy4_bucket(sim, r, tasks)
+    let _ = bucket_law_finish(take sim)
+    refused?
+    let dir = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, dir, c, r, options)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let baseline = db.resident
+    let start = db.file_end
+    let seq = db.file_seq
+    let Committed(initial) = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(34))
+    })? else { return Error(Missing("insert")) }
+    // entry(12, 34) = 62 + 16 + 40 = 118.
+    if db.resident != baseline + 118 || db.file_end != start + 101 {
+        return Error(Missing("insert charge or length"))
+    }
+    let first = share_page_tree(db.heads[0].roots.collections)
+    let Committed(changed) = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(16))?
+        put_bytes(mut tx, 1, key_word(7), prior_fixture_value(10))
+    })? else { return Error(Missing("overwrite")) }
+    // entry(12, 10) = 62 + 16 + 16 = 94. Only one put survives in the frame.
+    if db.resident != baseline + 94 || db.file_end != start + 101 + 77 {
+        return Error(Missing("overwrite charge or length"))
+    }
+    let Committed(removed) = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
+        let _ = delete_bytes(mut tx, 1, key_word(7))?
+        Ok(())
+    })? else { return Error(Missing("delete")) }
+    if db.resident != baseline || db.file_end != start + 101 + 77 + 63 {
+        return Error(Missing("delete charge or length"))
+    }
+    durable(mut db, removed.ticket)?
+    let path = capacity(disk_path("j-", seq, ""))?
+    let wire = disk_read_file(dir, path, start + 241)?
+    if !prior_fixture_frame(wire, start, 1, 101, 0) || !prior_fixture_frame(wire, start + 101, 1, 77, 35) ||
+        !prior_fixture_frame(wire, start + 178, 2, 63, 11) {
+        return Error(Missing("table prior bytes"))
+    }
+
+    let body_at = start + 101 + 16
+    let mut body = copied(list.slice(wire, body_at, start + 178))?
+    list.set_word_le(mut body, 43, 34u32)
+    let invalid = journal_decode_commit(path, body)?
+    let mut tree = take first
+    let mut ids = db.next_node
+    match journal_apply_ops(path, mut ids, mut tree, invalid.data) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => return Error(Missing("contradictory prior refusal")),
+    }
+    list.set_word_le(mut body, 43, 16711682u32)
+    match journal_decode_commit(path, body) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => return Error(Missing("oversized prior refusal")),
+    }
+    if initial.info.id.version + 1 != changed.info.id.version || changed.info.id.version + 1 != removed.info.id.version {
+        return Error(Missing("version sequence"))
+    }
+    close(take db)?
+    let reopened = open(tasks, dir, c, r, options)?
+    if reopened.resident != baseline || page_row_count(reopened.heads[0].roots.collections) != 0 ||
+        reopened.heads[0].head != removed.info.id.version {
+        return Error(Missing("replayed table account"))
+    }
+    close(take reopened)
+}

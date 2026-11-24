@@ -448,7 +448,7 @@ fn journal_test_order_workspace() -> Result[(), ()] {
 }
 
 fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Option[CallSection], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
-    encode_staged(ci, mut ops, NO_FRAME_TAIL, streams, call, None, None, seq, offset)
+    encode_staged(ci, None, mut ops, NO_FRAME_TAIL, streams, call, None, None, seq, offset)
 }
 
 // Hand-derived COMMIT bytes: delete key 1, then put key 2 = 33. Check from
@@ -471,11 +471,11 @@ pub fn law_frames(c: Clock) -> bool {
     })
     match take outcome {
         Ok(Committed(done)) => {
-            let expected: Inline[u8, 88] =[17u8, 0u8, 1u8, 0u8, 72u8, 0u8, 0u8, 0u8, 113u8, 81u8, 236u8, 174u8, 179u8, 213u8, 128u8, 52u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 30u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 2u8, 0u8, 0u8, 0u8, 2u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 1u8, 12u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 2u8, 8u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 33u8]
-            if list.len(done.value) != 88 {
+            let expected: Inline[u8, 96] = [17, 0, 1, 0, 80, 0, 0, 0, 135, 213, 200, 80, 237, 65, 92, 89, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 33]
+            if list.len(done.value) != 96 {
                 return false
             }
-            for i in 0u64 .. 88 {
+            for i in 0u64 .. 96 {
                 if done.value[i] != expected[i] {
                     return false
                 }

@@ -755,9 +755,9 @@ fn check_index_put_refusal(mut db: Db, t: Table[u64, u64], value: u64, frame_lim
         let previous_frame = tx.frame_bytes
         if frame_limit {
             tx.frame_bytes = Some(42u64)
-            // U1: header42 + primary31 + two (delete25 + put29) + delete25.
+            // U1: header42 + primary35 + two (delete29 + put33) + delete29.
             // The last index put is the only edit that exceeds this allowance.
-            tx.extra_bytes = 16777280 - (42 + 31 + 2 * (25 + 29) + 25 - 16)
+            tx.extra_bytes = 16777280 - (42 + 35 + 2 * (29 + 33) + 29 - 16)
         }
         let prior = write_state(tx)
         let rejected = match put(mut tx, t, 1, value) {

@@ -15,6 +15,8 @@ pub const FRAME_LIMIT: u64 = 16777296
 
 pub const VALUE_LIMIT: u64 = 16711680
 
+const FORMAT_VALUE_MAX: u64 = 16711680
+
 pub type Options: send {
     create: bool,
     lock_wait_ms: u64,
@@ -1335,7 +1337,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
             } else {
                 take staged
             }
-            match frame_draft(db, ci, rec, settlement, take prepared) {
+            match frame_draft(db, db.heads[i].roots.collections, ci, rec, settlement, take prepared) {
                 Ok(take framed) => take framed,
                 Error(problem) => RolledBack(Refused(Allocation(problem))),
             }
@@ -1423,13 +1425,13 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
     Prepared(Prepared(outcome: take value, roots: take roots, live: live, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
-fn frame_draft[R, A](db: Db, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
+fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         Prepared(take ready) => {
             let mut prepared = take ready
             if is_disk(db) {
-                prepared.frame = Some(encode_staged(ci, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
+                prepared.frame = Some(encode_staged(ci, Some(view base), mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
             }
             Ok(Prepared(take prepared))
         },
@@ -1523,7 +1525,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             }
             let CallDraft(finished: take result, reads: take reads, issued: take issued) = (take draft)?
             // Encoding spends the call's steps and the head's frame bytes.
-            let framed = match frame_draft(db, ci, rec, None, take result) {
+            let framed = match frame_draft(db, db.heads[0].roots.collections, ci, rec, None, take result) {
                 Ok(take finished) => take finished,
                 Error(problem) => RolledBack(Aborted(Undone(value: StoreFailure(Full(Allocation(problem))), ticket: None))),
             }
@@ -2580,7 +2582,7 @@ fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
 // The frame bytes of the op staged for `key`, in `ops` or the newest layer.
 fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: Bytes) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
-        return data_op_size(data_row(ops.rows, slot))
+        return data_op_size(data_row(ops.rows, slot), streams)
     }
     let mut size = 0u64
     for layer in below {
@@ -2590,14 +2592,14 @@ fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: 
             view layer.ops
         }
         if let Some(slot) = op_slot(staged, key) {
-            size = data_op_size(data_row(staged.rows, slot))
+            size = data_op_size(data_row(staged.rows, slot), streams)
         }
     }
     size
 }
 
-fn data_op_size(operation: DataOp) -> u64 {
-    let size = 5 + list.len(operation.key)
+fn data_op_size(operation: DataOp, stream: bool) -> u64 {
+    let size = (if stream { 5u64 } else { 9u64 }) + list.len(operation.key)
     match operation.value {
         None => size,
         Some(raw) => size + 4 + list.len(staged_bytes(raw)),
@@ -2662,28 +2664,38 @@ fn ordered_row(ops: DataRows, order: DataOrder, slot_order: u64) -> View[DataOp]
     data_row(ops, slot)
 }
 
-fn encode_data_ops(mut payload: Bytes, ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
+fn stored_prior(raw: Option[View[Bytes]]) -> u32 {
+    match raw {
+        Some(value) => int.truncate(1 + list.len(value)),
+        None => 0,
+    }
+}
+
+fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], ops: DataRows, order: DataOrder) -> Result[(), Capacity] {
     le(mut payload, 0, 1)?
     le(mut payload, ops.count, 4)?
     for slot_order in 0u64 .. ops.count {
         let op = ordered_row(ops, order, slot_order)
-        encode_data_op(mut payload, op.key, op.value)?
+        let prior = match base {
+            Some(head) => stored_prior(get_page_row(head, op.key)),
+            None => 0,
+        }
+        encode_data_op(mut payload, op.key, op.value, Some(prior))?
     }
     Ok(())
 }
 
-fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue]) -> Result[(), Capacity] {
-    match value {
-        None => {
-            le(mut payload, 2, 1)?;
-            blob(mut payload, key)
-        },
-        Some(raw) => {
-            le(mut payload, 1, 1)?;
-            blob(mut payload, key)?;
-            blob(mut payload, staged_bytes(raw))
-        }
+fn encode_data_op(mut payload: Bytes, key: Bytes, value: Option[StagedValue], prior: Option[u32]) -> Result[(), Capacity] {
+    let tag: u64 = match value { Some(_) => 1, None => 2 }
+    le(mut payload, tag, 1)?
+    blob(mut payload, key)?
+    if let Some(width) = prior {
+        list.put_word_le(mut payload, width)
     }
+    if let Some(raw) = value {
+        blob(mut payload, staged_bytes(raw))?
+    }
+    Ok(())
 }
 
 fn encode_log_trim(mut payload: Bytes, key: Bytes, floor: u64, dropped: u64) {
@@ -2702,7 +2714,7 @@ fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[Cal
             return encode_call(mut payload, record, settlement)
         }
     }
-    encode_data_op(mut payload, operation.key, operation.value)
+    encode_data_op(mut payload, operation.key, operation.value, None)
 }
 
 fn encode_stream_ops(mut payload: Bytes, ops: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement]) -> Result[(), Capacity] {
@@ -2745,17 +2757,17 @@ fn encode_call(mut payload: Bytes, record: CallRecord, settlement: Option[Settle
     }
 }
 
-fn encode_staged(ci: CallInfo, mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_staged(ci: CallInfo, base: Option[View[PageTree]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[CallSection], rec: Option[CallRecord], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     if let Some(record) = rec {
-        return encode_frame(ci, mut ops, tail, streams, Some(view record), settlement, seq, offset)
+        return encode_frame(ci, base, mut ops, tail, streams, Some(view record), settlement, seq, offset)
     }
     match call {
-        Some(section) => encode_frame(ci, mut ops, tail, streams, Some(view section.record), section.settlement, seq, offset),
-        None => encode_frame(ci, mut ops, tail, streams, None, None, seq, offset),
+        Some(section) => encode_frame(ci, base, mut ops, tail, streams, Some(view section.record), section.settlement, seq, offset),
+        None => encode_frame(ci, base, mut ops, tail, streams, None, None, seq, offset),
     }
 }
 
-fn encode_frame(ci: CallInfo, mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
+fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], mut ops: DataRows, tail: u64, streams: DataRows, call: Option[View[CallRecord]], settlement: Option[Settlement], seq: u64, offset: u64) -> Result[Bytes, Capacity] {
     let data = ops.count != 0 || streams.count == 0
     let stream = streams.count != 0
     let sections = (if data {
@@ -2770,11 +2782,11 @@ fn encode_frame(ci: CallInfo, mut ops: DataRows, tail: u64, streams: DataRows, c
     let mut size = 21 + 5 * sections
     for slot in 0u64 .. ops.count {
         let operation = data_row(ops, slot)
-        size += data_op_size(operation)
+        size += data_op_size(operation, false)
     }
     for slot in 0u64 .. streams.count {
         let operation = data_row(streams, slot)
-        size += data_op_size(operation)
+        size += data_op_size(operation, true)
         if let (Some(_), Some(record)) = (view operation.value, view call) {
             if operation.key == record.stream {
                 size += call_section_bytes(record, settlement)
@@ -2801,7 +2813,7 @@ fn encode_frame(ci: CallInfo, mut ops: DataRows, tail: u64, streams: DataRows, c
     le(mut out, ci.at, 8)?
     le(mut out, sections, 1)?
     if data {
-        encode_data_ops(mut out, ops, order)?
+        encode_data_ops(mut out, base, ops, order)?
     }
     if stream {
         encode_stream_ops(mut out, streams, call, settlement)?
@@ -4612,7 +4624,7 @@ fn catalog_recharge(live: u64, roots: Roots, key: Bytes, value: Bytes, retained:
 }
 
 // Format-3 disk framing. STORE-SPEC §11.
-const DISK_FORMAT: u64 = 4
+const DISK_FORMAT: u64 = 5
 
 type DiskContext {
     store: StoreId,
@@ -7035,6 +7047,7 @@ type JournalTrim: shareable + send {
 type JournalOp: shareable + send {
     key: Bytes,
     value: Option[Bytes],
+    prior: u32,
     trim: Option[JournalTrim]
 }
 
@@ -7062,12 +7075,12 @@ fn journal_event_kind(kind: u16) -> bool {
 }
 
 fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Option[CallSection]) -> Result[List[JournalOp], Error] {
-    let operation_count = disk_count(file, raw, mut at, 5)?
+    let operation_count = disk_count(file, raw, mut at, if stream { 5u64 } else { 9u64 })?
     let mut ops: List[JournalOp] = list.new()
     let value_limit = if stream {
         1048576u64
     } else {
-        16711680u64
+        FORMAT_VALUE_MAX
     }
     for i in 0u64 .. operation_count {
         let op_at = at
@@ -7080,13 +7093,17 @@ fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Op
             let floor = word_be(raw, at + 4)
             let dropped = word_be(raw, at + 12)
             at += 20
-            list.push(mut ops, JournalOp(key: take key, value: None, trim: Some(JournalTrim(floor: floor, dropped: dropped))))
+            list.push(mut ops, JournalOp(key: take key, value: None, prior: 0, trim: Some(JournalTrim(floor: floor, dropped: dropped))))
             continue
         }
         if kind < 1 || kind > 3 {
             return Error(disk_fault(file, op_at, Malformed))
         }
         let key = disk_blob(file, raw, mut at, 4096)?
+        let prior = if stream { 0u64 } else { disk_number(file, raw, mut at, 4)? }
+        if prior > FORMAT_VALUE_MAX + 1 {
+            return Error(disk_fault(file, op_at, Malformed))
+        }
         let value: Option[Bytes] = if kind == 2 {
             None
         } else {
@@ -7102,7 +7119,7 @@ fn journal_ops(file: String, raw: Bytes, stream: bool, mut at: u64, mut call: Op
             }
             Some(take stored)
         }
-        list.push(mut ops, JournalOp(key: take key, value: take value, trim: None))
+        list.push(mut ops, JournalOp(key: take key, value: take value, prior: int.truncate(prior), trim: None))
     }
     Ok(take ops)
 }
@@ -7408,11 +7425,13 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             return Error(disk_fault(file, 0, Malformed))
         }
         if tree_domain(tree) == CollectionMap {
-            let valid = list.len(op.key) >= 4 && match std.page.collection_child(tree.root, list.slice(op.key, 0, 4)) {
-                Some(_) => true,
-                None => false
+            if list.len(op.key) < 4 {
+                return Error(disk_fault(file, 0, Malformed))
             }
-            if !valid {
+            let Some(root) = std.page.collection_child(tree.root, list.slice(op.key, 0, 4)) else {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+            if op.prior != stored_prior(std.page.lookup(root, list.slice(op.key, 4, list.len(op.key)))) {
                 return Error(disk_fault(file, 0, Malformed))
             }
         }

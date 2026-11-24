@@ -6,9 +6,10 @@ pub fn journal_law_apply() -> bool {
     for head in 1u64 .. 4 {
         let key = result.unwrap(logical_key(1, key_word(7)))
         let mut data: List[JournalOp] = list.new()
-        list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10)), trim: None))
+        let prior: u32 = if head == 1 { 0 } else { 9 }
+        list.push(mut data, JournalOp(key: result.unwrap(copied(key)), value: Some(key_word(head * 10)), prior: prior, trim: None))
         let mut streams: List[JournalOp] = list.new()
-        list.push(mut streams, JournalOp(key: result.unwrap(copied(string.as_bytes("stream"))), value: Some(key_word(head)), trim: None))
+        list.push(mut streams, JournalOp(key: result.unwrap(copied(string.as_bytes("stream"))), value: Some(key_word(head)), prior: 0, trim: None))
         let commit = JournalCommit(branch: 0, version: head, at: 100 + head, data: take data, streams: take streams, call: None)
         result.unwrap(journal_apply("j-7", mut replay, Commit(take commit)))
         if replay.state.tips[0].head != head || replay.state.tips[0].at != 100 + head {
@@ -46,7 +47,7 @@ pub fn journal_law_apply() -> bool {
     }
     let key = result.unwrap(logical_key(1, key_word(7)))
     let mut deletes: List[JournalOp] = list.new()
-    list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None, trim: None))
+    list.push(mut deletes, JournalOp(key: result.unwrap(copied(key)), value: None, prior: 9, trim: None))
     let removed = JournalCommit(branch: 0, version: 4, at: 104, data: take deletes, streams: list.new(), call: None)
     result.unwrap(journal_apply("j-7", mut replay, Commit(take removed)))
     if page_row_count(replay.state.tips[0].roots.collections) != 0 || page_row_count(saved) != 1 || replay.state.tips[0].head != 4 || replay.state.tips[0].at != 104 {
@@ -160,7 +161,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     push_data_row(mut written, DataOp(key: take key, value: Some(PageValue(take stored))))
     let ci = CallInfo(id: CallId(store: id, branch: 0, version: 2), at: wall, seed: 0)
     let raw = result.unwrap(encode_commit(ci, mut written, seq, 72))
-    if list.len(raw) != 73 {
+    if list.len(raw) != 77 {
         return false
     }
     let path = result.unwrap(disk_path("j-", seq, ""))
@@ -169,7 +170,7 @@ pub fn journal_law_bootstrap(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool 
     result.unwrap(host.sync(mut file))
     result.unwrap(host.close(take file))
     let end_path = result.unwrap(disk_path("j-", seq, ".end"))
-    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 145)))
+    result.unwrap(disk_write_synced(d, end_path, journal_end_bytes(id, seq, 149)))
     let reopened = result.unwrap(open(tasks, d, c, r, options))
     if reopened.heads[0].head != 2 || reopened.heads[0].at != wall || reopened.resident != baseline + 94 || reopened.next_node <= next_node {
         return false

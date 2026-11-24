@@ -14,8 +14,8 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let initial_generation = db.checkpointed
     let initial_segment = db.file_seq
     let start = run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let mut body: Bytes = list.with_capacity(4027)
-        list.fill(mut body, 4027, 7u8)
+        let mut body: Bytes = list.with_capacity(4023)
+        list.fill(mut body, 4023, 7u8)
         put(mut tx, rows, 1, body)
     })?
     let Committed(_) = start else {
@@ -43,7 +43,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         delete(mut tx, rows, 1)
     })?
     match refused {
-        Refused(Journal(problem)) if problem.requested == 16781451 && problem.available == 16781392 => (),
+        Refused(Journal(problem)) if problem.requested == 16781455 && problem.available == 16781392 => (),
         _ => return Error(Foreign),
     }
     let overwritten = run(mut db, None, fn(mut tx: Tx) -> Result[bool, Error] {
@@ -52,7 +52,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         delete(mut tx, rows, 1)
     })?
     match overwritten {
-        Refused(Journal(problem)) if problem.requested == 16781451 && problem.available == 16781392 => (),
+        Refused(Journal(problem)) if problem.requested == 16781455 && problem.available == 16781392 => (),
         _ => return Error(Foreign),
     }
     let empty_args: Bytes = list.new()
@@ -84,7 +84,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         delete(mut tx, rows, 1)
     })?
     match refused_again {
-        Refused(Journal(problem)) if problem.requested == 16781451 && problem.available == 16781392 => (),
+        Refused(Journal(problem)) if problem.requested == 16781455 && problem.available == 16781392 => (),
         _ => return Error(Foreign),
     }
     let _ = checkpoint(mut recovered)?
@@ -140,8 +140,8 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     }
     let attempted = pend.attempted
     let padding = result.unwrap(run(mut db, None, fn(mut tx: Tx) -> Result[(), Error] {
-        let mut body: Bytes = list.with_capacity(3827)
-        list.fill(mut body, 3827, 7u8)
+        let mut body: Bytes = list.with_capacity(3823)
+        list.fill(mut body, 3823, 7u8)
         put(mut tx, rows, 1, body)
     }))
     let Committed(_) = padding else {
@@ -169,7 +169,7 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         return Error(())
     }
     // Two section heads (47 including the frame header), one data put
-    // (27 bytes) and the 66-byte reply op. Nothing reaches the journal.
+    // (31 bytes) and the 66-byte reply op. Nothing reaches the journal.
     let refused = serve(mut db, take first, plan, None, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         let empty: Bytes = list.new()
         if let Error(_) = put(mut tx, rows, 4, empty) {
@@ -178,13 +178,13 @@ fn journal_test_cap_calls(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
         Ok(key_word(7))
     })
     match take refused {
-        Error(Before(Full(Journal(problem)), None)) if problem.requested == 16781532 && problem.available == 16781392 => (),
+        Error(Before(Full(Journal(problem)), None)) if problem.requested == 16781536 && problem.available == 16781392 => (),
         _ => return Error(()),
     }
     let Abandoned(_) = result.unwrap(admit(mut db, first_stream, 0, digest)) else {
         return Error(())
     }
-    // The 338-byte vector in L29(d) without its 60-byte data section.
+    // The 342-byte vector in L29(d) without its 64-byte data section.
     let settle_refusal = conclude(mut db, take pend, key_word(7), Resident)
     let Error(Before(Full(Journal(problem)), Some(take retry))) = take settle_refusal else {
         return Error(())

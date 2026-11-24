@@ -40,8 +40,8 @@ class Manifest:
         raw = (directory / 'MANIFEST').read_bytes()
         kind, version, width = unpack_from('<HHI', raw, PACK_HEADER)
         disk_format, = unpack_from('<I', raw, 24)
-        if disk_format != 4 or (kind, version, width) != (0x0031, 1, len(raw) - PACK_HEADER - FRAME_HEADER):
-            raise ValueError('R6 expected a format-4 MANIFEST')
+        if disk_format != 5 or (kind, version, width) != (0x0031, 1, len(raw) - PACK_HEADER - FRAME_HEADER):
+            raise ValueError('R6 expected a format-5 MANIFEST')
         manifest = raw[PACK_HEADER + FRAME_HEADER:]
         self.next_stamp = unpack_from('<Q', manifest, 24)[0]
         self.next_pack = unpack_from('<Q', manifest, 40)[0]

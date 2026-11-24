@@ -191,8 +191,8 @@ fn edit_frame(ops: DataOps, below: List[Arc[Staged]], extra: u64, key: Bytes, va
         return Ok(None)
     }
     let width = match value_size {
-        Some(size) => 9 + size,
-        None => 5u64,
+        Some(size) => 13 + size,
+        None => 9u64,
     } + list.len(key)
     let after = int.saturating_add(current - old_data_op_size(ops, below, false, key), width)
     if int.saturating_add(after, extra) - 16 > 16777280 {

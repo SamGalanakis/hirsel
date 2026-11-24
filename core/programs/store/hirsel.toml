@@ -87,6 +87,7 @@ dirs = ["."]
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format4_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
+"store_prior_laws.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "store"
 "store_packs_disk_laws.hirsel" = "store"
 "store_scrub_laws.hirsel" = "store"

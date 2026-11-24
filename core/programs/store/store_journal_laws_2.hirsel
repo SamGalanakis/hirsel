@@ -180,7 +180,7 @@ fn journal_test_fork_same_roots(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     deploy_result(close(take db))
 }
 
-// AP17. A 73-byte put and a 38-byte FORK cross 110 bytes. A successful
+// AP17. A 77-byte put and a 38-byte FORK cross 110 bytes. A successful
 // cut covers both. An allocation refusal during planning leaves both in
 // the original segment.
 @test
@@ -192,7 +192,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
         let mut db = open(tasks, child, c, r, options)?
         create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
         let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-        if !typed_put(mut db, rows, 1, 11) || disk_state(db).uncovered != 73 {
+        if !typed_put(mut db, rows, 1, 11) || disk_state(db).uncovered != 77 {
             return Error(Foreign)
         }
         let previous = db.file_seq
@@ -215,7 +215,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
             return Error(Foreign)
         }
         let expected_journal = if refuse {
-            111u64
+            115u64
         } else {
             0u64
         }

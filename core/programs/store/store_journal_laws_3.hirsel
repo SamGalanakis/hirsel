@@ -21,11 +21,11 @@ pub fn journal_law_call_vector() -> bool {
     let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 257), at: 1234, seed: 0)
     let raw = result.unwrap(encode_sections(ci, mut data, streams, call, 7, 72))
     // L29 (d): independent layout from AP1a's fields, checked with libxxhash XXH3.
-    let expected: Inline[u8, 313] =[17, 0, 1, 0, 41, 1, 0, 0, 72, 28, 112, 123, 72, 77, 23, 235, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 3, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 49, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 3, 3, 3, 3, 3, 3, 3, 3, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 32, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 48, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0]
-    if list.len(raw) != 313 {
+    let expected: Inline[u8, 317] = [17, 0, 1, 0, 45, 1, 0, 0, 72, 141, 69, 18, 68, 170, 65, 247, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 210, 4, 0, 0, 0, 0, 0, 0, 2, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 1, 1, 0, 0, 0, 3, 8, 0, 0, 0, 115, 116, 114, 101, 97, 109, 48, 48, 49, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 2, 3, 3, 3, 3, 3, 3, 3, 3, 32, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 16, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 32, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 48, 0, 0, 0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 0]
+    if list.len(raw) != 317 {
         return false
     }
-    for i in 0u64 .. 313 {
+    for i in 0u64 .. 317 {
         if raw[i] != expected[i] {
             return false
         }
@@ -40,25 +40,25 @@ pub fn journal_law_call_vector() -> bool {
         })
         let shifted = result.unwrap(encode_sections(ci, mut data, streams, Some(CallSection(record: take record, settlement: Some(context))), 7, 72))
         let checksum = if way == 1 {
-            2701735143281265526u64
+            17314076040683180269u64
         } else {
-            7804208544902511782u64
+            10820821955355951556u64
         }
         let width = if way == 1 {
-            338u64
+            342u64
         } else {
-            337u64
+            341u64
         }
-        if list.len(shifted) != width || read_le(shifted, 8, 8) != checksum || shifted[312] != settle {
+        if list.len(shifted) != width || read_le(shifted, 8, 8) != checksum || shifted[316] != settle {
             return false
         }
-        if word_be(shifted, 313) != 256 || word_be(shifted, 321) != 1122 || word_be(shifted, 329) != 3344 {
+        if word_be(shifted, 317) != 256 || word_be(shifted, 325) != 1122 || word_be(shifted, 333) != 3344 {
             return false
         }
         let call_commit = result.unwrap(journal_decode_commit("j-7", list.slice(shifted, 16, width)))
         match call_commit.call {
             Some(decoded_call) => match decoded_call.settlement {
-                Some(actual) => if actual.way != settle || actual.base != 256 || actual.at != 1122 || actual.seed != 3344 || (way == 1 && shifted[337] != 1u8) {
+                Some(actual) => if actual.way != settle || actual.base != 256 || actual.at != 1122 || actual.seed != 3344 || (way == 1 && shifted[341] != 1u8) {
                     return false
                 },
                 None => return false,
@@ -70,10 +70,10 @@ pub fn journal_law_call_vector() -> bool {
     let available = code_vector()
     let without_identity = Some(CallSection(record: CallRecord(key: result.unwrap(copied(entry_key)), args: result.unwrap(copied(args)), stream: result.unwrap(copied(stream)), revision: Some(revision_vector()), code: result.unwrap(copied(list.slice(available, 0, 16)))), settlement: None))
     let short = result.unwrap(encode_sections(ci, mut data, streams, without_identity, 7, 72))
-    if list.len(short) != 281 {
+    if list.len(short) != 285 {
         return false
     }
-    match result.unwrap(journal_decode_commit("j-7", list.slice(short, 16, 281))).call {
+    match result.unwrap(journal_decode_commit("j-7", list.slice(short, 16, 285))).call {
         Some(c) => if c.record.code != list.slice(available, 0, 16) || !revision_is_vector(c.record.revision) {
             return false
         },
@@ -82,10 +82,10 @@ pub fn journal_law_call_vector() -> bool {
     // None is a zero length: 4 bytes, not 36, and reads back as None.
     let no_revision = Some(CallSection(record: CallRecord(key: take entry_key, args: take args, stream: take stream, revision: None, code: code_vector()), settlement: None))
     let bare = result.unwrap(encode_sections(ci, mut data, streams, no_revision, 7, 72))
-    if list.len(bare) != 281 {
+    if list.len(bare) != 285 {
         return false
     }
-    match result.unwrap(journal_decode_commit("j-7", list.slice(bare, 16, 281))).call {
+    match result.unwrap(journal_decode_commit("j-7", list.slice(bare, 16, 285))).call {
         Some(c) => if !revision_is_none(c.record.revision) {
             return false
         },
@@ -858,8 +858,8 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
             list.fill(mut value, size, 0u8)
             put_bytes(mut tx, 1, key_word(k), value)?
         }
-        // §2.4:26-byte section prelude +16*(1+4+12+4)+stored values.
-        let expected = 16 + 26 + 16 * 21 + 15 * 1048576 + last
+        // §2.4:26-byte section prelude +16*(1+4+12+4+4)+stored values.
+        let expected = 16 + 26 + 16 * 25 + 15 * 1048576 + last
         if tx.frame_bytes != Some(expected) {
             fail("disk L29 arithmetic")
         }
@@ -867,7 +867,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     }))
     match take done {
         Committed(x) => {
-            if !accepted || x.value != 15729018 + last || db.heads[0].head != 2 {
+            if !accepted || x.value != 15729082 + last || db.heads[0].head != 2 {
                 return false
             }
             result.unwrap(durable(mut db, x.ticket))
@@ -882,7 +882,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
     let path = result.unwrap(disk_path("j-", seq, ""))
     let raw = result.unwrap(disk_read_file(d, path, 16777400))
     if accepted {
-        if list.len(raw) != 72 + 15729018 + last || read_le(raw, 76, 4) != 15729002 + last {
+        if list.len(raw) != 72 + 15729082 + last || read_le(raw, 76, 4) != 15729066 + last {
             return false
         }
     } else if list.len(raw) != 72 {
@@ -928,7 +928,7 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, last: u64, a
 // L29: the journal applies the hand-derived payload boundary.
 // The whole 16MiB boundary frame is replayed, rather than only decoded.
 pub fn journal_law_frame_size_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
-    journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048277, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048278, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048279, false)
+    journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048213, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048214, true) && journal_boundary_case(disk_test_directory(d), c, r, tasks, 1048215, false)
 }
 
 @test
@@ -945,6 +945,6 @@ fn journal_full_frame(mut tx: Tx, rows: Table[u64, Bytes]) -> Result[(), Error] 
     list.fill(mut body, 16711674, 8u8)
     put(mut tx, rows, 2, body)?
     list.clear(mut body)
-    list.fill(mut body, 65526, 9u8)
+    list.fill(mut body, 65518, 9u8)
     put(mut tx, rows, 3, body)
 }

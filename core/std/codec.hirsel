@@ -22,7 +22,7 @@ pub type EncodeError = CountOverflow(u64)
 
 /// The codec of T: plain, so a store's shape holds it. Generated codecs and the built-in
 /// codecs below provide `of`. `least` is a lower bound on encoded length.
-pub opaque type Codec[T] {
+pub opaque type Codec[T]: shareable + send {
     encoder: fn(T, mut Bytes) -> Result[(), EncodeError],
     decoder: fn(Bytes, mut u64) -> Result[T, DecodeError],
     describer: fn(mut Schema, Codec[T]) -> Result[(), EncodeError],

@@ -20,6 +20,8 @@ to prepare a format once. T must have a codec. Preparation refuses tuples,
 options whose element already admits `null`, lists with zero-byte elements,
 maps with zero-byte entries, and schema cycles that can recur without consuming
 a codec byte. A schema refusal includes the relevant codec opcode.
+`Format[T]` is shareable and sendable. Cloning it shares the prepared plan
+without copying the schema and shapes.
 
 `decode_typed(format, take input, byte_limit)` reads one UTF-8 JSON value.
 The byte bound covers decoding scratch and allocations made by T's decoder.
@@ -45,6 +47,10 @@ nesting over 64 before any output is sent.
 reserves room before appending JSON to Bytes. It returns the appended byte
 count. A refused measurement or reservation leaves the output bytes intact.
 `to_string(format, value)` returns a new String containing the same JSON.
+
+`encode_wire(format, value)` returns owned codec bytes and a shared
+reference to the prepared plan for the measured wire writer.
+Use [`http.response_typed`](http.md) to send a typed JSON response.
 
 The `typed()` format follows [HTTP B-4 and B-5](../../../docs/spec/http.md#b-4-lexical-forms-json-path-and-query).
 In particular, 64-bit integers are strings, Bytes use padded base64, and maps

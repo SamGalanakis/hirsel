@@ -126,11 +126,10 @@ fn http_body_fields(body: String, args: Map[String, HttpArgument]) -> Result[Map
 }
 
 fn http_query_fields(req: std.http.Request, args: Map[String, HttpArgument]) -> Result[Map[String, List[String]], HttpAssemblyError] {
-    let raw = string.from_utf8(std.http.copy_bytes(std.http.query(req))) ?=> |_| BadArgument(2u32)
-    let span = std.http1.Span(start: 0u64, end: string.byte_len(raw))
+    let raw = std.http.query(req)
     let mut at = 0u64
     let mut found: Map[String, List[String]] = map.new()
-    while let Some((key, value, next)) = std.uri.next_pair(raw, span, at) {
+    while let Some((key, value, next)) = std.uri.next_pair(raw, at) {
         let mut name = string.new()
         std.uri.decode_text(raw, key, mut name) ?=> |_| BadArgument(1u32)
         let Some(field) = map.get(args, name) else { return Error(BadArgument(1u32)) }

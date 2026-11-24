@@ -63,12 +63,14 @@
     "lines": 3331
   },
   "core/std/http.hirsel": {
-    "lines": 3159,
-    "raise_revision": 3,
-    "reason": "hirsel4-cutover-2276"
+    "lines": 3202,
+    "raise_revision": 4,
+    "reason": "http-server-dx-2291"
   },
   "core/std/json.hirsel": {
-    "lines": 3786
+    "lines": 3627,
+    "raise_revision": 1,
+    "reason": "http-server-dx-2291"
   },
   "core/std/markdown.hirsel": {
     "lines": 2819

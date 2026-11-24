@@ -1380,9 +1380,9 @@ fn ascii(x: u8) -> char {
 
 // Typed JSON uses a prepared graph. Definition indices occupy its initial slots;
 // structural expressions add nodes as the reachable definitions are expanded.
-pub opaque type Format[T] {
+pub opaque type Format[T]: shareable + send {
     binary: codec.Codec[T],
-    plan: JsonPlan
+    plan: Arc[JsonPlan]
 }
 
 pub type JsonPlan: shareable + send {
@@ -1446,7 +1446,7 @@ fn prepare[T: codec](profile: Profile) -> Result[Format[T], TypedError] {
     let binary: codec.Codec[T] = codec.of()
     let description = codec.describe(binary) ?=> CodecFormat
     let plan = prepare_schema(take description, profile)?
-    Ok(Format(binary, plan: take plan))
+    Ok(Format(binary, plan: arc.new(take plan)))
 }
 
 /// Prepares a schema and its encoded defaults for B-4 wire values.
@@ -2388,9 +2388,21 @@ pub fn push_typed[T](format: Format[T], value: T, mut out: Bytes, mut scratch: B
     }, WriteMeasured)
 }
 
+/// Encodes one value for the measured wire writer and shares its prepared plan.
+pub fn encode_wire[T](format: Format[T], value: T) -> Result[(Bytes, Arc[JsonPlan]), TypedWriteError] {
+    let mut binary: Bytes = list.new()
+    encode_binary(format, value, mut binary)?
+    Ok((take binary, arc.share(format.plan)))
+}
+
+fn encode_binary[T](format: Format[T], value: T, mut binary: Bytes) -> Result[(), TypedWriteError] {
+    codec.encode(format.binary, value, mut binary) ?=> |_| LengthOverflow
+    Ok(())
+}
+
 fn measure_typed[T](format: Format[T], value: T, mut scratch: Bytes) -> Result[u64, TypedWriteError] {
     list.clear(mut scratch)
-    codec.encode(format.binary, value, mut scratch) ?=> |_| LengthOverflow
+    encode_binary(format, value, mut scratch)?
     typed_length(format, scratch)
 }
 

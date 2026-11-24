@@ -3,8 +3,10 @@
 [API overview](../API.md). [Specification](../../../docs/spec/http.md).
 [Outbound HTTP/1.1](http_client.md).
 
-`defaults()` returns the limits used in the primer's small server example.
-It permits two HTTP connections and disables upgrades and event streams.
+`defaults()` sets ceilings of 512 sockets, HTTP connections, first-phase
+connections and sockets per source IP. It sets 8 KiB head and output buffers,
+64 fields, a 256 KiB handler budget, 16 refusal workers and a 64-event
+supervisor inbox. Upgrades and event streams are disabled.
 
 `serve(take listeners, clock, tasks, take config, take routes, take state)`
 serves HTTP/1.1 and HTTP/1.0 on listeners from `Net`. The supplied
@@ -43,6 +45,13 @@ decoded segments. `copy_bytes` makes an owned
 copy charged to the current request. `handler_deadline` gives the absolute
 monotonic deadline used by the dispatcher.
 
+`query_param(request, name)` looks up a decoded name and returns an owned
+UTF-8 value. An absent name gives `Ok(None)`. A bare name or `name=` gives
+an empty string. It splits pairs before decoding, keeps `+` and `;` literal,
+and returns `Repeated` for a second occurrence of the decoded name. It
+reports malformed escapes and invalid decoded text as `Escape` and `Utf8`.
+Values of unrelated parameters are skipped.
+
 `inline_body` borrows a short fixed-length body already in the read buffer.
 Otherwise `read(mut body, mut buffer)` copies decoded body bytes into the
 buffer's spare capacity and returns zero at EOF. The first read of a pending
@@ -56,7 +65,10 @@ budget and deadline before the next head is parsed. A response without a
 body still sends a complete head.
 
 `response(status, take body, close)` builds a final response for status 200
-through 599. `header(mut response, take name, take value)` appends a field
+through 599. `response_typed(status, format, value)` sends
+`application/json` using a prepared [JSON format](json.md). It encodes the
+value once and measures the exact length before the connection streams the
+JSON through its output buffer. `header(mut response, take name, take value)` appends a field
 after checking HTTP field syntax. It refuses Content-Length, Transfer-Encoding
 Connection, Idempotent-Outcome and Hirsel-Refused case-insensitively with
 `HeaderReserved`. Invalid status and field syntax return `StatusInvalid` and

@@ -479,3 +479,37 @@ fn incomplete_metadata_at_limits() -> bool {
     d = http.decoder(Chunked, h, 0)
     http.decode(mut d, trailers) == Failed(http.BodyError(status: 431, close: true))
 }
+
+// HTTP-1. The standalone limits are independent of the runner's edge policy.
+// expect: run http_server_defaults_contract() = true
+fn http_server_defaults_contract() -> bool {
+    let cfg = http.defaults()
+    cfg.sockets_max == 512 && cfg.http_max == 512 && cfg.conns_max == 512 && cfg.ip_sockets_max == 512 && cfg.head_max == 8192 && cfg.out_cap == 8192 && cfg.fields_max == 64 && cfg.handler_bytes == 262144 && cfg.refuse_max == 16 && cfg.inbox_cap == 64 && cfg.upgrades_max == 0 && cfg.streams_max == 0
+}
+
+fn route_tag_at(routing: router.Router[()], verb: Bytes, raw_path: Bytes) -> Option[u64] {
+    let decoded = result.unwrap(router.request_segments(raw_path))
+    match router.select(routing, verb, decoded) {
+        Some(entry) => Some(entry.tag),
+        None => None,
+    }
+}
+
+fn router_noop(req: http.Request, scratch: Region, mut out: http.Responder, state: ()) -> Result[http.Outcome, http.HandlerError] {
+    Ok(Reply(http.response(204, b"", false)?))
+}
+
+// HTTP-11. An explicit HEAD capture competes with an overlapping GET literal.
+// The decoded-segment index must also distinguish a slash from an escaped slash.
+// expect: run http_router_literal_precedence() = true
+fn http_router_literal_precedence() -> bool {
+    let mut routes: router.Builder[()] = router.builder()
+    result.unwrap(router.add_tagged(mut routes, "GET", "/item/{id}", 1, router.raw(router_noop)))
+    result.unwrap(router.add_tagged(mut routes, "GET", "/item/static", 2, router.raw(router_noop)))
+    result.unwrap(router.add_tagged(mut routes, "HEAD", "/item/{id}", 3, router.raw(router_noop)))
+    result.unwrap(router.add_tagged(mut routes, "GET", "/other/a%2Fb", 4, router.raw(router_noop)))
+    result.unwrap(router.add_tagged(mut routes, "GET", "/other/a/b", 5, router.raw(router_noop)))
+    result.unwrap(router.add_tagged(mut routes, "GET", "/", 6, router.raw(router_noop)))
+    let routing = result.unwrap(router.build(take routes))
+    route_tag_at(routing, b"GET", b"/item/static") == Some(2u64) && route_tag_at(routing, b"GET", b"/item/%73tatic") == Some(2u64) && route_tag_at(routing, b"GET", b"/item/other") == Some(1u64) && route_tag_at(routing, b"HEAD", b"/item/static") == Some(3u64) && route_tag_at(routing, b"HEAD", b"/other/a%2fb") == Some(4u64) && route_tag_at(routing, b"GET", b"/other/a/b") == Some(5u64) && route_tag_at(routing, b"GET", b"") == Some(6u64) && route_tag_at(routing, b"GET", b"/missing") == None
+}

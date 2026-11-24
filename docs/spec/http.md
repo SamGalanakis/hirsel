@@ -178,6 +178,12 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 | `reads_max` | One-shot reads waiting for their initial result (B-11) | 64 |
 | `heartbeat_ms`, `lease_ms` | Stream heartbeat period and lifetime (§2) | 15000, 300000 |
 
+`std.http.defaults()` uses the table's byte limits, deadlines and refusal and
+inbox sizes. It sets `sockets_max`, `http_max`, `conns_max` and
+`ip_sockets_max` to 512, trusts no proxy prefixes, and sets the upgrade,
+stream and one-shot read settings to zero. It reserves connection bytes at
+spawn. The connection counts are admission ceilings.
+
 **Reservations.** Each is a logical charge under MEM-24 (`charge-v1`), not RSS: host memory behind provider operations, the call stack and kernel socket buffers are outside it (MEM-19). T(r) = 256 + r + 32 is a task record whose result is r bytes, without its `n` (MEM-24); ch(cap, item) = cap × item + 64 is a channel. h is the size of a `ReadHalf` or `WriteHalf` value.
 - **Supervisor**, admitted at `serve`: its record, its inbox ch(`inbox_cap`, event), the acceptors (T(0) + 64 each), the router and `Config`, and `refuse_max` × R, where **R** = T(0) + 64 (the static response) + 8192 (`net.finish`'s scratch, net.hirsel:12).
 - **C** (a connection) = T(0) + H + 8192 + X + `handler_bytes` + J + ch(1, Promote reply), where
@@ -284,6 +290,9 @@ Framing runs once per request over the parsed `Head`. Each failure below closes 
     - 1xx, 204 and 304 carry no body and no framing field.
     - A HEAD response has the framing fields GET's response would have, and no body (HTTP-11 says which handler runs).
     - A known-length body gets `Content-Length`.
+    - `response_typed(status, format, value)` encodes the value once with the
+      prepared format, attaches `application/json`, and measures the body
+      before the connection writes it through the B-5 transcoder.
     - A `Stream` gets `chunked` on HTTP/1.1, and is close-delimited on HTTP/1.0. Both carry `Connection: close` (HTTP-10).
 12. **Interoperability.** Slice H2 sends the framing corpus through nginx and HAProxy in front of `serve` with stock, documented framing settings (law L2p). A vector passes if the proxy refuses it or the client receives the answer direct `serve` gives to the request the proxy actually forwarded, captured on the wire. In either case no second smuggled request may reach `serve`.
 
@@ -319,6 +328,11 @@ Each phase, and each output unit, has one absolute deadline on the monotonic `Cl
 **The request**
 - `Request` is a scoped type (OWN-19) whose values are anchored to the connection's read buffer (OWN-20). The handler receives it as `req: Request in buf`, so it cannot outlive the handler call.
 - Its accessors (`method`, `target`, `path`, `segments`, `query`, `field`) return `String` and `Bytes` views anchored to `req`. `http1.Span` offsets stay inside std; no handler sees an offset.
+- `query_param(req, name)` returns an owned optional UTF-8 value using
+  B-4's separator and percent-decoding rules. A repeated decoded name gives
+  `Repeated`. An absent name gives None, and a bare name or `name=` gives an
+  empty string. Malformed escapes and invalid UTF-8 in decoded names or the
+  selected value give `Escape` and `Utf8` respectively.
 - `Outcome`, `StreamSpec`, `UpgradeSpec` and a producer's state are `send` types that contain no scoped type (OWN-22). A view cannot be returned in them or captured into them; the checker refuses it.
 - A handler that keeps a field copies it with `http.copy`, charged to its `bound bytes` scope (MEM-25).
 
@@ -426,7 +440,8 @@ owns them. Channel `Sender` is sendable, and a shared state field requires share
 - A raw handler is `fn(req: Request in buf, scratch: Region, mut out: Responder, s: S) -> Result[Outcome, HandlerError] waits`; `scratch` is the request's scratch region (HTTP-6). It holds only the capabilities in `S` and its arguments (CAP-3).
 
 **Conflicts**
-- Precedence is Go's: the more specific pattern wins.
+- The most specific pattern wins. After path normalization, the router
+  looks for a literal match for the method before scanning parameter routes.
 - Two patterns for one method that some path matches, with neither more specific, give `RouteConflict` at `build`. They are never resolved by order.
 - Raw routes and generated routes (§3) are added to one builder, so they get one conflict check.
 

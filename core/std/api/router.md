@@ -20,7 +20,9 @@ the remaining segments after the preceding slash. Use `http.capture` and
 
 `build(take builder)` refuses overlapping patterns for the same method
 unless one matches a strict subset of the other's paths. The final table
-is immutable. The most specific matching route wins regardless of order.
+is immutable. It indexes literal paths by method and decoded segments.
+A literal hit takes precedence over parameter routes for that method. The
+most specific matching parameter route wins regardless of order.
 
 HEAD selects an explicit HEAD route if one matches, then falls back to GET.
 Both responses omit the body. An unrouted path gives 404. A path with routes

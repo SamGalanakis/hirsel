@@ -401,7 +401,7 @@ fn encode_user_info() -> bool {
 
 fn decoded_text(raw: String, expected: String) -> bool {
     let mut out = string.new()
-    result.unwrap(uri.decode_text(raw, full(raw), mut out))
+    result.unwrap(uri.decode_text(string.as_bytes(raw), full(raw), mut out))
     out == expected && (match uri.parse(raw) {
         Ok(_) => recomposes(raw),
         Error(_) => true
@@ -410,7 +410,7 @@ fn decoded_text(raw: String, expected: String) -> bool {
 
 fn bad_utf8(raw: String, at: u64) -> bool {
     let mut out = string.from("pre")
-    let refused = match uri.decode_text(raw, full(raw), mut out) {
+    let refused = match uri.decode_text(string.as_bytes(raw), full(raw), mut out) {
         Error(NotUtf8(i)) => i == at,
         _ => false
     }
@@ -446,7 +446,7 @@ fn decode_rejects_atomically() -> bool {
         Error(Invalid(4)) => true,
         _ => false
     }
-    let bad_text = match uri.decode_text(raw, full(raw), mut out) {
+    let bad_text = match uri.decode_text(string.as_bytes(raw), full(raw), mut out) {
         Error(Invalid(4)) => true,
         _ => false
     }
@@ -456,11 +456,12 @@ fn decode_rejects_atomically() -> bool {
 
 fn query_row(text: String, expected: String) -> bool {
     let q = option.unwrap(result.unwrap(uri.parse(text)).query)
-    let mut at = q.start
+    let raw = string.as_bytes(string.slice(text, q.start, q.end))
+    let mut at: u64 = 0
     let mut row: u64 = 0
     let mut key_text = string.new()
     let mut value_text = string.new()
-    while let Some((key, value, next)) = uri.next_pair(text, q, at) {
+    while let Some((key, value, next)) = uri.next_pair(raw, at) {
         let Some((line, after)) = string.next_line(expected, row) else {
             return false
         }
@@ -469,8 +470,8 @@ fn query_row(text: String, expected: String) -> bool {
         }
         string.truncate(mut key_text, 0)
         string.truncate(mut value_text, 0)
-        result.unwrap(uri.decode_text(text, key, mut key_text))
-        result.unwrap(uri.decode_text(text, value, mut value_text))
+        result.unwrap(uri.decode_text(raw, key, mut key_text))
+        result.unwrap(uri.decode_text(raw, value, mut value_text))
         if key_text != want_key || value_text != want_value || next <= at {
             return false
         }
@@ -517,9 +518,10 @@ fn go_query_pairs() -> bool {
 fn raw_query_spans() -> bool {
     let text = "/p?&&a%2B=x=y&&flag#f"
     let q = option.unwrap(result.unwrap(uri.parse(text)).query)
-    let first = uri.next_pair(text, q, q.start)
-    let second = uri.next_pair(text, q, 14)
-    first == Some((span(5, 9), span(10, 13), 14u64)) && second == Some((span(15, 19), span(19, 19), 19u64)) && uri.next_pair(text, q, 19) == None && query_row("?a=1=2", "a|1=2\n") && query_row("?&&", "") && query_row("?&&a&&b=&=x&", "a|\nb|\n|x\n") &&
+    let raw = string.as_bytes(string.slice(text, q.start, q.end))
+    let first = uri.next_pair(raw, 0)
+    let second = uri.next_pair(raw, 11)
+    first == Some((span(2, 6), span(7, 10), 11u64)) && second == Some((span(12, 16), span(16, 16), 16u64)) && uri.next_pair(raw, 16) == None && query_row("?a=1=2", "a|1=2\n") && query_row("?&&", "") && query_row("?&&a&&b=&=x&", "a|\nb|\n|x\n") &&
     // B-4 leaves the literal '+' in this retired form-decoding row.
     query_row("?q=%E2%98%BA+%2B%00", "q|☺++\0\n")
 }
@@ -603,4 +605,28 @@ fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
         },
         _ => None,
     }
+}
+
+// Query spans refer to the wire bytes even when the input is not valid UTF-8.
+// expect: run raw_query_byte_contract() = true
+fn raw_query_byte_contract() -> bool {
+    let raw = b"&a+b=%FF&x=\xff"
+    let Some((key, value, after)) = uri.next_pair(raw, 0) else {
+        return false
+    }
+    let mut key_text = string.new()
+    result.unwrap(uri.decode_text(raw, key, mut key_text))
+    let mut out = string.from("pre")
+    let escaped = match uri.decode_text(raw, value, mut out) {
+        Error(NotUtf8(5)) => true,
+        _ => false,
+    }
+    let Some((_, literal, _)) = uri.next_pair(raw, after) else {
+        return false
+    }
+    let invalid_literal = match uri.decode_text(raw, literal, mut out) {
+        Error(NotUtf8(11)) => true,
+        _ => false,
+    }
+    key_text == "a+b" && escaped && invalid_literal && out == "pre"
 }

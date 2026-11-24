@@ -29,8 +29,14 @@ pub opaque type Builder[S: send]: send {
     entries: List[Entry[S]]
 }
 
+type MethodRoutes: shareable + send {
+    literals: Map[List[String], u64],
+    parameters: List[u64]
+}
+
 pub opaque type Router[S: send]: shareable + send {
-    entries: List[Entry[S]]
+    entries: List[Entry[S]],
+    methods: Map[Bytes, MethodRoutes]
 }
 
 pub type AddError: send = InvalidMethod | InvalidPattern
@@ -104,7 +110,7 @@ fn parse(pattern: String) -> Result[Pattern, AddError] {
                 }
             }
             let mut literal = string.new()
-            match uri.decode_text(pattern, http1.Span(start, end), mut literal) {
+            match uri.decode_text(raw_bytes, http1.Span(start, end), mut literal) {
                 Ok(()) => {},
                 Error(_) => return Error(InvalidPattern),
             }
@@ -240,6 +246,20 @@ pub fn conflict(a: String, b: String) -> Result[bool, AddError] {
     Ok(relationship(first, second) == Conflict)
 }
 
+fn literal_path(p: Pattern) -> Option[List[String]] {
+    if p.tail != None {
+        return None
+    }
+    let mut path: List[String] = list.new()
+    for piece in p.pieces {
+        match piece {
+            Literal(s) => list.push(mut path, string.from(s)),
+            Capture(_) => return None,
+        }
+    }
+    Some(take path)
+}
+
 pub fn build[S: send](take b: Builder[S]) -> Result[Router[S], RouteConflict] {
     let Builder(entries: take entries) = take b
     for i in 0u64 .. list.len(entries) {
@@ -249,7 +269,20 @@ pub fn build[S: send](take b: Builder[S]) -> Result[Router[S], RouteConflict] {
             }
         }
     }
-    Ok(Router(entries: take entries))
+    let mut methods: Map[Bytes, MethodRoutes] = map.new()
+    for i in 0u64 .. list.len(entries) {
+        let entry = view entries[i]
+        let method = string.into_bytes(string.from(entry.method))
+        let first = MethodRoutes(literals: map.new(), parameters: list.new())
+        map.update_or_insert(mut methods, take method, take first, scoped fn(mut routes: MethodRoutes) {
+            if let Some(take path) = literal_path(entry.pattern) {
+                map.insert(mut routes.literals, take path, i)
+            } else {
+                list.push(mut routes.parameters, i)
+            }
+        })
+    }
+    Ok(Router(entries: take entries, methods: take methods))
 }
 
 fn matches(p: Pattern, path: List[String]) -> bool {
@@ -276,19 +309,28 @@ fn matches(p: Pattern, path: List[String]) -> bool {
 }
 
 pub fn select[S: send](r: Router[S], method: Bytes, path: List[String]) -> Option[View[Entry[S]]] in r {
-    let head = method == string.as_bytes("HEAD")
+    if let Some(entry) = select_method(r, method, path) {
+        return Some(entry)
+    }
+    if method == b"HEAD" {
+        return select_method(r, b"GET", path)
+    }
+    None
+}
+
+fn select_method[S: send](r: Router[S], method: Bytes, path: List[String]) -> Option[View[Entry[S]]] in r {
+    let Some(routes) = map.get(r.methods, method) else {
+        return None
+    }
+    if let Some(i) = map.get(routes.literals, path) {
+        return list.get(r.entries, i)
+    }
     let end = list.len(r.entries)
     let mut selected = end
-    let mut selected_exact = false
-    for i in 0u64 .. end {
-        let entry = view r.entries[i]
-        let exact = method == string.as_bytes(entry.method)
-        if !exact && (!head || selected_exact || entry.method != "GET") {
-            continue
-        }
-        if matches(entry.pattern, path) && (selected == end || exact && !selected_exact || relationship(entry.pattern, r.entries[selected].pattern) == LeftSpecific) {
+    for i in routes.parameters {
+        let p = view r.entries[i].pattern
+        if matches(p, path) && (selected == end || relationship(p, r.entries[selected].pattern) == LeftSpecific) {
             selected = i
-            selected_exact = exact
         }
     }
     list.get(r.entries, selected)

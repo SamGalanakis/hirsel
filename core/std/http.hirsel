@@ -59,6 +59,15 @@ pub fn response_json(status: u16, take body: Bytes, offset: u64, take plan: Arc[
     Ok(response_with(status, JsonBody(take body, take plan, root, offset, length), false) ?=> JsonResponse)
 }
 
+/// Encodes a codec value once and sends JSON using a prepared format.
+pub fn response_typed[T](status: u16, format: json.Format[T], value: T) -> Result[Response, JsonResponseError] {
+    let (take binary, take plan) = json.encode_wire(format, value) ?=> JsonEncoding
+    let root = plan.root
+    let mut reply = response_json(status, take binary, 0, take plan, root)?
+    content_type(mut reply, ApplicationJson) ?=> JsonResponse
+    Ok(take reply)
+}
+
 /// Creates a fixed-length response whose body uses the connection buffer.
 pub fn response_measured(status: u16, length: u64, take write: BodyWriter) -> Result[Response, ResponseError] {
     response_with(status, MeasuredBody(length, take write), false)
@@ -653,9 +662,9 @@ pub type Config: shareable + send {
     lease_ms: u64
 }
 
-/// Limits for a small HTTP server, with upgrades and event streams disabled.
+/// Standalone server ceilings. A connection reserves its bytes at spawn.
 pub fn defaults() -> Config {
-    Config(ingress: list.new(), sockets_max: 2, http_max: 2, upgrades_max: 0, conns_max: 2, ip_sockets_max: 2, refuse_max: 1, refuse_ms: 500, inbox_cap: 4, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 1500, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+    Config(ingress: list.new(), sockets_max: 512, http_max: 512, upgrades_max: 0, conns_max: 512, ip_sockets_max: 512, refuse_max: 16, refuse_ms: 1000, inbox_cap: 64, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 16384, body_max: 1048576, out_cap: 8192, handler_bytes: 262144, first_head_ms: 5000, idle_ms: 60000, head_ms: 10000, body_ms: 30000, handler_ms: 30000, write_ms: 30000, drain_ms: 2000, linger_ms: 2000, drain_max: 65536, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
 }
 
 pub opaque scoped type Request {
@@ -736,6 +745,40 @@ pub fn capture_tail(r: Request, name: String) -> Option[View[List[String]]] in r
 
 pub fn query(r: Request) -> View[Bytes] in r {
     part(r.input, r.meta.query)
+}
+
+pub type QueryError: key = Escape | Utf8 | Repeated
+
+fn query_error(take e: uri.Error) -> QueryError {
+    match e {
+        NotUtf8(_) => Utf8,
+        _ => Escape,
+    }
+}
+
+/// Looks up one decoded query name. A bare name has an empty value.
+pub fn query_param(r: Request, name: String) -> Result[Option[String], QueryError] {
+    let raw = query(r)
+    let mut at: u64 = 0
+    let mut decoded = string.new()
+    let mut found: Option[http1.Span] = None
+    while let Some((key, value, next)) = uri.next_pair(raw, at) {
+        string.truncate(mut decoded, 0)
+        uri.decode_text(raw, key, mut decoded) ?=> query_error
+        if decoded == name {
+            if found != None {
+                return Error(Repeated)
+            }
+            found = Some(value)
+        }
+        at = next
+    }
+    let Some(value) = found else {
+        return Ok(None)
+    }
+    string.truncate(mut decoded, 0)
+    uri.decode_text(raw, value, mut decoded) ?=> query_error
+    Ok(Some(take decoded))
 }
 
 pub fn field(r: Request, name: Bytes) -> Option[View[Bytes]] in r {

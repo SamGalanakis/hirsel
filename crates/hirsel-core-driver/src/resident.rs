@@ -423,11 +423,11 @@ fn short_path(directory: &Path, name: &str) -> io::Result<(PathBuf, std::fs::Fil
 struct Route {
     store: PathBuf,
     resident: bool,
-    replayable: bool,
+    retryable: bool,
 }
 
-/// A request's resident compiler listens in `--store` or the package store.
-fn request_route(args: &[String]) -> Option<Route> {
+/// Route a request to the resident compiler for its store.
+fn route(args: &[String]) -> Option<Route> {
     use crate::cli::OptionId as Opt;
     let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.iter().cloned()).ok()?
     else {
@@ -438,10 +438,22 @@ fn request_route(args: &[String]) -> Option<Route> {
     }
     let mut store = None;
     let mut resident = false;
+    // Test processes run on the server and may already have had effects.
+    let mut retryable = invocation.command.name != "test";
     for (option, value) in &invocation.options {
         match option {
             Opt::Store => store = value.clone().map(PathBuf::from),
             Opt::Resident => resident = true,
+            // Ordinary compiler stores publish by content. A durable code
+            // store also refreshes publication times. A custom linker can
+            // have its own effects. Never repeat either after a lost reply.
+            Opt::CodeStore | Opt::Cc => retryable = false,
+            Opt::Grant
+                if invocation.command.name == "run"
+                    && value.as_deref().is_some_and(|v| v.starts_with("Foreign=")) =>
+            {
+                retryable = false;
+            }
             _ => {}
         }
     }
@@ -451,26 +463,22 @@ fn request_route(args: &[String]) -> Option<Route> {
     Some(Route {
         store,
         resident,
-        // Test processes run on the server and may already have had effects.
-        replayable: invocation.command.name != "test",
+        retryable,
     })
 }
 
 /// Submit a `build`, `run` or `test` request to the resident compiler serving its
-/// store, starting one first under `--resident`. None lets the caller run the
-/// request itself.
+/// store, starting one first under `--resident`. The request's exit status
+/// when a server answered it; None when the caller runs it itself.
 pub fn submit(args: &[String]) -> Option<i32> {
-    let route = request_route(args)?;
+    let route = route(args)?;
     match try_submit(&route, args) {
         Ok(answer) => answer,
-        Err(error) if route.resident => Some(failure_code(error)),
-        Err(_) => None,
+        Err(error) => {
+            eprintln!("hirsel: resident compiler: {error}");
+            Some(2)
+        }
     }
-}
-
-fn failure_code(error: io::Error) -> i32 {
-    eprintln!("hirsel: resident compiler: {error}");
-    2
 }
 
 fn connect(store: &Path) -> io::Result<UnixStream> {
@@ -478,17 +486,18 @@ fn connect(store: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(path)
 }
 
-fn exchange(stream: &mut UnixStream, request: &[u8]) -> io::Result<Answer> {
-    write_message(stream, request, &[0, 1, 2])?;
-    let (answer, _) = read_message(stream).map_err(|error| {
-        io::Error::other(format!("the server ended without an answer: {error}"))
-    })?;
-    Ok(serde_json::from_slice(&answer)?)
-}
-
 fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
-    let store = &route.store;
-    let resident = route.resident;
+    let Route {
+        store,
+        resident,
+        retryable,
+    } = route;
+    let (resident, retryable) = (*resident, *retryable);
+    let (mut stream, mut started) = match connect(store) {
+        Ok(stream) => (stream, false),
+        Err(_) if resident => (start(store)?, true),
+        Err(_) => return Ok(None),
+    };
     let request = Request {
         protocol: PROTOCOL,
         toolchain: Toolchain::current()?,
@@ -499,26 +508,27 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
         stop: false,
     };
     let request = serde_json::to_vec(&request)?;
-    let mut started = false;
+    let mut retried = false;
     loop {
-        let stream = match connect(store) {
-            Ok(stream) => Some(stream),
-            Err(_) if resident && !started => {
-                start(store)?;
+        let (answer, _) = match write_message(&mut stream, &request, &[0, 1, 2])
+            .and_then(|()| read_message(&mut stream))
+        {
+            Ok(answer) => answer,
+            Err(error) if connection_lost(&error) && retryable && resident && !retried => {
+                drop(stream);
+                stream = start(store)?;
                 started = true;
+                retried = true;
                 continue;
             }
-            Err(error) if resident => return Err(error),
-            Err(_) => None,
+            Err(error) if connection_lost(&error) && retryable && !resident => return Ok(None),
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "the server ended without an answer: {error}"
+                )));
+            }
         };
-        let Some(mut stream) = stream else {
-            return Ok(None);
-        };
-        let answer = match exchange(&mut stream, &request) {
-            Err(error) if !route.replayable => return Ok(Some(failure_code(error))),
-            answer => answer?,
-        };
-        match answer {
+        match serde_json::from_slice::<Answer>(&answer)? {
             Answer::Exit(code) => return Ok(Some(code)),
             Answer::Launch { argv, env } => {
                 let argv: Vec<OsString> = argv.into_iter().map(OsString::from_vec).collect();
@@ -533,14 +543,25 @@ fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
             }
             Answer::Refused(_) if resident && !started => {
                 // The refusing server exits; start this toolchain's own.
+                drop(stream);
                 wait_gone(store);
-                start(store)?;
+                stream = start(store)?;
                 started = true;
             }
             Answer::Refused(reason) if resident => return Err(io::Error::other(reason)),
             Answer::Refused(_) => return Ok(None),
         }
     }
+}
+
+fn connection_lost(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+    )
 }
 
 /// Wait until no server holds the store's lock.
@@ -554,8 +575,8 @@ fn wait_gone(store: &Path) {
     }
 }
 
-/// Start a server for `store` in its own session and wait until it accepts.
-fn start(store: &Path) -> io::Result<()> {
+/// Start a server for `store` and return the connection the request will use.
+fn start(store: &Path) -> io::Result<UnixStream> {
     use std::os::unix::process::CommandExt;
     std::fs::create_dir_all(store)?;
     let mut command = std::process::Command::new(std::env::current_exe()?);
@@ -569,13 +590,22 @@ fn start(store: &Path) -> io::Result<()> {
         .process_group(0);
     let mut child = command.spawn()?;
     for _ in 0..10_000 {
-        if connect(store).is_ok() {
-            return Ok(());
+        if let Ok(stream) = connect(store) {
+            return Ok(stream);
         }
         if let Some(status) = child.try_wait()? {
             // Another client's server may have taken the lock first.
-            if connect(store).is_ok() {
-                return Ok(());
+            if let Ok(stream) = connect(store) {
+                return Ok(stream);
+            }
+            if status.success() {
+                // The old server can relinquish the lock before its
+                // replacement binds, or while our child is exiting.
+                if lock(store)?.is_some() {
+                    child = command.spawn()?;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
             }
             return Err(io::Error::other(format!(
                 "the resident compiler exited at start: {status}"
@@ -743,7 +773,7 @@ fn serve_requests(
             Some("the client runs another toolchain")
         } else if request.env != env {
             Some("the client's environment differs from the server's")
-        } else if fds.len() != 3 || request_route(&request.args).is_none() {
+        } else if fds.len() != 3 || route(&request.args).is_none() {
             Some("the request is not one a resident compiler serves")
         } else {
             None
@@ -762,8 +792,8 @@ fn serve_requests(
         drop(fds);
         let served = REQUEST.fetch_add(1, Ordering::Relaxed) + 1;
         let cwd = PathBuf::from(OsString::from_vec(request.cwd));
+        CLIENT.with_borrow_mut(|client| *client = stream.try_clone().ok());
         let outcome = if std::env::set_current_dir(&cwd).is_ok() {
-            CLIENT.with_borrow_mut(|client| *client = stream.try_clone().ok());
             let args = request.args;
             std::panic::catch_unwind(move || crate::request::serve(args))
         } else {

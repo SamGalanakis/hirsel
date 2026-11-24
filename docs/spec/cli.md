@@ -57,8 +57,12 @@ compiler takes, with the client's arguments, working directory,
 environment and standard streams. Its output is byte-identical to a
 one-shot build. A `run` request's program runs in the client process,
 under the client's terminal and signals.
-If a submitted `test` request loses its reply, the client reports a
-transport failure. The test processes may already have run.
+
+If the connection ends before the compiler answers, `--resident`
+reconnects to a resident compiler, starting one if needed, and retries
+compilation once. A `test` request or a request that can publish to a
+durable code store or invoke a custom linker reports the lost answer. The
+client starts a `run` program after receiving the complete launch answer.
 
 A resident compiler refuses a request from another toolchain or another
 environment. The client then compiles in its own process. A refusal for

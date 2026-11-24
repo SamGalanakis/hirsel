@@ -6,6 +6,7 @@ mod listing;
 mod metadata;
 mod path;
 mod random;
+mod tables;
 pub(crate) mod temp;
 mod write;
 use listing::Listing;
@@ -17,10 +18,11 @@ use path::{
 use std::{
     collections::BTreeMap,
     io,
-    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
     path::Path,
-    sync::Mutex,
+    sync::{Mutex, atomic::AtomicU64},
 };
+use tables::Tables;
 #[cfg(test)]
 pub(crate) use temp::TEMP_ATTEMPTS;
 pub(crate) use write::write_all;
@@ -57,13 +59,14 @@ pub struct OsProvider {
     sync_file: Option<SyncFile>,
     /// Host CLOCK_MONOTONIC at construction: mono_ns and sleep deadlines count from it.
     epoch: u64,
-    directories: BTreeMap<u64, OwnedFd>,
+    /// Units on every slot thread issue file operations on this one provider
+    /// at once, so its handle tables sit behind a lock. No lock is held across
+    /// a syscall that can wait.
+    tables: Mutex<Tables>,
+    /// Written only while the run starts, before any unit issues.
     pub(crate) unix_roots: BTreeMap<String, OwnedFd>,
-    files: BTreeMap<u64, OwnedFd>,
-    listings: BTreeMap<u64, Listing>,
-    next: u64,
-    temporary: u64,
-    in_flight_syncs: Vec<*mut crate::os_sync::SyncCell>,
+    next: AtomicU64,
+    temporary: AtomicU64,
     pub(crate) inherited_listener: Mutex<Option<OwnedFd>>,
     /// The launcher's operator listener and the one peer UID it admits, until the first
     /// UNIX_LISTEN adopts it (docs/spec/launch.md "Starting the host").
@@ -75,7 +78,8 @@ pub struct OsProvider {
 }
 impl Drop for OsProvider {
     fn drop(&mut self) {
-        for cell in self.in_flight_syncs.drain(..) {
+        let tables = self.tables.get_mut().unwrap_or_else(|e| e.into_inner());
+        for cell in tables.in_flight_syncs.drain(..) {
             // SAFETY: provider is ending with a sync still in flight; detach
             // its issuer handle so the helper frees the cell on completion.
             unsafe { crate::os_sync::SyncCell::detach(cell) };
@@ -85,19 +89,15 @@ impl Drop for OsProvider {
 impl OsProvider {
     #[cfg(test)]
     pub(crate) fn file_descriptor(&self, handle: u64) -> i32 {
-        self.files[&handle].as_raw_fd()
+        self.file(handle)
     }
     #[cfg(test)]
     pub(crate) fn adopt_file(&mut self, fd: OwnedFd) -> u64 {
-        let id = self.id();
-        self.files.insert(id, fd);
-        id
+        self.insert_file(fd)
     }
     #[cfg(test)]
     pub(crate) fn adopt_directory(&mut self, fd: OwnedFd) -> u64 {
-        let id = self.id();
-        self.directories.insert(id, fd);
-        id
+        self.insert_directory(fd)
     }
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
@@ -113,13 +113,10 @@ impl OsProvider {
             issue_file: None,
             sync_file: None,
             epoch,
-            directories: BTreeMap::new(),
+            tables: Mutex::default(),
             unix_roots: BTreeMap::new(),
-            files: BTreeMap::new(),
-            listings: BTreeMap::new(),
-            next: 1,
-            temporary: 0,
-            in_flight_syncs: Vec::new(),
+            next: AtomicU64::new(1),
+            temporary: AtomicU64::new(0),
             inherited_listener: Mutex::new(None),
             inherited_unix: Mutex::new(None),
             operator: Mutex::new(None),
@@ -141,26 +138,16 @@ impl OsProvider {
             }
             Ok(file)
         })?;
-        let id = self.id();
-        self.directories.insert(id, file.into());
-        Ok(id)
+        Ok(self.insert_directory(file.into()))
     }
     /// Startup-only capability probe. The per-operation confined open is unchanged.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
-        let directory = self.directories[&handle].as_raw_fd();
+        let directory = self.directory(handle);
         crate::units::off_slot(|| {
             drop(beneath(directory, b".", libc::O_PATH | libc::O_DIRECTORY)?);
             Ok(())
         })
-    }
-    fn id(&mut self) -> u64 {
-        let id = self.next;
-        self.next = self
-            .next
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-        id
     }
     pub fn provider(&mut self) -> Provider {
         self.provider_with(Some(&hirsel_core_os_directory_ops))
@@ -179,7 +166,7 @@ impl OsProvider {
             deliver,
         }
     }
-    fn execute_file(&mut self, request: &mut Request) -> io::Result<Outcome> {
+    fn execute_file(&self, request: &mut Request) -> io::Result<Outcome> {
         let mut out = Outcome::default();
         // SAFETY: emitter/provider ABI pins these buffers and exact extents.
         let path = if request.path_len == 0 {
@@ -206,23 +193,18 @@ impl OsProvider {
                     }
                     _ => unreachable!(),
                 };
-                let fd = beneath(self.directories[&request.handle].as_raw_fd(), path, flags)?;
+                let fd = beneath(self.directory(request.handle), path, flags)?;
                 if request.mode == MODE_DIRECT {
                     metadata::enable_direct(fd.as_fd(), flags)?;
                 }
-                let id = self.id();
-                self.files.insert(id, fd);
-                out.value = id;
+                out.value = self.insert_file(fd);
             }
             OPEN_DIR => {
-                let root = self.directories[&request.handle].as_raw_fd();
-                let dir = open_directory(root, path)?;
-                let id = self.id();
-                self.directories.insert(id, dir);
-                out.value = id;
+                let dir = open_directory(self.directory(request.handle), path)?;
+                out.value = self.insert_directory(dir);
             }
             ENTRIES => {
-                let root = self.directories[&request.handle].as_raw_fd();
+                let root = self.directory(request.handle);
                 // Open a fresh description so independently opened listings have distinct cursors.
                 let path = if path.is_empty() {
                     b".".as_slice()
@@ -233,15 +215,20 @@ impl OsProvider {
                 let fd = open_directory(root, path)?;
                 let listing = Listing::open(fd)?;
                 let id = self.id();
-                self.listings.insert(id, listing);
+                self.tables().listings.insert(id, listing);
                 out.value = id;
             }
             NEXT_ENTRIES => {
-                let listing = self
+                // Taken out while it reads, so the read holds no lock. The
+                // issuing unit owns the listing, so nothing else looks it up.
+                let mut listing = self
+                    .tables()
                     .listings
-                    .get_mut(&request.handle)
+                    .remove(&request.handle)
                     .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
-                match listing.append(&mut request.buffer) {
+                let read = listing.append(&mut request.buffer);
+                self.tables().listings.insert(request.handle, listing);
+                match read {
                     Ok(count) => out.value = count,
                     Err(error) => {
                         out.error = IoError {
@@ -253,21 +240,25 @@ impl OsProvider {
             }
             CLOSE_ENTRIES => {
                 let listing = self
+                    .tables()
                     .listings
                     .remove(&request.handle)
                     .ok_or_else(|| io::Error::from_raw_os_error(libc::EBADF))?;
                 drop(listing);
             }
             STAT => {
-                let root = self.directories[&request.handle].as_raw_fd();
+                let root = self.directory(request.handle);
                 let fd = beneath(root, path, libc::O_PATH | libc::O_NOFOLLOW)?;
                 let result = stat(fd.as_fd());
                 let _ = close_file(fd);
                 return result;
             }
-            STAT_FILE => return stat(self.files[&request.handle].as_fd()),
+            STAT_FILE => {
+                // SAFETY: the issuing unit's open handle keeps the descriptor live.
+                return stat(unsafe { BorrowedFd::borrow_raw(self.file(request.handle)) });
+            }
             READ | READ_AT => {
-                let fd = self.files[&request.handle].as_raw_fd();
+                let fd = self.file(request.handle);
                 let offset = (request.operation == READ_AT).then(|| request.offset());
                 let b = &mut request.buffer;
                 // A single read either commits a prefix or fails without moving the
@@ -289,16 +280,14 @@ impl OsProvider {
                 }
             }
             WRITE | WRITE_AT => {
-                return Ok(write_request(
-                    self.files[&request.handle].as_raw_fd(),
-                    request,
-                ));
+                return Ok(write_request(self.file(request.handle), request));
             }
             CLOSE => {
-                close_file(self.files.remove(&request.handle).unwrap())?;
+                let fd = self.tables().files.remove(&request.handle).unwrap();
+                close_file(fd)?;
             }
             TRY_LOCK | UNLOCK => {
-                let fd = self.files[&request.handle].as_raw_fd();
+                let fd = self.file(request.handle);
                 let flags = if request.operation == TRY_LOCK {
                     libc::LOCK_EX | libc::LOCK_NB
                 } else {
@@ -325,10 +314,8 @@ impl OsProvider {
                 let to = &raw[split + 1..];
                 valid_path(from)?;
                 valid_path(to)?;
-                let (from_parent, from_name) =
-                    parent(self.directories[&request.handle].as_raw_fd(), from)?;
-                let (to_parent, to_name) =
-                    parent(self.directories[&request.handle].as_raw_fd(), to)?;
+                let (from_parent, from_name) = parent(self.directory(request.handle), from)?;
+                let (to_parent, to_name) = parent(self.directory(request.handle), to)?;
                 // core.md: only a regular file is renamed, only a regular file is
                 // replaced, and neither final component is followed. renameat alone
                 // would move a directory or a link, or replace a link.
@@ -353,7 +340,7 @@ impl OsProvider {
                 } as isize)?;
             }
             MKDIR | REMOVE | REMOVE_TREE => {
-                let (parent, name) = parent(self.directories[&request.handle].as_raw_fd(), path)?;
+                let (parent, name) = parent(self.directory(request.handle), path)?;
                 match request.operation {
                     MKDIR => {
                         // SAFETY: pinned parent and single NUL-terminated leaf.
@@ -368,29 +355,28 @@ impl OsProvider {
                 }
             }
             MKDTEMP | MKSTEMP => {
-                let fd = self.directories[&request.handle].as_raw_fd();
-                let opened = temp::create(fd, request, &mut self.temporary)?;
-                let id = self.id();
-                if request.operation == MKSTEMP {
-                    self.files.insert(id, opened);
+                let fd = self.directory(request.handle);
+                let opened = temp::create(fd, request, &self.temporary)?;
+                out.value = if request.operation == MKSTEMP {
+                    self.insert_file(opened)
                 } else {
-                    self.directories.insert(id, opened);
-                }
-                out.value = id;
+                    self.insert_directory(opened)
+                };
             }
             SYNC => {
-                let fd = self.files[&request.handle].as_raw_fd();
+                let fd = self.file(request.handle);
                 // fdatasync makes file contents and the metadata required to
                 // read them back durable. A refusal is delivered as a host
                 // error; the store owns the poison/recovery policy.
                 syscall(unsafe { libc::fdatasync(fd) } as isize)?;
             }
             ZERO_EXTENSION => {
-                let fd = self.directories[&request.handle].as_fd();
-                out.value = u64::from(zero_extension(fd)?);
+                let fd = self.directory(request.handle);
+                // SAFETY: directory descriptors stay open until the run ends.
+                out.value = u64::from(zero_extension(unsafe { BorrowedFd::borrow_raw(fd) })?);
             }
             SYNC_DIR => {
-                let fd = self.directories[&request.handle].as_raw_fd();
+                let fd = self.directory(request.handle);
                 // fsync on a directory persists its entry updates.
                 syscall(unsafe { libc::fsync(fd) } as isize)?;
             }
@@ -427,8 +413,8 @@ pub(crate) unsafe fn foreign_root(
         let key = hirsel_core_capability_handle(context, handle);
         // Only host Dir grants carry these callbacks and an OsProvider state.
         let os = &*provider.state.cast::<OsProvider>();
-        let directory = os.directories.get(&key)?;
-        Some((directory.as_raw_fd(), grant & DIR_READ_ONLY == 0))
+        let directory = os.tables().directories.get(&key)?.as_raw_fd();
+        Some((directory, grant & DIR_READ_ONLY == 0))
     }
 }
 
@@ -631,7 +617,7 @@ pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<
     }
     // SAFETY: the OS provider's state is its OsProvider.
     let os = unsafe { &*provider.state.cast::<OsProvider>() };
-    let fd = os.files.get(&handle)?.as_raw_fd();
+    let fd = os.tables().files.get(&handle)?.as_raw_fd();
     // SAFETY: a live descriptor; the duplicate is owned by the result.
     let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     // SAFETY: a fresh descriptor nothing else owns.
@@ -842,9 +828,10 @@ unsafe extern "C" fn resume_with_directory(
         let (step, consumed) = unsafe { crate::os_sync::resume(request) };
         if let Some(cell) = consumed {
             // SAFETY: state is this run's live OsProvider.
-            let os = unsafe { &mut *state.cast::<OsProvider>() };
-            if let Some(i) = os.in_flight_syncs.iter().position(|&c| c == cell) {
-                os.in_flight_syncs.swap_remove(i);
+            let os = unsafe { &*state.cast::<OsProvider>() };
+            let mut tables = os.tables();
+            if let Some(i) = tables.in_flight_syncs.iter().position(|&c| c == cell) {
+                tables.in_flight_syncs.swap_remove(i);
             }
         }
         return step;
@@ -896,7 +883,7 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
 /// As `issue_on_stack`.
 unsafe fn issue_now(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.
-    let os = unsafe { &mut *state.cast::<OsProvider>() };
+    let os = unsafe { &*state.cast::<OsProvider>() };
     let request = unsafe { &mut *request };
     match request.operation {
         STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
@@ -928,11 +915,16 @@ unsafe fn sync_file(state: *mut u8, request: *mut Request, token: u64) -> Option
             request.handle,
         )
     };
-    if operation == SYNC_DIR {
-        os.directories.get(&handle)
+    let tables = os.tables();
+    let live = if operation == SYNC_DIR {
+        tables.directories.contains_key(&handle)
     } else {
-        os.files.get(&handle)
-    }?;
+        tables.files.contains_key(&handle)
+    };
+    drop(tables);
+    if !live {
+        return None;
+    }
     SUBMIT.set((token, None));
     // SAFETY: as `issue`.
     unsafe { crate::tasks::host_operation(state, request, submit_on_stack) };
@@ -941,19 +933,18 @@ unsafe fn sync_file(state: *mut u8, request: *mut Request, token: u64) -> Option
 
 unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded caller contract; `sync_file` checked the handle.
-    let (os, req) = unsafe { (&mut *state.cast::<OsProvider>(), &*request) };
+    let (os, req) = unsafe { (&*state.cast::<OsProvider>(), &*request) };
     let directory = req.operation == SYNC_DIR;
     let fd = if directory {
-        &os.directories[&req.handle]
+        os.directory(req.handle)
     } else {
-        &os.files[&req.handle]
-    }
-    .as_raw_fd();
+        os.file(req.handle)
+    };
     let token = SUBMIT.get().0;
     // SAFETY: pinned SYNC/SYNC_DIR request.
     let (step, untracked) = unsafe { crate::os_sync::submit(fd, directory, token, request) };
     if let Some(cell) = untracked {
-        os.in_flight_syncs.push(cell);
+        os.tables().in_flight_syncs.push(cell);
     }
     SUBMIT.set((token, Some(step)));
     Outcome::default()
@@ -961,7 +952,7 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
 
 unsafe extern "C" fn issue_file(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded caller contract.
-    request_outcome(unsafe { (&mut *state.cast::<OsProvider>()).execute_file(&mut *request) })
+    request_outcome(unsafe { (*state.cast::<OsProvider>()).execute_file(&mut *request) })
 }
 
 fn request_outcome(result: io::Result<Outcome>) -> Outcome {

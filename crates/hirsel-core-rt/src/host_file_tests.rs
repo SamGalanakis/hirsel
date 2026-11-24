@@ -443,3 +443,86 @@ fn slot_ring_writes_report_progress_and_preserve_positioned_cursor() {
     assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"abXYZ");
     check_file_backend();
 }
+
+/// How many of this process's descriptors refer to `path`.
+fn descriptors_on(path: &std::path::Path) -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter(|fd| std::fs::read_link(fd.as_ref().unwrap().path()).is_ok_and(|to| to == path))
+        .count()
+}
+
+/// Every unit of a run issues on the run's one OS provider, whichever slot
+/// thread it is on. Units on four slots each hold 64 files open at once and
+/// close them. Each OPEN must get its own handle and each CLOSE must close
+/// exactly the descriptor that OPEN made, so every descriptor is gone at the end.
+#[test]
+fn units_on_every_slot_share_one_provider_handle_table() {
+    use crate::{
+        abi::{hirsel_core_context_free, hirsel_core_context_new, hirsel_core_task_start},
+        os::OsProvider,
+    };
+    const UNITS: usize = 4;
+    const HELD: usize = 64;
+    const ROUNDS: usize = 64;
+    if !slot_file_child("host_file_tests::units_on_every_slot_share_one_provider_handle_table") {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file"), b"contents").unwrap();
+    let mut os = OsProvider::from_streams(None, None);
+    let dir = os.adopt_directory(File::open(root.path()).unwrap().into());
+    let provider = os.provider();
+    struct Shared(Provider);
+    // SAFETY: the provider state outlives the launch, which joins every unit.
+    unsafe impl Sync for Shared {}
+    let shared = Shared(provider);
+    let handles = std::sync::Mutex::new(Vec::new());
+    // SAFETY: the launcher reads no fields of this fixture's configuration.
+    let config = unsafe { std::mem::zeroed() };
+    let status = crate::units::launch(UNITS, UNITS, &config, &|_| {
+        let shared = &shared;
+        let provider = &shared.0;
+        let context = hirsel_core_context_new(1 << 20);
+        // SAFETY: this unit exclusively owns its fresh context.
+        assert!(!unsafe { hirsel_core_task_start(context) }.pointer.is_null());
+        let mut issue = |operation, handle, path: &[u8]| {
+            let mut r = request(operation);
+            r.handle = handle;
+            r.path = path.as_ptr();
+            r.path_len = path.len();
+            r.mode = 0;
+            // SAFETY: the request and its path stay live through delivery.
+            unsafe { hirsel_core_host(context, provider, &mut r) }
+        };
+        let mut mine = Vec::new();
+        for _ in 0..ROUNDS {
+            let opened: Vec<u64> = (0..HELD)
+                .map(|_| {
+                    let o = issue(OPEN, dir, b"file");
+                    assert_eq!((o.error, o.status), (IoError::OK, 0));
+                    o.value
+                })
+                .collect();
+            for &file in &opened {
+                let o = issue(CLOSE, file, b"");
+                assert_eq!((o.error, o.status), (IoError::OK, 0));
+            }
+            mine.extend(opened);
+        }
+        // SAFETY: no operation remains live on this context.
+        unsafe { hirsel_core_context_free(context) };
+        handles.lock().unwrap().extend(mine);
+        0
+    });
+    assert_eq!(status, 0);
+    let mut handles = handles.into_inner().unwrap();
+    let issued = handles.len();
+    handles.sort_unstable();
+    handles.dedup();
+    assert_eq!(handles.len(), UNITS * HELD * ROUNDS);
+    assert_eq!(issued, handles.len(), "two OPENs got one handle");
+    let file = root.path().canonicalize().unwrap().join("file");
+    assert_eq!(descriptors_on(&file), 0, "a CLOSE missed its descriptor");
+    drop(os);
+}

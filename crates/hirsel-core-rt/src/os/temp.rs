@@ -1,11 +1,16 @@
 //! Exclusive temporary names within an already granted directory.
 use super::beneath;
 use crate::provider::{Buffer, MKSTEMP, Request};
-use std::{ffi::CString, io, os::fd::OwnedFd};
+use std::{
+    ffi::CString,
+    io,
+    os::fd::OwnedFd,
+    sync::atomic::{AtomicU64, Ordering::Relaxed},
+};
 
 pub(crate) const TEMP_ATTEMPTS: usize = 128;
 
-pub(super) fn create(fd: i32, request: &mut Request, sequence: &mut u64) -> io::Result<OwnedFd> {
+pub(super) fn create(fd: i32, request: &mut Request, sequence: &AtomicU64) -> io::Result<OwnedFd> {
     let buffer = &mut request.buffer;
     let prefix = if buffer.len == 0 {
         &[]
@@ -26,12 +31,13 @@ pub(super) fn create(fd: i32, request: &mut Request, sequence: &mut u64) -> io::
     Ok(opened)
 }
 
-fn create_temp_dir(fd: i32, prefix: &[u8], sequence: &mut u64) -> io::Result<(OwnedFd, String)> {
+fn create_temp_dir(fd: i32, prefix: &[u8], sequence: &AtomicU64) -> io::Result<(OwnedFd, String)> {
     for _ in 0..TEMP_ATTEMPTS {
-        let suffix = format!("h{:x}x{:x}", std::process::id(), *sequence);
-        *sequence = sequence
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"HostNames"));
+        let n = sequence.fetch_add(1, Relaxed);
+        if n == u64::MAX {
+            crate::process::stop(b"HostNames");
+        }
+        let suffix = format!("h{:x}x{n:x}", std::process::id());
         let mut name = prefix.to_vec();
         name.extend_from_slice(suffix.as_bytes());
         let name = CString::new(name)?;

@@ -463,3 +463,138 @@ fn claim_crash_phase(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, pha
     }
     close(take db)
 }
+
+fn claim_law_expiry(db: Db, key: ClaimKey) -> Result[Option[u64], Error] {
+    let address = claim_key_bytes(key)?
+    claim_reply_expiry(db, address)
+}
+
+// L19 (http.md H9, K-6): expiry counts from the reply's keyed time, never from
+// admission or a raw wall read, and saturates to NEVER (2^64 - 1).
+@test
+fn claim_expires_from_its_reply() -> Result[(), Error] waits {
+    let digest = request_digest(b"charge", b"args")
+    let mut policy = claim_law_policy()
+    policy.retention_ms = 50
+    // expire_from_admit and lease_on_admitted: admitted at 100, replied at 200.
+    let (time, take hand) = provide.clock(0, 100)
+    let mut wall = take hand
+    let mut db = test_db(time, 134217728)
+    let late = claim_law_key(b"late")
+    let Accepted(_) = admit_claim(mut db, late, digest, b"args", Some(clone(policy)))? else { fail("first admission") }
+    clock.set_wall(mut wall, 200)
+    let Ownerless(take pending) = admit_claim(mut db, late, digest, b"args", Some(clone(policy)))? else {
+        fail("an Admitted row expired past retention_ms after admission")
+    }
+    let _ = conclude_claim(mut db, take pending, b"done")?
+    if claim_law_expiry(db, late)? != Some(250) { fail("expiry not from the reply commit's at") }
+    clock.set_wall(mut wall, 249)
+    match admit_claim(mut db, late, digest, b"args", Some(clone(policy)))? {
+        Duplicate(saved) if saved == b"done" => (),
+        _ => fail("claim not live at reply + retention_ms - 1"),
+    }
+    clock.set_wall(mut wall, 250)
+    let Accepted(_) = admit_claim(mut db, late, digest, b"args", Some(clone(policy)))? else {
+        fail("claim still live at reply + retention_ms")
+    }
+    // reply_from_raw_wall: a reply whose wall read is behind keyed time
+    // measures retention from keyed time (200), not from the read (100).
+    let (raw_time, take raw_hand) = provide.clock(0, 200)
+    let mut raw_wall = take raw_hand
+    let mut raw = test_db(raw_time, 134217728)
+    let floor = claim_law_key(b"floor")
+    let Accepted(take admitted) = admit_claim(mut raw, floor, digest, b"args", Some(clone(policy)))? else { fail("floor admission") }
+    clock.set_wall(mut raw_wall, 100)
+    let _ = conclude_claim(mut raw, take admitted, b"done")?
+    if claim_law_expiry(raw, floor)? != Some(250) { fail("reply expiry read the raw wall clock") }
+    match admit_claim(mut raw, floor, digest, b"args", Some(clone(policy)))? {
+        Duplicate(_) => (),
+        _ => fail("a reply after a wall rollback was born expired"),
+    }
+    // expiry_wraps: reply at values 2^64 - 2 - R, 2^64 - 1 - R and 2^64 - 1.
+    let walls: Inline[u64, 3] = [18446744073709551564u64, 18446744073709551565u64, 18446744073709551615u64]
+    let wanted: Inline[u64, 3] = [18446744073709551614u64, 18446744073709551615u64, 18446744073709551615u64]
+    for i in 0u64 .. 3u64 {
+        let (edge_time, _) = provide.clock(0, walls[i])
+        let mut edge = test_db(edge_time, 134217728)
+        let Accepted(take edge_claim) = admit_claim(mut edge, late, digest, b"args", Some(clone(policy)))? else { fail("edge admission") }
+        let _ = conclude_claim(mut edge, take edge_claim, b"done")?
+        if claim_law_expiry(edge, late)? != Some(wanted[i]) { fail("expiry did not saturate to NEVER at 2^64 - 1") }
+    }
+    // never_reclaimed: at keyed time u64::MAX a NEVER claim is Duplicate, fills
+    // its quota, survives the sweep and the open check reports it as Never.
+    let (never_time, _) = provide.clock(0, 18446744073709551615u64)
+    let mut never = test_db(never_time, 134217728)
+    policy.keys_max = 1
+    policy.principal_keys_max = 1
+    let Accepted(take kept) = admit_claim(mut never, late, digest, b"args", Some(clone(policy)))? else { fail("never admission") }
+    let _ = conclude_claim(mut never, take kept, b"done")?
+    match admit_claim(mut never, late, digest, b"args", Some(clone(policy)))? {
+        Duplicate(_) => (),
+        _ => fail("a NEVER claim was not Duplicate at keyed time u64::MAX"),
+    }
+    match admit_claim(mut never, claim_law_key(b"next"), digest, b"args", Some(clone(policy))) {
+        Error(Full(_)) => (),
+        _ => fail("a NEVER claim was reclaimed"),
+    }
+    let unbound: scoped[view] fn(Bytes) -> bool = scoped fn(_op: Bytes) -> bool { false }
+    let mut cursor = claim_sweep_start()
+    let swept = sweep_claims(mut never, mut cursor, unbound)?
+    if swept.deleted_rows != 0 || claim_law_expiry(never, late)? != Some(18446744073709551615u64) {
+        fail("the orphan sweep deleted a NEVER claim")
+    }
+    let Some(DroppedClaimOp(op: dropped, last_expiry: Never)) = check_dropped_claim_ops(mut never, unbound)? else {
+        fail("open check did not report a NEVER claim as Never")
+    }
+    if dropped != b"pay" { fail("open check named another op") }
+    Ok(())
+}
+
+// L18 (http.md H9, K-5): liveness is read before the digest. A live row with
+// another digest is a mismatch; an expired one is a new operation, with or
+// without reclaim having run.
+@test
+fn claim_liveness_before_digest() -> Result[(), Error] waits {
+    let digest = request_digest(b"charge", b"args")
+    let other = request_digest(b"charge", b"other")
+    let mut policy = claim_law_policy()
+    policy.retention_ms = 50
+    policy.keys_max = 2
+    policy.principal_keys_max = 2
+    let (time, take hand) = provide.clock(0, 100)
+    let mut wall = take hand
+    let mut db = test_db(time, 134217728)
+    let first = claim_law_key(b"one")
+    let second = claim_law_key(b"two")
+    let Accepted(take one) = admit_claim(mut db, first, digest, b"args", Some(clone(policy)))? else { fail("first admission") }
+    let Mismatch = admit_claim(mut db, first, other, b"other", Some(clone(policy)))? else {
+        fail("an Admitted claim accepted another digest")
+    }
+    let _ = conclude_claim(mut db, take one, b"done")?
+    let Accepted(take two) = admit_claim(mut db, second, digest, b"args", Some(clone(policy)))? else { fail("second admission") }
+    let _ = conclude_claim(mut db, take two, b"done")?
+    clock.set_wall(mut wall, 149)
+    let Mismatch = admit_claim(mut db, first, other, b"other", Some(clone(policy)))? else {
+        fail("a live Replied claim accepted another digest")
+    }
+    // At expiry both rows are expired but unreclaimed. The scope is full, so
+    // this admission reclaims in its own commit.
+    clock.set_wall(mut wall, 150)
+    let Accepted(take renewed) = admit_claim(mut db, first, other, b"other", Some(clone(policy)))? else {
+        fail("an expired claim with another digest was a mismatch (with reclaim)")
+    }
+    let _ = conclude_claim(mut db, take renewed, b"again")?
+    // After expiry, without reclaim: the scope has room, so no reclaim runs.
+    let (quiet_time, take quiet_hand) = provide.clock(0, 100)
+    let mut quiet_wall = take quiet_hand
+    let mut quiet = test_db(quiet_time, 134217728)
+    policy.keys_max = 5
+    policy.principal_keys_max = 5
+    let Accepted(take kept) = admit_claim(mut quiet, first, digest, b"args", Some(clone(policy)))? else { fail("quiet admission") }
+    let _ = conclude_claim(mut quiet, take kept, b"done")?
+    clock.set_wall(mut quiet_wall, 151)
+    let Accepted(_) = admit_claim(mut quiet, first, other, b"other", Some(clone(policy)))? else {
+        fail("an expired claim with another digest was a mismatch (without reclaim)")
+    }
+    Ok(())
+}

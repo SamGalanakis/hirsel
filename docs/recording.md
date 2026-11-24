@@ -251,10 +251,14 @@ recording build is the same build as the build without recording, and replay on 
 is exact. A replay on another build of the same revision is admitted and is exact for a run
 that took no slice end and was stopped by no step bound. For any other run it may end
 `Diverged` where the two builds' steps first differ: a scheduler choice made at a slice end,
-or an `OutOfTime` at another point, is then not the one recorded. When the replaying
-executable's digest differs from the recorded launch metadata's, the replay writes
-`replay: build differs` first, so such a divergence is attributed to the build and not read
-as a bug in the program.
+or an `OutOfTime` at another point, is then not the one recorded. A recording also holds
+its **build digest**: the hash of the compiler, the toolchain and runtime archive, the
+program's objects and their sources, the target, the engine, the optimisation level and the
+link mode. It leaves out the launch policy (grants, directories and the replay plan), so the
+launcher-only replay executable of a build, which differs from the recording executable only
+in that policy, has the recording's build digest. When the replaying build's digest differs
+from the recorded one, the replay writes `replay: build differs` first, so such a divergence
+is attributed to the build and not read as a bug in the program.
 
 **Across revisions.** `hirsel replay app --tape PATH --diagnose` admits a recording of
 another code revision and still refuses the other differences. It writes
@@ -316,15 +320,15 @@ recorded outcome.
 
 ## Format
 
-A recording file is a **tape** in format 12, which `crates/hirsel-tape-format` owns. Format 7
+A recording file is a **tape** in format 13, which `crates/hirsel-tape-format` owns. Format 7
 added the run's Map hash key to the header, and format 12 removes it (below). Format 8 adds the terminal byte to stream grants
 and adds the SCRAM frames described in [TLS-6](spec/tls.md#tls-6-scram-sha-256). Format 9
 writes each Secret grant's policy as its canonical set of uses
 ([TLS-5](spec/tls.md#tls-5-secrets)). Format 10 gives `SEND_SECRET` the list of
 designations, the `wire` and the `marks` of one message. Format 11 adds the `Cred` grant
 record and the credential fetch frames ([TLS-7](spec/tls.md#tls-7-credential-grants)).
-Format 12 removes the Map hash key from the header; a replay refuses a tape of an earlier
-format. The format is not part of the language and a replay reads only tapes its own build admits,
+Format 12 removes the Map hash key from the header. Format 13 ends a Run's launch metadata
+with the recording's 32-byte build digest. A replay refuses a tape of an earlier format. The format is not part of the language and a replay reads only tapes its own build admits,
 and its pinned executable reads that layout. The host uses the checked block-zero prefix
 through the launch arguments to find and verify the pin.
 

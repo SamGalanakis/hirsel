@@ -11,6 +11,7 @@ pub(super) fn emit(
     entry: FuncId,
     foreign_waits: bool,
     spawns_units: bool,
+    build: Option<DataId>,
 ) -> Result<()> {
     let mut context = object.make_context();
     context.func.signature = signature(object, &[I32, I64], Some(I32));
@@ -188,7 +189,8 @@ pub(super) fn emit(
     let sources = f.address(data.sources);
     let entry = f.object.declare_func_in_func(entry, f.b.func);
     let entry = f.b.ins().func_addr(I64, entry);
-    let status = if let Some(replay) = plan.replay {
+    let build = build.map(|build| f.address(build));
+    let status = if let (Some(replay), Some(build)) = (plan.replay, build) {
         let path = f.string(replay.path.as_bytes())?;
         let identity = f.string(plan.identity.as_bytes())?;
         let mode = f.constant(if replay.diagnose { 2 } else { 1 });
@@ -196,10 +198,10 @@ pub(super) fn emit(
             "hirsel_core_os_replay",
             I8,
             &[
-                config, names, sources, entry, path, mode, identity, revision,
+                config, names, sources, entry, path, mode, identity, revision, build,
             ],
         )?
-    } else if plan.recording {
+    } else if let Some(build) = build {
         let identity = f.string(plan.identity.as_bytes())?;
         let runner = if spawns_units {
             "hirsel_core_os_run_recording_with_units"
@@ -209,7 +211,7 @@ pub(super) fn emit(
         f.value_call(
             runner,
             I8,
-            &[config, names, sources, entry, identity, revision],
+            &[config, names, sources, entry, identity, revision, build],
         )?
     } else if !plan.foreign.is_empty() {
         let waits = f.b.ins().iconst(I8, i64::from(foreign_waits));

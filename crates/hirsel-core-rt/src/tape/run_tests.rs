@@ -126,6 +126,7 @@ pub(in crate::tape) fn check_launch_replay() {
                 mode,
                 c"launch-case".as_ptr(),
                 &[7; 32],
+                &[9; 32],
                 None,
             )
         };
@@ -149,7 +150,7 @@ pub(in crate::tape) fn check_launch_replay() {
     assert_eq!(replayed, recorded);
     assert_eq!(
         std::fs::read_to_string(root.join("stderr")).unwrap(),
-        "replay: refused: unsupported tape format 11 (expected 12)\n"
+        "replay: refused: unsupported tape format 11 (expected 13)\n"
     );
     assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
 }

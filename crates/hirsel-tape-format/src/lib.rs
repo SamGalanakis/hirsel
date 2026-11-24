@@ -21,7 +21,7 @@ pub use payload::{carries_payload, tls_connect_payload};
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 12;
+pub const FORMAT: u16 = 13;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;

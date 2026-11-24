@@ -30,6 +30,9 @@ struct Run {
     path: Vec<u8>,
     identity: Vec<u8>,
     revision: [u8; 32],
+    /// The build digest the driver gave this executable: its objects,
+    /// runtime, toolchain, engine and link mode, without the launch policy.
+    build: [u8; 32],
     mode: u64,
     sources: *const SourceTable,
     stderr: i32,
@@ -291,7 +294,12 @@ unsafe fn record_header(
                 arg.extend_from_slice(std::slice::from_raw_parts(b.data, b.len));
             }
         }
-        write_launch(&mut arg, &*(*config).launch, !run.host.is_null());
+        write_launch(
+            &mut arg,
+            &*(*config).launch,
+            !run.host.is_null(),
+            &run.build,
+        );
         let mut net_rules = vec![];
         if !(*(*config).launch).is_describe() {
             let net = entry::hirsel_core_entry_grant(config, entry::NET, 0);
@@ -414,10 +422,8 @@ unsafe extern "C" fn invoke(
             ((*(*config).launch).clone(), !run.host.is_null())
         } else {
             match read_launch(&startup.arg, launch_revision) {
-                Ok((launch, managed)) => {
-                    let current = (*(*config).launch).digest();
-                    let recorded = launch.digest();
-                    if !current.is_empty() && !recorded.is_empty() && current != recorded {
+                Ok((launch, managed, build)) => {
+                    if build != run.build {
                         let label = b"replay: build differs\n";
                         crate::os::diagnostic(run.stderr, label.as_ptr(), label.len());
                     }
@@ -615,8 +621,8 @@ unsafe extern "C" fn invoke(
 /// Reads and removes `HIRSEL_RECORD` before any grant snapshot is taken.
 /// With HIRSEL_RECORD unset, forward to the ordinary runtime entry.
 /// # Safety
-/// The generated config, names, source tables, entry and 32-byte revision stay
-/// pinned for the call. Identity is a NUL-terminated native string.
+/// The generated config, names, source tables, entry, 32-byte revision and
+/// 32-byte build digest stay pinned for the call. Identity is a NUL-terminated native string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_recording(
     input: *const OsConfig,
@@ -625,9 +631,10 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
     entry: Entry,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     // SAFETY: the caller pins every startup operand for the call.
-    unsafe { run_recording::<false>(input, names, sources, entry, identity, revision) }
+    unsafe { run_recording::<false>(input, names, sources, entry, identity, revision, build) }
 }
 
 /// Recording entry for a program whose ordinary run can spawn helper units.
@@ -642,9 +649,10 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording_with_units(
     entry: Entry,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     // SAFETY: the caller pins every startup operand for the call.
-    unsafe { run_recording::<true>(input, names, sources, entry, identity, revision) }
+    unsafe { run_recording::<true>(input, names, sources, entry, identity, revision, build) }
 }
 
 unsafe fn run_recording<const UNITS: bool>(
@@ -654,6 +662,7 @@ unsafe fn run_recording<const UNITS: bool>(
     entry: Entry,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     // SAFETY: process startup is single-threaded before any task or grant snapshot.
     unsafe {
@@ -662,7 +671,7 @@ unsafe fn run_recording<const UNITS: bool>(
             #[cfg(feature = "prof")]
             let _profile = crate::prof::Run::start_replay();
             return run_taped(
-                input, names, sources, entry, path, mode, identity, revision, None,
+                input, names, sources, entry, path, mode, identity, revision, build, None,
             );
         }
         let path = std::env::var_os("HIRSEL_RECORD");
@@ -697,6 +706,7 @@ unsafe fn run_recording<const UNITS: bool>(
             0,
             identity,
             revision,
+            build,
             record_id,
         );
         super::writer::flush();
@@ -729,8 +739,8 @@ fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64)> {
 /// Launcher-only replay entry (`hirsel replay --tape PATH [--diagnose]`).
 /// Replay is never reachable from the program's environment.
 /// # Safety
-/// The generated config, names, source tables, entry and 32-byte revision stay
-/// pinned for the call. Path and identity are NUL-terminated native strings.
+/// The generated config, names, source tables, entry, 32-byte revision and
+/// 32-byte build digest stay pinned for the call. Path and identity are NUL-terminated native strings.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_replay(
@@ -742,6 +752,7 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
     mode: u64,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
 ) -> u8 {
     #[cfg(feature = "prof")]
     let _profile = crate::prof::Run::start_replay();
@@ -756,6 +767,7 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
             mode,
             identity,
             revision,
+            build,
             None,
         )
     }
@@ -771,6 +783,7 @@ unsafe fn run_taped(
     mode: u64,
     identity: *const libc::c_char,
     revision: *const [u8; 32],
+    build: *const [u8; 32],
     record_id: Option<[u8; 16]>,
 ) -> u8 {
     // SAFETY: every pointer is a borrowed generated startup operand.
@@ -784,11 +797,6 @@ unsafe fn run_taped(
             _ => return process::NOT_STARTED,
         };
         let stderr = sink.stderr_fd();
-        let launch_metadata = if mode == 0 {
-            Metadata::source
-        } else {
-            Metadata::native
-        };
         let mut run = Run {
             entry,
             requirements: input.parameters,
@@ -797,6 +805,7 @@ unsafe fn run_taped(
             path,
             identity: CStr::from_ptr(identity).to_bytes().to_vec(),
             revision: *revision,
+            build: *build,
             mode,
             sources,
             stderr,
@@ -806,7 +815,7 @@ unsafe fn run_taped(
             grants: vec![],
             creds: vec![],
             sink,
-            launch: Box::new(launch_metadata(
+            launch: Box::new(Metadata::source(
                 "",
                 hirsel_core_ids::launch::DEFAULT_N_PLACE,
                 false,

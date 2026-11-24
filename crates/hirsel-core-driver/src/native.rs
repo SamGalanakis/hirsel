@@ -1554,28 +1554,15 @@ fn link_objects(
     };
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
     let archive_pins: Vec<_> = link_archives.pins().collect();
-    // The image objects are linked as their image unit. The source map
-    // enters by its digest, and the runtime headers by the compiler identity,
-    // which embeds them.
+    let build = link::build_key(
+        (toolchain, recipe.identity, &identities, &archive_pins),
+        sources_digest,
+        options,
+        link_mode,
+    )?;
     let link_key = match assembly {
         Some(assembly) => key("hirsel.recipe-final-link.v3", &assembly)?,
-        None => key(
-            "hirsel.core-executable.v8",
-            &(
-                compiler_identity()?,
-                toolchain,
-                recipe.identity,
-                entry_plan,
-                &identities,
-                &archive_pins,
-                sources_digest,
-                &options.target,
-                options.backend,
-                options.optimize,
-                options.debug_lines,
-                link_mode,
-            ),
-        )?,
+        None => key("hirsel.core-executable.v9", &(build, entry_plan))?,
     };
     let store = Store::new(&options.store)?;
     use crate::native_debug::NativeImage;
@@ -1723,6 +1710,7 @@ fn link_objects(
                     &runtime_sources,
                     sources_digest,
                     &revision.0,
+                    &build.0,
                     &revisions,
                     (live_sites, spawns_units),
                 )
@@ -2337,6 +2325,7 @@ fn f5 = n5 g5 extern
                     TARGET,
                     &sources,
                     ContentHash::default(),
+                    &[0; 32],
                     &[0; 32],
                     &[],
                     (None, false),

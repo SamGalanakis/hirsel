@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn write_launch(out: &mut Vec<u8>, launch: &Metadata, managed: bool) {
+pub(super) fn write_launch(out: &mut Vec<u8>, launch: &Metadata, managed: bool, build: &[u8; 32]) {
     for bytes in [launch.digest(), launch.target().as_bytes()] {
         put_varint(out, bytes.len() as u64);
         out.extend_from_slice(bytes);
@@ -19,9 +19,15 @@ pub(super) fn write_launch(out: &mut Vec<u8>, launch: &Metadata, managed: bool) 
     if let Some(version) = launch.witness() {
         out.extend_from_slice(&version.to_le_bytes());
     }
+    out.extend_from_slice(build);
 }
 
-pub(super) fn read_launch(arg: &[u8], revision: [u8; 32]) -> Result<(Metadata, bool), Corrupt> {
+/// The recorded launch metadata, whether the run was managed, and the
+/// recording build's digest.
+pub(super) fn read_launch(
+    arg: &[u8],
+    revision: [u8; 32],
+) -> Result<(Metadata, bool, [u8; 32]), Corrupt> {
     let mut c = Cursor::new(arg);
     for _ in 0..c.varint()? {
         c.bytes()?;
@@ -44,8 +50,9 @@ pub(super) fn read_launch(arg: &[u8], revision: [u8; 32]) -> Result<(Metadata, b
     if flags & 16 != 0 {
         launch = launch.with_witness(Some(u64::from_le_bytes(c.fixed()?)));
     }
+    let build = c.fixed()?;
     if !c.done() {
         return Err(Corrupt);
     }
-    Ok((launch, flags & 2 != 0))
+    Ok((launch, flags & 2 != 0, build))
 }

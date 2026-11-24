@@ -1,6 +1,41 @@
 //! Final ELF link of the checked native inputs.
-use super::{NativeStop, command};
+use super::{NativeOptions, NativeStop, command, key};
+use hirsel_core_ids::ContentHash;
 use std::path::{Path, PathBuf};
+
+/// The build a recording and its replay share: the executable key without
+/// the entry plan, whose launch policy (grants, directories, replay plan) is
+/// the only difference between the two links of one build. The image objects
+/// are linked as their image unit; the source map enters by its digest, the
+/// runtime headers by the compiler identity, which embeds them.
+pub(super) fn build_key(
+    (toolchain, recipe, objects, archives): (
+        ContentHash,
+        ContentHash,
+        &[ContentHash],
+        &[ContentHash],
+    ),
+    sources: ContentHash,
+    options: &NativeOptions,
+    link_mode: &str,
+) -> std::io::Result<ContentHash> {
+    key(
+        "hirsel.core-build.v1",
+        &(
+            crate::compiler_identity()?,
+            toolchain,
+            recipe,
+            objects,
+            archives,
+            sources,
+            &options.target,
+            options.backend,
+            options.optimize,
+            options.debug_lines,
+            link_mode,
+        ),
+    )
+}
 
 pub(super) fn direct_link(
     recipe: &crate::tool_inputs::LinkRecipe,

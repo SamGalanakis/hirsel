@@ -345,6 +345,8 @@ mod tests;
 mod provider_s0_tests;
 #[cfg(test)]
 mod provider_tests;
+#[cfg(test)]
+mod unix_join_tests;
 
 #[cfg(test)]
 mod tasks_tests;

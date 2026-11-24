@@ -92,7 +92,9 @@ halves unchanged and still usable, and nothing else happens:
 1. `r` and `w` are not the two halves of one socket.
 2. The socket is a TLS stream. Its halves stay halves; there is no TLS inside TLS.
 3. The socket is outside TCP. `host.connect` and `host.accept` both create TCP sockets
-   whose halves can rejoin. A joined socket retains its origin for TLS-1's check 1.
+   whose halves can rejoin. A program that rejoins an accepted socket must have read with
+   `max_receive` equal to the bytes its pre-protocol needs, as the STARTTLS client below
+   does. A joined socket retains its origin for TLS-1's check 1.
 
 A STARTTLS client must read the server's go-ahead with `max_receive` equal to the go-ahead's
 length, so that no byte past it reaches program memory as plaintext. Bytes the program

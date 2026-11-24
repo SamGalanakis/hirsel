@@ -1,0 +1,221 @@
+// NET-7 join refusals on a served Net (net.md, Joining halves). Each case
+// gives Unjoined with both halves unchanged, and the returned write half
+// still sends to its own peer.
+fn net_answer(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
+    match provide.reply(mut s, take c, provide.net_reply(r)) {
+        Ok(_) => true,
+        _ => false
+    }
+}
+
+// Take the next call, expect a Connect to 127.0.0.1:443, and issue
+// Socket(id).
+fn net_connect(mut s: Served[NetOp], id: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Connect(addr) => addr.port == 443 && match addr.ip {
+                    V4(x) => x == 2130706433,
+                    _ => false
+                },
+                _ => false
+            }
+            op && net_answer(mut s, take call, Socket(id, Addr(ip: V4(2130706433), port: 443)))
+        },
+        None => false
+    }
+}
+
+// Take the next call and expect Released(id, part), which Done acknowledges.
+fn net_released(mut s: Served[NetOp], id: u64, part: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Released(id: h, part: p) => h == id && match p {
+                    Whole => part == 0,
+                    Read => part == 1,
+                    Write => part == 2,
+                },
+                _ => false
+            }
+            op && net_answer(mut s, take call, Done)
+        },
+        None => false
+    }
+}
+
+// Take the next call, expect a Handshake on socket 8 for "alpha.test" with
+// no ALPN offer, and answer it Secured.
+fn net_secured(mut s: Served[NetOp]) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Handshake(socket, name, alpn, system) => socket == 8 && name == 10 && alpn == 0 && system,
+                _ => false
+            }
+            let digest: (u64, u64, u64, u64) = (0, 0, 0, 0)
+            op && net_answer(mut s, take call, Secured(Handshake(protocol: None, peer: digest)))
+        },
+        None => false
+    }
+}
+
+// Sends the one byte "x" on w.
+fn one_byte(mut w: WriteHalf) -> bool waits {
+    match host.send_pair(mut w, string.as_bytes("x"), string.as_bytes(""), Never) {
+        Ok(k) => k == 1,
+        _ => false
+    }
+}
+
+// Take the next call and expect a Send of the one byte "x" on socket id,
+// answered Count(1).
+fn net_one_byte(mut s: Served[NetOp], id: u64) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                Send(socket, prefix, tail) => socket == id && prefix == 1 && tail == 0,
+                _ => false
+            }
+            let mut p: Bytes = list.with_capacity(8)
+            provide.payload(call, 1, mut p)
+            let data = list.len(p) == 1 && p[0] == 0x78
+            op && data && net_answer(mut s, take call, Count(1))
+        },
+        None => false
+    }
+}
+
+// True when the served Net has no call left.
+fn net_quiet(mut s: Served[NetOp]) -> bool waits {
+    match provide.next(mut s) {
+        Some(take call) => {
+            let _ = take call
+            false
+        },
+        None => true
+    }
+}
+
+// Joins the read half of one dialed socket to the write half of another.
+fn crossed_client(take n: Net) -> bool waits {
+    let at = Addr(ip: V4(2130706433), port: 443)
+    let first = result.unwrap(host.connect(n, at, Never))
+    let second = result.unwrap(host.connect(n, at, Never))
+    let (r1, w1) = net.split(take first)
+    let (r2, w2) = net.split(take second)
+    match net.join(take r1, take w2) {
+        Ok(take joined) => {
+            let _ = take joined
+            let _ = take r2
+            let _ = take w1
+            false
+        },
+        Error(take u) => {
+            let Unjoined(take r, take w) = take u
+            let mut back = take w
+            let mut other = take w1
+            let sent = one_byte(mut back) && one_byte(mut other)
+            let _ = take r
+            let _ = take back
+            let _ = take other
+            let _ = take r2
+            sent
+        }
+    }
+}
+
+// NET-7 check 1 on a served Net: the halves of two dialed sockets give
+// Unjoined, and each returned write half still sends to its own peer:
+// the second socket's (9), then the first's (8).
+// expect: run net_join_crossed(tasks) = true
+fn net_join_crossed(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 128)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, crossed_client)
+    let dialed = net_connect(mut served, 8) && net_connect(mut served, 9)
+    let sent = net_one_byte(mut served, 9) && net_one_byte(mut served, 8)
+    let parts = net_released(mut served, 8, 1) && net_released(mut served, 9, 2) && net_released(mut served, 8, 2) && net_released(mut served, 9, 1)
+    let client = result.unwrap(task.join(take child))
+    dialed && sent && parts && client && net_quiet(mut served)
+}
+
+// Joins the two halves tls.connect returns.
+fn tls_join_client(take n: Net) -> bool waits {
+    let at = Addr(ip: V4(2130706433), port: 443)
+    let socket = result.unwrap(host.connect(n, at, Never))
+    let none: List[String] = list.new()
+    let (r, w, _) = result.unwrap(tls.connect(n, take socket, "alpha.test", System, none, Never))
+    match net.join(take r, take w) {
+        Ok(take joined) => {
+            let _ = take joined
+            false
+        },
+        Error(take u) => {
+            let Unjoined(take rh, take wh) = take u
+            let mut back = take wh
+            let sent = one_byte(mut back)
+            let _ = take rh
+            let _ = take back
+            sent
+        }
+    }
+}
+
+// NET-7 check 2 on a served Net: a TLS stream's halves give Unjoined, and
+// the returned write half still sends to its peer.
+// expect: run net_join_tls(tasks) = true
+fn net_join_tls(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, tls_join_client)
+    let dialed = net_connect(mut served, 8)
+    let shaken = net_secured(mut served)
+    let sent = net_one_byte(mut served, 8)
+    let parts = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let client = result.unwrap(task.join(take child))
+    dialed && shaken && sent && parts && client && net_quiet(mut served)
+}
+
+// Joins the halves of a Unix stream.
+fn unix_join_client(take n: Net) -> bool waits {
+    let socket = result.unwrap(host.connect_unix(n, "run", "db.sock", Never))
+    let (r, w) = net.split(take socket)
+    match net.join(take r, take w) {
+        Ok(take joined) => {
+            let _ = take joined
+            false
+        },
+        Error(take u) => {
+            let Unjoined(take rh, take wh) = take u
+            let mut back = take wh
+            let sent = one_byte(mut back)
+            let _ = take rh
+            let _ = take back
+            sent
+        }
+    }
+}
+
+// NET-7 check 3 on a served Net: a Unix stream's halves give Unjoined, and
+// the returned write half still sends to its peer.
+// expect: run net_join_unix(tasks) = true
+fn net_join_unix(tasks: Tasks) -> bool waits {
+    let (n, s) = provide.net(bytes 64)
+    let mut served = take s
+    let child = task.spawn(tasks, bytes 65536, n, unix_join_client)
+    let connected = match provide.next(mut served) {
+        Some(take call) => {
+            let op = match provide.net_op(call) {
+                ConnectUnix(root, path) => root == 3 && path == 7,
+                _ => false
+            }
+            op && net_answer(mut served, take call, UnixSocket(8))
+        },
+        None => false
+    }
+    let sent = net_one_byte(mut served, 8)
+    let parts = net_released(mut served, 8, 1) && net_released(mut served, 8, 2)
+    let client = result.unwrap(task.join(take child))
+    connected && sent && parts && client && net_quiet(mut served)
+}

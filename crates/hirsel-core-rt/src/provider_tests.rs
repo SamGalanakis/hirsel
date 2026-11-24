@@ -7,7 +7,7 @@ pub(super) struct Fixture {
     pub(super) context: *mut crate::Context,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let out: OwnedFd = File::create(root.path().join("stdout")).unwrap().into();
         let err: OwnedFd = File::create(root.path().join("stderr")).unwrap().into();
@@ -608,7 +608,7 @@ unsafe extern "C" fn diagnostic(state: *mut u8, p: *const u8, n: usize) {
         (&mut *state.cast::<Vec<u8>>()).extend_from_slice(std::slice::from_raw_parts(p, n));
     }
 }
-fn config(args: *const Buffer, args_len: usize, stderr: &mut Vec<u8>) -> Config {
+pub(super) fn config(args: *const Buffer, args_len: usize, stderr: &mut Vec<u8>) -> Config {
     Config {
         launch: std::ptr::null(),
         describe_output: None,
@@ -1847,10 +1847,7 @@ fn unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet() {
     );
     assert!(is_socket(&slot));
     unsafe {
-        let halves = net::hirsel_core_net_split(f.context, first.value, 2);
-        let join = net::hirsel_core_net_join(f.context, halves.value, halves.written, 2);
-        assert_eq!(join.error, error(1, 0));
-        for handle in [join.value, join.written, second.value] {
+        for handle in [first.value, second.value] {
             net::hirsel_core_socket_drop(f.context, handle);
         }
     }

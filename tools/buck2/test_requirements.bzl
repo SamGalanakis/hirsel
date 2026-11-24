@@ -37,6 +37,7 @@ OPENAT2_TEST_CASES = {
         "provider_tests::operator_listener_is_private",
         "provider_tests::paths_cannot_escape_grants_and_tree_drop_never_follows_links",
         "provider_tests::unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet",
+        "unix_join_tests::unix_stream_halves_never_rejoin",
         "host_ops_tests::sleep_until_cancellation_is_cancelled_at_the_native_wait_boundary",
         "host_ops_tests::live_sleep_until_waits_on_host_clock_and_advances_wall",
         "host_ops_tests::already_reached_sleep_until_returns_at_once",

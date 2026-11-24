@@ -587,10 +587,7 @@ answered.
 
 - `poll` is `relay_poll`: a package has no overloading, and the client's `poll` holds
   the name. `relay` takes its config.
-- U3's `RelayConfig` and `RelayDiscards` leave out the stream fields (`streams`,
-  `streams_per_source`, `stream_allocate_s`, `idle_stream`), and there is no
-  `connected` or `disconnected`; U5 adds them. Until then every `Stream` origin is
-  discarded and counted `unknown_stream`. `revoke` is U4.
+- `revoke` is U4. The stream fields, `connected` and `disconnected` came in U5 (below).
 - `relay` answers `Config` for a non-empty policy until U4 builds it. It also answers
   `Config` for:
   - a zero `lifetime_s`, `quota`, `permissions` or `channels`;
@@ -631,6 +628,27 @@ answered.
   420 (TURN-1).
 - `lifetimes_exact`'s relay half drives the relay directly, not under `std.sim.udp`,
   as U2's client half does.
+
+**Decisions made building U5.** Each is reversible inside the package.
+
+- `relay` answers `Config` for a zero `streams`, `streams_per_source` or
+  `stream_allocate_s`, as for the other zero limits.
+- `connected` for a connection already connected answers `Config`; `disconnected` for one
+  the relay does not know (it was never connected, or `Close` already forgot it) does nothing.
+- `streams_per_source` counts connections by their exact prefix: the IPv4 /32, the IPv6
+  /64, an IPv4-mapped address as its IPv4. It is not the source table's hashed slot, so two
+  prefixes that share a slot never share a stream limit.
+- Every allocation ends through one function, `end_lease`. Expiry, Refresh with LIFETIME 0
+  and U4's `revoke` all call it. It returns the address to the pool, and for a `Stream`
+  origin it restarts the `stream_allocate_s` timer from the allocation's end. For an expiry
+  that is the expiry time itself, not the time of the sweep that found it, so the timer is
+  exact. `disconnected` deletes its allocation directly, since the connection is gone.
+- An idle connection is forgotten in the first `advance` at or after its time, whichever
+  entry point that is. Its `Close` waits in a queue. `relay_poll` answers queued `Close`s
+  first, in the order they fell due (oldest connection first within one sweep), and only
+  then `WakeAt` or `Idle`.
+- `connected`'s address parameter is named `source` in the code, because `client` is the
+  package's client constructor.
 
 **No byte-rate limit.** Decision: the relay limits allocations (`quota`, the pool),
 permissions and channels, not relayed bytes per second, which RFC 8656 §21.1.7 and §21.3.1

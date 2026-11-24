@@ -53,7 +53,7 @@ fn refresh(mut r: Relay, now: Now, v: Verified, h: stun_ice.Header, packet: Byte
     }
     if requested == Some(0u32) {
         let gone = list.swap_remove(mut r.leases, i)
-        list.push(mut r.free, gone.relayed)
+        end_lease(mut r, take gone, now.mono_ns)
         return success(mut r, v, h, Some(0u32), mut out)
     }
     let lifetime = granted(r, requested)
@@ -349,15 +349,18 @@ fn channel_data_in(mut r: Relay, o: Origin, packet: Bytes) -> Out {
     ToPeer(r.leases[i].relayed, peer, stun_ice.Range(lo: 4, hi: 4 + len))
 }
 
-/// One datagram or framed message from a client. Stream origins wait for TURN-8's
-/// connected (slice U5) and are discarded and counted unknown_stream until then.
+/// One datagram or framed message from a client. A Stream origin that was never connected,
+/// or whose client differs from connected's, is discarded and counted unknown_stream.
 pub fn from_client(mut r: Relay, now: Now, rnd: Random, o: Origin, mut packet: Bytes, mut out: Bytes) -> Result[Out, TurnError] {
     advance(mut r, now.mono_ns)?
     let local = match o.ingress {
         Udp(a) => a,
-        Stream(_) => {
-            r.discards.unknown_stream += 1
-            return Ok(Nothing)
+        Stream(conn) => match stream_local(r, o, conn) {
+            Some(a) => a,
+            None => {
+                r.discards.unknown_stream += 1
+                return Ok(Nothing)
+            },
         },
     }
     let n = list.len(packet)

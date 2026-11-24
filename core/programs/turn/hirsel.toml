@@ -15,6 +15,7 @@ stun_ice = { major = 1, path = "../stun_ice" }
 "client_rx.hirsel" = "turn"
 "relay.hirsel" = "turn"
 "relay_paths.hirsel" = "turn"
+"streams.hirsel" = "turn"
 
 [tests]
 limit = 67108864

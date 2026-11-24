@@ -1,0 +1,206 @@
+// TURN-8's stream framer and TURN-7's stream connections: connected, disconnected, the
+// stream_allocate_s timer and Close(conn).
+const MAGIC_COOKIE: u32 = 0x2112a442
+
+/// The caller's buffer and how much of it frame_next has handed out.
+pub opaque type Framer {
+    at: u64,
+    failed: bool
+}
+
+/// Message(range): one whole STUN or ChannelData message, padding included, in the buffer.
+pub type Frame = Message(stun_ice.Range) | Pending
+
+pub fn framer() -> Framer {
+    Framer(at: 0, failed: false)
+}
+
+/// The next whole message after those already handed out, Pending until it is buffered, or
+/// Framing for bytes that can start no message. Framing is fatal and stays.
+pub fn frame_next(mut f: Framer, buffer: Bytes) -> Result[Frame, TurnError] {
+    if f.failed {
+        return Error(Framing)
+    }
+    let n = list.len(buffer)
+    if f.at >= n {
+        return Ok(Pending)
+    }
+    let first = buffer[f.at]
+    let avail = n - f.at
+    let size = if first < 0x40 {
+        // RFC 8489 section 5: 20 header bytes, a length that is a multiple of 4, the cookie.
+        if avail < 8 {
+            return Ok(Pending)
+        }
+        let len16: u16 = list.word_be(buffer, f.at + 2)
+        let cookie: u32 = list.word_be(buffer, f.at + 4)
+        if len16 % 4 != 0 || cookie != MAGIC_COOKIE {
+            f.failed = true
+            return Error(Framing)
+        }
+        let len: u64 = int.widen(len16)
+        20 + len
+    } else if first < 0x80 {
+        // RFC 8656 section 12.5: over a stream, ChannelData is padded to a multiple of 4.
+        if avail < 4 {
+            return Ok(Pending)
+        }
+        let len16: u16 = list.word_be(buffer, f.at + 2)
+        let len: u64 = int.widen(len16)
+        4 + padded(len)
+    } else {
+        f.failed = true
+        return Error(Framing)
+    }
+    if avail < size {
+        return Ok(Pending)
+    }
+    let lo = f.at
+    f.at += size
+    Ok(Message(stun_ice.Range(lo: lo, hi: lo + size)))
+}
+
+/// Drop the messages already handed out from the front of the buffer.
+pub fn frame_consumed(mut f: Framer, mut buffer: Bytes) {
+    list.drop_prefix(mut buffer, f.at)
+    f.at = 0
+}
+
+/// An accepted stream. idle_ns: when it is forgotten for holding no allocation; NEVER
+/// while it holds one.
+type Conn {
+    id: u64,
+    local: Addr,
+    client: Addr,
+    family: u64,
+    prefix: u64,
+    idle_ns: u64
+}
+
+/// The source table's prefix, compared exactly: the IPv4 /32 or the IPv6 /64, an
+/// IPv4-mapped address as IPv4.
+fn source_prefix(a: Addr) -> (u64, u64) {
+    match a.ip {
+        V4(ip) => {
+            let wide: u64 = int.widen(ip)
+            (4u64, wide)
+        },
+        V6(high, low) => if high == 0 && (low >> 32) == 0xffff {
+            (4u64, low & 0xffffffff)
+        } else {
+            (6u64, high)
+        },
+    }
+}
+
+fn conn_index(r: Relay, conn: u64) -> Option[u64] {
+    for k in 0u64 .. list.len(r.conns) {
+        if r.conns[k].id == conn {
+            return Some(k)
+        }
+    }
+    None
+}
+
+fn idle_after(r: Relay, from_ns: u64) -> u64 {
+    let s: u64 = int.widen(r.c.stream_allocate_s)
+    from_ns + s * SECOND_NS
+}
+
+/// Once per accepted stream, before its first from_client. local is the address the client
+/// connected to and source the client's (behind H1, the PROXY v2 destination and source).
+pub fn connected(mut r: Relay, conn: u64, local: Addr, source: Addr, now: Now) -> Result[(), TurnError] {
+    advance(mut r, now.mono_ns)?
+    if let Some(_) = conn_index(r, conn) {
+        return Error(Config)
+    }
+    let streams: u64 = int.widen(r.c.streams)
+    if list.len(r.conns) >= streams {
+        return Error(StreamsFull)
+    }
+    let (family, prefix) = source_prefix(source)
+    let mut same = 0u64
+    for k in 0u64 .. list.len(r.conns) {
+        if r.conns[k].family == family && r.conns[k].prefix == prefix {
+            same += 1
+        }
+    }
+    let per_source: u64 = int.widen(r.c.streams_per_source)
+    if same >= per_source {
+        return Error(StreamsFull)
+    }
+    list.try_reserve(mut r.conns, 1) ?=> Capacity
+    list.try_reserve(mut r.closing, 1) ?=> Capacity
+    let idle = idle_after(r, now.mono_ns)
+    list.push(mut r.conns, Conn(id: conn, local: local, client: source, family: family, prefix: prefix, idle_ns: idle))
+    r.due_ns = order.min(r.due_ns, idle)
+    Ok(())
+}
+
+/// The client closed the stream: its allocation, if any, ends at once (RFC 8656 section 3.1).
+pub fn disconnected(mut r: Relay, conn: u64) {
+    if let Some(k) = conn_index(r, conn) {
+        let _ = list.swap_remove(mut r.conns, k)
+    }
+    let mut i = 0u64
+    while i < list.len(r.leases) {
+        if r.leases[i].origin.ingress == Stream(conn) {
+            let gone = list.swap_remove(mut r.leases, i)
+            list.push(mut r.free, gone.relayed)
+            continue
+        }
+        i += 1
+    }
+}
+
+/// The local address of a connected stream origin, or None when it was never connected or
+/// its client differs from connected's.
+fn stream_local(r: Relay, o: Origin, conn: u64) -> Option[Addr] {
+    let Some(k) = conn_index(r, conn) else {
+        return None
+    }
+    if r.conns[k].client != o.client {
+        return None
+    }
+    Some(r.conns[k].local)
+}
+
+/// An allocation was made on o: a stream origin's idle timer stops.
+fn stream_held(mut r: Relay, o: Origin) {
+    if let Stream(conn) = o.ingress {
+        if let Some(k) = conn_index(r, conn) {
+            r.conns[k].idle_ns = NEVER
+        }
+    }
+}
+
+/// Every allocation ends here (expiry at its own time, Refresh 0, and U4's revoke): the
+/// address returns to the pool, and a stream origin's idle timer restarts at ended_ns.
+fn end_lease(mut r: Relay, take gone: Lease, ended_ns: u64) {
+    list.push(mut r.free, gone.relayed)
+    if let Stream(conn) = gone.origin.ingress {
+        if let Some(k) = conn_index(r, conn) {
+            let idle = idle_after(r, ended_ns)
+            r.conns[k].idle_ns = idle
+            r.due_ns = order.min(r.due_ns, idle)
+        }
+    }
+}
+
+/// Forget the streams idle at now_ns, queue their Close, and answer the next idle time.
+fn sweep_streams(mut r: Relay, now_ns: u64) -> u64 {
+    let mut due = NEVER
+    let mut k = 0u64
+    while k < list.len(r.conns) {
+        let idle = r.conns[k].idle_ns
+        if now_ns >= idle {
+            let gone = list.remove(mut r.conns, k)
+            r.discards.idle_stream += 1
+            list.push(mut r.closing, gone.id)
+            continue
+        }
+        due = order.min(due, idle)
+        k += 1
+    }
+    due
+}

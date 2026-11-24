@@ -221,6 +221,21 @@ pub fn key_domain(image: Image) -> Domain {
     image.domain
 }
 
+/// Whether a collection-map leaf names any Tiered collection.
+pub fn has_tiered_roots(image: Image) -> bool {
+    if image.domain != CollectionMap || level(image) != 0 {
+        return false
+    }
+    for slot in 0u64 .. count(image) {
+        let at = entry_at(image, slot)
+        let descriptor = at + 5 + u16_at(image.raw, at)
+        if image.raw[descriptor + 53] == 1 {
+            return true
+        }
+    }
+    false
+}
+
 pub fn image_of(page: Arc[Page]) -> View[Image] in page {
     view page.image
 }
@@ -324,18 +339,26 @@ pub fn collection_child(root: Arc[Page], key: Bytes) -> Option[View[Arc[Page]]] 
     }
 }
 
-pub fn collection_entry(root: Arc[Page], key: Bytes) -> Option[(View[Arc[Page]], View[Bytes])] in root {
+/// Find a collection descriptor and its root slot without resolving it.
+pub fn collection_slot(root: Arc[Page], key: Bytes) -> Option[(View[Slot], View[Bytes])] in root {
     if let Some(slot) = descend(root.image, key) {
-        return collection_entry(hot_child(root.kids[slot]), key)
+        return collection_slot(hot_child(root.kids[slot]), key)
     }
     let (slot, hit) = search(root.image, key)
     if hit && root.image.domain == CollectionMap {
         let Some(descriptor) = value_at(root, slot) else {
             return None
         }
-        return Some((hot_child(root.kids[slot]), descriptor))
+        return Some((view root.kids[slot], descriptor))
     }
     None
+}
+
+pub fn collection_entry(root: Arc[Page], key: Bytes) -> Option[(View[Arc[Page]], View[Bytes])] in root {
+    let Some((edge, descriptor)) = collection_slot(root, key) else {
+        return None
+    }
+    Some((hot_child(edge), descriptor))
 }
 
 pub fn rank(root: Arc[Page], key: Bytes, inclusive: bool) -> u64 {
@@ -476,7 +499,7 @@ fn map_value(raw: Bytes, at: u64, width: u64) -> Result[(), Error] {
     if kind != 3 && ptr.stamp == 0 && (rows != 0 || charge != 0) {
         return Error(MalformedPage)
     }
-    if (residency != 0 && kind != 4) || raw[at + 54] != 0 {
+    if raw[at + 54] != 0 {
         return Error(UnsupportedPage)
     }
     Ok(())
@@ -1041,9 +1064,10 @@ fn check_attachment(image: Image, kids: List[Slot], blobs: List[BlobSlot]) -> Re
             } else {
                 value
             })
+            let tiered_root = lvl == 0 && image.domain == CollectionMap && image.raw[value + 56] == 1
             let invalid = match kids[i] {
-                HotPage(kid) => stamp(kid.image) != ptr.stamp || (lvl != 0 && level(kid.image) != lvl - 1),
-                ColdPage(edge) => image.domain != Collection || edge.pack == 0 || edge != ptr,
+                HotPage(kid) => stamp(kid.image) != ptr.stamp || (lvl != 0 && level(kid.image) != lvl - 1) || (tiered_root && ptr.pack != 0),
+                ColdPage(edge) => !(image.domain == Collection || tiered_root) || edge.pack == 0 || edge.offset < 72 || edge.len == 0 || edge != ptr,
             }
             if invalid {
                 return Error(MalformedPage)

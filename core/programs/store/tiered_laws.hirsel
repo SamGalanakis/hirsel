@@ -652,3 +652,46 @@ fn test_l62_root_scoped_pins() -> Result[(), Error] {
     }
     Ok(())
 }
+
+@test
+fn test_l68_lazy_collection_root() -> Result[(), Error] {
+    // Hand-laid AP7 map leaf: header 24, prefix 4, inline entry 61,
+    // and one 2-byte slot. Its table root belongs to another pack.
+    let mut raw: Bytes = list.with_capacity(91)
+    list.fill(mut raw, 24, 0u8)
+    list.set_word_le(mut raw, 2, 1u16)
+    list.set_word_le(mut raw, 4, 4u16)
+    list.set_word_le(mut raw, 8, 100u64)
+    list.set_word_le(mut raw, 16, 89u32)
+    list.put_word_be(mut raw, 9u32)
+    list.put_word_le(mut raw, 0u16)
+    list.push(mut raw, 0u8)
+    list.put_word_le(mut raw, 56u16)
+    list.put_word_le(mut raw, 8u64)
+    list.put_word_le(mut raw, 72u64)
+    list.put_word_le(mut raw, 80u32)
+    list.put_word_le(mut raw, 0xc3a9635c753cb40cu64)
+    list.put_word_le(mut raw, 40u64)
+    list.put_word_le(mut raw, 1u64)
+    list.put_word_le(mut raw, 78u64)
+    list.put_word_le(mut raw, 0x00000101u32)
+    list.put_word_le(mut raw, 28u16)
+    let disk_image = page_result(std.page.decode(clone(raw), CollectionMap))?
+    let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
+    let mut slots: List[std.page.Slot] = list.new()
+    list.push(mut slots, ColdPage(ptr))
+    let root = page_result(std.page.attach(take disk_image, take slots, list.new()))?
+    let logical = prefix(9)?
+    let Some((ColdPage(found), descriptor)) = std.page.collection_slot(root, logical) else {
+        fail("L68: lazy attach lost the table root's location")
+    }
+    let rows: u64 = list.word_le(descriptor, 36)
+    let charged: u64 = list.word_le(descriptor, 44)
+    if found != ptr || descriptor[53u64] != 1 || rows != 1 || charged != 78 {
+        fail("L68: lazy attach changed the table descriptor")
+    }
+    let Error(Unsupported(0x0021)) = decode_located_page("p-9", 72, take raw, CollectionMap) else {
+        fail("L68: the eager opener accepted a Tiered descriptor")
+    }
+    Ok(())
+}

@@ -394,6 +394,10 @@ fn decode_located_page(path: String, offset: u64, take raw: Bytes, domain: std.p
         UnsupportedPage => Unsupported(0x0021),
         _ => disk_fault(path, offset, Malformed),
     }
+    // The eager opener cannot attach a Tiered root, even if that root is empty.
+    if std.page.has_tiered_roots(image) {
+        return Error(Unsupported(0x0021))
+    }
     Ok(take image)
 }
 

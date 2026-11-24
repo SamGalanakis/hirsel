@@ -494,7 +494,7 @@ fn collection_map_leaf() -> bool {
     list.push(mut kids, HotPage(page.empty(0, 0, Collection)))
     let root = result.unwrap(page.attach(take decoded, take kids, list.new()))
     let mut wrong: Bytes = clone(expected)
-    wrong[86u64] = 1
+    wrong[87u64] = 1
     child_stamp(root, 0) == 0 && (if let Error(UnsupportedPage) = page.decode(take wrong, CollectionMap) {
         true
     } else {

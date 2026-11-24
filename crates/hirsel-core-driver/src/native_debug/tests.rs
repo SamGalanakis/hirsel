@@ -639,7 +639,7 @@ fn cranelift_unwind_links_into_pie_from_whole_and_cached_objects() {
             let warm = keys
                 .into_iter()
                 .map(|key| {
-                    let (bare, _, _) = crate::native_object::load(&store, key).unwrap().unwrap();
+                    let (bare, _) = crate::native_object::load(&store, key).unwrap().unwrap();
                     crate::native_object::path(&store, bare.address)
                 })
                 .collect::<Vec<_>>();

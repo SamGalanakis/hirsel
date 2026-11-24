@@ -375,11 +375,6 @@ impl Store {
     /// Write `bytes` to a temporary and rename it to `path`. Nothing is
     /// synced (module documentation).
     fn publish(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.publish_held(path, bytes).map(drop)
-    }
-    /// [`Self::publish`], keeping the descriptor the bytes were written
-    /// through: it names the published inode whatever is renamed over `path`.
-    fn publish_held(&self, path: &Path, bytes: &[u8]) -> io::Result<File> {
         let mut temporary = self.temporary()?;
         #[cfg(test)]
         if crashed(&self.root) {
@@ -394,7 +389,7 @@ impl Store {
             let _ = fs::remove_file(&temporary.path);
             return Err(e);
         }
-        Ok(temporary.file)
+        Ok(())
     }
     /// Whether `path` names a file of this store.
     /// The store's directory.
@@ -424,16 +419,15 @@ impl Store {
     /// whose bytes are not the record's fails the read check, a miss.
     /// The bytes always replace the file by a rename: a file already at the
     /// path may be one whose check just failed, and an existing name says
-    /// nothing about its bytes. The descriptor returned is the one the bytes
-    /// were written through.
-    pub(crate) fn put_bare(&self, name: ContentHash, bytes: &[u8]) -> io::Result<(Bare, File)> {
+    /// nothing about its bytes.
+    pub(crate) fn put_bare(&self, name: ContentHash, bytes: &[u8]) -> io::Result<Bare> {
         let bare = Bare {
             address: name,
             check: checksum(bytes),
         };
-        let file = self.publish_held(&self.path(bare.address), bytes)?;
+        self.publish(&self.path(bare.address), bytes)?;
         wrote("bare");
-        Ok((bare, file))
+        Ok(bare)
     }
     pub(crate) fn archive(
         &self,
@@ -694,9 +688,8 @@ impl Store {
         }
         Ok(Some((bytes, end)))
     }
-    /// A bare object's bytes when they pass their check, with the descriptor
-    /// they were read and checked through.
-    pub(crate) fn get_bare(&self, bare: Bare) -> io::Result<Option<(Vec<u8>, File)>> {
+    /// A bare object's bytes when they pass their check.
+    pub(crate) fn get_bare(&self, bare: Bare) -> io::Result<Option<Vec<u8>>> {
         let mut file = match File::open(self.path(bare.address)) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -706,7 +699,7 @@ impl Store {
         crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        Ok((checksum(&bytes) == bare.check).then_some((bytes, file)))
+        Ok((checksum(&bytes) == bare.check).then_some(bytes))
     }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
         let bytes = match fs::read(self.root.join(name)) {

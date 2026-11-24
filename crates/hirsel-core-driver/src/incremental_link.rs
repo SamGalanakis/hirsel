@@ -14,15 +14,17 @@
 //! full link of the same objects makes, so a build in an empty store and an
 //! incremental build deliver the same bytes.
 use hirsel_core_ids::ContentHash;
-use std::fs::File;
 use std::io;
 use std::sync::{Arc, Mutex};
 
 /// One object a link reads, in link order: bytes made for this link, or a
-/// checked descriptor with the key its bytes are a function of.
+/// member of the link's bundle with the key its bytes are a function of.
 pub(crate) enum Slot<'a> {
     Bytes(&'a [u8]),
-    Keyed((ContentHash, u64), &'a File),
+    Keyed(
+        (ContentHash, u64),
+        (&'a crate::native::link_input::Bundle, usize),
+    ),
 }
 
 struct Remembered {
@@ -47,12 +49,9 @@ pub(crate) struct Incremental(Option<Previous>);
 /// The resident compiler's incremental link.
 pub(crate) static RESIDENT: Mutex<Incremental> = Mutex::new(Incremental(None));
 
-/// The bytes of the inode `file` names, read as the linker reads them:
-/// through `/proc/self/fd`, since an object this request wrote is held by
-/// the write-only descriptor its bytes were written through.
-fn read(file: &File) -> io::Result<Arc<[u8]>> {
-    let fd = std::os::fd::AsRawFd::as_raw_fd(file);
-    Ok(std::fs::read(format!("/proc/self/fd/{fd}"))?.into())
+/// The bytes of a bundle's member, as the linker reads them.
+fn read(&(bundle, n): &(&crate::native::link_input::Bundle, usize)) -> io::Result<Arc<[u8]>> {
+    Ok(bundle.member(n)?.into())
 }
 
 impl Incremental {

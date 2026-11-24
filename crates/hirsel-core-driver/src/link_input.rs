@@ -1,94 +1,171 @@
-//! The descriptors a link hands the linker: one per object, through which
-//! its bytes were checked or written, and the process limit they count
-//! against.
+//! The objects a link hands the linker, as one archive of their checked
+//! bytes: a sealed memory file the linker reads whole through one descriptor
+//! of this process, however many objects the link has.
 #[cfg(test)]
 use crate::native::{AFTER_CHECK, BEFORE_OPEN};
 use crate::native::{NativeStop, ObjectProduct};
 use hirsel_core_ir::Identity;
-use std::io;
-#[cfg(test)]
+use std::fs::File;
+use std::io::{self, Write};
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 
-/// Raise the soft descriptor limit to the hard limit once, as Go does since
-/// 1.19: a build holds one descriptor per object from the object's check or
-/// write to the link, so every place that makes such a descriptor
-/// (`native_object`) raises it before the first. The limit a link may use.
-pub(crate) fn descriptor_limit() -> u64 {
-    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: getrlimit and setrlimit read and write the struct passed.
-        unsafe {
-            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
-                return 1024;
-            }
-            if limit.rlim_cur < limit.rlim_max {
-                let raised = libc::rlimit {
-                    rlim_cur: limit.rlim_max,
-                    rlim_max: limit.rlim_max,
-                };
-                if libc::setrlimit(libc::RLIMIT_NOFILE, &raised) == 0 {
-                    limit = raised;
-                }
-            }
-        }
-        limit.rlim_cur
-    })
+/// A link's objects, in link order, as the members of a GNU archive without
+/// a symbol table, in a sealed memory file. The linker reads it under
+/// `--whole-archive` (`native_link::direct_link`), which loads every member
+/// in order as if each were named alone, so the executable is the one a link
+/// of the separate objects makes. Only checked bytes are written into it, and
+/// once sealed nothing changes them.
+pub(crate) struct Bundle {
+    file: File,
+    /// Each member's bytes: offset and length.
+    members: Vec<(u64, usize)>,
 }
 
-/// A checked object's descriptor for the link: the one an object this
-/// request read or emitted holds, lent, or one opened here.
-pub(crate) enum Opened<'a> {
-    Lent(&'a std::fs::File),
-    Owned(std::fs::File),
-}
-impl std::ops::Deref for Opened<'_> {
-    type Target = std::fs::File;
-    fn deref(&self) -> &std::fs::File {
-        match self {
-            Self::Lent(file) => file,
-            Self::Owned(file) => file,
-        }
+const MAGIC: &[u8; 8] = b"!<arch>\n";
+
+impl Bundle {
+    /// The path through which another process reads the bundle.
+    pub(crate) fn path(&self) -> PathBuf {
+        PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            std::os::fd::AsRawFd::as_raw_fd(&self.file)
+        ))
+    }
+    pub(crate) fn len(&self) -> usize {
+        self.members.len()
+    }
+    /// Member `n`'s bytes.
+    pub(crate) fn member(&self, n: usize) -> io::Result<Vec<u8>> {
+        let (at, len) = self.members[n];
+        let mut bytes = vec![0; len];
+        self.file.read_exact_at(&mut bytes, at)?;
+        Ok(bytes)
     }
 }
 
-/// One descriptor per object, through which its bytes were checked or
-/// written: an object this request read or emitted lends its own, and a
-/// stored object named by a record is opened once and checked through that
-/// descriptor. The linker names each by `/proc/<pid>/fd/N` of this process,
-/// which resolves to that inode, so no store path is reopened after a check.
-/// Every stored object is checked; each that fails is removed, and the
-/// instances of all of them are returned.
-pub(crate) fn open_objects<'a>(
-    objects: &[&'a ObjectProduct],
+/// A [`Bundle`] being written.
+pub(crate) struct BundleWriter {
+    file: io::BufWriter<File>,
+    at: u64,
+    members: Vec<(u64, usize)>,
+}
+
+impl BundleWriter {
+    pub(crate) fn new() -> io::Result<Self> {
+        let mut file = io::BufWriter::with_capacity(1 << 20, memory_file()?);
+        file.write_all(MAGIC)?;
+        Ok(Self {
+            file,
+            at: MAGIC.len() as u64,
+            members: Vec::new(),
+        })
+    }
+    /// Append checked `bytes` as the next member.
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        // The member's name is its index; `/` ends a GNU member name.
+        let header = format!(
+            "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+            format!("{}/", self.members.len()),
+            0,
+            0,
+            0,
+            644,
+            bytes.len()
+        );
+        debug_assert_eq!(header.len(), 60);
+        self.file.write_all(header.as_bytes())?;
+        self.at += 60;
+        self.members.push((self.at, bytes.len()));
+        self.file.write_all(bytes)?;
+        self.at += bytes.len() as u64;
+        if bytes.len() % 2 == 1 {
+            self.file.write_all(b"\n")?;
+            self.at += 1;
+        }
+        Ok(())
+    }
+    /// The bundle, sealed against every further write.
+    pub(crate) fn finish(self) -> io::Result<Bundle> {
+        let file = self
+            .file
+            .into_inner()
+            .map_err(io::IntoInnerError::into_error)?;
+        seal(&file)?;
+        Ok(Bundle {
+            file,
+            members: self.members,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn memory_file() -> io::Result<File> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: the name is NUL-terminated and these flags take no other arguments.
+    let fd = unsafe {
+        libc::memfd_create(
+            c"hirsel-link".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: memfd_create returned a fresh owned descriptor.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+#[cfg(target_os = "linux")]
+fn seal(file: &File) -> io::Result<()> {
+    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+    // SAFETY: the file is open and F_ADD_SEALS takes a single integer argument.
+    if unsafe {
+        libc::fcntl(
+            std::os::fd::AsRawFd::as_raw_fd(file),
+            libc::F_ADD_SEALS,
+            seals,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(not(target_os = "linux"))]
+fn memory_file() -> io::Result<File> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+#[cfg(not(target_os = "linux"))]
+fn seal(_: &File) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// Append each object's checked bytes to `bundle`, in order: the bytes an
+/// object this request read or emitted holds, or a stored object's, read and
+/// checked here through one descriptor closed before the next opens. Every
+/// stored object is checked; each that fails is removed, and the instances
+/// of all of them are returned.
+pub(crate) fn bundle_objects(
+    objects: &[&ObjectProduct],
+    bundle: &mut BundleWriter,
     counters: &mut crate::reach::ReachCounters,
-) -> Result<Result<Vec<Opened<'a>>, Vec<Identity>>, NativeStop> {
+) -> Result<Result<(), Vec<Identity>>, NativeStop> {
     use std::io::Read;
-    let limit = descriptor_limit();
-    if objects.len() as u64 + 64 > limit {
-        return Err(NativeStop::Link(format!(
-            "{} objects exceed the descriptor limit of {limit}",
-            objects.len()
-        )));
-    }
     #[cfg(test)]
     BEFORE_OPEN.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
             hook(&objects.iter().map(|o| o.path.clone()).collect::<Vec<_>>());
         }
     });
-    let mut files = Vec::with_capacity(objects.len());
     let mut refused = Vec::new();
     let mut bytes = Vec::new();
     for &object in objects {
-        if let Some(held) = &object.held {
-            files.push(Opened::Lent(held));
+        if let Some(held) = &object.bytes {
+            bundle.push(held)?;
             continue;
         }
-        let mut file = match std::fs::File::open(&object.path) {
+        let mut file = match File::open(&object.path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 refused.push(object.instance.clone());
@@ -100,9 +177,9 @@ pub(crate) fn open_objects<'a>(
         crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
         bytes.clear();
         file.read_to_end(&mut bytes)?;
+        drop(file);
         counters.objects_verified += 1;
         if crate::store::checksum(&bytes) != object.check {
-            drop(file);
             match std::fs::remove_file(&object.path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -111,7 +188,7 @@ pub(crate) fn open_objects<'a>(
             refused.push(object.instance.clone());
             continue;
         }
-        files.push(Opened::Owned(file));
+        bundle.push(&bytes)?;
     }
     if !refused.is_empty() {
         return Ok(Err(refused));
@@ -122,5 +199,5 @@ pub(crate) fn open_objects<'a>(
             hook(&objects.iter().map(|o| o.path.clone()).collect::<Vec<_>>());
         }
     });
-    Ok(Ok(files))
+    Ok(Ok(()))
 }

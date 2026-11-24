@@ -1730,16 +1730,15 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
             absent: vec![],
             identity: ContentHash::default(),
         };
-        let collision = staged
-            .append_link_inputs(&mut vec![fixture.path().join("laws.o")], &caller, &plan)
-            .unwrap_err();
+        let mut laws = vec![fixture.path().join("laws.o")];
+        let collision = staged.append_link_inputs(&mut laws, None, &caller, &plan);
         assert_eq!(
-            collision.to_string(),
+            collision.unwrap_err().to_string(),
             "FFI-3: symbol hfl_shared is defined by archive laws.a of ffi_laws@1/native and by the generated code",
         );
         let mut inputs = vec![caller.clone()];
         staged
-            .append_link_inputs(&mut inputs, &caller, &plan)
+            .append_link_inputs(&mut inputs, None, &caller, &plan)
             .unwrap();
         let linked = Command::new(&plan.linker)
             .args(["--shared", "--no-undefined"])

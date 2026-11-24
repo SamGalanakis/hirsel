@@ -1017,12 +1017,12 @@ impl StdSide {
                     crate::native_object::load(store, key)?
                 };
                 match object {
-                    Some((bare, object, file)) => {
+                    Some((bare, object)) => {
                         named.extend(
                             hirsel_llvm_lazy::core::undefined_symbols(&object.bytes)
                                 .map_err(emit)?,
                         );
-                        linked.insert(i, (bare, object.debug, file));
+                        linked.insert(i, (bare, object));
                     }
                     None => missed.push(i),
                 }
@@ -1059,9 +1059,9 @@ impl StdSide {
                     named.extend(
                         hirsel_llvm_lazy::core::undefined_symbols(&object.bytes).map_err(emit)?,
                     );
-                    let (bare, file) =
+                    let bare =
                         crate::native_object::publish(store, part_name(self.key, i)?, &object)?;
-                    linked.insert(i, (bare, object.debug, file));
+                    linked.insert(i, (bare, object));
                 }
             }
             next = if by_name.is_empty() {
@@ -1072,14 +1072,14 @@ impl StdSide {
         }
         Ok(linked
             .into_values()
-            .map(|(bare, debug, file)| ObjectProduct {
+            .map(|(bare, object)| ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
                 path: crate::native_object::path(store, bare.address),
                 identity: bare.address,
                 check: bare.check,
-                held: Some(file),
-                debug: debug.map(std::sync::Arc::new),
+                bytes: Some(object.bytes),
+                debug: object.debug.map(std::sync::Arc::new),
                 debug_record: None,
                 compiled: false,
             })
@@ -1133,26 +1133,17 @@ fn read_compressed(store: &Store, key: ContentHash) -> io::Result<Option<Vec<u8>
 fn read_prebuilt_object(
     store: &Store,
     key: ContentHash,
-) -> io::Result<
-    Option<(
-        crate::store::Bare,
-        hirsel_core_ir::source::NativeObject,
-        std::fs::File,
-    )>,
-> {
-    use std::io::Write;
+) -> io::Result<Option<(crate::store::Bare, hirsel_core_ir::source::NativeObject)>> {
     let Some(payload) = read_compressed(store, key)? else {
         return Ok(None);
     };
     let native: hirsel_core_ir::source::NativeObject =
         decode(&payload).ok_or_else(|| io::Error::other("invalid prebuilt release std object"))?;
-    let mut file = tempfile::tempfile()?;
-    file.write_all(&native.bytes)?;
     let bare = crate::store::Bare {
         address: key,
         check: crate::store::checksum(&native.bytes),
     };
-    Ok(Some((bare, native, file)))
+    Ok(Some((bare, native)))
 }
 
 /// The record stored under `key` when it decodes, is of `kin` and its own

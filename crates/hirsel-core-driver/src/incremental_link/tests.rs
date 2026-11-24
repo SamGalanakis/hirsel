@@ -97,10 +97,12 @@ fn a_patched_link_is_the_lld_link_of_the_edited_objects() {
     let mut linker = Incremental::default();
     let mut step = |name: &str, unit_source: String, patches: bool| {
         let unit = assemble(dir, name, &unit_source);
-        let file = std::fs::File::open(dir.join(format!("{name}.o"))).unwrap();
+        let mut bundle = crate::native::link_input::BundleWriter::new().unwrap();
+        bundle.push(&unit).unwrap();
+        let bundle = bundle.finish().unwrap();
         let objects = [
             Slot::Bytes(&main),
-            Slot::Keyed((ContentHash::of_bytes(&unit), 0), &file),
+            Slot::Keyed((ContentHash::of_bytes(&unit), 0), (&bundle, 0)),
         ];
         let want = lld(dir, &[&main, &unit]);
         match linker.patch(frame, &objects).unwrap() {

@@ -87,8 +87,8 @@ impl<G: serde::Serialize> hirsel_llvm_lazy::Held for SharedParts<'_, G> {
             crate::native_object::load(self.shared, key)
         });
         match loaded {
-            Ok(Some((bare, object, file))) => {
-                self.held.push((bare, object, file, false));
+            Ok(Some((bare, object))) => {
+                self.held.push((bare, object, false));
                 true
             }
             Ok(None) => false,
@@ -155,7 +155,6 @@ const PARTS_SCHEMA: u32 = 5;
 type Held = (
     crate::store::Bare,
     hirsel_core_ir::source::NativeObject,
-    std::fs::File,
     bool,
 );
 
@@ -172,10 +171,10 @@ fn load_parts(
     }
     let mut held = Vec::with_capacity(record.parts.len());
     for &key in &record.parts {
-        let Some((bare, object, file)) = crate::native_object::load(shared, key)? else {
+        let Some((bare, object)) = crate::native_object::load(shared, key)? else {
             return Ok(None);
         };
-        held.push((bare, object, file, false));
+        held.push((bare, object, false));
     }
     Ok(Some((record, held)))
 }
@@ -466,8 +465,8 @@ pub(super) fn emit_release_image(
                 true => hits.next().expect("a reused part was loaded"),
                 false => {
                     let object = made.next().expect("a missed part was generated");
-                    let (bare, file) = crate::native_object::publish(&shared, key, &object)?;
-                    (bare, object, file, true)
+                    let bare = crate::native_object::publish(&shared, key, &object)?;
+                    (bare, object, true)
                 }
             });
         }
@@ -487,13 +486,13 @@ pub(super) fn emit_release_image(
     }
     let objects = held
         .into_iter()
-        .map(|(bare, object, file, compiled)| ObjectProduct {
+        .map(|(bare, object, compiled)| ObjectProduct {
             private_variants: std::mem::take(&mut private_variants),
             instance: instance.clone(),
             path: crate::native_object::path(&shared, bare.address),
             identity: bare.address,
             check: bare.check,
-            held: Some(file),
+            bytes: Some(object.bytes),
             debug: object.debug.map(std::sync::Arc::new),
             debug_record: None,
             compiled,

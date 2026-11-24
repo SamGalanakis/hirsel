@@ -229,10 +229,10 @@ pub struct ObjectProduct {
     pub path: PathBuf,
     /// The object's read check (`Bare::check`).
     pub(crate) check: u64,
-    /// The descriptor this request checked or wrote the object's bytes
-    /// through, which the link hands the linker. None: a stored object named
-    /// by a record, which the link opens and checks through that descriptor.
-    pub(crate) held: Option<std::fs::File>,
+    /// The bytes this request checked or wrote, which the link hands the
+    /// linker. None: a stored object named by a record, which the link reads
+    /// and checks.
+    pub(crate) bytes: Option<Vec<u8>>,
     pub debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
     /// Stored debug rows: their store and address. A link with debug lines
     /// reads them when `debug` is not in hand.
@@ -248,18 +248,17 @@ impl ObjectProduct {
             identity: object.address,
             path: crate::native_object::path(store, object.address),
             check: object.check,
-            held: None,
+            bytes: None,
             debug: None,
             debug_record: debug.map(|d| (store.clone(), d)),
             compiled: false,
         }
     }
-    /// An object this request read and checked, or emitted and wrote,
-    /// through `held`.
+    /// An object this request read and checked, or emitted and wrote.
     fn held(
         instance: Identity,
         store: &Store,
-        (object, held): (Bare, std::fs::File),
+        object: Bare,
         native: hirsel_core_ir::source::NativeObject,
         debug: Option<ContentHash>,
         compiled: bool,
@@ -267,19 +266,19 @@ impl ObjectProduct {
         let mut product = Self::shared(
             instance,
             store,
-            (object, held),
+            (object, native.bytes),
             native.debug.map(std::sync::Arc::new),
             compiled,
         );
         product.debug_record = debug.map(|d| (store.clone(), d));
         product
     }
-    /// An object this request checked through `held`, its debug rows
+    /// An object whose checked `bytes` this request holds, its debug rows
     /// `debug` in hand.
     pub(crate) fn shared(
         instance: Identity,
         store: &Store,
-        (object, held): (Bare, std::fs::File),
+        (object, bytes): (Bare, Vec<u8>),
         debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
         compiled: bool,
     ) -> Self {
@@ -289,7 +288,7 @@ impl ObjectProduct {
             identity: object.address,
             path: crate::native_object::path(store, object.address),
             check: object.check,
-            held: Some(held),
+            bytes: Some(bytes),
             debug,
             debug_record: None,
             compiled,
@@ -750,7 +749,7 @@ impl CheckProduct {
                     items: module.items.clone(),
                     closures: fields.closures.clone(),
                 };
-                let (bare, debug, held) =
+                let (bare, debug) =
                     crate::native_object::publish_instance(store, object_key, &object, record)?;
                 if let Some(table) = &mut table {
                     table.push(
@@ -774,7 +773,7 @@ impl CheckProduct {
                 objects.push(ObjectProduct::held(
                     instance.clone(),
                     store,
-                    (bare, held),
+                    bare,
                     object,
                     debug,
                     true,
@@ -807,28 +806,26 @@ impl CheckProduct {
                     instance_body.ir_hash(&mut scratch)?,
                 ),
             )?;
-            let (held, object, compiled) = if let Some((bare, object, file)) =
-                crate::native_object::load(store, object_key)?
-            {
-                ((bare, file), object, false)
-            } else {
-                let symbols = materialized.link_symbols(instance, &mut names)?;
-                let object = emit_unit(module, || symbols, options, object_key, instance).map_err(
-                    |message| NativeStop::Emit {
-                        definition: instance.definition.clone(),
-                        message,
-                    },
-                )?;
-                (
-                    crate::native_object::publish(store, object_key, &object)?,
-                    object,
-                    true,
-                )
-            };
+            let (bare, object, compiled) =
+                if let Some((bare, object)) = crate::native_object::load(store, object_key)? {
+                    (bare, object, false)
+                } else {
+                    let symbols = materialized.link_symbols(instance, &mut names)?;
+                    let object = emit_unit(module, || symbols, options, object_key, instance)
+                        .map_err(|message| NativeStop::Emit {
+                            definition: instance.definition.clone(),
+                            message,
+                        })?;
+                    (
+                        crate::native_object::publish(store, object_key, &object)?,
+                        object,
+                        true,
+                    )
+                };
             objects.push(ObjectProduct::held(
                 instance.clone(),
                 store,
-                held,
+                bare,
                 object,
                 None,
                 compiled,
@@ -1149,32 +1146,31 @@ impl CheckProduct {
                 &env,
                 &crate::body::ir_hash(&module, &mut Vec::new())?,
             )?;
-            let (held, object, compiled) = if let Some((bare, object, file)) =
-                crate::native_object::load(&store, object_key)?
-            {
-                ((bare, file), object, false)
-            } else {
-                let object = emit_unit(
-                    &module,
-                    || module.link_symbols(),
-                    options,
-                    object_key,
-                    &cleanup_identity(&module),
-                )
-                .map_err(|message| NativeStop::Emit {
-                    definition: entry.clone(),
-                    message,
-                })?;
-                (
-                    crate::native_object::publish(&store, object_key, &object)?,
-                    object,
-                    true,
-                )
-            };
+            let (bare, object, compiled) =
+                if let Some((bare, object)) = crate::native_object::load(&store, object_key)? {
+                    (bare, object, false)
+                } else {
+                    let object = emit_unit(
+                        &module,
+                        || module.link_symbols(),
+                        options,
+                        object_key,
+                        &cleanup_identity(&module),
+                    )
+                    .map_err(|message| NativeStop::Emit {
+                        definition: entry.clone(),
+                        message,
+                    })?;
+                    (
+                        crate::native_object::publish(&store, object_key, &object)?,
+                        object,
+                        true,
+                    )
+                };
             let object = ObjectProduct::held(
                 cleanup_identity(&module),
                 &store,
-                held,
+                bare,
                 object,
                 None,
                 compiled,
@@ -1290,17 +1286,12 @@ impl CheckProduct {
             items: module.items.clone(),
             closures: vec![],
         };
-        let (bare, debug, held) =
+        let (bare, debug) =
             crate::native_object::publish_instance(&store, object_key, &object, record)?;
         Ok((
             abi,
             Some(ObjectProduct::held(
-                identity,
-                &store,
-                (bare, held),
-                object,
-                debug,
-                true,
+                identity, &store, bare, object, debug, true,
             )),
         ))
     }
@@ -1649,6 +1640,8 @@ fn link_objects(
         let (in_image, separate): (Vec<&ObjectProduct>, Vec<&ObjectProduct>) = objects
             .iter()
             .partition(|o| image.is_some_and(|image| image.holds(&o.path)));
+        // The linker reads every object from one bundle of checked bytes.
+        let mut bundle = link_input::BundleWriter::new()?;
         let unit = match image.filter(|_| !in_image.is_empty()) {
             None => None,
             Some(image) => {
@@ -1656,53 +1649,44 @@ fn link_objects(
                 let unit_key =
                     crate::image_unit::key(toolchain, &recipe, &options.target, &identities)?;
                 // The unit and whether this link prelinked it, which a test reads.
-                let (_unit, file, _prelinked) = match crate::image_unit::load(image, unit_key)? {
-                    Some((unit, file)) => (unit, file, false),
+                let (_unit, bytes, _prelinked) = match crate::image_unit::load(image, unit_key)? {
+                    Some((unit, bytes)) => (unit, bytes, false),
                     None => {
-                        let files = match link_input::open_objects(&in_image, &mut counters)? {
-                            Ok(files) => files,
-                            Err(refused) => {
-                                return Ok(Linked::Damaged(refused, compiled, counters));
-                            }
-                        };
-                        let (unit, file) =
-                            crate::image_unit::prelink(image, unit_key, &recipe.linker, &files)?;
-                        (unit, file, true)
+                        let mut objects = link_input::BundleWriter::new()?;
+                        if let Err(refused) =
+                            link_input::bundle_objects(&in_image, &mut objects, &mut counters)?
+                        {
+                            return Ok(Linked::Damaged(refused, compiled, counters));
+                        }
+                        let (unit, bytes) = crate::image_unit::prelink(
+                            image,
+                            unit_key,
+                            &recipe.linker,
+                            &objects.finish()?,
+                        )?;
+                        (unit, bytes, true)
                     }
                 };
                 #[cfg(test)]
                 UNIT.set(Some((unit_key, image.path(_unit.address), _prelinked)));
-                Some((unit_key, file))
+                bundle.push(&bytes)?;
+                Some(unit_key)
             }
         };
-        let files = match link_input::open_objects(&separate, &mut counters)? {
-            Ok(files) => files,
-            Err(refused) => return Ok(Linked::Damaged(refused, compiled, counters)),
-        };
-        // The linker opens each checked object through this process's
-        // descriptor table, so it reads the inode that was checked and inherits
-        // nothing: a spawn that cleared close-on-exec would need fork, whose
-        // child holds every thread's writable descriptors until it execs.
-        let pid = std::process::id();
-        let mut inputs = Vec::with_capacity(objects.len() + 4);
-        inputs.push(entry.clone());
-        let mut linked: Vec<_> = unit.iter().map(|u| &u.1).collect();
-        linked.extend(files.iter().map(|f| &**f));
-        inputs.extend(linked.iter().map(|file| {
-            PathBuf::from(format!(
-                "/proc/{pid}/fd/{}",
-                std::os::fd::AsRawFd::as_raw_fd(*file)
-            ))
-        }));
-        // Each input is named by the key its bytes are a function of: the
+        if let Err(refused) = link_input::bundle_objects(&separate, &mut bundle, &mut counters)? {
+            return Ok(Linked::Damaged(refused, compiled, counters));
+        }
+        let bundle = bundle.finish()?;
+        let mut inputs = vec![entry.clone(), bundle.path()];
+        // Each member is named by the key its bytes are a function of: the
         // unit by its key, an object by its identity and read check.
         let keys: Vec<_> = unit
             .iter()
-            .map(|(key, _)| (*key, 0))
+            .map(|key| (*key, 0))
             .chain(separate.iter().map(|o| (o.identity, o.check)))
             .collect();
         let (runtime_sources, spawns_units) =
-            crate::native_entry::runtime_sources(&sources, sources_key, &inputs[1..], &keys)?;
+            crate::native_entry::runtime_sources(&sources, sources_key, &bundle, &keys)?;
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<Vec<u8>, NativeStop> {
             let bytes = entry_plan
                 .emit(
@@ -1736,51 +1720,56 @@ fn link_objects(
         let incremental = !options.optimize && !options.debug_lines && crate::resident::serving();
         let patched = std::cell::Cell::new(false);
         let link = |recipe: &crate::tool_inputs::LinkRecipe| {
-            let run =
-                |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
-                    let entry_bytes = write_entry(live_sites)?;
-                    let mut inputs = inputs.clone();
-                    link_archives.append_link_inputs(&mut inputs, &options.runtime, recipe)?;
-                    inputs.push(options.runtime.clone());
-                    let objects: Vec<_> =
-                        std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
-                            .chain(keys.iter().zip(linked.iter().copied()).map(|(key, file)| {
-                                crate::incremental_link::Slot::Keyed(*key, file)
-                            }))
-                            .collect();
-                    let frame = key(
-                        "hirsel.incremental-link-frame.v2",
-                        &(
-                            &recipe.identity,
-                            &recipe.linker,
-                            &recipe.args,
-                            &archive_pins,
-                            &options.runtime,
-                            &options.target,
-                        ),
-                    )?;
-                    if incremental {
-                        let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
-                        if let Some(image) = resident.patch(frame, &objects)? {
-                            patched.set(true);
-                            return Ok(image);
-                        }
+            let run = |live_sites: Option<&BTreeSet<u64>>, emit_relocations| {
+                let entry_bytes = write_entry(live_sites)?;
+                let mut inputs = inputs.clone();
+                link_archives.append_link_inputs(
+                    &mut inputs,
+                    Some(&bundle),
+                    &options.runtime,
+                    recipe,
+                )?;
+                inputs.push(options.runtime.clone());
+                let objects: Vec<_> =
+                    std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
+                        .chain(keys.iter().enumerate().map(|(n, key)| {
+                            crate::incremental_link::Slot::Keyed(*key, (&bundle, n))
+                        }))
+                        .collect();
+                let frame = key(
+                    "hirsel.incremental-link-frame.v2",
+                    &(
+                        &recipe.identity,
+                        &recipe.linker,
+                        &recipe.args,
+                        &archive_pins,
+                        &options.runtime,
+                        &options.target,
+                    ),
+                )?;
+                if incremental {
+                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
+                    if let Some(image) = resident.patch(frame, &objects)? {
+                        patched.set(true);
+                        return Ok(image);
                     }
-                    direct_link(
-                        recipe,
-                        &inputs,
-                        &output,
-                        options.optimize,
-                        options.debug_lines,
-                        emit_relocations,
-                    )?;
-                    let image = std::fs::read(&output)?;
-                    if incremental {
-                        let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
-                        resident.remember(frame, &objects, &image)?;
-                    }
-                    Ok::<_, NativeStop>(image)
-                };
+                }
+                direct_link(
+                    recipe,
+                    &inputs,
+                    Some(&bundle.path()),
+                    &output,
+                    options.optimize,
+                    options.debug_lines,
+                    emit_relocations,
+                )?;
+                let image = std::fs::read(&output)?;
+                if incremental {
+                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
+                    resident.remember(frame, &objects, &image)?;
+                }
+                Ok::<_, NativeStop>(image)
+            };
             if options.optimize && !runtime_sources.items.is_empty() {
                 // The probe defines the same symbols and references. Only the
                 // source payload changes between the two links.
@@ -1806,7 +1795,7 @@ fn link_objects(
             }
         };
         counters.link_patched = u64::from(patched.get());
-        drop((unit, files));
+        drop(bundle);
         let bytes = linked;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         let debug = crate::native_debug::bind_detached(
@@ -2338,11 +2327,11 @@ fn f5 = n5 g5 extern
             std::fs::write(path("startup.o"), startup).unwrap();
             let mut inputs = vec![path("startup.o"), path("unit.o")];
             archives
-                .append_link_inputs(&mut inputs, &options.runtime, &recipe)
+                .append_link_inputs(&mut inputs, None, &options.runtime, &recipe)
                 .unwrap();
             inputs.push(options.runtime.clone());
             let output = path("program");
-            direct_link(&recipe, &inputs, &output, false, false, false).unwrap();
+            direct_link(&recipe, &inputs, None, &output, false, false, false).unwrap();
             if profile {
                 let profile_path = dir.path().join(format!("foreign-{backend:?}.hprof"));
                 let raw = tempfile::NamedTempFile::new_in(dir.path()).unwrap();

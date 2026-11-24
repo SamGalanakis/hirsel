@@ -94,6 +94,7 @@ impl LinkArchives {
     pub(crate) fn append_link_inputs(
         &self,
         inputs: &mut Vec<PathBuf>,
+        bundle: Option<&crate::native::link_input::Bundle>,
         runtime: &Path,
         recipe: &crate::tool_inputs::LinkRecipe,
     ) -> Result<(), AdmissionError> {
@@ -102,8 +103,15 @@ impl LinkArchives {
         }
         let symbols = self.definitions(&Debit::unlimited())?;
         symbols.check_tool_inputs(runtime, recipe)?;
-        for input in &*inputs {
+        // The bundle among `inputs` is checked member by member.
+        let bundled = bundle.map(|b| b.path());
+        for input in inputs.iter().filter(|i| Some(*i) != bundled.as_ref()) {
             symbols.check_link_input(&std::fs::read(input)?, "the generated code")?;
+        }
+        if let Some(bundle) = bundle {
+            for n in 0..bundle.len() {
+                symbols.check_link_input(&bundle.member(n)?, "the generated code")?;
+            }
         }
         let pid = std::process::id();
         inputs.extend(

@@ -1629,7 +1629,7 @@ fn object<'m>(
         found = crate::native_object::load_shared(library, key)?.map(|hit| (library, hit));
     }
     let (store, held, debug, compiled) = match found {
-        Some((store, (bare, debug, file))) => (store, (bare, file), debug, false),
+        Some((store, (bare, debug, bytes))) => (store, (bare, bytes), debug, false),
         None => {
             let module = module()?;
             let object = emit_unit(&module, || module.link_symbols(), options, key, instance)
@@ -1637,12 +1637,9 @@ fn object<'m>(
                     definition: instance.definition.clone(),
                     message,
                 })?;
-            (
-                store,
-                crate::native_object::publish(store, key, &object)?,
-                object.debug.map(Arc::new),
-                true,
-            )
+            let bare = crate::native_object::publish(store, key, &object)?;
+            let debug = object.debug.map(Arc::new);
+            (store, (bare, object.bytes), debug, true)
         }
     };
     Ok(ObjectProduct::shared(

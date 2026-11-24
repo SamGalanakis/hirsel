@@ -1,11 +1,12 @@
-/// A release build's link opens each part it links through exactly one
-/// descriptor: the one its bytes were checked or written through
-/// (`link_input::open_objects`). Bug caught: a link that opens a second
-/// descriptor per held part doubles a build's descriptors (Checkbox: 14,972
-/// for 7,482 parts), past a service's soft limit of 1,024.
+
+/// A release build's link holds no descriptor on any part it links: the
+/// linker reads them as members of one bundle (`link_input::bundle_objects`).
+/// Bug caught: a build that holds a descriptor per part from its check or
+/// write to the link needs as many as it has parts (Checkbox: 7,724 for
+/// 7,716 parts), past a service's soft limit of 1,024.
 #[test]
 #[ignore = "explicit native integration target"]
-fn release_link_holds_one_descriptor_per_part() {
+fn release_link_holds_no_descriptor_on_its_parts() {
     const APP: &str = "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7)) }\n";
     let dir = tempfile::tempdir().unwrap();
     let mut options = native_options(Backend::Llvm, dir.path());
@@ -35,6 +36,6 @@ fn release_link_holds_one_descriptor_per_part() {
     let held = held.take();
     assert!(!held.is_empty(), "the link checked release parts");
     for (part, descriptors) in held {
-        assert_eq!(descriptors, Some(1), "descriptors open on {}", part.display());
+        assert_eq!(descriptors, None, "descriptors open on {}", part.display());
     }
 }

@@ -40,6 +40,7 @@ pub(super) fn build_key(
 pub(super) fn direct_link(
     recipe: &crate::tool_inputs::LinkRecipe,
     inputs: &[PathBuf],
+    whole: Option<&Path>,
     output: &Path,
     optimize: bool,
     debug_lines: bool,
@@ -87,7 +88,15 @@ pub(super) fn direct_link(
     for argument in &recipe.args {
         if argument == crate::tool_inputs::INPUT_MARKER {
             for input in inputs {
-                process.arg(std::path::absolute(input)?);
+                // The bundle of the link's objects loads every member.
+                if whole == Some(input.as_path()) {
+                    process
+                        .args(["--push-state", "--whole-archive"])
+                        .arg(input)
+                        .arg("--pop-state");
+                } else {
+                    process.arg(std::path::absolute(input)?);
+                }
             }
             inserted = true;
         } else {

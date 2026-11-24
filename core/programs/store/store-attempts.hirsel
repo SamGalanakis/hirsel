@@ -55,10 +55,10 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
                 let staged = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, attempt, pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
                     stage_reply(mut tx, complete, rec, plan.reply_max, body)
                 })
-                let finished = match prepare_metered_pages(take staged) {
+                let finished = match prepare_metered_pages(db.heads[0].roots.collections, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
                     Error(Full(problem)) => RolledBack(Refused(problem)),
-                    Error(take problem) => RolledBack(Aborted(Undone(value: StoreFailure(take problem), ticket: None))),
+                    Error(take problem) => DraftFault(take problem),
                 }
                 CallDraft(finished: take finished, reads: take reads, issued: take issued)
             }

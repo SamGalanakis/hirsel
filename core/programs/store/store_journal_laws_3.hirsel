@@ -383,6 +383,7 @@ pub fn journal_law_streams(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool wa
     }) {
         Ran(ran) => ran.live,
         Over(_) => return false,
+        DraftError(_) => return false,
         Latched => return false
     }
     let ceiling = db.ceiling

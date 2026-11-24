@@ -14,6 +14,7 @@ fn execute[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], body: scoped
     match stage(mut db, i, wall, steps, keep_reply, attempt, no_pins, body) {
         Over(take o) => Ok(take o),
         Ran(take ran) => commit_ran(mut db, i, take ran),
+        DraftError(take problem) => Error(take problem),
         Latched => fail("execute: a Hot law's attempt latched")
     }
 }

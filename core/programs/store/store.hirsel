@@ -1095,6 +1095,7 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     let pending_run = Pending(completion: take complete, record: take rec, attempted: attempted, stop: None)
     match take draft {
         Ran(take staged) => finish_served(mut db, take pending_run, take staged, false),
+        DraftError(take problem) => Error(Before(take problem, None)),
         Over(Stopped(limit)) => Ok(stopped_pending(take pending_run, OutOfSteps(limit.steps))),
         Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
         Over(Failed(Conflict(take name))) => Ok(stopped_pending(take pending_run, Conflict(take name))),
@@ -1220,6 +1221,7 @@ fn append_transaction[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: 
     let outcome: Result[Outcome[R, A], Error] = match staged_until_decided(mut db, i, wall, steps, keep_reply, body)? {
         Over(take o) => Ok(take o),
         Ran(take ran) => settle_admit(mut db, i, take ran),
+        DraftError(take problem) => Error(take problem),
         Latched => fail("store: a decided stage is latched"),
     }
     handoff(mut db)?
@@ -1275,15 +1277,16 @@ type Ran[R, A] {
 
 // Latched: the attempt's latch was set, so its result, writes, reads and
 // issued ids are discarded and the driver serves or refuses the stop.
-type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A]) | Latched
+type Stage[R, A] = Over(Outcome[R, A]) | Ran(Ran[R, A]) | DraftError(Error) | Latched
 
-type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A])
+type Finished[R, A] = RolledBack(Outcome[R, A]) | Prepared(Prepared[R, A]) | DraftFault(Error)
 
 // A successful body or an application error with a reply to commit.
 type Prepared[R, A] {
     outcome: Result[R, A],
     roots: Roots,
     tiered: Option[u64],
+    plan: Option[TieredWritePlan],
     live: u64,
     frame: Option[Bytes],
     ops: DataRows,
@@ -1310,10 +1313,10 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
         let perform = scoped fn() -> Finished[R, A] {
             let staged = draft_body(db, db.indexes, db.heads[i].roots, ci, keep_reply, reads, issued, attempt, pins, body)
             let prepared = if let Some(_) = steps {
-                match prepare_metered_pages(take staged) {
+                match prepare_metered_pages(db.heads[i].roots.collections, attempt, pins, take staged) {
                     Ok(take ready) => take ready,
                     Error(Full(problem)) => RolledBack(Refused(problem)),
-                    Error(_) => fail("store: invalid staged pages"),
+                    Error(take problem) => DraftFault(take problem),
                 }
             } else {
                 take staged
@@ -1409,46 +1412,16 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => Some(db.tiered),
         None => None,
     }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
-}
-
-fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
-    match take finished {
-        RolledBack(take outcome) => Ok(RolledBack(take outcome)),
-        Prepared(take ready) => {
-            let mut prepared = take ready
-            if is_disk(db) {
-                prepared.frame = Some(encode_staged(ci, Some(view base), None, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
-            }
-            Ok(Prepared(take prepared))
-        },
-    }
-}
-
-// Charge page preparation to the existing call scope when the caller
-// supplied a byte or step grant. Only application is outside that scope.
-fn prepare_metered_pages[R, A](take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
-    match take finished {
-        RolledBack(take outcome) => Ok(RolledBack(take outcome)),
-        Prepared(take staged) => {
-            let mut prepared = take staged
-            let first = prepared.first_stamp
-            let mut draw = first
-            materialize_rows(mut prepared.roots.collections, prepared.ops, first, mut draw)?
-            materialize_rows(mut prepared.roots.streams, prepared.stream_ops, first, mut draw)?
-            canonical_roots(mut prepared.roots)?
-            prepared.prepared_roots = true
-            Ok(Prepared(take prepared))
-        },
-    }
+    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
     let prepared = match take finished {
         RolledBack(take o) => return Over(take o),
+        DraftFault(take problem) => return DraftError(take problem),
         Prepared(take tx) => take tx,
     }
-    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, call: _) = take prepared
+    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, live: live_bytes, frame: take frame, ops: take operations, frame_tail: _, stream_ops: take stream_edits, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
     let mut admits_rows = stream_edits.count != 0
     if !admits_rows {
         for slot in 0u64 .. operations.count {

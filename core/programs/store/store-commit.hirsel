@@ -289,3 +289,43 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
         OverLimit(_, c) => Ok(Refused(c)),
     }
 }
+
+fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
+    match take finished {
+        RolledBack(take outcome) => Ok(RolledBack(take outcome)),
+        DraftFault(take problem) => Ok(DraftFault(take problem)),
+        Prepared(take ready) => {
+            let mut prepared = take ready
+            if is_disk(db) {
+                let deltas: Option[View[List[Option[TieredDataDelta]]]] = match prepared.plan {
+                    Some(plan) => Some(view plan.deltas),
+                    None => None,
+                }
+                prepared.frame = Some(encode_staged(ci, Some(view base), deltas, mut prepared.ops, prepared.frame_tail, prepared.stream_ops, prepared.call, rec, settlement, db.file_seq, db.file_end)?)
+            }
+            Ok(Prepared(take prepared))
+        },
+    }
+}
+
+// Charge page preparation to the existing call scope when the caller
+// supplied a byte or step grant. Only application is outside that scope.
+fn prepare_metered_pages[R, A](base: PageTree, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], take finished: Finished[R, A]) -> Result[Finished[R, A], Error] {
+    match take finished {
+        RolledBack(take outcome) => Ok(RolledBack(take outcome)),
+        DraftFault(take problem) => Ok(DraftFault(take problem)),
+        Prepared(take staged) => {
+            let mut prepared = take staged
+            let first = prepared.first_stamp
+            let mut draw = first
+            materialize_rows(mut prepared.roots.collections, prepared.ops, first, mut draw)?
+            materialize_rows(mut prepared.roots.streams, prepared.stream_ops, first, mut draw)?
+            canonical_roots(mut prepared.roots)?
+            prepared.prepared_roots = true
+            if let Some(record) = attempt {
+                prepared.plan = plan_tiered_edits(base, record, pins, prepared.ops, draw)?
+            }
+            Ok(Prepared(take prepared))
+        },
+    }
+}

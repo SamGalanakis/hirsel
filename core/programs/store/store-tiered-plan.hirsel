@@ -80,6 +80,11 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
             list.push(mut deltas, None)
             continue
         }
+        let sought = match op.trim {
+            Some(trim) => key_word(trim.floor),
+            None => copied(list.slice(op.key, 4, list.len(op.key)))?,
+        }
+        tiered_seek(attempt, SeekKey(take sought))
         let prior = match op.trim {
             None => tiered_plan_prior(attempt, visible, base, op.key)?,
             Some(_) => 0u32,
@@ -87,6 +92,17 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
         let (take ready, take revised, delta) = tiered_stage_collection_edit(attempt, visible, staged, op, prior, first_stamp, mut draw)?
         page_result(std.page.insert(mut staged.root, id, revised, Some(take ready), inline, first_stamp, mut draw))?
         list.push(mut deltas, Some(delta))
+        tiered_seek(attempt, SeekOperation)
     }
     Ok(TieredWritePlan(tree: take staged, deltas: take deltas, next_stamp: draw))
+}
+
+
+fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ops: DataRows, first: u64) -> Result[Option[TieredWritePlan], Error] {
+    for slot in 0u64 .. ops.count {
+        if tiered_data_key(base, data_row(ops, slot).key) {
+            return Ok(Some(prepare_tiered_writes(attempt, visible, base, ops, first)?))
+        }
+    }
+    Ok(None)
 }

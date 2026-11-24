@@ -1,0 +1,308 @@
+const CELL_INLINE: u64 = 256
+
+type ValueCollection[V]: shareable + send {
+    store: StoreId,
+    id: u32,
+    catalog_key: Arc[Bytes],
+    catalog_page: Arc[Bytes],
+    readers: Arc[Readers[V]]
+}
+
+pub opaque type Cell[V]: shareable + send {
+    binding: ValueCollection[V]
+}
+
+pub fn declare_cell[V](mut d: Declare, name: String, take value: std.codec.Codec[V]) -> Result[Cell[V], Error] {
+    Ok(Cell(binding: declare_value_collection(mut d, name, 3, list.new(), take value)?))
+}
+
+fn declare_value_collection[V](mut d: Declare, name: String, kind: u8, key_schema: Bytes, take value: std.codec.Codec[V]) -> Result[ValueCollection[V], Error] {
+    if d.failed {
+        return Error(MigrationFault)
+    }
+    d.failed = true
+    declaration_name(name)?
+    let key = table_key(name)?
+    let schema = std.codec.schema(value) ?=> |_| Schema(0)
+    let fp = std.codec.fingerprint_of(schema)
+    let (take record, created) = match get_page_row(d.plan.roots.catalog, key) {
+        Some(raw) => {
+            let existing = decode_catalog(raw)?
+            if existing.kind != kind {
+                if let Migrate = d.mode { return Error(Exists(named(name)?)) }
+                return Error(Changed(named(name)?))
+            }
+            if map.contains(d.tables, existing.id) {
+                return Error(Exists(named(name)?))
+            }
+            (take existing, false)
+        },
+        None => {
+            let Migrate = d.mode else { return Error(Missing(named(name)?)) }
+            let initial = Catalog(kind: kind, id: d.plan.next_table, owner: 0, epoch: 1, key: copied(key_schema)?, schemas: list.new(), next: 0, by: list.new(), revision: list.new())
+            (take initial, true)
+        },
+    }
+    let mut catalog = take record
+    let mut number = catalog.next
+    for old in catalog.schemas {
+        if old.fingerprint == fp && old.schema == schema {
+            number = old.number
+        }
+    }
+    if number == catalog.next {
+        let Migrate = d.mode else { return Error(Missing("schema")) }
+        if number == 65535 {
+            return Error(Limit(Ids))
+        }
+    }
+    let resolved = readers(value, catalog, number, schema)?
+    if number == catalog.next {
+        list.push(mut catalog.schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
+        catalog.next += 1
+        stage_value_collection(mut d.plan, key, catalog, created)?
+    }
+    map.insert(mut d.tables, catalog.id, true)
+    d.failed = false
+    Ok(ValueCollection(store: d.plan.store, id: catalog.id, catalog_key: catalog_key_handle(take key)?, catalog_page: catalog_page(d.plan.roots.catalog)?, readers: take resolved))
+}
+
+fn stage_value_collection(mut plan: SchemaPlan, key: Bytes, catalog: Catalog, created: bool) -> Result[(), Error] {
+    let wire = encode_catalog(catalog)?
+    let mut live = catalog_recharge(plan.live, plan.roots, key, wire, plan.retained)
+    let base = share_roots(plan.roots)
+    let mut roots = catalog_insert(mut plan.next_node, base, key, wire)?
+    let mut next_id = plan.next_table
+    if created {
+        if next_id == 4294967295 {
+            return Error(Limit(Ids))
+        }
+        define_store_collection(mut roots.collections, catalog.id, catalog.kind, mut plan.next_node)?
+        live = int.saturating_add(live, 126)
+        next_id += 1
+    }
+    keep_schema(mut plan, take roots, live, next_id)
+}
+
+fn readable_value[V](store_id: StoreId, roots: Roots, binding: ValueCollection[V]) -> Result[(), Error] {
+    if !same(store_id, binding.store) {
+        return Error(Foreign)
+    }
+    readable(roots, binding.catalog_key, binding.catalog_page, binding.id)
+}
+
+type CellEdit: shareable + send = CellPut(StagedValue) | CellDelete | CellRevert
+
+fn lower_cell_edit(layers: List[Arc[Staged]], id: u32) -> Option[View[CellEdit]] in layers {
+    let mut layer = list.len(layers)
+    while layer > 0 {
+        layer -= 1
+        if let Some(edit) = map.get(layers[layer].ops.cells, id) {
+            return Some(edit)
+        }
+    }
+    None
+}
+
+fn cell_edit(tx: Tx, id: u32) -> Option[View[CellEdit]] in tx {
+    if let Some(edit) = map.get(tx.ops.cells, id) {
+        return Some(edit)
+    }
+    lower_cell_edit(tx.below, id)
+}
+
+fn cell_current(tx: Tx, id: u32, key: Bytes) -> Option[View[Bytes]] in tx {
+    match cell_edit(tx, id) {
+        Some(CellPut(value)) => Some(staged_bytes(value)),
+        Some(CellDelete) => None,
+        _ => get_page_row(tx.roots.collections, key),
+    }
+}
+
+pub fn cell_fetch[V](tx: Tx, c: Cell[V]) -> Result[Option[V], Error] {
+    readable_value(tx.store, tx.roots, c.binding)?
+    let key = prefix(c.binding.id)?
+    note_read(tx, Point(copied(key)?))?
+    let value = match cell_current(tx, c.binding.id, key) {
+        Some(raw) => Some(row_value(c.binding.readers, c.binding.id, raw)?),
+        None => None,
+    }
+    Ok(take value)
+}
+
+pub fn cell_get[V](r: Reader, s: Snapshot, c: Cell[V]) -> Result[Option[V], Error] waits {
+    read_access(r, s)?
+    readable_value(s.store, s.roots, c.binding)?
+    match get_page_row(s.roots.collections, prefix(c.binding.id)?) {
+        Some(raw) => Ok(Some(row_value(c.binding.readers, c.binding.id, raw)?)),
+        None => Ok(None),
+    }
+}
+
+fn inline_cell(descriptor: Bytes) -> Option[View[Bytes]] in descriptor {
+    if list.len(descriptor) > 58 {
+        Some(list.slice(descriptor, 58, list.len(descriptor)))
+    } else {
+        None
+    }
+}
+
+fn owned_cell(root: Arc[std.page.Page], descriptor: Bytes) -> Option[Arc[Bytes]] {
+    if let Some(raw) = inline_cell(descriptor) {
+        return Some(arc.new(result.unwrap(copied(raw))))
+    }
+    let mut rows = std.page.cursor_open(root, None, true, false)
+    let Some(take item) = std.page.cursor_next(mut rows) else { return None }
+    let std.page.CursorRow(value: take raw, ..) = take item
+    Some(take raw)
+}
+
+fn cell_walk_value(walking: std.page.Walk) -> Option[Arc[Bytes]] {
+    let descriptor = option.unwrap(std.page.walk_value(walking))
+    owned_cell(std.page.walk_collection(walking), descriptor)
+}
+
+fn apply_cell(mut tree: PageTree, key: Bytes, raw: Option[View[Bytes]], shared: Option[View[Arc[Bytes]]], first: u64, mut ids: u64) -> Result[(), Error] {
+    let mut root = {
+        let Some(empty) = view tree.empty_collection else { fail("store: missing empty collection page") }
+        arc.share(empty)
+    }
+    let inline = match raw {
+        Some(value) if list.len(value) <= CELL_INLINE => Some(value),
+        Some(value) => {
+            if let Some(contents) = shared {
+                page_result(std.page.insert_shared(mut root, list.new(), contents, tree.inline, first, mut ids))?
+            } else {
+                page_result(std.page.insert(mut root, list.new(), value, None, tree.inline, first, mut ids))?
+            }
+            None
+        },
+        None => None,
+    }
+    let descriptor = cell_record(root, inline)?
+    page_result(std.page.insert(mut tree.root, key, descriptor, Some(take root), tree.inline, first, mut ids))
+}
+
+pub fn cell_set[V](mut tx: Tx, c: Cell[V], v: V) -> Result[(), Error] {
+    readable_value(tx.store, tx.roots, c.binding)?
+    let mut raw: Bytes = list.new()
+    list.put_word_le(mut raw, c.binding.readers.current)
+    std.codec.encode(c.binding.readers.codec, v, mut raw) ?=> |_| Limit(Value)
+    if list.len(raw) > VALUE_LIMIT {
+        return Error(Limit(Value))
+    }
+    stage_cell(mut tx, c.binding.id, Some(take raw))
+}
+
+pub fn cell_clear[V](mut tx: Tx, c: Cell[V]) -> Result[(), Error] {
+    readable_value(tx.store, tx.roots, c.binding)?
+    stage_cell(mut tx, c.binding.id, None)
+}
+
+fn cell_wire_size(edit: Option[View[CellEdit]]) -> u64 {
+    match edit {
+        Some(CellPut(value)) => 17 + list.len(staged_bytes(value)),
+        Some(CellDelete) => 13,
+        _ => 0,
+    }
+}
+
+fn cell_charge(raw: Option[View[Bytes]]) -> u64 {
+    match raw {
+        Some(value) => 70 + round8(list.len(value)),
+        None => 0,
+    }
+}
+
+fn cell_matches(before: Option[View[Bytes]], after: Option[Bytes]) -> bool {
+    match after {
+        Some(right) => match before {
+            Some(left) => left == right,
+            None => false,
+        },
+        None => before == None,
+    }
+}
+
+fn stage_cell(mut tx: Tx, id: u32, take wanted: Option[Bytes]) -> Result[(), Error] {
+    let key = prefix(id)?
+    let (reverts, old_width, old_charge) = {
+        let current = cell_current(tx, id, key)
+        if cell_matches(current, wanted) {
+            return Ok(())
+        }
+        let previous = cell_edit(tx, id)
+        let was = if tx.retain_old {
+            match previous {
+                Some(CellPut(raw)) => cell_charge(Some(staged_bytes(raw))),
+                _ => 0u64,
+            }
+        } else {
+            cell_charge(current)
+        }
+        (cell_matches(get_page_row(tx.roots.collections, key), wanted), cell_wire_size(previous), was)
+    }
+    let (new_width, new_charge) = match view wanted {
+        Some(raw) => (17 + list.len(raw), 70 + round8(list.len(raw))),
+        None => (13u64, 0u64),
+    }
+    let effective_width = if reverts { 0u64 } else { new_width }
+    let old_count = if old_width == 0 { 0u64 } else { 1u64 }
+    let new_count = if effective_width == 0 { 0u64 } else { 1u64 }
+    let cell_rows = tx.cell_rows - old_count + new_count
+    let frame: Option[u64] = match tx.frame_bytes {
+        None => None,
+        Some(current) => {
+            let after = current - old_width + effective_width
+            let data_head = if tx.streams != 0 && tx.rows + cell_rows == 0 { 5u64 } else { 0u64 }
+            if int.saturating_add(after, tx.extra_bytes) - 16 - data_head > 16777280 {
+                return Error(Limit(Transaction))
+            }
+            Some(after)
+        },
+    }
+    if reverts {
+        remove_cell_edit(mut tx.ops.cells, tx.below, id)
+    } else {
+        let height = collection_write_height(tx.roots.collections, key)
+        let _ = reserve_ids(mut tx, height)?
+        let edit = match take wanted {
+            Some(take raw) => CellPut(stage_value(take raw, tx.roots.collections.inline)),
+            None => CellDelete,
+        }
+        map.insert(mut tx.ops.cells, id, take edit)
+    }
+    let added = if tx.retain_old && reverts { 0u64 } else { new_charge }
+    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), added)
+    tx.frame_bytes = frame
+    tx.cell_rows = cell_rows
+    Ok(())
+}
+
+fn remove_cell_edit(mut cells: Map[u32, CellEdit], layers: List[Arc[Staged]], id: u32) {
+    match lower_cell_edit(layers, id) {
+        Some(CellPut(_)) => map.insert(mut cells, id, CellRevert),
+        Some(CellDelete) => map.insert(mut cells, id, CellRevert),
+        _ => { let _ = map.remove(mut cells, id) },
+    }
+}
+
+fn fold_cell_edits(mut cells: Map[u32, CellEdit], layers: List[Arc[Staged]], newer: Map[u32, CellEdit]) {
+    for (id, edit) in newer {
+        match edit {
+            CellRevert => remove_cell_edit(mut cells, layers, id),
+            _ => map.insert(mut cells, id, clone(edit)),
+        }
+    }
+}
+
+fn seal_cell_edits(mut rows: DataRows, cells: Map[u32, CellEdit]) {
+    for (id, edit) in cells {
+        let key = result.unwrap(prefix(id))
+        match edit {
+            CellPut(value) => push_data_row(mut rows, DataOp(key: take key, value: Some(clone(value)))),
+            CellDelete => push_data_row(mut rows, DataOp(key: take key, value: None)),
+            CellRevert => (),
+        }
+    }
+}

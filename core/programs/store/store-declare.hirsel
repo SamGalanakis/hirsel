@@ -81,6 +81,10 @@ pub fn declare_table[K, V](mut d: Declare, name: String, take key: std.codec.Key
     let lookup_key = table_key(name)?
     let exists = match get_page_row(d.plan.roots.catalog, lookup_key) {
         Some(record) => {
+            if record[0] != 1 {
+                if let Migrate = d.mode { return Error(Exists(named(name)?)) }
+                return Error(Changed(named(name)?))
+            }
             let id: u32 = int.truncate(read_le(record, 1, 4))
             if map.contains(d.tables, id) {
                 return Error(Exists(named(name)?))

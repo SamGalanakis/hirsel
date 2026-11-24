@@ -90,7 +90,7 @@ fn rooted_collection_record(root: Arc[std.page.Page], kind: u8, residency: u8) -
     collection_header(stamp, rows, charge, kind, residency)
 }
 
-fn cell_record(root: Arc[std.page.Page], inline: Option[Bytes]) -> Result[Bytes, Error] {
+fn cell_record(root: Arc[std.page.Page], inline: Option[View[Bytes]]) -> Result[Bytes, Error] {
     if let Some(value) = inline {
         let mut record = collection_header(0, 1, 70 + round8(list.len(value)), 3, 0)?
         capacity(le(mut record, list.len(value), 2))?
@@ -119,7 +119,10 @@ fn put_collection(mut tree: PageTree, key: Bytes, built: Option[Arc[std.page.Pag
             arc.share(shared)
         },
     }
-    let record = rooted_collection_record(root, kind, 0)?
+    let record = match kind {
+        3 => cell_record(root, None)?,
+        _ => rooted_collection_record(root, kind, 0)?,
+    }
     page_result(std.page.insert(mut tree.root, key, record, Some(take root), tree.inline, private_from, mut ids))
 }
 
@@ -336,15 +339,25 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
     let mut streams: List[Arc[std.page.Page]] = list.with_capacity(list.len(roots))
     let mut catalog: List[Arc[std.page.Page]] = list.with_capacity(list.len(roots))
     let mut collections: Map[u32, List[Arc[std.page.Page]]] = map.new()
+    let mut cells: Map[u32, List[Arc[Bytes]]] = map.new()
     for participating in roots {
         list.push(mut streams, arc.share(participating.streams.root))
         list.push(mut catalog, arc.share(participating.catalog.root))
         let mut listed = std.page.cursor_open(participating.collections.root, None, true, false)
         while let Some(take item) = std.page.cursor_next(mut listed) {
-            let std.page.CursorRow(key: take key, collection: take collection_root, ..) = take item
+            let std.page.CursorRow(key: take key, value: take descriptor, collection: take collection_root) = take item
             let id: u32 = list.word_be(key, 0)
             let Some(take child) = take collection_root else {
                 fail("store: missing collection root")
+            }
+            if descriptor[52] == 3 {
+                let value = owned_cell(child, descriptor)
+                map.update_or_insert(mut cells, id, list.new(), fn(mut group: List[Arc[Bytes]]) {
+                    if let Some(raw) = value {
+                        list.push(mut group, arc.share(raw))
+                    }
+                })
+                continue
             }
             map.update_or_insert(mut collections, id, list.new(), fn(mut group: List[Arc[std.page.Page]]) {
                 list.push(mut group, arc.share(child))
@@ -354,6 +367,16 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
     let mut charge = int.saturating_add(row_version_union(streams, 0), row_version_union(catalog, 0))
     for (_, group) in collections {
         charge = int.saturating_add(charge, int.saturating_add(126, row_version_union(group, 4)))
+    }
+    for (_, group) in cells {
+        let mut versions: List[Arc[Bytes]] = clone(group)
+        list.sort(mut versions, fn(a: Arc[Bytes], b: Arc[Bytes]) -> Order { list.compare_bytes(a, b) })
+        charge = int.saturating_add(charge, 126)
+        for i in 0u64 .. list.len(versions) {
+            if i == 0 || versions[i - 1] != versions[i] {
+                charge = int.saturating_add(charge, 70 + round8(list.len(versions[i])))
+            }
+        }
     }
     charge
 }
@@ -365,10 +388,25 @@ fn get_page_row(tree: PageTree, key: Bytes) -> Option[View[Bytes]] in tree {
     if list.len(key) < 4 {
         return None
     }
-    let Some(root) = std.page.collection_child(tree.root, list.slice(key, 0, 4)) else {
+    let Some((root, descriptor)) = std.page.collection_entry(tree.root, list.slice(key, 0, 4)) else {
         return None
     }
+    if descriptor[52] == 3 {
+        if list.len(key) != 4 {
+            return None
+        }
+        if let Some(raw) = inline_cell(descriptor) {
+            return Some(raw)
+        }
+    }
     std.page.lookup(root, list.slice(key, 4, list.len(key)))
+}
+
+fn collection_kind(tree: PageTree, key: Bytes) -> Option[u8] {
+    match std.page.lookup(tree.root, key) {
+        Some(descriptor) => Some(descriptor[52]),
+        None => None,
+    }
 }
 
 fn put_page_row(mut tree: PageTree, key: Bytes, value: Bytes, private_from: u64, mut ids: u64) -> Result[(), Error] {
@@ -630,6 +668,28 @@ fn page_change_rows(mut out: ChangeOutput, id: u32, mut left: std.page.Walk, mut
     Ok(true)
 }
 
+fn page_change_cell(mut out: ChangeOutput, key: Bytes, left: std.page.Walk, right: std.page.Walk, comparison: Order, low: Option[Bytes]) -> Result[bool, Error] {
+    if let Some(lower) = low {
+        if key < lower { return Ok(true) }
+    }
+    let before: Option[Arc[Bytes]] = if comparison == Greater { None } else { cell_walk_value(left) }
+    let after: Option[Arc[Bytes]] = if comparison == Less { None } else { cell_walk_value(right) }
+    if before == after {
+        return Ok(true)
+    }
+    if let Some(limits) = out.limits {
+        let width = match after { Some(raw) => list.len(raw), None => 0u64 }
+        let filled = list.len(out.rows)
+        if filled == limits.rows || (filled != 0 && 4 + width > out.remaining) {
+            out.next = Some(copied(key)?)
+            return Ok(false)
+        }
+        out.remaining = int.saturating_sub(out.remaining, 4 + width)
+    }
+    list.push(mut out.rows, Change(tree_key: copied(key)?, value: take after))
+    Ok(true)
+}
+
 fn start_diff(root: Option[View[Arc[std.page.Page]]], low: Option[Bytes]) -> std.page.Walk {
     let Some(page) = root else {
         return std.page.walk_empty()
@@ -660,6 +720,15 @@ fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], afte
     }
     let mut right = start_diff(Some(view after.root), low_id)
     while let Some((take key, comparison)) = diff_position(mut left, mut right, high) {
+        let is_cell = {
+            let descriptor = if comparison == Less { std.page.walk_value(left) } else { std.page.walk_value(right) }
+            option.unwrap(descriptor)[52] == 3
+        }
+        if is_cell {
+            if !page_change_cell(mut out, key, left, right, comparison, low)? { break }
+            diff_advance(mut left, mut right, comparison)
+            continue
+        }
         if comparison != Equal || compare_row_versions(left, right) != Equal {
             let start = diff_bound(low, key)
             let stop = diff_bound(high, key)

@@ -51,6 +51,7 @@ std = { major = 1 }
 "store-index-registry.hirsel" = "store"
 "store-declare.hirsel" = "store"
 "store-read.hirsel" = "store"
+"store-cell.hirsel" = "store"
 "main.hirsel" = "main"
 
 [program]

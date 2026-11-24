@@ -3,7 +3,7 @@
 pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
     freeze(mut tx)
     let d = {
-        let mut draft = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
+        let mut draft = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, streams: tx.streams)
         let result = body(mut draft)
         drafted_tx(take draft, take result)
     }
@@ -23,6 +23,7 @@ type Drafted[R, E] {
     extra_bytes: u64,
     call: Option[CallSection],
     rows: u64,
+    cell_rows: u64,
     streams: u64,
     result: Result[R, E]
 }
@@ -30,8 +31,8 @@ type Drafted[R, E] {
 // A callback's Tx, less its shares of the layers beneath, so the parent's own
 // layers are unique again when `install` folds them back.
 fn drafted_tx[R, E](take draft: Tx, take result: Result[R, E]) -> Drafted[R, E] {
-    let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, ..) = take draft
-    Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, result: take result)
+    let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, streams: streams, ..) = take draft
+    Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, streams: streams, result: take result)
 }
 
 // Moves what `tx` has staged into a layer its callback shares, leaving `tx`
@@ -101,7 +102,8 @@ fn fold_own(mut tx: Tx) {
 
 // Stages `newer`'s rows over `ops` in their first-write order.
 fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, take newer: DataOps) {
-    let DataOps(rows: take rows, slots: _) = take newer
+    let DataOps(rows: take rows, cells: take cells, ..) = take newer
+    fold_cell_edits(mut ops.cells, below, cells)
     let DataRows(count: staged, first: take first, rest: take rest) = take rows
     let mut head = take first
     // Moved, not copied: the frame-tail key keeps the spare room it was made with.
@@ -121,7 +123,7 @@ fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, take newe
 // stay on a typed Error too; table writes and their frame-tail slot install
 // only on Ok.
 fn install[R, E](mut tx: Tx, take d: Drafted[R, E]) -> Result[R, E] {
-    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, result: take result) = take d
+    let Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, streams: streams, result: take result) = take d
     fold_own(mut tx)
     tx.ids = ids
     tx.refusal = refusal
@@ -135,6 +137,7 @@ fn install[R, E](mut tx: Tx, take d: Drafted[R, E]) -> Result[R, E] {
         tx.roots = take roots
         fold_ops(mut tx.ops, tx.below, false, take ops)
         tx.rows = rows
+        tx.cell_rows = cell_rows
         tx.frame_tail = frame_tail
         tx.resident = resident
         tx.frame_bytes = frame_bytes
@@ -157,13 +160,13 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
     // The work's views anchor it to `tx`: its slot ends, and the bound returns
     // the work's owned parts, before `tx` is written.
     let ran = {
-        let work = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, streams: tx.streams)
+        let work = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, refusal: tx.refusal, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, streams: tx.streams)
         bound steps steps {
             let mut draft = take work
             let result = body(mut draft)
             // Inline, not drafted_tx: a call here would take a step after the body.
-            let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, ..) = take draft
-            Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, streams: streams, result: take result)
+            let Tx(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, streams: streams, ..) = take draft
+            Drafted(roots: take roots, ids: ids, resident: resident, frame_tail: frame_tail, refusal: refusal, frame_bytes: frame_bytes, wrote: wrote, ops: take ops, stream_ops: take stream_ops, extra_bytes: extra_bytes, call: take call, rows: rows, cell_rows: cell_rows, streams: streams, result: take result)
         }
     }
     match take ran {

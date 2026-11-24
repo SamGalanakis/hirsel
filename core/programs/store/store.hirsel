@@ -454,7 +454,8 @@ fn push_data_row(mut rows: DataRows, take row: DataOp) {
 // slot map is built only when a commit stages more.
 type DataOps: shareable + send {
     rows: DataRows,
-    slots: Map[Bytes, u64]
+    slots: Map[Bytes, u64],
+    cells: Map[u32, CellEdit]
 }
 
 const SCANNED_OPS: u64 = 8
@@ -466,7 +467,7 @@ const NO_FRAME_TAIL: u64 = 18446744073709551615
 const OPEN_FRAME_TAIL: u64 = NO_FRAME_TAIL - 1
 
 fn empty_ops() -> DataOps {
-    DataOps(rows: new_data_rows(), slots: map.new())
+    DataOps(rows: new_data_rows(), slots: map.new(), cells: map.new())
 }
 
 // What enclosing transactions staged before a callback began, frozen so the
@@ -520,6 +521,7 @@ pub opaque scoped type Tx {
     below: List[Arc[Staged]],
     own: u64,
     rows: u64,
+    cell_rows: u64,
     streams: u64
 }
 
@@ -1382,7 +1384,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, refusal: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1415,8 +1417,10 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         }
     }
     let Tx(store: _, roots: take roots, ids: _, private_from: first_stamp, resident: live, retain_old: _, frame_tail: frame_tail, reads: _, issued: _, refusal: _, frame_bytes: _, wrote: _, ops: take ops, info: _, stream_ops: take stream_ops, extra_bytes: _, call: take call, ..) = take tx
-    let DataOps(rows: take rows, slots: _) = take ops
-    let DataOps(rows: take stream_rows, slots: _) = take stream_ops
+    let DataOps(rows: take ordinary, cells: take cells, ..) = take ops
+    let mut rows = take ordinary
+    seal_cell_edits(mut rows, cells)
+    let DataOps(rows: take stream_rows, ..) = take stream_ops
     Prepared(Prepared(outcome: take value, roots: take roots, live: live, frame: None, ops: take rows, frame_tail: frame_tail, stream_ops: take stream_rows, first_stamp: first_stamp, prepared_roots: false, call: take call))
 }
 
@@ -1685,6 +1689,12 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
             return Ok(false)
         }
         let collection = list.slice(op.key, 0, 4)
+        if list.len(op.key) == 4 {
+            let Some(descriptor) = std.page.lookup(db.heads[i].roots.collections.root, collection) else { return Ok(false) }
+            if descriptor[52] == 3 {
+                return Ok(false)
+            }
+        }
         for prior in 0u64 .. e {
             if list.compare_bytes(list.slice(data_row(ran.edits, prior).key, 0, 4), collection) == Equal {
                 return Ok(false)
@@ -2215,7 +2225,7 @@ fn stream_write(mut tx: Tx, take key: Bytes, take value: Bytes, call_size: u64) 
         } else {
             0u64
         }
-        let data_head = if tx.rows == 0 {
+        let data_head = if tx.rows + tx.cell_rows == 0 {
             5u64
         } else {
             0u64
@@ -2546,6 +2556,14 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, first: u64, mut dr
     let order = capacity(data_order(operations))?
     for slot_order in 0u64 .. operations.count {
         let op = ordered_row(operations, order, slot_order)
+        if tree_domain(tree) == CollectionMap && list.len(op.key) == 4 && collection_kind(tree, op.key) == Some(3u8) {
+            match op.value {
+                Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw)?,
+                Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw)?,
+                None => apply_cell(mut tree, op.key, None, None, first, mut draw)?,
+            }
+            continue
+        }
         match op.value {
             Some(PageValue(raw)) => put_page_row(mut tree, op.key, raw, first, mut draw)?,
             Some(BlobBody(raw)) => put_shared_page_row(mut tree, op.key, raw, first, mut draw)?,
@@ -3822,6 +3840,9 @@ fn stage_table[K, V](mut plan: SchemaPlan, name: String, take key: std.codec.Key
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(named(name)?))
     }
+    if c.kind != 1 {
+        return Error(Missing(named(name)?))
+    }
     let key_schema = std.codec.key_schema(key) ?=> |_| Schema(0)
     if key_schema != c.key {
         return Error(Schema(0))
@@ -3863,6 +3884,9 @@ fn catalog_handle[K, V](store_id: StoreId, catalog: PageTree, take name: String,
     let c = match get_page_row(catalog, k) {
         Some(raw) => decode_catalog(raw)?,
         None => return Error(Missing(take name))
+    }
+    if c.kind != 1 {
+        return Error(Missing(take name))
     }
     let key_schema = std.codec.key_schema(key) ?=> |_| Schema(0)
     if key_schema != c.key {
@@ -4310,7 +4334,7 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
-            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, streams: 0)
+            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, refusal: None, frame_bytes: None, wrote: false, ops: empty_ops(), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, streams: 0)
             body(tx, env)
         }
         match steps {
@@ -5429,13 +5453,14 @@ fn prepared_frame[T](mut input: PreparedInput, kind: u16, codec: std.codec.Codec
 }
 
 fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
-    if list.len(key) == 0 || key[0u64] != c.kind {
+    let prefix_tag = if c.kind == 2 { 2u8 } else { 1u8 }
+    if list.len(key) == 0 || key[0u64] != prefix_tag {
         return false
     }
-    let prefix_size = if c.kind == 1 {
-        1u64
-    } else {
+    let prefix_size = if c.kind == 2 {
         5u64
+    } else {
+        1u64
     }
     if list.len(key) < prefix_size || list.len(key) - prefix_size > 255u64 {
         return false
@@ -5446,7 +5471,7 @@ fn validate_catalog_key(key: Bytes, c: Catalog) -> bool {
             return false
         }
     }
-    if c.kind == 1 {
+    if c.kind != 2 {
         let total_count = list.len(c.schemas)
         if c.owner != 0 || c.next == 0 || total_count == 0 || c.schemas[total_count - 1u64].number != c.next - 1u16 {
             return false
@@ -5539,6 +5564,9 @@ fn read_valid_range(mut input: PreparedInput, expected: RangeChange, desc: Inven
             }
             (0u8, 0u16)
         },
+    }
+    if (kind == 3 || kind == 4) && desc.count != 0 {
+        return Error(ImportMalformed)
     }
     let mut rows: List[std.page.Row] = list.new()
     let mut digest = std.check.start()
@@ -7282,11 +7310,22 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             if list.len(op.key) < 4 {
                 return Error(disk_fault(file, 0, Malformed))
             }
-            let Some(root) = std.page.collection_child(tree.root, list.slice(op.key, 0, 4)) else {
+            let Some(kind) = collection_kind(tree, list.slice(op.key, 0, 4)) else {
                 return Error(disk_fault(file, 0, Malformed))
             }
-            if op.prior != stored_prior(std.page.lookup(root, list.slice(op.key, 4, list.len(op.key)))) {
+            if op.prior != stored_prior(get_page_row(tree, op.key)) {
                 return Error(disk_fault(file, 0, Malformed))
+            }
+            if kind == 3 {
+                if list.len(op.key) != 4 {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                let raw = match op.value { Some(stored) => Some(view stored), None => None }
+                if let Some(stored) = raw {
+                    if list.len(stored) < 2 { return Error(disk_fault(file, 0, Malformed)) }
+                }
+                apply_cell(mut tree, op.key, raw, None, 0, mut next_stamp)?
+                continue
             }
         }
         match op.value {

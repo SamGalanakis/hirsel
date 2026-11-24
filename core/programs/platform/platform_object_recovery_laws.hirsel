@@ -152,6 +152,10 @@ fn bucket_hand_install_adopts_at_12(c: Clock, rnd: Random, tasks: Tasks) -> Resu
     outcome
 }
 
+// One genesis GET and seven reclaim probes precede the racing client's head GET.
+const WITNESS_PROBE_GET: u64 = 9
+const WITNESS_ACTIVATION_PUT: u64 = 12
+
 type WitnessHistory = EarlierPrepared | DifferentPrepared | StandaloneAtTen | SameClaimAbsent
 
 fn witness_store_options() -> store.Options {
@@ -177,25 +181,13 @@ fn witness_law_case(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket, wa
     if let EarlierPrepared = wanted {
         return witness_overtaken(c, rnd, tasks, sim)
     }
-    let options = witness_store_options()
-    let mut writer = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), sim.time, rnd, options) ?=> |store.Refusal(error: take problem, ..)| take problem
-    let mut old_description = describe_of(image())
-    old_description.n_place = 1048576
-    witness_empty_commits(mut writer, 2)?
-    let old_identity = object_install_at(mut writer, tasks, 3, old_description)?
-    witness_empty_commits(mut writer, 6)?
-    let store_id = store.identity(writer)
-    let store.Claim(epoch, holder: take holder) = store.claim_of(writer)?
-    let mut new_description = describe_of(image_two())
-    new_description.n_place = 1048576
-    // The release's executable digest I and the prepared digest D differ.
-    new_description.digest = bytes_of(32, 3u8)
-    let new_identity = result.unwrap(runner.identity_digest(new_description))
+    let authority = recovery_bucket_client(sim, tasks, 1)
+    let (take opened, take base, take new_description) = witness_base(tasks, rnd, sim.time, take authority, false)?
+    let mut writer = take opened
     match wanted {
         SameClaimAbsent => (),
         _ => {
             let prepared_digest = match wanted {
-                EarlierPrepared => image_two(),
                 DifferentPrepared => bytes_of(32, 5u8),
                 _ => list.new(),
             }
@@ -204,7 +196,6 @@ fn witness_law_case(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket, wa
     }
     store.close(take writer)?
 
-    let base = ActivationAttempt(id: store_id, pair: (epoch, take holder), old_binding: take old_identity, new_binding: take new_identity)
     witness_observe(c, rnd, tasks, sim, base, wanted)
 }
 
@@ -239,8 +230,8 @@ fn bucket_activation_witness_distinguishes_prepared(c: Clock, rnd: Random, tasks
     for history in histories {
         let mut request_holds: List[std.sim.s3.Hold] = list.with_capacity(1)
         if let EarlierPrepared = history {
-            list.push(mut request_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: 12, count: 1,
-                until: Requested("GET", "head", 3), then: ApplyLoseReply))
+            list.push(mut request_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1,
+                until: Requested("GET", "head", WITNESS_PROBE_GET), then: ApplyLoseReply))
         }
         let sim = recovery_bucket_with(tasks, c, seed, take request_holds)
         let seen = witness_law_case(c, rnd, tasks, sim, history)
@@ -270,20 +261,27 @@ type ActivationWriter: send {
     ready: Sender[ActivationAttempt],
 }
 
-fn write_prepared_ten(take trial: ActivationWriter) -> Result[(), store.Error] waits {
-    let authority = recovery_bucket_endpoint_client(trial.endpoint, trial.time, trial.tasks, 1)
-    let mut writer = store.open_authority(trial.tasks, take authority, trial.time, trial.rnd, witness_store_options()) ?=> |store.Refusal(error: take problem, ..)| take problem
+fn witness_base(tasks: Tasks, rnd: Random, time: Clock, take authority: store.Authority, one_identity: bool) -> Result[(store.Db, ActivationAttempt, runner.Describe), store.Error] waits {
+    let mut writer = store.open_authority(tasks, take authority, time, rnd, witness_store_options()) ?=> |store.Refusal(error: take problem, ..)| take problem
     let mut old_description = describe_of(image())
     old_description.n_place = 1048576
     witness_empty_commits(mut writer, 2)?
-    let old_binding = object_install_at(mut writer, trial.tasks, 3, old_description)?
+    let old_binding = object_install_at(mut writer, tasks, 3, old_description)?
     witness_empty_commits(mut writer, 6)?
-    let mut next_description = describe_of(image_two())
+    let mut next_description: runner.Describe = if one_identity { clone(old_description) } else { describe_of(image_two()) }
     next_description.n_place = 1048576
+    // The release's executable digest I and the prepared digest D differ.
     next_description.digest = bytes_of(32, 3u8)
     let new_binding = result.unwrap(runner.identity_digest(next_description))
     let store.Claim(epoch, holder: take holder) = store.claim_of(writer)?
     let base = ActivationAttempt(id: store.identity(writer), pair: (epoch, take holder), old_binding: take old_binding, new_binding: take new_binding)
+    Ok((take writer, take base, take next_description))
+}
+
+fn write_prepared_ten(take trial: ActivationWriter) -> Result[(), store.Error] waits {
+    let authority = recovery_bucket_endpoint_client(trial.endpoint, trial.time, trial.tasks, 1)
+    let (take opened, take base, take next_description) = witness_base(trial.tasks, trial.rnd, trial.time, take authority, false)?
+    let mut writer = take opened
     result.unwrap(channel.send(trial.ready, take base))
     let _ = object_install_record(mut writer, trial.tasks, 10, next_description, image_two())?
     store.close(take writer)
@@ -294,7 +292,7 @@ fn witness_overtaken(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket) -
     let trial = ActivationWriter(endpoint: sim.endpoint, time: sim.time, rnd, tasks, ready: take report_ready)
     let writer = task.spawn(tasks, bytes 33554432, take trial, write_prepared_ten)
     let base = result.unwrap(channel.receive(await_ready))
-    result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", 12))
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", WITNESS_ACTIVATION_PUT))
     let mut opts = witness_store_options()
     opts.create = false
     opts.expect = Some(base.id)
@@ -312,4 +310,216 @@ fn finish_recovery_bucket(take sim: RecoveryBucket) -> std.sim.s3.Report waits {
     let report = result.unwrap(task.join(take server))
     result.unwrap(task.join(take clock_task))
     take report
+}
+
+type MovedActivation {
+    prepared_applies: bool,
+    one_identity: bool,
+    allow_other: bool,
+}
+
+fn moved_activation_case(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket, schedule: MovedActivation) -> Result[(), store.Error] waits {
+    let options = witness_store_options()
+    let authority = recovery_bucket_client(sim, tasks, 1)
+    let (take opened, take base, take new_description) = witness_base(tasks, rnd, sim.time, take authority, schedule.one_identity)?
+    let mut incumbent = take opened
+    let store_id = base.id
+    let tried = object_install_record(mut incumbent, tasks, 10, new_description, image_two())
+    match (schedule.prepared_applies, view tried) {
+        (true, Ok(_)) => (),
+        (false, Error(Undecided)) => (),
+        _ => fail("L54-H: the prepared install did not take the scripted cut"),
+    }
+    let _ = take incumbent
+
+    let mut reopen: store.Options = clone(options)
+    reopen.expect = Some(store_id)
+    reopen.create = false
+    let mut standalone = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 2), sim.time, rnd, reopen) ?=> |store.Refusal(error: take problem, ..)| take problem
+    let active = if schedule.allow_other {
+        let mut bare: runner.Describe = clone(new_description)
+        bare.n_place = 524288
+        let _ = object_install_at(mut standalone, tasks, 10, bare)?
+        10u64
+    } else {
+        if !schedule.prepared_applies { let _ = object_install_at(mut standalone, tasks, 10, new_description)? }
+        let _ = object_install_at(mut standalone, tasks, 11, new_description)?
+        11u64
+    }
+    store.close(take standalone)?
+
+    let mut host_test = trace_probe_authority(c, rnd, (store_id.hi, store_id.lo), base.old_binding, base.new_binding, Some(clone(base.pair)), false)
+    reopen.activation = Some(10u64)
+    reopen.binding = Some(clone(base.new_binding))
+    let probed = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 3), sim.time, rnd, reopen)
+    let Error(store.Refusal(error: NotCurrent(observed), authority: take returned)) = take probed else {
+        fail("L54-H: NEW's probe proceeded to claim")
+    }
+    expect(observed == active, "L54-H: the refused probe reported the wrong activation")
+    let report = recovery_read_authority(tasks, sim.time, take returned, options, store_id)?
+    let (seen, take raw) = take report
+    expect(seen == active, "L54-H: the follower read another activation")
+    trace_current(mut host_test, seen, take raw)
+    let group = option.unwrap(must(group_row(host_test.h, "g"), "L54-H: the group disappeared"))
+    let snapshot = store.snapshot(host_test.h.db)
+    let reader = store.reader(host_test.h.db, 0)?
+    let at_ten = store.get(reader, snapshot, host_test.h.t.activations, (group.incarnation, 10u64))?
+    let expected = if schedule.prepared_applies { Some(image_two()) } else { None }
+    expect(at_ten == expected, "L54-H: the catalog index disagreed with the prepared outcome")
+    if schedule.allow_other {
+        expect(failed_with(host_test, "not installed after recovery") && rooted_at(host_test, image(), 3), "L54-H: an unmatched release changed the selection")
+        if let Some(Unmatched(_, 10, _, Some(524288))) = group.recovery {} else {
+            fail("L54-H: refusal did not record the unmatched binding")
+        }
+        let mut bare: runner.Describe = clone(new_description)
+        bare.n_place = 524288
+        let identity = result.unwrap(runner.identity_digest(bare))
+        let expected_cause = moved_unmatched_cause(identity, base.old_binding, base.new_binding)
+        expect(failing_cause(host_test, "g") == Some(take expected_cause), "L54-H: the unmatched status changed the probe's cause")
+        expect(collection_keeps(mut host_test, true, true), "L54-H: wrong allowance lost a candidate")
+    } else if schedule.prepared_applies {
+        expect(last_activation(host_test) == Some(11), "L54-H: the host relaunched below the applied activation")
+        expect(installed_new(host_test, 11) && collection_keeps(mut host_test, true, true), "L54-H: the applied attempt did not select NEW at 11")
+    } else if schedule.one_identity {
+        expect(last_activation(host_test) == Some(11), "L54-H: the host relaunched the shared identity below 11")
+        expect(failed_with(host_test, "not installed after recovery") && rooted_at(host_test, image(), 11), "L54-H: shared identity did not follow the failed attempt's OLD selection")
+        expect(collection_keeps(mut host_test, false, true), "L54-H: shared identity did not collect NEW")
+    } else {
+        expect(last_activation(host_test) == Some(11), "L54-H: the host relaunched the distinct identity below 11")
+        expect(failed_with(host_test, "not installed after recovery") && rooted_at(host_test, image_two(), 11), "L54-H: distinct identity did not select NEW at 11")
+        expect(collection_keeps(mut host_test, true, true), "L54-H: distinct identity lost OLD")
+    }
+    Ok(())
+}
+
+fn moved_unmatched_cause(id: Bytes, old_binding: Bytes, new_binding: Bytes) -> String {
+    let mut text = string.from("No recovery candidate matches the store at activation 10: its release identity is ")
+    string.push(mut text, std.hex.encode(id))
+    string.push(mut text, " at n_place 524288; candidates: ")
+    string.push(mut text, std.hex.encode(image()))
+    string.push(mut text, " with identity ")
+    string.push(mut text, std.hex.encode(old_binding))
+    string.push(mut text, " at n_place 1048576, ")
+    string.push(mut text, std.hex.encode(image_two()))
+    string.push(mut text, " with identity ")
+    string.push(mut text, std.hex.encode(new_binding))
+    string.push(mut text, " at n_place 1048576; last start: NotCurrent: the store's release identity at activation 10 is not that of assembly ")
+    string.push(mut text, std.hex.encode(image_two()))
+    string.push(mut text, ", which this start ran")
+    take text
+}
+
+fn recovery_read_authority(tasks: Tasks, time: Clock, take authority: store.Authority, options: store.Options, id: store.StoreId) -> Result[(u64, Bytes), store.Error] waits {
+    let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
+    let plan = result.unwrap(store.follower_plan(Bucket(lanes), options))
+    let mut plans: List[store.FollowerPlan] = list.with_capacity(1)
+    list.push(mut plans, clone(plan))
+    let service = store.follower_service(tasks, option.unwrap(store.service_bytes(plans)))?
+    let mut readers = store.followers()
+    let slot = store.follower_slot(store.follower_owner(service)?, plan)?
+    let mut mirror = store.follower(mut readers, take slot, take authority, time, Some(id))?
+    let _ = store.fresh(mut mirror, clock.deadline_after_ms(host.mono_ns(time), 30000))?
+    let read = runner.follower_release(mirror, 10)
+    let _ = take mirror
+    store.close_follower_service(take service)?
+    take read
+}
+
+fn observe_moved_activation(c: Clock, rnd: Random, tasks: Tasks, seed: u64, schedule: MovedActivation) -> Result[(), store.Error] waits {
+    let mut request_holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    let rule: std.sim.s3.Hold = if schedule.prepared_applies {
+        std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1, until: At(50000000), then: ApplyLoseReply)
+    } else {
+        std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1, until: Never, then: Drop)
+    }
+    list.push(mut request_holds, take rule)
+    let sim = recovery_bucket_with(tasks, c, seed, take request_holds)
+    let observed = moved_activation_case(c, rnd, tasks, sim, schedule)
+    let report = finish_recovery_bucket(take sim)
+    observed?
+    let mut prepared_at_ten = false
+    for applied_head in report.head_writes {
+        if applied_head.data[88] == 1 && applied_head.data[112] == 10 { prepared_at_ten = true }
+    }
+    expect(prepared_at_ten == schedule.prepared_applies, "L54-H: register history disagreed with the prepared outcome")
+    Ok(())
+}
+
+@test
+fn bucket_moved_activation_recovery(c: Clock, rnd: Random, tasks: Tasks, env_seed: Env) -> Result[(), store.Error] waits {
+    let seed = match std.sim.world.test_seed(env_seed) { Some(active) => active, None => 1123u64 }
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: true, one_identity: false, allow_other: false))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: false, one_identity: false, allow_other: false))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: false, one_identity: false, allow_other: true))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: false, one_identity: true, allow_other: false))?
+    observe_moved_activation(c, rnd, tasks, seed, MovedActivation(prepared_applies: true, one_identity: true, allow_other: false))?
+    refusal_write_follower(c, rnd, tasks, seed, false)?
+    refusal_write_follower(c, rnd, tasks, seed, true)
+}
+
+fn refusal_write_follower(c: Clock, rnd: Random, tasks: Tasks, seed: u64, follower_fails: bool) -> Result[(), store.Error] waits {
+    let mut request_holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    if follower_fails {
+        list.push(mut request_holds, std.sim.s3.Hold(method: "GET", key: "head", from: WITNESS_PROBE_GET + 1, count: 5,
+            until: Requested("GET", "after-probe", 1), then: Apply))
+    }
+    list.push(mut request_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: WITNESS_ACTIVATION_PUT, count: 1,
+        until: Requested("GET", "after-probe", 1), then: ApplyLoseReply))
+    let sim = recovery_bucket_with(tasks, c, seed, take request_holds)
+    let (report_ready, await_ready): (Sender[ActivationAttempt], Receiver[ActivationAttempt]) = channel.new(1)
+    let trial = ActivationWriter(endpoint: sim.endpoint, time: sim.time, rnd, tasks, ready: take report_ready)
+    let writer = task.spawn(tasks, bytes 33554432, take trial, write_prepared_ten)
+    let base = result.unwrap(channel.receive(await_ready))
+    result.unwrap(std.sim.s3.requested(sim.endpoint, "PUT", "head", WITNESS_ACTIVATION_PUT))
+
+    let mut host_test = trace_probe_authority(c, rnd, (base.id.hi, base.id.lo), base.old_binding, base.new_binding, Some(clone(base.pair)), false)
+    if follower_fails { trace_current(mut host_test, 3, list.new()) }
+    let mut opts = witness_store_options()
+    opts.expect = Some(base.id)
+    opts.activation = Some(10u64)
+    opts.binding = Some(clone(base.new_binding))
+    opts.create = false
+    let client = recovery_bucket_wire_client(sim.endpoint, sim.time, tasks, 2)
+    let authority = store.object_authority(take client, "bucket", if follower_fails { 10u64 } else { 30000u64 })
+    let probe = store.open_authority(tasks, take authority, sim.time, rnd, opts)
+    let Error(store.Refusal(error: NotCurrent(3), authority: take returned)) = take probe else {
+        fail("L54-H: the held install did not leave the probe at activation 3")
+    }
+    let mut recovery: Option[store.Authority] = Some(take returned)
+    if follower_fails {
+        let returned_probe = option.unwrap(replace(mut recovery, None))
+        let observed_read = recovery_read_authority(tasks, sim.time, take returned_probe, opts, base.id)
+        match take observed_read {
+            Error(Remote(_)) => {
+                trace_current(mut host_test, 3, list.new())
+                if let Some(Undecided(_)) = deploy_outcome(host_test.h, "g") {} else { fail("L54-H: a failed follower read decided the deploy") }
+                expect(rooted_at(host_test, image(), 3), "L54-H: a failed follower read moved the group")
+                let cause = failing_cause(host_test, "g")
+                if cause != Some("NotCurrent: the store is at activation 3; this start requested 10") {
+                    let found = match cause { Some(text) => string.from(text), None => string.from("no failing row") }
+                    fail(joined("L54-H expected the probe's own cause, found ", found))
+                }
+            },
+            Error(take issue) => return Error(take issue),
+            Ok(_) => fail("L54-H: the held follower read returned a value"),
+        }
+    }
+    {
+        let mut marker = recovery_bucket_wire_client(sim.endpoint, sim.time, tasks, 3)
+        let deadline = std.object.deadline_after_ms(marker, 30000)
+        let (response, _) = std.object.fetch(mut marker, "after-probe", list.new(), deadline)
+        if let Error(NotFound) = response {} else { fail("L54-H: the release marker did not reach S3") }
+    }
+    result.unwrap(task.join(take writer))?
+    if let Some(take remaining) = take recovery {
+        let (seen, take raw) = recovery_read_authority(tasks, sim.time, take remaining, opts, base.id)?
+        expect(seen == 10, "L54-H: the separate follower read missed the activation")
+        trace_current(mut host_test, seen, take raw)
+        expect(installed_new(host_test, 10) && collection_keeps(mut host_test, true, true), "L54-H: the follower evidence did not decide the attempt")
+    }
+
+    let report = finish_recovery_bucket(take sim)
+    let last_write = view report.head_writes[list.len(report.head_writes) - 1]
+    expect(last_write.data[88] == 1 && last_write.data[112] == 10, "L54-H: the refused probe wrote a claim")
+    Ok(())
 }

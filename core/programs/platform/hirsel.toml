@@ -59,3 +59,6 @@ limit = 134217728
 
 [tests.runs."platform@1/platform/bucket_activation_witness_distinguishes_prepared"]
 limit = 134217728
+
+[tests.runs."platform@1/platform/bucket_moved_activation_recovery"]
+limit = 134217728

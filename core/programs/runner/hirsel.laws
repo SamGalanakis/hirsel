@@ -9,6 +9,7 @@ runner@1/runner/journal_test_trigger_granted src=a127b103c583329c sig=258b4551c5
 runner@1/runner/journal_test_trigger_snapshot src=8d7bf2d74965ca59 sig=122c4674a01840a4 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/journal_test_trigger_transact src=ea540a6f239a4be1 sig=43e3116eed0b46e1 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_claim_route_and_alias src=7a76f4893955513a sig=673f5da07fafd264 run=f59d61459ff3d2d7 bug=- oracle=- rows=pending
+runner@1/runner/keyed_http_horizon_at_deciding_admission src=e66ddfc1ba35a11b sig=96e0e18a837384ad run=f59d61459ff3d2d7 bug=- oracle=- rows=pending
 runner@1/runner/law_trigger_model src=96051ef040e5a864 sig=8aeff3b07f70536a run=4e2c39d888a20f27 bug=- oracle=- rows=pending
 runner@1/runner/leaving_sub_does_not_block_successor src=de1a924e8cdc66c4 sig=bcef8d4f8776744f run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/operate_derived_budgets src=2b01ee69a38cb43e sig=555037cefd6dafad run=fdbe03c87a737934 bug=- oracle=- rows=pending

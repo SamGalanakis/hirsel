@@ -755,3 +755,78 @@ fn keyed_http_claim_route_and_alias(d: Dir, random: Random, tasks: Tasks, net: N
     result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }
+
+type KeyedHorizonPost: send {
+    net: Net, clock: Clock, address: Addr, stream: u32, replayed: bool, body: Bytes, dedup_until: Bytes
+}
+
+fn keyed_horizon_post(take job: KeyedHorizonPost) waits {
+    let KeyedHorizonPost(net, clock, address, stream, replayed, body: take body, dedup_until: take until) = take job
+    let reply = http_law_post(net, clock, address, "/old", b"token", stream, 0u64, b"{}", 1000u32)
+    if reply.status != 201u16 || !reply.committed || reply.replayed != replayed || reply.body != body || reply.dedup_until != Some(take until) {
+        fail("keyed admission did not decide expiry at its own commit's time")
+    }
+}
+
+type KeyedHorizonDrive: send {
+    head: Sender[HeadInput], publisher: Sender[PubIn], clock: Clock, hand: ClockHand, random: Random, tasks: Tasks, net: Net
+}
+
+fn keyed_horizon_drive(take job: KeyedHorizonDrive) waits {
+    let KeyedHorizonDrive(head: take head, publisher: take pub_to, clock: time, hand: take clock_hand, random, tasks, net) = take job
+    let mut wall = take clock_hand
+    let definition: HttpOpPlace = code.describe(keyed_http_place)
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let (intercept, waiting): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let (take relay, take relay_task) = result.unwrap(start_relay(reg, intercept, pub_to, time, tasks,
+        RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock: time, random, tasks,
+        place: definition, previous: None, retired: None, stage: 0u8, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    // The first reply commits at 100, so retention 10000 ends it at 10100.
+    let first = task.spawn(tasks, bytes 1048576u64,
+        KeyedHorizonPost(net, clock: time, address, stream: 0u32, replayed: false, body: b"\"1\"", dedup_until: b"10100"), keyed_horizon_post)
+    result.unwrap(channel.send(head, l15_head_request(waiting)))
+    if let Error(_) = task.join(take first) { fail("first keyed post failed") }
+    // A retry the relay accepts at 10099 reaches the head at 10100: the
+    // deciding admission reads 10100, so it is a new operation, not a replay.
+    clock.set_wall(mut wall, 10099u64)
+    let retry = task.spawn(tasks, bytes 1048576u64,
+        KeyedHorizonPost(net, clock: time, address, stream: 1u32, replayed: false, body: b"\"2\"", dedup_until: b"20100"), keyed_horizon_post)
+    let held = l15_head_request(waiting)
+    clock.set_wall(mut wall, 10100u64)
+    result.unwrap(channel.send(head, take held))
+    if let Error(_) = task.join(take retry) { fail("retry at the horizon failed") }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+    let _ = take head
+    let _ = take wall
+}
+
+// Carry 7 (http.md H9, K-6): expiry is decided by the admitting commit's
+// keyed time, never by the time the relay accepted the request.
+@test
+fn keyed_http_horizon_at_deciding_admission(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (clock, take wall) = provide.clock(0u64, 100u64)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let definition: HttpOpPlace = code.describe(keyed_http_place)
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_horizon_drive)
+    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail,
+        tasks, 1048576u64, None, None)
+    if let Error(take problem) = started { fail(start_text(Open(take problem))) }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}

@@ -66,12 +66,24 @@ client's credential to a Caller with a copy of a plain seed;
 `Some(runner.wire_bind(latest_seed, bind, ..))` does it from the current published
 seed.
 
-**`PlaceConfig.grants`.** The place's one grant source: `Grants(seed, attempt, call,
-bytes)`. One grant task owns `seed`. A granted trigger attempt runs with
-`attempt(seed, h, ctx)`; a wire call to a granted entry, and a keyed HTTP claim, with
-`call(seed, h)`, minted fresh for that call. With `call: None` (or `grants: None`) a
-wire call to a granted entry is `Refused(NotAllowed)` and a keyed binding refuses the
-open. Transact and query entries never see `G`.
+**`PlaceConfig.grants`.** The place's grant sources: `Grants(attempt, call, claim)`.
+`attempt` and `claim` are optional `Mint(seed, mint, bytes, steps)`s, and `call` is an
+optional `CallMint(mint, entries)`. Every seed has the same type `S`. Each present mint has its own
+task, which owns its seed, and its own allowance `bytes`: every live `G` it made stays
+charged there, so one use cannot exhaust another's. A mint is
+`fn(S, H, I) -> Result[G, Capacity]`, with `I` by view. It never waits, and it runs as
+`isolate` around `bound steps steps`, so its error, fault or step overrun fails only its
+own request (`Failed(OutOfBytes)`, `Failed(Raised)`, `Failed(OutOfTime)`) and the
+task keeps serving. A granted trigger attempt gets `attempt`'s `G`; the mint sees a view of the
+attempt's `TriggerContext` and keeps one with `share_trigger_context`. A wire call gets `call`'s `G` only for the granted entries
+`call.entries` lists (by path and argument schema, built with `triggers.granted` and
+`triggers.allow`). Any other wire call to a granted entry is `Refused(NotAllowed)`
+before any mint. A keyed HTTP claim gets `claim`'s `G`. Give each mint its own seed:
+duplicate a `Sender` with `channel.sender` and a `Secret` with `secret.share`. A
+listed granted trigger entry with no `attempt` mint refuses the open
+(`TriggerNoGrant`), as does a `call` list element that names no registered granted
+entry (`CallNotGranted`) and a keyed binding with no `claim` mint (`KeyedNoGrant`).
+Transact and query entries never see `G`. Mints are never recorded or replayed.
 
 **Sizing `n_place`.** The serving task builds the place's one Registry under
 `n_place` and every wire session plans against it, so `n_place` counts once in the
@@ -129,8 +141,9 @@ The decoder's peak memory therefore counts against n. `start(r, tasks, g, caller
 arg)` spawns a task under the entry's `bytes n` that holds the grant g and decodes and runs
 the granted entry, a body `fn(G, Caller, take A) -> Result[R, Capacity] waits`. A trigger
 moves its attempt's `G` into `start`. A wire call reaches a granted entry only when the
-place's `PlaceConfig.grants` has a `call` mint; each wire call then runs with its own
-freshly minted `G`, so no call consumes or shares another's. Without one a wire call to a
+place's `PlaceConfig.grants.call` lists it; the call's task first asks the `call` mint
+for its g and then runs as `start` does; each wire call then runs with its own
+freshly minted `G`, so no call consumes or shares another's. Otherwise a wire call to a
 granted entry is `Refused(NotAllowed)`, whatever the place's `Wire`. A spawn the place cannot grant returns `Budget`. `finish` joins
 that task, and a task that fails or is cancelled gives `Failed(Raised)`. A key that
 names no entry of the kind being asked for gives `NoEntry`.
@@ -443,10 +456,12 @@ network provider (W8a) lands.
 
 A place enables the trigger library by calling `triggers.migrate` from its
 schema migration and setting `PlaceConfig.triggers` before calling
-`runner.operate`. The `TriggerConfig[G, S]` supplies the entry list, the
-Caller for triggered transactions, and the seed grants of type `S`. Its plain
-callback `fn(S, take TriggerContext) -> Result[G, Capacity] waits` makes the
-entry's grants for each attempt in a task with the configured `grant_bytes`.
+`runner.operate`. The `TriggerConfig` supplies the entry list and the
+Caller for triggered transactions. A granted entry's `G` for each attempt comes from
+`PlaceConfig.grants.attempt`, a `Mint` whose function
+`fn(S, H, TriggerContext) -> Result[G, Capacity]` runs in its own task under
+the mint's `bytes` and `steps`. Listing a granted entry without an `attempt` mint
+refuses the open with `TriggerNoGrant`.
 With `None` or an empty entry list a place starts no new trigger, but its head still
 settles the rows already in its store: cancels and holds run, and a row whose entry is
 gone is consumed `Gone` (RUNNER-SPEC §12.1).
@@ -458,7 +473,7 @@ Use `AfterCommit` or `At(T)`, where T is in the units of `store.CallInfo.at`.
 Read the terminal result by trigger identity with `triggers.outcome` on a
 snapshot or `triggers.fetch_outcome` in a transaction.
 
-A grant callback receives the attempt’s `TriggerContext`. The run uses `trigger_call` to
+The `attempt` mint receives the attempt’s `TriggerContext`. The run uses `trigger_call` to
 invoke a fenced transaction and `trigger_boundary` to check its attempt and
 any committed cancel request before an outside step. `trigger_snapshot` returns a
 read-only store snapshot for the current attempt, with a `store.Reader` to read it through, so the run can read rows off

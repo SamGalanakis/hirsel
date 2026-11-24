@@ -634,6 +634,10 @@ pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<
 /// As `wait`.
 #[inline(never)]
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) -> Step {
+    // SAFETY: UDP adapters pin the request extension through delivery.
+    if unsafe { udp_operation((*request).operation) } {
+        return unsafe { crate::udp_net::step(request, token) };
+    }
     #[cfg(feature = "record")]
     // SAFETY: the tape pins the source's local socket registry in a typed CLOSE.
     unsafe {
@@ -786,6 +790,8 @@ unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -
             (crate::stdin::operations(request).step)(request, token, false)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).step)(&*state.cast(), &mut *request, token, false)
+        } else if udp_operation((*request).operation) {
+            crate::udp_net::step(request, token)
         } else {
             (socket_operations(request).step)(request, token, false)
         }
@@ -805,6 +811,8 @@ unsafe extern "C" fn abort(
             (crate::stdin::operations(request).abort)(request, token, reason)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).abort)(&*state.cast(), &mut *request, token, reason)
+        } else if udp_operation((*request).operation) {
+            crate::udp_net::abort(request, token, reason)
         } else {
             (socket_operations(request).abort)(request, token, reason)
         }

@@ -522,6 +522,12 @@ tags!(HostOp {
     136 => SecretJwsHmacSign,
     137 => SecretJwsHmacVerify,
     138 => ProvideRandomTape,
+    139 => UdpOpen,
+    140 => UdpBind,
+    141 => UdpBindGroup,
+    142 => UdpRecv,
+    143 => UdpSend,
+    144 => UdpLocalAddr,
 });
 
 tags!(RaiseCause {

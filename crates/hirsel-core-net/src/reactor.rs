@@ -14,8 +14,10 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError},
 };
 mod sendzc;
+mod udp_group;
 mod uring;
 pub use sendzc::{TxSlot, TxState};
+pub use udp_group::UdpMember;
 use uring::{Uring, msg_ring_wake};
 
 const POLL_BATCH: i32 = 128;
@@ -187,6 +189,7 @@ pub fn reactor() -> io::Result<Reactor> {
 
 pub struct Poller {
     backend: Backend,
+    udp_groups: OnceLock<Mutex<udp_group::Groups>>,
     /// The owner's turn: held while a thread submits to or waits in this
     /// poller, which makes it the poller's owner for that turn.
     events: Mutex<Vec<libc::epoll_event>>,
@@ -246,6 +249,7 @@ impl Poller {
     fn from_uring(ring: Uring) -> Arc<Self> {
         Arc::new(Self {
             backend: Backend::Uring(Box::new(ring)),
+            udp_groups: OnceLock::new(),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_uring,
@@ -262,6 +266,7 @@ impl Poller {
                 epoll,
                 wake: eventfd()?,
             },
+            udp_groups: OnceLock::new(),
             events: Mutex::new(Vec::with_capacity(POLL_BATCH as usize)),
             operations: &PollOperations {
                 poll: Self::poll_epoll,
@@ -377,7 +382,11 @@ impl Poller {
         let Some(events) = self.try_turn() else {
             return Ok(None);
         };
-        let timeout_ms = if woken() { 0 } else { timeout_ms };
+        let timeout_ms = if woken() || self.udp_due() {
+            0
+        } else {
+            timeout_ms
+        };
         (self.operations.poll)(self, events, timeout_ns(timeout_ms))
     }
 
@@ -411,6 +420,8 @@ impl Poller {
         let len = checked(count)? as usize;
         // SAFETY: epoll_wait initialized exactly this prefix of the buffer.
         unsafe { events.set_len(len) };
+        let visible = self.dispatch_udp_slot(&mut events);
+        events.truncate(visible);
         Ok(Some(PollEvents(events)))
     }
 
@@ -452,7 +463,7 @@ impl Poller {
 }
 
 fn tag(index: usize, generation: u32) -> u64 {
-    index as u64 | (u64::from(generation) << 32)
+    index as u64 | (u64::from(generation & 0xffff) << 32)
 }
 
 /// Where the calling thread is in a unit pool: its unit and the worker slot
@@ -577,6 +588,17 @@ impl Sockets {
     pub fn active_poller(&self) -> Option<Arc<Poller>> {
         self.poller.clone()
     }
+
+    /// The current slot is the permanent home for new UDP intakes.
+    pub fn udp_poller(&mut self) -> io::Result<Arc<Poller>> {
+        self.poller()?;
+        let home = self
+            .shared
+            .as_ref()
+            .and_then(|shared| (shared.slots.here)())
+            .map_or(0, |here| here.slot);
+        Ok(self.home(home).0.clone())
+    }
     /// The poller holding registrations homed at `home`, and whether the
     /// calling thread owns it now. A private poller's holder always does.
     fn home(&self, home: usize) -> (&Arc<Poller>, bool) {
@@ -598,6 +620,10 @@ impl Sockets {
     }
     /// Transfer a uniquely owned descriptor; harness descriptors need no poller until parked.
     pub fn insert(&mut self, fd: OwnedFd) -> Option<u64> {
+        self.insert_shared(Arc::new(fd))
+    }
+
+    pub fn insert_shared(&mut self, fd: Arc<OwnedFd>) -> Option<u64> {
         self.insert_fd(fd, false, 0)
     }
 
@@ -614,12 +640,12 @@ impl Sockets {
 
     /// A pipe has one directional owner and closes its descriptor on release.
     pub fn insert_pipe(&mut self, fd: OwnedFd, write: bool) -> Option<u64> {
-        self.insert_fd(fd, true, if write { 2 } else { 1 })
+        self.insert_fd(Arc::new(fd), true, if write { 2 } else { 1 })
     }
 
-    fn insert_fd(&mut self, fd: OwnedFd, pipe: bool, direction: u64) -> Option<u64> {
+    fn insert_fd(&mut self, fd: Arc<OwnedFd>, pipe: bool, direction: u64) -> Option<u64> {
         let key = self.insert_record(Record {
-            fd: Arc::new(fd),
+            fd,
             pipe,
             owners: 1 << direction,
             reset: false,
@@ -844,110 +870,11 @@ impl Sockets {
             )
         };
     }
+}
 
-    /// Register a socket once and publish this direction's current waiter.
-    /// Only the registry's holder dispatches completions, so readiness
-    /// reported before the waiter is published still finds it.
-    pub fn arm(&mut self, key: u64, write: bool, token: u64) -> io::Result<u64> {
-        self.register(key)?;
-        let index = ((key >> 2) as u32) as usize;
-        let generation = self.slots[index].generation;
-        let r = self.record_mut(key);
-        if r.waiters[usize::from(write)].replace(token).is_none() {
-            self.waiting += 1;
-        }
-        Ok(tag(index, generation))
-    }
-    pub fn disarm(&mut self, key: u64, write: bool) {
-        if self.record_mut(key).waiters[usize::from(write)]
-            .take()
-            .is_some()
-        {
-            self.waiting -= 1;
-        }
-    }
-    /// An edge names a live socket. A direction's waiter still retries its
-    /// syscall before committing a result, including after stale readiness.
-    pub fn dispatch(&mut self, identity: u64, flags: u32, ready: impl FnMut(u64)) {
-        Self::dispatch_edge(&mut self.slots, &mut self.waiting, identity, flags, ready);
-    }
+mod dispatch;
 
-    fn dispatch_edge(
-        slots: &mut [Slot],
-        waiting: &mut usize,
-        identity: u64,
-        flags: u32,
-        mut ready: impl FnMut(u64),
-    ) {
-        let index = identity as u32 as usize;
-        let Some(slot) = slots.get_mut(index) else {
-            return;
-        };
-        // A shared tag keeps 16 generation bits. A stale edge that matches
-        // only readies a waiter that retries its syscall.
-        if slot.generation & 0xffff != (identity >> 32) as u32 & 0xffff {
-            return;
-        }
-        let Some(r) = slot.record.as_mut() else {
-            return;
-        };
-        let failed = flags & (libc::EPOLLERR | libc::EPOLLHUP) as u32 != 0;
-        let terminal = failed || flags & libc::EPOLLRDHUP as u32 != 0;
-        if terminal || flags & libc::EPOLLIN as u32 != 0 {
-            r.read_drained = false;
-            r.read_terminal |= terminal;
-            if let Some(token) = r.waiters[0].take() {
-                *waiting -= 1;
-                ready(token);
-            }
-        }
-        if (failed || flags & libc::EPOLLOUT as u32 != 0)
-            && let Some(token) = r.waiters[1].take()
-        {
-            *waiting -= 1;
-            ready(token);
-        }
-    }
-    /// Poll only returned registrations while holding the driver token
-    /// and exclusive access to the socket registry.
-    pub fn poll(&mut self, timeout_ms: i32, ready: impl FnMut(u64)) -> io::Result<usize> {
-        if (timeout_ms == 0 && self.waiting == 0) || self.shared.is_some() {
-            return Ok(0);
-        }
-        let Some(poller) = self.poller.as_ref() else {
-            return Ok(0);
-        };
-        let Some(events) = poller.poll(timeout_ms)? else {
-            return Ok(0);
-        };
-        Ok(Self::dispatch_batch(
-            &mut self.slots,
-            &mut self.waiting,
-            events,
-            ready,
-        ))
-    }
-
-    /// Apply a poll from this registry's driver. Closing or reusing a slot
-    /// invalidates any edge still in a worker's poll batch.
-    pub fn dispatch_polled(&mut self, events: PollEvents<'_>, ready: impl FnMut(u64)) -> usize {
-        Self::dispatch_batch(&mut self.slots, &mut self.waiting, events, ready)
-    }
-
-    fn dispatch_batch(
-        slots: &mut [Slot],
-        waiting: &mut usize,
-        events: PollEvents<'_>,
-        mut ready: impl FnMut(u64),
-    ) -> usize {
-        for event in events.0.iter() {
-            if event.u64 != WAKE {
-                Self::dispatch_edge(slots, waiting, event.u64, event.events, &mut ready);
-            }
-        }
-        events.0.len()
-    }
-
+impl Sockets {
     pub fn release(&mut self, key: u64) -> bool {
         let r = self.record_mut(key);
         let direction = key & 3;

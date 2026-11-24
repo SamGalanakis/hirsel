@@ -166,8 +166,32 @@ unsafe impl Send for ChargeCell {}
 unsafe impl Sync for ChargeCell {}
 
 impl ChargeCell {
-    fn new(charge: Charge) -> Arc<Self> {
+    pub(crate) fn new(charge: Charge) -> Arc<Self> {
         Arc::new(Self(Mutex::new(Some(charge))))
+    }
+
+    pub(crate) fn take_charge(&self, payer: Payer) -> Option<Charge> {
+        let mut charge = self.0.lock().unwrap();
+        if charge.as_ref().is_some_and(|c| c.0.same_domain(payer)) {
+            charge.take()
+        } else {
+            None
+        }
+    }
+}
+
+impl Charge {
+    pub(crate) fn new(payer: Payer, bytes: u64) -> Self {
+        Self(payer, bytes)
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.1
+    }
+
+    pub(crate) fn partition(&mut self, bytes: u64) -> Self {
+        self.1 -= bytes;
+        Self(self.0, bytes)
     }
 }
 
@@ -264,9 +288,7 @@ impl Secrets {
         let mut refunds = Vec::new();
         for entry in self.entries.iter().flatten() {
             for cell in [&entry.charge, &entry.secret.seal].into_iter().flatten() {
-                let mut charge = cell.0.lock().unwrap();
-                if charge.as_ref().is_some_and(|c| c.0.same_domain(payer)) {
-                    let c = charge.take().unwrap();
+                if let Some(c) = cell.take_charge(payer) {
                     handed.push((Arc::downgrade(cell), c.1));
                     refunds.push(c);
                 }

@@ -99,8 +99,13 @@ def network_case(case):
     return '(network)' in case.call
 
 
+LIVE_UDP_CASES = ('net:udp_gro_first_truncates', 'net:udp_group_recycles_a_full_member_capture',
+                  'net:udp_pool_charge_outlives_its_helper')
+
+
 def unit_socket_case(case):
-    return case.name in ('net:socket_served_by_receiving_unit', 'net:inbox_seal_closes_socket')
+    return case.name in ('net:socket_served_by_receiving_unit', 'net:inbox_seal_closes_socket',
+                         *LIVE_UDP_CASES)
 
 
 def simulated_network_case(case, evaluating=False):
@@ -108,8 +113,11 @@ def simulated_network_case(case, evaluating=False):
             and (evaluating or case.call != 'net_parity(network)'))
 
 
-def loopback_grants():
-    return ['--grant', 'Net=' + ';'.join(LOOPBACK_RULES), '--grant', 'Clock', '--grant', 'Tasks']
+def loopback_grants(case):
+    rules = LOOPBACK_RULES
+    if case.name in LIVE_UDP_CASES:
+        rules += ('UdpBind 127.0.0.0/8 1-65535', 'UdpSend 127.0.0.0/8 1-65535')
+    return ['--grant', 'Net=' + ';'.join(rules), '--grant', 'Clock', '--grant', 'Tasks']
 
 def exec_fixture(scratch, host):
     """Pin a host executable with a known exit and derive its EXEC-1 approval."""
@@ -753,7 +761,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if simulated:
                     command.extend(['--grant', 'Tasks'])
                 elif network_case(case):
-                    command.extend(loopback_grants())
+                    command.extend(loopback_grants(case))
                 elif '(unix, dir, tasks)' in case.call:
                     grant = f'Net=UnixRoot parity {host};UnixBind parity packet;UnixSend parity packet'
                     command.extend(['--grant', grant, '--grant', 'Tasks'])

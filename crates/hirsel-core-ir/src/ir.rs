@@ -1263,52 +1263,25 @@ impl RtOp {
                         ],
                         outcome,
                     ),
-                    HostOp::Listen => (
+                    HostOp::Listen
+                    | HostOp::Accept
+                    | HostOp::LocalAddr
+                    | HostOp::PeerAddr
+                    | HostOp::UdpBind
+                    | HostOp::UdpBindGroup
+                    | HostOp::UdpLocalAddr => op.address_signature(),
+                    HostOp::UdpOpen => (
                         vec![
                             V(u64_),
-                            V(u8_),
-                            V(u64_),
-                            V(u64_),
-                            V(Ty::Scalar(Scalar::U16)),
-                            V(Ty::Scalar(Scalar::U16)),
+                            V(Ty::Scalar(Scalar::Bool)),
+                            V(Ty::Scalar(Scalar::U32)),
+                            V(Ty::Scalar(Scalar::U32)),
                         ],
-                        vec![
-                            u64_,
-                            u8_,
-                            Ty::Scalar(Scalar::U32),
-                            u64_,
-                            u8_,
-                            u64_,
-                            u64_,
-                            Ty::Scalar(Scalar::U16),
-                        ],
+                        outcome,
                     ),
-                    HostOp::Accept => (
-                        vec![V(u64_), V(u8_), V(u64_), V(u64_)],
-                        vec![
-                            u64_,
-                            u8_,
-                            Ty::Scalar(Scalar::U32),
-                            u64_,
-                            u8_,
-                            u64_,
-                            u64_,
-                            Ty::Scalar(Scalar::U16),
-                        ],
-                    ),
-                    HostOp::LocalAddr | HostOp::PeerAddr => (
-                        vec![V(u64_)],
-                        vec![
-                            u64_,
-                            u8_,
-                            Ty::Scalar(Scalar::U32),
-                            u64_,
-                            u8_,
-                            u64_,
-                            u64_,
-                            Ty::Scalar(Scalar::U16),
-                        ],
-                    ),
+                    HostOp::UdpRecv | HostOp::UdpSend => {
+                        (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+                    }
                     HostOp::RecvBounded => (
                         vec![V(u64_), V(p), V(u64_), V(u8_), V(u64_), V(u64_)],
                         outcome,

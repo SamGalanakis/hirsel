@@ -92,3 +92,15 @@ pub fn send_datagram(mut d: UnixDatagram, b: Bytes, until: Until) -> Result[(), 
 pub fn send_to(mut d: UnixDatagram, root: String, path: String, b: Bytes, until: Until) -> Result[(), NetError] waits
 
 pub fn recv_datagram(mut d: UnixDatagram, mut buf: Bytes, until: Until) -> Result[Received, NetError] waits
+
+pub fn udp_open(n: Net, v6: bool, opts: UdpOptions) -> Result[UdpSocket, NetError] waits
+
+pub fn udp_bind(n: Net, a: Addr, opts: UdpOptions) -> Result[(UdpSocket, Addr), NetError] waits
+
+pub fn udp_bind_group(n: Net, a: Addr, opts: UdpOptions, members: u16, steer: Steer, mut out: List[UdpSocket]) -> Result[Addr, NetError] waits
+
+pub fn udp_recv(mut s: UdpSocket, mut buf: Bytes, mut out: List[UdpPacket], until: Until) -> Result[u64, NetError] waits
+
+pub fn udp_send(mut s: UdpSocket, data: Bytes, pkts: List[UdpTx], until: Until) -> Result[u64, NetError] waits
+
+pub fn udp_local_addr(s: UdpSocket) -> Result[Addr, NetError] waits

@@ -103,6 +103,12 @@ pub enum HostOp {
     DatagramSend = hirsel_core_ids::host_op::DATAGRAM_SEND as isize,
     DatagramSendTo = hirsel_core_ids::host_op::DATAGRAM_SEND_TO as isize,
     DatagramRecv = hirsel_core_ids::host_op::DATAGRAM_RECV as isize,
+    UdpOpen = hirsel_core_ids::host_op::UDP_OPEN as isize,
+    UdpBind = hirsel_core_ids::host_op::UDP_BIND as isize,
+    UdpBindGroup = hirsel_core_ids::host_op::UDP_BIND_GROUP as isize,
+    UdpRecv = hirsel_core_ids::host_op::UDP_RECV as isize,
+    UdpSend = hirsel_core_ids::host_op::UDP_SEND as isize,
+    UdpLocalAddr = hirsel_core_ids::host_op::UDP_LOCAL_ADDR as isize,
     NetNarrowUnix = hirsel_core_ids::host_op::NET_NARROW_UNIX as isize,
     /// Wait until the clock's wall time reaches an absolute millisecond reading.
     SleepUntilWall = hirsel_core_ids::host_op::SLEEP_UNTIL_WALL as isize,
@@ -118,12 +124,44 @@ pub enum HostOp {
 }
 
 impl HostOp {
-    /// Whether the native adapter returns a TCP address with its outcome.
+    /// Whether the native adapter returns an IP endpoint with its outcome.
     pub const fn address_outcome(self) -> bool {
         matches!(
             self,
-            Self::Listen | Self::Accept | Self::LocalAddr | Self::PeerAddr
+            Self::Listen
+                | Self::Accept
+                | Self::LocalAddr
+                | Self::PeerAddr
+                | Self::UdpBind
+                | Self::UdpBindGroup
+                | Self::UdpLocalAddr
         )
+    }
+
+    pub(super) fn address_signature(self) -> (Vec<super::Param>, Vec<super::Ty>) {
+        use super::{Param::Value as V, Scalar, Ty};
+        let byte = Ty::Scalar(Scalar::U8);
+        let short = Ty::Scalar(Scalar::U16);
+        let word = Ty::Scalar(Scalar::U32);
+        let long = Ty::Scalar(Scalar::U64);
+        let mut args = vec![V(long)];
+        match self {
+            Self::Listen | Self::UdpBind | Self::UdpBindGroup => {
+                args.extend([V(byte), V(long), V(long), V(short)]);
+                if self == Self::Listen {
+                    args.push(V(short));
+                } else {
+                    args.extend([V(word), V(word)]);
+                    if self == Self::UdpBindGroup {
+                        args.extend([V(short), V(word), V(Ty::Ptr)]);
+                    }
+                }
+            }
+            Self::Accept => args.extend([V(byte), V(long), V(long)]),
+            Self::LocalAddr | Self::PeerAddr | Self::UdpLocalAddr => {}
+            _ => unreachable!(),
+        }
+        (args, vec![long, byte, word, long, byte, long, long, short])
     }
 
     /// Native entry for rows that use the common operand signature.
@@ -210,6 +248,12 @@ impl HostOp {
         HostOp::DatagramSend,
         HostOp::DatagramSendTo,
         HostOp::DatagramRecv,
+        HostOp::UdpOpen,
+        HostOp::UdpBind,
+        HostOp::UdpBindGroup,
+        HostOp::UdpRecv,
+        HostOp::UdpSend,
+        HostOp::UdpLocalAddr,
         HostOp::NetNarrowUnix,
         HostOp::StdinRead,
         HostOp::EnvGet,
@@ -305,6 +349,12 @@ impl HostOp {
             HostOp::DatagramSend => "host_send_datagram",
             HostOp::DatagramSendTo => "host_send_to",
             HostOp::DatagramRecv => "host_recv_datagram",
+            HostOp::UdpOpen => "host_udp_open",
+            HostOp::UdpBind => "host_udp_bind",
+            HostOp::UdpBindGroup => "host_udp_bind_group",
+            HostOp::UdpRecv => "host_udp_recv",
+            HostOp::UdpSend => "host_udp_send",
+            HostOp::UdpLocalAddr => "host_udp_local_addr",
             HostOp::NetNarrowUnix => "net_narrow_unix",
             HostOp::TlsConnect => "tls_connect",
             HostOp::SendSecret => "send_secret",
@@ -389,6 +439,12 @@ impl HostOp {
             Self::DatagramSend => "hirsel_core_host_send_datagram",
             Self::DatagramSendTo => "hirsel_core_host_send_to",
             Self::DatagramRecv => "hirsel_core_host_recv_datagram",
+            Self::UdpOpen => "hirsel_core_host_udp_open",
+            Self::UdpBind => "hirsel_core_host_udp_bind",
+            Self::UdpBindGroup => "hirsel_core_host_udp_bind_group",
+            Self::UdpRecv => "hirsel_core_host_udp_recv",
+            Self::UdpSend => "hirsel_core_host_udp_send",
+            Self::UdpLocalAddr => "hirsel_core_host_udp_local_addr",
             Self::NetNarrowUnix => "hirsel_core_net_narrow_unix",
             Self::TlsConnect => "hirsel_core_tls_connect",
             Self::SendSecret => "hirsel_core_host_send_secret",

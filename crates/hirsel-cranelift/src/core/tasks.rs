@@ -313,6 +313,12 @@ impl Function<'_, '_, '_> {
                     | HostOp::DatagramSend
                     | HostOp::DatagramSendTo
                     | HostOp::DatagramRecv
+                    | HostOp::UdpOpen
+                    | HostOp::UdpBind
+                    | HostOp::UdpBindGroup
+                    | HostOp::UdpRecv
+                    | HostOp::UdpSend
+                    | HostOp::UdpLocalAddr
                     | HostOp::NetNarrowUnix
                     | HostOp::Resolve
                     | HostOp::CredFetch

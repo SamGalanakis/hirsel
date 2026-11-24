@@ -3,11 +3,11 @@ use std::{
     io,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6},
     os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
-    sync::atomic::AtomicBool,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 pub struct Socket {
-    fd: OwnedFd,
+    fd: Arc<OwnedFd>,
     pub(super) v6: bool,
     pub(super) gso: AtomicBool,
 }
@@ -52,10 +52,14 @@ impl Socket {
             option(libc::SOL_UDP, libc::UDP_GRO, 1)?;
         }
         Ok(Self {
-            fd,
+            fd: Arc::new(fd),
             v6,
             gso: AtomicBool::new(true),
         })
+    }
+
+    pub fn descriptor(&self) -> Arc<OwnedFd> {
+        self.fd.clone()
     }
 
     pub fn bind(&self, addr: SocketAddr) -> io::Result<SocketAddr> {

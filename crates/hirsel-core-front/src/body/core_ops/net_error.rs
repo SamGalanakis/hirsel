@@ -24,22 +24,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.jump(join, &[], n);
             self.start(no);
         }
-        let ephemeral = self
-            .runtime_compare(Ty::Scalar(Scalar::U8), error, 11, n)
-            .unwrap();
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        self.runtime_branch(ephemeral, yes, no, n);
-        self.start(yes);
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 10,
-            },
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(no);
+        for (tag, case) in [(11, 10), (12, 11), (13, 12)] {
+            let on = self
+                .runtime_compare(Ty::Scalar(Scalar::U8), error, tag, n)
+                .unwrap();
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            if tag == 12 {
+                self.runtime_store(
+                    to,
+                    &[Step::CaseField { case, field: 0 }],
+                    Ty::Scalar(Scalar::U32),
+                    code,
+                    n,
+                );
+            }
+            self.jump(join, &[], n);
+            self.start(no);
+        }
         let tls = self
             .runtime_compare(Ty::Scalar(Scalar::U8), error, 9, n)
             .unwrap();
@@ -163,6 +168,43 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 address: to,
                 case: 6,
             },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+    }
+    pub(super) fn runtime_stdin_error(
+        &mut self,
+        to: AddressId,
+        error: ValueId,
+        code: ValueId,
+        n: NodeId,
+    ) {
+        let join = self.new_block(&[]);
+        for (tag, case) in [(7, 0), (6, 1)] {
+            let on = self
+                .runtime_compare(Ty::Scalar(Scalar::U8), error, tag, n)
+                .unwrap();
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 2,
+            },
+            n,
+        );
+        self.runtime_store(
+            to,
+            &[Step::CaseField { case: 2, field: 0 }],
+            Ty::Scalar(Scalar::U32),
+            code,
             n,
         );
         self.jump(join, &[], n);

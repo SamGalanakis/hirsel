@@ -189,6 +189,16 @@ pub opaque resource type UnixListener
 
 pub opaque resource type UnixDatagram
 
+pub opaque resource type UdpSocket
+
+pub type Steer = Hash | Quic
+
+pub type UdpOptions = UdpOptions(slots: u32, slot_bytes: u32)
+
+pub type UdpPacket = UdpPacket(peer: Addr, at: u64, len: u64, truncated: bool, ecn: u8)
+
+pub type UdpTx = UdpTx(to: Addr, at: u64, len: u64, ecn: u8)
+
 pub type Received = Received(len: u64, truncated: bool)
 
 pub type Ip: key = V4(u32) | V6(u64, u64)
@@ -200,7 +210,7 @@ pub type Addr: key {
 
 pub type Until = Never | At(Clock, u64)
 
-pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32) | EphemeralOutsideNetGrant
+pub type NetError = Denied | Refused | Unreachable | InUse | Reset | TimedOut | Aborted | Other(u32) | Tls(TlsFailure) | BoundNotListening(u32) | EphemeralOutsideNetGrant | Oversize(max: u32) | Exhausted
 
 pub type Trust: send = System | Roots(Bytes)
 

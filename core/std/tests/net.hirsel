@@ -195,3 +195,117 @@ fn inbox_seal_closes_socket(n: Net, _clock: Clock, _tasks: Tasks) -> bool waits 
     let mut data: Bytes = list.with_capacity(1)
     result.unwrap(host.recv_bounded(mut r, mut data, 1, Never)) == 0
 }
+
+// expect: run udp_gro_first_truncates(network) = true
+fn udp_gro_first_truncates(n: Net, clock: Clock, _tasks: Tasks) -> bool waits {
+    let (take socket, addr) = result.unwrap(host.udp_bind(n, Addr(ip: V4(0x7f000001), port: 0), UdpOptions(slots: 2, slot_bytes: 65792)))
+    let mut receiver = take socket
+    let mut sender = result.unwrap(host.udp_open(n, false, UdpOptions(slots: 1, slot_bytes: 1536)))
+    let mut data: Bytes = list.with_capacity(2400)
+    for _ in 0u64 .. 1200u64 {
+        list.push(mut data, 65u8)
+    }
+    for _ in 0u64 .. 1200u64 {
+        list.push(mut data, 66u8)
+    }
+    let mut tx: List[UdpTx] = list.with_capacity(2)
+    list.push(mut tx, UdpTx(to: addr, at: 0, len: 1200, ecn: 1))
+    list.push(mut tx, UdpTx(to: addr, at: 1200, len: 1200, ecn: 1))
+    let until = At(clock, host.mono_ns(clock) + 5000000000u64)
+    if result.unwrap(host.udp_send(mut sender, data, tx, until)) != 2 {
+        return false
+    }
+    let local = result.unwrap(host.udp_local_addr(sender))
+    let peer = Addr(ip: V4(0x7f000001), port: local.port)
+    let mut prefix: Bytes = list.with_capacity(100)
+    let mut packets: List[UdpPacket] = list.with_capacity(2)
+    if result.unwrap(host.udp_recv(mut receiver, mut prefix, mut packets, until)) != 1 || list.len(prefix) != 100 {
+        return false
+    }
+    let UdpPacket(peer: first_peer, at: first_at, len: first_len, truncated: first_truncated, ecn: first_ecn) = packets[0]
+    if first_peer != peer || first_at != 0 || first_len != 1200 || !first_truncated || first_ecn != 1 {
+        return false
+    }
+    for b in prefix {
+        if b != 65u8 {
+            return false
+        }
+    }
+    list.clear(mut packets)
+    let mut reply: Bytes = list.with_capacity(2400)
+    if result.unwrap(host.udp_recv(mut receiver, mut reply, mut packets, until)) != 1 || list.len(reply) != 1200 {
+        return false
+    }
+    let UdpPacket(peer: second_peer, at: second_at, len: second_len, truncated: second_truncated, ecn: second_ecn) = packets[0]
+    if second_peer != peer || second_at != 0 || second_len != 1200 || second_truncated || second_ecn != 1 {
+        return false
+    }
+    for b in reply {
+        if b != 66u8 {
+            return false
+        }
+    }
+    true
+}
+
+// expect: run udp_group_recycles_a_full_member_capture(network) = true
+fn udp_group_recycles_a_full_member_capture(n: Net, clock: Clock, _tasks: Tasks) -> bool waits {
+    let opts = UdpOptions(slots: 1, slot_bytes: 1536)
+    let mut members: List[UdpSocket] = list.with_capacity(2)
+    let addr = result.unwrap(host.udp_bind_group(n, Addr(ip: V4(0x7f000001), port: 0), opts, 2, Quic, mut members))
+    let mut one = option.unwrap(list.pop(mut members))
+    let mut zero = option.unwrap(list.pop(mut members))
+    let mut sender = result.unwrap(host.udp_open(n, false, opts))
+    let mut data: Bytes = list.with_capacity(15)
+    for byte in[0x40u8, 0u8, 0u8, 0u8, 17u8, 0x40u8, 0u8, 0u8, 0u8, 18u8, 0x40u8, 0u8, 0u8, 1u8, 19u8] {
+        list.push(mut data, byte)
+    }
+    let mut tx: List[UdpTx] = list.with_capacity(3)
+    list.push(mut tx, UdpTx(to: addr, at: 0, len: 5, ecn: 0))
+    list.push(mut tx, UdpTx(to: addr, at: 5, len: 5, ecn: 1))
+    list.push(mut tx, UdpTx(to: addr, at: 10, len: 5, ecn: 2))
+    let until = At(clock, host.mono_ns(clock) + 5000000000u64)
+    if result.unwrap(host.udp_send(mut sender, data, tx, until)) != 3 {
+        return false
+    }
+    let mut received: Bytes = list.with_capacity(5)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    if result.unwrap(host.udp_recv(mut one, mut received, mut packets, until)) != 1 || received[4] != 19u8 {
+        return false
+    }
+    list.clear(mut received)
+    list.clear(mut packets)
+    result.unwrap(host.udp_recv(mut zero, mut received, mut packets, until)) == 1 && received[4] == 17u8
+}
+
+fn udp_room() -> u64 {
+    match (bound bytes 0xffffffffffffffffu64 {
+        ()
+    }) {
+        Error(capacity) => capacity.available,
+        Ok(()) => fail("capacity probe admitted"),
+    }
+}
+
+fn udp_helper_bind(take n: Net) -> UdpSocket waits {
+    let (take socket, _) = result.unwrap(host.udp_bind(n, Addr(ip: V4(0x7f000001), port: 0), UdpOptions(slots: 1, slot_bytes: 1536)))
+    take socket
+}
+
+// expect: run udp_pool_charge_outlives_its_helper(network) = true
+fn udp_pool_charge_outlives_its_helper(n: Net, _clock: Clock, tasks: Tasks) -> bool waits {
+    let before = udp_room()
+    let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, n, udp_helper_bind))
+    let socket = result.unwrap(task.join(take helper))
+    let charged = udp_room()
+    if charged != before - 1544 {
+        fail("join changed the live UDP socket charge")
+    }
+    let endpoint = result.unwrap(host.udp_local_addr(socket))
+    let _ = take socket
+    let retired = udp_room()
+    if retired != before {
+        fail("retirement did not refund the UDP socket charge")
+    }
+    endpoint.ip == V4(0x7f000001) && endpoint.port != 0
+}

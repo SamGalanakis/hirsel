@@ -116,6 +116,13 @@ host_ops! {
     ZERO_EXTENSION = 124,
     PROVIDE_RANDOM_TAPE = 131,
     MEDIA_AGREEMENT = 132,
+    UDP_OPEN = 133,
+    UDP_BIND = 134,
+    UDP_BIND_GROUP = 135,
+    UDP_RECV = 136,
+    UDP_SEND = 137,
+    UDP_LOCAL_ADDR = 138,
+    UDP_FILL_PACKETS = 139,
 }
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.
@@ -136,4 +143,8 @@ pub fn valid_temp_suffix(suffix: &[u8]) -> bool {
 
 pub fn unix_operation(op: u8) -> bool {
     (UNIX_CONNECT..=DATAGRAM_RECV).contains(&op)
+}
+
+pub fn udp_operation(op: u8) -> bool {
+    (UDP_OPEN..=UDP_LOCAL_ADDR).contains(&op)
 }

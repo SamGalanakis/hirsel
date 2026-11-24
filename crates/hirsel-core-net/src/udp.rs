@@ -5,9 +5,11 @@ use std::{io, net::SocketAddr, num::NonZeroU16};
 mod rules;
 pub use rules::UdpRules;
 mod linux;
+mod members;
 mod receive;
 mod send;
 pub use linux::Socket;
+pub use members::{MemberProducer, MemberReader, WriterList, member_queue};
 pub use receive::{Captured, ReceivePool};
 pub use send::Window;
 
@@ -215,6 +217,10 @@ impl TurnBudget {
         self.datagrams -= 1;
         self.bytes -= copied_bytes;
         true
+    }
+
+    pub(crate) fn has_datagrams(&self) -> bool {
+        self.datagrams != 0
     }
 }
 

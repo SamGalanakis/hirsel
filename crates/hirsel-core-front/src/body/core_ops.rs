@@ -15,6 +15,7 @@ mod net_error;
 mod provide;
 mod secret_kdf;
 mod secret_key;
+mod udp_runtime;
 #[cfg(test)]
 pub(crate) use declarations::{assert_declarations, assert_no_ambient_input};
 
@@ -521,6 +522,12 @@ operations! {
     ("host", "send_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramSend)), "B", "exec-unix-impl-c-1627", false),
     ("host", "send_to", Lane::Runtime(Kernel::Net(HostOp::DatagramSendTo)), "B", "exec-unix-impl-c-1627", false),
     ("host", "recv_datagram", Lane::Runtime(Kernel::Net(HostOp::DatagramRecv)), "B", "exec-unix-impl-c-1627", false),
+    ("host", "udp_open", Lane::Runtime(Kernel::Net(HostOp::UdpOpen)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_bind", Lane::Runtime(Kernel::Net(HostOp::UdpBind)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_bind_group", Lane::Runtime(Kernel::Net(HostOp::UdpBindGroup)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_recv", Lane::Runtime(Kernel::Net(HostOp::UdpRecv)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_send", Lane::Runtime(Kernel::Net(HostOp::UdpSend)), "B", "media-w0-udp-build-2280", false),
+    ("host", "udp_local_addr", Lane::Runtime(Kernel::Net(HostOp::UdpLocalAddr)), "B", "media-w0-udp-build-2280", false),
     ("sha1", "compress", Lane::Value, "A", "sha1-hardware", false),
     ("sha1", "block", Lane::Value, "A", "sha1-hardware", false),
 }
@@ -3317,6 +3324,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         if matches!(
             op,
+            HostOp::UdpOpen
+                | HostOp::UdpBind
+                | HostOp::UdpBindGroup
+                | HostOp::UdpRecv
+                | HostOp::UdpSend
+                | HostOp::UdpLocalAddr
+        ) {
+            return self.runtime_udp(op, f, vals, result, n);
+        }
+        if matches!(
+            op,
             HostOp::ExecSpawn | HostOp::ExecWait | HostOp::ExecSignal
         ) {
             return self.runtime_exec(op, f, vals, result, n);
@@ -3913,37 +3931,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             &[Step::CaseField { case: 1, field: 0 }],
             u,
             index,
-            n,
-        );
-        self.jump(join, &[], n);
-        self.start(join);
-    }
-    fn runtime_stdin_error(&mut self, to: AddressId, error: ValueId, code: ValueId, n: NodeId) {
-        let join = self.new_block(&[]);
-        for (tag, case) in [(7, 0), (6, 1)] {
-            let on = self
-                .runtime_compare(Ty::Scalar(Scalar::U8), error, tag, n)
-                .unwrap();
-            let yes = self.new_block(&[]);
-            let no = self.new_block(&[]);
-            self.runtime_branch(on, yes, no, n);
-            self.start(yes);
-            self.inst(Inst::SetCase { address: to, case }, n);
-            self.jump(join, &[], n);
-            self.start(no);
-        }
-        self.inst(
-            Inst::SetCase {
-                address: to,
-                case: 2,
-            },
-            n,
-        );
-        self.runtime_store(
-            to,
-            &[Step::CaseField { case: 2, field: 0 }],
-            Ty::Scalar(Scalar::U32),
-            code,
             n,
         );
         self.jump(join, &[], n);

@@ -14,7 +14,7 @@ mod watch;
 use completion::Completion;
 use watch::{REMOVE, Watches};
 
-const COMPLETION_READY: u64 = u64::MAX - 2;
+pub(super) const COMPLETION_READY: u64 = u64::MAX - 2;
 
 /// Post a `WAKE` completion to the ring `fd` without a source ring
 /// (`IORING_REGISTER_SEND_MSG_RING`, 6.13). The kernel posts it into the
@@ -358,6 +358,7 @@ impl Poller {
             libc::epoll_event { events: 0, u64: 0 },
         );
         let len = ring.wait(&mut events, timeout_ns)?;
+        let len = self.dispatch_udp_slot(&mut events[..len]);
         events.truncate(len);
         Ok(Some(PollEvents(events)))
     }
@@ -374,7 +375,9 @@ impl Poller {
             unreachable!("a pool waits on an epoll slot poller directly")
         };
         let _turn = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        ring.wait(out, timeout_ns)
+        let timeout_ns = if self.udp_due() { Some(0) } else { timeout_ns };
+        let len = ring.wait(out, timeout_ns)?;
+        Ok(self.dispatch_udp_slot(&mut out[..len]))
     }
 
     /// io_uring: whether the owner has anything to take from its ring now: a
@@ -384,7 +387,7 @@ impl Poller {
         let Backend::Uring(ring) = &self.backend else {
             return false;
         };
-        ring.due()
+        ring.due() || self.udp_due()
     }
 }
 

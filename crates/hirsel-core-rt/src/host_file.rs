@@ -111,6 +111,9 @@ pub(crate) struct Registry {
 pub(crate) struct RunGrants {
     designations: Mutex<Designations>,
     pub(crate) net_grants: Mutex<Vec<crate::net::Grant>>,
+    pub(crate) udp_rules: Mutex<BTreeMap<u64, Arc<hirsel_core_net::udp::UdpRules>>>,
+    pub(crate) udp_allowance: Arc<crate::udp_net::Allowance>,
+    pub(crate) udp_waiters: Arc<crate::udp_net::Waiters>,
     pub(crate) exec_grants: Mutex<Vec<crate::exec::NarrowedGrant>>,
     pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
@@ -128,6 +131,7 @@ pub(crate) type TlsSessions = BTreeMap<u64, Box<dyn crate::net::SecureStream>>;
 
 pub(crate) struct Files {
     pub(crate) sockets: hirsel_core_net::Sockets,
+    pub(crate) udp_sockets: BTreeMap<u64, crate::udp_net::Resource>,
     pub(crate) datagrams: BTreeMap<u64, crate::unix_net::Datagram>,
     pub(crate) exec_pipes: BTreeMap<u64, crate::exec_runtime::HandleCharge>,
     pub(crate) unix_served: BTreeMap<u64, Provider>,
@@ -275,6 +279,7 @@ impl Files {
     pub(crate) fn with_registry(registry: Registry) -> Self {
         Self {
             sockets: Default::default(),
+            udp_sockets: BTreeMap::new(),
             datagrams: BTreeMap::new(),
             exec_pipes: BTreeMap::new(),
             unix_served: BTreeMap::new(),
@@ -294,6 +299,7 @@ impl Files {
 
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
         self.sockets = hirsel_core_net::Sockets::default();
+        self.udp_sockets.clear();
         self.tls_sessions.clear();
         self.connected.clear();
         self.datagrams.clear();

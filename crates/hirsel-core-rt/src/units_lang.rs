@@ -22,7 +22,6 @@
 use crate::{
     Capacity, Context, block,
     causes::{self, Cause, Causes, Cell},
-    limit::Payer,
     net::{CrossedSocket, CrossingSockets, SocketCrossing},
     tasks::{self, Body, Readies, TaskLayout, Waiters},
     units::ledger::conn::{Client, Inbox, MAX_CAP, MAX_ROOM, Sent},
@@ -39,45 +38,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Bytes admitted from `payer` and held for the unit runtime; the limit
-/// record stays live while they are outstanding. Dropping a part refunds it
-/// at the unit.
-struct Held {
-    payer: Payer,
-    bytes: u64,
-}
-
-impl Held {
-    fn admit(context: &Context, bytes: u64) -> Result<Self, Capacity> {
-        let payer = context.payer();
-        payer.admit(Some(bytes))?;
-        Ok(Held { payer, bytes })
-    }
-
-    /// A part of at most `bytes`, refunded on its own.
-    fn split(&mut self, bytes: u64) -> Held {
-        let bytes = bytes.min(self.bytes);
-        self.bytes -= bytes;
-        Held {
-            payer: self.payer,
-            bytes,
-        }
-    }
-
-    /// Hand `bytes` to an owner that refunds them itself.
-    fn partition(&mut self, bytes: u64) -> Payer {
-        self.bytes -= bytes;
-        self.payer
-    }
-}
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        if self.bytes != 0 {
-            self.payer.settle_at_unit(self.bytes);
-        }
-    }
-}
+mod held;
+use held::Held;
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.
 type Map<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
@@ -1225,9 +1187,9 @@ struct Ended {
     /// one's key and its retained charge, part of `n`.
     survivors: Vec<(usize, u64)>,
     run_grants: u64,
-    /// The charges of `Secret` designations it paid for that are still held
-    /// (TLS-5): its owner pays them from the end take on.
-    secrets: crate::secret::HandedOver,
+    /// Live charges for Secret designations and UDP pools paid by this helper.
+    /// Its owner pays them from the end take on.
+    charges: crate::secret::HandedOver,
 }
 
 /// A tagged task handle names a helper.
@@ -1463,13 +1425,20 @@ fn helper_main(
             .chain(lu.homed.drain())
             .collect();
         // Likewise each Secret designation still held elsewhere.
-        let (secrets, refunds) = files
+        let (mut charges, refunds) = files
             .registry
             .run_grants()
             .secrets
             .lock()
             .unwrap()
             .hand_over(context.payer());
+        drop(refunds);
+        let (udp, refunds) = files
+            .registry
+            .run_grants()
+            .udp_allowance
+            .hand_over(context.payer());
+        charges.extend(udp);
         drop(refunds);
         let ended = Ended {
             failed: failed != 0,
@@ -1482,7 +1451,7 @@ fn helper_main(
             survivors,
             run_grants: context.payer().run_owned()
                 + lu.run_grants.drain(..).map(|held| held.bytes).sum::<u64>(),
-            secrets,
+            charges,
         };
         let mut ret = Value::empty();
         if failed == 0 {
@@ -1537,7 +1506,7 @@ unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     if ended.run_grants != 0 {
         u.run_grants.push(held.split(ended.run_grants));
     }
-    crate::secret::take_over(&ended.secrets, |bytes| held.partition(bytes));
+    crate::secret::take_over(&ended.charges, |bytes| held.partition(bytes));
     let causes = ended
         .causes
         .iter()

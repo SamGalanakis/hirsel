@@ -137,7 +137,7 @@ pub struct AddressOutcome {
     pub port: u16,
 }
 impl AddressOutcome {
-    fn new(o: Outcome, a: Address) -> Self {
+    pub(crate) fn new(o: Outcome, a: Address) -> Self {
         Self {
             value: o.value,
             error: o.error,
@@ -1138,94 +1138,8 @@ pub unsafe extern "C" fn hirsel_core_net_split(
         }
     }
 }
-/// Owns a socket or listener while it is in transit.
-pub(crate) struct CrossedSocket {
-    carrier: Option<hirsel_core_net::SocketTransfer>,
-    connected: Option<(Address, Provider)>,
-}
-
-// SAFETY: the provider descriptor moves as opaque data and is used only
-// under its existing calling contract.
-unsafe impl Send for CrossedSocket {}
-
-impl CrossedSocket {
-    pub(crate) fn check(files: &crate::host_file::Files, key: u64) {
-        if key & 3 != 0
-            || files.unix_served.contains_key(&key)
-            || files.tls_sessions.contains_key(&key)
-            || files.tls_writes.contains_key(&key)
-            || files
-                .connected
-                .get(&key)
-                .is_some_and(|(_, provider)| crate::provide::owns(provider))
-        {
-            // A port owns its served keys. TLS halves own separate stream state.
-            crate::process::stop(b"UnitSocket");
-        }
-    }
-
-    pub(crate) fn detach(files: &mut crate::host_file::Files, key: u64) -> Self {
-        #[cfg(feature = "record")]
-        if files.net_tape.is_some() {
-            crate::process::stop(b"UnitRecording");
-        }
-        let carrier = files
-            .sockets
-            .detach(key)
-            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        Self {
-            carrier: Some(carrier),
-            connected: files.connected.remove(&key),
-        }
-    }
-
-    pub(crate) fn attach(mut self, files: &mut crate::host_file::Files) -> u64 {
-        let key = files
-            .sockets
-            .attach(self.carrier.take().unwrap())
-            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        if let Some(connected) = self.connected.take() {
-            files.connected.insert(key, connected);
-        }
-        key
-    }
-}
-
-/// Sockets taken from a waiting send are held jointly by its item and the
-/// issuing call, which needs them back if the send is refused or withdrawn.
-pub(crate) type CrossingSockets = std::sync::Arc<std::sync::Mutex<SocketCrossing>>;
-
-pub(crate) enum SocketCrossing {
-    InTransit(Vec<CrossedSocket>),
-    Taken(Vec<u64>),
-}
-
-impl SocketCrossing {
-    pub(crate) fn take(&mut self, files: &mut crate::host_file::Files) {
-        if let Self::InTransit(sockets) = self {
-            let keys = sockets
-                .drain(..)
-                .map(|socket| socket.attach(files))
-                .collect();
-            *self = Self::Taken(keys);
-        }
-    }
-
-    pub(crate) fn keys(&mut self, files: &mut crate::host_file::Files) -> Vec<u64> {
-        self.take(files);
-        let Self::Taken(keys) = self else {
-            unreachable!()
-        };
-        std::mem::take(keys)
-    }
-
-    pub(crate) fn discard(&mut self) -> Vec<u64> {
-        match std::mem::replace(self, Self::Taken(Vec::new())) {
-            Self::InTransit(_) => Vec::new(),
-            Self::Taken(keys) => keys,
-        }
-    }
-}
+mod crossing;
+pub(crate) use crossing::{CrossedSocket, CrossingSockets, SocketCrossing};
 
 /// Reunite the halves of one plain client socket in the run's registry.
 /// # Safety
@@ -1299,6 +1213,10 @@ pub unsafe extern "C" fn hirsel_core_net_join(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_socket_drop(context: *mut Context, key: u64) {
     unsafe {
+        if crate::udp_net::is_socket(key) {
+            crate::udp_net::drop_socket((*context).host_files, key);
+            return;
+        }
         if crate::exec_runtime::is_proc(key) {
             crate::exec_runtime::drop_proc(context, key);
             return;

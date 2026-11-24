@@ -242,7 +242,7 @@ impl Role {
                 Role::HostFile
             }
             "Socket" | "ReadHalf" | "WriteHalf" | "Listener" | "UnixListener" | "UnixDatagram"
-            | "Proc" => Role::Socket,
+            | "UdpSocket" | "Proc" => Role::Socket,
             "FixedSpan" => Role::FixedSpan,
             "SeqSpan" => Role::SeqSpan,
             "IndexedSpan" => Role::IndexedSpan,
@@ -3133,10 +3133,10 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
         Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
         Some(Role::Client | Role::Secret) => SEND | CROSS,
-        Some(Role::Socket) if matches!(decl.path.0.name.as_str(), "Socket" | "Listener") => {
-            SEND | CROSS
-        }
-        Some(Role::Socket) => SEND,
+        Some(Role::Socket) => match decl.path.0.name.as_str() {
+            "Socket" | "Listener" | "UdpSocket" => SEND | CROSS,
+            _ => SEND,
+        },
         Some(Role::Map) => meet() & (SHAREABLE | SEND | CODEC),
         Some(Role::Capability) => PLAIN | SHAREABLE | SEND | CROSS,
         Some(Role::ForeignHandle) => PLAIN | SEND,

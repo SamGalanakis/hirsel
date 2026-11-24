@@ -25,6 +25,13 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::DatagramSend => &["u64", "ptr", "u8", "u64", "u64"],
         HostOp::DatagramSendTo => &["u64", "ptr", "ptr", "ptr", "u8", "u64", "u64"],
         HostOp::DatagramRecv => &["u64", "ptr", "u8", "u64", "u64"],
+        HostOp::UdpOpen => &["u64", "u8", "u32", "u32"],
+        HostOp::UdpBind => &["u64", "u8", "u64", "u64", "u16", "u32", "u32"],
+        HostOp::UdpBindGroup => &[
+            "u64", "u8", "u64", "u64", "u16", "u32", "u32", "u16", "u32", "ptr",
+        ],
+        HostOp::UdpRecv | HostOp::UdpSend => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
+        HostOp::UdpLocalAddr => &["u64"],
         HostOp::NetNarrowUnix => &["u64", "u8", "ptr", "ptr"],
         HostOp::Resolve | HostOp::CredFetch => &["u64", "ptr", "ptr", "u8", "u64", "u64"],
         HostOp::SendSecret => &["u64", "ptr", "ptr", "ptr", "u8", "u64", "u64"],

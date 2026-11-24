@@ -86,6 +86,7 @@ pub mod tasks;
 #[cfg(feature = "testing")]
 pub mod test_provider;
 pub mod tls;
+mod udp_net;
 mod units;
 pub mod units_lang;
 mod unix_net;

@@ -339,6 +339,8 @@ fn net_words(e: NetError) -> (u64, u64) {
         },
         BoundNotListening(code) => (10, int.widen(code)),
         EphemeralOutsideNetGrant => (11, 0),
+        Oversize(max) => (12, int.widen(max)),
+        Exhausted => (13, 0),
     }
 }
 

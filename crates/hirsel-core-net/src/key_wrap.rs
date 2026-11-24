@@ -188,26 +188,9 @@ pub fn sign(alg: SignAlg, pkcs8: &[u8], msg: &[u8]) -> Result<Vec<u8>, KeyFailur
                 .map_err(|_| KeyFailure::Invalid)?;
             Ok(key.sign(msg).as_ref().to_vec())
         }
-        SignAlg::P256 => {
-            let key = signature::EcdsaKeyPair::from_pkcs8(
-                &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-                pkcs8,
-                &rng,
-            )
-            .map_err(|error| {
-                // ring 0.17.14 uses this diagnostic when loading a valid
-                // document reaches the nonce-key RNG. It exposes no tag.
-                if error.to_string() == "RNG failed" {
-                    KeyFailure::Provider("secret.sign: P-256 key loading: RNG failed")
-                } else {
-                    KeyFailure::Invalid
-                }
-            })?;
-            let sig = key.sign(&rng, msg).map_err(|_| {
-                KeyFailure::Provider("secret.sign: P-256 signing: ring Unspecified")
-            })?;
-            Ok(sig.as_ref().to_vec())
-        }
+        SignAlg::P256 => crate::p256_key::HostSigner::load(pkcs8)?
+            .sign(msg)
+            .map(|signature| signature.to_vec()),
         SignAlg::Rs256 => {
             let key = signature::RsaKeyPair::from_pkcs8(pkcs8).map_err(|_| KeyFailure::Invalid)?;
             let mut sig = vec![0; key.public().modulus_len()];

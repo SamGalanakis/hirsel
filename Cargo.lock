@@ -418,6 +418,7 @@ dependencies = [
  "der",
  "digest",
  "elliptic-curve",
+ "rfc6979",
  "signature",
  "zeroize",
 ]
@@ -726,6 +727,7 @@ dependencies = [
  "p256",
  "ring",
  "rustls",
+ "sec1",
  "serde",
  "stringprep",
  "subtle",
@@ -1109,6 +1111,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
+ "sha2",
 ]
 
 [[package]]
@@ -1226,6 +1229,16 @@ name = "regex-lite"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
+name = "rfc6979"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
+dependencies = [
+ "crypto-bigint",
+ "hmac",
+]
 
 [[package]]
 name = "ring"

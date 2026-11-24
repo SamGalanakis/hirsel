@@ -13,7 +13,8 @@ libc = { version = "0.2", default-features = false }
 io-uring = { version = "=0.7.16", default-features = false }
 serde = { version = "1", features = ["derive"] }
 ring = "=0.17.14"
-p256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdh", "pkcs8"] }
+sec1 = { version = "=0.8.1", default-features = false, features = ["der"] }
+p256 = { version = "=0.14.0", default-features = false, features = ["arithmetic", "ecdh", "ecdsa", "pkcs8"] }
 x25519-dalek = { version = "=3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 argon2 = { version = "=0.6.0", default-features = false, features = ["alloc"] }
 base64 = "=0.23.1"

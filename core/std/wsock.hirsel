@@ -754,7 +754,17 @@ type Request {
     writer: WriteHalf,
     input: Bytes,
     head: http1.Head,
+    path_end: u64,
     deadline: Until,
+}
+
+fn route_end(input: Bytes, target: http1.Span) -> u64 {
+    for i in target.start .. target.end {
+        if input[i] == b'?' || input[i] == b'#' {
+            return i
+        }
+    }
+    target.end
 }
 
 fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_ns: u64) -> Result[Request, Error] waits {
@@ -773,7 +783,10 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
             return Error(Network(TimedOut))
         }
         let status: u16 = match http1.resume(input, mut head, mut cursor) {
-            Complete => return Ok(Request(reader: take reader, writer: take writer, input: take input, head: take head, deadline)),
+            Complete => {
+                let path_end = route_end(input, head.target)
+                return Ok(Request(reader: take reader, writer: take writer, input: take input, head: take head, path_end, deadline))
+            },
             Partial => 0,
             Bad => 400,
             TooLarge => 431,
@@ -791,12 +804,16 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
     }
 }
 
-/// Serve one request. The raw GET handler runs before the upgrade's source policy.
+/// Serve one request. The raw GET and HEAD handler runs before the upgrade's source policy.
 /// Raw and static responses close the connection.
 pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, accepted_ns: u64, site: Option[Site], raw: scoped fn(Bytes) -> Result[Option[(bool, String)], Capacity], admit: scoped fn(Ip) -> bool waits) -> Result[Option[Upgraded], Error] waits {
     let request = receive_request(take socket, config, clock, accepted_ns)?
-    let is_get = list.slice(request.input, request.head.method.start, request.head.method.end) == string.as_bytes("GET")
-    if is_get {
+    let (head_only, fetch) = {
+        let method = list.slice(request.input, request.head.method.start, request.head.method.end)
+        let head_only = method == string.as_bytes("HEAD")
+        (head_only, head_only || method == string.as_bytes("GET"))
+    }
+    if fetch {
         let response = match raw(list.slice(request.input, request.head.target.start, request.head.target.end)) {
             Ok(take value) => take value,
             Error(c) => return Error(Allocation(c)),
@@ -805,21 +822,25 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
             let header = static_head(ready, "application/json", list.len(string.as_bytes(body)))
             let Request(writer: take output, deadline, ..) = take request
             let mut writer = take output
-            send_response(mut writer, string.as_bytes(header), string.as_bytes(body), deadline)?
+            send_response(mut writer, string.as_bytes(header), if head_only {
+                string.as_bytes("")
+            } else {
+                string.as_bytes(body)
+            }, deadline)?
             return Ok(None)
         }
     }
     let use_upgrade = match site {
         None => true,
-        Some(_) => list.slice(request.input, request.head.target.start, request.head.target.end) == string.as_bytes("/hirsel"),
+        Some(_) => list.slice(request.input, request.head.target.start, request.path_end) == string.as_bytes("/hirsel"),
     }
     if use_upgrade {
         let upgraded = upgrade_request(take request, take slot, peer, ingress, config, clock, admit)?
         return Ok(Some(take upgraded))
     }
     let web = option.unwrap(site)
-    let asset = if is_get {
-        (web.find)(list.slice(request.input, request.head.target.start, request.head.target.end))
+    let asset = if fetch {
+        (web.find)(list.slice(request.input, request.head.target.start, request.path_end))
     } else {
         None
     }
@@ -842,7 +863,11 @@ pub fn server_with_site(take socket: Socket, take slot: Pending, peer: Ip, ingre
     }
     let built_header = static_head(true, selected.content_type, list.len(body))
     let header = built_header
-    send_response(mut writer, string.as_bytes(header), body, deadline)?
+    send_response(mut writer, string.as_bytes(header), if head_only {
+        string.as_bytes("")
+    } else {
+        body
+    }, deadline)?
     Ok(None)
 }
 
@@ -861,8 +886,10 @@ fn static_head(ready: bool, content_type: String, size: u64) -> String {
 }
 
 fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress: List[Prefix], config: Config, clock: Clock, admit: scoped fn(Ip) -> bool waits) -> Result[Upgraded, Error] waits {
-    let Request(reader: take reader, writer: take output, input: take input, head: take head, deadline) = take request
+    let Request(reader: take reader, writer: take output, input: take input, head: take parsed, path_end, deadline) = take request
     let mut writer = take output
+    let mut head = take parsed
+    head.target.end = path_end
     let upgraded = websocket.server_head(input, head)
     match take upgraded {
         Upgraded(end, take response) => {

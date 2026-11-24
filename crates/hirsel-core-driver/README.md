@@ -138,7 +138,8 @@ Every LLVM release build, `build`, `run` and `test` alike, is assembled from its
 published recipe over the release std. When the build's library image holds
 the std its std product prebuilt for the build's target and generator, the
 release std is that: every plain std root the image checked whole, with what
-it reaches, less the roots `ALWAYS_IMPORT` holds back. Its modules each run
+it reaches, less the roots that take bindable code or make owned network waits
+and what those roots reach. Its modules each run
 the full optimizer and emit machine code when the toolchain installs the
 target (`std-product --install`) or on `std-product --store|--image --target
 TRIPLE`. A build over
@@ -150,7 +151,7 @@ roots, each with its step summary, and lends bodies of at most `LEND_LIMIT`
 instructions `available_externally` for inlining. The release unit holds the
 program's own bodies and every other library instance it reaches, so its
 optimiser sees the closure and dictionary arguments it passes them, along with
-the roots `ALWAYS_IMPORT` holds back and what they reach; it calls every export
+the held roots and what they reach; it calls every export
 by its symbol, and its widths stay dynamic. A program that reaches no std
 root links the side like any other.
 The unit's key covers every reached module and the sealed and place-blind

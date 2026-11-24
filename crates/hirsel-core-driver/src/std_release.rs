@@ -15,10 +15,9 @@
 //!
 //! A program lowers every other library instance it reaches itself, so its
 //! optimiser sees the closure and dictionary arguments it passes them, and
-//! the held roots with what they reach: those [`ALWAYS_IMPORT`] names, those
-//! that take code a caller can bind ([`callable_variants::takes_code`]), and
-//! those that make an owned network wait, whose returnable variants a
-//! program builds.
+//! the held roots with what they reach: those that take code a caller can
+//! bind ([`callable_variants::takes_code`]) and those that make an owned
+//! network wait, whose returnable variants a program builds.
 //!
 //! The unit and a program meet at five contracts:
 //! - callable: each root is defined under its instance symbol, and one
@@ -55,26 +54,11 @@ const STD_SCHEMA: u32 = 12;
 /// bounds what each program reads and links.
 const LEND_LIMIT: usize = 2000;
 
-/// Definitions whose callers need the program to lower them, with every
-/// plain root they reach, to pass Guard B: their hot loops call through
-/// std bodies the program's optimizer must see whole. Regex search is not one:
-/// the side optimises it once and lends its bodies, and a program's inliner
-/// takes each lent body only at the call sites its cost admits.
-const ALWAYS_IMPORT: &[&str] = &["std@1/string/next_split"];
-
-fn always_imported(definition: &DefPath) -> bool {
-    let path = definition.to_string();
-    ALWAYS_IMPORT.contains(&path.as_str())
-}
-
-/// A plain root a program lowers itself, with what it reaches: one
-/// [`ALWAYS_IMPORT`] names, one taking code a caller can bind, or one making
-/// an owned network wait, whose returnable variant (`returnable.rs`) only a
-/// program's unit can build. It is decided from the root's own function
-/// alone.
-fn held_root(definition: &DefPath, module: &hirsel_core_ir::Module, root: FuncId) -> bool {
-    always_imported(definition)
-        || crate::callable_variants::takes_code(module, root)
+/// A plain root a program lowers itself, with what it reaches. The root's
+/// own function takes code a caller can bind or makes an owned network wait,
+/// whose returnable variant (`returnable.rs`) only the program's unit can build.
+fn held_root(module: &hirsel_core_ir::Module, root: FuncId) -> bool {
+    crate::callable_variants::takes_code(module, root)
         || hirsel_core_ir::returnable::waits_owned(module, root)
 }
 
@@ -188,7 +172,7 @@ fn program_side(
     };
     let mut local_roots: Vec<_> = units
         .iter()
-        .filter(|(i, unit)| plain(i) && held_root(&i.definition, &unit.module, FuncId(0)))
+        .filter(|(i, unit)| plain(i) && held_root(&unit.module, FuncId(0)))
         .map(|(i, _)| i.clone())
         .collect();
     for (identity, unit) in units {
@@ -373,7 +357,7 @@ impl CheckProduct {
         let mut held = BTreeSet::new();
         for (root, walked) in &walks {
             let instance = materialized.get(root);
-            if held_root(&root.definition, instance.ir()?, instance.function) {
+            if held_root(instance.ir()?, instance.function) {
                 held.extend(walked.iter().cloned());
                 held.insert(root.clone());
             }

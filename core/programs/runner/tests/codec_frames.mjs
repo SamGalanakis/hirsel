@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {laws as clientLaws} from './client.mjs';
 const bytes = hex => Uint8Array.from(Buffer.from(hex.replaceAll(' ',''),'hex'));
 
-export async function vectors(c,frame,entries) {
+export async function vectors(c,frame,entries,http) {
   assert.equal(frame.subprotocol,'hirsel.4');
   assert.strictEqual(frame.Frame,c.Frame);
   assert.deepEqual(frame.Raised,{Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});
@@ -115,7 +115,7 @@ export async function vectors(c,frame,entries) {
   assert.throws(() => c.Frame.decode(bytes('070000000000000005000000')),c.Malformed);
   assert.throws(() => c.Frame.decode(bytes('07000000000000000200000008000000')),c.Malformed);
   assert.throws(() => c.Frame.encode({tag:'Ended',values:[3,{tag:'Superseded'}]}),TypeError);
-  cases += (await clientLaws(c.Frame,undefined,undefined,entries)).cases;
+  cases += (await clientLaws(c.Frame,undefined,undefined,entries,http)).cases;
   return {cases};
 }
 

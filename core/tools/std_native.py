@@ -605,10 +605,22 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         slots = (count(1) + blob(b"rows") + count(0) + blob(bytes([4, 0, 0, 0, 0, 6]))
                                  + blob(bytes([3, 0, 0, 0, 0, 6]))
                                  + blob(bytes([3, 0, 0, 0, 0, 14, 3])))
-                        description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + blob(bytes(32)) + count(3)
+                        events_identity = b'\x01fixture@1/main/events(take ())->EventValue'
+                        event_value = bytes([3]) + count(1) + blob(b'fixture.main.EventValue') + count(0) + bytes([0]) + count(0) + bytes([19]) + count(0)
+                        def event_slot(name, value):
+                            return (blob(name) + count(0) + blob(bytes([4, 0, 0, 0, 0, 5]))
+                                    + blob(bytes([3, 0, 0, 0, 0, 5])) + blob(bytes([3, 0, 0, 0, 0]) + value))
+                        event_slots = count(2) + event_slot(b'unit', bytes([0])) + event_slot(b'option', bytes([16, 5]))
+                        event_entry = (count(2) + blob(events_identity) + unit + blob(bytes([3, 0, 0, 0, 0, 0]))
+                                       + (11).to_bytes(8, 'little') + (12).to_bytes(8, 'little') + blob(bytes(32)) + event_slots + blob(event_value))
+                        event_binding = (blob(b'events') + count(0) + blob(b'/events')
+                                         + blob(events_identity + (11).to_bytes(8, 'little') + (12).to_bytes(8, 'little'))
+                                         + count(0) + count(1) + (200).to_bytes(2, 'little') + (422).to_bytes(2, 'little')
+                                         + b''.join(n.to_bytes(8, 'little') for n in [0, 4096, 1000, 10000]) + count(0))
+                        description = (blob(bytes([1, 2])) + blob(b't') + (16777216).to_bytes(8, 'little') + blob(bytes(32)) + count(4)
                                        + exported(0, b'\x01fixture@1/main/toggle(take u64)->u64', b'\x06', b'\x06', 9007199254740993, 7)
                                        + exported(2, b'\x01fixture@1/main/rows(take u32)->Bytes', b'\x05', unit + slots, 2, 3, slots + unit)
-                                       + transaction + count(0) + count(0))
+                                       + transaction + event_entry + count(0) + count(1) + event_binding)
                         description_file.write_bytes(description)
                         (work / 'package.json').write_text('{"type":"commonjs"}\n')
                         generated = output.with_name(output.stem + '-sdk') if output else work / 'sdk'
@@ -632,7 +644,10 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     if frame:
                         program += f'import * as frame from {json.dumps(module.with_name("frame.js").resolve().as_uri())};'
                         program += f'import * as entries from {json.dumps(module.with_name("entries.js").resolve().as_uri())};'
-                    arguments = 'c,frame,entries' if frame else 'c'
+                    arguments = 'c'
+                    if frame:
+                        http_url = module.with_name("http.js").resolve().as_uri()
+                        arguments = f'c,frame,entries,new URL({json.dumps(http_url)})'
                     program += f'console.log(JSON.stringify(await {law}({arguments})));'
                     partner = progress.run([str(node), '--input-type=module', '--eval', program], capture_output=True, text=True)
                     if partner.returncode:

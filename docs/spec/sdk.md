@@ -275,6 +275,15 @@ so the consumer never needs the event to stay correct. Every re-request is a
 fresh subscription (no `Last-Event-ID`), and the image is replaced from empty
 at its completing `batch` event.
 
+Call `bindHttp(client, {url}).<op>(args, {signal, onChange, onEnd})` for a
+generated Subscribe binding. It returns the same typed image reads as a
+decoded WebSocket subscription and a `done` promise. `done` reports
+`Ended` with the decoded Outcome, `Refused` with the pre-head HTTP status
+and body, or `Aborted` on cancellation. It rejects with the client's error
+if the shared credential recovery ends in `Unbound`. A Reset or a transport
+failure clears the image and resubscribes with jittered backoff. Each active
+SSE subscription holds one HTTP/1.1 connection for its current request.
+
 ## Calling an entry from the terminal
 
 `hirsel call SERVER --url ws://HOST:PORT/PATH [--stream 32-HEX] [-- ENTRY [--FLAG VALUE...]]`

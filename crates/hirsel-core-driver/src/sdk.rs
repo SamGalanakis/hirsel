@@ -504,7 +504,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     }
     entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
     if !decoded.is_empty() {
-        entries.push_str(r#"function queryCodec(value,names,keys,rows) {
+        entries.push_str(r#"export function queryCodec(value,names,keys,rows,keyPrefixBytes = 4) {
     const positions = new Map(names.map((name, i) => [name, i]));
     const slot = position => {
         if (names[position] === undefined) throw new codec.Malformed('unknown row slot');
@@ -513,7 +513,7 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
     const decodeRow = (i, key, value) => ({slot:slot(i),key:keys[i].decode(key),
         value:value.tag === 'Some' ? {tag:'Some',value:rows[i].decode(value.value)} : value});
     return {
-        value: value.decode, slot, keyPrefixBytes: 4,
+        value: value.decode, slot, keyPrefixBytes,
         key: (name, key) => keys[positions.get(name)].encode(key),
         encodeValue: value.encode,
         encodeRow(name, key, row) {
@@ -527,8 +527,8 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             return {raw, decoded:decodeRow(i,key,{tag:'Some',value:raw})};
         },
         row(row) {
-            if (row.key.length < 4) throw new codec.Malformed('truncated collection key');
-            return decodeRow(row.slot,row.key.subarray(4),row.value);
+            if (row.key.length < keyPrefixBytes) throw new codec.Malformed('truncated collection key');
+            return decodeRow(row.slot,row.key.subarray(keyPrefixBytes),row.value);
         },
     };
 }
@@ -596,6 +596,14 @@ pub fn write_with_frame(describe: &Describe, frame_schema: &[u8], out: &Path) ->
                     .is_some_and(|path| path.rsplit(['.', '/']).next() == Some(name))
             })
             .ok_or_else(|| format!("Frame schema has no {name}"))?;
+        if name == "Outcome"
+            && let Some(http) = files.get_mut("http.js")
+        {
+            http.push_str(&format!(
+                "const outcomeSchema = [[19,{index}],{}];\n",
+                json!(schema.definitions)
+            ));
+        }
         files.get_mut("codec.js").unwrap().push_str(&format!(
             "export const {name} = makeCodec([19,{index}],{});\n",
             json!(schema.definitions)

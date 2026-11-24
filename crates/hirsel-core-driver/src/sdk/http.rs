@@ -121,9 +121,17 @@ pub(super) fn generate(
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut js = String::from(include_str!("../sdk_http.js"));
-    js.push_str("\nimport {want} from './entries.js';\nconst bindings = {\n");
+    js.push_str("\nimport * as codec from './codec.js';\n");
+    if description
+        .bindings
+        .iter()
+        .any(|binding| binding.mode == "subscribe")
+    {
+        js.push_str("import {queryCodec} from './entries.js';\n");
+    }
+    js.push_str("import {want} from './entries.js';\nconst bindings = {\n");
     let mut types = String::from(
-        "import type * as codec from './codec.js';\nimport type {Client, HttpReply, HttpRequest, Outcome} from './client.js';\n         export interface HttpOptions {url: string; fetch?: typeof fetch; credential?: string}\n         export const httpBindings: {\n",
+        "import type * as codec from './codec.js';\n         import type {DecodedRow} from './entries.js';\n         import type {Change, Client, Clock, HttpReply, HttpRequest, Outcome, Subscription, SubscriptionEnd} from './client.js';\n         export interface HttpOptions {url: string; fetch?: typeof fetch; credential?: string; clock?: Clock}\n         export type HttpSubscriptionEnd = {tag: 'Ended'; reason: SubscriptionEnd} | {tag: 'Refused'; status: number; body: string} | {tag: 'Aborted'};\n         export interface HttpSubscription<V, Slots extends object, Keys extends Record<keyof Slots, unknown>> extends Subscription<V, Slots, Keys> {readonly done: Promise<HttpSubscriptionEnd>}\n         export interface HttpSubscribeOptions<V, Slots extends object, Keys extends Record<keyof Slots, unknown>> {\n           signal?: AbortSignal;\n           onChange?: (sub: HttpSubscription<V, Slots, Keys>, change: Change<V, Slots>) => void;\n           onEnd?: (reason: SubscriptionEnd) => void;\n         }\n         export const httpBindings: {\n",
     );
     let mut calls = Vec::new();
     for binding in &description.bindings {
@@ -164,15 +172,50 @@ pub(super) fn generate(
         });
         let name = json!(binding.op);
         writeln!(
-            js,
-            "  [{name}]: makeHttpBinding({{...{params},want:want[{index}]}}),"
-        )?;
-        writeln!(
             types,
             "  {name}: {{request(args: codec.Args{index}): HttpRequest}};"
         )?;
+        if binding.mode == "subscribe" {
+            let mut names = Vec::new();
+            let mut keys = Vec::new();
+            let mut rows = Vec::new();
+            let mut slot_types = Vec::new();
+            let mut key_types = Vec::new();
+            for (slot_index, slot) in entry.slots.iter().enumerate() {
+                let slot_name = json!(slot.name);
+                let key = format!("codec.Key{index}_{slot_index}");
+                let row = format!("codec.RowValue{index}_{slot_index}");
+                slot_types.push(format!(
+                    "{slot_name}: DecodedRow<{slot_name}, {key}, {row}>"
+                ));
+                key_types.push(format!("{slot_name}: {key}"));
+                names.push(&slot.name);
+                keys.push(key);
+                rows.push(row);
+            }
+            let value = format!("codec.Value{index}");
+            let names = json!(names);
+            let keys = keys.join(",");
+            let rows = rows.join(",");
+            writeln!(
+                js,
+                "  [{name}]: makeHttpBinding({{...{params},want:want[{index}],value:{value},keys:[{keys}],rows:[{rows}],codec:queryCodec({value},{names},[{keys}],[{rows}],0)}}),"
+            )?;
+            let generics = format!(
+                "{value}, {{ {} }}, {{ {} }}",
+                slot_types.join("; "),
+                key_types.join("; ")
+            );
+            calls.push(format!(
+                "  {name}: (args: codec.Args{index}, options?: HttpSubscribeOptions<{generics}>) => HttpSubscription<{generics}>;\n"
+            ));
+            continue;
+        }
+        writeln!(
+            js,
+            "  [{name}]: makeHttpBinding({{...{params},want:want[{index}]}}),"
+        )?;
         let output = match binding.mode {
-            "subscribe" => "Response".to_owned(),
             "stream" => format!(
                 "(HttpReply & {{value?: codec.Result{index}}}) | Exclude<Outcome<never>, {{tag: 'Returned'}}>"
             ),
@@ -184,7 +227,7 @@ pub(super) fn generate(
         ));
     }
     js.push_str(
-        "};\nexport const httpBindings = Object.freeze(bindings);\n         export function bindHttp(client, options) {\n           return Object.fromEntries(Object.entries(bindings).map(([name, binding]) => [name, args => binding.call(client, options, args)]));\n         }\n",
+        "};\nexport const httpBindings = Object.freeze(bindings);\n         export function bindHttp(client, options) {\n           return Object.fromEntries(Object.entries(bindings).map(([name, binding]) => [name, (args, subscription) => binding.call(client, options, args, subscription)]));\n         }\n",
     );
     types.push_str("};\nexport function bindHttp(client: Client, options: HttpOptions): {\n");
     for call in calls {

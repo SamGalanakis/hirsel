@@ -1,4 +1,77 @@
-import type {Change, Group, RowChange, SlotRow, SubscriptionCodec} from './client.js';
+import type {Group, SlotRow, SubscriptionEnd, Want} from './client.js';
+
+export type Access<T> = {tag: 'Pending' | 'Ended'} | {tag: 'Ready'; value: T};
+export interface SubscriptionControl { unsubscribe(): void }
+export type Frozen<T> = T extends Uint8Array ? Readonly<T>
+  : T extends ReadonlyMap<infer K, infer V> ? ReadonlyMap<K, V>
+  : T extends object ? {readonly [K in keyof T]: Frozen<T[K]>}
+  : T;
+export type RowChange<Slots extends object> = {
+  [S in keyof Slots]: {readonly slot: S; readonly key: string; readonly old?: Frozen<Slots[S]>; readonly new?: Frozen<Slots[S]>}
+}[keyof Slots];
+export interface Change<V, Slots extends object> {
+  readonly invalidated?: true;
+  readonly replaced: boolean;
+  readonly value?: {readonly old?: Frozen<V>; readonly new: Frozen<V>};
+  readonly rows: readonly RowChange<Slots>[];
+}
+export interface Subscription<V = Uint8Array, Slots extends object = Record<number, SlotRow>,
+  Keys extends Record<keyof Slots, unknown> = Record<keyof Slots, Uint8Array>> extends SubscriptionControl {
+  /** @internal Preserves type inference between the packaged and generated declarations. */
+  readonly __subscriptionTypes?: {value: V; slots: Slots; keys: Keys};
+  value(): Access<Frozen<V>>;
+  rows<S extends keyof Slots>(slot: S): Access<readonly Frozen<Slots[S]>[]>;
+  map<S extends keyof Slots>(slot: S): Access<ReadonlyMap<string, Frozen<Slots[S]>>>;
+  get<S extends keyof Slots>(slot: S, key: Keys[S]): Access<Frozen<Slots[S]> | undefined>;
+  current(): boolean;
+}
+export interface SubscriptionCodec<V, Slots extends object,
+  Keys extends Record<keyof Slots, unknown> = Record<keyof Slots, Uint8Array>> {
+  value(bytes: Uint8Array): V;
+  slot(position: number): keyof Slots;
+  row(row: SlotRow): Slots[keyof Slots];
+  key<S extends keyof Slots>(slot: S, value: Keys[S]): Uint8Array;
+  encodeValue?(value: V): Uint8Array;
+  encodeRow?<S extends keyof Slots>(slot: S, key: Uint8Array, row: Slots[S]): {raw: Uint8Array; decoded: Slots[S]};
+  keyPrefixBytes?: number;
+}
+export interface Draft {
+  get<V, Slots extends object, Keys extends Record<keyof Slots, unknown>, S extends keyof Slots>(
+    sub: Subscription<V, Slots, Keys>, slot: S, key: NoInfer<Keys[S]>): Frozen<Slots[S]> | undefined;
+  put<V, Slots extends object, Keys extends Record<keyof Slots, unknown>, S extends keyof Slots>(
+    sub: Subscription<V, Slots, Keys>, slot: S, key: NoInfer<Keys[S]>, row: NoInfer<Slots[S]>): void;
+  delete<V, Slots extends object, Keys extends Record<keyof Slots, unknown>, S extends keyof Slots>(
+    sub: Subscription<V, Slots, Keys>, slot: S, key: NoInfer<Keys[S]>): void;
+  value<V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(
+    sub: Subscription<V, Slots, Keys>, value: NoInfer<V>): void;
+}
+export interface CallOptions { optimistic?: (draft: Draft) => void }
+export interface Sub extends ImageState {
+  want: Want; args: Uint8Array; id?: number; active: boolean;
+  codec: SubscriptionCodec<unknown, ImageSlots, ImageSlots>;
+  notify: (change: ImageChange) => void;
+  onEnd?: (reason: SubscriptionEnd) => void;
+}
+
+export type Layer = Map<Sub, ImageEdits>;
+export interface Overlay { run: NonNullable<CallOptions['optimistic']>; writes: Set<Sub>; done: boolean }
+
+export function imageEdits(layer: Layer, sub: Sub): ImageEdits {
+  let edits = layer.get(sub);
+  if (!edits) layer.set(sub, edits = {slots: new Map()});
+  return edits;
+}
+
+export function mergeLayer(layer: Layer, patch: Layer): void {
+  for (const [sub, edits] of patch) {
+    const combined = imageEdits(layer, sub);
+    if (edits.value) combined.value = edits.value;
+    for (const [slot, next] of edits.slots) {
+      const current = slotEdits(combined.slots, slot);
+      for (const [hex, row] of next) current.set(hex, row);
+    }
+  }
+}
 
 export const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v, i) => v === b[i]);
 export const key = (b: Uint8Array) => Array.from(b, n => n.toString(16).padStart(2, '0')).join('');
@@ -127,4 +200,44 @@ export function commitVisible(sub: ImageState, serverEdit?: ReturnType<typeof st
   if (!changedValue && !rows.length) return;
   return Object.freeze({replaced: serverEdit?.replaced ?? false,
     ...(changeValue && {value: changeValue}), rows: Object.freeze(rows)});
+}
+
+const emptyRows: readonly never[] = Object.freeze([]);
+const emptyMap: ReadonlyMap<string, never> = new Map<string, never>();
+export const invalidation: ImageChange = Object.freeze({invalidated: true, replaced: false, rows: emptyRows});
+
+export function subscriptionHandle<V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(
+  sub: ImageState & {active: boolean},
+  codec: SubscriptionCodec<unknown, ImageSlots, ImageSlots>,
+  unsubscribe: () => void,
+): Subscription<V, Slots, Keys> {
+  const access = <T>(read: (value: NonNullable<ImageState['image']>) => T): Access<T> => {
+    if (!sub.active) return {tag: 'Ended'};
+    if (!sub.image) return {tag: 'Pending'};
+    return {tag: 'Ready', value: read(sub.image)};
+  };
+  const handle: Subscription<V, Slots, Keys> = {
+    value: () => access(image => image.value.decoded as Frozen<V>),
+    rows: slot => access(image => {
+      const current = image.slots.get(slot);
+      if (!current) return emptyRows;
+      current.rows ??= Object.freeze(Array.from(current.entries.values(), entry => entry.decoded));
+      return current.rows as readonly Frozen<Slots[typeof slot]>[];
+    }),
+    map: slot => access(image => {
+      const current = image.slots.get(slot);
+      if (!current) return emptyMap;
+      current.map ??= new Map(Array.from(current.entries, ([hex, entry]) => [hex, entry.decoded]));
+      return current.map as ReadonlyMap<string, Frozen<Slots[typeof slot]>>;
+    }),
+    get: (slot, typedKey) => access(image => {
+      const current = image.slots.get(slot);
+      if (!current) return undefined;
+      const hex = key(codec.key(slot, typedKey));
+      return current.entries.get(hex)?.decoded as Frozen<Slots[typeof slot]> | undefined;
+    }),
+    current: () => sub.server !== undefined,
+    unsubscribe,
+  };
+  return handle;
 }

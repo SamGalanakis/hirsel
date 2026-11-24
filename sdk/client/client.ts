@@ -5,8 +5,10 @@ import {CorruptState, emptyStream, fresh, hex, intact, maxU64, randomGeneration,
 export {CorruptState, RECOVERY_VERSION, intact, validCaller, validHttpRequest} from './persistence.js';
 export type {Clock, Socket} from './browser.js';
 export type {Caller, HttpRequest, Installation, Lease, Pending, Storage, StreamId, StreamRecord} from './persistence.js';
-import {applyImage, commitVisible, equal, freezeDecoded, key, rawSubscription, slotEdits, stageImage,
-  type ImageChange, type ImageEdits, type ImageSlots, type ImageState} from './image.js';
+import {applyImage, commitVisible, equal, freezeDecoded, imageEdits, invalidation, key, mergeLayer, rawSubscription,
+  slotEdits, stageImage, subscriptionHandle, type CallOptions, type Change, type Draft, type ImageEdits, type ImageSlots,
+  type Layer, type Overlay, type Sub, type Subscription, type SubscriptionCodec} from './image.js';
+export type {Access, CallOptions, Change, Draft, Frozen, RowChange, Subscription, SubscriptionCodec, SubscriptionControl} from './image.js';
 
 export type Option<T> = {tag: 'None'} | {tag: 'Some'; value: T};
 export interface Want { identity: Uint8Array; args_fp: bigint; result_fp: bigint }
@@ -41,52 +43,6 @@ export type Frame = {tag: 'Hello'; values: [Option<Uint8Array>, Want[]]}
   | {tag: 'Live'; value: Part[]};
 export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Array): Frame }
 export type SubscriptionEnd = Extract<Frame, {tag: 'Ended'}>['values'][1];
-export type Access<T> = {tag: 'Pending' | 'Ended'} | {tag: 'Ready'; value: T};
-export interface SubscriptionControl { unsubscribe(): void }
-export type Frozen<T> = T extends Uint8Array ? Readonly<T>
-  : T extends ReadonlyMap<infer K, infer V> ? ReadonlyMap<K, V>
-  : T extends object ? {readonly [K in keyof T]: Frozen<T[K]>}
-  : T;
-export type RowChange<Slots extends object> = {
-  [S in keyof Slots]: {readonly slot: S; readonly key: string; readonly old?: Frozen<Slots[S]>; readonly new?: Frozen<Slots[S]>}
-}[keyof Slots];
-export interface Change<V, Slots extends object> {
-  readonly invalidated?: true;
-  readonly replaced: boolean;
-  readonly value?: {readonly old?: Frozen<V>; readonly new: Frozen<V>};
-  readonly rows: readonly RowChange<Slots>[];
-}
-export interface Subscription<V = Uint8Array, Slots extends object = Record<number, SlotRow>,
-  Keys extends Record<keyof Slots, unknown> = Record<keyof Slots, Uint8Array>> extends SubscriptionControl {
-  /** @internal Preserves type inference between the packaged and generated declarations. */
-  readonly __subscriptionTypes?: {value: V; slots: Slots; keys: Keys};
-  value(): Access<Frozen<V>>;
-  rows<S extends keyof Slots>(slot: S): Access<readonly Frozen<Slots[S]>[]>;
-  map<S extends keyof Slots>(slot: S): Access<ReadonlyMap<string, Frozen<Slots[S]>>>;
-  get<S extends keyof Slots>(slot: S, key: Keys[S]): Access<Frozen<Slots[S]> | undefined>;
-  current(): boolean;
-}
-export interface SubscriptionCodec<V, Slots extends object,
-  Keys extends Record<keyof Slots, unknown> = Record<keyof Slots, Uint8Array>> {
-  value(bytes: Uint8Array): V;
-  slot(position: number): keyof Slots;
-  row(row: SlotRow): Slots[keyof Slots];
-  key<S extends keyof Slots>(slot: S, value: Keys[S]): Uint8Array;
-  encodeValue?(value: V): Uint8Array;
-  encodeRow?<S extends keyof Slots>(slot: S, key: Uint8Array, row: Slots[S]): {raw: Uint8Array; decoded: Slots[S]};
-  keyPrefixBytes?: number;
-}
-export interface Draft {
-  get<V, Slots extends object, Keys extends Record<keyof Slots, unknown>, S extends keyof Slots>(
-    sub: Subscription<V, Slots, Keys>, slot: S, key: NoInfer<Keys[S]>): Frozen<Slots[S]> | undefined;
-  put<V, Slots extends object, Keys extends Record<keyof Slots, unknown>, S extends keyof Slots>(
-    sub: Subscription<V, Slots, Keys>, slot: S, key: NoInfer<Keys[S]>, row: NoInfer<Slots[S]>): void;
-  delete<V, Slots extends object, Keys extends Record<keyof Slots, unknown>, S extends keyof Slots>(
-    sub: Subscription<V, Slots, Keys>, slot: S, key: NoInfer<Keys[S]>): void;
-  value<V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(
-    sub: Subscription<V, Slots, Keys>, value: NoInfer<V>): void;
-}
-export interface CallOptions { optimistic?: (draft: Draft) => void }
 export interface Transport {
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, options?: CallOptions): Promise<Outcome<R>>;
   subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void,
@@ -118,40 +74,13 @@ const sameCaller = (a: Caller | null, b: Caller | null) =>
 const sameWant = (a: Want, b: Want) => equal(a.identity, b.identity) && a.args_fp === b.args_fp && a.result_fp === b.result_fp;
 const copyWant = (w: Want): Want => ({identity: w.identity.slice(), args_fp: w.args_fp, result_fp: w.result_fp});
 const futureSlackMs = 300000n;
+const credentialUsable = (state: State) => state === 'Ready' || state === 'Connecting' || state === 'Backoff';
+const authorization = (credential: Uint8Array | undefined) =>
+  credential && Array.from(credential, b => String.fromCharCode(b)).join('');
+
 export class ClientError extends Error {
   constructor(public readonly code: string) { super(code); this.name = 'ClientError'; }
 }
-interface Sub extends ImageState {
-  want: Want; args: Uint8Array; id?: number; active: boolean;
-  codec: SubscriptionCodec<unknown, ImageSlots, ImageSlots>;
-  notify: (change: ImageChange) => void;
-  onEnd?: (reason: SubscriptionEnd) => void;
-}
-
-type Layer = Map<Sub, ImageEdits>;
-interface Overlay { run: NonNullable<CallOptions['optimistic']>; writes: Set<Sub>; done: boolean }
-
-function imageEdits(layer: Layer, sub: Sub): ImageEdits {
-  let edits = layer.get(sub);
-  if (!edits) layer.set(sub, edits = {slots: new Map()});
-  return edits;
-}
-
-function mergeLayer(layer: Layer, patch: Layer): void {
-  for (const [sub, edits] of patch) {
-    const combined = imageEdits(layer, sub);
-    if (edits.value) combined.value = edits.value;
-    for (const [slot, next] of edits.slots) {
-      const current = slotEdits(combined.slots, slot);
-      for (const [hex, row] of next) current.set(hex, row);
-    }
-  }
-}
-
-const emptyRows: readonly never[] = Object.freeze([]);
-const emptyMap: ReadonlyMap<string, never> = new Map<string, never>();
-const invalidation: ImageChange = Object.freeze({invalidated: true, replaced: false, rows: emptyRows});
-
 interface QueuedCall {
   want: Want; args: Uint8Array; slot: number; overlay?: symbol; http?: HttpRequest;
   resolve: (outcome: Outcome<Uint8Array>) => void; reject: (error: unknown) => void;
@@ -162,6 +91,8 @@ export class Client implements Transport {
   readonly generation: bigint;
   private readonly installationId: bigint;
   private credential?: Uint8Array;
+  private httpAuthority = new AbortController();
+  private readonly credentialWaiters = new Set<() => void>();
   private refreshing = false;
   private refreshed = false;
   private record: StreamRecord;
@@ -276,7 +207,10 @@ export class Client implements Transport {
   }
   private setState(state: State): void {
     this.state = state;
-    if (state !== 'Ready' && state !== 'Connecting' && state !== 'Backoff' && state !== 'CredentialNeeded') {
+    if (state === 'CredentialNeeded' || !credentialUsable(state)) this.httpAuthority.abort(new ClientError(state));
+    else if (this.httpAuthority.signal.aborted) this.httpAuthority = new AbortController();
+    for (const wake of this.credentialWaiters) wake();
+    if (state !== 'CredentialNeeded' && !credentialUsable(state)) {
       for (const call of this.calls) {
         if (call.overlay) this.overlays.delete(call.overlay);
         call.reject(new ClientError(state));
@@ -557,6 +491,34 @@ export class Client implements Transport {
     return this.queueCall(want, args, options?.optimistic)
       .then(outcome => outcome.tag === 'Returned' ? {tag: 'Returned', value: decode(outcome.value)} : outcome);
   }
+  /** @internal Used by generated Subscribe bindings to share session recovery. */
+  async httpSubscribeCredential(signal: AbortSignal) {
+    while (true) {
+      signal.throwIfAborted();
+      if (credentialUsable(this.state) && (!this.options.credential || this.credential)) break;
+      if (this.state !== 'CredentialNeeded' && !credentialUsable(this.state)) throw new ClientError(this.state);
+      await new Promise<void>(resolve => {
+        const wake = () => {
+          this.credentialWaiters.delete(wake);
+          signal.removeEventListener('abort', wake);
+          resolve();
+        };
+        this.credentialWaiters.add(wake);
+        signal.addEventListener('abort', wake, {once: true});
+      });
+    }
+    const authority = this.httpAuthority;
+    return {
+      authorization: authorization(this.credential),
+      signal: authority.signal,
+      refused: (cause: string, retried: boolean) => this.enqueue(async () => {
+        if (signal.aborted || authority.signal.aborted) return;
+        if (retried) await this.unbound(cause);
+        else await this.credentialLost(cause);
+      }),
+    };
+  }
+
   callHttp(want: Want, request: HttpRequest): Promise<Outcome<HttpReply>> {
     if (!this.options.http || !validHttpRequest(request)) return Promise.reject(new ClientError('InvalidHttpRequest'));
     return this.queueCall(want, new Uint8Array(), undefined, {...request})
@@ -704,7 +666,8 @@ export class Client implements Transport {
     const options = this.options.http;
     if (!options) throw new ClientError('HttpUnavailable');
     const headers = new Headers();
-    if (this.credential) headers.set('Authorization', Array.from(this.credential, b => String.fromCharCode(b)).join(''));
+    const auth = authorization(this.credential);
+    if (auth !== undefined) headers.set('Authorization', auth);
     if (request.body !== undefined) headers.set('Content-Type', 'application/json');
     const key = `"${streamHex(id)}.${p}"`;
     headers.set('Idempotency-Key', key);
@@ -971,34 +934,7 @@ export class Client implements Transport {
       want: copyWant(want), args: args.slice(), active: true, codec, onEnd,
       notify: change => onChange(handle, change as Change<V, Slots>),
     };
-    const access = <T>(read: (value: NonNullable<ImageState['image']>) => T): Access<T> => {
-      if (!sub.active) return {tag: 'Ended'};
-      if (!sub.image) return {tag: 'Pending'};
-      return {tag: 'Ready', value: read(sub.image)};
-    };
-    const handle: Subscription<V, Slots, Keys> = {
-      value: () => access(image => image.value.decoded as Frozen<V>),
-      rows: slot => access(image => {
-        const current = image.slots.get(slot);
-        if (!current) return emptyRows;
-        current.rows ??= Object.freeze(Array.from(current.entries.values(), entry => entry.decoded));
-        return current.rows as readonly Frozen<Slots[typeof slot]>[];
-      }),
-      map: slot => access(image => {
-        const current = image.slots.get(slot);
-        if (!current) return emptyMap;
-        current.map ??= new Map(Array.from(current.entries, ([hex, entry]) => [hex, entry.decoded]));
-        return current.map as ReadonlyMap<string, Frozen<Slots[typeof slot]>>;
-      }),
-      get: (slot, typedKey) => access(image => {
-        const current = image.slots.get(slot);
-        if (!current) return undefined;
-        const hex = key(codec.key(slot, typedKey));
-        return current.entries.get(hex)?.decoded as Frozen<Slots[typeof slot]> | undefined;
-      }),
-      current: () => sub.server !== undefined,
-      unsubscribe: () => this.unsubscribe(sub),
-    };
+    const handle = subscriptionHandle<V, Slots, Keys>(sub, codec, () => this.unsubscribe(sub));
     this.handles.set(handle, sub);
     this.subs.add(sub);
     void this.enqueue(async () => this.subscribeAll());

@@ -133,7 +133,7 @@ export async function loadRuntime(mutant) {
   }
 }
 
-export async function laws(codec, only, mutant, entries) {
+export async function laws(codec, only, mutant, entries, http) {
   const runtime=await loadRuntime(mutant), tests={};
   const clients=[];
   async function setup(storage=new Memory(),options={}) {
@@ -395,6 +395,112 @@ export async function laws(codec, only, mutant, entries) {
       assert.equal(h.client.state,'Ready');h.server.check();
     }
   };
+  if (http) {
+    for (const name of ['http.js', 'codec.js', 'entries.js']) {
+      await writeFile(join(runtime.dir, name), await readFile(new URL(name, http)));
+    }
+    const {bindHttp} = await import(pathToFileURL(join(runtime.dir, 'http.js')).href);
+    const encoder = new TextEncoder();
+    const batchEvent = (version, complete, rows = []) => 'event: batch\ndata: ' + JSON.stringify({
+      version, complete: complete ? [0] : [], groups: [{sub: 0, ...(complete && {value:{}}), rows}], outcomes: [],
+    }) + '\n\n';
+    const content = {headers: {'Content-Type': 'text/event-stream'}};
+    const expire = 'event: expired\ndata: {"reason":"auth_expired"}\n\n';
+    const flow = () => {
+      const requests = [];
+      const fetch = (url, options) => new Promise((resolve, reject) => {
+        assert.equal(url.pathname, '/events');
+        assert.equal(options.headers.get('Accept'), 'text/event-stream');
+        assert.equal(options.headers.has('Last-Event-ID'), false);
+        const abort = () => reject(options.signal.reason);
+        options.signal.addEventListener('abort', abort, {once:true});
+        requests.push({auth:options.headers.get('Authorization'), signal:options.signal,
+          loss:() => reject(new TypeError('connection lost')),
+          reject:(status,body='') => resolve(new Response(body,{status})),
+          open:() => {
+            let stream;
+            resolve(new Response(new ReadableStream({start(controller){stream=controller;}}),content));
+            return {send:text=>stream.enqueue(encoder.encode(text)), end:()=>stream.close()};
+          },
+        });
+      });
+      return {requests, connect:(h, options) => bindHttp(h.client, {url:'https://scripted', fetch, clock:h.time}).events(undefined, options)};
+    };
+    tests.http_subscribe_replaces_and_reconnects=async()=>{
+      const c=source();
+      const h=await setup(new Memory(),{credential:c.fn});await c.give(0,credential);await ready(h);
+      const f=flow(), changes=[];
+      const sub=f.connect(h,{onChange:(handle,change)=>{assert.equal(handle,sub);changes.push(change);}});
+      await settle();
+      const first=f.requests[0].open();
+      first.send('\ufeff: comment\r\nretry: 40\r'); first.send('\n\r\n');
+      first.send(batchEvent('9007199254740993',true,[{slot:'unit',table:'units',key:1,present:true,value:null}]));
+      first.send(batchEvent('9007199254740992',false).slice(0,-1));
+      await settle();
+      assert.deepEqual(sub.get('unit',1),{tag:'Ready',value:{slot:'unit',key:1,value:{tag:'Some',value:undefined}}});
+      first.end();await settle();
+      assert.equal(f.requests.length,2); assert.equal(c.asks.length,1);
+      assert.equal(f.requests[1].auth,f.requests[0].auth); assert.equal(sub.value().tag,'Pending');
+      const second=f.requests[1].open();second.send(batchEvent('1',true));
+      await settle(); assert.deepEqual(sub.rows('unit'),{tag:'Ready',value:[]});
+      second.send('retry: 40\n\nevent: reset\ndata: {"version":"2","outcomes":[]}\n\n');
+      await settle();assert.equal(sub.current(),false);assert.equal(f.requests.length,2);
+      await h.time.advance(19);assert.equal(f.requests.length,2);
+      await h.time.advance(1);assert.equal(f.requests.length,3);
+      const third=f.requests[2].open();
+      third.send(batchEvent('0',true));
+      third.send('event: ended\ndata: {"sub":0,"outcome":{"Refused":"Deadline"}}\n\n');
+      assert.deepEqual(await sub.done,{tag:'Ended',reason:{tag:'Refused',value:{tag:'Deadline'}}});
+      assert.equal(sub.current(),false);assert.equal(c.asks.length,1);
+      assert.equal(changes.filter(change=>change.invalidated).length,2);
+    };
+    tests.http_subscribe_refreshes_once=async()=>{
+      for (const refusal of ['event','401']) {
+        const c=source(), fresh=bytes(...Array(16).fill(3));
+        const h=await setup(new Memory(),{credential:c.fn});await c.give(0,credential);await ready(h);
+        const f=flow(), sub=f.connect(h);
+        await settle();
+        if(refusal==='event') {
+          const stream=f.requests[0].open();stream.send(batchEvent('1',true));await settle();
+          assert.equal(sub.current(),true);stream.send(expire);
+        } else {
+          f.requests[0].open().end();
+          await settle();assert.equal(f.requests.length,2);assert.equal(c.asks.length,1);
+          assert.equal(f.requests[1].auth,f.requests[0].auth);f.requests[1].reject(401);
+        }
+        await settle();
+        assert.equal(h.client.state,'CredentialNeeded'); assert.equal(sub.current(),false); assert.equal(c.asks.length,2);
+        await c.give(1,fresh);await settle();
+        assert.notEqual(f.requests.at(-1).auth,f.requests[0].auth);
+        f.requests.at(-1).reject(401);
+        await assert.rejects(sub.done,{code:'Unbound'});assert.equal(c.asks.length,2);
+      }
+    };
+    tests.http_subscribe_shares_refresh_and_aborts=async()=>{
+      const c=source();
+      const h=await setup(new Memory(),{credential:c.fn});await c.give(0,credential);await ready(h);
+      const f=flow(), abort=new AbortController();
+      const sub=f.connect(h,{signal:abort.signal});
+      await settle();h.server.close(h.server.sockets[0],4401);
+      await settle();assert.equal(c.asks.length,2);
+      assert.equal(f.requests[0].signal.aborted,true);
+      abort.abort();assert.deepEqual(await sub.done,{tag:'Aborted'});
+      const second=f.connect(h);await settle();assert.equal(f.requests.length,1);
+      const closed=h.client.close();await c.give(1,bytes(...Array(16).fill(2)));await closed;
+      await assert.rejects(second.done,{code:'Closed'});assert.equal(f.requests.length,1);
+    };
+    tests.http_subscribe_distinguishes_refusal_from_loss=async()=>{
+      const h=await setup();await ready(h);
+      const f=flow(), sub=f.connect(h);
+      await settle();f.requests[0].loss();await settle();
+      assert.equal(f.requests.length,1);
+      await h.time.advance(499);assert.equal(f.requests.length,1);
+      await h.time.advance(1);assert.equal(f.requests.length,2);
+      f.requests[1].reject(503,'too large');
+      assert.deepEqual(await sub.done,{tag:'Refused',status:503,body:'too large'});
+      await h.time.advance(10000);assert.equal(f.requests.length,2);
+    };
+  }
   // A credential source answers in the order its promises are settled by the law.
   const source=()=>{
     const asks=[];const fn=()=>new Promise((resolve,reject)=>asks.push({resolve,reject}));

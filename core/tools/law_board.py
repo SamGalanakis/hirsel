@@ -14,8 +14,15 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE = ROOT / "core" / "programs"
 FOREIGN_GRANTS = {
-    "ffi_laws": "Foreign=ffi_laws@1/laws/Laws",
-    "sqlite": "Foreign=sqlite@1/sqlite/Sqlite",
+    "ffi_laws": ("Foreign=ffi_laws@1/laws/Laws",),
+    "image_pipeline": (
+        "Foreign=image_jpeg@1/image_jpeg/Jpeg",
+        "Foreign=image_webp@1/webp/Webp",
+        "Foreign=av1@1/av1/DecoderCodec",
+        "Foreign=av1@1/av1/EncoderCodec",
+        "Foreign=video_yuv@1/video_yuv/Yuv",
+    ),
+    "sqlite": ("Foreign=sqlite@1/sqlite/Sqlite",),
 }
 
 
@@ -54,8 +61,8 @@ def run_package(args, member, env, commit, compiler_scratch):
         command.extend(["--store", str(compiler_scratch / member)])
     if "tests" not in manifest(package):
         command += ["--limit", "67108864"]
-    if member in FOREIGN_GRANTS:
-        command += ["--grant", FOREIGN_GRANTS[member]]
+    for grant in FOREIGN_GRANTS.get(member, ()):
+        command += ["--grant", grant]
     if args.mode == "seed":
         command.append("--write-laws")
     else:

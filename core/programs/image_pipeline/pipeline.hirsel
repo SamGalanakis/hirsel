@@ -1,0 +1,224 @@
+pub type Codecs: send {
+    jpeg: Foreign[image_jpeg.Jpeg],
+    webp: Foreign[image_webp.webp.Webp],
+    av1_decode: Foreign[av1.DecoderCodec],
+    av1_encode: Foreign[av1.EncoderCodec],
+    yuv: Foreign[video_yuv.Yuv]
+}
+
+pub type OutputFormat: key + send = OutputAvif | OutputWebp | OutputJpeg
+
+pub type Padding: send {
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    rgba: u32
+}
+
+/// Resize in oriented coordinates, crop the resized raster, then pad it.
+pub type Transform: send {
+    width: u32,
+    height: u32,
+    crop: Option[image_core.image.Rect],
+    pad: Option[Padding]
+}
+
+pub type ResultImage: send {
+    format: OutputFormat,
+    width: u32,
+    height: u32,
+    content: Bytes,
+    thumbhash: Inline[u8, 25],
+    thumbhash_len: u8
+}
+
+pub type PipelineError: send = PipelineImage(image_core.image.Error) | PipelineJpeg(image_jpeg.Error) | PipelineWebp(image_webp.webp.Error) | PipelineAv1(av1.Av1Error) | PipelineYuv(video_yuv.YuvError) | PipelineUnsupported | PipelineAccept | PipelineSignature | PipelineObject(std.object.Error) | PipelineCacheClosed | PipelineCacheData
+
+pub type DecodeSource = OriginalImage | EmbeddedThumbnail
+
+pub type DecodedImage {
+    raster: image_core.image.Raster,
+    source: DecodeSource
+}
+
+fn area(width: u32, height: u32) -> u64 {
+    let w: u64 = int.widen(width)
+    let h: u64 = int.widen(height)
+    w * h
+}
+
+fn buffer(size: u64, fill: u8) -> Result[Bytes, PipelineError] {
+    let mut out: Bytes = list.new()
+    if let Error(_) = list.try_reserve(mut out, size) {
+        return Error(PipelineImage(ByteLimit))
+    }
+    list.fill(mut out, size, fill)
+    Ok(take out)
+}
+
+fn image_result[T](take value: Result[T, image_core.image.Error]) -> Result[T, PipelineError] {
+    match take value {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(PipelineImage(e)),
+    }
+}
+
+fn require_size(w: u32, h: u32, limits: image_core.image.Limits) -> Result[(), PipelineError] {
+    let pixels = area(w, h)
+    if pixels == 0 || pixels > limits.max_pixels || pixels > 0x3fffffffffffffff {
+        Error(PipelineImage(PixelLimit))
+    } else {
+        Ok(())
+    }
+}
+
+fn oriented_size(w: u32, h: u32, orientation: u8) -> image_core.image.Size {
+    if orientation >= 5 {
+        image_core.image.Size(width: h, height: w)
+    } else {
+        image_core.image.Size(width: w, height: h)
+    }
+}
+
+fn shrink_size(w: u32, h: u32, target: image_core.image.Size) -> image_core.image.Size {
+    // Retain headroom for the final linear-light resample. Avoid independent
+    // axis scaling when only one axis would shrink.
+    if area(target.width, 2) < int.widen(w) && area(target.height, 2) < int.widen(h) {
+        image_core.image.Size(width: target.width * 2, height: target.height * 2)
+    } else {
+        image_core.image.Size(width: w, height: h)
+    }
+}
+
+/// Decode a still image through the shared firewall. The output is oriented,
+/// contains only pixels, and may be larger or smaller than the requested size.
+pub fn decode(codecs: Codecs, take input: Bytes, target: image_core.image.Size, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[DecodedImage, PipelineError] waits {
+    require_size(target.width, target.height, limits)?
+    let info = image_result(image_core.image.probe(input, limits))?
+    if info.frame_count != 1 {
+        return Error(PipelineUnsupported)
+    }
+    let raw_target = oriented_size(target.width, target.height, info.orientation)
+    let mut source: DecodeSource = OriginalImage
+    let mut orientation = info.orientation
+    let raster = match info.format {
+        Jpeg => {
+            if let Some(thumb) = jpeg_thumbnail(input, info, target, limits) {
+                match decode_thumbnail(codecs.jpeg, input, thumb, target, limits, max_native_bytes) {
+                    Ok(take decoded) => {
+                        source = EmbeddedThumbnail
+                        orientation = thumb.orientation
+                        take decoded
+                    },
+                    Error(_) => jpeg_decode(codecs.jpeg, take input, raw_target, limits, max_native_bytes)?,
+                }
+            } else {
+                jpeg_decode(codecs.jpeg, take input, raw_target, limits, max_native_bytes)?
+            }
+        },
+        Webp => webp_decode(codecs.webp, input, info, raw_target, limits)?,
+        Avif => avif_decode(codecs, input, raw_target, limits)?,
+        Png => image_result(image_core.image.decode_png(input, limits))?,
+        Qoi => image_result(image_core.image.decode_qoi(input, limits))?,
+        Gif => return Error(PipelineUnsupported),
+    }
+    let oriented = if orientation == 1 {
+        take raster
+    } else {
+        image_result(image_core.image.auto_orient(raster, orientation, limits))?
+    }
+    Ok(DecodedImage(raster: take oriented, source: source))
+}
+
+fn webp_decode(f: Foreign[image_webp.webp.Webp], input: Bytes, info: image_core.image.ImageInfo, target: image_core.image.Size, limits: image_core.image.Limits) -> Result[image_core.image.Raster, PipelineError] waits {
+    let size = shrink_size(info.width, info.height, target)
+    require_size(size.width, size.height, limits)?
+    let mut rgba = buffer(4 * area(size.width, size.height), 0)?
+    match image_webp.webp.decode(f, input, limits, None, Some(size), mut rgba) {
+        Ok(_) => Ok(image_core.image.Raster(width: size.width, height: size.height, rgba: take rgba)),
+        Error(e) => Error(PipelineWebp(e)),
+    }
+}
+
+fn geometry(take decoded: image_core.image.Raster, transform: Transform, limits: image_core.image.Limits) -> Result[image_core.image.Raster, PipelineError] {
+    let resized = if decoded.width == transform.width && decoded.height == transform.height {
+        take decoded
+    } else {
+        image_result(image_core.image.resize(decoded, transform.width, transform.height, Lanczos3, limits))?
+    }
+    let cropped = match transform.crop {
+        Some(rect) => image_result(image_core.image.crop(resized, rect, limits))?,
+        None => take resized,
+    }
+    match transform.pad {
+        Some(pad) => image_result(image_core.image.pad(cropped, pad.width, pad.height, pad.x, pad.y, pad.rgba, limits)),
+        None => Ok(take cropped),
+    }
+}
+
+fn inline_thumbhash(raster: image_core.image.Raster, limits: image_core.image.Limits) -> Result[(Inline[u8, 25], u8), PipelineError] {
+    let largest = order.max(raster.width, raster.height)
+    let thumbnail = if largest > 100 {
+        let w: u32 = int.narrow(order.max(1u64, area(raster.width, 100) / int.widen(largest)))
+        let h: u32 = int.narrow(order.max(1u64, area(raster.height, 100) / int.widen(largest)))
+        Some(image_result(image_core.image.resize(raster, w, h, Box, limits))?)
+    } else {
+        None
+    }
+    let hash = match thumbnail {
+        Some(small) => image_result(image_core.image.thumbhash(small, limits))?,
+        None => image_result(image_core.image.thumbhash(raster, limits))?,
+    }
+    let length = list.len(hash)
+    if length > 25 {
+        return Error(PipelineUnsupported)
+    }
+    let mut inline: Inline[u8, 25] =[0; 25]
+    for i in 0u64 .. length {
+        inline[i] = hash[i]
+    }
+    Ok((inline, int.narrow(length)))
+}
+
+fn encode(codecs: Codecs, raster: image_core.image.Raster, format: OutputFormat, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[Bytes, PipelineError] waits {
+    match format {
+        OutputJpeg => jpeg_encode(codecs.jpeg, raster, limits, max_native_bytes),
+        OutputAvif => avif_encode(codecs, raster, limits),
+        OutputWebp => {
+            let size = image_core.image.Size(width: raster.width, height: raster.height)
+            let capacity = order.min(limits.max_bytes, area(size.width, size.height) * 4 + 4096)
+            let mut out = buffer(capacity, 0)?
+            match image_webp.webp.encode(codecs.webp, raster.rgba, size, Lossy(85), mut out) {
+                Error(e) => Error(PipelineWebp(e)),
+                Ok(n) => {
+                    list.truncate(mut out, int.widen(n))
+                    Ok(take out)
+                },
+            }
+        },
+    }
+}
+
+/// Render a trusted transform. Route untrusted URLs through verify_url first,
+/// or submit them to the signed cache endpoint.
+pub fn render(codecs: Codecs, take input: Bytes, transform: Transform, accept: Bytes, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[ResultImage, PipelineError] waits {
+    let target = image_core.image.Size(width: transform.width, height: transform.height)
+    let decoded = decode(codecs, take input, target, limits, max_native_bytes)?
+    let DecodedImage(raster: take pixels, ..) = take decoded
+    let raster = geometry(take pixels, transform, limits)?
+    let Some(format) = choose_format(accept, avif_size(raster.width, raster.height) && opaque_pixels(raster), webp_size(raster.width, raster.height)) else {
+        return Error(PipelineAccept)
+    }
+    render_raster(codecs, raster, format, limits, max_native_bytes)
+}
+
+fn webp_size(w: u32, h: u32) -> bool {
+    w <= 16383 && h <= 16383 && area(w, h) <= 4194304
+}
+
+fn render_raster(codecs: Codecs, raster: image_core.image.Raster, format: OutputFormat, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[ResultImage, PipelineError] waits {
+    let (hash, len) = inline_thumbhash(raster, limits)?
+    let content = encode(codecs, raster, format, limits, max_native_bytes)?
+    Ok(ResultImage(format: format, width: raster.width, height: raster.height, content: take content, thumbhash: hash, thumbhash_len: len))
+}

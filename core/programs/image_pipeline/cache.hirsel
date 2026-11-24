@@ -1,0 +1,155 @@
+type CacheRequest: send {
+    path: String,
+    input: Bytes,
+    accept: Bytes,
+    deadline: u64,
+    reply: Sender[Result[ResultImage, PipelineError]]
+}
+
+pub opaque type Cache: send {
+    send_to: Sender[CacheRequest]
+}
+
+pub opaque type CacheInbox: send {
+    receive_from: Receiver[CacheRequest]
+}
+
+/// All handles for the same inbox share a single producer. Use a bounded
+/// queue, and give its object client a bucket or prefix reserved for this cache.
+pub fn cache_channel(capacity: u64) -> (Cache, CacheInbox) {
+    let (take tx, take rx): (Sender[CacheRequest], Receiver[CacheRequest]) = channel.new(capacity)
+    (Cache(send_to: take tx), CacheInbox(receive_from: take rx))
+}
+
+pub fn cache_share(cache: Cache) -> Cache {
+    Cache(send_to: channel.sender(cache.send_to))
+}
+
+pub fn cached_render(cache: Cache, take path: String, take input: Bytes, take accept: Bytes, deadline: u64) -> Result[ResultImage, PipelineError] waits {
+    let (take tx, take rx): (Sender[Result[ResultImage, PipelineError]], Receiver[Result[ResultImage, PipelineError]]) = channel.new(1)
+    let call = CacheRequest(path: take path, input: take input, accept: take accept, deadline: deadline, reply: take tx)
+    if let Error(_) = channel.send(cache.send_to, take call) {
+        return Error(PipelineCacheClosed)
+    }
+    match channel.receive(rx) {
+        Ok(take value) => take value,
+        Error(_) => Error(PipelineCacheClosed),
+    }
+}
+
+const CACHE_HEADER: u64 = 35
+
+fn cache_key(request: SignedTransform, accept: Bytes) -> String {
+    let payload = transform_payload(request.source, request.transform)
+    let mut sha = std.sha256.start()
+    let domain = b"image-pipeline/v1\x00"
+    std.sha256.add(mut sha, domain, 0, list.len(domain))
+    std.sha256.add(mut sha, payload, 0, list.len(payload))
+    std.sha256.add(mut sha, accept, 0, list.len(accept))
+    let mut hash: Bytes = list.with_capacity(32)
+    append_digest(mut hash, std.sha256.finish(sha))
+    let mut key = string.from("image-pipeline/v1/")
+    string.push(mut key, std.base64.encode_url(hash, false))
+    take key
+}
+
+fn pack_result(result: ResultImage) -> Result[Bytes, PipelineError] {
+    let mut encoded = buffer(0, 0)?
+    if let Error(_) = list.try_reserve(mut encoded, CACHE_HEADER + list.len(result.content)) {
+        return Error(PipelineImage(ByteLimit))
+    }
+    let format: u8 = match result.format {
+        OutputAvif => 1,
+        OutputWebp => 2,
+        OutputJpeg => 3,
+    }
+    list.push(mut encoded, format)
+    list.put_word_be(mut encoded, result.width)
+    list.put_word_be(mut encoded, result.height)
+    list.push(mut encoded, result.thumbhash_len)
+    for i in 0u64 .. 25 {
+        list.push(mut encoded, result.thumbhash[i])
+    }
+    list.append(mut encoded, result.content)
+    Ok(take encoded)
+}
+
+fn unpack_result(take body: Bytes, limits: image_core.image.Limits) -> Result[ResultImage, PipelineError] {
+    let n = list.len(body)
+    if n <= CACHE_HEADER || n - CACHE_HEADER > limits.max_bytes {
+        return Error(PipelineCacheData)
+    }
+    let format = match body[0] {
+        1 => OutputAvif,
+        2 => OutputWebp,
+        3 => OutputJpeg,
+        _ => return Error(PipelineCacheData),
+    }
+    let w: u32 = list.word_be(body, 1)
+    let h: u32 = list.word_be(body, 5)
+    require_size(w, h, limits)?
+    let length = body[9]
+    if length < 5 || length > 25 {
+        return Error(PipelineCacheData)
+    }
+    let mut hash: Inline[u8, 25] =[0; 25]
+    for i in 0u64 .. 25 {
+        hash[i] = body[10 + i]
+    }
+    let mut content = buffer(0, 0)?
+    if let Error(_) = list.try_reserve(mut content, n - CACHE_HEADER) {
+        return Error(PipelineImage(ByteLimit))
+    }
+    list.append(mut content, list.slice(body, CACHE_HEADER, n))
+    Ok(ResultImage(format: format, width: w, height: h, content: take content, thumbhash: hash, thumbhash_len: length))
+}
+
+fn lookup(mut client: std.object.Client, key: String, limits: image_core.image.Limits, deadline: u64) -> Result[Option[ResultImage], PipelineError] waits {
+    let mut into: Bytes = list.new()
+    if let Error(_) = list.try_reserve(mut into, int.saturating_add(limits.max_bytes, CACHE_HEADER)) {
+        return Error(PipelineImage(ByteLimit))
+    }
+    let (status, take data) = std.object.fetch(mut client, key, take into, deadline)
+    match take status {
+        Ok(_) => Ok(Some(unpack_result(take data, limits)?)),
+        Error(NotFound) => Ok(None),
+        Error(take e) => Error(PipelineObject(take e)),
+    }
+}
+
+fn resolve_cached(mut client: std.object.Client, codecs: Codecs, key: Secret, path: String, take input: Bytes, accept: Bytes, limits: image_core.image.Limits, max_native_bytes: u64, deadline: u64) -> Result[ResultImage, PipelineError] waits {
+    let request = verify_url(key, path)?
+    verify_source(request, input, limits)?
+    let name = cache_key(request, accept)
+    if let Some(take existing) = lookup(mut client, name, limits, deadline)? {
+        return Ok(take existing)
+    }
+    let rendered = render(codecs, take input, request.transform, accept, limits, max_native_bytes)?
+    let body = pack_result(rendered)?
+    let (stored, _) = std.object.store_no_clobber(mut client, name, take body, deadline)
+    match take stored {
+        Ok(Created(_)) => Ok(take rendered),
+        Ok(Exists) => {
+            if let Some(take winner) = lookup(mut client, name, limits, deadline)? {
+                Ok(take winner)
+            } else {
+                Error(PipelineCacheData)
+            }
+        },
+        Error(take e) => Error(PipelineObject(take e)),
+    }
+}
+
+/// Serve until the last cache handle closes. Requests to this inbox are
+/// processed one at a time, so concurrent misses for the same key share one
+/// successful render. A conditional PUT protects the winner across inboxes.
+pub fn serve_cache(take inbox: CacheInbox, mut client: std.object.Client, codecs: Codecs, key: Secret, limits: image_core.image.Limits, max_native_bytes: u64) waits {
+    loop {
+        let Ok(take request) = channel.receive(inbox.receive_from) else {
+            return
+        }
+        let CacheRequest(path: take path, input: take input, accept: take accept, deadline: deadline, reply: take tx) = take request
+        let answer = resolve_cached(mut client, codecs, key, path, take input, accept, limits, max_native_bytes, deadline)
+        let _ = channel.send(tx, take answer)
+    }
+}

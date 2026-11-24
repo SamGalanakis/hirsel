@@ -1,0 +1,158 @@
+fn av1_result[T](take value: Result[T, av1.Av1Error]) -> Result[T, PipelineError] {
+    match take value {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(PipelineAv1(e)),
+    }
+}
+
+fn yuv_result[T](take value: Result[T, video_yuv.YuvError]) -> Result[T, PipelineError] {
+    match take value {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(PipelineYuv(e)),
+    }
+}
+
+fn avif_picture(f: Foreign[av1.DecoderCodec], input: Bytes, item: image_core.image.AvifItem, info: image_core.image.ImageInfo, monochrome: bool, mut output: Bytes) -> Result[(), PipelineError] waits {
+    let packet = list.slice(input, item.payload.start, item.payload.end)
+    let pixels = area(info.width, info.height)
+    if pixels > 8847360 || info.bit_depth != 8 {
+        return Error(PipelineUnsupported)
+    }
+    let cap: u32 = int.narrow(pixels)
+    av1_result(av1.probe(f, cap, packet))?
+    let mut decoder = av1_result(av1.decoder(f, cap))?
+    av1_result(av1.decode_send(mut decoder, packet))?
+    let Some(pic) = av1_result(av1.decode_receive(mut decoder, mut output))? else {
+        return Error(PipelineAv1(Invalid))
+    }
+    let layout_matches = match pic.layout {
+        Monochrome => monochrome,
+        Yuv420 => !monochrome,
+        _ => false,
+    }
+    if !layout_matches || pic.width != info.width || pic.height != info.height || pic.bit_depth != 8 {
+        return Error(PipelineUnsupported)
+    }
+    Ok(())
+}
+
+// dav1d has no reduced-resolution decode. Scale the decoded I420 planes
+// before RGB expansion when the still is opaque and has enough headroom.
+fn avif_decode(codecs: Codecs, input: Bytes, target: image_core.image.Size, limits: image_core.image.Limits) -> Result[image_core.image.Raster, PipelineError] waits {
+    let avif = image_result(image_core.image.demux_avif(input, limits))?
+    let w = avif.info.width
+    let h = avif.info.height
+    if area(w, h) > 8847360 || avif.info.bit_depth != 8 {
+        return Error(PipelineUnsupported)
+    }
+    let count = yuv_result(video_yuv.yuv_size(I420, w, h))?
+    let monochrome = (input[avif.primary.config.start + 2] & 16) != 0
+    let mut yuv = buffer(count, 128)?
+    avif_picture(codecs.av1_decode, input, avif.primary, avif.info, monochrome, mut yuv)?
+    let source = image_core.image.Size(width: w, height: h)
+    let (size, reduced) = if let None = avif.alpha {
+        let size = shrink_size(w, h, target)
+        if size.width != w || size.height != h {
+            let mut scaled = buffer(yuv_result(video_yuv.yuv_size(I420, size.width, size.height))?, 0)?
+            yuv_result(video_yuv.scale(codecs.yuv, I420, Box, w, h, size.width, size.height, yuv, mut scaled))?
+            (size, take scaled)
+        } else {
+            (source, take yuv)
+        }
+    } else {
+        (source, take yuv)
+    }
+    let mut rgba = buffer(4 * area(size.width, size.height), 0)?
+    yuv_result(video_yuv.to_rgb(codecs.yuv, I420, Rgba, Bt601, size.width, size.height, reduced, mut rgba))?
+    if let Some(item) = avif.alpha {
+        let pixels = area(w, h)
+        let mut alpha = buffer(pixels, 0)?
+        avif_picture(codecs.av1_decode, input, item, avif.info, true, mut alpha)?
+        for i in 0u64 .. pixels {
+            rgba[i * 4 + 3] = alpha[i]
+        }
+    }
+    Ok(image_core.image.Raster(width: size.width, height: size.height, rgba: take rgba))
+}
+
+fn avif_size(w: u32, h: u32) -> bool {
+    w >= 64 && h >= 64 && w <= 4096 && h <= 2304 && w % 2 == 0 && h % 2 == 0
+}
+
+fn opaque_pixels(raster: image_core.image.Raster) -> bool {
+    for i in 0u64 .. area(raster.width, raster.height) {
+        if raster.rgba[4 * i + 3] != 255 {
+            return false
+        }
+    }
+    true
+}
+
+// AV1CodecConfigurationRecord for the encoder's profile 0, 8-bit 4:2:0
+// still-picture stream. Read level and tier from operating point zero.
+fn avif_configuration(packet: Bytes) -> Result[Bytes, PipelineError] {
+    let mut at = 0u64
+    while at < list.len(packet) {
+        let Ok(obu) = media_bits.av1.parse_obu(packet, at) else {
+            return Error(PipelineAv1(Invalid))
+        }
+        if obu.kind == 1 {
+            let seq = list.slice(packet, obu.payload_start, obu.end)
+            if list.len(seq) < 4 || (seq[0] & 0xf0) != 0x10 {
+                return Error(PipelineUnsupported)
+            }
+            let (level, tier) = if seq[0] & 8 != 0 {
+                (((seq[0] & 7) << 2) | (seq[1] >> 6), 0u8)
+            } else {
+                if seq[0] & 4 != 0 {
+                    return Error(PipelineUnsupported)
+                }
+                let level = seq[3] >> 3
+                (level, if level > 7 {
+                    (seq[3] & 4) << 5
+                } else {
+                    0u8
+                })
+            }
+            let mut out = buffer(4, 0)?
+            out[0] = 0x81
+            out[1] = level
+            out[2] = tier | 0x0c
+            return Ok(take out)
+        }
+        at = obu.end
+    }
+    Error(PipelineAv1(Invalid))
+}
+
+fn avif_encode(codecs: Codecs, raster: image_core.image.Raster, limits: image_core.image.Limits) -> Result[Bytes, PipelineError] waits {
+    let w = raster.width
+    let h = raster.height
+    let mut pixels = buffer(yuv_result(video_yuv.yuv_size(I420, w, h))?, 0)?
+    yuv_result(video_yuv.from_rgb(codecs.yuv, I420, Rgba, Bt601, w, h, raster.rgba, mut pixels))?
+    let cfg = av1.EncodeConfig(width: w, height: h, bit_depth: 8, enc_mode: 10, fast_decode: 0, level_of_parallelism: 1, avif: true, qp: 22, fps_num: 1, fps_den: 1)
+    let mut e = av1_result(av1.encoder(codecs.av1_encode, cfg))?
+    av1_result(av1.encode_send(mut e, pixels))?
+    let capacity = order.min(limits.max_bytes, area(w, h) * 4 + 4096)
+    let mut packet = buffer(capacity, 0)?
+    let first = av1_result(av1.encode_receive(mut e, mut packet))?
+    let size = if let Some(length) = first {
+        let mut extra = buffer(capacity, 0)?
+        if let Some(_) = av1_result(av1.encode_receive(mut e, mut extra))? {
+            return Error(PipelineAv1(Invalid))
+        }
+        av1_result(av1.encode_finish(mut e))?
+        length
+    } else {
+        av1_result(av1.encode_finish(mut e))?
+        let Some(length) = av1_result(av1.encode_receive(mut e, mut packet))? else {
+            return Error(PipelineAv1(Invalid))
+        }
+        length
+    }
+    list.truncate(mut packet, int.widen(size))
+    let configuration = avif_configuration(packet)?
+    let primary = image_core.image.AvifSource(av1: take packet, configuration: take configuration)
+    let options = image_core.image.AvifOptions(width: w, height: h, bit_depth: 8, orientation: 1, monochrome: false, color_space: Unspecified)
+    image_result(image_core.image.mux_avif(primary, None, options, limits))
+}

@@ -1,0 +1,165 @@
+type Preference {
+    specificity: u8,
+    quality: u16
+}
+
+fn blank(byte: u8) -> bool {
+    byte == b' ' || byte == b'\t'
+}
+
+fn trim(input: Bytes, first: u64, last: u64) -> (u64, u64) {
+    let mut lo = first
+    let mut hi = last
+    while lo < hi && blank(input[lo]) {
+        lo += 1
+    }
+    while lo < hi && blank(input[hi - 1]) {
+        hi -= 1
+    }
+    (lo, hi)
+}
+
+fn delimiter(input: Bytes, start: u64, end: u64, byte: u8) -> u64 {
+    let mut at = start
+    while at < end && input[at] != byte {
+        at += 1
+    }
+    at
+}
+
+fn lower(c: u8) -> u8 {
+    if c >= b'A' && c <= b'Z' {
+        c + 32
+    } else {
+        c
+    }
+}
+
+fn equal_media(input: Bytes, name: Bytes) -> bool {
+    if list.len(input) != list.len(name) {
+        return false
+    }
+    for i in 0u64 .. list.len(name) {
+        if lower(input[i]) != name[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn qvalue(input: Bytes) -> Option[u16] {
+    let n = list.len(input)
+    if n == 0 || n > 5 || (input[0] != b'0' && input[0] != b'1') {
+        return None
+    }
+    let whole: u16 = int.widen(input[0] - b'0')
+    if n == 1 {
+        return Some(whole * 1000)
+    }
+    if input[1] != b'.' {
+        return None
+    }
+    let mut value = whole * 1000
+    let mut place = 100u16
+    for i in 2u64 .. n {
+        let byte = input[i]
+        if byte < b'0' || byte > b'9' || (whole == 1 && byte != b'0') {
+            return None
+        }
+        value += place * int.widen(byte - b'0')
+        place /= 10
+    }
+    Some(value)
+}
+
+fn range_quality(input: Bytes, start: u64, end: u64) -> u16 {
+    let mut at = start
+    let mut quality = 1000u16
+    let mut seen = false
+    while at < end {
+        let next = delimiter(input, at + 1, end, b';')
+        let (lo, hi) = trim(input, at + 1, next)
+        let equals = delimiter(input, lo, hi, b'=')
+        let (key_lo, key_hi) = trim(input, lo, equals)
+        // The generated representations have no media type parameters.
+        if equals == hi || seen || !equal_media(list.slice(input, key_lo, key_hi), b"q") {
+            return 0
+        }
+        let (v_lo, v_hi) = trim(input, equals + 1, hi)
+        let Some(q) = qvalue(list.slice(input, v_lo, v_hi)) else {
+            return 0
+        }
+        quality = q
+        seen = true
+        at = next
+    }
+    quality
+}
+
+fn prefer(mut current: Preference, specificity: u8, quality: u16) {
+    if specificity > current.specificity || (specificity == current.specificity && quality > current.quality) {
+        current.specificity = specificity
+        current.quality = quality
+    }
+}
+
+fn choose_format(accept: Bytes, avif: bool, webp: bool) -> Option[OutputFormat] {
+    let n = list.len(accept)
+    let (start, end) = trim(accept, 0, n)
+    if start == end {
+        return Some(OutputJpeg)
+    }
+    let mut a = Preference(specificity: 0, quality: 0)
+    let mut w = Preference(specificity: 0, quality: 0)
+    let mut j = Preference(specificity: 0, quality: 0)
+    let mut at = start
+    while at < end {
+        let next = delimiter(accept, at, end, b',')
+        let params = delimiter(accept, at, next, b';')
+        let (lo, hi) = trim(accept, at, params)
+        let name = list.slice(accept, lo, hi)
+        let quality = range_quality(accept, params, next)
+        if equal_media(name, b"image/avif") {
+            prefer(mut a, 3, quality)
+        } else if equal_media(name, b"image/webp") {
+            prefer(mut w, 3, quality)
+        } else if equal_media(name, b"image/jpeg") {
+            prefer(mut j, 3, quality)
+        } else if equal_media(name, b"image/*") || equal_media(name, b"*/*") {
+            let specificity = if name[0] == b'*' {
+                1u8
+            } else {
+                2u8
+            }
+            prefer(mut a, specificity, quality)
+            prefer(mut w, specificity, quality)
+            prefer(mut j, specificity, quality)
+        }
+        at = next + 1
+    }
+    let aq = if avif {
+        a.quality
+    } else {
+        0u16
+    }
+    let wq = if webp {
+        w.quality
+    } else {
+        0u16
+    }
+    if aq > 0 && aq >= wq && aq >= j.quality {
+        Some(OutputAvif)
+    } else if wq > 0 && wq >= j.quality {
+        Some(OutputWebp)
+    } else if j.quality > 0 {
+        Some(OutputJpeg)
+    } else {
+        None
+    }
+}
+
+/// A more specific range overrides a wildcard. Quality wins first, then
+/// server preference breaks ties. With no Accept header, use JPEG.
+pub fn negotiate(accept: Bytes) -> Option[OutputFormat] {
+    choose_format(accept, true, true)
+}

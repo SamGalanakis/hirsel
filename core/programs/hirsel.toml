@@ -1,2 +1,2 @@
 [workspace]
-members = ["archive", "av1", "ffi_laws", "h264", "harness", "harness/serve", "harness/ts-client/gateway", "image_core", "image_jpeg", "image_webp", "mcp", "media_bits", "media_container", "notes", "opus", "platform", "postgres", "runner", "search", "sqlite", "store", "store-crash", "stun_ice", "toml", "tz", "video_packager", "video_yuv", "xml", "yaml"]
+members = ["archive", "av1", "ffi_laws", "h264", "harness", "harness/serve", "harness/ts-client/gateway", "image_core", "image_jpeg", "image_pipeline", "image_webp", "mcp", "media_bits", "media_container", "notes", "opus", "platform", "postgres", "runner", "search", "sqlite", "store", "store-crash", "stun_ice", "toml", "tz", "video_packager", "video_yuv", "xml", "yaml"]

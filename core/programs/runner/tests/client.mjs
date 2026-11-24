@@ -401,11 +401,11 @@ export async function laws(codec, only, mutant, entries, http) {
     }
     const {bindHttp} = await import(pathToFileURL(join(runtime.dir, 'http.js')).href);
     const encoder = new TextEncoder();
-    const batchEvent = (version, complete, rows = []) => 'event: batch\ndata: ' + JSON.stringify({
-      version, complete: complete ? [0] : [], groups: [{sub: 0, ...(complete && {value:{}}), rows}], outcomes: [],
-    }) + '\n\n';
+    const vectors = await readFile(new URL('./b9-vectors.hirsel', import.meta.url), 'utf8');
+    const corpus = Object.fromEntries(Array.from(vectors.matchAll(/^const B9_(\w+): String = (".*")$/gm),
+      ([, name, value]) => [name.toLowerCase(), JSON.parse(value)]));
+    const event = (name, version) => corpus[name].replace('@version@', version);
     const content = {headers: {'Content-Type': 'text/event-stream'}};
-    const expire = 'event: expired\ndata: {"reason":"auth_expired"}\n\n';
     const flow = () => {
       const requests = [];
       const fetch = (url, options) => new Promise((resolve, reject) => {
@@ -434,25 +434,40 @@ export async function laws(codec, only, mutant, entries, http) {
       await settle();
       const first=f.requests[0].open();
       first.send('\ufeff: comment\r\nretry: 40\r'); first.send('\n\r\n');
-      first.send(batchEvent('9007199254740993',true,[{slot:'unit',table:'units',key:1,present:true,value:null}]));
-      first.send(batchEvent('9007199254740992',false).slice(0,-1));
+      first.send(event('present','9007199254740993'));
+      first.send(event('removed','9007199254740994'));
+      await settle();
+      assert.deepEqual(sub.rows('unit'),{tag:'Ready',value:[]});
+      assert.deepEqual(sub.rows('option'),{tag:'Ready',value:[]});
+      first.send(event('inserted','9007199254740995'));
+      first.send(event('removed','9007199254740994').slice(0,-1));
       await settle();
       assert.deepEqual(sub.get('unit',1),{tag:'Ready',value:{slot:'unit',key:1,value:{tag:'Some',value:undefined}}});
+      assert.deepEqual(sub.get('option',2),{tag:'Ready',value:{slot:'option',key:2,value:{tag:'Some',value:{tag:'None'}}}});
       first.end();await settle();
       assert.equal(f.requests.length,2); assert.equal(c.asks.length,1);
       assert.equal(f.requests[1].auth,f.requests[0].auth); assert.equal(sub.value().tag,'Pending');
-      const second=f.requests[1].open();second.send(batchEvent('1',true));
+      const second=f.requests[1].open();second.send(event('empty','1'));
       await settle(); assert.deepEqual(sub.rows('unit'),{tag:'Ready',value:[]});
-      second.send('retry: 40\n\nevent: reset\ndata: {"version":"2","outcomes":[]}\n\n');
+      second.send('retry: 40\n\n'+event('reset','2'));
       await settle();assert.equal(sub.current(),false);assert.equal(f.requests.length,2);
       await h.time.advance(19);assert.equal(f.requests.length,2);
       await h.time.advance(1);assert.equal(f.requests.length,3);
       const third=f.requests[2].open();
-      third.send(batchEvent('0',true));
-      third.send('event: ended\ndata: {"sub":0,"outcome":{"Refused":"Deadline"}}\n\n');
+      third.send(event('empty','0'));
+      third.send(event('ended'));
       assert.deepEqual(await sub.done,{tag:'Ended',reason:{tag:'Refused',value:{tag:'Deadline'}}});
       assert.equal(sub.current(),false);assert.equal(c.asks.length,1);
       assert.equal(changes.filter(change=>change.invalidated).length,2);
+    };
+    tests.http_subscribe_preserves_version_width=async()=>{
+      const h=await setup();await ready(h);
+      const f=flow(), sub=f.connect(h);
+      await settle();
+      const stream=f.requests[0].open();
+      stream.send(event('empty','9007199254740993'));
+      stream.send(event('reset','9007199254740992'));
+      await assert.rejects(sub.done,/invalid SSE reset/);
     };
     tests.http_subscribe_refreshes_once=async()=>{
       for (const refusal of ['event','401']) {
@@ -461,8 +476,8 @@ export async function laws(codec, only, mutant, entries, http) {
         const f=flow(), sub=f.connect(h);
         await settle();
         if(refusal==='event') {
-          const stream=f.requests[0].open();stream.send(batchEvent('1',true));await settle();
-          assert.equal(sub.current(),true);stream.send(expire);
+          const stream=f.requests[0].open();stream.send(event('empty','1'));await settle();
+          assert.equal(sub.current(),true);stream.send(event('expired'));
         } else {
           f.requests[0].open().end();
           await settle();assert.equal(f.requests.length,2);assert.equal(c.asks.length,1);

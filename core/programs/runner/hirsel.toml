@@ -83,6 +83,7 @@ dirs = ["."]
 "runner-http-status-law.hirsel" = "runner"
 "runner-http-op-law.hirsel" = "runner"
 "runner-http-sse-law.hirsel" = "runner"
+"tests/b9-vectors.hirsel" = "runner"
 "runner-http-delivery-law.hirsel" = "runner"
 "runner-keyed-recovery-law.hirsel" = "runner"
 "runner_wire.hirsel" = "runner_wire"

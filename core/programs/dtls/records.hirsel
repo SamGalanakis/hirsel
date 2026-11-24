@@ -290,7 +290,12 @@ fn receive_protected(mut k: ReceiveKeys, mut a: Ahead, connected: bool, mut drop
         list.word_be(datagram, h.start)
     }
     let length: u16 = int.narrow(size - TAG - k.explicit)
-    let aad = record_aad(h.kind, number, length)
+    let aad = match record_aad(h.kind, number, length) {
+        Ok(take built) => built,
+        Error(c) => {
+            return Error(Capacity(c))
+        },
+    }
     let ciphertext = list.slice(datagram, h.start + k.explicit, h.end)
     let mut body: Bytes = list.new()
     match list.try_reserve(mut body, int.widen(length)) {
@@ -455,7 +460,12 @@ pub fn write_record_in(mut r: Records, mtu: u16, protected: bool, kind: u8, body
             }
             output_room(out, size)?
             let number = record_number(1, k.next)
-            let aad = record_aad(kind, number, int.narrow(len))
+            let aad = match record_aad(kind, number, int.narrow(len)) {
+                Ok(take built) => built,
+                Error(c) => {
+                    return Error(Capacity(c))
+                },
+            }
             record_prefix(mut out, kind, 0xfefd, number, int.narrow(len + TAG + k.explicit))
             if k.explicit != 0 {
                 list.put_word_be(mut out, number)

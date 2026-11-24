@@ -70,11 +70,15 @@ fn record_prefix(mut out: Bytes, kind: u8, version: u16, number: u64, length: u1
     list.put_word_be(mut out, length)
 }
 
-fn record_aad(kind: u8, number: u64, length: u16) -> Bytes {
-    let mut aad: Bytes = list.with_capacity(RECORD_HEADER)
+/// Fallible, so a refused allocation is Capacity and the endpoint stays usable (DTLS-8).
+fn record_aad(kind: u8, number: u64, length: u16) -> Result[Bytes, Capacity] {
+    let mut aad: Bytes = list.new()
+    if let Error(c) = list.try_reserve(mut aad, RECORD_HEADER) {
+        return Error(c)
+    }
     list.put_word_be(mut aad, number)
     list.push(mut aad, kind)
     list.put_word_be(mut aad, 0xfefdu16)
     list.put_word_be(mut aad, length)
-    aad
+    Ok(take aad)
 }

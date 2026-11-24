@@ -4,6 +4,7 @@ dtls@1/laws/atk_epoch0_hello_after_ccs_seals src=aa9316de449dd6a3 sig=26a8fcc0d0
 dtls@1/laws/atk_epoch0_message_after_ccs_closes src=212eee3b7b5c7e40 sig=26a8fcc0d08474a8 run=acdd7fe37d41c86f bug=537df5d825a8bc1e oracle=- rows=pending
 dtls@1/laws/capacity_refusal_before_flight_6 src=11e0e9110aa8741d sig=750de42a6d0dc6f3 run=acdd7fe37d41c86f bug=dfd4c10a6e606f84 oracle=- rows=pending
 dtls@1/laws/capacity_refusal_keeps_message src=d32d9c8427994cca sig=4852b848c58ed74f run=acdd7fe37d41c86f bug=424236583618de4c oracle=- rows=pending
+dtls@1/laws/capacity_refusal_opening_record src=328d89a0e6b653ab sig=750de42a6d0dc6f3 run=acdd7fe37d41c86f bug=3584751e21ac9a60 oracle=- rows=pending
 dtls@1/laws/cookie_bounds_unproven_address src=28fc09394003d6ef sig=9d70b33cc69f38f9 run=acdd7fe37d41c86f bug=3e3c7318814f7f0c oracle=b7ac6ae0a6ce1f16 rows=pending
 dtls@1/laws/exporter_once_after_pin src=17e845a9650f6781 sig=1dd4a932ff727ada run=acdd7fe37d41c86f bug=b6dbf9ebd8fa593e oracle=5c6f98cb2e8e661d rows=pending
 dtls@1/laws/final_flight_resent src=930ae83c17ecd920 sig=f1e04cda03054a95 run=acdd7fe37d41c86f bug=21fd642e34638984 oracle=- rows=pending

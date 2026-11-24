@@ -211,6 +211,45 @@ fn capacity_refusal_before_flight_6() -> Result[(), ()] {
     Ok(())
 }
 
+/// bug: at a 0-byte budget, opening an epoch-1 record built its AAD with an infallible
+/// allocation, so receive faulted the task instead of answering Capacity (2465). oracle:
+/// DTLS-8 by hand: a Capacity refusal leaves the endpoint usable, so the same Finished
+/// received again with budget completes the handshake.
+@test
+fn capacity_refusal_opening_record() -> Result[(), ()] {
+    let a = party(811)
+    let b = party(812)
+    let rc = provide.random(813)
+    let rs = provide.random(814)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, dtls.defaults(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, dtls.defaults(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let _ = deliver(mut server, rs, 0, drain(mut client, rc, 0))
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    let parts = records_in(drain(mut client, rc, 0))
+    let n = list.len(parts)
+    for i in 0u64 .. n - 1 {
+        let _ = deliver(mut server, rs, 0, single(parts[i]))
+    }
+    let finished = owned(parts[n - 1])
+    let outcome = bound bytes 0 {
+        refused_capacity(mut server, rs, finished)
+    }
+    match outcome {
+        Ok(true) => (),
+        _ => fail("opening Finished at budget 0 was not refused for Capacity"),
+    }
+    let _ = deliver(mut server, rs, 0, single(finished))
+    let _ = deliver(mut client, rc, 0, drain(mut server, rs, 0))
+    if !is_connected(client) || !is_connected(server) {
+        fail("the endpoint refused at budget 0 did not complete the handshake")
+    }
+    Ok(())
+}
+
 /// An epoch-1 application record with `length` bytes of payload.
 fn epoch1_record(length: u64) -> Bytes {
     let mut out = unhex("17fefd0001000000000001")

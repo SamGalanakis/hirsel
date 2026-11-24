@@ -101,3 +101,39 @@ fn retired_quota_checked_before_idle_keyed_recovery(d: Dir, random: Random, task
     }
     store.close(take finished)
 }
+
+fn recovery_law_order(mut queue: ClaimQueue) -> List[Bytes] {
+    let mut seen: List[Bytes] = list.new()
+    while let Some(take key) = dequeue_recovery(mut queue) { list.push(mut seen, take key) }
+    take seen
+}
+
+// L21r queue half (http.md H9, K-8): a key is queued once however often it is
+// enqueued; a refused front goes behind the claims queued after it; refusals
+// count across re-enqueues until recover_max (3) ends the claim; a claim
+// replied by a client before its turn leaves no queue entry or member.
+@test
+fn recovery_queue_runs_each_claim_once() -> Result[(), ()] {
+    let mut queue = new_claim_queue()
+    enqueue_recovery(mut queue, b"a")
+    enqueue_recovery(mut queue, b"a")
+    enqueue_recovery(mut queue, b"b")
+    if std.omap.len(queue.fifo) != 2 { fail("a twice-enqueued claim holds two queue entries") }
+    // a is at the front and refused: it re-enters behind b.
+    if recovery_refused(mut queue, b"a") { fail("one refusal ended the claim") }
+    let order = recovery_law_order(mut queue)
+    if list.len(order) != 2 || order[0] != b"b" || order[1] != b"a" { fail("a refused front kept the queue blocked") }
+    // Dequeued and enqueued again, a keeps its count: refusals 2 and 3.
+    enqueue_recovery(mut queue, b"a")
+    if recovery_refused(mut queue, b"a") { fail("the second refusal ended the claim") }
+    if !recovery_refused(mut queue, b"a") { fail("refusals reset on re-enqueue: the third did not end the claim") }
+    if std.omap.len(queue.fifo) != 0 { fail("an ended claim stayed queued") }
+    // Stale entry: c is queued, then replied by a client's run. Only a (ended) and b
+    // (dequeued, not yet replied) keep members.
+    enqueue_recovery(mut queue, b"c")
+    recovery_replied(mut queue, b"c")
+    if std.omap.len(queue.fifo) != 0 || std.omap.len(queue.members) != 2 {
+        fail("a claim replied before its turn left a queue entry")
+    }
+    Ok(())
+}

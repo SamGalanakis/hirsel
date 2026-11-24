@@ -14,6 +14,7 @@ runner@1/runner/law_trigger_model src=96051ef040e5a864 sig=8aeff3b07f70536a run=
 runner@1/runner/leaving_sub_does_not_block_successor src=de1a924e8cdc66c4 sig=bcef8d4f8776744f run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/operate_derived_budgets src=2b01ee69a38cb43e sig=555037cefd6dafad run=fdbe03c87a737934 bug=- oracle=- rows=pending
 runner@1/runner/promise_resumes_once src=1bd94b19d7463625 sig=f5a2b3e533e1b857 run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/recovery_queue_runs_each_claim_once src=ed5251d23ed42f08 sig=a57836f42d4e5401 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 runner@1/runner/relay_handler_expiry_leaves_ask_queued src=ae9b73229b218807 sig=b142a751137c3b0c run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 runner@1/runner/retired_quota_checked_before_idle_keyed_recovery src=312b90ebb8f32138 sig=c9d8f2abc2a85c39 run=52846919a3decb1f bug=- oracle=- rows=pending
 runner@1/runner/test_after_publication src=bf972b4d4decbdb8 sig=1c2a46cbcb2345fe run=ea720f3846592392 bug=- oracle=- rows=pending

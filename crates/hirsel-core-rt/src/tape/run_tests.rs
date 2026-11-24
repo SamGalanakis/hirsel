@@ -54,7 +54,7 @@ pub(in crate::tape) fn check_launch_replay() {
             // the trailing key and a valid checksum.
             let bytes = std::fs::read(&path).unwrap();
             let header_end =
-                format::BLOCK_HEAD + u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+                format::BLOCK_HEAD + u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
             let mut header = bytes[format::BLOCK_HEAD..header_end].to_vec();
             header[..2].copy_from_slice(&11u16.to_le_bytes());
             let tape_id = header[format::TAPE_ID_AT..format::TAPE_ID_AT + 16]
@@ -150,7 +150,7 @@ pub(in crate::tape) fn check_launch_replay() {
     assert_eq!(replayed, recorded);
     assert_eq!(
         std::fs::read_to_string(root.join("stderr")).unwrap(),
-        "replay: refused: unsupported tape format 11 (expected 13)\n"
+        "replay: refused: unsupported tape format 11 (expected 14)\n"
     );
     assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
 }

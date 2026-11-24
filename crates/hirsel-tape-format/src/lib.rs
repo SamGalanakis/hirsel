@@ -11,17 +11,29 @@ hirsel_guard::install!();
 
 mod arguments;
 mod blocks;
+mod exec;
+mod frames;
+mod index;
 mod payload;
+mod units;
 pub use arguments::Args;
 pub use blocks::{
     Blocks, Header, HeaderTooLarge, ReadError, Stop, TAPE_ID_AT, block, run_route, seal,
+    stream_block,
 };
+pub use exec::exec_snapshot_rules;
+pub use frames::{Decoder, Encoder};
+pub use index::{Index, StreamBlocks};
 pub use payload::{carries_payload, tls_connect_payload};
+pub use units::{
+    Arrival, CanonicalValue, Cause, CauseDetail, Credit, Entry, EntryBody, HelperEnding,
+    HelperOutcome, Settlement, Survivor, TakeBody, TakePoint, Value,
+};
 
 use std::hash::Hasher;
 use twox_hash::XxHash3_64;
 
-pub const FORMAT: u16 = 13;
+pub const FORMAT: u16 = 14;
 pub const MAGIC: [u8; 3] = *b"HTB";
 /// The tape's last block.
 pub const END: u8 = 2;
@@ -37,8 +49,8 @@ pub const CLOSE_AT: usize = 64 * 1024;
 pub const CLOSE_FRAMES: usize = CLOSE_AT / 3;
 /// The most frames a reader accepts in one block, after expanding REPEAT.
 pub const MAX_FRAMES: usize = MAX_LEN;
-/// flags, magic, seq, len.
-pub const BLOCK_HEAD: usize = 1 + 3 + 8 + 4;
+/// flags, magic, stream, seq, len.
+pub const BLOCK_HEAD: usize = 1 + 3 + 4 + 8 + 4;
 pub const BLOCK_CHECK: usize = 8;
 /// The most payload one frame carries; the rest continues in DATA frames.
 pub const PAYLOAD_CHUNK: usize = 64 * 1024;
@@ -63,6 +75,7 @@ pub const F_WAIT: u8 = 11;
 /// A positive count of CHOOSE frames, each equal to the one two frames back.
 pub const F_REPEAT: u8 = 12;
 pub const F_RETIRED: u8 = 13;
+pub const F_TAKE: u8 = 14;
 /// The head bit saying a task varint follows.
 pub const T: u8 = 0x10;
 
@@ -211,8 +224,13 @@ impl<'a> Cursor<'a> {
     pub fn fixed<const N: usize>(&mut self) -> Result<[u8; N], Corrupt> {
         Ok(self.take(N)?.try_into().unwrap())
     }
-    /// Canonical unsigned LEB128 (section 5.1): at most 10 bytes, no overlong
-    /// final 0x00 byte, a 10th byte of at most 1.
+    pub fn u32(&mut self) -> Result<u32, Corrupt> {
+        Ok(u32::from_le_bytes(self.fixed()?))
+    }
+    pub fn u64(&mut self) -> Result<u64, Corrupt> {
+        Ok(u64::from_le_bytes(self.fixed()?))
+    }
+    /// Canonical unsigned LEB128 with at most 10 bytes.
     pub fn varint(&mut self) -> Result<u64, Corrupt> {
         let mut v = 0u64;
         for i in 0..10 {
@@ -284,16 +302,29 @@ impl Out {
         if writes(op) || (matches!(op, op::SEND_SECRET | op::SCRAM) && self.status != OK) {
             put_varint(out, self.written);
         }
-        if carries_payload(op) {
+        if op == op::PORT_NEXT {
+            units::put_carrier(out, &self.payload, rest);
+        } else if carries_payload(op) {
             put_payload(out, &self.payload, rest);
         }
     }
-    fn decode(op: u8, c: &mut Cursor) -> Result<Self, Corrupt> {
+    fn decode(op: u8, c: &mut Cursor) -> Result<(Self, usize), Corrupt> {
         let status = c.u8()?;
-        if status > TIMED_OUT {
+        if status > TIMED_OUT || (op == op::PORT_NEXT && status != OK) {
             return Err(Corrupt);
         }
         let value = c.varint()?;
+        let lit_max = match op {
+            op::UNIT_SPAWN if value == 0 => return Err(Corrupt),
+            op::UNIT_SPAWN => u64::from(u32::MAX),
+            op::CONN_SEND => 1,
+            op::CONN_TRY_SEND => 2,
+            op::UNIT_CANCEL => 0,
+            _ => u64::MAX,
+        };
+        if lit_max != u64::MAX && (status != OK || value > lit_max) {
+            return Err(Corrupt);
+        }
         if matches!(op, op::MEDIA_P256_KEY | op::MEDIA_KEY_SHARE) && (status != OK || value == 0) {
             return Err(Corrupt);
         }
@@ -336,22 +367,19 @@ impl Out {
         } else {
             0
         };
-        let payload = if carries_payload(op) {
+        let port_total = (op == op::PORT_NEXT)
+            .then(|| usize::try_from(c.varint()?).map_err(|_| Corrupt))
+            .transpose()?;
+        let payload = if port_total.is_some() || carries_payload(op) {
             let b = c.bytes()?;
-            if b.len() > PAYLOAD_CHUNK {
+            if b.len() > PAYLOAD_CHUNK
+                || port_total.is_some_and(|total| b.len() > total || b.is_empty() != (total == 0))
+            {
                 return Err(Corrupt);
             }
             if matches!(op, op::LISTEN | op::ACCEPT | op::LOCAL_ADDR | op::PEER_ADDR) {
                 if status == OK {
-                    let [family, rest @ ..] = b else {
-                        return Err(Corrupt);
-                    };
-                    if b.len() != 19
-                        || *family > 1
-                        || (*family == 0 && rest[..8].iter().chain(&rest[12..16]).any(|&n| n != 0))
-                    {
-                        return Err(Corrupt);
-                    }
+                    payload::address(b)?;
                 } else if !b.is_empty() {
                     return Err(Corrupt);
                 }
@@ -376,13 +404,18 @@ impl Out {
         } else {
             vec![]
         };
-        Ok(Self {
+        let out = Self {
             status,
             value,
             error,
             written,
             payload,
-        })
+        };
+        let total = match port_total {
+            Some(total) => total,
+            None => out.needs(op)?,
+        };
+        Ok((out, total))
     }
     /// Total payload length determines whether DATA frames follow.
     fn needs(&self, op: u8) -> Result<usize, Corrupt> {
@@ -463,9 +496,19 @@ pub enum Frame {
     Repeat {
         count: u64,
     },
+    Take {
+        gap: u64,
+        point: TakePoint,
+        count: u64,
+        body: TakeBody,
+    },
     End {
         gap: u64,
         ending: Ending,
+    },
+    HelperEnd {
+        gap: u64,
+        ending: HelperEnding,
     },
 }
 
@@ -473,400 +516,6 @@ fn put_payload<'a>(out: &mut Vec<u8>, payload: &'a [u8], rest: &mut Vec<&'a [u8]
     let first = payload.len().min(PAYLOAD_CHUNK);
     put_bytes(out, &payload[..first]);
     rest.extend(payload[first..].chunks(PAYLOAD_CHUNK));
-}
-
-impl Frame {
-    fn continued_payload(&mut self) -> &mut Vec<u8> {
-        match self {
-            Self::Done { out, .. } | Self::Op { out, .. } => &mut out.payload,
-            Self::Grant {
-                args: Some(payload),
-                ..
-            } => payload,
-            _ => unreachable!(),
-        }
-    }
-}
-
-/// Encodes frames with the T bit's previous-task compression. DATA
-/// continuations are produced here and never handed in by a caller.
-#[derive(Default)]
-pub struct Encoder {
-    task: Option<u64>,
-    /// The op outstanding per task, for a DONE's outcome shape.
-    issued: std::collections::BTreeMap<u64, u8>,
-}
-impl Encoder {
-    /// A block's first frame that carries a task writes it (T set), so each
-    /// block's frames read without the blocks before it.
-    pub fn new_block(&mut self) {
-        self.task = None;
-    }
-    fn task(&mut self, out: &mut Vec<u8>, head_at: usize, task: u64) {
-        if self.task != Some(task) {
-            out[head_at] |= T;
-            put_varint(out, task);
-            self.task = Some(task);
-        }
-    }
-    /// The frame's bytes and the DATA frames that continue its payload. A
-    /// writer may close its block between them, never inside one.
-    pub fn frame(&mut self, f: &Frame) -> (Vec<u8>, Vec<Vec<u8>>) {
-        let mut out = Vec::new();
-        let mut rest = Vec::new();
-        self.frame_into(f, &mut out, &mut rest);
-        let data = rest
-            .into_iter()
-            .map(|chunk| {
-                let mut d = Vec::new();
-                put_data(&mut d, chunk);
-                d
-            })
-            .collect();
-        (out, data)
-    }
-    /// `frame`, appending the frame's bytes to `out` (a block being filled)
-    /// and pushing the payload chunks of its DATA frames to `rest`, borrowed
-    /// from the frame; `put_data` writes each where it falls.
-    pub fn frame_into<'f>(&mut self, f: &'f Frame, out: &mut Vec<u8>, rest: &mut Vec<&'f [u8]>) {
-        let start = out.len();
-        match f {
-            Frame::Wait { gap, task } => {
-                out.push(F_WAIT);
-                put_varint(out, *gap);
-                self.task(out, start, *task);
-            }
-            Frame::Issue {
-                task,
-                op,
-                object,
-                args,
-            } => {
-                out.push(F_ISSUE);
-                self.task(out, start, *task);
-                out.push(*op);
-                put_varint(out, *object);
-                args.encode(out);
-                self.issued.insert(*task, *op);
-            }
-            Frame::Done { gap, task, out: o } => {
-                out.push(F_DONE);
-                put_varint(out, *gap);
-                self.task(out, start, *task);
-                let op = self
-                    .issued
-                    .remove(task)
-                    .expect("DONE follows its task's ISSUE");
-                o.encode(op, out, rest);
-            }
-            Frame::Op {
-                task,
-                op,
-                object,
-                args,
-                out: o,
-            } => {
-                out.push(F_OP);
-                self.task(out, start, *task);
-                out.push(*op);
-                put_varint(out, *object);
-                args.encode(out);
-                o.encode(*op, out, rest);
-            }
-            Frame::Wake { gap, task } | Frame::Cancel { gap, task } => {
-                out.push(if matches!(f, Frame::Wake { .. }) {
-                    F_WAKE
-                } else {
-                    F_CANCEL
-                });
-                put_varint(out, *gap);
-                self.task(out, start, *task);
-            }
-            Frame::Retired { gap, task, pool } => {
-                out.push(F_RETIRED);
-                put_varint(out, *gap);
-                self.task(out, start, *task);
-                put_varint(out, *pool);
-            }
-            Frame::Choose { gap, index } => put_choose(out, *gap, *index),
-            Frame::Grant { gap, kind, args } => {
-                out.push(F_GRANT);
-                put_varint(out, *gap);
-                out.push(*kind);
-                if *kind == ARGS_KIND {
-                    put_bytes(
-                        out,
-                        args.as_deref().expect("an Args grant carries its vector"),
-                    );
-                } else if *kind == EXEC_KIND {
-                    let snapshot = args.as_deref().expect("an Exec grant carries its profiles");
-                    put_varint(out, snapshot.len() as u64);
-                    put_payload(out, snapshot, rest);
-                } else if is_stream_grant(*kind) {
-                    let [terminal] = args
-                        .as_deref()
-                        .expect("a stream grant carries its terminal bit")
-                    else {
-                        unreachable!("a stream grant carries one byte")
-                    };
-                    out.push(*terminal);
-                }
-            }
-            Frame::Repeat { count } => put_repeat(out, *count),
-            Frame::End { gap, ending: e } => {
-                out.push(F_END);
-                put_varint(out, *gap);
-                out.push(END_COMPLETE);
-                out.push(e.kind);
-                e.outcome.encode(out);
-            }
-        }
-    }
-}
-
-/// Decodes the frames of successive validated payloads. State crosses blocks:
-/// the previous task, each task's outstanding op, an unfinished payload.
-#[derive(Default)]
-pub struct Decoder {
-    task: Option<u64>,
-    issued: std::collections::BTreeMap<u64, u8>,
-    /// A frame whose payload still waits for DATA frames: (frame, bytes needed).
-    open: Option<(Frame, usize)>,
-    /// Return REPEAT frames as stored. By default they expand to CHOOSE.
-    pub physical: bool,
-}
-impl Decoder {
-    fn task(&mut self, head: u8, c: &mut Cursor) -> Result<u64, Corrupt> {
-        if head & T != 0 {
-            let t = c.varint()?;
-            self.task = Some(t);
-            Ok(t)
-        } else {
-            self.task.ok_or(Corrupt)
-        }
-    }
-    /// Every complete frame of `payload`, in order. `end` says the block is
-    /// the END block, whose last frame must be END and whose only END it is.
-    pub fn block(&mut self, payload: &[u8], end: bool) -> Result<Vec<Frame>, Corrupt> {
-        let mut c = Cursor::new(payload);
-        let mut frames = Vec::new();
-        // A block's first task-carrying frame names its task (Encoder::new_block).
-        self.task = None;
-        let mut chooses = [None, None];
-        let mut count = 0;
-        while !c.done() {
-            let head = c.u8()?;
-            let kind = head & 0x0f;
-            if head & 0xe0 != 0 {
-                return Err(Corrupt);
-            }
-            let has_task = matches!(
-                kind,
-                F_ISSUE | F_DONE | F_OP | F_WAKE | F_CANCEL | F_WAIT | F_RETIRED
-            );
-            if head & T != 0 && !has_task {
-                return Err(Corrupt);
-            }
-            if self.open.is_some() && kind != F_DATA {
-                return Err(Corrupt);
-            }
-            if kind == F_REPEAT {
-                let n = c.varint()?;
-                let [Some(two_back), Some(one_back)] = chooses else {
-                    return Err(Corrupt);
-                };
-                if n == 0 || n > (MAX_FRAMES - count) as u64 {
-                    return Err(Corrupt);
-                }
-                count += n as usize;
-                if self.physical {
-                    frames.push(Frame::Repeat { count: n });
-                } else {
-                    let pair = [two_back, one_back];
-                    for i in 0..n {
-                        let (gap, index) = pair[(i % 2) as usize];
-                        frames.push(Frame::Choose { gap, index });
-                    }
-                }
-                chooses = [None, None];
-                continue;
-            }
-            count += 1;
-            if count > MAX_FRAMES {
-                return Err(Corrupt);
-            }
-            if kind != F_CHOOSE {
-                chooses = [None, None];
-            }
-            let frame = match kind {
-                F_WAIT => Frame::Wait {
-                    gap: c.varint()?,
-                    task: self.task(head, &mut c)?,
-                },
-                F_ISSUE => {
-                    let task = self.task(head, &mut c)?;
-                    let op = c.u8()?;
-                    let object = c.varint()?;
-                    let args = Args::decode(&mut c)?;
-                    if self.issued.insert(task, op).is_some() {
-                        return Err(Corrupt);
-                    }
-                    Frame::Issue {
-                        task,
-                        op,
-                        object,
-                        args,
-                    }
-                }
-                F_DONE => {
-                    let gap = c.varint()?;
-                    let task = self.task(head, &mut c)?;
-                    let op = self.issued.remove(&task).ok_or(Corrupt)?;
-                    let out = Out::decode(op, &mut c)?;
-                    let needs = out.needs(op)?;
-                    let f = Frame::Done { gap, task, out };
-                    let Some(frame) = self.complete(f, needs)? else {
-                        continue;
-                    };
-                    frame
-                }
-                F_OP => {
-                    let task = self.task(head, &mut c)?;
-                    let op = c.u8()?;
-                    let object = c.varint()?;
-                    let args = Args::decode(&mut c)?;
-                    let out = Out::decode(op, &mut c)?;
-                    let needs = out.needs(op)?;
-                    let f = Frame::Op {
-                        task,
-                        op,
-                        object,
-                        args,
-                        out,
-                    };
-                    let Some(frame) = self.complete(f, needs)? else {
-                        continue;
-                    };
-                    frame
-                }
-                F_WAKE => {
-                    let gap = c.varint()?;
-                    Frame::Wake {
-                        gap,
-                        task: self.task(head, &mut c)?,
-                    }
-                }
-                F_CANCEL => {
-                    let gap = c.varint()?;
-                    Frame::Cancel {
-                        gap,
-                        task: self.task(head, &mut c)?,
-                    }
-                }
-                F_RETIRED => {
-                    let gap = c.varint()?;
-                    let task = self.task(head, &mut c)?;
-                    let pool = c.varint()?;
-                    if pool < 2 {
-                        return Err(Corrupt);
-                    }
-                    Frame::Retired { gap, task, pool }
-                }
-                F_CHOOSE => {
-                    let (gap, index) = (c.varint()?, c.varint()?);
-                    chooses = [chooses[1], Some((gap, index))];
-                    Frame::Choose { gap, index }
-                }
-                F_GRANT => {
-                    let gap = c.varint()?;
-                    let kind = c.u8()?;
-                    if kind > SECRET_KIND && !matches!(kind, EXEC_KIND | CRED_KIND) {
-                        return Err(Corrupt);
-                    }
-                    if kind == EXEC_KIND {
-                        let needs = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
-                        let chunk = c.bytes()?;
-                        if chunk.is_empty() || chunk.len() > PAYLOAD_CHUNK {
-                            return Err(Corrupt);
-                        }
-                        let f = Frame::Grant {
-                            gap,
-                            kind,
-                            args: Some(chunk.to_vec()),
-                        };
-                        let Some(frame) = self.complete(f, needs)? else {
-                            continue;
-                        };
-                        frames.push(frame);
-                        continue;
-                    }
-                    let args = if kind == ARGS_KIND {
-                        Some(c.bytes()?.to_vec())
-                    } else if is_stream_grant(kind) {
-                        let terminal = c.u8()?;
-                        if terminal > 1 {
-                            return Err(Corrupt);
-                        }
-                        Some(vec![terminal])
-                    } else {
-                        None
-                    };
-                    Frame::Grant { gap, kind, args }
-                }
-                F_DATA => {
-                    let chunk = c.bytes()?;
-                    let Some((mut f, needs)) = self.open.take() else {
-                        return Err(Corrupt);
-                    };
-                    if chunk.is_empty() || chunk.len() > PAYLOAD_CHUNK {
-                        return Err(Corrupt);
-                    }
-                    f.continued_payload().extend_from_slice(chunk);
-                    let Some(frame) = self.complete(f, needs)? else {
-                        continue;
-                    };
-                    frame
-                }
-                F_END => {
-                    let gap = c.varint()?;
-                    let status = c.u8()?;
-                    let kind = c.u8()?;
-                    if !end || status != END_COMPLETE || kind > END_DEADLOCK {
-                        return Err(Corrupt);
-                    }
-                    let ending = Ending {
-                        kind,
-                        outcome: Args::decode(&mut c)?,
-                    };
-                    if !c.done() || (kind == END_DEADLOCK && ending.deadlock_events().is_none()) {
-                        return Err(Corrupt);
-                    }
-                    Frame::End { gap, ending }
-                }
-                _ => return Err(Corrupt),
-            };
-            frames.push(frame);
-        }
-        if end && !matches!(frames.last(), Some(Frame::End { .. })) {
-            return Err(Corrupt);
-        }
-        Ok(frames)
-    }
-    /// Keep a frame whose payload is short of `needs` until its DATA frames arrive.
-    fn complete(&mut self, mut f: Frame, needs: usize) -> Result<Option<Frame>, Corrupt> {
-        match f.continued_payload().len().cmp(&needs) {
-            std::cmp::Ordering::Less => {
-                self.open = Some((f, needs));
-                Ok(None)
-            }
-            std::cmp::Ordering::Equal => Ok(Some(f)),
-            std::cmp::Ordering::Greater => Err(Corrupt),
-        }
-    }
-    /// A frame left waiting for its payload when the blocks stop.
-    pub fn unfinished(&self) -> bool {
-        self.open.is_some()
-    }
 }
 
 /// The Args grant kind in the entry ABI.

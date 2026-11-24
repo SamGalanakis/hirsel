@@ -1905,7 +1905,7 @@ pub enum Outcome {
 #[path = "request_launch.rs"]
 mod launch;
 pub use launch::Launch;
-use launch::{conclude, finish};
+use launch::{conclude, finish, report_request_error};
 
 /// Run the request `args` names (the arguments after the program name) and
 /// exit with its status, through a resident compiler when one serves the
@@ -1922,8 +1922,7 @@ pub fn main(args: Vec<String>) -> ! {
         },
         Err(e) => e,
     };
-    eprintln!("hirsel: {e}", e = error);
-    std::process::exit(2)
+    std::process::exit(report_request_error(error.as_ref()))
 }
 
 /// Serve one request in a resident compiler: [`main`]'s request, with its
@@ -1932,8 +1931,7 @@ pub(crate) fn serve(args: Vec<String>) -> Outcome {
     match run(args) {
         Ok(outcome) => outcome,
         Err(e) => {
-            eprintln!("hirsel: {e}");
-            let outcome = Outcome::Exit(2);
+            let outcome = Outcome::Exit(report_request_error(e.as_ref()));
             crate::resident::answer(&outcome);
             outcome
         }

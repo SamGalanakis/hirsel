@@ -157,7 +157,7 @@ impl World {
 pub(super) struct Store {
     pub(super) files: BTreeMap<Vec<u8>, Vec<u8>>,
     pub(super) close_to: Option<std::path::PathBuf>,
-    open: BTreeMap<u64, (Vec<u8>, usize)>,
+    open: BTreeMap<u64, Vec<u8>>,
     next: u64,
     write_error: Option<IoError>,
     fail_after_bytes: Option<(usize, IoError)>,
@@ -188,14 +188,14 @@ impl Store {
                         _ => {
                             st.files.entry(path.clone()).or_default();
                             st.next += 1;
-                            st.open.insert(100 + st.next, (path, 0));
+                            st.open.insert(100 + st.next, path);
                             o.value = 100 + st.next;
                         }
                     }
                 }
                 WRITE if st.write_error.is_some() => o.error = st.write_error.unwrap(),
                 WRITE => {
-                    let (name, _) = &st.open[&r.handle];
+                    let name = &st.open[&r.handle];
                     let bytes = unsafe { std::slice::from_raw_parts(r.buffer.data, r.buffer.len) };
                     let file = st.files.get_mut(name).unwrap();
                     if let Some((limit, err)) = st.fail_after_bytes
@@ -207,10 +207,10 @@ impl Store {
                         o.written = bytes.len() as u64;
                     }
                 }
-                READ => {
-                    let (name, at) = st.open.get_mut(&r.handle).unwrap();
-                    let f = &st.files[name];
-                    let mut n = (r.buffer.capacity - r.buffer.len).min(f.len() - *at);
+                READ_AT => {
+                    let data = &st.files[&st.open[&r.handle]];
+                    let data = data.get(r.offset() as usize..).unwrap_or_default();
+                    let mut n = (r.buffer.capacity - r.buffer.len).min(data.len());
                     if let Some(meter) = &st.read_meter {
                         st.read_peak = st.read_peak.max(meter.bytes());
                         // Exercise short reads of both metadata and payload.
@@ -218,17 +218,12 @@ impl Store {
                     }
                     st.bytes_read += n;
                     unsafe {
-                        ptr::copy_nonoverlapping(
-                            f[*at..].as_ptr(),
-                            r.buffer.data.add(r.buffer.len),
-                            n,
-                        )
+                        ptr::copy_nonoverlapping(data.as_ptr(), r.buffer.data.add(r.buffer.len), n)
                     };
-                    *at += n;
                     o.value = n as u64;
                 }
                 CLOSE => {
-                    let (name, _) = st.open.remove(&r.handle).unwrap();
+                    let name = st.open.remove(&r.handle).unwrap();
                     if let Some(directory) = &st.close_to {
                         let path = directory.join(std::str::from_utf8(&name).unwrap());
                         std::fs::write(path, &st.files[&name]).unwrap();
@@ -514,7 +509,7 @@ pub(super) fn boundaries(t: &[u8]) -> Vec<usize> {
     let mut at = vec![0];
     let mut p = 0;
     while p < t.len() {
-        let len = u32::from_le_bytes(t[p + 12..p + 16].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(t[p + 16..p + 20].try_into().unwrap()) as usize;
         p += BLOCK_HEAD + len + BLOCK_CHECK;
         at.push(p);
     }
@@ -555,7 +550,7 @@ fn xxh3_is_libxxhash_whole_and_in_two_parts() {
 
 /// Wrong implementation caught: any byte of the encoder off the spec (field
 /// order, varint, zig-zag delta, T at a block's first frame, check input).
-/// The oracle is vectors.py's format-12 derivation from REPLAY-SPEC §5,
+/// The oracle is vectors.py's format-14 derivation from REPLAY-SPEC §5,
 /// checked with libxxhash. Its Call header has a 32-byte revision.
 #[test]
 fn the_encoder_writes_the_format_12_model_tape_byte_for_byte() {
@@ -814,8 +809,8 @@ fn record_writes_the_hand_encoded_tape() {
     assert_eq!(obs[8].bytes.len(), 70_000);
 }
 
-/// CAP-9 and replay format §5.2: validate only block zero on open, then
-/// replay with a measured buffer allowance independent of the tape's length.
+/// Index the whole tape on open and retain only a bounded payload buffer
+/// during replay. The index stores one location per block.
 #[test]
 fn replay_reads_and_allocates_by_block() {
     use hirsel_guard::admission::{Owner, OwnerKind};
@@ -912,31 +907,30 @@ fn replay_reads_and_allocates_by_block() {
         *sample = (reads_on_refusal, reads_on_open, store.read_peak);
         assert_eq!(host.calls.get(), 0);
         assert!(store.open.is_empty());
-        assert_eq!(store.bytes_read, store.file().len());
+        assert_eq!(store.bytes_read, 2 * store.file().len() - header_end);
     }
 
     // One maximum-size block plus 128 KiB for the READ carrier, provider
     // bookkeeping and tape state. The 8 MiB input lives outside the meter.
     let allowance = (MAX_LEN + 2 * CLOSE_AT) as u64;
-    eprintln!("block-zero bytes and peak live allocations (short, long): {samples:?}");
+    eprintln!("index bytes and peak live allocations (short, long): {samples:?}");
     for (reads_on_refusal, reads_on_open, peak) in samples {
         assert_eq!(
-            reads_on_refusal, header_end,
-            "read bytes beyond refused header"
+            reads_on_refusal, reads_on_open,
+            "each open checks the whole index"
         );
-        assert_eq!(
-            reads_on_open, header_end,
-            "read bytes beyond accepted header"
-        );
+        assert!(reads_on_open > header_end);
         assert!((CLOSE_AT as u64..=allowance).contains(&peak), "{samples:?}");
     }
 
     let mut trailing = HAND.to_vec();
     trailing.push(0);
-    let (_, _, result) = replay(&trailing, 70_000, Variant::Same, &ending()).unwrap();
+    let result = replay(&trailing, 70_000, Variant::Same, &ending());
     assert_eq!(
-        result,
-        Err(Fault::Damaged((boundaries(HAND).len() - 1) as u64))
+        result.err(),
+        Some(OpenError::Refused(Refusal::Damaged(
+            (boundaries(HAND).len() - 1) as u64
+        )))
     );
 
     let mut store = Store::with(HAND);
@@ -944,7 +938,7 @@ fn replay_reads_and_allocates_by_block() {
         unsafe { Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()) }.unwrap();
     drop(tape);
     assert!(store.open.is_empty());
-    assert_eq!(store.bytes_read, header_end);
+    assert_eq!(store.bytes_read, HAND.len());
 }
 
 #[test]
@@ -977,7 +971,7 @@ fn record_closes_the_file_when_the_header_write_fails() {
 #[test]
 fn record_refuses_a_header_that_overflows_block_zero_before_creating_the_file() {
     let mut h = header(REVISION);
-    // Format 12 has 72 fixed bytes,
+    // The header has 72 fixed bytes,
     // 14 identity bytes + 1 length byte, a 3-byte argument length,
     // and a 1-byte empty grants length.
     const HEADER_BYTES: usize = 72 + 14 + 1 + 3 + 1;
@@ -1063,12 +1057,12 @@ fn every_one_byte_change_is_refused() {
     let at = boundaries(&t);
     for i in 0..t.len() {
         let k = at.iter().rposition(|&b| b <= i).unwrap();
-        let in_len = (at[k] + 12..at[k] + 16).contains(&i);
+        let in_len = (at[k] + 16..at[k] + 20).contains(&i);
         for x in [0x01u8, 0x80, 0xff] {
             let mut m = t.clone();
             m[i] ^= x;
             let r = match replay(&m, 100, Variant::Same, &ending()) {
-                Err(OpenError::Refused(Refusal::Damaged(0))) => Fault::Damaged(0),
+                Err(OpenError::Refused(Refusal::Damaged(block))) => Fault::Damaged(block),
                 Err(OpenError::Unreadable(f)) => f,
                 Err(e) => panic!("byte {i}: {e:?}"),
                 Ok((_, _, verdict)) => verdict.unwrap_err(),
@@ -1109,10 +1103,8 @@ fn swapped_blocks_are_damaged() {
     let at = boundaries(HAND);
     assert_eq!(at.len(), 4, "three blocks");
     let swapped = [&HAND[..at[1]], &HAND[at[2]..at[3]], &HAND[at[1]..at[2]]].concat();
-    let (obs, fault, verdict) = replay(&swapped, 70_000, Variant::Same, &ending()).unwrap();
-    assert!(obs.is_empty());
-    assert_eq!(fault, Some(Fault::Damaged(1)));
-    assert_eq!(verdict, Err(Fault::Damaged(1)));
+    let result = replay(&swapped, 70_000, Variant::Same, &ending());
+    assert_eq!(result.err(), Some(OpenError::Refused(Refusal::Damaged(1))));
 }
 
 /// Wrong implementation caught: a Replay that answers by op and object
@@ -2506,3 +2498,6 @@ mod p256_tests;
 
 #[path = "key_share_tests.rs"]
 mod key_share_tests;
+
+#[path = "rl6.rs"]
+mod rl6;

@@ -82,7 +82,6 @@ fn read_patterns(c: &mut Cursor<'_>) -> Result<String, Corrupt> {
 }
 
 fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
-    c.u8()?;
     let count = usize::try_from(c.varint()?).map_err(|_| Corrupt)?;
     let mut rules = Vec::new();
     for _ in 0..count {
@@ -192,7 +191,6 @@ fn write_patterns(out: &mut Vec<u8>, text: &str) -> Result<(), HeaderTooLarge> {
 }
 
 fn read_env(c: &mut Cursor<'_>) -> Result<EnvSnapshot, Corrupt> {
-    c.u8()?;
     let text = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
     let patterns = EnvPatterns::parse(text).ok_or(Corrupt)?;
     let count = c.varint()?;
@@ -346,11 +344,13 @@ impl Header {
         }
         let mut grants = Cursor::new(grants);
         let net_rules = if grants.bytes.first() == Some(&NET_KIND) {
+            grants.u8()?;
             read_net_rules(&mut grants)?
         } else {
             vec![]
         };
         let env = if grants.bytes.get(grants.at) == Some(&ENV_KIND) {
+            grants.u8()?;
             Some(read_env(&mut grants)?)
         } else {
             None
@@ -390,10 +390,21 @@ pub const TAPE_ID_AT: usize = 3;
 /// One block's bytes: head, payload, then the check over the tape id and
 /// everything before the check.
 pub fn block(tape_id: &[u8; 16], flags: u8, seq: u64, payload: &[u8]) -> Vec<u8> {
+    stream_block(tape_id, flags, 0, seq, payload)
+}
+
+pub fn stream_block(
+    tape_id: &[u8; 16],
+    flags: u8,
+    stream: u32,
+    seq: u64,
+    payload: &[u8],
+) -> Vec<u8> {
     assert!(payload.len() <= MAX_LEN);
     let mut out = Vec::with_capacity(BLOCK_HEAD + payload.len() + BLOCK_CHECK);
     out.push(flags);
     out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&stream.to_le_bytes());
     out.extend_from_slice(&seq.to_le_bytes());
     out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     out.extend_from_slice(payload);
@@ -410,8 +421,9 @@ pub fn seal(tape_id: &[u8; 16], flags: u8, seq: u64, bytes: &mut Vec<u8>) {
     assert!(len <= MAX_LEN);
     bytes[0] = flags;
     bytes[1..4].copy_from_slice(&MAGIC);
-    bytes[4..12].copy_from_slice(&seq.to_le_bytes());
-    bytes[12..16].copy_from_slice(&(len as u32).to_le_bytes());
+    bytes[4..8].fill(0);
+    bytes[8..16].copy_from_slice(&seq.to_le_bytes());
+    bytes[16..20].copy_from_slice(&(len as u32).to_le_bytes());
     let check = xxh3(&[tape_id, bytes]);
     bytes.extend_from_slice(&check.to_le_bytes());
 }
@@ -501,6 +513,9 @@ impl Blocks {
         }
         read_block(&mut self.bytes, self.seq, &mut read)?;
         check_head(&self.bytes, self.seq)?;
+        if stream(&self.bytes) != 0 || sequence(&self.bytes) != self.seq {
+            return Err(Stop::Damaged(self.seq).into());
+        }
         check_digest(&self.bytes, &self.tape_id, self.seq)?;
         self.seq += 1;
         let flags = self.bytes[0];
@@ -530,18 +545,18 @@ fn fill<E>(
     Ok(len - bytes.len())
 }
 
-fn header_payload(bytes: &[u8]) -> &[u8] {
+pub(super) fn header_payload(bytes: &[u8]) -> &[u8] {
     &bytes[BLOCK_HEAD..bytes.len() - BLOCK_CHECK]
 }
 
-fn header_block<E>(
+pub(super) fn header_block<E>(
     read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
     format: Option<u16>,
 ) -> Result<Vec<u8>, ReadError<E>> {
     let mut bytes = Vec::new();
     read_block(&mut bytes, 0, read)?;
     check_head(&bytes, 0)?;
-    if bytes[0] != 0 {
+    if bytes[0] != 0 || stream(&bytes) != 0 || sequence(&bytes) != 0 {
         return Err(Stop::Damaged(0).into());
     }
     let payload = header_payload(&bytes);
@@ -575,11 +590,11 @@ pub fn run_route<E>(
         Ok((tape_id, c.bytes()?.to_vec()))
     }
 
-    let bytes = header_block(&mut read, None)?;
+    let bytes = header_block(&mut read, Some(FORMAT))?;
     route(header_payload(&bytes)).map_err(|e| Stop::from(e).into())
 }
 
-fn read_block<E>(
+pub(super) fn read_block<E>(
     bytes: &mut Vec<u8>,
     seq: u64,
     read: &mut impl FnMut(&mut [u8]) -> Result<usize, E>,
@@ -592,7 +607,7 @@ fn read_block<E>(
         BLOCK_HEAD => {}
         _ => return Err(Stop::Truncated.into()),
     }
-    let len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+    let len = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) as usize;
     if len > MAX_LEN {
         return Err(Stop::Damaged(seq).into());
     }
@@ -605,22 +620,53 @@ fn read_block<E>(
     Ok(())
 }
 
-fn check_head(bytes: &[u8], seq: u64) -> Result<(), Stop> {
+pub(super) fn check_head(bytes: &[u8], seq: u64) -> Result<(), Stop> {
     let flags = bytes[0];
     if bytes[1..4] != MAGIC
-        || flags & !(END | TRUNCATED) != 0
-        || (flags & TRUNCATED != 0 && (flags & END != 0 || bytes.len() != BLOCK_HEAD + BLOCK_CHECK))
-        || u64::from_le_bytes(bytes[4..12].try_into().unwrap()) != seq
+        || !matches!(flags, 0 | END | TRUNCATED)
+        || (flags == TRUNCATED && bytes.len() != BLOCK_HEAD + BLOCK_CHECK)
     {
         return Err(Stop::Damaged(seq));
     }
     Ok(())
 }
 
-fn check_digest(bytes: &[u8], id: &[u8; 16], seq: u64) -> Result<(), Stop> {
+pub(super) fn check_digest(bytes: &[u8], id: &[u8; 16], seq: u64) -> Result<(), Stop> {
     let (body, stored) = bytes.split_at(bytes.len() - BLOCK_CHECK);
     if xxh3(&[id, body]) != u64::from_le_bytes(stored.try_into().unwrap()) {
         return Err(Stop::Damaged(seq));
     }
     Ok(())
+}
+
+pub(super) fn stream(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes(bytes[4..8].try_into().unwrap())
+}
+
+pub(super) fn sequence(bytes: &[u8]) -> u64 {
+    u64::from_le_bytes(bytes[8..16].try_into().unwrap())
+}
+
+pub(super) fn capability_snapshot(kind: u8, bytes: &[u8]) -> Result<(), Corrupt> {
+    let mut c = Cursor::new(bytes);
+    match kind {
+        NET_KIND => {
+            read_net_rules(&mut c)?;
+        }
+        ENV_KIND => {
+            read_env(&mut c)?;
+        }
+        CRED_KIND => {
+            let mut field = || std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt);
+            hirsel_core_net::CredGrant::new(field()?, field()?, field()?).map_err(|_| Corrupt)?;
+        }
+        4..=6 => {
+            if c.u8()? > 1 {
+                return Err(Corrupt);
+            }
+        }
+        super::EXEC_KIND => return super::exec_snapshot_rules(bytes).map(|_| ()),
+        _ => {}
+    }
+    c.done().then_some(()).ok_or(Corrupt)
 }

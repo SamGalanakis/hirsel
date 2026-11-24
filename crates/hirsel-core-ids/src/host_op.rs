@@ -147,6 +147,10 @@ host_ops! {
     SCHEDULE_SRTP = 161,
     SCHEDULE_SPACE_INFO = 162,
     SCHEDULE_SEALER_PAIR = 163,
+    UNIT_SPAWN = 164,
+    CONN_SEND = 165,
+    CONN_TRY_SEND = 166,
+    UNIT_CANCEL = 167,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

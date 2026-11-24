@@ -1,4 +1,4 @@
-use super::{Corrupt, op};
+use super::Corrupt;
 
 pub fn carries_payload(op: u8) -> bool {
     use crate::op::*;
@@ -31,6 +31,7 @@ pub fn carries_payload(op: u8) -> bool {
             | UDP_BIND_GROUP
             | UDP_RECV
             | UDP_LOCAL_ADDR
+            | PORT_NEXT
     )
 }
 
@@ -47,4 +48,17 @@ pub fn tls_connect_payload(bytes: &[u8]) -> Result<(&[u8], &[u8; 32], &[u8]), Co
         return Err(Corrupt);
     }
     Ok((alpn, peer, binding))
+}
+
+pub(super) fn address(bytes: &[u8]) -> Result<(), Corrupt> {
+    let [family, rest @ ..] = bytes else {
+        return Err(Corrupt);
+    };
+    if bytes.len() != 19
+        || *family > 1
+        || (*family == 0 && rest[..8].iter().chain(&rest[12..16]).any(|&n| n != 0))
+    {
+        return Err(Corrupt);
+    }
+    Ok(())
 }

@@ -19,6 +19,7 @@ mod close_replay;
 mod dispatch;
 mod error;
 mod exec;
+mod file;
 mod managed;
 mod record_delivery;
 mod retirement;
@@ -45,6 +46,7 @@ use crate::{
 };
 use arguments::canonical;
 use close_replay::{CloseKey, Closes, is_close, replay_close};
+use file::ProviderFile;
 use format::*;
 use record_delivery::record_out;
 use replay_delivery::{ReadSpace, replay_out};
@@ -163,7 +165,7 @@ unsafe impl Sync for ReplayAbort {}
 
 struct FrameReader {
     source: ProviderFile,
-    blocks: Blocks,
+    blocks: StreamBlocks,
     retained_block: Option<Retained<'static>>,
     decoder: Decoder,
     frames: std::vec::IntoIter<Frame>,
@@ -304,7 +306,7 @@ enum TapeInput<'a> {
 
 struct ReplayInput {
     source: ProviderFile,
-    blocks: Blocks,
+    blocks: StreamBlocks,
     stored: Header,
     origin: (Inner, Vec<u8>),
 }
@@ -314,7 +316,7 @@ impl ReplayInput {
         writer::flush();
         // SAFETY: forwarded.
         let source = unsafe { ProviderFile::open(dir, 0, name) }.map_err(OpenError::Io)?;
-        let (blocks, stored) = match Blocks::open(|bytes| source.read(bytes)) {
+        let (blocks, stored) = match Index::root(|offset, bytes| source.read_at(offset, bytes)) {
             Ok(b) => b,
             Err(ReadError::Source(e)) => return Err(OpenError::Io(e)),
             Err(ReadError::Format(Stop::Damaged(k))) => {
@@ -392,79 +394,11 @@ fn failed(o: &Outcome) -> Option<IoError> {
         None
     }
 }
-/// Owns a file from successful OPEN until CLOSE. The provider must remain
-/// pinned in its run for the owner's lifetime.
-struct ProviderFile(Option<Inner>);
-
-impl ProviderFile {
-    unsafe fn open(dir: Inner, mode: u8, name: &[u8]) -> Result<Self, IoError> {
-        // SAFETY: the opener owns the pinned provider.
-        let o = unsafe { sink(dir, request(OPEN, mode, 0, name, empty_buffer())) };
-        match failed(&o) {
-            Some(e) => Err(e),
-            None => Ok(Self(Some(Inner {
-                provider: dir.provider,
-                handle: o.value,
-            }))),
-        }
-    }
-
-    fn write(&self, bytes: &[u8]) -> Result<(), IoError> {
-        let mut r = request(
-            WRITE,
-            0,
-            0,
-            &[],
-            Buffer {
-                data: bytes.as_ptr().cast_mut(),
-                len: bytes.len(),
-                capacity: 0,
-            },
-        );
-        r.path = ptr::null();
-        // SAFETY: the file and the borrowed input are pinned through delivery.
-        let o = unsafe { sink(self.0.unwrap(), r) };
-        failed(&o).map_or(Ok(()), Err)
-    }
-
-    fn read(&self, bytes: &mut [u8]) -> Result<usize, IoError> {
-        let mut r = request(
-            READ,
-            0,
-            0,
-            &[],
-            Buffer {
-                data: bytes.as_mut_ptr(),
-                len: 0,
-                capacity: bytes.len(),
-            },
-        );
-        r.path = ptr::null();
-        // SAFETY: the file and the writable buffer are pinned through delivery.
-        let o = unsafe { sink(self.0.unwrap(), r) };
-        failed(&o).map_or(Ok(o.value as usize), Err)
-    }
-
-    fn close(&mut self) -> Result<(), IoError> {
-        let Some(file) = self.0.take() else {
-            return Ok(());
-        };
-        // SAFETY: the file remains pinned through delivery.
-        let o = unsafe { sink(file, request(CLOSE, 0, 0, &[], empty_buffer())) };
-        failed(&o).map_or(Ok(()), Err)
-    }
-}
-impl Drop for ProviderFile {
-    fn drop(&mut self) {
-        let _ = self.close();
-    }
-}
-
 pub(crate) fn format_verdict(fault: Fault, at_corrupt: u64) -> String {
     match fault {
         Fault::Diverged(d) => format!("replay: Diverged({:?}) at {}", d.kind, d.at),
         Fault::Truncated(at) => format!("replay: Truncated at {at}"),
-        Fault::Damaged(block) => format!("replay: Damaged at {block}"),
+        Fault::Damaged(block) => format!("replay: Damaged at block {block}"),
         Fault::Corrupt => format!("replay: Corrupt at {at_corrupt}"),
         other => format!("replay: {other}"),
     }
@@ -700,6 +634,10 @@ impl std::fmt::Display for FrameEvidence<'_> {
             Frame::Grant { gap, kind, .. } => write!(f, "kind={kind} gap={gap}"),
             Frame::Repeat { count } => write!(f, "count={count}"),
             Frame::End { gap, ending } => write!(f, "outcome_kind={} gap={gap}", ending.kind),
+            Frame::Take { gap, count, .. } => write!(f, "gap={gap} count={count}"),
+            Frame::HelperEnd { gap, ending } => {
+                write!(f, "outcome_kind={} gap={gap}", ending.kind())
+            }
         }
     }
 }
@@ -717,7 +655,8 @@ impl FrameEvidence<'_> {
             Frame::Choose { .. } => "CHOOSE",
             Frame::Grant { .. } => "GRANT",
             Frame::Repeat { .. } => "REPEAT",
-            Frame::End { .. } => "END",
+            Frame::Take { .. } => "TAKE",
+            Frame::End { .. } | Frame::HelperEnd { .. } => "END",
         }
     }
 }
@@ -757,7 +696,7 @@ impl std::fmt::Display for IssueEvidence<'_> {
 }
 
 impl FrameReader {
-    fn new(source: ProviderFile, blocks: Blocks) -> Self {
+    fn new(source: ProviderFile, blocks: StreamBlocks) -> Self {
         let mut reader = Self {
             source,
             blocks,
@@ -785,7 +724,10 @@ impl FrameReader {
                 return Ok(frame);
             }
             self.retained_block = None;
-            let decoded = match self.blocks.next(|bytes| self.source.read(bytes)) {
+            let decoded = match self
+                .blocks
+                .next(|offset, bytes| self.source.read_at(offset, bytes))
+            {
                 Err(ReadError::Format(s)) => Err(Fault::stopped(s, at)),
                 Err(ReadError::Source(e)) => Err(Fault::Io(e)),
                 Ok(None) => Err(Fault::Diverged(Divergence {
@@ -1131,9 +1073,8 @@ impl Tape {
                 let mut file =
                     unsafe { ProviderFile::open(dir, 3, name) }.map_err(OpenError::Io)?;
                 // SAFETY: the file is open in this run's provider.
-                let sink = match unsafe {
-                    crate::os::duplicate_file(&dir.provider, file.0.unwrap().handle)
-                } {
+                let sink = match unsafe { crate::os::duplicate_file(&dir.provider, file.handle()) }
+                {
                     Some(fd) => {
                         file.close().map_err(OpenError::Io)?;
                         Sink::Writer(writer::Stream::new(fd))
@@ -1302,7 +1243,7 @@ impl Tape {
         };
         let (provider, handle, stored) =
             self.grant(crate::entry::EXEC, snapshot, Some((provider, handle)))?;
-        let rules = exec::rules(&stored)?;
+        let rules = exec_snapshot_rules(&stored)?;
         let mut state = self.cell.state.lock().unwrap();
         let live = state.live.as_mut().unwrap();
         live.exec_rules

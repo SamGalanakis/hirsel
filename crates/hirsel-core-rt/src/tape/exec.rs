@@ -2,8 +2,8 @@
 use super::{Args, Cursor, Fault, Out, Request, ordinal_of};
 use crate::exec_runtime::{Call, LogicalLaunch, ProcCall, SpawnCall};
 use hirsel_core_ids::host_op::{EXEC_SIGNAL, EXEC_SPAWN, EXEC_WAIT};
-use hirsel_core_net::exec::{ArgToken, ExecRules, Form, PinnedProfile, ProfileRules};
-use std::collections::{BTreeMap, BTreeSet};
+use hirsel_core_net::exec::{ArgToken, PinnedProfile};
+use std::collections::BTreeMap;
 
 pub(super) fn arguments(launch: &LogicalLaunch<'_>) -> Vec<u8> {
     let mut out = Vec::new();
@@ -89,74 +89,6 @@ pub(super) fn snapshot(profiles: &BTreeMap<String, PinnedProfile>) -> Vec<u8> {
     out
 }
 
-pub(super) fn rules(bytes: &[u8]) -> Result<ExecRules, Fault> {
-    let mut c = Cursor::new(bytes);
-    let mut result = BTreeMap::<String, ProfileRules>::new();
-    let profiles = read_count(&mut c)?;
-    if profiles == 0 {
-        return Err(Fault::Corrupt);
-    }
-    for _ in 0..profiles {
-        let name = read_name(&mut c)?;
-        if result
-            .last_key_value()
-            .is_some_and(|(last, _)| last.as_str() >= name)
-        {
-            return Err(Fault::Corrupt);
-        }
-        let _: [u8; 32] = c.fixed()?;
-        read_str(&mut c)?;
-        let mut forms = Vec::new();
-        for _ in 0..read_count(&mut c)? {
-            let mut tokens = Vec::new();
-            for _ in 0..read_count(&mut c)? {
-                tokens.push(match c.u8()? {
-                    0 => ArgToken::Lit(read_field(&mut c)?.to_vec()),
-                    1 => ArgToken::Any,
-                    2 => ArgToken::Rest,
-                    _ => return Err(Fault::Corrupt),
-                });
-            }
-            forms.push(Form::new(tokens).ok_or(Fault::Corrupt)?);
-        }
-        let mut keys = BTreeSet::new();
-        let mut fixed = BTreeSet::new();
-        let mut last = None;
-        for _ in 0..read_count(&mut c)? {
-            let key = read_str(&mut c)?;
-            if !hirsel_core_net::exec::valid_key(key) || last.is_some_and(|last| last >= key) {
-                return Err(Fault::Corrupt);
-            }
-            last = Some(key);
-            let group = match c.u8()? {
-                0 => &mut fixed,
-                1 => &mut keys,
-                _ => return Err(Fault::Corrupt),
-            };
-            group.insert(key.to_owned());
-        }
-        let mut dirs = BTreeSet::<String>::new();
-        for _ in 0..read_count(&mut c)? {
-            let dir = read_name(&mut c)?;
-            if dirs.last().is_some_and(|last| last.as_str() >= dir) {
-                return Err(Fault::Corrupt);
-            }
-            dirs.insert(dir.to_owned());
-        }
-        if dirs.is_empty() {
-            return Err(Fault::Corrupt);
-        }
-        result.insert(
-            name.to_owned(),
-            ProfileRules::host(forms, keys, dirs, fixed),
-        );
-    }
-    if !c.done() {
-        return Err(Fault::Corrupt);
-    }
-    Ok(ExecRules::host(result))
-}
-
 fn count(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(&u32::try_from(n).unwrap().to_le_bytes());
 }
@@ -164,31 +96,6 @@ fn count(out: &mut Vec<u8>, n: usize) {
 fn field(out: &mut Vec<u8>, bytes: &[u8]) {
     count(out, bytes.len());
     out.extend_from_slice(bytes);
-}
-
-fn read_count(c: &mut Cursor<'_>) -> Result<usize, Fault> {
-    Ok(u32::from_le_bytes(c.fixed()?) as usize)
-}
-
-fn read_field<'a>(c: &mut Cursor<'a>) -> Result<&'a [u8], Fault> {
-    let n = read_count(c)?;
-    Ok(c.take(n)?)
-}
-
-fn read_str<'a>(c: &mut Cursor<'a>) -> Result<&'a str, Fault> {
-    let bytes = read_field(c)?;
-    if bytes.contains(&0) {
-        return Err(Fault::Corrupt);
-    }
-    std::str::from_utf8(bytes).map_err(|_| Fault::Corrupt)
-}
-
-fn read_name<'a>(c: &mut Cursor<'a>) -> Result<&'a str, Fault> {
-    let name = read_str(c)?;
-    if name.is_empty() || name.contains(',') {
-        return Err(Fault::Corrupt);
-    }
-    Ok(name)
 }
 
 pub(super) fn delivery(r: &Request, out: &Out, objects: u64) -> Result<[u64; 3], Fault> {

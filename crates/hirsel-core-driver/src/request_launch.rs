@@ -33,6 +33,20 @@ pub(super) mod dev;
 #[path = "dry_run.rs"]
 pub(super) mod dry_run;
 
+pub(super) fn report_request_error(error: &(dyn std::error::Error + 'static)) -> i32 {
+    if let Some(damage) = error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::get_ref)
+        .and_then(|inner| inner.downcast_ref::<crate::tape_cli::ReplayDamage>())
+    {
+        eprintln!("{damage}");
+        1
+    } else {
+        eprintln!("hirsel: {error}");
+        2
+    }
+}
+
 /// End a request with `outcome`. A one-shot process exits here, running the
 /// program first for a launch: the in-memory graphs are the OS's to reclaim,
 /// with no teardown. A resident compiler answers its client here, before the

@@ -116,6 +116,15 @@ unsafe extern "C" fn describe(state: *mut u8, cause: *const Cause) -> View {
     }
 }
 fn refused(run: &mut Run, error: OpenError) -> u8 {
+    if run.mode != 0
+        && let OpenError::Refused(Refusal::Damaged(block)) = error
+    {
+        let line = format!("replay: Damaged at block {block}\n");
+        // SAFETY: stderr is borrowed for this diagnostic.
+        unsafe { crate::os::diagnostic(run.stderr, line.as_ptr(), line.len()) };
+        run.stop = Some(1);
+        return 1;
+    }
     let reason = match error {
         OpenError::Refused(Refusal::Code) => "code".to_owned(),
         OpenError::Refused(Refusal::Revision) => "revision".to_owned(),

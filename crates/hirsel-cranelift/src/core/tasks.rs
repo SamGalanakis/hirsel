@@ -352,6 +352,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::CallWord
                     | HostOp::CallSecret
                     | HostOp::CallPayload
+                    | HostOp::CallPayloadPrefix
                     | HostOp::PortReply
                     | HostOp::ProvideDir
                     | HostOp::ProvideNet

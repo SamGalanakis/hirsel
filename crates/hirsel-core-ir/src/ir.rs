@@ -1401,16 +1401,13 @@ impl RtOp {
                     HostOp::DatagramOpen => (vec![V(u64_)], outcome),
                     HostOp::DatagramBind => (vec![V(u64_), V(p), V(p)], outcome),
                     HostOp::DatagramConnect => (vec![V(u64_), V(p), V(p)], outcome),
-                    HostOp::DatagramSend => {
+                    HostOp::DatagramSend | HostOp::DatagramRecv => {
                         (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
                     }
                     HostOp::DatagramSendTo => (
                         vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
                         outcome,
                     ),
-                    HostOp::DatagramRecv => {
-                        (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
-                    }
                     HostOp::NetNarrowUnix => (vec![V(u64_), V(u8_), V(p), V(p)], outcome),
                     HostOp::SendPair => {
                         (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
@@ -1513,6 +1510,7 @@ impl RtOp {
                         (vec![V(u64_), V(u64_)], outcome)
                     }
                     HostOp::CallPayload => (vec![V(u64_), V(u64_), V(p)], outcome),
+                    HostOp::CallPayloadPrefix => (vec![V(u64_), V(u64_), V(u64_), V(p)], outcome),
                     HostOp::PortReply => (vec![V(u64_); 9], outcome),
                     HostOp::PortFill => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {

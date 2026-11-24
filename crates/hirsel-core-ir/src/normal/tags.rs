@@ -494,6 +494,7 @@ tags!(HostOp {
     122 => CredFetch,
     123 => LocalAddr,
     124 => PeerAddr,
+    125 => CallPayloadPrefix,
 });
 
 tags!(RaiseCause {

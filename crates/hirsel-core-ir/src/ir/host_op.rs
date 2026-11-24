@@ -101,6 +101,7 @@ pub enum HostOp {
     NetNarrowUnix = hirsel_core_ids::host_op::NET_NARROW_UNIX as isize,
     /// Wait until the clock's wall time reaches an absolute millisecond reading.
     SleepUntilWall = hirsel_core_ids::host_op::SLEEP_UNTIL_WALL as isize,
+    CallPayloadPrefix = hirsel_core_ids::host_op::CALL_PAYLOAD_PREFIX as isize,
 }
 
 impl HostOp {
@@ -206,6 +207,7 @@ impl HostOp {
         HostOp::ExecWait,
         HostOp::ExecSignal,
         HostOp::CallPayload,
+        HostOp::CallPayloadPrefix,
         HostOp::PortReply,
         HostOp::ProvideDir,
         HostOp::PortFill,
@@ -313,6 +315,7 @@ impl HostOp {
             HostOp::ExecWait => "exec_wait",
             HostOp::ExecSignal => "exec_signal",
             HostOp::CallPayload => "call_payload",
+            HostOp::CallPayloadPrefix => "call_payload_prefix",
             HostOp::PortReply => "port_reply",
             HostOp::ProvideDir => "provide_dir",
             HostOp::ProvideNet => "provide_net",
@@ -384,6 +387,7 @@ impl HostOp {
             Self::ExecWait => "hirsel_core_exec_wait",
             Self::ExecSignal => "hirsel_core_exec_signal",
             Self::CallPayload => "hirsel_core_call_payload",
+            Self::CallPayloadPrefix => "hirsel_core_call_payload_prefix",
             Self::PortReply => "hirsel_core_port_reply",
             Self::ProvideDir => "hirsel_core_provide_dir",
             Self::ProvideNet => "hirsel_core_provide_net",

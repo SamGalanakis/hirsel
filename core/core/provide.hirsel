@@ -26,6 +26,10 @@ pub fn next[Op](mut s: Served[Op]) -> Option[Call[Op]] waits
 
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
 
+// Append at most max bytes of the field and return the number of bytes omitted.
+// A settled call appends nothing and returns zero.
+pub fn payload_prefix[Op](c: Call[Op], field: u64, max: u64, mut out: Bytes) -> u64
+
 // A SendSecret call's Secret at index `i` of its `secrets`, narrowed to the
 // stream's verified name: a new designation charged as `secret.narrow`
 // (TLS-5). Never its bytes; any other call, or an index past `secrets`,

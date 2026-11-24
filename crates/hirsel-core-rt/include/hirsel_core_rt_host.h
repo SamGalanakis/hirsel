@@ -299,6 +299,7 @@ HirselCoreHostOutcome hirsel_core_port_next(HirselCoreContext *, uint64_t served
 HirselCoreHostOutcome hirsel_core_call_word(HirselCoreContext *, uint64_t call, uint64_t i, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_secret(HirselCoreContext *, uint64_t call, uint64_t index, uint64_t);
 HirselCoreHostOutcome hirsel_core_call_payload(HirselCoreContext *, uint64_t call, uint64_t field, HirselCoreBuffer *out, uint64_t);
+HirselCoreHostOutcome hirsel_core_call_payload_prefix(HirselCoreContext *, uint64_t call, uint64_t field, uint64_t max, HirselCoreBuffer *out, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_reply(HirselCoreContext *, uint64_t served, uint64_t call, uint64_t tag, uint64_t w0, uint64_t w1, uint64_t w2, uint64_t w3, uint64_t w4, uint64_t w5, uint64_t);
 HirselCoreHostOutcome hirsel_core_port_fill(HirselCoreContext *, uint64_t served, uint64_t call, const HirselCoreBuffer *bytes, uint64_t);
 HirselCoreHostOutcome hirsel_core_provide_dir(HirselCoreContext *, uint64_t n, uint64_t);

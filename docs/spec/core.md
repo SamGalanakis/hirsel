@@ -912,6 +912,7 @@ pub fn dir_op(c: Call[DirOp]) -> DirOp
 pub fn net_op(c: Call[NetOp]) -> NetOp
 pub fn stream_op(c: Call[StreamOp]) -> StreamOp
 pub fn payload[Op](c: Call[Op], field: u64, mut out: Bytes)
+pub fn payload_prefix[Op](c: Call[Op], field: u64, max: u64, mut out: Bytes) -> u64
 pub fn fill[Op](mut s: Served[Op], mut c: Call[Op], b: Bytes) -> u64
 pub fn secret(c: Call[NetOp], i: u64) -> Secret
 pub fn reply[Op](mut s: Served[Op], take c: Call[Op], take r: Reply[Op]) -> Result[(), Withdrawn]
@@ -936,8 +937,11 @@ pub fn trigger(take t: StopTrigger)
   first queued call, and `provide.dir_op`, `net_op` and `stream_op` read its `Op`, which holds
   only scalars: a path, name or data field is its byte length, which `provide.payload(c,
   field, mut out)` appends to `out` (fields numbered from 0 in declaration order;
-  `Bounds` when `out`'s spare capacity is short), and `room` is the spare capacity the
-  caller offers for a result. `provide.fill` stages result bytes in the room, at most the
+  `Bounds` when `out`'s spare capacity is short). `provide.payload_prefix` appends only the
+  first `max` bytes and returns the number of bytes omitted. It checks spare capacity
+  against the bytes to append. A settled call supplies no bytes and returns zero.
+  The `room` field is the spare capacity the caller offers for a result.
+  `provide.fill` stages result bytes in the room, at most the
   call's `room`, and returns how many it took. No caller storage reaches the server, and
   no server storage reaches the caller until the reply.
 - **Handles.** Ids name the server's own objects: 0 is the capability `provide` returned,

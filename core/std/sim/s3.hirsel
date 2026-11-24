@@ -967,9 +967,9 @@ fn send(config: Config, mut peer: Peer, prefix: u64, tail: u64, mut served: Serv
         return
     }
     let mut data: Bytes = list.with_capacity(prefix + tail)
-    provide.payload(call, 1, mut data)
-    provide.payload(call, 2, mut data)
-    if list.len(data) != prefix + tail {
+    let prefix_omitted = provide.payload_prefix(call, 1, config.fragment_bytes, mut data)
+    let tail_omitted = provide.payload_prefix(call, 2, config.fragment_bytes, mut data)
+    if list.len(data) + prefix_omitted + tail_omitted != prefix + tail {
         let _ = answer(mut served, take call, Failed(Aborted))
         return
     }

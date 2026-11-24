@@ -111,6 +111,7 @@ host_ops! {
     NET_NARROW_UNIX = 115,
     LOCAL_ADDR = 116,
     PEER_ADDR = 117,
+    CALL_PAYLOAD_PREFIX = 118,
 }
 
 /// A bit of the guest's Dir designation. Providers and tapes use only the underlying handle.

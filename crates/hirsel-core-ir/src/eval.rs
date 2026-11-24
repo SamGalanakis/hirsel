@@ -13,6 +13,7 @@
 mod conn;
 mod launch;
 mod map;
+mod provide;
 mod simd;
 
 pub use map::run_map_hash;
@@ -3231,21 +3232,9 @@ impl Machine<'_> {
                 let key = self.designate(secret, (payer.clone(), charge));
                 ok(key, 0)
             }
-            HostOp::CallPayload => {
-                let (c, id) = Self::call_of(a[0]);
-                let (calls, ..) = self.world.cells[c].port();
-                let call = &calls[&id];
-                if call.finished || call.answer.is_some() {
-                    return Some(Ok(ok(0, 0)));
-                }
-                let bytes = call.fields.get(a[1] as usize).cloned().unwrap_or_default();
-                let (_, data, len, cap) = self.carrier(a[2]);
-                if cap.saturating_sub(len) < bytes.len() as u64 {
-                    return Some(Err(Stop::Cause("Bounds")));
-                }
-                self.put(data + len, &bytes);
-                self.store(a[2] + 8, 8, len + bytes.len() as u64);
-                ok(0, bytes.len() as u64)
+            HostOp::CallPayload => return Some(self.read_call_payload(a[0], a[1], u64::MAX, a[2])),
+            HostOp::CallPayloadPrefix => {
+                return Some(self.read_call_payload(a[0], a[1], a[2], a[3]));
             }
             HostOp::PortFill => {
                 // Stage reply bytes in the room, at most the call's offer; a
@@ -4866,6 +4855,7 @@ impl Machine<'_> {
             | HostOp::CallWord
             | HostOp::CallSecret
             | HostOp::CallPayload
+            | HostOp::CallPayloadPrefix
             | HostOp::PortReply
             | HostOp::ProvideDir
             | HostOp::ProvideNet

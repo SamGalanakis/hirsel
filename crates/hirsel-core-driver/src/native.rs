@@ -1724,34 +1724,37 @@ fn link_objects(
         let recapture = || {
             let recipe = crate::tool_inputs::recapture_link_recipe(&options.link, &options.target)
                 .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
-            if assembly.is_some() && recipe.identity != expected_link {
-                return Err(NativeStop::Link(
-                    "link inputs changed during recipe assembly".into(),
-                ));
+            if recipe.identity != expected_link {
+                let reason = if assembly.is_some() {
+                    "link inputs changed during recipe assembly".into()
+                } else {
+                    "link inputs changed during native build".into()
+                };
+                return Err(NativeStop::Link(reason));
             }
             if closed_image && !recipe.uses_hirsel_launcher(&options.link) {
                 return Err(NativeStop::Link(
                     "direct link refused: process entry inputs changed".into(),
                 ));
             }
+            let missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
+            if !missing.is_empty() {
+                return Err(NativeStop::Link(format!(
+                    "direct link refused: missing recipe inputs: {}",
+                    missing
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
             Ok(recipe)
         };
-        let mut recipe = recipe;
-        let mut missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
-        if !missing.is_empty() {
-            recipe = recapture()?;
-            missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
-        }
-        if !missing.is_empty() {
-            return Err(NativeStop::Link(format!(
-                "direct link refused: missing recipe inputs: {}",
-                missing
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        }
+        let recipe = if crate::tool_inputs::missing_recipe_inputs(&recipe).is_empty() {
+            recipe
+        } else {
+            recapture()?
+        };
         // The image objects are linked as their unit, prelinked here when no
         // unit is stored under their key; the rest are linked one by one.
         #[cfg(test)]
@@ -1914,19 +1917,7 @@ fn link_objects(
                 if missing.is_empty() {
                     return Err(first);
                 }
-                let refreshed = recapture()?;
-                let remaining = crate::tool_inputs::missing_recipe_inputs(&refreshed);
-                if !remaining.is_empty() {
-                    return Err(NativeStop::Link(format!(
-                        "direct link refused: missing recipe inputs: {}",
-                        remaining
-                            .iter()
-                            .map(|path| path.display().to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )));
-                }
-                link(&refreshed)?
+                link(&recapture()?)?
             }
         };
         counters.link_patched = u64::from(patched.get());

@@ -149,16 +149,17 @@ impl FunctionEmitter<'_> {
         (fits, available)
     }
     pub(super) fn admit_balance(&mut self, payer: &Value, charge: &Value, available: &Value) {
+        self.debit_room(payer, charge, available);
         let outstanding = self.load_native(payer, LIMIT_OUTSTANDING, Type::I64);
         let used = self.bin(Binary::Add, &Type::I64, &outstanding, charge);
         self.store_native(payer, LIMIT_OUTSTANDING, Type::I64, &used);
-        self.admit_room(payer, charge, available);
+        self.observe_admission();
     }
-    /// Take `charge` from the payer's room only. Frame charges pin no record
-    /// (`Payer::admit_frame`), so they leave `outstanding` alone.
-    fn admit_room(&mut self, payer: &Value, charge: &Value, available: &Value) {
+    fn debit_room(&mut self, payer: &Value, charge: &Value, available: &Value) {
         let left = self.bin(Binary::Sub, &Type::I64, available, charge);
         self.store_native(payer, LIMIT_AVAILABLE, Type::I64, &left);
+    }
+    fn observe_admission(&mut self) {
         if self.observe_charge {
             self.cold_void("hirsel_core_observe_charge", &[]);
         }
@@ -324,7 +325,8 @@ impl FunctionEmitter<'_> {
         let fits = self.cmp(Predicate::Ult, &i64, &last, &available);
         self.likely(&fits, if self.test_hooks { slow } else { debit }, slow);
         self.block(debit);
-        self.admit_room(&payer, charge, &available);
+        self.debit_room(&payer, charge, &available);
+        self.observe_admission();
         self.br(done);
         self.block(slow);
         let (admitted, room) = self.allocation_cold(

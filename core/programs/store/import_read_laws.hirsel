@@ -86,7 +86,8 @@ fn prepared_imports_match(a: ValidatedImport, b: ValidatedImport) -> bool {
     left == right && a.digest == b.digest && a.charge == b.charge && list.len(a.delta) == 0 && list.len(b.delta) == 0 && list.len(a.ranges) == 0 && list.len(b.ranges) == 0
 }
 
-// R1: a refused admission in a read raises Capacity. The reads wait, so a child
+// R1: a refused admission in shared read code raises Capacity; Store disk reads
+// return theirs as values (d6b92dd2). The reads wait, so a child
 // task (FAIL-14), not isolate, is the boundary that observes the refusal; the
 // bound inside the child keeps each read's limit exact.
 type LawRead[R] = ReadReturned(R) | ReadRaised(Capacity) | ReadLost
@@ -214,9 +215,11 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     let mut fixture: Bytes = list.with_capacity(217)
     list.fill(mut fixture, 217, 0u8)
     result.unwrap(std.file.write(d, "EXPORT", list.slice(fixture, 0, 1)))
+    // d6b92dd2 made Store disk reads return their refusals (L85), so the short
+    // read's 8-byte admission comes back as a value on the scratch side.
     let short_export = joined_read(tasks, ExportRead(d: d, c: c, limit: 216), law_export_read)
     match take short_export {
-        ReadRaised(admission) => if admission.requested != 8 || admission.available != 0 {
+        ReadReturned(Some(Scratch(Full(Allocation(admission))))) => if admission.requested != 8 || admission.available != 0 {
             return false
         },
         _ => return false,

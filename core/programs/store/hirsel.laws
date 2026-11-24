@@ -46,7 +46,7 @@ store@1/store/disk_test_db_refusal src=95d1b4ad752de8cf sig=e2543e436001b32a run
 store@1/store/disk_test_format4 src=734498598c596323 sig=4cb3887073e93671 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_format_cutover src=263763c316c068c6 sig=d5fcd0025c844679 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_frames src=564272578f42507f sig=177851b951c67adc run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/disk_test_import_read_boundaries src=d0d30f33980cec74 sig=21db0ae3126ee5ef run=a6b003f729117be3 bug=- oracle=- rows=pending
+store@1/store/disk_test_import_read_boundaries src=67907c31c0ee46fc sig=21db0ae3126ee5ef run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/disk_test_load_path_layout src=b2e54b0228149e6f sig=c263428c50c2d2fc run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_location_relocations src=3acebeb09803944e sig=4ce87a1de9eb8371 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_migrate src=07a4e779db302b67 sig=b1cfce38672abffd run=ea720f3846592392 bug=- oracle=- rows=pending

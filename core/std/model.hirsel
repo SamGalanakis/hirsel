@@ -674,3 +674,205 @@ pub fn replay[S: key, A](m: Model[S, A], b: Bounds, text: String) -> Replayed {
     }
     NoLongerFails
 }
+
+pub type Boundary[S: key, A, L: key, O: key] {
+    label: own fn(A) -> L,
+    observe: own fn(S, A, S) -> Option[O],
+    show: own fn(L, O, mut String)
+}
+
+pub type Seen[L: key, O: key] {
+    hint: L,
+    seen: O
+}
+
+pub type Reason[L: key] = NoTransition | HintMismatch(L)
+
+pub type Conformance[L: key] = Conforms(u64, u64) | Diverged(u64, u64, Reason[L]) | Incomplete(u64, Limit)
+
+type Compatible[S: key] {
+    states: StateSet[S],
+    depths: List[u64]
+}
+
+fn compatible[S: key]() -> Compatible[S] {
+    Compatible(states: state_set(), depths: list.new())
+}
+
+fn admit[S: key](mut c: Compatible[S], init: List[S], b: Bounds, take state: S, distance: u64) -> Result[(), Limit] {
+    if seen_state(c.states, init, state) {
+        return Ok(())
+    }
+    if distance > b.depth {
+        return Error(Depth)
+    }
+    if list.len(c.depths) == b.states {
+        return Error(States)
+    }
+    set.insert(mut c.states.reached, take state)
+    list.push(mut c.depths, distance)
+    Ok(())
+}
+
+fn boundary_result[T](take checked: Result[T, HandlerError]) -> T {
+    match take checked {
+        Ok(take value) => take value,
+        Error(take error) => {
+            let mut text = string.from("model: conforms: ")
+            string.push(mut text, error.cause)
+            string.push(mut text, " in ")
+            string.push(mut text, error.name)
+            fail(take text)
+        },
+    }
+}
+
+fn observe[S: key, A, L: key, O: key](v: Boundary[S, A, L, O], b: Bounds, prev: S, action: A, next: S) -> Option[O] {
+    boundary_result(bounded(b, "observe", scoped fn() -> Option[O] {
+        v.observe(prev, action, next)
+    }))
+}
+
+fn close[S: key, A, L: key, O: key](m: Model[S, A], b: Bounds, v: Boundary[S, A, L, O], mut c: Compatible[S]) -> Result[(), Limit] {
+    let mut i: u64 = 0
+    while i < list.len(c.depths) {
+        let actions = with_state(c.states, m.init, i, scoped fn(state: S) -> List[A] {
+            boundary_result(enabled(m, b, state))
+        })
+        let distance = c.depths[i] + 1
+        for action in actions {
+            let internal = with_state(c.states, m.init, i, scoped fn(state: S) -> Option[S] {
+                let next = boundary_result(advance(m, b, state, action))
+                if let None = observe(v, b, state, action, next) {
+                    return Some(take next)
+                }
+                None
+            })
+            if let Some(take next) = take internal {
+                admit(mut c, m.init, b, take next, distance)?
+            }
+        }
+        i += 1
+    }
+    Ok(())
+}
+
+fn trace_step[S: key, A, L: key, O: key](m: Model[S, A], b: Bounds, v: Boundary[S, A, L, O], c: Compatible[S], entry: Seen[L, O], mut next_set: Compatible[S]) -> Result[Reason[L], Limit] {
+    let mut reason: Reason[L] = NoTransition
+    for i in 0 .. list.len(c.depths) {
+        with_state(c.states, m.init, i, scoped fn(state: S) -> Result[(), Limit] {
+            let actions = boundary_result(enabled(m, b, state))
+            for action in actions {
+                let next = boundary_result(advance(m, b, state, action))
+                if let Some(seen) = observe(v, b, state, action, next) {
+                    if seen == entry.seen {
+                        let label = boundary_result(bounded(b, "label", scoped fn() -> L {
+                            v.label(action)
+                        }))
+                        if label == entry.hint {
+                            admit(mut next_set, m.init, b, take next, 0)?
+                        } else if let NoTransition = reason {
+                            reason = HintMismatch(take label)
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?
+    }
+    Ok(take reason)
+}
+
+pub fn conforms[S: key, A, L: key, O: key](m: Model[S, A], b: Bounds, v: Boundary[S, A, L, O], trace: List[Seen[L, O]]) -> Conformance[L] {
+    validate(m)
+    let mut current: Compatible[S] = compatible()
+    for root in 0 .. list.len(m.init) {
+        if seen_initial(current.states, m.init, m.init[root]) {
+            continue
+        }
+        if list.len(current.depths) == b.states {
+            return Incomplete(0, States)
+        }
+        list.push(mut current.states.initial, root)
+        list.push(mut current.depths, 0u64)
+    }
+    if let Error(limit) = close(m, b, v, mut current) {
+        return Incomplete(0, limit)
+    }
+    let mut widest = list.len(current.depths)
+    let mut i: u64 = 0
+    for entry in trace {
+        let mut next: Compatible[S] = compatible()
+        let stepped = trace_step(m, b, v, current, entry, mut next)
+        let reason = match take stepped {
+            Ok(take reason) => take reason,
+            Error(limit) => return Incomplete(i, limit),
+        }
+        if list.len(next.depths) == 0 {
+            return Diverged(i, list.len(current.depths), take reason)
+        }
+        if let Error(limit) = close(m, b, v, mut next) {
+            return Incomplete(i, limit)
+        }
+        widest = order.max(widest, list.len(next.depths))
+        current = take next
+        i += 1
+    }
+    Conforms(i, widest)
+}
+
+fn display_seen[S: key, A, L: key, O: key](v: Boundary[S, A, L, O], b: Bounds, hint: L, seen: O) -> String {
+    boundary_result(bounded(b, "show", scoped fn() -> String {
+        let mut text = string.new()
+        v.show(hint, seen, mut text)
+        take text
+    }))
+}
+
+pub fn conforms_check[S: key, A, L: key, O: key](m: Model[S, A], b: Bounds, v: Boundary[S, A, L, O], trace: List[Seen[L, O]]) -> Result[(), ()] {
+    let verdict = conforms(m, b, v, trace)
+    match verdict {
+        Conforms(_, _) => Ok(()),
+        Diverged(i, width, reason) => {
+            let entry = view trace[i]
+            let mut out = string.from("model: conforms: diverged at entry ")
+            string.push_u64(mut out, i)
+            string.push(mut out, " of ")
+            string.push_u64(mut out, list.len(trace))
+            string.push(mut out, " (")
+            string.push(mut out, display_seen(v, b, entry.hint, entry.seen))
+            string.push(mut out, "): ")
+            match reason {
+                NoTransition => string.push(mut out, "no transition"),
+                HintMismatch(hint) => {
+                    string.push(mut out, "observation fits only under hint ")
+                    string.push(mut out, display_seen(v, b, hint, entry.seen))
+                },
+            }
+            string.push(mut out, "; ")
+            string.push_u64(mut out, width)
+            string.push(mut out, if width == 1 {
+                " compatible state before it"
+            } else {
+                " compatible states before it"
+            })
+            fail(take out)
+        },
+        Incomplete(i, limit) => {
+            let mut out = string.from("model: conforms: incomplete at entry ")
+            string.push_u64(mut out, i)
+            string.push(mut out, ": more than ")
+            match limit {
+                States => {
+                    string.push_u64(mut out, b.states)
+                    string.push(mut out, " compatible states")
+                },
+                Depth => {
+                    string.push_u64(mut out, b.depth)
+                    string.push(mut out, " internal steps")
+                },
+            }
+            fail(take out)
+        },
+    }
+}

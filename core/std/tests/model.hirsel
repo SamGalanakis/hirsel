@@ -318,3 +318,167 @@ fn replay_malformed() -> bool {
     }
     false
 }
+
+type Pipe: key {
+    sent: u64,
+    outbox: u64,
+    wire: u64,
+    got: u64
+}
+
+type PipeAction: key = StartPipe | SendPipe | Ship | Recv
+
+fn pipe_step(state: Pipe, action: PipeAction) -> Pipe {
+    let mut next = state
+    match action {
+        StartPipe => {},
+        SendPipe => {
+            next.sent += 1
+            next.outbox += 1
+        },
+        Ship => {
+            next.outbox -= 1
+            next.wire += 1
+        },
+        Recv => {
+            next.wire -= 1
+            next.got += 1
+        },
+    }
+    next
+}
+
+fn pipe() -> model.Model[Pipe, PipeAction] {
+    let mut init: List[Pipe] = list.new()
+    list.push(mut init, Pipe(sent: 0, outbox: 0, wire: 0, got: 0))
+    let mut sometimes: List[model.Sometimes[Pipe]] = list.new()
+    list.push(mut sometimes, model.Sometimes(label: string.from("both"), holds: fn(s: Pipe) -> bool {
+        s.got == 2
+    }))
+    model.Model(
+        init: take init,
+        start: StartPipe,
+        actions: fn(s: Pipe, mut out: List[PipeAction]) {
+            if s.sent < 2 {
+                list.push(mut out, SendPipe)
+            }
+            if s.outbox > 0 {
+                list.push(mut out, Ship)
+            }
+            if s.wire > 0 {
+                list.push(mut out, Recv)
+            }
+        },
+        step: pipe_step,
+        done: fn(s: Pipe) -> bool {
+            s.got == 2
+        },
+        always: list.new(),
+        sometimes: take sometimes,
+        show: fn(action: PipeAction, mut out: String) {
+            string.push(mut out, pipe_label(action))
+        },
+    )
+}
+
+fn pipe_label(action: PipeAction) -> String {
+    match action {
+        StartPipe => string.from("start"),
+        SendPipe => string.from("send"),
+        Ship => string.from("ship"),
+        Recv => string.from("recv"),
+    }
+}
+
+fn pipe_boundary() -> model.Boundary[Pipe, PipeAction, PipeAction, u64] {
+    model.Boundary(
+        label: fn(action: PipeAction) -> PipeAction {
+            action
+        },
+        observe: fn(prev: Pipe, action: PipeAction, next: Pipe) -> Option[u64] {
+            match action {
+                SendPipe => Some(next.sent),
+                Recv => Some(next.got),
+                _ => None,
+            }
+        },
+        show: fn(hint: PipeAction, seen: u64, mut out: String) {
+            string.push(mut out, pipe_label(hint))
+            string.push(mut out, " ")
+            string.push_u64(mut out, seen)
+        },
+    )
+}
+
+fn observe_pipe(mut trace: List[model.Seen[PipeAction, u64]], hint: PipeAction, seen: u64) {
+    list.push(mut trace, model.Seen(hint: hint, seen: seen))
+}
+
+fn pipe_trace() -> List[model.Seen[PipeAction, u64]] {
+    let mut trace: List[model.Seen[PipeAction, u64]] = list.new()
+    observe_pipe(mut trace, SendPipe, 1)
+    observe_pipe(mut trace, SendPipe, 2)
+    observe_pipe(mut trace, Recv, 1)
+    observe_pipe(mut trace, Recv, 2)
+    take trace
+}
+
+// T1
+// expect: run conforms_pipe() = true
+fn conforms_pipe() -> bool {
+    if let Conforms(4, 3) = model.conforms(pipe(), model_bounds(), pipe_boundary(), pipe_trace()) {
+        return true
+    }
+    false
+}
+
+fn impossible_pipe_trace() -> List[model.Seen[PipeAction, u64]] {
+    let mut trace: List[model.Seen[PipeAction, u64]] = list.new()
+    observe_pipe(mut trace, SendPipe, 1)
+    observe_pipe(mut trace, Recv, 1)
+    observe_pipe(mut trace, Recv, 3)
+    take trace
+}
+
+// T2
+// expect: run conforms_impossible_prefix() = true
+fn conforms_impossible_prefix() -> bool {
+    let Diverged(2, 1, NoTransition) = model.conforms(pipe(), model_bounds(), pipe_boundary(), impossible_pipe_trace()) else {
+        return false
+    }
+    let run = isolate(fn() {
+        let _ = model.conforms_check(pipe(), model_bounds(), pipe_boundary(), impossible_pipe_trace())
+    })
+    let Error(causes) = result.unwrap(take run) else {
+        return false
+    }
+    for cause in causes {
+        if let Fail(message) = cause.kind {
+            return message == "model: conforms: diverged at entry 2 of 3 (recv 3): no transition; 1 compatible state before it"
+        }
+    }
+    false
+}
+
+// T3
+// expect: run conforms_checks_label() = true
+fn conforms_checks_label() -> bool {
+    let mut trace: List[model.Seen[PipeAction, u64]] = list.new()
+    observe_pipe(mut trace, SendPipe, 1)
+    observe_pipe(mut trace, SendPipe, 1)
+    if let Diverged(1, 2, HintMismatch(Recv)) = model.conforms(pipe(), model_bounds(), pipe_boundary(), trace) {
+        return true
+    }
+    false
+}
+
+// T4
+// expect: run conforms_states_cap() = true
+fn conforms_states_cap() -> bool {
+    let mut b = model_bounds()
+    b.states = 2
+    if let Incomplete(1, States) = model.conforms(pipe(), b, pipe_boundary(), pipe_trace()) {
+        return true
+    }
+    false
+}

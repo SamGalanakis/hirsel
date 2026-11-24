@@ -1,6 +1,6 @@
 # Model
 
-[API overview](../API.md). Verification Phases 1.4 and 1.5. The Bag, explorer, and replay are implemented.
+[API overview](../API.md). Verification Phases 1.4 and 1.5.
 The build list is
 `hirsel-briefs/verify-phase-spec-2034/BUILD-ITEMS.md`.
 
@@ -9,6 +9,8 @@ Version note (2026-11-24, verify-phase-spec-2034): first text. This document spe
 the same `Model` value. It follows the ratified 1.4 plan (BFS over whole states, `always`
 plus required counted `sometimes`, `closed` versus `to depth k`), the 2026-11-24
 shortlist amendments (VP5, VP8, VP9), and R28 and R29.
+
+Version note (verify-model-2038): T2 ends with `(Recv,3)`.
 
 `std.model` checks a pure reducer. It explores every state that a finite transition
 relation can reach and checks the model's laws on every transition. It is ordinary
@@ -285,7 +287,7 @@ failure does in `std.prop`.
 `conforms_check` returns `Ok(())` on `Conforms`. Otherwise it raises one line:
 
 ```text
-model: conforms: diverged at entry 2 of 3 (recv 2): no transition; 1 compatible state before it
+model: conforms: diverged at entry 2 of 3 (recv 3): no transition; 1 compatible state before it
 model: conforms: diverged at entry 1 of 2 (send 1): observation fits only under hint recv
 model: conforms: incomplete at entry 4: more than 64 compatible states
 ```
@@ -379,10 +381,11 @@ The result is `Conforms(4, 3)`. Without the stuttering closure, the set after
 `(Send,1)` would be {(1,1,0,0)} and the set after `(Send,2)` would be {(2,2,0,0)}. Its
 wire is empty, so `(Recv,1)` would diverge.
 
-**The trace `[(Send,1), (Recv,1), (Recv,2)]` diverges.**
+**The trace `[(Send,1), (Recv,1), (Recv,3)]` diverges.**
 
 - After `(Recv,1)` the set is {(1,0,0,1)}.
-- No state has `wire > 0`, so `(Recv,2)` is impossible.
+- The only enabled action in `(1,0,0,1)` is `Send`, which emits 2, so no action under
+  any label emits 3 and the reason is `NoTransition`.
 - The result is `Diverged(2, 1, NoTransition)`, and the first impossible observable
   prefix is all three entries.
 
@@ -426,6 +429,6 @@ Phase 1.5 adds three entries:
 | # | Trace | Expected | Bug it catches |
 |---|---|---|---|
 | T1 | the conforming pipe trace | `Conforms(4, 3)` | no stuttering closure (diverges at entry 2) |
-| T2 | the impossible `(Recv,2)` | `Diverged(2, 1, NoTransition)` | a final-state-only check, or a label taken as proof |
+| T2 | the impossible `(Recv,3)` | `Diverged(2, 1, NoTransition)` | a final-state-only check, or a label taken as proof |
 | T3 | the mislabeled `(Send,1)` | `Diverged(1, 2, HintMismatch(Recv))` | hints ignored, or hints trusted over observations |
 | T4 | the conforming trace with `Bounds.states = 2` | `Incomplete(1, States)`: closing after `(Send,2)` reaches a third state | a cap reported as `Conforms` or `Diverged` |

@@ -482,7 +482,6 @@ pub opaque type Relay
 
 pub const HEADROOM: u64 = 48
 pub fn relay_defaults(realm: Bytes) -> RelayConfig
-pub fn default_deny() -> List[Prefix]
 pub fn relay(c: RelayConfig, rnd: Random, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError]
 pub fn from_client(mut r: Relay, now: Now, rnd: Random, o: Origin, mut packet: Bytes, mut out: Bytes) -> Result[Out, TurnError]
 pub fn from_peer(mut r: Relay, now: Now, relayed: Addr, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[Out, TurnError]
@@ -587,17 +586,21 @@ address the policy admits, so the policy bounds where bytes go; a rate belongs t
 caller's socket layer, where it can count every path alike. Reversible: a per-allocation
 token bucket fits TURN-7's paths without changing a signature other than `RelayConfig`.
 
-**The peer policy.** An address is denied when a `deny` prefix contains it, or its IP is in
-`local`, and no `allow` entry covers it and its port; an IPv4-mapped IPv6 address is checked
-as IPv4. `local` is the relay host's own addresses: the caller lists every address
+**The peer policy.** An address is denied when its class is not `Public`
+([NET-18](net.md#net-18-public-only-connects)'s table, through `net.class`), a `deny` prefix
+contains it, or its IP is in `local`, and no `allow` entry covers it and its port. The
+table is the one a `public` Net rule uses, so an IPv4-mapped, NAT64, 6to4 or Teredo
+address is judged by the IPv4 address inside it. `local` is the relay host's own addresses: the caller lists every address
 assigned to the host, and `relay` adds every pool IP. Without it a client could send UDP from the
 relay to any service on the relay's own public addresses, its pool or its TURN port, and
 the host would deliver it locally past its firewall. The check is made on the full address
 in CreatePermission, ChannelBind, Send, ChannelData and `from_peer`, so a datagram from an
-uncovered port of an admitted IP is discarded. `default_deny`
-is LiveKit's list (`/tmp/ref-livekit` at `d210b4d`, `pkg/service/turnrelay.go`): loopback,
-link-local unicast and multicast, multicast, private (10/8, 172.16/12, 192.168/16, fc00::/7),
-unspecified, 0/8, 100.64/10, 198.18/15, 240/4, 64:ff9b::/96 and 64:ff9b:1::/48. A
+uncovered port of an admitted IP is discarded. `deny` holds only the operator's additions
+and is empty by default. Against LiveKit's list (`/tmp/ref-livekit` at `d210b4d`,
+`pkg/service/turnrelay.go`), which this policy used before, the table also denies the
+documentation ranges, `192.0.0.0/24`, `192.88.99.0/24`, `2001::/23` and private IPv4 inside
+6to4 and Teredo, and it admits a public IPv4 inside `64:ff9b::/96`. `64:ff9b:1::/48` and
+`198.18.0.0/15` stay denied. A
 co-located SFU's own address and media ports go in `allow` (TURN-8). A relay that serves
 only one set of media addresses sets `deny` to `0.0.0.0/0` and `::/0` and lists those
 addresses and their media ports in `allow`, so it relays to nothing else (slice U8).
@@ -711,7 +714,7 @@ Goose (`/tmp/ref-goose` at `d5ae5bb`), LiveKit (`/tmp/ref-livekit` at `d210b4d`)
 | Any STUN, TURN, socket or crypto surface | Goose: no network or cryptography modules in its standard library | NOT TAKEN: nothing to take |
 | ICE/TCP and TURN/TLS both, chosen by RTT | LiveKit `pkg/rtc/transportmanager_test.go:52-53`, `TCPFallbackRTTThreshold` | REPLACED by one fallback, TURN over a stream (TURN-2) |
 | Embedded relay limited to the node's media ports | LiveKit `pkg/service/turnrelay.go` | ADAPTED: `allow` entries in a generic policy |
-| Restricted peer ranges | LiveKit `pkg/service/turnrelay.go` (`isRestrictedPeerIP`) | ADOPTED as `default_deny` |
+| Restricted peer ranges | LiveKit `pkg/service/turnrelay.go` (`isRestrictedPeerIP`) | REPLACED by NET-18's shared address-class table |
 | TCP relays rejected | LiveKit `pkg/service/turnrelay.go:67` | ADOPTED as 442 |
 | 12 allocations per user | LiveKit `pkg/config/config.go:74`, `pkg/service/turn.go:119` | ADOPTED as the `quota` default |
 | PROXY protocol behind an external TLS front, trusted CIDRs | LiveKit `pkg/service/turn.go:236` (`ExternalTLS`, `ProxyProtocol`) | ADAPTED as H1 and slice U6 |
@@ -799,14 +802,15 @@ not re-pinned; U0 must leave it green.
   number to a second peer and a peer to a second number; ChannelData on 0x5000 and on an
   unbound number; a peer datagram once bound. *Oracle:* RFC 8656 §11 and §12 by hand,
   including ChannelData (not a Data indication) after the bind.
-- **`peer_policy`** (U4). *Scenario:* one CreatePermission per `default_deny` prefix, its
-  first and last address, the IPv4-mapped form, and an `allow` entry for 10.0.0.5 ports
+- **`peer_policy`** (U4). *Scenario:* one CreatePermission per row of NET-18's table, its
+  first and last address, the IPv4-mapped form, `64:ff9b::808:808`, and an `allow` entry for 10.0.0.5 ports
   50000 to 50100. Then, with the relay's public address in `local` and its media ports in
   `allow`: CreatePermission or Send to a pool address, to the TURN port, and to the public
   address on a port outside `allow`; and a datagram to a relayed address from an admitted
-  IP's uncovered port. *Oracle:* LiveKit's `isRestrictedPeerIP` and `turnRelayPolicy.allows`
-  over the same addresses, run in Go from the clone, with their answers written into the
-  case; and RFC 6890's registry: 403 for each local case, and the inbound datagram
+  IP's uncovered port. *Oracle:* NET-18's table and the IANA registries for the
+  class; LiveKit's `isRestrictedPeerIP` and `turnRelayPolicy.allows`, run in Go from the
+  clone, where they agree with the table (the differences listed in TURN-7 excepted), with
+  their answers written into the case: 403 for each local case, and the inbound datagram
   discarded and counted `policy`.
 - **`quota_and_capacity`** (U4). *Scenario:* 13 allocations for one subject, spread over two
   usernames (two expiries); a pool of two addresses and three subjects; `streams` + 1
@@ -873,7 +877,7 @@ Sizes are S (under a day of one lane), M (one to three days) and L (more than th
 | **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; TLS-5's long-key rules: the `digest` use for `derive_digest`, `derive_digest` `Raw`/`Sha256` with empty prefix and suffix `Invalid`, and no `digest` in a `derive_digest` child; std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording`, TLS-5's KD4 long-key cases |
 | **U2** long-term credentials and client | L | U0, U1 | `core/programs/turn/`<!-- doc-ref: planned --> package; TURN-5 (`mint`, `relay_key`, nonce, server check order as a function the relay calls, client rules, USERHASH); TURN-6 client | `userhash_vector`, `challenge_exchange`, `bid_down_refused`, `nonce_bound_to_tuple`, `expired_costs_no_derivation`, `retransmit_schedule`, client half of `lifetimes_exact` |
 | **U3** relay server | L | U2 | TURN-7 Allocate, Refresh, CreatePermission, ChannelBind, Send, Data, ChannelData; pool; timers; in-place framing | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules` |
-| **U4** relay policy, quota, revocation | M | U3 | TURN-7 policy with `local` and `default_deny`, the full-address check on every path including `from_peer`, quota per subject, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
+| **U4** relay policy, quota, revocation | M | U3, NET-18 S1 | TURN-7 policy with `local` and `net.class` (after NET-18 S1), the full-address check on every path including `from_peer`, quota per subject, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |
 | **U5** streams and simulation | M | U3 | TURN-8 `Framer` with the length and cookie checks; stream origins, `connected`, `streams`, `stream_allocate_s` and `Close(conn)`; the sim runs | `stream_framing`, `sim_relay_loss` |
 | **U6** PROXY v2 header | S | — | `proxy.step`, the sans-IO decoder of [launch.md H1](launch.md#stream-ingress-behind-a-tls-front); `proxy.accept` is H1-a, not this slice | the decoder half of `proxy_v2_header` |
 | **U7** interop and cost | M | U4, U5 | `interop.py` against coturn and Pion from `/tmp` clones; counted-allocator run | `interop_coturn`, `interop_pion`, the cost targets |

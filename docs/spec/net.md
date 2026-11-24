@@ -166,7 +166,8 @@ written `Tls <pattern>[,<pattern>] <lo>-<hi> <trust>`, and a `Resolve` rule
 `--grant Net` is refused with the required syntax. Full authority is explicit,
 for example `Connect 0.0.0.0/0 0-65535`; it is never implicit.
 
-A rule permits its direction, prefix and inclusive port interval only. A wildcard
+A rule permits its direction, prefix and inclusive port interval only. A `Connect` rule
+with the `public` reach permits only public addresses within them (NET-18). A wildcard
 listen requires a `/0` rule of the same family. Listen port 0 lets the kernel
 choose a port. The matching Listen rules must together cover every nonzero port
 (`1-65535`) so the kernel cannot bind outside the grant. IPv4-mapped IPv6 and
@@ -197,7 +198,8 @@ of `n` that covers `name`. A query name is itself a message to the resolver and 
 nameserver it reaches, so resolution is gated by name as a handshake is
 ([TLS-3](tls.md#tls-3-authority)), not by address. The rule is
 `Resolve(names: String)` in `Rule`, written `Resolve <pattern>[,<pattern>]` in a grant,
-with TLS-3's pattern syntax and normalisation:
+with TLS-3's pattern syntax and normalisation, including the bare `*` that covers every
+name (NET-18):
 
 ```sh
 hirsel run app --grant 'Net=Resolve api.example.com,*.internal;Connect 10.0.0.0/8 443-443'
@@ -231,6 +233,248 @@ Its issue passes the replay point with `n`'s ordinal, `name`, the spare capacity
 `until`, and its delivery with the addresses or the error
 ([CAP-8](capabilities.md#cap-8-the-replay-point)). A replay supplies the recorded addresses
 and makes no query ([recording](../recording.md#what-a-recording-holds)).
+
+### NET-18: Public-only connects
+
+A `Connect` rule may carry the reach `Public`. That rule then covers only an address that
+the address-class table below calls public, so a program granted
+`Connect 0.0.0.0/0 443-443 public` can reach any web server on the internet. It cannot
+reach the host's loopback, a private network, link-local addresses (including the cloud
+metadata service at `169.254.169.254`), or the host's own addresses. This is a filter on
+the grant, not authentication. It says where a socket may go and nothing about who opens it.
+
+```hirsel unbuilt
+pub type Reach = Any | Public
+pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16), reach: Reach) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
+pub type AddressClass = Public | Unspecified | ThisNetwork | Private | SharedCgnat | Loopback | LinkLocal | Protocol | Documentation | Relay6to4 | Benchmarking | Multicast | Reserved | Broadcast | UniqueLocal | Nat64Local | NotGlobal6
+pub fn class(ip: Ip) -> AddressClass
+pub type NetDenials { not_public: u64, own_address: u64 }
+pub fn denials(n: Net) -> NetDenials
+```
+
+**The grant.** In a grant, `public` is an optional last word of an address rule:
+`Connect <prefix>/<len> <lo>-<hi> public`. Without it the rule's reach is `Any`, which is
+what every rule means today. `Public` is valid only on `Connect`. On `Listen`, `UdpBind`
+or `UdpSend`, `net.narrow` returns `Invalid` and `hirsel run` refuses the grant with the
+rule syntax. Listening binds a local address, which has no peer to classify. A `UdpSend`
+reach would also have to filter every datagram of a batch, and an opened socket's
+ingress (NET-15) for the host's own addresses. That is a design of its own: it is not
+specified here and is reversible by a later amendment. A `Public` rule whose prefix
+covers no public address, for example `Connect 10.0.0.0/8 5432-5432 public`, is
+`Invalid`. That is computed exactly over the table's intervals, so an operator's typo
+cannot leave a rule that silently reaches nothing. Every constructor of `Rule` names
+`reach`, with no default (the build slice updates every call site).
+
+A fetcher that reaches arbitrary public hosts also needs to resolve and verify arbitrary
+names. So a name pattern may be a bare `*`, which covers every name, in `Resolve` and
+`Tls` rules ([TLS-3](tls.md#tls-3-authority), NET-11). `*` intersected with any pattern
+gives that pattern. A whole public-web grant is:
+
+```sh
+hirsel run fetcher --grant 'Net=Resolve *;Connect 0.0.0.0/0 80-80 public;Connect 0.0.0.0/0 443-443 public;Connect 2000::/3 80-80 public;Connect 2000::/3 443-443 public;Tls * 443-443 System'
+```
+
+An IPv6 public rule's prefix may be `::/0`, which also covers the IPv4-embedding forms
+(below), or `2000::/3`, which leaves out NAT64. A `Secret` still reaches only the names
+in its own `tls_send` patterns ([TLS-5](tls.md#tls-5-secrets)). `Tls *` widens where a
+handshake may go, not where a secret may go.
+
+**Composition with allow-lists.** A connect is permitted when some `Connect` rule covers
+its address and port. A `Public` rule also needs the address to be public, and an `Any`
+rule does not. An `Any` rule is therefore the explicit exception, and grants compose by
+union:
+
+```sh
+--grant 'Net=Connect 0.0.0.0/0 443-443 public;Connect 10.0.0.5/32 5432-5432'
+```
+
+reaches any public HTTPS server and one private database, and nothing else private.
+`net.narrow` intersects prefixes and ports as before. The intersection's reach is `Public`
+when either side is `Public`, and an intersection that covers no public address is
+dropped. So no narrowing loses the filter, and a child of a public-only `Net` stays
+public-only ([CAP-7](capabilities.md#cap-7-attenuation)).
+
+**Enforcement.** The check is made on the address `host.connect` is given, which is the
+address the kernel connects to. Hirsel has no connect-by-name: a name becomes addresses
+only through `host.resolve` (NET-11), and a resolved address grants nothing. So the check
+is on the resolved IP, never on a host name, and DNS rebinding cannot pass it. A
+rebinding resolver can only change which addresses the next resolve returns, and each of
+those is checked when it is connected. Nothing is resolved again between the check and the
+kernel's connect. The system resolver's own queries to its nameservers are the operator's
+configuration and are not program connects (NET-11).
+
+The check has two parts, kept apart because they depend on different things.
+
+1. **Address class.** A pure function of the address: `net.class(ip)` must be `Public`.
+   It runs in the same preflight as the rule match (`hirsel_core_net::address_denial`,
+   called by the native runtime in `crates/hirsel-core-rt/src/net/addr.rs` and by the
+   interpreter in `crates/hirsel-core-ir/src/eval/net.rs`). That is before issue, with no
+   host effect and no replay point passed. NET-6's own refusals come first: an
+   IPv4-mapped IPv6 address, an unscoped `fe80::/10` and the unspecified address are
+   already `Denied` by every rule, whatever its reach. A replay makes the same check from
+   the same rules and gets the same answer. A served `Net` (`provide.net`) is checked by
+   the same preflight in the caller before the call is queued. So a program in a
+   `std.sim.net` world whose `Net` was narrowed by a `Public` rule is refused exactly as
+   on the host, and the sim server never sees the call.
+2. **The host's own addresses.** A connect that only `Public` rules cover is also denied
+   when its address is assigned to the host, because a service bound to a wildcard address
+   on the host would answer it past the host's firewall. This is TURN-7's `local` and
+   Smokescreen's `LocalIPs`. It depends on host state, so the provider makes it at issue.
+   The runtime marks the call as public-only (the `Connect` provider operation gains
+   `public: bool`, set when no `Any` rule covers the address). The provider answers a
+   public-only connect to one of the host's addresses with `Denied`, without a socket
+   call, and that delivery passes the replay point like any connect result
+   ([CAP-8](capabilities.md#cap-8-the-replay-point)). A replay supplies the recorded
+   delivery. This is NET-15's precedent of a `Denied` that arrives after issue. The native
+   provider keeps the address table from a `NETLINK_ROUTE` socket bound to
+   `RTMGRP_IPV4_IFADDR | RTMGRP_IPV6_IFADDR` (`0x10 | 0x100`), filled by one
+   `RTM_GETADDR` dump when the first public-only connect is issued and kept current from
+   `RTM_NEWADDR` and `RTM_DELADDR` messages. When the socket reports `ENOBUFS` (messages
+   lost), the provider dumps again before it answers the next public-only connect. A
+   connect issued while a dump runs waits for the dump. A `std.sim.net` server answers
+   `Denied` to a public-only `Connect` to an address given by
+   `sim.net.local_as(mut n, addrs)`<!-- doc-ref: planned -->.
+
+**What the program sees.** A connect refused by either part returns `NetError.Denied`,
+the same value as an address no rule covers. The recovery is the same (the address is
+outside the grant), and a distinct variant would add a match arm to every caller for no
+different action. `net.denials(n)` returns the counts of the two refusals made by `n`'s
+provider for the run: `not_public` (part 1) and `own_address` (part 2). Every `Net` value
+from one provider shares the counts. It is a capability query, answered at issue without
+waiting, and its value is a function of the run's checks and recorded deliveries, so a
+replay reads the same counts. Operators read it in the program's trace.
+
+**The HTTP client pool.** `std.http_client.Pool` dials through `host.connect` under the
+pool's `Net` ([HTTP-18](http.md#http-18-client-fetch-redirects-decoding-and-reuse)), so
+every dial is checked. That includes every address a name resolves to and every redirect
+hop that needs a new connection. A hop that reuses a parked connection goes to the peer
+that was checked when that connection was dialed. A dial skips an address refused with
+`Denied` and tries the next one, so a name that resolves to `[127.0.0.1, 8.8.8.8]`
+connects to the second, and never to the first. When no address
+connects, the ask's error is `Http(Connect(Denied))` if every address tried was denied,
+and otherwise the last other address's error.
+
+**The address-class table.** `net.class` reads this table. An IPv4 address is `Public`
+unless a row below contains it. An IPv6 address is first checked for an embedded IPv4
+form, in the order of the embedding rows, and such an address is judged by the IPv4
+address inside it. Any other IPv6 address is `Public` only if it lies in global unicast
+`2000::/3` (RFC 4291 §2.4; IANA IPv6 address space) and in no IPv6 row. IPv6 therefore
+fails closed: an address outside `2000::/3` that no row names is `NotGlobal6`. The rows
+come from the IANA IPv4 and IPv6 Special-Purpose Address Registries
+(`iana-ipv4-special-registry-1.csv`, `iana-ipv6-special-registry-1.csv`, fetched
+2026-11-24). Where the registry marks a block "globally reachable" but the table denies
+it, the table says so.
+
+| family | range | class | source |
+|---|---|---|---|
+| v4 | `0.0.0.0/32` | `Unspecified` | RFC 1122 §3.2.1.3 |
+| v4 | `0.0.0.0/8` | `ThisNetwork` | RFC 791 §3.2 |
+| v4 | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | `Private` | RFC 1918 |
+| v4 | `100.64.0.0/10` | `SharedCgnat` | RFC 6598 |
+| v4 | `127.0.0.0/8` | `Loopback` | RFC 1122 §3.2.1.3 |
+| v4 | `169.254.0.0/16` (includes the `169.254.169.254` metadata service) | `LinkLocal` | RFC 3927 |
+| v4 | `192.0.0.0/24` | `Protocol` | RFC 6890 §2.1. Denied whole, including the registry's globally reachable `192.0.0.9/32` (RFC 7723) and `192.0.0.10/32` (RFC 8155) anycast, which no outbound web client needs. |
+| v4 | `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` | `Documentation` | RFC 5737 |
+| v4 | `192.88.99.0/24` | `Relay6to4` | RFC 7526 |
+| v4 | `198.18.0.0/15` | `Benchmarking` | RFC 2544 |
+| v4 | `224.0.0.0/4` | `Multicast` | RFC 5771 |
+| v4 | `255.255.255.255/32` | `Broadcast` | RFC 919 §7, RFC 8190 |
+| v4 | `240.0.0.0/4` (other addresses) | `Reserved` | RFC 1112 §4 |
+| v6 embed | `::ffff:0:0/96`, the low 32 bits | IPv4 rule | RFC 4291 §2.5.5.2. A `Connect` never reaches the table with it, because NET-6 denies it first. |
+| v6 embed | `64:ff9b::/96`, the low 32 bits | IPv4 rule | RFC 6052 §2.1 |
+| v6 embed | `2002::/16`, bits 16 to 47 | IPv4 rule | RFC 3056 §2 |
+| v6 embed | `2001::/32` (Teredo): the server address in bits 32 to 63 and the client address, which is the low 32 bits inverted. Public only when both are public. | IPv4 rule | RFC 4380 §4 |
+| v6 | `::/128` | `Unspecified` | RFC 4291 §2.5.2 |
+| v6 | `::1/128` | `Loopback` | RFC 4291 §2.5.3 |
+| v6 | `64:ff9b:1::/48` | `Nat64Local` | RFC 8215. Its embedding is chosen by the local operator, so no IPv4 address can be read from it. |
+| v6 | `2001::/23` (other addresses) | `Protocol` | RFC 2928. Denied whole, including the registry's globally reachable anycast and AMT blocks within it. |
+| v6 | `2001:db8::/32`, `3fff::/20` | `Documentation` | RFC 3849, RFC 9637 |
+| v6 | `fc00::/7` | `UniqueLocal` | RFC 4193 |
+| v6 | `fe80::/10` | `LinkLocal` | RFC 4291 §2.5.6 |
+| v6 | `ff00::/8` | `Multicast` | RFC 4291 §2.7 |
+| v6 | everything else outside `2000::/3`, including `100::/64` (RFC 6666), `5f00::/16` (RFC 9602) and deprecated site-local `fec0::/10` (RFC 3879) | `NotGlobal6` | RFC 4291 §2.4 |
+
+The only addresses of `2000::/3` that are denied are the documentation, `2001::/23` and
+embedding rows. The embedded forms are judged, not denied outright, because a NAT64
+gateway or 6to4 relay forwards to the IPv4 address inside the IPv6 one. Judging that
+address blocks `64:ff9b::a9fe:a9fe` (`169.254.169.254`) as the IPv4 rule blocks the
+address itself, and leaves IPv6-only hosts able to reach public IPv4 servers through
+NAT64. The table is one Rust table (`crates/hirsel-core-net/src/class.rs`<!-- doc-ref: planned -->)
+behind both the preflight and `net.class`, a core operation, so Hirsel code and the
+runtime cannot disagree.
+
+**TURN shares the table.** TURN-7's peer policy denies a peer whose class is not
+`Public` ([TURN-7](turn.md#turn-7-the-relay-server)). `default_deny` is withdrawn, and the
+policy's `deny` list holds only the operator's additions. Like the `Any` rules here,
+`allow` is the explicit exception. The two filters guard the same thing, a program or a
+relay client steering traffic into the host's networks, so they use one table. TURN's
+`local` is this rule's part 2, kept in the relay because the relay sends from its own
+pool sockets.
+
+**Laws.** The build makes each pass, red first, in the named harness.
+
+- **`public_class_table`** (S1). *Scenario:* for every row, its first and last address,
+  and the public address just outside it where one exists. Embedded forms:
+  `64:ff9b::a00:1` (10.0.0.1) and `64:ff9b::a9fe:a9fe` denied, `64:ff9b::808:808` public,
+  `2002:7f00:1::1` denied, `2002:808:808::1` public; a Teredo address with server
+  `8.8.8.8` and client `127.0.0.1` (`2001:0:808:808::80ff:fffe`) denied, and with both
+  public, public. *Oracle:* the IANA registry CSVs above (a row whose "Globally Reachable"
+  is `False` must be denied), and CPython 3.14.0 `ipaddress.ip_address(a).is_global` over
+  the same addresses, run once with its answers written into the case. The cases where
+  this table and CPython disagree are named in the case: CPython calls all of
+  `64:ff9b::/96` global and all of `2002::/16` and Teredo not global, while this table
+  judges the embedded address. *Bug caught:* a missing row, an off-by-one prefix
+  length, or an embedded form passed without its IPv4 judged. *Harness:* the
+  `hirsel-core-net` unit tests.
+- **`public_reach_narrows`** (S1). *Scenario:* `Public` on `Listen`, `UdpBind` and
+  `UdpSend`. `Connect 10.0.0.0/8 1-1 public`. `Any ∩ Public`, `Public ∩ Any`, and a
+  `Public` `0.0.0.0/0` rule narrowed to `10.0.0.0/8`. *Oracle:* this section by hand: three
+  `Invalid`, one `Invalid`, both intersections `Public`, and the last one dropped.
+  *Harness:* the `hirsel-core-net` unit tests.
+- **`public_connect_preflight`** (S1). *Scenario:* under
+  `Connect 0.0.0.0/0 1-65535 public;Connect 10.0.0.5/32 5432-5432`, connects to
+  `127.0.0.1:80`, `169.254.169.254:80`, `10.0.0.1:5432` and `10.0.0.5:5432`, natively, in
+  the interpreter, and on a `std.sim.net` Net narrowed by the same rules. *Oracle:* by hand:
+  three `Denied` with no issue (the sim server records no `Connect`, and `denials` reads
+  `not_public` 3), and the fourth issued. *Harness:* the NET law suite
+  (`core/std/tests/net.hirsel`).
+- **`public_fetch_rebinding`** (S2). *Scenario:* in `std.sim.net`,
+  `sim.net.resolve_sequence`<!-- doc-ref: planned --> answers a name's first resolve with
+  a public address and its second with `127.0.0.1`. Two fetches go to that name, with
+  the first connection closed in between. A redirect goes to a second name that resolves
+  to `169.254.169.254`. A third name resolves to `[127.0.0.1, <public>]`. *Oracle:* by
+  hand: the second fetch and the redirect end with `Http(Connect(Denied))`, the third
+  connects to its public address, and the sim server records no `Connect` to a non-public
+  address. *Bug caught:* a check on the name, a cached first answer, or a redirect dialed
+  outside the pool's `Net`. *Harness:* `core/std/tests/http_fetch.hirsel`.
+- **`own_address_denied`** (S3). *Scenario:* natively, a public-only connect to one of
+  the host's non-loopback addresses, and the same connect with an `Any` rule covering it.
+  In `std.sim.net`, the same with `local_as`. *Oracle:* the kernel's own address list
+  (`getifaddrs`, read by the law outside the provider): `Denied` with `own_address` 1,
+  then an issued connect. *Harness:* the NET law suite.
+- TURN's `peer_policy` law (turn.md U4) takes its expected answers from `net.class`'s
+  table and `allow`, with LiveKit's list kept as a second oracle only where it agrees.
+
+**Build slices.**
+
+| slice | size | depends on | content | laws | engine |
+|---|---|---|---|---|---|
+| **S0** `*` name pattern | S | — | the bare `*` in `Resolve` and `Tls` patterns (`tls_rule.rs`, the resolve rule), its intersection, the NET-11 and TLS-3 text | a `*` case in the existing TLS-3 pattern-intersection tests | Devin SWE-2.1 high |
+| **S1** class table and `Public` reach | M | — | `class.rs`; `reach` in `Rule` (Rust and Hirsel), the grant parser, `Invalid` cases, intersection; the preflight; `net.class` and the `not_public` count | `public_class_table`, `public_reach_narrows`, `public_connect_preflight` | Sol |
+| **S2** pool dials and sim rebinding | S | S1 | HTTP-18's dial skip and error rule; `sim.net.resolve_sequence` | `public_fetch_rebinding` | Devin SWE-2.1 high |
+| **S3** the host's own addresses | M | S1 | `public` on the `Connect` provider operation; the native netlink table; `sim.net.local_as`; `own_address` | `own_address_denied` | Sol |
+
+S0 and S1 run in parallel, and S2 and S3 run in parallel after S1. TURN's U4 uses `net.class`
+and so waits on S1.
+
+**Prior art.**
+
+| system | what it does | verdict |
+|---|---|---|
+| Goose (`/tmp/ref-goose` at `d5ae5bb`) | no network stack or address policy | NOT TAKEN |
+| Stripe Smokescreen (`/tmp/ref-smokescreen` at `530ed8c`, `pkg/smokescreen/smokescreen.go`) | an egress proxy that classifies the resolved address before dialing (`classifyAddr`), denies CGNAT, denies NAT64, 6to4 and Teredo outright (`addrHasIPv6Embedding`), and denies the proxy's own addresses (`LocalIPs`) | ADAPTED. The resolved-address check and the own-address rule are taken. Embedded forms are judged by their IPv4 rather than denied, so IPv6-only hosts keep NAT64. Its weakness, a check that a proxy's name-based bypass list can skip (`IPFilterBypassedDomains`), is not taken: here only an `Any` address rule makes an exception. |
+| CPython `ipaddress` (3.14.0, `is_global`) | a registry-derived global or not-global predicate | ADOPTED as the table's second oracle, with its embedded-form disagreements named |
+| LiveKit `isRestrictedPeerIP` (`/tmp/ref-livekit` at `d210b4d`) | TURN's former `default_deny` list | REPLACED by the shared table, which also denies documentation, `192.0.0/24`, `192.88.99/24`, the `2001::/23` blocks and private IPv4 inside 6to4 and Teredo, and admits a public IPv4 inside `64:ff9b::/96` |
 
 ## Unix-domain sockets
 

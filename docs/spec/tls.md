@@ -167,6 +167,7 @@ Two things are required for a handshake. The socket must exist, which means its
   name (a DNS name or an IP literal, normalised as in TLS-1) or `*.` followed by a DNS
   name. `*.example.com` covers every name with at least one more label that ends in
   `.example.com`. It does not cover `example.com` itself.
+  A bare `*` covers every name ([NET-18](net.md#net-18-public-only-connects)).
 - `<lo>-<hi>` is checked against the peer port of the socket.
 - `<trust>` is `System`, or `Roots=sha256:<64 hex>`. In the second form, the handshake's
   `Roots(b)` must have exactly that SHA-256 over `b`'s bytes. A rule that pins `System`
@@ -180,7 +181,8 @@ necessary.
 
 `net.narrow` intersects `Tls` rules as it intersects the other rules. Name patterns
 intersect as sets of names: an exact name with a pattern that covers it gives the exact
-name, and two wildcards give the narrower one when one covers the other. Port ranges
+name, `*` with any pattern gives that pattern, and two wildcards give the narrower one
+when one covers the other. Port ranges
 intersect. Trusts intersect only when they are equal. An intersection with no names, no
 ports or unequal trusts is dropped. Narrowing never widens a rule
 ([CAP-7](capabilities.md#cap-7-attenuation)).

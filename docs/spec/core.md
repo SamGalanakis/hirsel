@@ -115,7 +115,7 @@ the format's u32 field. Fixed-width scalar and key writers return unit.
 | `UnixListener`, `UnixDatagram` ([NET-13](net.md#net-13-unix-streams), [NET-14](net.md#net-14-unix-datagrams)), `Proc` ([EXEC-3](exec.md#exec-3-spawn)) | resource, mechanical | `send` | 8 | resource |
 | `Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`, `Stdin`, `Env`, `Process`, `Tasks` | plain | `shareable`, `send` | 8 | capability |
 | `Secret` ([TLS-5](tls.md#tls-5-secrets)) | resource, mechanical | `send` | 8 | resource |
-| `PacketCipher`, `HeaderMask`, `KeyShare` ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)) | resource, mechanical | `send` | 8 | resource |
+| `KeyShare`, `Schedule`, `Sealer`, `Opener`, `HeaderMask` ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)) | resource, mechanical | `send` | 8 | resource |
 | `Foreign[I]` ([FFI-4](foreign.md#ffi-4-the-foreign-capability)) | plain | `shareable`, `send` | 8 | capability |
 | `Exec` ([EXEC-2](exec.md#exec-2-launch-profiles-and-narrowing)) | plain | `shareable`, `send` | 8 | capability |
 | `Cred` ([TLS-7](tls.md#tls-7-credential-grants)) | plain | `shareable`, `send` | 8 | capability |
@@ -600,7 +600,9 @@ wrappers in `hirsel-core-net` beside the existing ones: AES-GCM and ChaCha20-Pol
 (`ring::aead`), HKDF-SHA256 (`ring::hkdf`), RSA and P-384 verification
 (`ring::signature`), and the SHA-384 inside P-384 verification. Two things ring lacks are
 not on ring. Argon2id is RustCrypto `argon2` 0.6.0 ([Argon2id](#argon2id)), the one
-outside crypto crate; ring has no memory-hard function. The SHA-512 block kernel is
+outside crypto crate for kernels; ring has no memory-hard function. (TLS-8's simulation
+backend adds RustCrypto `p256` and `x25519-dalek` for virtual key draws only; open items,
+below.) The SHA-512 block kernel is
 Hirsel's own compression, as SHA-256's and SHA-1's are, for the reason above.
 
 ### SHA-512 laws
@@ -641,8 +643,9 @@ provider issues under the algorithms JWS registers for it: `RS256`, `PS256`, `ES
 `ES384` and `EdDSA` with Ed25519 ([RFC 7518 §3.1](https://www.rfc-editor.org/rfc/rfc7518#section-3.1),
 [RFC 8037](https://www.rfc-editor.org/rfc/rfc8037)).
 Signing is `secret.sign` ([TLS-5](tls.md#tls-5-secrets)), and ephemeral key agreement is
-`secret.key_share` and `secret.agree` ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)):
-both keep the private key in a `Secret` or a `KeyShare`, never in program bytes.
+`secret.key_share`, consumed by a `schedule` constructor ([TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement)):
+both keep the private key in a `Secret` or a `KeyShare`, never in program bytes, and the
+agreed value never leaves the schedule.
 
 - **Ed25519.** `ed25519.verify` is pure Ed25519 ([RFC 8032 §5.1.7](https://www.rfc-editor.org/rfc/rfc8032#section-5.1.7)),
   without context or prehash. `key` is the 32-byte encoding of the point `A`, and `sig` is
@@ -907,8 +910,11 @@ and derivation sinks in [TLS-5](tls.md#tls-5-secrets)) leave for a later decisio
 
 Two earlier questions are closed. The backend: every new kernel runs on ring 0.17.14 but
 Argon2id, on RustCrypto `argon2` because ring has none, and the SHA-512 block kernel, which
-is Hirsel's own as SHA-256's is ([SHA-512](#sha-512)), so no second general crypto crate is
-linked. The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
+is Hirsel's own as SHA-256's is ([SHA-512](#sha-512)). The one exception is TLS-8's
+simulation backend: RustCrypto `p256` 0.14.0 and `x25519-dalek` 3.0.0 compute key shares and
+P-256 signatures from virtual draws, because ring takes randomness only through its
+`SecureRandom` and cannot be fed an ordered stream. Host keys stay on ring
+(media-crypto-amend-2227; reversible if ring gains a scalar-from-bytes constructor). The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
 
 1. **Argon2 associated data** is capped at 32 bytes, the crate's limit, where RFC 9106
    allows `2^32 − 1`. No known format needs more.
@@ -921,7 +927,8 @@ linked. The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
    `ES512` needs P-521, which ring 0.17.14 lacks, so it would reopen the backend question.
 4. **HKDF on program bytes** and HKDF over SHA-512 are not specified; the first is library
    code over `std.hmac` with no kernel, and ring's `HKDF_SHA512` would back the second.
-   HKDF over SHA-384 on secrets is TLS-8's `derive_hkdf_extract` and `derive_hkdf_expand`.
+   HKDF over SHA-384 on secrets is not a sink either: TLS-8's schedules run it inside,
+   under fixed labels, and no generic Extract or Expand on a `Secret` exists.
 5. **A pepper under `Secret`.** Argon2's secret value `K` is program bytes in `argon2.id`;
    a `secret.argon2id_hash` that takes `K` from a `Secret` is not specified.
 6. **Random-nonce AEAD at scale.** XChaCha20-Poly1305 or AES-GCM-SIV would let callers
@@ -933,8 +940,10 @@ linked. The `rsa` crate's age and RUSTSEC-2023-0071: no `rsa` crate is used.
    memory and no charge, not zeroing of that state. The secret's own bytes and Argon2id's
    working memory, which Hirsel holds, are still zeroed as their rules say. Zeroing ring's
    state would need a ring that does it or an allocator that clears what the sinks free.
-   TLS-8's packet ciphers, header masks and key shares hold their state in run-owned
-   storage and zero it at drop, so this item covers only the one-shot sinks.
+   TLS-8 erases only what Hirsel owns: schedule secrets, sealer and opener IVs, and the VAES
+   `AesKey` and `HTable` built in place in the slot. The state of its ring values
+   (ChaCha20-Poly1305 and non-VAES AES-GCM keys, HMAC-SHA1 keys, ephemeral and ECDSA keys)
+   falls under this item too, as do earlier copies, registers and stack.
 
 ## Provide
 

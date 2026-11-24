@@ -244,6 +244,55 @@ fn crash_install_run(mut db: Db, d: Dir, c: Clock, tasks: Tasks) -> Result[u64, 
     crash_apply(mut db, attempt, digest)
 }
 
+@test
+fn export_refuses_a_second_lease(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let directory = disk_test_directory(d)
+    let scratch = disk_test_directory(d)
+    let mut db = deploy_result(open(tasks, directory, c, r, disk_crash_options("install")))?
+    let first = install_fixture_bytes(16, 7)
+    let second = install_fixture_bytes(16, 8)
+    let _ = begin_export_copy(mut db, scratch, deploy_result(copied(first))?, 0)?
+    if let Error(AttemptBusy) = begin_export_copy(mut db, scratch, deploy_result(copied(second))?, 0) {} else {
+        fail("a second export replaced the current lease")
+    }
+    release_export(mut db, second)
+    if !export_leased(db) {
+        fail("the refused attempt could release the first export")
+    }
+    release_export(mut db, first)
+    let _ = begin_export_copy(mut db, scratch, deploy_result(copied(second))?, 0)?
+    release_export(mut db, second)
+    deploy_result(close(take db))
+}
+
+@test
+fn expired_cutover_keeps_old_serving(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), DeployError] waits {
+    let directory = disk_test_directory(d)
+    deploy_result(crash_install_init(directory, c, r, tasks))?
+    let mut db = deploy_result(open(tasks, directory, c, r, disk_crash_options("install")))?
+    let attempt = install_fixture_bytes(16, 7)
+    let (scratch, base) = crash_install_prepared(mut db, directory, c, tasks, attempt)?
+    let digest = crash_import(mut db, scratch, c, tasks, attempt, 66, 16781392)?
+    let request = Cutover(attempt: take attempt, digest: digest, deadline: 0)
+    let description = install_fixture_bytes(32, 65)
+    match perform_cutover(mut db, request, 1, description, std.codec.of_bytes(), install_target_value, scoped fn() -> bool {
+        true
+    }) {
+        Error(Expired) => (),
+        _ => fail("the prepared cutover did not refuse the expired deadline"),
+    }
+    let old = deploy_result(table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let read = deploy_result(reader(db, 0))?
+    let snap = snapshot(db)
+    if version(snap) != base || deploy_result(get(read, snap, old, 0))? != Some(1) {
+        fail("the expired cutover changed OLD's serving state")
+    }
+    if !typed_put(mut db, old, 0, 99) {
+        fail("OLD could not commit after the expired cutover")
+    }
+    deploy_result(close(take db))
+}
+
 fn crash_prepared_meta(d: Dir) -> Result[Bytes, DeployError] waits {
     let mut file = scratch_result(disk_io(host.open(d, "PREPARED", Read)))?
     // AP1b gives 212 + 32 bytes for this fixture's 32-byte describe.

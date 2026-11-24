@@ -1,0 +1,165 @@
+// ISO/IEC 14496-3 AudioSpecificConfig and ISO/IEC 13818-7 ADTS.
+pub type Error = Truncated | InvalidHeader | Unsupported
+
+fn rate(index: u8) -> Result[u32, Error] {
+    let rates: Inline[u32, 13] =[96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
+    let at: u64 = int.widen(index)
+    if at >= 13 {
+        return Error(InvalidHeader)
+    }
+    Ok(rates[at])
+}
+
+pub type Adts {
+    mpeg2: bool,
+    object_type: u8,
+    sample_rate: u32,
+    channel_configuration: u8,
+    frame_size: u16,
+    header_size: u8,
+    raw_blocks: u8,
+    buffer_fullness: u16,
+    crc_present: bool
+}
+
+// Parse the transport header and check that the complete frame is available.
+// A protected multi-block frame has block positions and a header CRC before
+// the first raw block, followed by a CRC after each raw block.
+pub fn parse_adts(input: Bytes) -> Result[Adts, Error] {
+    let size = list.len(input)
+    if size < 7 {
+        return Error(Truncated)
+    }
+    let flags = input[1]
+    if input[0] != 255 || (flags & 246) != 240 {
+        return Error(InvalidHeader)
+    }
+    let parameters = input[2]
+    let object_type = (parameters >> 6) + 1
+    let mpeg2 = (flags & 8) != 0
+    if mpeg2 && object_type == 4 {
+        return Error(InvalidHeader)
+    }
+    let channels = ((parameters & 1) << 2) | (input[3] >> 6)
+    let frame_hi: u16 = int.widen(input[3] & 3)
+    let frame_mid: u16 = int.widen(input[4])
+    let frame_lo: u16 = int.widen(input[5] >> 5)
+    let frame_size = (frame_hi << 11) | (frame_mid << 3) | frame_lo
+    let raw_blocks = (input[6] & 3) + 1
+    let crc = (flags & 1) == 0
+    let header_size = if crc {
+        7 + 2 * raw_blocks
+    } else {
+        7
+    }
+    let block_count: u16 = int.widen(raw_blocks)
+    let trailer_size: u16 = if crc && raw_blocks > 1 {
+        2 * block_count
+    } else {
+        0
+    }
+    let header_bytes: u16 = int.widen(header_size)
+    if frame_size <= header_bytes + trailer_size {
+        return Error(InvalidHeader)
+    }
+    let frame_bytes: u64 = int.widen(frame_size)
+    if frame_bytes > size {
+        return Error(Truncated)
+    }
+    let fullness_hi: u16 = int.widen(input[5] & 31)
+    let fullness_lo: u16 = int.widen(input[6] >> 2)
+    Ok(Adts(mpeg2: mpeg2, object_type: object_type, sample_rate: rate((parameters >> 2) & 15)?, channel_configuration: channels, frame_size: frame_size, header_size: header_size, raw_blocks: raw_blocks, buffer_fullness: (fullness_hi << 6) | fullness_lo, crc_present: crc))
+}
+
+fn bits(input: Bytes, mut at: u64, width: u64) -> Result[u32, Error] {
+    let mut value = 0u32
+    for _ in 0u64 .. width {
+        let byte = at / 8
+        if byte >= list.len(input) {
+            return Error(Truncated)
+        }
+        let shift: u8 = int.narrow(7 - at % 8)
+        let bit_in_byte = (input[byte] >> shift) & 1
+        let bit: u32 = int.widen(bit_in_byte)
+        value = (value << 1) | bit
+        at += 1
+    }
+    Ok(value)
+}
+
+fn read_object_type(input: Bytes, mut at: u64) -> Result[u8, Error] {
+    let first = bits(input, mut at, 5)?
+    if first == 0 {
+        return Error(InvalidHeader)
+    }
+    if first == 31 {
+        return Ok(int.narrow(32 + bits(input, mut at, 6)?))
+    }
+    Ok(int.narrow(first))
+}
+
+fn frequency(input: Bytes, mut at: u64) -> Result[u32, Error] {
+    let index: u8 = int.narrow(bits(input, mut at, 4)?)
+    if index == 15 {
+        let hz = bits(input, mut at, 24)?
+        if hz == 0 {
+            return Error(InvalidHeader)
+        }
+        return Ok(hz)
+    }
+    rate(index)
+}
+
+pub type AudioSpecificConfig {
+    object_type: u8,
+    sample_rate: u32,
+    channel_configuration: u8,
+    output_sample_rate: u32,
+    sbr: bool,
+    parametric_stereo: bool,
+    short_frame: bool
+}
+
+// AAC Main, LC, SSR and LTP with optional SBR/PS signalling. A channel
+// layout carried by a Program Config Element requires a separate parser.
+pub fn parse_asc(input: Bytes) -> Result[AudioSpecificConfig, Error] {
+    let mut at = 0u64
+    let mut kind = read_object_type(input, mut at)?
+    let hz = frequency(input, mut at)?
+    let channels: u8 = int.narrow(bits(input, mut at, 4)?)
+    if channels == 0 || channels > 7 {
+        return Error(Unsupported)
+    }
+    let mut sbr = kind == 5 || kind == 29
+    let mut ps = kind == 29
+    let mut output = hz
+    if sbr {
+        output = frequency(input, mut at)?
+        kind = read_object_type(input, mut at)?
+    }
+    if kind > 4 {
+        return Error(Unsupported)
+    }
+    let short_frame = bits(input, mut at, 1)? != 0
+    if bits(input, mut at, 1)? != 0 {
+        let _ = bits(input, mut at, 14)?
+    }
+    if bits(input, mut at, 1)? != 0 && bits(input, mut at, 1)? != 0 {
+        return Error(Unsupported)
+    }
+    if !sbr && (at + 10) / 8 < list.len(input) {
+        if bits(input, mut at, 11)? == 0x2b7 {
+            if read_object_type(input, mut at)? != 5 {
+                return Error(Unsupported)
+            }
+            sbr = bits(input, mut at, 1)? != 0
+            if sbr {
+                output = frequency(input, mut at)?
+                if (at + 10) / 8 < list.len(input) && bits(input, mut at, 11)? == 0x548 {
+                    ps = bits(input, mut at, 1)? != 0
+                }
+            }
+        }
+    }
+    Ok(AudioSpecificConfig(object_type: kind, sample_rate: hz, channel_configuration: channels, output_sample_rate: output, sbr: sbr, parametric_stereo: ps, short_frame: short_frame))
+}

@@ -1,0 +1,48 @@
+/// bug: Misread escaped HEVC headers, omit the conformance crop, or mistake AAC transport length or configuration.
+/// oracle: FFmpeg trace_headers and ffprobe on libx265 Main 10 and FFmpeg AAC LC output.
+@test
+fn hevc_aac_headers() -> Result[(), ()] {
+    let vps = b"\x40\x01\x0c\x01\xff\xff\x02\x20\x00\x00\x03\x00\x90\x00\x00\x03\x00\x00\x03\x00\x1e\x95\x98\x09"
+    let sps = b"\x42\x01\x01\x02\x20\x00\x00\x03\x00\x90\x00\x00\x03\x00\x00\x03\x00\x1e\xa0\x16\x20\x69\xc9\x23\x65\x95\x9a\x49\x32\xbc\x05\xa0\x20\x00\x00\x03\x00\x20\x00\x00\x03\x01\x81"
+    let pps = b"\x44\x01\xc1\x72\xb4\x62\x40"
+    let video = result.unwrap(hevc.parse_vps(vps))
+    let seq = result.unwrap(hevc.parse_sps(sps))
+    let pic = result.unwrap(hevc.parse_pps(pps))
+    if video.id != 0 || video.layers != 1 || video.temporal_layers != 1 || !video.temporal_id_nested || video.profile.profile_id != 2 || video.profile.level_id != 30 {
+        fail("VPS identity and profile")
+    }
+    if seq.id != 0 || seq.video_id != 0 || seq.temporal_layers != 1 || !seq.temporal_id_nested || seq.profile.profile_id != 2 || seq.profile.level_id != 30 || seq.chroma_format != 1 || seq.luma_depth != 10 || seq.log2_max_poc_lsb != 8 || seq.chroma_depth != 10 {
+        fail("SPS identity, profile and format")
+    }
+    if seq.coded_width != 176 || seq.coded_height != 104 || seq.width != 170 || seq.height != 98 {
+        fail("SPS coded and cropped dimensions")
+    }
+    if pic.id != 0 || pic.sequence_id != 0 || pic.dependent_slice_segments || pic.output_flag_present || pic.extra_slice_header_bits != 0 || !pic.sign_data_hiding || pic.cabac_init_present {
+        fail("PPS slice flags")
+    }
+    let idr = result.unwrap(hevc.nal(b"\x28\x01"))
+    if !idr.idr || !idr.irap || idr.kind != 20 || idr.temporal_id != 0 || idr.layer_id != 0 {
+        fail("IDR NAL header")
+    }
+    if let Ok(_) = hevc.nal(b"\x42\x00") {
+        fail("zero HEVC temporal_id_plus1")
+    }
+    if let Ok(_) = hevc.parse_sps(list.slice(sps, 0, 12)) {
+        fail("truncated HEVC emulation prevention")
+    }
+    let asc = result.unwrap(aac.parse_asc(b"\x11\x88\x56\xe5\x00"))
+    if asc.object_type != 2 || asc.sample_rate != 48000 || asc.output_sample_rate != 48000 || asc.channel_configuration != 1 || asc.sbr || asc.parametric_stereo || asc.short_frame {
+        fail("AAC LC AudioSpecificConfig")
+    }
+    let mut frame: Bytes = list.with_capacity(214)
+    list.append(mut frame, b"\xff\xf1\x4c\x40\x1a\xdf\xfc")
+    list.fill(mut frame, 207, 0)
+    let adts = result.unwrap(aac.parse_adts(frame))
+    if adts.object_type != 2 || adts.sample_rate != 48000 || adts.channel_configuration != 1 || adts.mpeg2 || adts.crc_present || adts.frame_size != 214 || adts.header_size != 7 || adts.raw_blocks != 1 || adts.buffer_fullness != 2047 {
+        fail("AAC LC ADTS transport header")
+    }
+    if let Ok(_) = aac.parse_adts(list.slice(frame, 0, 213)) {
+        fail("truncated ADTS frame")
+    }
+    Ok(())
+}

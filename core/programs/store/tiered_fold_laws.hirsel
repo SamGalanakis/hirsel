@@ -13,7 +13,7 @@ fn l79_fold_parent(d: Dir, owner: StoreId, left: std.page.PagePtr) -> Result[(st
         list.push(mut rows, std.page.Entry(key: key_word(seq), cell: InlineValue(string.into_bytes(string.from("stored")))))
     }
     let right_leaf = page_result(std.page.encode(rows, 0, 41, Collection))?
-    let right = l68_write_page_pack(d, owner, 9, 41, std.page.payload(right_leaf))?
+    let right = l68_write_page_pack(d, owner, 6, 41, std.page.payload(right_leaf))?
     let mut children: List[std.page.Entry] = list.with_capacity(2)
     list.push(mut children, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 3, charge: 258))))
     list.push(mut children, std.page.Entry(key: key_word(3), cell: Child(std.page.Branch(child: right, rows: 2, charge: 172))))
@@ -174,16 +174,19 @@ fn test_l79_fold_checks_cold_evidence(d: Dir, tasks: Tasks) -> Result[(), Error]
         let (take updated, _) = std.omap.insert(mut ids, packs, ptr.pack, TieredPagerPack(inventory: inventory, object: None))
         packs = take updated
     }
+    let (queued_blob, blob_pack) = l87_probe_blob(fixtures, owner)?
+    let (take all_packs, _) = std.omap.insert(mut ids, packs, 7u64, TieredPagerPack(inventory: blob_pack, object: None))
     let funding = TieredPagerFunding(cache_bytes: 89, writer_pin_bytes: 89, pager_task_bytes: 1048576, cut_pins: true)
     let (take requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), funding, 4)?
-    let source = TieredPageSource(pager: take requests, packs: take packs, next_stamp: 43, deadline: 0)
-    let checked = l79_fold_and_emit(source, base, parent, right, owner)
+    let source = TieredPageSource(pager: take requests, packs: take all_packs, next_stamp: 43, deadline: 0)
+    let checked = l79_fold_and_emit(source, base, parent, right, queued_blob, owner)
     let _ = take source
     let _ = result.unwrap(task.join(take worker))
     checked
 }
 
-fn l79_fold_and_emit(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr, owner: StoreId) -> Result[(), Error] waits {
+fn l79_fold_and_emit(source: TieredPageSource, base: std.page.PagePtr, parent: std.page.PagePtr, right: std.page.PagePtr, queued_blob: std.page.BlobRef, owner: StoreId) -> Result[(), Error] waits {
+    l87_probe_queue_roots(source, parent, right, queued_blob)?
     l64_fold_with_writer_pin(source, base, parent, right)?
     l79_cut_emits_folded_tree(source, base, owner)
 }
@@ -242,6 +245,43 @@ fn test_l70_tiered_sizes_include_cut_quota(d: Dir, tasks: Tasks) -> Result[(), E
     let short_cache = sized_with(Directory, 2147483648, overrides) ?=> |_| Missing("tiered test sizing")
     if (short_cache.cache_bytes, short_cache.writer_pin_bytes, short_cache.dirty_bytes, short_cache.pager_task_bytes) != (0u64, 0u64, 0u64, 0u64) {
         fail("L70: the cache override must cover the writer and Reader partitions")
+    }
+    Ok(())
+}
+
+fn l87_probe_blob(d: Dir, owner: StoreId) -> Result[(std.page.BlobRef, PagePack), Error] waits {
+    let body = arc.new(string.into_bytes(string.from("queued without a leaf")))
+    let frame = PackFrame(stamp: 39, size: 8 + list.len(body), body: BlobBody(arc.share(body)))
+    let mut draft = begin_tiered_pack(owner, 7, 4, 4096)?
+    let place = option.unwrap(add_tiered_pack_frame(mut draft, frame, 9, log_key(9, 0)?, fn(stamp: u64) -> std.page.PagePtr {
+        fail("L87(c): a BLOB has no children")
+    })?)
+    let (take raw, packed) = finish_tiered_pack(take draft)?
+    disk_write_synced(d, "p-7", raw)?
+    Ok((std.page.BlobRef(stamp: 39, len: list.len(body), checksum: place.checksum, pack: 7, offset: 72, body: 0), packed))
+}
+
+fn l87_probe_queue_roots(source: TieredPageSource, parent: std.page.PagePtr, leaf: std.page.PagePtr, queued_blob: std.page.BlobRef) -> Result[(), Error] waits {
+    let direct = blob_index_row(queued_blob, 9, log_key(9, 0)?)
+    let Some(TieredProbePath(target: TieredBlob(found_blob), slots: blob_slots)) = probe_deferred_root(source, TieredBlob(queued_blob), 7, direct)? else {
+        fail("L87(c): a queued BLOB must match without an owning leaf")
+    }
+    if found_blob != queued_blob || list.len(blob_slots) != 0 {
+        fail("L87(c): the matched BLOB is the queue value itself")
+    }
+    let descendant = page_index_row(leaf, 9, log_key(9, 3)?)
+    let Some(TieredProbePath(target: TieredPage(found_leaf), slots: leaf_slots)) = probe_deferred_root(source, TieredPage(parent), 6, descendant)? else {
+        fail("L87(c): the queued PAGE must route the index key to its child")
+    }
+    if found_leaf != leaf || list.len(leaf_slots) != 1 || leaf_slots[0u64] != 1 {
+        fail("L87(c): the child is under the queued root's second edge")
+    }
+    let queued_page = page_index_row(parent, 9, log_key(9, 3)?)
+    let Some(TieredProbePath(target: TieredPage(found_root), slots: root_slots)) = probe_deferred_root(source, TieredPage(parent), 10, queued_page)? else {
+        fail("L87(a): a queued root itself must compare before descent")
+    }
+    if found_root != parent || list.len(root_slots) != 0 {
+        fail("L87(a): the queue value names the matching root directly")
     }
     Ok(())
 }

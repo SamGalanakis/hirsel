@@ -114,7 +114,7 @@ trace.log(mut lg, c, err, Info, Some(trace.ids(span)), "fetched", [Attribute(key
   `c` reads below the anchor.
 - **Charging.** `logger` admits nothing until the first line. The line buffer is admitted
   under the limit current at that `log` call, grows by GROWTH to the longest line, and is
-  refunded when the logger is dropped. `encode_line` admits only `out`'s growth. Steps:
+  refunded when the logger is dropped. `encode_line` admits only `out`'s growth. `enabled` admits nothing and takes one step. Steps:
   sorting the fields takes O(k log k) for k fields, and escaping takes O(bytes written).
   Both are bounded by the caller's own arguments.
 - **Replay.** `log` reads the Clock and writes the stream, each passing its own replay

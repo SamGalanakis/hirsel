@@ -171,7 +171,8 @@ directory itself is not returned.
   `walk` makes no host call. The first `next` lists the start.
 - **Descending.** When `next` returns a `Directory`, the following `next` lists it and
   continues inside it, unless the caller called `skip` in between. `skip` after any other
-  kind, or twice, changes nothing.
+  kind, or twice, changes nothing. `skip` makes no host call, takes O(1) steps, and refunds
+  the skipped directory's buffered entries, if any were listed.
 - **Symbolic links.** A walk never follows one. A link is returned with kind `Symlink`
   and never descended, whatever it points to, so a walk cannot loop and cannot leave `d`.
   (A listing's kinds do not follow links, Listing above.) A directory replaced by a link

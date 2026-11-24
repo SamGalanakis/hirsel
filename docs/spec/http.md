@@ -663,7 +663,8 @@ with `TooManyRedirects`, which also ends a loop. `Return` follows none. Per stat
 When the body is dropped, the next hop also drops the caller's `Content-Encoding`,
 `Content-Language`, `Content-Location`, `Content-Type`, `Digest` and `Last-Modified`
 fields (RFC 9110 §15.4, item 5). The client writes framing fields itself. Before the next
-hop, the redirect's body is read and discarded up to 2048 bytes. If it ends within them
+hop, the redirect's body is read and discarded up to 2048 bytes (Go's `maxBodySlurpSize`, `2 << 10`,
+`/tmp/ref-go` 8eaf19e `src/net/http/client.go:717`; redirect bodies are short notices). If it ends within them
 and the connection is reusable, the connection goes back to the pool. Otherwise it is
 closed.
 

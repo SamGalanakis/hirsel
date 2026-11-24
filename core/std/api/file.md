@@ -100,7 +100,7 @@ gives a new file. It is not removed automatically. `file.create_temp` is the std
 1. Refuse before issue, with `NotReplaced(Denied)` and no host effect, a `name` that is not
    a valid path of exactly one component (`path.is_valid` and no `/`).
 2. `host.mkstemp(d, mut tmp)` with the prefix `.hirsel-tmp-`. The prefix is fixed, and the
-   temp name is at most 44 bytes, so it fits whatever `name`'s length.
+   temp name is at most 44 bytes (the 12-byte prefix plus `mkstemp`'s suffix of at most 32), so it fits whatever `name`'s length.
 3. `host.write` all of `data`, then `host.sync` the file, then `host.close` it.
 4. `host.rename(d, tmp, name)`.
 5. `host.sync_dir(d)`.

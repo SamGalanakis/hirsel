@@ -12,9 +12,7 @@ fn captures() {
 // expect: refuse LANG-11 at 3:29
 // expect: refuse LANG-13 at 5:44
 // expect: refuse LANG-12 at 7:34
-// expect: refuse OWN-19 at 10:28
-// expect: refuse LANG-11 at 10:14
-// expect: compared LANG-11 at 10:14 | core@1/core/StaticFn[scoped fn(take u64) -> core@1/core/Result[u64, core@1/core/Capacity]] | core@1/core/StaticFn[fn(take _) -> core@1/core/Result[_, core@1/core/Capacity]]
+// PROG-9 requires a top-level function name at the argument to code.describe.
+// expect: refuse PROG-9 at 10:28
 // expect: compared LANG-11 at 3:29 | core@1/core/StaticFn[fn(mut u64) -> core@1/core/Result[u64, core@1/core/Capacity]] | core@1/core/StaticFn[fn(take _) -> core@1/core/Result[_, core@1/core/Capacity]]
 // expect: compared LANG-12 at 7:34 | core@1/core/HostFile | codec
-// expect: compared OWN-19 at 10:28 | scoped fn(take u64) -> core@1/core/Result[u64, core@1/core/Capacity] | not scoped

@@ -72,7 +72,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let mut clean: List[Fault] = list.new()
     let control = begin_scrub(mut db)?
     let mut tour = take control
-    if scrub_to_end(mut tour, 4096, mut clean)? != total || list.len(clean) != 0 || list.len(data) < 3 {
+    if scrub_to_end(mut tour, 4096, mut clean)? != total || list.len(clean) != 0 || list.len(data) < 4 {
         return Error(MigrationFault)
     }
     // A is the first data pack whose first frame fits inside B, the second.
@@ -82,6 +82,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let b_name = paged_pack_path(b)?
     let mut a_raw = disk_read_paged_file(path, a_name, 67108864)?
     let mut b_raw = disk_read_paged_file(path, b_name, 67108864)?
+    let old_stamp = read_le(a_raw, 96, 8)
     let width = 16 + read_le(a_raw, 76, 4)
     if 72 + width > list.len(b_raw) {
         return Error(MigrationFault)
@@ -103,12 +104,26 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     let sealed = capacity(disk_check(DiskContext(store: db.store, role: 3, seq: c_seq), 72, list.slice(c_raw, 72, 80), list.slice(c_raw, 88, 88 + c_width)))?
     list.set_word_le(mut c_raw, 80, sealed)
     disk_write_synced(path, c_name, c_raw)?
+    // D's live frame is replaced by a same-width frame sealed for D at
+    // this offset, but carrying the stamp of a different live frame.
+    let d_seq = data[3u64]
+    let d_name = paged_pack_path(d_seq)?
+    let mut d_raw = disk_read_paged_file(path, d_name, 67108864)?
+    let d_width = read_le(d_raw, 76, 4)
+    if old_stamp == read_le(d_raw, 96, 8) { fail("the stale frame needs a different stamp") }
+    list.set_word_le(mut d_raw, 96, old_stamp)
+    let d_seal = capacity(disk_check(DiskContext(store: db.store, role: 3, seq: d_seq), 72, list.slice(d_raw, 72, 80), list.slice(d_raw, 88, 88 + d_width)))?
+    list.set_word_le(mut d_raw, 80, d_seal)
+    disk_write_synced(path, d_name, d_raw)?
     let mut faults: List[Fault] = list.new()
     let damaged = begin_scrub(mut db)?
     let mut second = take damaged
-    let _ = scrub_to_end(mut second, 4096, mut faults)?
-    if list.len(faults) != 3 || !scrub_fault_is(faults[0u64], a, 72, Kind(0))? || !scrub_fault_is(faults[1u64], b, 72, Checksum)? || !scrub_fault_is(faults[2u64], c_seq, 72, Checksum)? {
+    let _ = scrub_to_end(mut second, 1, mut faults)?
+    if list.len(faults) < 3 || !scrub_fault_is(faults[0u64], a, 72, Kind(0))? || !scrub_fault_is(faults[1u64], b, 72, Checksum)? || !scrub_fault_is(faults[2u64], c_seq, 72, Checksum)? {
         return Error(MigrationFault)
+    }
+    if list.len(faults) != 4 || !scrub_fault_is(faults[3u64], d_seq, 72, Checksum)? {
+        fail("scrub missed the sealed stale stamp at the live offset")
     }
     // Detection only: resident pages still answer.
     if get(result.unwrap(reader(db, 0u64)), snapshot(db), t, 1999)? != Some(1999u64) {

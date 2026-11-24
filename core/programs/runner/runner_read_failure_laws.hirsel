@@ -78,7 +78,7 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
     let owner = failed_read_owner(mut joined, mut rounds, 1u64)
     let other = failed_read_owner(mut joined, mut rounds, 2u64)
     let register = latest.handle(rounds.round)
-    fence_round(mut joined, Fenced(sessions: list.new(), all: false), a, mut rounds)
+    fence_round(mut joined, Fenced(sessions: map.new()), a, mut rounds)
 
     let first = at_base_generation(mut b, 1u64, 1u32, 1u64, failed_read_sub())
     if list.len(first.complete) != 1u64 || first.complete[0u64] != 1u32 || list.len(first.rows) != 2u64 || !release_load(register, owner.fence, a) { return false }
@@ -103,7 +103,7 @@ fn read_failure_case(c: Clock, r: Random, problem: FailedRead, phase: ReadPhase)
         let committed = store.snapshot(db)
         let version = store.version(committed)
         b.newest = Some(take committed)
-        let mut fenced = Fenced(sessions: list.new(), all: false)
+        let mut fenced = Fenced(sessions: map.new())
         owes = round(mut b, mut fenced)
         fence_before_round(mut joined, take fenced, version, mut rounds, scoped fn() {
             if latest.read(register).at != a || latest.read(owner.fence).latest != version ||

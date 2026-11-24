@@ -46,7 +46,7 @@ fn observe_s3_read_failure(take trial: S3ReadTrial, fault: S3ReadCase) -> bool w
     } else {
         let version = store.version(committed)
         b.newest = Some(take committed)
-        let mut fenced = Fenced(sessions: list.new(), all: false)
+        let mut fenced = Fenced(sessions: map.new())
         owes = round(mut b, mut fenced)
         fence_before_round(mut joined, take fenced, version, mut rounds, scoped fn() {
             if latest.read(register).at != a || latest.read(owner.fence).latest != version {

@@ -522,10 +522,9 @@ pub fn law_stale_never_released(c: Clock, r: Random, tasks: Tasks) -> bool waits
 // faults after reading perm, which its last good run never read. Session 4's q1 gets round
 // c's rows, which bounce at its full owner inbox after c's R is published (B1d), so it is due
 // for repair (§3 "Repair"): no Ended, no fence. Commit b then writes only perm: all four
-// sessions are fenced at b, and nothing is owed, since session 4's sub is due and is not re-run.
-// A second write to perm fences only session 4, whose due sub keeps its read set; each ended
-// entry left at its first hit. Repair waits for session 4's drain token, then owes q1's whole
-// image at the base: perm is set, so rows 1 and 2, in one `complete`.
+// sessions are fenced at b. The due view re-runs and owes no delta. A second write fences
+// all four again because the owners still hold their ended entries. Repair waits for session
+// 4's drain token and then owes q1's full image at the base, rows 1 and 2 in one `complete`.
 fn ended_trace(c: Clock, r: Random) -> bool waits {
     let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()
@@ -561,7 +560,7 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
     })
     set(mut db, t, 2u64, 2u64)
     b.newest = Some(store.snapshot(db))
-    let mut at_c = Fenced(sessions: list.new(), all: false)
+    let mut at_c = Fenced(sessions: map.new())
     let mut owes_c = round(mut b, mut at_c)
     let (full_to, _full_from): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
     let (progressed, progress): (Sender[()], Receiver[()]) = channel.new(1u64)
@@ -587,18 +586,20 @@ fn ended_trace(c: Clock, r: Random) -> bool waits {
             if (o.session == 1u64 || o.session == 3u64) && e.sub == 1u32 && raised_fail { ended += 1u64 }
         }
     }
-    let c_fences = !at_c.all && list.len(at_c.sessions) == 1u64 && list.contains(at_c.sessions, 3u64)
+    let c_fences = map.len(at_c.sessions) == 1u64 && map.contains(at_c.sessions, 3u64)
     set(mut db, t, 0u64, 5u64)
     b.newest = Some(store.snapshot(db))
-    let mut at_b = Fenced(sessions: list.new(), all: false)
+    let mut at_b = Fenced(sessions: map.new())
     let owes_b = round(mut b, mut at_b)
-    let b_fences = !at_b.all && list.len(at_b.sessions) == 4u64 && list.contains(at_b.sessions, 1u64)
-        && list.contains(at_b.sessions, 2u64) && list.contains(at_b.sessions, 3u64) && list.contains(at_b.sessions, 4u64)
+    let b_fences = map.len(at_b.sessions) == 4u64 && map.contains(at_b.sessions, 1u64)
+        && map.contains(at_b.sessions, 2u64) && map.contains(at_b.sessions, 3u64) && map.contains(at_b.sessions, 4u64)
     set(mut db, t, 0u64, 6u64)
     b.newest = Some(store.snapshot(db))
-    let mut again = Fenced(sessions: list.new(), all: false)
+    let mut again = Fenced(sessions: map.new())
     let owes_again = round(mut b, mut again)
-    let kept = !again.all && list.len(again.sessions) == 1u64 && list.contains(again.sessions, 4u64) && list.len(owes_again) == 0u64
+    let kept = map.len(again.sessions) == 4u64 && map.contains(again.sessions, 1u64)
+        && map.contains(again.sessions, 2u64) && map.contains(again.sessions, 3u64)
+        && map.contains(again.sessions, 4u64) && list.len(owes_again) == 0u64
     let mut idle: List[Owe] = list.new()
     repair(mut b, mut joined, mut idle)
     let _ = channel.try_send(progressed, ())

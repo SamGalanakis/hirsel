@@ -124,11 +124,11 @@ fn covered_pages(access: PublisherReads, read_handle: store.Reader, a: store.Sna
     let base: Option[store.Snapshot] = Some(clone(a))
     let mut low: Bytes = clone(span.low)
     loop {
-        let page = (access.changes)(read_handle, base, b, low, span.high, publication_page_limits()) ?=> |e| projection_error(take e)
+        let page = (access.changes)(read_handle, base, b, low, span.high, publication_page_limits()) ?=> |e| projection_error(take e, list.new())
         let projected = isolate(scoped fn() -> Result[(), store.Error] { covered_rows(page.changes, span, bindings, rows) })
         match take projected {
             Ok(Ok(Ok(()))) => (),
-            Ok(Ok(Error(take e))) => return Error(projection_error(take e)),
+            Ok(Ok(Error(take e))) => return Error(projection_error(take e, list.new())),
             Ok(Error(cs)) => return Error(Stopped(Failed(Raised(raised(cs))))),
             Error(f) => return Error(Stopped(Failed(OutOfBytes(room(f))))),
         }

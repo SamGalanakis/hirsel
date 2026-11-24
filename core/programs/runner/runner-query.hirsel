@@ -1,6 +1,6 @@
 // An attempted query cannot publish a value or a cover before Store accepts its read set.
 type Viewed: shareable + send { covers: List[Cover], value: Bytes, reads: List[store.Read] }
-type Queried = Covered(Viewed) | Stopped(Outcome) | Faulted(Outcome, List[store.Read]) | Lost(store.Error)
+type Queried = Covered(Viewed) | Stopped(Outcome) | Faulted(Outcome, List[store.Read]) | Lost(store.Error, List[store.Read])
 
 type QueryBody[H, A, R] = Plain(StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]]) |
     As(StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[R], Capacity]])
@@ -82,13 +82,13 @@ fn query_projection[H: inert + send, A, R](access: PublisherReads, read_handle: 
             }
             match take projected {
                 Ok(()) => Covered(Viewed(covers: take spans, value: take value, reads: take reads)),
-                Error(take problem) => projection_error(take problem),
+                Error(take problem) => projection_error(take problem, take reads),
             }
         },
         Ok(Failed(cs)) => Stopped(Failed(Raised(raised(cs)))),
         Ok(Refused(c)) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
         Ok(Stopped(e)) => Stopped(Failed(OutOfTime(e.steps))),
-        Error(take problem) => Lost(take problem),
+        Error(take problem) => Lost(take problem, list.new()),
     }
 }
 

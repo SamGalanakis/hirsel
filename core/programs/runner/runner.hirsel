@@ -3466,7 +3466,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
     // Declared last, so a trap cleans it first (FAIL-8): R = u64::MAX is published before any
     // owner channel or the inbox closes.
     let mut rounds = take register
-    fence_round(mut joined, Fenced(sessions: list.new(), all: false), at, mut rounds)
+    fence_round(mut joined, Fenced(sessions: map.new()), at, mut rounds)
     // A message taken while coalescing Releases, handled next in inbox order.
     let mut held: Option[PubIn] = None
     loop {
@@ -3511,7 +3511,7 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
                 if let Some(take s) = take newest {
                     at = newest_at
                     b.newest = Some(take s)
-                    let mut fenced = Fenced(sessions: list.new(), all: false)
+                    let mut fenced = Fenced(sessions: map.new())
                     owes = round(mut b, mut fenced)
                     // G2 step 3: every fence of the round, then R, before anything is offered.
                     fence_round(mut joined, take fenced, newest_at, mut rounds)
@@ -3556,9 +3556,8 @@ fn publisher[G: send, H: shareable + inert + send](take r: Registry[G, H], take 
     }
 }
 
-// The sessions a round's read-set hits fence: each named session, or every joined session
-// when the round could not tell which (a lost diff resets them all).
-type Fenced { sessions: List[u64], all: bool }
+// One mark per session for the union of this round's read-set hits.
+type Fenced { sessions: Map[u64, ()] }
 
 // G2 step 3 (§3 "The release check"): publish every fence of round b, then R = b, each from
 // its reservation. A publisher that cannot is stopped, which publishes R = u64::MAX as it is
@@ -3568,10 +3567,9 @@ fn fence_round(mut joined: List[Joiner], take fenced: Fenced, b: u64, mut rounds
 }
 
 fn fence_before_round(mut joined: List[Joiner], take fenced: Fenced, b: u64, mut rounds: RoundRegister, before_release: scoped fn()) {
-    let Fenced(sessions: take sessions, all: all) = take fenced
     let mut i = 0u64
     while i < list.len(joined) {
-        if all || list.contains(sessions, joined[i].who) {
+        if map.contains(fenced.sessions, joined[i].who) {
             publish_session_fence(mut joined[i], b)
         }
         i += 1u64
@@ -4156,7 +4154,7 @@ fn holds(c: Client, keys: List[Bytes], who: u64, sub: u32, row0: Option[u8], row
 
 fn step[G: send, H: shareable + inert + send](mut b: Board[G, H], db: store.Db) -> List[Owe] waits {
     b.newest = Some(store.snapshot(db))
-    let mut fenced = Fenced(sessions: list.new(), all: false)
+    let mut fenced = Fenced(sessions: map.new())
     round(mut b, mut fenced)
 }
 

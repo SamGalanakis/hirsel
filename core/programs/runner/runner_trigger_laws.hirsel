@@ -756,7 +756,7 @@ fn apply_all(mut c: Client, take owes: List[Owe]) -> bool {
 }
 
 fn step_held[G: send, H: shareable + inert + send](mut b: Board[G, H]) -> List[Owe] waits {
-    let mut fenced = Fenced(sessions: list.new(), all: false)
+    let mut fenced = Fenced(sessions: map.new())
     round(mut b, mut fenced)
 }
 

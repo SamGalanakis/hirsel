@@ -390,10 +390,14 @@ fn run_query[G: send, H: shareable + inert + send](r: Registry[G, H], h: H, acce
     (registered.run)(registered.slots, bindings, access, read_handle, h, input.caller, input.arg, at, prior, rows, old)
 }
 
-fn projection_error(take e: store.Error) -> Queried {
+fn projection_error(take e: store.Error, take dependencies: List[store.Read]) -> Queried {
     match take e {
-        Full(c) => Stopped(Failed(OutOfBytes(room(store_capacity(c))))),
-        take other => Lost(take other),
+        Full(c) => {
+            let why: Outcome = Failed(OutOfBytes(room(store_capacity(c))))
+            if list.len(dependencies) == 0u64 { return Stopped(take why) }
+            Faulted(take why, take dependencies)
+        },
+        take other => Lost(take other, take dependencies),
     }
 }
 
@@ -446,7 +450,11 @@ fn at_base_generation[G: send, H: shareable + inert + send](mut b: Board[G, H], 
         Error(Stopped(take why)) => append_terminal(mut o, sub, generation, take why),
         Error(Faulted(take why, take reads)) =>
             retain_initial_failure(mut b.subs, mut o, sub, generation, take input, take why, take reads),
-        Error(Lost(problem)) => {
+        Error(Lost(problem, take dependencies)) => {
+            let charge = subscription_charge(b.subs, who, sub, input, read_charge(dependencies))
+            if let Ok(assigned) = charge {
+                let _ = add_subscription(mut b.subs, who, sub, generation, take input, None, assigned, take dependencies)
+            }
             o.reset = true
             o.read_failed = read_failed(problem)
         },
@@ -619,13 +627,13 @@ fn advance_view[G: send, H: shareable + inert + send](b: Board[G, H], newest: st
             Covered(take v) => Refreshed(take v, take rows),
             Stopped(take why) => EndSub(take why),
             Faulted(take why, take reads) => EndRead(take why, take reads),
-            Lost(problem) => ResetSubs(read_failed(problem)),
+            Lost(problem, _) => ResetSubs(read_failed(problem)),
         }
     }
     match project_changes(b, entry.input.key, newest, image.covers, rows) {
         Ok(()) => Rows(take rows),
         Error(Stopped(take why)) => EndSub(take why),
-        Error(Lost(problem)) => ResetSubs(read_failed(problem)),
+        Error(Lost(problem, _)) => ResetSubs(read_failed(problem)),
         Error(_) => ResetSubs(false),
     }
 }
@@ -644,7 +652,7 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
             let failed = read_failed(problem)
             let mut i = 0u64
             while i < list.len(owes) {
-                list.push(mut fenced.sessions, owes[i].session)
+                map.insert(mut fenced.sessions, owes[i].session, ())
                 owes[i].read_failed = failed
                 i += 1u64
             }
@@ -656,7 +664,7 @@ fn round[G: send, H: shareable + inert + send](mut b: Board[G, H], mut fenced: F
         if !read { continue }
         let shared = option.unwrap(map.get(b.subs.indexed, serial))
         for (_, id) in shared.subscribers {
-            if !list.contains(fenced.sessions, id.who) { list.push(mut fenced.sessions, id.who) }
+            map.insert(mut fenced.sessions, id.who, ())
         }
     }
     for (serial, read) in hits {
@@ -710,15 +718,20 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
             let new_routes = index_view(mut subs, Some(arc.share(image)), list.new())
             for id in members {
                 let Some((generation, due, limit)) = live_instance(subs, id) else { continue }
-                let k = owe(mut owes, id.who, version)
                 match view_admit(subs, id, size, new_routes) {
                     Ok(ViewAdmission(serial: next, charge: charge)) => {
                         move_subscription(mut subs, id, next, charge, true)
-                        if !due && !append_round_rows(mut owes[k], id, generation, projected, list.len(image.value), limit) {
-                            reset_session(mut subs, mut owes, id.who, version)
+                        if !due && (list.len(projected) != 0u64 || list.len(image.value) != 0u64) {
+                            let k = owe(mut owes, id.who, version)
+                            if !append_round_rows(mut owes[k], id, generation, projected, list.len(image.value), limit) {
+                                reset_session(mut subs, mut owes, id.who, version)
+                            }
                         }
                     },
-                    Error(f) => end_round_sub(mut subs, mut owes[k], id, generation, Refused(Budget(room(f)))),
+                    Error(f) => {
+                        let k = owe(mut owes, id.who, version)
+                        end_round_sub(mut subs, mut owes[k], id, generation, Refused(Budget(room(f))))
+                    },
                 }
             }
             if let Ok(next) = new_routes {
@@ -756,7 +769,7 @@ fn apply_view_round(mut subs: Subscriptions, mut owes: List[Owe], mut fenced: Fe
         },
         ResetSubs(failed) => {
             for id in members {
-                if failed && !list.contains(fenced.sessions, id.who) { list.push(mut fenced.sessions, id.who) }
+                if failed { map.insert(mut fenced.sessions, id.who, ()) }
                 let k = owe(mut owes, id.who, version)
                 reset_session(mut subs, mut owes, id.who, version)
                 owes[k].read_failed = failed

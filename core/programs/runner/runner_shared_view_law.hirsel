@@ -35,9 +35,9 @@ fn test_shared_view_once(clock: Clock, random: Random) -> Result[(), String] wai
     if !mark_due(mut b.subs, 1u64, 10u32) || !mark_due(mut b.subs, 2u64, 20u32) { return Error("views did not become due") }
     set(mut db, h.t, 0u64, 1u64)
     b.newest = Some(store.snapshot(db))
-    let mut fences = Fenced(sessions: list.new(), all: false)
+    let mut fences = Fenced(sessions: map.new())
     let changes = round(mut b, mut fences)
-    if list.len(fences.sessions) != 2u64 { return Error("the due view skipped its shared refresh") }
+    if map.len(fences.sessions) != 2u64 { return Error("the due view skipped its shared refresh") }
     {
         let tight = option.unwrap(sub_at(b.subs, 1u64, 10u32))
         let roomy = option.unwrap(sub_at(b.subs, 2u64, 20u32))

@@ -164,7 +164,7 @@ fn view_image_rows[G: send, H: shareable + inert + send](b: Board[G, H], key: By
     }
     match take projected {
         Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Error(take problem))) => Error(projection_error(take problem)),
+        Ok(Ok(Error(take problem))) => Error(projection_error(take problem, clone(image.reads))),
         Ok(Error(limit)) => Error(Stopped(Failed(OutOfTime(limit.steps)))),
         Error(problem) => Error(Stopped(Refused(Budget(room(problem))))),
     }
@@ -232,7 +232,8 @@ fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u
             }
         },
         Error(Stopped(take why)) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),
-        Error(Lost(problem)) => {
+        Error(Faulted(take why, _)) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),
+        Error(Lost(problem, _)) => {
             reset_session(mut b.subs, mut owes, who, at)
             owes[0u64].read_failed = read_failed(problem)
         },

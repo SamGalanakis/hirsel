@@ -1,5 +1,5 @@
 hirsel.laws 1
-platform@1/launcher/session_vectors src=643f08b75774b170 sig=2c993f8b0970fe85 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+platform@1/launcher/session_vectors src=643f08b75774b170 sig=0dae66af0c6da8a3 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_genesis_recovers src=685ffce2afeb9fe9 sig=9fcea1ac7265af49 run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_idle_unload src=44d2d72412e11e46 sig=d1faad78304f750d run=d58926ede9b57167 bug=- oracle=- rows=pending
 platform@1/local_laws/test_local_one_head src=f7acc5a529061ae0 sig=8531003394c2cd30 run=d58926ede9b57167 bug=- oracle=- rows=pending

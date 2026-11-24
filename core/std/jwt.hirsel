@@ -1,0 +1,845 @@
+// RFC 7515 JWS compact serialization, RFC 7517 JWK and JWK Set, RFC 7519 JWT.
+// Contract: api/jwt.md. Every verification takes a non-empty allowlist and a
+// key that carries its algorithm family; "none" has no Alg.
+/// The JWS algorithms this module signs and verifies (RFC 7518 section 3.1,
+/// RFC 8037 section 3.1). "none" and every other name are unsupported.
+pub type Alg: key = Hs256 | EdDsa | Es256 | Rs256
+
+/// A non-empty set of accepted algorithms: first, then any others.
+pub type Allow: send {
+    first: Alg,
+    rest: List[Alg]
+}
+
+/// Why a structure was refused before any key was used.
+pub type Fault: send = Size | Segments | Encoding | Utf8 | Json | NotObject | Duplicate | MissingAlg
+
+/// A claim check that failed.
+pub type Claim: send = Iss | Aud | Exp
+
+pub type Error: send = Malformed(Fault) | UnsupportedAlg | UnsupportedCrit | WrongKey | BadSignature | Expired | NotYetValid | Mismatch(Claim) | NoKey | AmbiguousKey | BadKey | UnsupportedKey | PrivateKey | Denied | Sign(KeyError)
+
+/// The protected header members this module reads.
+pub type Header: send {
+    alg: Alg,
+    kid: Option[String],
+    typ: Option[String],
+    cty: Option[String]
+}
+
+/// A verified JWS: its header and payload octets.
+pub type Jws: send {
+    header: Header,
+    payload: Bytes
+}
+
+/// The registered claims of a verified JWT, and its whole claims object.
+pub type Claims: send {
+    iss: Option[String],
+    sub: Option[String],
+    aud: List[String],
+    exp: Option[u64],
+    nbf: Option[u64],
+    iat: Option[u64],
+    jti: Option[String],
+    json: String
+}
+
+pub type Jwt: send {
+    header: Header,
+    claims: Claims
+}
+
+/// What a JWT must satisfy besides its signature. Times are seconds since
+/// the epoch; leeway widens exp, nbf and iat by that many seconds.
+pub type Rules: send {
+    allow: Allow,
+    now_secs: u64,
+    leeway_secs: u64,
+    iss: Option[String],
+    aud: Option[String],
+    require_exp: bool
+}
+
+type Family: key = Mac | RsaKey | EcKey | OkpKey
+
+type Material: send = MacKey(Secret) | EdPoint(Bytes) | EcPoint(Bytes) | RsaPublic(Bytes, Bytes)
+
+/// A verification key: its material, the family that fixes which algorithms
+/// can use it, an optional pinned algorithm and an optional key id.
+pub opaque type Key: send {
+    material: Material,
+    alg: Option[Alg],
+    kid: Option[String]
+}
+
+/// A JWK Set's signature keys, in document order.
+pub opaque type KeySet: send {
+    keys: List[Key]
+}
+
+/// A signing key: the algorithm its Secret signs with, and an optional kid.
+pub opaque type Signer: send {
+    alg: Alg,
+    key: Secret,
+    kid: Option[String]
+}
+
+/// Longest compact token accepted, in bytes.
+pub const MAX_TOKEN: u64 = 65536
+
+/// Longest JWK or JWK Set document accepted, in bytes.
+pub const MAX_JWKS: u64 = 1048576
+
+const U64_MAX: u64 = 18446744073709551615u64
+
+/// The JWS "alg" spelling.
+pub fn alg_name(a: Alg) -> String {
+    match a {
+        Hs256 => string.from("HS256"),
+        EdDsa => string.from("EdDSA"),
+        Es256 => string.from("ES256"),
+        Rs256 => string.from("RS256"),
+    }
+}
+
+fn parse_alg(s: String) -> Option[Alg] {
+    if s == "HS256" {
+        Some(Hs256)
+    } else if s == "EdDSA" {
+        Some(EdDsa)
+    } else if s == "ES256" {
+        Some(Es256)
+    } else if s == "RS256" {
+        Some(Rs256)
+    } else {
+        None
+    }
+}
+
+fn family(a: Alg) -> Family {
+    match a {
+        Hs256 => Mac,
+        EdDsa => OkpKey,
+        Es256 => EcKey,
+        Rs256 => RsaKey,
+    }
+}
+
+fn material_family(m: Material) -> Family {
+    match m {
+        MacKey(_) => Mac,
+        EdPoint(_) => OkpKey,
+        EcPoint(_) => EcKey,
+        RsaPublic(_, _) => RsaKey,
+    }
+}
+
+/// An allowlist of exactly one algorithm.
+pub fn allow(a: Alg) -> Allow {
+    Allow(first: a, rest: list.new())
+}
+
+fn allowed(accept: Allow, a: Alg) -> bool {
+    accept.first == a || list.contains(accept.rest, a)
+}
+
+// ---- keys ----
+/// An HMAC key. Its Secret needs the `mac` or `verify` use.
+pub fn hmac_key(take key: Secret) -> Key {
+    Key(material: MacKey(take key), alg: None, kid: None)
+}
+
+/// An Ed25519 public key: 32 bytes (RFC 8032 section 5.1.5).
+pub fn ed25519_key(take x: Bytes) -> Result[Key, Error] {
+    if list.len(x) != 32 {
+        return Error(BadKey)
+    }
+    Ok(Key(material: EdPoint(take x), alg: None, kid: None))
+}
+
+/// A P-256 public key from its 32-byte affine coordinates.
+pub fn p256_key(x: Bytes, y: Bytes) -> Result[Key, Error] {
+    if list.len(x) != 32 || list.len(y) != 32 {
+        return Error(BadKey)
+    }
+    let mut point: Bytes = list.with_capacity(65)
+    list.push(mut point, 4u8)
+    list.append(mut point, x)
+    list.append(mut point, y)
+    Ok(Key(material: EcPoint(take point), alg: None, kid: None))
+}
+
+/// An RSA public key: minimal unsigned big-endian modulus of 2048 to 8192
+/// bits and exponent of at most 4 bytes (RFC 7518 sections 3.3 and 6.3.1).
+pub fn rsa_key(take n: Bytes, take e: Bytes) -> Result[Key, Error] {
+    let n_len = list.len(n)
+    let e_len = list.len(e)
+    if n_len < 256 || n_len > 1024 || n[0] == 0 || e_len == 0 || e_len > 4 || e[0] == 0 {
+        return Error(BadKey)
+    }
+    Ok(Key(material: RsaPublic(take n, take e), alg: None, kid: None))
+}
+
+/// The same key with kid set.
+pub fn with_kid(take k: Key, take kid: String) -> Key {
+    let mut out = take k
+    out.kid = Some(take kid)
+    out
+}
+
+/// The key's kid, if any.
+pub fn key_id(k: Key) -> Option[View[String]] in k {
+    match view k.kid {
+        Some(s) => Some(s),
+        None => None,
+    }
+}
+
+/// A signer for alg. The Secret holds an HMAC key with the `mac` use for
+/// HS256, or a PKCS#8 private key with `sign(ed25519)`, `sign(p256)` or
+/// `sign(rs256)` (TLS-5).
+pub fn signer(alg: Alg, take key: Secret) -> Signer {
+    Signer(alg: alg, key: take key, kid: None)
+}
+
+/// The same signer, writing kid into the headers sign_jwt makes.
+pub fn signer_with_kid(take s: Signer, take kid: String) -> Signer {
+    let mut out = take s
+    out.kid = Some(take kid)
+    out
+}
+
+// ---- parsing ----
+type HeaderSeen {
+    alg: Option[String],
+    kid: Option[String],
+    typ: Option[String],
+    cty: Option[String],
+    crit: bool,
+    dup: bool,
+    names: set.Set[String]
+}
+
+fn json_fault(take _e: json.Error) -> Error {
+    Malformed(Json)
+}
+
+fn object_start(s: String) -> bool {
+    let b = string.as_bytes(s)
+    let n = list.len(b)
+    let mut i: u64 = 0
+    while i < n && (b[i] == b' ' || b[i] == b'\t' || b[i] == b'\n' || b[i] == b'\r') {
+        i += 1
+    }
+    i < n && b[i] == b'{'
+}
+
+fn read_header_seen(s: String, mut c: json.Cursor) -> Result[HeaderSeen, json.Error] {
+    let seed = HeaderSeen(alg: None, kid: None, typ: None, cty: None, crit: false, dup: false, names: set.new())
+    json.record_of(s, mut c, take seed, fn(key: String, input: String, mut v: json.Cursor, mut h: HeaderSeen) -> Result[(), json.Error] {
+        if !set.insert(mut h.names, clone(key)) {
+            h.dup = true
+        }
+        if key == "alg" {
+            h.alg = Some(json.read_string(input, mut v)?)
+        } else if key == "kid" {
+            h.kid = Some(json.read_string(input, mut v)?)
+        } else if key == "typ" {
+            h.typ = Some(json.read_string(input, mut v)?)
+        } else if key == "cty" {
+            h.cty = Some(json.read_string(input, mut v)?)
+        } else if key == "crit" {
+            h.crit = true
+            json.skip_value(input, mut v)?
+        } else {
+            json.skip_value(input, mut v)?
+        }
+        Ok(())
+    })
+}
+
+// RFC 7515 sections 4 and 5.2: an object, no duplicate names, an understood
+// alg, and no crit (this module understands no extension).
+fn parse_header(text: String) -> Result[Header, Error] {
+    if !object_start(text) {
+        return Error(Malformed(NotObject))
+    }
+    let seen = json.decode(text, read_header_seen) ?=> json_fault
+    let HeaderSeen(alg: name, kid: kid, typ: typ, cty: cty, crit: crit, dup: dup, names: _) = take seen
+    if dup {
+        return Error(Malformed(Duplicate))
+    }
+    if crit {
+        return Error(UnsupportedCrit)
+    }
+    let Some(spelled) = view name else {
+        return Error(Malformed(MissingAlg))
+    }
+    let Some(alg) = parse_alg(spelled) else {
+        return Error(UnsupportedAlg)
+    }
+    Ok(Header(alg: alg, kid: take kid, typ: take typ, cty: take cty))
+}
+
+fn decode_segment(token: String, lo: u64, hi: u64) -> Result[Bytes, Error] {
+    match base64.decode_url(string.as_bytes(string.slice(token, lo, hi)), false) {
+        Some(take b) => Ok(take b),
+        None => Error(Malformed(Encoding)),
+    }
+}
+
+fn utf8(take b: Bytes) -> Result[String, Error] {
+    match string.from_utf8(take b) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(Malformed(Utf8)),
+    }
+}
+
+type Compact {
+    header: Header,
+    signed: u64,
+    payload: Bytes,
+    signature: Bytes
+}
+
+// Exactly three canonical base64url segments (RFC 7515 sections 2 and 7.1).
+fn split_compact(token: String) -> Result[Compact, Error] {
+    let b = string.as_bytes(token)
+    let n = list.len(b)
+    if n > MAX_TOKEN {
+        return Error(Malformed(Size))
+    }
+    let Some(d1) = list.find_byte(b, 0, n, b'.') else {
+        return Error(Malformed(Segments))
+    }
+    let Some(d2) = list.find_byte(b, d1 + 1, n, b'.') else {
+        return Error(Malformed(Segments))
+    }
+    if list.find_byte(b, d2 + 1, n, b'.') != None {
+        return Error(Malformed(Segments))
+    }
+    let header_text = utf8(decode_segment(token, 0, d1)?)?
+    let header = parse_header(header_text)?
+    let payload = decode_segment(token, d1 + 1, d2)?
+    let signature = decode_segment(token, d2 + 1, n)?
+    Ok(Compact(header: take header, signed: d2, payload: take payload, signature: take signature))
+}
+
+// ---- verification ----
+fn admit(accept: Allow, alg: Alg, k: Key) -> Result[(), Error] {
+    if !allowed(accept, alg) {
+        return Error(UnsupportedAlg)
+    }
+    if family(alg) != material_family(k.material) {
+        return Error(WrongKey)
+    }
+    match k.alg {
+        Some(pinned) if pinned != alg => Error(WrongKey),
+        _ => Ok(()),
+    }
+}
+
+fn check_signature(k: Key, input: Bytes, sig: Bytes) -> Result[(), Error] {
+    let good = match view k.material {
+        MacKey(s) => match secret.verify_hmac_sha256(s, input, sig) {
+            Ok(v) => v,
+            Error(_) => return Error(Denied),
+        },
+        EdPoint(x) => list.len(sig) == 64 && ed25519.verify(x, input, sig),
+        EcPoint(point) => list.len(sig) == 64 && p256.verify(point, input, sig),
+        RsaPublic(n, e) => list.len(sig) == list.len(n) && rsa.verify_pkcs1_sha256(n, e, input, sig),
+    }
+    if good {
+        Ok(())
+    } else {
+        Error(BadSignature)
+    }
+}
+
+fn verify_with(token: String, accept: Allow, take parts: Compact, k: Key) -> Result[Jws, Error] {
+    admit(accept, parts.header.alg, k)?
+    check_signature(k, list.slice(string.as_bytes(token), 0, parts.signed), parts.signature)?
+    let Compact(header: header, signed: _, payload: payload, signature: _) = take parts
+    Ok(Jws(header: take header, payload: take payload))
+}
+
+/// Verifies a compact JWS with one key. The header's alg must be in allow and
+/// in the key's family (and equal its pinned alg). Alloc: the decoded parts.
+pub fn verify_jws(token: String, accept: Allow, k: Key) -> Result[Jws, Error] {
+    let parts = split_compact(token)?
+    verify_with(token, accept, take parts, k)
+}
+
+/// Verifies a compact JWS with the one key of set that its header's kid picks
+/// (find's rule).
+pub fn verify_jws_in(token: String, accept: Allow, keys: KeySet) -> Result[Jws, Error] {
+    let parts = split_compact(token)?
+    let k = find(keys, parts.header.kid)?
+    verify_with(token, accept, take parts, k)
+}
+
+/// The one key whose kid equals kid. A missing kid picks the only key of a
+/// one-key set. No match is NoKey; two matches, or no kid with more than one
+/// key, is AmbiguousKey. Keys are never tried in turn.
+pub fn find(keys: KeySet, kid: Option[String]) -> Result[View[Key], Error] in keys {
+    let n = list.len(keys.keys)
+    match view kid {
+        None => {
+            if n == 1 {
+                Ok(view keys.keys[0])
+            } else if n == 0 {
+                Error(NoKey)
+            } else {
+                Error(AmbiguousKey)
+            }
+        },
+        Some(want) => {
+            let mut hit: Option[u64] = None
+            for i in 0u64 .. n {
+                let matches = match view keys.keys[i].kid {
+                    Some(have) => have == want,
+                    None => false,
+                }
+                if matches {
+                    if hit != None {
+                        return Error(AmbiguousKey)
+                    }
+                    hit = Some(i)
+                }
+            }
+            match hit {
+                Some(i) => Ok(view keys.keys[i]),
+                None => Error(NoKey),
+            }
+        },
+    }
+}
+
+type ClaimsSeen {
+    iss: Option[String],
+    sub: Option[String],
+    aud: List[String],
+    exp: Option[u64],
+    nbf: Option[u64],
+    iat: Option[u64],
+    jti: Option[String],
+    dup: bool,
+    names: set.Set[String]
+}
+
+fn read_strings(s: String, mut c: json.Cursor) -> Result[List[String], json.Error] {
+    if json.peek(s, c)? == JsonString {
+        let mut one: List[String] = list.new()
+        list.push(mut one, json.read_string(s, mut c)?)
+        return Ok(take one)
+    }
+    json.list_of(s, mut c, json.read_string)
+}
+
+fn read_claims_seen(s: String, mut c: json.Cursor) -> Result[ClaimsSeen, json.Error] {
+    let seed = ClaimsSeen(iss: None, sub: None, aud: list.new(), exp: None, nbf: None, iat: None, jti: None, dup: false, names: set.new())
+    json.record_of(s, mut c, take seed, fn(key: String, input: String, mut v: json.Cursor, mut m: ClaimsSeen) -> Result[(), json.Error] {
+        if !set.insert(mut m.names, clone(key)) {
+            m.dup = true
+        }
+        if key == "iss" {
+            m.iss = Some(json.read_string(input, mut v)?)
+        } else if key == "sub" {
+            m.sub = Some(json.read_string(input, mut v)?)
+        } else if key == "aud" {
+            m.aud = read_strings(input, mut v)?
+        } else if key == "exp" {
+            m.exp = Some(json.read_u64(input, mut v)?)
+        } else if key == "nbf" {
+            m.nbf = Some(json.read_u64(input, mut v)?)
+        } else if key == "iat" {
+            m.iat = Some(json.read_u64(input, mut v)?)
+        } else if key == "jti" {
+            m.jti = Some(json.read_string(input, mut v)?)
+        } else {
+            json.skip_value(input, mut v)?
+        }
+        Ok(())
+    })
+}
+
+// RFC 7519 section 7.2 step 10: the payload is a JSON object, its names
+// unique. NumericDate is accepted as a non-negative integer only.
+fn parse_claims(take text: String) -> Result[Claims, Error] {
+    if !object_start(text) {
+        return Error(Malformed(NotObject))
+    }
+    let seen = json.decode(text, read_claims_seen) ?=> json_fault
+    let ClaimsSeen(iss: iss, sub: sub, aud: aud, exp: exp, nbf: nbf, iat: iat, jti: jti, dup: dup, names: _) = take seen
+    if dup {
+        return Error(Malformed(Duplicate))
+    }
+    Ok(Claims(iss: take iss, sub: take sub, aud: take aud, exp: exp, nbf: nbf, iat: iat, jti: take jti, json: take text))
+}
+
+fn later(now: u64, leeway: u64) -> u64 {
+    if now > U64_MAX - leeway {
+        U64_MAX
+    } else {
+        now + leeway
+    }
+}
+
+// Leeway moves only the trusted clock, so no claim value can overflow.
+fn check_claims(c: Claims, r: Rules) -> Result[(), Error] {
+    match c.exp {
+        Some(exp) => {
+            if r.now_secs >= r.leeway_secs && exp <= r.now_secs - r.leeway_secs {
+                return Error(Expired)
+            }
+        },
+        None => {
+            if r.require_exp {
+                return Error(Mismatch(Exp))
+            }
+        },
+    }
+    let future = later(r.now_secs, r.leeway_secs)
+    match c.nbf {
+        Some(nbf) if nbf > future => return Error(NotYetValid),
+        _ => {},
+    }
+    match c.iat {
+        Some(iat) if iat > future => return Error(NotYetValid),
+        _ => {},
+    }
+    match view r.iss {
+        Some(want) => {
+            let same = match view c.iss {
+                Some(have) => have == want,
+                None => false,
+            }
+            if !same {
+                return Error(Mismatch(Iss))
+            }
+        },
+        None => {},
+    }
+    // RFC 7519 section 4.1.3: a present aud that does not name us rejects.
+    match view r.aud {
+        Some(want) => {
+            if !list.contains(c.aud, want) {
+                return Error(Mismatch(Aud))
+            }
+        },
+        None => {
+            if list.len(c.aud) != 0 {
+                return Error(Mismatch(Aud))
+            }
+        },
+    }
+    Ok(())
+}
+
+fn finish_jwt(take jws: Jws, r: Rules) -> Result[Jwt, Error] {
+    let Jws(header: header, payload: payload) = take jws
+    let claims = parse_claims(utf8(take payload)?)?
+    check_claims(claims, r)?
+    Ok(Jwt(header: take header, claims: take claims))
+}
+
+/// Verifies a JWT with one key: the signature as verify_jws, then the claims
+/// against r. Claims are read only after the signature verifies.
+pub fn verify_jwt(token: String, r: Rules, k: Key) -> Result[Jwt, Error] {
+    let jws = verify_jws(token, r.allow, k)?
+    finish_jwt(take jws, r)
+}
+
+/// verify_jwt with the key of set that the header's kid picks.
+pub fn verify_jwt_in(token: String, r: Rules, keys: KeySet) -> Result[Jwt, Error] {
+    let jws = verify_jws_in(token, r.allow, keys)?
+    finish_jwt(take jws, r)
+}
+
+// ---- signing ----
+fn sign_bytes(s: Signer, input: Bytes) -> Result[Bytes, Error] {
+    let alg: SignAlg = match s.alg {
+        Hs256 => {
+            let tag = match secret.hmac_sha256(s.key, input) {
+                Ok(t) => t,
+                Error(_) => return Error(Denied),
+            }
+            let mut out: Bytes = list.with_capacity(32)
+            for x in tag {
+                list.push(mut out, x)
+            }
+            return Ok(take out)
+        },
+        EdDsa => Ed25519,
+        Es256 => P256,
+        Rs256 => Rs256,
+    }
+    let mut out: Bytes = list.with_capacity(1024)
+    match secret.sign(s.key, alg, input, mut out) {
+        Ok(_) => Ok(take out),
+        Error(Denied) => Error(Denied),
+        Error(e) => Error(Sign(e)),
+    }
+}
+
+/// Signs payload under the given protected header text, which must parse as
+/// verify reads it and name the signer's alg. Alloc: the token.
+pub fn sign_jws(s: Signer, header: String, payload: Bytes) -> Result[String, Error] {
+    let parsed = parse_header(header)?
+    if parsed.alg != s.alg {
+        return Error(WrongKey)
+    }
+    let mut token = base64.encode_url(string.as_bytes(header), false)
+    string.push(mut token, ".")
+    string.push(mut token, base64.encode_url(payload, false))
+    if string.byte_len(token) > MAX_TOKEN {
+        return Error(Malformed(Size))
+    }
+    let sig = sign_bytes(s, string.as_bytes(token))?
+    string.push(mut token, ".")
+    string.push(mut token, base64.encode_url(sig, false))
+    if string.byte_len(token) > MAX_TOKEN {
+        return Error(Malformed(Size))
+    }
+    Ok(take token)
+}
+
+/// Signs a claims object as a JWT with header {"alg":..,"typ":"JWT"} and
+/// the signer's kid. The claims must parse as verify_jwt reads them.
+pub fn sign_jwt(s: Signer, claims: String) -> Result[String, Error] {
+    let _ = parse_claims(clone(claims))?
+    let mut header = string.from("{\"alg\":\"")
+    string.push(mut header, alg_name(s.alg))
+    string.push(mut header, "\",\"typ\":\"JWT\"")
+    match view s.kid {
+        Some(kid) => {
+            string.push(mut header, ",\"kid\":")
+            json.write(mut header, false, scoped fn(w: json.Writer) {
+                json.write_string_value(w, kid)
+            })
+        },
+        None => {},
+    }
+    string.push(mut header, "}")
+    sign_jws(s, header, string.as_bytes(claims))
+}
+
+// ---- JWK (RFC 7517 section 4, RFC 7518 section 6, RFC 8037 section 2) ----
+type JwkSeen {
+    kty: Option[String],
+    crv: Option[String],
+    alg: Option[String],
+    usage: Option[String],
+    ops: Option[List[String]],
+    kid: Option[String],
+    x: Option[String],
+    y: Option[String],
+    n: Option[String],
+    e: Option[String],
+    k: Option[String],
+    private: bool,
+    dup: bool,
+    names: set.Set[String]
+}
+
+fn read_jwk_seen(s: String, mut c: json.Cursor) -> Result[JwkSeen, json.Error] {
+    let seed = JwkSeen(kty: None, crv: None, alg: None, usage: None, ops: None, kid: None, x: None, y: None, n: None, e: None, k: None, private: false, dup: false, names: set.new())
+    json.record_of(s, mut c, take seed, fn(key: String, input: String, mut v: json.Cursor, mut j: JwkSeen) -> Result[(), json.Error] {
+        if !set.insert(mut j.names, clone(key)) {
+            j.dup = true
+        }
+        if key == "kty" {
+            j.kty = Some(json.read_string(input, mut v)?)
+        } else if key == "crv" {
+            j.crv = Some(json.read_string(input, mut v)?)
+        } else if key == "alg" {
+            j.alg = Some(json.read_string(input, mut v)?)
+        } else if key == "use" {
+            j.usage = Some(json.read_string(input, mut v)?)
+        } else if key == "key_ops" {
+            j.ops = Some(json.list_of(input, mut v, json.read_string)?)
+        } else if key == "kid" {
+            j.kid = Some(json.read_string(input, mut v)?)
+        } else if key == "x" {
+            j.x = Some(json.read_string(input, mut v)?)
+        } else if key == "y" {
+            j.y = Some(json.read_string(input, mut v)?)
+        } else if key == "n" {
+            j.n = Some(json.read_string(input, mut v)?)
+        } else if key == "e" {
+            j.e = Some(json.read_string(input, mut v)?)
+        } else if key == "k" {
+            j.k = Some(json.read_string(input, mut v)?)
+        } else if key == "d" || key == "p" || key == "q" || key == "dp" || key == "dq" || key == "qi" || key == "oth" {
+            j.private = true
+            json.skip_value(input, mut v)?
+        } else {
+            json.skip_value(input, mut v)?
+        }
+        Ok(())
+    })
+}
+
+fn member(m: Option[String]) -> Result[Bytes, Error] {
+    match view m {
+        Some(text) => match base64.decode_url(string.as_bytes(text), false) {
+            Some(take b) => Ok(take b),
+            None => Error(BadKey),
+        },
+        None => Error(BadKey),
+    }
+}
+
+fn is(m: Option[String], want: String) -> bool {
+    match view m {
+        Some(v) => v == want,
+        None => false,
+    }
+}
+
+// Ok(None): a well-formed key this module does not use for JWS
+// verification (another kty, curve or alg, or use other than "sig").
+fn jwk_key(take j: JwkSeen) -> Result[Option[Key], Error] {
+    let JwkSeen(kty: kty, crv: crv, alg: alg, usage: usage, ops: ops, kid: kid, x: x, y: y, n: n, e: e, k: k, private: private, dup: dup, names: _) = take j
+    if dup {
+        return Error(Malformed(Duplicate))
+    }
+    let Some(kind) = view kty else {
+        return Error(BadKey)
+    }
+    match view usage {
+        Some(u) if u != "sig" => return Ok(None),
+        _ => {},
+    }
+    match view ops {
+        Some(list_ops) if !list.contains(list_ops, "verify") => return Ok(None),
+        _ => {},
+    }
+    let pinned: Option[Alg] = match view alg {
+        Some(name) => match parse_alg(name) {
+            Some(a) => Some(a),
+            None => return Ok(None),
+        },
+        None => None,
+    }
+    let key = if kind == "oct" {
+        if private {
+            return Error(BadKey)
+        }
+        let raw = member(k)?
+        // RFC 7518 section 3.2: an HS256 key has at least 256 bits.
+        if list.len(raw) < 32 {
+            return Error(BadKey)
+        }
+        match secret.seal(take raw, "verify") {
+            Ok(take sealed) => hmac_key(take sealed),
+            Error(_) => return Error(BadKey),
+        }
+    } else if kind == "RSA" {
+        if private {
+            return Error(PrivateKey)
+        }
+        rsa_key(member(n)?, member(e)?)?
+    } else if kind == "EC" {
+        if !is(crv, "P-256") {
+            return Ok(None)
+        }
+        if private {
+            return Error(PrivateKey)
+        }
+        p256_key(member(x)?, member(y)?)?
+    } else if kind == "OKP" {
+        if !is(crv, "Ed25519") {
+            return Ok(None)
+        }
+        if private {
+            return Error(PrivateKey)
+        }
+        ed25519_key(member(x)?)?
+    } else {
+        return Ok(None)
+    }
+    match pinned {
+        Some(a) if family(a) != material_family(key.material) => return Error(BadKey),
+        _ => {},
+    }
+    let mut out = take key
+    out.alg = pinned
+    out.kid = take kid
+    Ok(Some(take out))
+}
+
+/// Parses one public JWK (RSA, EC P-256, OKP Ed25519) or HMAC JWK ("oct",
+/// whose k is sealed as a Secret with the `verify` use). A key for another
+/// use or algorithm is UnsupportedKey; private members are PrivateKey.
+pub fn jwk(text: String) -> Result[Key, Error] {
+    if string.byte_len(text) > MAX_JWKS {
+        return Error(Malformed(Size))
+    }
+    if !object_start(text) {
+        return Error(Malformed(NotObject))
+    }
+    let seen = json.decode(text, read_jwk_seen) ?=> json_fault
+    let usable = jwk_key(take seen)?
+    match take usable {
+        Some(take k) => Ok(take k),
+        None => Error(UnsupportedKey),
+    }
+}
+
+type SetSeen {
+    keys: List[JwkSeen],
+    found: bool,
+    dup: bool,
+    names: set.Set[String]
+}
+
+fn read_set_seen(s: String, mut c: json.Cursor) -> Result[SetSeen, json.Error] {
+    let seed = SetSeen(keys: list.new(), found: false, dup: false, names: set.new())
+    json.record_of(s, mut c, take seed, fn(key: String, input: String, mut v: json.Cursor, mut st: SetSeen) -> Result[(), json.Error] {
+        if !set.insert(mut st.names, clone(key)) {
+            st.dup = true
+        }
+        if key == "keys" {
+            st.keys = json.list_of(input, mut v, read_jwk_seen)?
+            st.found = true
+        } else {
+            json.skip_value(input, mut v)?
+        }
+        Ok(())
+    })
+}
+
+/// Parses a JWK Set. Keys this module cannot use for JWS verification are
+/// left out (RFC 7517 section 5); any malformed or private key fails the set.
+pub fn jwks(text: String) -> Result[KeySet, Error] {
+    if string.byte_len(text) > MAX_JWKS {
+        return Error(Malformed(Size))
+    }
+    if !object_start(text) {
+        return Error(Malformed(NotObject))
+    }
+    let seen = json.decode(text, read_set_seen) ?=> json_fault
+    let SetSeen(keys: raw, found: found, dup: dup, names: _) = take seen
+    if dup {
+        return Error(Malformed(Duplicate))
+    }
+    if !found {
+        return Error(BadKey)
+    }
+    let mut keys: List[Key] = list.new()
+    for take j in take raw {
+        let usable = jwk_key(take j)?
+        match take usable {
+            Some(take k) => list.push(mut keys, take k),
+            None => {},
+        }
+    }
+    Ok(KeySet(keys: take keys))
+}
+
+/// The number of usable keys in the set.
+pub fn len(keys: KeySet) -> u64 {
+    list.len(keys.keys)
+}

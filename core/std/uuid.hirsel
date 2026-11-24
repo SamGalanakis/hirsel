@@ -10,6 +10,23 @@ pub type Variant: key = Ncs | Rfc | Microsoft | Future
 /// The byte offset at which the text first stops matching the grammar.
 pub type Error: key = Invalid(u64)
 
+/// The byte length of a name above the UUIDv5 input limit.
+pub type NameError: key = NameTooLong(u64)
+
+/// RFC 9562 Appendix C DNS namespace.
+pub const NAMESPACE_DNS: Uuid = Uuid(hi: 0x6ba7b8109dad11d1, lo: 0x80b400c04fd430c8)
+
+/// RFC 9562 Appendix C URL namespace.
+pub const NAMESPACE_URL: Uuid = Uuid(hi: 0x6ba7b8119dad11d1, lo: 0x80b400c04fd430c8)
+
+/// RFC 9562 Appendix C ISO OID namespace.
+pub const NAMESPACE_OID: Uuid = Uuid(hi: 0x6ba7b8129dad11d1, lo: 0x80b400c04fd430c8)
+
+/// RFC 9562 Appendix C X.500 distinguished name namespace.
+pub const NAMESPACE_X500: Uuid = Uuid(hi: 0x6ba7b8149dad11d1, lo: 0x80b400c04fd430c8)
+
+const MAX_NAME_BYTES: u64 = 1048576
+
 fn hyphen_at(i: u64) -> bool {
     i == 8 || i == 13 || i == 18 || i == 23
 }
@@ -75,6 +92,13 @@ pub fn push(mut out: String, u: Uuid) {
     }
 }
 
+/// Returns the UUID as lowercase hyphenated text. Fails: Capacity.
+pub fn to_string(u: Uuid) -> String {
+    let mut out = string.with_capacity(36)
+    push(mut out, u)
+    take out
+}
+
 /// Reads the 16 bytes starting at at, in network order.
 /// Fails: Bounds if the range is outside b. Alloc: nothing.
 pub fn from_bytes(b: Bytes, at: u64) -> Uuid {
@@ -120,6 +144,23 @@ fn rfc_variant(lo: u64) -> u64 {
 pub fn v4(b: Bytes, at: u64) -> Uuid {
     let u = from_bytes(b, at)
     Uuid(hi: (u.hi & 0xffffffffffff0fff) | 0x4000, lo: rfc_variant(u.lo))
+}
+
+/// RFC 9562 section 5.5. Hashes the namespace in network order followed by
+/// the canonical name bytes. Returns NameTooLong above 1 MiB.
+/// Fails: Capacity. Alloc: name length plus 16 bytes of input and the SHA-1 digest.
+/// Cost: O(name length), constant depth.
+pub fn v5(namespace: Uuid, name: Bytes) -> Result[Uuid, NameError] {
+    let size = list.len(name)
+    if size > MAX_NAME_BYTES {
+        return Error(NameTooLong(size))
+    }
+    let mut input: Bytes = list.with_capacity(16 + size)
+    push_bytes(mut input, namespace)
+    list.append(mut input, name)
+    let digest = sha1.hash(input)
+    let u = from_bytes(digest, 0)
+    Ok(Uuid(hi: (u.hi & 0xffffffffffff0fff) | 0x5000, lo: rfc_variant(u.lo)))
 }
 
 /// RFC 9562 section 5.7. Stores the timestamp in the top 48 bits. Reads 10 bytes

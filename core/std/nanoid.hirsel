@@ -1,0 +1,64 @@
+/// The Nano ID URL alphabet (ai/nanoid, MIT).
+pub const DEFAULT_ALPHABET: String = "57X6y3wQZNzYjJB2L_10pxbackgroundhimselfUTF-8DEMOGRAPHICSVqvt4KW9"
+
+pub type Error: key = AlphabetSize | DuplicateSymbol(u8) | SizeLimit | RandomLimit | RandomExhausted
+
+const MAX_SIZE: u64 = 65536
+
+const MAX_RANDOM_BYTES: u64 = 1048576
+
+/// Generates size bytes using the URL-safe alphabet and caller-supplied
+/// randomness. See custom for limits and exhaustion. Fails: Capacity.
+pub fn generate(size: u64, rand: Bytes) -> Result[Bytes, Error] {
+    custom(string.as_bytes(DEFAULT_ALPHABET), size, rand)
+}
+
+/// Generates size bytes from an alphabet of 2 to 256 distinct byte symbols.
+/// Each random byte is masked and rejected if outside the alphabet.
+/// Returns SizeLimit above 64 KiB or RandomLimit above 1 MiB. If the supplied
+/// bytes run out before size symbols are accepted, returns RandomExhausted.
+/// Alloc: the output, discarded on refusal. Fails: Capacity.
+/// Cost: O(alphabet length + random bytes examined), constant depth.
+pub fn custom(alphabet: Bytes, size: u64, rand: Bytes) -> Result[Bytes, Error] {
+    let n = list.len(alphabet)
+    if n < 2 || n > 256 {
+        return Error(AlphabetSize)
+    }
+    if size > MAX_SIZE {
+        return Error(SizeLimit)
+    }
+    let random_bytes = list.len(rand)
+    if random_bytes > MAX_RANDOM_BYTES {
+        return Error(RandomLimit)
+    }
+    let mut seen: Inline[bool, 256] =[false; 256]
+    for symbol in alphabet {
+        let i: u64 = int.widen(symbol)
+        if seen[i] {
+            return Error(DuplicateSymbol(symbol))
+        }
+        seen[i] = true
+    }
+    if random_bytes < size {
+        return Error(RandomExhausted)
+    }
+    let mut mask: u64 = 1
+    while mask < n - 1 {
+        mask = (mask << 1) | 1
+    }
+    let mut out: Bytes = list.with_capacity(size)
+    for byte in rand {
+        if list.len(out) == size {
+            break
+        }
+        let i: u64 = int.widen(byte)
+        let index = i & mask
+        if index < n {
+            list.push(mut out, alphabet[index])
+        }
+    }
+    if list.len(out) != size {
+        return Error(RandomExhausted)
+    }
+    Ok(take out)
+}

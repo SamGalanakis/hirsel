@@ -2,14 +2,22 @@
 
 [API overview](../API.md). [Operations and contracts](../uuid.hirsel).
 
-`std.uuid` handles RFC 9562 UUIDs. It parses and writes the text form, and builds versions 4
-and 7 from bytes and a time the caller supplies. The module has no capability: it never draws
+`std.uuid` handles RFC 9562 UUIDs. It parses and writes the text form and builds versions 4,
+5 and 7. Versions 4 and 7 take random bytes from the caller, and version 7 also takes a
+millisecond timestamp. The module never draws
 randomness or reads a clock. The caller fills 16 or 10 bytes from `host.random` (unguessable)
 or from a `std.rand` stream (repeatable, and therefore **predictable**), and passes a
 millisecond time from `host.wall_ms` or `CallInfo.at`. An identifier that must not be guessed,
 such as a bearer token, a capability URL or a session id, has to come from `host.random`. A
-seeded stream gives the same identifiers to anyone who knows the seed. Operations allocate
-nothing except `push`, which appends 36 bytes to a caller-owned String.
+seeded stream gives the same identifiers to anyone who knows the seed. `push` appends 36 bytes
+to a caller-owned String, and `to_string` returns a new String with the same lowercase
+hyphenated text.
+
+Version 5 takes a namespace UUID and canonical name bytes. It hashes the namespace in
+network order followed by the name with SHA-1, then sets the RFC version and variant bits.
+RFC 9562 defines `NAMESPACE_DNS`, `NAMESPACE_URL`, `NAMESPACE_OID` and `NAMESPACE_X500`.
+The caller chooses the name encoding for the namespace. Names above 1 MiB return
+`NameTooLong`.
 
 ## Types
 
@@ -52,5 +60,5 @@ pub type Error: key = Invalid(u64)
 
 ## Left out
 
-v1, v3, v5, v6 and v8 constructors, MAC-address nodes, Nil/Max constants (`Uuid(hi: 0, lo: 0)`
+v1, v3, v6 and v8 constructors, MAC-address nodes, Nil/Max constants (`Uuid(hi: 0, lo: 0)`
 is the literal), braced/URN/simple text, and monotonic counters.

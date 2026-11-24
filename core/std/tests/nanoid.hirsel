@@ -1,0 +1,21 @@
+// A 5-symbol alphabet needs mask 7. Byte 5 is the first rejected value
+// and byte 12 masks to 4. Modulo 5 would accept 5 and map 12 to 2.
+// expect: run nanoid_bias_law() = true
+fn nanoid_bias_law() -> bool {
+    let rejects_boundary = nanoid.custom(b"abcde", 1, b"\x05") == Error(RandomExhausted)
+    let skips_boundary = nanoid.custom(b"abcde", 2, b"\x05\x0c\x03") == Ok(b"ed")
+    let default_alphabet = nanoid.generate(4, b"\0\x3f\x40\xff") == Ok(b"5959")
+    let duplicates = nanoid.custom(b"aa", 1, b"\0") == Error(DuplicateSymbol(b'a'))
+    let too_small = nanoid.custom(b"a", 1, b"\0") == Error(AlphabetSize)
+    let too_long = nanoid.generate(65537, b"") == Error(SizeLimit)
+    let empty = nanoid.custom(b"ab", 0, b"") == Ok(b"")
+    let mut alphabet: Bytes = list.with_capacity(256)
+    for i in 0u64 .. 256u64 {
+        list.push(mut alphabet, int.truncate(i))
+    }
+    let all_symbols = nanoid.custom(alphabet, 2, b"\xff\0") == Ok(b"\xff\0")
+    let mut too_much_randomness: Bytes = list.new()
+    list.fill(mut too_much_randomness, 1048577, 0)
+    let random_limit = nanoid.generate(1, too_much_randomness) == Error(RandomLimit)
+    rejects_boundary && skips_boundary && default_alphabet && duplicates && too_small && too_long && empty && all_symbols && random_limit
+}

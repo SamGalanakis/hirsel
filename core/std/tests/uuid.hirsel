@@ -196,3 +196,21 @@ fn v4_short_suffix() -> u64 {
 fn v7_short_suffix() -> bool {
     uuid.v7(0, b"0123456789", 1) == None
 }
+
+// RFC 9562 Appendix A.4 (IETF Trust Legal Provisions, BCP 78).
+// DNS and URL cross-checks, independently generated with:
+// python3 -c 'import uuid; print(uuid.uuid5(uuid.NAMESPACE_DNS, "python.org")); print(uuid.uuid5(uuid.NAMESPACE_URL, "https://example.com/羊"))'
+// expect: run uuid_v5_law() = true
+fn uuid_v5_law() -> bool {
+    let rfc = result.unwrap(uuid.v5(uuid.NAMESPACE_DNS, b"www.example.com"))
+    let dns = result.unwrap(uuid.v5(uuid.NAMESPACE_DNS, b"python.org"))
+    let url = result.unwrap(uuid.v5(uuid.NAMESPACE_URL, string.as_bytes("https://example.com/羊")))
+    let rfc_matches = uuid.to_string(rfc) == "2ed6657d-e927-568b-95e1-2665a8aea6a2"
+    let dns_matches = uuid.to_string(dns) == "886313e1-3b8a-5372-9b90-0c9aee199e5d"
+    let url_matches = uuid.to_string(url) == "811d5a26-13d5-5f21-a892-f974fa57bf01"
+    let namespaces = uuid.to_string(uuid.NAMESPACE_OID) == "6ba7b812-9dad-11d1-80b4-00c04fd430c8" && uuid.to_string(uuid.NAMESPACE_X500) == "6ba7b814-9dad-11d1-80b4-00c04fd430c8"
+    let mut too_long: Bytes = list.new()
+    list.fill(mut too_long, 1048577, 0)
+    let refuses_long = uuid.v5(uuid.NAMESPACE_DNS, too_long) == Error(NameTooLong(1048577))
+    rfc_matches && dns_matches && url_matches && namespaces && refuses_long
+}

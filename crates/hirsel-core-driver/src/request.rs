@@ -326,6 +326,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut test_replay = false;
     let mut test_laws = false;
     let mut test_write_laws = false;
+    let mut law_baseline = None;
     let mut test_rerun = false;
     let mut expect_verdict = None;
     let mut diagnose = false;
@@ -361,6 +362,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::Replay => test_replay = true,
             Opt::Laws => test_laws = true,
             Opt::WriteLaws => test_write_laws = true,
+            Opt::LawsBaseline => law_baseline = Some(PathBuf::from(value)),
             Opt::Rerun => test_rerun = true,
             Opt::Sim => test_sim = true,
             Opt::PropertyCorpus => corpus_path = Some(PathBuf::from(value)),
@@ -512,7 +514,27 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
         }
     }
-    test_laws |= test_write_laws;
+    if law_baseline.is_some() {
+        for (narrowed, option) in [
+            (test_filter.is_some(), "--filter"),
+            (test_seed.is_some(), "--seed"),
+            (test_sim, "--sim"),
+            (test_seeds.is_some(), "--seeds"),
+            (corpus_path.is_some(), "--property-corpus"),
+            (test_replay, "--replay"),
+        ] {
+            if narrowed {
+                return Err(
+                    format!("test: --laws-baseline compares a full run; drop {option}").into(),
+                );
+            }
+        }
+    }
+    let law_baseline = law_baseline
+        .as_deref()
+        .map(crate::law_lock::Baseline::read)
+        .transpose()?;
+    test_laws |= test_write_laws || law_baseline.is_some();
     if test_write_laws && manifest.is_some() {
         return Err("test: --write-laws requires a package directory".into());
     }
@@ -1504,7 +1526,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         row["law_strength"] = strength.into();
                         row["laws"] = outcome.laws.json_rows();
                     }
-                    if test_write_laws {
+                    if test_write_laws || law_baseline.is_some() {
                         match observations.entry(test.to_string()) {
                             std::collections::btree_map::Entry::Occupied(mut held) => held.get_mut().merge(outcome.laws),
                             std::collections::btree_map::Entry::Vacant(slot) => { slot.insert(outcome.laws); }
@@ -1540,9 +1562,22 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         if let Some(current) = law_inventory {
             crate::law_lock::update(law_directory, |lock| lock.record(&current, &observations))?;
         }
+        let regressions = law_baseline
+            .as_ref()
+            .map(|baseline| baseline.compare(&observations));
+        let law_red = regressions.as_ref().is_some_and(|rows| !rows.is_empty());
+        failed |= law_red;
         let passed = !tests.is_empty() && !failed;
         if json {
-            println!("{}", serde_json::json!({"passed":passed,"tests":rows}));
+            let mut report = serde_json::json!({"passed":passed,"tests":rows});
+            if let Some(regressions) = regressions {
+                report["law_regressions"] = serde_json::json!(regressions);
+            }
+            println!("{report}");
+        } else if let Some(regressions) = regressions {
+            for red in regressions {
+                println!("{red}");
+            }
         }
         if tests.is_empty() && !json {
             eprintln!("no tests found");
@@ -1552,7 +1587,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             meter.write_metrics(path)?;
         }
         drop(test_store);
-        return conclude(Outcome::Exit(if tests.is_empty() {
+        return conclude(Outcome::Exit(if tests.is_empty() && !law_red {
             2
         } else {
             i32::from(failed)

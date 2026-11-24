@@ -807,7 +807,7 @@ impl PackageLaw {
         if matches!(arguments[0], "run" | "test" | "build") {
             let options = native_options(Backend::Cranelift, self.dir.path());
             let Link::Driver(cc) = options.link else { unreachable!() };
-            let runtime = if arguments.contains(&"--laws") || arguments.contains(&"--write-laws") { env_record_runtime() } else { options.runtime };
+            let runtime = if arguments.iter().any(|arg| matches!(*arg, "--laws" | "--write-laws" | "--laws-baseline")) { env_record_runtime() } else { options.runtime };
             args.extend(["--runtime".into(), runtime.canonicalize().unwrap().to_str().unwrap().into()]);
             args.extend(["--cc".into(), cc.canonicalize().unwrap().to_str().unwrap().into()]);
         }
@@ -1005,6 +1005,53 @@ fn law_lock_checks_static_columns_and_preserves_unselected_lines() {
     PackageLaw::pass(law.run(&["test", "app", "--laws", "--write-laws", "--filter", "catch_all"]));
     assert_eq!(std::fs::read_to_string(law.path(path)).unwrap(),
         format!("hirsel.laws 1\n{SELECTED} rows=all#1:truncated:6/0\n{OTHERS}"));
+}
+
+#[test]
+fn law_baseline_compares_full_runs_and_keeps_test_results() {
+    let law = PackageLaw::new();
+    law.app("app", "[dependencies]\nstd = { major = 1 }\n\n[tests]\nlimit = 67108864");
+    law.write("app/main.hirsel", r#"
+fn property(x: u64) -> Result[(), String] {
+    let _ = std.prop.sometimes("big", x > 100)
+    Ok(())
+}
+
+@test
+fn range() -> Result[(), ()] {
+    match std.prop.all(std.prop.config(), std.prop.u64_in(0, 4), property) {
+        Held(5, 0) => Ok(()),
+        _ => Error(()),
+    }
+}
+"#);
+    let columns = "src=0000000000000001 sig=0000000000000002 run=0000000000000003 bug=- oracle=-";
+    law.write("base.laws", format!("hirsel.laws 1\napp@1/main/range {columns} rows=all#1:held:10/0;sometimes:big\n"));
+    let (status, stdout, stderr) = law.run(&["test", "app", "--laws-baseline", "base.laws", "--json"]);
+    assert_eq!(status, Some(1), "{stdout}\n{stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["passed"], false);
+    assert_eq!(report["tests"][0]["passed"], true);
+    assert_eq!(report["law_regressions"], serde_json::json!([
+        "app@1/main/range all#1: held 5/0 below held 10/0",
+        "app@1/main/range sometimes:big: witnessed 0, baseline witnessed"
+    ]));
+    law.write("base.laws", format!("hirsel.laws 1\napp@1/main/range {columns} rows=all#1:held:5/0\n"));
+    PackageLaw::pass(law.run(&["test", "app", "--laws-baseline", "base.laws"]));
+
+    for (option, value) in [
+        ("--filter", Some("range")),
+        ("--seed", Some("1")),
+        ("--sim", None),
+        ("--seeds", Some("2")),
+        ("--property-corpus", Some("corpus")),
+        ("--replay", None),
+    ] {
+        let mut args = vec!["test", "app", "--laws-baseline", "base.laws", option];
+        args.extend(value);
+        PackageLaw::refuse(law.run(&args),
+            &format!("test: --laws-baseline compares a full run; drop {option}"));
+    }
 }
 
 #[test]

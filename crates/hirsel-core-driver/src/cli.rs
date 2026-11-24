@@ -18,6 +18,7 @@ pub enum OptionId {
     Replay,
     Laws,
     WriteLaws,
+    LawsBaseline,
     ExpectVerdict,
     IncludeCredentials,
     Diagnose,
@@ -612,6 +613,13 @@ static OPTIONS: &[OptionSpec] = &[
         None,
         ["test"],
         "Observe laws and update the executed tests' rows in hirsel.laws."
+    ),
+    option!(
+        LawsBaseline,
+        ["--laws-baseline"],
+        Some("FILE"),
+        ["test"],
+        "Compare a full observed test run with the law lock at FILE."
     ),
     option!(
         IncludeCredentials,

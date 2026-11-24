@@ -12,6 +12,9 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
 
+mod comparison;
+pub(crate) use comparison::Baseline;
+
 const NAME: &str = "hirsel.laws";
 const HEADER: &str = "hirsel.laws 1";
 

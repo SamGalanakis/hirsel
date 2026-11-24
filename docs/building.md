@@ -171,13 +171,13 @@ deterministic simulation and property campaigns.
 
 `hirsel test app --laws` adds a strength column (held, truncated, vacuous, …) beside pass
 and fail ([law table](laws.md)). `--write-laws` rewrites the rows
-of the tests it ran in `hirsel.laws`; `--laws-baseline FILE` <!-- doc-ref: planned -->
+of the tests it ran in `hirsel.laws`; `--laws-baseline FILE`
 compares a full run with the lock exported from the approved ref and exits 1 on a weaker
 row. `hirsel laws check app` checks lock currency without running tests, and
 `hirsel laws write app` refreshes its static columns.
 `--locked` keeps its package meaning.
 
-Version note (2026-11-24, verify-phase-spec-2034): names the planned law-table commands.
+Version note (2026-11-24, verify-observer-2037): adds the law-table and lock commands.
 
 Additional CLI commands cover package workflows (`lock`, `fetch`, `pack`, `publish`,
 `--locked`, `--frozen`; [Packages](spec/packages.md)), inspection and profiling

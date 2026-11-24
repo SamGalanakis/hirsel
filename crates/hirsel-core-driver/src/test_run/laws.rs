@@ -20,14 +20,7 @@ pub(crate) struct LawRow {
 
 impl LawRow {
     pub(crate) fn rank(&self) -> u8 {
-        match self.class.as_str() {
-            "falsified" | "failed" | "diverged" => 0,
-            "gave up" | "unbounded" | "incomplete" => 1,
-            "vacuous" => 2,
-            "truncated" | "to depth" => 3,
-            "held" | "sampled" | "closed" | "conforms" => 4,
-            _ => 5,
-        }
+        class_rank(&self.class)
     }
 
     fn strength(&self) -> (u8, &[u64], bool, &str, &Option<String>, Option<u64>) {
@@ -68,6 +61,17 @@ impl LawRow {
             text.push_str(" (per build)");
         }
         text
+    }
+}
+
+pub(crate) fn class_rank(class: &str) -> u8 {
+    match class {
+        "falsified" | "failed" | "diverged" => 0,
+        "gave up" | "unbounded" | "incomplete" => 1,
+        "vacuous" => 2,
+        "truncated" | "to depth" => 3,
+        "held" | "sampled" | "closed" | "conforms" => 4,
+        _ => 5,
     }
 }
 

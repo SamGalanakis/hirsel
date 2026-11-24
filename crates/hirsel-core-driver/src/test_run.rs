@@ -10,7 +10,7 @@ mod laws;
 pub use cache::TestCache;
 use cache::test_key;
 use laws::LawCapture;
-pub(crate) use laws::{LawReport, LawRow};
+pub(crate) use laws::{LawReport, LawRow, class_rank};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;

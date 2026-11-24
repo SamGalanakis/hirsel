@@ -2,6 +2,7 @@ hirsel.laws 1
 store@1/store/bucket_test_claim_cut src=d309c767020a267e sig=7d97adad7a59ab2b run=57538e9471c5f788 bug=- oracle=- rows=pending
 store@1/store/bucket_test_fence src=9182c621019838ab sig=807c433d9745cbe9 run=6677ce756ba8a915 bug=- oracle=- rows=pending
 store@1/store/bucket_test_l4_cuts src=fd574bcc5265b479 sig=664e6ead19c6c016 run=6677ce756ba8a915 bug=- oracle=- rows=pending
+store@1/store/bucket_test_m2_ack_history src=14a5272ab77045f3 sig=283bbbe3c39788fc run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_admitted_claim src=15ae8b15e15a43b7 sig=5c781d0ad47119cd run=bc0855e1b21bfb40 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_binding src=04593ebe0b588a32 sig=ab48b5f6d88b00fb run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_branch_position src=23c365cb5f778f32 sig=051073768083edae run=1fd273d65cab0cd3 bug=- oracle=- rows=pending

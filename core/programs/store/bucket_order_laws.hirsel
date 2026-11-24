@@ -131,3 +131,139 @@ fn bucket_order_fresh_case(tasks: Tasks, c: Clock, r: Random, seed: u64, orderin
     }
     Ok(())
 }
+
+fn bucket_ack_fixture(tasks: Tasks, c: Clock, seed: u64) -> BucketSim {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(4)
+    list.push(mut faults, Clean)
+    list.push(mut faults, ResetAfterBody)
+    list.push(mut faults, Conflict)
+    list.push(mut faults, SlowDown)
+    let mut choices = std.sim.world.plan(seed)
+    let mut words: List[u64] = list.with_capacity(512)
+    for i in 0u64 .. 256 {
+        // Keep one clean connection after each seeded fault so the law
+        // reaches every commit without exhausting a retry budget.
+        let fault = if i % 2 == 0 { 0u64 } else { std.sim.world.pick(mut choices, 4) }
+        list.push(mut words, fault << 62)
+        list.push(mut words, seed + i)
+    }
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take words)
+    let tape = std.sim.world.Script(tail_seed: seed, streams: take streams)
+    bucket_law_sim_plan(tasks, c, seed, None, take faults, std.sim.world.plan_from(tape, 0))
+}
+
+fn bucket_ack_marker(i: u64) -> String {
+    let mut marker = string.from("mark-")
+    string.push_u64(mut marker, i)
+    take marker
+}
+
+fn bucket_ack_commits(tasks: Tasks, r: Random, sim: BucketSim, replaced: bool) -> Result[(), Error] waits {
+    let mut primary = bucket_order_open(tasks, r, sim.time, sim.endpoint, 1, true)?
+    let mut marker_client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
+    for i in 1u64 .. 9 {
+        let committed = bucket_order_commit(mut primary)
+        let acked = match committed {
+            Ok(receipt) => durable(mut primary, receipt),
+            Error(take problem) => Error(take problem),
+        }
+        if replaced && i > 4 {
+            if let Error(Fenced(1)) = acked {} else { fail("VP1: the deposed holder acknowledged a commit") }
+            continue
+        }
+        acked?
+        let due = std.object.deadline_after_ms(marker_client, BUCKET_LAW_OP_MS)
+        let (seen, _) = std.object.fetch(mut marker_client, bucket_ack_marker(i), list.new(), due)
+        if let Error(NotFound) = seen {} else { fail("VP1: the acknowledgement marker must be absent") }
+        if replaced && i == 4 {
+            let successor = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
+            if version(snapshot(successor)) != 4 { fail("VP1: the successor did not inherit four acknowledged commits") }
+            close(take successor)?
+        }
+    }
+    Ok(())
+}
+
+fn bucket_ack_history(report: std.sim.s3.Report, expected: u64) -> Result[(), Error] {
+    let mut seen_mark = 0u64
+    let mut position_at = 0u64
+    let mut written: Map[u64, u64] = map.new()
+    for event in report.head_writes {
+        if read_le(event.data, 88, 8) == 1 {
+            map.insert(mut written, event.request, read_le(event.data, 120, 8))
+        }
+    }
+    for req in report.requests {
+        if let Some(applied_position) = map.get(written, req.request) {
+            position_at = applied_position
+        }
+        if req.method == "GET" && req.key == bucket_ack_marker(seen_mark + 1) {
+            seen_mark += 1
+            if position_at < 2 + seen_mark {
+                fail("VP1: the acknowledgement preceded its exact head advance")
+            }
+        }
+    }
+    if seen_mark != expected || position_at != 2 + expected {
+        fail("VP1: the register and successful acknowledgements disagree")
+    }
+    Ok(())
+}
+
+// Validate in application order. Connection numbers identify requests but
+// can be out of order when connections deliver their final bytes concurrently.
+fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
+    let mut last_head: Map[String, u64] = map.new()
+    let mut requests: Map[u64, ()] = map.new()
+    for i in 0u64 .. list.len(report.head_writes) {
+        let event = view report.head_writes[i]
+        if event.request == 0 || event.request > report.attempts || map.contains(requests, event.request) {
+            fail("VP1: duplicate or invalid applied HEAD request id")
+        }
+        map.insert(mut requests, event.request, ())
+        let captured = history_decode_head(event.data)?
+        let current = captured.head
+        if let Some(previous_index) = map.get(last_head, event.key) {
+            let prior = view report.head_writes[previous_index]
+            let prior_capture = history_decode_head(prior.data)?
+            let previous = prior_capture.head
+            let Some(precondition) = event.if_match else { fail("VP1: HEAD replaced without an If-Match") }
+            if precondition != prior.etag || event.if_none_match != None || !same(previous.store, current.store) || prior.etag == event.etag || list.slice(prior.data, 240, list.len(prior.data)) != list.slice(event.data, 240, list.len(event.data)) {
+                fail("VP1: HEAD did not condition on its predecessor or changed the authority")
+            }
+            if current.pair.epoch == previous.pair.epoch {
+                if !same(current.pair.holder, previous.pair.holder) || current.entry.seq != previous.entry.seq + 1 || current.entry.epoch != current.pair.epoch || current.floor < previous.floor || current.activation < previous.activation {
+                    fail("VP1: HEAD did not advance the incumbent's prefix")
+                }
+                if !history_ref_matches(current.checkpoint, previous.checkpoint) && !history_ref_matches(current.checkpoint, current.entry) {
+                    fail("VP1: HEAD did not publish the checkpoint at its new entry")
+                }
+                // Reclaim can erase earlier entries. Where an entry remains,
+                // the bucket's bytes must link to the previous applied tip.
+                let offset = string.byte_len(event.key) - 4
+                let mut entry_key = string.from(string.slice(event.key, 0, offset))
+                string.push(mut entry_key, history_key("e-", current.entry))
+                if let Some(stored_entry) = map.get(report.objects, entry_key) {
+                    let (_, link) = history_entry_context(entry_key, current.store, current.entry, stored_entry.data)?
+                    if !history_ref_matches(history_length(link, current.entry.seq - 1), previous.entry) {
+                        fail("VP1: the applied advance omitted its predecessor")
+                    }
+                }
+            } else if current.pair.epoch != previous.pair.epoch + 1 || !history_ref_matches(current.entry, previous.entry) || !history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
+                fail("VP1: a claim reused an epoch, applied from a stale epoch, or changed the inherited prefix")
+            }
+        } else if event.if_match != None || event.if_none_match != Some("*") || current.pair.epoch != 1 || current.entry.seq != 1 || !history_ref_matches(current.entry, current.checkpoint) {
+            fail("VP1: genesis was not a create-only checkpoint")
+        }
+        map.insert(mut last_head, string.from(event.key), i)
+    }
+    for (key, at) in last_head {
+        let event = view report.head_writes[at]
+        let Some(present) = map.get(report.objects, key) else { fail("VP1: the applied HEAD disappeared") }
+        if event.etag != present.etag || event.data != present.data {
+            fail("VP1: the last applied HEAD differs from the stored HEAD")
+        }
+    }
+    Ok(())
+}

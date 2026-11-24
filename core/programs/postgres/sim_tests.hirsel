@@ -1,4 +1,4 @@
-type Script: key + send = StartupError | TruncatedFrame | ReadyDeadline | FatalDuringSync | CommaHost | SelectAnswer
+type Script: key + send = StartupError | TruncatedFrame | ReadyDeadline | FatalDuringSync | CommaHost | SelectAnswer | ParameterDiagnostics
 
 type Link: send {
     port: Served[NetOp],
@@ -162,13 +162,16 @@ fn peer(take input: Peer) waits {
             send_frame(mut writer, b't', b"\0\0")
             // One int4 column, with no source table or typmod.
             send_frame(mut writer, b'T', b"\0\x01answer\0\0\0\0\0\0\0\0\0\0\x17\0\x04\xff\xff\xff\xff\0\0")
-            expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\x01\0\x01\0\0\0\x01\0\x01")
+            expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\0\0\0\0\x01\0\x01")
             expect_frame(mut reader, b'H', b"")
             send_frame(mut writer, b'2', b"")
             expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x01")
             expect_frame(mut reader, b'H', b"")
             send_frame(mut writer, b'D', b"\0\x01\0\0\0\x04\0\0\0\x2a")
-            send_frame(mut writer, b'C', b"SELECT 1\0")
+            send_frame(mut writer, b's', b"")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x01")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'C', b"SELECT 0\0")
             expect_frame(mut reader, b'C', b"Phirsel_rows\0")
             expect_frame(mut reader, b'H', b"")
             send_frame(mut writer, b'3', b"")
@@ -176,9 +179,37 @@ fn peer(take input: Peer) waits {
             send_frame(mut writer, b'Z', b"I")
             expect_frame(mut reader, b'X', b"")
         },
+        ParameterDiagnostics => {
+            authenticate(mut reader, mut writer)
+            send_frame(mut writer, b'Z', b"I")
+            // int4 is declared. PostgreSQL infers uuid for the second parameter.
+            expect_frame(mut reader, b'P', b"\0INSERT INTO mixed VALUES ($1, $2)\0\0\x02\0\0\0\x17\0\0\0\0")
+            expect_frame(mut reader, b'D', b"S\0")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'1', b"")
+            send_frame(mut writer, b't', b"\0\x02\0\0\0\x17\0\0\x0b\x86")
+            send_frame(mut writer, b'n', b"")
+            // Two input formats: 1 for binary int4, 0 for text uuid. No result formats.
+            expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\x02\0\x01\0\0\0\x02\0\0\0\x04\0\0\0\x2a\0\0\0\x2412345678-1234-5678-abcd-1234567890ab\0\0")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'2', b"")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x01")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'E', b"VERROR\0C23514\0Mcheck failed\0Ddetail\0nmixed_check\0tmixed\0ctoken\0Huse another token\0P31\0qextension\0\0")
+            expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'Z', b"I")
+            expect_frame(mut reader, b'X', b"")
+        },
         CommaHost => return,
     }
     expect_eof(mut reader)
+}
+
+fn optional_text_is(value: Option[String], expected: String) -> bool {
+    if let Some(actual) = value {
+        return actual == expected
+    }
+    false
 }
 
 fn client(net: Net, address: Addr, clock: Clock, script: Script, own_deadline: bool) waits {
@@ -248,6 +279,23 @@ fn client(net: Net, address: Addr, clock: Clock, script: Script, own_deadline: b
             if let Some(_) = postgres.transaction(conn) {
                 fail("a connection shut down during Sync must be retired")
             }
+        },
+        ParameterDiagnostics => {
+            let mut conn = result.unwrap(take opened)
+            let mut params: List[postgres.Param] = list.new()
+            list.push(mut params, Int4(42))
+            list.push(mut params, UntypedText(string.from("12345678-1234-5678-abcd-1234567890ab")))
+            if let Error(Sql(e)) = postgres.execute(mut conn, "INSERT INTO mixed VALUES ($1, $2)", params, clock, DEADLINE + 10) {
+                if e.sqlstate != "23514" || !optional_text_is(e.constraint, "mixed_check") || !optional_text_is(e.table, "mixed") || !optional_text_is(e.column, "token") || !optional_text_is(e.hint, "use another token") || option.unwrap(e.position) != 31 {
+                    fail("SQL ErrorResponse lost one of its structured fields")
+                }
+            } else {
+                fail("expected a SQL ErrorResponse")
+            }
+            if let Some(Idle) = postgres.transaction(conn) {} else {
+                fail("SQL error drain must recover the idle connection")
+            }
+            result.unwrap(postgres.close(take conn, clock, DEADLINE + 20))
         },
         SelectAnswer => {
             let mut conn = result.unwrap(take opened)
@@ -324,5 +372,11 @@ fn comma_host_refused(tasks: Tasks, e: Env) -> Result[(), ()] waits {
 fn exchange_deadline(tasks: Tasks, e: Env) -> Result[(), ()] waits {
     simulate(tasks, test_seed(e), SelectAnswer, true)
     simulate(tasks, test_seed(e), FatalDuringSync, true)
+    Ok(())
+}
+
+@test
+fn parameters_and_diagnostics(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), ParameterDiagnostics, false)
     Ok(())
 }

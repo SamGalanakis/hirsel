@@ -33,13 +33,6 @@ pub type Config {
     deadline: u64
 }
 
-pub type SqlError {
-    sqlstate: String,
-    severity: String,
-    message: String,
-    detail: Option[String]
-}
-
 pub type AuthMethod = Trust | Cleartext | Md5 | Gss | Sspi | Other(i32) | NoScram
 
 pub type ProtocolError = Length | Tag(u8) | Truncated | Fields | AuthenticationOrder | UnverifiedServer | SslReply(u8) | CancelReply
@@ -48,7 +41,7 @@ pub type Error = Protocol(ProtocolError) | Network(NetError) | OutcomeUnknown(Ne
 
 pub type Transaction: key = Idle | InTransaction | Failed
 
-pub type Param = Null | Bool(bool) | Int2(i16) | Int4(i32) | Int8(i64) | Float8(f64) | Text(String) | Bytea(Bytes)
+pub type Param = Null | Bool(bool) | Int2(i16) | Int4(i32) | Int8(i64) | Float8(f64) | Text(String) | UntypedText(String) | Bytea(Bytes)
 
 pub type Value = Null | Bool(bool) | Int2(i16) | Int4(i32) | Int8(i64) | Float8(f64) | Text | Bytea | OtherText
 
@@ -328,76 +321,6 @@ fn parameter(mut p: Parameters, b: Bytes) -> Result[(), Error] {
     Ok(())
 }
 
-type Diagnostic {
-    code: Option[String],
-    severity: Option[String],
-    localized: Option[String],
-    message: Option[String],
-    detail: Option[String]
-}
-
-fn diagnostic(b: Bytes) -> Result[SqlError, Error] {
-    let mut at: u64 = 0
-    let mut d = Diagnostic(code: None, severity: None, localized: None, message: None, detail: None)
-    let mut seen: Inline[bool, 256] =[false; 256]
-    loop {
-        let start = end_at(b, mut at, 1)?
-        let tag = b[start]
-        if tag == 0 {
-            break
-        }
-        let index: u64 = int.widen(tag)
-        if seen[index] {
-            return Error(fields())
-        }
-        seen[index] = true
-        let low = at
-        let high = cstring_end(b, mut at)?
-        let raw = list.slice(b, low, high)
-        match tag {
-            b'C' => {
-                if list.len(raw) != 5 {
-                    return Error(fields())
-                }
-                for byte in raw {
-                    if !(b'0' <= byte && byte <= b'9' || b'A' <= byte && byte <= b'Z') {
-                        return Error(fields())
-                    }
-                }
-                d.code = Some(text(raw)?)
-            },
-            b'V' => {
-                d.severity = Some(text(raw)?)
-            },
-            b'S' => {
-                d.localized = Some(text(raw)?)
-            },
-            b'M' => {
-                d.message = Some(text(raw)?)
-            },
-            b'D' => {
-                d.detail = Some(text(raw)?)
-            },
-            _ => {},
-        }
-    }
-    consumed(b, at)?
-    let Diagnostic(code: take code, severity: take canonical, localized: take localized, message: take primary, detail: take detail) = take d
-    let Some(take sqlstate) = take code else {
-        return Error(fields())
-    }
-    let Some(take primary_text) = take primary else {
-        return Error(fields())
-    }
-    let Some(take severity) = (match take canonical {
-        Some(take s) => Some(take s),
-        None => take localized,
-    }) else {
-        return Error(fields())
-    }
-    Ok(SqlError(sqlstate: take sqlstate, severity: take severity, message: take primary_text, detail: take detail))
-}
-
 fn notify(b: Bytes) -> Result[(), Error] {
     let mut at: u64 = 0
     let _ = u32_at(b, mut at)?
@@ -432,22 +355,12 @@ fn ready(mut s: Session, b: Bytes) -> Result[(), Error] {
     Ok(())
 }
 
-fn is_fatal(e: SqlError) -> bool {
-    let severity = string.as_bytes(e.severity)
-    equal(severity, b"FATAL") || equal(severity, b"PANIC")
-}
-
 fn sql_error(take e: SqlError) -> Error {
     if is_fatal(e) {
         Fatal(take e)
     } else {
         Sql(take e)
     }
-}
-
-fn startup_error(b: Bytes) -> Result[(), Error] {
-    let e = diagnostic(b)?
-    Error(sql_error(take e))
 }
 
 fn authentication_offer(b: Bytes) -> Result[bool, Error] {
@@ -767,6 +680,7 @@ fn parameter_oid(p: Param) -> u32 {
         Int8(_) => 20,
         Float8(_) => 701,
         Text(_) => 25,
+        UntypedText(_) => 0,
         Bytea(_) => 17,
     }
 }
@@ -793,6 +707,7 @@ fn parameter_size(p: Param) -> u64 {
         Int8(_) => 8,
         Float8(_) => 8,
         Text(s) => string.byte_len(s),
+        UntypedText(s) => string.byte_len(s),
         Bytea(b) => list.len(b),
     }
 }
@@ -824,6 +739,7 @@ fn put_parameter(mut b: Bytes, p: Param) {
         },
         Float8(v) => list.put_word_be(mut b, float.to_bits64(v)),
         Text(s) => list.append(mut b, string.as_bytes(s)),
+        UntypedText(s) => list.append(mut b, string.as_bytes(s)),
         Bytea(v) => list.append(mut b, v),
     }
 }
@@ -845,26 +761,36 @@ fn parse_packet(sql: String, types: List[u32]) -> Bytes {
 
 fn bind_parameters(params: List[Param]) -> Result[Bytes, Error] {
     // Leave room for the result-format count and up to FIELD_LIMIT formats.
-    let mut size = string.byte_len(PORTAL) + 15 + 2 * FIELD_LIMIT
+    let mut size = string.byte_len(PORTAL) + 13 + 2 * (list.len(params) + FIELD_LIMIT)
     for p in params {
         let n = parameter_size(p)
-        if n > BODY_LIMIT - size - 4 {
+        if n > BODY_LIMIT || size + 4 + n > BODY_LIMIT {
             return Error(RequestTooLarge)
         }
         size += 4 + n
-        if let Text(s) = p {
-            if has(string.as_bytes(s), 0) {
-                return Error(InvalidRequest)
-            }
+        let has_nul = match p {
+            Text(value) => has(string.as_bytes(value), 0),
+            UntypedText(value) => has(string.as_bytes(value), 0),
+            _ => false,
+        }
+        if has_nul {
+            return Error(InvalidRequest)
         }
     }
     let mut b: Bytes = list.with_capacity(size)
     start_frame(mut b, b'B', 0)
     put_string(mut b, PORTAL)
     list.push(mut b, 0)
-    list.put_word_be(mut b, 1u16)
-    list.put_word_be(mut b, 1u16)
     let n: u16 = int.narrow(list.len(params))
+    list.put_word_be(mut b, n)
+    for param in params {
+        let format: u16 = if let UntypedText(_) = param {
+            0
+        } else {
+            1
+        }
+        list.put_word_be(mut b, format)
+    }
     list.put_word_be(mut b, n)
     for param in params {
         put_parameter(mut b, param)

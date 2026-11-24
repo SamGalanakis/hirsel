@@ -138,7 +138,7 @@ fn postgres_scripted_peer_laws() {
         }
 
         let mut bind = PORTAL.to_vec();
-        bind.extend_from_slice(b"\0\x00\x01\x00\x01\x00\x00");
+        bind.extend_from_slice(b"\0\0\0\0\0");
         bind.extend_from_slice(if returns_rows {
             b"\x00\x01\x00\x01"
         } else {
@@ -286,8 +286,9 @@ fn postgres_scripted_peer_laws() {
     let roots = dir.path().join("roots.pem");
     std::fs::write(&roots, CA).unwrap();
     let source = format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
         include_str!("../../../core/programs/postgres/postgres.hirsel"),
+        include_str!("../../../core/programs/postgres/diagnostic.hirsel"),
         include_str!("../../../core/front/fixtures/recording/postgres-peer.hirsel")
             .replace("12345", &port.to_string()),
     );

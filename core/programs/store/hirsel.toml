@@ -35,6 +35,7 @@ std = { major = 1 }
 "store-tiered-count.hirsel" = "store"
 "store-tiered-scan.hirsel" = "store"
 "store-tiered-span.hirsel" = "store"
+"store-tiered-tx-read.hirsel" = "store"
 "store-tiered-initial-changes.hirsel" = "store"
 "store-tiered-pins.hirsel" = "store"
 "store-tiered-overlay.hirsel" = "store"
@@ -151,6 +152,7 @@ dirs = ["."]
 "tiered_queue_laws.hirsel" = "store"
 "tiered_count_laws.hirsel" = "store"
 "tiered_compact_laws.hirsel" = "store"
+"tiered_tx_read_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format4_laws.hirsel" = "store"
@@ -336,4 +338,7 @@ limit = 268435456
 limit = 268435456
 
 [tests.runs."store@1/store/test_l88_crash_after_publication_resumes_remove"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_tiered_tx_reads_see_staged_overlay_and_cold_rows"]
 limit = 268435456

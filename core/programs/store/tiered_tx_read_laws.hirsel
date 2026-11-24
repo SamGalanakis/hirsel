@@ -1,0 +1,250 @@
+// Tx reads of a Tiered table (§13.3, v2.59 #13: Tx cursors step through the
+// attempt). A body's range, reverse range, count and index lookup over a
+// Cold Tiered table read the rows the Tx sees: its own staged puts and
+// deletes over the replay overlay over the Cold tree. A body that writes a
+// Tiered row and then ranges a Memory table reads the Memory rows. The
+// expected rows come from the fixture's generator and the body's own edits.
+
+fn tx_read_bucket(v: u64) -> Result[u64, Capacity] {
+    Ok(v % 4)
+}
+
+const TX_READ_ROWS: u64 = 600
+
+type TxReadHandles: shareable + send {
+    rows: Table[u64, u64],
+    ix: Index[u64, u64, u64, ()],
+    plain: Table[u64, u64]
+}
+
+fn tx_read_handles(mut db: Db) -> Result[TxReadHandles, Error] waits {
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let ix = bind_table_index(mut db, rows, "i", code.describe(tx_read_bucket), std.codec.key_u64())?
+    let plain = table(mut db, "plain", std.codec.key_u64(), std.codec.of_u64())?
+    Ok(TxReadHandles(rows: take rows, ix: take ix, plain: take plain))
+}
+
+// A 600-row table with a bucket index; the cut emits the table Cold into a
+// class-3 pack. The index and the "plain" table stay Memory.
+fn tx_read_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = create_table(mut db, spec("plain", std.codec.key_u64(), std.codec.of_u64()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = create_index(mut db, rows, "i", code.describe(tx_read_bucket), std.codec.key_u64())?
+    let handles = tx_read_handles(mut db)?
+    let Committed(_) = run(mut db, None, copy_env(handles), fn(mut tx: Tx, env: TxReadHandles) -> Result[(), Error] {
+        for key in 0u64 .. TX_READ_ROWS {
+            put(mut tx, env.rows, key, key)?
+        }
+        for key in 0u64 .. 3 {
+            put(mut tx, env.plain, key, key + 100)?
+        }
+        Ok(())
+    })? else {
+        fail("Tx reads: fixture puts commit")
+    }
+    let id = prefix(rows.id)?
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let (take root, take descriptor) = {
+        let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
+            fail("Tx reads: the fixture has its table")
+        }
+        (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+    }
+    if std.page.level(std.page.image_of(root)) == 0 {
+        fail("Tx reads: the fixture table spans more than one leaf")
+    }
+    let mut draw = stamp_after(db.next_node)?
+    let first = draw
+    page_result(std.page.insert(mut tree.root, id, descriptor, Some(arc.share(root)), tree.inline, first, mut draw))?
+    page_result(std.page.install_tiered_root(mut tree.root, id, HotPage(take root), mut draw))?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    let _ = checkpoint(mut db)?
+    close(take db)
+}
+
+// The value the store holds for `key` after the edit commit: key 7 is
+// rewritten to 1007, key 9 deleted and key 2000 added.
+fn tx_read_value(key: u64) -> Option[u64] {
+    if key == 7 {
+        return Some(1007)
+    }
+    if key == 9 {
+        return None
+    }
+    if key == 2000 {
+        return Some(2000)
+    }
+    if key < TX_READ_ROWS { Some(key) } else { None }
+}
+
+// Every check returns its number on a mismatch, 0 when all hold.
+fn tx_read_check(tx: Tx, env: TxReadHandles) -> Result[u64, Error] {
+    let mut forward: List[(u64, u64)] = list.new()
+    {
+        let mut rows = range(tx, env.rows, Included(5u64), Excluded(12u64))?
+        while let Some(row) = next_in(tx, mut rows)? {
+            list.push(mut forward, row)
+        }
+    }
+    let mut wanted: List[(u64, u64)] = list.new()
+    for key in 5u64 .. 12 {
+        if let Some(value) = tx_read_value(key) {
+            list.push(mut wanted, (key, value))
+        }
+    }
+    if forward != wanted {
+        return Ok(1)
+    }
+    let mut backward: List[(u64, u64)] = list.new()
+    {
+        let mut rows = range_reverse(tx, env.rows, Included(5u64), Excluded(12u64))?
+        while let Some(row) = next_in(tx, mut rows)? {
+            list.push(mut backward, row)
+        }
+    }
+    list.reverse(mut backward)
+    if backward != wanted {
+        return Ok(2)
+    }
+    // The whole table, across every leaf, ends with the added key.
+    let mut seen = 0u64
+    let mut newest: Option[u64] = None
+    {
+        let mut rows = range(tx, env.rows, Unbounded, Unbounded)?
+        while let Some((key, value)) = next_in(tx, mut rows)? {
+            if tx_read_value(key) != Some(value) {
+                return Ok(3)
+            }
+            if let Some(before) = newest {
+                if before >= key {
+                    return Ok(4)
+                }
+            }
+            newest = Some(key)
+            seen += 1
+        }
+    }
+    if seen != TX_READ_ROWS || newest != Some(2000u64) {
+        return Ok(5)
+    }
+    if count(tx, env.rows, Included(5u64), Excluded(12u64))? != list.len(wanted) {
+        return Ok(6)
+    }
+    if count(tx, env.rows, Unbounded, Unbounded)? != TX_READ_ROWS {
+        return Ok(7)
+    }
+    // Bucket 3 holds every key ≡ 3 (mod 4) below 600; key 7's new value
+    // 1007 stays in bucket 3. Each primary is read through the attempt.
+    let mut in_bucket: List[(u64, u64)] = list.new()
+    {
+        let mut rows = lookup(tx, env.ix, Included(3u64), Included(3u64))?
+        while let Some(row) = next_indexed(mut rows)? {
+            list.push(mut in_bucket, row)
+        }
+    }
+    let mut expected_bucket: List[(u64, u64)] = list.new()
+    for key in 0u64 .. TX_READ_ROWS {
+        if key % 4 == 3 {
+            list.push(mut expected_bucket, (key, option.unwrap(tx_read_value(key))))
+        }
+    }
+    if in_bucket != expected_bucket {
+        return Ok(8)
+    }
+    // A Memory table beside the Tiered one.
+    let mut plain: List[(u64, u64)] = list.new()
+    {
+        let mut rows = range(tx, env.plain, Unbounded, Unbounded)?
+        while let Some(row) = next_in(tx, mut rows)? {
+            list.push(mut plain, row)
+        }
+    }
+    let mut plain_wanted: List[(u64, u64)] = list.new()
+    for key in 0u64 .. 3 {
+        list.push(mut plain_wanted, (key, key + 100))
+    }
+    if plain != plain_wanted {
+        return Ok(9)
+    }
+    Ok(0)
+}
+
+fn tx_read_run(mut db: Db, handles: TxReadHandles) -> Result[(), Error] waits {
+    let Committed(done) = run(mut db, Some(10000000), copy_env(handles), fn(mut tx: Tx, env: TxReadHandles) -> Result[u64, Error] {
+        tx_read_check(tx, env)
+    })? else {
+        fail("Tx reads: the read call commits")
+    }
+    if done.value != 0 {
+        fail("Tx reads: a committed call reads the rows the store holds")
+    }
+    Ok(())
+}
+
+fn tx_read_look(db: Db, handles: TxReadHandles) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let Seen(seen) = look(read_handle, s, Some(10000000), copy_env(handles), fn(tx: Tx, env: TxReadHandles) -> Result[u64, Error] {
+        tx_read_check(tx, env)
+    })? else {
+        fail("Tx reads: the look runs")
+    }
+    let Ok(0) = view seen.value else {
+        fail("Tx reads: a look reads the rows the Snapshot holds")
+    }
+    drop(take s)
+    drop(take read_handle)
+    Ok(())
+}
+
+@test
+fn test_tiered_tx_reads_see_staged_overlay_and_cold_rows(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    tx_read_fixture(d, c, r, tasks, floor)?
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let handles = tx_read_handles(mut db)?
+    // The edits are staged in the same body that reads them.
+    let edited = match run(mut db, Some(10000000), copy_env(handles), fn(mut tx: Tx, env: TxReadHandles) -> Result[u64, Error] {
+        put(mut tx, env.rows, 7u64, 1007u64)?
+        let _ = delete(mut tx, env.rows, 9u64)?
+        put(mut tx, env.rows, 2000u64, 2000u64)?
+        tx_read_check(tx, env)
+    })? {
+        Committed(done) => done,
+        Aborted(_) => fail("Tx reads: the edit call commits (aborted)"),
+        Failed(Raised(cs)) => {
+            for cause in cs {
+                if let Fail(text) = cause.kind {
+                    fail(clone(text))
+                }
+            }
+            fail("Tx reads: the edit call commits (raised)")
+        },
+        Failed(_) => fail("Tx reads: the edit call commits (failed)"),
+        Refused(_) => fail("Tx reads: the edit call commits (refused)"),
+        Stopped(_) => fail("Tx reads: the edit call commits (stopped)"),
+    }
+    if edited.value != 0 {
+        fail("Tx reads: a body reads its own staged Tiered edits")
+    }
+    // The committed edits, before any cut.
+    tx_read_run(mut db, handles)?
+    tx_read_look(db, handles)?
+    close(take db)?
+    // The journaled edits reopen as a replay overlay over the Cold tree.
+    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let again = tx_read_handles(mut replayed)?
+    tx_read_look(replayed, again)?
+    let _ = checkpoint(mut replayed)?
+    tx_read_run(mut replayed, again)?
+    close(take replayed)?
+    // After the fold cut, every row is Cold.
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let folded = tx_read_handles(mut cold)?
+    tx_read_run(mut cold, folded)?
+    tx_read_look(cold, folded)?
+    close(take cold)
+}

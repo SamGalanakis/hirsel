@@ -289,6 +289,7 @@ store@1/store/test_staged_index_reads src=4001962c6cd10085 sig=7f48a63ee792b505 
 store@1/store/test_step_bounds src=bc8bb1bd2de4d3a7 sig=606e44821ac533a7 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_stored_size src=4d978cf0648bf9b4 sig=b05ccb027f322f20 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_streams src=aa17ce17ef4107ee sig=6a9a9e22fe7136b4 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_tiered_tx_reads_see_staged_overlay_and_cold_rows src=68d8f76743ffb53e sig=d08b22e13fbb9b67 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_typed_foreign src=ad09a39160866d68 sig=380b997ffa4210df run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_indexes src=e65a1533fe64c4fa sig=b785b2d45d961a92 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_typed_model src=c7c800886126a025 sig=f7d1a27891aa516c run=aff7b6b8625190d8 bug=- oracle=- rows=pending

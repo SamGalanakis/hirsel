@@ -385,21 +385,49 @@ pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result
     check_table_read(tx, t)?
     let low = lower_bytes(t.id, typed_bound(t.key, lo)?, false)?
     let high = lower_bytes(t.id, typed_bound(t.key, hi)?, true)?
-    let data = transaction_collection_pages(tx)?
-    let n = count_page_rows(data, t.id, low, high)?
+    let n = if tx_tiered_descriptor(tx, t.id)? {
+        tx_tiered_count(tx, t.id, low, high)?
+    } else {
+        let data = transaction_collection_pages(tx)?
+        count_page_rows(data, t.id, low, high)?
+    }
     note_read(tx, Span(take low, take high))?
     Ok(n)
 }
 
+// Applies the rows in key order, the order their journal frame records and
+// replay applies them, so a commit splits and merges pages as recovery does.
+fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
+    let mut tree = share_page_tree(tx.roots.collections)
+    let Some(first) = int.checked_add(tx.ids, 1) else {
+        return Error(Limit(Ids))
+    }
+    let mut draw = first
+    // Tiered rows are read through the attempt (store-tiered-tx-read).
+    let memory_only = match tx.attempt {
+        Some(_) => true,
+        None => false,
+    }
+    for layer in tx.below {
+        materialize_rows(mut tree, layer.ops.rows, memory_only, first, mut draw)?
+    }
+    materialize_rows(mut tree, tx.ops.rows, memory_only, first, mut draw)?
+    Ok(take tree)
+}
+
 fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: Bytes, reverse: bool) -> Result[TxRows[K, V], Error] in tx {
     let tree = transaction_collection_pages(tx)?
-    let cursor = if reverse {
+    let tiered = tx_tiered_rows(tx, t.id, low, high, true)?
+    // A Tiered cursor steps through the attempt; its page range is never read.
+    let cursor = if let Some(_) = tiered {
+        byte_cursor(tree, Included(copied(high)?), high)?
+    } else if reverse {
         reverse_byte_cursor(tree, low, high)?
     } else {
         byte_cursor(tree, Included(copied(low)?), high)?
     }
     let rows = PageRows(cursor: take cursor, data: take tree, decoder: table_decoder(t))
-    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse, log_tail: None))
+    Ok(TxRows(rows: take rows, owner: tx.info.id, depth: tx.own, reads: tx.reads, low: take low, high: take high, reverse, log_tail: None, tiered: take tiered))
 }
 
 // RUNNER-SPEC §4 (R2): a Cover names data-tree key ranges (I1) without reading them. `key_span`
@@ -463,7 +491,8 @@ pub scoped type IndexRows[K, V] {
     rows: PageRows[K, V],
     reads: View[core.Log[Read]],
     low: Bytes,
-    high: Bytes
+    high: Bytes,
+    tiered: Option[TxIndexTiered]
 }
 
 pub opaque scoped type IndexEntries[J, K, P] {
@@ -501,7 +530,7 @@ fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take 
     let tree = transaction_collection_pages(tx)?
     let cursor = byte_cursor(tree, Included(copied(low)?), high)?
     let rows = indexed_rows(tree, ix, take cursor)?
-    Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high))
+    Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high, tiered: tx_index_tiered(tx)?))
 }
 
 pub fn entries[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexEntries[J, K, P], Error] in tx {
@@ -535,10 +564,16 @@ pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Erro
         return Ok(None)
     }
     note_index_step(r.reads, mut r.low, r.high, Some(view key))?
-    let row = advance_rows(r.rows.decoder, r.rows.data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] {
-        log.append(r.reads, Point(copied(observed)?))
-        Ok(())
-    })?
+    let row = match r.tiered {
+        Some(tiered) => tx_tiered_index_row(tiered, r.rows.decoder, r.rows.data, key, raw, fn(observed: Bytes) -> Result[(), Error] {
+            log.append(r.reads, Point(copied(observed)?))
+            Ok(())
+        })?,
+        None => advance_rows(r.rows.decoder, r.rows.data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] {
+            log.append(r.reads, Point(copied(observed)?))
+            Ok(())
+        })?,
+    }
     match take row {
         Some((take value, _)) => Ok(Some(take value)),
         None => Ok(None),

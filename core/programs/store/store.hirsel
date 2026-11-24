@@ -1757,21 +1757,6 @@ fn newest_layer(below: List[Arc[Staged]], streams: bool, key: Bytes) -> Option[u
     newest
 }
 
-// Applies the rows in key order, the order their journal frame records and
-// replay applies them, so a commit splits and merges pages as recovery does.
-fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
-    let mut tree = share_page_tree(tx.roots.collections)
-    let Some(first) = int.checked_add(tx.ids, 1) else {
-        return Error(Limit(Ids))
-    }
-    let mut draw = first
-    for layer in tx.below {
-        materialize_rows(mut tree, layer.ops.rows, false, first, mut draw)?
-    }
-    materialize_rows(mut tree, tx.ops.rows, false, first, mut draw)?
-    Ok(take tree)
-}
-
 // The frame bytes of the op staged for `key`, in `ops` or the newest layer.
 fn old_data_op_size(ops: DataOps, below: List[Arc[Staged]], streams: bool, key: Bytes) -> u64 {
     if let Some(slot) = op_slot(ops, key) {
@@ -2995,7 +2980,8 @@ pub opaque scoped type TxRows[K, V] {
     low: Bytes,
     high: Bytes,
     reverse: bool,
-    log_tail: Option[LogRangeTail]
+    log_tail: Option[LogRangeTail],
+    tiered: Option[TxTieredRows]
 }
 
 // Before decoding an attempted row, record it and the gap traversed to find it.
@@ -3004,7 +2990,10 @@ pub fn next_in[K, V](tx: Tx, mut r: TxRows[K, V]) -> Result[Option[(K, V)], Erro
     if !same(tx.store, r.owner.store) || tx.info.id.branch != r.owner.branch || tx.info.id.version != r.owner.version || tx.own != r.depth {
         return Error(Foreign)
     }
-    let mut found = next_bytes(mut r.rows.cursor)?
+    let mut found = match r.tiered {
+        Some(mut tiered) => next_tiered_in(tx, mut tiered, r.reverse)?,
+        None => next_bytes(mut r.rows.cursor)?,
+    }
     if let None = found {
         if let Some(mut tail) = r.log_tail {
             found = next_log_range_tail(tx, mut tail)?

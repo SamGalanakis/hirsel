@@ -1,0 +1,423 @@
+// One subscriber's outgoing stream, made from the source packets it receives
+// (RTP-11). Indices are extended source indices; timestamps are signed
+// extended source timestamps; the answers are outgoing numbers.
+pub type Unit {
+    start: bool,
+    end: bool,
+    keyframe: bool,
+    needs: u32,
+    switches: u32,
+    frame: u16
+}
+
+pub type Target = Off | Layer(source: u32, target: u8)
+
+pub type TargetError = Unrepresentable()
+
+pub type Out = Forward(u64, u32) | Late(u64, u32) | Drop | Wait
+
+// The latest SR of a source, with its arrival time.
+type Report {
+    ntp: u64,
+    rtp: u32,
+    at_ns: u64
+}
+
+pub opaque type Rewrite {
+    clock: i64,
+    first_ts: i64,
+    closed: bool,
+    // The current layer.
+    live: bool,
+    source: u32,
+    layer: u8,
+    // A target that has not yet taken effect.
+    wanting: bool,
+    want_source: u32,
+    want_layer: u8,
+    // SRs of the current and the pending source.
+    current_sr: Option[Report],
+    pending_sr: Option[Report],
+    // The current generation.
+    generation: u64,
+    gen_start: u64,
+    highest_in: u64,
+    // The newest offset, also the newest ring entry's.
+    offset: i64,
+    ts_offset: i64,
+    // The source timestamp of the last packet forwarded, for extending SRs.
+    last_src_ts: i64,
+    // Ranges: (from index, offset), newest at range_head.
+    range_from: List[u64],
+    range_offset: List[i64],
+    range_count: u64,
+    range_head: u64,
+    // Frames: decision per (generation, ts, frame), with the highest index seen.
+    frame_gen: List[u64],
+    frame_ts: List[i64],
+    frame_id: List[u16],
+    frame_forward: List[bool],
+    frame_max: List[u64],
+    frame_used: List[bool],
+    frame_next: u64,
+    evicted: bool,
+    evicted_upto: u64,
+    // The outgoing stream.
+    next_out: u64,
+    sent: bool,
+    reported: bool,
+    last_out_ts: i64,
+    last_at_ns: u64,
+    switch_at: Option[u64]
+}
+
+const SECOND_NS: i64 = 1000000000
+
+pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u32) -> Result[Rewrite, Capacity] {
+    if clock == 0 {
+        fail("an RTP clock rate is positive")
+    }
+    let r: u64 = int.widen(ranges)
+    let f: u64 = int.widen(frames)
+    if r == 0 {
+        return Error(Capacity(requested: r, available: 0))
+    }
+    if f == 0 {
+        return Error(Capacity(requested: f, available: 0))
+    }
+    let mut range_from: List[u64] = list.new()
+    let mut range_offset: List[i64] = list.new()
+    let mut frame_gen: List[u64] = list.new()
+    let mut frame_ts: List[i64] = list.new()
+    let mut frame_id: List[u16] = list.new()
+    let mut frame_forward: List[bool] = list.new()
+    let mut frame_max: List[u64] = list.new()
+    let mut frame_used: List[bool] = list.new()
+    list.try_reserve(mut range_from, r)?
+    list.try_reserve(mut range_offset, r)?
+    list.try_reserve(mut frame_gen, f)?
+    list.try_reserve(mut frame_ts, f)?
+    list.try_reserve(mut frame_id, f)?
+    list.try_reserve(mut frame_forward, f)?
+    list.try_reserve(mut frame_max, f)?
+    list.try_reserve(mut frame_used, f)?
+    list.fill(mut range_from, r, 0u64)
+    list.fill(mut range_offset, r, 0i64)
+    list.fill(mut frame_gen, f, 0u64)
+    list.fill(mut frame_ts, f, 0i64)
+    list.fill(mut frame_id, f, 0u16)
+    list.fill(mut frame_forward, f, false)
+    list.fill(mut frame_max, f, 0u64)
+    list.fill(mut frame_used, f, false)
+    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, range_from: range_from, range_offset: range_offset, range_count: 0, range_head: 0, frame_gen: frame_gen, frame_ts: frame_ts, frame_id: frame_id, frame_forward: frame_forward, frame_max: frame_max, frame_used: frame_used, frame_next: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, switch_at: None))
+}
+
+pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError] {
+    match t {
+        Off => {
+            // Going to Off takes effect at once.
+            r.live = false
+            r.wanting = false
+            r.current_sr = None
+            r.pending_sr = None
+        },
+        Layer(source: source, target: layer) => {
+            if layer > 31 {
+                return Error(Unrepresentable())
+            }
+            if r.wanting && r.want_source != source {
+                r.pending_sr = None
+            }
+            if r.live && r.source == source && r.layer == layer {
+                r.wanting = false
+                r.pending_sr = None
+            } else {
+                r.wanting = true
+                r.want_source = source
+                r.want_layer = layer
+            }
+        }
+    }
+    Ok(())
+}
+
+fn has(mask: u32, bit: u8) -> bool {
+    let shift: u32 = int.widen(bit)
+    ((mask >> shift) & 1) != 0
+}
+
+// The ring slot holding the current generation's decision for a frame.
+fn find_frame(r: Rewrite, ts: i64, frame: u16) -> Option[u64] {
+    let n = list.len(r.frame_used)
+    let mut k = 0u64
+    while k < n {
+        // Newest first.
+        let i = (r.frame_next + n - 1 - k) % n
+        if r.frame_used[i] && r.frame_gen[i] == r.generation && r.frame_ts[i] == ts && r.frame_id[i] == frame {
+            return Some(i)
+        }
+        k += 1
+    }
+    None
+}
+
+fn add_frame(mut r: Rewrite, ts: i64, frame: u16, forward: bool, index: u64) {
+    let i = r.frame_next
+    if r.frame_used[i] && r.frame_gen[i] == r.generation {
+        let upto = r.frame_max[i]
+        if !r.evicted || upto > r.evicted_upto {
+            r.evicted_upto = upto
+        }
+        r.evicted = true
+    }
+    r.frame_used[i] = true
+    r.frame_gen[i] = r.generation
+    r.frame_ts[i] = ts
+    r.frame_id[i] = frame
+    r.frame_forward[i] = forward
+    r.frame_max[i] = index
+    r.frame_next = (i + 1) % list.len(r.frame_used)
+}
+
+fn push_range(mut r: Rewrite, from: u64, offset: i64) {
+    let n = list.len(r.range_from)
+    let i = if r.range_count == 0 {
+        0u64
+    } else {
+        (r.range_head + 1) % n
+    }
+    r.range_from[i] = from
+    r.range_offset[i] = offset
+    r.range_head = i
+    if r.range_count < n {
+        r.range_count += 1
+    }
+    r.offset = offset
+}
+
+// The offset of the newest range at or below `index`.
+fn offset_at(r: Rewrite, index: u64) -> Option[i64] {
+    let n = list.len(r.range_from)
+    let mut k = 0u64
+    while k < r.range_count {
+        let i = (r.range_head + n - k) % n
+        if r.range_from[i] <= index {
+            return Some(r.range_offset[i])
+        }
+        k += 1
+    }
+    None
+}
+
+// floor(delta_ns * clock / 10^9), exact.
+fn ticks(delta_ns: i64, clock: i64) -> i64 {
+    let mut q = delta_ns / SECOND_NS
+    let mut rest = delta_ns % SECOND_NS
+    if rest < 0 {
+        q -= 1
+        rest += SECOND_NS
+    }
+    q * clock + (rest * clock) / SECOND_NS
+}
+
+fn since(now_ns: u64, then_ns: u64) -> i64 {
+    int.truncate(int.wrapping_sub(now_ns, then_ns))
+}
+
+// floor((ntp_b - ntp_a) * clock / 2^32), exact, for 32.32 NTP values.
+fn ntp_ticks(ntp_b: u64, ntp_a: u64, clock: i64) -> i64 {
+    let d: i64 = int.truncate(int.wrapping_sub(ntp_b, ntp_a))
+    let high = d >> 32
+    let low: u64 = int.narrow(d & 0xffffffff)
+    let c: u64 = int.narrow(clock)
+    let part: i64 = int.narrow((low * c) >> 32)
+    high * clock + part
+}
+
+// The switch packet's capture time on A's timeline, minus A's offset.
+fn projected(r: Rewrite, a: Report, b: Report, ts: i64) -> Option[i64] {
+    let rtp_a = seq.estimate32(r.last_src_ts, a.rtp)
+    let rtp_b = seq.estimate32(ts, b.rtp)
+    let t_a = int.checked_add(int.checked_add(rtp_a, int.checked_sub(ts, rtp_b)?)?, ntp_ticks(b.ntp, a.ntp, r.clock))?
+    int.checked_sub(t_a, r.ts_offset)
+}
+
+fn start_generation(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64) {
+    let anchor = if !r.sent {
+        r.first_ts
+    } else {
+        let mut value = r.last_out_ts + ticks(since(at_ns, r.last_at_ns), r.clock)
+        if r.live && r.source != source {
+            if let Some(a) = r.current_sr {
+                if let Some(b) = r.pending_sr {
+                    if let Some(p) = projected(r, a, b, ts) {
+                        value = p
+                    }
+                }
+            }
+        }
+        if value < r.last_out_ts + 1 {
+            r.last_out_ts + 1
+        } else {
+            value
+        }
+    }
+    if !r.live || r.source != source {
+        r.current_sr = r.pending_sr
+    }
+    r.pending_sr = None
+    r.generation += 1
+    r.gen_start = index
+    r.highest_in = index
+    r.range_count = 0
+    let i: i64 = int.narrow(index)
+    let out: i64 = int.narrow(r.next_out)
+    push_range(mut r, index, i - out)
+    r.ts_offset = ts - anchor
+    r.evicted = false
+    r.switch_at = Some(r.next_out)
+    r.live = true
+    r.source = source
+}
+
+fn emit(mut r: Rewrite, index: u64, offset: i64, ts: i64, at_ns: u64) -> Out {
+    let i: i64 = int.narrow(index)
+    let out: u64 = int.narrow(i - offset)
+    let out_ts = ts - r.ts_offset
+    let wire: u32 = int.truncate(out_ts)
+    if r.sent && out < r.next_out {
+        // The sealer has gone past it.
+        return Late(out, wire)
+    }
+    r.next_out = out + 1
+    if !r.sent || out_ts >= r.last_out_ts {
+        r.last_out_ts = out_ts
+        r.last_at_ns = at_ns
+    }
+    r.sent = true
+    r.reported = false
+    r.last_src_ts = ts
+    Forward(out, wire)
+}
+
+pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, padding_only: bool, u: Unit) -> Out {
+    if r.closed {
+        return Drop
+    }
+    if r.wanting && source == r.want_source && u.start && !padding_only && has(u.switches, r.want_layer) {
+        let other = !r.live || r.source != source
+        if other && u.keyframe {
+            start_generation(mut r, source, index, ts, at_ns)
+            r.layer = r.want_layer
+            r.wanting = false
+            add_frame(mut r, ts, u.frame, true, index)
+            let offset = r.offset
+            return emit(mut r, index, offset, ts, at_ns)
+        }
+        if !other && index > r.highest_in && find_frame(r, ts, u.frame) == None {
+            r.layer = r.want_layer
+            r.wanting = false
+            add_frame(mut r, ts, u.frame, true, index)
+            r.highest_in = index
+            let offset = r.offset
+            return emit(mut r, index, offset, ts, at_ns)
+        }
+    }
+    if !r.live {
+        return Wait
+    }
+    if source != r.source || index < r.gen_start {
+        return Drop
+    }
+    let forward = match find_frame(r, ts, u.frame) {
+        Some(i) => {
+            if index > r.frame_max[i] {
+                r.frame_max[i] = index
+            }
+            r.frame_forward[i]
+        },
+        None => {
+            if r.evicted && index <= r.evicted_upto {
+                return Drop
+            }
+            let wanted = has(u.needs, r.layer)
+            add_frame(mut r, ts, u.frame, wanted, index)
+            wanted
+        }
+    }
+    let send = forward && !padding_only
+    if index > r.highest_in {
+        r.highest_in = index
+        if send {
+            let offset = r.offset
+            return emit(mut r, index, offset, ts, at_ns)
+        }
+        // Close it up: every later packet's offset grows by one.
+        let offset = r.offset + 1
+        if r.range_from[r.range_head] == index {
+            r.range_from[r.range_head] = index + 1
+            r.range_offset[r.range_head] = offset
+            r.offset = offset
+        } else {
+            push_range(mut r, index + 1, offset)
+        }
+        return Drop
+    }
+    if !send {
+        return Drop
+    }
+    match offset_at(r, index) {
+        Some(offset) => emit(mut r, index, offset, ts, at_ns),
+        None => Drop
+    }
+}
+
+pub fn on_sr(mut r: Rewrite, source: u32, info: rtcp.SenderInfo, at_ns: u64) {
+    if r.closed {
+        return
+    }
+    let report = Report(ntp: info.ntp, rtp: info.rtp, at_ns: at_ns)
+    if r.live && source == r.source {
+        r.current_sr = Some(report)
+    } else if r.wanting && source == r.want_source {
+        r.pending_sr = Some(report)
+    }
+}
+
+pub fn sr_timestamp(mut r: Rewrite, now_ns: u64) -> Option[u32] {
+    if r.closed || r.reported {
+        return None
+    }
+    r.reported = true
+    let value = match r.current_sr {
+        Some(sr) => {
+            if r.live {
+                seq.estimate32(r.last_src_ts, sr.rtp) + ticks(since(now_ns, sr.at_ns), r.clock) - r.ts_offset
+            } else {
+                r.last_out_ts + ticks(since(now_ns, r.last_at_ns), r.clock)
+            }
+        },
+        None => r.last_out_ts + ticks(since(now_ns, r.last_at_ns), r.clock)
+    }
+    Some(int.truncate(value))
+}
+
+pub fn switch_index(r: Rewrite) -> Option[u64] {
+    r.switch_at
+}
+
+pub fn pending(r: Rewrite) -> Option[u32] {
+    if r.wanting && (!r.live || r.want_source != r.source) {
+        Some(r.want_source)
+    } else {
+        None
+    }
+}
+
+pub fn close(mut r: Rewrite) {
+    r.closed = true
+    r.live = false
+    r.wanting = false
+    r.current_sr = None
+    r.pending_sr = None
+}

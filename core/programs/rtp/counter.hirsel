@@ -1,0 +1,187 @@
+// A codec counter of one outgoing stream (RTP-11): picture IDs, TL0PICIDX
+// and dependency descriptor frame numbers, mapped from source pictures to
+// output values of a fixed width.
+pub type Mode = Compact | Translate
+
+pub type CounterError = Absent | Width | Full
+
+const EMPTY: u8 = 0
+
+const EMITTED: u8 = 1
+
+const OMITTED: u8 = 2
+
+pub opaque type Counter {
+    width: u8,
+    mode: Mode,
+    // The ring of decisions per key.
+    keys: List[i64],
+    outs: List[u64],
+    states: List[u8],
+    cursor: u64,
+    evicted: bool,
+    evicted_max: i64,
+    // The next output, below 2^width.
+    next: u64,
+    emitted: bool,
+    // Translate: the highest extended input and the offset.
+    high: Option[i64],
+    offset: Option[i64]
+}
+
+pub fn counter(width: u8, mode: Mode, slots: u32) -> Result[Counter, Capacity] {
+    if width == 0 || width > 32 {
+        fail("a codec counter is 1 to 32 bits wide")
+    }
+    let n: u64 = int.widen(slots)
+    if n == 0 {
+        return Error(Capacity(requested: n, available: 0))
+    }
+    let mut keys: List[i64] = list.new()
+    let mut outs: List[u64] = list.new()
+    let mut states: List[u8] = list.new()
+    list.try_reserve(mut keys, n)?
+    list.try_reserve(mut outs, n)?
+    list.try_reserve(mut states, n)?
+    list.fill(mut keys, n, 0i64)
+    list.fill(mut outs, n, 0u64)
+    list.fill(mut states, n, EMPTY)
+    Ok(Counter(width: width, mode: mode, keys: keys, outs: outs, states: states, cursor: 0, evicted: false, evicted_max: 0, next: 0, emitted: false, high: None, offset: None))
+}
+
+fn period(c: Counter) -> u64 {
+    let w: u64 = int.widen(c.width)
+    1u64 << w
+}
+
+pub fn restart(mut c: Counter, first: u64) {
+    let n = list.len(c.states)
+    let mut i = 0u64
+    while i < n {
+        c.states[i] = EMPTY
+        i += 1
+    }
+    c.evicted = false
+    if !c.emitted {
+        c.next = first % period(c)
+    }
+    c.high = None
+    c.offset = None
+}
+
+fn find(c: Counter, key: i64) -> Option[u64] {
+    let n = list.len(c.states)
+    let mut k = 0u64
+    while k < n {
+        let i = (c.cursor + n - 1 - k) % n
+        if c.states[i] != EMPTY && c.keys[i] == key {
+            return Some(i)
+        }
+        k += 1
+    }
+    None
+}
+
+fn record(mut c: Counter, key: i64, state: u8, out: u64) {
+    let i = c.cursor
+    if c.states[i] != EMPTY {
+        if !c.evicted || c.keys[i] > c.evicted_max {
+            c.evicted_max = c.keys[i]
+        }
+        c.evicted = true
+    }
+    c.keys[i] = key
+    c.states[i] = state
+    c.outs[i] = out
+    c.cursor = (i + 1) % list.len(c.states)
+}
+
+// The value nearest `high` whose low `width` bits are `wire`.
+fn nearest(high: i64, wire: u64, width: u8) -> i64 {
+    let w: i64 = int.widen(width)
+    let size = 1i64 << w
+    let raw: i64 = int.narrow(wire)
+    let delta = raw - (high & (size - 1))
+    let half = size / 2
+    let step = if delta > half {
+        delta - size
+    } else if delta < -half {
+        delta + size
+    } else {
+        delta
+    }
+    high + step
+}
+
+pub fn forward(mut c: Counter, key: i64, value: Option[u64], width: u8) -> Result[u64, CounterError] {
+    if let Some(i) = find(c, key) {
+        if c.states[i] == EMITTED {
+            return Ok(c.outs[i])
+        }
+        return Error(Full)
+    }
+    if c.evicted && key <= c.evicted_max {
+        return Error(Full)
+    }
+    let size = period(c)
+    let out = match c.mode {
+        Compact => c.next,
+        Translate => {
+            let Some(v) = value else {
+                return Error(Absent)
+            }
+            if width != c.width || v >= size {
+                return Error(Width)
+            }
+            let extended = match c.high {
+                Some(high) => nearest(high, v, width),
+                None => int.narrow(v)
+            }
+            match c.high {
+                Some(high) => {
+                    if extended > high {
+                        c.high = Some(extended)
+                    }
+                },
+                None => {
+                    c.high = Some(extended)
+                }
+            }
+            let next: i64 = int.narrow(c.next)
+            let offset = match c.offset {
+                Some(o) => o,
+                None => extended - next
+            }
+            c.offset = Some(offset)
+            let s: i64 = int.narrow(size)
+            let mut mapped = (extended - offset) % s
+            if mapped < 0 {
+                mapped += s
+            }
+            int.narrow(mapped)
+        }
+    }
+    c.next = (out + 1) % size
+    c.emitted = true
+    record(mut c, key, EMITTED, out)
+    Ok(out)
+}
+
+pub fn omit(mut c: Counter, key: i64) {
+    if find(c, key) == None {
+        record(mut c, key, OMITTED, 0)
+    }
+}
+
+pub fn lookup(c: Counter, key: i64) -> Option[u64] {
+    match find(c, key) {
+        Some(i) => {
+            if c.states[i] == EMITTED {
+                Some(c.outs[i])
+            } else {
+                None
+            }
+        },
+        None => None
+    }
+}

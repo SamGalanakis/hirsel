@@ -1040,7 +1040,7 @@ padding packet is representable. A full pacer refuses explicitly.
 // module rewrite
 pub type Unit = Unit(start: bool, end: bool, keyframe: bool, needs: u32, switches: u32, frame: u16)
 pub type Target = Off | Layer(source: u32, target: u8)
-pub type TargetError = Unrepresentable
+pub type TargetError = Unrepresentable()
 pub type Out = Forward(u64, u32) | Late(u64, u32) | Drop | Wait
 pub opaque type Rewrite
 
@@ -1157,8 +1157,9 @@ delays the down-switch to the next frame that sets them.
 only at a switch point:
 
 - within one source, from target `i` to `j` at a packet with `start` and bit `j` of
-  `switches`, whose frame has no decision yet (a frame some of whose packets were already
-  decided under `i` keeps that decision, so it is forwarded whole or not at all);
+  `switches`, whose frame has no decision yet and that is newer than every packet already
+  decided (a frame some of whose packets were already decided under `i` keeps that
+  decision, so it is forwarded whole or not at all);
 - to another source, or from `Off`, only at a packet of that source with `start`,
   `keyframe` and bit `j` of `switches`.
 
@@ -1221,7 +1222,9 @@ within a frame. At a switch from source A to source B, at the accepted frame sta
 - `on_sr` keeps the latest SR of the current source and of the pending source, with its
   arrival time. An SR of any other source is ignored, and a source's SR is forgotten when it
   stops being current or pending. **Usable** means kept, and both SRs come from one sender
-  clock (the publisher's), which the caller vouches for by presenting them on one rewrite.
+  clock (the publisher's), which the caller vouches for by presenting them on one rewrite,
+  and the projection below fits the signed 64-bit timeline (an NTP difference of more than
+  2^31 seconds does not).
 - **With usable SRs** from both sources, project B's capture time into A's timeline. Both
   sources run at the one negotiated `clock`, so the RTP part carries over exactly and only the
   NTP difference is scaled: `t_A = rtp_A + (ts − rtp_B) + floor(((ntp_B − ntp_A) · clock) / 2^32)`,

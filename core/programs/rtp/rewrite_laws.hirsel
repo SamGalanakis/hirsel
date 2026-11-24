@@ -1,0 +1,253 @@
+const EVERY: u32 = 0xffffffff
+
+fn unit(start: bool, keyframe: bool, needs: u32, switches: u32, frame: u16) -> rewrite.Unit {
+    rewrite.Unit(start: start, end: false, keyframe: keyframe, needs: needs, switches: switches, frame: frame)
+}
+
+fn key_unit() -> rewrite.Unit {
+    unit(true, true, EVERY, EVERY, 0)
+}
+
+fn starts(needs: u32) -> rewrite.Unit {
+    unit(true, false, needs, 0, 0)
+}
+
+fn inside(needs: u32) -> rewrite.Unit {
+    unit(false, false, needs, 0, 0)
+}
+
+fn expect(got: rewrite.Out, want: rewrite.Out, take what: String) {
+    let same = match (got, want) {
+        (Forward(a, b), Forward(c, d)) => a == c && b == d,
+        (Late(a, b), Late(c, d)) => a == c && b == d,
+        (Drop, Drop) => true,
+        (Wait, Wait) => true,
+        _ => false,
+    }
+    if !same {
+        fail(take what)
+    }
+}
+
+fn sender(ssrc: u32, seconds: u64, rtp: u32) -> rtcp.SenderInfo {
+    rtcp.SenderInfo(ssrc: ssrc, ntp: seconds << 32, rtp: rtp, packets: 0, octets: 0)
+}
+
+/// bug: Leave a gap for a frame the target does not need or for a padding-only packet, change the source's timestamp spacing, or forward a dropped packet that arrives again.
+/// oracle: RTP-11, by hand. The first outgoing index is 1000 and the first timestamp 3000; 102 and 104 are closed up, so 103 is 1002 and 105 is 1003, and every timestamp is its source value minus 7,000 (3,000, 6,000, 12,000, 15,000), with 102's 3,000 ticks kept.
+@test
+fn rewrite_continuity() -> Result[(), ()] {
+    let mut r = result.unwrap(rewrite.rewrite(90000, 8, 8, 1000, 3000))
+    result.unwrap(rewrite.target(mut r, Layer(source: 7, target: 0)))
+    expect(rewrite.on_packet(mut r, 7, 100, 10000, 0, false, key_unit()), Forward(1000, 3000), "100")
+    expect(rewrite.on_packet(mut r, 7, 101, 13000, MS, false, starts(1)), Forward(1001, 6000), "101")
+    expect(rewrite.on_packet(mut r, 7, 102, 16000, 2 * MS, false, starts(2)), Drop, "102 is not needed by target 0")
+    expect(rewrite.on_packet(mut r, 7, 103, 19000, 3 * MS, false, starts(1)), Forward(1002, 12000), "103 closes up 102")
+    expect(rewrite.on_packet(mut r, 7, 104, 19000, 4 * MS, true, inside(1)), Drop, "104 is padding only")
+    expect(rewrite.on_packet(mut r, 7, 105, 22000, 5 * MS, false, starts(1)), Forward(1003, 15000), "105 closes up 104")
+    expect(rewrite.on_packet(mut r, 7, 102, 16000, 6 * MS, false, starts(2)), Drop, "a late 102")
+    Ok(())
+}
+
+/// bug: Seal a reordered packet on the media stream below an index already sealed, give it another index than its place, or close up a real upstream loss.
+/// oracle: TLS-8's sealer rule and RTP-11, by hand: 201 maps to 2001 but 2002 was sealed, so it is Late; 203 is lost, so 204 keeps its place at 2004.
+@test
+fn rewrite_late() -> Result[(), ()] {
+    let mut r = result.unwrap(rewrite.rewrite(90000, 8, 8, 2000, 0))
+    result.unwrap(rewrite.target(mut r, Layer(source: 1, target: 0)))
+    expect(rewrite.on_packet(mut r, 1, 200, 50000, 0, false, key_unit()), Forward(2000, 0), "200")
+    expect(rewrite.on_packet(mut r, 1, 202, 56000, 2 * MS, false, starts(1)), Forward(2002, 6000), "202")
+    expect(rewrite.on_packet(mut r, 1, 201, 53000, 3 * MS, false, starts(1)), Late(2001, 3000), "201 after 202")
+    expect(rewrite.on_packet(mut r, 1, 204, 62000, 5 * MS, false, starts(1)), Forward(2004, 12000), "204 after a lost 203")
+    Ok(())
+}
+
+fn simulcast(with_sr: bool) {
+    let mut r = result.unwrap(rewrite.rewrite(90000, 16, 16, 500, 9000))
+    result.unwrap(rewrite.target(mut r, Layer(source: 1, target: 0)))
+    expect(rewrite.on_packet(mut r, 1, 7000, 90000, 0, false, key_unit()), Forward(500, 9000), "A's first fragment")
+    result.unwrap(rewrite.target(mut r, Layer(source: 2, target: 0)))
+    if rewrite.pending(r) != Some(2) {
+        fail("B is pending")
+    }
+    if with_sr {
+        rewrite.on_sr(mut r, 1, sender(11, 1000, 90000), MS)
+        rewrite.on_sr(mut r, 2, sender(22, 1000, 5000000), 2 * MS)
+    }
+    expect(rewrite.on_packet(mut r, 2, 31000, 4997900, 3 * MS, false, starts(EVERY)), Drop, "B before its keyframe")
+    expect(rewrite.on_packet(mut r, 1, 7001, 90000, 4 * MS, false, inside(EVERY)), Forward(501, 9000), "A's second fragment")
+    expect(rewrite.on_packet(mut r, 2, 31001, 4997900, 5 * MS, false, inside(EVERY)), Drop, "B before its keyframe")
+    let t0 = 10 * MS
+    expect(rewrite.on_packet(mut r, 1, 7002, 90000, t0, false, inside(EVERY)), Forward(502, 9000), "A's last fragment")
+    // With SRs the keyframe comes late enough that the switch_at rule would give 13,500.
+    let switch_at = if with_sr {
+        t0 + 50 * MS
+    } else {
+        t0 + 10 * MS
+    }
+    expect(rewrite.on_packet(mut r, 2, 31002, 5000900, switch_at, false, key_unit()), Forward(503, 9900), "B's keyframe")
+    if rewrite.switch_index(r) != Some(503) || rewrite.pending(r) != None {
+        fail("the switch record")
+    }
+    expect(rewrite.on_packet(mut r, 1, 7003, 93000, switch_at + MS, false, starts(EVERY)), Drop, "A after the switch")
+    expect(rewrite.on_packet(mut r, 2, 31003, 5000900, switch_at + MS, false, inside(EVERY)), Forward(504, 9900), "B's keyframe, second packet")
+    let tb = switch_at + 33 * MS
+    expect(rewrite.on_packet(mut r, 2, 31004, 5003900, tb, false, starts(EVERY)), Forward(505, 12900), "B's next frame")
+    result.unwrap(rewrite.target(mut r, Layer(source: 3, target: 0)))
+    expect(rewrite.on_packet(mut r, 3, 9000, 4294967000, tb + 20 * MS, false, key_unit()), Forward(506, 14700), "C's keyframe")
+    expect(rewrite.on_packet(mut r, 3, 9001, 4294967592, tb + 27 * MS, false, starts(EVERY)), Forward(507, 15292), "C across the wrap")
+    if rewrite.sr_timestamp(mut r, tb + 32 * MS) != Some(15742) {
+        fail("the SR timestamp")
+    }
+    if rewrite.sr_timestamp(mut r, tb + 40 * MS) != None {
+        fail("an SR with nothing forwarded since the last")
+    }
+}
+
+/// bug: Switch simulcast sources before a keyframe, let the old source's packets after the switch or the pending source's drops move an offset, round the SR projection, skip the old offset or the clamp, miss the switch_at rule, or extend a timestamp wrongly across the 32-bit wrap.
+/// oracle: RTP-11's clock rules, by hand. At 90 kHz, A's 90,000 goes out as 9,000 (offset 81,000). SRs put B's 5,000,900 900 ticks after NTP 1000 s, which is 90,900 on A, minus 81,000: 9,900. Without SRs, 10 ms of switch_at is 900 ticks: 9,900. B's offset is 4,991,000, so 5,003,900 is 12,900. C arrives 20 ms after B's last (1,800 ticks): 14,700, and 592 ticks later 15,292. An SR 5 ms later carries 15,292 + 450.
+@test
+fn simulcast_switch() -> Result[(), ()] {
+    simulcast(true)
+    simulcast(false)
+    Ok(())
+}
+
+/// bug: Refuse target 31 or accept 32, switch within a source before a frame whose switches has the bit, wait from Off at a frame that may start, decide a frame per packet instead of per frame, merge two layer frames that share a timestamp, or leave gaps for frames the target does not need.
+/// oracle: RTP-11, by hand. Index 11 goes out as 0 with timestamp 0; 13, 14, 18, 19 and 21 are closed up, so 15, 16, 17 are 2, 3, 4, 20 is 5 and 22 is 6, each at its source timestamp minus 1.
+@test
+fn svc_masks() -> Result[(), ()] {
+    let mut r = result.unwrap(rewrite.rewrite(90000, 16, 16, 0, 0))
+    result.unwrap(rewrite.target(mut r, Layer(source: 1, target: 31)))
+    let Error(Unrepresentable()) = rewrite.target(mut r, Layer(source: 1, target: 32)) else {
+        fail("target 32")
+    }
+    result.unwrap(rewrite.target(mut r, Layer(source: 1, target: 0)))
+    expect(rewrite.on_packet(mut r, 1, 10, 0, 0, false, unit(true, false, EVERY, 1, 0)), Wait, "no keyframe from Off")
+    expect(rewrite.on_packet(mut r, 1, 11, 1, 0, false, unit(true, true, EVERY, 1, 0)), Forward(0, 0), "the first eligible packet from Off")
+    result.unwrap(rewrite.target(mut r, Layer(source: 1, target: 2)))
+    if rewrite.pending(r) != None {
+        fail("a target within the source needs no keyframe")
+    }
+    expect(rewrite.on_packet(mut r, 1, 12, 2, 0, false, unit(true, false, 7, 1, 0)), Forward(1, 1), "no bit 2 in switches")
+    expect(rewrite.on_packet(mut r, 1, 13, 3, 0, false, unit(true, false, 4, 0, 0)), Drop, "target 0 does not need it")
+    expect(rewrite.on_packet(mut r, 1, 14, 4, 0, false, unit(true, false, 0, 0, 0)), Drop, "no target needs it")
+    expect(rewrite.on_packet(mut r, 1, 15, 5, 0, false, unit(true, false, 6, 6, 0)), Forward(2, 4), "the switch to target 2")
+    expect(rewrite.on_packet(mut r, 1, 16, 5, 0, false, unit(false, false, 0, 0, 0)), Forward(3, 4), "the frame's second packet")
+    expect(rewrite.on_packet(mut r, 1, 17, 5, 0, false, unit(false, false, 1, 4, 0)), Forward(4, 4), "the frame's third packet")
+    expect(rewrite.on_packet(mut r, 1, 18, 6, 0, false, unit(true, false, 8, 0, 0)), Drop, "target 2 does not need it")
+    expect(rewrite.on_packet(mut r, 1, 19, 6, 0, false, unit(false, false, 4, 4, 0)), Drop, "the dropped frame's second packet")
+    expect(rewrite.on_packet(mut r, 1, 20, 7, 0, false, unit(true, false, 4, 0, 0)), Forward(5, 6), "layer frame 0")
+    expect(rewrite.on_packet(mut r, 1, 21, 7, 0, false, unit(true, false, 1024, 0, 1)), Drop, "layer frame 1 of the same picture")
+    expect(rewrite.on_packet(mut r, 1, 22, 8, 0, false, unit(true, false, 4, 0, 0)), Forward(6, 7), "the next picture")
+    Ok(())
+}
+
+fn emits(mut c: counter.Counter, key: i64, value: Option[u64], width: u8, want: u64, take what: String) {
+    match counter.forward(mut c, key, value, width) {
+        Ok(got) => {
+            if got != want {
+                fail(take what)
+            }
+        },
+        Error(_) => fail(take what)
+    }
+}
+
+/// bug: Leave a gap for an omitted picture in Compact, answer fragments of one picture differently, keep a stale key across a restart, restart the output instead of continuing it, map a dependent frame's TL0 to another base, translate across the 16-bit wrap wrongly, or accept an absent field or another width in Translate.
+/// oracle: RTP-11's counter rules, by hand. Picture IDs 125, (126 omitted), 127, 0 go out as 125, 126, 127 at 7 bits; B's 4000 continues at 0. TL0 254, 255, 0 go out as 254, 255, 0, and B's 254 continues at 1. Frame numbers restarted so 65,534 is 10: 65,535 is 11, 0 is omitted, and 1 (65,537) is 13.
+@test
+fn codec_counter_continuity() -> Result[(), ()] {
+    let mut picture = result.unwrap(counter.counter(7, Compact, 8))
+    let mut tl0 = result.unwrap(counter.counter(8, Compact, 8))
+    counter.restart(mut picture, 125)
+    counter.restart(mut tl0, 254)
+    emits(mut picture, 3000, Some(125), 7, 125, "picture 125")
+    emits(mut tl0, 254, Some(254), 8, 254, "TL0 254")
+    emits(mut picture, 3000, Some(125), 7, 125, "picture 125, second fragment")
+    emits(mut tl0, 254, Some(254), 8, 254, "TL0 254, second fragment")
+    counter.omit(mut picture, 6000)
+    emits(mut picture, 9000, Some(127), 7, 126, "picture 127")
+    emits(mut tl0, 255, Some(255), 8, 255, "TL0 255")
+    emits(mut picture, 12000, Some(0), 7, 127, "picture 0")
+    emits(mut tl0, 256, Some(0), 8, 0, "TL0 0")
+    counter.restart(mut picture, 0)
+    counter.restart(mut tl0, 0)
+    emits(mut picture, 500000, Some(4000), 15, 0, "B's keyframe 4000")
+    emits(mut tl0, 254, Some(254), 8, 1, "B's TL0 254")
+    emits(mut picture, 503000, Some(4001), 15, 1, "B's enhancement 4001")
+    if counter.lookup(tl0, 254) != Some(1) {
+        fail("the enhancement's base TL0")
+    }
+    let mut frames = result.unwrap(counter.counter(16, Translate, 8))
+    counter.restart(mut frames, 10)
+    emits(mut frames, 1, Some(65534), 16, 10, "frame 65,534")
+    emits(mut frames, 2, Some(65535), 16, 11, "frame 65,535")
+    counter.omit(mut frames, 3)
+    emits(mut frames, 4, Some(1), 16, 13, "frame 1")
+    if counter.lookup(frames, 2) != Some(13 - 2) {
+        fail("frame 1's reference")
+    }
+    let Error(Absent) = counter.forward(mut frames, 5, None, 16) else {
+        fail("an absent frame number")
+    }
+    let Error(Width) = counter.forward(mut frames, 6, Some(5), 15) else {
+        fail("a 15-bit frame number")
+    }
+    Ok(())
+}
+
+/// bug: Let a closed rewrite forward, answer a NACK from a cleared history, keep or lose a removed stream's queued entries, or touch the other stream.
+/// oracle: RTP-12, by hand. Stream 1 queues 101 and 102, stream 2 queues 201 and 202; 101 and 201 leave, then remove(1) hands back exactly 102, and only 202 leaves after it.
+@test
+fn close_leaves_nothing() -> Result[(), ()] {
+    let mut r1 = result.unwrap(rewrite.rewrite(90000, 8, 8, 1000, 0))
+    let mut r2 = result.unwrap(rewrite.rewrite(90000, 8, 8, 5000, 0))
+    result.unwrap(rewrite.target(mut r1, Layer(source: 1, target: 0)))
+    result.unwrap(rewrite.target(mut r2, Layer(source: 2, target: 0)))
+    expect(rewrite.on_packet(mut r1, 1, 10, 0, 0, false, key_unit()), Forward(1000, 0), "stream 1")
+    expect(rewrite.on_packet(mut r2, 2, 20, 0, 0, false, key_unit()), Forward(5000, 0), "stream 2")
+    let mut h1: history.History[u64] = result.unwrap(history.history(8, 2000 * MS))
+    let mut h2: history.History[u64] = result.unwrap(history.history(8, 2000 * MS))
+    drop(history.put(mut h1, 1000, 0, 101))
+    drop(history.put(mut h2, 5000, 0, 201))
+    let mut p: pacer.Pacer[u64] = result.unwrap(pacer.pacer(8, 2.5, 0, 20))
+    pacer.set_rate(mut p, 400000, 0)
+    result.unwrap(pacer.push(mut p, 1, Video, 100, 0, 101))
+    result.unwrap(pacer.push(mut p, 2, Video, 100, 0, 201))
+    result.unwrap(pacer.push(mut p, 1, Video, 100, 0, 102))
+    result.unwrap(pacer.push(mut p, 2, Video, 100, 0, 202))
+    let Send(101) = pacer.poll(mut p, 0) else {
+        fail("stream 1 delivers")
+    }
+    let Send(201) = pacer.poll(mut p, 10 * MS) else {
+        fail("stream 2 delivers")
+    }
+    let Found(1000) = history.get(mut h1, 1000, 10 * MS, 0) else {
+        fail("stream 1 answers a NACK")
+    }
+    let Found(5000) = history.get(mut h2, 5000, 10 * MS, 0) else {
+        fail("stream 2 answers a NACK")
+    }
+    rewrite.close(mut r1)
+    drop(history.clear(mut h1))
+    let mut out: List[u64] = list.new()
+    if pacer.remove(mut p, 1, mut out) != 1 || list.len(out) != 1 || out[0] != 102 {
+        fail("remove hands back stream 1's queued entries")
+    }
+    expect(rewrite.on_packet(mut r1, 1, 11, 3000, 20 * MS, false, starts(EVERY)), Drop, "a closed rewrite")
+    let Missing = history.get(mut h1, 1000, 20 * MS, 0) else {
+        fail("a cleared history")
+    }
+    expect(rewrite.on_packet(mut r2, 2, 21, 3000, 20 * MS, false, starts(EVERY)), Forward(5001, 3000), "stream 2 after the close")
+    let Found(5000) = history.get(mut h2, 5000, 20 * MS, 0) else {
+        fail("stream 2 after the close")
+    }
+    let Send(202) = pacer.poll(mut p, 20 * MS) else {
+        fail("stream 2's queued entry")
+    }
+    let Idle = pacer.poll(mut p, 30 * MS) else {
+        fail("nothing of stream 1 leaves")
+    }
+    Ok(())
+}

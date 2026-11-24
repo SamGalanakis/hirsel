@@ -10,6 +10,7 @@
 //! static d0 = align 1 hex 6869            ; read-only data
 //! sig g0 = (i32, &view t0) -> (i32) dest t0 ; params: scalar, ptr or &mut/view/take tN
 //! sig g1 = (u64) -> never                 ; FORM v1: a function whose result is Never
+//! sig g2 = (&view t0) -> () dest view t0 in (0) ; a dest view anchored on params 0… (OWN-20)
 //! inst n0 = app@1/main/add [t0] []        ; instance row: definition, argument rows, dictionaries
 //! fn f0 = n0 g0 extern                    ; defined in another module
 //! fn f1 = n1 g1 {
@@ -336,10 +337,11 @@ impl Printer {
             } else {
                 format!("({})", list(&s.results, |t| ty(*t).into()))
             };
-            let dest = s
-                .dest
-                .map(|t| format!(" dest t{}", t.0))
-                .unwrap_or_default();
+            let dest = match (s.dest, s.anchors.as_slice()) {
+                (None, _) => String::new(),
+                (Some(t), []) => format!(" dest t{}", t.0),
+                (Some(t), k) => format!(" dest view t{} in ({})", t.0, list(k, |k| k.to_string())),
+            };
             self.line(&format!("sig g{i} = ({params}) -> {results}{dest}"));
         }
         for (i, k) in m.instances.iter().enumerate() {
@@ -2156,16 +2158,28 @@ impl Parser {
                     } else {
                         l.seq("(", ")", Line::ty)?
                     };
-                    let dest = if l.eat("dest") {
-                        Some(TypeId(l.id('t')?))
+                    let (dest, anchors) = if l.eat("dest") {
+                        let view = l.eat("view");
+                        let dest = Some(TypeId(l.id('t')?));
+                        let anchors = if view {
+                            l.expect("in")?;
+                            l.seq("(", ")", |l| {
+                                let k = l.next()?;
+                                k.parse().map_err(|_| format!("bad anchor `{k}`"))
+                            })?
+                        } else {
+                            vec![]
+                        };
+                        (dest, anchors)
                     } else {
-                        None
+                        (None, vec![])
                     };
                     l.end()?;
                     self.module.signatures.push(Signature {
                         params,
                         results,
                         dest,
+                        anchors,
                         never,
                     });
                 }

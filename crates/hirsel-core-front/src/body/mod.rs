@@ -820,9 +820,15 @@ impl Emitter {
             params: vec![],
             result: true,
         };
+        // Each source parameter's index in `params`, when it is passed by address.
+        let mut at: Vec<Option<u32>> = vec![];
         for q in &fd.params {
             let ty = subst(t, q.ty, arguments);
             let rep = self.rep(p, t, ty)?;
+            at.push(match (q.mode, rep) {
+                (Mode::Mut, _) | (_, Rep::Place(_)) => Some(params.len() as u32),
+                _ => None,
+            });
             if q.mode == Mode::Mut {
                 let place = self
                     .mut_place(p, t, ty, rep)
@@ -857,11 +863,19 @@ impl Emitter {
             Rep::Scalar(s) => (vec![s], None),
             Rep::Place(id) => (vec![], Some(id)),
         };
+        // A result through `dest` anchored on parameters (OWN-20) borrows their places.
+        let mut anchors: Vec<u32> = match dest {
+            Some(_) => fd.anchors.iter().filter_map(|&k| at[k as usize]).collect(),
+            None => vec![],
+        };
+        anchors.sort_unstable();
+        anchors.dedup();
         Ok((
             Signature {
                 params,
                 results,
                 dest,
+                anchors,
                 never,
             },
             abi,
@@ -871,12 +885,11 @@ impl Emitter {
 
 /// A clone body's: `(ptr from, ptr to)`, failing with `Capacity` (MEM-17).
 fn clone_body_signature() -> Signature {
-    Signature {
-        params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
-        results: vec![],
-        dest: None,
-        never: false,
-    }
+    Signature::new(
+        vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
+        vec![],
+        None,
+    )
 }
 
 /// The loan a by-address parameter of this source mode carries (crate docs of
@@ -890,12 +903,7 @@ pub(super) fn loan(mode: Mode) -> Loan {
 }
 
 fn finalizer_signature() -> Signature {
-    Signature {
-        params: vec![Param::Value(Ty::Ptr)],
-        results: vec![],
-        dest: None,
-        never: false,
-    }
+    Signature::new(vec![Param::Value(Ty::Ptr)], vec![], None)
 }
 
 /// A field whose cleanup runs code by itself; the rows it holds go to `row`.

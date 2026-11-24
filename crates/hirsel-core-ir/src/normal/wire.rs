@@ -683,12 +683,60 @@ record!(ItemPath {
     modules,
     name
 });
-record!(Signature {
-    params,
-    results,
-    dest,
-    never
-});
+/// `dest` is a tag: 0 none, 1 an owned result's type, 2 a view's type and its
+/// anchors (OWN-20), never empty; a signature with no anchors has the bytes it had
+/// before they existed.
+impl Wire for Signature {
+    fn write(&self, out: &mut Write<'_, '_, '_>) {
+        let Self {
+            params,
+            results,
+            dest,
+            anchors,
+            never,
+        } = self;
+        params.write(out);
+        results.write(out);
+        match (dest, anchors.is_empty()) {
+            (None, _) => 0u8.write(out),
+            (Some(t), true) => {
+                1u8.write(out);
+                t.write(out);
+            }
+            (Some(t), false) => {
+                2u8.write(out);
+                t.write(out);
+                anchors.write(out);
+            }
+        }
+        never.write(out);
+    }
+
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        let params = Wire::read(input)?;
+        let results = Wire::read(input)?;
+        let (dest, anchors) = match u8::read(input)? {
+            0 => (None, vec![]),
+            1 => (Some(Wire::read(input)?), vec![]),
+            2 => {
+                let dest = Some(Wire::read(input)?);
+                let anchors: Vec<u32> = Wire::read(input)?;
+                if anchors.is_empty() {
+                    return Err(invalid("a dest view with no anchors"));
+                }
+                (dest, anchors)
+            }
+            _ => return Err(invalid("invalid dest tag")),
+        };
+        Ok(Self {
+            params,
+            results,
+            dest,
+            anchors,
+            never: Wire::read(input)?,
+        })
+    }
+}
 record!(Field { name, ty });
 record!(Case { name, fields });
 record!(AddressInfo { base, steps, ty });

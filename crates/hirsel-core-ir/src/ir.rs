@@ -1635,12 +1635,7 @@ impl RtOp {
                 }
             }
         };
-        Signature {
-            params,
-            results,
-            dest: None,
-            never: false,
-        }
+        Signature::new(params, results, None)
     }
 
     /// Whether a call of this row can fail, and so returns the failure status
@@ -1862,10 +1857,26 @@ pub struct Signature {
     pub params: Vec<Param>,
     pub results: Vec<Ty>,
     pub dest: Option<TypeId>,
+    /// The parameters (indices into `params`, ascending) a `dest` result is a view
+    /// anchored on (OWN-20): the destination borrows their places, so it dangles
+    /// once one of them is dropped. Empty for an owned result or no `dest`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<u32>,
     pub never: bool,
 }
 
 impl Signature {
+    /// A signature that returns, with no dest view.
+    pub fn new(params: Vec<Param>, results: Vec<Ty>, dest: Option<TypeId>) -> Self {
+        let (anchors, never) = (vec![], false);
+        Signature {
+            params,
+            results,
+            dest,
+            anchors,
+            never,
+        }
+    }
     pub fn has_vectors(&self) -> bool {
         self.results.iter().any(|t| matches!(t, Ty::Vector(_)))
             || self.params.iter().any(|p| {

@@ -30,12 +30,11 @@ impl Signature {
     }
     pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
-            &c::Signature {
-                params: params.iter().copied().map(Param::Value).collect(),
-                results: results.to_vec(),
-                dest: None,
-                never: false,
-            },
+            &c::Signature::new(
+                params.iter().copied().map(Param::Value).collect(),
+                results.to_vec(),
+                None,
+            ),
             None,
             aarch64(object),
             false,

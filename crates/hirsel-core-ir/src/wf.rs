@@ -64,12 +64,7 @@ pub fn module(m: &Module) -> R {
                 .functions
                 .get(f.0 as usize)
                 .and_then(|f| m.signatures.get(f.signature.index()));
-            let want = Signature {
-                params: vec![Param::Value(Ty::Ptr)],
-                results: vec![],
-                dest: None,
-                never: false,
-            };
+            let want = Signature::new(vec![Param::Value(Ty::Ptr)], vec![], None);
             need(sig == Some(&want), || {
                 format!("t{i}: finalizer is not (ptr) -> ()")
             })?;
@@ -96,12 +91,11 @@ pub fn module(m: &Module) -> R {
                 .functions
                 .get(f.0 as usize)
                 .and_then(|f| m.signatures.get(f.signature.index()));
-            let want = Signature {
-                params: vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
-                results: vec![],
-                dest: None,
-                never: false,
-            };
+            let want = Signature::new(
+                vec![Param::Value(Ty::Ptr), Param::Value(Ty::Ptr)],
+                vec![],
+                None,
+            );
             need(sig == Some(&want), || {
                 format!("t{i}: clone body is not (ptr, ptr) -> ()")
             })?;
@@ -138,6 +132,7 @@ pub fn module(m: &Module) -> R {
             !s.never || (s.results.is_empty() && s.dest.is_none()),
             || format!("g{i}: a never signature has results"),
         )?;
+        own::anchors(s).map_err(|e| format!("g{i}: {e}"))?;
     }
     for (i, f) in m.functions.iter().enumerate() {
         need(f.instance.index() < m.instances.len(), || {

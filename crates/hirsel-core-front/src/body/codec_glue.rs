@@ -186,12 +186,7 @@ impl CodecOp {
             }
             Self::Describe => (vec![env, out(rows.schema)], Some(rows.written)),
         };
-        Signature {
-            params,
-            results: vec![],
-            dest,
-            never: false,
-        }
+        Signature::new(params, vec![], dest)
     }
     /// Which parameters follow their rows' carriage: the viewed value, bytes or codec.
     pub fn abi(self, format: Format) -> scalar_abi::SignatureAbi {
@@ -398,12 +393,7 @@ impl Derive<'_> {
         let part = self.rows.parts[i];
         let sig = signature_id(
             self.module,
-            Signature {
-                params: vec![],
-                results: vec![],
-                dest: Some(part.codec),
-                never: false,
-            },
+            Signature::new(vec![], vec![], Some(part.codec)),
         );
         let maker = if self.rows.format == Format::Value {
             templates::codec_maker(self.module, self.of, part.ty, sig)?
@@ -852,31 +842,16 @@ impl Derive<'_> {
             CodecOp::Describe => ("schema_desc", vec![], vec![out(rows.schema)], None),
             CodecOp::Of => unreachable!("descending key protocol"),
         };
-        self.sibling(
-            name,
-            arguments,
-            Signature {
-                params,
-                results: vec![],
-                dest,
-                never: false,
-            },
-        )
+        self.sibling(name, arguments, Signature::new(params, vec![], dest))
     }
 
     fn schema_tuple(&mut self) -> (FuncId, SigId) {
-        let sig = Signature {
-            params: vec![
-                Param::Address {
-                    place: scalar_abi::mut_place(&self.module.types, self.rows.schema),
-                    loan: Loan::Mut,
-                },
-                Param::Value(Ty::Scalar(Scalar::U64)),
-            ],
-            results: vec![],
-            dest: Some(self.rows.written),
-            never: false,
+        let schema = Param::Address {
+            place: scalar_abi::mut_place(&self.module.types, self.rows.schema),
+            loan: Loan::Mut,
         };
+        let params = vec![schema, Param::Value(Ty::Scalar(Scalar::U64))];
+        let sig = Signature::new(params, vec![], Some(self.rows.written));
         self.sibling("schema_tuple", vec![], sig)
     }
 

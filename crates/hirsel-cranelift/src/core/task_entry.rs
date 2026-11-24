@@ -76,23 +76,21 @@ impl Glues {
                 .iadd_imm(ps[2], input_offset(tables.input, tables.layouts, x)? as i64);
             let xc = tables.input.types[x.index()].carried;
             let rc = tables.input.types[r.index()].carried;
-            let mut sig = c::Signature {
-                params: match xc {
-                    // The task takes its input (RtOp::Spawn).
-                    Carried::Address => vec![Param::Address {
-                        place: c::PlaceTy::Declared(x),
-                        loan: c::Loan::Take,
-                    }],
-                    Carried::Value(t) => vec![Param::Value(t)],
-                    Carried::Nothing => vec![],
-                },
-                results: match rc {
-                    Carried::Value(t) => vec![t],
-                    _ => vec![],
-                },
-                dest: matches!(rc, Carried::Address).then_some(r),
-                never: false,
+            let params = match xc {
+                // The task takes its input (RtOp::Spawn).
+                Carried::Address => vec![Param::Address {
+                    place: c::PlaceTy::Declared(x),
+                    loan: c::Loan::Take,
+                }],
+                Carried::Value(t) => vec![Param::Value(t)],
+                Carried::Nothing => vec![],
             };
+            let results = match rc {
+                Carried::Value(t) => vec![t],
+                _ => vec![],
+            };
+            let dest = matches!(rc, Carried::Address).then_some(r);
+            let mut sig = c::Signature::new(params, results, dest);
             // A spawned task's code takes an environment first; a root a
             // transfer enters is a function's own, with none.
             if environment {

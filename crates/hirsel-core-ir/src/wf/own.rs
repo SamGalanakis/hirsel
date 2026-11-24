@@ -8,6 +8,17 @@
 //! pointer from anywhere else (an `alloc`, a load, a call's result) names nothing
 //! this pass checks.
 //!
+//! A pointer block parameter whose edges carry more than one place is a join: it
+//! gets a root of its own, the place it points at on the path taken. Each edge sets
+//! that root's state from the place it carries, a drop through the join drops it
+//! (and may drop each place it stands for), and a drop of one of those may drop it.
+//!
+//! A call whose signature marks its `dest` a view anchored on parameters (OWN-20)
+//! makes the destination's places borrow the anchor arguments' places, from the
+//! call until a new value is written or begun in the destination. A drop of an
+//! anchor while the borrow holds drops the destination too, so a later use of the
+//! view is a use after drop.
+//!
 //! A forward may-analysis then tracks, for each place some `drop` may reach,
 //! whether it may be dropped. A `drop` through one place drops it; through several,
 //! it may drop each. Any write overlapping the place, and its slot's `live` or
@@ -233,6 +244,8 @@ enum Act {
     Write(AddressId),
     Begin(usize),
     Flag(usize, Option<bool>),
+    /// A call has begun borrow `k`: its dest now views its anchors.
+    Lend(usize),
 }
 
 struct Own<'a> {
@@ -258,6 +271,15 @@ struct Own<'a> {
     pairs: Vec<Vec<usize>>,
     /// Per tracked place: the tracked join places that may be it, in part.
     shadow: Vec<Vec<usize>>,
+    /// Per borrow (a call with a dest view): its dest's tracked places.
+    borrows: Vec<Vec<usize>>,
+    /// Per call: its borrow.
+    lends: std::collections::HashMap<usize, usize>,
+    /// Per tracked place: the borrows anchored on it, and those whose dest it is.
+    lent: Vec<Vec<usize>>,
+    held: Vec<Vec<usize>>,
+    /// The state index of borrow 0's bit: whether it may be in force.
+    base: usize,
     /// Per flag slot: the pairings it guards.
     guards: std::collections::HashMap<usize, Vec<usize>>,
     /// Read results of whole flag slots.
@@ -340,6 +362,9 @@ impl Own<'_> {
                         _ => out.push(Act::Use(a)),
                     }
                 }
+                if let Some(&k) = self.lends.get(&call.index()) {
+                    out.push(Act::Lend(k));
+                }
             }
             _ => {}
         }
@@ -393,15 +418,15 @@ impl Own<'_> {
                         own.extend(self.tracked.iter().position(|t| t == r));
                     }
                     for &q in &own {
-                        self.mark(now, q, |s| dropped(s, true), joined.len() == 1);
+                        self.drop(now, q, joined.len() == 1, &mut vec![]);
                     }
                 }
                 let strong = !routed && roots.len() == 1;
                 for r in roots.iter().filter(|r| !r.cut) {
                     if let Some(q) = self.tracked.iter().position(|t| t == r) {
-                        self.mark(now, q, |s| dropped(s, true), strong);
+                        self.drop(now, q, strong, &mut vec![]);
                         for &t in self.shadow[q].iter().filter(|t| !own.contains(t)) {
-                            self.mark(now, t, |s| dropped(s, true), false);
+                            self.drop(now, t, false, &mut vec![]);
                         }
                     }
                 }
@@ -416,6 +441,7 @@ impl Own<'_> {
                     && !r.cut
                 {
                     for &q in &self.hits[a.index()] {
+                        self.end(now, q);
                         self.mark(now, q, begun, true);
                         for &t in &self.shadow[q] {
                             self.mark(now, t, begun, false);
@@ -426,6 +452,7 @@ impl Own<'_> {
             Act::Begin(s) => {
                 for (q, t) in self.tracked.iter().enumerate() {
                     if t.root == s {
+                        self.end(now, q);
                         self.mark(now, q, begun, true);
                         for &t in &self.shadow[q] {
                             self.mark(now, t, begun, false);
@@ -433,6 +460,7 @@ impl Own<'_> {
                     }
                 }
             }
+            Act::Lend(k) => now[self.base + k] = 1,
             Act::Flag(f, value) => {
                 for &p in self.guards.get(&f).map_or(&[][..], |v| v) {
                     now[p] = flag(now[p], value);
@@ -440,6 +468,29 @@ impl Own<'_> {
             }
         }
         Ok(())
+    }
+    /// Drop place `q`, and so the dest of every borrow of it in force (OWN-20): a
+    /// view dangles once its anchor is dropped.
+    fn drop(&self, now: &mut [u8], q: usize, strong: bool, seen: &mut Vec<usize>) {
+        if seen.contains(&q) {
+            return;
+        }
+        seen.push(q);
+        self.mark(now, q, |s| dropped(s, true), strong);
+        for &k in &self.lent[q] {
+            if now[self.base + k] != 0 {
+                for &d in &self.borrows[k] {
+                    self.drop(now, d, strong, seen);
+                }
+            }
+        }
+    }
+    /// A new value in place `q` ends the borrows whose dest it is: a slot reused
+    /// for another value no longer views the old anchor.
+    fn end(&self, now: &mut [u8], q: usize) {
+        for &k in &self.held[q] {
+            now[self.base + k] = 0;
+        }
     }
     /// Set place `q`'s pairings to `f` of themselves, or, when not `strong`, add
     /// that to what they were.
@@ -534,6 +585,43 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             }
         }
     }
+    let dropping = !tracked.is_empty();
+    // A call whose signature marks its dest a view (OWN-20) makes the dest's places
+    // borrow its anchor arguments' places.
+    let places = |a: AddressId| {
+        let a = a.index();
+        if !j.addrs[a].is_empty() {
+            &j.addrs[a]
+        } else {
+            &n.addrs[a]
+        }
+    };
+    let mut borrows: Vec<(usize, Vec<Pl>, Vec<Pl>)> = vec![];
+    for i in &b.insts {
+        let Inst::Call { call } = *i else { continue };
+        let site = &b.calls[call.index()];
+        let sig = &m.signatures[site.signature.index()];
+        let args = site.args.get(&b.pools.args).unwrap_or_default();
+        let (Some(_), Some(Arg::Address(d))) = (sig.dest, args.first()) else {
+            continue;
+        };
+        let mut from = vec![];
+        for &k in &sig.anchors {
+            if let Some(&Arg::Address(a)) = args.get(1 + k as usize) {
+                from.extend(places(a).iter().cloned());
+            }
+        }
+        if from.is_empty() {
+            continue;
+        }
+        let to: Vec<Pl> = places(*d).iter().filter(|p| !p.cut).cloned().collect();
+        for p in &to {
+            if !tracked.contains(p) {
+                tracked.push(p.clone());
+            }
+        }
+        borrows.push((call.index(), to, from));
+    }
     // A join place stands for each place its parameter's edges carry; one that an
     // address reaches is tracked when one of those is, so a use through the join
     // after a drop of the slot itself is seen.
@@ -560,7 +648,7 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             }
         }
     }
-    if tracked.is_empty() && !any_view_drop {
+    if !dropping && !any_view_drop {
         return Ok(());
     }
     let hits_of = |ps: &[Pl]| -> Vec<usize> {
@@ -591,9 +679,34 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             }
         }
     }
+    let mut lent: Vec<Vec<usize>> = vec![vec![]; tracked.len()];
+    let mut held: Vec<Vec<usize>> = vec![vec![]; tracked.len()];
+    let mut lends = std::collections::HashMap::new();
+    let mut dests = vec![];
+    for (k, (call, to, from)) in borrows.iter().enumerate() {
+        let to: Vec<usize> = to
+            .iter()
+            .filter_map(|d| tracked.iter().position(|t| t == d))
+            .collect();
+        for (q, tq) in tracked.iter().enumerate() {
+            if from.iter().any(|f| overlap(f, tq)) && !to.contains(&q) {
+                lent[q].push(k);
+            }
+        }
+        for &d in &to {
+            held[d].push(k);
+        }
+        lends.insert(*call, k);
+        dests.push(to);
+    }
     let mut own = Own {
         b,
         j,
+        borrows: dests,
+        lends,
+        lent,
+        held,
+        base: 0,
         routed,
         roots,
         joins,
@@ -658,6 +771,8 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             }
         }
     }
+    own.base = width;
+    width += own.borrows.len();
     // Forward may-analysis: a block starts with the union of what its edges carry.
     let blocks = b.blocks.len();
     let mut start: Vec<Option<Vec<u8>>> = vec![None; blocks];
@@ -754,6 +869,24 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
         if start[bi].is_some() {
             flow(&mut start, true, bi)?;
         }
+    }
+    Ok(())
+}
+
+/// A dest view's anchors (OWN-20) name, ascending, address parameters of a
+/// signature with a `dest`.
+pub(super) fn anchors(s: &Signature) -> R {
+    need(s.anchors.is_empty() || s.dest.is_some(), || {
+        "anchors a result with no dest".into()
+    })?;
+    need(s.anchors.windows(2).all(|w| w[0] < w[1]), || {
+        "anchors are not ascending".into()
+    })?;
+    for &k in &s.anchors {
+        need(
+            matches!(s.params.get(k as usize), Some(Param::Address { .. })),
+            || format!("anchor {k} is not an address parameter"),
+        )?;
     }
     Ok(())
 }

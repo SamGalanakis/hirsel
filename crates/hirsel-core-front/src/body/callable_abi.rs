@@ -53,6 +53,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             params: std::mem::take(buffer),
             results,
             dest,
+            anchors: vec![],
             never: result == NEVER,
         };
         if let Some(&row) = self

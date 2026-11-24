@@ -273,9 +273,9 @@
     "lines": 1325
   },
   "crates/hirsel-core-front/src/body/mod.rs": {
-    "lines": 3185,
-    "raise_revision": 1,
-    "reason": "w3a-b-codec-changes-2008"
+    "lines": 3058,
+    "raise_revision": 2,
+    "reason": "coreir-own-2127: OWN-20 dest view mark"
   },
   "crates/hirsel-core-front/src/body/patterns.rs": {
     "lines": 2578
@@ -326,9 +326,9 @@
     "lines": 1233
   },
   "crates/hirsel-core-ir/src/ir.rs": {
-    "lines": 2329,
-    "raise_revision": 7,
-    "reason": "crypto-argon2-2130"
+    "lines": 2340,
+    "raise_revision": 8,
+    "reason": "coreir-own-2127: OWN-20 dest view mark"
   },
   "crates/hirsel-core-ir/src/lib.rs": {
     "lines": 1151,
@@ -345,9 +345,9 @@
     "lines": 1576
   },
   "crates/hirsel-core-ir/src/text.rs": {
-    "lines": 2376,
-    "raise_revision": 5,
-    "reason": "crypto-argon2-2130"
+    "lines": 2390,
+    "raise_revision": 6,
+    "reason": "coreir-own-2127: OWN-20 dest view mark"
   },
   "crates/hirsel-core-ir/src/wf.rs": {
     "lines": 1905

@@ -84,12 +84,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     arguments,
                     dictionaries: vec![],
                 },
-                Signature {
-                    params,
-                    results: vec![],
-                    dest: Some(result_row),
-                    never: false,
-                },
+                Signature::new(params, vec![], Some(result_row)),
                 scalar_abi::SignatureAbi {
                     params: vec![true; g.params.len()],
                     result: true,

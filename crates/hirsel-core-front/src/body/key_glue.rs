@@ -64,20 +64,10 @@ impl KeyOp {
         let mut params = vec![view(ty)];
         match self {
             Self::NeedsDrop => {
-                return Signature {
-                    params: vec![],
-                    results: vec![Ty::Scalar(Scalar::Bool)],
-                    dest: None,
-                    never: false,
-                };
+                return Signature::new(vec![], vec![Ty::Scalar(Scalar::Bool)], None);
             }
             Self::Class => {
-                return Signature {
-                    params: vec![],
-                    results: vec![Ty::Scalar(Scalar::U8)],
-                    dest: None,
-                    never: false,
-                };
+                return Signature::new(vec![], vec![Ty::Scalar(Scalar::U8)], None);
             }
             Self::Hash | Self::Place | Self::Strong => {}
             Self::Fold => params.push(Param::Value(Ty::Ptr)),
@@ -88,25 +78,16 @@ impl KeyOp {
                 } else {
                     params.extend([Param::Value(Ty::Ptr), Param::Value(Ty::Scalar(Scalar::U64))]);
                 }
-                return Signature {
-                    params,
-                    results: vec![],
-                    dest: None,
-                    never: false,
-                };
+                return Signature::new(params, vec![], None);
             }
         }
-        Signature {
-            params,
-            results: match self {
-                Self::Fold => vec![],
-                Self::Equal | Self::Ordered(_) => vec![Ty::Scalar(Scalar::Bool)],
-                Self::Order => vec![Ty::Scalar(Scalar::I8)],
-                _ => vec![Ty::Scalar(Scalar::U64)],
-            },
-            dest: None,
-            never: false,
-        }
+        let results = match self {
+            Self::Fold => vec![],
+            Self::Equal | Self::Ordered(_) => vec![Ty::Scalar(Scalar::Bool)],
+            Self::Order => vec![Ty::Scalar(Scalar::I8)],
+            _ => vec![Ty::Scalar(Scalar::U64)],
+        };
+        Signature::new(params, results, None)
     }
 }
 

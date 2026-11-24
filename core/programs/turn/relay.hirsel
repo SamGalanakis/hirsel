@@ -1,0 +1,492 @@
+// TURN-7: the relay server's state, pool, timers and Allocate (RFC 8656 section 7.2).
+// Refresh, CreatePermission, ChannelBind and the data paths are in relay_paths.hirsel.
+/// RFC 8656 section 9: a permission lives 300 s from its install or refresh.
+const PERMISSION_NS: u64 = 300000000000
+
+/// RFC 8656 section 12: a channel binding lives 600 s from its bind or refresh.
+const CHANNEL_NS: u64 = 600000000000
+
+/// The largest payload one UDP datagram to a peer carries.
+const PAYLOAD_MAX: u64 = 65507
+
+/// Every response this relay builds fits here; from_client grows out to it.
+const RESPONSE_MAX: u64 = 512
+
+pub type Prefix {
+    ip: Ip,
+    bits: u8
+}
+
+pub type Allow {
+    prefix: Prefix,
+    ports_lo: u16,
+    ports_hi: u16
+}
+
+/// TURN-7's peer policy. U3 accepts only the empty policy; U4 builds the check.
+pub type PeerPolicy {
+    deny: List[Prefix],
+    allow: List[Allow],
+    local: List[Ip]
+}
+
+pub type RelayConfig {
+    realm: Bytes,
+    lifetime_s: u32,
+    lifetime_max_s: u32,
+    nonce_s: u32,
+    credential_max_s: u32,
+    quota: u16,
+    permissions: u16,
+    channels: u16,
+    sources: u32,
+    challenge_per_s: u16,
+    derive_per_source_s: u16,
+    policy: PeerPolicy
+}
+
+/// ToClient(o, range): send slot[range] to o. ToPeer(relayed, peer, range): send
+/// packet[range] from the socket bound to relayed to peer. Reply(o, n): out[0..n) to o.
+pub type Out = ToClient(Origin, stun_ice.Range) | ToPeer(Addr, Addr, stun_ice.Range) | Reply(Origin, u64) | Nothing
+
+pub type RelayDiscards {
+    malformed: u64,
+    no_allocation: u64,
+    no_permission: u64,
+    policy: u64,
+    unbound_channel: u64,
+    reserved_channel: u64,
+    throttled: u64,
+    challenged: u64,
+    oversize: u64,
+    unknown_stream: u64
+}
+
+/// channels counts live bindings, not quarantined ones.
+pub type RelayCounts {
+    allocations: u64,
+    permissions: u64,
+    channels: u64,
+    pool_free: u64
+}
+
+type Grant {
+    ip: Ip,
+    expires_ns: u64
+}
+
+/// A channel binding: live until expires_ns, then quarantined for 300 s.
+type Binding {
+    number: u16,
+    peer: Addr,
+    live: bool,
+    expires_ns: u64
+}
+
+type Lease {
+    origin: Origin,
+    relayed: Addr,
+    family: Family,
+    held: Held,
+    subject: Bytes,
+    tx: stun_ice.Transaction,
+    partial: bool,
+    expires_ns: u64,
+    grants: List[Grant],
+    bindings: List[Binding]
+}
+
+pub opaque type Relay {
+    c: RelayConfig,
+    g: Gate,
+    free: List[Addr],
+    has_v4: bool,
+    has_v6: bool,
+    leases: List[Lease],
+    discards: RelayDiscards,
+    ind_high: u32,
+    ind_low: u64,
+    last_ns: u64,
+    due_ns: u64,
+    fields: List[stun_ice.Attr],
+    scratch: Bytes
+}
+
+pub fn relay_defaults(realm: Bytes) -> RelayConfig {
+    let mut name: Bytes = list.with_capacity(list.len(realm))
+    list.append(mut name, realm)
+    RelayConfig(realm: take name, lifetime_s: 600, lifetime_max_s: 3600, nonce_s: 600, credential_max_s: 86400, quota: 12, permissions: 64, channels: 64, sources: 65536, challenge_per_s: 10, derive_per_source_s: 10, policy: PeerPolicy(deny: list.new(), allow: list.new(), local: list.new()))
+}
+
+fn family_of(a: Addr) -> Family {
+    match a.ip {
+        V4(_) => V4,
+        V6(_, _) => V6,
+    }
+}
+
+/// The pool is the relay's whole capacity: each address once, bound by the caller.
+pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError] {
+    if list.len(c.policy.deny) != 0 || list.len(c.policy.allow) != 0 || list.len(c.policy.local) != 0 {
+        return Error(Config)
+    }
+    if c.lifetime_s == 0 || c.lifetime_max_s < c.lifetime_s || c.quota == 0 || c.permissions == 0 || c.channels == 0 || c.channels > 4096 || list.len(pool) == 0 {
+        return Error(Config)
+    }
+    let mut seen: Map[Addr, bool] = map.new()
+    let mut has_v4 = false
+    let mut has_v6 = false
+    for i in 0u64 .. list.len(pool) {
+        let a = pool[i]
+        if map.contains(seen, a) {
+            return Error(Config)
+        }
+        map.insert(mut seen, a, true)
+        if family_of(a) == V4 {
+            has_v4 = true
+        } else {
+            has_v6 = true
+        }
+    }
+    let mut realm: Bytes = list.with_capacity(list.len(c.realm))
+    list.append(mut realm, c.realm)
+    let gc = GateConfig(realm: take realm, nonce_s: c.nonce_s, credential_max_s: c.credential_max_s, sources: c.sources, challenge_per_s: c.challenge_per_s, derive_per_source_s: c.derive_per_source_s)
+    let g = gate(take gc, rnd, take master, take nonce_key)?
+    let ind = draw_tx(rnd)
+    let mut scratch: Bytes = list.new()
+    list.try_reserve(mut scratch, RESPONSE_MAX) ?=> Capacity
+    list.fill(mut scratch, RESPONSE_MAX, 0)
+    let discards = RelayDiscards(malformed: 0, no_allocation: 0, no_permission: 0, policy: 0, unbound_channel: 0, reserved_channel: 0, throttled: 0, challenged: 0, oversize: 0, unknown_stream: 0)
+    Ok(Relay(c: take c, g: take g, free: take pool, has_v4: has_v4, has_v6: has_v6, leases: list.new(), discards: discards, ind_high: ind.high, ind_low: ind.low, last_ns: 0, due_ns: NEVER, fields: list.new(), scratch: take scratch))
+}
+
+/// The gate's pre-authentication discards are the relay's malformed, throttled and challenged.
+pub fn relay_discards(r: Relay) -> RelayDiscards {
+    let gc = gate_counts(r.g)
+    let mut d = r.discards
+    d.malformed += gc.malformed
+    d.throttled += gc.throttled
+    d.challenged += gc.challenged
+    d
+}
+
+pub fn relay_counts(r: Relay) -> RelayCounts {
+    let mut permissions = 0u64
+    let mut channels = 0u64
+    for i in 0u64 .. list.len(r.leases) {
+        permissions += list.len(r.leases[i].grants)
+        for k in 0u64 .. list.len(r.leases[i].bindings) {
+            if r.leases[i].bindings[k].live {
+                channels += 1
+            }
+        }
+    }
+    RelayCounts(allocations: list.len(r.leases), permissions: permissions, channels: channels, pool_free: list.len(r.free))
+}
+
+/// Expire allocations, permissions, channels and quarantines due at now_ns, and keep due_ns
+/// the earliest time any of them changes next. Between sweeps every record is current.
+fn sweep(mut r: Relay, now_ns: u64) {
+    let mut due = NEVER
+    let mut i = 0u64
+    while i < list.len(r.leases) {
+        if now_ns >= r.leases[i].expires_ns {
+            let gone = list.swap_remove(mut r.leases, i)
+            list.push(mut r.free, gone.relayed)
+            continue
+        }
+        due = order.min(due, r.leases[i].expires_ns)
+        let mut k = 0u64
+        while k < list.len(r.leases[i].grants) {
+            if now_ns >= r.leases[i].grants[k].expires_ns {
+                let _ = list.swap_remove(mut r.leases[i].grants, k)
+                continue
+            }
+            due = order.min(due, r.leases[i].grants[k].expires_ns)
+            k += 1
+        }
+        k = 0
+        while k < list.len(r.leases[i].bindings) {
+            let b = r.leases[i].bindings[k]
+            if now_ns >= b.expires_ns + QUARANTINE_NS {
+                let _ = list.swap_remove(mut r.leases[i].bindings, k)
+                continue
+            }
+            if b.live && now_ns >= b.expires_ns {
+                r.leases[i].bindings[k].live = false
+            }
+            if r.leases[i].bindings[k].live {
+                due = order.min(due, b.expires_ns)
+            } else {
+                due = order.min(due, b.expires_ns + QUARANTINE_NS)
+            }
+            k += 1
+        }
+        i += 1
+    }
+    r.due_ns = due
+}
+
+/// Every entry point: the clock may not go back, and due expiries happen first.
+fn advance(mut r: Relay, now_ns: u64) -> Result[(), TurnError] {
+    if now_ns < r.last_ns {
+        return Error(Clock)
+    }
+    r.last_ns = now_ns
+    if now_ns >= r.due_ns {
+        sweep(mut r, now_ns)
+    }
+    Ok(())
+}
+
+/// Expire what is due and answer the next expiry. A clock that went back changes nothing.
+pub fn relay_poll(mut r: Relay, now: Now) -> Poll {
+    let _ = advance(mut r, now.mono_ns)
+    if r.due_ns == NEVER {
+        Idle
+    } else {
+        WakeAt(r.due_ns)
+    }
+}
+
+fn lease_on(r: Relay, o: Origin) -> Option[u64] {
+    for i in 0u64 .. list.len(r.leases) {
+        if r.leases[i].origin == o {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn lease_at(r: Relay, relayed: Addr) -> Option[u64] {
+    for i in 0u64 .. list.len(r.leases) {
+        if r.leases[i].relayed == relayed {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// TURN-7's peer policy. U3 holds only the empty policy (relay refuses any other), which
+/// admits every address; U4 adds NET-18's class table, deny, local and allow here. Every
+/// path that relays to or from a peer calls it on the full address.
+fn peer_allowed(_r: Relay, _peer: Addr) -> bool {
+    true
+}
+
+fn relay_error(v: Verified, h: stun_ice.Header, code: u16, unknown: Option[u16], mut out: Bytes, mut scratch: Bytes) -> Result[u64, TurnError] {
+    let mut b = stun_ice.start(h.method, Failure, h.transaction, mut out) ?=> Wire
+    stun_ice.add_error(mut b, code, mut out) ?=> Wire
+    if let Some(kind) = unknown {
+        let mut value: Bytes = list.with_capacity(2)
+        list.put_word_be(mut value, kind)
+        stun_ice.add(mut b, UNKNOWN_ATTRIBUTES, value, mut out) ?=> Wire
+    }
+    sign(v, take b, mut out, mut scratch)
+}
+
+fn has(fields: List[stun_ice.Attr], kind: u16) -> bool {
+    if let Some(_) = find(fields, kind) {
+        true
+    } else {
+        false
+    }
+}
+
+/// A REQUESTED-ADDRESS-FAMILY or ADDITIONAL-ADDRESS-FAMILY value: Some(Some(family)),
+/// Some(None) for a well-formed value naming another family, None when malformed.
+fn family_value(packet: Bytes, v: stun_ice.Range) -> Option[Option[Family]] {
+    if v.hi - v.lo != 4 {
+        return None
+    }
+    let code = packet[v.lo]
+    if code == 1 {
+        Some(Some(V4))
+    } else if code == 2 {
+        Some(Some(V6))
+    } else {
+        Some(None)
+    }
+}
+
+/// The requested lifetime clamped to [lifetime_s, lifetime_max_s]; absent is the default.
+fn granted(r: Relay, requested: Option[u32]) -> u32 {
+    match requested {
+        Some(s) => order.max(r.c.lifetime_s, order.min(s, r.c.lifetime_max_s)),
+        None => r.c.lifetime_s,
+    }
+}
+
+/// The Allocate success: relayed address, lifetime in seconds, the client's mapped address
+/// and, for a dual-family request, ADDRESS-ERROR-CODE 440 for IPv6.
+fn allocated_reply(mut r: Relay, v: Verified, h: stun_ice.Header, i: u64, lifetime: u32, mut out: Bytes) -> Result[u64, TurnError] {
+    let relayed = r.leases[i].relayed
+    let mapped = r.leases[i].origin.client
+    let partial = r.leases[i].partial
+    let mut b = stun_ice.start(stun_ice.ALLOCATE, Success, h.transaction, mut out) ?=> Wire
+    stun_ice.add_xor_addr(mut b, stun_ice.XOR_RELAYED_ADDRESS, relayed, mut out) ?=> Wire
+    add_u32(mut b, stun_ice.LIFETIME, lifetime, mut out)?
+    stun_ice.add_xor_addr(mut b, XOR_MAPPED_ADDRESS, mapped, mut out) ?=> Wire
+    if partial {
+        stun_ice.add(mut b, stun_ice.ADDRESS_ERROR_CODE, b"\x02\x00\x04\x28", mut out) ?=> Wire
+    }
+    sign(v, take b, mut out, mut r.scratch)
+}
+
+/// A free address of family, chosen with rnd (an even port when even), removed from the pool.
+fn take_address(mut r: Relay, rnd: Random, family: Family, even: bool) -> Option[Addr] {
+    let mut candidates = 0u64
+    for i in 0u64 .. list.len(r.free) {
+        let a = r.free[i]
+        if family_of(a) == family && (!even || a.port % 2 == 0) {
+            candidates += 1
+        }
+    }
+    if candidates == 0 {
+        return None
+    }
+    let mut pick = draw_u64(rnd) % candidates
+    for i in 0u64 .. list.len(r.free) {
+        let a = r.free[i]
+        if family_of(a) == family && (!even || a.port % 2 == 0) {
+            if pick == 0 {
+                return Some(list.remove(mut r.free, i))
+            }
+            pick -= 1
+        }
+    }
+    None
+}
+
+/// TURN-7's Allocate, RFC 8656 section 7.2 steps 2 to 10 and the pool, after TURN-5's step 1.
+fn allocate(mut r: Relay, now: Now, rnd: Random, o: Origin, v: Verified, h: stun_ice.Header, packet: Bytes, on: Option[u64], mut out: Bytes) -> Result[u64, TurnError] {
+    // 2. An allocation on this 5-tuple: a retransmission gets its success again.
+    if let Some(i) = on {
+        if r.leases[i].tx == h.transaction {
+            let left: u32 = int.narrow((r.leases[i].expires_ns - now.mono_ns) / SECOND_NS)
+            return allocated_reply(mut r, v, h, i, left, mut out)
+        }
+        return relay_error(v, h, 437, None, mut out, mut r.scratch)
+    }
+    // 3. REQUESTED-TRANSPORT.
+    let Some(t) = find(r.fields, stun_ice.REQUESTED_TRANSPORT) else {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    if t.hi - t.lo != 4 {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    if packet[t.lo] != 17 {
+        return relay_error(v, h, 442, None, mut out, mut r.scratch)
+    }
+    // 4. DONT-FRAGMENT is not supported.
+    if has(r.fields, stun_ice.DONT_FRAGMENT) {
+        return relay_error(v, h, 420, Some(stun_ice.DONT_FRAGMENT), mut out, mut r.scratch)
+    }
+    let even = find(r.fields, stun_ice.EVEN_PORT)
+    let requested = find(r.fields, stun_ice.REQUESTED_ADDRESS_FAMILY)
+    let additional = find(r.fields, stun_ice.ADDITIONAL_ADDRESS_FAMILY)
+    let has_even = if let Some(_) = even {
+        true
+    } else {
+        false
+    }
+    let has_requested = if let Some(_) = requested {
+        true
+    } else {
+        false
+    }
+    let has_additional = if let Some(_) = additional {
+        true
+    } else {
+        false
+    }
+    // 5. RESERVATION-TOKEN: no token is ever issued.
+    if has(r.fields, stun_ice.RESERVATION_TOKEN) {
+        let code: u16 = if has_even || has_requested || has_additional {
+            400
+        } else {
+            508
+        }
+        return relay_error(v, h, code, None, mut out, mut r.scratch)
+    }
+    // 6. Both family attributes.
+    if has_requested && has_additional {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    // 7. The family, which the pool must hold.
+    let family = match requested {
+        Some(range) => match family_value(packet, range) {
+            None => return relay_error(v, h, 400, None, mut out, mut r.scratch),
+            Some(None) => return relay_error(v, h, 440, None, mut out, mut r.scratch),
+            Some(Some(f)) => f,
+        },
+        None => V4,
+    }
+    if family == V4 && !r.has_v4 || family == V6 && !r.has_v6 {
+        return relay_error(v, h, 440, None, mut out, mut r.scratch)
+    }
+    // 8. EVEN-PORT with R = 1: no reservation is ever made.
+    let mut even_port = false
+    if let Some(e) = even {
+        if e.hi - e.lo != 1 {
+            return relay_error(v, h, 400, None, mut out, mut r.scratch)
+        }
+        if packet[e.lo] & 0x80 != 0 {
+            let code: u16 = if has_additional {
+                400
+            } else {
+                508
+            }
+            return relay_error(v, h, code, None, mut out, mut r.scratch)
+        }
+        even_port = true
+    }
+    // 9. ADDITIONAL-ADDRESS-FAMILY: IPv6 only, and the allocation is IPv4 alone.
+    let mut partial = false
+    if let Some(a) = additional {
+        match family_value(packet, a) {
+            Some(Some(V6)) => {
+                partial = true
+            },
+            _ => return relay_error(v, h, 400, None, mut out, mut r.scratch),
+        }
+    }
+    // 10. The subject's quota, under any of its usernames.
+    let subject = list.slice(packet, v.username.subject.lo, v.username.subject.hi)
+    let mut held_by_subject = 0u64
+    for i in 0u64 .. list.len(r.leases) {
+        if list.compare_bytes(r.leases[i].subject, subject) == Equal {
+            held_by_subject += 1
+        }
+    }
+    let quota: u64 = int.widen(r.c.quota)
+    if held_by_subject >= quota {
+        return relay_error(v, h, 486, None, mut out, mut r.scratch)
+    }
+    let mut requested_lifetime: Option[u32] = None
+    if let Some(l) = find(r.fields, stun_ice.LIFETIME) {
+        if l.hi - l.lo != 4 {
+            return relay_error(v, h, 400, None, mut out, mut r.scratch)
+        }
+        requested_lifetime = Some(list.word_be(packet, l.lo))
+    }
+    list.try_reserve(mut r.leases, 1) ?=> Capacity
+    let Some(relayed) = take_address(mut r, rnd, family, even_port) else {
+        return relay_error(v, h, 508, None, mut out, mut r.scratch)
+    }
+    let lifetime = granted(r, requested_lifetime)
+    let life: u64 = int.widen(lifetime)
+    let expires = now.mono_ns + life * SECOND_NS
+    let Some(u) = find(r.fields, USERNAME) else {
+        return Error(Config)
+    }
+    let mut username: Bytes = list.with_capacity(u.hi - u.lo)
+    list.append(mut username, list.slice(packet, u.lo, u.hi))
+    let mut owned_subject: Bytes = list.with_capacity(list.len(subject))
+    list.append(mut owned_subject, subject)
+    let held = Held(username: take username, key: secret.share(v.key))
+    list.push(mut r.leases, Lease(origin: o, relayed: relayed, family: family, held: take held, subject: take owned_subject, tx: h.transaction, partial: partial, expires_ns: expires, grants: list.new(), bindings: list.new()))
+    r.due_ns = order.min(r.due_ns, expires)
+    let i = list.len(r.leases) - 1
+    allocated_reply(mut r, v, h, i, lifetime, mut out)
+}

@@ -28,6 +28,9 @@ pub const REQUESTED_TRANSPORT: u16 = 0x0019
 
 pub const DONT_FRAGMENT: u16 = 0x001a
 
+/// RFC 7635 ACCESS-TOKEN: known, so TURN handles a request with it as one without it.
+pub const ACCESS_TOKEN: u16 = 0x001b
+
 pub const MESSAGE_INTEGRITY_SHA256: u16 = 0x001c
 
 pub const PASSWORD_ALGORITHM: u16 = 0x001d
@@ -198,7 +201,7 @@ fn scan_start() -> Scan {
 }
 
 fn required_known(kind: u16) -> bool {
-    kind == 0x0001 || kind == 0x0006 || kind == 0x0009 || kind == 0x000a || kind == CHANNEL_NUMBER || kind == LIFETIME || kind == XOR_PEER_ADDRESS || kind == DATA || kind == REALM || kind == NONCE || kind == XOR_RELAYED_ADDRESS || kind == REQUESTED_ADDRESS_FAMILY || kind == EVEN_PORT || kind == REQUESTED_TRANSPORT || kind == DONT_FRAGMENT || kind == PASSWORD_ALGORITHM || kind == USERHASH || kind == 0x0020 || kind == RESERVATION_TOKEN || kind == 0x0024 || kind == 0x0025
+    kind == 0x0001 || kind == 0x0006 || kind == 0x0009 || kind == 0x000a || kind == CHANNEL_NUMBER || kind == LIFETIME || kind == XOR_PEER_ADDRESS || kind == DATA || kind == REALM || kind == NONCE || kind == XOR_RELAYED_ADDRESS || kind == REQUESTED_ADDRESS_FAMILY || kind == EVEN_PORT || kind == REQUESTED_TRANSPORT || kind == DONT_FRAGMENT || kind == ACCESS_TOKEN || kind == PASSWORD_ALGORITHM || kind == USERHASH || kind == 0x0020 || kind == RESERVATION_TOKEN || kind == 0x0024 || kind == 0x0025
 }
 
 fn next_attr(packet: Bytes, mut scan: Scan) -> Result[Attr, Error] {

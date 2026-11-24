@@ -1,0 +1,443 @@
+// TURN-7: what the relay receives. Requests go through TURN-5's admit; Refresh,
+// CreatePermission and ChannelBind are here, and the Send, Data and ChannelData paths.
+fn grant_index(l: Lease, ip: Ip) -> Option[u64] {
+    for k in 0u64 .. list.len(l.grants) {
+        if l.grants[k].ip == ip {
+            return Some(k)
+        }
+    }
+    None
+}
+
+/// Install or refresh the permission for ip on lease i for 300 s from now_ns.
+fn permit_ip(mut r: Relay, i: u64, ip: Ip, now_ns: u64) -> Result[(), TurnError] {
+    let expires = now_ns + PERMISSION_NS
+    match grant_index(r.leases[i], ip) {
+        Some(k) => {
+            r.leases[i].grants[k].expires_ns = expires
+        },
+        None => {
+            list.try_reserve(mut r.leases[i].grants, 1) ?=> Capacity
+            list.push(mut r.leases[i].grants, Grant(ip: ip, expires_ns: expires))
+        },
+    }
+    r.due_ns = order.min(r.due_ns, expires)
+    Ok(())
+}
+
+fn success(mut r: Relay, v: Verified, h: stun_ice.Header, lifetime: Option[u32], mut out: Bytes) -> Result[u64, TurnError] {
+    let mut b = stun_ice.start(h.method, Success, h.transaction, mut out) ?=> Wire
+    if let Some(s) = lifetime {
+        add_u32(mut b, stun_ice.LIFETIME, s, mut out)?
+    }
+    sign(v, take b, mut out, mut r.scratch)
+}
+
+/// RFC 8656 section 8.2. A REQUESTED-ADDRESS-FAMILY other than the allocation's is 443;
+/// LIFETIME 0 deletes the allocation; an absent LIFETIME is the default.
+fn refresh(mut r: Relay, now: Now, v: Verified, h: stun_ice.Header, packet: Bytes, i: u64, mut out: Bytes) -> Result[u64, TurnError] {
+    if let Some(range) = find(r.fields, stun_ice.REQUESTED_ADDRESS_FAMILY) {
+        match family_value(packet, range) {
+            None => return relay_error(v, h, 400, None, mut out, mut r.scratch),
+            Some(f) => if f != Some(r.leases[i].family) {
+                return relay_error(v, h, 443, None, mut out, mut r.scratch)
+            },
+        }
+    }
+    let mut requested: Option[u32] = None
+    if let Some(l) = find(r.fields, stun_ice.LIFETIME) {
+        if l.hi - l.lo != 4 {
+            return relay_error(v, h, 400, None, mut out, mut r.scratch)
+        }
+        requested = Some(list.word_be(packet, l.lo))
+    }
+    if requested == Some(0u32) {
+        let gone = list.swap_remove(mut r.leases, i)
+        list.push(mut r.free, gone.relayed)
+        return success(mut r, v, h, Some(0u32), mut out)
+    }
+    let lifetime = granted(r, requested)
+    let life: u64 = int.widen(lifetime)
+    let expires = now.mono_ns + life * SECOND_NS
+    r.leases[i].expires_ns = expires
+    r.due_ns = order.min(r.due_ns, expires)
+    success(mut r, v, h, Some(lifetime), mut out)
+}
+
+/// The XOR-PEER-ADDRESS values of a request, in order; None when any is malformed.
+fn peers_of(r: Relay, packet: Bytes) -> Option[List[Addr]] {
+    let mut peers: List[Addr] = list.new()
+    for k in 0u64 .. list.len(r.fields) {
+        if r.fields[k].kind == stun_ice.XOR_PEER_ADDRESS {
+            let Ok(a) = stun_ice.xor_addr(packet, r.fields[k].value) else {
+                return None
+            }
+            list.push(mut peers, a)
+        }
+    }
+    Some(peers)
+}
+
+/// RFC 8656 section 10.2: every peer or none. A family other than the allocation's is 443,
+/// a peer the policy denies 403, and more than `permissions` 508.
+fn create_permission(mut r: Relay, now: Now, v: Verified, h: stun_ice.Header, packet: Bytes, i: u64, mut out: Bytes) -> Result[u64, TurnError] {
+    let Some(peers) = peers_of(r, packet) else {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    if list.len(peers) == 0 {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    for k in 0u64 .. list.len(peers) {
+        if family_of(peers[k]) != r.leases[i].family {
+            return relay_error(v, h, 443, None, mut out, mut r.scratch)
+        }
+    }
+    for k in 0u64 .. list.len(peers) {
+        if !peer_allowed(r, peers[k]) {
+            return relay_error(v, h, 403, None, mut out, mut r.scratch)
+        }
+    }
+    let mut fresh = 0u64
+    for k in 0u64 .. list.len(peers) {
+        let ip = peers[k].ip
+        let mut seen = false
+        for m in 0u64 .. k {
+            if peers[m].ip == ip {
+                seen = true
+            }
+        }
+        if !seen {
+            if let None = grant_index(r.leases[i], ip) {
+                fresh += 1
+            }
+        }
+    }
+    let most: u64 = int.widen(r.c.permissions)
+    if list.len(r.leases[i].grants) + fresh > most {
+        return relay_error(v, h, 508, None, mut out, mut r.scratch)
+    }
+    for k in 0u64 .. list.len(peers) {
+        permit_ip(mut r, i, peers[k].ip, now.mono_ns)?
+    }
+    success(mut r, v, h, None, mut out)
+}
+
+/// RFC 8656 section 12.2. A binding's number and peer stay paired for its life and its
+/// 300 s quarantine; the pair itself may not be bound again until the quarantine ends.
+fn channel_bind(mut r: Relay, now: Now, v: Verified, h: stun_ice.Header, packet: Bytes, i: u64, mut out: Bytes) -> Result[u64, TurnError] {
+    let Some(c) = find(r.fields, stun_ice.CHANNEL_NUMBER) else {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    let Some(p) = find(r.fields, stun_ice.XOR_PEER_ADDRESS) else {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    if c.hi - c.lo != 4 {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    let Ok(peer) = stun_ice.xor_addr(packet, p) else {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    let number: u16 = list.word_be(packet, c.lo)
+    if number < FIRST_CHANNEL || number > LAST_CHANNEL {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    let mut live: Option[u64] = None
+    let mut in_use = 0u64
+    for k in 0u64 .. list.len(r.leases[i].bindings) {
+        let b = r.leases[i].bindings[k]
+        let same_number = b.number == number
+        let same_peer = b.peer == peer
+        if same_number != same_peer || same_number && !b.live {
+            return relay_error(v, h, 400, None, mut out, mut r.scratch)
+        }
+        if b.live {
+            in_use += 1
+            if same_number {
+                live = Some(k)
+            }
+        }
+    }
+    if family_of(peer) != r.leases[i].family {
+        return relay_error(v, h, 443, None, mut out, mut r.scratch)
+    }
+    if !peer_allowed(r, peer) {
+        return relay_error(v, h, 403, None, mut out, mut r.scratch)
+    }
+    let channels: u64 = int.widen(r.c.channels)
+    let permissions: u64 = int.widen(r.c.permissions)
+    let new_grant = if let None = grant_index(r.leases[i], peer.ip) {
+        1u64
+    } else {
+        0u64
+    }
+    let new_channel = if let None = live {
+        true
+    } else {
+        false
+    }
+    if new_channel && in_use >= channels || list.len(r.leases[i].grants) + new_grant > permissions {
+        return relay_error(v, h, 508, None, mut out, mut r.scratch)
+    }
+    let expires = now.mono_ns + CHANNEL_NS
+    match live {
+        Some(k) => {
+            r.leases[i].bindings[k].expires_ns = expires
+        },
+        None => {
+            list.try_reserve(mut r.leases[i].bindings, 1) ?=> Capacity
+            list.push(mut r.leases[i].bindings, Binding(number: number, peer: peer, live: true, expires_ns: expires))
+        },
+    }
+    r.due_ns = order.min(r.due_ns, expires)
+    permit_ip(mut r, i, peer.ip, now.mono_ns)?
+    success(mut r, v, h, None, mut out)
+}
+
+/// One authenticated request on the 5-tuple's allocation at on, if any.
+fn dispatch(mut r: Relay, now: Now, rnd: Random, o: Origin, v: Verified, h: stun_ice.Header, packet: Bytes, on: Option[u64], mut out: Bytes) -> Result[u64, TurnError] {
+    if h.method == stun_ice.ALLOCATE {
+        return allocate(mut r, now, rnd, o, v, h, packet, on, mut out)
+    }
+    let known = h.method == stun_ice.REFRESH || h.method == stun_ice.CREATE_PERMISSION || h.method == stun_ice.CHANNEL_BIND
+    if !known {
+        return relay_error(v, h, 400, None, mut out, mut r.scratch)
+    }
+    let Some(i) = on else {
+        return relay_error(v, h, 437, None, mut out, mut r.scratch)
+    }
+    if h.method == stun_ice.REFRESH {
+        refresh(mut r, now, v, h, packet, i, mut out)
+    } else if h.method == stun_ice.CREATE_PERMISSION {
+        create_permission(mut r, now, v, h, packet, i, mut out)
+    } else {
+        channel_bind(mut r, now, v, h, packet, i, mut out)
+    }
+}
+
+fn grow(mut b: Bytes, n: u64) -> Result[(), TurnError] {
+    let have = list.len(b)
+    if have < n {
+        list.try_reserve(mut b, n - have) ?=> Capacity
+        list.fill(mut b, n, 0)
+    }
+    Ok(())
+}
+
+/// Only Capacity and Clock reach the caller; every other error after authentication is a
+/// signed 500, and one before it a counted discard.
+fn serve_request(mut r: Relay, now: Now, rnd: Random, o: Origin, local: Addr, h: stun_ice.Header, packet: Bytes, mut out: Bytes) -> Result[Out, TurnError] {
+    grow(mut out, RESPONSE_MAX)?
+    grow(mut r.scratch, list.len(packet) + RESPONSE_MAX)?
+    let on = lease_on(r, o)
+    let mut existing: Option[Held] = None
+    if let Some(i) = on {
+        let mut username: Bytes = list.with_capacity(list.len(r.leases[i].held.username))
+        list.append(mut username, r.leases[i].held.username)
+        existing = Some(Held(username: take username, key: secret.share(r.leases[i].held.key)))
+    }
+    let admitted = admit(mut r.g, now, o, local, packet, existing, mut r.fields, mut out, mut r.scratch)
+    let v = match admitted {
+        Ok(Authentic(v)) => v,
+        Ok(Reply(n)) => return Ok(Reply(o, n)),
+        Ok(Dropped) => return Ok(Nothing),
+        Error(Capacity(c)) => return Error(Capacity(c)),
+        Error(Clock) => return Error(Clock),
+        Error(_) => {
+            r.discards.malformed += 1
+            return Ok(Nothing)
+        },
+    }
+    match dispatch(mut r, now, rnd, o, v, h, packet, on, mut out) {
+        Ok(n) => Ok(Reply(o, n)),
+        Error(Capacity(c)) => Error(Capacity(c)),
+        Error(_) => match relay_error(v, h, 500, None, mut out, mut r.scratch) {
+            Ok(n) => Ok(Reply(o, n)),
+            Error(Capacity(c)) => Error(Capacity(c)),
+            Error(_) => {
+                r.discards.malformed += 1
+                Ok(Nothing)
+            },
+        },
+    }
+}
+
+fn grant_live(l: Lease, ip: Ip) -> bool {
+    if let Some(_) = grant_index(l, ip) {
+        true
+    } else {
+        false
+    }
+}
+
+/// RFC 8656 section 11.2: a Send indication is relayed or discarded, never answered, and
+/// never refreshes a permission. DONT-FRAGMENT is not supported, so it is discarded.
+fn send_indication(mut r: Relay, o: Origin, h: stun_ice.Header, packet: Bytes) -> Out {
+    let Some(i) = lease_on(r, o) else {
+        r.discards.no_allocation += 1
+        return Nothing
+    }
+    list.clear(mut r.fields)
+    let parsed = match stun_ice.attrs(packet, mut r.fields) {
+        Ok(_) => h.method == stun_ice.SEND && !has(r.fields, stun_ice.DONT_FRAGMENT),
+        Error(_) => false,
+    }
+    let (Some(p), Some(d)) = (find(r.fields, stun_ice.XOR_PEER_ADDRESS), find(r.fields, stun_ice.DATA)) else {
+        r.discards.malformed += 1
+        return Nothing
+    }
+    let Ok(peer) = stun_ice.xor_addr(packet, p) else {
+        r.discards.malformed += 1
+        return Nothing
+    }
+    if !parsed || family_of(peer) != r.leases[i].family {
+        r.discards.malformed += 1
+        return Nothing
+    }
+    if !grant_live(r.leases[i], peer.ip) {
+        r.discards.no_permission += 1
+        return Nothing
+    }
+    if !peer_allowed(r, peer) {
+        r.discards.policy += 1
+        return Nothing
+    }
+    if d.hi - d.lo > PAYLOAD_MAX {
+        r.discards.oversize += 1
+        return Nothing
+    }
+    ToPeer(r.leases[i].relayed, peer, d)
+}
+
+/// RFC 8656 section 12.6: ChannelData on a bound number is relayed to its peer. It is never
+/// answered and refreshes nothing; like Pion, it checks the binding, not the permission.
+fn channel_data_in(mut r: Relay, o: Origin, packet: Bytes) -> Out {
+    let n = list.len(packet)
+    let number: u16 = list.word_be(packet, 0)
+    if number > LAST_CHANNEL {
+        r.discards.reserved_channel += 1
+        return Nothing
+    }
+    let len16: u16 = list.word_be(packet, 2)
+    let len: u64 = int.widen(len16)
+    if 4 + len > n {
+        r.discards.malformed += 1
+        return Nothing
+    }
+    let Some(i) = lease_on(r, o) else {
+        r.discards.no_allocation += 1
+        return Nothing
+    }
+    let mut to: Option[Addr] = None
+    for k in 0u64 .. list.len(r.leases[i].bindings) {
+        let b = r.leases[i].bindings[k]
+        if b.live && b.number == number {
+            to = Some(b.peer)
+        }
+    }
+    let Some(peer) = to else {
+        r.discards.unbound_channel += 1
+        return Nothing
+    }
+    if !peer_allowed(r, peer) {
+        r.discards.policy += 1
+        return Nothing
+    }
+    if len > PAYLOAD_MAX {
+        r.discards.oversize += 1
+        return Nothing
+    }
+    ToPeer(r.leases[i].relayed, peer, stun_ice.Range(lo: 4, hi: 4 + len))
+}
+
+/// One datagram or framed message from a client. Stream origins wait for TURN-8's
+/// connected (slice U5) and are discarded and counted unknown_stream until then.
+pub fn from_client(mut r: Relay, now: Now, rnd: Random, o: Origin, mut packet: Bytes, mut out: Bytes) -> Result[Out, TurnError] {
+    advance(mut r, now.mono_ns)?
+    let local = match o.ingress {
+        Udp(a) => a,
+        Stream(_) => {
+            r.discards.unknown_stream += 1
+            return Ok(Nothing)
+        },
+    }
+    let n = list.len(packet)
+    if n >= 1 && packet[0] >= 0x40 {
+        if n < 4 {
+            r.discards.malformed += 1
+            return Ok(Nothing)
+        }
+        return Ok(channel_data_in(mut r, o, packet))
+    }
+    let Ok(h) = stun_ice.header(packet) else {
+        r.discards.malformed += 1
+        return Ok(Nothing)
+    }
+    match h.class {
+        Request => serve_request(mut r, now, rnd, o, local, h, packet, mut out),
+        Indication => Ok(send_indication(mut r, o, h, packet)),
+        _ => {
+            r.discards.malformed += 1
+            Ok(Nothing)
+        },
+    }
+}
+
+/// A datagram received on relayed from peer into slot[lo..hi], with HEADROOM before lo and
+/// 3 bytes after hi. The ChannelData or Data indication header is written in place.
+pub fn from_peer(mut r: Relay, now: Now, relayed: Addr, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[Out, TurnError] {
+    advance(mut r, now.mono_ns)?
+    if lo < HEADROOM || hi < lo || hi + 3 > list.len(slot) {
+        return Error(Config)
+    }
+    let Some(i) = lease_at(r, relayed) else {
+        r.discards.no_allocation += 1
+        return Ok(Nothing)
+    }
+    if !grant_live(r.leases[i], peer.ip) {
+        r.discards.no_permission += 1
+        return Ok(Nothing)
+    }
+    if !peer_allowed(r, peer) {
+        r.discards.policy += 1
+        return Ok(Nothing)
+    }
+    let len = hi - lo
+    let xlen = stun_ice.xor_addr_len(peer)
+    if 4 + xlen + 4 + padded(len) > 0xffff {
+        r.discards.oversize += 1
+        return Ok(Nothing)
+    }
+    let len16: u16 = int.narrow(len)
+    let o = r.leases[i].origin
+    for k in 0u64 .. list.len(r.leases[i].bindings) {
+        let b = r.leases[i].bindings[k]
+        if b.live && b.peer == peer {
+            list.set_word_be(mut slot, lo - 4, b.number)
+            list.set_word_be(mut slot, lo - 2, len16)
+            let end = if stream_of(o) {
+                padded(len)
+            } else {
+                len
+            }
+            list.fill_slice(mut slot, hi, lo + end - hi, 0)
+            return Ok(ToClient(o, stun_ice.Range(lo: lo - 4, hi: lo + end)))
+        }
+    }
+    let start = lo - 4 - (4 + xlen) - 20
+    let tx = stun_ice.Transaction(high: r.ind_high, low: r.ind_low)
+    r.ind_low = int.wrapping_add(r.ind_low, 1)
+    let body: u16 = int.narrow(4 + xlen + 4 + padded(len))
+    let xlen16: u16 = int.narrow(xlen)
+    list.set_word_be(mut slot, start, 0x0017u16)
+    list.set_word_be(mut slot, start + 2, body)
+    list.set_word_be(mut slot, start + 4, 0x2112a442u32)
+    list.set_word_be(mut slot, start + 8, tx.high)
+    list.set_word_be(mut slot, start + 12, tx.low)
+    list.set_word_be(mut slot, start + 20, stun_ice.XOR_PEER_ADDRESS)
+    list.set_word_be(mut slot, start + 22, xlen16)
+    stun_ice.put_xor_addr(mut slot, start + 24, peer, tx)
+    list.set_word_be(mut slot, lo - 4, stun_ice.DATA)
+    list.set_word_be(mut slot, lo - 2, len16)
+    list.fill_slice(mut slot, hi, lo + padded(len) - hi, 0)
+    Ok(ToClient(o, stun_ice.Range(lo: start, hi: lo + padded(len))))
+}

@@ -152,6 +152,11 @@ source = "member:toml"
 edges = ["std@1"]
 
 [[package]]
+id = "turn@1"
+source = "member:turn"
+edges = ["std@1", "stun_ice@1"]
+
+[[package]]
 id = "tz@1"
 source = "member:tz"
 edges = ["std@1"]

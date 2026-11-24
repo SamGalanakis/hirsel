@@ -20,10 +20,10 @@ pub type Failure = Local | Rejected(u16) | Timeout | Credentials | Mismatch | Di
 pub type TurnError = Config | Clock | Closed(Failure) | NotAllocated | Unpermitted(Addr) | ChannelsFull | StreamsFull | Framing | Wire(stun_ice.Error) | Secret(SecretError) | Mac(MacError) | Capacity(Capacity)
 
 /// The local UDP address a datagram arrived on, or an accepted stream connection.
-pub type Ingress = Udp(Addr) | Stream(u64)
+pub type Ingress: key = Udp(Addr) | Stream(u64)
 
 /// The client side of the 5-tuple.
-pub type Origin {
+pub type Origin: key {
     ingress: Ingress,
     client: Addr
 }

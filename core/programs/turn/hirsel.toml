@@ -13,10 +13,12 @@ stun_ice = { major = 1, path = "../stun_ice" }
 "gate.hirsel" = "turn"
 "client.hirsel" = "turn"
 "client_rx.hirsel" = "turn"
-
+"relay.hirsel" = "turn"
+"relay_paths.hirsel" = "turn"
 
 [tests]
 limit = 67108864
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"relay_laws.hirsel" = "laws"

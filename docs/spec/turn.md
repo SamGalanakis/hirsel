@@ -486,12 +486,12 @@ pub opaque type Relay
 
 pub const HEADROOM: u64 = 48
 pub fn relay_defaults(realm: Bytes) -> RelayConfig
-pub fn relay(c: RelayConfig, rnd: Random, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError]
+pub fn relay(take c: RelayConfig, rnd: Random, take master: Secret, take nonce_key: Secret, take pool: List[Addr]) -> Result[Relay, TurnError]
 pub fn from_client(mut r: Relay, now: Now, rnd: Random, o: Origin, mut packet: Bytes, mut out: Bytes) -> Result[Out, TurnError]
 pub fn from_peer(mut r: Relay, now: Now, relayed: Addr, peer: Addr, mut slot: Bytes, lo: u64, hi: u64) -> Result[Out, TurnError]
 pub fn connected(mut r: Relay, conn: u64, local: Addr, client: Addr, now: Now) -> Result[(), TurnError]
 pub fn disconnected(mut r: Relay, conn: u64)
-pub fn poll(mut r: Relay, now: Now) -> Poll
+pub fn relay_poll(mut r: Relay, now: Now) -> Poll
 pub fn revoke(mut r: Relay, subject: Bytes, until_unix_s: u64) -> Result[u64, TurnError]
 pub fn relay_discards(r: Relay) -> RelayDiscards
 pub fn relay_counts(r: Relay) -> RelayCounts
@@ -582,6 +582,55 @@ and counted. A Send or ChannelData payload over 65,507 bytes (possible only from
 origin) cannot be one UDP datagram to the peer: discarded and counted `oversize`.
 Indications and ChannelData without an allocation on the origin are discarded, never
 answered.
+
+**Decisions made building U3.** Each is reversible inside the package.
+
+- `poll` is `relay_poll`: a package has no overloading, and the client's `poll` holds
+  the name. `relay` takes its config.
+- U3's `RelayConfig` and `RelayDiscards` leave out the stream fields (`streams`,
+  `streams_per_source`, `stream_allocate_s`, `idle_stream`), and there is no
+  `connected` or `disconnected`; U5 adds them. Until then every `Stream` origin is
+  discarded and counted `unknown_stream`. `revoke` is U4.
+- `relay` answers `Config` for a non-empty policy until U4 builds it. It also answers
+  `Config` for:
+  - a zero `lifetime_s`, `quota`, `permissions` or `channels`;
+  - `lifetime_max_s` below `lifetime_s`, or more than 4,096 `channels`;
+  - an empty pool, or an address listed twice.
+  One function checks the policy, and all five paths call it. In U3 it admits every
+  address.
+- `Reply(o, n)` loans out `out[0..n)`, as the client's `poll` does.
+- ChannelData is checked against the channel binding, not against a permission (Pion's
+  `handleChannelData` does the same). The binding installed the permission, and a
+  binding whose permission has lapsed still names one peer.
+- A Send indication is discarded and counted `malformed` when it carries any of:
+  - DONT-FRAGMENT;
+  - an unknown comprehension-required attribute;
+  - a peer of the other family.
+- A retransmitted Allocate gets the whole seconds left in its LIFETIME, rounded down.
+- These values answer 400:
+  - a LIFETIME or a REQUESTED-ADDRESS-FAMILY not 4 bytes long;
+  - an EVEN-PORT not 1 byte long;
+  - an ADDITIONAL-ADDRESS-FAMILY that is neither IPv4 nor IPv6;
+  - a CreatePermission with no XOR-PEER-ADDRESS.
+
+  A well-formed REQUESTED-ADDRESS-FAMILY naming another family answers 440. Two peers on
+  one IP count once against `permissions`.
+- An error is handled by when it happens:
+  - before authentication: counted `malformed` and not answered;
+  - after authentication: a signed 500;
+  - `Capacity`, `Clock` and `Config` reach the caller, and the relay stays open.
+- An authenticated request of another method is answered with a signed 400.
+- A datagram whose first byte is 0x50 or more, and so is neither STUN nor a channel from
+  0x4000 to 0x4FFF, is counted `reserved_channel`.
+- A `from_peer` payload too long for one Data indication's 16-bit length is counted
+  `oversize`.
+- `RelayCounts.channels` counts live bindings, not quarantined ones.
+- Allocations are found by a linear scan, by origin and by relayed address. U7's
+  counted run measures that cost.
+- stun_ice knows ACCESS-TOKEN (0x001B), so a request carrying it is not answered with
+  420 (TURN-1).
+- `lifetimes_exact`'s relay half drives the relay directly, not under `std.sim.udp`,
+  as U2's client half does.
 
 **No byte-rate limit.** Decision: the relay limits allocations (`quota`, the pool),
 permissions and channels, not relayed bytes per second, which RFC 8656 §21.1.7 and §21.3.1

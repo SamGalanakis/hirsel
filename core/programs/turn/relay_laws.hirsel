@@ -1,0 +1,628 @@
+// TURN-7 laws (slice U3): the relay driven directly, its requests built with stun_ice alone.
+const POOL_1: Addr = Addr(ip: V4(0xc0000264), port: 50000)
+
+const POOL_2: Addr = Addr(ip: V4(0xc0000264), port: 50002)
+
+const HOST_C: Addr = Addr(ip: V4(0xcb007106), port: 40000)
+
+const HOST_D: Addr = Addr(ip: V4(0xcb007107), port: 40000)
+
+const PEER_1: Addr = Addr(ip: V4(0xc6336401), port: 9000)
+
+const PEER_2: Addr = Addr(ip: V4(0xc6336402), port: 9000)
+
+const PEER_3: Addr = Addr(ip: V4(0xc6336403), port: 9000)
+
+type Extra = Raw(u16, Bytes) | Xor(u16, Addr)
+
+fn list_of1[T](take a: T) -> List[T] {
+    let mut xs: List[T] = list.new()
+    list.push(mut xs, take a)
+    xs
+}
+
+fn list_of2[T](take a: T, take b: T) -> List[T] {
+    let mut xs = list_of1(take a)
+    list.push(mut xs, take b)
+    xs
+}
+
+fn list_of3[T](take a: T, take b: T, take c: T) -> List[T] {
+    let mut xs = list_of2(take a, take b)
+    list.push(mut xs, take c)
+    xs
+}
+
+fn list_of4[T](take a: T, take b: T, take c: T, take d: T) -> List[T] {
+    let mut xs = list_of3(take a, take b, take c)
+    list.push(mut xs, take d)
+    xs
+}
+
+fn list_of5[T](take a: T, take b: T, take c: T, take d: T, take e: T) -> List[T] {
+    let mut xs = list_of4(take a, take b, take c, take d)
+    list.push(mut xs, take e)
+    xs
+}
+
+fn relay_config() -> turn.RelayConfig {
+    let mut c = turn.relay_defaults(b"example.org")
+    c.nonce_s = 86400
+    c.sources = 64
+    c.challenge_per_s = 1000
+    c.derive_per_source_s = 1000
+    c
+}
+
+fn new_relay(take c: turn.RelayConfig, take pool: List[Addr], seed: u64) -> turn.Relay {
+    let rnd = provide.random(seed)
+    result.unwrap(turn.relay(take c, rnd, sealed(20, 0x0b, "kdf"), sealed(32, 0x5a, "mac"), take pool))
+}
+
+fn udp(client: Addr) -> turn.Origin {
+    turn.Origin(ingress: Udp(SERVER), client: client)
+}
+
+fn ns(t: u64) -> turn.Now {
+    turn.Now(mono_ns: t, unix_s: UNIX)
+}
+
+fn offer(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, packet: Bytes, mut out: Bytes) -> turn.Out {
+    let mut p = copy_of(packet)
+    result.unwrap(turn.from_client(mut rl, now, rnd, o, mut p, mut out))
+}
+
+/// The relay's response to packet from o, which must answer.
+fn exchange(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, packet: Bytes) -> Bytes {
+    let mut out = buffer(0)
+    let Reply(to, n) = offer(mut rl, now, rnd, o, packet, mut out) else {
+        fail("request not answered")
+    }
+    if to != o {
+        fail("response to another origin")
+    }
+    list.truncate(mut out, n)
+    out
+}
+
+fn nonce_for(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin) -> Bytes {
+    let reply = exchange(mut rl, now, rnd, o, bare(7))
+    if code_of(reply) != 401 {
+        fail("bare Allocate was not answered 401")
+    }
+    value_of(reply, stun_ice.NONCE)
+}
+
+/// The SHA-256 key of the credential minted for subject, expiring at 1700000000.
+fn minted_key(subject: Bytes) -> Secret {
+    let mut name: Bytes = list.new()
+    let mut password: Bytes = list.new()
+    result.unwrap(turn.mint(sealed(20, 0x0b, "mac"), 1700000000, subject, mut name, mut password))
+    let sealed_password = result.unwrap(secret.seal(take password, "digest"))
+    result.unwrap(turn.client_key(sealed_password, name, b"example.org", Sha256))
+}
+
+/// A request from name signed with MESSAGE-INTEGRITY-SHA256, extras first.
+fn signed_by(name: Bytes, take key: Secret, method: u16, low: u64, nonce: Bytes, extras: List[Extra]) -> Bytes {
+    let mut out = buffer(1024)
+    let mut scratch = buffer(1024)
+    let tx = stun_ice.Transaction(high: 0x01020304, low: low)
+    let mut b = result.unwrap(stun_ice.start(method, Request, tx, mut out))
+    for i in 0u64 .. list.len(extras) {
+        match extras[i] {
+            Raw(kind, value) => result.unwrap(stun_ice.add(mut b, kind, value, mut out)),
+            Xor(kind, a) => result.unwrap(stun_ice.add_xor_addr(mut b, kind, a, mut out)),
+        }
+    }
+    add_credentials(mut b, name, nonce, 1, mut out)
+    let n = result.unwrap(stun_ice.finish(take b, Sha256, Long(take key), false, mut out, mut scratch))
+    list.truncate(mut out, n)
+    out
+}
+
+fn alice(method: u16, low: u64, nonce: Bytes, extras: List[Extra]) -> Bytes {
+    signed_by(username(), minted_key(b"alice"), method, low, nonce, extras)
+}
+
+fn udp_transport() -> Extra {
+    Raw(stun_ice.REQUESTED_TRANSPORT, b"\x11\x00\x00\x00")
+}
+
+fn token() -> Extra {
+    Raw(stun_ice.RESERVATION_TOKEN, b"\x01\x02\x03\x04\x05\x06\x07\x08")
+}
+
+fn dont_fragment() -> Extra {
+    Raw(stun_ice.DONT_FRAGMENT, b"")
+}
+
+fn family_v6() -> Extra {
+    Raw(stun_ice.REQUESTED_ADDRESS_FAMILY, b"\x02\x00\x00\x00")
+}
+
+fn extra_v6() -> Extra {
+    Raw(stun_ice.ADDITIONAL_ADDRESS_FAMILY, b"\x02\x00\x00\x00")
+}
+
+fn reserve() -> Extra {
+    Raw(stun_ice.EVEN_PORT, b"\x80")
+}
+
+fn lifetime_in(reply: Bytes) -> u32 {
+    let Some(v) = find(reply, stun_ice.LIFETIME) else {
+        fail("no LIFETIME")
+    }
+    list.word_be(reply, v.lo)
+}
+
+fn relayed_in(reply: Bytes) -> Addr {
+    let Some(v) = find(reply, stun_ice.XOR_RELAYED_ADDRESS) else {
+        fail("no XOR-RELAYED-ADDRESS")
+    }
+    result.unwrap(stun_ice.xor_addr(reply, v))
+}
+
+fn lifetime_attr(s: u32) -> Extra {
+    let mut value: Bytes = list.with_capacity(4)
+    list.put_word_be(mut value, s)
+    Raw(stun_ice.LIFETIME, take value)
+}
+
+fn channel_attr(number: u16) -> Extra {
+    let mut value: Bytes = list.with_capacity(4)
+    list.put_word_be(mut value, number)
+    list.put_word_be(mut value, 0u16)
+    Raw(stun_ice.CHANNEL_NUMBER, take value)
+}
+
+/// A Send indication to peer carrying payload.
+fn send_indication(peer: Addr, payload: Bytes, low: u64) -> Bytes {
+    let mut out = buffer(1024)
+    let mut scratch = buffer(64)
+    let tx = stun_ice.Transaction(high: 0x0a0b0c0d, low: low)
+    let mut b = result.unwrap(stun_ice.start(stun_ice.SEND, Indication, tx, mut out))
+    result.unwrap(stun_ice.add_xor_addr(mut b, stun_ice.XOR_PEER_ADDRESS, peer, mut out))
+    result.unwrap(stun_ice.add(mut b, stun_ice.DATA, payload, mut out))
+    let n = result.unwrap(stun_ice.finish(take b, NoIntegrity, Short(b""), false, mut out, mut scratch))
+    list.truncate(mut out, n)
+    out
+}
+
+fn channel_data(number: u16, payload: Bytes) -> Bytes {
+    let mut out: Bytes = list.new()
+    list.put_word_be(mut out, number)
+    let len: u16 = int.narrow(list.len(payload))
+    list.put_word_be(mut out, len)
+    list.append(mut out, payload)
+    out
+}
+
+/// Where the relay sends packet from o: the (relayed, peer) pair and the payload, or None.
+fn relayed_to(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, packet: Bytes) -> Option[(Addr, Addr, Bytes)] {
+    let mut p = copy_of(packet)
+    let mut out = buffer(0)
+    match result.unwrap(turn.from_client(mut rl, now, rnd, o, mut p, mut out)) {
+        ToPeer(relayed, peer, range) => Some((relayed, peer, copy_of(list.slice(p, range.lo, range.hi)))),
+        Nothing => None,
+        _ => fail("an indication or ChannelData was answered"),
+    }
+}
+
+/// The bytes the relay sends to its client for payload from peer on relayed, or None.
+fn from_peer_bytes(mut rl: turn.Relay, now: turn.Now, relayed: Addr, peer: Addr, payload: Bytes) -> Option[(turn.Origin, Bytes)] {
+    let lo = turn.HEADROOM
+    let hi = lo + list.len(payload)
+    let mut slot = buffer(hi + 3)
+    list.fill_slice(mut slot, 0, hi + 3, 0xee)
+    for i in 0u64 .. list.len(payload) {
+        slot[lo + i] = payload[i]
+    }
+    match result.unwrap(turn.from_peer(mut rl, now, relayed, peer, mut slot, lo, hi)) {
+        ToClient(o, range) => Some((o, copy_of(list.slice(slot, range.lo, range.hi)))),
+        Nothing => None,
+        _ => fail("from_peer answered other than ToClient or Nothing"),
+    }
+}
+
+/// A Data indication's peer and DATA, read with stun_ice.
+fn data_indication_of(packet: Bytes) -> (Addr, Bytes) {
+    let h = result.unwrap(stun_ice.header(packet))
+    if h.class != Indication || h.method != stun_ice.DATA_METHOD || list.len(packet) % 4 != 0 {
+        fail("not a Data indication")
+    }
+    let Some(p) = find(packet, stun_ice.XOR_PEER_ADDRESS) else {
+        fail("Data indication without XOR-PEER-ADDRESS")
+    }
+    (result.unwrap(stun_ice.xor_addr(packet, p)), value_of(packet, stun_ice.DATA))
+}
+
+/// A relay whose one address alice holds from HOST_A (quota 1), with nonces for HOST_A,
+/// HOST_B and HOST_C.
+type Ordered {
+    rl: turn.Relay,
+    a: Bytes,
+    b: Bytes,
+    c: Bytes
+}
+
+fn ordered(rnd: Random) -> Ordered {
+    let mut c = relay_config()
+    c.quota = 1
+    let mut rl = new_relay(take c, list_of1(POOL_1), 101)
+    let a = nonce_for(mut rl, at(1000), rnd, udp(HOST_A))
+    let b = nonce_for(mut rl, at(1000), rnd, udp(HOST_B))
+    let n = nonce_for(mut rl, at(1000), rnd, udp(HOST_C))
+    let first = exchange(mut rl, at(1000), rnd, udp(HOST_A), alice(stun_ice.ALLOCATE, 1, a, list_of1(udp_transport())))
+    if code_of(first) != 0 {
+        fail("the first Allocate failed")
+    }
+    Ordered(rl: take rl, a: take a, b: take b, c: take n)
+}
+
+fn ordered_code(mut s: Ordered, rnd: Random, from: Addr, low: u64, extras: List[Extra]) -> u16 {
+    let nonce = if from == HOST_A {
+        copy_of(s.a)
+    } else {
+        copy_of(s.b)
+    }
+    code_of(exchange(mut s.rl, at(2000), rnd, udp(from), alice(stun_ice.ALLOCATE, low, nonce, extras)))
+}
+
+/// bug: run RFC 8656 section 7.2's Allocate checks out of order, so a request breaking
+/// several gets a later step's code, or skip one of them.
+/// oracle: RFC 8656 section 7.2 steps 2 to 10 by hand: the earliest broken step's code.
+/// Every case also breaks each later step it can; where two steps share 400 the case
+/// pairs it with a later step that answers otherwise, or with a request that succeeds.
+@test
+fn allocate_check_order() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(102)
+    let mut s = ordered(rnd)
+    // Step 2: a second Allocate on HOST_A's allocation, with no REQUESTED-TRANSPORT and every later fault.
+    if ordered_code(mut s, rnd, HOST_A, 2, list_of4(dont_fragment(), token(), family_v6(), extra_v6())) != 437 {
+        fail("step 2: not 437")
+    }
+    // Step 3: TCP (442) before DONT-FRAGMENT (420) and the token() (508).
+    if ordered_code(mut s, rnd, HOST_B, 3, list_of3(Raw(stun_ice.REQUESTED_TRANSPORT, b"\x06\x00\x00\x00"), dont_fragment(), token())) != 442 {
+        fail("step 3: not 442")
+    }
+    if ordered_code(mut s, rnd, HOST_B, 4, list_of2(dont_fragment(), token())) != 400 {
+        fail("step 3: a missing REQUESTED-TRANSPORT is not 400")
+    }
+    // Step 4: DONT-FRAGMENT (420) before the token() alone (508).
+    let df = exchange(mut s.rl, at(2000), rnd, udp(HOST_B), alice(stun_ice.ALLOCATE, 5, copy_of(s.b), list_of3(udp_transport(), dont_fragment(), token())))
+    if code_of(df) != 420 || list.compare_bytes(value_of(df, 0x000a), b"\x00\x1a") != Equal {
+        fail("step 4: not 420 listing 0x001A")
+    }
+    // Step 5: the token() alone (508) before the quota (486); with EVEN-PORT, 400 before IPv6 on an IPv4 pool (440).
+    if ordered_code(mut s, rnd, HOST_B, 6, list_of2(udp_transport(), token())) != 508 {
+        fail("step 5: a token() alone is not 508")
+    }
+    if ordered_code(mut s, rnd, HOST_B, 7, list_of4(udp_transport(), token(), family_v6(), reserve())) != 400 {
+        fail("step 5: a token() with a family is not 400")
+    }
+    // Step 6: both families (400) before IPv6 on an IPv4 pool (440).
+    if ordered_code(mut s, rnd, HOST_B, 8, list_of3(udp_transport(), family_v6(), extra_v6())) != 400 {
+        fail("step 6: not 400")
+    }
+    // Step 7: IPv6 on an IPv4 pool (440) before EVEN-PORT R = 1 (508) and the quota (486).
+    if ordered_code(mut s, rnd, HOST_B, 9, list_of3(udp_transport(), family_v6(), reserve())) != 440 {
+        fail("step 7: not 440")
+    }
+    // Step 8: R = 1 (508) before the quota (486); with ADDITIONAL-ADDRESS-FAMILY IPv6,
+    // which alone step 9 grants, 400.
+    if ordered_code(mut s, rnd, HOST_B, 10, list_of2(udp_transport(), reserve())) != 508 {
+        fail("step 8: R = 1 is not 508")
+    }
+    if ordered_code(mut s, rnd, HOST_B, 11, list_of3(udp_transport(), reserve(), extra_v6())) != 400 {
+        fail("step 8: R = 1 with ADDITIONAL-ADDRESS-FAMILY is not 400")
+    }
+    // Step 9: ADDITIONAL-ADDRESS-FAMILY IPv4 (400) before the quota (486).
+    if ordered_code(mut s, rnd, HOST_B, 12, list_of2(udp_transport(), Raw(stun_ice.ADDITIONAL_ADDRESS_FAMILY, b"\x01\x00\x00\x00"))) != 400 {
+        fail("step 9: not 400")
+    }
+    // Step 10: alice's one allocation is her quota (486), though the pool is also empty (508).
+    if ordered_code(mut s, rnd, HOST_B, 13, list_of1(udp_transport())) != 486 {
+        fail("step 10: not 486")
+    }
+    // Then the pool: bob is under quota, and no address is free.
+    let bob = signed_by(b"1700000000:bob", minted_key(b"bob"), stun_ice.ALLOCATE, 14, copy_of(s.c), list_of1(udp_transport()))
+    if code_of(exchange(mut s.rl, at(2000), rnd, udp(HOST_C), bob)) != 508 {
+        fail("pool exhausted: not 508")
+    }
+    let counts = turn.relay_counts(s.rl)
+    if counts.allocations != 1 || counts.pool_free != 0 {
+        fail("a refused Allocate changed the allocations")
+    }
+    Ok(())
+}
+
+/// TURN-1's table rows for Allocate, in order: TCP, DONT-FRAGMENT, a token with EVEN-PORT,
+/// a token with a family, a token alone, R = 1 with a second family, R = 1 alone.
+fn unsupported_row(i: u64) -> List[Extra] {
+    if i == 0 {
+        list_of1(Raw(stun_ice.REQUESTED_TRANSPORT, b"\x06\x00\x00\x00"))
+    } else if i == 1 {
+        list_of2(udp_transport(), dont_fragment())
+    } else if i == 2 {
+        list_of3(udp_transport(), token(), Raw(stun_ice.EVEN_PORT, b"\x00"))
+    } else if i == 3 {
+        list_of3(udp_transport(), token(), Raw(stun_ice.REQUESTED_ADDRESS_FAMILY, b"\x01\x00\x00\x00"))
+    } else if i == 4 {
+        list_of2(udp_transport(), token())
+    } else if i == 5 {
+        list_of3(udp_transport(), reserve(), extra_v6())
+    } else {
+        list_of2(udp_transport(), reserve())
+    }
+}
+
+/// bug: answer an out-of-scope feature other than TURN-1's table says: relay over TCP,
+/// accept DONT-FRAGMENT or a reservation, ignore EVEN-PORT R = 0, refuse the dual-family
+/// partial case, or refuse a request for SOFTWARE, ICMP or ACCESS-TOKEN.
+/// oracle: TURN-1's out-of-scope table and RFC 8656 section 7.2 by hand.
+@test
+fn unsupported_answers() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(111)
+    let odd_1 = Addr(ip: V4(0xc0000264), port: 50001)
+    let odd_2 = Addr(ip: V4(0xc0000264), port: 50003)
+    let odd_3 = Addr(ip: V4(0xc0000264), port: 50005)
+    let mut rl = new_relay(relay_config(), list_of5(odd_1, odd_2, odd_3, POOL_2, POOL_1), 112)
+    let a = nonce_for(mut rl, at(1000), rnd, udp(HOST_A))
+    let b = nonce_for(mut rl, at(1000), rnd, udp(HOST_B))
+    let c = nonce_for(mut rl, at(1000), rnd, udp(HOST_C))
+    let d = nonce_for(mut rl, at(1000), rnd, udp(HOST_D))
+    let rows =[442u16, 420u16, 400u16, 400u16, 508u16, 400u16, 508u16]
+    for i in 0u64 .. 7 {
+        if code_of(exchange(mut rl, at(2000), rnd, udp(HOST_A), alice(stun_ice.ALLOCATE, 20 + i, copy_of(a), unsupported_row(i)))) != rows[i] {
+            fail("an out-of-scope Allocate got another code than TURN-1's")
+        }
+    }
+    // EVEN-PORT R = 0 is honoured from the pool: the one even address free of three odd ones.
+    let even = exchange(mut rl, at(2000), rnd, udp(HOST_A), alice(stun_ice.ALLOCATE, 30, copy_of(a), list_of2(udp_transport(), Raw(stun_ice.EVEN_PORT, b"\x00"))))
+    if code_of(even) != 0 || relayed_in(even).port % 2 != 0 {
+        fail("EVEN-PORT R = 0 not given an even port")
+    }
+    let even_2 = exchange(mut rl, at(2000), rnd, udp(HOST_D), alice(stun_ice.ALLOCATE, 31, copy_of(d), list_of2(udp_transport(), Raw(stun_ice.EVEN_PORT, b"\x00"))))
+    if code_of(even_2) != 0 || relayed_in(even_2).port % 2 != 0 {
+        fail("EVEN-PORT R = 0 not given the last even port")
+    }
+    // IPv4 and IPv6 asked together: IPv4 only, with ADDRESS-ERROR-CODE 440 for IPv6.
+    let partial = exchange(mut rl, at(2000), rnd, udp(HOST_B), alice(stun_ice.ALLOCATE, 32, copy_of(b), list_of2(udp_transport(), extra_v6())))
+    if code_of(partial) != 0 || list.compare_bytes(value_of(partial, stun_ice.ADDRESS_ERROR_CODE), b"\x02\x00\x04\x28") != Equal {
+        fail("dual-family request not the partial success")
+    }
+    if let V6(_, _) = relayed_in(partial).ip {
+        fail("partial success relayed over IPv6")
+    }
+    // SOFTWARE, ICMP and ACCESS-TOKEN are ignored.
+    let ignored = alice(stun_ice.ALLOCATE, 33, copy_of(c), list_of4(udp_transport(), Raw(0x8022, b"probe"), Raw(stun_ice.ICMP, b"\x00\x00\x03\x01"), Raw(stun_ice.ACCESS_TOKEN, b"\x00\x04abcd")))
+    if code_of(exchange(mut rl, at(2000), rnd, udp(HOST_C), ignored)) != 0 {
+        fail("SOFTWARE, ICMP or ACCESS-TOKEN not ignored")
+    }
+    Ok(())
+}
+
+/// bug: match a permission on the full address instead of the IP, keep a permission past
+/// 300 s, or let a Send indication refresh it.
+/// oracle: RFC 8656 sections 9 and 11.2 by hand.
+@test
+fn permissions_by_ip() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(121)
+    let mut rl = new_relay(relay_config(), list_of1(POOL_1), 122)
+    let o = udp(HOST_B)
+    let n = nonce_for(mut rl, at(1000), rnd, o)
+    let allocated = exchange(mut rl, at(1000), rnd, o, alice(stun_ice.ALLOCATE, 1, copy_of(n), list_of1(udp_transport())))
+    let relayed = relayed_in(allocated)
+    let granted = Addr(ip: V4(0xc0000201), port: 5000)
+    if code_of(exchange(mut rl, at(1000), rnd, o, alice(stun_ice.CREATE_PERMISSION, 2, copy_of(n), list_of1(Xor(stun_ice.XOR_PEER_ADDRESS, granted))))) != 0 {
+        fail("CreatePermission refused")
+    }
+    let port_a = Addr(ip: V4(0xc0000201), port: 6000)
+    let port_b = Addr(ip: V4(0xc0000201), port: 7000)
+    let stranger = Addr(ip: V4(0xc0000202), port: 6000)
+    let ports =[port_a, port_b]
+    for k in 0u64 .. 2 {
+        let p = ports[k]
+        let Some((to, framed)) = from_peer_bytes(mut rl, at(2000), relayed, p, b"hello") else {
+            fail("a datagram from the permitted IP on another port was dropped")
+        }
+        let (from, data) = data_indication_of(framed)
+        if to != o || from != p || list.compare_bytes(data, b"hello") != Equal {
+            fail("Data indication peer or payload")
+        }
+    }
+    if let Some(_) = from_peer_bytes(mut rl, at(2000), relayed, stranger, b"hello") {
+        fail("a datagram from an IP without permission was relayed")
+    }
+    if turn.relay_discards(rl).no_permission != 1 {
+        fail("the unpermitted datagram not counted")
+    }
+    // Installed at 1 s: a Send at 300.999 s is relayed, and did not refresh it for 301 s.
+    let Some((rel, peer, payload)) = relayed_to(mut rl, ns(300999 * MS), rnd, o, send_indication(port_b, b"ping", 1)) else {
+        fail("Send within 300 s dropped")
+    }
+    if rel != relayed || peer != port_b || list.compare_bytes(payload, b"ping") != Equal {
+        fail("Send relayed to the wrong peer or payload")
+    }
+    if let Some(_) = relayed_to(mut rl, ns(301 * S), rnd, o, send_indication(port_b, b"ping", 2)) {
+        fail("Send at 300 s after the permission relayed: it expired late or a Send refreshed it")
+    }
+    if let Some(_) = from_peer_bytes(mut rl, ns(301 * S), relayed, port_a, b"late") {
+        fail("datagram relayed after the permission expired")
+    }
+    if turn.relay_discards(rl).no_permission != 3 || turn.relay_counts(rl).permissions != 0 {
+        fail("expired permission not counted or not removed")
+    }
+    Ok(())
+}
+
+fn bind_code(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, nonce: Bytes, low: u64, number: u16, peer: Addr) -> u16 {
+    code_of(exchange(mut rl, now, rnd, o, alice(stun_ice.CHANNEL_BIND, low, copy_of(nonce), list_of2(channel_attr(number), Xor(stun_ice.XOR_PEER_ADDRESS, peer)))))
+}
+
+/// The client side of channel_rules: a turn.client bound through the relay.
+fn client_round_trip(rnd: Random) -> Result[(), turn.TurnError] {
+    let mut rl = new_relay(relay_config(), list_of1(POOL_1), 132)
+    let mut cl = turn.client(turn.client_defaults(), SERVER, username(), user_password())?
+    let o = udp(HOST_A)
+    let mut channel = 0u16
+    for step in 0u64 .. 3 {
+        if step == 1 {
+            channel = turn.bind(mut cl, PEER_1, at(2000))?
+        }
+        let now = at(1000 + 1000 * step)
+        for _ in 0u64 .. 8 {
+            let mut out = buffer(512)
+            let Send(n) = turn.poll(mut cl, now, rnd, mut out)? else {
+                break
+            }
+            list.truncate(mut out, n)
+            let mut reply = exchange(mut rl, now, rnd, o, out)
+            let _ = turn.receive(mut cl, now, rnd, mut reply)?
+        }
+    }
+    let mut slot = buffer(turn.HEADROOM + 5 + 3)
+    list.fill_slice(mut slot, turn.HEADROOM, 5, 0x61)
+    let range = turn.send_to(mut cl, PEER_1, mut slot, turn.HEADROOM, turn.HEADROOM + 5)?
+    let framed = copy_of(list.slice(slot, range.lo, range.hi))
+    if framed[0] != 0x40 || channel != 0x4000 {
+        fail("the client did not frame ChannelData on 0x4000")
+    }
+    let Some((relayed, peer, payload)) = relayed_to(mut rl, at(4000), rnd, o, framed) else {
+        fail("the client's ChannelData was not relayed")
+    }
+    if relayed != POOL_1 || peer != PEER_1 || list.compare_bytes(payload, b"aaaaa") != Equal {
+        fail("ChannelData relayed to the wrong peer or payload")
+    }
+    let Some((_, back)) = from_peer_bytes(mut rl, at(4000), POOL_1, PEER_1, b"bbb") else {
+        fail("the peer's datagram was not relayed")
+    }
+    let mut packet = take back
+    let Data(from, d) = turn.receive(mut cl, at(4000), rnd, mut packet)? else {
+        fail("the client did not take the relay's ChannelData")
+    }
+    if from != PEER_1 || list.compare_bytes(list.slice(packet, d.lo, d.hi), b"bbb") != Equal {
+        fail("the client read another peer or payload")
+    }
+    Ok(())
+}
+
+/// bug: accept a channel number outside 0x4000 to 0x4FFF, rebind a number or a peer,
+/// relay ChannelData on a reserved or unbound number, or send a bound peer's datagram as
+/// a Data indication.
+/// oracle: RFC 8656 sections 11 and 12 by hand; ChannelData bytes 0x4000, length, payload.
+@test
+fn channel_rules() -> Result[(), turn.TurnError] {
+    let rnd = provide.random(131)
+    let mut rl = new_relay(relay_config(), list_of1(POOL_1), 133)
+    let o = udp(HOST_B)
+    let n = nonce_for(mut rl, at(1000), rnd, o)
+    let _ = exchange(mut rl, at(1000), rnd, o, alice(stun_ice.ALLOCATE, 1, copy_of(n), list_of1(udp_transport())))
+    let codes =[(0x3fffu16, PEER_1, 400u16), (0x4000u16, PEER_1, 0u16), (0x4fffu16, PEER_2, 0u16), (0x5000u16, PEER_3, 400u16), (0x4000u16, PEER_3, 400u16), (0x4001u16, PEER_1, 400u16), (0x4000u16, PEER_1, 0u16)]
+    for i in 0u64 .. 7 {
+        let (number, peer, want) = codes[i]
+        if bind_code(mut rl, at(2000), rnd, o, n, 10 + i, number, peer) != want {
+            fail("ChannelBind answered against RFC 8656 section 12.2")
+        }
+    }
+    if turn.relay_counts(rl).channels != 2 || turn.relay_counts(rl).permissions != 2 {
+        fail("ChannelBind did not install two channels and their permissions")
+    }
+    let numbers =[0x5000u16, 0x4001u16]
+    for k in 0u64 .. 2 {
+        let number = numbers[k]
+        if let Some(_) = relayed_to(mut rl, at(3000), rnd, o, channel_data(number, b"x")) {
+            fail("ChannelData on a reserved or unbound number relayed")
+        }
+    }
+    let d = turn.relay_discards(rl)
+    if d.reserved_channel != 1 || d.unbound_channel != 1 {
+        fail("reserved and unbound ChannelData not counted apart")
+    }
+    let Some((_, peer, payload)) = relayed_to(mut rl, at(3000), rnd, o, channel_data(0x4fff, b"abc")) else {
+        fail("ChannelData on 0x4FFF dropped")
+    }
+    if peer != PEER_2 || list.compare_bytes(payload, b"abc") != Equal {
+        fail("ChannelData relayed to the wrong peer or payload")
+    }
+    let Some((_, framed)) = from_peer_bytes(mut rl, at(3000), POOL_1, PEER_1, b"hello") else {
+        fail("bound peer's datagram dropped")
+    }
+    if list.compare_bytes(framed, b"\x40\x00\x00\x05hello") != Equal {
+        fail("bound peer's datagram not sent as ChannelData")
+    }
+    // Another port of PEER_1's IP has a permission but no channel: a Data indication.
+    let other_port = Addr(ip: PEER_1.ip, port: 9001)
+    let Some((_, indication)) = from_peer_bytes(mut rl, at(3000), POOL_1, other_port, b"hi") else {
+        fail("permitted IP on an unbound port dropped")
+    }
+    let (from, data) = data_indication_of(indication)
+    if from != other_port || list.compare_bytes(data, b"hi") != Equal {
+        fail("Data indication for an unbound port")
+    }
+    client_round_trip(rnd)
+}
+
+/// The relay half of lifetimes_exact: grants, expiry to the nanosecond, quarantine.
+fn relay_lifetimes(rnd: Random) -> Result[(), turn.TurnError] {
+    let mut rl = new_relay(relay_config(), list_of2(POOL_1, POOL_2), 93)
+    let o = udp(HOST_A)
+    let short = udp(HOST_B)
+    let n = nonce_for(mut rl, at(1000), rnd, o)
+    let m = nonce_for(mut rl, at(1000), rnd, short)
+    let first = alice(stun_ice.ALLOCATE, 1, copy_of(n), list_of2(udp_transport(), lifetime_attr(7200)))
+    // Above the maximum: 3,600 s. Below the default: 600 s.
+    if lifetime_in(exchange(mut rl, at(1000), rnd, o, first)) != 3600 {
+        fail("LIFETIME 7200 not clamped to 3600")
+    }
+    if lifetime_in(exchange(mut rl, at(1000), rnd, short, alice(stun_ice.ALLOCATE, 2, copy_of(m), list_of2(udp_transport(), lifetime_attr(300))))) != 600 {
+        fail("LIFETIME 300 not raised to 600")
+    }
+    // A retransmission at 11 s gets the time left: 3,601 − 11 = 3,590 s.
+    if lifetime_in(exchange(mut rl, at(11000), rnd, o, first)) != 3590 {
+        fail("retransmitted Allocate not given the remaining lifetime")
+    }
+    relay_expiry(rnd)
+}
+
+/// The relay half of lifetimes_exact, from 11 s on.
+fn relay_expiry(rnd: Random) -> Result[(), turn.TurnError] {
+    let mut rl = new_relay(relay_config(), list_of2(POOL_1, POOL_2), 94)
+    let o = udp(HOST_A)
+    let n = nonce_for(mut rl, at(1000), rnd, o)
+    let _ = exchange(mut rl, at(1000), rnd, o, alice(stun_ice.ALLOCATE, 1, copy_of(n), list_of2(udp_transport(), lifetime_attr(7200))))
+    let _ = exchange(mut rl, at(2000), rnd, o, alice(stun_ice.CREATE_PERMISSION, 2, copy_of(n), list_of1(Xor(stun_ice.XOR_PEER_ADDRESS, PEER_1))))
+    if bind_code(mut rl, at(3000), rnd, o, n, 3, 0x4000, PEER_2) != 0 {
+        fail("ChannelBind refused")
+    }
+    // Permissions end at 302 s and 303 s, the channel at 603 s and its quarantine at 903 s.
+    // 0x4000 then binds PEER_3 at 903 s: its permission ends at 1,203 s, the channel at
+    // 1,503 s, its quarantine at 1,803 s; the allocation at 3,601 s.
+    let marks =[(302u64, 2u64, 1u64), (303u64, 1u64, 1u64), (603u64, 0u64, 1u64), (903u64, 0u64, 0u64), (1203u64, 1u64, 1u64), (1503u64, 0u64, 1u64), (1803u64, 0u64, 0u64), (3601u64, 0u64, 0u64)]
+    for i in 0u64 .. 8 {
+        let (s, permissions, channels) = marks[i]
+        if wake_of(turn.relay_poll(mut rl, ns(s * S - 1))) != s * S {
+            fail("next expiry not at the RFC 8656 time")
+        }
+        let c = turn.relay_counts(rl)
+        if c.permissions != permissions || c.channels != channels || c.allocations != 1 {
+            fail("expired early")
+        }
+        if s == 903 {
+            if bind_code(mut rl, ns(s * S - 1), rnd, o, n, 4, 0x4000, PEER_2) != 400 || bind_code(mut rl, ns(s * S - 1), rnd, o, n, 5, 0x4000, PEER_3) != 400 {
+                fail("a quarantined number or pair bound within 300 s")
+            }
+            if bind_code(mut rl, ns(s * S), rnd, o, n, 6, 0x4000, PEER_3) != 0 {
+                fail("number not free 300 s after its channel expired")
+            }
+        }
+    }
+    if let Idle = turn.relay_poll(mut rl, ns(3601 * S)) {} else {
+        fail("nothing left after the allocation, yet a wake")
+    }
+    let c = turn.relay_counts(rl)
+    if c.allocations != 0 || c.pool_free != 2 {
+        fail("allocation not expired at 3,601 s or its address not back in the pool")
+    }
+    Ok(())
+}

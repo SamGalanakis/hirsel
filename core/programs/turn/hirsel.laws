@@ -1,8 +1,12 @@
 hirsel.laws 1
-turn@1/laws/bid_down_refused src=cdada8695937acde sig=249cd8447ddba40b run=c2c0c6612d4cbb79 bug=646b7010630cd718 oracle=c0e9fc271076be06 rows=pending
-turn@1/laws/challenge_exchange src=36afc803058835f2 sig=64d03ed9f60b259d run=c2c0c6612d4cbb79 bug=897c35371728bc96 oracle=287d552963f9d813 rows=pending
-turn@1/laws/expired_costs_no_derivation src=7df0ad9b88060d31 sig=4acbbafc2a12cc7a run=c2c0c6612d4cbb79 bug=d01af20791f08f83 oracle=b4bbe9b976b26115 rows=pending
-turn@1/laws/lifetimes_exact src=0a0bc0493eb14210 sig=58e5c9b9dff07ca5 run=c2c0c6612d4cbb79 bug=622964c1bd28aa15 oracle=36ff6139206f207e rows=pending
-turn@1/laws/nonce_bound_to_tuple src=2f84beb0cd0914b2 sig=821fdd01699acd00 run=c2c0c6612d4cbb79 bug=905987db0621b22b oracle=f8acb5e150c373d1 rows=pending
+turn@1/laws/allocate_check_order src=1b7108b2eba43b40 sig=2edca9fb9dac7878 run=c2c0c6612d4cbb79 bug=26879e24f8c6890b oracle=e79c38897ab3af11 rows=pending
+turn@1/laws/bid_down_refused src=cdada8695937acde sig=24ff260a8b834b19 run=c2c0c6612d4cbb79 bug=646b7010630cd718 oracle=c0e9fc271076be06 rows=pending
+turn@1/laws/challenge_exchange src=36afc803058835f2 sig=9467ad73694d39c4 run=c2c0c6612d4cbb79 bug=897c35371728bc96 oracle=287d552963f9d813 rows=pending
+turn@1/laws/channel_rules src=5db511daf94a16b0 sig=ef1678b12e4b309f run=c2c0c6612d4cbb79 bug=77dfa4112cee58f6 oracle=d261197281743292 rows=pending
+turn@1/laws/expired_costs_no_derivation src=7df0ad9b88060d31 sig=9e8a5e4e0f8308f2 run=c2c0c6612d4cbb79 bug=d01af20791f08f83 oracle=b4bbe9b976b26115 rows=pending
+turn@1/laws/lifetimes_exact src=5ca2b7b8f5c3dd4c sig=320d8823ec38a1e1 run=c2c0c6612d4cbb79 bug=622964c1bd28aa15 oracle=36ff6139206f207e rows=pending
+turn@1/laws/nonce_bound_to_tuple src=2f84beb0cd0914b2 sig=17869c205637f360 run=c2c0c6612d4cbb79 bug=905987db0621b22b oracle=f8acb5e150c373d1 rows=pending
+turn@1/laws/permissions_by_ip src=a01c783b5beb8073 sig=e1af21c274383d57 run=c2c0c6612d4cbb79 bug=c67d128eac3c8b27 oracle=54d659b129092ed1 rows=pending
 turn@1/laws/retransmit_schedule src=68b7ed256c9b9203 sig=cf99a4861c8bb657 run=c2c0c6612d4cbb79 bug=137bc2662447c1a7 oracle=ad78e61507804df8 rows=pending
+turn@1/laws/unsupported_answers src=72dd40e7247cabe5 sig=882b38fe7c2048c7 run=c2c0c6612d4cbb79 bug=d6737bfeb078ac88 oracle=74fe3c35bad9f67a rows=pending
 turn@1/laws/userhash_vector src=a490089ca9be6563 sig=051cd476abc5c155 run=c2c0c6612d4cbb79 bug=3242c69d6fc5b466 oracle=1c949b07f68d020c rows=pending

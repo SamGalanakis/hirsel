@@ -221,9 +221,9 @@
     "reason": "stale-codec-1910"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
-    "lines": 1189,
-    "raise_revision": 1,
-    "reason": "verify-observer-2037"
+    "lines": 1180,
+    "raise_revision": 2,
+    "reason": "cc-s4-pack-2143"
   },
   "crates/hirsel-core-driver/src/test_run.rs": {
     "lines": 1004

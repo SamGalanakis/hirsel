@@ -1939,96 +1939,6 @@ fn fetch_logical(tx: Tx, take key: Bytes) -> Result[Option[View[Bytes]], Error] 
     Ok(found)
 }
 
-fn apply_put(mut tx: Tx, take p: Bytes, take val: Bytes, tail: bool) -> Result[(), Error] {
-    let charge = entry(p, val)
-    let (old_charge, height) = {
-        let Some(child) = std.page.collection_child(tx.roots.collections.root, list.slice(p, 0, 4)) else {
-            return Error(Stale(list.word_be(p, 0)))
-        }
-        // Both retention modes find the previous charge, so a body takes the
-        // same steps on a live store and on a replay fork that retains rows;
-        // the selection takes none.
-        let previous = match op_slot(tx.ops, p) {
-            Some(slot) => match data_row(tx.ops.rows, slot).value {
-                Some(value) => entry(p, staged_bytes(value)),
-                None => 0,
-            },
-            None => {
-                // The newest layer that staged the key wins.
-                let mut beneath: Option[u64] = None
-                for layer in tx.below {
-                    if let Some(slot) = op_slot(layer.ops, p) {
-                        beneath = Some(match data_row(layer.ops.rows, slot).value {
-                            Some(value) => entry(p, staged_bytes(value)),
-                            None => 0,
-                        })
-                    }
-                }
-                match beneath {
-                    Some(found) => found,
-                    None => match std.page.lookup(child, list.slice(p, 4, list.len(p))) {
-                        Some(value) => entry(p, value),
-                        None => 0,
-                    },
-                }
-            },
-        }
-        let old = if tx.retain_old {
-            0u64
-        } else {
-            previous
-        }
-        let child_depth: u64 = int.widen(std.page.level(std.page.image_of(child)))
-        (old, tree_height(tx.roots.collections) + child_depth + 1)
-    }
-    let _ = reserve_ids(mut tx, height)?
-    let value = stage_value(take val, tx.roots.collections.inline)
-    let slot_order = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, Some(take value))
-    if tail {
-        tx.frame_tail = slot_order
-    }
-    tx.resident = int.saturating_add(int.saturating_sub(tx.resident, old_charge), charge)
-    tx.wrote = true
-    Ok(())
-}
-
-fn delete_refund(tx: Tx, key: Bytes) -> Option[u64] {
-    match transaction_row(tx, key) {
-        Some(v) => {
-            // As in apply_put: both retention modes take the same steps.
-            let previous = entry(key, v)
-            Some(if tx.retain_old {
-                0u64
-            } else {
-                previous
-            })
-        },
-        None => None
-    }
-}
-
-fn apply_delete(mut tx: Tx, take p: Bytes, refund: u64) -> Result[(), Error] {
-    let height = collection_write_height(tx.roots.collections, p)
-    let _ = reserve_ids(mut tx, height)?
-    let _ = save_data_op(mut tx.ops, tx.below, false, mut tx.rows, take p, None)
-    tx.resident = int.saturating_sub(tx.resident, refund)
-    Ok(())
-}
-
-fn tree_height(tree: PageTree) -> u64 {
-    let height: u64 = int.widen(std.page.level(std.page.image_of(tree.root)))
-    height + 1
-}
-
-fn collection_write_height(tree: PageTree, key: Bytes) -> u64 {
-    let map_height = tree_height(tree)
-    let Some(root) = std.page.collection_child(tree.root, list.slice(key, 0, 4)) else {
-        return map_height
-    }
-    let height: u64 = int.widen(std.page.level(std.page.image_of(root)))
-    map_height + height + 1
-}
-
 // Stream value (section 1.8): position u64 LE, state u8 (1 Admitted,
 // 2 Replied), then the reply when Replied.
 // A request's identity at a stream position (STORE-SPEC v2.24 §1.8, AH1).
@@ -2396,33 +2306,6 @@ fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut n
     } else {
         at
     }
-}
-
-fn transaction_row(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
-    match staged_row(tx, key) {
-        Some(staged) => staged,
-        None => get_page_row(tx.roots.collections, key),
-    }
-}
-
-// The row this Tx or a layer beneath it staged for key, if any.
-fn staged_row(tx: Tx, key: Bytes) -> Option[Option[View[Bytes]]] in tx {
-    if let Some(slot) = op_slot(tx.ops, key) {
-        return Some(match data_row(tx.ops.rows, slot).value {
-            Some(raw) => Some(staged_bytes(raw)),
-            None => None,
-        })
-    }
-    if let Some(at) = newest_layer(tx.below, false, key) {
-        let layer = view tx.below[at]
-        if let Some(slot) = op_slot(layer.ops, key) {
-            return Some(match data_row(layer.ops.rows, slot).value {
-                Some(raw) => Some(staged_bytes(raw)),
-                None => None,
-            })
-        }
-    }
-    None
 }
 
 fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {
@@ -3723,6 +3606,7 @@ fn typed_put(mut db: Db, t: Table[u64, u64], k: u64, v: u64) -> bool waits {
 }
 
 pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
+    check_write_attempt(tx)?
     if let Some(name) = tx.index_conflict { return Error(Conflict(clone(name))) }
     let indexes = writable(tx, t)?
     let tail = tx.frame_tail == OPEN_FRAME_TAIL
@@ -3732,6 +3616,7 @@ pub fn put[K, V](mut tx: Tx, t: Table[K, V], k: K, v: V) -> Result[(), Error] {
 }
 
 pub fn delete[K, V](mut tx: Tx, t: Table[K, V], k: K) -> Result[bool, Error] {
+    check_write_attempt(tx)?
     if let Some(name) = tx.index_conflict { return Error(Conflict(clone(name))) }
     let indexes = writable(tx, t)?
     let key = encode_key(t.key, k)?

@@ -88,6 +88,22 @@ fn l63_retry_until_hit(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) 
     if l63_mark(mut db, handles.1, 2)? != Some(30) {
         fail("L63: the committed attempt read row 3 as 30")
     }
+    let before_abort = version(snapshot(db))
+    let Aborted(Undone(value: Missing(marker), ticket: None)) = run(mut db, Some(100000), copy_env(handles.0), fn(mut tx: Tx, rows: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, rows, 3u64, 31u32)?
+        if !delete(mut tx, rows, 5u64)? || delete(mut tx, rows, 5u64)? {
+            fail("L63: delete sees the Cold row and then the staged absence")
+        }
+        if fetch(tx, rows, 3u64)? != Some(31) {
+            fail("L63: fetch sees the staged replacement")
+        }
+        Error(Missing("abort after old-row reads"))
+    })? else {
+        fail("L63: a Cold write reruns to the body's abort")
+    }
+    if marker != "abort after old-row reads" || version(snapshot(db)) != before_abort {
+        fail("L63: neither the missed write nor the deciding abort publishes")
+    }
     Ok(())
 }
 

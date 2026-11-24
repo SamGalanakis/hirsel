@@ -52,7 +52,7 @@ fn put_logical_key(mut tx: Tx, take p: Bytes, take val: Bytes) -> Result[(), Err
 
 fn delete_bytes(mut tx: Tx, id: u32, key: Bytes) -> Result[bool, Error] {
     let p = logical_key(id, key)?
-    let Some(refund) = delete_refund(tx, p) else {
+    let Some(refund) = delete_refund(tx, p)? else {
         return Ok(false)
     }
     let frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, p, None, tx.frame_bytes)?

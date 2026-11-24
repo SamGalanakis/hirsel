@@ -43,29 +43,44 @@ type LogState: shareable + send {
 }
 
 fn transaction_log_state(tx: Tx, id: u32) -> Result[LogState, Error] {
-    if let Some(existing) = map.get(tx.ops.logs, id) {
+    if let Some(existing) = staged_log_state(tx, id) {
         return Ok(existing)
+    }
+    let tree = view tx.roots.collections
+    let key = prefix(id)?
+    let Some(descriptor) = std.page.lookup(tree.root, key) else { return Error(Stale(id)) }
+    let head = descriptor_bounds(descriptor)
+    let height = if descriptor[53u64] == 1 {
+        transaction_write_height(tx, log_key(id, head.next)?)?
+    } else {
+        collection_write_height(tree, key)
+    }
+    Ok(LogState(head: head, limits: head, height: height))
+}
+
+fn staged_log_state(tx: Tx, id: u32) -> Option[LogState] {
+    if let Some(existing) = map.get(tx.ops.logs, id) {
+        return Some(existing)
     }
     let mut layer = list.len(tx.below)
     while layer > 0 {
         layer -= 1
         if let Some(existing) = map.get(tx.below[layer].ops.logs, id) {
-            return Ok(existing)
+            return Some(existing)
         }
     }
-    let tree = view tx.roots.collections
-    let key = prefix(id)?
-    let Some((root, descriptor)) = std.page.collection_entry(tree.root, key) else { return Error(Stale(id)) }
-    let depth: u64 = int.widen(std.page.level(std.page.image_of(root)))
-    let head = descriptor_bounds(descriptor)
-    Ok(LogState(head: head, limits: head, height: tree_height(tree) + depth + 1))
+    None
 }
 
 fn transaction_log_bounds(tx: Tx, id: u32) -> Result[LogBounds, Error] {
-    Ok(transaction_log_state(tx, id)?.limits)
+    if let Some(existing) = staged_log_state(tx, id) {
+        return Ok(existing.limits)
+    }
+    committed_log_bounds(tx.roots.collections, id)
 }
 
 pub fn append[V](mut tx: Tx, l: Log[V], v: V) -> Result[u64, Error] {
+    check_write_attempt(tx)?
     readable_value(tx.store, tx.roots, l.binding)?
     let id = l.binding.id
     let mut current = transaction_log_state(tx, id)?
@@ -109,12 +124,14 @@ pub fn bounds[V](tx: Tx, l: Log[V]) -> Result[LogBounds, Error] {
 pub fn log_fetch[V](tx: Tx, l: Log[V], seq: u64) -> Result[Option[V], Error] {
     readable_value(tx.store, tx.roots, l.binding)?
     let key = log_key(l.binding.id, seq)?
-    note_read(tx, Point(copied(key)?))?
     let current = transaction_log_bounds(tx, l.binding.id)?
     if seq < current.first || seq >= current.next {
+        note_read(tx, Point(take key))?
         return Ok(None)
     }
-    decode_log_row(l, transaction_row(tx, key))
+    let row = transaction_row(tx, key)?
+    note_read(tx, Point(take key))?
+    decode_log_row(l, row)
 }
 
 fn decode_log_row[V](l: Log[V], raw: Option[View[Bytes]]) -> Result[Option[V], Error] {
@@ -141,8 +158,9 @@ pub fn last[V](tx: Tx, l: Log[V]) -> Result[Option[(u64, V)], Error] {
     }
     let seq = current.next - 1
     let key = log_key(id, seq)?
-    note_read(tx, Span(copied(key)?, prefix(id + 1)?))?
-    decode_log_last(l, seq, transaction_row(tx, key))
+    let row = transaction_row(tx, key)?
+    note_read(tx, Span(take key, prefix(id + 1)?))?
+    decode_log_last(l, seq, row)
 }
 
 pub fn log_bounds[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[LogBounds, Error] waits {
@@ -224,7 +242,7 @@ fn next_log_range_tail(tx: Tx, mut tail: LogRangeTail) -> Result[Option[(Bytes, 
         return Ok(None)
     }
     let key = log_key(tail.id, tail.seq)?
-    let Some(raw) = transaction_row(tx, key) else { return Error(malformed(0)) }
+    let Some(raw) = transaction_row(tx, key)? else { return Error(malformed(0)) }
     let body = arc.new(copied(raw)?)
     tail.seq += 1
     Ok(Some((take key, take body)))
@@ -240,6 +258,7 @@ fn apply_log_append(mut tree: PageTree, key: Bytes, value: Bytes, shared: Option
 }
 
 pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {
+    check_write_attempt(tx)?
     readable_value(tx.store, tx.roots, l.binding)?
     let id = l.binding.id
     let mut current = transaction_log_state(tx, id)?
@@ -251,7 +270,7 @@ pub fn trim_before[V](mut tx: Tx, l: Log[V], seq: u64) -> Result[(), Error] {
     let mut masked_wire = 0u64
     for old_seq in order.max(current.head.next, current.limits.first) .. floor {
         let key = log_key(id, old_seq)?
-        let Some(raw) = transaction_row(tx, key) else { fail("store: missing staged Log append") }
+        let Some(raw) = transaction_row(tx, key)? else { fail("store: missing staged Log append") }
         masked_charge += entry(key, raw)
         if let Some(_) = tx.frame_bytes {
             masked_wire += 25 + list.len(raw)

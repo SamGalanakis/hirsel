@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.58: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.59: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -22,43 +22,18 @@ Evidence marks:
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
 
+## CHANGES-v2.59 (rooms in §1.1 and §4, as built; lane rooms-rs-rewrite-2345)
+
+- **§1.1** declares `Kind.Room`, `RegisterError.RoomBounds`, `Grant`, `RoomBounds`, the room constants and `room`'s signature as built in `core/programs/runner/runner-room.hirsel`.
+- **§4** names rooms in G2 step 3 (grants are staged before the fences and take effect with R = b) and in G3 (a room Subscribe is a G3 Subscribe of its admission view). §4 "Rooms" now holds the whole contract: admission, the roster and its diffs, delivery under a full block, decode capacity and loss, session charging and the nine laws.
+- **Superseded.** The v2.58 entry's own contract, its pointer to a room design section that is not in the repo, and its "Open" item are removed. The v2.58 entry said the reservation is "at the place's room maxima". As built it is at the runner-wide maxima, and §4 says so.
+- **Not here.** A membership revision on the wire and a kick API belong to runner slice R1 of docs/spec/webrtc.md.
+
+Reversible: text only. No model, frame or law changed.
+
 ## CHANGES-v2.58 (rooms: the ephemeral lane, as built; lanes hirsel4-cutover-2276 and hirsel4-rooms-2301)
 
-A room carries presence state and messages between the sessions that hold a membership. Nothing in a room is stored, replayed or ordered against commits. Admission is an ordinary view, so revocation and covers work as for any query.
-- **Declaration (rule 2, §1.1).** `runner.room[G, H, A, S: codec, M: codec](mut r, admit, declarations, state: Codec[S], message: Codec[M], bounds: RoomBounds, n, steps)` registers an entry of the new kind `Room`, which is Describe kind 4. `admit` has `query_as`'s shape and returns `Answer[Grant]`, where `Grant = Denied | Watch | Join`. `RoomBounds { peers, state, message }` must satisfy 1 ≤ peers ≤ `PEERS_MAX` (256), state ≤ `STATE_MAX` (8192), message ≤ `MESSAGE_MAX` (32768) and n ≤ `ROOM_ARGS_MAX` (1024), and one Part with a maximal state and message must fit `LIVE_MAX` (65536). Otherwise registration returns `RegisterError.RoomBounds`. S and M belong to the application, and the runner names no application type. A Room's `Described.result` is the codec of `(value schema, slot list, state schema, message schema, peers, state, message)`. Its `result_fp` covers the room's types and bounds, so a stale client fails at Hello.
-- **Rule 13.** The runner makes no auth decisions. It enforces mechanically the `Grant` that the admission view returns.
-- **Frames (§3).** `Set(sub, Option[Bytes])` is tag 9 and `Send(sub, Option[u32], Bytes)` is tag 10, both client to server. `Live(List[Part])` is tag 11, server to client.
-  - A Part is `{sub, complete, you, joined, states, msgs, left, gap, lost, full}`, applied in the order joined, states, msgs, left.
-  - Peer ids are minted per room from 1. Within a roster epoch they are monotonic and never reused. Peer 0 names no member, so a `Send` to it reaches no one.
-  - A `Live` frame is at most min(`LIVE_MAX`, `socket.max_frame`). The place refuses to start when one legal Part does not fit.
-  - `Live` is not content. It takes no fence, no `budget` and no `Dropped`, and no order holds between `Live` and `Batch`.
-- **Membership.** A room membership is a Subscribe to the Room entry. The Grant and any slots arrive in ordinary Batch groups. The relay admits a granted session to the roster in FIFO order. A session it cannot place gets one Part with `full`. The first Part of each membership carries `you` and `complete`.
-  - Only the owner's acceptance installs the membership token. So a `Set` or `Send` from a waiter, a deferred sub or an old membership is dropped, and a value set while waiting never becomes the member's state.
-  - The member's first state is its first `Set` after `you`.
-- **Refusals (§2.5 of the room design).**
-  - These close the session with 1002:
-    - a `Set` or `Send` naming a live sub that is not a Room;
-    - a `Set` or `Send` naming a sub id never named;
-    - S or M bytes that fail strict decode or exceed the registered bound.
-  - A `Set` or `Send` that `permits` refuses is dropped silently. So is one for a sub that is no longer live, and a `Send` to a peer that is not a member.
-  - A value whose decode exceeds the decode budget is dropped, and the sender's `lost` gains 1.
-- **Delivery.** Each receiver's ring is bounded, and overflow becomes that receiver's `gap`. Each sender's message blocks are bounded, and overflow becomes its own `lost`.
-  - A Part is at most 65536 bytes. State diffs that a maximal message held back take the first reservation on the next Part, so sustained messages do not starve roster diffs.
-  - A message waits for its sender's `joined`.
-- **Memory (MEM-20, L15).** Each owner reserves `room_session_charge` at the place's room maxima on its session limit. The blocks keep that record when they move to the relay. The start check counts that reservation inside the session ceiling, and `n_relay` must hold the relay's inbox, its tables and one room record.
-- **Idle (§7).** Rooms exist only in sessions (§14.4), and `serve` votes idle only when no owner remains.
-- **Laws (runner `runner_owner_laws.hirsel`, all green):**
-  - `first_admission_installs_adm`;
-  - `waiter_set_not_installed_after_promotion`;
-  - `direct_destination_survives_full_block`, where a `Send` to peer 0 and one to a never-minted peer reach no one;
-  - `message_delivered_under_full_state_churn`;
-  - `roster_diffs_served_under_sustained_messages`;
-  - `room_decode_capacity_reports_loss`;
-  - `room_session_charge_covers_maximum_session`;
-  - `leaving_sub_does_not_block_successor`.
-  
-  The client half is in docs/spec/sdk.md "Rooms", checked by `sdk.client:packed_consumer`.
-- **Open.** The §1.1 declarations and the §4 G2/G3 steps do not yet name rooms. §3 names the hirsel.4 tags but not the Part. This entry is the contract until they are rewritten. The bench reference server (bench/wire) has no rooms and closes a session that sends a room frame with 1007.
+Added rooms: the `Room` entry kind (Describe kind 4), its admission view returning `Grant`, the frames `Set`, `Send` and `Live` (tags 9–11) and the relay. The contract is §1.1 and §4 "Rooms" (rewritten in v2.59). A Room's `Described.result` is the codec of `(value schema, slot list, state schema, message schema, peers, state, message)`. Its `result_fp` covers the room's types and bounds, so a stale client fails at Hello. The client half is docs/spec/sdk.md "Rooms". The bench reference server (bench/wire) has no rooms and closes a session that sends a room frame with 1007.
 
 Reversible: the constants and bounds are GUESS values. The frame tags and the Part layout are part of `hirsel.4` and change only with a new subprotocol.
 
@@ -1058,18 +1033,18 @@ STORE-SPEC is at v2.8: nothing in v2.8 changes the runner. The pending v2.9 item
 
 ### 1.1 Declarations
 
-The type declarations are unchanged from v2.1 (RUN p15: accepted, and they round-trip through `std.codec.of`). Only `Outcome`'s meaning of `Abandoned` changes.
+The type declarations are v2.1's (RUN p15: accepted, and they round-trip through `std.codec.of`), plus the room declarations of v2.58 (§4 "Rooms"). Only `Outcome`'s meaning of `Abandoned` changes.
 
 ```hirsel
 // module runner (package store). Room and Bad mirror Capacity and DecodeError, which are not codec (OWN-4).
 pub type Room: codec + send { requested: u64, available: u64 }
 pub type Bad: codec + send { kind: u32, at: u64 }
-pub type Kind: codec + send = Compute | Transact | Query | Granted
+pub type Kind: codec + key + send = Compute | Transact | Query | Granted | Room   // v2.58: Room is Describe kind 4
 pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable   // v2.11.3: the last two appended
 pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone | Conflict(String)   // v2.45: Conflict at tag 4, a transact body that returned Ok after a unique Conflict (STORE-SPEC v2.57 §1.2)
 pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt   // v2.11.4: Superseded deleted (STORE AH2)
 pub type Described: codec + send { kind: Kind, identity: Bytes, args: Bytes, result: Bytes }   // v2.11.2: `result` is the schema of what `Returned` carries (Result[R, E] for transact)
-pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds   // v2.17: Bounds (an allowance sum overflows u64)
+pub type RegisterError = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds   // v2.17: Bounds (an allowance sum overflows u64); v2.58: RoomBounds (a room's bounds out of range, §4 "Rooms")
 pub type OpenError = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | PublisherStopped   // v2.17: Migrate (v2.45: `on_migrate`, `schema` in Migrate, or `seal`); v2.19.3: PublisherStopped (the publisher ended without a Halt; §3 "The release check")
 pub type Fence: shareable + send { prior: u64, latest: u64 }   // v2.19: a session's release fence (§3 "The release check")
 pub type Caller: codec + send { issuer: u8, subject: Bytes }   // not secret; subject ≤ SUBJECT_MAX; issuer 1 anonymous, later issuers take the next number (§3)
@@ -1096,6 +1071,14 @@ pub fn slot_cell[H, V: codec](mut s: Slots[H], name: String, select: StaticFn[fn
 pub fn slot_log[H, V: codec](mut s: Slots[H], name: String, select: StaticFn[fn(H) -> store.Log[V]]) -> Result[(), RegisterError]     // v2.46 (W3B-O1): a Log slot; its keys are id ‖ seq
 pub fn query[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, take A) -> Result[Answer[R], Capacity]], take s: Slots[H], n: u64, st: u64) -> Result[(), RegisterError]
 pub fn query_as[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(Tx, H, Caller, take A) -> Result[Answer[R], Capacity]], take s: Slots[H], n: u64, st: u64) -> Result[(), RegisterError]
+pub type Grant: codec + key + send = Denied | Watch | Join   // v2.58: what a room's admission view answers (§4 "Rooms")
+pub type RoomBounds: send { peers: u32, state: u32, message: u32 }   // v2.58: roster places, and the byte bounds of S and M
+pub const PEERS_MAX: u32 = 256       // v2.58: GUESS
+pub const STATE_MAX: u32 = 8192      // v2.58: GUESS
+pub const MESSAGE_MAX: u32 = 32768   // v2.58: GUESS
+pub const LIVE_MAX: u32 = 65536      // v2.58: the largest Live frame; GUESS
+pub const ROOM_ARGS_MAX: u64 = 1024  // v2.58: the largest `n` of a room; GUESS
+pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](mut r: Registry[G, H], admit: StaticFn[fn(Tx, H, Caller, take A) -> Result[Answer[Grant], Capacity]], take declarations: Slots[H], state: std.codec.Codec[S], message: std.codec.Codec[M], bounds: RoomBounds, n: u64, steps: u64) -> Result[(), RegisterError]   // v2.58: RoomBounds when peers is 0 or over PEERS_MAX, state over STATE_MAX, message over MESSAGE_MAX, n over ROOM_ARGS_MAX, or 144 + state + message over LIVE_MAX
 pub fn caller_key(c: Caller, mut out: Bytes) -> Result[(), Capacity]   // v2.15: u8 issuer ‖ u8 len ‖ subject
 pub fn granted[G: send, H: send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError]   // v2.24: the Caller
 pub type BoundCaller: send { caller: Caller, expires_at_ms: Option[u64] }   // v2.57: exclusive Unix-ms expiry, None never expires
@@ -1115,7 +1098,8 @@ pub fn mailbox(n: u64) -> Result[Mailbox, Capacity]
 pub fn post(mail: Mailbox) -> Sender[PubIn]
 pub fn place_head[G: send, H: shareable + inert + send](take db: Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], take inbox: Receiver[Req], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits
 pub fn connect[G: send, H: send](tasks: Tasks, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, head: Sender[Req], to_publisher: Sender[PubIn], take client: Sender[Down], clock: Clock, q: u64, n_session: u64) -> Result[(Sender[Event], Task[Result[(), RegisterError]]), Capacity]
-```
+```- **Rooms (v2.58).** `room` registers a `Room` entry: an admission view `admit` of `query_as`'s shape, with its slots, plus the room's codecs and bounds. `n` is both the view's byte bound and the longest argument a Subscribe may carry. The slots, the view and its key are a `query_as` view's (§3 "Shared views"). The contract is §4 "Rooms".
+
 
 - **Slot binding (v2.46, astra 1995 #11).** `place` is capability-free and runs before any store is open (rule 10), so a slot names its table through a static selector `fn(H) -> Table[K, V]`, never a `Table` value. Describe and the query key (rule 3) use only the slot's declaration-order name, its ordered key schema (`std.codec.key_of[K]()`) and its value schema (`std.codec.of[V]()`), so Describe needs no H and no open; its diagnostic `Migrate` run on an empty memory store (§5) installs nothing in the serving Registry. After the one `schema` call (rule 12), the publisher calls each selector with its share of H and checks that the returned Table's key schema and current value schema are byte-equal to the slot's, else `place_head` returns `Place(Bounds)` before it serves. Each `cover` a run records is checked against its bound slot's StoreId and table id (the incarnation, STORE-SPEC I3) before anything is enumerated; a name that is no slot, or a table that is not the bound one, ends the view like a faulted run, `Failed(Raised(5))`. So two same-typed tables can never satisfy each other's slot. A slot's image is the union of its covers, each (slot, key) emitted at most once, and its rows are the difference of two images (v2.53, §3 "Slot images").
 - **Cell and Log slots (v2.46, STORE-SPEC §14.9, open item W3B-O1).** A slot has a kind, `Table`, `Cell` or `Log`, which Describe and the query key record with its schemas (a Cell slot has no key schema; a Log slot's key is the u64 sequence). A Cell slot's row key is the Cell's id and a Log slot's is `id ‖ seq`, so `Row{slot, key, value}` carries them with no new row form, (astra 1998 #11) Binding a slot registers the declared Table's, Cell's or Log's collection id, current codec and Readers, and the publisher normalizes every stored value it publishes through them under AG3 (`published_value`, STORE-SPEC §1.5): the initial image, ordinary changes, rerun diffs and a tail's inserted rows alike, so a value stored under an older schema number reaches the wire in the current codec; a deletion stays `None`. An inline Cell has no leaf row: `span_changes` yields its descriptor's value, inline or spilled, exactly once at the Cell's id when the id is in range (STORE-SPEC §14.8). `cover_cell` and `cover_log` record ordinary Spans, each checked against its bound slot's collection id. `cover_tail(c, name, l, t)` records a **tail cover**: it is indexed on the whole Log, `Span(id, id + 1)`, because its window moves with every append and trim; the view keeps (l, t) and no rows (L20). At s it adds the keys of `tail_window(s, t)` to its slot's image (§3 "Slot images", v2.53), and the slot's rows in a round are the difference of the two images. `window_changes(a, b, l, t)` computes that difference directly only for a slot with no fixed span and the same widest t on both sides. (v2.53) Every cover of a slot names the slot's bound collection ("Slot binding"), so one slot never spans two Logs. A `cover_log` or `cover_tail` over another Log is `Failed(Raised(5))`, and a query that moves from one Log to another moves its coverage from one slot to another. (astra 1998 #4) For a Log with bounds (f, n) and t ≥ 1 the window is [n − min(t, n − f), n), so t > n and a new Log need no unsigned case.
@@ -1407,11 +1391,12 @@ Admission checks a 16 MiB per-session ceiling on pooled work. The bound includes
        - `Failed` or `Refused`: send `Ended(sub, ..)` to every subscriber and end the view. The run's partial read log stays indexed as its ended entry (§3, "Ended entries"). A subscriber whose own ledger refuses the new charge is ended alone (§3 "Admission per subscriber").
        - A `look` Error (`Foreign`): Reset. Each subscription's read set stays indexed as an ended entry. A `Reclaimed`, `Remote` or `Io` Error goes to G4 (v2.47).
      - **otherwise (a Cover-only hit):** send, per hit slot, the rows of §3 "Slot images" from the view's registration at `a` to the same registration at `b`, and an empty `value` (v2.53). For a Table or Cell slot these are the changed keys inside its covers with their values at `b`. A `Trimmed` overlapping a fixed span deletes each key of span ∩ cover that leaves the image, enumerated from `a`. A tail adds its window's symmetric difference. A key in both a fixed span and the window is sent once, and only if it leaves or enters the image or its value changes. `window_changes(a, b, l, T)` gives these rows only on §3's fast path. Neither path reruns anything or retains rows.
-  3. **Fences (v2.19, v2.19.1; v2.45: one barrier).** The publisher takes the round's `Arc`s from their reservations, then publishes `Fence{prior: old latest, latest: b}` for each session subscribed to a view with a read-set hit in step 2, a hit on an ended entry included, each session once, and then R = b once (§3 "The release check", "The publisher's order"). A Cover-only hit moves no fence. Nothing of round b is offered before this step ends.
+  3. **Fences (v2.19, v2.19.1; v2.45: one barrier).** The publisher takes the round's `Arc`s from their reservations, then publishes `Fence{prior: old latest, latest: b}` for each session subscribed to a view with a read-set hit in step 2, a hit on an ended entry included, each session once, and then R = b once (§3 "The release check", "The publisher's order"). A Cover-only hit moves no fence. Before these fences the publisher stages each joined session's room grants with version b, so a changed `Grant` takes effect with R = b (§4 "Rooms"). Nothing of round b is offered before this step ends.
   4. Each session with groups, or with outcomes from the drained Releases, gets one update for the group containing its content `{version: b, complete, groups}` (each group the view's delta or full-image bytes, spliced behind the session's `sub`; none for a due subscriber, §3 "Repair") and its `Told`s in its owner's inbox. The owner builds one Batch or Reset with one outcome row for every send still owed, including local joins and sessions without subscriptions (§3).
 - **The Caller (v2.25).** Every run of a `query_as` body, at G2's re-run, G3's Subscribe and a repair, gets the Caller in the subscription's input, which is the subscribing session's. A `query` body gets none. (v2.45) A `query_as` view is shared only by sessions whose Callers' codec bytes are equal, so the Caller a run gets is every subscriber's.
 - **G3. Subscribe** (and a v2.20 repair, §3) joins the live view of its view key with no run when the view is validated through the current base (§3 "Joining"), or makes a view and runs the query with `look` at the publisher's base (v2.45, §3 "Shared views"), and sends its full result, value and slot rows, at that version, **whole in one Batch whose `complete` names the sub, an empty result included** (v2.11, F11). No row for that sub is sent before that Batch. When several initial results each fit but do not fit together, they go in separate Batches at the same version. `Failed` or `Refused` answers `Ended` at the base, and the run's partial read log stays indexed as an ended entry (§3).
   - **The base is defined by inbox order (v2.12).** It is the version of the last `Released` the publisher took from `PubIn` before this `Subscribed`. Releases taken after it reach this subscription as G2 rounds.
+  - **A room membership (v2.58)** is a G3 Subscribe of the room's admission view with argument A, refused as §4 "Rooms" says. Its `Grant` and slot rows arrive in this Batch, and it joins the roster only through the relay (§4 "Rooms").
   - A Subscribe of a (session, sub) that is still live replaces the old subscription, with no `Ended` for the old one. Its `Subscribed` carries a new instance and is sent only while the writer holds no unit, and the owner discards the old instance's content (§3, v2.19.1).
 - **G4. A failed read (v2.47, astra 1990 #9).** A G2 round, a G3 Subscribe and a repair each **hold** what they read (rows, CoverSet, read set, encoded group) privately, and adopt it only when every read of that work succeeded. A partial `changes` is never a diff.
   - **While pipelining.** A read that fails during a pass at `Staged(v, snapshot)` only discards that staged work: no fence, no R and no Reset come from it. The round runs again when its Release arrives, and G4 applies only if a read fails there.
@@ -1480,6 +1465,95 @@ bound bytes n {
 - Rung 1 mints no token, so every `Some(token)` is unknown and is answered with `Reset`. The SDK sends `resume: None` on every Subscribe (sdk/client/README.md).
 - On a `Reset` or transport loss, the client clears the public image immediately and issues a data-free invalidation after all affected subscriptions become Pending. It ignores groups for retired ids. A new instance's first `complete` publishes an image from empty (F11). A repair's `complete` carries a full image, and the SDK publishes its difference from the current image.
 - A token that names open, version and subscription state, with bounded retention, is a later rung. Its field and its meaning are added together.
+
+**Rooms (v2.58; rewritten in v2.59 as built at 54f8dc37).** A room carries live presence between the sessions that hold a membership in it. Each member has one typed State S that every member sees, and members send addressed Messages M to the whole room or to one peer. S and M belong to the application. The runner knows only their codecs and bounds and names no application type, so the primitive stays general and domain-agnostic (Sam's ruling). Nothing in a room is stored, replayed, recorded (§7) or ordered against commits. Evidence is READ from `core/programs/runner/runner-room-relay.hirsel` and the other `runner-room*.hirsel` files unless a law is named.
+
+- **The entry and its admission view.** `runner.room` (§1.1) registers a `Room` entry: an admission view of `query_as`'s shape, plus the room's codecs and bounds. A membership is a Subscribe to that entry with argument A. The room is named by (entry, A's bytes), so sessions that subscribe with equal argument bytes share one room. The admission view is an ordinary shared view (G2, G3, §3 "Shared views"). Its `Grant` value and slot rows arrive in ordinary Batch groups, its read set fences, and a commit that changes its answer re-grants. Under rule 13 the runner makes no auth decision. It enforces the Grant the view returns, mechanically:
+
+  | Grant | holds a roster place | `Set` | `Send` to the room | `Send` to one peer | receives Parts |
+  |---|---|---|---|---|---|
+  | `Denied` | no | dropped | dropped | dropped | none |
+  | `Watch` | yes | dropped | dropped | yes | yes |
+  | `Join` | yes | yes | yes | yes | yes |
+
+- **When a grant takes effect.** Each round, the publisher stages every joined session's room grants with that round's version b. It does this after G2 step 2 and before step 3's fences. Each session has one grant register, which holds the prior set, the latest set and b. The owner and the relay read the latest set only once R ≥ b, so a grant change takes effect together with the round's fences and R = b. Changes from one round to the next:
+  - any grant to `Denied` ends the membership;
+  - `Join` to `Watch` clears the member's state;
+  - `Denied` to a grant starts a new membership with a new peer id.
+
+  A session that ends (`Left`), and a publisher `Halt`, revoke all of a session's grants.
+- **Refusals at Subscribe.** A room Subscribe is refused as any Subscribe is (§3: `max_subs`, the subscription quota), and also in these cases:
+  - an argument longer than the entry's `n`: `Ended(sub, Refused(Budget(Room{requested: |A|, available: n})))`;
+  - a ninth live room membership on one session (`ROOMS_PER_SESSION` = 8): `Refused(NotAllowed)`;
+  - an owner that cannot allocate its room state: `Refused(Budget(..))`.
+- **Admission to the roster.** One relay task per place holds every roster.
+  - **Waiting.** A granted membership waits in one FIFO across the place, ordered by when its grant took effect. The relay admits the oldest waiter whose room has a free place (`RoomBounds.peers`), or whose new roster record fits the relay's room bytes.
+  - **`full`.** A waiter the relay cannot place gets one Part with `full` set, no `you` and `complete` false, once per wait.
+  - **Admission.** On admission the relay mints the member's peer id. The membership's first Part carries `complete` and `you` (law `first_admission_installs_adm`).
+  - **Peer ids.** Ids are minted per roster, from 1, increasing, and never reused while the roster lives. Peer 0 names no member.
+  - **When ids restart.** A roster with no members and no waiters is dropped. A roster whose member count reaches 0 restarts its ids at 1. So a peer id names one membership only within one roster lifetime.
+  - **Exhaustion.** A roster whose next id reaches 2³² − 1 admits no one more, and its waiters stay `full`.
+  - **The waiter guarantee.** The owner installs a membership only when it accepts the Part that carries `you`. So a `Set` or `Send` from a waiter, from a sub not yet live or from an earlier membership is dropped. A value set while waiting never becomes the member's state. The member's first state is its first `Set` after `you` (law `waiter_set_not_installed_after_promotion`).
+- **Roster diffs.** For each roster place, a member keeps the peer id it was last told and a changed mark. A join, a leave or a state change marks that place for every member. For each place a Part includes, the Part carries:
+  - `joined`: (peer, Caller), for a peer id the receiver has not been told;
+  - `states`: (peer, the current state bytes, or `None` for no state);
+  - `left`: a told peer id that is gone.
+
+  The receiver applies `joined`, `states`, `msgs` and `left` in that order. The `complete` Part of a membership starts a new roster image of every occupied place. When that image does not fit one Part, the rest follows in later Parts. A state diff carries the current value, not each `Set`, so states coalesce and the newest wins. Every member's Caller is in `joined`, which is how a receiver knows who sent a message.
+- **Messages.**
+  - **Message blocks.** Each session owner holds `ROOM_MSG_BLOCKS` = 4 message blocks of the place's largest message bound. A `Send` takes one. With none free, the `Send` is dropped and its sender's `lost` gains 1. The relay returns a block once it has copied the message.
+  - **Targets.** The relay copies the message into each target's ring. A `Send` to the room reaches every member except the sender. A `Send` to peer p reaches only the member whose id is p. Peer 0, and an id that is not a member, reach no one (law `direct_destination_survives_full_block`). The relay checks the sender's grant and each receiver's grant at the current round.
+  - **The ring.** Each session has one receive ring of `ROOM_RING_BYTES` = 65,536 bytes, shared by all its rooms. Each message in the ring is tagged with the receiver's admission. A message that does not fit adds 1 to that receiver's `gap`. A message tagged with an earlier admission of the receiver is dropped silently.
+  - **The sender's `joined` first.** A message is delivered only once the receiver has been told the sender's id, in an earlier Part or in the same one. A message whose sender left before that is dropped, and the receiver's `gap` gains 1.
+  - **Order.** Messages from one sender to one receiver arrive in send order. No other order holds: none across senders, and none between `Live` and `Batch`.
+- **Delivery under a full block.**
+  - **Buffers.** Each session has two Live buffers, each of min(`LIVE_MAX`, `socket.max_frame`) bytes. When a buffer is free, the relay fills it with at most one Part per room that has something to send, round-robin over the session's rooms.
+  - **A blocked write.** While a write is blocked, its buffer stays held and the relay fills only the other one. Messages that arrive meanwhile wait in the ring, and overflow becomes `gap`.
+  - **What a Part takes first.** A Part first reserves room for the oldest deliverable message and its sender's diff, then fills with other diffs. When a maximum message leaves too little room for the next diff, that diff takes the first reservation in the next Part. So sustained messages never starve roster diffs (laws `message_delivered_under_full_state_churn`, `roster_diffs_served_under_sustained_messages`).
+  - **`Live` is not content.** It takes no fence, no `budget` and no `Dropped`. When the owner takes a filled buffer, it drops every Part whose membership the session's grant register, read at R, no longer holds. So a member is sent no Part after the round that revoked it is published.
+- **Decode capacity and loss.** The owner checks each `Set` and `Send` against the room's codecs.
+  - These close the session with 1002:
+    - bytes over the registered `state` or `message` bound;
+    - bytes that fail strict decode;
+    - a `Set` or `Send` that names a live sub that is not a room;
+    - a sub id never named.
+  - A decode runs in an isolate under `bound bytes 2·|bytes| + 4096`. A decode that exhausts that bound is dropped, the sender's `lost` gains 1, and the sub stays live (law `room_decode_capacity_reports_loss`).
+  - These are dropped silently:
+    - a `Set` or `Send` the grant does not permit (the table above);
+    - one for a retired sub id;
+    - one from a session that is not yet a member;
+    - a `Send` to peer 0 or to a non-member.
+  - `gap` counts messages to this member that were dropped. `lost` counts messages and values from this member that were dropped. Each is counted since the membership's last Part, is reset when a Part carries it, and saturates at 2³² − 1.
+- **Frames.**
+  - **Client to server.** `Set(sub, Option[Bytes])` has tag 9 and `Send(sub, Option[u32], Bytes)` has tag 10.
+  - **Server to client.** `Live(List[Part])` has tag 11. A `Part` is `{sub: u32, complete: bool, you: Option[u32], joined: List[(u32, Caller)], states: List[(u32, Option[Bytes])], msgs: List[(u32, bool, Bytes)], left: List[u32], gap: u32, lost: u32, full: bool}`. In `msgs`, the bool marks a direct send.
+  - **Size.** A `Live` frame is at most min(`LIVE_MAX`, `socket.max_frame`) bytes. A Part with a maximal state and a maximal message needs 144 + `state` + `message` bytes. If that does not fit, the place refuses to start with `Exceeds(Bound("socket.max_frame", ..))`.
+  - **Vectors.** Law `frame_sizer_matches_vectors` pins the `Set`, `Send` and `Live` encodings against `core/programs/runner/frame-vectors.json`.
+- **Session charging (MEM-20, L15).**
+  - **The owner.** When `n_relay` > 0, every owner task is spawned with `room_session_charge`, computed at the runner-wide maxima (`STATE_MAX`, `MESSAGE_MAX`, `PEERS_MAX`, `LIVE_MAX`). That charge covers:
+    - the desk with its two Live buffers and its ring;
+    - the four message blocks;
+    - one largest decode;
+    - `ROOMS_PER_SESSION` memberships of the largest room.
+
+    The blocks keep the owner's record when they move to the relay. The start check counts this reservation inside the session ceiling (`WIRE_SESSION_CEILING`), and `serving_bytes` counts it in each owner's floor (law `room_session_charge_covers_maximum_session`).
+  - **The relay.** `n_relay` must hold the relay's inbox, `ROOM_RELAY_TOKENS` per session, its desk table, and one roster at `ROOM_ARGS_MAX` and the place's largest `peers`. Otherwise the place refuses to start and names `n_relay`. Each roster is charged against the rest of `n_relay`. A room whose roster cannot be charged leaves its waiters `full`.
+  - **The admission view.** It is charged on the session's `budget` ledger like any subscription.
+- **Leaving.** A membership ends on `Unsubscribe`, on a grant of `Denied`, or when the session ends. The relay frees the place and marks it changed, so every other member gets `left`. A room sub that is leaving does not block its successor (law `leaving_sub_does_not_block_successor`). Rooms exist only in sessions (§14.4), so `serve` votes idle only when no owner remains. A bound session's expiry ends its memberships with the session (L62).
+- **Not specified here.** A membership revision on the wire, a room incarnation and a kick API are new design that goes with runner slice R1 of docs/spec/webrtc.md ("Build slices"); until R1 lands, an application kicks by changing what its admission view answers.
+- **Constants** (GUESS values; changing one changes `hirsel.4` only where it bounds a frame): `PEERS_MAX` 256, `STATE_MAX` 8,192, `MESSAGE_MAX` 32,768, `LIVE_MAX` 65,536, `ROOM_ARGS_MAX` 1,024, `ROOMS_PER_SESSION` 8, `ROOM_MSG_BLOCKS` 4, `ROOM_RING_BYTES` 65,536.
+- **The nine room laws** (RUN, green at 54f8dc37; all in `core/programs/runner/runner_owner_laws.hirsel` except the vector law, which is in `core/programs/runner/runner-wire-protocol-law.hirsel`):
+  1. `first_admission_installs_adm`: the first member gets peer 1 and the second peer 2, each in a `complete` Part with `you`. A broadcast reaches the other member once. A third session gets `full`, and on a leave it is promoted as peer 3, whose broadcast then arrives once.
+  2. `waiter_set_not_installed_after_promotion`: a waiter's `Set` before promotion is never shown. An observer sees the promoted peer's state as `None`, then the value set after `you`.
+  3. `direct_destination_survives_full_block`: two direct sends of a maximal message each reach their own peer once and no one else. Sends to peer 0 and to an id that is not a member reach no one.
+  4. `message_delivered_under_full_state_churn`: one buffer is held, then eight maximal states and one maximal message arrive. The message is delivered with three state diffs and `gap` 0. The oracle is hand-derived: 65,536 − 42 − 32,777 bytes holds three 8,204-byte diffs.
+  5. `roster_diffs_served_under_sustained_messages`: a maximal message is always pending, and all eight pending diffs still arrive within two Parts.
+  6. `room_decode_capacity_reports_loss`: a `Set` whose decode exceeds its bound reports `lost` = 1, and the sub stays live.
+  7. `room_session_charge_covers_maximum_session`: eight maximal memberships, the desk, the message blocks and one largest decode all fit inside the reservation.
+  8. `leaving_sub_does_not_block_successor`: a waiting removal comes before its one charged successor, an excess Subscribe is refused, and an idle removal makes progress. A `Set` or `Send` naming an unnamed id closes with 1002.
+  9. `frame_sizer_matches_vectors`: the hand-packed `hirsel.4` vectors, `Set`, `Send` and `Live` among them, and the 48-byte Done size.
+
+  The client half is docs/spec/sdk.md "Rooms", checked by `sdk.client:packed_consumer`.
 
 ## 5. Exported entries, the generator and non-termination
 

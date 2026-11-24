@@ -2175,15 +2175,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 return None;
             }
         };
-        let value = match r {
-            Rep::None => return Some(()),
+        match r {
             Rep::Scalar(t) => {
                 let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Value(t), n);
-                self.read_bits(at, t, n)
+                let value = self.read_bits(at, t, n);
+                self.inst(Inst::Store { address: to, value }, n);
             }
-            Rep::Place(_) => pointer,
-        };
-        self.install(to, r, Some(value), n);
+            Rep::Place(id) if self.live() => self.copy_bytes_to(to, pointer, id, n),
+            Rep::None | Rep::Place(_) => {}
+        }
         Some(())
     }
     pub(super) fn snapshot(&mut self, from: ValueId, id: TypeId, n: NodeId) -> ValueId {

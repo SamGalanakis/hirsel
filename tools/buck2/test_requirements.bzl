@@ -29,6 +29,7 @@ OPENAT2_TEST_CASES = {
         "host_ops_tests::every_host_op_routes_to_the_host_and_records_delivery",
         "provider_tests::files_deliver_committed_prefixes_and_all_open_modes",
         "host_file_tests::slot_ring_open_stat_and_close_need_no_helper",
+        "host_file_tests::slot_ring_writes_report_progress_and_preserve_positioned_cursor",
         "provider_tests::rule_provider_tests::cap7_temporary_dir_never_widens_its_parent_authority",
         "provider_tests::guarded_root_routes_real_os_calls_through_the_separate_host_stack",
         "provider_tests::locks_are_exclusive_idempotent_and_end_at_close",

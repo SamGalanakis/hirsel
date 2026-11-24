@@ -298,31 +298,74 @@ fn run_stop_skips_host_file_cleanup_and_kernel_releases_the_descriptor() {
     );
 }
 
-#[test]
-fn slot_ring_open_stat_and_close_need_no_helper() {
+fn slot_file_child(case: &str) -> bool {
+    const CHILD: &str = "HIRSEL_SLOT_FILE_LAW_CHILD";
+    crate::openat2_required::require();
+    if std::env::var_os(CHILD).is_some() {
+        return true;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", case])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
+
+fn slot_file_fixture<T: Send>(
+    directory: File,
+    run: impl Fn(&mut crate::provider_tests::Fixture) -> T + Sync,
+) -> T {
     use crate::{
         abi::{hirsel_core_context_new, hirsel_core_task_start},
         os::OsProvider,
         provider_tests::Fixture,
     };
 
-    crate::openat2_required::require();
-    const CHILD: &str = "HIRSEL_SLOT_FILE_LAW_CHILD";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "host_file_tests::slot_ring_open_stat_and_close_need_no_helper",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let result = std::sync::Mutex::new(None);
+    // SAFETY: the launcher reads no fields of this fixture's configuration.
+    let config = unsafe { std::mem::zeroed() };
+    let status = crate::units::launch(1, 1, &config, &|_| {
+        let mut os = OsProvider::from_streams(None, None);
+        let dir = os.adopt_directory(directory.try_clone().unwrap().into());
+        let context = hirsel_core_context_new(1 << 20);
+        // SAFETY: fixture exclusively owns this fresh context.
+        assert!(!unsafe { hirsel_core_task_start(context) }.pointer.is_null());
+        let mut fixture = Fixture {
+            root: tempfile::tempdir().unwrap(),
+            os,
+            dir,
+            context,
+        };
+        let value = run(&mut fixture);
+        *result.lock().unwrap() = Some(value);
+        0
+    });
+    assert_eq!(status, 0);
+    result.into_inner().unwrap().unwrap()
+}
+
+fn check_file_backend() {
+    let expected_helper = hirsel_core_net::reactor().unwrap() == hirsel_core_net::Reactor::Epoll;
+    let helper = std::fs::read_dir("/proc/self/task").unwrap().any(|task| {
+        std::fs::read_to_string(task.unwrap().path().join("comm"))
+            .is_ok_and(|comm| comm.trim_end() == "hirsel-host")
+    });
+    assert_eq!(
+        helper, expected_helper,
+        "file operations used the wrong backend"
+    );
+}
+
+#[test]
+fn slot_ring_open_stat_and_close_need_no_helper() {
+    if !slot_file_child("host_file_tests::slot_ring_open_stat_and_close_need_no_helper") {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -332,39 +375,19 @@ fn slot_ring_open_stat_and_close_need_no_helper() {
     std::fs::write(granted.join("file"), b"contents").unwrap();
     std::os::unix::fs::symlink("../outside", granted.join("escape")).unwrap();
     let directory = File::open(granted).unwrap();
-    let expected_helper = hirsel_core_net::reactor().unwrap() == hirsel_core_net::Reactor::Epoll;
-    let outcomes = std::sync::Mutex::new(None);
-    // SAFETY: the launcher reads no fields of this fixture's configuration.
-    let config = unsafe { std::mem::zeroed() };
-    assert_eq!(
-        crate::units::launch(1, 1, &config, &|_| {
-            let mut os = OsProvider::from_streams(None, None);
-            let dir = os.adopt_directory(directory.try_clone().unwrap().into());
-            let context = hirsel_core_context_new(1 << 20);
-            // SAFETY: fixture exclusively owns this fresh context.
-            assert!(!unsafe { hirsel_core_task_start(context) }.pointer.is_null());
-            let mut f = Fixture {
-                root: tempfile::tempdir().unwrap(),
-                os,
-                dir,
-                context,
-            };
-            let file = f.open(b"file", 0);
-            let by_path = f.simple(STAT, dir, b"file", 0);
-            let by_handle = f.simple(STAT_FILE, file, b"", 0);
-            let link = f.simple(STAT, dir, b"escape", 0);
-            let escape = f.simple(OPEN, dir, b"escape", 0);
-            let fd = f.os.file_descriptor(file);
-            let close = f.simple(CLOSE, file, b"", 0);
-            // SAFETY: F_GETFD inspects the descriptor number without taking ownership.
-            let closed = unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF);
-            *outcomes.lock().unwrap() = Some((by_path, by_handle, link, escape, close, closed));
-            0
-        }),
-        0
-    );
-    let (by_path, by_handle, link, escape, close, closed) = outcomes.into_inner().unwrap().unwrap();
+    let (by_path, by_handle, link, escape, close, closed) = slot_file_fixture(directory, |f| {
+        let file = f.open(b"file", 0);
+        let by_path = f.simple(STAT, f.dir, b"file", 0);
+        let by_handle = f.simple(STAT_FILE, file, b"", 0);
+        let link = f.simple(STAT, f.dir, b"escape", 0);
+        let escape = f.simple(OPEN, f.dir, b"escape", 0);
+        let fd = f.os.file_descriptor(file);
+        let close = f.simple(CLOSE, file, b"", 0);
+        // SAFETY: F_GETFD inspects the descriptor number without taking ownership.
+        let closed = unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF);
+        (by_path, by_handle, link, escape, close, closed)
+    });
     assert_eq!(
         (by_path.error, by_path.kind, by_path.value),
         (IoError::OK, 0, 8)
@@ -377,12 +400,46 @@ fn slot_ring_open_stat_and_close_need_no_helper() {
     assert_eq!(escape.error.tag, 2);
     assert_eq!(close.error, IoError::OK);
     assert!(closed);
-    let helper = std::fs::read_dir("/proc/self/task").unwrap().any(|task| {
-        std::fs::read_to_string(task.unwrap().path().join("comm"))
-            .is_ok_and(|comm| comm.trim_end() == "hirsel-host")
+    check_file_backend();
+}
+
+#[test]
+fn slot_ring_writes_report_progress_and_preserve_positioned_cursor() {
+    if !slot_file_child(
+        "host_file_tests::slot_ring_writes_report_progress_and_preserve_positioned_cursor",
+    ) {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let directory = File::open(root.path()).unwrap();
+    let (at, cursor, refusal) = slot_file_fixture(directory, |f| {
+        let file = f.open(b"file", 1);
+        let mut positioned_bytes = *b"XYZ";
+        let mut cursor_bytes = *b"ab";
+        let mut refusal_bytes = *b"fail";
+        let at = f
+            .call(
+                WRITE_AT,
+                file,
+                &2u64.to_le_bytes(),
+                1,
+                &mut positioned_bytes,
+                3,
+            )
+            .0;
+        let cursor = f.call(WRITE, file, b"", 0, &mut cursor_bytes, 2).0;
+        let _ = f.simple(CLOSE, file, b"", 0);
+        let readonly = f.open(b"file", 0);
+        let refusal = f.call(WRITE, readonly, b"", 0, &mut refusal_bytes, 4).0;
+        let _ = f.simple(CLOSE, readonly, b"", 0);
+        (at, cursor, refusal)
     });
+    assert_eq!((at.error, at.written), (IoError::OK, 3));
+    assert_eq!((cursor.error, cursor.written), (IoError::OK, 2));
     assert_eq!(
-        helper, expected_helper,
-        "file operations used the wrong backend"
+        (refusal.error, refusal.written),
+        (IoError::from_errno(libc::EBADF), 0)
     );
+    assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"abXYZ");
+    check_file_backend();
 }

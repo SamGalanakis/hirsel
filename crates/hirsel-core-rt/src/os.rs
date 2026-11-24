@@ -7,6 +7,7 @@ mod metadata;
 mod path;
 mod random;
 pub(crate) mod temp;
+mod write;
 use listing::Listing;
 use metadata::{stat, zero_extension};
 pub(crate) use path::open_beneath;
@@ -22,6 +23,8 @@ use std::{
 };
 #[cfg(test)]
 pub(crate) use temp::TEMP_ATTEMPTS;
+pub(crate) use write::write_all;
+use write::write_request;
 
 pub(crate) type IssueFile = unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome;
 /// Queue a SYNC or SYNC_DIR on the sync helper; None for a handle this
@@ -846,7 +849,9 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
         // Waiting is owned by the scheduler; issue completes at once.
         SLEEP_UNTIL | SLEEP_UNTIL_WALL => return Outcome::default(),
         RANDOM => return random::issue(unsafe { &mut *request }),
-        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE if crate::units::uses_file_ring() => {
+        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | WRITE | WRITE_AT
+            if crate::units::uses_file_ring() =>
+        {
             // SAFETY: the request is pinned until the CQE completes.
             return unsafe { issue_now(state, request) };
         }
@@ -944,75 +949,11 @@ fn request_outcome(result: io::Result<Outcome>) -> Outcome {
     })
 }
 
-fn write_request(fd: i32, request: &Request) -> Outcome {
-    let bytes = if request.buffer.len == 0 {
-        &[]
-    } else {
-        // SAFETY: the caller pins the readable input bytes through delivery.
-        unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
-    };
-    let offset = (request.operation == WRITE_AT).then(|| request.offset());
-    write_all_from(fd, bytes, offset)
-}
-
 fn syscall(rc: isize) -> io::Result<isize> {
     if rc < 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(rc)
-    }
-}
-pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
-    write_all_from(fd, bytes, None)
-}
-
-fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>) -> Outcome {
-    let mut written = 0;
-    while written < bytes.len() {
-        // SAFETY: live descriptor and remaining readable bytes.
-        let n = unsafe {
-            let data = bytes[written..].as_ptr().cast();
-            let len = bytes.len() - written;
-            match offset {
-                Some(at) => {
-                    let Some(at) = at
-                        .checked_add(written as u64)
-                        .and_then(|n| i64::try_from(n).ok())
-                    else {
-                        return Outcome {
-                            written: written as u64,
-                            error: IoError::from_errno(libc::EFBIG),
-                            ..Outcome::default()
-                        };
-                    };
-                    libc::pwrite(fd, data, len, at)
-                }
-                None => libc::write(fd, data, len),
-            }
-        };
-        if n < 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Outcome {
-                written: written as u64,
-                error: IoError::from_errno(error.raw_os_error().unwrap_or(libc::EIO)),
-                ..Outcome::default()
-            };
-        }
-        if n == 0 {
-            return Outcome {
-                written: written as u64,
-                error: IoError::from_errno(libc::EIO),
-                ..Outcome::default()
-            };
-        }
-        written += n as usize;
-    }
-    Outcome {
-        written: written as u64,
-        ..Outcome::default()
     }
 }
 

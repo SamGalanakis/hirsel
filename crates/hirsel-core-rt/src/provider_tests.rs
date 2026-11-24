@@ -25,7 +25,7 @@ impl Fixture {
             context,
         }
     }
-    fn call(
+    pub(super) fn call(
         &mut self,
         op: u8,
         handle: u64,

@@ -1,0 +1,202 @@
+pub opaque type Migration {
+    plan: SchemaPlan,
+    tiered: bool
+}
+
+type SchemaPlan: send {
+    store: StoreId,
+    roots: Roots,
+    next_node: u64,
+    next_table: u32,
+    live: u64,
+    ceiling: u64,
+    retained: bool,
+    changed: bool,
+    bindings: List[IndexRegistration],
+    preview: Option[List[MigrationBackfill]]
+}
+
+fn schema_plan(db: Db) -> SchemaPlan {
+    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node, next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new(), preview: None)
+}
+
+fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
+    over_ceiling(live_bytes, plan.ceiling)?
+    plan.roots = take roots
+    plan.live = live_bytes
+    plan.next_table = next_table
+    plan.changed = true
+    Ok(())
+}
+
+fn application_name(name: String) -> Result[(), Error] {
+    if std.string.starts_with(name, "hirsel.") {
+        return Error(Exists("reserved"))
+    }
+    Ok(())
+}
+
+type MigrationJob: send {
+    plan: SchemaPlan,
+    tiered: bool,
+    configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits],
+    answer: Sender[Result[SchemaPlan, Error]]
+}
+
+fn prepare_migration(take job: MigrationJob) -> () waits {
+    let MigrationJob(plan: take plan, tiered: tiered, configure: configure, answer: take answer) = take job
+    let mut working = Migration(plan: take plan, tiered: tiered)
+    let result = (code.callable(configure))(mut working)
+    let completed: Result[SchemaPlan, Error] = match take result {
+        Ok(()) => {
+            let Migration(plan: take committed, ..) = take working
+            Ok(take committed)
+        },
+        Error(take problem) => Error(take problem)
+    }
+    let _ = channel.send(answer, take completed)
+}
+
+pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
+    healthy(db)?
+    let plan = stage_migration_plan(db, tasks, configure, schema_plan(db))?
+    Ok(StagedMigration(base: declaration_base(db), plan: take plan, declared: false))
+}
+
+fn stage_migration_plan(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits], take plan: SchemaPlan) -> Result[SchemaPlan, Error] waits {
+    let (answer, from): (Sender[Result[SchemaPlan, Error]], Receiver[Result[SchemaPlan, Error]]) = channel.new(1)
+    let job = MigrationJob(plan: take plan, tiered: store_has_tiered(db), configure: configure, answer: take answer)
+    // The callback can wait, so its fault boundary is a task (FAIL-14).
+    // An empty task result costs 288 B (MEM-24). Use the parent's remaining
+    // grant for this phase and release the unused portion before the cut.
+    let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, prepare_migration)
+    let running = match take first {
+        Ok(take handle) => take handle,
+        Error((c, take returned)) => {
+            if c.available < 288 {
+                return Error(Full(Allocation(c)))
+            }
+            task.spawn(tasks, bytes (c.available - 288), take returned, prepare_migration)
+        },
+    }
+    match task.join(take running) {
+        Ok(()) => (),
+        Error(Failed(causes)) => return Error(match raised_capacity(causes) {
+            Some(c) => Full(Allocation(c)),
+            None => MigrationFault,
+        }),
+        Error(Cancelled(_)) => return Error(MigrationFault),
+    }
+    result.unwrap(channel.receive(from))
+}
+
+pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[(), Error] waits {
+    let StagedMigration(plan: take plan, ..) = stage_migration(db, tasks, configure)?
+    if plan.changed {
+        let _ = publish_schema_plan(mut db, take plan)?
+    } else {
+        let SchemaPlan(bindings: take bindings, ..) = take plan
+        for take schema_binding in take bindings {
+            register_index(mut db.indexes, take schema_binding)
+        }
+    }
+    Ok(())
+}
+
+pub type ConflictKeys: send {
+    first: Bytes,
+    second: Bytes
+}
+
+pub type BackfillOutcome: send = Filled | Conflict(ConflictKeys)
+
+pub type MigrationBackfill: send {
+    table: String,
+    index: Option[String],
+    read: u64,
+    written: u64,
+    outcome: BackfillOutcome
+}
+
+pub type MigrationChange = CollectionAdded(DeclaredCollection) | CollectionDropped(DeclaredCollection) | CollectionRenamed(DeclaredCollection, String)
+
+pub type MigrationPreview {
+    changes: List[MigrationChange],
+    backfills: List[MigrationBackfill],
+    failure: Option[Error]
+}
+
+// Run the ordinary migration operations against shared roots. Only the
+// diagnostics leave this function. No staged roots can be installed.
+pub fn preview_migration[H](db: Db, tasks: Tasks, configure: Option[StaticFn[fn(mut Migration) -> Result[(), Error] waits]],
+    schema: StaticFn[fn(mut Declare) -> Result[H, Error]]) -> Result[MigrationPreview, Error] waits {
+    healthy(db)?
+    require_memory_collections(store_has_tiered(db), Migrate)?
+    let mut plan = schema_plan(db)
+    plan.preview = Some(list.new())
+    let ready = match configure {
+        Some(callback) => stage_migration_plan(db, tasks, callback, take plan)?,
+        None => take plan,
+    }
+    let mut declared = new_declaration(Migrate, declaration_base(db), take ready, is_disk(db))
+    let checked = match (code.callable(schema))(mut declared) {
+        Ok(_) => complete_declaration(declared),
+        Error(take problem) => Error(take problem),
+    }
+    let failure: Option[Error] = match take checked {
+        Ok(()) => None,
+        Error(take problem) => Some(take problem),
+    }
+    let catalog_delta = preview_catalog_changes(db.heads[0].roots.catalog, declared.plan.roots.catalog)?
+    let Declare(plan: SchemaPlan(preview: take records, ..), ..) = take declared
+    Ok(MigrationPreview(changes: take catalog_delta, backfills: option.unwrap(take records), failure: take failure))
+}
+
+fn catalog_collection_name(key: Bytes, kind: u8) -> Result[String, Error] {
+    let start = if kind == 2u8 { 5u64 } else { 1u64 }
+    Ok(string.from_utf8(copied(list.slice(key, start, list.len(key)))?) ?=> |_| malformed(0u64))
+}
+
+fn catalog_descriptions(catalog: PageTree) -> Result[List[DeclaredCollection], Error] {
+    let mut rows = open_page_range(catalog, None, true, false, None)?
+    let mut descriptions: List[DeclaredCollection] = list.new()
+    while let Some((key, raw)) = next_page_range(mut rows)? {
+        let stored = decode_catalog(raw)?
+        let name = catalog_collection_name(key, stored.kind)?
+        list.push(mut descriptions, DeclaredCollection(name: take name, id: stored.id, owner: stored.owner, kind: stored.kind))
+    }
+    Ok(take descriptions)
+}
+
+fn catalog_positions(descriptions: List[DeclaredCollection]) -> Map[u32, u64] {
+    let mut positions: Map[u32, u64] = map.new()
+    for i in 0u64 .. list.len(descriptions) {
+        map.insert(mut positions, descriptions[i].id, i)
+    }
+    take positions
+}
+
+fn preview_catalog_changes(before: PageTree, after: PageTree) -> Result[List[MigrationChange], Error] {
+    let old = catalog_descriptions(before)?
+    let new = catalog_descriptions(after)?
+    let old_positions = catalog_positions(old)
+    let new_positions = catalog_positions(new)
+    let mut catalog_delta: List[MigrationChange] = list.new()
+    for previous in old {
+        match map.get(new_positions, previous.id) {
+            None => list.push(mut catalog_delta, CollectionDropped(clone(previous))),
+            Some(i) => {
+                let current = new[i]
+                if previous.name != current.name {
+                    list.push(mut catalog_delta, CollectionRenamed(clone(previous), clone(current.name)))
+                }
+            },
+        }
+    }
+    for current in new {
+        if !map.contains(old_positions, current.id) {
+            list.push(mut catalog_delta, CollectionAdded(clone(current)))
+        }
+    }
+    Ok(take catalog_delta)
+}

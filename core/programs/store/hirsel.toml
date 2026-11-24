@@ -65,6 +65,7 @@ std = { major = 1 }
 "store-tiered-refusals.hirsel" = "store"
 "store-index-registry.hirsel" = "store"
 "store-declare.hirsel" = "store"
+"store-migration.hirsel" = "store"
 "store-projector.hirsel" = "store"
 "store-read.hirsel" = "store"
 "store-read-pages.hirsel" = "store"

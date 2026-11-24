@@ -681,3 +681,46 @@ fn test_follower_projector_floor(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     if list.len(destination.pins) != 0 { return Error(MigrationFault) }
     Ok(())
 }
+
+fn preview_law_schema(mut d: Declare) -> Result[(), Error] {
+    let key = std.codec.key_u64()
+    let mut rows = declare_table(mut d, "rows", key, std.codec.of_u64())?
+    let _ = index(mut d, mut rows, "unique", Unique, code.describe(backfill_keys), key)?
+    let _ = finish(mut d, take rows)?
+    Ok(())
+}
+
+@test
+fn test_migration_preview_conflict(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, directory, c, r, options)?
+    let mut initial = declare(db, Migrate)?
+    let declared = declare_table(mut initial, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut initial, take declared)?
+    let _ = seal(mut db, take initial)?
+    let saved = run(mut db, None, rows, fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 9u64, 22u64)?
+        put(mut tx, t, 3u64, 22u64)?
+        put(mut tx, t, 5u64, 17u64)
+    })?
+    let Committed(done) = saved else { return Error(MigrationFault) }
+    durable(mut db, done.ticket)?
+    let before = refusal_directory(directory)
+    let head = version(snapshot(db))
+    let result = preview_migration(db, tasks, None, code.describe(preview_law_schema))?
+    if let Some(_) = result.failure { return Error(MigrationFault) }
+    if list.len(result.changes) != 1u64 || list.len(result.backfills) != 1u64 {
+        return Error(MigrationFault)
+    }
+    let CollectionAdded(added) = result.changes[0] else { return Error(MigrationFault) }
+    let backfill = result.backfills[0]
+    let Conflict(keys) = backfill.outcome else { return Error(MigrationFault) }
+    if added.kind != 2u8 || added.name != "unique" || backfill.table != "rows" ||
+        backfill.index != Some("unique") || backfill.read != 3u64 || backfill.written != 2u64 ||
+        keys.first != b"\x00\x00\x00\x00\x00\x00\x00\x03" || keys.second != b"\x00\x00\x00\x00\x00\x00\x00\x09" ||
+        head != version(snapshot(db)) || !refusal_directory_unchanged(directory, before) {
+        return Error(MigrationFault)
+    }
+    Ok(())
+}

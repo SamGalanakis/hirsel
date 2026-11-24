@@ -195,6 +195,7 @@ fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, 
         Some(root) => arc.share(root),
         None => return Error(Stale(t.id)),
     }
+    let (read, _) = std.page.totals(source)
     let mut rows = std.page.cursor_open(source, None, true, false)
     let mut runs: List[List[std.page.Row]] = list.new()
     let mut done = false
@@ -219,15 +220,24 @@ fn stage_index_backfill[K, V](mut plan: SchemaPlan, t: Table[K, V], key: Bytes, 
             list.push(mut runs, take chunk)
         }
     }
-    let backfill = merge_index_runs(take runs, record.index_kind, name)?
+    let mut outcome: BackfillOutcome = Filled
+    let preview = if let Some(_) = plan.preview { true } else { false }
+    let backfill = merge_index_runs(take runs, record.index_kind, name, preview, mut outcome, mut live_bytes)?
+    let written = list.len(backfill)
     let mut roots = share_roots(plan.roots)
     bulk_store_collection(mut roots.collections, record.id, 2, backfill, mut plan.next_node)?
     roots = catalog_insert(mut plan.next_node, roots, key, raw)?
     roots = catalog_insert(mut plan.next_node, roots, t.catalog_key, changed)?
-    keep_schema(mut plan, take roots, live_bytes, next_table)
+    keep_schema(mut plan, take roots, live_bytes, next_table)?
+    if let Some(mut backfills) = plan.preview {
+        let table_name = catalog_collection_name(t.catalog_key, 1u8)?
+        list.push(mut backfills, MigrationBackfill(table: take table_name, index: Some(clone(name)), read: read, written: written, outcome: take outcome))
+    }
+    Ok(())
 }
 
-fn merge_index_runs(take runs: List[List[std.page.Row]], kind: IndexKind, name: String) -> Result[List[std.page.Row], Error] {
+fn merge_index_runs(take runs: List[List[std.page.Row]], kind: IndexKind, name: String, preview: bool,
+    mut outcome: BackfillOutcome, mut live_bytes: u64) -> Result[List[std.page.Row], Error] {
     let mut sorted = take runs
     let mut pending_rows: Heap[(Bytes, u64, u64)] = heap.new()
     for i in 0u64 .. list.len(sorted) {
@@ -235,18 +245,30 @@ fn merge_index_runs(take runs: List[List[std.page.Row]], kind: IndexKind, name: 
     }
     let mut out: List[std.page.Row] = list.new()
     while let Some((take key, chunk, at)) = heap.pop(mut pending_rows) {
-        if let Unique = kind {
-            let written = list.len(out)
-            if written > 0 && out[written - 1].key == key {
-                return Error(Conflict(named(name)?))
-            }
+        let written = list.len(out)
+        let duplicate = match kind {
+            Unique => written > 0 && out[written - 1].key == key,
+            Many => false,
         }
+        if duplicate && !preview { return Error(Conflict(named(name)?)) }
         let row = list.set(mut sorted[chunk], at, std.page.Row(key: list.new(), value: list.new(), charge: 0))
-        list.push(mut out, take row)
         let following = at + 1
         if following < list.len(sorted[chunk]) {
             heap.push(mut pending_rows, (copied(sorted[chunk][following].key)?, chunk, following))
         }
+        if duplicate {
+            if let Filled = outcome {
+                let prior = out[written - 1].value
+                let first = copied(list.slice(prior, 4, unique_owner_end(prior)?))?
+                let second = copied(list.slice(row.value, 4, unique_owner_end(row.value)?))?
+                outcome = Conflict(ConflictKeys(first: take first, second: take second))
+            }
+            // The scratch index retains one row per index key so the next
+            // declaration can still run and report its own conflict.
+            live_bytes -= row.charge
+            continue
+        }
+        list.push(mut out, take row)
     }
     Ok(take out)
 }

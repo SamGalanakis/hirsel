@@ -3223,105 +3223,6 @@ fn remove_store_collection(mut tree: PageTree, id: u32, mut final_item: u64) -> 
     Ok(charge)
 }
 
-pub opaque type Migration {
-    plan: SchemaPlan,
-    tiered: bool
-}
-
-type SchemaPlan: send {
-    store: StoreId,
-    roots: Roots,
-    next_node: u64,
-    next_table: u32,
-    live: u64,
-    ceiling: u64,
-    retained: bool,
-    changed: bool,
-    bindings: List[IndexRegistration]
-}
-
-fn schema_plan(db: Db) -> SchemaPlan {
-    SchemaPlan(store: db.store, roots: share_roots(db.heads[0].roots), next_node: db.next_node, next_table: db.next_table, live: db.resident, ceiling: db.ceiling, retained: retaining(db), changed: false, bindings: list.new())
-}
-
-fn keep_schema(mut plan: SchemaPlan, take roots: Roots, live_bytes: u64, next_table: u32) -> Result[(), Error] {
-    over_ceiling(live_bytes, plan.ceiling)?
-    plan.roots = take roots
-    plan.live = live_bytes
-    plan.next_table = next_table
-    plan.changed = true
-    Ok(())
-}
-
-fn application_name(name: String) -> Result[(), Error] {
-    if std.string.starts_with(name, "hirsel.") {
-        return Error(Exists("reserved"))
-    }
-    Ok(())
-}
-
-type MigrationJob: send {
-    plan: SchemaPlan,
-    tiered: bool,
-    configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits],
-    answer: Sender[Result[SchemaPlan, Error]]
-}
-
-fn prepare_migration(take job: MigrationJob) -> () waits {
-    let MigrationJob(plan: take plan, tiered: tiered, configure: configure, answer: take answer) = take job
-    let mut working = Migration(plan: take plan, tiered: tiered)
-    let result = (code.callable(configure))(mut working)
-    let completed: Result[SchemaPlan, Error] = match take result {
-        Ok(()) => {
-            let Migration(plan: take committed, ..) = take working
-            Ok(take committed)
-        },
-        Error(take problem) => Error(take problem)
-    }
-    let _ = channel.send(answer, take completed)
-}
-
-pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[StagedMigration, Error] waits {
-    healthy(db)?
-    let (answer, from): (Sender[Result[SchemaPlan, Error]], Receiver[Result[SchemaPlan, Error]]) = channel.new(1)
-    let job = MigrationJob(plan: schema_plan(db), tiered: store_has_tiered(db), configure: configure, answer: take answer)
-    // The callback can wait, so its fault boundary is a task (FAIL-14).
-    // An empty task result costs 288 B (MEM-24). Use the parent's remaining
-    // grant for this phase and release the unused portion before the cut.
-    let first = task.try_spawn(tasks, bytes 18446744073709551327u64, take job, prepare_migration)
-    let running = match take first {
-        Ok(take handle) => take handle,
-        Error((c, take returned)) => {
-            if c.available < 288 {
-                return Error(Full(Allocation(c)))
-            }
-            task.spawn(tasks, bytes (c.available - 288), take returned, prepare_migration)
-        },
-    }
-    match task.join(take running) {
-        Ok(()) => (),
-        Error(Failed(causes)) => return Error(match raised_capacity(causes) {
-            Some(c) => Full(Allocation(c)),
-            None => MigrationFault,
-        }),
-        Error(Cancelled(_)) => return Error(MigrationFault),
-    }
-    Ok(StagedMigration(base: declaration_base(db), plan: result.unwrap(channel.receive(from))?, declared: false))
-}
-
-pub fn run_migration(mut db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits]) -> Result[(), Error] waits {
-    let StagedMigration(plan: take plan, ..) = stage_migration(db, tasks, configure)?
-    if plan.changed {
-        let _ = publish_schema_plan(mut db, take plan)?
-    } else {
-        let SchemaPlan(bindings: take bindings, ..) = take plan
-        for take schema_binding in take bindings {
-            register_index(mut db.indexes, take schema_binding)
-        }
-    }
-    Ok(())
-}
-
 pub fn system_table[K, V](db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
     healthy(db)?
     catalog_handle(db.store, db.heads[0].roots.catalog, named(name)?, take key, take value)
@@ -3601,7 +3502,9 @@ fn stage_drop_table_key(mut plan: SchemaPlan, catalog_key: Bytes, table_id: u32)
 // What a migrate builds before its cut: the new roots and the account.
 type Built {
     roots: Roots,
-    live: u64
+    live: u64,
+    read: u64,
+    written: u64
 }
 
 fn over_ceiling(live_bytes: u64, ceiling: u64) -> Result[(), Error] {
@@ -3640,7 +3543,10 @@ fn sort_bulk_rows(mut rows: List[std.page.Row]) -> Result[(), Error] {
         list.push(mut positions, slot)
     }
     list.sort(mut positions, scoped fn(a: u64, b: u64) -> Order {
-        list.compare_bytes(rows[a].key, rows[b].key)
+        match list.compare_bytes(rows[a].key, rows[b].key) {
+            Equal => order.compare(a, b),
+            different => different,
+        }
     })
     for first in 0u64 .. n {
         let mut at = first
@@ -3688,6 +3594,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     let Some(source_root) = std.page.collection_child(source.root, prefix(from.id)?) else {
         return Error(Stale(from.id))
     }
+    let (source_rows, _) = std.page.totals(source_root)
     let mut original = std.page.cursor_open(source_root, None, true, false)
     let mut new_rows: List[std.page.Row] = list.new()
     loop {
@@ -3745,6 +3652,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
         sort_bulk_rows(mut index_rows)?
         list.push(mut indexes, take index_rows)
     }
+    let written = list.len(new_rows)
     bulk_store_collection(mut roots.collections, id, 1, new_rows, mut ids)?
     let mut index_id = id + 1
     for rows in indexes {
@@ -3783,7 +3691,7 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
         live_bytes = one_page_account(roots)
     }
     over_ceiling(live_bytes, ceiling)?
-    Ok(Built(roots: take roots, live: live_bytes))
+    Ok(Built(roots: take roots, live: live_bytes, read: source_rows, written: written))
 }
 
 fn same_bytes(a: Bytes, b: Bytes) -> bool {
@@ -3847,8 +3755,15 @@ fn stage_migrate[K, V, K2, V2](mut plan: SchemaPlan, take from: Table[K, V], tak
     let mut ids = plan.next_node
     let built = migrate_build(plan.roots.collections, take base, mut ids, plan.live, plan.ceiling, plan.retained, from, olds, to, f, id, meta.next, target)
     plan.next_node = ids
-    let Built(roots: take roots, live: live_bytes) = built?
-    keep_schema(mut plan, take roots, live_bytes, id + 1 + total_count)
+    let Built(roots: take roots, live: live_bytes, read, written) = built?
+    keep_schema(mut plan, take roots, live_bytes, id + 1 + total_count)?
+    if let Some(mut backfills) = plan.preview {
+        list.push(mut backfills, MigrationBackfill(table: clone(to.name), index: None, read: read, written: written, outcome: Filled))
+        for ix in to.indexes {
+            list.push(mut backfills, MigrationBackfill(table: clone(to.name), index: Some(clone(ix.name)), read: written, written: written, outcome: Filled))
+        }
+    }
+    Ok(())
 }
 
 fn bucket(v: u64) -> Result[u64, Capacity] {

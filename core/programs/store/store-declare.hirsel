@@ -73,7 +73,7 @@ pub fn declare_read_only(source: ReadOnly) -> Declare {
     let base = DeclarationBase(store: snap.store, opened: snap.open, version: snap.head,
         stamp: snap.watermark, changes: 0u64, live: 0u64)
     let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark,
-        next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new())
+        next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), preview: None)
     new_declaration(Follower, base, take plan, true)
 }
 
@@ -85,20 +85,12 @@ pub fn describe_declarations[H](clock: Clock,
     let mut declared = declare(db, Migrate)?
     let _ = (code.callable(schema))(mut declared)?
     complete_declaration(declared)?
-    let mut rows = open_page_range(declared.plan.roots.catalog, None, true, false, None)?
-    let mut descriptions: List[DeclaredCollection] = list.new()
-    while let Some((key, raw)) = next_page_range(mut rows)? {
-        let stored = decode_catalog(raw)?
-        let start = if stored.kind == 2u8 { 5u64 } else { 1u64 }
-        let name = string.from_utf8(clone(list.slice(key, start, list.len(key)))) ?=> |_| malformed(0u64)
-        list.push(mut descriptions, DeclaredCollection(name: take name, id: stored.id, owner: stored.owner, kind: stored.kind))
-    }
-    Ok(take descriptions)
+    catalog_descriptions(declared.plan.roots.catalog)
 }
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new())
+    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), preview: None)
     new_declaration(Follower, follower_base(f), take plan, true)
 }
 

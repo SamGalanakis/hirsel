@@ -50,21 +50,29 @@ pub fn hmac.sha1(key: Bytes, data: Bytes) -> Inline[u8, 20]
 ```
 pub type MacError = Denied()
 pub fn secret.hmac_sha256(s: Secret, data: Bytes) -> Result[Inline[u8, 32], MacError]
+pub fn secret.hmac_sha384(s: Secret, data: Bytes) -> Result[Inline[u8, 48], MacError]
+pub fn secret.hmac_sha512(s: Secret, data: Bytes) -> Result[Inline[u8, 64], MacError]
 pub fn secret.verify_hmac_sha256(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
+pub fn secret.verify_hmac_sha384(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
+pub fn secret.verify_hmac_sha512(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacError]
+
+pub type JwsMacAlg = Sha256 | Sha384 | Sha512
+pub type JwsMacError = Denied() | ShortKey()
+pub fn secret.jws_hmac_sign(s: Secret, alg: JwsMacAlg, data: Bytes) -> Result[Inline[u8, 64], JwsMacError]
+pub fn secret.jws_hmac_verify(s: Secret, alg: JwsMacAlg, data: Bytes, tag: Bytes) -> Result[bool, JwsMacError]
 ```
 
-These are the HMAC sink that TLS-5 reserves. The runtime computes the MAC from the
-secret's run-owned bytes, and the key never enters program memory, a view, a
-diagnostic or a recording. `verify_hmac_sha256` compares the tag in constant time
-inside the runtime and returns only the verdict. A tag of any length other than 32 bytes
-gives `Ok(false)`. Accepting a shorter tag as a prefix would let a 1-byte guess pass one
-time in 256.
+The runtime reads the key from run-owned memory. It compares full-length tags in
+constant time and returns `Ok(false)` for a tag of the wrong length.
+The JWS operations enforce RFC 7518 §3.2. A key shorter than 32, 48 or 64 bytes for its
+algorithm gives `ShortKey`. `jws_hmac_sign` pads its inline result with zeros after
+the tag.
 
 - **Authority.** A MAC with a secret's key is a signing oracle. Whoever can ask for tags
   over chosen data can forge what the key authenticates, wherever the tag is then sent.
   So a secret can be used as a key only when its policy holds the use
   ([TLS-5](../../../docs/spec/tls.md#tls-5-secrets)): `mac` permits both operations, and
-  `verify` permits only `verify_hmac_sha256`, which reveals one bit per call.
+  `verify` permits the verification operations.
 
   ```sh
   hirsel run app --grant 'Secret:hook=env:WEBHOOK_KEY verify'
@@ -79,14 +87,13 @@ time in 256.
 - **Passwords.** A password used for SCRAM goes through `secret.scram_sha256`
   ([TLS-6](../../../docs/spec/tls.md#tls-6-scram-sha-256)), never through these. Under
   `mac`, a program could rebuild PBKDF2 one HMAC at a time and read `SaltedPassword`.
-- **Charging.** Nothing is admitted. The tag is an inline result. Neither operation waits.
-- **Failures.** `Denied` only. The secret's bytes are always present while the run lives.
+- **Charging.** An authorized call spends one call step plus one per message byte
+  before issue. These operations admit no bytes and do not wait.
 - **Replay.** Each operation is a provider operation
   ([CAP-5](../../../docs/spec/capabilities.md#cap-5-provider-operations)) and passes the
   replay point at issue and at delivery
   ([CAP-8](../../../docs/spec/capabilities.md#cap-8-the-replay-point)). The issue holds the
   secret's designation and the canonical bytes of `data` (and of `tag`). The delivery
-  holds the 32-byte tag or the verdict. When recording is on, the recording holds these
-  and never the key or anything else computed from it. A replay, whose secret has no bytes
-  behind it, delivers the recorded tag or verdict
+  holds the complete tag, verdict or JWS key-size refusal. On replay the provider
+  delivers the recorded result without reading key bytes
   ([recording](../../../docs/recording.md#credentials)). Recording is off by default.

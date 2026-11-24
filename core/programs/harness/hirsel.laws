@@ -18,7 +18,7 @@ harness@1/laws/test_frames_open_once src=82126c3605bd52d7 sig=3918f1cc10e1bd4a r
 harness@1/laws/test_gates_fold_by_maximum src=3951fe57416c124e sig=3f44b0103ba9a46a run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_ingress_orders_at_boundaries src=a08519a6d0b98872 sig=d96080825b9e565f run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_inside_rolls_back_on_error src=9691f3d170d745c1 sig=85143a81996a2696 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-harness@1/laws/test_late_decisions_lapse src=0ab007243013b001 sig=c6982920f5739074 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+harness@1/laws/test_late_decisions_lapse src=0ab007243013b001 sig=badecf91a62bb7f8 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_mcp_catalog_approval_and_patch src=04aea27ebe4a8a3f sig=e0c2a5f5a5699fa1 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 harness@1/laws/test_mcp_working_and_blob src=dfef2646ab7e16a0 sig=c97c8196d4896f36 run=3f1310d156afae9e bug=- oracle=- rows=pending
 harness@1/laws/test_once_tool_crash src=3d51d378e6f09d32 sig=612b06a59f9a7a6d run=3806a14949dd9b41 bug=- oracle=- rows=pending

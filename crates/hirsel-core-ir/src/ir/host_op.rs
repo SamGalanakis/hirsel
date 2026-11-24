@@ -108,6 +108,12 @@ pub enum HostOp {
     Mkstemp = hirsel_core_ids::host_op::MKSTEMP as isize,
     ZeroExtension = hirsel_core_ids::host_op::ZERO_EXTENSION as isize,
     CallPayloadPrefix = hirsel_core_ids::host_op::CALL_PAYLOAD_PREFIX as isize,
+    SecretHmacSha384 = 125,
+    SecretHmacSha512 = 126,
+    SecretVerifyHmacSha384 = 127,
+    SecretVerifyHmacSha512 = 128,
+    SecretJwsHmacSign = 129,
+    SecretJwsHmacVerify = 130,
 }
 
 impl HostOp {
@@ -163,6 +169,12 @@ impl HostOp {
         HostOp::SecretNarrow,
         HostOp::SecretHmac,
         HostOp::SecretVerifyHmac,
+        HostOp::SecretHmacSha384,
+        HostOp::SecretHmacSha512,
+        HostOp::SecretVerifyHmacSha384,
+        HostOp::SecretVerifyHmacSha512,
+        HostOp::SecretJwsHmacSign,
+        HostOp::SecretJwsHmacVerify,
         HostOp::SecretDeriveHmac,
         HostOp::SecretDeriveHkdf,
         HostOp::SecretDeriveArgon2id,
@@ -301,6 +313,12 @@ impl HostOp {
             HostOp::SecretDeriveHkdf => "secret_derive_hkdf_sha256",
             HostOp::SecretDeriveArgon2id => "secret_derive_argon2id",
             HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
+            HostOp::SecretHmacSha384 => "secret_hmac_sha384",
+            HostOp::SecretHmacSha512 => "secret_hmac_sha512",
+            HostOp::SecretVerifyHmacSha384 => "secret_verify_hmac_sha384",
+            HostOp::SecretVerifyHmacSha512 => "secret_verify_hmac_sha512",
+            HostOp::SecretJwsHmacSign => "secret_jws_hmac_sign",
+            HostOp::SecretJwsHmacVerify => "secret_jws_hmac_verify",
             HostOp::SecretWrap => "secret_wrap",
             HostOp::SecretUnwrap => "secret_unwrap",
             HostOp::SecretSign => "secret_sign",
@@ -378,6 +396,12 @@ impl HostOp {
             Self::SecretDeriveHkdf => "hirsel_core_secret_derive_hkdf_sha256",
             Self::SecretDeriveArgon2id => "hirsel_core_secret_derive_argon2id",
             Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",
+            Self::SecretHmacSha384 => "hirsel_core_secret_hmac_sha384",
+            Self::SecretHmacSha512 => "hirsel_core_secret_hmac_sha512",
+            Self::SecretVerifyHmacSha384 => "hirsel_core_secret_verify_hmac_sha384",
+            Self::SecretVerifyHmacSha512 => "hirsel_core_secret_verify_hmac_sha512",
+            Self::SecretJwsHmacSign => "hirsel_core_secret_jws_hmac_sign",
+            Self::SecretJwsHmacVerify => "hirsel_core_secret_jws_hmac_verify",
             Self::SecretWrap => "hirsel_core_secret_wrap",
             Self::SecretUnwrap => "hirsel_core_secret_unwrap",
             Self::SecretSign => "hirsel_core_secret_sign",
@@ -430,6 +454,17 @@ impl HostOp {
         }
     }
 
+    /// Whether a Secret MAC operation returns a tag instead of a verdict.
+    pub const fn secret_mac_signs(self) -> bool {
+        matches!(
+            self,
+            Self::SecretHmac
+                | Self::SecretHmacSha384
+                | Self::SecretHmacSha512
+                | Self::SecretJwsHmacSign
+        )
+    }
+
     /// Whether the operation waits (a cancellation point, so it can fail).
     pub const fn waits(self) -> bool {
         !matches!(
@@ -445,6 +480,12 @@ impl HostOp {
                 | HostOp::SecretSeal
                 | HostOp::SecretNarrow
                 | HostOp::SecretHmac
+                | HostOp::SecretHmacSha384
+                | HostOp::SecretHmacSha512
+                | HostOp::SecretVerifyHmacSha384
+                | HostOp::SecretVerifyHmacSha512
+                | HostOp::SecretJwsHmacSign
+                | HostOp::SecretJwsHmacVerify
                 | HostOp::SecretDeriveHmac
                 | HostOp::SecretDeriveHkdf
                 | HostOp::SecretDeriveArgon2id

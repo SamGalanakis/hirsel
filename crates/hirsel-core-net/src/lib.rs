@@ -245,8 +245,7 @@ pub mod secret_aead;
 mod secret_grant;
 pub mod secret_kdf;
 pub use secret_grant::{
-    SecretGrant, SecretPolicy, SecretSource, SecretUse, derive_hmac_sha256, hmac_sha256,
-    verify_hmac_sha256,
+    HmacSha2, SecretGrant, SecretPolicy, SecretSource, SecretUse, derive_hmac_sha256,
 };
 
 #[cfg(test)]

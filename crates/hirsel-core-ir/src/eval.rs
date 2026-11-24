@@ -4355,31 +4355,6 @@ impl Machine<'_> {
         }
     }
 
-    fn secret_mac(&mut self, op: HostOp, a: &[u64]) -> Vec<u64> {
-        let secret = self.secret(a[0]).unwrap();
-        let signing = op == HostOp::SecretHmac;
-        let needed = if signing {
-            SecretUse::MAC
-        } else {
-            SecretUse::VERIFY
-        };
-        if !secret.policy.uses.permits(needed) {
-            return vec![0, 1, 0, 0];
-        }
-        let data = self.carrier_bytes(a[1]);
-        if signing {
-            let tag = hirsel_core_net::hmac_sha256(&secret.bytes, data);
-            for (i, byte) in tag.into_iter().enumerate() {
-                self.store(a[2] + i as u64, 1, u64::from(byte));
-            }
-            vec![0, 0, 0, 0]
-        } else {
-            let verdict =
-                hirsel_core_net::verify_hmac_sha256(&secret.bytes, data, self.carrier_bytes(a[2]));
-            vec![u64::from(verdict), 0, 0, 0]
-        }
-    }
-
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
         let words = |this: &Self, carrier: u64| -> Vec<u64> {
@@ -4573,7 +4548,14 @@ impl Machine<'_> {
             HostOp::SecretDeriveHmac | HostOp::SecretDeriveHkdf | HostOp::SecretDeriveArgon2id => {
                 return self.secret_derive(t, op, a);
             }
-            HostOp::SecretHmac | HostOp::SecretVerifyHmac => return Ok(self.secret_mac(op, a)),
+            HostOp::SecretHmac
+            | HostOp::SecretHmacSha384
+            | HostOp::SecretHmacSha512
+            | HostOp::SecretVerifyHmacSha384
+            | HostOp::SecretVerifyHmacSha512
+            | HostOp::SecretVerifyHmac
+            | HostOp::SecretJwsHmacSign
+            | HostOp::SecretJwsHmacVerify => return self.secret_mac(t, op, a),
             HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign => {
                 return Ok(self.secret_key(t, op, a));
             }
@@ -4637,6 +4619,12 @@ impl Machine<'_> {
             | HostOp::SecretDeriveArgon2id
             | HostOp::SecretHmac
             | HostOp::SecretVerifyHmac
+            | HostOp::SecretHmacSha384
+            | HostOp::SecretHmacSha512
+            | HostOp::SecretVerifyHmacSha384
+            | HostOp::SecretVerifyHmacSha512
+            | HostOp::SecretJwsHmacSign
+            | HostOp::SecretJwsHmacVerify
             | HostOp::SecretWrap
             | HostOp::SecretUnwrap
             | HostOp::SecretSign

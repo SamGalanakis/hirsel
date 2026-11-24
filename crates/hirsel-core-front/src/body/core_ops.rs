@@ -438,10 +438,16 @@ operations! {
     ("secret", "seal", Lane::Runtime(Kernel::SecretSeal), "A", "tls-t4-1447", false),
     ("secret", "narrow", Lane::Runtime(Kernel::Net(HostOp::SecretNarrow)), "B", "tls-t4-1447", false),
     ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
+    ("secret", "hmac_sha384", Lane::Runtime(Kernel::Net(HostOp::SecretHmacSha384)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "hmac_sha512", Lane::Runtime(Kernel::Net(HostOp::SecretHmacSha512)), "B", "secret-hmac-sha2-2277", false),
     ("secret", "derive_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHmac)), "B", "secret-kdf-signer-1816", false),
     ("secret", "derive_hkdf_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHkdf)), "B", "crypto-derive-2137", false),
     ("secret", "derive_argon2id", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveArgon2id)), "B", "crypto-derive-2137", false),
     ("secret", "verify_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmac)), "B", "hmac-1504", false),
+    ("secret", "verify_hmac_sha384", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmacSha384)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "verify_hmac_sha512", Lane::Runtime(Kernel::Net(HostOp::SecretVerifyHmacSha512)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "jws_hmac_sign", Lane::Runtime(Kernel::Net(HostOp::SecretJwsHmacSign)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "jws_hmac_verify", Lane::Runtime(Kernel::Net(HostOp::SecretJwsHmacVerify)), "B", "secret-hmac-sha2-2277", false),
     ("secret", "scram_sha256", Lane::Runtime(Kernel::Net(HostOp::ScramSha256)), "B", "small-host-impl-1576", false),
     ("secret", "scram_final_len", Lane::Runtime(Kernel::Net(HostOp::ScramFinalLen)), "B", "small-host-impl-1576", false),
     ("secret", "scram_verify", Lane::Runtime(Kernel::Net(HostOp::ScramVerify)), "B", "small-host-impl-1576", false),
@@ -3321,8 +3327,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             return self.runtime_secret_derive(op, f, vals, result, n);
         }
-        if matches!(op, HostOp::SecretHmac | HostOp::SecretVerifyHmac) {
-            return self.runtime_secret_mac(op, vals, result, n);
+        if matches!(
+            op,
+            HostOp::SecretHmac
+                | HostOp::SecretHmacSha384
+                | HostOp::SecretHmacSha512
+                | HostOp::SecretVerifyHmacSha384
+                | HostOp::SecretVerifyHmacSha512
+                | HostOp::SecretVerifyHmac
+                | HostOp::SecretJwsHmacSign
+                | HostOp::SecretJwsHmacVerify
+        ) {
+            return self.runtime_secret_mac(op, f, vals, result, n);
         }
         if matches!(
             op,
@@ -3820,59 +3836,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(join);
     }
 
-    fn runtime_secret_mac(
-        &mut self,
-        op: HostOp,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let u = Ty::Scalar(Scalar::U64);
-        let signing = op == HostOp::SecretHmac;
-        let third = if signing {
-            let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
-                unreachable!("the MAC builtin returns a Result")
-            };
-            let id = self.runtime_type(arguments[0], n)?;
-            let output = self.new_slot(PlaceTy::Declared(id), n);
-            self.pointer(output, n)
-        } else {
-            vals[2]?
-        };
-        let secret = self.runtime_key(vals[0]?, n);
-        let [value, error, ..] = self.runtime_row(
-            RtOp::Host(op),
-            &[Arg::Value(secret), Arg::Value(vals[1]?), Arg::Value(third)],
-            n,
-        )?;
-        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                let value = if signing {
-                    Some(third)
-                } else {
-                    cx.runtime_nonzero(u, value, n)
-                };
-                cx.runtime_case_payload(to, 0, ty, value, n);
-            },
-            |cx, to, ty| {
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
-                {
-                    cx.inst(
-                        Inst::SetCase {
-                            address: at,
-                            case: 0,
-                        },
-                        n,
-                    );
-                }
-            },
-        )
-    }
     fn runtime_tls_result(
         &mut self,
         to: AddressId,

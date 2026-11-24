@@ -1,6 +1,6 @@
 # JWS, JWK and JWT
 
-[API overview](../API.md). [Operations and contracts](../jwt.hirsel). [HMAC-SHA256](hmac.md).
+[API overview](../API.md). [Operations and contracts](../jwt.hirsel). [HMAC](hmac.md#secret-keys).
 [Base64](base64.md). [JSON](json.md). [TLS and secrets](../../../docs/spec/tls.md#tls-5-secrets).
 
 `std.jwt` verifies and signs JWS compact tokens
@@ -11,7 +11,7 @@ JWKs and JWK Sets ([RFC 7517](https://www.rfc-editor.org/rfc/rfc7517)). It is bu
 core `ed25519`, `p256` and `rsa` verifiers.
 
 ```
-pub type Alg: key = Hs256 | EdDsa | Es256 | Rs256
+pub type Alg: key = Hs256 | EdDsa | Es256 | Rs256 | Hs384 | Hs512
 pub type Allow { first: Alg, rest: List[Alg] }
 pub type Error = Malformed(Fault) | UnsupportedAlg | UnsupportedCrit | WrongKey
     | BadSignature | Expired | NotYetValid | Mismatch(Claim) | NoKey | AmbiguousKey
@@ -29,13 +29,13 @@ pub fn jwks(text: String) -> Result[KeySet, Error]
 
 | `Alg` | Name | Verify | Sign |
 |---|---|---|---|
-| `Hs256` | `HS256` | `secret.verify_hmac_sha256`, constant-time, inside the runtime | `secret.hmac_sha256` (`mac` use) |
+| `Hs256` | `HS256` | `secret.jws_hmac_verify`, 32-byte tag | `secret.jws_hmac_sign`, key at least 32 bytes |
+| `Hs384` | `HS384` | `secret.jws_hmac_verify`, 48-byte tag | `secret.jws_hmac_sign`, key at least 48 bytes |
+| `Hs512` | `HS512` | `secret.jws_hmac_verify`, 64-byte tag | `secret.jws_hmac_sign`, key at least 64 bytes |
 | `EdDsa` | `EdDSA` (Ed25519 only, [RFC 8037](https://www.rfc-editor.org/rfc/rfc8037)) | `ed25519.verify`, 64-byte signature | `secret.sign` (`sign(ed25519)`, PKCS#8) |
 | `Es256` | `ES256` | `p256.verify`, 64-byte P1363 `r‖s` | `secret.sign` (`sign(p256)`, PKCS#8) |
 | `Rs256` | `RS256` | `rsa.verify_pkcs1_sha256`, signature as long as `n` | `secret.sign` (`sign(rs256)`, PKCS#8) |
 
-`HS384` and `HS512` are not provided. TLS-5 has no HMAC-SHA384 or HMAC-SHA512 sink, and an
-HMAC key must stay a `Secret`; they read as `UnsupportedAlg` until such a sink exists.
 `RS384`, `RS512`, `PS*`, `ES384` and `ES512` follow [core Open item 3](../../../docs/spec/core.md).
 
 ## Invariants
@@ -51,9 +51,10 @@ Each invariant is a property of the types, not a caller's discipline.
    EC or OKP) and, from a JWK `alg`, an optional pinned algorithm. A header whose algorithm
    is of another family, or differs from the pin, gives `WrongKey`. An RSA public key can
    therefore never be used as an HMAC key, the RFC 8725 §2.1 confusion.
-3. **Constant-time MAC.** HMAC keys are `Secret`s and their tags are compared by
-   `secret.verify_hmac_sha256` inside the runtime. The module never holds a key or an
-   expected tag. A JWK `oct` key is sealed with the `verify` use only.
+3. **Constant-time MAC.** The runtime checks HMAC tags against `Secret` keys.
+   It requires the key minimum in the table for both signing and verification.
+   An undersized key gives `BadKey`. Signing requires the `mac` use. A JWK `oct`
+   key is sealed with the `verify` use only.
 4. **Time and audience.** `Rules` holds `now_secs` and `leeway_secs`; the module reads no
    clock. With `t = now_secs`:
    - `exp ≤ t − leeway` gives `Expired` (so a token is valid up to `exp + leeway − 1`).
@@ -111,7 +112,6 @@ and name the signer's algorithm, otherwise `WrongKey`. `sign_jwt` writes
 
 ## Oracle
 
-`core/std/tests/jwt.hirsel` holds one law over RFC 7515 A.1 (HS256), A.2 (RS256) and
-A.3 (ES256), RFC 8037 A.4 (Ed25519), and the RFC 7517 A.1 to A.3 key sets, with the
-attacks of RFC 8725: `alg: none`, HS256 signed with the RS256 public key's PEM bytes,
-expiry at the leeway boundary, a wrong `aud`, and an unknown `crit`.
+`core/std/tests/jwt.hirsel` checks RFC 7515 A.1–A.3, RFC 8037 A.4, RFC 7517 A.1–A.3,
+and Python-generated HS384 and HS512 tokens at their minimum key sizes. It also covers
+`alg: none`, MAC/RSA key confusion, the expiry and audience rules, and malformed headers.

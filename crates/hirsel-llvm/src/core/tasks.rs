@@ -161,6 +161,12 @@ impl FunctionEmitter<'_> {
             | HostOp::SecretDeriveHkdf
             | HostOp::SecretDeriveArgon2id
             | HostOp::SecretVerifyHmac
+            | HostOp::SecretHmacSha384
+            | HostOp::SecretHmacSha512
+            | HostOp::SecretVerifyHmacSha384
+            | HostOp::SecretVerifyHmacSha512
+            | HostOp::SecretJwsHmacSign
+            | HostOp::SecretJwsHmacVerify
             | HostOp::SecretWrap
             | HostOp::SecretUnwrap
             | HostOp::SecretSign

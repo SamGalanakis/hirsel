@@ -293,8 +293,8 @@ most once:
 | Use | Permits |
 | --- | --- |
 | `tls_send(<patterns>)` | `tls.send_secret` and `secret.scram_sha256` on a stream whose verified name one of the comma-separated TLS-3 patterns covers |
-| `mac` | `secret.hmac_sha256` and `secret.verify_hmac_sha256` (the MAC sink, below) |
-| `verify` | `secret.verify_hmac_sha256` only |
+| `mac` | the MAC signing and verification sinks below |
+| `verify` | the MAC verification sinks below |
 | `kdf` | `secret.derive_hmac_sha256`, `secret.derive_hkdf_sha256` and `secret.derive_argon2id` with the secret as parent (the derivation sinks, below) |
 | `sign(<alg>)` | `secret.sign` with `<alg>`, one of `ed25519`, `p256` and `rs256` (key operations, below) |
 | `aead(<alg>)` | `secret.aead_seal` and `secret.aead_open` with `<alg>`, one of `chacha20-poly1305`, `aes128-gcm` and `aes256-gcm` (the AEAD sink, below) |
@@ -386,7 +386,7 @@ stay with the helper's owner, as the charges of its open connections do
 
 **No cleartext accessor.** No operation returns a secret's bytes, their length, any
 unkeyed digest of them, or the result of comparing them. The MAC sink's keyed tag and
-verdict, the SCRAM sink's verdict, `wrap`'s blob (ciphertext under the KEK), `sign`'s
+verdict or JWS key-size refusal, the SCRAM sink's verdict, `wrap`'s blob (ciphertext under the KEK), `sign`'s
 signature and the AEAD sink's sealed and opened bytes are the only values computed from
 them that reach the program. A derivation
 returns an opaque designation. The SCRAM proof goes only onto an authorized stream (TLS-6). Because `Secret` is not `codec`, no
@@ -477,15 +477,26 @@ place header values, kind 0 or 1 marks place body segments, and a kind 2 mark wr
 `Content-Length` ([http](http.md#http-17-client-request-bodies)). On a plain-TCP
 connection, such a request fails `Denied` before any byte is sent.
 
-**The MAC sink.** `secret.hmac_sha256(s, data)` and `secret.verify_hmac_sha256(s, data,
-tag)` use a secret as an HMAC-SHA256 key without sending it
-([hmac](../../core/std/api/hmac.md#secret-keys)). The runtime computes from run-owned
-memory. The tag, or the constant-time verdict for exactly 32 tag bytes, is a delivery
-that passes the replay point ([CAP-8](capabilities.md#cap-8-the-replay-point)), and the
-key never does. `hmac_sha256` needs the `mac` use, and `verify_hmac_sha256` needs `mac`
-or `verify`. Without the use, the result is `Denied` before issue, with no effect. A tag over chosen data is a
-signing oracle wherever it is sent, which is why the use must be granted. The key
-operations below follow the same rule.
+**The MAC sink.** `secret.hmac_sha256`, `secret.hmac_sha384` and `secret.hmac_sha512`
+use a secret as an HMAC key without sending it. The runtime computes from run-owned
+memory and returns a 32-, 48- or 64-byte inline tag. The corresponding
+`secret.verify_hmac_sha256`, `secret.verify_hmac_sha384` and `secret.verify_hmac_sha512`
+verify full-length tags in constant time. They return `Ok(false)` for a tag of any
+other length. Signing requires `mac` and verification requires `mac` or `verify`.
+Without the use, the result is `Denied` before issue. A tag over chosen data is a signing
+oracle wherever it is sent, which is why the use must be granted.
+
+`secret.jws_hmac_sign` and `secret.jws_hmac_verify` have the same use requirements.
+They enforce RFC 7518 §3.2 in the provider. A key shorter than its algorithm's tag
+gives `ShortKey` without computing a MAC. The JWS signing sink returns a 64-byte
+inline result padded with zeros after the tag.
+
+An authorized call takes one step for the call and one per byte of `data`, charged
+before issue. No operation waits or admits bytes. The tag, verdict or JWS key-size
+refusal is a delivery at the replay point. The recording contains the designation,
+policy and public arguments, plus that delivery.
+[HMAC API](../../core/std/api/hmac.md#secret-keys).
+[CAP-8](capabilities.md#cap-8-the-replay-point).
 
 **Key operations.** `secret.wrap`, `secret.unwrap` and `secret.sign` use a secret as a key
 without revealing it. A connector stores an OAuth refresh token as `wrap`'s blob in a
@@ -1891,6 +1902,8 @@ endpoint by name.
 | **CR3** the IMDS exchange | a missing IMDSv2 token, a wrong expiry, or a failure that still makes a designation | The server answers only a `PUT` with the TTL header and only `GET`s that carry its token. `Expiration` `2026-11-23T12:00:00Z` gives `1795435200000000000` (`date -ud`). A 404 on the role gives `Status(404)`. A reply without `SecretAccessKey`, with an escaped value, or with `Code` `Expired` gives `Malformed`. A `token` with 3 bytes of room against a 7-byte token gives `Room(20, 7)` with both strings unchanged. A server that never answers, under a 50 ms deadline, gives `Net(TimedOut)`. A grant with source `static` is refused at its spelling. |
 | **CR4** STS web identity | the token sent from a stale read, or the wrong reply element taken as the key | A loopback TLS server as `localhost` with its CA's roots, granted `sts:<arn> at:localhost:<port> roots:<ca> file:<token>`. The server receives `WebIdentityToken` equal to the file's bytes, which it rewrites before each reply, and sees each of three versions once. The reply puts `SessionToken` before `SecretAccessKey`. Its `AssumeRoleWithWebIdentityResponse` gives the fixture's key id and expiry, and the key's MAC matches CR1's oracle. A 403 `AccessDenied` gives `Status(403)`. |
 | **CR5** STS file refusals | a wrong refusal, a blocked fetch, or file contents in output | Against CR4's loopback server, missing and empty tokens give `Token(NotFound)`, a permissions failure gives `Token(Denied)`, an oversized token gives `Malformed`, and a token pipe gives `Token(Other(EINVAL))`. Missing, unreadable, invalid PEM, and pipe roots give `Net(Tls(Roots))`. Output contains only the typed refusal labels and no diagnostics. Only the valid control reaches STS. |
+| **MAC1** RFC 4231 | the wrong SHA-2 algorithm or failure to hash a key longer than the hash block | Cases 1 and 6 return their full HMAC-SHA384 and HMAC-SHA512 tags. Under a narrowed `verify` key, each full tag verifies and each one-byte-short tag gives `Ok(false)`. |
+| **MAC2** charge per message byte | a fixed step cost regardless of message length | In the core law body, HMAC-SHA256 on a one-byte input fits in one step. On RFC 4231 case 1's eight-byte message, signing and verification give `Error(OutOfTime)` under seven steps and fit in eight. |
 | **AE1** RFC 8439 | a wrong Poly1305 key, AAD or length block, or the tag placed before the ciphertext | The key of [RFC 8439 §2.8.2](https://www.rfc-editor.org/rfc/rfc8439#section-2.8.2), sealed as `aead(chacha20-poly1305)`, with its nonce, AAD and plaintext: `aead_seal` appends the section's ciphertext followed by its tag and answers 130. With Appendix A.5's key, nonce, AAD, ciphertext and tag, `aead_open` appends A.5's plaintext. |
 | **AE2** CAVP GCM | a wrong GHASH, counter start or key schedule | In `gcmEncryptExtIV128.rsp` and `gcmEncryptExtIV256.rsp` from [gcmtestvectors.zip](https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/gcmtestvectors.zip), every record under `[IVlen = 96]` and `[Taglen = 128]`, with its key sealed as `aead(aes128-gcm)` or `aead(aes256-gcm)`: `aead_seal` appends `CT` then `Tag`. In `gcmDecrypt128.rsp` and `gcmDecrypt256.rsp` under the same headers, a record marked `FAIL` gives `Tampered` and every other record opens to its `PT`. |
 | **AE3** Wycheproof corpus | an edge of either construction that the RFC and CAVP records miss | Over `aes_gcm_test.json` and `chacha20_poly1305_test.json` at the commit [core](core.md#signature-verification)'s laws pin: in groups with `ivSize` 96 and a key size the algorithm takes, each `valid` case seals to `ct` then `tag` and opens to `msg`, and each `invalid` case gives `Tampered` on open. In groups with any other `ivSize`, every case gives `Invalid` before issue, including valid AES-GCM tcId 69 and invalid ChaCha20-Poly1305 tcIds 317 and 318. The 192-bit-key AES groups give `Invalid` under both AES algorithms. |

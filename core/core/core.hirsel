@@ -167,6 +167,10 @@ pub type SecretError = Invalid | Capacity(Capacity)
 
 pub type MacError = Denied()
 
+pub type JwsMacAlg = Sha256 | Sha384 | Sha512
+
+pub type JwsMacError = Denied() | ShortKey()
+
 pub type KeyError = Denied | Invalid | Tampered | Capacity(Capacity)
 
 pub type SignAlg = Ed25519 | P256 | Rs256

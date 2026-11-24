@@ -88,4 +88,106 @@ impl Cx<'_, '_, '_> {
             },
         )
     }
+
+    pub(super) fn runtime_secret_mac(
+        &mut self,
+        op: HostOp,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let signing = op.secret_mac_signs();
+        let jws = matches!(op, HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify);
+        let data = if jws { 2 } else { 1 };
+        let third = if signing {
+            let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
+                unreachable!("the MAC builtin returns a Result")
+            };
+            let id = self.runtime_type(arguments[0], n)?;
+            let output = self.new_slot(PlaceTy::Declared(id), n);
+            self.pointer(output, n)
+        } else {
+            vals[data + 1]?
+        };
+        let secret = self.runtime_key(vals[0]?, n);
+        let mut args = vec![
+            Arg::Value(secret),
+            Arg::Value(vals[data]?),
+            Arg::Value(third),
+        ];
+        if jws {
+            let (_, at) = self.runtime_place(self.p.fns[f].params[1].ty, vals[1], n)?;
+            let case = self.net_case(at, n);
+            let algorithm = self.value(u);
+            self.inst(
+                Inst::Convert {
+                    result: algorithm,
+                    flag: None,
+                    operand: case,
+                    mode: ConvertMode::Widen,
+                },
+                n,
+            );
+            args.push(Arg::Value(algorithm));
+        }
+        let [value, error, ..] = self.runtime_row(RtOp::Host(op), &args, n)?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                let value = if signing {
+                    Some(third)
+                } else {
+                    cx.runtime_nonzero(u, value, n)
+                };
+                cx.runtime_case_payload(to, 0, ty, value, n);
+            },
+            |cx, to, ty| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    if jws {
+                        let short = cx
+                            .runtime_compare(Ty::Scalar(Scalar::U8), error, 2, n)
+                            .unwrap();
+                        let too_short = cx.new_block(&[]);
+                        let denied = cx.new_block(&[]);
+                        let join = cx.new_block(&[]);
+                        cx.runtime_branch(short, too_short, denied, n);
+                        cx.start(too_short);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 1,
+                            },
+                            n,
+                        );
+                        cx.jump(join, &[], n);
+                        cx.start(denied);
+                        cx.inst(
+                            Inst::SetCase {
+                                address: at,
+                                case: 0,
+                            },
+                            n,
+                        );
+                        cx.jump(join, &[], n);
+                        cx.start(join);
+                        return;
+                    }
+                    cx.inst(
+                        Inst::SetCase {
+                            address: at,
+                            case: 0,
+                        },
+                        n,
+                    );
+                }
+            },
+        )
+    }
 }

@@ -930,8 +930,6 @@ P-256 signatures from virtual draws, because ring takes randomness only through 
    row in this section over ring's `RSA_PKCS1_2048_8192_SHA384`, `_SHA512`,
    `RSA_PSS_2048_8192_SHA384` or `_SHA512` and its Wycheproof file when a provider needs it.
    `ES512` needs P-521, which ring 0.17.14 lacks, so it would reopen the backend question.
-   `HS384` and `HS512` in [`std.jwt`](../../core/std/api/jwt.md) need an HMAC-SHA384 or
-   HMAC-SHA512 sink beside `secret.hmac_sha256`; `std.jwt` refuses them until one exists.
 4. **HKDF on program bytes** and HKDF over SHA-512 are not specified; the first is library
    code over `std.hmac` with no kernel, and ring's `HKDF_SHA512` would back the second.
    HKDF over SHA-384 on secrets is not a sink either: TLS-8's schedules run it inside,

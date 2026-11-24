@@ -159,4 +159,52 @@ impl Machine<'_> {
             Err(KeyFailure::Denied) => unreachable!(),
         }
     }
+
+    pub(super) fn secret_mac(&mut self, t: &mut Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+        let secret = self.secret(a[0]).unwrap();
+        let signing = op.secret_mac_signs();
+        let needed = if signing {
+            SecretUse::MAC
+        } else {
+            SecretUse::VERIFY
+        };
+        if !secret.policy.uses.permits(needed) {
+            return Ok(vec![0, 1, 0, 0]);
+        }
+        self.take_steps(t, self.load(a[1] + 8, 8))?;
+        let secret = self.secret(a[0]).unwrap();
+        let data = self.carrier_bytes(a[1]);
+        use hirsel_core_net::HmacSha2;
+        let alg = match op {
+            HostOp::SecretHmac | HostOp::SecretVerifyHmac => HmacSha2::Sha256,
+            HostOp::SecretHmacSha384 | HostOp::SecretVerifyHmacSha384 => HmacSha2::Sha384,
+            HostOp::SecretHmacSha512 | HostOp::SecretVerifyHmacSha512 => HmacSha2::Sha512,
+            HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify => {
+                HmacSha2::from_jws_case(a[3])
+            }
+            _ => unreachable!(),
+        };
+        let jws = matches!(op, HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify);
+        if jws && secret.bytes.len() < alg.tag_len() {
+            return Ok(vec![0, 2, 0, 0]);
+        }
+        if signing {
+            let tag = alg.sign(&secret.bytes, data);
+            let bytes = tag.as_ref();
+            let len = if jws { 64 } else { bytes.len() };
+            for (i, byte) in bytes
+                .iter()
+                .copied()
+                .chain(std::iter::repeat(0))
+                .take(len)
+                .enumerate()
+            {
+                self.store(a[2] + i as u64, 1, u64::from(byte));
+            }
+            Ok(vec![0, 0, 0, 0])
+        } else {
+            let verdict = alg.verify(&secret.bytes, data, self.carrier_bytes(a[2]));
+            Ok(vec![u64::from(verdict), 0, 0, 0])
+        }
+    }
 }

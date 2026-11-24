@@ -515,6 +515,12 @@ tags!(HostOp {
     129 => SecretDeriveHkdf,
     130 => SecretDeriveArgon2id,
     131 => ZeroExtension,
+    132 => SecretHmacSha384,
+    133 => SecretHmacSha512,
+    134 => SecretVerifyHmacSha384,
+    135 => SecretVerifyHmacSha512,
+    136 => SecretJwsHmacSign,
+    137 => SecretJwsHmacVerify,
 });
 
 tags!(RaiseCause {

@@ -16,6 +16,7 @@ mod host_op;
 mod runtime_types;
 mod simd;
 pub use host_op::HostOp;
+pub use runtime_types::Wait;
 pub use simd::SimdOp;
 
 use crate::decode::{Debit, DecodeResult};
@@ -1026,46 +1027,6 @@ pub enum RtOp {
     Sha1Compress,
 }
 
-/// The waits with a returnable row ([`RtOp::Returnable`]), each the stackful
-/// row [`Wait::row`] with the child word in front.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum Wait {
-    /// An owned provider wait (one with [`HostOp::returnable_symbol`]).
-    Host(HostOp),
-    Join {
-        r: TypeId,
-    },
-    ConnSend {
-        item: TypeId,
-    },
-    ConnReceive {
-        item: TypeId,
-    },
-}
-
-impl Wait {
-    /// The stackful row this wait wraps.
-    pub fn row(self) -> RtOp {
-        match self {
-            Wait::Host(op) => RtOp::Host(op),
-            Wait::Join { r } => RtOp::Join { r },
-            Wait::ConnSend { item } => RtOp::ConnSend { item },
-            Wait::ConnReceive { item } => RtOp::ConnReceive { item },
-        }
-    }
-
-    /// The returnable wait of a stackful row, if it has one.
-    pub fn of(row: RtOp) -> Option<Wait> {
-        Some(match row {
-            RtOp::Host(op) if op.returnable_symbol().is_some() => Wait::Host(op),
-            RtOp::Join { r } => Wait::Join { r },
-            RtOp::ConnSend { item } => Wait::ConnSend { item },
-            RtOp::ConnReceive { item } => Wait::ConnReceive { item },
-            _ => return None,
-        })
-    }
-}
-
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
 /// recorded by the instructions that raise them; Cancelled by the engine operations
 /// that observe it.
@@ -1447,9 +1408,16 @@ impl RtOp {
                     }
                     HostOp::SecretHmac
                     | HostOp::SecretVerifyHmac
+                    | HostOp::SecretHmacSha384
+                    | HostOp::SecretHmacSha512
+                    | HostOp::SecretVerifyHmacSha384
+                    | HostOp::SecretVerifyHmacSha512
                     | HostOp::SecretUnwrap
                     | HostOp::ScramFinalLen
                     | HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify => {
+                        (vec![V(u64_), V(p), V(p), V(u64_)], outcome)
+                    }
                     HostOp::SecretWrap => (vec![V(u64_), V(u64_), V(p)], outcome),
                     HostOp::SecretSign => (vec![V(u64_), V(u64_), V(p), V(p)], outcome),
                     HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {

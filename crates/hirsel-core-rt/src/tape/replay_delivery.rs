@@ -298,7 +298,7 @@ pub(super) unsafe fn replay_out(
             secret: None,
             expires_ns,
         });
-    } else if op == SECRET_MAC && r.mode >= crate::secret::key::KEY_WRAP {
+    } else if op == SECRET_MAC && crate::secret::key::is_key_mode(r.mode) {
         // Key operations record appended bytes, or just an outcome for unwrap.
         let produced = r.mode != crate::secret::key::KEY_UNWRAP;
         if if ok {
@@ -327,19 +327,27 @@ pub(super) unsafe fn replay_out(
             }
         }
     } else if op == SECRET_MAC {
-        if !ok
-            || if r.mode == 0 {
-                out.value != 0 || out.payload.len() != 32
-            } else {
-                out.value > 1 || !out.payload.is_empty()
+        // A signing adapter pins an inline destination of exactly the tag length.
+        // A verification adapter supplies an empty output carrier.
+        let tag_len = r.buffer.capacity;
+        if !ok {
+            if !(crate::secret::is_jws_mac_mode(r.mode)
+                && out.status == ERROR
+                && out.error == (crate::secret::SHORT_JWS_KEY, 0)
+                && out.value == 0
+                && out.payload.is_empty())
+            {
+                return Err(Fault::Corrupt);
             }
-        {
+        } else if tag_len != 0 {
+            if out.value != 0 || out.payload.len() != tag_len {
+                return Err(Fault::Corrupt);
+            }
+            // SAFETY: the validated payload fits the adapter's pinned destination.
+            unsafe { ptr::copy_nonoverlapping(out.payload.as_ptr(), r.buffer.data, tag_len) };
+            r.buffer.len = tag_len;
+        } else if out.value > 1 || !out.payload.is_empty() {
             return Err(Fault::Corrupt);
-        }
-        if r.mode == 0 {
-            // SAFETY: the signing adapter pins an inline 32-byte destination.
-            unsafe { ptr::copy_nonoverlapping(out.payload.as_ptr(), r.buffer.data, 32) };
-            r.buffer.len = 32;
         }
     } else if carries_payload(op) {
         if op == NEXT_ENTRIES

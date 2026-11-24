@@ -260,9 +260,48 @@ impl SecretGrant {
     }
 }
 
-pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
-    ring::hmac::sign(&key, data).as_ref().try_into().unwrap()
+#[derive(Clone, Copy)]
+pub enum HmacSha2 {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl HmacSha2 {
+    /// The case of the guest's JwsMacAlg.
+    pub fn from_jws_case(case: u64) -> Self {
+        match case {
+            0 => Self::Sha256,
+            1 => Self::Sha384,
+            2 => Self::Sha512,
+            _ => unreachable!("JwsMacAlg case"),
+        }
+    }
+
+    fn algorithm(self) -> ring::hmac::Algorithm {
+        match self {
+            Self::Sha256 => ring::hmac::HMAC_SHA256,
+            Self::Sha384 => ring::hmac::HMAC_SHA384,
+            Self::Sha512 => ring::hmac::HMAC_SHA512,
+        }
+    }
+
+    pub fn tag_len(self) -> usize {
+        self.algorithm().digest_algorithm().output_len()
+    }
+
+    pub fn sign(self, key: &[u8], data: &[u8]) -> ring::hmac::Tag {
+        let key = ring::hmac::Key::new(self.algorithm(), key);
+        ring::hmac::sign(&key, data)
+    }
+
+    pub fn verify(self, key: &[u8], data: &[u8], tag: &[u8]) -> bool {
+        if tag.len() != self.tag_len() {
+            return false;
+        }
+        let key = ring::hmac::Key::new(self.algorithm(), key);
+        ring::hmac::verify(&key, data, tag).is_ok()
+    }
 }
 
 pub fn derive_hmac_sha256(key: &[u8], prefix: &[u8], data: &[u8]) -> zeroize::Zeroizing<Vec<u8>> {
@@ -284,12 +323,4 @@ pub fn derive_hmac_sha256(key: &[u8], prefix: &[u8], data: &[u8]) -> zeroize::Ze
         ring::hmac::Key::new(ring::hmac::HMAC_SHA256, digest.finish().as_ref())
     };
     zeroize::Zeroizing::new(ring::hmac::sign(&key, data).as_ref().to_vec())
-}
-
-pub fn verify_hmac_sha256(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
-    if tag.len() != 32 {
-        return false;
-    }
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
-    ring::hmac::verify(&key, data, tag).is_ok()
 }

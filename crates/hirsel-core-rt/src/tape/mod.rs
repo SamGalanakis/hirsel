@@ -1099,7 +1099,7 @@ unsafe fn operands(r: &Request) -> Args {
         if r.operation == SECRET_KDF {
             return secret::kdf_args(r);
         }
-        if r.operation == SECRET_MAC && r.mode >= crate::secret::key::KEY_WRAP {
+        if r.operation == SECRET_MAC && crate::secret::key::is_key_mode(r.mode) {
             return secret::key_args(r);
         }
         if r.operation == SECRET_MAC {

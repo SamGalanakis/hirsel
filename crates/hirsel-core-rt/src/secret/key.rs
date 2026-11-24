@@ -10,6 +10,10 @@ pub(crate) const KEY_SIGN: u8 = 4;
 pub(crate) const KEY_AEAD_SEAL: u8 = 5;
 pub(crate) const KEY_AEAD_OPEN: u8 = 6;
 
+pub(crate) fn is_key_mode(mode: u8) -> bool {
+    (KEY_WRAP..=KEY_AEAD_OPEN).contains(&mode)
+}
+
 /// `KeyError` as an outcome's error tag: the case index plus one.
 const KEY_DENIED: u8 = 1;
 const KEY_INVALID: u8 = 2;

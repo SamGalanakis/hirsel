@@ -3,7 +3,7 @@
 // key that carries its algorithm family; "none" has no Alg.
 /// The JWS algorithms this module signs and verifies (RFC 7518 section 3.1,
 /// RFC 8037 section 3.1). "none" and every other name are unsupported.
-pub type Alg: key = Hs256 | EdDsa | Es256 | Rs256
+pub type Alg: key = Hs256 | EdDsa | Es256 | Rs256 | Hs384 | Hs512
 
 /// A non-empty set of accepted algorithms: first, then any others.
 pub type Allow: send {
@@ -97,6 +97,8 @@ const U64_MAX: u64 = 18446744073709551615u64
 pub fn alg_name(a: Alg) -> String {
     match a {
         Hs256 => string.from("HS256"),
+        Hs384 => string.from("HS384"),
+        Hs512 => string.from("HS512"),
         EdDsa => string.from("EdDSA"),
         Es256 => string.from("ES256"),
         Rs256 => string.from("RS256"),
@@ -106,6 +108,10 @@ pub fn alg_name(a: Alg) -> String {
 fn parse_alg(s: String) -> Option[Alg] {
     if s == "HS256" {
         Some(Hs256)
+    } else if s == "HS384" {
+        Some(Hs384)
+    } else if s == "HS512" {
+        Some(Hs512)
     } else if s == "EdDSA" {
         Some(EdDsa)
     } else if s == "ES256" {
@@ -120,9 +126,28 @@ fn parse_alg(s: String) -> Option[Alg] {
 fn family(a: Alg) -> Family {
     match a {
         Hs256 => Mac,
+        Hs384 => Mac,
+        Hs512 => Mac,
         EdDsa => OkpKey,
         Es256 => EcKey,
         Rs256 => RsaKey,
+    }
+}
+
+// RFC 7518 section 3.2 requires a MAC key at least as long as the digest.
+fn jws_mac(a: Alg) -> Option[(JwsMacAlg, u64)] {
+    match a {
+        Hs256 => Some((Sha256, 32)),
+        Hs384 => Some((Sha384, 48)),
+        Hs512 => Some((Sha512, 64)),
+        _ => None,
+    }
+}
+
+fn jws_mac_error(e: JwsMacError) -> Error {
+    match e {
+        Denied => Denied,
+        ShortKey => BadKey,
     }
 }
 
@@ -214,7 +239,7 @@ pub fn key_id(k: Key) -> Option[View[String]] in k {
 }
 
 /// A signer for alg. The Secret holds an HMAC key with the `mac` use for
-/// HS256, or a PKCS#8 private key with `sign(ed25519)`, `sign(p256)` or
+/// HS256, HS384 or HS512, or a PKCS#8 private key with `sign(ed25519)`, `sign(p256)` or
 /// `sign(rs256)` (TLS-5).
 pub fn signer(alg: Alg, take key: Secret) -> Signer {
     Signer(alg: alg, key: take key, kid: None)
@@ -363,11 +388,16 @@ fn admit_key(alg: Alg, k: Key) -> Result[(), Error] {
     }
 }
 
-fn check_signature(k: Key, input: Bytes, sig: Bytes) -> Result[(), Error] {
+fn check_signature(k: Key, alg: Alg, input: Bytes, sig: Bytes) -> Result[(), Error] {
     let good = match view k.material {
-        MacKey(s) => match secret.verify_hmac_sha256(s, input, sig) {
-            Ok(v) => v,
-            Error(_) => return Error(Denied),
+        MacKey(s) => {
+            let Some((mac, _)) = jws_mac(alg) else {
+                return Error(WrongKey)
+            }
+            match secret.jws_hmac_verify(s, mac, input, sig) {
+                Ok(v) => v,
+                Error(e) => return Error(jws_mac_error(e)),
+            }
         },
         EdPoint(x) => list.len(sig) == 64 && ed25519.verify(x, input, sig),
         EcPoint(point) => list.len(sig) == 64 && p256.verify(point, input, sig),
@@ -382,7 +412,7 @@ fn check_signature(k: Key, input: Bytes, sig: Bytes) -> Result[(), Error] {
 
 fn verify_with(token: String, take parts: Compact, k: Key) -> Result[Jws, Error] {
     admit_key(parts.header.alg, k)?
-    check_signature(k, list.slice(string.as_bytes(token), 0, parts.signed), parts.signature)?
+    check_signature(k, parts.header.alg, list.slice(string.as_bytes(token), 0, parts.signed), parts.signature)?
     let Compact(header: header, signed: _, payload: payload, signature: _) = take parts
     Ok(Jws(header: take header, payload: take payload))
 }
@@ -587,21 +617,20 @@ pub fn verify_jwt_in(token: String, r: Rules, keys: KeySet) -> Result[Jwt, Error
 
 // ---- signing ----
 fn sign_bytes(s: Signer, input: Bytes) -> Result[Bytes, Error] {
+    if let Some((mac, tag_len)) = jws_mac(s.alg) {
+        let tag = match secret.jws_hmac_sign(s.key, mac, input) {
+            Ok(tag) => tag,
+            Error(e) => return Error(jws_mac_error(e)),
+        }
+        let mut out: Bytes = list.with_capacity(tag_len)
+        let _ = bytebuf.append_inline(mut out, tag, 0, tag_len)
+        return Ok(take out)
+    }
     let alg: SignAlg = match s.alg {
-        Hs256 => {
-            let tag = match secret.hmac_sha256(s.key, input) {
-                Ok(t) => t,
-                Error(_) => return Error(Denied),
-            }
-            let mut out: Bytes = list.with_capacity(32)
-            for x in tag {
-                list.push(mut out, x)
-            }
-            return Ok(take out)
-        },
         EdDsa => Ed25519,
         Es256 => P256,
         Rs256 => Rs256,
+        _ => return Error(WrongKey),
     }
     let mut out: Bytes = list.with_capacity(1024)
     match secret.sign(s.key, alg, input, mut out) {
@@ -617,7 +646,10 @@ fn encoded_len(n: u64) -> u64 {
 
 fn minimum_signature_len(alg: Alg) -> u64 {
     match family(alg) {
-        Mac => 32,
+        Mac => {
+            let (_, tag_len) = option.unwrap(jws_mac(alg))
+            tag_len
+        },
         OkpKey => 64,
         EcKey => 64,
         RsaKey => 256,
@@ -804,8 +836,14 @@ fn jwk_key(take j: JwkSeen) -> Result[Option[Key], Error] {
     }
     let key = if kind == "oct" {
         let raw = member(k)?
-        // RFC 7518 section 3.2: an HS256 key has at least 256 bits.
-        if list.len(raw) < 32 {
+        let min_len = match pinned {
+            Some(a) => match jws_mac(a) {
+                Some((_, minimum)) => minimum,
+                None => return Error(BadKey),
+            },
+            None => 32,
+        }
+        if list.len(raw) < min_len {
             return Error(BadKey)
         }
         match secret.seal(take raw, "verify") {

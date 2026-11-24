@@ -118,6 +118,61 @@ fn jwt_error(take r: Result[jwt.Jwt, jwt.Error]) -> Option[jwt.Error] {
     }
 }
 
+// HS384 and HS512 over {"exp":2000}, each with a key at its RFC 7518 minimum.
+// Independent oracle:
+// python3 - <<'PY'
+// import base64, hmac
+// b64 = lambda b: base64.urlsafe_b64encode(b).rstrip(b'=')
+// for bits in (384, 512):
+//     header = ('{"alg":"HS%d","typ":"JWT"}' % bits).encode()
+//     signed = b64(header) + b'.' + b64(b'{"exp":2000}')
+//     print((signed + b'.' + b64(hmac.digest(bytes(range(bits // 8)), signed, 'sha%d' % bits))).decode())
+// PY
+const HS384_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+
+const HS384_JWT: String = "eyJhbGciOiJIUzM4NCIsInR5cCI6IkpXVCJ9.eyJleHAiOjIwMDB9.syYs9ytrLz3Y-29iRttjdH2fkdjqeF0983ZXZiDtCT-TwS5h7M4Y6aIS1t44T4F-"
+
+const HS384_SHORT_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4"
+
+const HS512_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-Pw"
+
+const HS512_JWT: String = "eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjIwMDB9.hXzHG-kmm4Bl_KCDOK8wD-wcEf0CS5R7l43gGO6fhq0Wo45XRLQ4q5Jv5pSpzmW8oEITTfYvY6E880ayKlK--w"
+
+const HS512_SHORT_KEY: String = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-"
+
+fn hs2_roundtrip(alg: jwt.Alg, key: String, short_key: String, expected: String) -> bool {
+    let signer = jwt.signer(alg, seal(b64(key), "mac"))
+    if !signed(jwt.sign_jwt(signer, "{\"exp\":2000}"), expected) {
+        return false
+    }
+    let verifier = jwt.hmac_key(seal(b64(key), "verify"))
+    let policy = jwt.Rules(allow: jwt.allow(alg), now_secs: 1000, leeway_secs: 0, iss: None, aud: None, require_exp: true)
+    let Ok(value) = jwt.verify_jwt(expected, policy, verifier) else {
+        return false
+    }
+    if value.header.alg != alg || value.claims.exp != Some(2000u64) {
+        return false
+    }
+    let Error(BadKey) = jwt.sign_jwt(jwt.signer(alg, seal(b64(short_key), "mac")), "{\"exp\":2000}") else {
+        return false
+    }
+    let Error(BadKey) = jwt.verify_jws(expected, jwt.allow(alg), jwt.hmac_key(seal(b64(short_key), "verify"))) else {
+        return false
+    }
+    let mut jwk = string.from("{\"kty\":\"oct\",\"alg\":\"")
+    string.push(mut jwk, jwt.alg_name(alg))
+    string.push(mut jwk, "\",\"k\":\"")
+    string.push(mut jwk, key)
+    string.push(mut jwk, "\"}")
+    let Ok(from_jwk) = jwt.jwk(jwk) else {
+        return false
+    }
+    let Ok(_) = jwt.verify_jws(expected, jwt.allow(alg), from_jwk) else {
+        return false
+    }
+    true
+}
+
 // expect: run jwt_law() = 0
 fn jwt_law() -> u64 {
     // 1. RFC 7515 A.1 verifies as a JWS and as a JWT one second before exp.
@@ -290,6 +345,12 @@ fn jwt_law() -> u64 {
     match jws_error(jwt.verify_jws(array, jwt.allow(Hs256), hs_key())) {
         Some(Malformed(NotObject)) => {},
         _ => return 18,
+    }
+    if !hs2_roundtrip(Hs384, HS384_KEY, HS384_SHORT_KEY, HS384_JWT) {
+        return 19
+    }
+    if !hs2_roundtrip(Hs512, HS512_KEY, HS512_SHORT_KEY, HS512_JWT) {
+        return 20
     }
     0
 }

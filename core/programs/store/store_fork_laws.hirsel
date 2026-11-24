@@ -74,7 +74,7 @@ fn range_boundary_points(c: Clock) -> bool waits {
     true
 }
 
-fn stale_reads(tx: Tx, sh: Table[u64, u64], ix: Index[u64, u64, u64], table_id: u32, index_id: u32) -> bool {
+fn stale_reads(tx: Tx, sh: Table[u64, u64], ix: Index[u64, u64, u64, ()], table_id: u32, index_id: u32) -> bool {
     let point = match fetch(tx, sh, 1) {
         Error(Stale(id)) => id == table_id,
         _ => false
@@ -101,7 +101,7 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
         return false
     }
     result.unwrap(create_index(mut db, old, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let old_index = result.unwrap(index(mut db, old, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let old_index = result.unwrap(bind_table_index(mut db, old, "bucket", code.describe(bucket), std.codec.key_u64()))
     result.unwrap(create_index(mut db, old, "other", code.describe(quotient), std.codec.key_u64()))
     let before = snapshot(db)
     if result.unwrap(get(result.unwrap(reader(db, 0u64)), before, old_shape, 1)) != Some(10u64) {
@@ -119,7 +119,7 @@ pub fn law_read_liveness(c: Clock) -> bool waits {
     result.unwrap(create_table(mut db, spec("live", std.codec.key_u64(), std.codec.of_u64())))
     let mut newer = result.unwrap(table(mut db, "live", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_index = result.unwrap(index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_index = result.unwrap(bind_table_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
     let fresh_shape = view newer
     if newer.id != 4 || fresh_index.id != 5 || !typed_put(mut db, newer, 1, 20) {
         return false

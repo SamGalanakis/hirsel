@@ -102,7 +102,7 @@ pub opaque type Rows[K, V]: send {
 }
 
 fn table_decoder[K, V](t: Table[K, V]) -> RowDecoder[K, V] {
-    RowDecoder(table: t.id, key: t.key, readers: arc.share(t.readers), skip: None)
+    RowDecoder(table: t.id, key: t.key, readers: arc.share(t.readers), unique: false, skip: None)
 }
 
 fn table_rows[K, V](s: Snapshot, t: Table[K, V], take cursor: ByteRows) -> PageRows[K, V] {
@@ -148,7 +148,7 @@ pub fn scan_reverse[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], 
     open_scan(r, s, t, lo, hi, true)
 }
 
-pub fn find[J, K, V](r: Reader, s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] waits {
+pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
     if !same(s.store, ix.store) { return Error(Foreign) }
     readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id)?

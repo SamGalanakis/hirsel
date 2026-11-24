@@ -1,3 +1,9 @@
+fn bucket_keys(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, value % 4)
+    Ok(take keys)
+}
+
 fn declaration_law_rename(mut m: Migration) -> Result[(), Error] {
     rename_table(mut m, "items", "renamed")
 }
@@ -8,8 +14,8 @@ fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     let key = std.codec.key_u64()
     let value = std.codec.of_u64()
     let mut staged = declare(db, Migrate)?
-    let items = declare_table(mut staged, "items", key, value)?
-    let ix = declare_index(mut staged, items, "bucket", code.describe(bucket), key)?
+    let mut items = declare_table(mut staged, "items", key, value)?
+    let ix = index(mut staged, mut items, "bucket", Many, code.describe(bucket_keys), key)?
     let rows = finish(mut staged, take items)?
     let omitted = declare_table(mut staged, "omitted", key, value)?
     let _ = finish(mut staged, take omitted)?
@@ -42,8 +48,8 @@ fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
         _ => return Error(Foreign),
     }
     let mut stale = declare(db, Open)?
-    let declared_items = declare_table(mut stale, "items", key, value)?
-    let _ = declare_index(mut stale, declared_items, "bucket", code.describe(bucket), key)?
+    let mut declared_items = declare_table(mut stale, "items", key, value)?
+    let _ = index(mut stale, mut declared_items, "bucket", Many, code.describe(bucket_keys), key)?
     let _ = finish(mut stale, take declared_items)?
     let declared_omitted = declare_table(mut stale, "omitted", key, value)?
     let _ = finish(mut stale, take declared_omitted)?
@@ -55,8 +61,8 @@ fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
         _ => return Error(Foreign),
     }
     let mut renamed = declare_migration(db, tasks, code.describe(declaration_law_rename))?
-    let table_decl = declare_table(mut renamed, "renamed", key, value)?
-    let _ = declare_index(mut renamed, table_decl, "bucket", code.describe(bucket), key)?
+    let mut table_decl = declare_table(mut renamed, "renamed", key, value)?
+    let _ = index(mut renamed, mut table_decl, "bucket", Many, code.describe(bucket_keys), key)?
     let new_handle = finish(mut renamed, take table_decl)?
     let untouched = declare_table(mut renamed, "omitted", key, value)?
     let _ = finish(mut renamed, take untouched)?
@@ -70,4 +76,162 @@ fn test_declaration_seal(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
         Error(Stale(_)) => Ok(()),
         _ => Error(Foreign),
     }
+}
+
+fn backfill_keys(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, value)
+    list.push(mut keys, value)
+    Ok(take keys)
+}
+
+fn unique_backfill_case(c: Clock, rows: u64, duplicate: Option[u64]) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let mut initial = declare(db, Migrate)?
+    let first_decl = declare_table(mut initial, "rows", key, value)?
+    let primary_table = finish(mut initial, take first_decl)?
+    let _ = seal(mut db, take initial)?
+    let result = run(mut db, None, (primary_table, rows, duplicate), fn(mut tx, input) -> Result[(), Error] {
+        for i in 0u64 .. input.1 {
+            put(mut tx, input.0, i, if input.2 == Some(i) { 0u64 } else { i })?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = result {} else { return Error(MigrationFault) }
+    let before = snapshot(db)
+    let mut declaration = declare(db, Migrate)?
+    let mut target_decl = declare_table(mut declaration, "rows", key, value)?
+    let added = index(mut declaration, mut target_decl, "unique", Unique, code.describe(backfill_keys), key)
+    if let Some(_) = duplicate {
+        match take added {
+            Error(Conflict(name)) if name == "unique" => (),
+            _ => return Error(MigrationFault),
+        }
+        match seal(mut db, take declaration) {
+            Error(Conflict(name)) if name == "unique" => (),
+            _ => return Error(MigrationFault),
+        }
+        let after = snapshot(db)
+        if version(before) != version(after) || tree_stamp(before.roots.catalog) != tree_stamp(after.roots.catalog) ||
+            tree_stamp(before.roots.collections) != tree_stamp(after.roots.collections) {
+            return Error(MigrationFault)
+        }
+        return Ok(())
+    }
+    let ix = added?
+    let _ = finish(mut declaration, take target_decl)?
+    let _ = seal(mut db, take declaration)?
+    let after = snapshot(db)
+    let mut cursor = byte_cursor(after.roots.collections, Included(prefix(ix.id)?), prefix(ix.id + 1)?)?
+    for expected in 0u64 .. rows {
+        let Some((index_key, raw)) = next_bytes(mut cursor)? else { return Error(MigrationFault) }
+        if list.len(index_key) != 12 || list.len(raw) != 12 || read_le(raw, 0, 4) != 8 {
+            return Error(MigrationFault)
+        }
+        let j: u64 = list.word_be(index_key, 4)
+        let k: u64 = list.word_be(raw, 4)
+        if j != expected || k != expected { return Error(MigrationFault) }
+    }
+    if let Some(_) = next_bytes(mut cursor)? { return Error(MigrationFault) }
+    Ok(())
+}
+
+fn law_unique_backfill(c: Clock) -> Result[(), Error] waits {
+    let sizes: Inline[u64, 6] = [0, 1, 4095, 4096, 4097, 12289]
+    let duplicates: Inline[u64, 10] = [1, 4095, 4096, 4097, 8191, 8192, 8193, 12287, 12288, 2]
+    for rows in sizes {
+        unique_backfill_case(c, rows, None)?
+        for duplicate in duplicates {
+            if duplicate < rows {
+                unique_backfill_case(c, rows, Some(duplicate))?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stable_cover_key(key: u64, value: u64) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, key)
+    Ok(take keys)
+}
+
+fn cover_sum(key: u64, value: u64) -> Result[u64, Capacity] {
+    Ok(key + value)
+}
+
+fn assert_cover_bytes(db: Db, index_id: u32, key: u64, expected: u64) -> Result[(), Error] {
+    let mut logical = prefix(index_id)?
+    list.put_word_be(mut logical, key)
+    list.put_word_be(mut logical, key)
+    let s = snapshot(db)
+    let Some(raw) = get_page_row(s.roots.collections, logical) else { return Error(MigrationFault) }
+    if list.len(raw) != 10 || read_le(raw, 0, 2) != 0 || read_le(raw, 2, 8) != expected {
+        return Error(MigrationFault)
+    }
+    Ok(())
+}
+
+fn covering_revision_case(c: Clock, change_project: bool) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let key = std.codec.key_u64()
+    let value = std.codec.of_u64()
+    let mut initial = declare(db, Migrate)?
+    let mut first_decl = declare_table(mut initial, "rows", key, value)?
+    let ix = covering(mut initial, mut first_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value)?
+    let primary_table = finish(mut initial, take first_decl)?
+    let _ = seal(mut db, take initial)?
+    if !typed_put(mut db, primary_table, 5, 7) { return Error(MigrationFault) }
+    assert_cover_bytes(db, ix.id, 5, 12)?
+    if !typed_put(mut db, primary_table, 5, 8) { return Error(MigrationFault) }
+    assert_cover_bytes(db, ix.id, 5, 13)?
+
+    // Use the catalog bytes a previous release would leave. Its function names
+    // match and one revision differs. Give its entry a different payload too.
+    let mut prior = schema_plan(db)
+    let mut record = catalog_entry_in(prior.roots.catalog, ix.catalog_key)?
+    let mut prior_revision: Bytes = list.new()
+    list.fill(mut prior_revision, 32, 1u8)
+    if change_project {
+        record.projection = Some((copied(code.identity(code.describe(cover_sum)))?, take prior_revision))
+    } else {
+        record.revision = take prior_revision
+    }
+    let raw = encode_catalog(record)?
+    prior.roots = catalog_insert(mut prior.next_node, share_roots(prior.roots), ix.catalog_key, raw)?
+    let mut fake_key = prefix(ix.id)?
+    list.put_word_be(mut fake_key, 5u64)
+    list.put_word_be(mut fake_key, 5u64)
+    let mut fake_payload: Bytes = list.new()
+    list.put_word_le(mut fake_payload, 0u16)
+    list.put_word_le(mut fake_payload, 99u64)
+    let _ = put_page_row(mut prior.roots.collections, fake_key, fake_payload, prior.next_node + 1, mut prior.next_node)?
+    prior.changed = true
+    let _ = publish_schema_plan(mut db, take prior)?
+    let read_modes: Inline[Mode, 2] = [Open, Follower]
+    for mode in read_modes {
+        let mut opened = declare(db, Open)?
+        opened.mode = mode
+        let mut open_decl = declare_table(mut opened, "rows", key, value)?
+        match covering(mut opened, mut open_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value) {
+            Error(Changed(name)) if name == "cover" => (),
+            _ => return Error(MigrationFault),
+        }
+    }
+    let mut migration = declare(db, Migrate)?
+    let mut rebuilt_decl = declare_table(mut migration, "rows", key, value)?
+    let rebuilt = covering(mut migration, mut rebuilt_decl, "cover", Many, code.describe(stable_cover_key), key, code.describe(cover_sum), value)?
+    let _ = finish(mut migration, take rebuilt_decl)?
+    let _ = seal(mut db, take migration)?
+    if rebuilt.id == ix.id { return Error(MigrationFault) }
+    assert_cover_bytes(db, rebuilt.id, 5, 13)
+}
+
+@test
+fn test_index_declaration_laws(c: Clock) -> Result[(), Error] waits {
+    law_unique_backfill(c)?
+    covering_revision_case(c, false)?
+    covering_revision_case(c, true)
 }

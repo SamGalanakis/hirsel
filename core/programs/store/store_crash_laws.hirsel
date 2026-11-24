@@ -113,7 +113,7 @@ fn disk_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, scenario: String, 
         let mut whole = false
         if moved && listed == 1 && db.heads[0].head == 98 {
             let mut indexed = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
-            let ix = index(mut db, indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
+            let ix = bind_table_index(mut db, indexed, "by_v", code.describe(crash_value), std.codec.key_u64())?
             let mut rows = find(result.unwrap(reader(db, 0u64)), snapshot(db), ix, Unbounded, Unbounded)?
             let mut expect = 0u64
             whole = true

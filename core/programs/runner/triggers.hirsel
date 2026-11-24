@@ -32,7 +32,7 @@ type Row: codec + send {
 
 pub opaque type Tables: shareable + send {
     rows: store.Table[Id, Row],
-    due: store.Index[u64, Id, Row],
+    due: store.Index[u64, Id, Row, ()],
     outcomes: store.Table[Id, Terminal]
 }
 

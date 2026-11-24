@@ -232,8 +232,8 @@ pub fn at_least(mut f: Follower, p: Position, deadline_ns: u64) -> Result[Snapsh
     }
 }
 
-pub fn follower_index[J, K, V](f: Follower, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+pub fn follower_index[J, K, V](f: Follower, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
     let catalog = view f.capture.state.tips[0].roots.catalog
     let (take catalog_key, take record) = read_catalog_index(f.capture.store, catalog, t, name, by, key)?
-    catalog_index_handle(catalog, t, record, take catalog_key, take key)
+    catalog_index_handle(catalog, t, record, take catalog_key, take key, None)
 }

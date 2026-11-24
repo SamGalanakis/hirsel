@@ -161,7 +161,7 @@ pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)]
 }
 
 fn log_decoder[V](l: Log[V]) -> RowDecoder[u64, V] {
-    RowDecoder(table: l.binding.id, key: std.codec.key_u64(), readers: arc.share(l.binding.readers), skip: None)
+    RowDecoder(table: l.binding.id, key: std.codec.key_u64(), readers: arc.share(l.binding.readers), unique: false, skip: None)
 }
 
 pub fn log_scan[V](r: Reader, s: Snapshot, l: Log[V], lo: Bound[u64], hi: Bound[u64]) -> Result[Rows[u64, V], Error] waits {

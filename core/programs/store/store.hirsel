@@ -48,7 +48,7 @@ pub type Fault: send {
 
 pub type StoreCapacity: send = Journal(Capacity) | Resident(Capacity) | Allocation(Capacity)
 
-pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error) | Missed | Tiered(TieredRefusal)
+pub type Error: send = Held | NotFound | Corrupt(Fault) | Unsupported(u64) | Io(IoError) | Poisoned(IoError) | Full(StoreCapacity) | Limit(Limit) | Schema(u64) | Stale(u32) | Decode(std.codec.DecodeError) | Exists(String) | Missing(String) | Changed(String) | Conflict(String) | Undeclared(String) | NoLevel(String) | Behind(Position) | Gone(u32) | Unseen(u32) | Diverged(u32) | Foreign | MigrationFault | ExportDirectory | Fenced(u64) | Lost | Undecided | Declared(String) | NotCurrent(u64) | Unqualified(String) | HistoryMissing(String, Option[u64]) | Reclaimed(u64) | Remote(std.object.Error) | Missed | Tiered(TieredRefusal)
 
 type Roots = PageRoots
 
@@ -2879,7 +2879,9 @@ pub opaque type Table[K, V]: shareable + send {
     readers: Arc[Readers[V]]
 }
 
-pub opaque type Index[J, K, V]: shareable + send {
+pub type IndexKind: key + shareable + send = Many | Unique
+
+pub opaque type Index[J, K, V, P]: shareable + send {
     store: StoreId,
     id: u32,
     catalog_key: Arc[Bytes],
@@ -2887,7 +2889,9 @@ pub opaque type Index[J, K, V]: shareable + send {
     table: u32,
     key: std.codec.Key[J],
     primary: std.codec.Key[K],
-    readers: Arc[Readers[V]]
+    readers: Arc[Readers[V]],
+    kind: IndexKind,
+    payload: Option[Arc[Readers[P]]]
 }
 
 // AB1: a table declared whole, for create_table and migrate. Each index keeps
@@ -2954,6 +2958,7 @@ type RowDecoder[K, V]: send {
     table: u32,
     key: std.codec.Key[K],
     readers: Arc[Readers[V]],
+    unique: bool,
     skip: Option[own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError]]
 }
 
@@ -3111,20 +3116,18 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[Catalog], take p: By
         let edits = {
             let previous = transaction_row(tx, p)
             let mut pending = IndexEdits(first: None, rest: list.new())
+            let primary = list.slice(p, 4, list.len(p))
             for ix in indexes {
                 let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
-                let key = list.slice(p, 4, list.len(p))
-                let index_row = (bound_index.extract)(raw, key)?
-                if let Some(value) = previous {
-                    let old_row = (bound_index.extract)(value, key)?
-                    if old_row == index_row {
-                        continue
-                    }
-                    append_index_remove(tx, mut pending, take old_row, mut frame)?
+                let incoming = (bound_index.extract)(raw, primary)?
+                let old_keys = match previous {
+                    Some(value) => {
+                        let IndexValue(keys: take keys, ..) = (bound_index.extract)(value, primary)?
+                        take keys
+                    },
+                    None => list.new(),
                 }
-                let empty: Bytes = list.new()
-                frame = put_frame(tx, index_row, empty, frame)?
-                push_index_edit(mut pending, StoreRow(take index_row, take empty))
+                plan_index_put(tx, mut pending, mut frame, ix, primary, old_keys, take incoming)?
             }
             take pending
         }
@@ -3147,8 +3150,10 @@ fn delete_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[Catalog], key: By
         let mut pending = IndexEdits(first: None, rest: list.new())
         for ix in indexes {
             let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
-            let row = (bound_index.extract)(old, key)?
-            append_index_remove(tx, mut pending, take row, mut frame)?
+            let IndexValue(keys: take keys, ..) = (bound_index.extract)(old, key)?
+            for take row in take keys {
+                append_index_remove(tx, mut pending, take row, mut frame)?
+            }
         }
         (take pending, refund)
     }
@@ -3225,7 +3230,7 @@ pub fn reads_key(r: Read, key: Bytes) -> bool {
     }
 }
 
-fn index_decoder[J, K, V](ix: Index[J, K, V]) -> RowDecoder[K, V] {
+fn index_decoder[J, K, V, P](ix: Index[J, K, V, P]) -> RowDecoder[K, V] {
     let k = ix.key
     let start = 4u64
     let skip: own[send] fn(Bytes, mut u64) -> Result[(), std.codec.DecodeError] = fn(raw: Bytes, mut at: u64) -> Result[(), std.codec.DecodeError] {
@@ -3233,10 +3238,10 @@ fn index_decoder[J, K, V](ix: Index[J, K, V]) -> RowDecoder[K, V] {
         let _ = std.codec.take_key_with(raw, mut at, k)?
         Ok(())
     }
-    RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), skip: Some(take skip))
+    RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), unique: (ix.kind == Unique), skip: Some(take skip))
 }
 
-fn indexed_rows[J, K, V](data: PageTree, ix: Index[J, K, V], take cursor: ByteRows) -> Result[PageRows[K, V], Error] {
+fn indexed_rows[J, K, V, P](data: PageTree, ix: Index[J, K, V, P], take cursor: ByteRows) -> Result[PageRows[K, V], Error] {
     Ok(PageRows(cursor: take cursor, data: share_page_tree(data), decoder: index_decoder(ix)))
 }
 
@@ -3283,7 +3288,7 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
     }
 }
 
-pub fn lookup[J, K, V](tx: Tx, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
+pub fn lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J]) -> Result[IndexRows[K, V], Error] in tx {
     if !same(tx.store, ix.store) {
         return Error(Foreign)
     }
@@ -3319,7 +3324,7 @@ pub fn scan_page[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], lo: Bou
     read_page(s, t.id, take high, table_rows(s, t, take cursor), l)
 }
 
-pub fn find_page[J, K, V](read_handle: Reader, s: Snapshot, ix: Index[J, K, V], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] waits {
+pub fn find_page[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound[J], hi: Bound[J], l: Limits) -> Result[Page[K, V], Error] waits {
     read_access(read_handle, s)?
     page_limits(l)?
     if !same(s.store, ix.store) {
@@ -3356,7 +3361,7 @@ pub fn scan_next[K, V](read_handle: Reader, s: Snapshot, t: Table[K, V], take r:
     Ok(Paged(read_page(s, t.id, take high, table_rows(s, t, take cursor), l)?))
 }
 
-pub fn find_next[J, K, V](read_handle: Reader, s: Snapshot, ix: Index[J, K, V], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
+pub fn find_next[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V, P], take r: Resume, l: Limits) -> Result[Resumed[K, V], Error] waits {
     read_access(read_handle, s)?
     if !resume_here(s, ix.store, ix.id, ix.catalog_key, ix.catalog_page, r, l)? {
         return Ok(Moved(s.head))
@@ -3412,7 +3417,11 @@ fn advance_rows[K, V](r: RowDecoder[K, V], data: PageTree, row_key: Bytes, raw: 
             Error(e) => return Error(Decode(e))
         }
     }
-    let key = list.slice(row_key, at, list.len(row_key))
+    let key = if r.unique {
+        list.slice(raw, 4, unique_owner_end(raw)?)
+    } else {
+        list.slice(row_key, at, list.len(row_key))
+    }
     let k = decoded(std.codec.decode_key(r.key, key))?
     if let Some(_) = r.skip {
         let primary = logical_key(r.table, key)?
@@ -3435,106 +3444,6 @@ fn finish_row[K, V](r: RowDecoder[K, V], take key: K, row_key: Bytes, raw: Bytes
     let value = row_value(r.readers, r.table, raw)?
     seen(row_key)?
     Ok(Some(((take key, take value), size)))
-}
-
-type ValueSchema: shareable + send {
-    number: u16,
-    fingerprint: u64,
-    schema: Bytes
-}
-
-type Catalog {
-    kind: u8,
-    id: u32,
-    owner: u32,
-    epoch: u64,
-    key: Bytes,
-    schemas: List[ValueSchema],
-    next: u16,
-    by: Bytes,
-    revision: Bytes
-}
-
-fn malformed(at: u64) -> Error {
-    Corrupt(Fault(file: "catalog", offset: at, why: Malformed))
-}
-
-fn take_le(raw: Bytes, mut at: u64, width: u64) -> Result[u64, Error] {
-    if at > list.len(raw) || width > list.len(raw) - at {
-        return Error(malformed(at))
-    }
-    let n = read_le(raw, at, width)
-    at += width
-    Ok(n)
-}
-
-fn take_blob(raw: Bytes, mut at: u64) -> Result[Bytes, Error] {
-    let n = take_le(raw, mut at, 4)?
-    if n > list.len(raw) - at {
-        return Error(malformed(at))
-    }
-    let data = list.slice(raw, at, at + n)
-    let out = copied(data)?
-    at += n
-    Ok(take out)
-}
-
-fn decode_catalog(raw: Bytes) -> Result[Catalog, Error] {
-    let mut at: u64 = 0
-    let kind: u8 = int.truncate(take_le(raw, mut at, 1)?)
-    let id: u32 = int.truncate(take_le(raw, mut at, 4)?)
-    let owner: u32 = int.truncate(take_le(raw, mut at, 4)?)
-    let epoch = take_le(raw, mut at, 8)?
-    if kind < 1 || kind > 4 || id == 0 || epoch == 0 || (kind == 2 && owner == 0) {
-        return Error(malformed(0))
-    }
-    let key = take_blob(raw, mut at)?
-    if kind == 3 && list.len(key) != 0 {
-        return Error(malformed(17))
-    }
-    if kind == 4 {
-        let expected = std.codec.key_schema(std.codec.key_u64()) ?=> |_| malformed(17)
-        if key != expected {
-            return Error(malformed(17))
-        }
-    }
-    let schema_count = take_le(raw, mut at, 2)?
-    let mut schemas: List[ValueSchema] = list.new()
-    for _ in 0u64 .. schema_count {
-        let number: u16 = int.truncate(take_le(raw, mut at, 2)?)
-        let fingerprint = take_le(raw, mut at, 8)?
-        let schema = take_blob(raw, mut at)?
-        list.push(mut schemas, ValueSchema(number: number, fingerprint: fingerprint, schema: take schema))
-    }
-    let next_number: u16 = int.truncate(take_le(raw, mut at, 2)?)
-    let by = take_blob(raw, mut at)?
-    let revision = take_blob(raw, mut at)?
-    if at != list.len(raw) {
-        return Error(malformed(at))
-    }
-    Ok(Catalog(kind: kind, id: id, owner: owner, epoch: epoch, key: take key, schemas: take schemas, next: next_number, by: take by, revision: take revision))
-}
-
-fn encode_catalog(c: Catalog) -> Result[Bytes, Error] {
-    let mut raw: Bytes = list.new()
-    capacity(le(mut raw, int.widen(c.kind), 1))?
-    capacity(le(mut raw, int.widen(c.id), 4))?
-    capacity(le(mut raw, int.widen(c.owner), 4))?
-    capacity(le(mut raw, c.epoch, 8))?
-    capacity(blob(mut raw, c.key))?
-    capacity(le(mut raw, list.len(c.schemas), 2))?
-    for schema in c.schemas {
-        capacity(le(mut raw, int.widen(schema.number), 2))?
-        capacity(le(mut raw, schema.fingerprint, 8))?
-        capacity(blob(mut raw, schema.schema))?
-    }
-    capacity(le(mut raw, int.widen(c.next), 2))?
-    capacity(blob(mut raw, c.by))?
-    capacity(blob(mut raw, c.revision))?
-    if list.len(raw) > 1048576 {
-        return Error(Limit(Value))
-    }
-    Ok(take raw)
 }
 
 fn named(s: String) -> Result[String, Error] {
@@ -3791,7 +3700,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Re
     let fp = std.codec.fingerprint_of(schema)
     list.push(mut schemas, ValueSchema(number: 0, fingerprint: fp, schema: take schema))
     let id = plan.next_table
-    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(s.key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new())
+    let c = Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(s.key) ?=> |_| Schema(0)), schemas: take schemas, next: 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None)
     let raw = encode_catalog(c)?
     let mut live = catalog_recharge(plan.live, plan.roots, k, raw, plan.retained)
     let base = share_roots(plan.roots)
@@ -3801,7 +3710,7 @@ fn stage_create_table[K, V](mut plan: SchemaPlan, take s: TableSpec[K, V]) -> Re
     let mut index_id = id + 1
     for ix in s.indexes {
         let ik = catalog_index_key(id, ix.name)?
-        let entry_raw = encode_catalog(Catalog(kind: 2, id: index_id, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
+        let entry_raw = encode_catalog(Catalog(kind: 2, id: index_id, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None))?
         live = catalog_recharge(live, plan.roots, ik, entry_raw, plan.retained)
         roots = catalog_insert(mut plan.next_node, roots, ik, entry_raw)?
         define_store_collection(mut roots.collections, index_id, 2, mut plan.next_node)?
@@ -3943,30 +3852,30 @@ fn stage_create_index[J, K, V](mut plan: SchemaPlan, t: Table[K, V], name: Strin
     stage_versioned_index(mut plan, t, name, by, key, list.new())
 }
 
-pub fn index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+fn bind_table_index[J, K, V](mut db: Db, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
     healthy(db)?
     let catalog = view db.heads[0].roots.catalog
     let (take k, take c) = read_catalog_index(db.store, catalog, t, name, by, key)?
-    let handle = catalog_index_handle(catalog, t, c, take k, key)?
+    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None)?
     register_index(mut db.indexes, bind_index(t, c, by, key))
     Ok(take handle)
 }
 
-pub fn schema_index[J, K, V](source: Schema, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+pub fn schema_index[J, K, V](source: Schema, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
     application_name(name)?
     let (take k, take c) = read_catalog_index(source.store, source.catalog, t, name, by, key)?
-    let handle = catalog_index_handle(source.catalog, t, c, take k, key)?
+    let handle: Index[J, K, V, ()] = catalog_index_handle(source.catalog, t, c, take k, key, None)?
     if let Some(bindings) = source.bindings {
         log.append(bindings, bind_index(t, c, by, key))
     }
     Ok(take handle)
 }
 
-pub fn migration_index[J, K, V](mut phase: Migration, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
+pub fn migration_index[J, K, V](mut phase: Migration, t: Table[K, V], name: String, by: StaticFn[fn(V) -> Result[J, Capacity]], take key: std.codec.Key[J]) -> Result[Index[J, K, V, ()], Error] {
     application_name(name)?
     let catalog = view phase.plan.roots.catalog
     let (take k, take c) = read_catalog_index(phase.plan.store, catalog, t, name, by, key)?
-    let handle = catalog_index_handle(catalog, t, c, take k, key)?
+    let handle: Index[J, K, V, ()] = catalog_index_handle(catalog, t, c, take k, key, None)?
     list.push(mut phase.plan.bindings, bind_index(t, c, by, key))
     Ok(take handle)
 }
@@ -3986,8 +3895,10 @@ fn read_catalog_index[J, K, V](store_id: StoreId, catalog: PageTree, t: Table[K,
     Ok((take k, take c))
 }
 
-fn catalog_index_handle[J, K, V](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J]) -> Result[Index[J, K, V], Error] {
-    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?, table: t.id, key: key, primary: t.key, readers: arc.share(t.readers)))
+fn catalog_index_handle[J, K, V, P](catalog: PageTree, t: Table[K, V], c: Catalog, take k: Bytes, take key: std.codec.Key[J],
+    take payload: Option[Arc[Readers[P]]]) -> Result[Index[J, K, V, P], Error] {
+    Ok(Index(store: t.store, id: c.id, catalog_key: catalog_key_handle(take k)?, catalog_page: catalog_page(catalog)?,
+        table: t.id, key: key, primary: t.key, readers: arc.share(t.readers), kind: c.index_kind, payload: take payload))
 }
 
 pub fn drop_table[K, V](mut db: Db, take t: Table[K, V]) -> Result[Ticket, Error] waits {
@@ -4119,13 +4030,13 @@ fn migrate_build[K, V, K2, V2](source: PageTree, take base: Roots, mut ids: u64,
     let fp = std.codec.fingerprint_of(schema)
     let mut schemas: List[ValueSchema] = list.new()
     list.push(mut schemas, ValueSchema(number: number, fingerprint: fp, schema: take schema))
-    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to.key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new()))?
+    let table_raw = encode_catalog(Catalog(kind: 1, id: id, owner: 0, epoch: 1, key: (std.codec.key_schema(to.key) ?=> |_| Schema(0)), schemas: take schemas, next: number + 1, by: list.new(), revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None))?
     let mut edits: List[CatalogWrite] = list.new()
     list.push(mut edits, CatalogWrite(key: copied(target)?, value: take table_raw))
     let mut slot_order = 1u32
     for ix in to.indexes {
         let ik = catalog_index_key(id, ix.name)?
-        let raw = encode_catalog(Catalog(kind: 2, id: id + slot_order, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new()))?
+        let raw = encode_catalog(Catalog(kind: 2, id: id + slot_order, owner: id, epoch: 1, key: copied(ix.key)?, schemas: list.new(), next: 0, by: copied(ix.by)?, revision: list.new(), index_kind: Many, payload_schemas: list.new(), projection: None))?
         list.push(mut edits, CatalogWrite(key: take ik, value: take raw))
         slot_order += 1
     }

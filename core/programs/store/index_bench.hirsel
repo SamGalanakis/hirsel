@@ -40,6 +40,12 @@ fn accounts() -> std.codec.Codec[Account] {
 fn bucket(a: Account) -> Result[u64, Capacity] {
     Ok(a.id % 4)
 }
+fn account_buckets(key: u64, account: Account) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.new()
+    list.push(mut keys, bucket(account)?)
+    Ok(take keys)
+}
+
 
 fn save(mut db: store.Db, t: store.Table[u64, Account], k: u64, balance: u64) -> u64 waits {
     let done = result.unwrap(store.run(mut db, None, (copy_env(balance), copy_env(k), copy_env(t)), fn(mut tx, call_env) -> Result[u64, store.Error] {
@@ -63,8 +69,8 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
         3
     }
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    result.unwrap(store.create_table(mut db, store.spec("accounts", std.codec.key_u64(), accounts())))
-    let mut t = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), accounts()))
+    let mut d = result.unwrap(store.declare(db, Migrate))
+    let mut declared = result.unwrap(store.declare_table(mut d, "accounts", std.codec.key_u64(), accounts()))
     for i in 0u64 .. count {
         let name = if i == 0 {
             "i0"
@@ -73,9 +79,10 @@ pub fn main(dir: Dir, clock: Clock, random: Random, out: Stdout, argv: Args) -> 
         } else {
             "i2"
         }
-        result.unwrap(store.create_index(mut db, t, name, code.describe(bucket), std.codec.key_u64()))
-        let _ = result.unwrap(store.index(mut db, t, name, code.describe(bucket), std.codec.key_u64()))
+        let _ = result.unwrap(store.index(mut d, mut declared, name, Many, code.describe(account_buckets), std.codec.key_u64()))
     }
+    let t = result.unwrap(store.finish(mut d, take declared))
+    let _ = result.unwrap(store.seal(mut db, take d))
     for i in 0u64 .. 100000 {
         let _ = save(mut db, t, i, i)
     }

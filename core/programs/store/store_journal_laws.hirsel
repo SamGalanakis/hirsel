@@ -707,8 +707,8 @@ fn journal_test_fork_exports(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(ExportMismatch)
     }
     release_export(mut db, attempt)
-    let covering = begin_export_copy(mut db, scratch, result.unwrap(copied(attempt)), 0)?
-    let covered_export = export_copy(take covering)?
+    let cover_copy = begin_export_copy(mut db, scratch, result.unwrap(copied(attempt)), 0)?
+    let covered_export = export_copy(take cover_copy)?
     if let Some(_) = deploy_result(recorded(db, main, 3))? {
         return Error(ExportMismatch)
     }

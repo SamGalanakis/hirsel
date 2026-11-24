@@ -10,7 +10,7 @@ pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
     result.unwrap(store.create_table(mut db, store.spec("t", std.codec.key_u64(), std.codec.of_u64())))
     let mut t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
-    let mut ix = result.unwrap(store.index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+    let mut ix = result.unwrap(bind_table_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
     for i in 0u64 .. 2 {
         let done = store.run(mut db, None, (copy_env(t), copy_env(i)), fn(mut tx, call_env) -> Result[(), store.Error] {
             store.put(mut tx, call_env.0, 1, call_env.1)
@@ -30,7 +30,7 @@ pub fn law_assembly_indexed_recreate(c: Clock, r: Random) -> bool waits {
         result.unwrap(store.create_table(mut db, store.spec("t", std.codec.key_u64(), std.codec.of_u64())))
         t = result.unwrap(store.table(mut db, "t", std.codec.key_u64(), std.codec.of_u64()))
         result.unwrap(store.create_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
-        ix = result.unwrap(store.index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
+        ix = result.unwrap(bind_table_index(mut db, t, "i", code.describe(assembly_bucket), std.codec.key_u64()))
     }
     true
 }
@@ -100,7 +100,7 @@ fn test_shared_payload_copy(c: Clock) -> Result[(), ()] {
     }
 }
 
-fn pages_match(s: Snapshot, sh: Table[u64, u64], ix: Index[u64, u64, u64], indexed: bool, limits: Limits) -> bool waits {
+fn pages_match(s: Snapshot, sh: Table[u64, u64], ix: Index[u64, u64, u64, ()], indexed: bool, limits: Limits) -> bool waits {
     let table_model: Inline[(u64, u64), 5] = [(2, 5), (3, 9), (4, 2), (5, 13), (6, 6)]
     let index_model: Inline[(u64, u64), 5] = [(2, 5), (3, 9), (5, 13), (4, 2), (6, 6)]
     let expected = if indexed { index_model } else { table_model }
@@ -173,7 +173,7 @@ pub fn law_keyset_pages(c: Clock) -> bool waits {
     result.unwrap(create_table(mut db, spec("pages", std.codec.key_u64(), std.codec.of_u64())))
     let mut original = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, original, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let ix = result.unwrap(index(mut db, original, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let ix = result.unwrap(bind_table_index(mut db, original, "bucket", code.describe(bucket), std.codec.key_u64()))
     let sh: Table[u64, u64] = clone(original)
     let written = run(mut db, None, original, fn(mut tx, call_env) -> Result[(), Error] {
         let inserted: Inline[(u64, u64), 7] = [(5, 13), (3, 9), (7, 3), (1, 8), (6, 6), (2, 5), (4, 2)]
@@ -214,7 +214,7 @@ pub fn law_keyset_pages(c: Clock) -> bool waits {
     result.unwrap(create_table(mut db, spec("pages", std.codec.key_u64(), std.codec.of_u64())))
     let mut newer = result.unwrap(table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
     result.unwrap(create_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
-    let fresh_ix = result.unwrap(index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
+    let fresh_ix = result.unwrap(bind_table_index(mut db, newer, "bucket", code.describe(bucket), std.codec.key_u64()))
     let fresh_shape = view newer
     let current = snapshot(db)
     match scan_next(result.unwrap(reader(db, 0u64)), current, fresh_shape, page_token(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, one))), one) {

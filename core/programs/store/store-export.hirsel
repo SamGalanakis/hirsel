@@ -127,9 +127,19 @@ fn copy_log_export(from: Dir, raw: Bytes, to: Dir, lease: Arc[ExportLease], stam
         scratch_result(copy_export_file(from, to, path, None))?
     }
     scratch_result(disk_write_synced(to, "MANIFEST", raw))?
+    let id = StoreId(hi: stamp.store_hi, lo: stamp.store_lo)
     for seq in lease.first .. stamp.terminal {
         let path = scratch_result(capacity(disk_path("j-", seq, "")))?
-        scratch_result(copy_export_file(from, to, path, None))?
+        let following = match journal_header(from, id, seq + 1, false) {
+            Ok(header) => header,
+            Error(Corrupt(_)) => None,
+            Error(take problem) => return Error(Scratch(take problem)),
+        }
+        let Some(successor) = following else {
+            let next_path = scratch_result(journal_path(seq + 1, ""))?
+            return Error(Scratch(disk_fault(next_path, 0, Header)))
+        }
+        scratch_result(copy_export_file(from, to, path, Some(successor.prev_end)))?
     }
     let terminal = scratch_result(capacity(disk_path("j-", stamp.terminal, "")))?
     scratch_result(copy_export_file(from, to, terminal, Some(stamp.end)))?

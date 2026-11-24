@@ -574,3 +574,135 @@ fn test_refused_reply(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), (
         Error(())
     }
 }
+
+fn window_law_commit(ctx: DiskContext, offset: u64, head: u64, width: u64) -> Bytes {
+    let mut value: Bytes = list.with_capacity(width)
+    list.fill(mut value, width, 119u8)
+    let key = result.unwrap(logical_key(1, key_word(head)))
+    let mut data = new_data_rows()
+    push_data_row(mut data, DataOp(key: take key, value: Some(PageValue(take value)), trim: None))
+    let ci = CallInfo(id: CallId(store: ctx.store, branch: 0, version: head), at: head + 100, seed: 0)
+    result.unwrap(encode_commit(ci, mut data, ctx.seq, offset))
+}
+
+fn window_law_image(d: Dir, id: StoreId, raw: Bytes, start: u64, frames: Inline[Bytes, 3]) -> Result[(), Error] waits {
+    let mut expected_end = start
+    let mut expected_head = 1u64
+    for frame in frames {
+        let end = expected_end + list.len(frame)
+        if end > list.len(raw) || list.slice(raw, expected_end, end) != frame {
+            break
+        }
+        expected_end = end
+        expected_head += 1
+    }
+    disk_write_synced(d, "j-7", raw)?
+    let mut initial = journal_initial()
+    define_store_collection(mut initial.state.tips[0].roots.collections, 1, 1, mut initial.next_node)?
+    let recovered = journal_recover(d, id, 7, Locked, take initial)?
+    if recovered.end != expected_end || recovered.uncovered != expected_end - 72 || recovered.replay.state.tips[0].head != expected_head {
+        return Error(Missing("window commit prefix"))
+    }
+    Ok(())
+}
+
+fn window_law_witness(d: Dir, id: StoreId, acked_image: Bytes, frame: Bytes) -> Result[(), Error] waits {
+    let acked_end = list.len(acked_image)
+    disk_write_synced(d, "j-7.end", journal_end_bytes(id, 7, acked_end))?
+    let mut image = copied(acked_image)?
+    list.fill(mut image, 16, 0u8)
+    disk_write_synced(d, "j-7", image)?
+    let zeros = log_journal_witness(d, id, 7)?
+    list.fill(mut image, 65536, 0u8)
+    disk_write_synced(d, "j-7", image)?
+    if zeros != log_journal_witness(d, id, 7)? { return Error(Missing("witness of added zeros")) }
+
+    let mut reserved = copied(acked_image)?
+    list.fill(mut reserved, 16, 0u8)
+    list.set_word_le(mut reserved, acked_end, 0x0020u16)
+    list.set_word_le(mut reserved, acked_end + 4, 1u32)
+    disk_write_synced(d, "j-7", reserved)?
+    if zeros == log_journal_witness(d, id, 7)? { return Error(Missing("witness of reserved head")) }
+    match journal_recover(d, id, 7, Locked, journal_initial()) {
+        Error(Unsupported(32)) => (),
+        _ => return Error(Missing("window reserved head")),
+    }
+
+    let mut in_place = copied(acked_image)?
+    list.append(mut in_place, frame)
+    let padding = list.len(image) - list.len(in_place)
+    list.fill(mut in_place, padding, 0u8)
+    disk_write_synced(d, "j-7", in_place)?
+    if zeros == log_journal_witness(d, id, 7)? { return Error(Missing("witness of in-place frame")) }
+
+    let mut gap = copied(acked_image)?
+    list.fill(mut gap, 16, 0u8)
+    list.append(mut gap, frame)
+    disk_write_synced(d, "j-7", gap)?
+    // Past d, even fitting-looking bytes after the zero head are unreachable.
+    if zeros != log_journal_witness(d, id, 7)? { return Error(Missing("witness stops at zero")) }
+    disk_write_synced(d, "j-7.end", journal_end_bytes(id, 7, list.len(gap)))?
+    match journal_recover(d, id, 7, Locked, journal_initial()) {
+        Error(Corrupt(Fault(offset: at, why: Kind(0), ..))) if at == acked_end => (),
+        _ => return Error(Missing("zero below durable end")),
+    }
+
+    disk_io(host.remove(d, "j-7.end"))?
+    disk_write_synced(d, "j-7", list.slice(acked_image, 0, 71))?
+    let short = log_journal_witness(d, id, 7)?
+    disk_write_synced(d, "j-7", list.slice(acked_image, 0, 70))?
+    if short == log_journal_witness(d, id, 7)? { return Error(Missing("witness of short header")) }
+    Ok(())
+}
+
+@test
+fn journal_window_prefix(d: Dir) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 2, seq: 7)
+    let mut acked_image = capacity(disk_header_bytes(ctx, 0, 0))?
+    list.append(mut acked_image, journal_empty_commit(ctx, 72, 1))
+    let acked_end = list.len(acked_image)
+    let empty = journal_empty_commit(ctx, acked_end, 2)
+    let big = window_law_commit(ctx, acked_end + 42, 3, 65300)
+    let small = window_law_commit(ctx, acked_end + 42 + list.len(big), 4, 512)
+    let frames: Inline[Bytes, 3] = [take empty, take big, take small]
+    let mut group: Bytes = list.new()
+    let mut cuts: List[u64] = list.new()
+    for frame in frames {
+        let at = list.len(group)
+        if at > 0 { list.push(mut cuts, at - 1) }
+        list.push(mut cuts, at)
+        list.push(mut cuts, at + 1)
+        list.append(mut group, frame)
+    }
+    let length = list.len(group)
+    list.push(mut cuts, length - 1)
+    list.push(mut cuts, length)
+    for cut in [38u64, 40u64, 41u64] { list.push(mut cuts, cut) }
+    let mut page = 4096 - acked_end % 4096
+    while page < length {
+        list.push(mut cuts, page)
+        page += 4096
+    }
+    for with_end in [false, true] {
+        if with_end {
+            disk_write_synced(dir, "j-7.end", journal_end_bytes(id, 7, acked_end))?
+        }
+        for cut in cuts {
+            for room in [0u64, 1u64, length - 1, 4096u64, 8192u64, 4194304u64] {
+                let mut image = copied(acked_image)?
+                list.append(mut image, list.slice(group, 0, cut))
+                if room > cut { list.fill(mut image, room - cut, 0u8) }
+                window_law_image(dir, id, image, acked_end, frames)?
+            }
+        }
+        let mut subset = copied(acked_image)?
+        let later_page = 8192 - acked_end
+        list.fill(mut subset, later_page, 0u8)
+        list.append(mut subset, list.slice(group, later_page, later_page + 4096))
+        list.fill(mut subset, length - later_page - 4096, 0u8)
+        window_law_image(dir, id, subset, acked_end, frames)?
+    }
+    window_law_witness(dir, id, acked_image, frames[0])
+}

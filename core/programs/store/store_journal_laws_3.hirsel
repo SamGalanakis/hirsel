@@ -879,12 +879,12 @@ fn journal_boundary_case(d: Dir, c: Clock, r: Random, tasks: Tasks, final_item: 
     let seq = db.file_seq
     result.unwrap(close(take db))
     let path = result.unwrap(disk_path("j-", seq, ""))
-    let raw = result.unwrap(disk_read_file(d, path, 16777400))
     if accepted {
-        if list.len(raw) != 72 + 15729082 + final_item || read_le(raw, 76, 4) != 15729066 + final_item {
+        let raw = result.unwrap(read_journal_prefix(d, path, 72 + 15729082 + final_item))
+        if read_le(raw, 76, 4) != 15729066 + final_item {
             return false
         }
-    } else if list.len(raw) != 72 {
+    } else if list.len(result.unwrap(disk_read_file(d, path, 72))) != 72 {
         return false
     }
     let reopened = result.unwrap(open(tasks, d, c, r, options))

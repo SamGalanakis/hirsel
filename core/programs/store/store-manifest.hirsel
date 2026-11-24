@@ -891,44 +891,94 @@ fn witness_word(mut digest: std.sha256.Sha256, n: u64) {
     }
 }
 
+fn witness_range(mut digest: std.sha256.Sha256, mut input: JournalInput, path: String, start: u64, end: u64) -> Result[(), Error] waits {
+    let mut at = start
+    while at < end {
+        let offset = journal_chunk(mut input, path, at)?
+        let used = order.min(end - at, list.len(input.chunk) - offset)
+        std.sha256.add(mut digest, input.chunk, offset, offset + used)
+        at += used
+    }
+    Ok(())
+}
+
+fn witness_terminal(mut digest: std.sha256.Sha256, mut input: JournalInput, path: String, boundary: Option[u64]) -> Result[(), Error] waits {
+    let durable_end = if let Some(end) = boundary {
+        std.sha256.add_byte(mut digest, 1)
+        witness_word(mut digest, end)
+        end
+    } else {
+        std.sha256.add_byte(mut digest, 0)
+        72u64
+    }
+    let size = input.size
+    if size < 72 {
+        std.sha256.add_byte(mut digest, 0)
+        witness_word(mut digest, size)
+        return witness_range(mut digest, mut input, path, 0, size)
+    }
+    std.sha256.add_byte(mut digest, 1)
+    witness_range(mut digest, mut input, path, 0, 72)?
+    let mut at = 72u64
+    loop {
+        let width = order.min(16u64, size - at)
+        let head = journal_prefix(mut input, path, at, width)?
+        let stop = if width < 16 {
+            1u8
+        } else if read_le(head, 0, 2) == 0 {
+            2u8
+        } else if read_le(head, 4, 4) > size - at - 16 {
+            3u8
+        } else {
+            0u8
+        }
+        if stop != 0 {
+            witness_word(mut digest, at)
+            if stop != 3 && at >= durable_end {
+                std.sha256.add_byte(mut digest, 0)
+            } else {
+                std.sha256.add_byte(mut digest, stop)
+                std.sha256.add(mut digest, head, 0, width)
+                witness_word(mut digest, size)
+            }
+            return Ok(())
+        }
+        let next_at = at + 16 + read_le(head, 4, 4)
+        std.sha256.add(mut digest, head, 0, 16)
+        witness_range(mut digest, mut input, path, at + 16, next_at)?
+        at = next_at
+    }
+}
+
 fn log_journal_witness(d: Dir, id: StoreId, first: u64) -> Result[Inline[u8, 32], Error] waits {
     let mut digest = std.sha256.start()
-    let mut scratch = disk_read_buffer(65536)?
     let mut seq = first
     loop {
         let path = journal_path(seq, "")?
-        let mut file = match host.open(d, path, Read) {
+        let file = match host.open(d, path, Read) {
             Ok(take handle) => take handle,
             Error(NotFound) => return Error(disk_fault(path, 0, Header)),
             Error(problem) => return Error(Io(problem)),
         }
-        disk_io(host.sync(mut file))?
-        let stat_size = disk_io(host.stat_file(mut file))?.size
+        let mut input = journal_input(take file, true)?
         let following = journal_following(d, id, seq, true)?
-        let end = if let Some(header) = following { header.prev_end } else { stat_size }
-        // §3.2 live capture: the writer may have extended the file and
-        // named the new bytes after this stat. Refresh before Truncated.
-        let size = if end > stat_size { disk_io(host.stat_file(mut file))?.size } else { stat_size }
-        if end > size { return Error(disk_fault(path, size, Truncated)) }
         witness_word(mut digest, seq)
-        witness_word(mut digest, end)
-        let mut at = 0u64
-        while at < end {
-            list.clear(mut scratch)
-            let n = disk_io(host.read_at(mut file, at, mut scratch))?
-            if n == 0 { return Error(disk_fault(path, at, Truncated)) }
-            let used = order.min(n, end - at)
-            std.sha256.add(mut digest, scratch, 0, used)
-            at += used
+        if let Some(header) = following {
+            let end = header.prev_end
+            journal_refresh_size(mut input, Live, Some(end))?
+            if end > input.size { return Error(disk_fault(path, input.size, Truncated)) }
+            std.sha256.add_byte(mut digest, 0)
+            witness_word(mut digest, end)
+            witness_range(mut digest, mut input, path, 0, end)?
+        } else {
+            let boundary = disk_end(d, id, seq)?
+            journal_refresh_size(mut input, Live, boundary)?
+            std.sha256.add_byte(mut digest, 1)
+            witness_terminal(mut digest, mut input, path, boundary)?
         }
-        disk_io(host.close(take file))?
+        let JournalInput(file: take consumed, ..) = take input
+        disk_io(host.close(take consumed))?
         if let None = following {
-            if let Some(boundary) = disk_end(d, id, seq)? {
-                std.sha256.add_byte(mut digest, 1)
-                witness_word(mut digest, boundary)
-            } else {
-                std.sha256.add_byte(mut digest, 0)
-            }
             return Ok(std.sha256.finish(digest))
         }
         seq += 1

@@ -488,7 +488,7 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     durable(mut db, receipt)?
     cell_law_require(db.resident == baseline + 110 && db.file_end == start + 42 + 21 + 55, "masked append charge and frame")?
     let path = capacity(disk_path("j-", db.file_seq, ""))?
-    let wire = disk_read_file(dir, path, db.file_end)?
+    let wire = read_journal_prefix(dir, path, db.file_end)?
     cell_law_require(wire[start + 42] == 3 && word_be(wire, start + 47) == 1 &&
         word_be(wire, start + 55) == 0 && wire[start + 63] == 1, "trim sorts before append and drops zero head rows")?
 
@@ -521,7 +521,7 @@ fn log_trim_bounded_and_dense(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let Some(root) = std.page.collection_child(captured.roots.collections.root, id_key) else { return Error(Missing("trim root")) }
     cell_law_require(trim_law_min_children(root), "trim left no unary branch")?
     cell_law_require(db.resident == baseline + (602 - floor) * 1078, "trim subtracted exactly once")?
-    let suffix_wire = disk_read_file(dir, path, db.file_end)?
+    let suffix_wire = read_journal_prefix(dir, path, db.file_end)?
     cell_law_require(word_be(suffix_wire, offset + 55) == 110 + (floor - 2) * 1078, "trim dropped wire charge")?
     let mut bad = share_page_tree(held.roots.collections)
     let mut draw = db.next_node + 1

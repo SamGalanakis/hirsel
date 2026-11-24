@@ -164,7 +164,7 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     }
     durable(mut db, removed.ticket)?
     let path = capacity(disk_path("j-", seq, ""))?
-    let wire = disk_read_file(dir, path, start + 241)?
+    let wire = read_journal_prefix(dir, path, start + 241)?
     if !prior_fixture_frame(wire, start, 1, 101, 0) || !prior_fixture_frame(wire, start + 101, 1, 77, 35) ||
         !prior_fixture_frame(wire, start + 178, 2, 63, 11) {
         return Error(Missing("table prior bytes"))
@@ -325,7 +325,7 @@ fn covering_prior_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
         durable(mut db, done.ticket)?
         if new_value == 7 {
             let path = capacity(disk_path("j-", seq, ""))?
-            let raw = disk_read_file(directory, path, db.file_end)?
+            let raw = read_journal_prefix(directory, path, db.file_end)?
             // Payload is a two-byte schema number plus a four-byte u32.
             // The 20-byte Many key follows the primary's 31-byte put.
             let op = start + 42 + 31
@@ -384,7 +384,7 @@ fn prior_ceiling_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let Committed(done) = removed else { return Error(Missing("delete commit")) }
     durable(mut reopened, done.ticket)?
     let path = capacity(disk_path("j-", seq, ""))?
-    let wire = disk_read_file(directory, path, start + 63)?
+    let wire = read_journal_prefix(directory, path, start + 63)?
     if !prior_fixture_frame(wire, start, 2, 63, 12582913) || reopened.resident != baseline {
         return Error(Missing("12 MiB delete prior or charge"))
     }

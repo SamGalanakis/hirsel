@@ -85,6 +85,13 @@ fn journal_initial() -> JournalReplay {
     journal_main(empty_roots(), 0, 0, 0)
 }
 
+fn read_journal_prefix(d: Dir, path: String, size: u64) -> Result[Bytes, Error] waits {
+    let mut file = disk_io(host.open(d, path, Read))?
+    let raw = read_disk_bytes(mut file, path, 0, size)?
+    disk_io(host.close(take file))?
+    Ok(take raw)
+}
+
 // L3/L10/L12: next-header prev_end ignores an older torn tail; a bad final
 // header is absent only without a good END, and its predecessor uses its own d.
 pub fn journal_law_recovery(d: Dir) -> bool waits {
@@ -756,8 +763,8 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let saved = snapshot(db)
     let (beta, receipt) = fork(mut db, "beta", saved)?
     let after = accounts(db)
-    let raw = disk_read_file(child, file, old_end + 46)?
-    if list.len(raw) != old_end + 46 || read_le(raw, old_end, 2) != 19 || read_le(raw, old_end + 2, 2) != 1 || read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || db.next_node != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
+    let raw = read_journal_prefix(child, file, old_end + 46)?
+    if read_le(raw, old_end, 2) != 19 || read_le(raw, old_end + 2, 2) != 1 || read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || db.next_node != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
         return Error(Foreign)
     }
     let on_beta = snapshot_of(db, beta)?

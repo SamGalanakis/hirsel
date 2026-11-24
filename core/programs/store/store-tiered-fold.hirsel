@@ -162,7 +162,6 @@ fn retry_fold_edit[R](cut: TieredPageSource, edit: scoped[view] fn(core.Cell[Tie
             Ok(edit(attempt, pins))
         })
         let TieredTouchSet(stopped: take stop, ..) = tiered_finish(take attempt)
-        let result = (take isolated)?
         match take stop {
             Some(AttemptMiss(take target)) => {
                 capacity(map.try_reserve(mut pins, 1))?
@@ -172,7 +171,10 @@ fn retry_fold_edit[R](cut: TieredPageSource, edit: scoped[view] fn(core.Cell[Tie
             Some(AttemptPinLimit(_)) => return Error(malformed(0)),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
             Some(AttemptFold(_)) => fail("store: a cut cannot wait for itself"),
-            None => return take result,
+            None => {
+                let result = (take isolated)?
+                return take result
+            },
         }
     }
 }

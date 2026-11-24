@@ -54,8 +54,9 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
         let isolated = disk_allocation(scoped fn() -> Result[Result[R, Error], Error] {
             Ok(read(attempt, pins.frames))
         })
+        // The latch is read first: a latched attempt reruns however the
+        // body ended, an isolated failure included.
         let state = tiered_finish(take attempt)
-        let observed = (take isolated)?
         match state.stopped {
             Some(AttemptMiss(target)) => {
                 let failed_here = match pending {
@@ -85,7 +86,10 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
             Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
             Some(AttemptFold(_)) => fail("store: a read attempt cannot wait for a fold"),
-            None => return take observed,
+            None => {
+                let observed = (take isolated)?
+                return take observed
+            },
         }
     }
 }

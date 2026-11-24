@@ -705,6 +705,7 @@ dependencies = [
  "hirsel-guard",
  "hirsel-stack",
  "hirsel-tape-format",
+ "io-uring",
  "libc",
  "libmimalloc-sys",
  "mimalloc",

@@ -4,15 +4,19 @@ use crate::provider::*;
 
 mod listing;
 mod metadata;
+mod path;
 mod random;
 pub(crate) mod temp;
 use listing::Listing;
 use metadata::{stat, zero_extension};
+pub(crate) use path::open_beneath;
+use path::{
+    beneath, close_file, leaf_kind, open_directory, parent, remove, remove_tree, valid_path,
+};
 use std::{
     collections::BTreeMap,
-    ffi::{CStr, CString},
     io,
-    os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     sync::Mutex,
 };
@@ -84,6 +88,12 @@ impl OsProvider {
     pub(crate) fn adopt_file(&mut self, fd: OwnedFd) -> u64 {
         let id = self.id();
         self.files.insert(id, fd);
+        id
+    }
+    #[cfg(test)]
+    pub(crate) fn adopt_directory(&mut self, fd: OwnedFd) -> u64 {
+        let id = self.id();
+        self.directories.insert(id, fd);
         id
     }
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
@@ -238,7 +248,9 @@ impl OsProvider {
             STAT => {
                 let root = self.directories[&request.handle].as_raw_fd();
                 let fd = beneath(root, path, libc::O_PATH | libc::O_NOFOLLOW)?;
-                return stat(fd.as_fd());
+                let result = stat(fd.as_fd());
+                let _ = close_file(fd);
+                return result;
             }
             STAT_FILE => return stat(self.files[&request.handle].as_fd()),
             READ | READ_AT => {
@@ -270,10 +282,7 @@ impl OsProvider {
                 ));
             }
             CLOSE => {
-                let fd = self.files.remove(&request.handle).unwrap().into_raw_fd();
-                // SAFETY: consumes the sole owned fd. Linux closes even on EINTR;
-                // retrying could close another operation's newly reused descriptor.
-                syscall(unsafe { libc::close(fd) } as isize)?;
+                close_file(self.files.remove(&request.handle).unwrap())?;
             }
             TRY_LOCK | UNLOCK => {
                 let fd = self.files[&request.handle].as_raw_fd();
@@ -837,6 +846,10 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
         // Waiting is owned by the scheduler; issue completes at once.
         SLEEP_UNTIL | SLEEP_UNTIL_WALL => return Outcome::default(),
         RANDOM => return random::issue(unsafe { &mut *request }),
+        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE if crate::units::uses_file_ring() => {
+            // SAFETY: the request is pinned until the CQE completes.
+            return unsafe { issue_now(state, request) };
+        }
         _ => {}
     }
     struct Issue(*mut u8, *mut Request);
@@ -1001,160 +1014,6 @@ fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>) -> Outcome {
         written: written as u64,
         ..Outcome::default()
     }
-}
-
-// Validate user paths once, before any operation can touch the host. Internal
-// descriptor walks may still use "." to duplicate their already granted parent.
-fn valid_path(path: &[u8]) -> io::Result<()> {
-    if !hirsel_core_net::valid_relative_path(path) {
-        return Err(io::Error::from_raw_os_error(libc::EACCES));
-    }
-    Ok(())
-}
-fn open_directory(fd: i32, path: &[u8]) -> io::Result<OwnedFd> {
-    let flags = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_RDONLY;
-    beneath(fd, path, flags).map_err(|error| match error.raw_os_error() {
-        Some(libc::ENOTDIR) => io::Error::from_raw_os_error(libc::EACCES),
-        _ => error,
-    })
-}
-
-fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
-    open_beneath(fd, path, flags, libc::RESOLVE_NO_MAGICLINKS)
-}
-
-pub(crate) fn open_beneath(fd: i32, path: &[u8], flags: i32, resolve: u64) -> io::Result<OwnedFd> {
-    let mut short = [0; 64];
-    let long;
-    let path: &CStr = if path.len() < short.len() {
-        short[..path.len()].copy_from_slice(path);
-        CStr::from_bytes_with_nul(&short[..=path.len()]).map_err(|_| io::ErrorKind::InvalidInput)?
-    } else {
-        long = CString::new(path)?;
-        &long
-    };
-    // SAFETY: open_how is an integer-only Linux UAPI structure.
-    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
-    how.flags = (flags | libc::O_CLOEXEC) as u64;
-    how.mode = if flags & libc::O_CREAT != 0 { 0o600 } else { 0 };
-    how.resolve = libc::RESOLVE_BENEATH | resolve;
-    // SAFETY: Linux openat2 atomically enforces confinement, including symlinks.
-    // Unsupported hosts return Other(ENOSYS); no unconstrained fallback.
-    let raw = unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            fd,
-            path.as_ptr(),
-            &how,
-            size_of::<libc::open_how>(),
-        )
-    };
-    syscall(raw as isize)?;
-    // SAFETY: successful openat2 transfers a fresh descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw as i32) })
-}
-fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
-    let split = path.iter().rposition(|&c| c == b'/');
-    let (prefix, name) = match split {
-        Some(at) => (&path[..at], &path[at + 1..]),
-        None => (b".".as_slice(), path),
-    };
-    Ok((
-        beneath(fd, prefix, libc::O_PATH | libc::O_DIRECTORY)?,
-        CString::new(name)?,
-    ))
-}
-/// The file type (`S_IFMT` bits) of `name` in `parent`, not following a final link;
-/// `None` when nothing has that name.
-fn leaf_kind(parent: &OwnedFd, name: &CString) -> io::Result<Option<libc::mode_t>> {
-    Ok(leaf_stat(parent.as_raw_fd(), name)?.map(|st| st.st_mode & libc::S_IFMT))
-}
-
-fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::stat>> {
-    // SAFETY: the parent descriptor and basename are live. The final link is not followed.
-    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-    let rc = unsafe {
-        libc::fstatat(
-            parent,
-            name.as_ptr(),
-            st.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    match syscall(rc as isize) {
-        // SAFETY: a successful fstatat initialized the out parameter.
-        Ok(_) => Ok(Some(unsafe { st.assume_init() })),
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn file_kind(mode: libc::mode_t) -> u8 {
-    match mode & libc::S_IFMT {
-        libc::S_IFREG => 0,
-        libc::S_IFDIR => 1,
-        libc::S_IFLNK => 2,
-        _ => 3,
-    }
-}
-fn remove(fd: i32, name: &CString) -> io::Result<()> {
-    // SAFETY: unlinkat never follows the final symlink; directory removal is retried explicitly.
-    let rc = unsafe { libc::unlinkat(fd, name.as_ptr(), 0) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() != Some(libc::EISDIR) {
-        return Err(error);
-    }
-    // SAFETY: same pinned parent and fixed leaf, directory-only removal.
-    syscall(unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } as isize)?;
-    Ok(())
-}
-fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
-    // Descriptor-based walk; never follow a leaf link. std's read_dir owns the
-    // /proc fd traversal, while every child open is relative to its pinned parent.
-    let root = beneath(
-        fd,
-        name.as_bytes(),
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-    )?;
-    let mut work = vec![(root, None::<(OwnedFd, CString)>)];
-    while let Some((directory, finish)) = work.pop() {
-        if let Some((parent, leaf)) = finish {
-            // SAFETY: children have been removed; no final link is followed.
-            syscall(
-                unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), libc::AT_REMOVEDIR) }
-                    as isize,
-            )?;
-            continue;
-        }
-        let mut children = Vec::new();
-        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
-            use std::os::unix::ffi::OsStrExt;
-            let entry = entry?;
-            let child = CString::new(entry.file_name().as_bytes())?;
-            let opened = beneath(
-                directory.as_raw_fd(),
-                child.as_bytes(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-            );
-            match opened {
-                Ok(opened) => children.push((opened, directory.try_clone()?, child)),
-                Err(error) if matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP)) => {
-                    remove(directory.as_raw_fd(), &child)?
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        for (child, parent, leaf) in children {
-            work.push((child.try_clone()?, Some((parent, leaf))));
-            work.push((child, None));
-        }
-    }
-    // SAFETY: remove only the named root, without following a replacement link.
-    syscall(unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } as isize)?;
-    Ok(())
 }
 
 /// # Safety

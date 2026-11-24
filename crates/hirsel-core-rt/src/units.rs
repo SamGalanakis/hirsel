@@ -32,6 +32,9 @@ pub(crate) use memory::{Memory, SharedMemory};
 mod check;
 #[path = "units_ledger.rs"]
 pub(crate) mod ledger;
+#[path = "units_reply.rs"]
+mod reply;
+pub(crate) use reply::{Reply, file_request, uses_file_ring};
 #[path = "units_report.rs"]
 mod report;
 #[path = "units_sync.rs"]
@@ -903,58 +906,6 @@ pub(crate) fn off_slot<T: Send>(call: impl FnOnce() -> T + Send) -> T {
 /// park on a `Reply`.
 pub(crate) fn in_unit() -> bool {
     !cur().is_null() && worker_ix() < pool().w
-}
-
-/// A completion a unit parks on while another thread works for it.
-pub(crate) struct Reply {
-    done: AtomicBool,
-    unit: *const Unit,
-}
-// SAFETY: `unit` names a leaked record; `done` is atomic.
-unsafe impl Send for Reply {}
-unsafe impl Sync for Reply {}
-
-impl Reply {
-    /// For the running unit, which must be inside the pool.
-    pub(crate) fn new() -> Self {
-        Self {
-            done: AtomicBool::new(false),
-            unit: cur(),
-        }
-    }
-
-    /// Publish completion and wake the waiting unit. The caller does not
-    /// touch the reply afterwards: the unit can resume and free it at once.
-    /// # Safety
-    /// `this` is a live reply that has not completed.
-    pub(crate) unsafe fn complete(this: *const Reply) {
-        // SAFETY: by the contract; the record outlives the reply.
-        unsafe {
-            let u = &*(*this).unit;
-            (*this).done.store(true, Ordering::Release);
-            wake(u);
-        }
-    }
-
-    /// Park the running unit until `complete`. Any other wake of the unit
-    /// (an arrival) parks it again: its tasks resume only after the call.
-    /// The task's thread-locals and binding are put aside across the park, as
-    /// at any other park, and restored on whichever thread resumed the unit.
-    pub(crate) fn wait(&self) {
-        use crate::tasks::{CALLBACK_TASK, CURRENT};
-        let task = CURRENT.replace(ptr::null_mut());
-        let callback = CALLBACK_TASK.replace(ptr::null_mut());
-        let guard = crate::fiber::guarded();
-        crate::fiber::guard((0, 0));
-        crate::limit::preserve_binding(|| {
-            while !self.done.load(Ordering::Acquire) {
-                park_unit(None);
-            }
-        });
-        crate::fiber::guard(guard);
-        CALLBACK_TASK.set(callback);
-        CURRENT.set(task);
-    }
 }
 
 struct HostJob {

@@ -1,6 +1,6 @@
 //! The io_uring backend of a [`Poller`](super::Poller): one ring per owner,
 //! its mailbox, and the multishot polls of its watched descriptors.
-use super::{INTEREST, POLL_BATCH, REGISTER_SEND_MSG_RING, REMOVED, WAKE, sendzc};
+use super::{Backend, INTEREST, POLL_BATCH, Poller, REGISTER_SEND_MSG_RING, REMOVED, WAKE, sendzc};
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -68,11 +68,21 @@ struct Submission {
     _fd: Option<Arc<OwnedFd>>,
 }
 
+// The ring's reserved unit, with an index above every transmit slot's index.
+const FILE: u64 = 0xffff_0000_8000_0000;
+struct FileCompletion {
+    context: *const (),
+    complete: unsafe fn(*const (), i32),
+}
+// SAFETY: submit_file keeps the context live across the owner's turns.
+unsafe impl Send for FileCompletion {}
+
 #[derive(Default)]
 struct Submissions {
     entries: VecDeque<Submission>,
     /// Prefix already visible in the SQ. The rest waits for space.
     published: usize,
+    files: HashMap<u16, FileCompletion>,
 }
 
 impl Submissions {
@@ -111,9 +121,13 @@ impl Uring {
         if !probe.is_supported(opcode::PollAdd::CODE)
             || !probe.is_supported(opcode::PollRemove::CODE)
             || !probe.is_supported(opcode::MsgRingData::CODE)
+            || !probe.is_supported(opcode::OpenAt2::CODE)
+            || !probe.is_supported(opcode::Statx::CODE)
+            || !probe.is_supported(opcode::Close::CODE)
         {
             return Err(unsupported());
         }
+        ring.submitter().register_iowq_max_workers(&mut [2, 1])?;
         let zc = probe.is_supported(opcode::SendZc::CODE)
             && probe.is_supported(opcode::AsyncCancel::CODE);
         let sparse = zc
@@ -155,6 +169,28 @@ impl Uring {
     pub(super) fn push(&self, entry: io_uring::squeue::Entry, fd: Option<Arc<OwnedFd>>) {
         let mut pending = self.sq.lock().unwrap_or_else(|e| e.into_inner());
         pending.entries.push_back(Submission { entry, _fd: fd });
+    }
+
+    /// # Safety
+    /// As `Poller::submit_file`.
+    pub(super) unsafe fn push_file(
+        &self,
+        unit: u16,
+        entry: io_uring::squeue::Entry,
+        context: *const (),
+        complete: unsafe fn(*const (), i32),
+    ) {
+        let mut pending = self.sq.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            pending
+                .files
+                .insert(unit, FileCompletion { context, complete })
+                .is_none()
+        );
+        pending.entries.push_back(Submission {
+            entry: entry.user_data(FILE | u64::from(unit)),
+            _fd: None,
+        });
     }
 
     fn poll_add(tag: u64, watch: &Watch) -> io_uring::squeue::Entry {
@@ -222,7 +258,8 @@ impl Uring {
         let mut sq = unsafe { self.ring.submission_shared() };
         while let Some(submission) = pending.entries.get(pending.published) {
             // SAFETY: the mailbox owns descriptors and the transmit table
-            // retains any bytes named by the entry until completion.
+            // retains any bytes named by sends until completion. File callers
+            // stay parked until their completion callback runs.
             if unsafe { sq.push(&submission.entry) }.is_err() {
                 break;
             }
@@ -298,6 +335,19 @@ impl Uring {
             let (tag, flags) = match data {
                 REMOVED => continue,
                 WAKE => (WAKE, libc::EPOLLIN as u32),
+                data if data & !u64::from(u16::MAX) == FILE => {
+                    let file = self
+                        .sq
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .files
+                        .remove(&(data as u16))
+                        .unwrap();
+                    // SAFETY: submission pins the context until this CQE, and
+                    // no further access to it follows the callback.
+                    unsafe { (file.complete)(file.context, cqe.result()) };
+                    continue;
+                }
                 data if sendzc::is_tx(data) => {
                     // A send's answer or notification readies its socket's writer.
                     match self.tx_complete(data, cqe.result(), cqe.flags()) {
@@ -327,5 +377,30 @@ impl Uring {
             n += 1;
         }
         n
+    }
+}
+
+impl Poller {
+    /// Queue a one-shot file operation to this slot's io_uring. Epoll has no
+    /// submission queue and returns false without taking the operation.
+    ///
+    /// # Safety
+    /// The caller owns the running slot and has at most one file request per
+    /// unit. All descriptors and memory named by `entry` and `context` must
+    /// remain valid until completion, except a descriptor consumed by CLOSE.
+    /// `complete` must publish the result without unwinding or polling.
+    pub unsafe fn submit_file(
+        &self,
+        unit: u16,
+        entry: io_uring::squeue::Entry,
+        context: *const (),
+        complete: unsafe fn(*const (), i32),
+    ) -> bool {
+        let Backend::Uring(ring) = &self.backend else {
+            return false;
+        };
+        // SAFETY: the caller keeps the request live until the sole CQE.
+        unsafe { ring.push_file(unit, entry, context, complete) };
+        true
     }
 }

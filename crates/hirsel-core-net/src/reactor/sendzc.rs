@@ -145,7 +145,7 @@ impl Poller {
                     None => {
                         let index = u32::try_from(table.entries.len())
                             .ok()
-                            .filter(|&index| index < u32::MAX - 1)?;
+                            .filter(|&index| index <= i32::MAX as u32)?;
                         table.entries.push(Entry::default());
                         index
                     }

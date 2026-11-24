@@ -1,4 +1,4 @@
-use super::{file_kind, syscall};
+use super::syscall;
 use crate::provider::Outcome;
 use std::{
     io,
@@ -47,15 +47,55 @@ fn file_stat(fd: BorrowedFd<'_>) -> io::Result<libc::stat> {
 }
 
 pub(super) fn stat(fd: BorrowedFd<'_>) -> io::Result<Outcome> {
+    if crate::units::uses_file_ring() {
+        let mut st = std::mem::MaybeUninit::<libc::statx>::zeroed();
+        let entry = io_uring::opcode::Statx::new(
+            io_uring::types::Fd(fd.as_raw_fd()),
+            c"".as_ptr(),
+            st.as_mut_ptr().cast(),
+        )
+        .flags(libc::AT_EMPTY_PATH)
+        .mask(libc::STATX_TYPE | libc::STATX_SIZE | libc::STATX_MTIME)
+        .build();
+        // SAFETY: the caller owns fd and statx storage lives through the CQE.
+        unsafe { crate::units::file_request(entry) }?;
+        // SAFETY: zero-initialized statx is valid and the successful CQE has
+        // published the kernel's result.
+        let st = unsafe { st.assume_init() };
+        return stat_outcome(
+            st.stx_size,
+            i128::from(st.stx_mtime.tv_sec),
+            i128::from(st.stx_mtime.tv_nsec),
+            u32::from(st.stx_mode),
+        );
+    }
     let st = file_stat(fd)?;
-    let overflow = |_| io::Error::from_raw_os_error(libc::EOVERFLOW);
-    let size = u64::try_from(st.st_size).map_err(overflow)?;
-    let nanos = i128::from(st.st_mtime) * 1_000_000_000 + i128::from(st.st_mtime_nsec);
-    let nanos = i64::try_from(nanos).map_err(overflow)?;
+    let size =
+        u64::try_from(st.st_size).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+    stat_outcome(
+        size,
+        i128::from(st.st_mtime),
+        i128::from(st.st_mtime_nsec),
+        st.st_mode,
+    )
+}
+
+fn stat_outcome(size: u64, sec: i128, nsec: i128, mode: libc::mode_t) -> io::Result<Outcome> {
+    let nanos = i64::try_from(sec * 1_000_000_000 + nsec)
+        .map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
     Ok(Outcome {
         value: size,
         written: nanos as u64,
-        kind: file_kind(st.st_mode),
+        kind: file_kind(mode),
         ..Outcome::default()
     })
+}
+
+pub(super) fn file_kind(mode: libc::mode_t) -> u8 {
+    match mode & libc::S_IFMT {
+        libc::S_IFREG => 0,
+        libc::S_IFDIR => 1,
+        libc::S_IFLNK => 2,
+        _ => 3,
+    }
 }

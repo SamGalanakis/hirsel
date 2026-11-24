@@ -369,13 +369,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(own.flag),
                 )
             }
-            Owner::Temp(t) => (
-                self.temporary_storage(t)
-                    .map_or(AddressBase::Value(t.value), AddressBase::Address),
-                t.id,
-                t.avail,
-                t.flag,
-            ),
+            Owner::Temp(t) => {
+                // A taken log remains an owner until log.finish consumes it.
+                frame = self.frame_logs.get(&t.value).copied().map(Frame::Log);
+                (
+                    self.temporary_storage(t)
+                        .map_or(AddressBase::Value(t.value), AddressBase::Address),
+                    t.id,
+                    t.avail,
+                    t.flag,
+                )
+            }
+
             Owner::Drain {
                 data,
                 next,
@@ -498,7 +503,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (Some(Frame::List(f)), AddressBase::Address(address)) => {
                 self.drop_frame_list(f, address, id, n);
             }
-            (Some(Frame::Log(frame)), AddressBase::Address(_)) => {
+            (Some(Frame::Log(frame)), _) => {
                 let _ = self.drop_frame_log(frame, n);
             }
             _ => self.emit_drop(base, id, n),

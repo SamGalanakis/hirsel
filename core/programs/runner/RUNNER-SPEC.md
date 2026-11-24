@@ -30,6 +30,8 @@ Sam approved this on 2026-11-24 through the lead. The whole contract is in the n
 - **Rule 13 is unchanged in substance.** The runner still verifies nothing. `jwtbind` is an application-level library binding over `std.jwt`. This closes D4.
 - **New laws** L64–L69 (§15.10).
 
+**Not built.** §1.1 and §3 describe the v2.60 surface (`Refusal`, the `Latest` seed), and L36's `wire_bind_nonshareable` is the case slice J2 builds. Until J2 lands, main has the v2.57 surface. L64–L69 are UNTESTED until their slices (§15.10).
+
 Not reversible: the Caller mapping (J-D7). Everything else is reversible (§15.8).
 
 ## CHANGES-v2.59 (rooms in §1.1 and §4, as built; lane rooms-rs-rewrite-2345)
@@ -2515,7 +2517,8 @@ pub type Issuer: send {
     leeway_s: u64,        // clock skew; 0..=MAX_LEEWAY_S, default 60
     max_token: u64        // credential bytes before parsing; ..=std.jwt.MAX_TOKEN, default 8192
 }
-pub fn verifier(issuer: Issuer, take source: Source, net: Net, clock: Clock, tasks: Tasks) -> Result[Verifier, ConfigError] waits
+pub type Seed: shareable + send { issuer: Issuer, clock: Clock, keys: Option[std.jwt.PublicKeys], good_until_ms: u64 }
+pub fn verifier(issuer: Issuer, take source: Source, net: Net, take trust: Trust, clock: Clock, random: Random, tasks: Tasks) -> Result[Verifier, ConfigError] waits   // trust: the roots for the https fetch (std.http_fetch); random: the jitter
 pub fn seed(v: Verifier) -> Latest[Seed]                        // the handle runner.wire_bind takes
 pub fn bind(s: Seed, credential: Bytes) -> Result[runner.BoundCaller, runner.Refusal] waits
 pub const BIND_BYTES: u64 = 262144   // GUESS: 3 × MAX_TOKEN of decoding plus claims and the largest RSA verify
@@ -2533,13 +2536,13 @@ A place wires it as `config.wire = Some(runner.wire_bind(jwtbind.seed(v), code.d
 - `max_token` above `MAX_TOKEN`;
 - a `Static` document that `jwks_public` refuses or that has no usable key;
 - a `Remote` URL that is not `https`;
-- `every_ms` outside 60 s..24 h, `stale_ms < 2 × every_ms`, or `fetch_ms` outside 1..30 s.
+- `every_ms` outside 60 s..24 h (default 300 s, GUESS), `stale_ms < 2 × every_ms`, or `fetch_ms` outside 1..30 s.
 
 **Asymmetric keys only.** An HMAC key is a `Secret`, a resource (docs/spec/core.md), so it cannot sit in a shareable seed. A place that holds the MAC key could also mint every token it accepts. So `jwtbind` verifies only `EdDsa`, `Es256` and `Rs256`, and its key set holds public keys only. Because no MAC key is ever in the set, an RSA or EC public key can never be used as an HMAC secret. That rules out algorithm confusion structurally, as well as by `std.jwt`'s family check. `none` has no `Alg` (`std.jwt`).
 
 **One issuer per binding.** A place has one `Wire`, so it trusts one issuer. Several issuers would need the binding to route by the unverified `iss`. That is additive: an `Issuer` list and a `std.jwt` peek at the payload's `iss`. It is left to a later slice (§15.9, OPEN).
 
-**The key set.** `Seed` is `{ issuer: Issuer, keys: Option[std.jwt.PublicKeys] }`, shareable. `None` means no set has been verified yet, or the last one has gone stale. `std.jwt` gains (slice J1) `PublicKeys: shareable + send`, built by `jwks_public(text)` from a JWK Set. It holds RSA, EC P-256 and Ed25519 public keys only; an `oct` member fails the document. `verify_jwt_public(token, r, keys)` behaves as `verify_jwt_in` does and uses `find`'s kid rule.
+**The key set.** `Seed` carries the binding's own `Clock` (plain and shareable, so the bind reads time without a grant), the set, and `good_until_ms`, the wall time from which the set is stale. `keys: None` means no set has been verified yet. A static set has `good_until_ms` = u64 max; a fetched set has its fetch's success time plus `stale_ms`. The bind compares `good_until_ms` itself, so the staleness bound holds even if the refresher is starved or has ended. `std.jwt` gains (slice J1) `PublicKeys: shareable + send`, built by `jwks_public(text)` from a JWK Set. It holds RSA, EC P-256 and Ed25519 public keys only; an `oct` member fails the document. `verify_jwt_public(token, r, keys)` behaves as `verify_jwt_in` does and uses `find`'s kid rule.
 
 **Static source.** The document is parsed once by `verifier` and published once.
 
@@ -2547,7 +2550,7 @@ A place wires it as `config.wire = Some(runner.wire_bind(jwtbind.seed(v), code.d
 - **Rate.** It fetches at most once per `every_ms`, plus jitter drawn uniformly from 0..every_ms/10 so that places restarted together spread out. After a failure it retries at `min(every_ms, 5 s × 2^n)`. Nothing a client sends starts a fetch: a token whose `kid` is not in the set is rejected (`NoKey`) and triggers nothing, so the fetch rate never depends on the bind rate or on attacker input.
 - **Size and time.** Each fetch is one `GET` through `std.http_fetch` with deadline `fetch_ms`, redirects refused, and a body of at most `std.jwt.MAX_JWKS`. A larger body, a non-200 status, a body `jwks_public` refuses, or a set with no usable key is a failed fetch.
 - **Rotation.** A successful fetch publishes the new set whole. A key removed at the issuer stops verifying at the next publish. A key added at the issuer verifies from the next publish. The issuer's rotation contract is the usual JWKS one: publish a new key at least `every_ms + every_ms/10` before signing with it. A token signed with a key the place has not fetched yet is `Rejected`, and the SDK path for that is §15.6.
-- **Staleness.** A failed fetch keeps the last good set. Once `stale_ms` passes since the last success, the refresher publishes `keys: None`, so every bind answers `Unavailable` until a fetch succeeds. A verifier never accepts a token on a set older than `stale_ms`, and never rejects a token only because the set is missing.
+- **Staleness.** A failed fetch keeps the last good set and republishes nothing. From `good_until_ms` on, every bind answers `Unavailable` until a fetch succeeds and publishes a new seed. A verifier never accepts a token on a set older than `stale_ms`, and never rejects a token only because the set is missing.
 - **Before the first set.** `verifier` waits for one fetch for at most `fetch_ms`. If that succeeds, it returns with the set published. Otherwise it returns with `keys: None` and the refresher keeps trying. The place starts and answers `Unavailable` until then, so a key-server outage at deploy is a 1013/503 window, not a failed start.
 - **Teardown.** The refresher is a child of the place's task group. It ends with the place, and it is never a reason for the place to stop.
 
@@ -2555,10 +2558,10 @@ A place wires it as `config.wire = Some(runner.wire_bind(jwtbind.seed(v), code.d
 
 `bind(s, credential)` does the following, in order, and its first refusal is its answer:
 
-1. If `s.keys` is `None`, answer `Unavailable`.
+1. Read `wall_ms` once from `s.clock`; every later step uses this reading. If `s.keys` is `None` or `wall_ms >= s.good_until_ms`, answer `Unavailable`.
 2. Strip an `Authorization` scheme. If the credential starts with `Bearer` followed by one space, with the scheme ASCII case-insensitive (RFC 6750 §2.1), drop that prefix. The SDK sends the bare compact token in Hello and `Bearer <token>` over HTTP, so one token gives one Caller on both transports (L29). If the rest is longer than `max_token` or is not ASCII, answer `Rejected`.
 3. Read the clock and verify:
-   - `now_secs = wall_ms / 1000` (floor), from `std.clock` on the binding's own `Clock`.
+   - `now_secs = wall_ms / 1000` (floor), from the step 1 reading.
    - Call `std.jwt.verify_jwt_public(token, Rules { allow, now_secs, leeway_secs: leeway_s, iss: Some(iss), aud: Some(aud), require_exp: true }, keys)`.
    - The signature is checked first, with the header's `alg` in `allow` and in the key's family, and `crit` refused. The claims are read only after the signature verifies (`std.jwt`).
 4. Map the principal (§15.4).
@@ -2570,7 +2573,7 @@ A place wires it as `config.wire = Some(runner.wire_bind(jwtbind.seed(v), code.d
 
 | Cause | `std.jwt.Error` or `jwtbind` check |
 |---|---|
-| no verified set | `keys: None`, the only `Unavailable` |
+| no verified set, or a stale one | step 1, the only `Unavailable` |
 | too long, not ASCII, or a bad scheme | `jwtbind` step 2 |
 | bad structure | `Malformed(_)` (size, segments, encoding, UTF-8, JSON, not an object, duplicate member, missing `alg`) |
 | `none`, HS*, or an algorithm outside `allow` | `UnsupportedAlg`; `WrongKey` (the key's family or pinned alg differs) |
@@ -2599,11 +2602,9 @@ A place wires it as `config.wire = Some(runner.wire_bind(jwtbind.seed(v), code.d
 
 ### 15.6 The SDK delta (docs/spec/sdk.md)
 
-docs/spec/sdk.md's credential recovery is unchanged for 1008, 4401 and 401. v2.60 adds one case and amends one rule:
+docs/spec/sdk.md's credential recovery is unchanged for 1008, 4401 and 401. v2.60 adds one case, which docs/spec/sdk.md and docs/spec/http.md note as not built until slices J2 and J5:
 - **New case: 1013 before Welcome, or HTTP 503 at bind.** This is not a credential failure. The client keeps its bytes, does not call the source and does not clear images. It reconnects with jittered backoff (the transport-failure path), and an SSE consumer re-requests the same way.
-- **Amended rule: the same bytes again.** At present a source that returns the bytes just refused ends recovery in `Unbound`. v2.60 changes that for one case. If the source returns the same bytes and the refusal was a 1008 or 401 at bind, the client makes one more attempt with those bytes after `ROTATION_WAIT` = 70 s (GUESS: the default `every_ms` of 60 s plus jitter), and ends in `Unbound` only if that attempt is refused too.
-  - This covers a token signed with a key the place has not fetched yet. The token is valid at the issuer, and a token cache can return it again.
-  - It costs a client with a truly bad token one extra connection per recovery, which no place-side state changes.
+- **No change for rotation.** A token signed with a key the place has not fetched yet is a 1008 or 401, and a source that returns the same bytes still ends in `Unbound`. The rotation contract is on the issuer (§15.2): it publishes a key at least `every_ms + every_ms/10` before signing with it, as OIDC providers do. A client-side wait cannot cover the window, which is the place's `every_ms` (up to 24 h) plus fetch backoff, and it would delay `Unbound` for every binding, not only JWT.
 
 ### 15.7 Tapes and replay
 
@@ -2632,17 +2633,17 @@ There are two records, and the binding's outcome goes on neither as a verdict to
 | J-D7 | Caller | configured issuer byte and verbatim `sub` (1–64 B) | the same | **no**: subjects are written into stream keys and application rows, and changing the mapping orphans every stored reply and row |
 | J-D8 | Issuers per place | one | an `Issuer` list routed by verified `iss` | yes: additive |
 | J-D9 | Claims beyond `sub` | not passed to entries | the same: authorization is entry code over the Caller (D8) | yes |
-| J-D10 | Rotation in the SDK | one same-bytes retry after `ROTATION_WAIT` | the same | yes: SDK only |
+| J-D10 | Rotation | the issuer pre-publishes keys at least one refresh interval ahead; the SDK is unchanged | the same: the place's refresh interval is unknown to a client | yes: a place-supplied retry hint would be additive |
 
 ### 15.9 Build slices
 
 | Slice | Size | Depends on | Model | What |
 |---|---|---|---|---|
 | J1 | S | — | Sol | `std.jwt`: `PublicKeys: shareable + send`, `jwks_public` and `verify_jwt_public`, and `Allow` declared `shareable` so that `jwtbind.Issuer` and `Seed` can be; `core/std/api/jwt.md` documents them |
-| J2 | M | — | Sol | runner: `Refusal`, 1013 and 503, and `wire_bind` over `Latest[B]` with `B: shareable + send`; update the bind child, `copy_wire`, the harness gateway's two `wire_bind` call sites and the tests that bind; rename the checker refusal `wire_bind_nonplain` to `wire_bind_nonshareable` (L36) |
+| J2 | M | — | Sol | runner: `Refusal`, 1013 and 503, and `wire_bind` over `Latest[B]` with `B: shareable + send`; update the bind child, `copy_wire`, the harness gateway's two `wire_bind` call sites and the tests that bind; rename the checker refusal `wire_bind_nonplain` to `wire_bind_nonshareable` (L36). Every binding and every direct caller of one moves to `Refusal`: `runner.ingress.caller`, the harness gateway's direct call (gateway.hirsel) and `gateway_http.hirsel`, and the test bindings in `runner_calls`, the HTTP op law and the SSE law. `runner.bind_credential` takes `seed: Arc[B]` and returns `Result[BoundCaller, Refusal]`, so a front maps `Unavailable` to its own 1013 or 503. An http.md K-2 claim function is seeded with a view of the binding's seed instead of a copy of the grant, so a keyed claim maps `authorization` with the same keys as `Wire.bind`; docs/spec/http.md K-2 changes with this slice |
 | J3 | M | J1, J2 | Sol | package `jwtbind`: `Issuer`, `Source`, `verifier`, the refresher and `bind` |
 | J4 | S | J3 | Sol | measure `BIND_STEPS` and `BIND_BYTES` on an RSA-8192 token of `max_token` bytes and replace the GUESS values; no other benchmark |
-| J5 | S | J2 | Sol | SDK: the 1013/503 case and the `ROTATION_WAIT` retry (§15.6), and docs/spec/sdk.md text |
+| J5 | S | J2 | Sol | SDK: the 1013/503 case (§15.6) |
 | J6 | — | U2–U4 (docs/recording.md) | — | the replay halves of L62 and L66 |
 | OPEN | — | — | — | several issuers per place (J-D8) |
 
@@ -2655,11 +2656,11 @@ Every token in these laws is made by an outside tool and checked into the test's
 | L64 `jwt_expiry_instant` | With `exp` = E and leeway L, a bind at `wall_ms` = (E + L) × 1000 − 1 gives Welcome with `expires_at_ms` = (E + L) × 1000, and that session closes 4401 at wall (E + L) × 1000 exactly. A bind at (E + L) × 1000 is 1008. A token whose `(exp + L) × 1000` overflows u64 is 1008 | `exp_ms_no_leeway` (`expires_at_ms = E × 1000`); `floor_mismatch` (rounds `wall_ms / 1000` up); `unchecked_mul` | hand arithmetic on E = 1767225600 and L = 60 |
 | L65 `jwt_caller_map` | An openssl-signed ES256 token with `sub` "user-42" binds `Caller(issuer: 9, subject: b"user-42")` over Hello and over HTTP `Bearer` (and `bearer`). The same `sub` in a second token with a later `exp` binds the same Caller. `sub` absent, empty or 65 bytes is 1008. A token from another `iss` or `aud` is 1008 | `sub_truncated`; `issuer_from_token`; `bearer_case_sensitive`; `iss_unchecked` | the hand-written claims |
 | L66 `jwt_rotation` | Set A = {k1}. A k2-signed token is 1008 and starts no fetch (the fixture server's request count is unchanged). After the refresher's next fetch returns {k1, k2}, the same token binds. After a fetch returns {k2}, a k1 token is 1008 | `kid_miss_fetch` (a miss triggers a fetch); `merge_sets` (old keys kept after rotation) | the fixture server's request log and the hand-built JWKS documents |
-| L67 `jwt_unavailable` | With the fixture key server down from start, a Hello is Close 1013 and an HTTP call is 503, never 1008 or 401. After `stale_ms` with the server down again, the same holds. After the first good fetch, the token binds | `unavailable_as_rejected`; `stale_never` (a stale set keeps verifying) | the close codes of §15.1 table |
-| L68 `jwt_no_token_at_rest` | L31's byte search, extended: after calls bound by a JWT, no file in the store directory contains the token's signature segment or any 16-byte window of the JWKS document | `claims_in_args` (J-D9 broken) | the byte search |
+| L67 `jwt_unavailable` | With the fixture key server down from start, a Hello is Close 1013 and an HTTP call is 503, never 1008 or 401. After a good fetch and then `stale_ms` of virtual time with the server down and the refresher task parked, the same holds. After the first good fetch, the token binds | `unavailable_as_rejected`; `stale_never` (a stale set keeps verifying); `stale_by_refresher` (only the refresher enforces staleness) | the close codes of §15.1 table |
+| L68 `jwt_no_token_at_rest` | L31's byte search, extended: after calls bound by a JWT, no file in the store directory contains the token's signature segment, its payload segment, or the base64url `n` or `x` value of any key in the fixture JWKS | `claims_in_args` (J-D9 broken) | the byte search |
 | L69 `jwt_config_refused` | `verifier` returns `ConfigError` for `issuer` 1, an HS256 entry in `allow`, `leeway_s` 301, an `http:` URL, and a `Static` document holding an `oct` key | `hmac_admitted`; `anon_issuer` | the list in §15.2 |
 
-**Not repeated here:** the SDK's 1013 handling and its `ROTATION_WAIT` retry are slice J5's cases in the existing SDK recovery suite, against a scripted place.
+**Status:** every law here is UNTESTED until J3 (L64–L66, L68, L69) or J2 (L67's codes), and the replay half of L66 waits on J6. **Not repeated here:** the SDK's 1013 handling is slice J5's case in the existing SDK recovery suite, against a scripted place.
 
 ### 15.11 Prior art (each source opened)
 

@@ -372,6 +372,11 @@ different Caller follows the Caller change rules above, and the anonymous
 issuer-1 reset to LocallyUnknown is unchanged. Calls queued in memory wait
 through `CredentialNeeded`.
 
+Not built (RUNNER-SPEC v2.60 §15.6, slices J2 and J5): a binding that cannot
+decide answers Close 1013 before Welcome, or HTTP 503 at bind. That is not a
+credential failure. The client keeps its bytes, calls no source, keeps its
+images and reconnects with jittered backoff, as after a transport failure.
+
 An SSE subscription (http.md B-9) shares the same credential source and the
 same refresh in flight. Its final event `expired`, and a 401 on any SSE
 request or re-request, are the same credential recovery as Close 4401: the

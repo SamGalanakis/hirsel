@@ -109,7 +109,8 @@ form, never with different behaviour: a provider that forwards every operation t
 is indistinguishable from it. A provider operation that may wait is declared `waits` and is a cancellation point
 at its issue ([CONC-7](tasks.md#conc-7-cancellation-points)). Provider operations state
 their allocation in their result types as every operation does
-([MEM-21](budgets.md#mem-21-admission)); host memory behind them is not charged. Core task,
+([MEM-21](budgets.md#mem-21-admission)); host memory behind them is not charged, except a
+`UdpSocket`'s receive pool ([MEM-19](budgets.md#mem-19-limits)). Core task,
 channel and `Arc` operations are not provider operations; their choices are events
 ([CONC-10](tasks.md#conc-10-event-order)).
 

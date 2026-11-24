@@ -15,7 +15,9 @@ the step bound of MEM-30, which counts steps, not bytes.
 Charges cover every block, node, region allocation, queue, task record, cause cell and
 grant a program makes. They do not cover the call stack, host memory behind provider
 operations ([CAP-5](capabilities.md#cap-5-provider-operations)), or the engine's own
-bookkeeping: drop flags and the limit records of MEM-20.
+bookkeeping: drop flags and the limit records of MEM-20. The one provider memory they do
+cover is a `UdpSocket`'s receive pool, whose size the program chooses
+([NET-16](net.md#net-16-udp-sockets-and-batches)).
 
 ### MEM-20: Limit records and hand-over
 
@@ -123,6 +125,7 @@ is the most any build charges for the allocation (MEM-28):
 | counted node | payload size + 8, rounded up to 8 |
 | owning closure environment | the sum of its captures' sizes, rounded up to 8 |
 | region allocation | its byte count, rounded up to 8 |
+| `UdpSocket` receive pool ([NET-16](net.md#net-16-udp-sockets-and-batches)) | slots × slot bytes, per member |
 | a `Text` or `FixedSpan` made outside a compact type | 8 (count) + payload bytes, rounded up to 8 |
 | a span builder's allocation | a region allocation of its current capacity × element size + 8 |
 | a `build_in` or `build_stream_in` allocation | `n`, rounded up to 8; after `finish_trim`, its used bytes, rounded up to 8 |

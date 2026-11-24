@@ -113,7 +113,7 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
         let holders = attach_manifest_holders(selected, pages, empty_collection)
         capacity(manifest_state(selected, holders))
     })?
-    let replay = journal_replay(take state, selected.next_stamp - 1)?
+    let replay = journal_replay_manifest(take state, selected)?
     for tip in replay.state.tips {
         if tip.id == b.id && tip.head > base {
             return Ok(None)

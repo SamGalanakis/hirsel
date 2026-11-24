@@ -3,6 +3,7 @@ type PageTree: shareable + send {
     inline: u64,
     // The collection map keeps its empty child shared even while every collection has rows.
     empty_collection: Option[Arc[std.page.Page]]
+    replay: Option[Arc[ReplayBranch]]
 }
 
 type PageRoots: shareable + send {
@@ -20,7 +21,7 @@ fn attach_page_tree(pages: Map[u64, Arc[std.page.Page]], ptr: std.page.PagePtr, 
         }
         arc.share(found)
     }
-    PageTree(root: take root, inline: inline, empty_collection: take empty_collection)
+    PageTree(root: take root, inline: inline, empty_collection: take empty_collection, replay: None)
 }
 
 fn attach_page_roots(pages: Map[u64, Arc[std.page.Page]], roots: LocatedRoots, inline: u64, empty_collection: Arc[std.page.Page]) -> PageRoots {
@@ -33,7 +34,7 @@ fn new_page_tree(domain: std.page.Domain, inline: u64) -> PageTree {
     } else {
         None
     }
-    PageTree(root: std.page.empty(0, 0, domain), inline: inline, empty_collection: take empty_collection)
+    PageTree(root: std.page.empty(0, 0, domain), inline: inline, empty_collection: take empty_collection, replay: None)
 }
 
 fn share_page_tree(tree: PageTree) -> PageTree {
@@ -41,7 +42,7 @@ fn share_page_tree(tree: PageTree) -> PageTree {
         Some(empty) => Some(arc.share(empty)),
         None => None
     }
-    PageTree(root: arc.share(tree.root), inline: tree.inline, empty_collection: take empty_collection)
+    PageTree(root: arc.share(tree.root), inline: tree.inline, empty_collection: take empty_collection, replay: clone(tree.replay))
 }
 
 fn tree_domain(tree: PageTree) -> std.page.Domain {
@@ -53,9 +54,10 @@ fn tree_stamp(tree: PageTree) -> u64 {
 }
 
 fn install_page_tree(mut tree: PageTree, take replacement: PageTree) {
-    let PageTree(root: take ready, inline: width, ..) = take replacement
+    let PageTree(root: take ready, inline: width, replay: take layers, ..) = take replacement
     std.page.install_planned(mut tree.root, take ready)
     tree.inline = width
+    tree.replay = take layers
 }
 
 fn page_error(problem: std.page.Error) -> Error {

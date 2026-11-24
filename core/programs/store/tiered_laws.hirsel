@@ -468,7 +468,7 @@ fn test_l70_cache_overlap() -> Result[(), Error] {
 
 @test
 fn test_l68_replay_overlay_table() -> Result[(), Error] {
-    let mut main_overlay = empty_replay_overlay()
+    let mut main_overlay = empty_replay_overlay(None)
     let mut logical = prefix(9)?
     list.push(mut logical, 5u8)
     let mut larger = prefix(9)?
@@ -504,10 +504,10 @@ fn test_l68_replay_overlay_table() -> Result[(), Error] {
 fn test_l79_overlay_trim_evidence() -> Result[(), Error] {
     // Three Cold rows and two suffix appends of six bytes each.
     // Every row costs 62 + round8(12) + round8(6) = 86.
-    let mut edited = empty_replay_overlay()
+    let mut edited = empty_replay_overlay(Some(3u64))
     let appended = ReplayOrigin(ordinal: 1, branch: 0)
-    let first_key = replay_log_key(9, 3)?
-    let last_key = replay_log_key(9, 4)?
+    let first_key = log_key(9, 3)?
+    let last_key = log_key(9, 4)?
     let value = arc.new(string.into_bytes(string.from("stored")))
     replay_overlay_edit(mut edited, "j-1", 72, appended, first_key, 0, ReplayPut(arc.share(value)))?
     replay_overlay_edit(mut edited, "j-1", 72, appended, last_key, 0, ReplayPut(take value))?
@@ -820,4 +820,72 @@ fn test_l68_lazy_directory_inventory(d: Dir) -> Result[(), Error] waits {
         fail("L68: the invalid extent was attributed to the wrong pack")
     }
     Ok(())
+}
+
+fn l68_replay_base() -> Result[JournalReplay, Error] {
+    let mut raw = l68_collection_map_wire()
+    list.set_word_le(mut raw, 69, 2u64)
+    list.set_word_le(mut raw, 77, 172u64)
+    let image = page_result(std.page.decode(take raw, CollectionMap))?
+    let mut slots: List[std.page.Slot] = list.new()
+    list.push(mut slots, ColdPage(std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)))
+    let mut roots = empty_roots()
+    roots.collections.root = page_result(std.page.attach(take image, take slots, list.new()))?
+    let mut manifest = page_manifest_empty()
+    manifest.account_tiered = 172
+    manifest.next_stamp = 101
+    journal_replay_manifest(capacity(main_state(take roots, 0, 0))?, manifest)
+}
+
+fn l68_replay_put(branch_id: u32, head: u64, prior: u32, value: String) -> Result[JournalEvent, Error] {
+    let mut ops: List[JournalOp] = list.new()
+    list.push(mut ops, JournalOp(key: log_key(9, 2)?, value: Some(string.into_bytes(string.from(value))), prior: prior, trim: None))
+    Ok(Commit(JournalCommit(branch: branch_id, version: head, at: head, data: take ops, streams: list.new(), call: None)))
+}
+
+fn l68_check_replay_root(tree: PageTree, rows: u64, charge: u64, expected_value: String) -> Result[(), Error] {
+    let Some((ColdPage(ptr), descriptor)) = std.page.collection_slot(tree.root, prefix(9)?) else {
+        fail("L68: replay forced the base page")
+    }
+    let recorded_rows: u64 = list.word_le(descriptor, 36)
+    let recorded_charge: u64 = list.word_le(descriptor, 44)
+    if ptr.stamp != 40 || recorded_rows != rows || recorded_charge != charge || tree_stamp(tree) <= 100 {
+        fail("L68: replay changed the base pointer or produced incorrect descriptor totals")
+    }
+    let Some(branch_overlay) = view tree.replay else {
+        fail("L68: Tiered replay did not leave an overlay")
+    }
+    let Some(collection_overlay) = std.omap.get(branch_overlay.collections, 9u32) else {
+        fail("L68: the branch's written collection has no replay overlay")
+    }
+    let Some(ReplayRow(first: ReplayOrigin(ordinal: 1, branch: 0), now: ReplayPut(value), ..)) = replay_overlay_at(collection_overlay, log_key(9, 2)?) else {
+        fail("L68: replay lost the origin of the first edit")
+    }
+    if list.compare_bytes(value, string.as_bytes(expected_value)) != Equal || branch_overlay.charged != 54 {
+        fail("L68: replay lost the value or charged the wrong overlay bytes")
+    }
+    Ok(())
+}
+
+@test
+fn test_l68_replay_branch_accounts() -> Result[(), Error] {
+    // The K pair has identical Memory metadata, and neither Cold tree is
+    // read. Replacing an 86-byte row in P leaves its account unchanged.
+    // Inserting the same row in Q adds 86.
+    let mut p = l68_replay_base()?
+    let mut q = l68_replay_base()?
+    journal_apply("j-1", mut p, l68_replay_put(0, 1, 7, "stored")?)?
+    journal_apply("j-1", mut q, l68_replay_put(0, 1, 0, "stored")?)?
+    if p.tiered.total != 172 || q.tiered.total != 258 {
+        fail("L68: exact replay did not distinguish insertion from overwrite")
+    }
+    l68_check_replay_root(p.state.tips[0u64].roots.collections, 2, 172, "stored")?
+    l68_check_replay_root(q.state.tips[0u64].roots.collections, 3, 258, "stored")?
+    journal_apply("j-1", mut q, Fork(JournalFork(id: 1, parent: 0, forked_at: 1, name: "beta", watermark: 102)))?
+    journal_apply("j-1", mut q, l68_replay_put(1, 2, 7, "second")?)?
+    if q.tiered.total != 344 || q.tiered.exact || q.tiered.ordinal != 3 {
+        fail("L68: the fork did not make subsequent Tiered accounting conservative")
+    }
+    l68_check_replay_root(q.state.tips[0u64].roots.collections, 3, 258, "stored")?
+    l68_check_replay_root(q.state.tips[1u64].roots.collections, 3, 258, "second")
 }

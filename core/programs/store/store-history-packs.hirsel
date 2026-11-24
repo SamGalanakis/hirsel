@@ -426,7 +426,7 @@ fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u6
     let initial = disk_allocation(scoped fn() -> Result[State, Error] {
         capacity(manifest_state(loaded.manifest, loaded.holders))
     })?
-    let mut replay = journal_replay(take initial, loaded.manifest.next_stamp - 1)?
+    let mut replay = journal_replay_manifest(take initial, loaded.manifest)?
     over_ceiling(journal_account(replay)?, ceiling)?
     history_apply_suffix(mut source.client, head, head.checkpoint.seq, chain, mut replay, ceiling, source.deadline)?
     Ok((take replay, take loaded))

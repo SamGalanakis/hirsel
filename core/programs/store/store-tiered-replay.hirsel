@@ -1,0 +1,136 @@
+type ReplayBranch: shareable + send {
+    collections: std.omap.OMap[u32, Arc[ReplayOverlay]],
+    ids: u64,
+    charged: u64
+}
+
+type ReplayTieredAccount: shareable + send {
+    total: u64,
+    exact: bool,
+    ordinal: u64
+}
+
+fn journal_replay_manifest(take state: State, manifest: PageManifest) -> Result[JournalReplay, Error] {
+    let mut replay = journal_replay(take state, manifest.next_stamp - 1)?
+    replay.tiered.total = manifest.account_tiered
+    Ok(take replay)
+}
+
+type ReplayDescriptor {
+    rows: u64,
+    row_bytes: u64,
+    seq_bounds: Option[LogBounds]
+}
+
+fn tiered_replay_descriptor(raw: Bytes) -> ReplayDescriptor {
+    let seq_bounds: Option[LogBounds] = if raw[52u64] == 4 {
+        Some(descriptor_bounds(raw))
+    } else {
+        None
+    }
+    ReplayDescriptor(rows: list.word_le(raw, 36), row_bytes: list.word_le(raw, 44), seq_bounds: seq_bounds)
+}
+
+fn prior_row_charge(key: Bytes, prior: u32) -> u64 {
+    if prior == 0 {
+        return 0
+    }
+    let width: u64 = int.widen(prior - 1)
+    62 + round8(list.len(key)) + round8(width)
+}
+
+fn replay_charge(file: String, before: u64, removed: u64, added: u64) -> Result[u64, Error] {
+    let Some(remaining) = int.checked_sub(before, removed) else {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    let Some(total) = int.checked_add(remaining, added) else {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    Ok(total)
+}
+
+fn replay_row_edit(file: String, mut overlay: Arc[ReplayOverlay], origin: ReplayOrigin, before: ReplayDescriptor, op: JournalOp) -> Result[(ReplayDescriptor, u64, u64), Error] {
+    let mut seq_bounds = before.seq_bounds
+    if let Some(window) = before.seq_bounds {
+        let Some(value) = view op.value else {
+            return Error(disk_fault(file, 0, Malformed))
+        }
+        if op.prior != 0 || list.len(op.key) != 12 || list.len(value) < 2 || list.word_be(op.key, 4) != window.next {
+            return Error(disk_fault(file, 0, Malformed))
+        }
+        let Some(following) = int.checked_add(window.next, 1) else {
+            return Error(disk_fault(file, 0, Malformed))
+        }
+        seq_bounds = Some(LogBounds(first: window.first, next: following))
+    }
+    let (now, added, added_rows): (ReplayValue, u64, u64) = match op.value {
+        Some(value) => (ReplayPut(arc.new(copied(value)?)), entry(op.key, value), 1),
+        None => (ReplayAbsent, 0, 0),
+    }
+    let removed = prior_row_charge(op.key, op.prior)
+    let removed_rows = if op.prior == 0 {
+        0u64
+    } else {
+        1u64
+    }
+    let rows = replay_charge(file, before.rows, removed_rows, added_rows)?
+    let row_bytes = replay_charge(file, before.row_bytes, removed, added)?
+    replay_overlay_edit(mut overlay, file, 0, origin, op.key, op.prior, now)?
+    Ok((ReplayDescriptor(rows: rows, row_bytes: row_bytes, seq_bounds: seq_bounds), removed, added))
+}
+
+fn replay_trim_edit(file: String, mut overlay: Arc[ReplayOverlay], origin: ReplayOrigin, collection: u32, before: ReplayDescriptor, op: JournalOp, trim: JournalTrim) -> Result[(ReplayDescriptor, u64, u64), Error] {
+    let Some(window) = before.seq_bounds else {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    if list.len(op.key) != 4 {
+        return Error(disk_fault(file, 0, Malformed))
+    }
+    let start = ReplayLogHead(first: window.first, next: window.next, cold_next: option.unwrap(overlay.cold_next), row_bytes: before.row_bytes)
+    let revised = replay_overlay_trim(mut overlay, file, 0, origin, collection, start, trim)?
+    let seq_bounds = LogBounds(first: revised.first, next: revised.next)
+    Ok((ReplayDescriptor(rows: revised.next - revised.first, row_bytes: revised.row_bytes, seq_bounds: Some(seq_bounds)), trim.dropped, 0u64))
+}
+
+fn replay_tiered_op(file: String, mut tree: PageTree, mut next_stamp: u64, mut account: ReplayTieredAccount, origin: ReplayOrigin, before: ReplayDescriptor, op: JournalOp) -> Result[(), Error] {
+    let id: u32 = list.word_be(op.key, 0)
+    let (take ready_root, take next_branch_overlay, following_stamp, total) = disk_allocation(scoped fn() -> Result[(Arc[std.page.Page], Arc[ReplayBranch], u64, u64), Error] {
+        let previous = match tree.replay {
+            Some(existing) => arc.share(existing),
+            None => arc.new(ReplayBranch(collections: std.omap.new(), ids: 0, charged: 0)),
+        }
+        let (take current, previous_charge) = match std.omap.get(previous.collections, id) {
+            Some(overlay) => (arc.share(overlay), overlay.charged),
+            None => (empty_replay_overlay(match before.seq_bounds {
+                Some(window) => Some(window.next),
+                None => None
+            }), 0u64),
+        }
+        let mut overlay = take current
+        let (after, removed, added) = match op.trim {
+            Some(trim) => replay_trim_edit(file, mut overlay, origin, id, before, op, trim)?,
+            None => replay_row_edit(file, mut overlay, origin, before, op)?,
+        }
+        let new_total = replay_charge(file, account.total, if account.exact {
+            removed
+        } else {
+            0u64
+        }, added)?
+        let seq_bounds: Option[(u64, u64)] = match after.seq_bounds {
+            Some(window) => Some((window.first, window.next)),
+            None => None,
+        }
+        let mut root = arc.share(tree.root)
+        let mut stamp = next_stamp
+        page_result(std.page.replay_collection_totals(mut root, list.slice(op.key, 0, 4), after.rows, after.row_bytes, seq_bounds, mut stamp))?
+        let charged = previous.charged - previous_charge + overlay.charged
+        let mut ids = previous.ids
+        let (take collections, _) = std.omap.insert(mut ids, previous.collections, id, take overlay)
+        Ok((take root, arc.new(ReplayBranch(collections: take collections, ids: ids, charged: charged)), stamp, new_total))
+    })?
+    tree.root = take ready_root
+    tree.replay = Some(take next_branch_overlay)
+    next_stamp = following_stamp
+    account.total = total
+    Ok(())
+}

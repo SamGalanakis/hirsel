@@ -20,14 +20,15 @@ type ReplayTrimEvidence: shareable + send {
 
 type ReplayOverlay: shareable + send {
     entries: std.omap.OMap[Bytes, ReplayRow],
+    cold_next: Option[u64],
     floor: Option[u64],
     trims: std.omap.OMap[u64, ReplayTrimEvidence],
     ids: u64,
     charged: u64
 }
 
-fn empty_replay_overlay() -> Arc[ReplayOverlay] {
-    arc.new(ReplayOverlay(entries: std.omap.new(), floor: None, trims: std.omap.new(), ids: 0, charged: 0))
+fn empty_replay_overlay(cold_next: Option[u64]) -> Arc[ReplayOverlay] {
+    arc.new(ReplayOverlay(entries: std.omap.new(), cold_next: cold_next, floor: None, trims: std.omap.new(), ids: 0, charged: 0))
 }
 
 fn replay_overlay_at(overlay: Arc[ReplayOverlay], logical: Bytes) -> Option[View[ReplayRow]] in overlay {
@@ -65,7 +66,7 @@ fn replay_overlay_edit(mut overlay: Arc[ReplayOverlay], path: String, at: u64, o
         let row = ReplayRow(base: base, first: first, now: clone(now))
         let (take entries, _) = std.omap.insert(mut ids, overlay.entries, clone(logical), take row)
         let charged = overlay.charged - removed + charge + replay_value_width(now)
-        Ok(arc.new(ReplayOverlay(entries: take entries, floor: overlay.floor, trims: clone(overlay.trims), ids: ids, charged: charged)))
+        Ok(arc.new(ReplayOverlay(entries: take entries, cold_next: overlay.cold_next, floor: overlay.floor, trims: clone(overlay.trims), ids: ids, charged: charged)))
     })?
     overlay = take ready
     Ok(())
@@ -78,16 +79,13 @@ type ReplayLogHead {
     row_bytes: u64
 }
 
-fn replay_log_key(collection: u32, sequence: u64) -> Result[Bytes, Error] {
-    let mut key = prefixed(collection, 8, false)?
-    list.put_word_be(mut key, sequence)
-    Ok(take key)
-}
-
 // Account for the suffix appends before dropping their entries. Only the
 // Cold part and its interval go to the fold, where the Cold tree is available.
 fn replay_overlay_trim(mut overlay: Arc[ReplayOverlay], path: String, at: u64, origin: ReplayOrigin, collection: u32, head: ReplayLogHead, trim: JournalTrim) -> Result[ReplayLogHead, Error] {
     if trim.floor < head.first || trim.dropped > head.row_bytes {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    if let Some(_) = std.omap.get(overlay.trims, origin.ordinal) {
         return Error(disk_fault(path, at, Malformed))
     }
     let end = order.min(trim.floor, head.next)
@@ -96,9 +94,9 @@ fn replay_overlay_trim(mut overlay: Arc[ReplayOverlay], path: String, at: u64, o
     let ready = disk_allocation(scoped fn() -> Result[Arc[ReplayOverlay], Error] {
         let mut removed = 0u64
         let mut suffix_charge = 0u64
-        let suffix_key = replay_log_key(collection, suffix_start)?
+        let suffix_key = log_key(collection, suffix_start)?
         if suffix_start < end {
-            let mut cursor = std.omap.range(overlay.entries, Included(clone(suffix_key)), Excluded(replay_log_key(collection, end)?))
+            let mut cursor = std.omap.range(overlay.entries, Included(clone(suffix_key)), Excluded(log_key(collection, end)?))
             let mut n = 0u64
             while let Some((key, row)) = std.omap.next(mut cursor) {
                 let ReplayPut(value) = view row.now else {
@@ -120,14 +118,14 @@ fn replay_overlay_trim(mut overlay: Arc[ReplayOverlay], path: String, at: u64, o
         }
         let mut ids = overlay.ids
         let entries = if suffix_start < end {
-            std.omap.graft(mut ids, overlay.entries, suffix_key, replay_log_key(collection, trim.floor)?, std.omap.new())
+            std.omap.graft(mut ids, overlay.entries, suffix_key, log_key(collection, trim.floor)?, std.omap.new())
         } else {
             clone(overlay.entries)
         }
         let proof = ReplayTrimEvidence(origin: origin, lo: head.first, hi: hi, cold_charge: cold_charge)
         let (take trims, _) = std.omap.insert(mut ids, overlay.trims, origin.ordinal, proof)
         let charged = overlay.charged - removed + 36
-        Ok(arc.new(ReplayOverlay(entries: take entries, floor: Some(trim.floor), trims: take trims, ids: ids, charged: charged)))
+        Ok(arc.new(ReplayOverlay(entries: take entries, cold_next: overlay.cold_next, floor: Some(trim.floor), trims: take trims, ids: ids, charged: charged)))
     })?
     overlay = take ready
     Ok(ReplayLogHead(first: trim.floor, next: order.max(head.next, trim.floor), cold_next: head.cold_next, row_bytes: head.row_bytes - trim.dropped))

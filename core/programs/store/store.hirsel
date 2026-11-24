@@ -6116,7 +6116,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
         Ok(located_owners(loaded.manifest))
     })?
     let recorded_after = manifested.tips[0u64].head
-    let initial = journal_replay(take manifested, loaded.manifest.next_stamp - 1)?
+    let initial = journal_replay_manifest(take manifested, loaded.manifest)?
     let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, true, take initial)?
     let JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
     let live = journal_account(replay)?
@@ -6367,7 +6367,7 @@ fn read_only_state(d: Dir, id: StoreId, take manifest: PageManifest, barriers: b
         let holders = attach_manifest_holders(selected, pages, empty_collection)
         capacity(manifest_state(selected, holders))
     })?
-    let replay = journal_replay(take state, selected.next_stamp - 1)?
+    let replay = journal_replay_manifest(take state, selected)?
     let JournalRecovered(replay: take recovered, ..) = journal_recover(d, id, selected.first_live, barriers, take replay)?
     Ok(take recovered)
 }
@@ -7213,7 +7213,8 @@ type JournalReplay {
     state: State,
     names: Map[String, u32],
     record_bytes: u64,
-    next_node: u64
+    next_node: u64,
+    tiered: ReplayTieredAccount
 }
 
 fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Error] {
@@ -7230,32 +7231,43 @@ fn journal_replay(take state: State, next_node: u64) -> Result[JournalReplay, Er
         }
         Ok((take names, total))
     })?
-    Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node))
+    let tiered = ReplayTieredAccount(total: 0, exact: list.len(state.tips) == 1 && list.len(state.pins) == 0, ordinal: 0)
+    Ok(JournalReplay(state: take state, names: take names, record_bytes: total, next_node: next_node, tiered: tiered))
 }
 
-fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp]) -> Result[(), Error] {
+fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount, origin: ReplayOrigin) -> Result[(), Error] {
     if list.len(ops) == 0 {
         return Ok(())
     }
     let mut next_stamp = stamp_after(ids)?
+    let domain = tree_domain(tree)
     for op in ops {
-        if let Some(trim) = op.trim {
-            if tree_domain(tree) != CollectionMap {
-                return Error(disk_fault(file, 0, Malformed))
-            }
-            match trim_log_page(mut tree, op.key, trim.floor, Some(trim.dropped), 0, mut next_stamp) {
-                Ok(_) => (),
-                Error(Corrupt(_)) => return Error(disk_fault(file, 0, Malformed)),
-                Error(take problem) => return Error(take problem),
-            }
-            continue
-        }
-        if tree_domain(tree) == CollectionMap {
+        if domain == CollectionMap {
             if list.len(op.key) < 4 {
                 return Error(disk_fault(file, 0, Malformed))
             }
-            let Some(kind) = collection_kind(tree, list.slice(op.key, 0, 4)) else {
-                return Error(disk_fault(file, 0, Malformed))
+            let (kind, tiered_descriptor) = {
+                let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                let tiered_counts: Option[ReplayDescriptor] = if descriptor[53u64] == 1 {
+                    Some(tiered_replay_descriptor(descriptor))
+                } else {
+                    None
+                }
+                (descriptor[52u64], tiered_counts)
+            }
+            if let Some(before) = tiered_descriptor {
+                replay_tiered_op(file, mut tree, mut next_stamp, mut account, origin, before, op)?
+                continue
+            }
+            if let Some(trim) = op.trim {
+                match trim_log_page(mut tree, op.key, trim.floor, Some(trim.dropped), 0, mut next_stamp) {
+                    Ok(_) => (),
+                    Error(Corrupt(_)) => return Error(disk_fault(file, 0, Malformed)),
+                    Error(take problem) => return Error(take problem),
+                }
+                continue
             }
             if kind == 4 {
                 let Some(value) = view op.value else { return Error(disk_fault(file, 0, Malformed)) }
@@ -7285,6 +7297,8 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 apply_cell(mut tree, op.key, raw, None, 0, mut next_stamp)?
                 continue
             }
+        } else if let Some(_) = op.trim {
+            return Error(disk_fault(file, 0, Malformed))
         }
         match op.value {
             Some(value) => put_page_row(mut tree, op.key, value, 0, mut next_stamp)?,
@@ -7310,8 +7324,10 @@ fn journal_apply_commit(file: String, mut replay: JournalReplay, commit: Journal
     if i == total_count || int.checked_add(replay.state.tips[i].head, 1) != Some(commit.version) {
         return Error(disk_fault(file, 0, Gap(commit.version)))
     }
-    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data)?
-    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams)?
+    let origin = ReplayOrigin(ordinal: stamp_after(replay.tiered.ordinal)?, branch: commit.branch)
+    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.collections, commit.data, mut replay.tiered, origin)?
+    journal_apply_ops(file, mut replay.next_node, mut replay.state.tips[i].roots.streams, commit.streams, mut replay.tiered, origin)?
+    replay.tiered.ordinal = origin.ordinal
     replay.state.tips[i].head = commit.version
     replay.state.tips[i].at = commit.at
     Ok(())
@@ -7326,6 +7342,7 @@ fn journal_apply(file: String, mut replay: JournalReplay, take event: JournalEve
 
 fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: JournalFork) -> Result[(), Error] {
     let JournalFork(id: id, parent: parent, forked_at: forked_at, name: take name, ..) = take encoded
+    let ordinal = stamp_after(replay.tiered.ordinal)?
     let charge = branch_record_bytes(name)
     if id < replay.state.next_branch || id == 4294967295 || charge > META_LIMIT - replay.record_bytes || map.contains(replay.names, name) {
         return Error(disk_fault(file, 0, Malformed))
@@ -7348,6 +7365,8 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
     list.push(mut replay.state.tips, Tip(id: id, name: take name, parent: parent, forked_at: forked_at, roots: take roots, head: forked_at, at: at))
     replay.record_bytes += charge
     replay.state.next_branch = id + 1
+    replay.tiered.ordinal = ordinal
+    replay.tiered.exact = false
     Ok(())
 }
 

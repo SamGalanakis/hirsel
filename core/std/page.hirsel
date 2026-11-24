@@ -2600,6 +2600,45 @@ pub fn edit_collection(mut root: Arc[Page], key: Bytes, private_from: u64, mut n
     }))
 }
 
+/// Restamp a Tiered collection's map path with replay's row totals and bounds.
+/// The collection slot still holds the unchanged base that the overlay reads.
+pub fn replay_collection_totals(mut root: Arc[Page], key: Bytes, rows: u64, charge: u64, bounds: Option[(u64, u64)], mut next: u64) -> Result[(), Error] {
+    if root.image.domain != CollectionMap {
+        return Error(MalformedPage)
+    }
+    let mut revised = copy_with_stamp(root, take_stamp(mut next)?)
+    option.unwrap(arc.with_unique(mut revised, scoped fn(mut page: Page) -> Result[(), Error] {
+        if let Some(slot) = descend(page.image, key) {
+            match page.kids[slot] {
+                HotPage(mut child_page) => replay_collection_totals(mut child_page, key, rows, charge, bounds, mut next)?,
+                ColdPage(_) => return Error(MalformedPage),
+            }
+            refresh_child(mut page, slot)
+            return Ok(())
+        }
+        let (slot, hit) = search(page.image, key)
+        if !hit || tiered_root_at(page.image, slot) == None {
+            return Error(MalformedPage)
+        }
+        let at = entry_at(page.image, slot)
+        let descriptor = at + 5 + u16_at(page.image.raw, at)
+        if let Some((first, following)) = bounds {
+            if page.image.raw[descriptor + 52] != 4 || int.checked_sub(following, first) != Some(rows) {
+                return Error(MalformedPage)
+            }
+            list.set_word_le(mut page.image.raw, descriptor + 56, following)
+            list.set_word_le(mut page.image.raw, descriptor + 64, first)
+        } else if page.image.raw[descriptor + 52] == 4 {
+            return Error(MalformedPage)
+        }
+        list.set_word_le(mut page.image.raw, descriptor + 36, rows)
+        list.set_word_le(mut page.image.raw, descriptor + 44, charge)
+        Ok(())
+    }))?
+    root = take revised
+    Ok(())
+}
+
 // What an inline write needs from its leaf. None sends the write to the
 // copying path; rewrite marks a same-width value written over in place.
 type InlineFit {

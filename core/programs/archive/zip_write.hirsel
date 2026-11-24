@@ -1,0 +1,192 @@
+pub type Input {
+    name: Bytes,
+    method: Method,
+    body: Bytes,
+}
+
+fn put_u16(mut out: Bytes, n: u64) {
+    let word: u16 = int.narrow(n)
+    list.put_word_le(mut out, word)
+}
+
+fn put_u32(mut out: Bytes, n: u64) {
+    let word: u32 = int.narrow(n)
+    list.put_word_le(mut out, word)
+}
+
+fn zip64_sizes(nums: Numbers, entry64: bool, in_directory: bool) -> Bytes {
+    let mut extra: Bytes = list.new()
+    if entry64 {
+        put_u16(mut extra, 1)
+        put_u16(mut extra, if in_directory {
+            24
+        } else {
+            16
+        })
+        list.put_word_le(mut extra, nums.size)
+        list.put_word_le(mut extra, nums.packed)
+        if in_directory {
+            list.put_word_le(mut extra, nums.offset)
+        }
+    }
+    take extra
+}
+
+fn file_header(rec: Record, entry64: bool, in_directory: bool) -> Bytes {
+    let extra = zip64_sizes(rec.numbers, entry64, in_directory)
+    let mut out: Bytes = list.with_capacity(46 + list.len(rec.name) + list.len(extra))
+    list.put_word_le(mut out, if in_directory {
+        CENTRAL
+    } else {
+        LOCAL
+    })
+    if in_directory {
+        list.put_word_le(mut out, 0x033fu16)
+    }
+    let version: u16 = if rec.method == Zstd {
+        63
+    } else if entry64 {
+        45
+    } else {
+        20
+    }
+    list.put_word_le(mut out, version)
+    list.put_word_le(mut out, rec.flags)
+    list.put_word_le(mut out, method_code(rec.method))
+    list.put_word_le(mut out, 0u16)
+    list.put_word_le(mut out, 33u16)
+    list.put_word_le(mut out, rec.crc)
+    put_u32(mut out, if entry64 {
+        MAX32
+    } else {
+        rec.numbers.packed
+    })
+    put_u32(mut out, if entry64 {
+        MAX32
+    } else {
+        rec.numbers.size
+    })
+    put_u16(mut out, list.len(rec.name))
+    put_u16(mut out, list.len(extra))
+    if in_directory {
+        list.put_word_le(mut out, 0u16)
+        list.put_word_le(mut out, 0u16)
+        list.put_word_le(mut out, 0u16)
+        let attrs: u32 = if rec.kind == Folder {
+            0x41ed0010
+        } else {
+            0x81a40000
+        }
+        list.put_word_le(mut out, attrs)
+        put_u32(mut out, if entry64 {
+            MAX32
+        } else {
+            rec.numbers.offset
+        })
+    }
+    list.append(mut out, rec.name)
+    list.append(mut out, extra)
+    take out
+}
+
+fn end_records(count: u64, start: u64, end: u64, wide: bool) -> Bytes {
+    let mut out: Bytes = list.with_capacity(98)
+    let length = end - start
+    if wide {
+        list.put_word_le(mut out, END64)
+        list.put_word_le(mut out, 44u64)
+        list.put_word_le(mut out, 63u16)
+        list.put_word_le(mut out, 45u16)
+        list.put_word_le(mut out, 0u32)
+        list.put_word_le(mut out, 0u32)
+        list.put_word_le(mut out, count)
+        list.put_word_le(mut out, count)
+        list.put_word_le(mut out, length)
+        list.put_word_le(mut out, start)
+        list.put_word_le(mut out, LOCATOR64)
+        list.put_word_le(mut out, 0u32)
+        list.put_word_le(mut out, end)
+        list.put_word_le(mut out, 1u32)
+    }
+    list.put_word_le(mut out, END)
+    list.put_word_le(mut out, 0u16)
+    list.put_word_le(mut out, 0u16)
+    put_u16(mut out, if wide {
+        MAX16
+    } else {
+        count
+    })
+    put_u16(mut out, if wide {
+        MAX16
+    } else {
+        count
+    })
+    put_u32(mut out, if wide {
+        MAX32
+    } else {
+        length
+    })
+    put_u32(mut out, if wide {
+        MAX32
+    } else {
+        start
+    })
+    list.put_word_le(mut out, 0u16)
+    take out
+}
+
+fn write_files(inputs: List[Input], caps: limits.Limits, force_zip64: bool, mut budget: limits.Budget, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[u64, limits.Error] waits {
+    let count = list.len(inputs)
+    if count > caps.entries {
+        return Error(CountLimit)
+    }
+    let mut records: List[Record] = list.with_capacity(count)
+    let mut written = 0u64
+    for input in inputs {
+        if list.len(input.name) > MAX16 {
+            return Error(EntryLimit)
+        }
+        let flags = 0x800u16
+        check_name(input.name, flags, caps)?
+        let size = list.len(input.body)
+        let kind: limits.Kind = if slash_end(input.name) {
+            Folder
+        } else {
+            Regular
+        }
+        if kind == Folder && size != 0 {
+            return Error(Invalid)
+        }
+        limits.entry(mut budget, size)?
+        limits.step(mut budget)?
+        let data: Bytes = match input.method {
+            Store => clone(input.body),
+            Deflate => std.flate.encode(Raw, input.body, 6),
+            Zstd => std.zstd.encode(input.body, 1),
+        }
+        let packed = list.len(data)
+        limits.ratio(size, packed, caps.ratio)?
+        let wide = force_zip64 || size >= MAX32 || packed >= MAX32 || written >= MAX32
+        let rec = Record(name: clone(input.name), kind: kind, method: input.method, flags: flags, crc: std.crc32.hash(input.body), numbers: Numbers(size: size, packed: packed, offset: written, disk: 0), wide: wide)
+        limits.emit(mut written, mut budget, caps.input_bytes, file_header(rec, wide, false), sink)?
+        limits.emit(mut written, mut budget, caps.input_bytes, data, sink)?
+        list.push(mut records, take rec)
+    }
+    let start = written
+    let mut wide = force_zip64
+    for rec in records {
+        limits.emit(mut written, mut budget, caps.input_bytes, file_header(rec, rec.wide, true), sink)?
+        wide = wide || rec.wide
+    }
+    wide = wide || count >= MAX16 || start >= MAX32 || written - start >= MAX32
+    let footer = end_records(count, start, written, wide)
+    limits.emit(mut written, mut budget, caps.input_bytes, footer, sink)?
+    Ok(written)
+}
+
+/// Emit a ZIP with fixed DOS dates in caller order. Force ZIP64 to use the
+/// wide representations with small entries. One compressed entry is buffered.
+pub fn write(inputs: List[Input], caps: limits.Limits, force_zip64: bool, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[u64, limits.Error] waits {
+    let mut budget = limits.new_budget(caps, 0, 0)?
+    write_files(inputs, caps, force_zip64, mut budget, sink)
+}

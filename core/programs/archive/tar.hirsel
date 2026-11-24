@@ -1,0 +1,365 @@
+// POSIX ustar headers and pax records, with block padding.
+pub type Time {
+    seconds: i64,
+    nanos: u32,
+}
+
+pub type Member {
+    name: Bytes,
+    kind: limits.Kind,
+    size: u64,
+    link_name: Bytes,
+    mode: u64,
+    uid: u64,
+    gid: u64,
+    uname: Bytes,
+    gname: Bytes,
+    mtime: Time,
+}
+
+pub type Event = TarEntry(Member) | TarData(Bytes)
+
+type Pax {
+    path: Option[Option[Bytes]],
+    link_name: Option[Option[Bytes]],
+    size: Option[Option[u64]],
+    mtime: Option[Option[Time]],
+}
+
+fn empty_pax() -> Pax {
+    Pax(path: None(), link_name: None(), size: None(), mtime: None())
+}
+
+fn zeros(data: Bytes) -> bool {
+    for byte in data {
+        if byte != 0 {
+            return false
+        }
+    }
+    true
+}
+
+fn field(block: Bytes, start: u64, width: u64) -> Result[Bytes, limits.Error] {
+    let mut stop = start
+    while stop < start + width && block[stop] != 0 {
+        stop += 1
+    }
+    if !zeros(list.slice(block, stop, start + width)) {
+        return Error(Invalid)
+    }
+    Ok(clone(list.slice(block, start, stop)))
+}
+
+fn octal(block: Bytes, start: u64, width: u64) -> Result[u64, limits.Error] {
+    let mut at = start
+    let end = start + width
+    while at < end && block[at] == 32 {
+        at += 1
+    }
+    let mut number = 0u64
+    while at < end && block[at] >= 48 && block[at] <= 55 {
+        number = number * 8 + int.widen(block[at] - 48)
+        at += 1
+    }
+    while at < end {
+        if block[at] != 0 && block[at] != 32 {
+            return Error(Invalid)
+        }
+        at += 1
+    }
+    Ok(number)
+}
+
+fn header_sum(block: Bytes) -> u64 {
+    let mut sum = 0u64
+    for i in 0u64 .. 512 {
+        sum += if i >= 148 && i < 156 {
+            32
+        } else {
+            int.widen(block[i])
+        }
+    }
+    sum
+}
+
+fn check_header(block: Bytes) -> Result[(), limits.Error] {
+    if header_sum(block) != octal(block, 148, 8)? {
+        return Error(Checksum)
+    }
+    if list.slice(block, 257, 265) != b"ustar\x0000" {
+        return Error(Unsupported)
+    }
+    Ok(())
+}
+
+fn decimal(data: Bytes, lo: u64, hi: u64, max: u64) -> Result[u64, limits.Error] {
+    if lo == hi {
+        return Error(Invalid)
+    }
+    match int.parse_decimal_span(data, lo, hi, max) {
+        Ok(value) => Ok(value),
+        Error(_) => Error(Invalid),
+    }
+}
+
+// Time uses floor seconds plus a nonnegative nanosecond fraction.
+fn pax_time(data: Bytes, lo: u64, hi: u64) -> Result[Time, limits.Error] {
+    if lo == hi {
+        return Error(Invalid)
+    }
+    let negative = data[lo] == 45
+    let start = if negative {
+        lo + 1
+    } else {
+        lo
+    }
+    let mut dot = start
+    while dot < hi && data[dot] != 46 {
+        dot += 1
+    }
+    let max: u64 = if negative {
+        0x8000000000000000
+    } else {
+        0x7fffffffffffffff
+    }
+    let whole = decimal(data, start, dot, max)?
+    let mut nanos = 0u32
+    if dot < hi {
+        if dot + 1 == hi {
+            return Error(Invalid)
+        }
+        let mut scale = 100000000u32
+        for i in (dot + 1) .. hi {
+            let digit = data[i]
+            if digit < 48 || digit > 57 {
+                return Error(Invalid)
+            }
+            if scale == 0 && digit != 48 {
+                return Error(Unsupported)
+            }
+            nanos += scale * int.widen(digit - 48)
+            scale /= 10
+        }
+    }
+    if !negative {
+        return Ok(Time(seconds: int.narrow(whole), nanos: nanos))
+    }
+    if nanos != 0 {
+        if whole == max {
+            return Error(Invalid)
+        }
+        let seconds: i64 = int.narrow(whole)
+        return Ok(Time(seconds: -seconds - 1, nanos: 1000000000 - nanos))
+    }
+    if whole == max {
+        return Ok(Time(seconds: -9223372036854775807 - 1, nanos: 0))
+    }
+    let seconds: i64 = int.narrow(whole)
+    Ok(Time(seconds: -seconds, nanos: 0))
+}
+
+fn pax_records(mut pax: Pax, data: Bytes, mut budget: limits.Budget) -> Result[(), limits.Error] {
+    let end = list.len(data)
+    let mut at = 0u64
+    while at < end {
+        limits.step(mut budget)?
+        let mut space = at
+        while space < end && data[space] >= 48 && data[space] <= 57 {
+            space += 1
+        }
+        if space == end || data[space] != 32 {
+            return Error(Invalid)
+        }
+        let size = decimal(data, at, space, end - at)?
+        if size < space - at + 4 {
+            return Error(Invalid)
+        }
+        let newline = at + size - 1
+        if data[newline] != 10 {
+            return Error(Invalid)
+        }
+        let key_start = space + 1
+        let mut eq = key_start
+        while eq < newline && data[eq] != 61 {
+            eq += 1
+        }
+        if eq == key_start || eq == newline {
+            return Error(Invalid)
+        }
+        let key = list.slice(data, key_start, eq)
+        let lo = eq + 1
+        if key == b"path" {
+            pax.path = Some(if lo == newline {
+                None()
+            } else {
+                Some(clone(list.slice(data, lo, newline)))
+            })
+        } else if key == b"linkpath" {
+            pax.link_name = Some(if lo == newline {
+                None()
+            } else {
+                Some(clone(list.slice(data, lo, newline)))
+            })
+        } else if key == b"size" {
+            pax.size = Some(if lo == newline {
+                None()
+            } else {
+                Some(decimal(data, lo, newline, 0xffffffffffffffff)?)
+            })
+        } else if key == b"mtime" {
+            pax.mtime = Some(if lo == newline {
+                None()
+            } else {
+                Some(pax_time(data, lo, newline)?)
+            })
+        } else if (list.len(key) >= 10 && list.slice(key, 0, 10) == b"GNU.sparse") || key == b"SCHILY.realsize" {
+            return Error(Unsupported)
+        }
+        at += size
+    }
+    Ok(())
+}
+
+fn preferred[T: plain](value: Option[Option[T]], global: Option[Option[T]], fallback: T) -> T {
+    let selected = match value {
+        Some(local) => local,
+        None() => match global {
+            Some(shared) => shared,
+            None() => None(),
+        },
+    }
+    match selected {
+        Some(x) => x,
+        None() => fallback,
+    }
+}
+
+fn preferred_bytes(value: Option[Option[Bytes]], global: Option[Option[Bytes]], take fallback: Bytes) -> Bytes {
+    match value {
+        Some(Some(x)) => clone(x),
+        Some(None()) => take fallback,
+        None() => match global {
+            Some(Some(x)) => clone(x),
+            _ => take fallback,
+        },
+    }
+}
+
+fn member(block: Bytes, pax: Pax, global: Pax, max_depth: u64) -> Result[Member, limits.Error] {
+    let mut name = field(block, 345, 155)?
+    if list.len(name) != 0 {
+        list.push(mut name, 47)
+    }
+    list.append(mut name, field(block, 0, 100)?)
+    let actual = preferred_bytes(pax.path, global.path, take name)
+    limits.path(actual, max_depth)?
+    let size = preferred(pax.size, global.size, octal(block, 124, 12)?)
+    let link_name = preferred_bytes(pax.link_name, global.link_name, field(block, 157, 100)?)
+    let kind: limits.Kind = match block[156] {
+        0 => Regular,
+        48 => Regular,
+        53 => Folder,
+        50 => SymbolicLink,
+        _ => return Error(Unsupported),
+    }
+    if list.len(actual) != 0 && actual[list.len(actual) - 1] == 47 && kind != Folder {
+        return Error(UnsafePath)
+    }
+    if kind == SymbolicLink {
+        limits.link(link_name, max_depth)?
+    } else if list.len(link_name) != 0 {
+        return Error(Invalid)
+    }
+    if kind != Regular && size != 0 {
+        return Error(Invalid)
+    }
+    let seconds: i64 = int.narrow(octal(block, 136, 12)?)
+    let mtime = preferred(pax.mtime, global.mtime, Time(seconds: seconds, nanos: 0))
+    Ok(Member(name: take actual, kind: kind, size: size, link_name: take link_name, mode: octal(block, 100, 8)?, uid: octal(block, 108, 8)?, gid: octal(block, 116, 8)?, uname: field(block, 265, 32)?, gname: field(block, 297, 32)?, mtime: mtime))
+}
+
+fn padding(size: u64) -> u64 {
+    (512 - size % 512) % 512
+}
+
+const CHUNK: u64 = 32768
+
+fn read_members(size: u64, caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let mut at = 0u64
+    let mut pax = empty_pax()
+    let mut global = empty_pax()
+    let mut pending = false
+    while at < size {
+        let block = limits.fetch(mut budget, size, at, 512, source)?
+        at += 512
+        if zeros(block) {
+            if pending {
+                return Error(Invalid)
+            }
+            let second = limits.fetch(mut budget, size, at, 512, source)?
+            if !zeros(second) {
+                return Error(Invalid)
+            }
+            at += 512
+            while at < size {
+                let count = order.min(size - at, CHUNK)
+                if !zeros(limits.fetch(mut budget, size, at, count, source)?) {
+                    return Error(Invalid)
+                }
+                at += count
+            }
+            return Ok(())
+        }
+        check_header(block)?
+        let marker = block[156]
+        let count = if marker == 120 || marker == 103 {
+            let record_size = octal(block, 124, 12)?
+            if record_size > caps.entry_bytes {
+                return Error(EntryLimit)
+            }
+            let data = limits.fetch(mut budget, size, at, record_size, source)?
+            if marker == 120 {
+                pax_records(mut pax, data, mut budget)?
+                pending = true
+            } else {
+                pax_records(mut global, data, mut budget)?
+            }
+            record_size
+        } else {
+            let entry = member(block, pax, global, caps.depth)?
+            pax = empty_pax()
+            pending = false
+            let count = entry.size
+            if count > size - at || padding(count) > size - at - count {
+                return Error(Truncated)
+            }
+            limits.entry(mut budget, count)?
+            receive(TarEntry(take entry))?
+            let end = at + count
+            while at < end {
+                let chunk = order.min(end - at, CHUNK)
+                receive(TarData(limits.fetch(mut budget, end, at, chunk, source)?))?
+                at += chunk
+            }
+            count
+        }
+        if marker == 120 || marker == 103 {
+            at += count
+        }
+        let skip = padding(count)
+        if skip != 0 {
+            if !zeros(limits.fetch(mut budget, size, at, skip, source)?) {
+                return Error(Invalid)
+            }
+            at += skip
+        }
+    }
+    Error(Truncated)
+}
+
+/// Read source ranges in increasing order and emit a header followed by body chunks.
+/// The caller commits any effects after a successful return.
+pub fn read(size: u64, caps: limits.Limits, depth: u64, source: scoped fn(u64, u64) -> Result[Bytes, limits.Error] waits, receive: scoped fn(Event) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let mut budget = limits.new_budget(caps, size, depth)?
+    read_members(size, caps, mut budget, source, receive)
+}

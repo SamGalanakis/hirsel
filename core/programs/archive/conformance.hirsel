@@ -1,0 +1,236 @@
+fn fixture_text() -> Bytes {
+    b"archive interop\n"
+}
+
+fn long_name() -> Bytes {
+    b"pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp.txt"
+}
+
+fn written_tar(reverse: bool) -> Bytes waits {
+    let short = tar.file(b"a.txt", list.len(fixture_text()), tar.Time(seconds: 0, nanos: 0))
+    let long = tar.file(long_name(), 10, tar.Time(seconds: -1, nanos: 750000000))
+    let mut members: List[tar.Member] = list.new()
+    if reverse {
+        list.push(mut members, take long)
+        list.push(mut members, take short)
+    } else {
+        list.push(mut members, take short)
+        list.push(mut members, take long)
+    }
+    let mut output: Bytes = list.new()
+    let size = result.unwrap(tar.write(members, limits.defaults(), scoped fn(index: u64, at: u64, n: u64) -> Result[Bytes, limits.Error] {
+        let data: Bytes = if (index == 0) != reverse {
+            fixture_text()
+        } else {
+            b"long name\n"
+        }
+        Ok(clone(list.slice(data, at, at + n)))
+    }, scoped fn(chunk: Bytes) -> Result[(), limits.Error] {
+        list.append(mut output, chunk)
+        Ok(())
+    }))
+    check(size == list.len(output), "TAR writer byte count")
+    take output
+}
+
+fn written_zip(wide: bool) -> Bytes waits {
+    let mut files: List[zip.Input] = list.new()
+    list.push(mut files, zip.Input(name: b"a.txt", method: Store, body: fixture_text()))
+    list.push(mut files, zip.Input(name: b"d.txt", method: Deflate, body: fixture_text()))
+    list.push(mut files, zip.Input(name: b"z.txt", method: Zstd, body: fixture_text()))
+    let mut output: Bytes = list.new()
+    let size = result.unwrap(zip.write(files, limits.defaults(), wide, scoped fn(chunk: Bytes) -> Result[(), limits.Error] {
+        list.append(mut output, chunk)
+        Ok(())
+    }))
+    check(size == list.len(output), "ZIP writer byte count")
+    take output
+}
+
+fn check(ok: bool, message: String) {
+    if !ok {
+        fail(clone(message))
+    }
+}
+
+fn range(data: Bytes, at: u64, n: u64) -> Result[Bytes, limits.Error] {
+    check(at <= list.len(data) && n <= list.len(data) - at, "reader requested a range past end of input")
+    Ok(clone(list.slice(data, at, at + n)))
+}
+
+fn read_tar(data: Bytes, name: Bytes, expected: Bytes, seconds: i64, nanos: u32) waits {
+    let mut count = 0u64
+    let mut cursor = 0u64
+    let mut received: Bytes = list.new()
+    result.unwrap(tar.read(list.len(data), limits.defaults(), 0, scoped fn(at: u64, n: u64) -> Result[Bytes, limits.Error] {
+        check(at == cursor, "TAR source requests must be contiguous")
+        cursor += n
+        range(data, at, n)
+    }, scoped fn(event: tar.Event) -> Result[(), limits.Error] {
+        match event {
+            TarEntry(member) => {
+                check(member.name == name && member.kind == Regular && member.size == list.len(expected), "TAR member")
+                check(member.mtime.seconds == seconds && member.mtime.nanos == nanos, "TAR mtime")
+                check(member.uid == 0 && member.gid == 0, "TAR ownership")
+                count += 1
+            },
+            TarData(chunk) => list.append(mut received, chunk),
+        }
+        Ok(())
+    }))
+    check(count == 1 && received == expected && cursor == list.len(data), "TAR content")
+}
+
+type Expected {
+    name: Bytes,
+    body: Bytes,
+}
+
+fn read_zip(data: Bytes, expected: List[Expected], forward: bool, depth: u64) waits {
+    let mut count = 0u64
+    let mut received: Bytes = list.new()
+    let mut cursor = 0u64
+    let read = scoped fn(at: u64, n: u64) -> Result[Bytes, limits.Error] {
+        if forward {
+            check(at == cursor, "ZIP stream source requests must be contiguous")
+            cursor += n
+        }
+        range(data, at, n)
+    }
+    let receive = scoped fn(event: zip.Event) -> Result[(), limits.Error] {
+        match event {
+            ZipEntry(member) => {
+                if count > 0 {
+                    check(received == expected[count - 1].body, "ZIP body")
+                    list.clear(mut received)
+                }
+                check(count < list.len(expected), "extra ZIP member")
+                let row = view expected[count]
+                check(member.name == row.name && member.kind == Regular && member.size == list.len(row.body), "ZIP member")
+                count += 1
+            },
+            ZipData(chunk) => {
+                check(list.len(chunk) <= 32768, "ZIP chunk bound")
+                list.append(mut received, chunk)
+            },
+        }
+        Ok(())
+    }
+    let size = list.len(data)
+    let caps = limits.defaults()
+    if forward {
+        result.unwrap(zip.read_local(size, caps, depth, read, receive))
+        check(cursor == size, "ZIP stream consumed byte count")
+    } else {
+        result.unwrap(zip.read(size, caps, depth, read, receive))
+    }
+    check(count == list.len(expected) && count > 0 && received == expected[count - 1].body, "ZIP final body")
+}
+
+fn zip_result(data: Bytes, caps: limits.Limits, depth: u64) -> Result[(), limits.Error] waits {
+    zip.read(list.len(data), caps, depth, scoped fn(at: u64, n: u64) -> Result[Bytes, limits.Error] {
+        range(data, at, n)
+    }, scoped fn(_event: zip.Event) -> Result[(), limits.Error] {
+        Ok(())
+    })
+}
+
+fn refusals(inflated: Bytes, nested: Bytes) waits {
+    let names: Inline[Bytes, 8] =[b"../leaf", b"a/../leaf", b"/leaf", b"C:leaf", b"a\\..\\leaf", b"nul\x00byte", b"//server/share", b"a/.. /leaf"]
+    for name in names {
+        check(limits.path(name, 32) == Error(UnsafePath), "unsafe archive path")
+    }
+    check(limits.link(b"../elsewhere", 32) == Error(UnsafeLink), "unsafe archive link")
+    check(limits.record_start(31, 32, 40) == Error(Overlap), "local record overlaps its predecessor")
+    check(limits.record_start(40, 32, 40) == Error(Overlap), "local record overlaps directory")
+    check(limits.record_start(32, 32, 40) == Ok(()), "adjacent local records")
+    let mut caps = limits.defaults()
+    caps.steps = 0
+    check(zip_result(inflated, caps, 0) == Error(StepLimit), "ZIP step limit")
+    caps = limits.defaults()
+    caps.entry_bytes = 100
+    check(zip_result(inflated, caps, 0) == Error(EntryLimit), "ZIP entry limit")
+    caps = limits.defaults()
+    caps.ratio = 2
+    check(zip_result(inflated, caps, 0) == Error(RatioLimit), "ZIP compression ratio limit")
+    caps = limits.defaults()
+    caps.entries = 1
+    check(zip_result(nested, caps, 0) == Error(CountLimit), "ZIP entry count limit")
+    caps = limits.defaults()
+    caps.total_bytes = 130
+    check(zip_result(nested, caps, 0) == Error(TotalLimit), "ZIP total size limit")
+    caps = limits.defaults()
+    caps.input_bytes = list.len(nested) - 1
+    check(zip_result(nested, caps, 0) == Error(InputLimit), "ZIP input size limit")
+    caps = limits.defaults()
+    caps.zstd_window_bytes = 1
+    check(zip_result(python_zip(), caps, 0) == Error(WindowLimit), "ZIP Zstd window limit")
+    let mut inner: Bytes = list.new()
+    let mut is_inner = false
+    caps = limits.defaults()
+    caps.depth = 1
+    result.unwrap(zip.read(list.len(nested), caps, 0, scoped fn(at: u64, n: u64) -> Result[Bytes, limits.Error] {
+        range(nested, at, n)
+    }, scoped fn(event: zip.Event) -> Result[(), limits.Error] {
+        match event {
+            ZipEntry(item) => {
+                is_inner = item.name == b"inner.zip"
+            },
+            ZipData(chunk) => {
+                if is_inner {
+                    list.append(mut inner, chunk)
+                }
+            },
+        }
+        Ok(())
+    }))
+    check(list.len(inner) == 124 && zip_result(inner, caps, 1) == Error(DepthLimit), "nested ZIP depth limit")
+    result.unwrap(zip_result(inner, limits.defaults(), 1))
+    let mut corrupt = local_zip()
+    corrupt[list.len(corrupt) - 1] ^= 1
+    check(zip_result(corrupt, limits.defaults(), 0) == Error(Checksum), "ZIP CRC mismatch")
+    let short = list.slice(corrupt, 0, list.len(corrupt) - 1)
+    check(zip_result(short, limits.defaults(), 0) == Error(Truncated), "ZIP short body")
+}
+
+@test
+fn archive_conformance() -> Result[(), ()] waits {
+    read_tar(gnu_ustar_tar(), b"a.txt", fixture_text(), 0, 0)
+    read_tar(bsd_ustar_tar(), b"a.txt", fixture_text(), 1700000000, 0)
+    read_tar(gnu_pax_tar(), long_name(), b"long name\n", -1, 750000000)
+    read_tar(bsd_pax_tar(), long_name(), b"long name\n", 1700000000, 123456789)
+    let mut plain: Bytes = list.with_capacity(38400)
+    for _ in 0u64 .. 150 {
+        for i in 0u64 .. 256 {
+            list.push(mut plain, int.narrow(i))
+        }
+    }
+    let mut expected: List[Expected] = list.new()
+    list.push(mut expected, Expected(name: b"compressed.bin", body: clone(plain)))
+    let info = info_zip_zip()
+    read_zip(info, expected, false, 0)
+    list.insert(mut expected, 0, Expected(name: b"a.txt", body: fixture_text()))
+    list.push(mut expected, Expected(name: b"z.txt", body: fixture_text()))
+    read_zip(python_zip(), expected, false, 0)
+    list.clear(mut expected)
+    list.push(mut expected, Expected(name: b"a.txt", body: fixture_text()))
+    read_zip(local_zip(), expected, true, 0)
+    read_zip(local_zip(), expected, false, 0)
+    list.clear(mut expected)
+    list.push(mut expected, Expected(name: b"compressed.bin", body: take plain))
+    list.push(mut expected, Expected(name: b"z.txt", body: fixture_text()))
+    read_zip(local_descriptors_zip(), expected, true, 0)
+    list.clear(mut expected)
+    list.push(mut expected, Expected(name: b"a.txt", body: fixture_text()))
+    list.push(mut expected, Expected(name: b"d.txt", body: fixture_text()))
+    list.push(mut expected, Expected(name: b"z.txt", body: fixture_text()))
+    let wide = written_zip(true)
+    let narrow = written_zip(false)
+    read_zip(wide, expected, false, 0)
+    read_zip(narrow, expected, false, 0)
+    check(wide == python_checked_zip64() && narrow == python_checked_zip32(), "Python ZIP extraction fixture")
+    let ordered = written_tar(false)
+    check(ordered == written_tar(true) && ordered == python_checked_tar(), "reproducible TAR and Python extraction fixture")
+    refusals(info, nested_zip())
+    Ok(())
+}

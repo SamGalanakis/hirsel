@@ -1,0 +1,241 @@
+const OCTAL_7: u64 = 0x1fffff
+
+const OCTAL_11: u64 = 0x1ffffffff
+
+pub fn file(take name: Bytes, size: u64, mtime: Time) -> Member {
+    Member(name: take name, kind: Regular, size: size, link_name: list.new(), mode: 420, uid: 0, gid: 0, uname: list.new(), gname: list.new(), mtime: mtime)
+}
+
+fn put_octal(mut block: Bytes, at: u64, width: u64, value: u64) {
+    let mut num = value
+    for i in 1u64 .. width {
+        let digit: u8 = int.narrow(num % 8)
+        block[at + width - i - 1] = 48 + digit
+        num /= 8
+    }
+}
+
+fn make_header(name: Bytes, prefix: Bytes, marker: u8, size: u64, link_name: Bytes, m: Member, seconds: u64) -> Bytes {
+    let mut block: Bytes = list.with_capacity(512)
+    list.fill(mut block, 512, 0)
+    list.copy_from_slice(mut block, 0, name)
+    list.copy_from_slice(mut block, 345, prefix)
+    list.copy_from_slice(mut block, 157, link_name)
+    list.copy_from_slice(mut block, 257, b"ustar\x0000")
+    list.copy_from_slice(mut block, 265, m.uname)
+    list.copy_from_slice(mut block, 297, m.gname)
+    put_octal(mut block, 100, 8, m.mode)
+    put_octal(mut block, 108, 8, m.uid)
+    put_octal(mut block, 116, 8, m.gid)
+    put_octal(mut block, 124, 12, size)
+    put_octal(mut block, 136, 12, seconds)
+    block[156] = marker
+    let sum = header_sum(block)
+    put_octal(mut block, 148, 7, sum)
+    block[155] = 32
+    take block
+}
+
+fn pax_record(mut out: Bytes, key: Bytes, data: Bytes) {
+    let base = list.len(key) + list.len(data) + 3
+    let mut width = 1u64
+    let mut power = 10u64
+    while base + width >= power {
+        width += 1
+        power *= 10
+    }
+    let mut len = string.new()
+    string.push_u64(mut len, base + width)
+    list.append(mut out, string.as_bytes(len))
+    list.push(mut out, 32)
+    list.append(mut out, key)
+    list.push(mut out, 61)
+    list.append(mut out, data)
+    list.push(mut out, 10)
+}
+
+fn decimal_bytes(n: u64) -> Bytes {
+    let mut s = string.new()
+    string.push_u64(mut s, n)
+    string.into_bytes(take s)
+}
+
+fn time_bytes(time: Time) -> Bytes {
+    let mut s = string.new()
+    let mut nanos = time.nanos
+    let whole: u64 = if time.seconds < 0 {
+        string.push_char(mut s, '-')
+        let magnitude: u64 = int.narrow(-(time.seconds + 1))
+        if nanos == 0 {
+            magnitude + 1
+        } else {
+            nanos = 1000000000 - nanos
+            magnitude
+        }
+    } else {
+        int.narrow(time.seconds)
+    }
+    string.push_u64(mut s, whole)
+    if nanos != 0 {
+        string.push_char(mut s, '.')
+        let mut scale = 100000000u32
+        while nanos != 0 {
+            let digit: u32 = 48 + nanos / scale
+            if let Some(ch) = char.from_u32(digit) {
+                string.push_char(mut s, ch)
+            }
+            nanos %= scale
+            scale /= 10
+        }
+    }
+    string.into_bytes(take s)
+}
+
+fn ustar_split(name: Bytes) -> Option[u64] {
+    let n = list.len(name)
+    if n <= 100 {
+        return Some(0)
+    }
+    let end = order.min(156, n - 1)
+    let mut at = end
+    while at > 1 {
+        at -= 1
+        if name[at] == 47 && n - at - 1 <= 100 {
+            return Some(at)
+        }
+    }
+    None()
+}
+
+fn validate_member(m: Member, caps: limits.Limits) -> Result[(), limits.Error] {
+    if list.len(m.name) > caps.entry_bytes || list.len(m.link_name) > caps.entry_bytes {
+        return Error(EntryLimit)
+    }
+    limits.path(m.name, caps.depth)?
+    if m.kind != Regular && m.size != 0 || m.kind != Folder && m.name[list.len(m.name) - 1] == 47 {
+        return Error(Invalid)
+    }
+    if m.kind == SymbolicLink {
+        limits.link(m.link_name, caps.depth)?
+    } else if list.len(m.link_name) != 0 {
+        return Error(Invalid)
+    }
+    if m.mtime.nanos >= 1000000000 || m.mode > OCTAL_7 || m.uid > OCTAL_7 || m.gid > OCTAL_7 {
+        return Error(Invalid)
+    }
+    if list.len(m.uname) > 32 || list.len(m.gname) > 32 {
+        return Error(Invalid)
+    }
+    for byte in m.uname {
+        if byte == 0 {
+            return Error(Invalid)
+        }
+    }
+    for byte in m.gname {
+        if byte == 0 {
+            return Error(Invalid)
+        }
+    }
+    Ok(())
+}
+
+fn emit_zeros(mut written: u64, mut budget: limits.Budget, cap: u64, n: u64, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    if n == 0 {
+        return Ok(())
+    }
+    let mut data: Bytes = list.with_capacity(n)
+    list.fill(mut data, n, 0)
+    limits.emit(mut written, mut budget, cap, data, sink)
+}
+
+fn write_headers(m: Member, caps: limits.Limits, mut written: u64, mut budget: limits.Budget, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[(), limits.Error] waits {
+    let mut pax: Bytes = list.new()
+    let split = ustar_split(m.name)
+    let (prefix, name): (Bytes, Bytes) = match split {
+        Some(0) => (b"", clone(m.name)),
+        Some(at) => (clone(list.slice(m.name, 0, at)), clone(list.slice(m.name, at + 1, list.len(m.name)))),
+        None() => {
+            pax_record(mut pax, b"path", m.name)
+            (b"", b"PaxMember")
+        },
+    }
+    let link_name: Bytes = if list.len(m.link_name) > 100 {
+        pax_record(mut pax, b"linkpath", m.link_name)
+        b""
+    } else {
+        clone(m.link_name)
+    }
+    let size: u64 = if m.size > OCTAL_11 {
+        pax_record(mut pax, b"size", decimal_bytes(m.size))
+        0
+    } else {
+        m.size
+    }
+    let seconds: u64 = if m.mtime.seconds < 0 || m.mtime.seconds > 0x1ffffffff || m.mtime.nanos != 0 {
+        pax_record(mut pax, b"mtime", time_bytes(m.mtime))
+        0
+    } else {
+        int.narrow(m.mtime.seconds)
+    }
+    let pax_len = list.len(pax)
+    if pax_len != 0 {
+        if pax_len > caps.entry_bytes || pax_len > OCTAL_11 {
+            return Error(EntryLimit)
+        }
+        let metadata = file(b"PaxHeader", pax_len, Time(seconds: 0, nanos: 0))
+        limits.emit(mut written, mut budget, caps.input_bytes, make_header(metadata.name, b"", 120, pax_len, b"", metadata, 0), sink)?
+        limits.emit(mut written, mut budget, caps.input_bytes, pax, sink)?
+        emit_zeros(mut written, mut budget, caps.input_bytes, padding(pax_len), sink)?
+    }
+    let marker: u8 = match m.kind {
+        Regular => 48,
+        Folder => 53,
+        SymbolicLink => 50,
+    }
+    limits.emit(mut written, mut budget, caps.input_bytes, make_header(name, prefix, marker, size, link_name, m, seconds), sink)
+}
+
+fn write_members(members: List[Member], caps: limits.Limits, mut budget: limits.Budget, source: scoped fn(u64, u64, u64) -> Result[Bytes, limits.Error] waits, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[u64, limits.Error] waits {
+    if list.len(members) > caps.entries {
+        return Error(CountLimit)
+    }
+    let mut indices: List[u64] = list.with_capacity(list.len(members))
+    for i in 0u64 .. list.len(members) {
+        let m = view members[i]
+        validate_member(m, caps)?
+        limits.entry(mut budget, m.size)?
+        list.push(mut indices, i)
+    }
+    list.sort_stable(mut indices, scoped fn(a: u64, b: u64) -> Order {
+        list.compare_bytes(members[a].name, members[b].name)
+    })
+    let mut written = 0u64
+    for i in 0u64 .. list.len(indices) {
+        let id = indices[i]
+        let m = view members[id]
+        if i > 0 && m.name == members[indices[i - 1]].name {
+            return Error(Invalid)
+        }
+        write_headers(m, caps, mut written, mut budget, sink)?
+        let mut at = 0u64
+        while at < m.size {
+            let n = order.min(m.size - at, CHUNK)
+            let data = source(id, at, n)?
+            if list.len(data) != n {
+                return Error(Truncated)
+            }
+            limits.emit(mut written, mut budget, caps.input_bytes, data, sink)?
+            at += n
+        }
+        emit_zeros(mut written, mut budget, caps.input_bytes, padding(m.size), sink)?
+    }
+    emit_zeros(mut written, mut budget, caps.input_bytes, 1024, sink)?
+    Ok(written)
+}
+
+/// Emit members in lexical name order, with caller-supplied time and ownership.
+/// Source receives the original member index and the requested body range.
+pub fn write(members: List[Member], caps: limits.Limits, source: scoped fn(u64, u64, u64) -> Result[Bytes, limits.Error] waits, sink: scoped fn(Bytes) -> Result[(), limits.Error] waits) -> Result[u64, limits.Error] waits {
+    let mut budget = limits.new_budget(caps, 0, 0)?
+    write_members(members, caps, mut budget, source, sink)
+}

@@ -414,22 +414,6 @@ impl Poller {
         Ok(Some(PollEvents(events)))
     }
 
-    fn poll_uring<'a>(
-        &'a self,
-        mut events: Turn<'a>,
-        timeout_ns: Option<u64>,
-    ) -> io::Result<Option<PollEvents<'a>>> {
-        let Backend::Uring(ring) = &self.backend else {
-            unreachable!()
-        };
-        events.clear();
-        crate::EPOLL_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        events.resize(POLL_BATCH as usize, libc::epoll_event { events: 0, u64: 0 });
-        let len = ring.wait(&mut events, timeout_ns)?;
-        events.truncate(len);
-        Ok(Some(PollEvents(events)))
-    }
-
     /// Wake this poller's owner from any thread: an eventfd edge on epoll, a
     /// MSG_RING completion on io_uring. Either is reported as a `WAKE` event.
     pub fn wake(&self) {

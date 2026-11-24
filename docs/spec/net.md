@@ -1181,24 +1181,30 @@ change how UDP sends.
   unbounded in what it is offered. It can therefore drop a completion (below), and every
   loss is recovered.
 - The **completion ring** carries every operation whose completion is the only record of
-  its state. That means a TCP zero-copy send (its result and its buffer notification), and a
-  completion-mode UDP receive if the build keeps one (Receive mode). Its queue **cannot
-  overflow**. Before submitting an operation, the poller reserves on the ring the most
-  completions that operation can post. A zero-copy send reserves 2: one result and at most
-  one notification (`sendzc.rs`, one send per transmit slot at a time). A multishot receive
-  reserves its buffer count plus 1 (below). A cancellation reserves 1. The reservations
-  never exceed the ring's queue entries. A completion's reservation returns once the poller
-  has reaped it. Whatever an operation reserved and did not use returns at its last
-  completion. For example, a zero-copy result without `IORING_CQE_F_MORE` posts no
-  notification (`sendzc.rs`, `tx_complete`), so its second reservation returns with the
-  result. The ring opens at first use with the kernel's largest queue, 65,536 entries
+  its state. That includes one-shot file operations, a TCP zero-copy send and its
+  buffer notification, and a completion-mode UDP receive if the build keeps one
+  (Receive mode). Its queue **cannot overflow**. Before submitting an operation, the poller
+  reserves the most completions that operation can post. A zero-copy send reserves two data
+  entries, one for the result and one for the possible notification (`sendzc.rs`), and one
+  control entry for a possible cancellation. A multishot receive reserves its buffer count
+  plus one for its terminal, and separately reserves its cancellation. The receive retains
+  these credits as it cycles its buffers. A file operation reserves one entry. The
+  reservations never exceed the ring's queue entries. Entries return once the poller has
+  reaped the corresponding completion or can prove it will never be posted. A zero-copy
+  result without `IORING_CQE_F_MORE` returns the notification credit with the result. A
+  send result also returns the control entry if it never queued a cancellation.
+  Each io_uring poller opens the ring at the kernel's maximum of 65,536 entries
   (`IORING_MAX_CQ_ENTRIES`, `io_uring.h:170-171`), and keeps that size. It is not resized,
   because `IORING_REGISTER_RESIZE_RINGS` requires `IORING_SETUP_DEFER_TASKRUN`
   (`register.c:510-512`). That flag would post completions only when the owner enters, and
   the poller reads this queue from shared memory each turn. Zero-copy sends may hold at most
-  4,096 of the entries. A zero-copy send that finds no room sends by copying instead, the
-  way `HIRSEL_NET_SEND_ZC` already lets a send copy ([HTTP](http.md)). Completion-mode
-  receives hold the other 61,440 entries as **one run-wide total**, so every poller's ring
+  4,096 data entries. A zero-copy send that finds no room sends by copying instead,
+  the way `HIRSEL_NET_SEND_ZC` already lets a send copy ([HTTP](http.md)). File operations
+  wait in submission order when they cannot reserve a credit, and at least one credit
+  is available to file operations while sends and receives hold the others. A waiting
+  CLOSE retains ownership of its descriptor through submission and completion.
+  Completion-mode receives hold up to 61,440 entries, including cancel credits,
+  as **one run-wide total**, so every poller's ring
   can take any socket's reservation. A receive that would exceed the total fails its
   socket's creation with `Exhausted` (NET-16). A move between pollers therefore always finds
   room on the destination ring.
@@ -1472,6 +1478,10 @@ laws (M1 to M3) are required as well, but each is a single case.
   shared ring the flag is set, so the law is red. *Harness:* the reactor tests
   (`crates/hirsel-core-net/src/reactor/tests.rs`), beside
   `an_answered_slot_is_not_reused_before_its_notification`.
+- **`close_waits_for_completion_credit` (H1).** Fill the completion queue with one-shot
+  file operations and queue CLOSE before reaping. The kernel's `F_GETFD` succeeds for the
+  descriptor while CLOSE is waiting. Reaping releases a file credit, the deferred CLOSE
+  delivers one completion, and `F_GETFD` then reports `EBADF`. *Harness:* the reactor tests.
 - **`replaced_watch_leaves_one_poll` (H2).** *Scenario:* register a UDP socket on an io_uring
   poller and run overflow recovery twice in a row without reaping. Then reap everything,
   including the old watches' terminal `-ECANCELED` completions, and tear the socket down.

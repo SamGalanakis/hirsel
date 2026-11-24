@@ -419,7 +419,9 @@ impl Tx {
                     TxState::Sending | TxState::Filling => return Ok(()),
                     // An abandoned send's cancel (`cancel_send`) leaves the
                     // rest of its slot for the next send, which resumes it.
-                    TxState::Sent(error) if error == -libc::ECANCELED || error == -libc::EINTR => {
+                    TxState::Sent(error)
+                        if [-libc::ECANCELED, -libc::EINTR, -libc::EAGAIN].contains(&error) =>
+                    {
                         return flight.slot.send(zc.tag, flight.sent..flight.end);
                     }
                     TxState::Sent(error) if error < 0 => {

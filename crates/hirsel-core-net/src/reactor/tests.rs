@@ -243,6 +243,7 @@ fn replaced_watch_leaves_one_poll() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let ring = Uring::open().unwrap();
+    ring.enter(Some(0));
     let poll_count = || {
         let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", ring.ring.as_raw_fd()))
             .unwrap();
@@ -435,6 +436,122 @@ fn reap_until(sockets: &mut Sockets, mut done: impl FnMut() -> bool) {
         assert!(std::time::Instant::now() < deadline, "no completion");
         sockets.poll(10, |_| {}).unwrap();
     }
+}
+
+#[test]
+fn completion_ring_never_overflows() {
+    let ring = Uring::with_cq_sizes(64, 64).unwrap();
+    let poller = Poller::from_uring(ring);
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let mut peer = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (socket, _) = listener.accept().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    socket.set_nodelay(true).unwrap();
+    let mut sockets = Sockets::default();
+    sockets.poller = Some(poller.clone());
+    let key = sockets.insert(socket.into()).unwrap();
+    sockets.record_mut(key).zero_copy = Some(true);
+    let (_, tag) = sockets.send_target(key).unwrap().unwrap();
+    let Backend::Uring(ring) = &poller.backend else {
+        unreachable!()
+    };
+    let count = ring.completion.ring.params().cq_entries() as usize * 2;
+    let mut copied = 0;
+    for _ in 0..count {
+        let mut slot = poller.tx_slot(1).unwrap();
+        slot.bytes()[0] = b'a';
+        slot.send(tag, 0..1).unwrap();
+        match slot.state() {
+            TxState::Sending => {}
+            TxState::Sent(1) => copied += 1,
+            other => panic!("unexpected transmit state {other:?}"),
+        }
+        drop(slot);
+    }
+    assert_eq!(copied, count - 21);
+    for _ in 0..2 {
+        for _ in 0..64 {
+            ring.push(io_uring::opcode::Nop::new().build(), None);
+        }
+        ring.enter(Some(0));
+    }
+    // SAFETY: the test owns the rings and these observations consume nothing.
+    unsafe {
+        assert!(ring.ring.submission_shared().cq_overflow());
+        assert_eq!(ring.completion.ring.completion_shared().overflow(), 0);
+        assert!(!ring.completion.ring.submission_shared().cq_overflow());
+    }
+    reap_until(&mut sockets, || ring.busy_tx_slots() == 0);
+    assert_eq!(poller.tx_notifications(), (21, 21));
+    // SAFETY: the registry still owns the socket.
+    assert_eq!(unsafe { libc::shutdown(sockets.fd(key), libc::SHUT_WR) }, 0);
+    read_all_a(&mut peer, count);
+}
+
+#[test]
+fn close_waits_for_completion_credit() {
+    use std::{
+        os::fd::IntoRawFd,
+        sync::atomic::{AtomicI32, Ordering},
+    };
+
+    unsafe fn complete(context: *const (), result: i32) {
+        // SAFETY: every test reply stays pinned until all calls finish.
+        unsafe { &*context.cast::<AtomicI32>() }.store(result, Ordering::Release);
+    }
+
+    let ring = Uring::with_cq_sizes(64, 64).unwrap();
+    let slots = ring.completion.ring.params().cq_entries() as usize;
+    let poller = Poller::from_uring(ring);
+    let Backend::Uring(ring) = &poller.backend else {
+        unreachable!()
+    };
+    let replies: Vec<_> = (0..=slots).map(|_| AtomicI32::new(i32::MIN)).collect();
+    for (unit, reply) in replies[..slots].iter().enumerate() {
+        // SAFETY: NOP has one result and the reply is pinned.
+        assert!(unsafe {
+            poller.submit_file(
+                unit as u16,
+                io_uring::opcode::Nop::new().build(),
+                std::ptr::from_ref(reply).cast(),
+                complete,
+            )
+        });
+    }
+    ring.enter(Some(0));
+    let fd = std::fs::File::open("/dev/null").unwrap().into_raw_fd();
+    let close = io_uring::opcode::Close::new(io_uring::types::Fd(fd)).build();
+    // SAFETY: CLOSE consumes the sole fd and its reply is pinned.
+    assert!(unsafe {
+        poller.submit_file(
+            slots as u16,
+            close,
+            std::ptr::from_ref(&replies[slots]).cast(),
+            complete,
+        )
+    });
+    ring.enter(Some(0));
+    // SAFETY: F_GETFD only inspects the descriptor, whether open or closed.
+    assert_ne!(
+        unsafe { libc::fcntl(fd, libc::F_GETFD) },
+        -1,
+        "CLOSE issued with a full CQ"
+    );
+    let mut events = [libc::epoll_event { events: 0, u64: 0 }; 128];
+    for _ in 0..4 {
+        ring.wait(&mut events, Some(0)).unwrap();
+    }
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply.load(Ordering::Acquire) == 0)
+    );
+    // SAFETY: no intervening open can reuse this fd in the test.
+    assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EBADF)
+    );
 }
 
 /// A slot whose send waits, cancelled once part of it is in the kernel's

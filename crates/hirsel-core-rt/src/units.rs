@@ -1121,7 +1121,7 @@ fn fire_timers(p: &Pool, ix: usize) {
 /// due timers. `None` waits for an event and `Some(0)` is nonblocking.
 fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) {
     let slot = &p.slots[ix];
-    let mut evs: [libc::epoll_event; 128] = [libc::epoll_event { events: 0, u64: 0 }; 128];
+    let mut evs = [libc::epoll_event { events: 0, u64: 0 }; 256];
     bump(S_GPOLLS);
     if timeout_ns != Some(0) {
         bump(S_GPOLL_BLOCKS);
@@ -1134,7 +1134,7 @@ fn poll_slot(p: &Pool, ix: usize, timeout_ns: Option<u64>) {
         let timeout =
             timeout_ns.map_or(-1, |ns| ns.div_ceil(1_000_000).min(i32::MAX as u64) as i32);
         // SAFETY: a live epoll and a writable event array.
-        let n = unsafe { sync::epoll_wait(slot.epfd, evs.as_mut_ptr(), evs.len() as i32, timeout) };
+        let n = unsafe { sync::epoll_wait(slot.epfd, evs.as_mut_ptr(), 128, timeout) };
         slot.last_poll.store(now(), Ordering::Relaxed);
         n.max(0) as usize
     };

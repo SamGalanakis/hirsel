@@ -1,4 +1,4 @@
-use super::{INTEREST, Uring, WAKE};
+use super::{COMPLETION_READY, INTEREST, Uring, WAKE};
 use io_uring::{cqueue, opcode, squeue, types};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -11,6 +11,7 @@ pub(super) const REMOVE: u64 = 1 << 62;
 
 pub(in crate::reactor) struct Watch {
     pub(in crate::reactor) fd: Arc<OwnedFd>,
+    interest: u32,
     id: u64,
 }
 
@@ -125,7 +126,7 @@ impl Watches {
             let Some(tag) = self.rechecks.pop_front() else {
                 break;
             };
-            if self.live.contains_key(&tag) {
+            if tag != COMPLETION_READY && self.live.contains_key(&tag) {
                 out[n] = libc::epoll_event {
                     events: (libc::EPOLLIN | libc::EPOLLOUT) as u32,
                     u64: tag,
@@ -161,7 +162,7 @@ impl Uring {
     }
 
     fn arm(&self, watch: &Watch) {
-        let entry = opcode::PollAdd::new(types::Fd(watch.fd.as_raw_fd()), INTEREST)
+        let entry = opcode::PollAdd::new(types::Fd(watch.fd.as_raw_fd()), watch.interest)
             .multi(true)
             .build()
             .user_data(watch.id);
@@ -176,7 +177,12 @@ impl Uring {
     pub(in crate::reactor) fn add(&self, tag: u64, fd: Arc<OwnedFd>) -> io::Result<()> {
         let mut watches = self.watches();
         let id = watches.id(tag)?;
-        let watch = Watch { fd, id };
+        let interest = if tag == COMPLETION_READY {
+            libc::EPOLLIN as u32
+        } else {
+            INTEREST
+        };
+        let watch = Watch { fd, interest, id };
         self.arm(&watch);
         let previous = watches.live.insert(tag, watch);
         debug_assert!(previous.is_none());

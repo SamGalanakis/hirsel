@@ -1,0 +1,110 @@
+const RTP_LIMIT: u64 = 1 << 48
+
+const RTCP_LIMIT: u64 = 1 << 31
+
+// RFC 3711 Appendix A. Keep the next ROC unreduced so the caller can refuse
+// exhaustion. Switch to rtp.seq.estimate when RTP-2 lands.
+fn estimate(highest: u64, seq: u16) -> Option[u64] {
+    let low = highest & 65535
+    let roc = highest >> 16
+    let wire: u64 = int.widen(seq)
+    if low < 32768 && wire > low + 32768 {
+        if roc == 0 {
+            return None
+        }
+        return Some(((roc - 1) << 16) | wire)
+    }
+    if low >= 32768 && wire < low - 32768 {
+        return Some(((roc + 1) << 16) | wire)
+    }
+    Some((roc << 16) | wire)
+}
+
+type Floor {
+    reference: Option[u64],
+    minimum: u64
+}
+
+type Window {
+    floor: Floor,
+    recent: u64,
+    older: u64
+}
+
+fn window(floor: Floor) -> Window {
+    Window(floor, recent: 0, older: 0)
+}
+
+fn start_floor(index: Option[u64]) -> Floor {
+    Floor(reference: index, minimum: index_or(index, 0))
+}
+
+fn kept_floor(w: Window) -> Floor {
+    if w.recent & 1 != 0 {
+        Floor(reference: w.floor.reference, minimum: option.unwrap(w.floor.reference) + 1)
+    } else {
+        w.floor
+    }
+}
+
+fn check_window(w: Window, index: u64) -> Result[(), SrtpError] {
+    if index < w.floor.minimum {
+        return Error(Discarded(TooOld))
+    }
+    if let Some(top) = w.floor.reference {
+        if index <= top {
+            let behind = top - index
+            if behind >= 128 {
+                return Error(Discarded(TooOld))
+            }
+            let marked = if behind < 64 {
+                (w.recent >> behind) & 1
+            } else {
+                (w.older >> (behind - 64)) & 1
+            }
+            if marked != 0 {
+                return Error(Discarded(Replayed))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mark(mut w: Window, index: u64) {
+    let top = index_or(w.floor.reference, index)
+    if index > top {
+        let advance = index - top
+        if advance >= 128 {
+            w.older = 0
+            w.recent = 1
+        } else if advance >= 64 {
+            w.older = w.recent << (advance - 64)
+            w.recent = 1
+        } else {
+            w.older = (w.older << advance) | (w.recent >> (64 - advance))
+            w.recent = (w.recent << advance) | 1
+        }
+        w.floor.reference = Some(index)
+    } else {
+        let behind = top - index
+        if behind < 64 {
+            w.recent = w.recent | (1u64 << behind)
+        } else {
+            w.older = w.older | (1u64 << (behind - 64))
+        }
+        w.floor.reference = Some(top)
+    }
+}
+
+fn index_or(index: Option[u64], fallback: u64) -> u64 {
+    match index {
+        Some(value) => value,
+        None => fallback,
+    }
+}
+
+fn start_index(roc: u32, seq: u16) -> u64 {
+    let high: u64 = int.widen(roc)
+    let low: u64 = int.widen(seq)
+    (high << 16) | low
+}

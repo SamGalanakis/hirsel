@@ -1,0 +1,477 @@
+const LIMITS: srtp.Limits = srtp.Limits(send_streams: 4, receive_streams: 4, ended_streams: 1)
+
+const LIB_SSRC: u32 = 0xcafebabe
+
+const LAST_RTCP: u32 = 0x7fffffff
+
+const LAST_ROC: u32 = 0xffffffff
+
+fn nibble(c: u8) -> u8 {
+    if c >= b'a' {
+        c - b'a' + 10
+    } else {
+        c - b'0'
+    }
+}
+
+fn unhex(s: String) -> Bytes {
+    let h = string.as_bytes(s)
+    let mut out: Bytes = list.with_capacity(list.len(h) / 2)
+    for i in 0u64 .. list.len(h) / 2 {
+        list.push(mut out, nibble(h[2 * i]) * 16 + nibble(h[2 * i + 1]))
+    }
+    take out
+}
+
+fn copy_packet(data: Bytes, spare: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(data) + spare)
+    list.append(mut out, data)
+    take out
+}
+
+fn master(p: schedule.SrtpProfile) -> Bytes {
+    match p {
+        Aes128CmHmacSha1_80 => master_cm(),
+        AeadAes128Gcm => master_gcm(),
+        AeadAes256Gcm => master_gcm256(),
+    }
+}
+
+fn other_master(p: schedule.SrtpProfile) -> Bytes {
+    let mut key = master(p)
+    key[0] = key[0] ^ 1
+    take key
+}
+
+fn import_key(p: schedule.SrtpProfile, take key: Bytes, uses: String) -> schedule.Schedule {
+    let designation = result.unwrap(secret.seal(take key, uses))
+    result.unwrap(schedule.import_srtp(p, take designation))
+}
+
+fn sender_with(p: schedule.SrtpProfile, take key: Bytes, l: srtp.Limits) -> srtp.Session {
+    let send = import_key(p, take key, "srtp_import(send)")
+    let receive = import_key(p, other_master(p), "srtp_import(receive)")
+    result.unwrap(srtp.session_pair(take send, take receive, p, l))
+}
+
+fn sender(p: schedule.SrtpProfile) -> srtp.Session {
+    sender_with(p, master(p), LIMITS)
+}
+
+fn receiver(p: schedule.SrtpProfile, l: srtp.Limits) -> srtp.Session {
+    let send = import_key(p, other_master(p), "srtp_import(send)")
+    let receive = import_key(p, master(p), "srtp_import(receive)")
+    result.unwrap(srtp.session_pair(take send, take receive, p, l))
+}
+
+fn rtp_prefix(mut out: Bytes, ssrc: u32, seq: u16) {
+    list.put_word_be(mut out, 0x8060u16)
+    list.put_word_be(mut out, seq)
+    list.put_word_be(mut out, 1u32)
+    list.put_word_be(mut out, ssrc)
+}
+
+fn rtp_plain(ssrc: u32, seq: u16) -> Bytes {
+    let mut out: Bytes = list.with_capacity(31)
+    rtp_prefix(mut out, ssrc, seq)
+    list.append(mut out, b"abc")
+    take out
+}
+
+fn assert_bytes(actual: Bytes, expected: Bytes, message: String) {
+    if list.compare_bytes(actual, expected) != Equal {
+        fail(string.from(message))
+    }
+}
+
+fn assert_discard[T](take outcome: Result[T, srtp.SrtpError], wanted: srtp.Discard) {
+    if let Error(Discarded(actual)) = outcome {
+        if actual == wanted {
+            return
+        }
+    }
+    fail("wrong discard")
+}
+
+fn boundary_case(p: schedule.SrtpProfile, plain: Bytes, wire: Bytes) -> Result[(), srtp.SrtpError] {
+    let mut send = sender(p)
+    let mut receive = receiver(p, LIMITS)
+    let mut out = copy_packet(plain, srtp.tag_room(p))
+    let n = srtp.protect_rtp(mut send, mut out)?
+    if n != list.len(wire) {
+        fail("RTP wire length")
+    }
+    assert_bytes(out, wire, "RTP header or payload differs")
+    let opened = srtp.unprotect_rtp(mut receive, mut out)?
+    if opened.index != 10 || opened.ssrc != 1 || opened.length != list.len(plain) {
+        fail("RTP authenticated metadata")
+    }
+    assert_bytes(out, plain, "RTP plaintext differs")
+    Ok(())
+}
+
+/// bug: leave an extension encrypted, exclude it from AAD, or read its length from the tag.
+/// oracle: RFC 3711 and RFC 7714 with libSRTP validation keys and Python cryptography.
+@test
+fn rtp_header_boundary() -> Result[(), srtp.SrtpError] {
+    boundary_case(Aes128CmHmacSha1_80, header_plain_0(), header_wire_0())?
+    boundary_case(AeadAes128Gcm, header_plain_1(), header_wire_1())?
+    boundary_case(AeadAes256Gcm, header_plain_2(), header_wire_2())?
+    let mut send = sender(AeadAes128Gcm)
+    let mut receive = receiver(AeadAes128Gcm, LIMITS)
+    let plain = header_plain_1()
+    let mut bad = copy_packet(plain, 16)
+    list.set_word_be(mut bad, 18, 10u16)
+    let before = copy_packet(bad, 0)
+    assert_discard(srtp.protect_rtp(mut send, mut bad), Malformed)
+    assert_bytes(bad, before, "bad extension changed RTP buffer")
+    let mut wrong_version = copy_packet(plain, 16)
+    wrong_version[0] = wrong_version[0] - 64
+    let before_version = copy_packet(wrong_version, 0)
+    assert_discard(srtp.protect_rtp(mut send, mut wrong_version), Malformed)
+    assert_bytes(wrong_version, before_version, "wrong version changed RTP buffer")
+    let mut bad_wire = header_wire_1()
+    list.set_word_be(mut bad_wire, 18, 5u16)
+    let before_wire = copy_packet(bad_wire, 0)
+    assert_discard(srtp.unprotect_rtp(mut receive, mut bad_wire), Malformed)
+    assert_bytes(bad_wire, before_wire, "protected extension consumed tag bytes")
+    let mut short = copy_packet(plain, 0)
+    if let Error(Short) = srtp.protect_rtp(mut send, mut short) {} else {
+        fail("short RTP spare")
+    }
+    assert_bytes(short, plain, "short RTP changed buffer")
+    Ok(())
+}
+
+fn wire_row(rows: Bytes, at: u64, width: u64) -> Bytes {
+    copy_packet(list.slice(rows, at * width, (at + 1) * width), 0)
+}
+
+fn assert_open(mut receive: srtp.Session, take incoming: Bytes, index: u64, ssrc: u32) -> Result[(), srtp.SrtpError] {
+    let mut wire = take incoming
+    let opened = srtp.unprotect_rtp(mut receive, mut wire)?
+    if opened.index != index || opened.ssrc != ssrc || opened.length != 15 {
+        fail("wrong RTP index, SSRC, or plaintext size")
+    }
+    let seq: u16 = int.truncate(index)
+    assert_bytes(wire, rtp_plain(ssrc, seq), "wrong RTP plaintext")
+    Ok(())
+}
+
+/// bug: use the current ROC for all packets or advance it on reordered packets.
+/// oracle: RFC 3711 Appendix A and independent AES-CM/HMAC over ROC 0, 1 and 5.
+@test
+fn roc_rollover() -> Result[(), srtp.SrtpError] {
+    let mut send = sender(Aes128CmHmacSha1_80)
+    let packets = rollover_packets()
+    for index in 65534u64 .. 65538 {
+        let mut plain = rtp_plain(1, int.truncate(index))
+        let _ = srtp.protect_rtp(mut send, mut plain)?
+        assert_bytes(plain, wire_row(packets, index - 65534, 25), "wrong RTP ROC in CM tag")
+    }
+    let mut receive = receiver(Aes128CmHmacSha1_80, LIMITS)
+    let offsets: Inline[u64, 4] =[1, 3, 0, 2]
+    for offset in offsets {
+        assert_open(mut receive, wire_row(packets, offset, 25), 65534 + offset, 1)?
+    }
+    let mut placed = receiver(Aes128CmHmacSha1_80, LIMITS)
+    srtp.receive_from(mut placed, 1, 5, 7, 0)?
+    assert_open(mut placed, roc_five_packet(), 5 * 65536 + 7, 1)
+}
+
+fn replay_row(rows: Bytes, index: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(31)
+    rtp_prefix(mut out, 1, int.narrow(index))
+    list.append(mut out, list.slice(rows, index * 19, (index + 1) * 19))
+    take out
+}
+
+fn corrupt(mut wire: Bytes) {
+    let last = list.len(wire) - 1
+    wire[last] = wire[last] ^ 1
+}
+
+fn bad_rtp(mut receive: srtp.Session, take incoming: Bytes, wanted: srtp.Discard) {
+    let mut wire = take incoming
+    let before = copy_packet(wire, 0)
+    assert_discard(srtp.unprotect_rtp(mut receive, mut wire), wanted)
+    assert_bytes(wire, before, "replay refusal changed RTP buffer")
+}
+
+fn bad_rtcp(mut receive: srtp.Session, rows: Bytes, index: u64) {
+    let mut wire = wire_row(rows, index, 32)
+    let before = copy_packet(wire, 0)
+    assert_discard(srtp.unprotect_rtcp(mut receive, mut wire), TooOld)
+    assert_bytes(wire, before, "replay refusal changed SRTCP buffer")
+}
+
+/// bug: update replay state before authentication, shift the wrong window word, or forget either kept floor on resume.
+/// oracle: SRTP-4 and 2346 review D2, using independently sealed RTP and RTCP.
+@test
+fn replay_window() -> Result[(), srtp.SrtpError] {
+    let mut receive = receiver(AeadAes128Gcm, LIMITS)
+    let rows = replay_rtp()
+    for index in 0u64 .. 201 {
+        if index != 73 {
+            assert_open(mut receive, replay_row(rows, index), index, 1)?
+        }
+    }
+    bad_rtp(mut receive, replay_row(rows, 150), Replayed)
+    assert_open(mut receive, replay_row(rows, 73), 73, 1)?
+    bad_rtp(mut receive, replay_row(rows, 72), TooOld)
+    let mut far = replay_rtp_far()
+    corrupt(mut far)
+    assert_discard(srtp.unprotect_rtp(mut receive, mut far), Tampered)
+    if list.len(far) != 31 || far[12] != 0 || far[13] != 0 || far[14] != 0 {
+        fail("RTP tamper changed length or kept ciphertext")
+    }
+    assert_open(mut receive, replay_row(rows, 201), 201, 1)?
+    let second = replay_rtp_second()
+    for index in 0u64 .. 6 {
+        assert_open(mut receive, wire_row(second, index, 31), index, 2)?
+    }
+    let controls = replay_rtcp()
+    for index in 0u64 .. 4 {
+        let mut wire = wire_row(controls, index, 32)
+        if srtp.unprotect_rtcp(mut receive, mut wire)? != 12 {
+            fail("SRTCP plaintext length")
+        }
+    }
+    let mut forged = replay_rtcp_far()
+    forged[12] = forged[12] ^ 1
+    assert_discard(srtp.unprotect_rtcp(mut receive, mut forged), Tampered)
+    let mut next = wire_row(controls, 4, 32)
+    let _ = srtp.unprotect_rtcp(mut receive, mut next)?
+    srtp.end_receive(mut receive, 2)?
+    bad_rtp(mut receive, wire_row(second, 3, 31), TooOld)
+    bad_rtcp(mut receive, controls, 2)
+    if let Error(Retired) = srtp.receive_from(mut receive, 2, 0, 0, 0) {} else {
+        fail("receive_from reset kept floors")
+    }
+    assert_open(mut receive, wire_row(second, 6, 31), 6, 2)?
+    bad_rtp(mut receive, wire_row(second, 4, 31), TooOld)
+    bad_rtcp(mut receive, controls, 2)
+    let mut next_control = wire_row(controls, 5, 32)
+    let _ = srtp.unprotect_rtcp(mut receive, mut next_control)?
+    srtp.end_receive(mut receive, 2)?
+    let mut resumed_by_control = wire_row(controls, 6, 32)
+    let _ = srtp.unprotect_rtcp(mut receive, mut resumed_by_control)?
+    bad_rtcp(mut receive, controls, 5)
+    bad_rtp(mut receive, wire_row(second, 6, 31), TooOld)
+    assert_open(mut receive, wire_row(second, 7, 31), 7, 2)?
+    assert_open(mut receive, replay_rtp_third(), 0, 3)?
+    if let Error(Streams) = srtp.end_receive(mut receive, 3) {} else {
+        fail("resuming freed a kept entry")
+    }
+    bad_rtp(mut receive, replay_rtp_third(), Replayed)
+    Ok(())
+}
+
+fn rtcp_vector(p: schedule.SrtpProfile, wire: Bytes, clear_wire: Bytes) -> Result[(), srtp.SrtpError] {
+    let mut send = sender(p)
+    let mut receive = receiver(p, LIMITS)
+    srtp.send_from(mut send, LIB_SSRC, 0, 0, 1)?
+    let plain = rtcp_plain()
+    let mut out = copy_packet(plain, srtp.tag_room(p) + 4)
+    if srtp.protect_rtcp(mut send, mut out)? != list.len(wire) {
+        fail("SRTCP wire length")
+    }
+    assert_bytes(out, wire, "libSRTP trailer order")
+    if srtp.unprotect_rtcp(mut receive, mut out)? != list.len(plain) {
+        fail("SRTCP plaintext length")
+    }
+    assert_bytes(out, plain, "wrong SRTCP decryption")
+    let mut forged = copy_packet(clear_wire, 0)
+    forged[8] = forged[8] ^ 1
+    assert_discard(srtp.unprotect_rtcp(mut receive, mut forged), Tampered)
+    let mut clear = copy_packet(clear_wire, 0)
+    let _ = srtp.unprotect_rtcp(mut receive, mut clear)?
+    assert_bytes(clear, plain, "E=0 changed cleartext")
+    let mut duplicate = copy_packet(clear_wire, 0)
+    assert_discard(srtp.unprotect_rtcp(mut receive, mut duplicate), Replayed)
+    assert_bytes(duplicate, clear_wire, "E=0 replay changed wire")
+    Ok(())
+}
+
+/// bug: reverse the tag and index, decrypt an E=0 packet, or wrap the 31-bit index.
+/// oracle: libSRTP fd08747f, RFC 3711 section 3.4 and Python AES-GCM with the RFC 7714 nonce.
+@test
+fn srtcp_trailer_order() -> Result[(), srtp.SrtpError] {
+    rtcp_vector(Aes128CmHmacSha1_80, lib_rtcp_cm(), clear_rtcp_cm())?
+    rtcp_vector(AeadAes128Gcm, lib_rtcp_gcm(), clear_rtcp_gcm())?
+    let mut send = sender(AeadAes128Gcm)
+    let mut receive = receiver(AeadAes128Gcm, LIMITS)
+    let plain = rtcp_plain()
+    let mut first = copy_packet(plain, 20)
+    let _ = srtp.protect_rtcp(mut send, mut first)?
+    assert_bytes(first, first_rtcp(), "default SRTCP index must be zero")
+    srtp.end_send(mut send, LIB_SSRC)
+    let mut last_sender = sender(AeadAes128Gcm)
+    srtp.send_from(mut last_sender, LIB_SSRC, 0, 0, LAST_RTCP)?
+    srtp.receive_from(mut receive, LIB_SSRC, 0, 0, LAST_RTCP)?
+    let mut last = copy_packet(plain, 20)
+    let _ = srtp.protect_rtcp(mut last_sender, mut last)?
+    assert_bytes(last, last_rtcp(), "wrong SRTCP nonce at maximum index")
+    let mut beyond = copy_packet(plain, 20)
+    if let Error(Exhausted) = srtp.protect_rtcp(mut last_sender, mut beyond) {} else {
+        fail("SRTCP index wrapped")
+    }
+    let _ = srtp.unprotect_rtcp(mut receive, mut last)?
+    assert_bytes(last, plain, "could not open maximal SRTCP index")
+    Ok(())
+}
+
+fn dtls_schedules() -> (schedule.Schedule, schedule.Schedule) {
+    let client_scalar = unhex("49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005")
+    let server_scalar = unhex("b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e")
+    let client_rng = provide.random_tape(take client_scalar)
+    let server_rng = provide.random_tape(take server_scalar)
+    let mut cp: Bytes = list.with_capacity(32)
+    let mut sp: Bytes = list.with_capacity(32)
+    let local = result.unwrap(secret.key_share(client_rng, X25519, mut cp))
+    let remote = result.unwrap(secret.key_share(server_rng, X25519, mut sp))
+    let client_random = unhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    let server_random = unhex("a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf")
+    let mut client = result.unwrap(schedule.dtls12(Aes128GcmSha256, Client, 1, take local, sp, client_random, server_random, None))
+    let mut server = result.unwrap(schedule.dtls12(Aes128GcmSha256, Server, 1, take remote, cp, client_random, server_random, None))
+    (result.unwrap(schedule.srtp(mut client, Aes128CmHmacSha1_80)), result.unwrap(schedule.srtp(mut server, Aes128CmHmacSha1_80)))
+}
+
+/// bug: reuse the local send key for receive or accept a single-direction or wrong-profile schedule.
+/// oracle: TLS-8 direction rule and its independent RFC 5764 exporter fixture.
+@test
+fn directions_independent() -> Result[(), srtp.SrtpError] {
+    let p: schedule.SrtpProfile = Aes128CmHmacSha1_80
+    let (take tx, take rx) = dtls_schedules()
+    let mut client = srtp.session(take tx, p, LIMITS)?
+    let mut server = srtp.session(take rx, p, LIMITS)?
+    let plain = unhex("800f1234decafbadcafebabeabababababababababababababababab")
+    let mut packet = copy_packet(plain, 10)
+    let _ = srtp.protect_rtp(mut client, mut packet)?
+    assert_bytes(packet, unhex("800f1234decafbadcafebabea96910a3d7e66d0f6c03290697acbb07443b55797ea969d2e520"), "wrong DTLS-SRTP direction")
+    let mut self_open = copy_packet(packet, 0)
+    assert_discard(srtp.unprotect_rtp(mut client, mut self_open), Tampered)
+    let _ = srtp.unprotect_rtp(mut server, mut packet)?
+    assert_bytes(packet, plain, "opposite endpoint used the wrong key")
+    let send = import_key(p, master(p), "srtp_import(send)")
+    let wrong = import_key(p, other_master(p), "srtp_import(send)")
+    if let Error(Direction) = srtp.session_pair(take send, take wrong, p, LIMITS) {} else {
+        fail("two send schedules formed a session")
+    }
+    let profile_send = import_key(p, master(p), "srtp_import(send)")
+    let recv = import_key(AeadAes128Gcm, master_gcm(), "srtp_import(receive)")
+    if let Error(Direction) = srtp.session_pair(take profile_send, take recv, p, LIMITS) {} else {
+        fail("wrong profile formed a session")
+    }
+    let one_way = import_key(p, master(p), "srtp_import(send)")
+    if let Error(Direction) = srtp.session(take one_way, p, LIMITS) {} else {
+        fail("single-direction schedule formed a session")
+    }
+    Ok(())
+}
+
+/// bug: allow an older sender index or reduce the estimated ROC modulo 2^32.
+/// oracle: RFC 3711 Appendix A and RFC 7714's maximum index, with Python's maximal-index wire bytes.
+@test
+fn sender_index_monotone() -> Result[(), srtp.SrtpError] {
+    let mut send = sender(AeadAes128Gcm)
+    let mut first = rtp_plain(1, 10)
+    let _ = srtp.protect_rtp(mut send, mut first)?
+    let mut previous = rtp_plain(1, 9)
+    if let Error(Reused) = srtp.protect_rtp(mut send, mut previous) {} else {
+        fail("decreasing sequence was sealed")
+    }
+    assert_bytes(previous, rtp_plain(1, 9), "older index changed RTP buffer")
+    let mut next = rtp_plain(1, 11)
+    let _ = srtp.protect_rtp(mut send, mut next)?
+    let mut low = rtp_plain(2, 5)
+    let _ = srtp.protect_rtp(mut send, mut low)?
+    let mut preceding_roc = rtp_plain(2, 40000)
+    if let Error(Reused) = srtp.protect_rtp(mut send, mut preceding_roc) {} else {
+        fail("ROC minus one at zero")
+    }
+    srtp.send_from(mut send, 3, LAST_ROC, 65535, 0)?
+    let mut last = rtp_plain(3, 65535)
+    let _ = srtp.protect_rtp(mut send, mut last)?
+    assert_bytes(last, last_rtp(), "last 48-bit index")
+    let mut exhausted = rtp_plain(3, 0)
+    if let Error(Exhausted) = srtp.protect_rtp(mut send, mut exhausted) {} else {
+        fail("next ROC did not exhaust")
+    }
+    if let Error(Retired) = srtp.send_from(mut send, 1, 0, 0, 0) {} else {
+        fail("send_from lowered an existing floor")
+    }
+    Ok(())
+}
+
+/// bug: admit SSRCs before authenticating or issue a second sender for a retired SSRC.
+/// oracle: SRTP-3 and SRTP-4 by hand, with packets sealed independently.
+@test
+fn streams_after_auth() -> Result[(), srtp.SrtpError] {
+    let limits = srtp.Limits(send_streams: 1, receive_streams: 2, ended_streams: 1)
+    let mut receive = receiver(AeadAes128Gcm, limits)
+    let rows = replay_rtp()
+    for ssrc in 6u32 .. 11 {
+        let mut forged = replay_row(rows, 0)
+        list.set_word_be(mut forged, 8, ssrc)
+        assert_discard(srtp.unprotect_rtp(mut receive, mut forged), Tampered)
+    }
+    assert_open(mut receive, replay_row(rows, 0), 0, 1)?
+    assert_open(mut receive, wire_row(replay_rtp_second(), 0, 31), 0, 2)?
+    let mut third = replay_rtp_third()
+    if let Error(Streams) = srtp.unprotect_rtp(mut receive, mut third) {} else {
+        fail("third authenticated receive stream was admitted")
+    }
+    srtp.end_receive(mut receive, 2)?
+    assert_open(mut receive, replay_rtp_third(), 0, 3)?
+    let mut resume = wire_row(replay_rtp_second(), 1, 31)
+    if let Error(Streams) = srtp.unprotect_rtp(mut receive, mut resume) {} else {
+        fail("resume bypassed receive limit")
+    }
+    bad_rtp(mut receive, wire_row(replay_rtp_second(), 0, 31), TooOld)
+    let mut send = sender_with(AeadAes128Gcm, master_gcm(), limits)
+    let mut first = rtp_plain(1, 0)
+    let _ = srtp.protect_rtp(mut send, mut first)?
+    let mut another = rtp_plain(2, 0)
+    if let Error(Streams) = srtp.protect_rtp(mut send, mut another) {} else {
+        fail("second live send stream was admitted")
+    }
+    srtp.end_send(mut send, 1)
+    let mut retired = rtp_plain(1, 1)
+    if let Error(Retired) = srtp.protect_rtp(mut send, mut retired) {} else {
+        fail("ended send stream was reissued")
+    }
+    let _ = srtp.protect_rtp(mut send, mut another)?
+    Ok(())
+}
+
+fn fan_row(ssrc: u32, seq: u16, src: Bytes, take key: Bytes, wire: Bytes) -> Result[(), srtp.SrtpError] {
+    let mut send = sender_with(AeadAes128Gcm, take key, LIMITS)
+    let mut header: Bytes = list.with_capacity(12)
+    rtp_prefix(mut header, ssrc, seq)
+    let mut out: Bytes = list.with_capacity(1030)
+    list.append(mut out, b"hi")
+    let appended = srtp.protect_rtp_into(mut send, header, src, 3, mut out)?
+    if appended != 1028 || list.len(out) != 1030 || out[0] != b'h' || out[1] != b'i' {
+        fail("seal_into wrote outside its destination suffix")
+    }
+    assert_bytes(list.slice(out, 2, 1030), wire, "fan-out output differs from Python")
+    Ok(())
+}
+
+/// bug: include the destination prefix in AAD, ignore the source offset, or overwrite shared payload.
+/// oracle: Python cryptography using three fixed keys and RTP headers.
+@test
+fn fan_out_into() -> Result[(), srtp.SrtpError] {
+    let mut src: Bytes = list.with_capacity(1003)
+    list.append(mut src, b"off")
+    for i in 0u64 .. 1000 {
+        list.push(mut src, int.narrow(i % 251))
+    }
+    let control = copy_packet(src, 0)
+    fan_row(20, 100, src, fan_key_0(), fan_wire_0())?
+    fan_row(21, 101, src, fan_key_1(), fan_wire_1())?
+    fan_row(22, 102, src, fan_key_2(), fan_wire_2())?
+    assert_bytes(src, control, "fan-out modified shared payload")
+    Ok(())
+}

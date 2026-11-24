@@ -1,0 +1,19 @@
+[package]
+name = "srtp"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"session.hirsel" = "srtp"
+"replay.hirsel" = "srtp"
+"packets.hirsel" = "srtp"
+
+[tests]
+limit = 16777216
+
+[tests.sources]
+"laws.hirsel" = "laws"
+"vectors.hirsel" = "laws"

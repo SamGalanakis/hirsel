@@ -1,0 +1,262 @@
+type Header {
+    end: u64,
+    seq: u16,
+    ssrc: u32
+}
+
+fn rtp_header(buf: Bytes, length: u64) -> Result[Header, SrtpError] {
+    if length < 12 || buf[0] >> 6 != 2 {
+        return Error(Discarded(Malformed))
+    }
+    let sources: u64 = int.widen(buf[0] & 15)
+    let mut end = 12 + 4 * sources
+    if buf[0] & 16 != 0 {
+        if end + 4 > length {
+            return Error(Discarded(Malformed))
+        }
+        let words: u16 = list.word_be(buf, end + 2)
+        let extension_words: u64 = int.widen(words)
+        end += 4 + 4 * extension_words
+    }
+    if end > length {
+        return Error(Discarded(Malformed))
+    }
+    Ok(Header(end, seq: list.word_be(buf, 2), ssrc: list.word_be(buf, 8)))
+}
+
+fn rtcp_ssrc(buf: Bytes, length: u64) -> Result[u32, SrtpError] {
+    if length < 8 || buf[0] >> 6 != 2 {
+        return Error(Discarded(Malformed))
+    }
+    Ok(list.word_be(buf, 4))
+}
+
+fn send_index(s: SendStream, seq: u16) -> Result[u64, SrtpError] {
+    let reference = index_or(s.reference, int.widen(seq))
+    let Some(index) = estimate(reference, seq) else {
+        return Error(Reused)
+    }
+    if index >= RTP_LIMIT {
+        return Error(Exhausted)
+    }
+    if index < reference || (s.sent_rtp && index == reference) {
+        return Error(Reused)
+    }
+    Ok(index)
+}
+
+fn sealed_error(e: packet.PacketError) -> SrtpError {
+    match e {
+        Reused => Reused,
+        Range => Exhausted,
+        TooLong => Discarded(Malformed),
+        Tampered => Discarded(Tampered),
+        Capacity(c) => Capacity(c),
+    }
+}
+
+fn opened_error(e: packet.PacketError) -> SrtpError {
+    match e {
+        TooLong => Discarded(Malformed),
+        Capacity(c) => Capacity(c),
+        _ => Discarded(Tampered),
+    }
+}
+
+fn check_send_size(cm: bool, spare: u64, body: u64, overhead: u64) -> Result[(), SrtpError] {
+    if spare < overhead || spare - overhead < body {
+        return Error(Short)
+    }
+    if cm && body > 1048576 {
+        return Error(Discarded(Malformed))
+    }
+    Ok(())
+}
+
+pub fn protect_rtp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] {
+    let length = list.len(buf)
+    let header = rtp_header(buf, length)?
+    let body = length - header.end
+    check_send_size(s.cm, list.capacity(buf) - header.end, body, s.tag)?
+    ensure_sender(mut s, header.ssrc, Some(int.widen(header.seq)))?
+    seal_rtp(mut s.senders, mut s.extra, s.cm, header, mut buf)
+}
+
+fn seal_rtp(mut senders: Map[u32, Option[SendStream]], mut scratch: Bytes, cm: bool, header: Header, mut buf: Bytes) -> Result[u64, SrtpError] {
+    let outcome = option.unwrap(map.update(mut senders, header.ssrc, scoped fn(mut slot: Option[SendStream]) -> Result[u64, SrtpError] {
+        if let Some(mut stream) = slot {
+            let index = send_index(stream, header.seq)?
+            if cm {
+                let roc: u32 = int.narrow(index >> 16)
+                list.set_word_be(mut scratch, 0, roc)
+            }
+            let extra = list.slice(scratch, 0, if cm {
+                4
+            } else {
+                0
+            })
+            let _ = packet.seal(mut stream.rtp, index, mut buf, 0, header.end, extra) ?=> |take e| sealed_error(e)
+            stream.reference = Some(index)
+            stream.sent_rtp = true
+            Ok(list.len(buf))
+        } else {
+            Error(Retired)
+        }
+    }))
+    outcome
+}
+
+pub fn protect_rtp_into(mut s: Session, header: Bytes, src: Bytes, from: u64, mut dst: Bytes) -> Result[u64, SrtpError] {
+    let length = list.len(header)
+    let h = rtp_header(header, length)?
+    if h.end != length || from > list.len(src) {
+        return Error(Discarded(Malformed))
+    }
+    let start = list.len(dst)
+    check_send_size(s.cm, list.capacity(dst) - start, list.len(src) - from, length + s.tag)?
+    ensure_sender(mut s, h.ssrc, Some(int.widen(h.seq)))?
+    seal_rtp_into(mut s.senders, mut s.extra, s.cm, h, header, src, from, mut dst)
+}
+
+fn seal_rtp_into(mut senders: Map[u32, Option[SendStream]], mut scratch: Bytes, cm: bool, h: Header, header: Bytes, src: Bytes, from: u64, mut dst: Bytes) -> Result[u64, SrtpError] {
+    let start = list.len(dst)
+    let length = h.end
+    let outcome = option.unwrap(map.update(mut senders, h.ssrc, scoped fn(mut slot: Option[SendStream]) -> Result[u64, SrtpError] {
+        if let Some(mut stream) = slot {
+            let index = send_index(stream, h.seq)?
+            if cm {
+                let roc: u32 = int.narrow(index >> 16)
+                list.set_word_be(mut scratch, 0, roc)
+            }
+            let extra = list.slice(scratch, 0, if cm {
+                4
+            } else {
+                0
+            })
+            list.append(mut dst, header)
+            match packet.seal_into(mut stream.rtp, index, src, from, mut dst, start, extra) {
+                Ok(written) => {
+                    stream.reference = Some(index)
+                    stream.sent_rtp = true
+                    Ok(length + written)
+                },
+                Error(e) => {
+                    list.truncate(mut dst, start)
+                    Error(sealed_error(e))
+                },
+            }
+        } else {
+            Error(Retired)
+        }
+    }))
+    outcome
+}
+
+pub fn protect_rtcp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] {
+    let length = list.len(buf)
+    let ssrc = rtcp_ssrc(buf, length)?
+    check_send_size(s.cm, list.capacity(buf) - 8, length - 8, s.tag + 4)?
+    ensure_sender(mut s, ssrc, None)?
+    seal_rtcp(mut s.senders, mut s.extra, s.cm, ssrc, mut buf)
+}
+
+fn seal_rtcp(mut senders: Map[u32, Option[SendStream]], mut scratch: Bytes, cm: bool, ssrc: u32, mut buf: Bytes) -> Result[u64, SrtpError] {
+    let length = list.len(buf)
+    let outcome = option.unwrap(map.update(mut senders, ssrc, scoped fn(mut slot: Option[SendStream]) -> Result[u64, SrtpError] {
+        if let Some(mut stream) = slot {
+            let index = stream.next_rtcp
+            if index >= RTCP_LIMIT {
+                return Error(Exhausted)
+            }
+            let trailer: u32 = int.narrow(index | RTCP_LIMIT)
+            list.set_word_be(mut scratch, 0, trailer)
+            let _ = packet.seal(mut stream.rtcp, index, mut buf, 0, 8, scratch) ?=> |take e| sealed_error(e)
+            list.put_word_be(mut buf, trailer)
+            if cm {
+                list.copy_within(mut buf, length, length + 4, 10)
+                list.set_word_be(mut buf, length, trailer)
+            }
+            stream.next_rtcp += 1
+            Ok(list.len(buf))
+        } else {
+            Error(Retired)
+        }
+    }))
+    outcome
+}
+
+pub fn unprotect_rtp(mut s: Session, mut buf: Bytes) -> Result[Opened, SrtpError] {
+    let length = list.len(buf)
+    if length < s.tag {
+        return Error(Discarded(Malformed))
+    }
+    let header = rtp_header(buf, length - s.tag)?
+    let (live, previous) = receive_stream(s, header.ssrc)
+    let mut stream = previous
+    let reference = index_or(stream.rtp.floor.reference, int.widen(header.seq))
+    let Some(index) = estimate(reference, header.seq) else {
+        return Error(Discarded(TooOld))
+    }
+    if index >= RTP_LIMIT {
+        return Error(Discarded(TooOld))
+    }
+    check_window(stream.rtp, index)?
+    if s.cm {
+        let roc: u32 = int.narrow(index >> 16)
+        list.set_word_be(mut s.extra, 0, roc)
+    }
+    {
+        let extra = list.slice(s.extra, 0, if s.cm {
+            4
+        } else {
+            0
+        })
+        let _ = packet.open(s.rtp, int.widen(header.ssrc), index, mut buf, 0, header.end, extra) ?=> |take e| opened_error(e)
+    }
+    mark(mut stream.rtp, index)
+    commit_receive(mut s, header.ssrc, live, stream)?
+    Ok(Opened(length: list.len(buf), ssrc: header.ssrc, index))
+}
+
+pub fn unprotect_rtcp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] {
+    let length = list.len(buf)
+    if length < s.tag + 4 {
+        return Error(Discarded(Malformed))
+    }
+    let plain_length = length - s.tag - 4
+    let ssrc = rtcp_ssrc(buf, plain_length)?
+    let trailer_at = if s.cm {
+        plain_length
+    } else {
+        length - 4
+    }
+    let trailer: u32 = list.word_be(buf, trailer_at)
+    let index: u64 = int.widen(trailer & 0x7fffffff)
+    let (live, previous) = receive_stream(s, ssrc)
+    let mut stream = previous
+    check_window(stream.rtcp, index)?
+    let at = if trailer & 0x80000000 != 0 {
+        8u64
+    } else {
+        plain_length
+    }
+    list.set_word_be(mut s.extra, 0, trailer)
+    if s.cm {
+        list.copy_within(mut buf, trailer_at + 4, trailer_at, s.tag)
+    }
+    list.truncate(mut buf, length - 4)
+    match packet.open(s.rtcp, int.widen(ssrc), index, mut buf, 0, at, s.extra) {
+        Ok(_) => (),
+        Error(e) => {
+            list.put_word_be(mut buf, trailer)
+            if s.cm {
+                list.copy_within(mut buf, trailer_at, trailer_at + 4, s.tag)
+                list.set_word_be(mut buf, trailer_at, trailer)
+            }
+            return Error(opened_error(e))
+        },
+    }
+    mark(mut stream.rtcp, index)
+    commit_receive(mut s, ssrc, live, stream)?
+    Ok(plain_length)
+}

@@ -1,0 +1,231 @@
+pub type Discard: key = Malformed | Replayed | TooOld | Tampered
+
+pub type SrtpError = Discarded(Discard) | Reused | Exhausted | Streams | Retired | Short | Direction | Schedule(schedule.ScheduleError) | Capacity(Capacity)
+
+pub type Limits {
+    send_streams: u32,
+    receive_streams: u32,
+    ended_streams: u32
+}
+
+pub type Opened {
+    length: u64,
+    ssrc: u32,
+    index: u64
+}
+
+type SendStream {
+    rtp: packet.Sealer,
+    rtcp: packet.Sealer,
+    reference: Option[u64],
+    sent_rtp: bool,
+    next_rtcp: u64
+}
+
+type ReceiveStream {
+    rtp: Window,
+    rtcp: Window
+}
+
+type Kept {
+    rtp: Floor,
+    rtcp: Floor
+}
+
+pub opaque type Session {
+    send: schedule.Schedule,
+    rtp: packet.Opener,
+    rtcp: packet.Opener,
+    cm: bool,
+    tag: u64,
+    limits: Limits,
+    senders: Map[u32, Option[SendStream]],
+    send_count: u64,
+    receivers: Map[u32, ReceiveStream],
+    ended: Map[u32, Kept],
+    extra: Bytes
+}
+
+pub fn tag_room(p: schedule.SrtpProfile) -> u64 {
+    if let Aes128CmHmacSha1_80 = p {
+        10
+    } else {
+        16
+    }
+}
+
+fn schedule_error(e: schedule.ScheduleError) -> SrtpError {
+    match e {
+        Invalid => Direction,
+        Issued => Retired,
+        Capacity(c) => Capacity(c),
+        _ => Schedule(e),
+    }
+}
+
+fn space_matches(s: schedule.Schedule, space: packet.Space, cipher: schedule.PacketCipher, send: bool, receive: bool) -> Result[(), SrtpError] {
+    let info = schedule.inspect(s, space) ?=> |take e| schedule_error(e)
+    if info.cipher != cipher || info.send != send || info.receive != receive {
+        return Error(Direction)
+    }
+    Ok(())
+}
+
+fn check_schedule(s: schedule.Schedule, p: schedule.SrtpProfile, send: bool, receive: bool) -> Result[(), SrtpError] {
+    let cipher: schedule.PacketCipher = match p {
+        Aes128CmHmacSha1_80 => Aes128CmHmacSha1_80,
+        AeadAes128Gcm => Aes128Gcm,
+        AeadAes256Gcm => Aes256Gcm,
+    }
+    space_matches(s, Rtp, cipher, send, receive)?
+    space_matches(s, Rtcp, cipher, send, receive)
+}
+
+fn new_session(take send: schedule.Schedule, take rtp: packet.Opener, take rtcp: packet.Opener, p: schedule.SrtpProfile, limits: Limits) -> Result[Session, SrtpError] {
+    let mut extra: Bytes = list.new()
+    list.try_reserve(mut extra, 4) ?=> |c| Capacity(c)
+    list.fill(mut extra, 4, 0)
+    let tag = tag_room(p)
+    Ok(Session(send: take send, rtp: take rtp, rtcp: take rtcp, cm: tag == 10, tag, limits, senders: map.new(), send_count: 0, receivers: map.new(), ended: map.new(), extra: take extra))
+}
+
+pub fn session(take s: schedule.Schedule, p: schedule.SrtpProfile, l: Limits) -> Result[Session, SrtpError] {
+    check_schedule(s, p, true, true)?
+    let rtp = schedule.opener(s, Rtp) ?=> |take e| schedule_error(e)
+    let rtcp = schedule.opener(s, Rtcp) ?=> |take e| schedule_error(e)
+    new_session(take s, take rtp, take rtcp, p, l)
+}
+
+pub fn session_pair(take send: schedule.Schedule, take receive: schedule.Schedule, p: schedule.SrtpProfile, l: Limits) -> Result[Session, SrtpError] {
+    check_schedule(send, p, true, false)?
+    check_schedule(receive, p, false, true)?
+    let rtp = schedule.opener(receive, Rtp) ?=> |take e| schedule_error(e)
+    let rtcp = schedule.opener(receive, Rtcp) ?=> |take e| schedule_error(e)
+    new_session(take send, take rtp, take rtcp, p, l)
+}
+
+fn start_send(mut s: Session, ssrc: u32, rtp: Option[u64], rtcp: u64) -> Result[(), SrtpError] {
+    if s.send_count >= int.widen(s.limits.send_streams) {
+        return Error(Streams)
+    }
+    map.try_reserve(mut s.senders, 1) ?=> |c| Capacity(c)
+    map.insert(mut s.senders, ssrc, None)
+    let issued = schedule.sealer_pair(mut s.send, Rtp, Rtcp, int.widen(ssrc), index_or(rtp, 0), rtcp)
+    let (take rtp_key, take rtcp_key) = match take issued {
+        Ok(take pair) => take pair,
+        Error(e) => {
+            let _ = map.remove(mut s.senders, ssrc)
+            return Error(schedule_error(e))
+        },
+    }
+    let stream = SendStream(rtp: take rtp_key, rtcp: take rtcp_key, reference: rtp, sent_rtp: false, next_rtcp: rtcp)
+    map.insert(mut s.senders, ssrc, Some(take stream))
+    s.send_count += 1
+    Ok(())
+}
+
+pub fn send_from(mut s: Session, ssrc: u32, roc: u32, seq: u16, srtcp: u32) -> Result[(), SrtpError] {
+    if let Some(_) = map.get(s.senders, ssrc) {
+        return Error(Retired)
+    }
+    let rtcp: u64 = int.widen(srtcp)
+    if rtcp >= RTCP_LIMIT {
+        return Error(Exhausted)
+    }
+    start_send(mut s, ssrc, Some(start_index(roc, seq)), rtcp)
+}
+
+pub fn end_send(mut s: Session, ssrc: u32) {
+    let ended = map.update(mut s.senders, ssrc, scoped fn(mut slot: Option[SendStream]) -> bool {
+        if let Some(_) = slot {
+            slot = None
+            true
+        } else {
+            false
+        }
+    })
+    if let Some(true) = ended {
+        s.send_count -= 1
+    }
+}
+
+fn ensure_sender(mut s: Session, ssrc: u32, rtp: Option[u64]) -> Result[(), SrtpError] {
+    let prior = match map.get(s.senders, ssrc) {
+        Some(Some(_)) => 1u8,
+        Some(None) => 2u8,
+        None => 0u8,
+    }
+    if prior == 1 {
+        return Ok(())
+    }
+    if prior == 2 {
+        return Error(Retired)
+    }
+    start_send(mut s, ssrc, rtp, 0)
+}
+
+pub fn receive_from(mut s: Session, ssrc: u32, roc: u32, seq: u16, srtcp: u32) -> Result[(), SrtpError] {
+    if let Some(_) = map.get(s.receivers, ssrc) {
+        return Error(Retired)
+    }
+    if let Some(_) = map.get(s.ended, ssrc) {
+        return Error(Retired)
+    }
+    let rtcp: u64 = int.widen(srtcp)
+    if rtcp >= RTCP_LIMIT {
+        return Error(Exhausted)
+    }
+    let rtp = start_index(roc, seq)
+    insert_receiver(mut s, ssrc, ReceiveStream(rtp: window(start_floor(Some(rtp))), rtcp: window(start_floor(Some(rtcp)))))
+}
+
+pub fn end_receive(mut s: Session, ssrc: u32) -> Result[(), SrtpError] {
+    let kept = {
+        let Some(stream) = map.get(s.receivers, ssrc) else {
+            return Ok(())
+        }
+        Kept(rtp: kept_floor(stream.rtp), rtcp: kept_floor(stream.rtcp))
+    }
+    let new_entry = match map.get(s.ended, ssrc) {
+        None => true,
+        Some(_) => false,
+    }
+    if new_entry {
+        if map.len(s.ended) >= int.widen(s.limits.ended_streams) {
+            return Error(Streams)
+        }
+        map.try_reserve(mut s.ended, 1) ?=> |c| Capacity(c)
+    }
+    map.insert(mut s.ended, ssrc, kept)
+    let _ = map.remove(mut s.receivers, ssrc)
+    Ok(())
+}
+
+fn insert_receiver(mut s: Session, ssrc: u32, stream: ReceiveStream) -> Result[(), SrtpError] {
+    if map.len(s.receivers) >= int.widen(s.limits.receive_streams) {
+        return Error(Streams)
+    }
+    map.try_reserve(mut s.receivers, 1) ?=> |c| Capacity(c)
+    map.insert(mut s.receivers, ssrc, stream)
+    Ok(())
+}
+
+fn receive_stream(s: Session, ssrc: u32) -> (bool, ReceiveStream) {
+    if let Some(stream) = map.get(s.receivers, ssrc) {
+        return (true, ReceiveStream(rtp: stream.rtp, rtcp: stream.rtcp))
+    }
+    let kept = match map.get(s.ended, ssrc) {
+        Some(k) => Kept(rtp: k.rtp, rtcp: k.rtcp),
+        None => Kept(rtp: start_floor(None), rtcp: start_floor(None)),
+    }
+    (false, ReceiveStream(rtp: window(kept.rtp), rtcp: window(kept.rtcp)))
+}
+
+fn commit_receive(mut s: Session, ssrc: u32, live: bool, stream: ReceiveStream) -> Result[(), SrtpError] {
+    if live {
+        map.insert(mut s.receivers, ssrc, stream)
+        Ok(())
+    } else {
+        insert_receiver(mut s, ssrc, stream)
+    }
+}

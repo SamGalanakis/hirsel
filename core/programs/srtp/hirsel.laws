@@ -1,0 +1,9 @@
+hirsel.laws 1
+srtp@1/laws/directions_independent src=cc90b22cd90018c3 sig=e9bf92fb14384dc1 run=acdd7fe37d41c86f bug=123139bfa1eeaaea oracle=158f746cc562a68b rows=pending
+srtp@1/laws/fan_out_into src=9c1e3d7703944d43 sig=78d3a336b666dc70 run=acdd7fe37d41c86f bug=f1999c0d6ce5b11b oracle=71fa2a0a61140d19 rows=pending
+srtp@1/laws/replay_window src=2c47e8aa70aaa0b7 sig=15ae3c901e699f42 run=acdd7fe37d41c86f bug=61687d0226eeeab8 oracle=1cdd642948c2d063 rows=pending
+srtp@1/laws/roc_rollover src=d2551e631b66e9e6 sig=6dba40ed1a1157df run=acdd7fe37d41c86f bug=56a8bd687ab98f21 oracle=518b2d3e76e2b6b3 rows=pending
+srtp@1/laws/rtp_header_boundary src=55c6d7701b531538 sig=4d818544e53fb1f7 run=acdd7fe37d41c86f bug=73c88675c0f4af3e oracle=e125cd6c20a9c80a rows=pending
+srtp@1/laws/sender_index_monotone src=6127af16f6c02eba sig=ae22b8b5bf63c4ae run=acdd7fe37d41c86f bug=019765b78d98d1e6 oracle=1a19edd511be9cbf rows=pending
+srtp@1/laws/srtcp_trailer_order src=f9243c69ff6f215c sig=83dab87377ad3dc4 run=acdd7fe37d41c86f bug=f9bab803932ce08c oracle=a1cde9656737ffa3 rows=pending
+srtp@1/laws/streams_after_auth src=b0a4eea5ca08a3ed sig=4b53cd73dceef263 run=acdd7fe37d41c86f bug=07577f770bf02c81 oracle=3e4f336beb60424b rows=pending

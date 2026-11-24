@@ -104,7 +104,11 @@ fn joined_read[X: send, R: send](tasks: Tasks, take job: X, f: fn(take X) -> Res
     }
 }
 
-type ExportRead: send { d: Dir, c: Clock, limit: u64 }
+type ExportRead: send {
+    d: Dir,
+    c: Clock,
+    limit: u64
+}
 
 fn law_export_read(take job: ExportRead) -> Result[Option[DeployError], Capacity] waits {
     let empty: Bytes = list.new()
@@ -143,10 +147,18 @@ fn refusal_side(r: LawRead[Result[ValidatedImport, DeployError]]) -> u64 {
 fn same_side(reference: LawRead[Result[ValidatedImport, DeployError]], production: LawRead[Result[ValidatedImport, DeployError]]) -> bool {
     let want = refusal_side(reference)
     let got = refusal_side(production)
-    if want == 0 { got == 0 } else { got == 0 || got == want }
+    if want == 0 {
+        got == 0
+    } else {
+        got == 0 || got == want
+    }
 }
 
-type PreparedRead: send { d: Dir, limit: u64, original: bool }
+type PreparedRead: send {
+    d: Dir,
+    limit: u64,
+    original: bool
+}
 
 fn law_prepared_read(take job: PreparedRead) -> Result[Result[ValidatedImport, DeployError], Capacity] waits {
     bound bytes job.limit {
@@ -271,10 +283,7 @@ pub fn disk_law_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> bool w
     // AP1b: a 32-byte description makes a 244-byte payload. The four
     // option words start at payload offset 192 (file offset 280).
     let bytes_on_disk = result.unwrap(disk_read_paged_file(d, "PREPARED", 332))
-    if list.len(bytes_on_disk) != 332 || read_le(bytes_on_disk, 72, 2) != 0x0081
-        || read_le(bytes_on_disk, 76, 4) != 244 || read_le(bytes_on_disk, 280, 8) != 1048576
-        || read_le(bytes_on_disk, 288, 8) != 1048576 || read_le(bytes_on_disk, 296, 8) != 67108864
-        || read_le(bytes_on_disk, 304, 8) != 268435456 {
+    if list.len(bytes_on_disk) != 332 || read_le(bytes_on_disk, 72, 2) != 0x0081 || read_le(bytes_on_disk, 76, 4) != 244 || read_le(bytes_on_disk, 280, 8) != 1048576 || read_le(bytes_on_disk, 288, 8) != 1048576 || read_le(bytes_on_disk, 296, 8) != 67108864 || read_le(bytes_on_disk, 304, 8) != 268435456 {
         return false
     }
     if !prepared_read_boundary_sweep(d, tasks) {
@@ -309,7 +318,10 @@ fn disk_test_import_read_boundaries(d: Dir, c: Clock, tasks: Tasks) -> Result[()
 }
 
 // L51 (e″). The old snapshot and the index give independent views of the cut.
-type RewriteLawRow: codec + send { due: u64, body: u64 }
+type RewriteLawRow: codec + send {
+    due: u64,
+    body: u64
+}
 
 fn rewrite_law_due(row: RewriteLawRow) -> Result[u64, Capacity] {
     Ok(row.due)
@@ -336,8 +348,9 @@ fn rewrite_law_refusals(mut staged: StagedMigration, rows: Table[u64, RewriteLaw
 fn rewrite_law_replace(mut migration: Migration) -> Result[(), Error] {
     let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
     let rows = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
-    migration_migrate(mut migration, take rows, spec("rewrite", std.codec.key_u64(), codec),
-        fn(k: u64, row: RewriteLawRow) -> Result[Option[(u64, RewriteLawRow)], Capacity] { Ok(Some((k, clone(row)))) })
+    migration_migrate(mut migration, take rows, spec("rewrite", std.codec.key_u64(), codec), fn(k: u64, row: RewriteLawRow) -> Result[Option[(u64, RewriteLawRow)], Capacity] {
+        Ok(Some((k, clone(row))))
+    })
 }
 
 fn rewrite_law_target() -> PreparedTarget {
@@ -347,10 +360,18 @@ fn rewrite_law_target() -> PreparedTarget {
 fn rewrite_law_append(d: Dir, base: Bytes, id: u32, keys: (u64, Option[u64]), truncated: bool) -> Result[(), DeployError] waits {
     let header = deploy_result(disk_read_header("PREPARED", base, 6, None, None))?
     let mut payload: Bytes = list.new()
-    let row_count: u32 = if let Some(_) = keys.1 { 2u32 } else { 1u32 }
+    let row_count: u32 = if let Some(_) = keys.1 {
+        2u32
+    } else {
+        1u32
+    }
     list.put_word_le(mut payload, row_count)
     for i in 0u32 .. row_count {
-        let key = if i == 0 { keys.0 } else { option.unwrap(keys.1) }
+        let key = if i == 0 {
+            keys.0
+        } else {
+            option.unwrap(keys.1)
+        }
         list.put_word_le(mut payload, id)
         list.put_word_le(mut payload, 8u32)
         list.put_word_be(mut payload, key)
@@ -365,7 +386,11 @@ fn rewrite_law_append(d: Dir, base: Bytes, id: u32, keys: (u64, Option[u64]), tr
         Error(problem) => return Error(Scratch(Io(problem.error))),
         Ok(()) => (),
     }
-    let end = list.len(frame) - if truncated { 1u64 } else { 0u64 }
+    let end = list.len(frame) - if truncated {
+        1u64
+    } else {
+        0u64
+    }
     match host.write(mut file, list.slice(frame, 0, end)) {
         Error(problem) => return Error(Scratch(Io(problem.error))),
         Ok(()) => (),
@@ -378,8 +403,89 @@ fn rewrite_law_import_refused(mut db: Db, scratch: Dir, base: u64) -> () waits {
         Ok(take checked) => reserve_import(mut db, take checked),
         Error(take error) => Error(take error),
     }
-    if let Error(ImportMalformed) = imported {} else { fail("L51(e″): imported a malformed rewrite") }
-    if version(snapshot(db)) != base { fail("L51(e″): refused rewrite changed OLD") }
+    if let Error(ImportMalformed) = imported {} else {
+        fail("L51(e″): imported a malformed rewrite")
+    }
+    if version(snapshot(db)) != base {
+        fail("L51(e″): refused rewrite changed OLD")
+    }
+}
+
+fn rewrite_law_replace_indexed(mut migration: Migration) -> Result[(), Error] {
+    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
+    let rows = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
+    let mut to = spec("rewrite", std.codec.key_u64(), codec)
+    with_index(mut to, "due", code.describe(rewrite_law_due), std.codec.key_u64())?
+    migration_migrate(mut migration, take rows, take to, fn(k: u64, row: RewriteLawRow) -> Result[Option[(u64, RewriteLawRow)], Capacity] {
+        Ok(Some((k, clone(row))))
+    })?
+    let replaced = migration_table(mut migration, "rewrite", std.codec.key_u64(), codec)?
+    let _ = migration_index(mut migration, replaced, "due", code.describe(rewrite_law_due), std.codec.key_u64())?
+    Ok(())
+}
+
+// L51 (e″), v2.103: a rewrite on a table the staging replaces edits the staged
+// range and writes no 0x0085 row. The frame walk reads only the §2.1 headers.
+fn rewrite_law_staged_range(mut db: Db, d: Dir, c: Clock, tasks: Tasks, old_rows: Table[u64, RewriteLawRow]) -> Result[(), DeployError] waits {
+    let codec: std.codec.Codec[RewriteLawRow] = std.codec.of()
+    let prior = snapshot(db)
+    let attempt = install_fixture_bytes(16, 9)
+    let (scratch, base) = crash_install_prepared(mut db, d, c, tasks, attempt)?
+    let source = open_export(scratch, c, attempt, disk_crash_options("install"))?
+    let mut staged = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_replace_indexed)))?
+    let rows = deploy_result(catalog_handle(source.db.store, staged.plan.roots.catalog, "rewrite", std.codec.key_u64(), codec))?
+    if rows.id == old_rows.id {
+        fail("L51(e″): the staging did not replace the table")
+    }
+    rewrite_law_refusals(mut staged, rows)
+    deploy_result(stage_rewrite(mut staged, rows, 1, RewriteLawRow(due: 10, body: 6)))?
+    write_prepared(source, staged, scratch, rewrite_law_target())?
+    let file = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
+    let mut at = 72u64
+    let mut final_kind = 0u64
+    while at + 16 <= list.len(file) {
+        let kind: u16 = list.word_le(file, at)
+        let n: u32 = list.word_le(file, at + 4)
+        final_kind = int.widen(kind)
+        let size: u64 = int.widen(n)
+        at += 16 + size
+    }
+    if at != list.len(file) || final_kind != 0x0084 {
+        fail("L51(e″): a staged-range rewrite wrote a 0x0085 row")
+    }
+    let work = reserve_import(mut db, validate_prepared(scratch)?)?
+    let ready = import_trees(take work)?
+    let digest = imported_digest(ready)
+    keep_import(mut db, take ready)?
+    if crash_apply(mut db, attempt, digest)? != base + 1 {
+        fail("L51(e″): wrong staged-range activation version")
+    }
+    let current = snapshot(db)
+    let new_rows = deploy_result(table(mut db, "rewrite", std.codec.key_u64(), codec))?
+    let due = deploy_result(bind_table_index(mut db, new_rows, "due", code.describe(rewrite_law_due), std.codec.key_u64()))?
+    let read = deploy_result(reader(db, 0))?
+    if let Some(row) = deploy_result(get(read, prior, old_rows, 1))? {
+        if row.due != 10 || row.body != 5 {
+            fail("L51(e″): staged-range rewrite changed v − 1")
+        }
+    } else {
+        fail("L51(e″): v − 1 row is missing")
+    }
+    for (key, body) in[(1u64, 6u64), (2u64, 2u64)] {
+        let Some(row) = deploy_result(get(read, current, new_rows, key))? else {
+            fail("L51(e″): replaced row is missing")
+        }
+        if row.body != body {
+            fail("L51(e″): replaced range lost the staged edit")
+        }
+        let mut index_key = deploy_result(prefix(due.id))?
+        list.put_word_be(mut index_key, row.due)
+        list.put_word_be(mut index_key, key)
+        let Some(_) = get_page_row(current.roots.collections, index_key) else {
+            fail("L51(e″): replaced index entry missing")
+        }
+    }
+    Ok(())
 }
 
 @test
@@ -394,7 +500,9 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let Committed(_) = result.unwrap(run(mut db, None, copy_env(rows), fn(mut tx: Tx, t: Table[u64, RewriteLawRow]) -> Result[(), Error] {
         put(mut tx, t, 1, RewriteLawRow(due: 10, body: 1))?
         put(mut tx, t, 2, RewriteLawRow(due: 20, body: 2))
-    })) else { fail("L51(e″): seed rows") }
+    })) else {
+        fail("L51(e″): seed rows")
+    }
     let mut standalone = deploy_result(stage_migration(db, tasks, code.describe(rewrite_law_schema)))?
     rewrite_law_refusals(mut standalone, rows)
     deploy_result(stage_rewrite(mut standalone, rows, 1, RewriteLawRow(due: 10, body: 4)))?
@@ -409,15 +517,16 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let replacement = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
     rewrite_law_append(scratch, replacement, exported_rows.id, (1u64, None), false)?
     rewrite_law_import_refused(mut db, scratch, base)
-
     let mut staged = deploy_result(stage_export_migration(source, tasks, code.describe(rewrite_law_schema)))?
     rewrite_law_refusals(mut staged, exported_rows)
     write_prepared(source, staged, scratch, rewrite_law_target())?
     let empty = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
-    if list.len(empty) != 332 { fail("L51(e″): preparation without rewrites has a suffix") }
+    if list.len(empty) != 332 {
+        fail("L51(e″): preparation without rewrites has a suffix")
+    }
     rewrite_law_append(scratch, empty, exported_rows.id, (3u64, None), false)?
     rewrite_law_import_refused(mut db, scratch, base)
-    for keys in [(2u64, Some(1u64)), (1u64, Some(1u64))] {
+    for keys in[(2u64, Some(1u64)), (1u64, Some(1u64))] {
         rewrite_law_append(scratch, empty, exported_rows.id, keys, false)?
         rewrite_law_import_refused(mut db, scratch, base)
     }
@@ -430,7 +539,9 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let expected = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
     write_prepared(source, staged, scratch, rewrite_law_target())?
     let coded = scratch_result(disk_read_paged_file(scratch, "PREPARED", 1048576))?
-    if coded != expected { fail("L51(e″): wrong rewrite frame bytes") }
+    if coded != expected {
+        fail("L51(e″): wrong rewrite frame bytes")
+    }
     let work = reserve_import(mut db, validate_prepared(scratch)?)?
     let ready = import_trees(take work)?
     let digest = imported_digest(ready)
@@ -441,21 +552,40 @@ fn disk_test_activation_rewrites(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
     let current = snapshot(db)
     let read = deploy_result(reader(db, 0))?
     if let Some(row) = deploy_result(get(read, prior, rows, 1))? {
-        if row.due != 10 || row.body != 4 { fail("L51(e″): old snapshot changed") }
-    } else { fail("L51(e″): old row is missing") }
+        if row.due != 10 || row.body != 4 {
+            fail("L51(e″): old snapshot changed")
+        }
+    } else {
+        fail("L51(e″): old row is missing")
+    }
     if let Some(row) = deploy_result(get(read, current, rows, 1))? {
-        if row.due != 10 || row.body != 5 { fail("L51(e″): rewritten row missing at activation") }
-    } else { fail("L51(e″): rewritten row is missing") }
+        if row.due != 10 || row.body != 5 {
+            fail("L51(e″): rewritten row missing at activation")
+        }
+    } else {
+        fail("L51(e″): rewritten row is missing")
+    }
     if let Some(row) = deploy_result(get(read, current, rows, 2))? {
-        if row.due != 20 || row.body != 2 { fail("L51(e″): untargeted row changed") }
-    } else { fail("L51(e″): untargeted row is missing") }
-    for (deadline, key) in [(10u64, 1u64), (20u64, 2u64)] {
+        if row.due != 20 || row.body != 2 {
+            fail("L51(e″): untargeted row changed")
+        }
+    } else {
+        fail("L51(e″): untargeted row is missing")
+    }
+    for (deadline, key) in[(10u64, 1u64), (20u64, 2u64)] {
         let mut index_key = deploy_result(prefix(due.id))?
         list.put_word_be(mut index_key, deadline)
         list.put_word_be(mut index_key, key)
-        let Some(before) = get_page_row(prior.roots.collections, index_key) else { fail("L51(e″): seed index missing") }
-        let Some(after) = get_page_row(current.roots.collections, index_key) else { fail("L51(e″): cut index missing") }
-        if list.compare_bytes(before, after) != Equal { fail("L51(e″): cut index changed") }
+        let Some(before) = get_page_row(prior.roots.collections, index_key) else {
+            fail("L51(e″): seed index missing")
+        }
+        let Some(after) = get_page_row(current.roots.collections, index_key) else {
+            fail("L51(e″): cut index missing")
+        }
+        if list.compare_bytes(before, after) != Equal {
+            fail("L51(e″): cut index changed")
+        }
     }
+    rewrite_law_staged_range(mut db, d, c, tasks, rows)?
     deploy_result(close(take db))
 }

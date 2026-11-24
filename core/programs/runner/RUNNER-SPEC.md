@@ -76,7 +76,7 @@ This writes ENDSTATE `storage-runs` "one activation commit selects ... the fate 
 
 **Not built.** Nothing here is built. `triggers.release` is called only by laws, and the operator wire has no `held` field. L40 (d), L49's and L54's v2.62 cases and L70 are UNTESTED until build slices F1, F1.5 and F2 to F4 land:
 - **F1, store.** Kind 0x0085 and `stage_rewrite`, with the STORE L51 (e″) case. It lands refusing a rewrite on a table the staging replaces.
-- **F1.5, store (v2.66, B1).** `stage_rewrite` on a table the staging replaces edits the row in the staged replacement range and writes no 0x0085 row (STORE v2.103 §3.5a), with an L51 (e″) case. It follows F1 and must land before any release replaces `store.triggers.pending`; none does today.
+- **F1.5, store (v2.66, B1).** `stage_rewrite` on a table the staging replaces edits the row in the staged replacement range and writes no 0x0085 row (STORE v2.103 §3.5a), with an L51 (e″) case. It follows F1 and must land before any release replaces `store.triggers.pending`; none does today. Built (activation-fate-f15-2447), replacing F1's refusal.
 - **F2, runner.** `Fates` and the shared resolution, the settle rewrite, the install's `--hirsel-held*`<!-- doc-ref: external --> and `Unsettled`, and L70 (a) to (d).
 - **F3, platform.** The prepare argument, TRIGGERS `fate` and `unmatched`, Begin `held`, the `Unsettled` class, `hirsel deploy --held`<!-- doc-ref: planned -->, `--held-entry`<!-- doc-ref: planned -->, L40 (d), L49, L54, L70 (e) and an `operator_wire` vector.
 - **F4.** `hirsel dev` passes `Release`, and core/std/api/runner.md.

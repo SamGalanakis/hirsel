@@ -102,23 +102,43 @@ fn fold_prefix_charge(cut: TieredCutInput, base: std.page.PagePtr, sequence_limi
     Ok(total)
 }
 
-fn verify_tiered_fold(cut: TieredCutInput, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
-    let pack_file = paged_pack_path(base.pack)?
-    let mut trim_records = std.omap.range(overlay.trims, Unbounded, Unbounded)
-    while let Some((_, evidence)) = std.omap.next(mut trim_records) {
-        if evidence.lo < evidence.hi {
-            let low = fold_prefix_charge(cut, base, evidence.lo)?
-            let high = fold_prefix_charge(cut, base, evidence.hi)?
-            if int.checked_sub(high, low) != Some(evidence.cold_charge) {
-                return Error(disk_fault(pack_file, base.offset, Malformed))
-            }
+// Borrow the evidence directly from the immutable overlay. No cursor
+// allocation or key copy is needed between pager calls.
+fn visit_fold_records[K: ordered + shareable + send, V: shareable + send](node: Arc[std.omap.Node[K, V]],
+    visit: scoped[view] fn(K, V) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    for slot in 0u64 .. std.omap.node_count(node) {
+        if let Some(child) = std.omap.node_child(node, slot) {
+            visit_fold_records(child, visit)?
+        } else {
+            let key = option.unwrap(std.omap.node_key(node, slot))
+            let row = option.unwrap(std.omap.node_value(node, slot))
+            visit(key, row)?
         }
     }
-    let mut items = std.omap.range(overlay.entries, Unbounded, Unbounded)
-    while let Some((key, row)) = std.omap.next(mut items) {
-        if fold_base_prior(cut, base, key)? != row.base {
-            return Error(disk_fault(pack_file, base.offset, Malformed))
-        }
+    Ok(())
+}
+
+fn verify_tiered_fold(cut: TieredCutInput, base: std.page.PagePtr, overlay: Arc[ReplayOverlay]) -> Result[(), Error] waits {
+    let pack_file = paged_pack_path(base.pack)?
+    if let Some(root) = std.omap.root(overlay.trims) {
+        visit_fold_records(root, scoped fn(ordinal: u64, evidence: ReplayTrimEvidence) -> Result[(), Error] waits {
+            if evidence.lo < evidence.hi {
+                let low = fold_prefix_charge(cut, base, evidence.lo)?
+                let high = fold_prefix_charge(cut, base, evidence.hi)?
+                if int.checked_sub(high, low) != Some(evidence.cold_charge) {
+                    return Error(disk_fault(pack_file, base.offset, Malformed))
+                }
+            }
+            Ok(())
+        })?
+    }
+    if let Some(root) = std.omap.root(overlay.entries) {
+        visit_fold_records(root, scoped fn(key: Bytes, row: ReplayRow) -> Result[(), Error] waits {
+            if fold_base_prior(cut, base, key)? != row.base {
+                return Error(disk_fault(pack_file, base.offset, Malformed))
+            }
+            Ok(())
+        })?
     }
     Ok(())
 }

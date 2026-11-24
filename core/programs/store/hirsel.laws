@@ -185,7 +185,7 @@ store@1/store/test_l68_trim_preserves_untouched_cold_slots src=736f78febff76090 
 store@1/store/test_l70_cache_overlap src=d009b9bf0f2e481c sig=579946178485b234 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_dirty_admission src=56d2d07a10ca7144 sig=f75f697f1f584326 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_pager_admits_cache_backing src=6b3983ac800f3844 sig=71d72376265374ed run=722e0e8306f441ca bug=- oracle=- rows=pending
-store@1/store/test_l79_fold_checks_cold_evidence src=5a33b7ce057eb370 sig=37d38ec8acf16653 run=722e0e8306f441ca bug=- oracle=- rows=pending
+store@1/store/test_l79_fold_checks_cold_evidence src=3f9195e29c0700d6 sig=37d38ec8acf16653 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l79_overlay_trim_evidence src=41983a0ffe21b672 sig=07f94c0bf26c1964 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l79_pinned_trim_records_boundary_charge src=13394132f491d6e1 sig=ab406002b3b239d7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l82_tiered_tail_window_resolves_entering_rows src=15deaecc16b13699 sig=6a78756c617b5c5b run=a6b003f729117be3 bug=- oracle=- rows=pending

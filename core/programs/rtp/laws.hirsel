@@ -180,6 +180,11 @@ fn egress_form() -> Result[(), ()] {
     let rid = b"abcdefghijklmnopq"
     result.unwrap(ext.put(mut w, mixed, Rid, rid, 0, 17))
     check_egress(view w, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\x10\x00\x00\x07\x01\x01\xaa\x02\x02\x12\x34\x03\x11abcdefghijklmnopq\x00\x00")
+    // A reset writer forgets the two-byte form the RID forced.
+    ext.reset(mut w)
+    result.unwrap(ext.put_level(mut w, mixed, true, 42))
+    result.unwrap(ext.put(mut w, mixed, TransportSeq, b"\x00\x12\x34", 1, 2))
+    check_egress(view w, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\xbe\xde\x00\x02\x10\xaa\x21\x12\x34\x00\x00\x00")
     let two = short_values(egress_map(TwoOnly, true))
     check_egress(view two, b"\x90\xe0\x12\x34\x00\x00\x0b\xb8\x00\x00\xbe\xef\x10\x00\x00\x02\x01\x01\xaa\x02\x02\x12\x34\x00")
     let one = egress_map(OneOnly, false)

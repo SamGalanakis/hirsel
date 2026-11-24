@@ -227,17 +227,21 @@ pub type Element = Element(id: u8, at: u64, len: u64)
 pub type MapError = BadId | IdTaken | KindTaken | Full | Value(Kind)
 pub opaque type ExtMap
 pub opaque type ExtWriter
+pub opaque type Found
 
 pub fn map(form: Form) -> ExtMap
 pub fn bind(mut m: ExtMap, id: u8, k: Kind) -> Result[(), MapError]
 pub fn vad(mut m: ExtMap, on: bool)
 pub fn next(pkt: Bytes, h: Header, mut at: u64) -> Result[Option[Element], Error]
+pub fn scan(m: ExtMap, pkt: Bytes, h: Header) -> Result[Found, Error]
+pub fn found(f: Found, k: Kind) -> Option[Element]
 pub fn find(m: ExtMap, pkt: Bytes, h: Header, k: Kind) -> Result[Option[Element], Error]
 pub fn audio_level(m: ExtMap, pkt: Bytes, h: Header, e: Element) -> Result[(Option[bool], u8), Error]
 pub fn abs_send_time(pkt: Bytes, h: Header, e: Element) -> Result[u32, Error]
 pub fn transport_seq(pkt: Bytes, h: Header, e: Element) -> Result[u16, Error]
 pub fn token(pkt: Bytes, h: Header, k: Kind, e: Element) -> Result[Element, Error]
 pub fn writer() -> ExtWriter
+pub fn reset(mut w: ExtWriter)
 pub fn put(mut w: ExtWriter, m: ExtMap, k: Kind, value: Bytes, from: u64, len: u64) -> Result[(), MapError]
 pub fn put_level(mut w: ExtWriter, m: ExtMap, voice: bool, level: u8) -> Result[(), MapError]
 pub fn put_other(mut w: ExtWriter, m: ExtMap, id: u8, value: Bytes, from: u64, len: u64) -> Result[(), MapError]
@@ -279,9 +283,11 @@ Every `Some` moves `at` past at least one byte, and the end of the walk is termi
 `next` has answered `None` it moves `at` to the block's end, and every later call answers
 `None`. So a walk takes at most the block's length in steps.
 
-`find` walks the **whole** block before it answers, and answers the first element whose id
-the map binds to `k` only when the walk ends without `Overrun`. An `Overrun` anywhere in the
-block is `Overrun`, even after a match.
+`scan` walks the **whole** block once, with `next`'s grammar, and records for every kind the
+map binds the first element with that kind's id; `found(f, k)` answers it, or `None`. It
+answers only when the walk ends without `Overrun`: an `Overrun` anywhere in the block is
+`Overrun`, even after a match. `find(m, pkt, h, k)` is `found(scan(m, pkt, h)?, k)`. A caller
+that reads several kinds of one packet scans once instead of walking the block per kind.
 
 An `Overrun` comes from an authenticated sender that broke the format. The forwarder drops
 the packet. `str0m` stops reading at the overrun and keeps the packet
@@ -304,7 +310,9 @@ the negotiated value in place, so reading a MID allocates nothing.
 
 **Writing.** An egress header carries the subscriber's ids, not the publisher's. The
 forwarder fills an `ExtWriter` (a fixed buffer of 256 bytes inside the writer, with up to 16
-elements) and `header.write` lays the block out. `put` looks up the subscriber map's id for
+elements) and `header.write` lays the block out. `reset(w)` empties a writer, so a
+forwarder keeps one writer per stream and resets it per packet instead of building and
+filling a new one. `put` looks up the subscriber map's id for
 `k`. An unbound kind is skipped and answers `Ok`, because the subscriber did not negotiate
 it. `put` checks the value against the kind's wire grammar above and answers `Value(k)`
 otherwise, so a forwarder never writes a RID the receiver would refuse. `put_level` writes
@@ -1343,9 +1351,9 @@ After these return, no packet of that stream can come out of `rtp` again, and ev
 stream is untouched.
 
 **Cost.** PLAN Wave 1.4 sets the target: **at most 80 ns to parse and rewrite one packet,
-with 0 allocations**. The measured path is `header.parse`, `ext.find` for MID, audio level
+with 0 allocations**. The measured path is `header.parse`, one `ext.scan` read for MID, audio level
 and transport sequence number, `Rewrite.on_packet`, and `header.write` of a subscriber
-header with audio level and transport sequence number, on a 1,200-byte packet shaped like
+header with audio level and transport sequence number from one writer `reset` per packet, on a 1,200-byte packet shaped like
 the vector of law `header_chrome_vector`. Instructions come from one `perf stat` run, and
 cycles from 60 interleaved pairs on a shielded CPU, as the host rules say. The forwarding
 spec owns the per-subscriber fan-out target (250 ns), of which this path is part. No peer
@@ -1661,7 +1669,9 @@ written here and repeated in the law's comment.
   and stays there; the receiver's goodput over the last 5 s is at least 0.7 Mbit/s; at least
   1,000 queue-delay samples are taken in the last 5 s, and their 95th percentile is below
   200 ms. *Oracle:* the scenario's capacity, with 10 s and 200 ms as acceptance thresholds.
-- **`parse_rewrite_cost` (RTP-12).** The cost path of RTP-12: at most 80 ns, 0 allocations.
+- **`parse_rewrite_cost` (RTP-12).** The cost path of RTP-12: at most 80 ns, 0 allocations. Passing since
+  rtp-s11b-ext-2501: 74.6 ns median (p99 78.7), 304.5 cycles and 1,530 instructions per packet
+  on shielded CPU 16 at 4.1 GHz, against 92.8 ns and 1,966 instructions for its parent.
   Each run first checks one rewritten packet's outgoing index, timestamp, SSRC and
   extension bytes against values worked by hand, and folds every output header into a
   checksum read after the timed region, so a skipped rewrite cannot pass. *Oracle:* the
@@ -1685,7 +1695,7 @@ package. Each law is carried by exactly one slice.
 | **S8** rewriting | RTP-11, RTP-12: modules `rewrite` and `counter`, and the close operations | S1, S4, S7 | `rewrite_continuity`, `rewrite_late`, `simulcast_switch`, `svc_masks`, `codec_counter_continuity`, `close_leaves_nothing` | L | Opus |
 | **S9** unit adapter in `media_bits` | a `vp8` module (RFC 7741 descriptor: picture ID, TL0PICIDX, TID, `Y`, `S`, `PID`, keyframe from `P`, in-place rewrite of picture ID and TL0PICIDX at the output width), and the `Unit` adapter for VP8, VP9, H.264 and AV1. The one owner of the VP8 parser and descriptor laws; WebRTC slice S2 consumes them at egress | nothing | `unit_adapter` | M | Opus |
 | **S10** network laws | the two `sim.udp` laws | S4 to S7, `std.sim.udp` (media-w0-sim-udp-2324) | `nack_recovery_under_loss`, `congestion_backoff` | M | Sol |
-| **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost`: [`python3 bench/rtp/cost.py <scratch-dir>`](../../bench/rtp/cost.py) checks 0 allocations per packet (default mode), reports instructions (`--mode instructions`) and times the path on a shielded CPU (`--mode time`) | S | Sol |
+| **S11** cost | the RTP-12 cost path; the only slice with a cost target and the only one that runs a benchmark | S1, S3, S8 | `parse_rewrite_cost`: [`python3 bench/rtp/cost.py <scratch-dir>`](../../bench/rtp/cost.py) checks 0 allocations per packet (the default mode), reports instructions (mode `instructions`) and times the path on a shielded CPU (mode `time`) | S | Sol |
 | **S12** protected RTX | the SRTP wire case of RTP-7, in `core/programs/srtp/` | S4, DTLS slice S5 | `rtx_protected` in `core/programs/srtp/laws.hirsel` | S | Devin |
 
 Every slice that changes a `.hirsel` source under `core/programs/rtp` <!-- doc-ref: planned --> or

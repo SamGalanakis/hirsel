@@ -131,18 +131,84 @@ pub fn next(pkt: Bytes, h: header.Header, mut at: u64) -> Result[Option[Element]
     Ok(None)
 }
 
-pub fn find(m: ExtMap, pkt: Bytes, h: header.Header, k: Kind) -> Result[Option[Element], Error] {
-    let id = m.ids[slot(k)]
-    let mut at = 0u64
-    let mut found: Option[Element] = None
-    while let Some(e) = next(pkt, h, mut at)? {
-        if e.id == id {
-            if let None = found {
-                found = Some(e)
-            }
-        }
+// One walk of the block for every kind the map binds. A value's offset is
+// kept relative to the block start; 0 means the kind was not found, since a
+// value always follows at least its element's first byte.
+pub opaque type Found {
+    start: u64,
+    ids: Inline[u8, 6],
+    at: Inline[u32, 6],
+    len: Inline[u8, 6]
+}
+
+pub fn scan(m: ExtMap, pkt: Bytes, h: header.Header) -> Result[Found, Error] {
+    if list.len(pkt) != h.len {
+        return Error(Buffer)
     }
-    Ok(found)
+    let mut f = Found(start: 0, ids: m.ids, at:[0u32; 6], len:[0u8; 6])
+    let (start, len, one_byte) = match h.block {
+        OneByte(at: start, len: len) => (start, len, true),
+        TwoByte(at: start, len: len) => (start, len, false),
+        _ => return Ok(f),
+    }
+    if !block_fits(h, start, len) {
+        return Error(Overrun)
+    }
+    f.start = start
+    let mut pos = 0u64
+    while pos < len {
+        let first = pkt[start + pos]
+        pos += 1
+        if first == 0 {
+            continue
+        }
+        let (id, octets) = if one_byte {
+            let id = first >> 4
+            if id == 0 || id == 15 {
+                return Ok(f)
+            }
+            (id, (first & 15) + 1)
+        } else {
+            if pos == len {
+                return Error(Overrun)
+            }
+            let size = pkt[start + pos]
+            pos += 1
+            (first, size)
+        }
+        let size: u64 = int.widen(octets)
+        if size > len - pos {
+            return Error(Overrun)
+        }
+        // Bound ids are distinct and nonzero, and an element's id is never 0.
+        let mut s = 0u64
+        while s < 6 {
+            if m.ids[s] == id {
+                if f.at[s] == 0 {
+                    f.at[s] = int.narrow(pos)
+                    f.len[s] = octets
+                }
+                break
+            }
+            s += 1
+        }
+        pos += size
+    }
+    Ok(f)
+}
+
+pub fn found(f: Found, k: Kind) -> Option[Element] {
+    let s = slot(k)
+    let at = f.at[s]
+    if at == 0 {
+        return None
+    }
+    let offset: u64 = int.widen(at)
+    Some(Element(id: f.ids[s], at: f.start + offset, len: int.widen(f.len[s])))
+}
+
+pub fn find(m: ExtMap, pkt: Bytes, h: header.Header, k: Kind) -> Result[Option[Element], Error] {
+    Ok(found(scan(m, pkt, h)?, k))
 }
 
 fn value_in_block(h: header.Header, e: Element) -> bool {
@@ -232,6 +298,16 @@ pub fn token(pkt: Bytes, h: header.Header, k: Kind, e: Element) -> Result[Elemen
 
 pub fn writer() -> ExtWriter {
     ExtWriter(form: Mixed, conflicting_forms: false, one_byte: true, entries:[Entry(id: 0, len: 0); 16], data:[0u8; 256], count: 0, used: 0)
+}
+
+// Empty the writer for the next header without touching its buffers: only
+// the first `count` entries and `used` bytes are ever read.
+pub fn reset(mut w: ExtWriter) {
+    w.form = Mixed
+    w.conflicting_forms = false
+    w.one_byte = true
+    w.count = 0
+    w.used = 0
 }
 
 fn reserve_element(mut w: ExtWriter, form: Form, id: u8, len: u64) -> Result[u64, MapError] {

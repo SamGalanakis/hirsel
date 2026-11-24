@@ -1,6 +1,6 @@
 // The RTP-12 cost path: parse one 1,200-byte packet shaped like the vector of
-// law header_chrome_vector, find MID, audio level and transport sequence
-// number, rewrite it for one subscriber, and write the subscriber's header.
+// law header_chrome_vector, scan once for MID, audio level and transport
+// sequence number, rewrite it for one subscriber, and write the subscriber's header.
 const PACKETS: u64 = 1000000
 
 const SIZE: u64 = 1200
@@ -39,15 +39,16 @@ type State {
 }
 
 // One packet through the cost path. Answers the length of the header written.
-fn forward(mut r: rtp.rewrite.Rewrite, mut s: State, from: rtp.ext.ExtMap, to: rtp.ext.ExtMap, pkt: Bytes, at_ns: u64, u: rtp.rewrite.Unit, mut tseq: Bytes, mut out: Bytes) -> u64 {
+fn forward(mut r: rtp.rewrite.Rewrite, mut s: State, mut w: rtp.ext.ExtWriter, from: rtp.ext.ExtMap, to: rtp.ext.ExtMap, pkt: Bytes, at_ns: u64, u: rtp.rewrite.Unit, mut tseq: Bytes, mut out: Bytes) -> u64 {
     let h = result.unwrap(rtp.header.parse(pkt))
-    let Some(_mid) = result.unwrap(rtp.ext.find(from, pkt, h, Mid)) else {
+    let found = result.unwrap(rtp.ext.scan(from, pkt, h))
+    let Some(_mid) = rtp.ext.found(found, Mid) else {
         fail("no MID")
     }
-    let Some(level_at) = result.unwrap(rtp.ext.find(from, pkt, h, AudioLevel)) else {
+    let Some(level_at) = rtp.ext.found(found, AudioLevel) else {
         fail("no audio level")
     }
-    let Some(_seq_at) = result.unwrap(rtp.ext.find(from, pkt, h, TransportSeq)) else {
+    let Some(_seq_at) = rtp.ext.found(found, TransportSeq) else {
         fail("no transport sequence number")
     }
     let (voice, level) = result.unwrap(rtp.ext.audio_level(from, pkt, h, level_at))
@@ -62,7 +63,7 @@ fn forward(mut r: rtp.rewrite.Rewrite, mut s: State, from: rtp.ext.ExtMap, to: r
     let Forward(out_index, out_ts) = rtp.rewrite.on_packet(mut r, h.ssrc, index, ts, at_ns, false, u) else {
         fail("packet not forwarded")
     }
-    let mut w = rtp.ext.writer()
+    rtp.ext.reset(mut w)
     result.unwrap(rtp.ext.put_level(mut w, to, voice == Some(true), level))
     list.set_word_be(mut tseq, 0, s.transport)
     s.transport = int.wrapping_add(s.transport, 1u16)
@@ -103,10 +104,12 @@ pub fn main(out: Stdout) -> Result[(), Exit] waits {
     let mut tseq: Bytes = list.with_capacity(2)
     list.fill(mut tseq, 2, 0u8)
     let mut header_out: Bytes = list.with_capacity(24)
+    // One writer for the stream, emptied for each packet's header.
+    let mut w = rtp.ext.writer()
     // Packet 0, checked against the header worked by hand: outgoing index
     // 1000, timestamp 5000, the subscriber's SSRC, then a one-byte block of
     // two words: audio level (ID 1, voice, 42) and transport sequence 0.
-    if forward(mut r, mut s, from, to, pkt, 0, unit(true), mut tseq, mut header_out) != 24 || header_out != b"\x90\x6f\x03\xe8\x00\x00\x13\x88\x11\x22\x33\x44\xbe\xde\x00\x02\x10\xaa\x31\x00\x00\x00\x00\x00" {
+    if forward(mut r, mut s, mut w, from, to, pkt, 0, unit(true), mut tseq, mut header_out) != 24 || header_out != b"\x90\x6f\x03\xe8\x00\x00\x13\x88\x11\x22\x33\x44\xbe\xde\x00\x02\x10\xaa\x31\x00\x00\x00\x00\x00" {
         fail("packet 0 header")
     }
     let next = unit(false)
@@ -121,7 +124,7 @@ pub fn main(out: Stdout) -> Result[(), Exit] waits {
         let wire_ts: u32 = int.truncate(10000 + step * i)
         list.set_word_be(mut pkt, 2, wire_seq)
         list.set_word_be(mut pkt, 4, wire_ts)
-        if forward(mut r, mut s, from, to, pkt, i * STEP_NS, next, mut tseq, mut header_out) != 24 {
+        if forward(mut r, mut s, mut w, from, to, pkt, i * STEP_NS, next, mut tseq, mut header_out) != 24 {
             fail("header length")
         }
         sum = fold(sum, header_out)

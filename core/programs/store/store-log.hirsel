@@ -378,12 +378,23 @@ fn window_deletions(mut out: ChangeOutput, id: u32, lo: u64, hi: u64) -> Result[
     Ok(())
 }
 
-fn window_insertions(mut out: ChangeOutput, after: PageTree, id: u32, lo: u64, hi: u64) -> Result[(), Error] {
-    if lo < hi {
-        let mut rows = byte_cursor(after, Included(log_key(id, lo)?), log_key(id, hi)?)?
-        while let Some((take key, take value)) = next_bytes(mut rows)? {
-            list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
+fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32, lo: u64, hi: u64) -> Result[(), Error] waits {
+    if lo >= hi { return Ok(()) }
+    let low = log_key(id, lo)?
+    let high = log_key(id, hi)?
+    let tree = view after.roots.collections
+    if let Some(inventory) = view tree.paging {
+        let descriptor = option.unwrap(std.page.lookup(tree.root, list.slice(low, 0, 4)))
+        if descriptor[53u64] == 1 {
+            let rows = snapshot_tiered_span(r, after, inventory, low, high)?
+            capacity(list.try_reserve(mut out.rows, list.len(rows)))?
+            for take row in take rows { list.push(mut out.rows, take row) }
+            return Ok(())
         }
+    }
+    let mut rows = byte_cursor(tree, Included(take low), high)?
+    while let Some((take key, take value)) = next_bytes(mut rows)? {
+        list.push(mut out.rows, Change(tree_key: take key, value: Some(take value)))
     }
     Ok(())
 }
@@ -396,7 +407,7 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
     let overlap_first = order.max(old.first, new.first)
     let overlap_next = order.min(old.next, new.next)
     window_deletions(mut out, id, old.first, order.min(old.next, new.first))?
-    window_insertions(mut out, b.roots.collections, id, new.first, order.min(new.next, old.first))?
+    window_insertions(r, mut out, b, id, new.first, order.min(new.next, old.first))?
     if a.branch != b.branch && overlap_first < overlap_next {
         let key = prefix(id)?
         let mut previous = start_diff(std.page.collection_child(a.roots.collections.root, key), Some(key_word(overlap_first)))
@@ -404,7 +415,7 @@ pub fn window_changes[V](r: Reader, a: Snapshot, b: Snapshot, l: Log[V], t: u64)
         let _ = page_change_rows(mut out, id, mut previous, mut current, Some(key_word(overlap_next)))?
     }
     window_deletions(mut out, id, order.max(old.first, new.next), old.next)?
-    window_insertions(mut out, b.roots.collections, id, order.max(new.first, old.next), new.next)?
+    window_insertions(r, mut out, b, id, order.max(new.first, old.next), new.next)?
     let ChangeOutput(rows: take items, ..) = take out
     Ok(take items)
 }

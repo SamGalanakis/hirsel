@@ -15,7 +15,14 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
             fail("L62: fixture PAGE did not fit")
         }
         let (take raw, inventory) = finish_tiered_pack(take draft)?
-        (take raw, inventory, place, arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+        let kind = before[52u64]
+        let descriptor = if kind == 4 {
+            let limits = descriptor_bounds(before)
+            log_record(here, limits.first, limits.next, 1)?
+        } else {
+            rooted_collection_record(here, kind, 1)?
+        }
+        (take raw, inventory, place, arc.share(here), take descriptor)
     }
     disk_write_synced(d, paged_pack_path(pack_seq)?, raw)?
     let mut draw = stamp_after(db.next_node)?
@@ -32,6 +39,73 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
     db.heads[0u64].roots.collections = take tree
     db.next_node = draw - 1
     Ok(())
+}
+
+fn l62_replay_log_window(mut db: Db, events: Log[u32]) -> Result[(), Error] {
+    let id = events.binding.id
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let mut draw = stamp_after(db.next_node)?
+    let mut account = ReplayTieredAccount(total: 258, exact: true, ordinal: 0)
+    let trimmed = JournalOp(key: prefix(id)?, value: None, prior: 0, trim: Some(JournalTrim(floor: 1, dropped: 86)))
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayOrigin(ordinal: 1, branch: 0),
+        ReplayDescriptor(rows: 3, row_bytes: 258, seq_bounds: Some(LogBounds(first: 0, next: 3))), trimmed)?
+    let mut value: Bytes = list.with_capacity(6)
+    list.put_word_le(mut value, events.binding.readers.current)
+    list.put_word_le(mut value, 13u32)
+    let appended = JournalOp(key: log_key(id, 3)?, value: Some(take value), prior: 0, trim: None)
+    replay_tiered_op("j-1", mut tree, mut draw, mut account, ReplayOrigin(ordinal: 2, branch: 0),
+        ReplayDescriptor(rows: 2, row_bytes: 172, seq_bounds: Some(LogBounds(first: 1, next: 3))), appended)?
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    db.heads[0u64].head += 1
+    Ok(())
+}
+
+fn l62_log_window_reads(mut db: Db, events: Log[u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let before = snapshot(db)
+    l62_replay_log_window(mut db, events)?
+    let after = snapshot(db)
+    let added = window_changes(read_handle, before, after, events, 2)?
+    let removed = window_changes(read_handle, after, before, events, 2)?
+    let id = events.binding.id
+    let old_key = log_key(id, 1)?
+    let new_key = log_key(id, 3)?
+    let mut eleven: Bytes = list.new()
+    let mut thirteen: Bytes = list.new()
+    list.put_word_le(mut eleven, 11u32)
+    list.put_word_le(mut thirteen, 13u32)
+    // The windows are [1, 3) and [2, 4). Only 1 and 3 change membership.
+    if list.len(added) != 2 || added[0u64].tree_key != old_key || added[0u64].value != None ||
+        added[1u64].tree_key != new_key || published_log(events, added[1u64])? != Some(take thirteen) ||
+        list.len(removed) != 2 || removed[0u64].tree_key != old_key || published_log(events, removed[0u64])? != Some(take eleven) ||
+        removed[1u64].tree_key != new_key || removed[1u64].value != None {
+        fail("L82: a moving window must recover entering rows from Cold pages and replay")
+    }
+    Ok(())
+}
+
+@test
+fn test_l82_tiered_tail_window_resolves_entering_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let mut schema = declare(db, Migrate)?
+    let events = declare_log(mut schema, "events", std.codec.of_u32())?
+    let _ = seal(mut db, take schema)?
+    let Committed(_) = run(mut db, None, copy_env(events), fn(mut tx: Tx, log_handle: Log[u32]) -> Result[(), Error] {
+        for value in 10u32 .. 13u32 { let _ = append(mut tx, log_handle, value)? }
+        Ok(())
+    })? else {
+        fail("L82: fixture Log appends must commit")
+    }
+    l62_prepare_snapshot_pages(mut db, fixtures, events.binding.id, 8)?
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answer = l62_log_window_reads(mut db, events)
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answer
 }
 
 fn l62_snapshot_point_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {

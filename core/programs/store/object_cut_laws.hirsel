@@ -216,15 +216,95 @@ fn bucket_test_m2_multipart_refused_cut(c: Clock, r: Random, tasks: Tasks) -> Re
     outcome
 }
 
+fn object_import_seed(mut writer: Db, rows: Table[u64, u64], other: Table[u64, u64]) -> Result[(), Error] waits {
+    let outcome = run(mut writer, None, (copy_env(rows), copy_env(other)), fn(mut tx, tables) -> Result[(), Error] {
+        for k in 0u64 .. 96 { put(mut tx, tables.0, k, k + 1)? }
+        for k in 10u64 .. 16 { put(mut tx, tables.1, k, k * 10)? }
+        Ok(())
+    })?
+    let Committed(take receipt) = take outcome else { fail("could not seed both import tables") }
+    durable(mut writer, receipt.ticket)?
+    bucket_law_checkpoint(mut writer)
+}
+
+fn object_import_edit(mut writer: Db, rows: Table[u64, u64], other: Table[u64, u64], later: bool) -> Result[(), Error] waits {
+    let outcome = run(mut writer, None, (copy_env(rows), copy_env(other), copy_env(later)), fn(mut tx, fixture) -> Result[(), Error] {
+        if fixture.2 {
+            put(mut tx, fixture.0, 96, 970)?
+            put(mut tx, fixture.1, 16, 160)?
+        } else {
+            put(mut tx, fixture.0, 7, 700)?
+            put(mut tx, fixture.1, 12, 1200)?
+            if !delete(mut tx, fixture.0, 8)? || !delete(mut tx, fixture.1, 13)? {
+                fail("the rows to delete must exist in both import tables")
+            }
+        }
+        Ok(())
+    })?
+    let Committed(take receipt) = take outcome else { fail("could not commit the import fixture edits") }
+    durable(mut writer, receipt.ticket)
+}
+
+fn object_import_rows(read_handle: Reader, visible: Snapshot, table_handle: Table[u64, u64], expected: Map[u64, u64]) -> Result[(), Error] waits {
+    let limit = Limits(rows: 2, byte_limit: 1024)
+    let mut batch = scan_page(read_handle, visible, table_handle, Unbounded, Unbounded, limit)?
+    let mut seen = 0u64
+    let mut previous: Option[u64] = None
+    loop {
+        for (key, value) in batch.rows {
+            let Some(expected_value) = map.get(expected, key) else {
+                fail("the restored table has a row outside its frozen map")
+            }
+            if (if let Some(prior_key) = previous { key <= prior_key } else { false }) ||
+                value != expected_value {
+                fail("the restored table differs from its frozen map")
+            }
+            previous = Some(key)
+            seen += 1
+        }
+        let Page(next: take more, ..) = take batch
+        let Some(take resume) = take more else { break }
+        if seen >= map.len(expected) {
+            fail("the restored table has a resume after its last expected row")
+        }
+        let Paged(take following) = scan_next(read_handle, visible, table_handle, take resume, limit)? else {
+            fail("the restored table's resume must stay on the same snapshot")
+        }
+        if list.len(following.rows) == 0 { fail("the restored table's resume made no progress") }
+        batch = take following
+    }
+    if seen != map.len(expected) { fail("the restored table ended before its frozen map") }
+    Ok(())
+}
+
 fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), DeployError] waits {
     let original = disk_test_directory(d)
     deploy_result(crash_install_init(original, c, r, tasks))?
     let log_options = disk_crash_options("install")
     let mut writer = deploy_result(open(tasks, original, c, r, log_options))?
+    let source_rows = deploy_result(table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let source_other = deploy_result(table(mut writer, "other", std.codec.key_u64(), std.codec.of_u64()))?
+    deploy_result(object_import_seed(mut writer, source_rows, source_other))?
+    deploy_result(object_import_edit(mut writer, source_rows, source_other, false))?
+
+    let mut expected_rows: Map[u64, u64] = map.new()
+    for k in 0u64 .. 96 {
+        if k != 8 { map.insert(mut expected_rows, k, if k == 7 { 700 } else { k + 1 }) }
+    }
+    let mut expected_other: Map[u64, u64] = map.new()
+    for k in 10u64 .. 16 {
+        if k != 13 { map.insert(mut expected_other, k, if k == 12 { 1200 } else { k * 10 }) }
+    }
+    let frozen_head = version(snapshot(writer))
     let original_id = writer.store
     let attempt = install_fixture_bytes(16, 7)
-    let (export_dir, exported_head) = crash_install_prepared(mut writer, d, c, tasks, attempt)?
+    let copying = begin_export_copy(mut writer, d, clone(attempt), 1)?
+    deploy_result(object_import_edit(mut writer, source_rows, source_other, true))?
+    if version(snapshot(writer)) <= frozen_head { fail("the source did not advance after capture") }
+    let exported = export_copy(take copying)?
+    release_export(mut writer, attempt)
     deploy_result(close(take writer))?
+    let export_dir = exported.dir
     let options = bucket_law_options(true)
     let prepared = open_export(export_dir, c, attempt, log_options)?
     let primary = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 1))?
@@ -271,16 +351,12 @@ fn object_import_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let mut schema = declare_follower(follower_view)
     let declared_rows = deploy_result(declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = deploy_result(finish(mut schema, take declared_rows))?
-    let other = deploy_result(declare_table(mut schema, "other", std.codec.key_u64(), std.codec.of_u64()))?
-    let _ = deploy_result(finish(mut schema, take other))?
+    let declared_other = deploy_result(declare_table(mut schema, "other", std.codec.key_u64(), std.codec.of_u64()))?
+    let other = deploy_result(finish(mut schema, take declared_other))?
     deploy_result(seal_follower(follower_view, take schema))?
-    if version(visible) != exported_head { fail("the imported base lost the exported version") }
-    for row_id in 0u64 .. 96 {
-        if deploy_result(get(view_reader, visible, rows, row_id))? != Some(row_id + 1) {
-            fail("a cold follower did not read the original export rows")
-        }
-    }
-    Ok(())
+    if version(visible) != frozen_head { fail("the imported base lost the writer's captured version") }
+    deploy_result(object_import_rows(view_reader, visible, rows, expected_rows))?
+    deploy_result(object_import_rows(view_reader, visible, other, expected_other))
 }
 
 @test

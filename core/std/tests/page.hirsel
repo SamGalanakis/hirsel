@@ -206,6 +206,180 @@ fn malformed_slots() -> bool {
     malformed(alias, Collection) && malformed(dangling, Collection) && malformed(wide, Collection) && malformed(good, CollectionMap)
 }
 
+// Build packed AP3 payloads from their field widths so the decoder's oracle
+// does not depend on what page.encode emits.
+fn sealed_pair(level: u8, stamp: u64, prefix: Bytes, first: Bytes, second: Bytes) -> Bytes {
+    let start = 24 + list.len(prefix)
+    let next = start + list.len(first)
+    let heap = next + list.len(second)
+    let prefix_word: u16 = int.narrow(list.len(prefix))
+    let heap_word: u32 = int.narrow(heap)
+    let first_slot: u16 = int.narrow(start)
+    let second_slot: u16 = int.narrow(next)
+    let mut raw: Bytes = list.with_capacity(heap + 4)
+    list.fill(mut raw, 24, 0)
+    raw[0u64] = level
+    list.set_word_le(mut raw, 2, 2u16)
+    list.set_word_le(mut raw, 4, prefix_word)
+    list.set_word_le(mut raw, 8, stamp)
+    list.set_word_le(mut raw, 16, heap_word)
+    list.append(mut raw, prefix)
+    list.append(mut raw, first)
+    list.append(mut raw, second)
+    list.put_word_le(mut raw, first_slot)
+    list.put_word_le(mut raw, second_slot)
+    take raw
+}
+
+fn sealed_inline(suffix: Bytes, value: Bytes) -> Bytes {
+    let mut row: Bytes = list.new()
+    let suffix_word: u16 = int.narrow(list.len(suffix))
+    let value_word: u16 = int.narrow(list.len(value))
+    list.put_word_le(mut row, suffix_word)
+    list.append(mut row, suffix)
+    list.push(mut row, 0u8)
+    list.put_word_le(mut row, value_word)
+    list.append(mut row, value)
+    take row
+}
+
+fn sealed_branch(suffix: Bytes, stamp: u64) -> Bytes {
+    let mut row: Bytes = list.new()
+    let suffix_word: u16 = int.narrow(list.len(suffix))
+    list.put_word_le(mut row, suffix_word)
+    list.append(mut row, suffix)
+    list.fill(mut row, 28, 0)
+    list.put_word_le(mut row, stamp)
+    list.put_word_le(mut row, 2u64)
+    list.put_word_le(mut row, 172u64)
+    take row
+}
+
+// Every one-byte edit of a well-formed image must decode or report one of the
+// local outcomes AP3 names, without a trap; only a collection map may report
+// UnsupportedPage.
+fn decodes_locally(raw: Bytes, domain: page.Domain, flip: u8) -> bool {
+    for i in 0u64 .. list.len(raw) {
+        let mut edited: Bytes = clone(raw)
+        edited[i] = edited[i] ^ flip
+        match page.decode(take edited, domain) {
+            Ok(_) => (),
+            Error(MalformedPage) => (),
+            Error(UnsupportedPage) => if domain != CollectionMap {
+                return false
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn sealed_page_trial(sample: (u64, (u64, u64))) -> Result[(), String] {
+    let (stamp, (prefix_len, trial)) = sample
+    let mut prefix: Bytes = list.new()
+    list.fill(mut prefix, prefix_len, int.narrow(stamp % 256))
+    let at = 24 + prefix_len
+    let mut value: Bytes = list.new()
+    list.fill(mut value, trial % 9, int.narrow(stamp % 251))
+    let high = hex("ab02")
+    let low = hex("ab01")
+    let mut leaf = sealed_pair(0, stamp, prefix, sealed_inline(hex("ab00"), value), sealed_inline(low, value))
+    // Both slots share another prefix byte. An edit to the first key reverses
+    // their order without invalidating the payload's local structure.
+    leaf[at + 3] = 2
+    let decoded = match page.decode(clone(leaf), Collection) {
+        Ok(take image) => take image,
+        _ => return Error(string.from("AP3 accepts a shorter prefix and does not check key order")),
+    }
+    let mut high_key: Bytes = clone(prefix)
+    let mut low_key: Bytes = clone(prefix)
+    list.append(mut high_key, high)
+    list.append(mut low_key, low)
+    if page.stamp(decoded) != stamp || page.count(decoded) != 2 || !unpacked(decoded, 0, high_key, value) || !unpacked(decoded, 1, low_key, value) {
+        return Error(string.from("the well-formed leaf changed its slots"))
+    }
+    let flip: u8 = int.narrow(trial % 255 + 1)
+    if !decodes_locally(leaf, Collection, flip) {
+        return Error(string.from("an edited leaf trapped or left AP3's local outcomes"))
+    }
+    let len = list.len(leaf)
+    let mut alias: Bytes = clone(leaf)
+    let mut bad_tag: Bytes = clone(leaf)
+    let mut bad_width: Bytes = clone(leaf)
+    let first_slot: u16 = int.narrow(at)
+    list.set_word_le(mut alias, len - 2, first_slot)
+    bad_tag[at + 4] = 2
+    list.set_word_le(mut bad_width, at + 5, 1025u16)
+    if !malformed(alias, Collection) || !malformed(bad_tag, Collection) || !malformed(bad_width, Collection) || !malformed(list.slice(leaf, 0, trial % len), Collection) {
+        return Error(string.from("AP3 admitted an alias, invalid inline value or truncated heap"))
+    }
+    let mut branch_image = sealed_pair(1, stamp, prefix, sealed_branch(list.new(), stamp), sealed_branch(low, stamp + 1))
+    let ptr = page.PagePtr(pack: 0, offset: 0, len: 0, checksum: 0, stamp: stamp + 1)
+    if let Ok(take image) = page.decode(clone(branch_image), Unprefixed) {
+        if page.level(image) != 1 || !branch_ok(image, 1, low_key, ptr) {
+            return Error(string.from("the well-formed branch changed its separator or child"))
+        }
+    } else {
+        return Error(string.from("AP3 refused a branch with a shorter prefix"))
+    }
+    if !decodes_locally(branch_image, Unprefixed, flip) {
+        return Error(string.from("an edited branch trapped or left AP3's local outcomes"))
+    }
+    list.set_word_le(mut branch_image, at, 1u16)
+    if !malformed(branch_image, Unprefixed) {
+        return Error(string.from("AP3 admitted a nonempty branch slot zero"))
+    }
+    let mut first_blob = hex("01000101")
+    list.append(mut first_blob, blob_ref_bytes())
+    let mut second_blob: Bytes = clone(first_blob)
+    second_blob[2u64] = 2
+    list.set_word_le(mut second_blob, 44, 1u16)
+    let mut blobs = sealed_pair(0, stamp, prefix, first_blob, second_blob)
+    if let Error(_) = page.decode(clone(blobs), Collection) {
+        return Error(string.from("AP3 refused consecutive blob body numbers"))
+    }
+    if !decodes_locally(blobs, Collection, flip) {
+        return Error(string.from("an edited blob leaf trapped or left AP3's local outcomes"))
+    }
+    list.set_word_le(mut blobs, at + 46 + 44, 0u16)
+    if !malformed(blobs, Collection) {
+        return Error(string.from("AP3 admitted duplicate blob body numbers"))
+    }
+    let mut descriptor: Bytes = list.new()
+    list.fill(mut descriptor, 52, 0)
+    list.append(mut descriptor, hex("01000000"))
+    let mut descriptors = sealed_pair(0, stamp, hex("000000"), sealed_inline(hex("01"), descriptor), sealed_inline(hex("02"), descriptor))
+    if let Error(_) = page.decode(clone(descriptors), CollectionMap) {
+        return Error(string.from("AP3 refused four-byte collection keys with table descriptors"))
+    }
+    if !decodes_locally(descriptors, CollectionMap, flip) {
+        return Error(string.from("an edited collection map leaf trapped or left AP3's local outcomes"))
+    }
+    let layout = 24u64 + 3 + 2 + 1 + 1 + 2 + 54
+    descriptors[layout] = 1
+    if let Error(UnsupportedPage) = page.decode(clone(descriptors), CollectionMap) {} else {
+        return Error(string.from("an unsupported collection layout must report UnsupportedPage"))
+    }
+    descriptors[layout] = 0
+    descriptors[layout + 1] = 1
+    if !malformed(descriptors, CollectionMap) {
+        return Error(string.from("AP3 admitted a nonzero descriptor reserved byte"))
+    }
+    Ok(())
+}
+
+// expect: run malformed_sealed_page_property() = true
+fn malformed_sealed_page_property() -> bool {
+    let mut config = prop.config()
+    config.cases = 64
+    let sample = prop.pair(prop.u64_in(1, 65535), prop.pair(prop.u64_in(0, 12), prop.u64_in(0, 255)))
+    if let Ok(()) = prop.check(config, take sample, sealed_page_trial) {
+        true
+    } else {
+        false
+    }
+}
+
 fn model(old: List[(u64, u64)], key: u64, value: u64, deleting: bool) -> List[(u64, u64)] {
     let mut out: List[(u64, u64)] = list.with_capacity(list.len(old) + 1)
     let mut pending = !deleting

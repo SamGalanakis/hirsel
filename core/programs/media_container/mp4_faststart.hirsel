@@ -1,0 +1,181 @@
+pub type FastStart {
+    prefix: FileRange,
+    metadata: Bytes,
+    middle: FileRange,
+    suffix: FileRange
+}
+
+type Relocation {
+    insert_at: u64,
+    original: FileRange,
+    new_size: u64,
+    promote: bool
+}
+
+fn moved_offset(pos: u64, movement: Relocation, media: List[FileRange]) -> Result[u64, VodError] {
+    let _ = media_range(media, pos)?
+    if pos < movement.insert_at {
+        return Ok(pos)
+    }
+    let base = if pos < movement.original.start {
+        pos
+    } else {
+        pos - (movement.original.end - movement.original.start)
+    }
+    let Some(changed) = int.checked_add(base, movement.new_size) else {
+        return Error(BadTable)
+    }
+    Ok(changed)
+}
+
+fn copy_chunk_table(mut out: Bytes, input: Bytes, start: u64, b: BoxHeader, movement: Relocation, media: List[FileRange]) -> Result[(), VodError] {
+    let source_width = if b.kind == 0x7374636f {
+        4u64
+    } else {
+        8u64
+    }
+    let table = entries(input, b, 8, source_width)?
+    let wide = movement.promote || source_width == 8
+    let begin = list.len(out)
+    list.append(mut out, list.slice(input, start, table.at))
+    if wide {
+        list.set_word_be(mut out, begin + 4, 0x636f3634u32)
+    }
+    for i in 0u64 .. table.count {
+        let at = table.at + i * source_width
+        let original = if source_width == 8 {
+            list.word_be(input, at)
+        } else {
+            let short: u32 = list.word_be(input, at)
+            int.widen(short)
+        }
+        let moved = moved_offset(original, movement, media)?
+        if wide {
+            list.put_word_be(mut out, moved)
+        } else {
+            let Some(short): Option[u32] = int.try_narrow(moved) else {
+                return Error(BadTable)
+            }
+            list.put_word_be(mut out, short)
+        }
+    }
+    set_preserved_size(mut out, begin, b.body - start)
+    Ok(())
+}
+
+fn set_preserved_size(mut out: Bytes, start: u64, original_header: u64) {
+    if original_header == 16 {
+        let n = list.len(out) - start
+        list.set_word_be(mut out, start + 8, n)
+    } else {
+        close_box(mut out, start)
+    }
+}
+
+fn check_metadata_locations(input: Bytes, meta: BoxHeader) -> Result[(), VodError] {
+    if meta.next - meta.body < 4 {
+        return Error(BadMovie)
+    }
+    let mut at = meta.body + 4
+    while at < meta.next {
+        let b = vod_box(input, at, meta.next)?
+        if b.kind == 0x696c6f63 {
+            return Error(UnsupportedVod)
+        }
+        at = b.next
+    }
+    Ok(())
+}
+
+// Only these ISO BMFF branches contain the chunk indices that move. Movie
+// user data is kept byte-for-byte after excluding item-location metadata.
+fn rewrite_movie(mut out: Bytes, input: Bytes, begin: u64, parent: BoxHeader, depth: u8, movement: Relocation, media: List[FileRange]) -> Result[(), VodError] {
+    let output_start = list.len(out)
+    list.append(mut out, list.slice(input, begin, parent.body))
+    let mut at = parent.body
+    while at < parent.next {
+        let b = vod_box(input, at, parent.next)?
+        if b.kind == 0x7361696f || b.kind == 0x696c6f63 {
+            return Error(UnsupportedVod)
+        }
+        if b.kind == 0x6d657461 {
+            check_metadata_locations(input, b)?
+        }
+        let nested = match (depth, b.kind) {
+            (0, 0x7472616b) => true,
+            (1, 0x6d646961) => true,
+            (2, 0x6d696e66) => true,
+            (3, 0x7374626c) => true,
+            (_, 0x75647461) => depth <= 1,
+            _ => false,
+        }
+        if nested {
+            rewrite_movie(mut out, input, at, b, depth + 1, movement, media)?
+        } else if depth == 4 && (b.kind == 0x7374636f || b.kind == 0x636f3634) {
+            copy_chunk_table(mut out, input, at, b, movement, media)?
+        } else {
+            list.append(mut out, list.slice(input, at, b.next))
+        }
+        at = b.next
+    }
+    set_preserved_size(mut out, output_start, parent.body - begin)
+    Ok(())
+}
+
+fn relocation(vod: Vod, insert_at: u64, metadata_limit: u64) -> Result[Relocation, VodError] {
+    let original = vod.layout.moov
+    let size = original.end - original.start
+    let mut hint = Relocation(insert_at: insert_at, original: original, new_size: size, promote: false)
+    let mut extra = 0u64
+    for i in 0u64 .. list.len(vod.tracks) {
+        let t = vod.tracks[i].tables
+        if t.chunk_width == 4 {
+            extra += t.chunks.count * 4
+            for chunk in 1u64 .. t.chunks.count + 1 {
+                let offset = chunk_offset(vod.metadata, t, chunk)
+                if moved_offset(offset, hint, vod.media)? > 0xffffffff {
+                    hint.promote = true
+                }
+            }
+        }
+    }
+    if hint.promote {
+        hint.new_size += extra
+    }
+    if hint.new_size > metadata_limit || hint.new_size > 0xffffffff {
+        return Error(ResourceLimit)
+    }
+    let final_base = vod.movie.file_size - size
+    let Some(_) = int.checked_add(final_base, hint.new_size) else {
+        return Error(BadMovie)
+    }
+    Ok(hint)
+}
+
+// Send the prefix range, metadata, middle range and suffix range in that
+// order. The returned plan borrows no payload and requires no media reads.
+pub fn faststart(vod: Vod, metadata_limit: u64) -> Result[FastStart, VodError] {
+    let end = vod.movie.file_size
+    let empty = FileRange(start: end, end: end)
+    let Some(at) = vod.layout.first_mdat else {
+        return Error(BadMovie)
+    }
+    let original = vod.layout.moov
+    if original.start < at {
+        return Ok(FastStart(prefix: FileRange(start: 0, end: end), metadata: list.new(), middle: empty, suffix: empty))
+    }
+    if vod.layout.has_relative_index {
+        return Error(UnsupportedVod)
+    }
+    let movement = relocation(vod, at, metadata_limit)?
+    let moov = vod_box(vod.metadata, 0, list.len(vod.metadata))?
+    let made: Result[Result[FastStart, VodError], Capacity] = bound bytes metadata_limit {
+        let mut metadata: Bytes = list.with_capacity(movement.new_size)
+        rewrite_movie(mut metadata, vod.metadata, 0, moov, 0, movement, vod.media)?
+        Ok(FastStart(prefix: FileRange(start: 0, end: at), metadata: take metadata, middle: FileRange(start: at, end: original.start), suffix: FileRange(start: original.end, end: end)))
+    }
+    match take made {
+        Ok(take answer) => take answer,
+        Error(_) => Error(ResourceLimit),
+    }
+}

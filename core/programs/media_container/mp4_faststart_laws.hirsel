@@ -1,0 +1,84 @@
+fn verify_relocation(payload: u64, expected_growth: u64) waits {
+    let base = payload - 10
+    let mut tracks: List[mp4.MuxTrack] = list.with_capacity(1)
+    list.push(mut tracks, mux_test_track(base))
+    let headers = result.unwrap(mp4.write_vod(1000, 125, tracks, payload, mp4.MuxLimits(metadata_bytes: 65536, sample_count: 3)))
+    let old_moov = 36 + payload
+    let old_len = list.len(headers.suffix)
+    let old_end = old_moov + old_len
+    let limits = mp4.VodLimits(metadata_bytes: 65536, top_boxes: 3, tracks: 1)
+    let source = result.unwrap(mp4.video_probe(old_end, limits, scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        let mut raw: Bytes = list.with_capacity(n)
+        if at + n <= 36 {
+            list.append(mut raw, list.slice(headers.prefix, at, at + n))
+        } else if at == old_moov && n <= old_len {
+            list.append(mut raw, list.slice(headers.suffix, 0, n))
+        } else {
+            fail("unexpected input range")
+        }
+        Ok(take raw)
+    }))
+    let plan = result.unwrap(mp4.faststart(source, 65536))
+    let new_len = old_len + expected_growth
+    if plan.prefix.start != 0 || plan.prefix.end != 28 || plan.middle.start != 28 || plan.middle.end != old_moov || plan.suffix.start != old_end || plan.suffix.end != old_end || list.len(plan.metadata) != new_len {
+        fail("metadata relocation ranges")
+    }
+    let output = result.unwrap(mp4.video_probe(old_end + expected_growth, limits, scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        let mut raw: Bytes = list.with_capacity(n)
+        if at == 0 {
+            list.append(mut raw, list.slice(headers.prefix, 0, n))
+        } else if at == 28 {
+            list.append(mut raw, list.slice(plan.metadata, 0, n))
+        } else if at == 28 + new_len && n == 8 {
+            list.append(mut raw, list.slice(headers.prefix, 28, 36))
+        } else {
+            fail("unexpected relocated range")
+        }
+        Ok(take raw)
+    }))
+    let offsets: Inline[u64, 3] =[0, 4, 7]
+    let mut seen = 0u64
+    result.unwrap(mp4.vod_samples(output, 0, 3, scoped fn(sample: mp4.VodSample) -> Result[(), mp4.VodError] {
+        if seen >= 3 || sample.offset != 36 + base + new_len + offsets[seen] {
+            fail("relocated chunk position")
+        }
+        seen += 1
+        Ok(())
+    }))
+    if seen != 3 {
+        fail("lost samples during relocation")
+    }
+}
+
+fn verify_sidx() {
+    // FFmpeg +global_sidx on Mozilla's avc-2bytes-nalu.mp4. The listed
+    // reference spans the following moof and mdat, up to the mfra at 26237.
+    let input = b"\x00\x00\x00\x34sidx\x01\x00\x00\x00\x00\x00\x00\x01\x00\x00\x5d\xc0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x63\x0c\x00\x00\x1f\x40\x80\x00\x00\x00"
+    let mut refs: List[mp4.SegmentReference] = list.with_capacity(1)
+    let found = result.unwrap(mp4.read_sidx(input, 0, 829, 26304, scoped fn(ref: mp4.SegmentReference, span: mp4.FileRange, pts: u64) {
+        if span.start != 881 || span.end != 26237 || pts != 0 || ref.index || !ref.starts_with_sap || ref.size != 25356 || ref.duration != 8000 {
+            fail("FFmpeg sidx reference")
+        }
+        list.push(mut refs, ref)
+    }))
+    if found.reference_id != 1 || found.timescale != 24000 || found.earliest_presentation != 0 || found.first_offset != 0 || list.len(refs) != 1 {
+        fail("FFmpeg sidx timing")
+    }
+    let mut output: Bytes = list.with_capacity(52)
+    let index = mp4.SegmentIndex(reference_id: 1, timescale: 24000, earliest_presentation: 0x100000000, first_offset: 5)
+    result.unwrap(mp4.write_sidx(mut output, index, refs))
+    let expected = b"\x00\x00\x00\x34sidx\x01\x00\x00\x00\x00\x00\x00\x01\x00\x00\x5d\xc0\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00\x01\x00\x00\x63\x0c\x00\x00\x1f\x40\x80\x00\x00\x00"
+    if output != expected {
+        fail("version-1 sidx wire bytes")
+    }
+}
+
+/// bug: Leave absolute chunk offsets unchanged when moving moov, overflow stco, or misplace indexed segment ranges.
+/// oracle: ISO/IEC 14496-12 offset arithmetic and FFmpeg global_sidx on Mozilla's avc-2bytes-nalu.mp4.
+@test
+fn relocate_vod_and_segment_index() -> Result[(), ()] waits {
+    verify_relocation(10, 0)
+    verify_relocation(4294967259, 8)
+    verify_sidx()
+    Ok(())
+}

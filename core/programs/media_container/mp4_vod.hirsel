@@ -94,8 +94,15 @@ type VodTrack {
     tables: SampleTables
 }
 
+type VodLayout {
+    moov: FileRange,
+    first_mdat: Option[u64],
+    has_relative_index: bool
+}
+
 pub opaque type Vod {
     movie: MovieInfo,
+    layout: VodLayout,
     metadata: Bytes,
     tracks: List[VodTrack],
     media: List[FileRange]
@@ -411,7 +418,7 @@ fn read_vod_track(input: Bytes, trak: BoxHeader) -> Result[VodTrack, VodError] {
     Ok(VodTrack(info: info, entry: FileRange(start: start, end: entry.next), edits: edits, edit_width: edit_width, hdr: hdr, tables: tables))
 }
 
-fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], track_limit: u64) -> Result[Vod, VodError] {
+fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], track_limit: u64, layout: VodLayout) -> Result[Vod, VodError] {
     let moov = vod_box(metadata, 0, list.len(metadata))?
     if moov.kind != MOOV || moov.next != list.len(metadata) {
         return Error(BadMovie)
@@ -442,7 +449,7 @@ fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], 
     if list.len(tracks) == 0 {
         return Error(BadMovie)
     }
-    Ok(Vod(movie: MovieInfo(timescale: scale, duration: duration, file_size: file_size), metadata: take metadata, tracks: take tracks, media: take media))
+    Ok(Vod(movie: MovieInfo(timescale: scale, duration: duration, file_size: file_size), layout: layout, metadata: take metadata, tracks: take tracks, media: take media))
 }
 
 // Reads box headers and the moov only. The reader must supply exactly the
@@ -451,6 +458,8 @@ pub fn video_probe(file_size: u64, limits: VodLimits, read: scoped fn(u64, u64) 
     let mut at = 0u64
     let mut inspected = 0u64
     let mut moov: Option[FileRange] = None
+    let mut first_mdat: Option[u64] = None
+    let mut has_relative_index = false
     let mut media: List[FileRange] = list.new()
     while at < file_size {
         if inspected == limits.top_boxes {
@@ -464,7 +473,12 @@ pub fn video_probe(file_size: u64, limits: VodLimits, read: scoped fn(u64, u64) 
             }
             moov = Some(FileRange(start: at, end: b.end))
         } else if b.kind == MDAT {
+            if let None = first_mdat {
+                first_mdat = Some(at)
+            }
             list.push(mut media, FileRange(start: b.body, end: b.end))
+        } else if b.kind == 0x73696478 || b.kind == 0x6d667261 || b.kind == 0x6d657461 {
+            has_relative_index = true
         } else if b.kind == MOOF {
             return Error(UnsupportedVod)
         }
@@ -478,7 +492,8 @@ pub fn video_probe(file_size: u64, limits: VodLimits, read: scoped fn(u64, u64) 
         return Error(ResourceLimit)
     }
     let metadata = fetch_range(range.start, n, read)?
-    read_moov(take metadata, file_size, take media, limits.tracks)
+    let layout = VodLayout(moov: range, first_mdat: first_mdat, has_relative_index: has_relative_index)
+    read_moov(take metadata, file_size, take media, limits.tracks, layout)
 }
 
 pub fn vod_info(vod: Vod) -> MovieInfo {

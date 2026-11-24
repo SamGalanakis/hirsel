@@ -1,0 +1,157 @@
+pub type SegmentIndex {
+    reference_id: u32,
+    timescale: u32,
+    earliest_presentation: u64,
+    first_offset: u64
+}
+
+pub type SegmentReference {
+    index: bool,
+    size: u32,
+    duration: u32,
+    starts_with_sap: bool,
+    sap_type: u8,
+    sap_delta: u32
+}
+
+fn segment_reference(input: Bytes, at: u64) -> SegmentReference {
+    let size: u32 = list.word_be(input, at)
+    let duration: u32 = list.word_be(input, at + 4)
+    let sap: u32 = list.word_be(input, at + 8)
+    SegmentReference(index: (size >> 31) != 0, size: size & 0x7fffffff, duration: duration, starts_with_sap: (sap >> 31) != 0, sap_type: int.narrow((sap >> 28) & 7), sap_delta: sap & 0x0fffffff)
+}
+
+// file_at is the absolute offset of the sidx header at at in input.
+pub fn read_sidx(input: Bytes, at: u64, file_at: u64, file_size: u64, receive: scoped fn(SegmentReference, FileRange, u64)) -> Result[SegmentIndex, VodError] {
+    let b = vod_box(input, at, list.len(input))?
+    let n = b.next - b.body
+    if b.kind != 0x73696478 || n < 24 {
+        return Error(BadMovie)
+    }
+    let flags: u32 = list.word_be(input, b.body)
+    let (earliest, offset, count_at) = match flags {
+        0 => {
+            let pts: u32 = list.word_be(input, b.body + 12)
+            let displacement: u32 = list.word_be(input, b.body + 16)
+            let time: u64 = int.widen(pts)
+            let relative: u64 = int.widen(displacement)
+            (time, relative, b.body + 22)
+        },
+        0x01000000 => {
+            if n < 32 {
+                return Error(BadMovie)
+            }
+            let time: u64 = list.word_be(input, b.body + 12)
+            let relative: u64 = list.word_be(input, b.body + 20)
+            (time, relative, b.body + 30)
+        },
+        _ => return Error(BadMovie),
+    }
+    let scale: u32 = list.word_be(input, b.body + 8)
+    let reserved: u16 = list.word_be(input, count_at - 2)
+    let count: u16 = list.word_be(input, count_at)
+    let entries_count: u64 = int.widen(count)
+    let entries_at = count_at + 2
+    if scale == 0 || reserved != 0 || b.next - entries_at != entries_count * 12 {
+        return Error(BadMovie)
+    }
+    if file_at > file_size || b.next - at > file_size - file_at {
+        return Error(BadTable)
+    }
+    let box_end = file_at + (b.next - at)
+    if offset > file_size - box_end {
+        return Error(BadTable)
+    }
+    let first = box_end + offset
+    let mut cursor = first
+    let mut tick = earliest
+    for i in 0u64 .. entries_count {
+        let r = segment_reference(input, entries_at + i * 12)
+        let size: u64 = int.widen(r.size)
+        let duration: u64 = int.widen(r.duration)
+        let Some(end_time) = int.checked_add(tick, duration) else {
+            return Error(BadTable)
+        }
+        if size == 0 || size > file_size - cursor {
+            return Error(BadTable)
+        }
+        cursor += size
+        tick = end_time
+    }
+    cursor = first
+    tick = earliest
+    for i in 0u64 .. entries_count {
+        let r = segment_reference(input, entries_at + i * 12)
+        let size: u64 = int.widen(r.size)
+        let duration: u64 = int.widen(r.duration)
+        receive(r, FileRange(start: cursor, end: cursor + size), tick)
+        cursor += size
+        tick += duration
+    }
+    Ok(SegmentIndex(reference_id: list.word_be(input, b.body + 4), timescale: scale, earliest_presentation: earliest, first_offset: offset))
+}
+
+pub fn write_sidx(mut out: Bytes, index: SegmentIndex, refs: List[SegmentReference]) -> Result[(), VodError] {
+    let count = list.len(refs)
+    if index.timescale == 0 || count > 65535 {
+        return Error(BadTable)
+    }
+    let wide = index.earliest_presentation > 0xffffffff || index.first_offset > 0xffffffff
+    let header = if wide {
+        40u64
+    } else {
+        32u64
+    }
+    if list.capacity(out) < header + 12 * count {
+        return Error(Framing(ShortBuffer))
+    }
+    let mut ticks = index.earliest_presentation
+    for r in refs {
+        if r.size == 0 || r.size > 0x7fffffff || r.sap_type > 7 || r.sap_delta > 0x0fffffff {
+            return Error(BadTable)
+        }
+        let d: u64 = int.widen(r.duration)
+        let Some(end) = int.checked_add(ticks, d) else {
+            return Error(BadTable)
+        }
+        ticks = end
+    }
+    list.clear(mut out)
+    let b = full_box(mut out, 0x73696478, if wide {
+        0x01000000
+    } else {
+        0
+    })
+    list.put_word_be(mut out, index.reference_id)
+    list.put_word_be(mut out, index.timescale)
+    if wide {
+        list.put_word_be(mut out, index.earliest_presentation)
+        list.put_word_be(mut out, index.first_offset)
+    } else {
+        let earliest: u32 = int.narrow(index.earliest_presentation)
+        let offset: u32 = int.narrow(index.first_offset)
+        list.put_word_be(mut out, earliest)
+        list.put_word_be(mut out, offset)
+    }
+    list.put_word_be(mut out, 0u16)
+    let narrow: u16 = int.narrow(count)
+    list.put_word_be(mut out, narrow)
+    for r in refs {
+        let hierarchy = if r.index {
+            0x80000000u32
+        } else {
+            0u32
+        }
+        let sap_start = if r.starts_with_sap {
+            0x80000000u32
+        } else {
+            0u32
+        }
+        let kind: u32 = int.widen(r.sap_type)
+        list.put_word_be(mut out, r.size | hierarchy)
+        list.put_word_be(mut out, r.duration)
+        list.put_word_be(mut out, sap_start | (kind << 28) | r.sap_delta)
+    }
+    close_box(mut out, b)
+    Ok(())
+}

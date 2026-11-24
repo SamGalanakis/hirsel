@@ -8,41 +8,13 @@ export type {Caller, HttpRequest, Installation, Lease, Pending, Storage, StreamI
 import {applyImage, commitVisible, equal, freezeDecoded, imageEdits, invalidation, key, mergeLayer, rawSubscription,
   slotEdits, stageImage, subscriptionHandle, type CallOptions, type Change, type Draft, type ImageEdits, type ImageSlots,
   type Layer, type Overlay, type Sub, type Subscription, type SubscriptionCodec} from './image.js';
+import {RoomMember, type Decoded, type LiveLink, type LiveRoom, type RoomCodec, type RoomHandlers} from './room.js';
+export type {LiveRoom, PeerId, RoomCodec, RoomHandlers, RoomPeer, RoomPeersChange, ValueCodec} from './room.js';
 export type {Access, CallOptions, Change, Draft, Frozen, RowChange, Subscription, SubscriptionCodec, SubscriptionControl} from './image.js';
 
-export type Option<T> = {tag: 'None'} | {tag: 'Some'; value: T};
-export interface Want { identity: Uint8Array; args_fp: bigint; result_fp: bigint }
-export interface Room { requested: bigint; available: bigint }
-export type Fault = {tag: 'Raised'; value: number} | {tag: 'OutOfBytes'; value: Room}
-  | {tag: 'OutOfTime'; value: bigint} | {tag: 'Gone'} | {tag: 'Conflict'; value: string};
-export type Refusal = {tag: 'NoEntry' | 'Overloaded' | 'Deadline' | 'NotAllowed' | 'RequestMismatch' | 'HistoryUnavailable'}
-  | {tag: 'Malformed'; value: {kind: number; at: bigint}} | {tag: 'Budget'; value: Room};
-type WireOutcome<R> = {tag: 'Returned'; value: R} | {tag: 'Failed'; value: Fault}
-  | {tag: 'Refused'; value: Refusal} | {tag: 'Abandoned' | 'InDoubt'};
-export type Outcome<R> = WireOutcome<R> | {tag: 'LocallyUnknown' | 'RequestMismatch'};
-export interface SlotRow { slot: number; key: Uint8Array; value: Option<Uint8Array> }
-export interface Group { sub: number; value: Uint8Array; rows: SlotRow[] }
-export interface Done {stream: StreamId; p: bigint; outcome: Outcome<Uint8Array>}
-export type Entry = {tag: 'Ready'; value: number} | {tag: 'Resolve'; values: [number, Uint8Array]} | {tag: 'Gone'};
-export interface Part {
-  sub: number; complete: boolean; you: Option<number>; joined: [number, Caller][];
-  states: [number, Option<Uint8Array>][]; msgs: [number, boolean, Uint8Array][];
-  left: number[]; gap: number; lost: number; full: boolean;
-}
-export type Frame = {tag: 'Hello'; values: [Option<Uint8Array>, Want[]]}
-  | {tag: 'Call'; values: [StreamId, bigint, number, number, Uint8Array]}
-  | {tag: 'Subscribe'; values: [number, number, Uint8Array, Option<Uint8Array>]}
-  | {tag: 'Unsubscribe'; value: number}
-  | {tag: 'Welcome'; values: [Caller, number, bigint, Uint8Array, string, bigint, bigint, bigint]}
-  | {tag: 'Placed'; value: Entry}
-  | {tag: 'Batch'; values: [bigint, number[], Group[], Done[]]}
-  | {tag: 'Ended'; values: [number, WireOutcome<Uint8Array>]}
-  | {tag: 'Reset'; values: [bigint, Done[]]}
-  | {tag: 'Set'; values: [number, Option<Uint8Array>]}
-  | {tag: 'Send'; values: [number, Option<number>, Uint8Array]}
-  | {tag: 'Live'; value: Part[]};
-export interface Codec { encode(frame: Frame): Uint8Array; decode(bytes: Uint8Array): Frame }
-export type SubscriptionEnd = Extract<Frame, {tag: 'Ended'}>['values'][1];
+import type {Codec, Done, Entry, Fault, Frame, Group, Option, Outcome, Part, Refusal, Room, SlotRow, SubscriptionEnd, Want,
+  WireOutcome} from './wire.js';
+export type {Codec, Done, Entry, Fault, Frame, Group, Option, Outcome, Part, Refusal, Room, SlotRow, SubscriptionEnd, Want} from './wire.js';
 export interface Transport {
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, options?: CallOptions): Promise<Outcome<R>>;
   subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void,
@@ -51,6 +23,8 @@ export interface Transport {
     onChange: (sub: Subscription<V, Slots, Keys>, change: Change<V, Slots>) => void,
     onEnd: ((reason: SubscriptionEnd) => void) | undefined,
     decode: SubscriptionCodec<V, Slots, Keys>): Subscription<V, Slots, Keys>;
+  room<S, M, V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(want: Want, args: Uint8Array,
+    handlers: RoomHandlers<S, M, V, Slots, Keys>, decode: SubscriptionCodec<V, Slots, Keys>, live: RoomCodec<S, M>): LiveRoom<S, M, V, Slots, Keys>;
 }
 export interface HttpReply { status: number; body: string; committed: boolean; replayed: boolean }
 interface HttpAttempt extends HttpReply { refusal?: string; at?: bigint; retention?: bigint }
@@ -117,6 +91,12 @@ export class Client implements Transport {
   private sent = false;
   private nextSub = 0;
   private subs = new Set<Sub>();
+  private rooms = new Map<Sub, RoomMember>();
+  private live: LiveLink = {
+    ready: () => this.state === 'Ready' && this.socket !== undefined, backlog: () => this.socket?.bufferedAmount ?? 0,
+    write: frame => { try { this.socket?.send(this.options.frame.encode(frame)); } catch { this.transient(); } },
+    clock: {set: (fn, ms) => this.clock.set(fn, ms), clear: id => this.clock.clear(id)},
+  };
   private handles = new WeakMap<object, Sub>();
   private overlays = new Map<symbol, Overlay>();
   private layer: Layer = new Map();
@@ -275,7 +255,7 @@ export class Client implements Transport {
         frame = this.options.frame.decode(event.data instanceof Uint8Array ? event.data : new Uint8Array(event.data));
       } catch { await this.incompatible(1007); return; }
       await this.receive(frame, epoch);
-      if (epoch === this.epoch) await this.startNextCall();
+      if (epoch === this.epoch) { this.flushRooms(); await this.startNextCall(); }
     }); };
     const lost = (finish: () => Promise<void>) => {
       if (epoch !== this.epoch) return;
@@ -458,6 +438,17 @@ export class Client implements Transport {
       this.version = version;
       this.recompute();
       this.publish(); await this.subscribeAll();
+    } else if (frame.tag === 'Live') {
+      for (const part of frame.value) {
+        if (part.sub >= this.nextSub) { await this.incompatible(1008); return; }
+        const sub = [...this.subs].find(s => s.id === part.sub);
+        if (!sub) continue;
+        const room = this.rooms.get(sub);
+        if (!room) { await this.incompatible(1008); return; }
+        let decoded: Decoded;
+        try { decoded = room.decode(part); } catch { await this.incompatible(1007); return; }
+        room.apply(part, decoded);
+      }
     } else if (frame.tag === 'Ended') {
       const [id, reason] = frame.values;
       const sub = [...this.subs].find(s => s.id === id);
@@ -940,7 +931,28 @@ export class Client implements Transport {
     void this.enqueue(async () => this.subscribeAll());
     return handle;
   }
+  private flushRooms(): void {
+    for (const room of this.rooms.values()) room.flush();
+  }
+  room<S, M, V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(want: Want, args: Uint8Array,
+    handlers: RoomHandlers<S, M, V, Slots, Keys>, decode: SubscriptionCodec<V, Slots, Keys>, live: RoomCodec<S, M>): LiveRoom<S, M, V, Slots, Keys> {
+    if (!this.wants.some(w => sameWant(w, want))) throw new ClientError('UnknownWant');
+    const codec = decode as unknown as Sub['codec'];
+    let handle: LiveRoom<S, M, V, Slots, Keys> | undefined;
+    const sub: Sub = {
+      want: copyWant(want), args: args.slice(), active: true, codec, onEnd: handlers.onEnd,
+      notify: change => handlers.onChange?.(handle!, change as Change<V, Slots>),
+    };
+    const room = new RoomMember(live as RoomCodec<unknown, unknown>, handlers as never, this.live, sub);
+    handle = room.handle(subscriptionHandle<V, Slots, Keys>(sub, codec, () => this.unsubscribe(sub))) as LiveRoom<S, M, V, Slots, Keys>;
+    this.handles.set(handle, sub);
+    this.rooms.set(sub, room);
+    this.subs.add(sub);
+    void this.enqueue(async () => this.subscribeAll());
+    return handle;
+  }
   private clearSubscriptions(): void {
+    for (const room of this.rooms.values()) room.end();
     const cleared: Sub[] = [];
     this.layer.clear();
     for (const sub of this.subs) {
@@ -952,6 +964,8 @@ export class Client implements Transport {
   private removeSubscription(sub: Sub): void {
     sub.active = false; sub.id = undefined; sub.image = sub.server = undefined; this.subs.delete(sub);
     this.layer.delete(sub);
+    this.rooms.get(sub)?.drop();
+    this.rooms.delete(sub);
   }
   private unsubscribe(sub: Sub): void {
     const id = sub.id;

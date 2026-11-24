@@ -25,13 +25,27 @@ fn query_slots() -> Result[runner.Slots[Handles], runner.RegisterError] {
     runner.table_slot("items", code.describe(query_table))
 }
 
+// A room's State and Message are the application's own types.
+type Cursor: codec + send { x: u32, y: u32 }
+
+type Note: codec + send = Ping(u64) | Text(String)
+
+fn packed_room(tx: store.Tx, h: Handles, author: store.Caller, take _arg: ()) -> Result[runner.Answer[runner.Grant], Capacity] {
+    let runner.Answer(value: _, covers: take covers) = runner.table_answer("items", h.items, Unbounded, Unbounded)?
+    Ok(runner.Answer(value: Join, covers: take covers))
+}
+
 fn packed_rows(tx: store.Tx, h: Handles, take _arg: ()) -> Result[runner.Answer[()], Capacity] {
     runner.table_answer("items", h.items, Unbounded, Unbounded)
 }
 
 fn place(mut registry: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {
     runner.compute(mut registry, code.describe(packed_reply), 1024u64, runner.DEFAULT_STEPS)?
-    runner.query(mut registry, code.describe(packed_rows), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
+    runner.query(mut registry, code.describe(packed_rows), query_slots()?, 65536u64, runner.DEFAULT_STEPS)?
+    let cursor: std.codec.Codec[Cursor] = std.codec.of()
+    let note: std.codec.Codec[Note] = std.codec.of()
+    runner.room(mut registry, code.describe(packed_room), query_slots()?, cursor, note,
+        runner.RoomBounds(peers: 4u32, state: 8u32, message: 64u32), 1024u64, runner.DEFAULT_STEPS)
 }
 
 fn by_id(id: u64, value: Item) -> Result[List[u64], Capacity] {

@@ -2,6 +2,8 @@ import {CorruptState, encodeState, decodeState, type Storage, type Installation,
 
 export interface Socket {
   binaryType: string;
+  // Bytes queued and not yet sent; rooms read it to coalesce Set and drop Send.
+  readonly bufferedAmount?: number;
   onopen: ((event?: unknown) => void) | null;
   onmessage: ((event: {data: unknown}) => void) | null;
   onclose: ((event: {code: number; reason?: string}) => void) | null;

@@ -27,12 +27,13 @@ retain every tag, including Some(None) and Some(unit). Nominal `via` types
 expose their representation type.
 
 `entries.js` exports the Want list, launch identity and `bind(client)`, whose
-result supplies `call`, `subscribe` and `subscribeDecoded` entry stubs, each
-namespaced by module: `api.call.<module>.<name>(args, options?)`, `api.subscribe.<module>.<name>`
-and `api.subscribeDecoded.<module>.<name>`. Every module is namespaced the same
+result supplies `call`, `subscribe`, `subscribeDecoded` and `room` entry stubs,
+each namespaced by module: `api.call.<module>.<name>(args, options?)`,
+`api.subscribe.<module>.<name>`, `api.subscribeDecoded.<module>.<name>` and
+`api.room.<module>.<name>(args, handlers?)`. Every module is namespaced the same
 way, `main` included, and there is no flat name. Calls (compute, granted and
 transact entries) appear under `call`; queries appear under `subscribe` and
-`subscribeDecoded`.
+`subscribeDecoded`; rooms (`runner.room`) appear under `room`.
 
 An entry's **stub path** comes from its definition identity `D`, which in the
 identity bytes ends at the first `[` or `(` ([PROG-9](programs.md#prog-9-code-descriptors)).
@@ -99,6 +100,48 @@ value as `Some`. The generated stub uses the appropriate slot's
 `Key<i>_<s>` and `RowValue<i>_<s>`
 for the query at index `i` and slot `s` in that query. Use
 `api.subscribe.<module>.<name>` for numeric slots and raw byte keys.
+
+### Rooms
+
+`api.room.<module>.<name>(args, handlers?)` joins a room registered with
+`runner.room`. The handle is a decoded subscription to the room's admission
+view, so `value()` is its `Grant` (`{tag: 'Denied'}`, `{tag: 'Watch'}` or
+`{tag: 'Join'}`) and `rows`, `map` and `get` read its declared slots, with
+`handlers.onChange` as a subscription's `onChange`. `codec.js` exports
+`State<i>` and `Message<i>` beside `Value<i>` for the room at index `i`, from
+the State and Message types the room registered. The room's live part adds:
+
+- `self`: this membership's peer id, set by the Part that carries `you`, and
+  undefined while waiting, `full` or between sessions.
+- `peers()`: the roster, a map from peer id to `{caller, state}`, where `state`
+  is the peer's newest State or undefined.
+- `set(state)`: the newest value wins. `undefined` clears. The SDK writes a
+  `Set` only while the socket holds less than one Live frame (64 KiB) of
+  unsent bytes, and otherwise checks again on the next `set`, the next frame
+  and a 16 ms timer that runs only while a value waits. A value set before
+  membership is stored and becomes the member's first state when `you`
+  arrives; each new membership, a reconnect's included, is sent the newest one.
+- `send(message, to?)`: writes one `Send` at once, to the whole room or to
+  peer `to`. Messages are never coalesced. Before membership, or with more
+  than 64 KiB unsent, the message is dropped and `onLost(1)` fires.
+- `leave()`: unsubscribes.
+
+`set` and `send` throw `RangeError` for a value whose encoding exceeds the
+room's registered `state` or `message` bound, because the server closes the
+session with 1002 for such a frame.
+
+The handlers are `onPeers(peers, change)`, with `change` naming the `joined`,
+`left` and `set` peer ids and `complete` when the roster was replaced;
+`onMessage(from, message, direct)`; `onGap(n)` for messages to this client the
+server dropped; `onLost(n)` for messages from this client that were dropped;
+`onFull()` when the grant holds but the room has no place yet; and `onEnd` as
+for a subscription, once after the server's `Ended`. The SDK applies each
+Part's `joined`, then `states`, then `msgs`, then `left`, so a message's
+sender is in `peers()` when `onMessage` runs. There is no order between
+`Live` and `Batch`. When a session ends, every room's roster empties with a
+`complete` change, and the room resubscribes under a fresh sub id with the
+other subscriptions. Peer ids from an old membership are dead. Parts for a
+room this client left are ignored.
 
 ### Optimistic writes
 
@@ -193,7 +236,7 @@ Each entry has `module` (an array of decoded module path components) and
 `name` (the decoded function name). Together they give the TypeScript stub
 path from section 4. `identity` retains the full PROG-9 entry identity,
 including the instance and signature. `kind` is `compute`, `transact`,
-`query`, or `granted`. `args_fp`, `result_fp`, and `revision` come from
+`query`, `granted`, or `room`. `args_fp`, `result_fp`, and `revision` come from
 Describe. The launch's `n_place` and both fingerprints are decimal strings
 to preserve all 64 bits. `digest`, `identity`, and `revision` are arrays of
 byte integers.
@@ -204,6 +247,10 @@ result schema in declaration order. Each slot has `name`, `kind` (`table`,
 `cell`, or `log`), `key` (the ordered key codec), `key_json` (the matching
 value codec for an HTTP JSON projection), and `value` (the row codec). A
 cell has the ordered unit codec for `key`. Calls have an empty `slots` array.
+A room's `result` is its admission view's Grant codec and `slots` its declared
+slots, as for a query. Only a room has `room`: its `state` and `message` value
+codecs and the `peers`, `state_max`, and `message_max` bounds from
+`runner.room`.
 
 A codec AST has `key` (true for ordered keys, false for values), `root` (a
 type expression), and `definitions` (an array indexed from zero). A nominal

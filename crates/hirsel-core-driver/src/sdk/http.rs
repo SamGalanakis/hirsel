@@ -138,6 +138,9 @@ pub(super) fn generate(
         let &(index, entry) = entries
             .get(&binding.entry)
             .ok_or("Malformed: HTTP binding references an unknown entry")?;
+        if entry.kind == 4 {
+            return Err("Malformed: an HTTP binding names a room entry".into());
+        }
         let args = super::Schema::read(&entry.args)?;
         let result = super::Schema::read(if entry.kind == 2 {
             &entry.value

@@ -3,6 +3,7 @@ import {readFile} from 'node:fs/promises';
 import {Client, type Socket, type Subscription} from '@hirsel/client';
 import {NodeStorage} from '@hirsel/client/node';
 import {Frame} from './generated/frame.js';
+import * as codec from './generated/codec.js';
 import {bind, identity, tables, want} from './generated/entries.js';
 import {reopenWhileCalling, watchItem} from './subscription-cache.ts';
 
@@ -26,8 +27,7 @@ function openSocket(): Socket {
       if (frame.tag === 'Hello') {
         assert.deepEqual(frame.values[1], want);
         emit({tag: 'Welcome', values: [caller, 1, 262144n, identity.digest, identity.target, identity.n_place, 14000000n, 5184000000n]});
-        emit({tag: 'Placed', value: {tag: 'Ready', value: 0}});
-        emit({tag: 'Placed', value: {tag: 'Ready', value: 1}});
+        want.forEach((_, i) => emit({tag: 'Placed', value: {tag: 'Ready', value: i}}));
       } else if (frame.tag === 'Subscribe') {
         const [id, slot, args] = frame.values;
         assert.equal(id, 0);
@@ -106,4 +106,103 @@ try {
   assert(ran);
 } finally {
   await client.close();
+}
+
+// The room: what only the SDK decides. A set() before membership becomes the member's
+// first state, a reconnect re-sends the newest one to the new membership, a direct
+// send names its peer, and a Part applies joined, states, messages, left in order.
+type Sent = Extract<Frame, {tag: 'Set' | 'Send' | 'Subscribe' | 'Unsubscribe'}>;
+const sent: Sent[] = [];
+const sockets: Socket[] = [];
+const roomSocket = (): Socket => {
+  const emit = (frame: Frame) => { const data = Frame.encode(frame); queueMicrotask(() => socket.onmessage?.({data})); };
+  const socket: Socket & {bufferedAmount: number} = {
+    binaryType: '', bufferedAmount: 0, onopen: null, onmessage: null, onclose: null, onerror: null,
+    send(data) {
+      const frame = Frame.decode(data);
+      if (frame.tag === 'Hello') {
+        emit({tag: 'Welcome', values: [caller, 1, 262144n, identity.digest, identity.target, identity.n_place, 14000000n, 5184000000n]});
+        want.forEach((_, i) => emit({tag: 'Placed', value: {tag: 'Ready', value: i}}));
+      } else if (frame.tag === 'Set' || frame.tag === 'Send' || frame.tag === 'Subscribe' || frame.tag === 'Unsubscribe') {
+        sent.push(frame);
+        if (frame.tag === 'Subscribe') {
+          const [id, slot] = frame.values;
+          assert.equal(slot, 2);
+          emit({tag: 'Batch', values: [1n, [id], [{sub: id, value: codec.Value2.encode({tag: 'Join'}), rows: []}], []]});
+        }
+      }
+    },
+    close() {},
+  };
+  sockets.push(socket);
+  queueMicrotask(() => socket.onopen?.());
+  return socket;
+};
+const live = (part: Partial<codec.Part> & {sub: number}): Frame => ({tag: 'Live', value: [{
+  complete: false, you: {tag: 'None'}, joined: [], states: [], msgs: [], left: [], gap: 0, lost: 0, full: false, ...part,
+}]});
+const deliver = async (frame: Frame) => {
+  sockets.at(-1)!.onmessage?.({data: Frame.encode(frame)});
+  await new Promise(resolve => setTimeout(resolve, 0));
+};
+const roomClient = await Client.open({
+  url: 'ws://scripted', frame: Frame, wants: want, identity, socket: roomSocket, storage: new NodeStorage('room-state'),
+  clock: {now: () => performance.now(), random: () => 0, set: (fn, ms) => setTimeout(fn, ms), clear: id => clearTimeout(id as never)},
+});
+try {
+  await roomClient.whenReady();
+  const api = bind(roomClient);
+  const lost: number[] = [], heard: string[] = [];
+  const roster = (peers: ReturnType<typeof room.peers>) =>
+    [...peers].map(([id, p]) => `${id}:${p.state ? `${p.state.x},${p.state.y}` : '-'}`).join(' ');
+  const room = api.room.packed_consumer.packed_room(undefined, {
+    onLost: n => lost.push(n),
+    onPeers: (peers, change) => heard.push(`${change.complete ? 'roster' : 'peers'} ${roster(peers)}`),
+    onMessage: (from, note, direct) => heard.push(`${from} ${direct ? 'direct' : 'room'} ${note.tag} ${roster(room.peers())}`),
+  });
+  const waitFor = async (done: () => boolean) => {
+    for (let i = 0; i < 100 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 1));
+    assert(done());
+  };
+  await waitFor(() => room.value().tag !== 'Pending');
+  assert.deepEqual(room.value(), {tag: 'Ready', value: {tag: 'Join'}});
+  const first = (sent[0] as Extract<Sent, {tag: 'Subscribe'}>).values[0];
+  room.set({x: 1, y: 2});
+  room.set({x: 3, y: 4});
+  room.send({tag: 'Ping', value: 1n});
+  assert.equal(room.self, undefined);
+  assert.deepEqual(lost, [1]);
+  assert.equal(sent.length, 1, 'nothing room-bound is sent before membership');
+  // @ts-expect-error A room's state is its registered State type.
+  if (false) room.set({x: 'left'});
+  assert.throws(() => room.send({tag: 'Text', value: 'x'.repeat(64)}), RangeError);
+
+  await deliver(live({sub: first, complete: true, you: {tag: 'Some', value: 5}, joined: [[5, caller]]}));
+  assert.equal(room.self, 5);
+  assert.deepEqual(sent.slice(1), [{tag: 'Set', values: [first, {tag: 'Some', value: codec.State2.encode({x: 3, y: 4})}]}]);
+
+  room.send({tag: 'Text', value: 'hi'}, 7);
+  assert.deepEqual(sent.at(-1), {tag: 'Send', values: [first, {tag: 'Some', value: 7}, codec.Message2.encode({tag: 'Text', value: 'hi'})]});
+  await deliver(live({sub: first, joined: [[7, caller]], states: [[7, {tag: 'Some', value: codec.State2.encode({x: 8, y: 9})}]],
+    msgs: [[7, true, codec.Message2.encode({tag: 'Ping', value: 2n})]], left: [7]}));
+  assert.deepEqual(heard, ['roster 5:-', '7 direct Ping 5:- 7:8,9', 'peers 5:-']);
+
+  // A new session: the old membership ends, the room resubscribes under a fresh id, and the
+  // newest set() reaches the new membership once its `you` arrives.
+  room.set({x: 6, y: 7});
+  const before = sent.length;
+  sockets.at(-1)!.onclose?.({code: 1006});
+  await waitFor(() => sent.slice(before).some(f => f.tag === 'Subscribe'));
+  assert.equal(room.self, undefined);
+  assert.equal(heard.at(-1), 'roster ');
+  const again = sent.slice(before).find(f => f.tag === 'Subscribe') as Extract<Sent, {tag: 'Subscribe'}>;
+  assert(again.values[0] > first);
+  await deliver(live({sub: again.values[0], complete: true, you: {tag: 'Some', value: 9}, joined: [[9, caller]]}));
+  assert.equal(room.self, 9);
+  assert.deepEqual(sent.at(-1), {tag: 'Set', values: [again.values[0], {tag: 'Some', value: codec.State2.encode({x: 6, y: 7})}]});
+  room.leave();
+  await waitFor(() => sent.at(-1)?.tag === 'Unsubscribe');
+  assert.deepEqual(sent.at(-1), {tag: 'Unsubscribe', value: again.values[0]});
+} finally {
+  await roomClient.close();
 }

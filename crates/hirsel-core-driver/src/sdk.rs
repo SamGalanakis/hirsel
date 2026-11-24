@@ -291,6 +291,31 @@ impl QuerySchemas {
     }
 }
 
+/// A Room entry's schemas: the admission view's Grant value and slots, then
+/// the room's State and Message codecs and its bounds (runner.room).
+pub(crate) struct RoomSchemas {
+    pub query: QuerySchemas,
+    pub state: Schema,
+    pub message: Schema,
+    pub peers: u32,
+    pub state_max: u32,
+    pub message_max: u32,
+}
+
+impl RoomSchemas {
+    pub(crate) fn describe_types(self, name: impl Fn(&Schema) -> String) -> (String, Vec<Schema>) {
+        let types = format!(
+            ", state: {}, message: {}",
+            name(&self.state),
+            name(&self.message)
+        );
+        let (mut description, mut schemas) = self.query.describe_types(name);
+        description.push_str(&types);
+        schemas.extend([self.state, self.message]);
+        (description, schemas)
+    }
+}
+
 pub(crate) struct QuerySlot {
     pub name: String,
     pub key: Schema,
@@ -324,6 +349,35 @@ impl Exported {
         }
         Ok(QuerySchemas { value, slots })
     }
+
+    /// The Room `Described.result`: the codec of (value, slots, state schema,
+    /// message schema, peers, state bound, message bound).
+    pub(crate) fn room_schemas(&self) -> Result<RoomSchemas, Error> {
+        let mut r = Reader {
+            bytes: &self.result,
+            at: 0,
+        };
+        if r.bytes()? != self.value {
+            return Err("Malformed: room result disagrees with its value schema".into());
+        }
+        r.bytes()?;
+        let state = Schema::read(&r.bytes()?)?;
+        let message = Schema::read(&r.bytes()?)?;
+        let (peers, state_max, message_max) =
+            (r.count()? as u32, r.count()? as u32, r.count()? as u32);
+        r.done()?;
+        if state.key || message.key {
+            return Err("Malformed: room state and message need value schemas".into());
+        }
+        Ok(RoomSchemas {
+            query: self.query_schemas()?,
+            state,
+            message,
+            peers,
+            state_max,
+            message_max,
+        })
+    }
 }
 pub struct Describe {
     pub digest: Vec<u8>,
@@ -351,7 +405,7 @@ impl Describe {
         let mut exported = Vec::new();
         for _ in 0..n {
             let kind = r.count()? as u32;
-            if kind > 3 {
+            if kind > 4 {
                 return Err("Malformed: entry kind".into());
             }
             let mut entry = Exported {
@@ -375,7 +429,7 @@ impl Describe {
                 });
             }
             entry.value = r.bytes()?;
-            if kind != 2 && (!entry.slots.is_empty() || !entry.value.is_empty()) {
+            if kind != 2 && kind != 4 && (!entry.slots.is_empty() || !entry.value.is_empty()) {
                 return Err("Malformed: call entry carries query schemas".into());
             }
             exported.push(entry);
@@ -442,10 +496,11 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             entry.result_fp
         ));
     }
-    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null);\nconst ns = (root, path) => path.reduce((o, k) => o[k] ??= Object.create(null), root);\n");
+    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null), room = Object.create(null);\nconst ns = (root, path) => path.reduce((o, k) => o[k] ??= Object.create(null), root);\n");
     let mut calls = StubTypes::default();
     let mut subscriptions = StubTypes::default();
     let mut decoded = StubTypes::default();
+    let mut rooms = StubTypes::default();
     for (i, entry) in describe.exported.iter().enumerate() {
         let args = Schema::read(&entry.args)?;
         let arg_name = format!("Args{i}");
@@ -454,12 +509,19 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         let path = &paths[i];
         let (name, module) = path.split_last().expect("stub path has a module");
         let at = |root: &str| format!("ns({root},{})[{}]", json!(module), json!(name));
-        if entry.kind == 2 {
+        if entry.kind == 2 || entry.kind == 4 {
+            let room_schemas = if entry.kind == 4 {
+                Some(entry.room_schemas()?)
+            } else {
+                None
+            };
             let query = entry.query_schemas()?;
-            entries.push_str(&format!("{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd);\n", at("subscribe")));
-            subscriptions.insert(path, format!(
-                "(args: codec.{arg_name}, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
-            ));
+            if room_schemas.is_none() {
+                entries.push_str(&format!("{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd);\n", at("subscribe")));
+                subscriptions.insert(path, format!(
+                    "(args: codec.{arg_name}, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+                ));
+            }
             let value = format!("Value{i}");
             js.push_str(&query.value.javascript(&value));
             dts.push_str(&query.value.declarations(&value));
@@ -484,15 +546,37 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
                 key_codecs.push(format!("codec.{key}"));
                 row_codecs.push(format!("codec.{row}"));
             }
-            entries.push_str(&format!(
-                "{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd,queryCodec(codec.{value}, {}, [{}], [{}]));\n",
-                at("subscribeDecoded"), json!(names), key_codecs.join(","), row_codecs.join(",")
-            ));
-            let slots = format!("{{ {} }}", slot_types.join("; "));
-            let sub = format!(
-                "Subscription<codec.{value}, {slots}, {{ {} }}>",
-                slot_keys.join("; ")
+            let decode = format!(
+                "queryCodec(codec.{value}, {}, [{}], [{}])",
+                json!(names),
+                key_codecs.join(","),
+                row_codecs.join(",")
             );
+            let slots = format!("{{ {} }}", slot_types.join("; "));
+            let keys = format!("{{ {} }}", slot_keys.join("; "));
+            if let Some(live) = room_schemas {
+                let (state, message) = (format!("State{i}"), format!("Message{i}"));
+                js.push_str(&live.state.javascript(&state));
+                js.push_str(&live.message.javascript(&message));
+                dts.push_str(&live.state.declarations(&state));
+                dts.push_str(&live.message.declarations(&message));
+                entries.push_str(&format!(
+                    "{} = (args,handlers) => client.room(want[{i}],codec.{arg_name}.encode(args),handlers ?? {{}},{decode},{{state:codec.{state},message:codec.{message},peers:{},stateMax:{},messageMax:{}}});\n",
+                    at("room"), live.peers, live.state_max, live.message_max
+                ));
+                let types =
+                    format!("codec.{state}, codec.{message}, codec.{value}, {slots}, {keys}");
+                rooms.insert(
+                    path,
+                    format!("(args: codec.{arg_name}, handlers?: RoomHandlers<{types}>) => LiveRoom<{types}>"),
+                );
+                continue;
+            }
+            entries.push_str(&format!(
+                "{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd,{decode});\n",
+                at("subscribeDecoded")
+            ));
+            let sub = format!("Subscription<codec.{value}, {slots}, {keys}>");
             decoded.insert(path, format!("(args: codec.{arg_name}, onChange: (sub: {sub}, change: Change<codec.{value}, {slots}>) => void, onEnd?: (reason: SubscriptionEnd) => void) => {sub}"));
         } else {
             let result = Schema::read(&entry.result)?;
@@ -506,8 +590,8 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             );
         }
     }
-    entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
-    if !decoded.is_empty() {
+    entries.push_str("return {call,subscribe,subscribeDecoded,room};\n}\n");
+    if !decoded.is_empty() || !rooms.is_empty() {
         entries.push_str(r#"export function queryCodec(value,names,keys,rows,keyPrefixBytes = 4) {
     const positions = new Map(names.map((name, i) => [name, i]));
     const slot = position => {
@@ -539,10 +623,11 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
 "#);
     }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{CallOptions, Change, Option, Outcome, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {} }};\n",
+        "import type * as codec from './codec.js';\nimport type {{CallOptions, Change, Option, Outcome, LiveRoom, RoomHandlers, SlotRow, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {}; room: {} }};\n",
         calls.render(),
         subscriptions.render(),
-        decoded.render()
+        decoded.render(),
+        rooms.render()
     );
     let mut files = BTreeMap::from([
         ("package.json".into(), "{\"type\":\"module\"}\n".into()),
@@ -569,6 +654,14 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
         (
             "persistence.ts".into(),
             include_str!("../../../sdk/client/persistence.ts").into(),
+        ),
+        (
+            "room.ts".into(),
+            include_str!("../../../sdk/client/room.ts").into(),
+        ),
+        (
+            "wire.ts".into(),
+            include_str!("../../../sdk/client/wire.ts").into(),
         ),
     ]);
     http::generate(describe, &mut files)?;

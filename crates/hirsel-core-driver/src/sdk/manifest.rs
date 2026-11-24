@@ -36,11 +36,25 @@ fn entry_json(entry: &Exported, path: &[String]) -> Result<Value, Error> {
         1 => "transact",
         2 => "query",
         3 => "granted",
+        4 => "room",
         _ => return Err("Malformed: entry kind".into()),
     };
     let mut slots = Vec::new();
-    let result = if entry.kind == 2 {
-        let query = entry.query_schemas()?;
+    let mut room = None;
+    let result = if entry.kind == 2 || entry.kind == 4 {
+        let query = if entry.kind == 4 {
+            let schemas = entry.room_schemas()?;
+            room = Some(json!({
+                "state": schemas.state,
+                "message": schemas.message,
+                "peers": schemas.peers,
+                "state_max": schemas.state_max,
+                "message_max": schemas.message_max,
+            }));
+            schemas.query
+        } else {
+            entry.query_schemas()?
+        };
         for (declared, slot) in entry.slots.iter().zip(query.slots) {
             let kind = match declared.kind {
                 0 => "table",
@@ -60,7 +74,7 @@ fn entry_json(entry: &Exported, path: &[String]) -> Result<Value, Error> {
     } else {
         Schema::read(&entry.result)?
     };
-    Ok(json!({
+    let mut value = json!({
         "module": module,
         "name": name,
         "kind": kind,
@@ -71,5 +85,9 @@ fn entry_json(entry: &Exported, path: &[String]) -> Result<Value, Error> {
         "args": Schema::read(&entry.args)?,
         "result": result,
         "slots": slots,
-    }))
+    });
+    if let Some(room) = room {
+        value["room"] = room;
+    }
+    Ok(value)
 }

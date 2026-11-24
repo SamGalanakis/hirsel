@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.57: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.58: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,46 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.58 (rooms: the ephemeral lane, as built; lanes hirsel4-cutover-2276 and hirsel4-rooms-2301)
+
+A room carries presence state and messages between the sessions that hold a membership. Nothing in a room is stored, replayed or ordered against commits. Admission is an ordinary view, so revocation and covers work as for any query.
+- **Declaration (rule 2, §1.1).** `runner.room[G, H, A, S: codec, M: codec](mut r, admit, declarations, state: Codec[S], message: Codec[M], bounds: RoomBounds, n, steps)` registers an entry of the new kind `Room`, which is Describe kind 4. `admit` has `query_as`'s shape and returns `Answer[Grant]`, where `Grant = Denied | Watch | Join`. `RoomBounds { peers, state, message }` must satisfy 1 ≤ peers ≤ `PEERS_MAX` (256), state ≤ `STATE_MAX` (8192), message ≤ `MESSAGE_MAX` (32768) and n ≤ `ROOM_ARGS_MAX` (1024), and one Part with a maximal state and message must fit `LIVE_MAX` (65536). Otherwise registration returns `RegisterError.RoomBounds`. S and M belong to the application, and the runner names no application type. A Room's `Described.result` is the codec of `(value schema, slot list, state schema, message schema, peers, state, message)`. Its `result_fp` covers the room's types and bounds, so a stale client fails at Hello.
+- **Rule 13.** The runner makes no auth decisions. It enforces mechanically the `Grant` that the admission view returns.
+- **Frames (§3).** `Set(sub, Option[Bytes])` is tag 9 and `Send(sub, Option[u32], Bytes)` is tag 10, both client to server. `Live(List[Part])` is tag 11, server to client.
+  - A Part is `{sub, complete, you, joined, states, msgs, left, gap, lost, full}`, applied in the order joined, states, msgs, left.
+  - Peer ids are minted per room from 1. Within a roster epoch they are monotonic and never reused. Peer 0 names no member, so a `Send` to it reaches no one.
+  - A `Live` frame is at most min(`LIVE_MAX`, `socket.max_frame`). The place refuses to start when one legal Part does not fit.
+  - `Live` is not content. It takes no fence, no `budget` and no `Dropped`, and no order holds between `Live` and `Batch`.
+- **Membership.** A room membership is a Subscribe to the Room entry. The Grant and any slots arrive in ordinary Batch groups. The relay admits a granted session to the roster in FIFO order. A session it cannot place gets one Part with `full`. The first Part of each membership carries `you` and `complete`.
+  - Only the owner's acceptance installs the membership token. So a `Set` or `Send` from a waiter, a deferred sub or an old membership is dropped, and a value set while waiting never becomes the member's state.
+  - The member's first state is its first `Set` after `you`.
+- **Refusals (§2.5 of the room design).**
+  - These close the session with 1002:
+    - a `Set` or `Send` naming a live sub that is not a Room;
+    - a `Set` or `Send` naming a sub id never named;
+    - S or M bytes that fail strict decode or exceed the registered bound.
+  - A `Set` or `Send` that `permits` refuses is dropped silently. So is one for a sub that is no longer live, and a `Send` to a peer that is not a member.
+  - A value whose decode exceeds the decode budget is dropped, and the sender's `lost` gains 1.
+- **Delivery.** Each receiver's ring is bounded, and overflow becomes that receiver's `gap`. Each sender's message blocks are bounded, and overflow becomes its own `lost`.
+  - A Part is at most 65536 bytes. State diffs that a maximal message held back take the first reservation on the next Part, so sustained messages do not starve roster diffs.
+  - A message waits for its sender's `joined`.
+- **Memory (MEM-20, L15).** Each owner reserves `room_session_charge` at the place's room maxima on its session limit. The blocks keep that record when they move to the relay. The start check counts that reservation inside the session ceiling, and `n_relay` must hold the relay's inbox, its tables and one room record.
+- **Idle (§7).** Rooms exist only in sessions (§14.4), and `serve` votes idle only when no owner remains.
+- **Laws (runner `runner_owner_laws.hirsel`, all green):**
+  - `first_admission_installs_adm`;
+  - `waiter_set_not_installed_after_promotion`;
+  - `direct_destination_survives_full_block`, where a `Send` to peer 0 and one to a never-minted peer reach no one;
+  - `message_delivered_under_full_state_churn`;
+  - `roster_diffs_served_under_sustained_messages`;
+  - `room_decode_capacity_reports_loss`;
+  - `room_session_charge_covers_maximum_session`;
+  - `leaving_sub_does_not_block_successor`.
+  
+  The client half is in docs/spec/sdk.md "Rooms", checked by `sdk.client:packed_consumer`.
+- **Open.** The §1.1 declarations and the §4 G2/G3 steps do not yet name rooms. §3 names the hirsel.4 tags but not the Part. This entry is the contract until they are rewritten. The bench reference server (bench/wire) has no rooms and closes a session that sends a room frame with 1007.
+
+Reversible: the constants and bounds are GUESS values. The frame tags and the Part layout are part of `hirsel.4` and change only with a new subprotocol.
 
 ## CHANGES-v2.57 (a bound session expires; lane wire-bind-expiry-2288)
 

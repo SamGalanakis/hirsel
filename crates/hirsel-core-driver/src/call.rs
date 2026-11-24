@@ -18,7 +18,7 @@ type Error = Box<dyn std::error::Error>;
 /// A server's message is bounded well above the runner's 1 MiB reply budget.
 const MAX_MESSAGE: usize = 64 << 20;
 const MAX_HEAD: usize = 8192;
-const KINDS: [&str; 4] = ["compute", "transact", "query", "granted"];
+const KINDS: [&str; 5] = ["compute", "transact", "query", "granted", "room"];
 
 pub struct Options {
     pub server: PathBuf,
@@ -134,11 +134,9 @@ fn run_with(
         print!("{}", entry_help(name, entry, &args)?);
         return Ok(0);
     }
-    if entry.kind == 2 {
-        return Err(format!(
-            "`{name}` is a query entry; hirsel call does not subscribe (unsupported)"
-        )
-        .into());
+    if let kind @ ("query" | "room") = KINDS[entry.kind as usize] {
+        let refusal = format!("`{name}` is a {kind} entry; hirsel call does not subscribe");
+        return Err(format!("{refusal} (unsupported)").into());
     }
     let result = Schema::read(&entry.result)?;
     // Every argument is typed before connecting.
@@ -322,12 +320,12 @@ fn listing(description: &Describe, entries: &[(String, &Exported)]) -> Result<St
 
 fn result_types(entry: &Exported) -> Result<(String, Vec<Schema>), Error> {
     let name = |schema: &Schema| type_name(&schema.root, &schema.definitions);
-    if entry.kind == 2 {
-        Ok(entry.query_schemas()?.describe_types(name))
-    } else {
-        let result = Schema::read(&entry.result)?;
-        Ok((name(&result), vec![result]))
-    }
+    let result = match entry.kind {
+        2 => return Ok(entry.query_schemas()?.describe_types(name)),
+        4 => return Ok(entry.room_schemas()?.describe_types(name)),
+        _ => Schema::read(&entry.result)?,
+    };
+    Ok((name(&result), vec![result]))
 }
 
 fn entry_help(name: &str, entry: &Exported, args: &Schema) -> Result<String, Error> {

@@ -248,12 +248,12 @@ fn format3_end() -> Bytes {
 }
 
 // Wire vectors derived from the spec tables with libxxhash.
-fn format5_manifest() -> Bytes {
+fn format6_manifest() -> Bytes {
     let words: Inline[u64, 86] =[
         0x0000003800010001,
-        0x9dc2310b617231e7,
+        0x564e0135196906fe,
         0x45524f5453524948,
-        0x0000000100000005,
+        0x0000000100000006,
         0x0000000000000001,
         0x0000000000000002,
         0x0000000000000000,
@@ -641,7 +641,7 @@ fn format4_manifest_law() -> Result[(), Error] {
     m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
     let roots: LocatedRoots = clone(m.branches[0].roots)
     list.push(mut m.pins, LocatedPin(name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
-    let oracle = format5_manifest()
+    let oracle = format6_manifest()
     if disk_page_manifest_bytes(id, m)? != oracle {
         return Error(Foreign)
     }

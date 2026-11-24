@@ -10,6 +10,8 @@ import subprocess
 import sys
 import time
 
+from bench_cpus import cpu_list
+
 RUNTIME = Path("/run/user") / str(os.getuid())
 REGIMES = RUNTIME / "hirsel-mc-regimes.lock"
 BOARD = RUNTIME / "hirsel-board.lock"
@@ -33,8 +35,13 @@ def measurement_affinity(*paths, force=False):
     affinity = os.sched_getaffinity(0)
     # CPU validation can run while a different holder has confined this
     # process. The actual pin happens in the system scope after acquisition.
-    if uses_shield(paths, force) and STATE.exists() and not in_timing_slice():
-        affinity |= RESERVED
+    if uses_shield(paths, force) and not in_timing_slice():
+        try:
+            masks = json.loads(STATE.read_text())
+        except FileNotFoundError:
+            pass
+        else:
+            affinity |= RESERVED | set(masks.get("also", ()))
     return affinity
 
 
@@ -111,21 +118,22 @@ def unshield():
     return True
 
 
-def shield():
-    from bench_cpus import cpu_list
-
+def shield(also):
     before = {unit: allowed_cpus(unit) for unit in SLICES}
-    online = Path("/sys/devices/system/cpu/online").read_text().strip()
-    if not RESERVED <= set(cpu_list(online)):
+    online = set(cpu_list(Path("/sys/devices/system/cpu/online").read_text().strip()))
+    reserved = RESERVED | set(also)
+    if not reserved <= online:
         raise RuntimeError("timing CPUs are offline")
-    after = {unit: set(cpu_list(",".join(value.split()) if value else online)) - RESERVED
+    after = {unit: (set(cpu_list(",".join(value.split()))) if value else online) - reserved
              for unit, value in before.items()}
-    if not all(after.values()):
-        raise RuntimeError("the timing shield would leave a slice with no CPUs")
+    minimum = 8 if also else 1
+    for unit, cpus in after.items():
+        if len(cpus & online) < minimum:
+            raise RuntimeError(f"the timing shield would leave {unit} with fewer than {minimum} online CPUs")
     # Publish the previous settings before changing either slice. Keep them
     # until both slices are restored, including after a partial failure.
     pending = STATE.with_suffix(".tmp")
-    pending.write_text(json.dumps(before))
+    pending.write_text(json.dumps(before | {"also": sorted(also)}))
     pending.replace(STATE)
     for unit, cpus in after.items():
         set_cpus(unit, ",".join(map(str, sorted(cpus))))
@@ -145,7 +153,7 @@ def exit_on_signal(signum, _frame):
 
 
 @contextmanager
-def shielded():
+def shielded(also):
     handlers = {sig: signal.signal(sig, exit_on_signal) for sig in SIGNALS}
     original = None
     keeper = None
@@ -160,7 +168,7 @@ def shielded():
                 keeper = subprocess.Popen(["/bin/cat"], stdin=subprocess.PIPE,
                                           stdout=subprocess.DEVNULL)
                 enter_scope()
-            shield()
+            shield(also)
         yield
     finally:
         with defer_signals():
@@ -194,13 +202,15 @@ def file_locks(paths, *, blocking=True):
 
 
 @contextmanager
-def hold(*paths, blocking=True, force=False):
+def hold(*paths, blocking=True, force=False, also=()):
     local = uses_shield(paths, force)
+    if also and not local:
+        raise RuntimeError("extra timing CPUs require the local timing shield")
     # Hold both canonical locks during the update and restore. Older callers
     # may take either lock independently and must never have their CPUs moved.
     with file_locks((REGIMES, BOARD, *paths) if local else paths, blocking=blocking):
         if local:
-            with shielded():
+            with shielded(also):
                 yield
         else:
             yield
@@ -222,9 +232,16 @@ def main():
     if sys.argv[1:] == ["clear-stale"]:
         clear_stale()
         return 0
-    if sys.argv[1:3] == ["run", "--"] and len(sys.argv) > 3:
-        with hold(REGIMES, BOARD):
-            status = subprocess.run(sys.argv[3:]).returncode
+    if sys.argv[1:2] == ["run"] and "--" in sys.argv:
+        separator = sys.argv.index("--")
+        parser = argparse.ArgumentParser(prog=f"{sys.argv[0]} run")
+        parser.add_argument("--also", type=cpu_list, default=(), help="extra CPUs to shield")
+        args = parser.parse_args(sys.argv[2:separator])
+        command = sys.argv[separator + 1:]
+        if not command:
+            parser.error("a timing command is required after --")
+        with hold(REGIMES, BOARD, also=args.also):
+            status = subprocess.run(command).returncode
             return status if status >= 0 else 128 - status
     if sys.argv[1:2] == ["scope"] and "--" in sys.argv:
         separator = sys.argv.index("--")
@@ -245,7 +262,7 @@ def main():
                       ("TimeoutStopUSec", "t", "2000000")]
         enter_scope(props)
         os.execvp(command[0], command)
-    print(f"Usage: {sys.argv[0]} clear-stale | run -- command [args...]", file=sys.stderr)
+    print(f"Usage: {sys.argv[0]} clear-stale | run [--also CPUS] -- command [args...]", file=sys.stderr)
     return 2
 
 

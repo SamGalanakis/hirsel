@@ -653,34 +653,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
-    /// The function item `code.describe` names, refused unless it is a top-level
-    /// function whose generics are all regions (PROG-9).
-    fn code_describe_target(&mut self, n: NodeId) -> Option<usize> {
-        let argument = self.kids(n).get(1).copied().unwrap_or(n);
-        let item = self.p.target(self.at, argument).and_then(|target| {
-            let Target::Definition(id) = target else {
-                return None;
-            };
-            let Some(Def::Fn(index)) = self.p.by_definition[id.0 as usize] else {
-                return None;
-            };
-            let function = &self.p.fns[index as usize];
-            function
-                .generics
-                .iter()
-                .all(|generic| generic.region)
-                .then_some(index as usize)
-        });
-        if item.is_none() {
-            self.refuse(
-                "PROG-9",
-                argument,
-                "code.describe requires a top-level non-generic function name",
-            );
-        }
-        item
-    }
-
     /// Lower `core.isolate`'s value boundary (FORM #101).  The callback's failure
     /// successor enters `handler`, whose first instruction is the catch row; the
     /// ordinary result slot is initialized independently on each of the three exits.
@@ -1005,7 +977,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
             Kernel::CodeRevision => self.runtime_code_revision(vals[0]?, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
-            Kernel::CodeDescribe => self.runtime_code_describe(result, n),
+            Kernel::CodeDescribe => {
+                self.refuse(
+                    "PROG-9",
+                    n,
+                    "code.describe requires the name of a top-level function",
+                );
+                None
+            }
             Kernel::Flow(op) => self.runtime_flow(op, types, vals, result, n),
         }
     }
@@ -2166,44 +2145,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    /// PROG-9: a StaticFn is the address of its function's static descriptor,
-    /// `{code, length, revision}` then the identity bytes (`Inst::DescriptorRef`). The
-    /// described function is the item's closed adapter, whatever body describes
-    /// it, so a program has one descriptor per function and StaticFn equality is
-    /// word equality.
-    fn runtime_code_describe(&mut self, result: TyId, n: NodeId) -> Option<ValueId> {
-        let item = self.code_describe_target(n)?;
-        let regions = (0..self.p.fns[item].generics.len())
-            .map(|i| self.t.mk(TyKind::Region(Root::Generic(i as u32))))
-            .collect::<Vec<_>>();
-        let callable = subst(&mut self.t, self.p.fns[item].callable, &regions);
-        let function = self.item_adapter_closed(item, &regions, callable, n)?;
-        // A closed adapter is no template of an enclosing generic body: carried
-        // under it, specialization would make a fresh row per instance.
-        self.nested.remove(&function);
-        let Some(bytes) = self.code_identity_bytes(function) else {
-            self.gap(n, "StaticFn identity source is not built");
-            return None;
-        };
-        let identity = self.e.static_bytes(&bytes);
-        let descriptor = self.value(Ty::Ptr);
-        self.inst(
-            Inst::DescriptorRef {
-                result: descriptor,
-                function,
-                identity,
-            },
-            n,
-        );
-        let word = self.reinterpret(descriptor, Ty::Ptr, Ty::Scalar(Scalar::U64), n);
-        if let Some(word) = word {
-            self.static_fns
-                .insert(word, (function, identity, bytes.len() as u64));
-        }
-        self.temp(result, word);
-        word
-    }
-
     /// The descriptor of `value`, a StaticFn, and its identity length: a
     /// StaticFn this body described has both here; any other has them in its
     /// word.
@@ -2325,26 +2266,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
-    fn code_identity_bytes(&self, function: FuncId) -> Option<Vec<u8>> {
-        let instance = self.e.module.functions[function.index()].instance;
-        let path = &self.e.module.instances[instance.index()].definition;
-        // Function items pass through a callable adapter before reaching this
-        // kernel. Its `$callable[...]` definition is an ABI row, not the source
-        // item whose PROG-9 identity is published.
-        let source_name = path
-            .0
-            .name
-            .split_once("$callable")
-            .map_or(path.0.name.as_str(), |(name, _)| name);
-        let f = self.p.fns.iter().position(|fd| {
-            fd.path.0.package == path.0.package
-                && fd.path.0.modules == path.0.modules
-                && fd.path.0.name == source_name
-        })?;
-        let fd = &self.p.fns[f];
-        crate::identity::code_identity(&self.p.decls, &self.t, fd, &[])
-    }
-
     /// A `Bytes` view `{bytes, length, 0}` of static identity bytes.
     fn identity_carrier(
         &mut self,
@@ -2415,23 +2336,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (self.b.values.get(value.index()) == Some(&Ty::Ptr))
             .then_some(value)
             .or_else(|| self.reinterpret(value, Ty::Scalar(Scalar::U64), Ty::Ptr, n))
-    }
-
-    fn reinterpret(&mut self, value: ValueId, from: Ty, to: Ty, n: NodeId) -> Option<ValueId> {
-        if self.b.values.get(value.index()) != Some(&from) {
-            return None;
-        }
-        let slot = self.new_slot(PlaceTy::Value(from), n);
-        self.inst(
-            Inst::Store {
-                address: slot,
-                value,
-            },
-            n,
-        );
-        let pointer = self.pointer(slot, n);
-        let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Value(to), n);
-        Some(self.read_bits(at, to, n))
     }
 
     fn owner_payload(

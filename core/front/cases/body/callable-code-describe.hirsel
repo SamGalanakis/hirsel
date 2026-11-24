@@ -1,4 +1,4 @@
-// PROG-9 accepts only a top-level non-generic function name and preserves the
+// PROG-9 accepts a top-level function name and preserves the
 // FunctionRef through the StaticFn value. The identity includes the full
 // signature but excludes parameter names.
 // expect: run describe_named() = 0
@@ -23,9 +23,49 @@ fn describe_local()->u64 {
  code.describe(local)
  0
 }
-// expect: refuse PROG-9 at 28:44
-fn generic[T]()->u64 {0}
-fn describe_generic()->u64 { code.describe(generic); 0 }
-// expect: refuse PROG-9 at 30:57
-fn describe_parameter(f:fn()->u64)->u64 { code.describe(f); 0 }
+fn same[T: key](a: T, b: T) -> bool { a == b }
+fn described_same() -> StaticFn[fn(u64, u64) -> bool] { code.describe(same) }
+
+// expect: run call_described_same() = 1
+fn call_described_same() -> u64 {
+    if (code.callable(described_same()))(3, 3) { 1 } else { 0 }
+}
+
+fn left[A: plain, B](a: A) -> A { a }
+// expect: refuse PROG-9 at 36:65
+fn open_parameter() -> StaticFn[fn(u64) -> u64] { code.describe(left) }
+
+fn keep[F](s: StaticFn[F]) -> StaticFn[F] { s }
+// expect: refuse PROG-9 at 40:49
+fn open_expected() { let _ = keep(code.describe(same)) }
+
+// expect: refuse LANG-12 at 44:70
+// expect: compared LANG-12 at 44:70 | f64 | key
+fn missing_bound() -> StaticFn[fn(f64, f64) -> bool] { code.describe(same) }
+
+fn idv[T](x: T) -> u64 { 0 }
+// expect: refuse PROG-9 at 48:84
+fn named_region[in s](r: Region) -> StaticFn[fn(Text in s) -> u64] { code.describe(idv) }
+
+// expect: refuse PROG-9 at 51:62
+fn describe_parameter(f: fn() -> u64) -> u64 { code.describe(f); 0 }
+
+fn pick[T: plain](a: T, b: T) -> T { a }
+fn d1() -> StaticFn[fn(u64, u64) -> u64] { code.describe(pick) }
+fn d2() -> StaticFn[fn(u64, u64) -> u64] { code.describe(pick) }
+fn d32() -> StaticFn[fn(u32, u32) -> u32] { code.describe(pick) }
+
+// expect: run describe_two_sites() = 1
+fn describe_two_sites() -> u64 {
+    let a = d1()
+    let b = d2()
+    let u = d32()
+    if code.identity(a) == code.identity(b) && a == b
+        && code.identity(a) != code.identity(u) && code.identity(b) != code.identity(u)
+        && (code.callable(a))(4, 5) == 4 && (code.callable(u))(7u32, 9u32) == 7u32 {
+        1
+    } else {
+        0
+    }
+}
 pub fn main()->Result[(),Exit] {Ok(())}

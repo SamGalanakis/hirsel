@@ -116,18 +116,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn item_adapter_closed(
         &mut self,
+        raw: FuncId,
         item: usize,
         types: &[TyId],
         ty: TyId,
         n: NodeId,
     ) -> Option<FuncId> {
-        let (raw, _) = match self.instance_row(item, types) {
-            Ok(row) => row,
-            Err(what) => {
-                self.gap(n, what);
-                return None;
-            }
-        };
         self.callable_adapter(raw, Some((item, types)), ty, n, true)
     }
     pub(super) fn row_adapter(&mut self, raw: FuncId, ty: TyId, n: NodeId) -> Option<FuncId> {
@@ -170,7 +164,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             return Some(raw);
         }
-        if let Some(&row) = self.e.callable_adapters.get(&(raw, signature)) {
+        let descriptor_instance = close_generics
+            && item.is_some_and(|(f, _)| self.p.fns[f].generics.iter().any(|g| !g.region));
+        let descriptor_key = descriptor_instance.then(|| {
+            let mut key = self.e.module.instances
+                [self.e.module.functions[raw.index()].instance.index()]
+            .clone();
+            key.definition.0.name.push_str("$callable[instance]");
+            key
+        });
+        let existing = match &descriptor_key {
+            Some(key) => self.e.funcs.get(key),
+            None => self.e.callable_adapters.get(&(raw, signature)),
+        };
+        if let Some(&row) = existing {
             return Some(row);
         }
         let mut child = Cx::new(self.p, self.definition, self.e);
@@ -195,6 +202,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             fd.path.0.name,
             crate::decls::canonical(&self.p.decls, &self.t, ty)
         );
+        if let Some(key) = &descriptor_key {
+            fd.path = key.definition.clone();
+        }
         child.fd = std::borrow::Cow::Owned(fd);
         child.entry = false;
         child.generated = true;
@@ -202,10 +212,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             child.nested.insert(raw, template.clone());
         }
         std::mem::swap(&mut child.t, &mut self.t);
-        let row = child.e.function(
-            &child.fd.path,
-            child.e.module.signatures[signature.index()].clone(),
-        );
+        let sig = child.e.module.signatures[signature.index()].clone();
+        let row = match descriptor_key {
+            Some(key) => child.e.add_function(key, sig),
+            None => child.e.function(&child.fd.path, sig),
+        };
         child.e.install_source_signature(row, signature);
         child.func = Some(row);
         let sig = &child.e.module.signatures[signature.index()];
@@ -289,7 +300,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.out.counts += out.counts;
         if out.function.is_none() {
             self.halt();
-        } else {
+        } else if !descriptor_instance {
             self.e.callable_adapters.insert((raw, signature), row);
         }
         out.function

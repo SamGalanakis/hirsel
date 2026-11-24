@@ -41,7 +41,6 @@ use hirsel_core_resolve::{NameScope, Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use simd::SimdCall;
-
 mod admission;
 mod anchors;
 mod builtins;
@@ -51,6 +50,7 @@ mod calls;
 mod cleanup;
 mod clone_glue;
 mod closures;
+mod code_describe;
 mod codec_glue;
 mod compact;
 mod compare;

@@ -324,27 +324,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if g.path.0.name == "callable" && g.path.is_core("code.callable") {
             self.flow_callable(n);
         }
-        // PROG-9 is decided at the argument even when a generic function item
-        // cannot otherwise be materialized without an expected callable type.
-        // Keep this refusal ahead of function-value inference so the diagnostic
-        // names the offending generic item rather than cascading LANG-12.
-        if g.path.0.name == "describe"
-            && g.path.is_core("code.describe")
-            && let Some(argument) = args.first()
-            && let Some(Target::Definition(id)) = p.target(self.at, *argument)
-            && let Some(Def::Fn(item)) = p.by_definition[id.0 as usize]
-            && p.fns[item as usize]
-                .generics
-                .iter()
-                .any(|generic| !generic.region)
-        {
-            self.refuse(
-                "PROG-9",
-                *argument,
-                "code.describe requires a top-level non-generic function name",
-            );
-            return (ERROR, None);
-        }
         // A result rooted in a Region parameter is rooted in the region its argument
         // names (MEM-6); `rooted` lists those parameters.
         let rooted: Vec<usize> = g
@@ -411,6 +390,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if !self.mapper_mode(n, g.params.first().map(|q| q.mode)) {
             return (ERROR, None);
+        }
+        if g.path.is_core("code.describe") {
+            self.builtin_use(f, n);
+            let want = want.and_then(|w| self.expected_part(g.result, w).map(|_| w.ty));
+            return self.code_describe(g.result, args[0], want, n);
         }
         if g.waits {
             self.waited = true;

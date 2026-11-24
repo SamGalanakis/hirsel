@@ -25,6 +25,34 @@ pub(crate) fn code_identity(
     fd: &FnDecl,
     args: &[TyId],
 ) -> Option<Vec<u8>> {
+    identity(decls, t, fd, args, None)
+}
+
+/// The source spellings accompany the key's layout rows: a layout erases anchors
+/// and its name is spelled for PROG-10. The key records the selected dictionaries.
+pub(crate) fn instance_identity(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    fd: &FnDecl,
+    key: &hirsel_core_ir::InstanceKey,
+    source_args: &[TyId],
+) -> Option<Vec<u8>> {
+    identity(
+        decls,
+        t,
+        fd,
+        source_args.get(..key.arguments.len())?,
+        Some(key),
+    )
+}
+
+fn identity(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    fd: &FnDecl,
+    args: &[TyId],
+    key: Option<&hirsel_core_ir::InstanceKey>,
+) -> Option<Vec<u8>> {
     let TyKind::Fn(params, result, waits, Callable::Plain) = t.kind(fd.callable).clone() else {
         return None;
     };
@@ -63,7 +91,7 @@ pub(crate) fn code_identity(
         return None;
     }
     let mut prefix = Words::new(decls, false);
-    prefix.definition(&fd.path);
+    prefix.definition(key.map_or(&fd.path, |key| &key.definition));
     if type_count > 0 {
         prefix.punct("[");
         for (i, &slot) in w.parameters.iter().enumerate() {
@@ -74,8 +102,21 @@ pub(crate) fn code_identity(
         }
         prefix.punct("]");
         let mut separator = "{";
+        let mut dictionaries = Vec::new();
+        if let Some(key) = key {
+            let mut selected = key.dictionaries.iter();
+            dictionaries.extend(fd.generics.iter().map(|generic| {
+                // The instance key stores dictionaries by slot, then bound bit.
+                (0..u16::BITS)
+                    .filter(|&bit| generic.bounds & (1 << bit) != 0)
+                    .filter_map(|_| selected.next()?.split_once('[').map(|(bound, _)| bound))
+                    .collect::<Vec<_>>()
+            }));
+        }
         for &slot in &w.parameters {
-            for bound in declared_bound_names(fd.generics[slot as usize].bounds) {
+            for bound in declared_bound_names(fd.generics[slot as usize].bounds)
+                .filter(|bound| key.is_none() || dictionaries[slot as usize].contains(bound))
+            {
                 prefix.punct(separator);
                 prefix.word(bound);
                 prefix.punct("[");

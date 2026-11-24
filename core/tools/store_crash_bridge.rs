@@ -62,6 +62,43 @@ struct Bridge {
     checkpoint_reopen: bool,
     fork_observation: Option<ForkObservation>,
     read_only: Option<Snapshot>,
+    staged: Option<StagedCommit>,
+}
+
+/// A writer COMMIT the follower law stages through stdout ("STAGE").
+/// It lands when the follower's recovery pass stats the segment, the
+/// second stat of that name after staging; the witness takes the first.
+struct StagedCommit {
+    segment: String,
+    at: usize,
+    frame: Vec<u8>,
+    /// With an END image: write and sync both after the stat's size is
+    /// taken. Without: write the frame unsynced before the stat returns.
+    end: Option<Vec<u8>>,
+    stats: u32,
+}
+
+impl StagedCommit {
+    fn parse(raw: &[u8]) -> Self {
+        let boundary = raw[0] == 1;
+        let at = u64::from_le_bytes(raw[1..9].try_into().unwrap()) as usize;
+        let name_len = raw[9] as usize;
+        let segment = std::str::from_utf8(&raw[10..10 + name_len])
+            .unwrap()
+            .to_owned();
+        let rest = &raw[10 + name_len..];
+        let frame_len = u32::from_le_bytes(rest[..4].try_into().unwrap()) as usize;
+        let frame = rest[4..4 + frame_len].to_vec();
+        let end = rest[4 + frame_len..].to_vec();
+        assert_eq!(boundary, !end.is_empty(), "STAGE END image");
+        StagedCommit {
+            segment,
+            at,
+            frame,
+            end: boundary.then_some(end),
+            stats: 0,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -170,6 +207,9 @@ impl Bridge {
             if self.phase == 1 {
                 if &data[..len] == b"DONE" {
                     self.acked = true;
+                } else if let Some(raw) = data[..len].strip_prefix(b"STAGE") {
+                    assert!(self.staged.is_none(), "one staged COMMIT");
+                    self.staged = Some(StagedCommit::parse(raw));
                 } else if &data[..len] == b"ARM" {
                     self.armed = true;
                 } else if &data[..len] == b"CHILD RETURNED" {
@@ -285,9 +325,37 @@ impl Bridge {
                 }
             }
             47 => {
-                let file = self.files.get(&handle).expect("live stat descriptor");
+                let name = self
+                    .files
+                    .get(&handle)
+                    .expect("live stat descriptor")
+                    .name
+                    .clone();
+                let due = self.staged.as_mut().is_some_and(|staged| {
+                    if staged.segment == name {
+                        staged.stats += 1;
+                    }
+                    staged.segment == name && staged.stats == 2
+                });
+                let mut size = self.fs.read(&name).unwrap_or(&[]).len() as u64;
+                if due {
+                    let staged = self.staged.as_ref().unwrap();
+                    let (at, frame, end) = (staged.at, staged.frame.clone(), staged.end.clone());
+                    let mut bytes = self.fs.read(&name).unwrap().to_vec();
+                    assert_eq!(bytes.len(), at, "staged COMMIT starts at the recovered end");
+                    bytes.extend_from_slice(&frame);
+                    assert!(self.apply(Op::Write(&name, &bytes)));
+                    if let Some(end) = end {
+                        let end_name = format!("{name}.end");
+                        assert!(self.apply(Op::Sync(&name)));
+                        assert!(self.apply(Op::Write(&end_name, &end)));
+                        assert!(self.apply(Op::Sync(&end_name)));
+                    } else {
+                        size = bytes.len() as u64;
+                    }
+                }
                 Outcome {
-                    value: self.fs.read(&file.name).unwrap_or(&[]).len() as u64,
+                    value: size,
                     ..Outcome::default()
                 }
             }
@@ -628,6 +696,7 @@ pub extern "C" fn store_crash_new(cut: u64) -> *mut c_void {
         checkpoint_reopen: false,
         fork_observation: None,
         read_only: None,
+        staged: None,
     }))
     .cast()
 }
@@ -774,6 +843,9 @@ pub unsafe extern "C" fn store_crash_free(p: *mut c_void) {
         bridge.files.is_empty(),
         "final run leaked provider file handles"
     );
+    if let Some(staged) = &bridge.staged {
+        assert!(staged.stats >= 2, "the staged COMMIT was never applied");
+    }
     if let Some(before) = &bridge.read_only {
         assert_eq!(*before, bridge.fs.snapshot(), "read-only directory changed");
     }

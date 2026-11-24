@@ -903,9 +903,12 @@ fn log_journal_witness(d: Dir, id: StoreId, first: u64) -> Result[Inline[u8, 32]
             Error(problem) => return Error(Io(problem)),
         }
         disk_io(host.sync(mut file))?
-        let size = disk_io(host.stat_file(mut file))?.size
+        let stat_size = disk_io(host.stat_file(mut file))?.size
         let following = journal_following(d, id, seq, true)?
-        let end = if let Some(header) = following { header.prev_end } else { size }
+        let end = if let Some(header) = following { header.prev_end } else { stat_size }
+        // §3.2 live capture: the writer may have extended the file and
+        // named the new bytes after this stat. Refresh before Truncated.
+        let size = if end > stat_size { disk_io(host.stat_file(mut file))?.size } else { stat_size }
         if end > size { return Error(disk_fault(path, size, Truncated)) }
         witness_word(mut digest, seq)
         witness_word(mut digest, end)

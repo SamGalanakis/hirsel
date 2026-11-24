@@ -5302,7 +5302,7 @@ fn disk_start(d: Dir, r: Random, options: Options) -> Result[DiskStartup, Error]
     })?
     let recorded_after = manifested.tips[0u64].head
     let initial = journal_replay_manifest(take manifested, loaded.manifest)?
-    let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, true, take initial)?
+    let recovered = journal_recover(d, loaded.store, loaded.manifest.first_live, Locked, take initial)?
     let JournalRecovered(replay: take replay, seq: last_seq, end: last_end, uncovered: uncovered) = take recovered
     let live_bytes = journal_account(replay)?
     let JournalReplay(state: take state, next_node: next_node, ..) = take replay
@@ -5541,15 +5541,15 @@ fn check_read_only_manifest(d: Dir, raw: Bytes) -> Result[(), Error] waits {
     Ok(())
 }
 
-fn read_only_state(d: Dir, id: StoreId, take manifest: PageManifest, barriers: bool) -> Result[JournalReplay, Error] waits {
+fn read_only_state(d: Dir, id: StoreId, take manifest: PageManifest, read: JournalRead) -> Result[JournalReplay, Error] waits {
     let first_live = manifest.first_live
     let replay = read_only_checkpoint(d, id, take manifest)?
-    let JournalRecovered(replay: take recovered, ..) = journal_recover(d, id, first_live, barriers, take replay)?
+    let JournalRecovered(replay: take recovered, ..) = journal_recover(d, id, first_live, read, take replay)?
     Ok(take recovered)
 }
 
 fn read_only_recover(d: Dir, id: StoreId, take manifest: PageManifest, ceiling: u64) -> Result[ReadOnly, Error] waits {
-    let replay = read_only_state(d, id, take manifest, false)?
+    let replay = read_only_state(d, id, take manifest, Live)?
     over_ceiling(journal_account(replay)?, ceiling)?
     let main = view replay.state.tips[0u64]
     Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?)))
@@ -6553,65 +6553,6 @@ fn journal_apply_fork(file: String, mut replay: JournalReplay, take encoded: Jou
     replay.tiered.ordinal = ordinal
     replay.tiered.exact = false
     Ok(())
-}
-
-type JournalRecovered {
-    replay: JournalReplay,
-    seq: u64,
-    end: u64,
-    uncovered: u64
-}
-
-fn journal_recover(d: Dir, id: StoreId, first: u64, flush: bool, take initial: JournalReplay) -> Result[JournalRecovered, Error] waits {
-    let mut replay = take initial
-    let mut seq = first
-    let mut uncovered = 0u64
-    loop {
-        let path = journal_path(seq, "")?
-        let file = match host.open(d, path, Read) {
-            Ok(take handle) => take handle,
-            Error(NotFound) => return Error(disk_fault(path, 0, Header)),
-            Error(e) => return Error(Io(e))
-        }
-        let mut source = journal_input(take file, flush)?
-        let following = journal_following(d, id, seq, flush)?
-        let boundary = match following {
-            Some(h) => Some(h.prev_end),
-            None => disk_end(d, id, seq)?
-        }
-        let final_item = match following {
-            None => true,
-            Some(_) => false
-        }
-        let scanned = journal_scan(mut source, path, id, seq, boundary, final_item, mut replay, scoped fn(mut recovered_state: JournalReplay, take event: JournalEvent) -> Result[(), Error] {
-            journal_apply(path, mut recovered_state, take event)
-        })
-        let JournalInput(file: take consumed_file, ..) = take source
-        disk_io(host.close(take consumed_file))?
-        let (end, segment_bytes) = match take scanned {
-            Ok(segment) => segment,
-            Error(Corrupt(take fault)) => {
-                // A bad last HEADER without a good END is an incomplete
-                // segment creation. Valid headers with bad frames follow d.
-                let no_end = match boundary {
-                    None => true,
-                    Some(_) => false
-                }
-                if final_item && no_end && seq == first {
-                    if let Error(Corrupt(_)) = journal_header(d, id, seq, false) {
-                        return Ok(JournalRecovered(replay: take replay, seq: seq - 1, end: 0, uncovered: uncovered))
-                    }
-                }
-                return Error(Corrupt(take fault))
-            },
-            Error(take e) => return Error(take e)
-        }
-        uncovered = int.saturating_add(uncovered, segment_bytes)
-        if let None = following {
-            return Ok(JournalRecovered(replay: take replay, seq: seq, end: end, uncovered: uncovered))
-        }
-        seq += 1
-    }
 }
 
 // Replay settles the Memory union from the final roots. A put can make

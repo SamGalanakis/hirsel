@@ -476,6 +476,9 @@ pub fn disk_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, ou
         disk_crash_read_only(d, published) ?=> |_| Exit(status: 33)
         return Ok(())
     }
+    if scenario == "follower-durable" || scenario == "follower-boundary" {
+        return disk_crash_follower_main(d, c, r, tasks, argv, out, scenario)
+    }
     if scenario == "watermark-absent" || scenario == "watermark-torn" {
         if phase == "write" {
             if let Error(_) = disk_watermark_cut(d, c, r, tasks, scenario == "watermark-torn") {

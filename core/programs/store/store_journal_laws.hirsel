@@ -108,23 +108,23 @@ pub fn journal_law_recovery(d: Dir) -> bool waits {
     result.unwrap(host.close(take newest))
     result.unwrap(host.close(take next_end))
     result.unwrap(disk_write_synced(d, "j-8.end", journal_end_bytes(id, 8, 114)))
-    let all = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
+    let all = result.unwrap(journal_recover(d, id, 7, Locked, journal_initial()))
     if all.seq != 8 || all.end != 114 || all.replay.state.tips[0].head != 2 || all.replay.state.tips[0].at != 102 {
         return false
     }
     let empty: Bytes = list.new()
     result.unwrap(disk_write_synced(d, "j-9", empty))
-    let incomplete = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
+    let incomplete = result.unwrap(journal_recover(d, id, 7, Locked, journal_initial()))
     if incomplete.seq != 8 || incomplete.end != 114 || incomplete.replay.state.tips[0].head != 2 {
         return false
     }
     result.unwrap(disk_write_synced(d, "j-9.end", journal_end_bytes(id, 9, 72)))
-    if !disk_corrupt(journal_recover(d, id, 7, true, journal_initial())) {
+    if !disk_corrupt(journal_recover(d, id, 7, Locked, journal_initial())) {
         return false
     }
     result.unwrap(host.remove(d, "j-9.end"))
     result.unwrap(host.remove(d, "j-8"))
-    let previous = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
+    let previous = result.unwrap(journal_recover(d, id, 7, Locked, journal_initial()))
     previous.seq == 7 && previous.end == 114 && previous.replay.state.tips[0].head == 1 && previous.replay.state.tips[0].at == 101
 }
 
@@ -337,7 +337,7 @@ fn journal_worker_case(d: Dir, tasks: Tasks, mode: u64) -> bool waits {
     }) {
         return false
     }
-    let all = result.unwrap(journal_recover(d, id, 7, true, journal_initial()))
+    let all = result.unwrap(journal_recover(d, id, 7, Locked, journal_initial()))
     if mode == 3 {
         all.seq == 8 && all.end == 156 && all.replay.state.tips[0].head == 3
     } else {

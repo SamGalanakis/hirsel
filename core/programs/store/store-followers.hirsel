@@ -89,7 +89,7 @@ fn log_follow_capture(d: Dir, expected: Option[StoreId], ceiling: u64,
     } else {
         0u64
     }
-    let replay = read_only_state(d, id, take manifest, true)?
+    let replay = read_only_state(d, id, take manifest, LiveDurable)?
     let resident = journal_account(replay)?
     over_ceiling(int.saturating_add(old_charge, resident), ceiling)?
     check_read_only_manifest(d, raw)?

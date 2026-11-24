@@ -128,3 +128,9 @@ fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, schema_id: Bytes) -> R
     for byte in digest { list.push(mut identity, byte) }
     Ok(take identity)
 }
+
+fn push_undeclared_schema(mut line: String, name: String) {
+    string.push(mut line, "undeclared table or index: ")
+    string.push(mut line, name)
+    string.push(mut line, ". Declare it in schema, or remove it during an upgrade. For a table, call store.drop_named_table in on_migrate. For an index, omit it from its table's declaration.")
+}

@@ -1037,7 +1037,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Missing(name) => { string.push(mut line, "missing: "); string.push(mut line, name) },
         Changed(name) => { string.push(mut line, "changed index: "); string.push(mut line, name) },
         Conflict(name) => { string.push(mut line, "unique index conflict: "); string.push(mut line, name) },
-        Undeclared(name) => { string.push(mut line, "undeclared table or index: "); string.push(mut line, name) },
+        Undeclared(name) => push_undeclared_schema(mut line, name),
         NoLevel(name) => { string.push(mut line, "unknown durability level "); string.push(mut line, name) },
         Behind(_) => string.push(mut line, "the follower has not applied the requested version"),
         Gone(id) => { string.push(mut line, "deleted branch "); string.push_u64(mut line, int.widen(id)) },

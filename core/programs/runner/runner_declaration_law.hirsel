@@ -18,6 +18,10 @@ fn declaration_law_migrate(mut m: store.Migration) -> Result[(), store.Error] {
     Error(MigrationFault)
 }
 
+fn declaration_law_drop(mut m: store.Migration) -> Result[(), store.Error] {
+    store.drop_named_table(mut m, "data")
+}
+
 @test
 fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
     let mut scratch = string.with_capacity(32u64)
@@ -39,12 +43,24 @@ fn test_declaration_open(parent: Dir, clock: Clock, random: Random, tasks: Tasks
         return Error("ordinary open changed the catalog or accepted a missing declaration")
     }
     let failed_install = head_prepare(mut db, Install, false, place, None, code.describe(declaration_law_missing), 1048576u64, tasks)
-    if let Error(Migrate(Undeclared(name))) = failed_install {
+    if let Error(Migrate(Undeclared(take name))) = take failed_install {
         if name != "data" { return Error("install reported the wrong undeclared table") }
+        let message = start_text(Open(Migrate(Undeclared(take name))))
+        if message != "place: migration failed: undeclared table or index: data. Declare it in schema, or remove it during an upgrade. For a table, call store.drop_named_table in on_migrate. For an index, omit it from its table's declaration." {
+            return Error(take message)
+        }
     } else {
         return Error("install accepted an undeclared table")
     }
     if store.version(store.snapshot(db)) != version { return Error("a reopen or refusal published a commit") }
+    let migration: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]] = Some(code.describe(declaration_law_drop))
+    let target = code.describe(declaration_law_missing)
+    let upgraded = head_prepare(mut db, Install, false, place, migration, target, 1048576u64, tasks)
+    if let Error(take problem) = take upgraded { return Error(start_text(Open(take problem))) }
+    let next = store.version(store.snapshot(db))
+    if next != version + 1u64 { return Error("drop and activation did not publish in one commit") }
+    let reopened = head_prepare(mut db, Current(next), false, place, migration, target, 1048576u64, tasks)
+    if let Error(take problem) = take reopened { return Error(start_text(Open(take problem))) }
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, scratch))
     Ok(())

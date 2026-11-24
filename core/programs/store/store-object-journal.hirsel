@@ -65,7 +65,7 @@ type ObjectJournalSession {
 
 fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
     let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim) = take input
-    ObjectJournalSession(client: std.object.attach(take requests), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim)
+    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {

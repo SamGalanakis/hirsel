@@ -30,7 +30,7 @@ virtual-host addressing adds the bucket name. `endpoint_secure` reports
 whether the configured scheme is HTTPS.
 
 `split` moves the request state and the worker lifetime out of a client.
-`Requests` can move to another task, where `attach` makes it a client again.
+`Requests` can move to another task, where `attach(requests, None)` makes it a client again. On the opening task, pass the original Workers to `attach` to restore the split client.
 The original task keeps `Workers` until the request task has stopped.
 `matches_lanes` checks the effective lane count and per-lane grant. It treats
 a requested count of zero as the default.

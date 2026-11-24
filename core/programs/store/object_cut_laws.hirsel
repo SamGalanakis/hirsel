@@ -175,12 +175,12 @@ fn object_cut_upload_budget_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSi
     let mut options = bucket_law_options(true)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let mut seed = open_authority(tasks, take clean, c, r, options)?
+    let mut seed = open_authority(tasks, take clean, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let _ = bucket_law_rows_table(mut seed)?
     close(take seed)?
     options.create = false
     let primary = bucket_law_authority(sim, tasks, "s3.test", 2)?
-    let mut writer = open_authority(tasks, take primary, c, r, options)?
+    let mut writer = open_authority(tasks, take primary, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     bucket_law_commit(mut writer, 1)?
     let mut witness = bucket_law_client_with(sim, tasks, "spare.test", 3, true)?
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
@@ -310,7 +310,7 @@ fn object_export_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     options.group_bytes = 65536
     options.retain = 1
     options.head_poll_ms = 10000
-    let mut writer = deploy_result(open_authority(tasks, take first, c, r, options))?
+    let mut writer = open_authority(tasks, take first, c, r, options) ?=> |Refusal(error: take problem, ..)| Store(take problem)
     let mut staged = deploy_result(stage_migration(writer, tasks, code.describe(install_old)))?
     let description = install_fixture_bytes(32, 65)
     deploy_result(stage_activation(mut staged, 1, None, description, std.codec.of_bytes(), description))?
@@ -331,7 +331,7 @@ fn object_export_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
 
     let second = deploy_result(bucket_law_authority(sim, tasks, "s3.test", 2))?
     options.create = false
-    let mut successor = deploy_result(open_authority(tasks, take second, c, r, options))?
+    let mut successor = open_authority(tasks, take second, c, r, options) ?=> |Refusal(error: take problem, ..)| Store(take problem)
     let attempt_three = install_fixture_bytes(16, 3)
     let with_claim = begin_export_copy(mut successor, d, clone(attempt_three), 1)?
     // The cut drops the prior checkpoint from retention before the copy runs.
@@ -381,7 +381,7 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
     let mut options = bucket_law_options(true)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let mut writer = deploy_result(open_authority(tasks, take original, c, r, options))?
+    let mut writer = open_authority(tasks, take original, c, r, options) ?=> |Refusal(error: take problem, ..)| Store(take problem)
     let mut staged = deploy_result(stage_migration(writer, tasks, code.describe(install_old)))?
     let description = install_fixture_bytes(32, 65)
     deploy_result(stage_activation(mut staged, 1, None, description, std.codec.of_bytes(), description))?
@@ -500,7 +500,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 9 {
@@ -553,7 +553,7 @@ fn object_binding_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     options.activation = Some(12)
     options.binding = Some(list.new())
     let wrong = open_authority(tasks, object_authority(take bad_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)
-    if let Error(NotCurrent(12)) = wrong {} else { fail("a wrong binding was admitted") }
+    if let Error(Refusal(error: NotCurrent(12), ..)) = wrong {} else { fail("a wrong binding was admitted") }
     let deadline = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
     let clean = fresh_snapshot(mut writer, deadline)?
     if version(clean) != 12 || claim_of(writer)?.epoch != 1 { fail("a refused binding fenced the incumbent") }

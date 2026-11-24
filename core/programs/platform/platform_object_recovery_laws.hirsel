@@ -90,7 +90,7 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     let service = store.follower_service(tasks, option.unwrap(store.service_bytes(plans)))?
     let owner = store.follower_owner(service)?
     options.head_poll_ms = 10000
-    let mut bare = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), c, rnd, options)?
+    let mut bare = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), c, rnd, options) ?=> |store.Refusal(error: take problem, ..)| take problem
     let _ = store.create_table(mut bare, store.spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = store.table(mut bare, "rows", std.codec.key_u64(), std.codec.of_u64())?
     for k in 0u64 .. 9 {
@@ -113,7 +113,7 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     expect(unmatched == 11 && rooted_at(host_test, image(), 3), "T1 bucket: the unmatched release moved the host")
     expect(collection_keeps(mut host_test, true, true), "T1 bucket: an unmatched release lost a candidate")
 
-    let mut hand = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 3), c, rnd, options)?
+    let mut hand = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 3), c, rnd, options) ?=> |store.Refusal(error: take problem, ..)| take problem
     let _ = object_install_at(mut hand, tasks, 12, description)?
     store.close(take hand)?
     let (adopted, take installed_read) = read_bucket_activation(mut readers, tasks, sim, 4, owner, plan, options.expect)?

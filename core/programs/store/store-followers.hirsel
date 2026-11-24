@@ -161,7 +161,7 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
     let Bind(take transport, expect, due) = box.unbox(take request) else { return }
     let mut source = match take transport {
         DirectoryFollow(directory) => DirectorySource(directory),
-        ObjectFollow(take requests) => ObjectSource(history_reader(std.object.attach(take requests), due)),
+        ObjectFollow(take requests) => ObjectSource(history_reader(std.object.attach(take requests, None), due)),
     }
     let initial = initial_follow_capture(mut source, expect, ceiling)
     let admitted = if let Ok(Some(_)) = initial { true } else { false }

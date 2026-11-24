@@ -83,7 +83,7 @@ fn run_tiered_pager(take launch: TieredPagerStart) waits {
     let TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, shared_bytes: shared) = take launch
     let mut input = match take authority {
         PagerDirectory(d) => PagerLocal(d),
-        PagerBucket(take requests, op_ms) => PagerObjects(std.object.attach(take requests), op_ms),
+        PagerBucket(take requests, op_ms) => PagerObjects(std.object.attach(take requests, None), op_ms),
     }
     let mut private_cache = new_tiered_cache(shared)
     while let Ok(take command) = channel.receive(incoming) {

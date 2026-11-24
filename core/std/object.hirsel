@@ -2211,8 +2211,8 @@ pub fn split(take c: Client) -> (Requests, Option[Workers]) {
     (take request_owner, take lifetime)
 }
 
-pub fn attach(take requests: Requests) -> Client {
-    Client(requests: take requests, workers: None)
+pub fn attach(take requests: Requests, take workers: Option[Workers]) -> Client {
+    Client(requests: take requests, workers: take workers)
 }
 
 type PartReceipt: send {

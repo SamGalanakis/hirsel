@@ -730,7 +730,7 @@ fn conditional_head_put(tasks: Tasks) -> bool waits {
 }
 
 fn object_register_worker(take requests: object.Requests) -> bool waits {
-    let mut c = object.attach(take requests)
+    let mut c = object.attach(take requests, None)
     let location = result.unwrap(object.bucket_location(mut c, OBJECT_END))
     let encryption = result.unwrap(object.bucket_encryption(mut c, OBJECT_END))
     let (initial, _) = object.store_if(mut c, "head", Absent, string.into_bytes(string.from("first")), OBJECT_END)

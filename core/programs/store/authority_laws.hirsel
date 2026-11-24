@@ -122,7 +122,7 @@ fn object_branch_position_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result
     let primary = bucket_law_client_lanes(sim, tasks, "s3.test", 701, true, 1)?
     let mut options = bucket_law_options(true)
     options.group_bytes = 65536
-    let mut writer = open_authority(tasks, object_authority(take primary, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options)?
+    let mut writer = open_authority(tasks, object_authority(take primary, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let rows = bucket_law_rows_table(mut writer)?
     let captured = snapshot(writer)
     let expected = Position(store: identity(writer), branch: 1, version: 2)

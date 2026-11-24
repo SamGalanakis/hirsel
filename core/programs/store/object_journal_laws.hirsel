@@ -58,7 +58,7 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let mut incumbent = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let mut incumbent = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let _ = create_table(mut incumbent, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let rows = table(mut incumbent, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let value = bucket_m2_pack_value()
@@ -79,7 +79,7 @@ fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resul
     let next_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     options.create = false
     options.expect = Some(saved.store)
-    let successor = open_authority(tasks, object_authority(take next_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let successor = open_authority(tasks, object_authority(take next_client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let mut surviving = take successor
     let current = snapshot(surviving)
     if get(result.unwrap(reader(surviving, 0u64)), current, rows, 7)? != Some(clone(value)) || current.head != saved.version || claim_of(surviving)?.epoch != 2 {
@@ -119,7 +119,7 @@ fn object_fresh_holder_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) ->
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let mut writer = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let mut writer = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let (notify, notifications): (Sender[u64], Receiver[u64]) = channel.new(1)
     on_unhealthy(mut writer, take notify, 17u64)?
     let deadline = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
@@ -127,7 +127,7 @@ fn object_fresh_holder_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) ->
     if version(initial) != 0 { fail("304 altered the holder's durable snapshot") }
     if let Ok(0) = health(writer) {} else { fail("unchanged HEAD altered writer health") }
     let successor_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
-    let successor = open_authority(tasks, object_authority(take successor_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let successor = open_authority(tasks, object_authority(take successor_client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     if let Error(Fenced(1)) = fresh_snapshot(mut writer, deadline) {} else {
         fail("fresh holder query accepted a new claim")
     }
@@ -173,7 +173,7 @@ fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     options.retain = 1
-    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let mut writer = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
     let mut workspace = history_buffers(65536)?
     let _ = history_fetch(mut witness, "head", mut workspace.witness, deadline)?
@@ -221,11 +221,11 @@ fn object_sweep_cursor_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) ->
     options.head_poll_ms = 10000
     options.retain = 1
     let first = bucket_law_authority(sim, tasks, "s3.test", 1)?
-    let seed = open_authority(tasks, take first, c, r, options)?
+    let seed = open_authority(tasks, take first, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     close(take seed)?
     options.create = false
     let second = bucket_law_authority(sim, tasks, "s3.test", 2)?
-    let mut writer = open_authority(tasks, take second, c, r, options)?
+    let mut writer = open_authority(tasks, take second, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?
     let deadline = std.object.deadline_after_ms(witness, BUCKET_LAW_OP_MS)
     let mut workspace = history_buffers(65536)?
@@ -255,7 +255,7 @@ fn object_sweep_cursor_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) ->
     let late = sweep_fixture_name(1, 7)
     history_create(mut witness, late, mut octets, mut workspace.compare, deadline)?
     let third = bucket_law_authority(sim, tasks, "s3.test", 4)?
-    let mut successor = open_authority(tasks, take third, c, r, options)?
+    let mut successor = open_authority(tasks, take third, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let _ = checkpoint(mut successor)?
     reclaim_barrier(successor)?
     let _ = history_fetch(mut witness, late, mut workspace.compare, deadline)?
@@ -284,7 +284,7 @@ fn object_reclaim_upload_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let seed = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let seed = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     close(take seed)?
     let mut pending = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
     let deadline = std.object.deadline_after_ms(pending, BUCKET_LAW_OP_MS)
@@ -295,7 +295,7 @@ fn object_reclaim_upload_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) 
     let _ = std.object.upload(mut pending, pending_pack_name(20, 1), NoClobber, deadline) ?=> Remote
     let _ = std.object.upload(mut pending, pending_pack_name(21, 3), NoClobber, deadline) ?=> Remote
     let current_client = bucket_law_client_lanes(sim, tasks, "s3.test", 3, true, 1)?
-    let mut writer = open_authority(tasks, object_authority(take current_client, "bucket", BUCKET_LAW_OP_MS), c, r, options)?
+    let mut writer = open_authority(tasks, object_authority(take current_client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     if claim_of(writer)?.epoch != 2 { fail("multipart fixture has the wrong holder") }
     let _ = checkpoint(mut writer)?
     reclaim_barrier(writer)?
@@ -320,7 +320,7 @@ fn object_retention_witness_law(r: Random, tasks: Tasks, sim: BucketSim) -> Resu
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
     options.group_bytes = 65536
     options.retain = 2
-    let mut writer = open_authority(tasks, object_authority(take connected, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options)?
+    let mut writer = open_authority(tasks, object_authority(take connected, "bucket", BUCKET_LAW_OP_MS), sim.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let rows = bucket_law_rows_table(mut writer)?
     let watching = bucket_law_client_lanes(sim, tasks, "s3.test", 812, true, 1)?
     let mut ids = followers()

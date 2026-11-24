@@ -1785,7 +1785,7 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
             let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms) = take bucket
             let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), op_ms)
             match std.object.start(net, tasks, take place, take credentials, None, System, clock, random, lanes, deadline) {
-                Ok(take client) => store.open_authority(tasks, store.object_authority(take client, level, op_ms), clock, random, options),
+                Ok(take client) => Ok(store.open_authority(tasks, store.object_authority(take client, level, op_ms), clock, random, options) ?=> |store.Refusal(error: take problem, ..)| Open(Store(take problem))),
                 Error(take problem) => Error(Remote(take problem)),
             }
         },

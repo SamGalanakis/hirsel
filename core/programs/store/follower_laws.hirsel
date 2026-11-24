@@ -249,7 +249,7 @@ fn follower_overlap_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Re
     let mut options = bucket_law_options(true)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let mut writer = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 1101)?, c, r, options)?
+    let mut writer = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 1101)?, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let _ = create_table(mut writer, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
     let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
     if !typed_put(mut writer, rows, 1, 10) { fail("L85: the first row was refused") }
@@ -539,7 +539,7 @@ fn follower_refusal_retry(r: Random, tasks: Tasks, sim: BucketSim) -> Result[(),
     let mut options = bucket_law_options(true)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
-    let mut writer = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 1201)?, sim.time, r, options)?
+    let mut writer = open_authority(tasks, bucket_law_authority(sim, tasks, "s3.test", 1201)?, sim.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     let rows = bucket_law_rows_table(mut writer)?
     let _ = checkpoint(mut writer)?
 

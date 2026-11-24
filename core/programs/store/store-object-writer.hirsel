@@ -53,9 +53,11 @@ fn object_cut_due(db: Db) -> bool {
     false
 }
 
-pub fn open_authority(tasks: Tasks, take authority: Authority, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
+pub type Refusal { error: Error, authority: Authority }
+
+pub fn open_authority(tasks: Tasks, take authority: Authority, c: Clock, r: Random, options: Options) -> Result[Db, Refusal] waits {
     match take authority {
-        LogAuthority(d) => open(tasks, d, c, r, options),
+        LogAuthority(d) => Ok(open(tasks, d, c, r, options) ?=> |problem| Refusal(error: take problem, authority: log_authority(d))),
         ObjectAuthority(take config) => open_object_writer(tasks, take config, c, r, options),
     }
 }
@@ -78,21 +80,41 @@ fn object_writer_journal_room(group: u64) -> u64 {
     4 * group + 524288
 }
 
-fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock, r: Random, options: Options) -> Result[Db, Error] waits {
-    object_open_checks(options)?
-    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms) = take config
-    let mut read_source = history_reader(take client, 0)
-    let metadata = history_config_bytes(HistoryConfig(place: std.object.bucket_config(read_source.client), level: string.from(level_name)))?
+type ObjectWriterOpen {
+    db: Db,
+    register: HistoryRegister,
+    metadata: Bytes,
+    workspace: HistoryBuffers,
+    blank: HistoryOpenBase,
+    start: Sender[ObjectJournalStart],
+    frames: Sender[JournalMsg],
+    journal_received: Receiver[Ack],
+    written_send: Sender[WriteNotice],
+    written_receive: Receiver[WriteNotice],
+    synced_receive: Receiver[()],
+    health_state: Latest[Health],
+    health_tx: Sender[()],
+    health_rx: Receiver[()],
+    timer: Task[()],
+    work: Task[Result[(), Error]],
+    options: Options
+}
+
+fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock, r: Random, options: Options, level_name: String, op_ms: u64) -> Result[ObjectWriterOpen, Error] waits {
     let group_room: u64 = int.widen(options.group_bytes)
-    let mut workspace = history_buffers(object_writer_entry_room(group_room))?
-    let channels = disk_allocation(scoped fn() -> Result[JournalChannels, Error] {
-        Ok(journal_channels(int.widen(options.group_commits)))
+    let metadata = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        history_config_bytes(HistoryConfig(place: std.object.bucket_config(read_source.client), level: string.from(level_name)))
     })?
-    let (start, starting): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+    let mut workspace = history_buffers(object_writer_entry_room(group_room))?
+    let (take channels, (take start, take starting), take health_state, (take health_tx, take health_rx)) =
+        disk_allocation(scoped fn() -> Result[(JournalChannels, (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]), Latest[Health], (Sender[()], Receiver[()])), Error] {
+            let startup: (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
+            let initial_health: Health = Ok(0)
+            let live_health = latest.new(arc.new(take initial_health))
+            let signal: (Sender[()], Receiver[()]) = channel.new(1)
+            Ok((journal_channels(int.widen(options.group_commits)), take startup, take live_health, take signal))
+        })?
     let JournalChannels(frames: take frames, queued: take queued, acks: take journal_acks, received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_send: take synced_send, synced_receive: take synced_receive, idle_send: take idle_send, idle_receive: take idle_receive, ..) = take channels
-    let initial_health: Health = Ok(0)
-    let health_state = latest.new(arc.new(take initial_health))
-    let (health_tx, health_rx): (Sender[()], Receiver[()]) = channel.new(1)
     let idle_ns = int.saturating_mul(options.head_poll_ms, 1000000)
     let timer_input = JournalIdleTimer(clock: c, requests: take idle_receive, journal: channel.sender(frames), interval_ns: idle_ns)
     let timer = match task.try_spawn(tasks, bytes OBJECT_TIMER_GRANT, take timer_input, journal_idle_timer) {
@@ -119,6 +141,31 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         prepared.resident = journal_account(replay)?
         Ok(take prepared)
     })?
+    Ok(ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace,
+        blank: take blank, start: take start, frames: take frames, journal_received: take journal_received,
+        written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive,
+        health_state: take health_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer,
+        work: take work, options: take held_options))
+}
+
+fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock, r: Random, options: Options) -> Result[Db, Refusal] waits {
+    if let Error(take problem) = object_open_checks(options) {
+        return Error(Refusal(error: take problem, authority: ObjectAuthority(take config)))
+    }
+    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms) = take config
+    let mut read_source = history_reader(take client, 0)
+    let prepared = match prepare_object_writer(tasks, mut read_source, c, r, options, level_name, op_ms) {
+        Ok(take ready) => take ready,
+        Error(take problem) => {
+            let ObjectPackRead(client: take returned, ..) = take read_source
+            return Error(Refusal(error: take problem, authority: ObjectAuthority(ObjectAuthorityConfig(client: take returned, level_name: take level_name, op_ms))))
+        },
+    }
+    let ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace,
+        blank: take blank, start: take start, frames: take frames, journal_received: take journal_received,
+        written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive,
+        health_state: take health_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer,
+        work: take work, options: take held_options) = take prepared
     let mut db = take started
     let head = register.head
     let ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
@@ -128,8 +175,10 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         None => take blank,
     }
     let startup = ObjectJournalStart(requests: take requests, register: take register, authority: take metadata, buffers: take workspace, op_ms, failed_polls: 0, sweep, issued_generation: generation, next_pack: pages.next_pack, export_lease: None, reclaim: None)
-    if let Error(_) = channel.send(start, take startup) {
-        return Error(Io(Closed))
+    if let Error(Closed(take unsent)) = channel.send(start, take startup) {
+        let ObjectJournalStart(requests: take returned, ..) = take unsent
+        let restored = std.object.attach(take returned, take workers)
+        return Error(Refusal(error: Io(Closed), authority: ObjectAuthority(ObjectAuthorityConfig(client: take restored, level_name: take level_name, op_ms))))
     }
     db.checkpointed = generation
     db.fence = fence
@@ -141,7 +190,6 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
         acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, acked_bytes: 0,
         written: take written_receive, written_send: take written_send, synced: Some(take synced_receive),
         poison: None, journal: take frames, pending: None, journal_task: take work, journal_idle_task: take timer))
-    maybe_checkpoint(mut db)?
     Ok(take db)
 }
 

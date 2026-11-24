@@ -57,22 +57,17 @@ fn overlap(a: &Pl, b: &Pl) -> bool {
     a.root == b.root && (a.steps.starts_with(&b.steps) || b.steps.starts_with(&a.steps))
 }
 
-/// What each address names, and the places an address's `deref` steps read.
+/// What each address and value names, and the places an address's `deref` steps
+/// read.
 struct Names {
     addrs: Vec<Vec<Pl>>,
     derefs: Vec<Vec<Pl>>,
+    vals: Vec<Vec<Pl>>,
 }
 
-fn names(b: &Body, entry: &[ValueId]) -> Names {
-    let slots = b.slots.len();
-    let mut vals: Vec<Vec<Pl>> = vec![vec![]; b.values.len()];
-    for (k, v) in entry.iter().enumerate() {
-        vals[v.index()].push(Pl {
-            root: slots + k,
-            steps: vec![],
-            cut: false,
-        });
-    }
+/// Spread `vals` through `pointer`s, addresses and, along `edges` (argument,
+/// parameter), block parameters, to a fixpoint.
+fn spread(b: &Body, mut vals: Vec<Vec<Pl>>, edges: &[(usize, usize)]) -> Names {
     let mut addrs: Vec<Vec<Pl>> = vec![vec![]; b.addresses.len()];
     let mut derefs: Vec<Vec<Pl>> = vec![vec![]; b.addresses.len()];
     let pointers: Vec<(usize, usize)> = b
@@ -81,23 +76,6 @@ fn names(b: &Body, entry: &[ValueId]) -> Names {
         .filter_map(|i| match *i {
             Inst::Pointer { result, address } => Some((result.index(), address.index())),
             _ => None,
-        })
-        .collect();
-    let edges: Vec<(usize, usize)> = b
-        .edges
-        .iter()
-        .flat_map(|e| {
-            let params = b.blocks[e.target.index()]
-                .params
-                .get(&b.pools.values)
-                .unwrap_or_default();
-            let args = e.args.get(&b.pools.values).unwrap_or_default();
-            params
-                .iter()
-                .zip(args)
-                .filter(|(p, _)| b.values[p.index()] == Ty::Ptr)
-                .map(|(p, a)| (a.index(), p.index()))
-                .collect::<Vec<_>>()
         })
         .collect();
     let union = |to: &mut Vec<Pl>, from: &[Pl]| {
@@ -145,14 +123,75 @@ fn names(b: &Body, entry: &[ValueId]) -> Names {
             let from = addrs[a].clone();
             grew |= union(&mut vals[v], &from);
         }
-        for &(a, p) in &edges {
+        for &(a, p) in edges {
             let from = vals[a].clone();
             grew |= union(&mut vals[p], &from);
         }
         if !grew {
-            return Names { addrs, derefs };
+            return Names {
+                addrs,
+                derefs,
+                vals,
+            };
         }
     }
+}
+
+/// The places of `entry`'s values and of the body's slots, and the joins: each
+/// pointer block parameter whose edges carry more than one place gets a root of
+/// its own (after the slots and entry values), what it points at on the path
+/// taken, so that a drop through it is strong and its state follows its edge.
+fn names(b: &Body, entry: &[ValueId]) -> (Names, Names, Vec<usize>) {
+    let slots = b.slots.len();
+    let mut vals: Vec<Vec<Pl>> = vec![vec![]; b.values.len()];
+    for (k, v) in entry.iter().enumerate() {
+        vals[v.index()].push(Pl {
+            root: slots + k,
+            steps: vec![],
+            cut: false,
+        });
+    }
+    let edges: Vec<(usize, usize)> = b
+        .edges
+        .iter()
+        .flat_map(|e| ptr_args(b, e))
+        .map(|(a, p)| (a.index(), p.index()))
+        .collect();
+    let under = spread(b, vals, &edges);
+    let joins: Vec<usize> = b
+        .blocks
+        .iter()
+        .skip(1)
+        .flat_map(|k| k.params.get(&b.pools.values).unwrap_or_default())
+        .map(|p| p.index())
+        .filter(|&p| b.values[p] == Ty::Ptr && under.vals[p].len() > 1)
+        .collect();
+    let mut seed: Vec<Vec<Pl>> = vec![vec![]; b.values.len()];
+    for (k, &p) in joins.iter().enumerate() {
+        seed[p].push(Pl {
+            root: slots + entry.len() + k,
+            steps: vec![],
+            cut: false,
+        });
+    }
+    // An edge into a join's parameter carries no join: every parameter an edge
+    // gives a join's pointer to is itself a join, seeded above.
+    let joined = spread(b, seed, &[]);
+    (under, joined, joins)
+}
+
+/// An edge's pointer arguments and the target's parameters they bind.
+fn ptr_args(b: &Body, e: &Edge) -> Vec<(ValueId, ValueId)> {
+    let params = b.blocks[e.target.index()]
+        .params
+        .get(&b.pools.values)
+        .unwrap_or_default();
+    let args = e.args.get(&b.pools.values).unwrap_or_default();
+    args.iter()
+        .zip(params)
+        .filter(|(_, p)| b.values[p.index()] == Ty::Ptr)
+        .map(|(a, p)| (*a, *p))
+        .collect()
 }
 
 const ZT: u8 = 1;
@@ -198,7 +237,15 @@ enum Act {
 struct Own<'a> {
     b: &'a Body,
     n: Names,
+    /// What addresses reached through a join name, by the join's root.
+    j: Names,
+    /// Per address: whether it reaches its places through a join.
+    routed: Vec<bool>,
     slots: usize,
+    /// The first join root: the slots, then the entry values.
+    roots: usize,
+    /// Per join: its parameter's value index.
+    joins: Vec<usize>,
     /// Entry values that are `view` parameters' pointers, by entry index.
     views: Vec<bool>,
     tracked: Vec<Pl>,
@@ -208,6 +255,8 @@ struct Own<'a> {
     deref_hits: Vec<Vec<usize>>,
     /// Per tracked place: its pairings (indices into the state).
     pairs: Vec<Vec<usize>>,
+    /// Per tracked place: the tracked join places that may be it, in part.
+    shadow: Vec<Vec<usize>>,
     /// Per flag slot: the pairings it guards.
     guards: std::collections::HashMap<usize, Vec<usize>>,
     /// Read results of whole flag slots.
@@ -219,8 +268,10 @@ impl Own<'_> {
     fn show(&self, p: &Pl) -> String {
         let mut s = if p.root < self.slots {
             format!("s{}", p.root)
-        } else {
+        } else if p.root < self.roots {
             format!("parameter {}", p.root - self.slots)
+        } else {
+            format!("*v{}", self.joins[p.root - self.roots])
         };
         for &(k, x, y) in &p.steps {
             match k {
@@ -333,22 +384,40 @@ impl Own<'_> {
                         })?;
                     }
                 }
-                let strong = roots.len() == 1;
+                let routed = self.routed[a.index()];
+                let mut own = vec![];
+                if routed {
+                    let joined = &self.j.addrs[a.index()];
+                    for r in joined.iter().filter(|r| !r.cut) {
+                        own.extend(self.tracked.iter().position(|t| t == r));
+                    }
+                    for &q in &own {
+                        self.mark(now, q, |s| dropped(s, true), joined.len() == 1);
+                    }
+                }
+                let strong = !routed && roots.len() == 1;
                 for r in roots.iter().filter(|r| !r.cut) {
                     if let Some(q) = self.tracked.iter().position(|t| t == r) {
-                        for &p in &self.pairs[q] {
-                            now[p] = dropped(now[p], strong);
+                        self.mark(now, q, |s| dropped(s, true), strong);
+                        for &t in self.shadow[q].iter().filter(|t| !own.contains(t)) {
+                            self.mark(now, t, |s| dropped(s, true), false);
                         }
                     }
                 }
             }
             Act::Write(a) => {
-                if let [r] = self.n.addrs[a.index()].as_slice()
+                let places = if self.routed[a.index()] {
+                    &self.j.addrs[a.index()]
+                } else {
+                    &self.n.addrs[a.index()]
+                };
+                if let [r] = places.as_slice()
                     && !r.cut
                 {
                     for &q in &self.hits[a.index()] {
-                        for &p in &self.pairs[q] {
-                            now[p] = begun(now[p]);
+                        self.mark(now, q, begun, true);
+                        for &t in &self.shadow[q] {
+                            self.mark(now, t, begun, false);
                         }
                     }
                 }
@@ -356,8 +425,9 @@ impl Own<'_> {
             Act::Begin(s) => {
                 for (q, t) in self.tracked.iter().enumerate() {
                     if t.root == s {
-                        for &p in &self.pairs[q] {
-                            now[p] = begun(now[p]);
+                        self.mark(now, q, begun, true);
+                        for &t in &self.shadow[q] {
+                            self.mark(now, t, begun, false);
                         }
                     }
                 }
@@ -369,6 +439,56 @@ impl Own<'_> {
             }
         }
         Ok(())
+    }
+    /// Set place `q`'s pairings to `f` of themselves, or, when not `strong`, add
+    /// that to what they were.
+    fn mark(&self, now: &mut [u8], q: usize, f: impl Fn(u8) -> u8, strong: bool) {
+        for &p in &self.pairs[q] {
+            now[p] = if strong {
+                f(now[p])
+            } else {
+                now[p] | f(now[p])
+            };
+        }
+    }
+    /// Edge `e` binds each join parameter's places to what its argument names on
+    /// this path: each tracked join place takes the state of the places it is now.
+    fn transfer(&self, now: &mut [u8], e: EdgeId) {
+        let mut set = vec![];
+        for (a, p) in ptr_args(self.b, &self.b.edges[e.index()]) {
+            let Some(k) = self.joins.iter().position(|&j| j == p.index()) else {
+                continue;
+            };
+            let srcs = match self.joins.iter().position(|&j| j == a.index()) {
+                Some(i) => vec![Pl {
+                    root: self.roots + i,
+                    steps: vec![],
+                    cut: false,
+                }],
+                None => self.n.vals[a.index()].clone(),
+            };
+            for (t, tp) in self.tracked.iter().enumerate() {
+                if tp.root != self.roots + k {
+                    continue;
+                }
+                let mut v = 0;
+                for src in &srcs {
+                    let mut x = src.clone();
+                    x.steps.extend(tp.steps.iter().copied());
+                    x.cut |= tp.cut;
+                    for q in (0..self.tracked.len()).filter(|&q| overlap(&x, &self.tracked[q])) {
+                        let z = self.pairs[q].iter().any(|&p| now[p] & Z != 0);
+                        v |= if self.may_drop(now, q) { D } else { 0 } | if z { Z } else { 0 };
+                    }
+                }
+                set.push((t, if v & D == 0 { Z } else { v | D }));
+            }
+        }
+        for (t, v) in set {
+            for &p in &self.pairs[t] {
+                now[p] = v;
+            }
+        }
     }
 }
 
@@ -391,7 +511,10 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
             *v = true;
         }
     }
-    let n = names(b, entry);
+    let (n, j, joins) = names(b, entry);
+    let routed: Vec<bool> = (0..b.addresses.len())
+        .map(|a| !j.addrs[a].is_empty() || !j.derefs[a].is_empty())
+        .collect();
     // The places some drop may reach, and those a view parameter's drop would.
     let mut tracked: Vec<Pl> = vec![];
     let mut any_view_drop = false;
@@ -399,6 +522,11 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
         if let Inst::Drop { address, .. } = *i {
             for r in &n.addrs[address.index()] {
                 any_view_drop |= r.root >= b.slots.len() && views[r.root - b.slots.len()];
+            }
+            for r in n.addrs[address.index()]
+                .iter()
+                .chain(&j.addrs[address.index()])
+            {
                 if !r.cut && !tracked.contains(r) {
                     tracked.push(r.clone());
                 }
@@ -415,10 +543,37 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
         v.dedup();
         v
     };
-    let hits: Vec<Vec<usize>> = n.addrs.iter().map(|ps| hits_of(ps)).collect();
-    let deref_hits: Vec<Vec<usize>> = n.derefs.iter().map(|ps| hits_of(ps)).collect();
+    let by_route = |under: &[Vec<Pl>], joined: &[Vec<Pl>]| -> Vec<Vec<usize>> {
+        (0..b.addresses.len())
+            .map(|a| hits_of(if routed[a] { &joined[a] } else { &under[a] }))
+            .collect()
+    };
+    let hits = by_route(&n.addrs, &j.addrs);
+    let deref_hits = by_route(&n.derefs, &j.derefs);
+    let roots = b.slots.len() + entry.len();
+    let mut shadow: Vec<Vec<usize>> = vec![vec![]; tracked.len()];
+    for (t, tp) in tracked
+        .iter()
+        .enumerate()
+        .filter(|(_, tp)| tp.root >= roots)
+    {
+        for src in &n.vals[joins[tp.root - roots]] {
+            let mut x = src.clone();
+            x.steps.extend(tp.steps.iter().copied());
+            for (q, tq) in tracked.iter().enumerate() {
+                if overlap(&x, tq) && !shadow[q].contains(&t) {
+                    shadow[q].push(t);
+                }
+            }
+        }
+    }
     let mut own = Own {
         b,
+        j,
+        routed,
+        roots,
+        joins,
+        shadow,
         slots: b.slots.len(),
         views,
         hits,
@@ -524,9 +679,25 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
                 y[p] &= T;
                 n[p] &= F;
             }
+            own.transfer(&mut y, *yes);
+            own.transfer(&mut n, *no);
             out.push((edge(yes), y));
             out.push((edge(no), n));
         } else {
+            let edges: Vec<EdgeId> = match &b.terminators[bi] {
+                Terminator::Jump(e) => vec![*e],
+                Terminator::Branch { yes, no, .. } => vec![*yes, *no],
+                Terminator::Switch {
+                    arms, otherwise, ..
+                } => arms
+                    .get(&b.pools.arms)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|a| a.edge)
+                    .chain([*otherwise])
+                    .collect(),
+                _ => vec![],
+            };
             if let Terminator::Raise {
                 cause: RaiseCause::Fail(a),
                 ..
@@ -535,8 +706,15 @@ pub(super) fn check(m: &Module, sig: &Signature, b: &Body) -> R {
                 own.apply(&mut now, &Act::Use(a), check)
                     .map_err(|e| format!("b{bi}: {e}"))?;
             }
-            for t in successors_of_terminator(b, bi) {
-                out.push((t, now.clone()));
+            if edges.is_empty() {
+                for t in successors_of_terminator(b, bi) {
+                    out.push((t, now.clone()));
+                }
+            }
+            for e in edges {
+                let mut s = now.clone();
+                own.transfer(&mut s, e);
+                out.push((edge(&e), s));
             }
         }
         Ok(out)

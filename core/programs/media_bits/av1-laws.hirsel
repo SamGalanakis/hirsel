@@ -59,10 +59,10 @@ fn check_dependency() {
     let frame = result.unwrap(dependency.parse(wire, mut structure))
     let resolution = option.unwrap(frame.resolution)
     let mut refs = frame.references
-    if !frame.first || !frame.last || frame.number != 65535 || frame.template_id != 3 || frame.spatial != 2 || frame.temporal != 0 || frame.active_targets != 3 || resolution.width != 65536 || resolution.height != 65536 || option.unwrap(dependency.protecting_chain(structure, 1)) != 1 || option.unwrap(dependency.chain_difference(frame, 0)) != 5 || option.unwrap(dependency.chain_difference(frame, 1)) != 5 || option.unwrap(result.unwrap(dependency.next_reference(wire, structure, mut refs))) != 4 {
+    if !frame.first || !frame.last || frame.number != 65535 || frame.template_id != 3 || frame.spatial != 2 || frame.temporal != 0 || frame.active_targets != 3 || resolution.width != 65536 || resolution.height != 65536 || option.unwrap(dependency.protecting_chain(view structure, 1)) != 1 || option.unwrap(dependency.chain_difference(frame, 0)) != 5 || option.unwrap(dependency.chain_difference(frame, 1)) != 5 || option.unwrap(result.unwrap(dependency.next_reference(wire, view structure, mut refs))) != 4 {
         fail("dependency template layers, references, chains or resolutions")
     }
-    if let Some(_) = result.unwrap(dependency.next_reference(wire, structure, mut refs)) {
+    if let Some(_) = result.unwrap(dependency.next_reference(wire, view structure, mut refs)) {
         fail("extra dependency in the template")
     }
     if let Ok(_) = dependency.parse(list.slice(wire, 0, 31), mut structure) {
@@ -91,12 +91,12 @@ fn check_dependency() {
     let expected: Inline[u64, 6] =[1, 16, 17, 256, 257, 4096]
     let mut differences = changed.references
     for diff in expected {
-        let found = result.unwrap(dependency.next_reference(custom, structure, mut differences))
+        let found = result.unwrap(dependency.next_reference(custom, view structure, mut differences))
         if option.unwrap(found) != diff {
             fail("custom frame differences")
         }
     }
-    if let Some(_) = result.unwrap(dependency.next_reference(custom, structure, mut differences)) {
+    if let Some(_) = result.unwrap(dependency.next_reference(custom, view structure, mut differences)) {
         fail("extra custom frame difference")
     }
     let implicit = result.unwrap(dependency.parse(b"\xc0\x00\x12", mut structure))

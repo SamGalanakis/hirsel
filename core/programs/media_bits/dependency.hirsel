@@ -70,7 +70,7 @@ pub fn decode_target(frame: Frame, index: u64) -> Option[Indication] {
     })
 }
 
-pub fn protecting_chain(structure: Structure, target: u64) -> Option[u8] {
+pub fn protecting_chain(structure: View[Structure], target: u64) -> Option[u8] {
     if target >= structure.targets || structure.chain_count == 0 {
         return None
     }
@@ -208,7 +208,7 @@ fn custom_reference(data: Bytes, mut at: u64) -> Result[Option[u64], Error] {
 }
 
 // Iterate frame differences with the same input and structure used by parse.
-pub fn next_reference(data: Bytes, structure: Structure, mut cursor: References) -> Result[Option[u64], Error] {
+pub fn next_reference(data: Bytes, structure: View[Structure], mut cursor: References) -> Result[Option[u64], Error] {
     match cursor {
         TemplateRefs(start, end) => {
             if start == end {
@@ -232,7 +232,7 @@ pub fn next_reference(data: Bytes, structure: Structure, mut cursor: References)
     }
 }
 
-fn read_frame(data: Bytes, structure: Structure, header: u8, flags: u8, mut at: u64) -> Result[Frame, Error] {
+fn read_frame(data: Bytes, structure: View[Structure], header: u8, flags: u8, mut at: u64) -> Result[Frame, Error] {
     if structure.count == 0 {
         return Error(MissingStructure)
     }
@@ -283,7 +283,7 @@ pub fn parse(data: Bytes, mut structure: Structure) -> Result[Frame, Error] {
     let header = data[0]
     if end == 3 {
         let mut at: u64 = 24
-        return read_frame(data, structure, header, 0, mut at)
+        return read_frame(data, view structure, header, 0, mut at)
     }
     let flags = data[3] >> 3
     let mut at: u64 = 29
@@ -292,12 +292,12 @@ pub fn parse(data: Bytes, mut structure: Structure) -> Result[Frame, Error] {
             return Error(InvalidStructure)
         }
         let mut next = read_structure(data, mut at)?
-        let parsed = read_frame(data, next, header, flags, mut at)?
+        let parsed = read_frame(data, view next, header, flags, mut at)?
         next.active = parsed.active_targets
         structure = take next
         return Ok(take parsed)
     }
-    let parsed = read_frame(data, structure, header, flags, mut at)?
+    let parsed = read_frame(data, view structure, header, flags, mut at)?
     structure.active = parsed.active_targets
     Ok(take parsed)
 }

@@ -1,5 +1,60 @@
 //! Owned media state is pinned independently of the one-word resource carrier.
 use crate::Context;
+use crate::{
+    limit::Payer,
+    secret::{Charge, ChargeCell, HandedOver},
+};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, Weak},
+};
+
+/// Tracks the charges that still belong to live media resources when a unit ends.
+#[derive(Default)]
+pub(crate) struct Charges(Mutex<BTreeMap<usize, Weak<ChargeCell>>>);
+
+pub(crate) struct Payment {
+    charges: Arc<Charges>,
+    cell: Arc<ChargeCell>,
+}
+
+impl Charges {
+    pub(crate) fn track(self: &Arc<Self>, charge: Charge) -> Payment {
+        let cell = ChargeCell::new(charge);
+        self.0
+            .lock()
+            .unwrap()
+            .insert(Arc::as_ptr(&cell) as usize, Arc::downgrade(&cell));
+        Payment {
+            charges: self.clone(),
+            cell,
+        }
+    }
+
+    pub(crate) fn hand_over(&self, payer: Payer) -> (HandedOver, Vec<Charge>) {
+        let mut handed = Vec::new();
+        let mut refunds = Vec::new();
+        for weak in self.0.lock().unwrap().values() {
+            if let Some(cell) = weak.upgrade()
+                && let Some(charge) = cell.take_charge(payer)
+            {
+                handed.push((weak.clone(), charge.bytes()));
+                refunds.push(charge);
+            }
+        }
+        (handed, refunds)
+    }
+}
+
+impl Drop for Payment {
+    fn drop(&mut self) {
+        self.charges
+            .0
+            .lock()
+            .unwrap()
+            .remove(&(Arc::as_ptr(&self.cell) as usize));
+    }
+}
 
 #[repr(C)]
 struct Slot<T> {

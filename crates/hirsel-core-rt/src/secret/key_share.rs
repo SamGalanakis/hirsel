@@ -10,7 +10,7 @@ struct Share {
     _key: Option<KeyShare>,
     _ticket: ShareTicket<Arc<ChargeCell>>,
     _origin: (u8, u64),
-    _charge: Arc<ChargeCell>,
+    _charge: crate::media::Payment,
 }
 
 pub(crate) struct Generation {
@@ -77,7 +77,8 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
         if let Err(refused) = payer.admit(Some(BYTES)) {
             return key::key_capacity(BYTES as usize, refused.available as usize);
         }
-        let charge = ChargeCell::new(Charge(payer, BYTES));
+        let grants = (*(*context).host_files).registry.run_grants();
+        let charge = grants.media_charges.track(Charge(payer, BYTES));
         let mut call = Generation {
             random,
             group,
@@ -119,7 +120,7 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
             }
             (Some(outcome.value), request.buffer)
         };
-        let registry = &(*(*context).host_files).registry.run_grants().agreements;
+        let registry = &grants.agreements;
         let ticket = registry
             .new_share()
             .unwrap_or_else(|| crate::process::stop(b"key share count overflow"));

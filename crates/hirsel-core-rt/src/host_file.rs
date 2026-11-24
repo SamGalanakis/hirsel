@@ -117,9 +117,24 @@ pub(crate) struct RunGrants {
     pub(crate) exec_grants: Mutex<Vec<crate::exec::NarrowedGrant>>,
     pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
+    pub(crate) media_charges: Arc<crate::media::Charges>,
     pub(crate) agreements:
         Arc<hirsel_core_net::agreement_registry::AgreementRegistry<Arc<crate::secret::ChargeCell>>>,
     pub(crate) cells: crate::provide::Cells,
+}
+
+impl RunGrants {
+    pub(crate) fn hand_over(&self, payer: crate::limit::Payer) -> crate::secret::HandedOver {
+        let (mut charges, refunds) = self.secrets.lock().unwrap().hand_over(payer);
+        drop(refunds);
+        let (udp, refunds) = self.udp_allowance.hand_over(payer);
+        charges.extend(udp);
+        drop(refunds);
+        let (media, refunds) = self.media_charges.hand_over(payer);
+        charges.extend(media);
+        drop(refunds);
+        charges
+    }
 }
 
 // SAFETY: the tables use mutexes and pin the storage behind each designation.

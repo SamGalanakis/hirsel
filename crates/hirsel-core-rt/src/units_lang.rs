@@ -1424,22 +1424,7 @@ fn helper_main(
             .map(|(k, h)| (k, h.bytes))
             .chain(lu.homed.drain())
             .collect();
-        // Likewise each Secret designation still held elsewhere.
-        let (mut charges, refunds) = files
-            .registry
-            .run_grants()
-            .secrets
-            .lock()
-            .unwrap()
-            .hand_over(context.payer());
-        drop(refunds);
-        let (udp, refunds) = files
-            .registry
-            .run_grants()
-            .udp_allowance
-            .hand_over(context.payer());
-        charges.extend(udp);
-        drop(refunds);
+        let charges = files.registry.run_grants().hand_over(context.payer());
         let ended = Ended {
             failed: failed != 0,
             causes: context.causes.iter().map(CrossedCause::pack).collect(),

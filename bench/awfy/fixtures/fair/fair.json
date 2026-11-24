@@ -1,0 +1,300 @@
+{
+  "version": 1,
+  "commit": "f147d44d8b08aa65a01faa90b5dd7cbc73d8520c",
+  "config": {
+    "mode": "full",
+    "families": [
+      "regimes"
+    ],
+    "regimes": [
+      "checkbox"
+    ],
+    "repeats": 1,
+    "reverse": false,
+    "build_cpus": [
+      8,
+      9,
+      10,
+      11
+    ],
+    "build_jobs": 4,
+    "build_memory_limit_bytes": 4294967296,
+    "regime_scope_memory_limit_bytes": 3221225472,
+    "sync_policy": {
+      "wait_us": 400,
+      "max_writes": 4096,
+      "durable_syncs_per_group": 1
+    },
+    "hold_policy": "foreign-cpu-share",
+    "foreign_share_limit": 0.015,
+    "minimum_arm_ns": 1000000000,
+    "server_cpus": [
+      0,
+      1,
+      2,
+      3,
+      16,
+      17,
+      18,
+      19
+    ],
+    "load_cpus": [
+      24,
+      25
+    ],
+    "helper_cpus": [
+      26,
+      27
+    ],
+    "controller_cpus": [
+      26,
+      27
+    ]
+  },
+  "started": "2026-11-22T17:32:41.531665+01:00",
+  "host": "turbo2-sam",
+  "host_load_start": [
+    6.771484375,
+    15.38818359375,
+    19.70751953125
+  ],
+  "binary_sha256": {
+    "regimes/checkbox/checkbox": "823c0fffe9a35ef511ef955ad3d4eebf0363084b332d700fd49873c251bdbdd7",
+    "regimes/checkbox/wants.bin": "3b2f11c9279b68e3674524483653a52e831eb06e023b7efd921477f21a059010",
+    "regimes/wire/release/wire-reference": "3002ecd68ca754643cdeabe0c07ae6de7eb8f3e5ec1144e523868d7603d18aff",
+    "regimes/wire/release/wire-load": "2ea19f51885312b3802d75fd46430e83a85c73c60ea96085e2fb385934766911"
+  },
+  "rows": [
+    {
+      "goal": "Regimes",
+      "row": "checkbox/0ns/w1",
+      "commit": "f147d44d8b08aa65a01faa90b5dd7cbc73d8520c",
+      "status": "ok",
+      "metrics": [
+        "work_per_s",
+        "speedup_vs_w1"
+      ],
+      "samples": {
+        "hirsel": {
+          "side": "hirsel",
+          "status": "ok",
+          "work_per_s": 10297.809761465305,
+          "speedup_vs_w1": 1.0,
+          "cpu_us_per_turn": 89.84375,
+          "arms": [
+            {
+              "status": "ok",
+              "cpus": "0",
+              "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+              "iterations": 12800,
+              "checksum": 392532,
+              "cycles": 2244447870,
+              "instructions": 4395969552,
+              "seconds": 1.301396431,
+              "max_rss_kib": 19304,
+              "load_cpus": "24,25",
+              "client_seconds": 1.2429827600717545,
+              "load_status": 0,
+              "smt_busy_percent": {
+                "16": 0.0
+              },
+              "server_status": 0,
+              "metrics": {},
+              "service_seconds": 1.2429827600717545,
+              "pool": {
+                "workers": 1,
+                "units": 2,
+                "resumes": 1271,
+                "parks": 1268,
+                "yields": 1,
+                "steals": 0,
+                "os_wakes": 551,
+                "gpolls": 1633,
+                "gpoll_blocks": 570,
+                "gpoll_events": 13405,
+                "timer_fires": 0,
+                "notified_requeue": 437,
+                "create_ns_avg": 1177,
+                "ready_to_park_ns_avg": 4970286,
+                "token_acquires": 0,
+                "unit_epoll_waits": 0,
+                "lifo": 2,
+                "handoffs": 0,
+                "handoff_ns": 1000000,
+                "handoff_tick_ns": 250000,
+                "handoff_age_ns_avg": 0
+              },
+              "cpu_us_per_turn": 89.84375,
+              "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-hirsel-1",
+              "invocations": [
+                {
+                  "status": "ok",
+                  "cpus": "0",
+                  "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+                  "iterations": 12800,
+                  "checksum": 392532,
+                  "cycles": 2244447870,
+                  "instructions": 4395969552,
+                  "seconds": 1.301396431,
+                  "max_rss_kib": 19304,
+                  "load_cpus": "24,25",
+                  "client_seconds": 1.2429827600717545,
+                  "load_status": 0,
+                  "smt_busy_percent": {
+                    "16": 0.0
+                  },
+                  "server_status": 0,
+                  "metrics": {},
+                  "service_seconds": 1.2429827600717545,
+                  "pool": {
+                    "workers": 1,
+                    "units": 2,
+                    "resumes": 1271,
+                    "parks": 1268,
+                    "yields": 1,
+                    "steals": 0,
+                    "os_wakes": 551,
+                    "gpolls": 1633,
+                    "gpoll_blocks": 570,
+                    "gpoll_events": 13405,
+                    "timer_fires": 0,
+                    "notified_requeue": 437,
+                    "create_ns_avg": 1177,
+                    "ready_to_park_ns_avg": 4970286,
+                    "token_acquires": 0,
+                    "unit_epoll_waits": 0,
+                    "lifo": 2,
+                    "handoffs": 0,
+                    "handoff_ns": 1000000,
+                    "handoff_tick_ns": 250000,
+                    "handoff_age_ns_avg": 0
+                  },
+                  "cpu_us_per_turn": 89.84375,
+                  "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-hirsel-1"
+                }
+              ],
+              "work_per_s": 10297.809761465305,
+              "foreign_share": {
+                "server": 0.0011528224675175828,
+                "load": 0.0004954449672454868
+              }
+            }
+          ]
+        },
+        "tokio": {
+          "side": "tokio",
+          "status": "ok",
+          "work_per_s": 10913.973556111041,
+          "speedup_vs_w1": 1.0,
+          "cpu_us_per_turn": 46.09375000000001,
+          "arms": [
+            {
+              "status": "ok",
+              "cpus": "0",
+              "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+              "iterations": 12800,
+              "checksum": 392532,
+              "cycles": 1151003326,
+              "instructions": 2798498331,
+              "seconds": 1.217437414,
+              "max_rss_kib": 17468,
+              "load_cpus": "24,25",
+              "client_seconds": 1.172808412462473,
+              "load_status": 0,
+              "smt_busy_percent": {
+                "16": 0.0
+              },
+              "server_status": 0,
+              "metrics": {},
+              "service_seconds": 1.172808412462473,
+              "cpu_us_per_turn": 46.09375000000001,
+              "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-tokio-1",
+              "invocations": [
+                {
+                  "status": "ok",
+                  "cpus": "0",
+                  "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+                  "iterations": 12800,
+                  "checksum": 392532,
+                  "cycles": 1151003326,
+                  "instructions": 2798498331,
+                  "seconds": 1.217437414,
+                  "max_rss_kib": 17468,
+                  "load_cpus": "24,25",
+                  "client_seconds": 1.172808412462473,
+                  "load_status": 0,
+                  "smt_busy_percent": {
+                    "16": 0.0
+                  },
+                  "server_status": 0,
+                  "metrics": {},
+                  "service_seconds": 1.172808412462473,
+                  "cpu_us_per_turn": 46.09375000000001,
+                  "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-tokio-1"
+                }
+              ],
+              "work_per_s": 10913.973556111041,
+              "foreign_share": {
+                "server": 0.0015367344622475194,
+                "load": 0.00020718889606484038
+              }
+            }
+          ]
+        }
+      },
+      "ratios": {
+        "tokio": {
+          "work_per_s": 0.9435435873581782,
+          "speedup_vs_w1": 1.0
+        }
+      },
+      "case": "checkbox",
+      "grain_ns": 0,
+      "width": 1,
+      "kind": "work_rate"
+    }
+  ],
+  "retention_8192_over_256": {},
+  "failures": {
+    "run": "Deadline"
+  },
+  "complete": false,
+  "updated": "2026-11-22T17:39:35.568980+01:00",
+  "host_load_last": [
+    7.99560546875,
+    9.17431640625,
+    15.16650390625
+  ],
+  "expected_rows": [
+    {
+      "goal": "Regimes",
+      "row": "checkbox/0ns/w1",
+      "status": "ok"
+    },
+    {
+      "goal": "Regimes",
+      "row": "checkbox/0ns/w4",
+      "status": "missing"
+    },
+    {
+      "goal": "Regimes",
+      "row": "checkbox/0ns/w8",
+      "status": "missing"
+    }
+  ],
+  "toolchain": {
+    "compiler_build_profile": "release",
+    "compiler_sha256": "82d183fdeb824723066c3c4c288a444681b5bce43680eaf9401b34c3ce47b938",
+    "runtime_archive_profile": "shipping-release-fat-lto",
+    "runtime_archive_sha256": "45a6ec0d2d3696c7fbbb2aac4fb2cee3bec57b40449052db66db9304ca105930",
+    "diagnostic": false,
+    "compiler": "/workspace/code/hirsel-briefs/mc-units-fair-bench/source/buck-out/measurement/pinned/v1/sha256/compiler/hirsel_core-release-82d183fdeb824723066c3c4c288a444681b5bce43680eaf9401b34c3ce47b938",
+    "runtime": "/workspace/code/hirsel-briefs/mc-units-fair-bench/source/buck-out/measurement/pinned/v1/sha256/runtime/libhirsel_core_rt-shipping-release-fat-lto-45a6ec0d2d3696c7fbbb2aac4fb2cee3bec57b40449052db66db9304ca105930.a",
+    "compiler_source": "/workspace/code/hirsel-briefs/mc-units-fair-bench/source/buck-out/v2/art/root/967aa399796c0942/__hirsel-core-driver-bin-hirsel__/hirsel",
+    "runtime_source": "/workspace/code/hirsel-briefs/mc-units-fair-bench/source/buck-out/v2/art/root/967aa399796c0942/__hirsel-core-rt-archives__/hirsel-core-rt-archives/x86_64-unknown-linux-gnu/libhirsel_core_rt.a",
+    "pins": "/workspace/code/hirsel-briefs/mc-units-fair-bench/source/buck-out/measurement/pinned/v1/sha256",
+    "compiler_target": "//:hirsel-core-driver-bin-hirsel",
+    "runtime_archive_target": "//:hirsel-core-rt-archives",
+    "target": "x86_64-unknown-linux-gnu"
+  }
+}

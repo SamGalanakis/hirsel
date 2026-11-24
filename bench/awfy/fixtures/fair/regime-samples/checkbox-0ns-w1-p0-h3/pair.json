@@ -1,0 +1,292 @@
+{
+  "hold": {
+    "case": "checkbox",
+    "grain_ns": 0,
+    "width": 1,
+    "order": [
+      "hirsel",
+      "tokio"
+    ],
+    "started": "2026-11-22T17:35:32.077520+01:00",
+    "arm_pids": [
+      1216981,
+      1216988,
+      1217004,
+      1217007
+    ],
+    "arm_windows": [
+      {
+        "side": "hirsel",
+        "start_ns": 8492303155412900,
+        "end_ns": 8492304509668255,
+        "pids": [
+          1216981,
+          1216988
+        ]
+      },
+      {
+        "side": "tokio",
+        "start_ns": 8492304509735712,
+        "end_ns": 8492305762983376,
+        "pids": [
+          1217004,
+          1217007
+        ]
+      }
+    ],
+    "foreign_share_limit": 0.015,
+    "clean": true,
+    "cpu_trace": "schedule-3.perf.data",
+    "idle_cpu_busy": {
+      "0": 0.0,
+      "1": 0.02,
+      "2": 0.009900990099009901,
+      "3": 0.0,
+      "16": 0.0,
+      "17": 0.0,
+      "18": 0.0,
+      "19": 0.0,
+      "24": 0.0,
+      "25": 0.0
+    },
+    "board_window_open": true,
+    "load_start": 8.03466796875,
+    "cc1plus_start": [],
+    "timed_start_ns": 8492303155409253,
+    "timed_end_ns": 8492305763041395,
+    "busy_ticks": {
+      "0": 176,
+      "1": 1,
+      "2": 0,
+      "3": 0,
+      "16": 0,
+      "17": 0,
+      "18": 0,
+      "19": 0,
+      "24": 96,
+      "25": 98
+    },
+    "hold_s": 3.416890984401107,
+    "load_end": 7.71142578125,
+    "finished": "2026-11-22T17:35:35.494417+01:00",
+    "cc1plus_end": [],
+    "arm_cpu": {
+      "hirsel": {
+        "start_ns": 8492303155412900,
+        "end_ns": 8492304509668255,
+        "duration_ns": 1354255355,
+        "pids": [
+          1216981,
+          1216988
+        ],
+        "owned_cpu_ns": {
+          "0": 1159312561,
+          "24": 517781882,
+          "25": 528729184
+        },
+        "foreign_cpu_ns": {
+          "0": 506794,
+          "1": 7782885,
+          "2": 1379479,
+          "3": 327787,
+          "16": 1776465,
+          "17": 9147,
+          "18": 697814,
+          "19": 9357,
+          "24": 534937,
+          "25": 806981
+        },
+        "foreign_share": {
+          "server": 0.0011528224675175828,
+          "load": 0.0004954449672454868
+        },
+        "trace_complete": true,
+        "admitted": true
+      },
+      "tokio": {
+        "start_ns": 8492304509735712,
+        "end_ns": 8492305762983376,
+        "duration_ns": 1253247664,
+        "pids": [
+          1217004,
+          1217007
+        ],
+        "owned_cpu_ns": {
+          "0": 599067324,
+          "24": 439946921,
+          "25": 440677081
+        },
+        "foreign_cpu_ns": {
+          "0": 693723,
+          "1": 8550576,
+          "2": 5550879,
+          "3": 464074,
+          "16": 38732,
+          "17": 98697,
+          "18": 0,
+          "19": 10590,
+          "24": 42731,
+          "25": 476587
+        },
+        "foreign_share": {
+          "server": 0.0015367344622475194,
+          "load": 0.00020718889606484038
+        },
+        "trace_complete": true,
+        "admitted": true
+      }
+    },
+    "lost_notices": 0,
+    "unobserved_busy_cpus": []
+  },
+  "samples": {
+    "hirsel": {
+      "status": "ok",
+      "cpus": "0",
+      "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+      "iterations": 12800,
+      "checksum": 392532,
+      "cycles": 2244447870,
+      "instructions": 4395969552,
+      "seconds": 1.301396431,
+      "max_rss_kib": 19304,
+      "load_cpus": "24,25",
+      "client_seconds": 1.2429827600717545,
+      "load_status": 0,
+      "smt_busy_percent": {
+        "16": 0.0
+      },
+      "server_status": 0,
+      "metrics": {},
+      "service_seconds": 1.2429827600717545,
+      "pool": {
+        "workers": 1,
+        "units": 2,
+        "resumes": 1271,
+        "parks": 1268,
+        "yields": 1,
+        "steals": 0,
+        "os_wakes": 551,
+        "gpolls": 1633,
+        "gpoll_blocks": 570,
+        "gpoll_events": 13405,
+        "timer_fires": 0,
+        "notified_requeue": 437,
+        "create_ns_avg": 1177,
+        "ready_to_park_ns_avg": 4970286,
+        "token_acquires": 0,
+        "unit_epoll_waits": 0,
+        "lifo": 2,
+        "handoffs": 0,
+        "handoff_ns": 1000000,
+        "handoff_tick_ns": 250000,
+        "handoff_age_ns_avg": 0
+      },
+      "cpu_us_per_turn": 89.84375,
+      "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-hirsel-1",
+      "invocations": [
+        {
+          "status": "ok",
+          "cpus": "0",
+          "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+          "iterations": 12800,
+          "checksum": 392532,
+          "cycles": 2244447870,
+          "instructions": 4395969552,
+          "seconds": 1.301396431,
+          "max_rss_kib": 19304,
+          "load_cpus": "24,25",
+          "client_seconds": 1.2429827600717545,
+          "load_status": 0,
+          "smt_busy_percent": {
+            "16": 0.0
+          },
+          "server_status": 0,
+          "metrics": {},
+          "service_seconds": 1.2429827600717545,
+          "pool": {
+            "workers": 1,
+            "units": 2,
+            "resumes": 1271,
+            "parks": 1268,
+            "yields": 1,
+            "steals": 0,
+            "os_wakes": 551,
+            "gpolls": 1633,
+            "gpoll_blocks": 570,
+            "gpoll_events": 13405,
+            "timer_fires": 0,
+            "notified_requeue": 437,
+            "create_ns_avg": 1177,
+            "ready_to_park_ns_avg": 4970286,
+            "token_acquires": 0,
+            "unit_epoll_waits": 0,
+            "lifo": 2,
+            "handoffs": 0,
+            "handoff_ns": 1000000,
+            "handoff_tick_ns": 250000,
+            "handoff_age_ns_avg": 0
+          },
+          "cpu_us_per_turn": 89.84375,
+          "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-hirsel-1"
+        }
+      ],
+      "work_per_s": 10297.809761465305,
+      "foreign_share": {
+        "server": 0.0011528224675175828,
+        "load": 0.0004954449672454868
+      }
+    },
+    "tokio": {
+      "status": "ok",
+      "cpus": "0",
+      "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+      "iterations": 12800,
+      "checksum": 392532,
+      "cycles": 1151003326,
+      "instructions": 2798498331,
+      "seconds": 1.217437414,
+      "max_rss_kib": 17468,
+      "load_cpus": "24,25",
+      "client_seconds": 1.172808412462473,
+      "load_status": 0,
+      "smt_busy_percent": {
+        "16": 0.0
+      },
+      "server_status": 0,
+      "metrics": {},
+      "service_seconds": 1.172808412462473,
+      "cpu_us_per_turn": 46.09375000000001,
+      "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-tokio-1",
+      "invocations": [
+        {
+          "status": "ok",
+          "cpus": "0",
+          "sha256": "2e2406cf290f8152d38a9d9f33b026d6b14482a6744b2489738cc79fe0125ab6",
+          "iterations": 12800,
+          "checksum": 392532,
+          "cycles": 1151003326,
+          "instructions": 2798498331,
+          "seconds": 1.217437414,
+          "max_rss_kib": 17468,
+          "load_cpus": "24,25",
+          "client_seconds": 1.172808412462473,
+          "load_status": 0,
+          "smt_busy_percent": {
+            "16": 0.0
+          },
+          "server_status": 0,
+          "metrics": {},
+          "service_seconds": 1.172808412462473,
+          "cpu_us_per_turn": 46.09375000000001,
+          "path": "regime-samples/checkbox-0ns-w1-p0-h3/checkbox-tokio-1"
+        }
+      ],
+      "work_per_s": 10913.973556111041,
+      "foreign_share": {
+        "server": 0.0015367344622475194,
+        "load": 0.00020718889606484038
+      }
+    }
+  }
+}

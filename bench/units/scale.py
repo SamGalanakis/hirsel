@@ -172,6 +172,8 @@ def assert_ports_free(ports):
 
 
 class Runner:
+    hold_gap = HOLDS_GAP_S
+
     def __init__(self, scratch, data, *, hold_guard=None, cpu_sets=None):
         self.scratch = scratch
         self.data = data
@@ -186,14 +188,18 @@ class Runner:
         self.hold = 0
         self.last_order = None
 
+    def measured_command(self, argv):
+        return argv
+
     @contextmanager
     def tool(self, precise=False):
         assert_ports_free([TOOL_PORT])
         pidfile = self.scratch / "tool.pid"
         with (self.scratch / "tool.err").open("w+") as err:
             cpus = self.cpu_sets.get("helper", TOOL)
-            proc = launch(pinned(cpus, [self.bin / "toolsrv", TOOL_PORT, TOOL_DELAY_US,
-                                        len(cpuset(cpus)), int(precise)]), pidfile, stderr=err)
+            command = pinned(cpus, [self.bin / "toolsrv", TOOL_PORT, TOOL_DELAY_US,
+                                    len(cpuset(cpus)), int(precise)])
+            proc = launch(self.measured_command(command), pidfile, stderr=err)
             try:
                 for _ in range(50):
                     if f"toolsrv ready port={TOOL_PORT}" in (self.scratch / "tool.err").read_text() and proc.poll() is None:
@@ -319,11 +325,12 @@ class Runner:
         arm_start_ns = time.monotonic_ns()
         tool0 = proc_sample(tool_pid)
         with (self.scratch / "server.err").open("w+") as err:
-            server = launch(server_argv, server_pidfile, env=env, stderr=err)
+            server = launch(self.measured_command(server_argv), server_pidfile, env=env, stderr=err)
             if self.active_hold is not None and "arm_pids" in self.active_hold:
                 self.active_hold["arm_pids"].append(server.pid)
             try:
-                load = launch(pinned(load_cpus, lg_argv), load_pidfile, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                command = self.measured_command(pinned(load_cpus, lg_argv))
+                load = launch(command, load_pidfile, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 try:
                     out, load_err, samples, seen_masks, load_timeout = self.collect_load(load, load_pidfile, server.pid, profile)
                 finally:
@@ -435,7 +442,8 @@ class Runner:
                 out.write(json.dumps(receipt | {"hold_summary": True, "discarded": not clean}) + "\n")
                 out.flush()
             log(f"hold {self.hold} {cell_name} {receipt.get('hold_s')} s clean={clean}")
-            time.sleep(HOLDS_GAP_S)
+            if self.hold_gap:
+                time.sleep(self.hold_gap)
             if clean:
                 return rows
 

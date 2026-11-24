@@ -1243,8 +1243,6 @@ def comparison_report(evidence):
         try:
             if "path" not in units:
                 raise ValueError(units.get("reason", "owner export collection did not complete"))
-            if units.get("exit_status", 0) != 0:
-                raise ValueError(f"owner producer exited {units['exit_status']}")
             path = Path(units["path"])
             if build.sha256(path) != units["sha256"]:
                 raise ValueError("owner export changed since collection")
@@ -1253,10 +1251,8 @@ def comparison_report(evidence):
                                         else "incomplete")}
         except (OSError, ValueError, KeyError, TypeError, ArithmeticError) as error:
             reason = str(error)
-            status = "incomplete" if units.get("source") == "imported" else "pending"
-            units = units | {"status": status, "reason": reason}
-            units_rows = [comparison_units.missing_row(key, reason, status=status)
-                          for key in comparison_units.expected(tmpfs_matched=True)]
+            units = units | {"status": "incomplete", "reason": reason}
+            units_rows = [comparison_units.rejected_row(key, reason) for key in comparison_units.expected()]
         evidence = evidence | {"units": units}
     return comparison.summary(evidence, units_rows)
 

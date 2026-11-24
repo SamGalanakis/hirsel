@@ -2,7 +2,7 @@
 """Build, run and record the matched Hirsel and Tokio comparison."""
 import argparse
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import partial
 import hashlib
 from itertools import count, cycle
@@ -24,39 +24,35 @@ sys.path.insert(0, str(ROOT / "core/tools"))
 sys.path.insert(0, str(ROOT / "bench/awfy"))
 from receipt import measurement_slot, read, release_tools, write
 from bench_cpus import cpu_list
-from measurement import FOREIGN_SHARE_LIMIT, MIN_ARM_NS, hold as measurement_hold
+from measurement import hold as measurement_hold
 from timing_shield import in_timing_slice, local_host, scoped_command
 
 from bench.multicore import build, regimes, run
+from bench.units.contract import (
+    A1_BINARIES, A1_SIDES, ARMS, BUILD_CPUS, BUILD_JOBS, BUILD_MEMORY_BYTES, CASES,
+    CHECKBOX_BINARIES, CPU_DEFAULTS, FOREIGN_SHARE_LIMIT, HOLD_POLICY, MEASUREMENT_MEMORY_BYTES,
+    MIN_ARM_NS, REGIME_BINARIES, SYNC_POLICY, VERSION, a1_cells, expected_rows, regime_grains,
+    regime_widths, valid_topology,
+)
 
-CPU_DEFAULTS = {
-    "server": (0, 1, 2, 3, 16, 17, 18, 19),
-    "load": (24, 25),
-    "helper": (26, 27),
-    "controller": (26, 27),
-}
-MEASURE_CPUS = set().union(*CPU_DEFAULTS.values())
-BUILD_CPUS = (8, 9, 10, 11)
-BUILD_MEMORY = "4G"
-REGIME_MEMORY = 3 << 30
 MATCHED_OFFER = 3000
-CONNECTIONS = (256, 2048, 8192)
 QUICK_REGIMES = ("fanin", "pipeline")
 ROUNDS = dict(zip(regimes.GRAINS, (0, 64, 640, 6400, 64000), strict=True))
-REGIMES = tuple(name for name in regimes.WORKLOADS if name != "calibrate")
-VERSION = 1
-ARMS = ("hirsel", "tokio")
-A1_SIDES = ("untied", "tokiow8")
-A1_BINARIES = ("a1/bin/session_u", "a1/bin/twin", "a1/bin/loadgen",
-               "a1/bin/toolsrv", "a1/software/twin")
-REGIME_BINARIES = ("regimes/hirsel/regimes", "regimes/rust/regimes")
-CHECKBOX_BINARIES = ("regimes/checkbox/checkbox", "regimes/checkbox/wants.bin",
-                     "regimes/wire/release/wire-reference", "regimes/wire/release/wire-load")
 SCOPE = count()
 
 
 def now():
-    return datetime.now().astimezone()
+    return datetime.now(timezone.utc)
+
+
+def run_config(*, full, suites, cases, repeats, reverse, cpu_sets):
+    return {"mode": "full" if full else "quick", "families": suites,
+            "regimes": list(cases) if "regimes" in suites else [], "repeats": repeats,
+            "reverse": reverse, "build_cpus": BUILD_CPUS, "build_jobs": BUILD_JOBS,
+            "build_memory_limit_bytes": BUILD_MEMORY_BYTES, "measurement_memory_limit_bytes": MEASUREMENT_MEMORY_BYTES,
+            "sync_policy": SYNC_POLICY, "hold_policy": HOLD_POLICY,
+            "foreign_share_limit": FOREIGN_SHARE_LIMIT, "minimum_arm_ns": MIN_ARM_NS,
+            **{f"{role}_cpus": cpus for role, cpus in cpu_sets.items()}}
 
 
 def sha256(path):
@@ -75,7 +71,8 @@ def mask(cpus):
 def build_command(arguments, *, local=False, env=None, **kwargs):
     env = os.environ | (env or {})
     if local:
-        env.update(HIRSEL_JOBS="4", HIRSEL_MEMORY_LIMIT=BUILD_MEMORY, UNITS_BUILD_UNDER_CAP="1")
+        env.update(HIRSEL_JOBS=str(BUILD_JOBS), HIRSEL_MEMORY_LIMIT=str(BUILD_MEMORY_BYTES),
+                   UNITS_BUILD_UNDER_CAP="1")
         arguments = ("taskset", "-c", mask(BUILD_CPUS), ROOT / "tools/capped", *arguments)
     return subprocess.run(list(map(str, arguments)), cwd=ROOT, env=env,
                           check=True, text=True, **kwargs)
@@ -172,18 +169,21 @@ def prepare(cache, commit, suites, cases):
 
 def guard(cpu_sets, output):
     return partial(measurement_hold, cpu_sets=cpu_sets, output=output,
-                   lock_paths=(scale.REGIMES, scale.BOARD), gap=scale.HOLDS_GAP_S,
+                   lock_paths=(scale.REGIMES, scale.BOARD),
                    compiler_processes=scale.cc1plus)
 
 
 def scope(cpus, command, *, limit=55):
+    command = list(map(str, command))
+    if cpus:
+        command = ["taskset", "-c", cpus, *command]
     if local_host() and in_timing_slice():
-        return ["taskset", "-c", cpus, *scoped_command(
-            list(map(str, command)), memory_bytes=REGIME_MEMORY, runtime_seconds=limit)]
-    return ["taskset", "-c", cpus, "systemd-run", "--user", "--scope", "--quiet", "--collect",
-            "--unit", f"hirsel-fair-{os.getpid()}-{next(SCOPE)}.scope", "-p", f"MemoryMax={REGIME_MEMORY}",
-            "-p", "MemorySwapMax=0", "-p", f"RuntimeMaxSec={limit}s", "-p", "TimeoutStopSec=2s",
-            "--", *map(str, command)]
+        return scoped_command(command, memory_bytes=MEASUREMENT_MEMORY_BYTES, runtime_seconds=limit)
+    runtime = ["-p", f"RuntimeMaxSec={limit}s", "-p", "TimeoutStopSec=2s"] if limit else []
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+            "--unit", f"hirsel-fair-{os.getpid()}-{next(SCOPE)}.scope",
+            "-p", f"MemoryMax={MEASUREMENT_MEMORY_BYTES}", "-p", "MemorySwapMax=0",
+            *runtime, "--", *command]
 
 
 def command_with_pid(path, command):
@@ -193,10 +193,8 @@ def command_with_pid(path, command):
 
 def measure_regime(directory, cpus, command, profile=False, cycles=False, *, controller):
     events = "instructions:u,duration_time,cycles:u"
-    launcher = command_with_pid(directory / "timed.pid", [
-        "taskset", "-c", mask(cpus), "/usr/bin/time", "-f", "%U %S\n%M",
-        "-o", directory / "rss.txt", *command,
-    ])
+    launcher = ["/usr/bin/time", "-f", "%U %S\n%M", "-o", directory / "rss.txt",
+                "taskset", "-c", mask(cpus), *command_with_pid(directory / "timed.pid", command)]
     if profile:
         return scope(mask(controller), ["perf", "record", "-N", "--clockid", "mono", "--sample-cpu",
                              "-e", "cycles:u,cycles:k,cpu-clock", "-F", "499",
@@ -271,7 +269,6 @@ def regime_pair(out, bins, case, grain, width, index, orders, cpu_sets, profile=
             for arm, sample in samples.items():
                 sample["foreign_share"] = hold.get("arm_cpu", {}).get(arm, {}).get("foreign_share")
             write(point / "pair.json", {"hold": hold, "samples": samples})
-        time.sleep(scale.HOLDS_GAP_S)
         if hold["clean"] or any(sample["status"] != "ok" for sample in samples.values()):
             return samples
 
@@ -297,6 +294,11 @@ def journal(path, filesystem):
 
 
 class A1Runner(scale.Runner):
+    hold_gap = 0
+
+    def measured_command(self, argv):
+        return scope(None, argv, limit=None)
+
     def profile_setup(self, mode):
         return 2_000_000_000, ["-e", "cycles:u,cycles:k,cpu-clock", "-F", "499",
                               "--call-graph", "dwarf,8192", "--sample-cpu"], "3"
@@ -344,35 +346,6 @@ def ratio(samples, metric):
     return h / t if h is not None and t else None
 
 
-def expected_rows(suites, cases, full):
-    labels = []
-    if "a1" in suites:
-        for storage in ("ext4", "tmpfs") if full else ("ext4",):
-            for clients in CONNECTIONS if full else (256, 8192):
-                cell = f"{storage}/{clients}/hardware"
-                labels.append(("A1", cell))
-                if full and storage == "ext4":
-                    labels.append(("A1", cell + "/matched"))
-        if full:
-            labels.extend((("A1", "ext4/8192/software"), ("A1", "ext4/8192/software/matched")))
-    if "regimes" in suites:
-        for case in cases:
-            for grain in regime_grains(case, full):
-                for width in regime_widths(full):
-                    labels.append(("Regimes", f"{case}/{grain}ns/w{width}"))
-    return labels
-
-
-def regime_grains(case, full):
-    if case == "checkbox":
-        return (0,)
-    return regimes.GRAINS if full else (100_000,)
-
-
-def regime_widths(full):
-    return (1, 4, 8) if full else (1, 8)
-
-
 class Report:
     def __init__(self, out, commit, config, expected):
         self.out = out
@@ -384,16 +357,27 @@ class Report:
         self.save()
 
     def save(self):
-        statuses = {(row["goal"], row["row"]): row["status"] for row in self.data["rows"]}
-        self.data.update(updated=now().isoformat(), host_load_last=os.getloadavg(),
-                         expected_rows=[{"goal": goal, "row": name, "status": statuses.get((goal, name), "missing")}
-                                        for goal, name in self.expected])
-        write(self.out / "fair.json", self.data)
+        measured = {(row["goal"], row["row"]): row for row in self.data["rows"]}
+        reason = self.data["failures"].get("run", "Cell did not run")
+        rows = []
+        for goal, name in self.expected:
+            rows.append(measured.get((goal, name), {
+                "goal": goal, "row": name, "commit": self.data["commit"],
+                "status": "rejected", "issues": {"export": reason},
+                "samples": {}, "ratios": {"tokio": {}},
+            }))
+        self.data.update(updated=now().isoformat(), host_load_last=os.getloadavg())
+        write(self.out / "fair.json", self.data | {
+            "rows": rows,
+            "expected_rows": [{key: row[key] for key in ("goal", "row", "status")} for row in rows],
+        })
         lines = ["# Fair Hirsel and Tokio benchmark", "", f"Commit `{self.data['commit']}`", "",
                  "Complete" if self.data["complete"] else "Incomplete", "",
                  "| Cell | Status | Metric | Hirsel | Tokio | Hirsel / Tokio |",
                  "|---|---|---|---:|---:|---:|"]
-        for row in self.data["rows"]:
+        for row in rows:
+            if not row["ratios"]["tokio"]:
+                lines.append(f"| {row['row']} | {row['status']} | | | | |")
             for metric, value in row["ratios"]["tokio"].items():
                 h = row["samples"]["hirsel"].get(metric)
                 t = row["samples"]["tokio"].get(metric)
@@ -411,11 +395,14 @@ class Report:
         ok = all(s["status"] == "ok" for s in samples.values()) and all(r is not None for r in ratios.values())
         if context.get("sync_groups_match") is False:
             ok = False
-        self.data["rows"].append({"goal": goal, "row": label, "commit": self.data["commit"],
-                                  "status": "ok" if ok else "failed", "metrics": fields,
-                                  "samples": samples, "ratios": {"tokio": ratios}, **context})
+        row = {"goal": goal, "row": label, "commit": self.data["commit"],
+               "status": "ok" if ok else "rejected", "metrics": fields,
+               "samples": samples, "ratios": {"tokio": ratios}, **context}
         if not ok:
-            self.data["failures"][label] = "A result, required metric, or sync grouping missed its criterion"
+            reason = "A result, required metric, or sync grouping missed its criterion"
+            self.data["failures"][label] = reason
+            row["issues"] = {"export": reason}
+        self.data["rows"].append(row)
         self.save()
 
     def retention(self, filesystem, metric, low, high):
@@ -459,15 +446,15 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
     scale.PORT, scale.TOOL_PORT = pick_ports()
     runner = A1Runner(cache / "a1", report.out, hold_guard=guard(cpu_sets, report.out),
                       cpu_sets={role: mask(cpus) for role, cpus in cpu_sets.items()})
-    for storage, software in ([("ext4", False), ("tmpfs", False), ("ext4", True)]
-                              if full else [("ext4", False)]):
+    cells = a1_cells(full)
+    for storage, sha in dict.fromkeys((storage, sha) for storage, _, sha in cells):
         found = {}
-        populations = (8192,) if software else CONNECTIONS if full else (256, 8192)
+        populations = [size for fs, size, backend in cells if (fs, backend) == (storage, sha)]
         with journal(runner.store, storage):
             for connections in populations:
                 cell_name = f"A1-{connections}"
-                cell = scale.SCALE_CELLS[cell_name] | {"journal": storage, "software_sha": software}
-                label = f"{storage}/{connections}/{'software' if software else 'hardware'}"
+                cell = scale.SCALE_CELLS[cell_name] | {"journal": storage, "software_sha": sha == "software"}
+                label = f"{storage}/{connections}/{sha}"
                 metrics = (("offer_turns_per_s", "goodput_turns_per_s", "intended_arrival_p99_ns")
                            if full else ("cpu_us_per_turn",))
                 path = report.out / f"{label.replace('/', '-')}-{'search' if full else 'matched'}.jsonl"
@@ -483,7 +470,7 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
                            kind="ceiling" if full else "matched", raw=path.name,
                            sync_groups_match=(sync is not None and abs(sync - 1) <= .05) if not full else None)
                 found[connections] = samples
-                if full and storage == "ext4":
+                if full:
                     raw_path = report.out / f"{label.replace('/', '-')}-matched.jsonl"
                     offer = min((value["offer_turns_per_s"] for value in samples.values()
                                  if value.get("offer_turns_per_s")), default=MATCHED_OFFER)
@@ -495,7 +482,7 @@ def run_a1(report, cache, full, repeats, reverse, cpu_sets):
                     report.row("A1", label + "/matched", paired, ("intended_arrival_p99_ns", "cpu_us_per_turn"),
                                filesystem=storage, connections=connections, kind="matched", raw=raw_path.name,
                                sync_groups_match=group_ratio is not None and abs(group_ratio - 1) <= .05)
-        if not software and 256 in found and 8192 in found:
+        if sha == "hardware" and 256 in found and 8192 in found:
             report.retention(storage, "offer_turns_per_s" if full else "goodput_turns_per_s",
                              found[256], found[8192])
 
@@ -552,22 +539,17 @@ def main():
     parser.add_argument("--deadline-seconds", type=int, help="limit time waiting and measuring after builds")
     args = parser.parse_args()
     suites = args.cells.split(",")
-    cases = args.regimes.split(",") if args.regimes else REGIMES if args.full else QUICK_REGIMES
+    cases = args.regimes.split(",") if args.regimes else CASES if args.full else QUICK_REGIMES
     if set(suites) - {"a1", "regimes"} or len(set(suites)) != len(suites):
         parser.error("select a1, regimes or a1,regimes")
-    if set(cases) - set(REGIMES) or len(set(cases)) != len(cases) or (args.regimes and "regimes" not in suites):
+    if set(cases) - set(CASES) or len(set(cases)) != len(cases) or (args.regimes and "regimes" not in suites):
         parser.error("select distinct regime workloads and include the regimes family")
     if (args.repeats is not None and args.repeats < 1
             or args.deadline_seconds is not None and args.deadline_seconds < 1):
         parser.error("repeats and deadline must be positive")
     cpu_sets = {role: getattr(args, f"{role}_cpus") for role in CPU_DEFAULTS}
-    server, load, helper, controller = map(set, cpu_sets.values())
-    if set().union(server, load, helper, controller) - MEASURE_CPUS:
-        parser.error("measurement CPUs must be in 0-3, 16-19 or 24-27")
-    if server & (load | helper | controller) or load & (helper | controller):
-        parser.error("server and load CPUs must be disjoint from the other roles")
-    if len(cpu_sets["server"]) != 8:
-        parser.error("the server CPU set must contain eight CPUs")
+    if not valid_topology(cpu_sets):
+        parser.error("use CPUs 0-3, 16-19 or 24-27, with eight server CPUs and disjoint server and load roles")
     controller = set(cpu_sets["controller"])
     if not controller.issubset(os.sched_getaffinity(0)):
         parser.error("pin the shell to the chosen controller CPUs")
@@ -582,14 +564,8 @@ def main():
     out.mkdir(parents=True)
     cache.mkdir(parents=True, exist_ok=True)
     repeats = args.repeats or (1 if args.full else 3)
-    config = {"mode": "full" if args.full else "quick", "families": suites,
-              "regimes": list(cases) if "regimes" in suites else [], "repeats": repeats,
-              "reverse": args.reverse, "build_cpus": BUILD_CPUS, "build_jobs": 4,
-              "build_memory_limit_bytes": 4 << 30, "regime_scope_memory_limit_bytes": REGIME_MEMORY,
-              "sync_policy": {"wait_us": 400, "max_writes": 4096, "durable_syncs_per_group": 1},
-              "hold_policy": "foreign-cpu-share", "foreign_share_limit": FOREIGN_SHARE_LIMIT,
-              "minimum_arm_ns": MIN_ARM_NS,
-              **{f"{role}_cpus": cpus for role, cpus in cpu_sets.items()}}
+    config = run_config(full=args.full, suites=suites, cases=cases, repeats=repeats,
+                        reverse=args.reverse, cpu_sets=cpu_sets)
     expected = expected_rows(suites, cases, args.full)
     report = Report(out, commit, config, expected)
     try:

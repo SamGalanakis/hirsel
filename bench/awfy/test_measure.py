@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -322,19 +323,102 @@ class ComparisonReceipts(unittest.TestCase):
             "CLBG::Spectralnorm checksum=1051192945 expected=1051192945 status=OK\n")
         self.assertEqual(compare()["status"], "ok")
 
-    def test_export_with_missing_units_labels_is_refused(self):
-        from comparison_units import CASES, expected, import_rows
+class FairReceipts(unittest.TestCase):
+    fixtures = Path(__file__).with_name("fixtures") / "fair"
 
-        labels = [{"goal": goal, "row": name, "status": "ok"}
-                  for goal, name in expected(tmpfs_matched=False)]
-        export = {"version": 1, "commit": self.commit, "complete": True, "failures": {},
-                  "config": {"mode": "full", "repeats": 1, "regimes": CASES, "families": ["a1", "regimes"]},
-                  "expected_rows": labels, "rows": labels[:-1]}
+    def test_producer_receipt_round_trip(self):
+        from comparison_units import import_rows
+        with patch.object(sys, "path", [str(build.ROOT / "bench/units"), *sys.path]):
+            from bench.units import fair
+
+        # The archived quiet-1720-checkbox export contains one measured row.
+        # Replay it through the current writer at full coverage without running anything.
+        archive = receipt.read(self.fixtures / "fair.json")
+        commit = archive["commit"]
+        source, = archive["rows"]
+        observed = source["samples"]
+        cpu_sets = {role: archive["config"][f"{role}_cpus"]
+                    for role in ("server", "load", "helper", "controller")}
+        config = fair.run_config(full=True, suites=["a1", "regimes"], cases=fair.CASES,
+                                 repeats=1, reverse=False, cpu_sets=cpu_sets)
         with tempfile.TemporaryDirectory() as temp:
-            path = Path(temp) / "fair.json"
-            path.write_text(json.dumps(export))
+            out = Path(temp)
+            shutil.copytree(self.fixtures / "regime-samples", out / "regime-samples")
+            path = out / "fair.json"
+            report = fair.Report(out, commit, config, fair.expected_rows(config["families"], fair.CASES, True))
+            report.data.update(started=archive["started"], binary_sha256=archive["binary_sha256"])
+            report.row("Regimes", source["row"], observed, source["metrics"],
+                       case="checkbox", grain_ns=0, width=1, kind="work_rate")
+            report.data["failures"]["run"] = "Deadline"
+            report.save()
+            export = receipt.read(path)
+            self.assertEqual(export["config"]["build_memory_limit_bytes"], 4 << 30)
+            self.assertEqual(export["config"]["measurement_memory_limit_bytes"], 2 << 30)
+            self.assertEqual(export["config"]["helper_cpus"], [26, 27])
+            self.assertEqual(export["config"]["controller_cpus"], [26, 27])
+            self.assertEqual(len(export["rows"]), 257)
+
+            def read_board():
+                rows = import_rows(path, commit)
+                self.assertEqual(len(rows), 257)
+                tmpfs = [row for row in rows if row["row"].startswith("tmpfs/")
+                         and row["row"].endswith(" / matched offer")]
+                self.assertEqual([row["row"].split("/")[1] for row in tmpfs], ["256", "2048", "8192"])
+                self.assertTrue(all(row["status"] == "rejected" and row["issues"]["export"] == "Deadline"
+                                    for row in tmpfs))
+                return next(row for row in rows if row["row"] == "checkbox/native/w1")
+
+            refused = read_board()
+            self.assertEqual(refused["status"], "rejected")
+            self.assertEqual(refused["issues"]["export"], "regime pair receipt or hold is unqualified")
+
+            # The recorded opening load was 8.0347. Set only that input to the
+            # accepted bound to exercise the successful qualification path.
+            pair_path = out / Path(observed["hirsel"]["arms"][0]["path"]).parent / "pair.json"
+            pair = receipt.read(pair_path)
+            self.assertGreater(pair["hold"]["load_start"], 8)
+            pair["hold"]["load_start"] = 8
+            receipt.write(pair_path, pair)
+            qualified = read_board()
+            self.assertEqual(qualified["status"], "ok")
+            self.assertEqual(qualified["samples"]["hirsel"]["work_per_s"],
+                             12800 / observed["hirsel"]["arms"][0]["service_seconds"])
+
+            for field, value, refusal in (
+                ("measurement_memory_limit_bytes", 3 << 30, "required build, measurement cap"),
+                ("build_memory_limit_bytes", 8 << 30, "required build, measurement cap"),
+                ("load_cpus", [16], "invalid units CPU topology"),
+            ):
+                with self.subTest(field=field):
+                    receipt.write(path, export | {"config": export["config"] | {field: value}})
+                    with self.assertRaisesRegex(ValueError, refusal):
+                        import_rows(path, commit)
+            receipt.write(path, export | {"rows": export["rows"][:-1]})
             with self.assertRaisesRegex(ValueError, "incomplete units label set"):
-                import_rows(path, self.commit)
+                import_rows(path, commit)
+
+    def test_switches_charge_the_outgoing_thread_group(self):
+        from bench.units import measurement
+
+        # CPU 16 runs the unrelated worker for 3 ms, the owned worker for
+        # 996 ms, and the unidentified tail for 2 ms. CPU 17 runs the
+        # owned load process for 900 ms and is otherwise idle.
+        start, end = 11_000_000_000, 12_001_000_000
+        windows = [{"side": "hirsel", "pids": [700, 800], "start_ns": start, "end_ns": end}]
+        with ((self.fixtures / "switches.txt").open() as trace,
+              patch.object(measurement.subprocess, "Popen") as popen):
+            reader = popen.return_value.__enter__.return_value
+            reader.stdout = trace
+            reader.wait.return_value = 0
+            result = measurement.classify_tasks(
+                Path("schedule.perf.data"), {"server": [16], "load": [17]}, windows,
+                10_990_000_000, 12_003_000_000, {16: 1_001_000_000, 17: 900_000_000},
+            )
+        self.assertIn("trace:pid,tid,cpu,time,event,trace", popen.call_args.args[0])
+        arm = result["arm_cpu"]["hirsel"]
+        self.assertEqual(arm["owned_cpu_ns"], {16: 996_000_000, 17: 900_000_000})
+        self.assertEqual(arm["foreign_cpu_ns"], {16: 5_000_000, 17: 0})
+        self.assertTrue(arm["admitted"])
 
 
 class SiblingActivity(unittest.TestCase):

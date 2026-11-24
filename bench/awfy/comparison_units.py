@@ -1,5 +1,5 @@
 """Read a complete, same-revision export from the owner of the units benchmarks."""
-from datetime import datetime, time
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -13,17 +13,17 @@ import receipt
 
 sys.path.insert(0, str(build.ROOT))
 from bench.multicore import regimes
+from bench.units.contract import (
+    A1_BINARIES, A1_SIDES, ARMS, BUILD_CPUS, BUILD_JOBS, BUILD_MEMORY_BYTES, CASES,
+    CHECKBOX_BINARIES, CPU_DEFAULTS, FOREIGN_SHARE_LIMIT, HOLD_POLICY, MEASUREMENT_MEMORY_BYTES,
+    MIN_ARM_NS, REGIME_BINARIES, SYNC_POLICY, VERSION, admits_hold, expected_rows, timing_window_open,
+    valid_topology,
+)
 
-ARMS = ("hirsel", "tokio")
-OWNER_SIDES = dict(zip(ARMS, ("untied", "tokiow8"), strict=True))
-CASES = tuple(case for case in regimes.WORKLOADS if case != "calibrate")
+OWNER_SIDES = dict(zip(ARMS, A1_SIDES, strict=True))
 HEADLINE = {"independent16", "pairs", "fanin", "fanout", "pipeline", "grain_spawn_chain",
             "spawn_tree", "channel_hub", "arc_hub", "timers", "sockets64", "sockets1024", "checkbox"}
 ROUNDS = dict(zip(regimes.GRAINS, (0, 64, 640, 6400, 64000), strict=True))
-POPS = (256, 2048, 8192)
-WIDTHS = (1, 4, 8)
-CAP = 2 << 30
-SYNC_POLICY = {"wait_us": 400, "max_writes": 4096, "durable_syncs_per_group": 1}
 CEILING_METRICS = ("offer_turns_per_s", "goodput_turns_per_s", "intended_arrival_p99_ns")
 MATCHED_METRICS = ("intended_arrival_p99_ns", "cpu_us_per_turn")
 REGIME_METRICS = ("work_per_s", "speedup_vs_w1")
@@ -31,22 +31,10 @@ QUANTILES = {
     "intended_arrival_p99_9_ns": "e2e_p999_ns", "intended_arrival_max_ns": "e2e_max_ns",
     "server_added_p99_9_ns": "p999_ns", "server_added_max_ns": "max_ns",
 }
-ALLOWED_CPUS = set(range(4)) | set(range(8, 12)) | set(range(16, 20)) | set(range(24, 28))
 
 
-def expected(*, tmpfs_matched):
-    a1 = [(storage, size, "hardware") for storage in ("ext4", "tmpfs") for size in POPS]
-    a1.append(("ext4", 8192, "software"))
-    rows = {}
-    for storage, size, sha in a1:
-        label = f"{storage}/{size}/{sha}"
-        rows["A1", label] = (storage, size, sha, False)
-        if storage == "ext4" or tmpfs_matched:
-            rows["A1", label + "/matched"] = (storage, size, sha, True)
-    rows.update({("Regimes", f"{case}/{grain}ns/w{width}"): (case, grain, width)
-                 for case in CASES for grain in ((0,) if case == "checkbox" else regimes.GRAINS)
-                 for width in WIDTHS})
-    return rows
+def expected():
+    return expected_rows(("a1", "regimes"), CASES, full=True)
 
 
 def board_label(key):
@@ -58,12 +46,12 @@ def board_label(key):
     return "Units A1", name + " / ceiling"
 
 
-def missing_row(key, reason, *, status="pending"):
+def rejected_row(key, reason):
     goal, name = board_label(key)
     metrics = REGIME_METRICS if key[0] == "Regimes" else (
         MATCHED_METRICS if key[1].endswith("/matched") else CEILING_METRICS)
     return {"goal": goal, "row": name, "metrics": metrics, "samples": {},
-            "ratios": {"tokio": {}}, "status": status, "issues": {"export": reason}}
+            "ratios": {"tokio": {}}, "status": "rejected", "issues": {"export": reason}}
 
 
 def require(predicate, message):
@@ -92,46 +80,34 @@ def close(left, right):
         left, right, rel_tol=1e-9)
 
 
-def clean_hold(hold, started, updated):
+def clean_hold(hold, started, updated, arms):
     begin, end = (datetime.fromisoformat(hold[field]) for field in ("started", "finished"))
-    return (begin.tzinfo is not None and end.tzinfo is not None and started <= begin <= end <= updated
-            and begin.date() == end.date()
-            and (end.time() < time(2, 45) or begin.time() >= time(4))
-            and hold["board_window_open"] is True and hold["cc1plus_start"] == hold["cc1plus_end"] == []
-            and 0 < hold["hold_s"] < 240 and hold["load_start"] <= 8 and hold["load_end"] <= 8
-            and not ({"load_exceeded", "port_conflict"} & hold.keys()))
+    if begin.tzinfo is None or end.tzinfo is None:
+        return False
+    return (started <= begin <= end <= updated and timing_window_open(begin, end)
+            and hold["clean"] is True and set(hold["arm_cpu"]) == set(arms) and admits_hold(hold))
 
 
 def validate_config(export, commit):
     require(export["commit"] == commit, "units revision mismatch")
     config = export["config"]
-    require(export["version"] == 1 and config["mode"] == "full" and config["repeats"] == 1
+    require(export["version"] == VERSION and config["mode"] == "full" and config["repeats"] == 1
             and sorted(config["families"]) == ["a1", "regimes"]
             and sorted(config["regimes"]) == sorted(CASES),
             "units requires one full, untaped A1 and 17-regime export")
-    require(export["complete"] is True and not export["failures"], "units export is incomplete")
-    tmpfs = config.get("tmpfs_matched", False)
-    require(type(tmpfs) is bool, "invalid tmpfs matched-offer mode")
-    keys = expected(tmpfs_matched=tmpfs)
+    keys = expected()
     declared, seen = (unique_rows(export[name]) for name in ("expected_rows", "rows"))
     require(declared.keys() == seen.keys() == keys.keys(), "incomplete units label set")
-    require(all(row["status"] == "ok" for row in declared.values()), "units expected row failed")
-    require(type(config["reverse"]) is bool and config["build_cpus"] == [8, 9, 10, 11]
-            and config["build_jobs"] == 4 and config["build_memory_limit_bytes"] == 8 << 30
-            and config["measurement_memory_limit_bytes"] == CAP and config["sync_policy"] == SYNC_POLICY,
+    require(all(declared[key]["status"] == row["status"] and row["status"] in ("ok", "rejected")
+                for key, row in seen.items()), "inconsistent units coverage statuses")
+    require(type(config["reverse"]) is bool and config["build_cpus"] == list(BUILD_CPUS)
+            and config["build_jobs"] == BUILD_JOBS and config["build_memory_limit_bytes"] == BUILD_MEMORY_BYTES
+            and config["measurement_memory_limit_bytes"] == MEASUREMENT_MEMORY_BYTES
+            and config["sync_policy"] == SYNC_POLICY and config["hold_policy"] == HOLD_POLICY
+            and config["foreign_share_limit"] == FOREIGN_SHARE_LIMIT and config["minimum_arm_ns"] == MIN_ARM_NS,
             "units export lacks the required build, measurement cap or sync policy")
-    topology = [config[f"{role}_cpus"] for role in ("server", "load", "helper", "controller")]
-    cpus = [cpu for group in topology for cpu in group]
-    require(len(topology[0]) == 8 and all(topology) and len(cpus) == len(set(cpus))
-            and all(type(cpu) is int for cpu in cpus) and set(cpus) <= ALLOWED_CPUS,
+    require(valid_topology({role: config[f"{role}_cpus"] for role in CPU_DEFAULTS}),
             "invalid units CPU topology")
-    require(set(export["binary_sha256"]) >= {
-        "a1/bin/session_u", "a1/bin/twin", "a1/software/twin", "a1/bin/loadgen", "a1/bin/toolsrv",
-        "regimes/hirsel/regimes", "regimes/rust/regimes", "regimes/checkbox/checkbox",
-        "regimes/checkbox/wants.bin", "regimes/wire/release/wire-reference",
-        "regimes/wire/release/wire-load",
-    } and all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in export["binary_sha256"].values()),
-            "missing units binary identities")
     started, updated = (datetime.fromisoformat(export[field]) for field in ("started", "updated"))
     require(started.tzinfo is not None and updated.tzinfo is not None and started <= updated,
             "invalid units timestamps")
@@ -153,7 +129,7 @@ def a1_samples(row, key, root, started, updated):
         require(len(candidates) == 1, f"{arm} A1 raw trial missing or duplicated")
         trial = candidates[0]
         require(trial["discarded"] is False and trial["passed"] is True and trial["hold"] == sample["hold"]
-                and clean_hold(trial, started, updated), f"{arm} A1 hold is unqualified")
+                and clean_hold(trial, started, updated, A1_SIDES), f"{arm} A1 hold is unqualified")
         pair.append(trial)
         cell, load = trial["cell"], trial["load"]
         require(cell["journal"] == storage and cell["sessions"] == clients and cell["fair"] is True
@@ -223,19 +199,19 @@ def regime_samples(row, key, config, root, started, updated, baselines):
         speedup = rate / baseline
         require(close(sample["work_per_s"], rate) and close(summary["work_per_s"], rate)
                 and close(summary["speedup_vs_w1"], speedup), f"{arm} regime work rate or speedup is invalid")
-        if width == 1:
-            baselines[case, grain, arm] = rate
         out[arm] = summary | {"work_per_s": rate, "speedup_vs_w1": speedup,
                               "timing": "service seconds" if timed_service else "process seconds"}
     require(len(pair_paths) == 1, "regime arms are from different holds")
     pair_path, = pair_paths
     pair = receipt.read(evidence_path(root, str(pair_path.relative_to(root) / "pair.json")))
     hold = pair["hold"]
-    require(hold["clean"] is True and clean_hold(hold, started, updated)
+    require(clean_hold(hold, started, updated, ARMS)
             and (hold["case"], hold["grain_ns"], hold["width"]) == key
             and sorted(hold["order"]) == list(ARMS)
             and pair["samples"] == {arm: out[arm]["arms"][0] for arm in ARMS},
             "regime pair receipt or hold is unqualified")
+    if width == 1:
+        baselines.update({(case, grain, arm): summary["work_per_s"] for arm, summary in out.items()})
     return out
 
 
@@ -247,8 +223,15 @@ def import_rows(path, commit):
     for key, identity in keys.items():
         row = seen[key]
         try:
-            require(row["commit"] == commit and row["status"] == "ok" and set(row["samples"]) == set(ARMS),
-                    "units row revision or status mismatch")
+            require(row["commit"] == commit, "units row revision mismatch")
+            if row["status"] == "rejected":
+                rows.append(rejected_row(key, row["issues"]["export"]))
+                continue
+            require(set(row["samples"]) == set(ARMS), "units row arms mismatch")
+            binaries = (A1_BINARIES if key[0] == "A1" else
+                        CHECKBOX_BINARIES if identity[0] == "checkbox" else REGIME_BINARIES)
+            require(all(re.fullmatch(r"[0-9a-f]{64}", export["binary_sha256"].get(name, ""))
+                        for name in binaries), "missing units binary identities")
             if key[0] == "A1":
                 samples = a1_samples(row, identity, path.parent, started, updated)
                 fields = MATCHED_METRICS if identity[-1] else CEILING_METRICS
@@ -270,8 +253,5 @@ def import_rows(path, commit):
             result["metrics"] += quantiles
             rows.append(result | {"notes": notes, "mode": "full", "commit": commit})
         except (OSError, ValueError, KeyError, TypeError, ArithmeticError) as error:
-            rows.append(missing_row(key, str(error), status="incomplete"))
-    for key in expected(tmpfs_matched=True):
-        if key not in keys:
-            rows.append(missing_row(key, "owner did not export the tmpfs matched offer"))
+            rows.append(rejected_row(key, str(error)))
     return rows

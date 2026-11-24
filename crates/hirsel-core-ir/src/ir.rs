@@ -2253,14 +2253,6 @@ impl Module {
             .expect("unmetered closure")
     }
 
-    pub(crate) fn decoded_closure(
-        &self,
-        root: TypeId,
-        budget: &mut DecodeBudget,
-    ) -> DecodeResult<Closure> {
-        self.closure_impl(root, ClosureKind::Full, Some(budget))
-    }
-
     pub(crate) fn closure_impl(
         &self,
         root: TypeId,

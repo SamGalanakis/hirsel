@@ -807,3 +807,72 @@ fn versioned_flag_enters_the_body_and_release_copies_do_not() {
         "D12 the checked versioned flag enters the body"
     );
 }
+
+/// A body whose `n` callees each take a wrapper of one `depth`-deep record chain, so
+/// decoding hashes `n` closures that each walk the whole chain.
+fn wrapped_chain(n: usize, depth: usize) -> Vec<u8> {
+    let mut text = String::from("core v1\n");
+    for i in 0..depth {
+        let field = if i + 1 < depth {
+            format!("t{}", i + 1)
+        } else {
+            "u64".into()
+        };
+        text += &format!("type t{i} = own \"Chain{i}\" {{ x: {field} }}\n");
+    }
+    for j in 0..n {
+        text += &format!("type t{} = own \"Wrap{j}\" {{ x: t0 }}\n", depth + j);
+    }
+    text += "sig g0 = () -> ()\ninst n0 = app@1/main/root [] []\n";
+    for j in 0..n {
+        text += &format!("inst n{} = app@1/main/take [t{}] []\n", j + 1, depth + j);
+    }
+    text += "fn f0 = n0 g0 {\nb0:\n";
+    for j in 0..n {
+        text += &format!("call f{} g0 ()\n", j + 1);
+    }
+    text += "return\n}\n";
+    for j in 0..n {
+        text += &format!("fn f{} = n{} g0 extern\n", j + 1, j + 1);
+    }
+    encode(&checked(&text), FuncId(0)).bytes
+}
+
+/// The fewest decoded bytes `bytes` decodes within.
+fn decode_bytes(bytes: &[u8]) -> usize {
+    let within = |limit| {
+        let mut budget = DecodeBudget::new(crate::decode::DecodeLimits {
+            bytes: limit,
+            members: usize::MAX,
+            slots: usize::MAX,
+            depth: usize::MAX,
+            deadline: None,
+        });
+        super::decode(bytes, &mut budget).is_ok()
+    };
+    let (mut low, mut high) = (0, 1 << 30);
+    assert!(within(high));
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if within(mid) {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    low
+}
+
+#[test]
+fn decoded_bytes_bound_held_memory_not_hashing_work() {
+    // launch.md "Admission" step 3 limits the memory decoded objects hold. A closure is
+    // hashed and dropped, so another wrapper of the chain costs its own rows whatever the
+    // chain's depth; charging each closure walk for good costs it the chain again.
+    let extra =
+        |depth| decode_bytes(&wrapped_chain(65, depth)) - decode_bytes(&wrapped_chain(1, depth));
+    let (shallow, deep) = (extra(64), extra(256));
+    assert!(
+        deep < shallow + shallow / 4,
+        "64 wrappers cost {shallow} at depth 64, {deep} at 256"
+    );
+}

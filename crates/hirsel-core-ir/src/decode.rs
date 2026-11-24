@@ -53,7 +53,9 @@ impl From<DecodeError> for std::io::Error {
 pub type DecodeResult<T> = Result<T, DecodeError>;
 
 /// A decoder charges cumulative allocations and table entries against the
-/// same attempt budget, including temporary allocations.
+/// same attempt budget, including temporary allocations. The byte limit bounds
+/// the memory an attempt holds at once (launch.md "Admission", step 3), so a
+/// working set freed before its result is kept is given back ([`Self::transient`]).
 pub struct DecodeBudget {
     remaining: DecodeLimits,
 }
@@ -105,6 +107,19 @@ impl DecodeBudget {
     pub fn charge_slots(&mut self, amount: usize) -> DecodeResult<()> {
         self.check()?;
         charge(&mut self.remaining.slots, amount, DecodeLimit::Slots)
+    }
+
+    /// Run `work`, whose allocations are all freed before it returns, and give the
+    /// bytes it charged back: they are charged while that working set is live and
+    /// not after. The result must own no charged allocation.
+    pub(crate) fn transient<T>(
+        &mut self,
+        work: impl FnOnce(&mut Self) -> DecodeResult<T>,
+    ) -> DecodeResult<T> {
+        let bytes = self.remaining.bytes;
+        let result = work(self)?;
+        self.remaining.bytes = bytes;
+        Ok(result)
     }
 
     pub(crate) fn allocation<T>(&mut self, count: usize) -> DecodeResult<()> {

@@ -38,17 +38,19 @@ pub(crate) fn decoded_closure_hash(
     rows: &[ClosureRow],
     budget: &mut DecodeBudget,
 ) -> DecodeResult<ContentHash> {
-    let empty = Module::default();
-    let meter = PlanMeter::new(budget);
-    let mut order = ModuleOrder::metered(&empty, Some(&meter));
-    let mut out = Write::module(&mut order);
-    wire::encode_closure(rows, &mut out);
-    let bytes = out.bytes;
-    meter.finish(budget)?;
-    Ok(ContentHash::of_parts(
-        "hirsel.core-closure.v1",
-        [&bytes[..]],
-    ))
+    budget.transient(|budget| {
+        let empty = Module::default();
+        let meter = PlanMeter::new(budget);
+        let mut order = ModuleOrder::metered(&empty, Some(&meter));
+        let mut out = Write::module(&mut order);
+        wire::encode_closure(rows, &mut out);
+        let bytes = out.bytes;
+        meter.finish(budget)?;
+        Ok(ContentHash::of_parts(
+            "hirsel.core-closure.v1",
+            [&bytes[..]],
+        ))
+    })
 }
 
 pub const VERSION: u16 = 3;
@@ -57,7 +59,9 @@ pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v3";
 const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x01\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
+mod charge;
 pub(crate) mod wire;
+pub(crate) use charge::{charge_identity, charge_shape};
 use wire::{Read, Tagged, Wire, Write};
 
 /// An operation tag in the normal form consumed by both native engines.
@@ -158,70 +162,6 @@ struct PlanMeter {
     budget: RefCell<DecodeBudget>,
     error: Cell<Option<DecodeError>>,
     depth: Cell<usize>,
-}
-
-pub(crate) fn charge_identity(
-    definition: &DefPath,
-    dictionaries: &[String],
-    budget: &mut DecodeBudget,
-) -> DecodeResult<()> {
-    let path = &definition.0;
-    budget.allocation::<String>(path.modules.len())?;
-    budget.allocation::<String>(dictionaries.len())?;
-    for component in [&path.package.name, &path.package.version, &path.name]
-        .into_iter()
-        .chain(&path.modules)
-        .chain(dictionaries)
-    {
-        budget.charge_bytes(component.len())?;
-    }
-    Ok(())
-}
-
-pub(crate) fn charge_shape(shape: &Shape, budget: &mut DecodeBudget) -> DecodeResult<()> {
-    fn field(ty: &FieldTy, budget: &mut DecodeBudget) -> DecodeResult<()> {
-        match ty {
-            FieldTy::Seq(element)
-            | FieldTy::Array(element, _)
-            | FieldTy::View(element)
-            | FieldTy::Locator(element)
-            | FieldTy::FixedSpan(element)
-            | FieldTy::SeqSpan(element)
-            | FieldTy::IndexedSpan(element) => {
-                budget.allocation::<FieldTy>(1)?;
-                field(element, budget)
-            }
-            FieldTy::Map(key, value) => {
-                budget.allocation::<FieldTy>(2)?;
-                field(key, budget)?;
-                field(value, budget)
-            }
-            _ => Ok(()),
-        }
-    }
-    fn fields(fields: &[Field], budget: &mut DecodeBudget) -> DecodeResult<()> {
-        budget.allocation::<Field>(fields.len())?;
-        for item in fields {
-            budget.charge_bytes(item.name.len())?;
-            field(&item.ty, budget)?;
-        }
-        Ok(())
-    }
-    budget.charge_bytes(shape.name.len())?;
-    match &shape.body {
-        hirsel_core_layout::Body::Record(items) => fields(items, budget)?,
-        hirsel_core_layout::Body::Variant(cases) => {
-            budget.allocation::<Case>(cases.len())?;
-            for case in cases {
-                budget.charge_bytes(case.name.len())?;
-                fields(&case.fields, budget)?;
-            }
-        }
-    }
-    if let Some(held) = &shape.held {
-        field(held, budget)?;
-    }
-    Ok(())
 }
 
 impl PlanMeter {
@@ -929,8 +869,20 @@ fn encode_with_sources(
 fn planned_closure(module: &Module, ty: TypeId, meter: Option<&PlanMeter>) -> Option<ContentHash> {
     match meter {
         None => Some(module.closure(ty).hash),
-        Some(meter) => meter.do_with(|budget| module.decoded_closure(ty, budget).map(|c| c.hash)),
+        Some(meter) => {
+            meter.do_with(|budget| metered_closure_hash(module, ty, ClosureKind::Full, budget))
+        }
     }
+}
+
+/// The hash of row `ty`'s closure, its working set charged only while it is live.
+fn metered_closure_hash(
+    module: &Module,
+    ty: TypeId,
+    kind: ClosureKind,
+    budget: &mut DecodeBudget,
+) -> DecodeResult<ContentHash> {
+    budget.transient(|budget| Ok(module.closure_impl(ty, kind, Some(budget))?.hash))
 }
 
 fn plan(module: &Module, root: FuncId) -> ModuleOrder<'_> {
@@ -1259,15 +1211,18 @@ impl DecodedBody {
                 budget,
             )?;
         }
-        let meter = PlanMeter::new(budget);
-        let mut order = ModuleOrder::metered(&self.module, Some(&meter));
-        let mut out = Write::module(&mut order);
-        out.abi = true;
-        out.abi_closures = Some(&self.abi_closures);
-        signature.write(&mut out);
-        let bytes = out.bytes;
-        meter.finish(budget)?;
-        let hash = ContentHash::of_parts(SIGNATURE_DOMAIN, [&bytes[..]]);
+        let abi_closures = &self.abi_closures;
+        let hash = budget.transient(|budget| {
+            let meter = PlanMeter::new(budget);
+            let mut order = ModuleOrder::metered(&self.module, Some(&meter));
+            let mut out = Write::module(&mut order);
+            out.abi = true;
+            out.abi_closures = Some(abi_closures);
+            signature.write(&mut out);
+            let bytes = out.bytes;
+            meter.finish(budget)?;
+            Ok(ContentHash::of_parts(SIGNATURE_DOMAIN, [&bytes[..]]))
+        })?;
         self.signatures[id] = Some(hash);
         Ok(hash)
     }
@@ -1289,7 +1244,7 @@ fn cached_closure_hash(
         budget.check()?;
         return Ok(hash);
     }
-    let hash = module.closure_impl(ty, kind, Some(budget))?.hash;
+    let hash = metered_closure_hash(module, ty, kind, budget)?;
     *slot = Some(hash);
     Ok(hash)
 }
@@ -1348,20 +1303,31 @@ pub fn decode(bytes: &[u8], budget: &mut DecodeBudget) -> DecodeResult<DecodedBo
             }
         }
     }
-    let meter = PlanMeter::new(budget);
-    let plan = plan_metered(&module, FuncId(0), Some(&meter));
-    let canonical = plan.canonical_locals
-        && plan.functions.is_canonical(module.functions.len())
-        && plan.types.numbers.is_canonical(module.types.len())
-        && plan
-            .signatures
-            .numbers
-            .is_canonical(module.signatures.len())
-        && plan.instances.numbers.is_canonical(module.instances.len())
-        && plan.statics.numbers.is_canonical(module.statics.len());
-    let live_functions = plan.live_functions;
-    let builtins = plan.slots;
-    meter.finish(budget)?;
+    // The plan is freed here but for its live-function bitmap and builtin slots, which
+    // are charged again as kept.
+    let (canonical, live_functions, builtins) = budget.transient(|budget| {
+        let meter = PlanMeter::new(budget);
+        let plan = plan_metered(&module, FuncId(0), Some(&meter));
+        let canonical = plan.canonical_locals
+            && plan.functions.is_canonical(module.functions.len())
+            && plan.types.numbers.is_canonical(module.types.len())
+            && plan
+                .signatures
+                .numbers
+                .is_canonical(module.signatures.len())
+            && plan.instances.numbers.is_canonical(module.instances.len())
+            && plan.statics.numbers.is_canonical(module.statics.len());
+        let (live_functions, builtins) = (plan.live_functions, plan.slots);
+        meter.finish(budget)?;
+        Ok((canonical, live_functions, builtins))
+    })?;
+    budget.allocation::<bool>(live_functions.capacity())?;
+    budget.allocation::<Slot>(builtins.capacity())?;
+    for slot in &builtins {
+        if let Slot::Builtin(definition) = slot {
+            charge_identity(definition, &[], budget)?;
+        }
+    }
     if !canonical {
         return Err(malformed());
     }

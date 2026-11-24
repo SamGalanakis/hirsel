@@ -165,7 +165,7 @@ commands! {
     "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
     "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
-    "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build and run requests from a resident compiler.";
+    "serve", "serve [package-dir] [--store DIRECTORY] [--max-memory BYTES] [--stop]", "Serve the package's build, run and test requests from a resident compiler.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";
     "prof run", "prof run [package-dir] [build-opts] [--tasks] [--mem[=sampled]] [--out FILE.hprof] [--freq 997] [--pmu LIST] [--stack-bytes 32768] [-- args...]", "Build and sample a native executable from exec until exit.";
     "prof replay", "prof replay [package-dir | --inputs MANIFEST] --tape TAPE [--entry DEFINITION] [--tasks] [--mem[=exact|sampled]] [--out FILE.hprof]", "Profile serial replay through the recording and profiling runtime.";
@@ -690,7 +690,7 @@ static OPTIONS: &[OptionSpec] = &[
         Resident,
         ["--resident"],
         None,
-        ["build", "run"],
+        ["build", "run", "test"],
         "Serve the request from the package's resident compiler, starting one if none serves it."
     ),
     option!(

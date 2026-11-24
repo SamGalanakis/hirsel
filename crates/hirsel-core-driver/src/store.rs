@@ -215,13 +215,8 @@ pub struct Store {
     image: bool,
 }
 
-/// Own the default compiler store for one test request. Drop it before
-/// `conclude`, since a one-shot request exits without unwinding.
-pub(crate) fn temporary_test_store(needed: bool) -> io::Result<Option<tempfile::TempDir>> {
-    let mut directory = tempfile::Builder::new();
-    needed
-        .then(|| directory.prefix("hirsel-test-store-").tempdir())
-        .transpose()
+pub(crate) fn default_path(directory: &Path) -> PathBuf {
+    directory.join(".hirsel-core")
 }
 
 /// A file in `<store>/tmp`, exclusively locked from its create until it is

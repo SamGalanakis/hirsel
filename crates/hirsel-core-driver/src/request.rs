@@ -879,11 +879,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .then_some(Path::new("core"))
     });
     let directory = dir.as_deref().unwrap_or(Path::new("."));
-    let test_store = crate::store::temporary_test_store(test_command && store.is_none())?;
     let store = store
         .or_else(|| install_root.as_ref().map(|root| root.join("core-packages")))
-        .or_else(|| test_store.as_ref().map(|scratch| scratch.path().to_owned()))
-        .unwrap_or_else(|| directory.join(".hirsel-core"));
+        .unwrap_or_else(|| crate::store::default_path(directory));
     let code_store = CodeStore::for_request(command, code_store, &store)?;
     let select_link = |cc: Option<PathBuf>| -> Result<Link, Box<dyn std::error::Error>> {
         match (cc, &installed) {
@@ -1220,7 +1218,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         }
     }
     meter.finish("startup/discovery");
-    let run_output = (command == "run" && output_path.is_none())
+    // Concurrent requests share keyed artifacts. Their launch paths are private.
+    let temporary_output = (matches!(command, "run" | "test") && output_path.is_none())
         .then(|| crate::Store::new(&native_store)?.scratch())
         .transpose()?;
     // Native options come before the reach: a Cranelift development build
@@ -1228,13 +1227,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     // error is reported only for a request check accepts.
     let mut prepared = if native_command {
         let prepare = || -> Result<_, Box<dyn std::error::Error>> {
-            let default_output = if let Some(scratch) = &run_output {
-                scratch.path().join("program")
-            } else if test_command {
-                native_store.join("tests")
-            } else {
-                PathBuf::from("program")
-            };
+            let default_output = temporary_output.as_ref().map_or_else(
+                || PathBuf::from("program"),
+                |scratch| scratch.path().join("program"),
+            );
             let publishing = command == "publish";
             let link = if publishing {
                 Link::Driver(PathBuf::new())
@@ -1348,7 +1344,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 run_args,
                 record_path.as_deref(),
                 profile.as_ref(),
-                run_output,
+                temporary_output,
                 &mut meter,
                 metrics,
             );
@@ -1624,7 +1620,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         if let Some(path) = metrics {
             meter.write_metrics(path)?;
         }
-        drop(test_store);
+        drop(temporary_output);
         return conclude(Outcome::Exit(if tests.is_empty() && !law_red {
             2
         } else {
@@ -1786,7 +1782,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         run_args,
         record_path.as_deref(),
         profile.as_ref(),
-        run_output,
+        temporary_output,
         &mut meter,
         metrics,
     )

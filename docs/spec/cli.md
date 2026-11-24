@@ -44,11 +44,11 @@ charge observation archive.
 
 `hirsel serve [package-dir]` keeps one compiler process for a store
 (`--store`, or `.hirsel-core` in the package directory). That process
-answers the store's `build` and `run` requests and keeps in memory the
+answers the store's `build`, `run` and `test` requests and keeps in memory the
 state those requests derive from unchanged inputs. The process listens
 on `resident.sock` in the store and holds `resident.lock` while it runs.
 
-`hirsel build` and `hirsel run` send their request to the store's
+`hirsel build`, `hirsel run` and `hirsel test` send their request to the store's
 resident compiler when one is running, and otherwise compile in their
 own process. `--resident` also starts a resident compiler when none
 serves the store, and replaces one that refuses the request. A
@@ -57,6 +57,8 @@ compiler takes, with the client's arguments, working directory,
 environment and standard streams. Its output is byte-identical to a
 one-shot build. A `run` request's program runs in the client process,
 under the client's terminal and signals.
+If a submitted `test` request loses its reply, the client reports a
+transport failure. The test processes may already have run.
 
 A resident compiler refuses a request from another toolchain or another
 environment. The client then compiles in its own process. A refusal for

@@ -129,3 +129,90 @@ fn pure() -> Result[(), ()] { Ok(()) }
     east_server.join().unwrap();
     west_server.join().unwrap();
 }
+
+#[test]
+fn default_test_store_rebuilds_when_named_grants_change() {
+    let law = PackageLaw::new();
+    let configure = |variable| {
+        law.manifest(
+            "app",
+            "app",
+            1,
+            &format!(
+                r#"[sources]
+"main.hirsel" = "main"
+
+[tests]
+limit = 1048576
+
+[tests.runs."app@1/main/reads_env"]
+grants = ["Stdout", "Env={variable}"]
+"#,
+            ),
+        );
+    };
+    law.write(
+        "app/main.hirsel",
+        r#"
+@test
+fn reads_env(e: Env, out: Stdout) -> Result[(), ()] waits {
+    match env.get(e, "HIRSEL_TEST_FIXTURE") {
+        Ok(Some(value)) => result.unwrap(stdout.write(out, value)),
+        _ => result.unwrap(stdout.write(out, "denied")),
+    }
+    Ok(())
+}
+"#,
+    );
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let args = [
+        "test".into(),
+        "app".into(),
+        "--libraries".into(),
+        law.libraries.to_str().unwrap().into(),
+        "--runtime".into(),
+        options.runtime.canonicalize().unwrap().to_str().unwrap().into(),
+        "--cc".into(),
+        cc.canonicalize().unwrap().to_str().unwrap().into(),
+        "--json".into(),
+    ];
+    let request = || {
+        let mut request = process::tape_request_command(&args, law.dir.path());
+        request
+            .env("XDG_CACHE_HOME", law.path("cache"))
+            .env("HIRSEL_TEST_FIXTURE", "visible");
+        request
+    };
+    let run = || {
+        let stdout = PackageLaw::pass(process::tape_request_output(request()));
+        let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(result["tests"][0]["source"], "executed");
+        result["tests"][0]["stdout"].as_str().unwrap().to_owned()
+    };
+    configure("HIRSEL_TEST_FIXTURE");
+    assert_eq!(run(), "visible");
+    assert!(law.path("app/.hirsel-core/native").is_dir());
+    configure("HIRSEL_TEST_OTHER");
+    assert_eq!(run(), "denied");
+
+    let listener = std::os::unix::net::UnixListener::bind(law.path("app/.hirsel-core/resident.sock"))
+        .unwrap();
+    let server = std::thread::spawn(move || {
+        use std::io::Read;
+
+        let (mut client, _) = listener.accept().unwrap();
+        let mut length = [0; 4];
+        client.read_exact(&mut length).unwrap();
+        let request: serde_json::Value =
+            serde_json::from_reader(client.take(u64::from(u32::from_le_bytes(length)))).unwrap();
+        assert_eq!(request["args"][0], "test");
+    });
+    let (status, stdout, stderr) = process::tape_request_output(request());
+    assert_eq!(status, Some(2), "{stdout}\n{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(stderr.contains("the server ended without an answer"), "{stderr}");
+    server.join().unwrap();
+}

@@ -1,5 +1,5 @@
 //! The resident compiler (`hirsel serve`): one long-lived process per store
-//! that serves the store's `build` and `run` requests, so the state a request
+//! that serves the store's `build`, `run` and `test` requests, so the state a request
 //! derives from unchanged inputs stays in memory between edits.
 //!
 //! A request runs in the server exactly as it runs one-shot: the server calls
@@ -420,17 +420,20 @@ fn short_path(directory: &Path, name: &str) -> io::Result<(PathBuf, std::fs::Fil
     ))
 }
 
-/// Where the resident compiler of a `build` or `run` request listens: the
-/// store `--store` names, else `.hirsel-core` in the package directory, and
-/// whether the request asks for one (`--resident`). None for any
-/// other request.
-fn request_store(args: &[String]) -> Option<(PathBuf, bool)> {
+struct Route {
+    store: PathBuf,
+    resident: bool,
+    replayable: bool,
+}
+
+/// A request's resident compiler listens in `--store` or the package store.
+fn request_route(args: &[String]) -> Option<Route> {
     use crate::cli::OptionId as Opt;
     let crate::cli::Action::Invoke(invocation) = crate::cli::parse(args.iter().cloned()).ok()?
     else {
         return None;
     };
-    if !matches!(invocation.command.name, "build" | "run") {
+    if !matches!(invocation.command.name, "build" | "run" | "test") {
         return None;
     }
     let mut store = None;
@@ -443,24 +446,31 @@ fn request_store(args: &[String]) -> Option<(PathBuf, bool)> {
         }
     }
     let store = store.unwrap_or_else(|| {
-        Path::new(invocation.positional.as_deref().unwrap_or(".")).join(".hirsel-core")
+        crate::store::default_path(Path::new(invocation.positional.as_deref().unwrap_or(".")))
     });
-    Some((store, resident))
+    Some(Route {
+        store,
+        resident,
+        // Test processes run on the server and may already have had effects.
+        replayable: invocation.command.name != "test",
+    })
 }
 
-/// Submit a `build` or `run` request to the resident compiler serving its
-/// store, starting one first under `--resident`. The request's exit status
-/// when a server answered it; None when the caller runs it itself.
+/// Submit a `build`, `run` or `test` request to the resident compiler serving its
+/// store, starting one first under `--resident`. None lets the caller run the
+/// request itself.
 pub fn submit(args: &[String]) -> Option<i32> {
-    let (store, resident) = request_store(args)?;
-    match try_submit(&store, args, resident) {
+    let route = request_route(args)?;
+    match try_submit(&route, args) {
         Ok(answer) => answer,
-        Err(error) if resident => {
-            eprintln!("hirsel: resident compiler: {error}");
-            Some(2)
-        }
+        Err(error) if route.resident => Some(failure_code(error)),
         Err(_) => None,
     }
+}
+
+fn failure_code(error: io::Error) -> i32 {
+    eprintln!("hirsel: resident compiler: {error}");
+    2
 }
 
 fn connect(store: &Path) -> io::Result<UnixStream> {
@@ -468,7 +478,17 @@ fn connect(store: &Path) -> io::Result<UnixStream> {
     UnixStream::connect(path)
 }
 
-fn try_submit(store: &Path, args: &[String], resident: bool) -> io::Result<Option<i32>> {
+fn exchange(stream: &mut UnixStream, request: &[u8]) -> io::Result<Answer> {
+    write_message(stream, request, &[0, 1, 2])?;
+    let (answer, _) = read_message(stream).map_err(|error| {
+        io::Error::other(format!("the server ended without an answer: {error}"))
+    })?;
+    Ok(serde_json::from_slice(&answer)?)
+}
+
+fn try_submit(route: &Route, args: &[String]) -> io::Result<Option<i32>> {
+    let store = &route.store;
+    let resident = route.resident;
     let request = Request {
         protocol: PROTOCOL,
         toolchain: Toolchain::current()?,
@@ -494,11 +514,11 @@ fn try_submit(store: &Path, args: &[String], resident: bool) -> io::Result<Optio
         let Some(mut stream) = stream else {
             return Ok(None);
         };
-        write_message(&mut stream, &request, &[0, 1, 2])?;
-        let (answer, _) = read_message(&mut stream).map_err(|error| {
-            io::Error::other(format!("the server ended without an answer: {error}"))
-        })?;
-        match serde_json::from_slice::<Answer>(&answer)? {
+        let answer = match exchange(&mut stream, &request) {
+            Err(error) if !route.replayable => return Ok(Some(failure_code(error))),
+            answer => answer?,
+        };
+        match answer {
             Answer::Exit(code) => return Ok(Some(code)),
             Answer::Launch { argv, env } => {
                 let argv: Vec<OsString> = argv.into_iter().map(OsString::from_vec).collect();
@@ -638,7 +658,7 @@ impl Serve {
             }
         }
         let store = store.unwrap_or_else(|| {
-            Path::new(invocation.positional.as_deref().unwrap_or(".")).join(".hirsel-core")
+            crate::store::default_path(Path::new(invocation.positional.as_deref().unwrap_or(".")))
         });
         Ok(Self {
             store,
@@ -723,7 +743,7 @@ fn serve_requests(
             Some("the client runs another toolchain")
         } else if request.env != env {
             Some("the client's environment differs from the server's")
-        } else if fds.len() != 3 || request_store(&request.args).is_none() {
+        } else if fds.len() != 3 || request_route(&request.args).is_none() {
             Some("the request is not one a resident compiler serves")
         } else {
             None

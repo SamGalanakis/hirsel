@@ -14,7 +14,10 @@ fn slot_rows(take output: Log[SlotRow]) -> List[SlotRow] {
 }
 
 fn read_rows(take output: Log[SlotRow], sub: u32) -> List[Row] {
-    let projected = slot_rows(take output)
+    wire_rows(slot_rows(take output), sub)
+}
+
+fn wire_rows(take projected: List[SlotRow], sub: u32) -> List[Row] {
     let mut rows: List[Row] = list.with_capacity(list.len(projected))
     for take item in take projected {
         let SlotRow(key: take key, value: take value, ..) = take item

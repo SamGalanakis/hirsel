@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import struct
+import tempfile
 
 from case_progress import run_case
 from store_tests import inputs
@@ -332,3 +333,58 @@ BUCKET_HOST_LAWS = {
     'bucket_adopts_and_fences': bucket_adopts_and_fences,
     'bucket_release_barrier': bucket_release_barrier,
 }
+
+
+def runner_idle_stop(args, work, engines, row, base, native_run, dir_for):
+    """P1 laws. Only the child runs here. Host wake rows are covered in P3."""
+    for engine in engines:
+        if engine == 'evaluator':
+            continue
+        store = work / f'idle-stop-store-{engine}'
+        for law in ('idle_keeps_runs', 'stop_unstarted'):
+            definition = f'runner@1/runner_calls/test_{law}'
+            code, report = native_run(args, engine, base, store, definition)
+            tests = report.get('tests', [])
+            row(engine=engine, law=law,
+                passed=code == 0 and [test['definition'] for test in tests] == [definition]
+                and all(test.get('passed') for test in tests), result=report)
+        child = work / f'wake-report-{engine}'
+        command = [str(args.compiler.resolve()), 'build', '--inputs', str(base), '--source-core',
+                   '--source-std', '--backend', engine, '--runtime', str(args.runtime.resolve()),
+                   '--store', str(store), '--entry', 'runner@1/runner_calls/wake_report_main',
+                   '--limit', str(64 * 1024 * 1024), '--dir', str(dir_for(store)),
+                   '--grant', 'Net=Listen 127.0.0.0/8 0-65535', '-o', str(child)]
+        for capability in ('Clock', 'Tasks', 'Random', 'Process', 'Stderr'):
+            command += ['--grant', capability]
+        if engine == 'llvm':
+            command.append('--release')
+        if args.cc:
+            command += ['--cc', str(args.cc.resolve())]
+        result = run_case('wake-report:build', engine, command, capture_output=True, text=True)
+        if result.returncode:
+            row(engine=engine, law='wake_report', passed=False, result=result.stderr)
+            continue
+        for mode, exit_code, expected in (
+            ('clean', 0, struct.pack('<I', 0)),
+            ('due', 0, struct.pack('<IQ', 1, 123456)),
+            ('forced', 1, b''),
+            ('unstarted', 0, b''),
+            ('error', 1, b''),
+        ):
+            launch = [str(child), '--hirsel-wake', '--hirsel-idle=30', mode]
+            with tempfile.TemporaryFile() as report, tempfile.TemporaryFile() as errors:
+                pid = os.posix_spawn(str(child), launch, os.environ, file_actions=[
+                    (os.POSIX_SPAWN_DUP2, report.fileno(), 5),
+                    (os.POSIX_SPAWN_DUP2, errors.fileno(), 2),
+                ])
+                _, status = os.waitpid(pid, 0)
+                report.seek(0)
+                output = report.read()
+                errors.seek(0)
+                diagnostic = errors.read().decode(errors='replace')
+            actual = os.waitstatus_to_exitcode(status)
+            line = ('place: forced at the drain deadline, 2 sends abandoned\n' if mode == 'forced'
+                    else 'place: missing or invalid test\n' if mode == 'error' else '')
+            row(engine=engine, law=f'wake_report_{mode}',
+                passed=(actual, output, diagnostic) == (exit_code, expected, line),
+                result={'status': actual, 'bytes': output.hex(), 'stderr': diagnostic})

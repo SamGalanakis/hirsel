@@ -359,7 +359,7 @@ pub type Ticket {
     mark: Mark
 }
 
-pub type Read = Point(Bytes) | Span(Bytes, Bytes)
+pub type Read: shareable + send = Point(Bytes) | Span(Bytes, Bytes)
 
 pub type StoreFailure = Raised(Causes) | Conflict(String)
 

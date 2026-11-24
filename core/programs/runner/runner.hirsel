@@ -3669,7 +3669,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             continue
         }
         let owner = match joined[i].identity { Some(id) => latest.read(id).number, None => 0u64 }
-        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), reset: false, read_failed: false)
+        let empty = Owe(session: who, version: at, generations: list.new(), complete: list.new(), rows: list.new(), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
         while content_index < list.len(contents) && contents[content_index].session < who {
             content_index += 1u64
         }
@@ -3681,7 +3681,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
             take empty
         }
         let old = replace(mut joined[i].ended, list.new())
-        if joined[i].reset || next.reset {
+        if joined[i].reset || next.reset || !owe_frame_fits(next) {
             let _ = replace(mut next.generations, list.new())
             let _ = replace(mut next.complete, list.new())
             let _ = replace(mut next.rows, list.new())
@@ -3746,7 +3746,7 @@ fn settle(mut subs: Subscriptions, mut joined: List[Joiner], mut waiting: List[R
 // A full inbox bounced this content: a Reset waits and covers it all; otherwise each live sub
 // it named (complete or a row) is due for repair (§3 "Repair") and its Ended subs wait.
 fn overloaded(mut subs: Subscriptions, mut j: Joiner, take o: Owe) {
-    let Owe(session: who, version: _, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take o
+    let Owe(session: who, version: _, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed, ..) = take o
     // A token taken before this bounce never counts after it (§3 "Repair").
     j.progressed = false
     if reset || j.reset {
@@ -3800,59 +3800,6 @@ fn repair[G: send, H: shareable + inert + send](mut b: Board[G, H], mut joined: 
     }
 }
 
-fn repair_entry[G: send, H: shareable + inert + send](mut b: Board[G, H], who: u64, sub: u32, at: u64) -> Owe waits {
-    let mut owes: List[Owe] = list.new()
-    let _ = owe(mut owes, who, at)
-    let rows = match row_log() {
-        Ok(take output) => take output,
-        Error(problem) => {
-            if let Some(entry) = sub_at(b.subs, who, sub) {
-                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: entry.generation, version: at, outcome: Refused(Budget(room(problem)))))
-            }
-            end_entry(mut b.subs, who, sub)
-            return list.remove(mut owes, 0u64)
-        },
-    }
-    let (id, generation, take fresh) = {
-        let Some(entry) = sub_at(b.subs, who, sub) else { return list.remove(mut owes, 0u64) }
-        let id = SubId(who: who, sub: sub, serial: entry.serial)
-        let read = run_query(b.r, b.h, b.reads, b.read_handle, b.base, entry.input, b.base, None, rows)
-        (id, entry.generation, take read)
-    }
-    match take fresh {
-        Covered(Viewed(covers: take c, reads: take reads, ..)) => {
-            match replace_routes(mut b.subs, id, Some(take c), take reads) {
-                Ok(()) => {
-                    clear_due(mut b.subs, id)
-                    owes[0u64].rows = read_rows(take rows, sub)
-                    stamp_rows(mut owes[0u64].generations, sub, generation)
-                    list.push(mut owes[0u64].complete, sub)
-                },
-                Error(problem) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, Refused(Budget(room(problem)))),
-            }
-        },
-        Stopped(take why) => end_round_sub(mut b.subs, mut owes[0u64], id, generation, take why),
-        Faulted(take why, take reads) => match replace_routes(mut b.subs, id, None, take reads) {
-            Ok(()) => {
-                clear_due(mut b.subs, id)
-                list.push(mut owes[0u64].ended, TerminalUpdate(sub: sub, generation: generation, version: at, outcome: take why))
-            },
-            Error(_) => { owes[0u64].reset = true },
-        },
-        Lost(problem) => {
-            owes[0u64].reset = true
-            owes[0u64].read_failed = read_failed(problem)
-        },
-    }
-    list.remove(mut owes, 0u64)
-}
-
-fn clear_due(mut subs: Subscriptions, id: SubId) {
-    let _ = map.update(mut subs.by_session, id.who, scoped fn(mut group: Map[u32, Sub]) {
-        let _ = map.update(mut group, id.sub, scoped fn(mut entry: Sub) { entry.due = false })
-    })
-}
-
 // v2.22 (§3 "Repair"): the owner holds no `complete` it took and has not sent. A session with
 // no taken register (the HTTP and one-shot sessions) is always caught up.
 fn caught_up(j: Joiner) -> bool {
@@ -3860,10 +3807,12 @@ fn caught_up(j: Joiner) -> bool {
 }
 
 fn merge_owe(mut into: Owe, take from: Owe) {
-    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take from
+    let Owe(session: _, version: v, generations: take generations, complete: take complete, rows: take rows, ended: take ended, group_bytes: group_bytes, frame_limit: frame_limit, reset: reset, read_failed: failed) = take from
     let has_content = list.len(complete) != 0u64 || list.len(rows) != 0u64
     let already_has_content = list.len(into.complete) != 0u64 || list.len(into.rows) != 0u64
     if has_content && (!already_has_content || v < into.version) { into.version = v }
+    into.group_bytes = int.saturating_add(into.group_bytes, group_bytes)
+    if frame_limit < into.frame_limit { into.frame_limit = frame_limit }
     if reset { into.reset = true }
     into.read_failed = into.read_failed || failed
     for g in generations { list.push(mut into.generations, g) }
@@ -3907,7 +3856,7 @@ fn sweep(mut subs: Subscriptions, mut joined: List[Joiner]) {
 
 fn forget_subs(mut subs: Subscriptions, who: u64) {
     if let Some(take group) = map.remove(mut subs.by_session, who) {
-        for (_, sub) in group { unregister_routes(mut subs.root, sub.routes) }
+        for (_, sub) in group { leave_view(mut subs, sub.routes, sub.serial, sub.live) }
     }
 }
 
@@ -4021,7 +3970,7 @@ fn slot_key(stream: Bytes, p: u64) -> Bytes {
 // keeps them, and the owner drops their rows and Endeds until a Batch completes the sub's
 // resubscription, an Ended ends it, or a Reset ends them all.
 fn hand(to: Sender[Down], take o: Owe, mut dropped: List[u32], take outcomes: List[KeyedDone]) -> () waits {
-    let Owe(session: _, version: v, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed) = take o
+    let Owe(session: _, version: v, generations: _, complete: take complete, rows: take rows, ended: take ended, reset: reset, read_failed: failed, ..) = take o
     if reset {
         list.clear(mut dropped)
         let _ = channel.send(to, KeyedReset(v, take outcomes))
@@ -5705,16 +5654,16 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
 }
 
 type SubscriptionRoom: send {
-    to: Sender[u64], from: Receiver[u64], slots: u64, limit: u64, held: u64, used: u64,
+    to: Sender[u64], from: Receiver[u64], slots: u64, limit: u64, held: u64, used: u64, ledger: u64, frame_limit: u64,
 }
 
-fn subscription_room(limit: u64, max_subs: u64) -> Result[SubscriptionRoom, Capacity] {
+fn subscription_room(limit: u64, max_subs: u64, ledger: u64, frame_limit: u64) -> Result[SubscriptionRoom, Capacity] {
     let possible = int.saturating_sub(limit, 64u64) / 8u64
     let wanted = int.saturating_add(max_subs, 1u64)
     let slot_capacity = if wanted < possible { wanted } else { possible }
     if slot_capacity == 0u64 { return Error(Capacity(requested: 72u64, available: limit)) }
     let (to, from): (Sender[u64], Receiver[u64]) = channel.new(slot_capacity)
-    Ok(SubscriptionRoom(to: take to, from: take from, slots: slot_capacity, limit: limit - (64u64 + slot_capacity * 8u64), held: 0u64, used: 0u64))
+    Ok(SubscriptionRoom(to: take to, from: take from, slots: slot_capacity, limit: limit - (64u64 + slot_capacity * 8u64), held: 0u64, used: 0u64, ledger: ledger, frame_limit: frame_limit))
 }
 
 fn subscription_hold(mut quota: SubscriptionRoom, take caller: Caller, take key: Bytes, take arg: Bytes) -> Result[SubscriptionInput, Capacity] {
@@ -5726,7 +5675,7 @@ fn subscription_hold(mut quota: SubscriptionRoom, take caller: Caller, take key:
     let charge = wire_round(list.capacity(key)) + wire_round(list.capacity(arg)) + wire_round(list.capacity(caller.subject)) + 64u64
     let available = quota.limit - quota.held
     if quota.used == quota.slots || charge > available { return Error(Capacity(requested: charge, available: available)) }
-    let lease = match SubscriptionLease(refund: channel.sender(quota.to), charge: charge) { Ok(take l) => take l, Error((c, _)) => return Error(c) }
+    let lease = match SubscriptionLease(refund: channel.sender(quota.to), charge: charge, ledger: quota.ledger, frame_limit: quota.frame_limit) { Ok(take l) => take l, Error((c, _)) => return Error(c) }
     quota.held += charge
     quota.used += 1u64
     Ok(SubscriptionInput(room: Some(take lease), key: take key, arg: take arg, caller: take caller))
@@ -6460,7 +6409,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send, B: send](mut s: Wir
     if let Some(take why) = take refused { return Ok(SubscriptionRefusal(sub, Refused(take why))) }
     if let None = s.subscription_room {
         let limit = int.saturating_sub(WIRE_SESSION_CEILING, wire_variable_peak(s.config) + s.config.n_granted)
-        match subscription_room(limit, s.config.max_subs) {
+        match subscription_room(limit, s.config.max_subs, s.config.budget, int.saturating_sub(s.config.socket.max_frame, wire_outcome_reserve(s.config))) {
             Ok(take quota) => { s.subscription_room = Some(take quota) },
             Error(_) => return Ok(SubscriptionRefusal(sub, Refused(Overloaded))),
         }
@@ -6553,7 +6502,7 @@ fn wire_stage_update[G: send, B: send](mut s: WireSession[G, B], mut output: Lis
     let mut generations: List[(u32, u64)] = list.new()
     let mut computed = 0u64
     if current {
-        let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, rows: take rows, ended: take stopped, reset: reset, read_failed: failed) = option.unwrap(take content)
+        let Owe(session: _, version: content_version, generations: take stamps, complete: take complete, rows: take rows, ended: take stopped, reset: reset, read_failed: failed, ..) = option.unwrap(take content)
         computed = content_version
         s.completes += list.len(complete)
         if reset {

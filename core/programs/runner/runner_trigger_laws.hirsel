@@ -877,8 +877,8 @@ pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
     let _ = at_base(mut b, 1, 1, query_key(code.describe(q_range_prefix)), range_limit(1))
     let _ = at_base(mut b, 2, 1, query_key(code.describe(q_range_prefix)), range_limit(8))
     set(mut db, t, 8, 80)
-    let hits = result.unwrap(affected_subscriptions(b, store.snapshot(db)))
-    if list.len(hits) != 1 || hits[0].0 .who != 2 || !hits[0].1 {
+    let hits = result.unwrap(affected_routes(b, store.snapshot(db)))
+    if list.len(hits) != 1 || hits[0].0 != option.unwrap(sub_at(b.subs, 2u64, 1u32)).routes || !hits[0].1 {
         return false
     }
     let updated = step(mut b, db)
@@ -886,7 +886,7 @@ pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
         return false
     }
     set(mut db, t, 2, 20)
-    let reruns = result.unwrap(affected_subscriptions(b, store.snapshot(db)))
+    let reruns = result.unwrap(affected_routes(b, store.snapshot(db)))
     if list.len(reruns) != 2 || !reruns[0].1 || !reruns[1].1 {
         return false
     }

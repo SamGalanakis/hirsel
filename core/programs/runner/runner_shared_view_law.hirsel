@@ -1,0 +1,68 @@
+fn shared_count_query(tx: store.Tx, h: Qh, take arg: u32) -> Result[Answer[()], Capacity] {
+    let (to, _from): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let _ = channel.try_send(to, ())
+    q1(tx, h, take arg)
+}
+
+fn shared_law_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(shared_count_query), law_query_slots()?, 65536u64, DEFAULT_STEPS)
+}
+
+fn shared_input(key: Bytes, limit: u64, issuer: u8, refund: Sender[u64]) -> SubscriptionInput {
+    let lease = result.unwrap(SubscriptionLease(refund: channel.sender(refund), charge: 64u64, ledger: limit, frame_limit: 262144u64))
+    SubscriptionInput(room: Some(take lease), key: clone(key), arg: no_arg(), caller: store.Caller(issuer: issuer, subject: list.new()))
+}
+
+@test
+fn test_shared_view_once(clock: Clock, random: Random) -> Result[(), String] waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864u64)))
+    let _ = result.unwrap(store.create_table(mut db, store.spec("data", std.codec.key_u64(), std.codec.of_u64())))
+    let h = result.unwrap(subs_handles(mut db))
+    set(mut db, h.t, 0u64, 0u64)
+    set(mut db, h.t, 1u64, 9u64)
+    let key = query_key(code.describe(shared_count_query))
+    let (refund, _returned): (Sender[u64], Receiver[u64]) = channel.new(8u64)
+    let mut registered = result.unwrap(placed(code.describe(shared_law_place), 1048576u64))
+    result.unwrap(bind_query_slots(mut registered, h))
+    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)),
+        reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let first = at_base_generation(mut b, 1u64, 10u32, 1u64, shared_input(key, 136u64, 1u8, refund))
+    let joined = at_base_generation(mut b, 2u64, 20u32, 1u64, shared_input(key, 65536u64, 2u8, refund))
+    if list.len(first.complete) != 1u64 || list.len(joined.complete) != 1u64 {
+        return Error("joining a plain view did not complete")
+    }
+    if map.len(b.subs.indexed) != 1u64 { return Error("the joined view has more than one interval index entry") }
+    if !mark_due(mut b.subs, 1u64, 10u32) || !mark_due(mut b.subs, 2u64, 20u32) { return Error("views did not become due") }
+    set(mut db, h.t, 0u64, 1u64)
+    b.newest = Some(store.snapshot(db))
+    let mut fences = Fenced(sessions: list.new(), all: false)
+    let changes = round(mut b, mut fences)
+    if list.len(fences.sessions) != 2u64 { return Error("the due view skipped its shared refresh") }
+    {
+        let tight = option.unwrap(sub_at(b.subs, 1u64, 10u32))
+        let roomy = option.unwrap(sub_at(b.subs, 2u64, 20u32))
+        if tight.live { return Error("the tight subscriber kept an uncharged image") }
+        if !roomy.live { return Error("the tight subscriber ended another subscriber") }
+        if list.len(option.unwrap(map.get(b.subs.indexed, tight.routes)).routes) != 1u64 { return Error("ended subscriber lost its old dependency") }
+    }
+    let mut rejected = false
+    for owed in changes {
+        if list.len(owed.rows) != 0u64 { return Error("due subscriber received a delta") }
+        for ended in owed.ended {
+            if owed.session == 1u64 && ended.sub == 10u32 {
+                if let Refused(Budget(_)) = ended.outcome { rejected = true }
+            }
+        }
+    }
+    if !rejected { return Error("a larger read image did not charge the subscriber") }
+    let current = at_base_generation(mut b, 3u64, 30u32, 1u64, shared_input(key, 65536u64, 3u8, refund))
+    if list.len(current.complete) != 1u64 || list.len(current.rows) != 1u64 { return Error("join did not get the refreshed image") }
+    Ok(())
+}
+
+pub fn law_shared_view_once(clock: Clock, random: Random) -> bool waits {
+    match test_shared_view_once(clock, random) {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}

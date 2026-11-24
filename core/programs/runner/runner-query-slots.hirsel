@@ -106,7 +106,7 @@ pub fn table_answer[K, V](take name: String, t: store.Table[K, V], lo: store.Bou
     }
 }
 
-type Cover: send { slot: u16, low: Bytes, high: Bytes }
+type Cover: shareable + send { slot: u16, low: Bytes, high: Bytes }
 
 fn compare_covers(a: Cover, b: Cover) -> Order {
     if a.slot < b.slot { return Less }

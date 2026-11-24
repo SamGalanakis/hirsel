@@ -1,5 +1,5 @@
 // An attempted query cannot publish a value or a cover before Store accepts its read set.
-type Viewed { covers: List[Cover], value: Bytes, reads: List[store.Read] }
+type Viewed: shareable + send { covers: List[Cover], value: Bytes, reads: List[store.Read] }
 type Queried = Covered(Viewed) | Stopped(Outcome) | Faulted(Outcome, List[store.Read]) | Lost(store.Error)
 
 type QueryBody[H, A, R] = Plain(StaticFn[fn(store.Tx, H, take A) -> Result[Answer[R], Capacity]]) |

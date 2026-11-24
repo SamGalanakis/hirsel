@@ -625,7 +625,7 @@ pub fn law_repair_coalesced(tasks: Tasks, c: Clock, r: Random) -> bool {
         list.push(mut generations, (1u32, 1u64))
         let mut complete: List[u32] = list.new()
         list.push(mut complete, 1u32)
-        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: repair_board(mark), ended: list.new(), reset: false, read_failed: false)
+        let owed = Owe(session: 7u64, version: version, generations: take generations, complete: take complete, rows: repair_board(mark), ended: list.new(), group_bytes: 0u64, frame_limit: 18446744073709551615u64, reset: false, read_failed: false)
         if let Error(_) = wire_update(mut owner, mut work, Update(version: version, content: Some(take owed), outcomes: list.new())) { delivered = false }
     }
     // The client's image: every `complete` naming sub 1 replaces it from empty.

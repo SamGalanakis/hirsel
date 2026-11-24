@@ -19,6 +19,10 @@ static const char source_dir[] = SOURCE_MANIFEST_DIR "/";
 static uint64_t head_task, publisher_task, retiring_task;
 static int publisher_spawn, observed, marker_send, retirement_send;
 static HirselCoreChannel *marker_channel, *head_channel;
+#ifdef SHARED_VIEW_ONCE
+static HirselCoreChannel *query_channel;
+static int query_send, query_runs;
+#endif
 #if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
 static int place_spawn, permit_create, places, publisher_live;
 static int first_permits, second_permits, place_permits, premature_accept;
@@ -109,6 +113,9 @@ HirselCoreChannelNew __wrap_hirsel_core_channel_new(HirselCoreContext *ctx, uint
     HirselCoreChannelNew out = __real_hirsel_core_channel_new(ctx, capacity, layout, site);
     if (item_named(site, "answer")) marker_channel = out.sender;
     if (item_named(site, "calls_inbox")) head_channel = out.sender;
+#ifdef SHARED_VIEW_ONCE
+    if (item_named(site, "shared_count_query")) query_channel = out.sender;
+#endif
 #if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
     permit_create = 0;
 #endif
@@ -119,7 +126,14 @@ uint8_t __wrap_hirsel_core_try_send(HirselCoreChannel *channel, void *input) {
     marker_send = channel == marker_channel && marker_channel != NULL;
     if (marker_send) marker_channel = NULL;
     retirement_send = channel == head_channel && head_channel != NULL;
+#ifdef SHARED_VIEW_ONCE
+    query_send = query_channel && channel == query_channel;
+    if (query_send) query_channel = NULL;
+#endif
     uint8_t result = __real_hirsel_core_try_send(channel, input);
+#ifdef SHARED_VIEW_ONCE
+    query_send = 0;
+#endif
     marker_send = 0;
     retirement_send = 0;
     return result;
@@ -161,6 +175,9 @@ static void finish_hung(void) {
 #endif
 static void event(void *state, HirselCoreEvent e) {
     (void)state;
+#ifdef SHARED_VIEW_ONCE
+    if (e.kind == HIRSEL_CORE_EVENT_TRY_SEND && query_send) query_runs++;
+#endif
 #if defined(READY_BEFORE_ACCEPT) || defined(LAG_ADMISSION)
     if (e.kind == HIRSEL_CORE_EVENT_SPAWN && place_spawn) {
         places++;
@@ -240,7 +257,14 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     uint8_t status = hirsel_core_run(&cfg, entry);
 #endif
     hirsel_core_os_process_free(open.process);
-#ifdef READY_BEFORE_ACCEPT
+#ifdef SHARED_VIEW_ONCE
+    if (status) return status;
+    if (query_runs != 2) {
+        fprintf(stderr, "shared view: expected 2 query runs, saw %d\n", query_runs);
+        return 105;
+    }
+    return 0;
+#elif defined(READY_BEFORE_ACCEPT)
     if (status) return status;
     if (places != 3 || publisher_live) {
         fprintf(stderr, "ready: incomplete place cleanup (%d starts, %d live publishers)\n", places, publisher_live);

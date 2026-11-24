@@ -130,6 +130,7 @@ dirs = ["."]
 "store_disk_laws_2.hirsel" = "store"
 "store_crash_laws.hirsel" = "store"
 "store_claim_crash_laws.hirsel" = "store"
+"store_claim_quota_laws.hirsel" = "store"
 "follower_crash_laws.hirsel" = "store"
 "store_journal_laws.hirsel" = "store"
 "store_journal_laws_2.hirsel" = "store"

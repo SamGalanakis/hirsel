@@ -1,0 +1,191 @@
+// Keyed claim quotas, reclaim and the orphan sweep at scale (http.md H9,
+// K-6, K-7).
+fn claim_quota_key(op: Bytes, subject: Bytes, key: Bytes) -> ClaimKey {
+    ClaimKey(op: clone(op), caller: Caller(issuer: 2, subject: clone(subject)), key: clone(key))
+}
+
+fn claim_quota_reply(mut db: Db, key: ClaimKey, policy: KeyedPolicy) -> Result[(), Error] waits {
+    let digest = request_digest(b"charge", b"args")
+    let Accepted(take admitted) = admit_claim(mut db, key, digest, b"args", Some(clone(policy)))? else {
+        fail("quota fixture admission")
+    }
+    let _ = conclude_claim(mut db, take admitted, b"done")?
+    Ok(())
+}
+
+fn claim_quota_full(mut db: Db, key: ClaimKey, policy: KeyedPolicy) -> bool waits {
+    let head = db.heads[0u64].head
+    let refused = match admit_claim(mut db, key, request_digest(b"charge", b"args"), b"args", Some(clone(policy))) {
+        Error(Full(Resident(_))) => true,
+        _ => false,
+    }
+    refused && db.heads[0u64].head == head
+}
+
+// L20 store half (http.md H9, K-6, K-7): each quota alone refuses with Full
+// and commits nothing, a full scope reclaims only its own expired front, and
+// the orphan sweep passes bound ops at one examined entry.
+@test
+fn claim_quotas_reclaim_their_own_scope() -> Result[(), Error] waits {
+    let mut policy = claim_law_policy()
+    policy.retention_ms = 50
+    policy.keys_max = 3
+    policy.principal_keys_max = 2
+    let (time, take hand) = provide.clock(0, 100)
+    let mut wall = take hand
+    let mut db = test_db(time, 134217728)
+    // Principal full, op free: alice holds 2 of 2 while the op holds 2 of 3.
+    // Replies at 100, 101 and 102 expire at 150, 151 and 152.
+    claim_quota_reply(mut db, claim_quota_key(b"pay", b"alice", b"a1"), policy)?
+    clock.set_wall(mut wall, 101)
+    claim_quota_reply(mut db, claim_quota_key(b"pay", b"alice", b"a2"), policy)?
+    if !claim_quota_full(mut db, claim_quota_key(b"pay", b"alice", b"a3"), policy) {
+        fail("a full principal admitted or committed")
+    }
+    // The saturated principal does not stop another one on the same op.
+    clock.set_wall(mut wall, 102)
+    claim_quota_reply(mut db, claim_quota_key(b"pay", b"bob", b"b1"), policy)?
+    // Op full, principal free: carol holds nothing while the op holds 3 of 3.
+    if !claim_quota_full(mut db, claim_quota_key(b"pay", b"carol", b"c1"), policy) {
+        fail("a full op admitted or committed")
+    }
+    // With all three expired, the op scope reclaims its two earliest expiries.
+    clock.set_wall(mut wall, 152)
+    claim_quota_reply(mut db, claim_quota_key(b"pay", b"carol", b"c1"), policy)?
+    if claim_law_expiry(db, claim_quota_key(b"pay", b"alice", b"a1"))? != None || claim_law_expiry(db, claim_quota_key(b"pay", b"alice", b"a2"))? != None || claim_law_expiry(db, claim_quota_key(b"pay", b"bob", b"b1"))? != Some(152) {
+        fail("op reclaim did not take exactly the two oldest rows of its scope")
+    }
+    // reclaim_wrong_scope: dave's full principal reclaims dave's rows, never
+    // the older expired row of another principal at the op's front.
+    let mut wide = claim_law_policy()
+    wide.retention_ms = 50
+    wide.principal_keys_max = 2
+    let (scope_time, take scope_hand) = provide.clock(0, 100)
+    let mut scope_wall = take scope_hand
+    let mut scoped_db = test_db(scope_time, 134217728)
+    claim_quota_reply(mut scoped_db, claim_quota_key(b"pay", b"alice", b"a1"), wide)?
+    clock.set_wall(mut scope_wall, 110)
+    claim_quota_reply(mut scoped_db, claim_quota_key(b"pay", b"dave", b"d1"), wide)?
+    claim_quota_reply(mut scoped_db, claim_quota_key(b"pay", b"dave", b"d2"), wide)?
+    clock.set_wall(mut scope_wall, 160)
+    claim_quota_reply(mut scoped_db, claim_quota_key(b"pay", b"dave", b"d3"), wide)?
+    if claim_law_expiry(scoped_db, claim_quota_key(b"pay", b"alice", b"a1"))? != Some(150) || claim_law_expiry(scoped_db, claim_quota_key(b"pay", b"dave", b"d1"))? != None || claim_law_expiry(scoped_db, claim_quota_key(b"pay", b"dave", b"d2"))? != None {
+        fail("a full principal reclaimed outside its own scope")
+    }
+    // An op full only of expired rows, behind live rows of an unrelated op in
+    // the expiry index, admits after reclaim.
+    let mut lasting = claim_law_policy()
+    lasting.retention_ms = 100000
+    let mut short = claim_law_policy()
+    short.retention_ms = 50
+    short.keys_max = 2
+    short.principal_keys_max = 2
+    let (order_time, take order_hand) = provide.clock(0, 100)
+    let mut order_wall = take order_hand
+    let mut ordered = test_db(order_time, 134217728)
+    claim_quota_reply(mut ordered, claim_quota_key(b"pay", b"alice", b"p1"), lasting)?
+    claim_quota_reply(mut ordered, claim_quota_key(b"pay", b"bob", b"p2"), lasting)?
+    claim_quota_reply(mut ordered, claim_quota_key(b"ship", b"alice", b"s1"), short)?
+    claim_quota_reply(mut ordered, claim_quota_key(b"ship", b"bob", b"s2"), short)?
+    clock.set_wall(mut order_wall, 150)
+    claim_quota_reply(mut ordered, claim_quota_key(b"ship", b"carol", b"s3"), short)?
+    // sweep: ship unbound with expired rows, pay bound with live rows. Every
+    // pass examines at most 3 entries and pay's passes examine exactly one.
+    clock.set_wall(mut order_wall, 200)
+    let ship_only: scoped[view] fn(Bytes) -> bool = scoped fn(op: Bytes) -> bool {
+        op == b"pay"
+    }
+    let mut cursor = claim_sweep_start()
+    let mut deleted = 0u64
+    let mut passes = 0u64
+    while passes < 8 {
+        let work = sweep_claims(mut ordered, mut cursor, ship_only)?
+        if work.examined > 3 || (work.examined > 1 && work.deleted_rows == 0) {
+            fail("a sweep pass examined too much")
+        }
+        deleted += work.deleted_rows
+        passes += 1
+    }
+    let ship_gone = match keyed_policy(ordered, b"ship")? {
+        None => true,
+        Some(_) => false
+    }
+    if deleted != 1 || !ship_gone || claim_law_expiry(ordered, claim_quota_key(b"pay", b"alice", b"p1"))? != Some(100100) {
+        fail("the sweep missed the unbound op or touched the bound one")
+    }
+    // A resident refusal at admission is Full and commits nothing: at a
+    // 20 MiB ceiling (keyed page height 20) one terminal reserve fits, two do not.
+    let (small_time, _) = provide.clock(0, 100)
+    let mut small = test_db(small_time, 20971520)
+    let Accepted(_) = admit_claim(mut small, claim_law_key(b"one"), request_digest(b"charge", b"args"), b"args", Some(claim_law_policy()))? else {
+        fail("one reserve did not fit")
+    }
+    let credit = small.keyed_credit.resident
+    if !claim_quota_full(mut small, claim_law_key(b"two"), claim_law_policy()) || small.keyed_credit.resident != credit {
+        fail("a resident refusal at admission was not Full or committed")
+    }
+    Ok(())
+}
+
+fn claim_many_key(i: u64) -> ClaimKey {
+    let mut name = string.from("k")
+    string.push_u64(mut name, i)
+    claim_quota_key(b"bulk", b"alice", clone(string.as_bytes(name)))
+}
+
+// L20 bound (http.md H9, K-6, K-7): 10^5 replied claims of one op fill
+// keys_max exactly, the next admission is Full, and the charged bytes stay
+// within K-7's resident bound, by hand: E(k, v) = 62 + round8(k) + round8(v),
+// a claim at most E(387, 41 + 8192) + E(460, 0) + E(526, 0) + E(387, 0)
+// = 8694 + 526 + 590 + 454 = 10264, plus E(131, 8) = 206 per claim, and per
+// op E(65, 8) + E(65, 16384) = 142 + 16518. Once the op is unbound and every
+// row expired, the sweep deletes all of it within K-6's 1 + (50000 + 1)
+// sweeps and the account is back to its value before the first claim.
+@test
+fn claim_sweep_bounds_a_full_op_of_many_keys() -> Result[(), Error] waits {
+    let keys: u64 = 100000
+    let mut policy = claim_law_policy()
+    policy.retention_ms = 50
+    policy.keys_max = keys
+    policy.principal_keys_max = keys
+    let (time, take hand) = provide.clock(0, 100)
+    let mut wall = take hand
+    let mut db = test_db(time, 4294967296)
+    let base = accounts(db).logical
+    let mut i = 0u64
+    while i < keys {
+        claim_quota_reply(mut db, claim_many_key(i), policy)?
+        i += 1
+    }
+    if !claim_quota_full(mut db, claim_many_key(keys), policy) {
+        fail("a full op of 10^5 keys admitted one more")
+    }
+    let ceiling = keys * (10264 + 206) + 142 + 16518
+    let held = accounts(db).logical - base
+    if held == 0 || held > ceiling {
+        fail("10^5 claims were charged outside K-7's bound")
+    }
+    clock.set_wall(mut wall, 150)
+    let unbound: scoped[view] fn(Bytes) -> bool = scoped fn(_op: Bytes) -> bool {
+        false
+    }
+    let mut cursor = claim_sweep_start()
+    let mut deleted = 0u64
+    let mut passes = 0u64
+    while passes < 1 + keys / 2 + 1 {
+        let work = sweep_claims(mut db, mut cursor, unbound)?
+        if work.examined > 3 {
+            fail("a sweep pass examined more than 3 entries")
+        }
+        deleted += work.deleted_rows
+        passes += 1
+    }
+    let gone = match keyed_policy(db, b"bulk")? {
+        None => true,
+        Some(_) => false
+    }
+    if deleted != keys || !gone || accounts(db).logical != base {
+        fail("the sweep left rows, index entries, counts or bytes of the unbound op")
+    }
+    Ok(())
+}

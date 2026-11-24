@@ -382,6 +382,50 @@ fn test_l68_fold_cut_publishes_emptied_table(d: Dir, c: Clock, r: Random, tasks:
     close(take reading)
 }
 
+// F3 through production: a journaled trim of entry 0 leaves an overlay that
+// edits the first Cold leaf of a multi-leaf Tiered Log, and that leaf's last
+// payload byte is flipped on disk. Lazy open reads no class-3 frame. An
+// append reads only the root and the last leaf, then waits for the fold,
+// which loads the damaged first leaf: `run` returns `Corrupt` with `why`
+// Malformed (§13.3), naming that leaf's pack and offset.
+@test
+fn test_f3_corrupt_fold_refuses_the_call(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let events = l87_cold_log(d, c, r, tasks, floor, 120, 48)?
+    let mut cold = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let (leaf, _) = l87_first_leaf(d, cold, events.binding.id)?
+    let Committed(_) = run(mut cold, Some(100000), copy_env(events), fn(mut tx: Tx, log: Log[Bytes]) -> Result[(), Error] {
+        trim_before(mut tx, log, 1)
+    })? else {
+        fail("F3: the journaled trim commits")
+    }
+    close(take cold)?
+    let name = paged_pack_path(leaf.pack)?
+    let mut raw = disk_read_file(d, name, 4194304)?
+    let flipped = leaf.offset + 16 + int.widen(leaf.len) - 1
+    raw[flipped] = raw[flipped] ^ 1u8
+    disk_write_synced(d, name, raw)?
+
+    let mut replayed = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let attempt = run(mut replayed, Some(100000), copy_env(events), fn(mut tx: Tx, log: Log[Bytes]) -> Result[(), Error] {
+        let _ = append(mut tx, log, b"after")?
+        Ok(())
+    })
+    match attempt {
+        Error(Corrupt(fault)) => {
+            if fault.offset != leaf.offset || fault.file != name {
+                fail("F3: the corrupt fold names the damaged leaf")
+            }
+            if let Malformed = fault.why {} else {
+                fail("F3: a corrupt fold is Malformed")
+            }
+        },
+        _ => fail("F3: a write over a corrupt fold returns Corrupt"),
+    }
+    let _ = close(take replayed)
+    Ok(())
+}
+
 // L68: the fold cut publishes X over the roots it publishes. A pin keeps the
 // Cold three-row leaf (3 × 86 = 258) and the head's journaled delete folds
 // into a fresh two-row leaf (172), so X = 430 live and after the reopen. A

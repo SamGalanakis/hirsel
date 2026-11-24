@@ -158,6 +158,7 @@ store@1/store/test_changes_rewritten_equal src=545d7edb0014c11e sig=3871be8f8407
 store@1/store/test_close_follow src=90d393768b7c5fff sig=f9e22a51af2463b2 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_declaration_seal src=097da98e60f6edc0 sig=01b8c06909cd390e run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_drop_recreate src=a5f50ce8bddd0a51 sig=ff8ca38ef661a39d run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_f3_corrupt_fold_refuses_the_call src=6df7f5a8d51cc166 sig=3e315750cff842a2 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_follow src=6a9299dc94ec1456 sig=765ed653daa3f79b run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_follower_projector_floor src=57abd2b92ff2901a sig=2f79e65fb5484798 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_foreign src=91f7ecf22f477bfb sig=4875df6a160eabe0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

@@ -1,6 +1,6 @@
 //! TLS-5 derivations shared by the native provider and the evaluator.
 use crate::argon2id::{self, Error, Plan};
-use ring::hkdf;
+use crate::tls_kdf::{self, TlsHash};
 use zeroize::Zeroizing;
 
 pub enum Derivation {
@@ -58,11 +58,15 @@ impl Derivation {
                 info_or_data,
             )),
             Self::Hkdf { len } => {
-                let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, salt_or_prefix).extract(parent);
-                let info = [info_or_data];
-                let okm = prk.expand(&info, Len(len)).expect("validated HKDF length");
                 let mut out = Zeroizing::new(vec![0; len]);
-                okm.fill(&mut out).expect("exact HKDF output length");
+                tls_kdf::hkdf(
+                    TlsHash::Sha256,
+                    salt_or_prefix,
+                    parent,
+                    &[info_or_data],
+                    &mut out,
+                )
+                .expect("validated HKDF length");
                 Ok(out)
             }
             Self::Argon2id { len, plan, .. } => {
@@ -81,13 +85,5 @@ impl Derivation {
                 Ok(out)
             }
         }
-    }
-}
-
-struct Len(usize);
-
-impl hkdf::KeyType for Len {
-    fn len(&self) -> usize {
-        self.0
     }
 }

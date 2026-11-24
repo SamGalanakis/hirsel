@@ -41,10 +41,81 @@ pub(crate) fn register_udp_retirements(
     intake: Option<Arc<SocketCharge>>,
 ) {
     let group = Group::root(cell_of(provider.state), generation_of(first));
-    group.with(|live| {
+    group.with(|live| live.register_udp_pools(first, members, intake));
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ServedPoolSet {
+    owner: Group,
+    first: u64,
+}
+
+impl ServedPoolSet {
+    pub(crate) fn member(self, index: usize) -> ServedPool {
+        ServedPool {
+            owner: self.owner,
+            ordinal: ordinal_of(self.first) as u64 + index as u64,
+        }
+    }
+}
+
+pub(crate) struct ServedPool {
+    owner: Group,
+    ordinal: u64,
+}
+
+impl Drop for ServedPool {
+    fn drop(&mut self) {
+        self.owner
+            .with(|live| live.close_udp_pool(self.ordinal).unwrap());
+    }
+}
+
+pub(crate) fn served_udp_pools(
+    members: &[Arc<SocketCharge>],
+    intake: Option<Arc<SocketCharge>>,
+) -> Option<ServedPoolSet> {
+    let owner = crate::tasks::current_group()?;
+    owner
+        .with(|live| {
+            let first = handle(owner.generation, live.objects.len() + 1);
+            for _ in members {
+                live.objects.push(Object {
+                    inner: None,
+                    open_resource: false,
+                });
+            }
+            if live.mode == Mode::Replay {
+                live.register_udp_pools(first, members, intake);
+                return Some(ServedPoolSet { owner, first });
+            }
+            for (index, member) in members.iter().enumerate() {
+                member.record_retirement(Retirement {
+                    group: owner,
+                    pool: pool_id(first + index as u64, false),
+                });
+            }
+            if let Some(intake) = intake {
+                intake.record_retirement(Retirement {
+                    group: owner,
+                    pool: pool_id(first, true),
+                });
+            }
+            None
+        })
+        .flatten()
+}
+
+impl Live {
+    fn register_udp_pools(
+        &mut self,
+        first: u64,
+        members: &[Arc<SocketCharge>],
+        intake: Option<Arc<SocketCharge>>,
+    ) {
         let intake_id = intake.map(|charge| {
             let id = pool_id(first, true);
-            live.udp_retirements.insert(
+            self.udp_retirements.insert(
                 id,
                 Pool {
                     charge,
@@ -55,7 +126,7 @@ pub(crate) fn register_udp_retirements(
             id
         });
         for (index, charge) in members.iter().enumerate() {
-            live.udp_retirements.insert(
+            self.udp_retirements.insert(
                 pool_id(first + index as u64, false),
                 Pool {
                     charge: charge.clone(),
@@ -64,10 +135,8 @@ pub(crate) fn register_udp_retirements(
                 },
             );
         }
-    });
-}
+    }
 
-impl Live {
     pub(super) fn close_udp_pool(&mut self, ordinal: u64) -> Result<(), Fault> {
         let entry = self
             .udp_retirements

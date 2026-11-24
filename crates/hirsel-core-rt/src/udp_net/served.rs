@@ -1,8 +1,10 @@
 use super::*;
 
 pub(crate) struct Retirement {
-    _member: SocketCharge,
+    _member: Arc<SocketCharge>,
     _intake: Option<Arc<SocketCharge>>,
+    #[cfg(feature = "record")]
+    _retired: Option<crate::tape::ServedPool>,
 }
 
 pub(super) struct Socket {
@@ -66,15 +68,24 @@ impl Call {
             } else {
                 None
             };
-            for (index, port_key) in self.served.ids.drain(..).enumerate() {
+            let members: Vec<_> = (0..self.served.ids.len())
+                .map(|index| {
+                    Arc::new(SocketCharge::new(
+                        allowance.clone(),
+                        self.key + index as u64,
+                        charge.partition(per_member),
+                    ))
+                })
+                .collect();
+            #[cfg(feature = "record")]
+            let replay = crate::tape::served_udp_pools(&members, group.clone());
+            for (index, (port_key, member)) in self.served.ids.drain(..).zip(members).enumerate() {
                 let key = self.key + index as u64;
                 let retirement = Retirement {
-                    _member: SocketCharge::new(
-                        allowance.clone(),
-                        key,
-                        charge.partition(per_member),
-                    ),
+                    _member: member,
                     _intake: group.clone(),
+                    #[cfg(feature = "record")]
+                    _retired: replay.map(|pools| pools.member(index)),
                 };
                 files.udp_sockets.insert(
                     key,

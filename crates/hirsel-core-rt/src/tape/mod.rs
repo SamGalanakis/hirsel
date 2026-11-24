@@ -22,7 +22,7 @@ mod exec;
 mod managed;
 mod record_delivery;
 mod retirement;
-pub(crate) use retirement::{Retirement, register_udp_retirements};
+pub(crate) use retirement::{Retirement, ServedPool, register_udp_retirements, served_udp_pools};
 mod replay_delivery;
 pub mod run;
 pub(crate) mod schedule;

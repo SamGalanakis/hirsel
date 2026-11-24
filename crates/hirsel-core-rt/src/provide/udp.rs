@@ -92,25 +92,19 @@ pub(super) fn answer(p: &Port, call: &PortCall, tag: u64, w: [u64; 6]) -> Option
             };
         }
         (OPEN | BIND, SOCKETS) => {
-            let a = address(w)?;
+            let actual = address(w)?;
             let count = if op == OPEN { 1 } else { call.words[7] };
-            let last = w[0].checked_add(count - 1)?;
-            if w[0] == 0
-                || w[5] != count
-                || p.handles.range(w[0]..=last).next().is_some()
-                || w[1] != call.words[1]
-            {
-                return None;
-            }
-            if op == OPEN {
-                if a.hi != 0 || a.lo != 0 || a.port != 0 {
-                    return None;
-                }
-            } else if w[2] != call.words[2]
-                || w[3] != call.words[3]
-                || a.port == 0
-                || call.words[4] != 0 && w[4] != call.words[4]
-            {
+            // SAFETY: the unsettled call pins the endpoint used for this admission.
+            let requested = unsafe { served::inputs(&*call.request).endpoint };
+            if !crate::udp_net::valid_creation(
+                requested,
+                actual,
+                op == BIND,
+                w[0],
+                w[5],
+                count,
+                |range| p.handles.range(range).next().is_none(),
+            ) {
                 return None;
             }
             out.value = w[0];

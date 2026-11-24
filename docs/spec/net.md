@@ -1505,5 +1505,5 @@ laws (M1 to M3) are required as well, but each is a single case.
   settled once by a reply, a `Fail`, a withdrawal, a dropped call and the seal. *Oracle:*
   MEM-24 Charge parity, by hand. The first stages the record and the second raises
   `Capacity` in the server. After each settlement the room is back to its starting balance
-  and the current limit is unchanged. *Harness:* the provider laws
-  (`core/programs/harness/provider_laws.hirsel`).
+  and the current limit is unchanged. *Harness:* the native Net provider laws
+  (`core/std/tests/net.hirsel`).

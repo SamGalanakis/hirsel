@@ -36,6 +36,32 @@ const HANDLE: u64 = 1 << 60;
 const OVERSIZE: u8 = 12;
 const EXHAUSTED: u8 = 13;
 
+pub(crate) fn valid_creation(
+    requested: Address,
+    actual: Address,
+    binding: bool,
+    first: u64,
+    count: u64,
+    expected_count: u64,
+    fresh: impl FnOnce(std::ops::RangeInclusive<u64>) -> bool,
+) -> bool {
+    if first == 0 || count == 0 || count != expected_count || actual.family != requested.family {
+        return false;
+    }
+    let Some(last) = first.checked_add(count - 1) else {
+        return false;
+    };
+    let endpoint = if binding {
+        actual.hi == requested.hi
+            && actual.lo == requested.lo
+            && actual.port != 0
+            && (requested.port == 0 || actual.port == requested.port)
+    } else {
+        actual.hi == 0 && actual.lo == 0 && actual.port == 0
+    };
+    endpoint && fresh(first..=last)
+}
+
 pub(crate) fn is_socket(key: u64) -> bool {
     key & HANDLE != 0 && key < HANDLE * 2
 }
@@ -120,6 +146,11 @@ pub(crate) struct SocketCharge {
 }
 
 impl SocketCharge {
+    #[cfg(feature = "record")]
+    pub(crate) fn record_retirement(&self, retirement: crate::tape::Retirement) {
+        self._cell.record_retirement(retirement);
+    }
+
     #[cfg(feature = "record")]
     pub(crate) fn refund_replayed(&self, payer: Payer) -> bool {
         self._cell.refund_replayed(payer)

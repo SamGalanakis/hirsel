@@ -189,18 +189,17 @@ pub(crate) unsafe fn replay(
                     return Ok(0);
                 }
                 let count = call.group.map_or(1, |(n, _)| usize::from(n.get()));
-                if next_ordinal != out.value
-                    || out
-                        .value
-                        .checked_add(count as u64 - 1)
-                        .is_none_or(|n| n > u64::from(u32::MAX))
-                    || endpoint.hi != call.endpoint.hi
-                    || endpoint.lo != call.endpoint.lo
-                    || (request.operation == UDP_OPEN && endpoint.port != 0)
-                    || (request.operation != UDP_OPEN
-                        && (endpoint.port == 0
-                            || (call.endpoint.port != 0 && endpoint.port != call.endpoint.port)))
-                {
+                if !valid_creation(
+                    call.endpoint,
+                    endpoint,
+                    request.operation != UDP_OPEN,
+                    out.value,
+                    count as u64,
+                    count as u64,
+                    |ordinals| {
+                        *ordinals.start() == next_ordinal && *ordinals.end() <= u64::from(u32::MAX)
+                    },
+                ) {
                     return Err(Corrupt);
                 }
                 call.endpoint = endpoint;

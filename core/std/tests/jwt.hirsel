@@ -550,3 +550,34 @@ fn jwt_set_allowlist_law() -> u64 {
         _ => 1,
     }
 }
+
+fn hmac_minimum(alg: jwt.Alg, minimum: u64) -> u64 {
+    let raw = b64(A1_K)
+    let hs = jwt.signer(alg, seal(clone(list.slice(raw, 0, minimum)), "mac"))
+    let Ok(token) = jwt.sign_jwt(hs, "{}") else {
+        return 1
+    }
+    let accept = jwt.allow(alg)
+    let key = jwt.hmac_key(seal(clone(list.slice(raw, 0, minimum)), "verify"))
+    let Ok(_) = jwt.verify_jws(token, accept, key) else {
+        return 2
+    }
+    for n in[0u64, minimum - 1] {
+        let short_signer = jwt.signer(alg, seal(clone(list.slice(raw, 0, n)), "mac"))
+        match jwt.sign_jwt(short_signer, "{}") {
+            Error(BadKey) => {},
+            _ => return 3,
+        }
+        let short_key = jwt.hmac_key(seal(clone(list.slice(raw, 0, n)), "verify"))
+        match jws_error(jwt.verify_jws(token, accept, short_key)) {
+            Some(BadKey) => {},
+            _ => return 4,
+        }
+    }
+    0
+}
+
+// expect: run jwt_hmac_key_law() = 0
+fn jwt_hmac_key_law() -> u64 {
+    hmac_minimum(Hs256, 32) + 10 * hmac_minimum(Hs384, 48) + 100 * hmac_minimum(Hs512, 64)
+}

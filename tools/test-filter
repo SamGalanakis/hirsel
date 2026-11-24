@@ -32,7 +32,7 @@ def graph_for(binaries, config):
     query_config = []
     options = iter(config)
     for option in options:
-        if option == '--target-platforms':
+        if option in ('--target-platforms', '-j'):
             next(options)
         else:
             query_config.append(option)
@@ -108,13 +108,6 @@ def has_positive_filter(arguments):
     return False
 
 
-def completed_bodies(details):
-    # Buck keeps stdout and stderr separately. Some outer tests forward a
-    # nested libtest's transcript to stderr; those are not outer case results.
-    stdout = re.split(r'^---- STDERR ----$', details, maxsplit=1, flags=re.M)[0]
-    return re.findall(r'^test (\S+)(?: - should panic)? \.\.\. (ok|FAILED)\b', stdout, re.M)
-
-
 def plan(binaries, config, arguments):
     graph = graph_for(binaries, config)
     inventories, dealt = {}, {}
@@ -131,8 +124,11 @@ def plan(binaries, config, arguments):
     if not any(inventories.values()):
         raise ValueError(f'selector {arguments!r} matched no runnable test bodies in {binaries}')
     assigned = owners(graph, dealt)
-    targets = sorted({assigned[binary, name] for binary, names in inventories.items() for name in names})
-    return targets, inventories
+    targets = {}
+    for binary, names in inventories.items():
+        for name in sorted(names):
+            targets.setdefault(assigned[binary, name], []).append(name)
+    return dict(sorted(targets.items())), inventories
 
 
 def main(argv=None):
@@ -142,6 +138,7 @@ def main(argv=None):
     split = argv.index('--')
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('-c', action='append', default=[])
+    parser.add_argument('-j', '--num-threads', type=int)
     parser.add_argument('--target-platforms')
     parser.add_argument('--env', action='append', default=[])
     parser.add_argument('--list', action='store_true', help='show owners and cases without running bodies')
@@ -150,34 +147,38 @@ def main(argv=None):
     arguments = argv[split + 1:]
     config = shlex.split(os.environ.get('HIRSEL_BUCK2_CONFIG', ''))
     config += [a for value in args.c for a in ('-c', value)]
+    if args.num_threads is not None:
+        config += ['-j', str(args.num_threads)]
     if args.target_platforms:
         config += ['--target-platforms', args.target_platforms]
     binaries = sorted({family(b) for b in args.binaries})
     targets, inventories = plan(binaries, config, arguments)
-    expected = {(binary, name) for binary, names in inventories.items() for name in names}
-    print(f'test-filter: {len(expected)} cases on {len(targets)} owning targets; selector {arguments!r}', flush=True)
+    count = sum(map(len, targets.values()))
+    print(f'test-filter: {count} cases on {len(targets)} owning targets; selector {arguments!r}', flush=True)
     if args.list:
-        print(json.dumps(dict(targets=targets, cases=inventories), default=sorted))
+        print(json.dumps(dict(targets=list(targets), cases=inventories), default=sorted))
         return 0
-    actual, code = [], 0
-    for offset in range(0, len(targets), 2):
-        chunk = targets[offset:offset + 2]
+    actual, code = set(), 0
+    labels = list(targets)
+    for offset in range(0, len(labels), 2):
+        chunk = labels[offset:offset + 2]
+        cases = '\n'.join(f'{target} {name}' for target in chunk for name in targets[target])
         command = [str(ROOT / '.buck2/bin/buck2'), 'test', *config, *chunk, '--',
                    *[a for value in args.env for a in ('--env', value)],
+                   '--env', 'HIRSEL_TEST_FILTER_CASES=' + cases,
                    *['--test-arg=' + a for a in arguments]]
         with event_logs.recorded('test-filter') as log:
             status = subprocess.run([*command[:2], '--event-log', str(log), *command[2:]], cwd=ROOT).returncode
             code = code or status
         results = event_logs.test_results(log)
-        for target, result in results.items():
-            binary = family(target)
-            actual += [(binary, name) for name, _ in completed_bodies(result['details'])]
+        actual.update(target for target, result in results.items() if result['status'] == event_logs.PASS)
         print(f'test-filter: event log {log}', flush=True)
-    if set(actual) != expected or len(actual) != len(expected):
-        print(f'test-filter: expected {len(expected)} bodies, observed {len(actual)}; '
-              f'missing {sorted(expected - set(actual))}; unexpected {sorted(set(actual) - expected)}', file=sys.stderr)
+    expected = {target.removeprefix('root//:') for target in targets}
+    if actual != expected:
+        print(f'test-filter: missing verified passes for {sorted(expected - actual)}; '
+              f'unexpected passes {sorted(actual - expected)}', file=sys.stderr)
         return code or 2
-    print(f'test-filter: executed exactly {len(actual)} selected bodies', flush=True)
+    print(f'test-filter: executed exactly {count} selected bodies', flush=True)
 
     return code
 

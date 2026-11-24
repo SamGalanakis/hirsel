@@ -33,7 +33,7 @@ class FilterOwners(unittest.TestCase):
         with patch.dict(self.globals, graph_for=lambda *_: self.graph,
                         listing=lambda _b, _g, _c, args: set() if '--ignored' in args else {'x'}):
             targets, cases = self.tool['plan'](['suite'], [], ['x'])
-        self.assertEqual(targets, [host])
+        self.assertEqual(targets, {host: ['x']})
         self.assertEqual(cases, {'suite': {'x'}})
         homes = self.tool['owners'](self.graph, {'suite': {'x', 'z'}})
         self.assertEqual(homes[('suite', 'x')], host)
@@ -71,15 +71,25 @@ class FilterOwners(unittest.TestCase):
                          ['--format=terse', '--color=never', '--exact', '--skip', 'skip value',
                           '--', '--format=literal'])
 
-    def test_nested_harness_results_on_stderr_are_not_counted_as_outer_bodies(self):
-        details = ('---- STDOUT ----\n'
-                   'test outer::case ... ok <21.640s>\n'
-                   '---- STDERR ----\n'
-                   'test outer::case ... ok\n'
-                   'test child::other_case ... FAILED\n')
-        self.assertEqual(self.tool['completed_bodies'](details), [('outer::case', 'ok')])
-        self.assertEqual(self.tool['completed_bodies']('test outer::case ... FAILED\n'),
-                         [('outer::case', 'FAILED')])
+    def test_filtered_execution_uses_the_launcher_verdict(self):
+        target, name = 'suite-shard-1', 'outer::case'
+
+        @contextmanager
+        def recorded(_):
+            yield self.root / 'events.pb.zst'
+
+        events = self.globals['event_logs']
+        for status, details, code in (
+            (events.PASS, f'test {name} ... body output\nok\n', 0),
+            (events.FAIL, f'test {name} ... ok\n', 2),
+        ):
+            with self.subTest(status=status), patch.dict(
+                self.globals, plan=lambda *_: ({'root//:' + target: [name]}, {'suite': {name}}),
+            ), patch.object(events, 'recorded', recorded), patch.object(
+                events, 'test_results', return_value={target: dict(status=status, details=details)},
+            ), patch.object(self.globals['subprocess'], 'run', return_value=SimpleNamespace(returncode=0)) as run:
+                self.assertEqual(self.tool['main'](['suite', '--', name, '--exact', '--nocapture']), code)
+                self.assertIn(f'HIRSEL_TEST_FILTER_CASES=root//:{target} {name}', run.call_args.args[0])
 
 
 if __name__ == '__main__':

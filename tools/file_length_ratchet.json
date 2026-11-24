@@ -29,9 +29,9 @@
     "lines": 1409
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 8049,
-    "raise_revision": 6,
-    "reason": "m3-s1-read-api-2005"
+    "lines": 7197,
+    "raise_revision": 7,
+    "reason": "bucket-backing-t1-2022"
   },
   "core/programs/runner/runner_calls.hirsel": {
     "lines": 2507
@@ -71,9 +71,9 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 2835,
-    "raise_revision": 10,
-    "reason": "m2-finish-2021"
+    "lines": 2930,
+    "raise_revision": 11,
+    "reason": "bucket-backing-t1-2022"
   },
   "core/std/omap.hirsel": {
     "lines": 1374
@@ -92,9 +92,9 @@
     "reason": "std-micro-prims-2019"
   },
   "core/std/sim/s3.hirsel": {
-    "lines": 1213,
-    "raise_revision": 5,
-    "reason": "m2-finish-2021"
+    "lines": 1404,
+    "raise_revision": 6,
+    "reason": "bucket-backing-t1-2022"
   },
   "core/std/string.hirsel": {
     "lines": 1044
@@ -128,7 +128,9 @@
     "lines": 1415
   },
   "core/tools/runner_tests.py": {
-    "lines": 1526
+    "lines": 1512,
+    "raise_revision": 1,
+    "reason": "bucket-backing-t1-2022"
   },
   "core/tools/std_native.py": {
     "lines": 1105

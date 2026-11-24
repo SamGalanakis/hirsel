@@ -85,6 +85,29 @@ fn valid_scope(part: String) -> bool {
     true
 }
 
+fn scope_key(root: Secret, date: Bytes, region_bytes: Bytes, service_bytes: Bytes) -> Result[Secret, Error] {
+    let empty = string.as_bytes("")
+    let k_date = derive(root, string.as_bytes("AWS4"), date, "kdf")?
+    let k_region = derive(k_date, empty, region_bytes, "kdf")?
+    let k_service = derive(k_region, empty, service_bytes, "kdf")?
+    derive(k_service, empty, string.as_bytes("aws4_request"), "mac")
+}
+
+/// Derives the signing key a verifier needs for a request whose credential
+/// scope names `date` (YYYYMMDD), `aws_region` and `service`. The key is
+/// sealed for MAC use only.
+pub fn scope_signing_key(root: Secret, date: String, aws_region: String, service: String) -> Result[Secret, Error] {
+    if string.byte_len(date) != 8 || !valid_scope(aws_region) || !valid_scope(service) {
+        return Error(InvalidScope)
+    }
+    for c in string.as_bytes(date) {
+        if !int.is_ascii_digit(c) {
+            return Error(InvalidScope)
+        }
+    }
+    scope_key(root, string.as_bytes(date), string.as_bytes(aws_region), string.as_bytes(service))
+}
+
 fn day_key(root: Secret, aws_region: String, service: String, day: u64) -> Result[Daily, Error] {
     let date = utc_date(day)?
     let end = string.as_bytes("/aws4_request")
@@ -92,11 +115,7 @@ fn day_key(root: Secret, aws_region: String, service: String, day: u64) -> Resul
     let service_bytes = string.as_bytes(service)
     let mut scope: Bytes = list.with_capacity(10 + list.len(region_bytes) + list.len(service_bytes) + list.len(end))
     let _ = bytebuf.append_inline(mut scope, date, 0, 8)
-    let empty = string.as_bytes("")
-    let k_date = derive(root, string.as_bytes("AWS4"), scope, "kdf")?
-    let k_region = derive(k_date, empty, region_bytes, "kdf")?
-    let k_service = derive(k_region, empty, service_bytes, "kdf")?
-    let key = derive(k_service, empty, string.as_bytes("aws4_request"), "mac")?
+    let key = scope_key(root, scope, region_bytes, service_bytes)?
     list.push(mut scope, b'/')
     list.append(mut scope, region_bytes)
     list.push(mut scope, b'/')

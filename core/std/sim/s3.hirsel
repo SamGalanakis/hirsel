@@ -48,6 +48,91 @@ pub opaque type Endpoint {
     network: Net
 }
 
+/// The request rules both serving modes share.
+type Rules: send {
+    exists_status: u16,
+    max_body: u64
+}
+
+/// How a served bucket checks SigV4. `Scoped` takes one fixed credential
+/// scope and its day key. `Rooted` derives the day key from the credential
+/// root for the date each request names, and proves each answer.
+type Signing: send = Scoped(String, Secret) | Rooted(Loopback)
+
+type Gate: send {
+    rules: Rules,
+    cut: Option[Cut],
+    signing: Signing
+}
+
+/// A bucket that other processes reach over real loopback sockets (STORE
+/// §12.2). It holds the credential root, checks each request's SigV4 for the
+/// date the request names, and answers each authenticated request with a
+/// proof that only a holder of that root can compute. Its clients are path
+/// style, so every target starts with `/<bucket>`.
+pub type Loopback: send {
+    bucket: String,
+    access_key: String,
+    aws_region: String,
+    root: Secret,
+    exists_status: u16,
+    max_body: u64
+}
+
+/// The response field that carries a loopback simulator's proof.
+pub const PROOF_FIELD: String = "x-hirsel-sim-proof"
+
+const PROOF_DOMAIN: String = "hirsel.sim.s3.proof"
+
+const PROOF_CONTEXT: String = "hirsel.sim.s3.v1\n"
+
+/// The key that proves answers for requests signed with `root`. Sealed for
+/// MAC use only; it reveals nothing about the signing keys.
+pub fn proof_key(root: Secret) -> Result[Secret, SecretError] {
+    secret.derive_hmac_sha256(root, string.as_bytes(PROOF_DOMAIN), string.as_bytes(""), "mac")
+}
+
+/// The message a proof authenticates: the context and the request's exact
+/// Authorization value.
+pub fn proof_message(authorization: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(string.byte_len(PROOF_CONTEXT) + list.len(authorization))
+    list.append(mut out, string.as_bytes(PROOF_CONTEXT))
+    list.append(mut out, authorization)
+    take out
+}
+
+fn rooted(service: Loopback, req: Request, raw_target: String, body: Bytes) -> Option[String] {
+    let Some(date) = map.get(req.fields, "x-amz-date") else {
+        return None
+    }
+    let Some(auth) = map.get(req.fields, "authorization") else {
+        return None
+    }
+    if string.byte_len(date) != 16 {
+        return None
+    }
+    let day = string.slice(date, 0, 8)
+    let Ok(take key) = sigv4.scope_signing_key(service.root, string.from(day), clone(service.aws_region), "s3") else {
+        return None
+    }
+    let mut scope = string.from(service.access_key)
+    string.push_char(mut scope, '/')
+    string.push(mut scope, day)
+    string.push_char(mut scope, '/')
+    string.push(mut scope, service.aws_region)
+    string.push(mut scope, "/s3/aws4_request")
+    if !authenticated(scope, key, req, raw_target, body) {
+        return None
+    }
+    let Ok(take prover) = proof_key(service.root) else {
+        return None
+    }
+    let Ok(tag) = secret.hmac_sha256(prover, proof_message(string.as_bytes(auth))) else {
+        return None
+    }
+    Some(hex(tag))
+}
+
 type Service: send {
     config: Config,
     plan: sim.world.Plan,
@@ -328,7 +413,7 @@ fn canonical_headers(mut out: String, fields: Map[String, String], signed: Strin
     has_host && has_date
 }
 
-fn authenticated(config: Config, req: Request, raw_target: String, body: Bytes) -> bool {
+fn authenticated(credential_scope: String, signing_key: Secret, req: Request, raw_target: String, body: Bytes) -> bool {
     let fields = view req.fields
     let Some(auth) = map.get(fields, "authorization") else {
         return false
@@ -346,11 +431,11 @@ fn authenticated(config: Config, req: Request, raw_target: String, body: Bytes) 
         return false
     }
     let mut prefix = string.from("AWS4-HMAC-SHA256 Credential=")
-    string.push(mut prefix, config.credential)
+    string.push(mut prefix, credential_scope)
     if credential != prefix || string.byte_len(signature) != 64 {
         return false
     }
-    let Some((_, scope)) = string.split_once(config.credential, "/") else {
+    let Some((_, scope)) = string.split_once(credential_scope, "/") else {
         return false
     }
     if string.byte_len(date) != 16 || string.byte_len(scope) < 8 || string.slice(date, 0, 8) != string.slice(scope, 0, 8) {
@@ -392,7 +477,7 @@ fn authenticated(config: Config, req: Request, raw_target: String, body: Bytes) 
         }
         list.push(mut tag, (hi << 4) | lo)
     }
-    if let Ok(true) = secret.verify_hmac_sha256(config.signing_key, string.as_bytes(message), tag) {
+    if let Ok(true) = secret.verify_hmac_sha256(signing_key, string.as_bytes(message), tag) {
         return true
     }
     false
@@ -447,7 +532,7 @@ fn etag(data: Bytes) -> String {
     take out
 }
 
-fn conditional_failure(config: Config, req: Request, mut objects: Map[String, Object], fault: Fault, writing: bool) -> Option[Response] {
+fn conditional_failure(rules: Rules, req: Request, mut objects: Map[String, Object], fault: Fault, writing: bool) -> Option[Response] {
     match (fault, writing) {
         (Conflict, true) if map.contains(req.fields, "if-match") => return Some(error(409, "ConditionalRequestConflict")),
         (DeleteConflict, true) if map.contains(req.fields, "if-none-match") && map.contains(objects, req.target.key) => {
@@ -468,7 +553,7 @@ fn conditional_failure(config: Config, req: Request, mut objects: Map[String, Ob
             return Some(error(if req.method == "GET" || req.method == "HEAD" {
                 304u16
             } else {
-                config.exists_status
+                rules.exists_status
             }, "PreconditionFailed"))
         }
     }
@@ -719,7 +804,7 @@ fn gather(upload: Upload, raw: Bytes, max_body: u64) -> Result[Bytes, String] {
     Ok(take data)
 }
 
-fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take body: Bytes, fault: Fault) -> Response {
+fn multipart(rules: Rules, mut bucket: Bucket, req: Request, id: String, take body: Bytes, fault: Fault) -> Response {
     let Some(take upload) = map.remove(mut bucket.uploads, id) else {
         return error(404, "NoSuchUpload")
     }
@@ -745,10 +830,10 @@ fn multipart(config: Config, mut bucket: Bucket, req: Request, id: String, take 
             error(200, "InternalError")
         } else if let MalformedComplete = fault {
             reply(200, "<Error/>")
-        } else if let Some(take failed) = conditional_failure(config, req, mut bucket.objects, fault, true) {
+        } else if let Some(take failed) = conditional_failure(rules, req, mut bucket.objects, fault, true) {
             take failed
         } else {
-            match gather(current, body, config.max_body) {
+            match gather(current, body, rules.max_body) {
                 Error(code) => error(400, code),
                 Ok(take data) => {
                     let Upload(metadata: take meta, ..) = take current
@@ -807,14 +892,14 @@ fn ranged(object: Object, value: String) -> Response {
     take response
 }
 
-fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, fault: Fault) -> Response {
+fn dispatch(rules: Rules, mut bucket: Bucket, req: Request, take body: Bytes, fault: Fault) -> Response {
     match fault {
         InternalError => return error(500, "InternalError"),
         SlowDown => return error(503, "SlowDown"),
         _ => ()
     }
     if let Some(id) = map.get(req.target.query, "uploadId") {
-        return multipart(config, mut bucket, req, id, take body, fault)
+        return multipart(rules, mut bucket, req, id, take body, fault)
     }
     if req.method == "POST" && map.get(req.target.query, "uploads") != None {
         return begin(mut bucket, req)
@@ -838,7 +923,7 @@ fn dispatch(config: Config, mut bucket: Bucket, req: Request, take body: Bytes, 
     if req.target.key == "" {
         return error(400, "InvalidArgument")
     }
-    if let Some(take failed) = conditional_failure(config, req, mut bucket.objects, fault, req.method == "PUT") {
+    if let Some(take failed) = conditional_failure(rules, req, mut bucket.objects, fault, req.method == "PUT") {
         return take failed
     }
     if req.method == "PUT" {
@@ -933,7 +1018,27 @@ fn respond(mut peer: Peer, response: Response, head: bool) {
     list.clear(mut peer.incoming)
 }
 
-fn received(config: Config, mut bucket: Bucket, mut peer: Peer) {
+// A path-style target without its `/<bucket>` segment, as the virtual-hosted
+// target the dispatcher routes.
+fn path_target(raw: String, name: String) -> Option[String] {
+    let octets = string.as_bytes(raw)
+    let n = string.byte_len(name) + 1
+    if list.len(octets) <= n || octets[0] != b'/' || string.slice(raw, 1, n) != name {
+        return None
+    }
+    let rest = string.slice(raw, n, list.len(octets))
+    if octets[n] == b'/' {
+        return Some(string.from(rest))
+    }
+    if octets[n] != b'?' {
+        return None
+    }
+    let mut target = string.from("/")
+    string.push(mut target, rest)
+    Some(take target)
+}
+
+fn received(gate: Gate, mut bucket: Bucket, mut peer: Peer) {
     if let Reading = peer.state {
         match http1.resume(peer.incoming, mut peer.head, mut peer.cursor) {
             Partial => return,
@@ -955,7 +1060,7 @@ fn received(config: Config, mut bucket: Bucket, mut peer: Peer) {
             respond(mut peer, error(400, "InvalidRequest"), false)
             return
         }
-        if size > config.max_body {
+        if size > gate.rules.max_body {
             respond(mut peer, error(413, "EntityTooLarge"), false)
             return
         }
@@ -974,19 +1079,39 @@ fn received(config: Config, mut bucket: Bucket, mut peer: Peer) {
         return
     }
     let raw_target = piece(peer.incoming, peer.head.target.start, peer.head.target.end)
-    let Some(take uri) = parse_target(raw_target) else {
+    let routed = match gate.signing {
+        Scoped(_, _) => Some(string.from(raw_target)),
+        Rooted(service) => path_target(raw_target, service.bucket),
+    }
+    let Some(take target) = take routed else {
+        respond(mut peer, error(404, "NoSuchBucket"), head)
+        return
+    }
+    let Some(take uri) = parse_target(target) else {
         respond(mut peer, error(400, "InvalidURI"), head)
         return
     }
     let fields = option.unwrap(parse_headers(peer.incoming, peer.head))
     let body: Bytes = clone(list.slice(peer.incoming, peer.head.end, list.len(peer.incoming)))
     let req = Request(method: take method, target: take uri, fields: take fields)
-    if !authenticated(config, req, raw_target, body) {
-        respond(mut peer, error(403, "SignatureDoesNotMatch"), head)
-        return
+    let proof: Option[String] = match gate.signing {
+        Scoped(credential_scope, key) => {
+            if !authenticated(credential_scope, key, req, raw_target, body) {
+                respond(mut peer, error(403, "SignatureDoesNotMatch"), head)
+                return
+            }
+            None
+        },
+        Rooted(service) => {
+            let Some(text) = rooted(service, req, raw_target, body) else {
+                respond(mut peer, error(403, "SignatureDoesNotMatch"), head)
+                return
+            }
+            Some(take text)
+        },
     }
     let mut silent = false
-    if let Some(cut) = config.cut {
+    if let Some(cut) = gate.cut {
         if !peer.spare {
             bucket.served += 1
             if bucket.served > cut.after {
@@ -998,7 +1123,10 @@ fn received(config: Config, mut bucket: Bucket, mut peer: Peer) {
             }
         }
     }
-    let response = dispatch(config, mut bucket, req, take body, peer.fault)
+    let mut response = dispatch(gate.rules, mut bucket, req, take body, peer.fault)
+    if let Some(take text) = take proof {
+        map.insert(mut response.fields, string.from(PROOF_FIELD), take text)
+    }
     if silent {
         peer.state = ResetPeer
     } else if let ResetAfterBody = peer.fault {
@@ -1023,7 +1151,7 @@ fn matches_closed(state: ReadState) -> bool {
     }
 }
 
-fn send(config: Config, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u64, mut served: Served[NetOp], take call: Call[NetOp]) {
+fn send(config: Config, gate: Gate, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u64, mut served: Served[NetOp], take call: Call[NetOp]) {
     if matches_closed(peer.state) {
         let _ = answer(mut served, take call, Failed(Reset))
         return
@@ -1043,7 +1171,7 @@ fn send(config: Config, mut bucket: Bucket, mut peer: Peer, prefix: u64, tail: u
     let count = 1 + sim.world.pick(mut peer.plan, limit)
     if answer(mut served, take call, Count(count)) {
         list.append(mut peer.incoming, list.slice(data, 0, count))
-        received(config, mut bucket, mut peer)
+        received(gate, mut bucket, mut peer)
     }
 }
 
@@ -1077,10 +1205,10 @@ fn recv(config: Config, mut peer: Peer, clock: Clock, room: u64, mut trace: u64,
     accepted
 }
 
-fn operate(config: Config, mut bucket: Bucket, mut peer: Peer, clock: Clock, op: NetOp, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
+fn operate(config: Config, gate: Gate, mut bucket: Bucket, mut peer: Peer, clock: Clock, op: NetOp, mut served: Served[NetOp], take call: Call[NetOp]) -> bool waits {
     match op {
         Send(prefix: prefix, tail: tail, ..) => {
-            send(config, mut bucket, mut peer, prefix, tail, mut served, take call)
+            send(config, gate, mut bucket, mut peer, prefix, tail, mut served, take call)
             true
         },
         Recv(room: room, max: max, ..) => recv(config, mut peer, clock, order.min(room, max), mut bucket.fragment_trace, mut served, take call),
@@ -1146,7 +1274,8 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
         fail("sim.s3 needs a positive fragment size and a 412 or 304 dialect")
     }
     let mut port = take served
-    let mut bucket = Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0, fragment_trace: 0xcbf29ce484222325)
+    let gate = Gate(rules: Rules(exists_status: n.exists_status, max_body: n.max_body), cut: clone(n.cut), signing: Scoped(clone(n.credential), secret.share(n.signing_key)))
+    let mut bucket = new_bucket()
     let mut peers: Map[u64, Peer] = map.new()
     let mut next = 1u64
     let mut dns_changed = false
@@ -1189,7 +1318,7 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
                 if let Some(id) = socket(op) {
                     if let Some(take found) = map.remove(mut peers, id) {
                         let mut entry = take found
-                        if !operate(n, mut bucket, mut entry, clock, op, mut port, take call) {
+                        if !operate(n, gate, mut bucket, mut entry, clock, op, mut port, take call) {
                             withdrawn += 1
                         }
                         if !entry.read_closed || !entry.write_closed {
@@ -1204,10 +1333,72 @@ pub fn serve(n: Config, mut plan: sim.world.Plan, clock: Clock, take served: Ser
             }
         }
     }
+    report(take bucket, next - 1, withdrawn)
+}
+
+fn new_bucket() -> Bucket {
+    Bucket(objects: map.new(), uploads: map.new(), next_upload: 1, writes: 0, served: 0, fragment_trace: 0xcbf29ce484222325)
+}
+
+fn report(take bucket: Bucket, attempts: u64, withdrawn: u64) -> Report {
     let Bucket(objects: take objects, uploads: take uploads, next_upload, writes, fragment_trace, ..) = take bucket
     let mut pending: List[String] = list.with_capacity(map.len(uploads))
     for id in sorted_keys(uploads) {
         list.push(mut pending, clone(option.unwrap(map.get(uploads, id)).key))
     }
-    Report(objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: next - 1, withdrawn: withdrawn, fragment_trace)
+    Report(objects: take objects, pending: take pending, multipart_uploads: next_upload - 1, writes: writes, attempts: attempts, withdrawn: withdrawn, fragment_trace)
+}
+
+const LOOPBACK_IO_NS: u64 = 30000000000
+
+fn serve_connection(gate: Gate, mut bucket: Bucket, take conn: Socket, clock: Clock) waits {
+    let (take input, take output) = net.split(take conn)
+    let mut reader = take input
+    let mut writer = take output
+    let mut peer = new_peer(Clean, sim.world.plan(0), false)
+    let until: Until = At(clock, int.saturating_add(host.mono_ns(clock), LOOPBACK_IO_NS))
+    let limit = int.saturating_add(gate.rules.max_body, 65536u64)
+    while !matches_closed(peer.state) {
+        if list.len(peer.incoming) >= limit {
+            return
+        }
+        let room = order.min(65536u64, limit - list.len(peer.incoming))
+        // A receive appends into spare capacity only.
+        list.reserve(mut peer.incoming, room)
+        match host.recv_bounded(mut reader, mut peer.incoming, room, until) {
+            Ok(0) => return,
+            Ok(_) => received(gate, mut bucket, mut peer),
+            Error(_) => return,
+        }
+    }
+    if let ResetPeer = peer.state {
+        return
+    }
+    let empty: Bytes = list.new()
+    while peer.sent < list.len(peer.outgoing) {
+        match host.send_pair(mut writer, list.slice(peer.outgoing, peer.sent, list.len(peer.outgoing)), empty, until) {
+            Ok(0) => return,
+            Ok(n) => {
+                peer.sent += n
+            },
+            Error(_) => return,
+        }
+    }
+}
+
+/// Serves one bucket to other processes over a loopback listener until the
+/// listener fails. Each connection carries one request; the answer closes it.
+/// Every answer to an authenticated request carries `PROOF_FIELD`.
+pub fn serve_loopback(mut listener: Listener, take service: Loopback, clock: Clock) -> Report waits {
+    if service.exists_status != 412 && service.exists_status != 304 {
+        fail("sim.s3 needs a 412 or 304 dialect")
+    }
+    let gate = Gate(rules: Rules(exists_status: service.exists_status, max_body: service.max_body), cut: None, signing: Rooted(take service))
+    let mut bucket = new_bucket()
+    let mut accepted = 0u64
+    while let Ok((take conn, _)) = host.accept(mut listener, Never) {
+        accepted += 1
+        serve_connection(gate, mut bucket, take conn, clock)
+    }
+    report(take bucket, accepted, 0)
 }

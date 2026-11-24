@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.49: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.50: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.50 (Bucket backing; with STORE-SPEC v2.66, lane bucket-backing-t1-2022)
+
+`Backing` gains `Bucket(BucketBacking)`: a Net, a `std.object.Bucket` place (endpoint, region, bucket, prefix, style), `std.cred.Credentials` whose secret is sealed (a `Secret` grant, never plaintext), lane configuration, durability level and per-operation budget. The head task starts the object client and opens the place through `store.open_authority`, the path every objects@1 store takes, so §12.2 qualification runs at every open. A Bucket backing is persistent: it installs and deploys like `Disk`, its store size kind is `Bucket(lanes)`, and a deposed head stops on `Fenced` (§ operation). Placed installs still need `Disk` scratch.
 
 ## CHANGES-v2.49 (Changes.bounds in G2; with STORE-SPEC v2.61, lane w3b-spec-fix-2003)
 

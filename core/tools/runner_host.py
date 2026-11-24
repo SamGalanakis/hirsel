@@ -98,3 +98,143 @@ def unpinned(tape, copy):
     check = xxh3(checked_bytes, len(checked_bytes))
     copy.write_bytes(head + bytes(payload) + check.to_bytes(8, 'little'))
     return copy
+
+
+def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path, limit):
+    """Native T1 on a Bucket backing: two processes of one executable share the
+    loopback simulator bucket (STORE-SPEC v2.65 §12.2). A loopback relay to that
+    bucket which drops the proof does not qualify. The bare holder serves
+    activation 11; the successor installs 12 under the hosted allowance; the
+    holder's next commit is fenced; the relaunched place adopts 12 and commits."""
+    import queue
+    import socket
+    import subprocess
+    import threading
+
+    executable = work / 'bucket-place'
+    native = (['--runtime', str(runtime.resolve())] if runtime else []) + (['--cc', str(cc.resolve())] if cc else [])
+    command = [compiler, 'build', '--inputs', str(manifest_path), '--source-core', '--source-std',
+               '--backend', engine, *native, '--store', str(work / 'publish-cache'),
+               '--entry', 'store_crash@1/runner_crash/bucket_main', '--limit', str(limit),
+               '--grant', 'Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535',
+               '--grant', 'Secret:key=env:HIRSEL_BUCKET_T1_KEY kdf', '-o', str(executable)]
+    for capability in ('Clock', 'Random', 'Tasks', 'Process', 'Stderr', 'Stdin', 'Stdout'):
+        command += ['--grant', capability]
+    checked(command, engine=engine, case='T1-bucket:build')
+    # The root key lives only in the children's environment; nothing prints it.
+    env = dict(os.environ, HIRSEL_BUCKET_T1_KEY=os.urandom(32).hex())
+    hosted = '--hirsel-n-place=1048576'
+
+    started = []
+
+    def spawn(args):
+        process = subprocess.Popen([str(executable), *args], cwd=work, env=env, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+        started.append(process)
+        lines = queue.Queue()
+        threading.Thread(target=lambda: [lines.put(line.rstrip('\n')) for line in process.stdout] + [lines.put(None)],
+                         daemon=True).start()
+        return process, lines
+
+    def line(lines, case, timeout=120):
+        try:
+            got = lines.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError(f'{case}: no line within {timeout}s')
+        assert got is not None, f'{case}: the process closed its output'
+        return got
+
+    def once(args, case):
+        result = subprocess.run([str(executable), *args], cwd=work, env=env, capture_output=True, text=True,
+                                timeout=120)
+        return result.returncode, result.stdout + result.stderr
+
+    stripped = []
+
+    def relay(port):
+        # Forwards each one-request connection to the simulator and drops the proof
+        # field from the answer, so only the proof differs from the qualifying path.
+        server = socket.socket()
+        server.bind(('127.0.0.1', 0))
+        server.listen(16)
+
+        def serve():
+            while True:
+                try:
+                    client, _ = server.accept()
+                except OSError:
+                    return
+                with client, socket.create_connection(('127.0.0.1', port), timeout=30) as upstream:
+                    client.settimeout(30)
+                    request = b''
+                    while b'\r\n\r\n' not in request:
+                        chunk = client.recv(65536)
+                        if not chunk:
+                            break
+                        request += chunk
+                    head, _, body = request.partition(b'\r\n\r\n')
+                    length = next((int(field.split(b':')[1]) for field in head.split(b'\r\n')
+                                   if field.lower().startswith(b'content-length:')), 0)
+                    while len(body) < length:
+                        body += client.recv(65536)
+                    upstream.sendall(head + b'\r\n\r\n' + body)
+                    answer = b''
+                    while chunk := upstream.recv(65536):
+                        answer += chunk
+                    head, _, body = answer.partition(b'\r\n\r\n')
+                    kept = [field for field in head.split(b'\r\n')
+                            if not field.lower().startswith(b'x-hirsel-sim-proof:')]
+                    stripped.append(len(head.split(b'\r\n')) - len(kept))
+                    client.sendall(b'\r\n'.join(kept) + b'\r\n\r\n' + body)
+
+        threading.Thread(target=serve, daemon=True).start()
+        return server
+
+    try:
+        sim, sim_lines = spawn(['--sim'])
+        port = line(sim_lines, 'T1-bucket:sim')
+        assert port.startswith('PORT '), port
+        bucket = f'--bucket=http://127.0.0.1:{port[5:]}'
+        unproven = relay(int(port[5:]))
+        try:
+            code, text = once([hosted, '--hirsel-install', f'--bucket=http://127.0.0.1:{unproven.getsockname()[1]}'],
+                              'T1-bucket:unproven')
+        finally:
+            unproven.close()
+        assert sum(stripped) and code != 0 and 'sim:proof' in text, f'an unproven answer qualified: {code} {text}'
+
+        for activation in range(1, 10):
+            code, text = once([hosted, '--hirsel-install', bucket], f'T1-bucket:install-{activation}')
+            assert code == 0, f'install {activation}: {text}'
+        for activation in (10, 11):
+            code, text = once(['--hirsel-install', bucket], f'T1-bucket:bare-{activation}')
+            assert code == 0, f'bare install {activation}: {text}'
+
+        holder, held = spawn(['--hold', bucket])
+        ready = line(held, 'T1-bucket:holder')
+        assert ready.startswith('READY 11 '), ready
+        bare_n_place = int(ready.split()[2])
+
+        code, text = once([hosted, '--hirsel-install', bucket], 'T1-bucket:successor-install-12')
+        assert code == 0, f'successor install: {text}'
+        holder.stdin.write('fence\n')
+        holder.stdin.flush()
+        ended = line(held, 'T1-bucket:fence')
+        assert ended.startswith('ENDED ') and 'another writer' in ended, ended
+        assert holder.wait(timeout=60) == 0, holder.stderr.read()
+
+        successor, serving = spawn([hosted, '--hold', bucket])
+        ready = line(serving, 'T1-bucket:adopt')
+        assert ready == 'READY 12 1048576' and bare_n_place != 1048576, ready
+        successor.stdin.write('stop\n')
+        successor.stdin.flush()
+        assert line(serving, 'T1-bucket:adopt-bump') == 'BUMPED'
+        assert line(serving, 'T1-bucket:stop') == 'STOPPED'
+        assert successor.wait(timeout=60) == 0, successor.stderr.read()
+    finally:
+        for process in started:
+            if process.poll() is None:
+                comm = subprocess.check_output(['ps', '-o', 'comm=', '-p', str(process.pid)], text=True).strip()
+                assert comm == executable.name[:15], comm
+                process.kill()
+            process.wait(timeout=15)

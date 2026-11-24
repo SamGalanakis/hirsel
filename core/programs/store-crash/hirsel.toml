@@ -14,3 +14,4 @@ platform = { major = 1, path = "../platform" }
 [sources]
 "platform_crash.hirsel" = "platform_crash"
 "runner_crash.hirsel" = "runner_crash"
+"runner_crash-bucket.hirsel" = "runner_crash"

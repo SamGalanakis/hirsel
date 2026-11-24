@@ -174,7 +174,7 @@ pub fn start[G: send, H: shareable + inert + send, S: send, B: send](take p: run
     match p.backing {
         Memory => (),
         Temp(_) => (),
-        Disk(_) => return Error(Start(Missing("backing")))
+        _ => return Error(Start(Missing("backing")))
     }
     if !loopback_any(p.listen) {
         return Error(Start(Missing("listen")))

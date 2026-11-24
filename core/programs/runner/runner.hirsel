@@ -62,7 +62,11 @@ pub type Phase: send = Starting(Step) | Ready | Draining | Paused
 // hosted place reports them in `PlaceReady`; an in-process launcher reads them here.
 pub type Status: shareable + send { phase: Phase, digest: Bytes, target: String, n_place: u64, release: Bytes, activation: u64, store_id: (u64, u64), retain_from: u64, addr: Option[Addr] }
 pub type Stop: codec + send { lag_ms: u64, grace_ms: u64 }
-pub type Backing: send = Memory | Disk(Dir) | Temp(Dir)
+// An objects@1 place (RUNNER-SPEC v2.50). `credentials.secret` is a sealed
+// grant. The head starts the client and opens it through `open_authority`.
+pub type BucketBacking: send { net: Net, place: std.object.Bucket, credentials: std.cred.Credentials, lanes: std.object.LaneConfig, level: String, op_ms: u64 }
+pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking)
+fn persistent_backing(backing: Backing) -> bool { match backing { Disk(_) => true, Bucket(_) => true, _ => false } }
 pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: send]: send {
     backing: Backing, sizes: store.Overrides, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64,
     on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
@@ -543,7 +547,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
 // before it sends proof. No publisher, triggers, or listener start for this launch.
 fn operate_install[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
     let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
-    let persistent = match backing { Disk(_) => true, _ => false }
+    let persistent = persistent_backing(backing)
     if let InstallAt(_) = selection {
         if !persistent { return Error(Missing("disk store")) }
     }
@@ -1044,7 +1048,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Undecided => string.push(mut line, "the object store head write has an unknown outcome"),
         Declared(_) => string.push(mut line, "the durability level differs from the store declaration"),
         NotCurrent(version) => { string.push(mut line, "the store is at activation "); string.push_u64(mut line, version) },
-        Unqualified(_) => string.push(mut line, "the object store provider did not pass conditional write qualification"),
+        Unqualified(reason) => { string.push(mut line, "the object store provider did not pass conditional write qualification: "); string.push(mut line, reason) },
         HistoryMissing(_, _) => string.push(mut line, "the object store history is missing an object"),
         Reclaimed(_) => string.push(mut line, "the requested object store history was reclaimed"),
         Missed => string.push(mut line, "a read is waiting for a store frame"),
@@ -2095,6 +2099,14 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
             temporary = Some(take cleanup)
             store.open(tasks, dir, clock, random, options)
         },
+        Bucket(take bucket) => {
+            let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms) = take bucket
+            let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), op_ms)
+            match std.object.start(net, tasks, take place, take credentials, None, System, clock, random, lanes, deadline) {
+                Ok(take client) => store.open_authority(tasks, store.object_authority(take client, level, op_ms), clock, random, options),
+                Error(take problem) => Error(Remote(take problem)),
+            }
+        },
     }
     let db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
     Ok((take db, take temporary))
@@ -2104,7 +2116,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
     let ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
         head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle, expected_store: expected_store) = take job
-    let persistent = match backing { Disk(_) => true, _ => false }
+    let persistent = persistent_backing(backing)
     let (take opened, take temporary) = open_backing(take backing, options, tasks, clock, random)?
     let mut db = take opened
     if let Some(expected) = expected_store {

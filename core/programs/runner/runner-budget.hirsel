@@ -47,7 +47,7 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
     let Some(share) = int.checked_sub(limit, reserved) else {
         return Error(Full(Capacity(requested: reserved, available: limit)))
     }
-    let kind: store.Kind = match p.backing { Memory => Memory, _ => Directory }
+    let kind: store.Kind = match p.backing { Memory => Memory, Bucket(b) => Bucket(b.lanes), _ => Directory }
     match store.sized_reservation(kind, share, p.sizes) {
         Ok((take options, reserved_store)) => Ok((take options, share, reserved_store)),
         Error(short) => {

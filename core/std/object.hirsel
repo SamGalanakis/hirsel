@@ -367,7 +367,41 @@ type Endpoint: send {
     authority: String,
     port: u16,
     secure: bool,
+    proven: bool,
     roots: Option[Bytes]
+}
+
+fn loopback_v4(host: String) -> bool {
+    let octets = string.as_bytes(host)
+    let mut dots = 0u64
+    let mut digits = 0u64
+    let mut value = 0u64
+    let mut first = 0u64
+    for c in octets {
+        if c == b'.' {
+            if digits == 0 || dots == 3 {
+                return false
+            }
+            if dots == 0 {
+                first = value
+            }
+            dots += 1
+            digits = 0
+            value = 0
+        } else if int.is_ascii_digit(c) {
+            if digits == 3 || (digits > 0 && value == 0) {
+                return false
+            }
+            value = value * 10 + int.widen(c - b'0')
+            digits += 1
+            if value > 255 {
+                return false
+            }
+        } else {
+            return false
+        }
+    }
+    dots == 3 && digits != 0 && first == 127
 }
 
 fn endpoint(bucket: Bucket, take trust: Trust) -> Result[Endpoint, Error] {
@@ -388,6 +422,9 @@ fn endpoint(bucket: Bucket, take trust: Trust) -> Result[Endpoint, Error] {
     if parsed.userinfo != None || parsed.query != None || parsed.fragment != None || (parsed.path.end != parsed.path.start && string.slice(bucket.endpoint, parsed.path.start, parsed.path.end) != "/") || bucket.bucket == "" {
         return Error(Fatal(Malformed))
     }
+    // A plain-http path-style endpoint at an IPv4 loopback literal is the
+    // loopback simulator (STORE §12.2): every answer must carry its proof.
+    let loopback = !secure && bucket.style == Path && loopback_v4(string.from(string.slice(bucket.endpoint, host.start, host.end)))
     let mut name = string.from("")
     if bucket.style == Virtual {
         string.push(mut name, bucket.bucket)
@@ -411,7 +448,7 @@ fn endpoint(bucket: Bucket, take trust: Trust) -> Result[Endpoint, Error] {
         System => None,
         Roots(take certs) => Some(take certs),
     }
-    Ok(Endpoint(name: take name, authority: take authority, port, secure, roots: take roots))
+    Ok(Endpoint(name: take name, authority: take authority, port, secure, proven: loopback, roots: take roots))
 }
 
 type Job: send {
@@ -1698,6 +1735,7 @@ type Lane: send {
     server: Endpoint,
     prefix: String,
     auth: AuthState,
+    proof: Option[Secret],
     source: Option[Cred],
     refresh: Option[Receiver[cred.Credentials]],
     region_name: String,
@@ -1794,7 +1832,7 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     let result = match take req {
         Error(take e) => Invalid(take e),
         Ok(take wire) => {
-            let response = transact(mut h.connection, wire, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe, mut lane.list_parsing)
+            let response = transact(mut h.connection, wire, lane.proof, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe, mut lane.list_parsing)
             reclaim_request(mut lane.wire, take wire)
             take response
         },
@@ -1832,7 +1870,38 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     take result
 }
 
-fn transact(mut c: http_client.Connection, wire: http_client.Request, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
+fn proven_answer(head: http_client.ResponseHead, wire: http_client.Request, key: Secret) -> bool {
+    let Some(text) = header(head, sim.s3.PROOF_FIELD) else {
+        return false
+    }
+    if list.len(text) != 64 {
+        return false
+    }
+    let mut tag: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        let Some(hi) = hex_value(text[2 * i]) else {
+            return false
+        }
+        let Some(lo) = hex_value(text[2 * i + 1]) else {
+            return false
+        }
+        list.push(mut tag, hi * 16 + lo)
+    }
+    for h in wire.headers {
+        if h.name == "authorization" {
+            let Public(value) = h.value else {
+                return false
+            }
+            if let Ok(true) = secret.verify_hmac_sha256(key, sim.s3.proof_message(value), tag) {
+                return true
+            }
+            return false
+        }
+    }
+    false
+}
+
+fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Option[Secret], mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     if let Error(e) = http_client.start(mut c, wire, job.deadline) {
         return failure(if http_client.request_started(c) {
             RequestSent
@@ -1847,6 +1916,11 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, mut job: J
     }
     if let Error(e) = http_client.finish_request(mut c, MAX_U64) {
         return failure(RequestSent, e)
+    }
+    if let Some(key) = proof {
+        if !proven_answer(http_client.head(c), wire, key) {
+            return Invalid(Fatal(Malformed))
+        }
     }
     let status = http_client.status(http_client.head(c))
     if payload_read(op) && status >= 200 && status < 300 {
@@ -2110,6 +2184,7 @@ fn lane_loop(take setup: Lane) waits {
 pub opaque type Requests: send {
     bucket: Bucket,
     simulated: bool,
+    proven: bool,
     lanes: List[Sender[LaneMessage]],
     output: Receiver[LaneEvent],
     next: u64,
@@ -2193,6 +2268,14 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     })
     let (pool_tx, pool_rx): (Sender[PoolMessage], Receiver[PoolMessage]) = channel.new(lanes * 2 + 4)
     let bucket_path = request_path(bucket, "", true)
+    let proof: Option[Secret] = if server.proven {
+        match sim.s3.proof_key(credentials_set.secret) {
+            Ok(take key) => Some(take key),
+            Error(_) => return Error(Fatal(Malformed)),
+        }
+    } else {
+        None
+    }
     let active = auth_state(c, bucket.aws_region, take credentials_set)?
     let (tx, output): (Sender[LaneEvent], Receiver[LaneEvent]) = channel.new(lanes * 2)
     for index in 0u64 .. lanes {
@@ -2211,7 +2294,10 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
             Ok(take output_handle) => take output_handle,
             Error(_) => return Error(TooLarge),
         }
-        let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), prefix: clone(bucket.prefix), auth: take auth, source, refresh: take refresh, region_name: clone(bucket.aws_region), bucket_path: clone(bucket_path), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), list_parsing: list_scratch(), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
+        let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), prefix: clone(bucket.prefix), auth: take auth, proof: match proof {
+            Some(key) => Some(secret.share(key)),
+            None => None,
+        }, source, refresh: take refresh, region_name: clone(bucket.aws_region), bucket_path: clone(bucket_path), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), list_parsing: list_scratch(), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
         let worker = task.spawn(tasks, bytes lane_bytes, take setup, lane_loop)
         list.push(mut workers, take worker)
         list.push(mut inputs, take input)
@@ -2227,7 +2313,10 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     }
     let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
     let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
-    let requests = Requests(bucket: take bucket, simulated: false, lanes: take inputs, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c)
+    let requests = Requests(bucket: take bucket, simulated: false, proven: match proof {
+        Some(_) => true,
+        None => false,
+    }, lanes: take inputs, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c)
     let lifetime = Workers(lanes: take workers, resolver: take resolver, renewal: take renewal)
     Ok(Client(requests: take requests, workers: Some(take lifetime)))
 }
@@ -2241,6 +2330,12 @@ pub fn start_simulated(n: sim.s3.Endpoint, tasks: Tasks, take bucket: Bucket, ta
 
 pub fn simulated(c: Client) -> bool {
     c.requests.simulated
+}
+
+/// Whether every answer this client accepts carries the loopback
+/// simulator's proof for its credential (STORE §12.2).
+pub fn proven(c: Client) -> bool {
+    c.requests.proven
 }
 
 pub fn bucket_config(c: Client) -> Bucket {

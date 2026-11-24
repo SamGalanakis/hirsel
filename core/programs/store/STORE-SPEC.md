@@ -1,4 +1,6 @@
-# STORE-SPEC v2.65: the M4 store library (lane store-spec-1001)
+# STORE-SPEC v2.66: the M4 store library (lane store-spec-1001)
+
+v2.66 (lane bucket-backing-t1-2022): §12.2 qualifies the **loopback simulator**, a `std.sim.s3` bucket that other processes reach over real loopback sockets, through a per-answer proof that only a holder of the bucket credential can compute. No other provider rule changes, and there is still no override flag. See CHANGES-v2.65.
 
 v2.64 (lane replay-delta-fix-2023, astra replay-delta-attack-2020's ten findings on v2.63): text only, **not yet built**. It fixes all ten and keeps v2.63's ruling: the journal carries what replay needs, open decodes no class-3 or class-4 frame, and every store of the format uses one COMMIT op encoding. **M3's format word is 5** (§13.1, AP1): format 4 was written by main with format-3 data ops, and its bytes can also parse under the prior grammar, so format-3 and format-4 stores are `Unsupported` at the first HEADER read, before claim, cleanup or rotation, on log@1 and objects@1, and old format-4 stores, the checkbox deployment included, are re-created from genesis. A prior is 1 + the full encoded length of the replaced value for every kind, so a Many entry's covering payload counts, and its ceiling is the format's, FORMAT_VALUE_MAX + 1 = 16,711,681, not the API write limit. Replay charges priors to `account_tiered` only; `account_memory` is recomputed exactly at open, because a commit that settles under AP15's proposed-root admission can lower it, which no prior can say. The fold applies without charging, then settles both classes like any cut. A Tiered trim keeps per-trim evidence through the fold; a Memory trim is compared at apply; the removed count is min(b, n) − f, bytes are subtracted once, and a regressing floor is `Corrupt`. A pin or cut-path fork of an overlaid Snapshot materializes its overlay before publishing. The fold rebuilds per-branch ownership from the ordered suffix. A corrupt fold takes the store error path, never `NoRoom`. See CHANGES-v2.64. Reversible: the spec only.
 
@@ -151,6 +153,14 @@ v2.29 (RUNNER-SPEC v2.18, lane caller-scope-1128, astra's third attack, ATTACK-3
 - **Two RUNNER-SPEC slices consume this version.** AM3 and AM8 are small and are built first, as slice RA. RS then takes AM1, AM2 and AM4–AM7, and RR builds on AM8 (RUNNER-SPEC §9). Neither RS nor RR waits on the other.
 
 v2.28 (RUNNER-SPEC v2.17, lane caller-scope-1128, astra's second attack, ATTACK-2): text and format; no store has been deployed, so the cutover is a fresh store. `serve` runs an admitted position: it runs the policy and the body as two isolated executions over one snapshot and writes the reply, and the record when there is one, in the body's transaction; a fault keeps the run's digest in a `Pending` that `conclude` writes with the fixed reply (AL1). A duplicate returns the stored reply with its scope digest (AL2). The scope digest begins with the StoreId (AL3). `migrate` is its own phase over a `Migration`, and `Schema` only opens (AL4). The CALL section carries the authority bytes (AL5). The sizes follow the 32-byte scope digest, and `serve` keeps no read log (AL6).
+
+## CHANGES-v2.66 (bucket-backing-t1-2022: the loopback simulator qualifies by proof)
+
+| Item | Change | Where |
+|---|---|---|
+| Loopback simulator | `std.sim.s3.serve_loopback` serves one path-style bucket over a loopback listener. It holds the credential root, checks SigV4 for the date each request names, and answers every authenticated request with `x-hirsel-sim-proof` | §12.2 |
+| Proven client | a `std.object` client whose endpoint is `http://`, path style, at an IPv4 loopback literal refuses every answer without a valid proof (`Fatal(Malformed)`) | §12.2 |
+| Qualification | such a client qualifies after one proven `GetBucketLocation`; a failed or unproven answer is `Unqualified("sim:proof")`. The https rule, host matching, AWS and Tigris rules are unchanged; a loopback host never qualifies without the proof | §12.2 |
 
 ## CHANGES-v2.65 (W3a B4)
 
@@ -3766,7 +3776,7 @@ Retirement on objects@1 is reclaim's (§12.6): a pack is garbage when no retaine
 The client maps **412** to `Mismatch` (for `If-Match`) and `Exists` (for `If-None-Match`). A **409** on a conditional PUT (S3's `ConditionalRequestConflict`: a conflicting request was in flight) is **retried with the same tag and body** within the budget, and is never `Mismatch` (Fable F7). Multipart completion has its own rule (above).
 
 **Which providers qualify (Fable S2, Astra #17).** `object_authority` qualifies the **live client** at every open (writer, genesis and follower) before any write. It never uses the AUTHORITY recorded in the head.
-- The live client's endpoint must be `https`. Otherwise the result is `Unqualified("insecure")`, because the service identity is the TLS-authenticated host.
+- The live client's endpoint must be `https`, except for the loopback simulator below. Otherwise the result is `Unqualified("insecure")`, because the service identity is the TLS-authenticated host.
 - The provider is identified by the live client's configured host, matched exactly:
   - `s3.<region>.amazonaws.com` or `s3.amazonaws.com` is AWS S3;
   - `fly.storage.tigris.dev` or `t3.storage.dev` is Tigris;
@@ -3781,7 +3791,11 @@ The client maps **412** to `Mismatch` (for `If-Match`) and `Exists` (for `If-Non
 
   The allow-list is a table in the store's source. Each row is a reply string and the probe that observed it on a bucket of a documented Multi-region or Single-region type. **v2.47 ships it empty.** The candidates are `usa`, `eur` and the region codes of Tigris's regions reference. Each enters only after one `GetBucketLocation` on a real bucket of that type (open item; the dev bucket `divine-glitter-523` replies `global` and is refused).
 - A single-endpoint race that one bucket wins 20 times out of 20 shows the operations work, not that they are linearizable across regions, so it never qualifies a bucket type on its own.
-- **`std.sim.s3`** qualifies. It is one map.
+- **`std.sim.s3`** qualifies. It is one map. A client reaches it in one of two ways (v2.66):
+  - a client started on the in-process simulator endpoint (`start_simulated`), whose provider port belongs to the simulator;
+  - the **loopback simulator** (`std.sim.s3.serve_loopback`), which other processes reach over real sockets. It serves one named bucket, path style, and answers a target outside `/<bucket>` with 404 `NoSuchBucket`. A client whose endpoint is `http://`, path style, with an IPv4 loopback literal host (`127.0.0.0/8`) is a proven client. It derives a proof key from its credential root, `HMAC-SHA256` derivation under `hirsel.sim.s3.proof`, sealed for MAC use only. It refuses every answer, error answers included, unless the answer carries `x-hirsel-sim-proof: hex(HMAC(proof key, "hirsel.sim.s3.v1\n" ‖ the request's exact Authorization value))`. The simulator proves only answers to SigV4-authenticated requests, so it is no proof oracle. The proof binds the request, not the answer: it shows that a holder of the credential root saw this request, so a process without the root cannot pass as the simulator, while the answer's status and body rest on the loopback host being the operator's own, as they do for any plain-http test endpoint. Qualification sends one `GetBucketLocation`. A failed or unproven answer is `Unqualified("sim:proof")`.
+  
+  A loopback host never qualifies by its address alone: only a process that holds the credential root can answer, so another local server is refused.
 - There is no override flag: a linearizability claim the store cannot check would be a hidden weaker promise.
 
 **`std.object` gains** (Astra #4, #17, #18):

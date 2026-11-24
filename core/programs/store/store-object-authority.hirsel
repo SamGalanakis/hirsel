@@ -41,6 +41,14 @@ fn history_qualify(mut client: std.object.Client, deadline: u64) -> Result[(), E
     if std.object.simulated(client) {
         return Ok(())
     }
+    if std.object.proven(client) {
+        // The client refuses any answer without the loopback simulator's
+        // proof for its credential, so one answered probe qualifies it.
+        let Ok(_) = std.object.bucket_location(mut client, deadline) else {
+            return Error(Unqualified("sim:proof"))
+        }
+        return Ok(())
+    }
     if !std.object.endpoint_secure(client) {
         return Error(Unqualified("insecure"))
     }

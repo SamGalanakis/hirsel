@@ -1,0 +1,109 @@
+fn load(d: Dir, label: String, index: u64) -> Bytes waits {
+    let mut name: String = string.with_capacity(12)
+    string.push(mut name, label)
+    string.push_u64(mut name, index)
+    result.unwrap(std.file.read(d, name))
+}
+
+fn buffer(size: u64, fill: u8) -> Bytes {
+    let mut b: Bytes = list.with_capacity(size)
+    list.fill(mut b, size, fill)
+    b
+}
+
+fn equal(d: Dir, index: u64, actual: Bytes) waits {
+    if actual != load(d, "out", index) {
+        fail("video YUV output differs from direct libyuv")
+    }
+}
+
+fn vectors(f: Foreign[video_yuv.Yuv], d: Dir, width: u32, height: u32, dw: u32, dh: u32, start: u64) -> u64 waits {
+    let formats =[(I420 : video_yuv.Format), (Nv12 : video_yuv.Format), (P010 : video_yuv.Format)]
+    let orders =[(Rgba : video_yuv.Order), (Abgr : video_yuv.Order)]
+    let matrices =[(Bt601 : video_yuv.Matrix), (Bt709 : video_yuv.Matrix), (Bt2020 : video_yuv.Matrix)]
+    let filters =[(Nearest : video_yuv.Filter), (Linear : video_yuv.Filter), (Bilinear : video_yuv.Filter), (Box : video_yuv.Filter)]
+    let rotations =[(Clockwise90 : video_yuv.Rotation), (Clockwise180 : video_yuv.Rotation), (Clockwise270 : video_yuv.Rotation)]
+    let mut index = start
+    for format in formats {
+        let yuv_len = result.unwrap(video_yuv.yuv_size(format, width, height))
+        let rgb_len = result.unwrap(video_yuv.rgb_size(width, height))
+        let mut rgb = buffer(rgb_len, 1)
+        let mut frame = buffer(yuv_len, 1)
+        for order in orders {
+            for matrix in matrices {
+                let src = load(d, "in", index)
+                result.unwrap(video_yuv.to_rgb(f, format, order, matrix, width, height, src, mut rgb))
+                equal(d, index, rgb)
+                index += 1
+                let packed = load(d, "in", index)
+                result.unwrap(video_yuv.from_rgb(f, format, order, matrix, width, height, packed, mut frame))
+                equal(d, index, frame)
+                index += 1
+            }
+        }
+        let mut scaled = buffer(result.unwrap(video_yuv.yuv_size(format, dw, dh)), 1)
+        for filter in filters {
+            let src = load(d, "in", index)
+            result.unwrap(video_yuv.scale(f, format, filter, width, height, dw, dh, src, mut scaled))
+            equal(d, index, scaled)
+            index += 1
+        }
+        for rotation in rotations {
+            let src = load(d, "in", index)
+            result.unwrap(video_yuv.rotate(f, format, rotation, width, height, src, mut frame))
+            equal(d, index, frame)
+            index += 1
+        }
+    }
+    index
+}
+
+fn limits(f: Foreign[video_yuv.Yuv]) {
+    let src = buffer(16, 0)
+    let mut dst = buffer(16, 83)
+    let sentinel = buffer(16, 83)
+    let huge_rgb = bound bytes 0 {
+        video_yuv.from_rgb(f, P010, Rgba, Bt2020, 4294967295u32, 4294967295u32, src, mut dst)
+    }
+    let Ok(Error(Dimensions)) = huge_rgb else {
+        fail("RGB header reached allocation")
+    }
+    let huge_scale = bound bytes 0 {
+        video_yuv.scale(f, P010, Box, 2, 2, 8192, 8192, src, mut dst)
+    }
+    let Ok(Error(Dimensions)) = huge_scale else {
+        fail("scale destination reached allocation")
+    }
+    let empty_rotate = bound bytes 0 {
+        video_yuv.rotate(f, I420, Clockwise180, 0, 4096, src, mut dst)
+    }
+    let Ok(Error(Dimensions)) = empty_rotate else {
+        fail("zero-sized rotation reached allocation")
+    }
+    if result.unwrap(video_yuv.rgb_size(8192, 4096)) != 134217728u64 || result.unwrap(video_yuv.yuv_size(P010, 3, 5)) != 54u64 {
+        fail("wrong frame limit or odd chroma size")
+    }
+    let Error(Dimensions) = video_yuv.rgb_size(8192, 4097) else {
+        fail("pixel bomb accepted")
+    }
+    let Error(BufferSize) = video_yuv.to_rgb(f, P010, Rgba, Bt601, 2, 2, src, mut dst) else {
+        fail("wrong P010 plane size admitted")
+    }
+    let unaligned = buffer(13, 0)
+    let Error(Alignment) = video_yuv.to_rgb(f, P010, Rgba, Bt601, 2, 2, list.slice(unaligned, 1, 13), mut dst) else {
+        fail("misaligned P010 loan accepted")
+    }
+    if dst != sentinel {
+        fail("refused call changed output")
+    }
+}
+
+@test
+fn direct_libyuv_vectors(f: Foreign[video_yuv.Yuv], d: Dir) -> Result[(), ()] waits {
+    limits(f)
+    let index = vectors(f, d, 64, 32, 32, 16, 0)
+    if vectors(f, d, 1039, 5, 17, 3, index) != 114 {
+        fail("wrong reference case count")
+    }
+    Ok(())
+}

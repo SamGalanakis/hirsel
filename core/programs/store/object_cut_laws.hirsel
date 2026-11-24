@@ -422,7 +422,13 @@ fn object_prepared_install_law(d: Dir, c: Clock, r: Random, tasks: Tasks, sim: B
     let mut schema = declare_follower(observer)
     let releases = deploy_result(declare_release_table(mut schema, std.codec.of_bytes()))?
     let declared_rows = deploy_result(declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(declare_single_index(mut schema, declared_rows, "by_v", code.describe(crash_value), std.codec.key_u64()))?
     let migrated = deploy_result(finish(mut schema, take declared_rows))?
+    let other = deploy_result(declare_table(mut schema, "other", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(declare_single_index(mut schema, other, "empty", code.describe(crash_value), std.codec.key_u64()))?
+    let _ = deploy_result(finish(mut schema, take other))?
+    let added = deploy_result(declare_table(mut schema, "added", std.codec.key_u64(), std.codec.of_u64()))?
+    let _ = deploy_result(finish(mut schema, take added))?
     deploy_result(seal_follower(observer, take schema))?
     if capture.activation != 4 || capture.binding != install_fixture_bytes(32, 66) || version(visible) != 4 ||
         deploy_result(get(view_reader, visible, releases, 4))? != Some(release_witness(digest)) ||

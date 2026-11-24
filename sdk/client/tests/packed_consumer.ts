@@ -54,16 +54,16 @@ try {
   await client.whenReady();
   const api = bind(client);
   // The fixture returns Value(Some(None), 2^53 + 1). The wire call wraps it in Returned.
-  const expected: Awaited<ReturnType<typeof api.call.packed_reply>> = {
+  const expected: Awaited<ReturnType<typeof api.call.packed_consumer.packed_reply>> = {
     tag: 'Returned', value: {tag: 'Value', values: [{tag: 'Some', value: {tag: 'None'}}, 9007199254740993n]},
   };
-  assert.deepEqual(await api.call.packed_reply(undefined), expected);
+  assert.deepEqual(await api.call.packed_consumer.packed_reply(undefined), expected);
   assert.deepEqual(tables.map(({name, id, owner, kind}) => [name, id, owner, kind]),
     [['items', 1, 0, 1], ['by_id', 2, 1, 2]]);
   type ItemRow = {slot: 'items'; key: bigint; value: {tag: 'None'} | {tag: 'Some'; value: {title: string; done: boolean}}};
   const rows = await new Promise<ItemRow[]>((resolve, reject) => {
     diagnostic = reject;
-    const sub = api.subscribeDecoded.packed_rows(undefined, current => {
+    const sub = api.subscribeDecoded.packed_consumer.packed_rows(undefined, current => {
       assert.deepEqual(current.value(), {tag: 'Ready', value: undefined});
       const rows = current.rows('items');
       if (rows.tag === 'Ready') resolve(rows.value);

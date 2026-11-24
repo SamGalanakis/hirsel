@@ -172,13 +172,13 @@
       call: (entry, arg, decode) => client.call(entry, arg, decode, values.u32.decode(arg)),
       subscribe: (entry, arg, onChanges) => client.subscribeChanges(entry, arg, onChanges),
     });
-    api.subscribe.board(undefined, onRows);
+    api.subscribe.main.board(undefined, onRows);
 
     async function toggle(i) {
       if (!painted || busy || client.state !== 'Ready') return;
       busy = true;
       try {
-        const outcome = await api.call.toggle(i);
+        const outcome = await api.call.main.toggle(i);
         if (outcome.tag !== 'Returned' || outcome.value.tag !== 'Ok') {
           status.textContent = `Toggle failed (${outcome.value?.tag ?? outcome.tag}).`;
         }

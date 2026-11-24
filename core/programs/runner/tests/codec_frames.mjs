@@ -32,12 +32,12 @@ export async function vectors(c,frame,entries) {
       return subscription;
     }
   });
-  assert.deepEqual(await client.call.toggle(7n),{tag:'Returned',value:8n});
-  assert.deepEqual(await client.call.commit(1n),{tag:'Returned',value:{tag:'Ok',value:{n:9n}}});
-  assert.deepEqual(await client.call.commit(0n),{tag:'Returned',value:{tag:'Error',value:{message:'bad'}}});
+  assert.deepEqual(await client.call.main.toggle(7n),{tag:'Returned',value:8n});
+  assert.deepEqual(await client.call.main.commit(1n),{tag:'Returned',value:{tag:'Ok',value:{n:9n}}});
+  assert.deepEqual(await client.call.main.commit(0n),{tag:'Returned',value:{tag:'Error',value:{message:'bad'}}});
   let delivered = false;
   let reason;
-  client.subscribe.rows(3, sub => { assert.deepEqual(sub.rows(0),{tag:'Ready',value:[]}); delivered = true; }, end => { reason = end; }).unsubscribe();
+  client.subscribe.main.rows(3, sub => { assert.deepEqual(sub.rows(0),{tag:'Ready',value:[]}); delivered = true; }, end => { reason = end; }).unsubscribe();
   assert.equal(delivered,true); assert.equal(unsubscribed,true);
   assert.deepEqual(reason,{tag:'Refused',value:{tag:'Deadline'}});
   let cases = 0;

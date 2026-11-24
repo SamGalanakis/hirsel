@@ -8,8 +8,11 @@ pub const RUNTIME: &str = include_str!("sdk_codec.js");
 const DECLARATIONS: &str = include_str!("sdk_codec.d.ts");
 
 mod http;
+mod stubs;
 
 pub use http::HttpBinding;
+use stubs::StubTypes;
+pub(crate) use stubs::{entry_path, stub_paths};
 
 pub(crate) struct Reader<'a> {
     pub(crate) bytes: &'a [u8],
@@ -415,84 +418,9 @@ pub fn place_error(bytes: &[u8]) -> Result<String, Error> {
     Ok(message)
 }
 
-pub(crate) fn entry_path(identity: &[u8]) -> Result<&str, Error> {
-    // PROG-9: version 01 followed by UTF-8 D A S. D ends at the first '[' or '('.
-    if identity.first() != Some(&1) {
-        return Err("Malformed: entry identity version".into());
-    }
-    let text = std::str::from_utf8(&identity[1..])?;
-    let (path, _) = text
-        .split_once(['[', '('])
-        .ok_or("Malformed: entry signature")?;
-    Ok(path)
-}
-
-pub(crate) fn stub_name(identity: &[u8]) -> Result<String, Error> {
-    let path = entry_path(identity)?;
-    let name = path
-        .rsplit('/')
-        .next()
-        .ok_or("Malformed: definition identity")?;
-    Ok(String::from_utf8(decode_identity_component(name)?)?)
-}
-
-fn decode_identity_component(component: &str) -> Result<Vec<u8>, Error> {
-    let mut out = Vec::new();
-    let mut bytes = component.bytes();
-    while let Some(b) = bytes.next() {
-        out.push(if b == b'%' {
-            let hi = bytes.next().ok_or("Malformed: percent escape")?;
-            let lo = bytes.next().ok_or("Malformed: percent escape")?;
-            u8::from_str_radix(std::str::from_utf8(&[hi, lo])?, 16)?
-        } else {
-            b
-        });
-    }
-    Ok(out)
-}
-
-pub(crate) fn duplicate_stub_name(first: &[u8], second: &[u8]) -> Error {
-    fn component_text(component: &str) -> String {
-        let Ok(bytes) = decode_identity_component(component) else {
-            return component.to_owned();
-        };
-        let mut text = String::new();
-        for chunk in bytes.utf8_chunks() {
-            text.push_str(chunk.valid());
-            for &byte in chunk.invalid() {
-                text.extend(byte.escape_ascii().map(char::from));
-            }
-        }
-        text
-    }
-
-    fn path_text(identity: &[u8]) -> String {
-        let path = entry_path(identity).expect("stub name already validated");
-        let (_, path) = path.split_once('/').unwrap_or(("", path));
-        let Some((module, entry)) = path.rsplit_once('/') else {
-            return component_text(path);
-        };
-        let module = module.split('/').map(component_text).collect::<Vec<_>>();
-        format!("{}::{}", module.join("."), component_text(entry))
-    }
-
-    format!(
-        "DuplicateStubName({}, {})",
-        path_text(first),
-        path_text(second)
-    )
-    .into()
-}
-
 /// Complete all generation before touching the requested output directory.
 pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> {
-    let mut names = BTreeMap::new();
-    for entry in &describe.exported {
-        let name = stub_name(&entry.identity)?;
-        if let Some(old) = names.insert(name, &entry.identity) {
-            return Err(duplicate_stub_name(old, &entry.identity));
-        }
-    }
+    let paths = stub_paths(describe)?;
     let mut js = RUNTIME.to_owned();
     let mut dts = DECLARATIONS.to_owned();
     let mut entries = "import * as codec from './codec.js';\n".to_owned();
@@ -510,21 +438,23 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             entry.result_fp
         ));
     }
-    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null);\n");
-    let mut calls = Vec::new();
-    let mut subscriptions = Vec::new();
-    let mut decoded = Vec::new();
+    entries.push_str("];\nexport function bind(client) {\nconst call = Object.create(null), subscribe = Object.create(null), subscribeDecoded = Object.create(null);\nconst ns = (root, path) => path.reduce((o, k) => o[k] ??= Object.create(null), root);\n");
+    let mut calls = StubTypes::default();
+    let mut subscriptions = StubTypes::default();
+    let mut decoded = StubTypes::default();
     for (i, entry) in describe.exported.iter().enumerate() {
         let args = Schema::read(&entry.args)?;
         let arg_name = format!("Args{i}");
         js.push_str(&args.javascript(&arg_name));
         dts.push_str(&args.declarations(&arg_name));
-        let name = json!(stub_name(&entry.identity)?);
+        let path = &paths[i];
+        let (name, module) = path.split_last().expect("stub path has a module");
+        let at = |root: &str| format!("ns({root},{})[{}]", json!(module), json!(name));
         if entry.kind == 2 {
             let query = entry.query_schemas()?;
-            entries.push_str(&format!("subscribe[{name}] = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd);\n"));
-            subscriptions.push(format!(
-                "{name}: (args: codec.{arg_name}, onChange: (sub: Subscription) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
+            entries.push_str(&format!("{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd);\n", at("subscribe")));
+            subscriptions.insert(path, format!(
+                "(args: codec.{arg_name}, onChange: (sub: Subscription) => void, onEnd?: (reason: SubscriptionEnd) => void) => Subscription"
             ));
             let value = format!("Value{i}");
             js.push_str(&query.value.javascript(&value));
@@ -549,23 +479,24 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
                 row_codecs.push(format!("codec.{row}"));
             }
             entries.push_str(&format!(
-                "subscribeDecoded[{name}] = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd,queryCodec(codec.{value}, {}, [{}], [{}]));\n",
-                json!(names), key_codecs.join(","), row_codecs.join(",")
+                "{} = (args,onChange,onEnd) => client.subscribe(want[{i}],codec.{arg_name}.encode(args),onChange,onEnd,queryCodec(codec.{value}, {}, [{}], [{}]));\n",
+                at("subscribeDecoded"), json!(names), key_codecs.join(","), row_codecs.join(",")
             ));
             let sub = format!(
                 "Subscription<codec.{value}, {{ {} }}>",
                 slot_types.join("; ")
             );
-            decoded.push(format!("{name}: (args: codec.{arg_name}, onChange: (sub: {sub}) => void, onEnd?: (reason: SubscriptionEnd) => void) => {sub}"));
+            decoded.insert(path, format!("(args: codec.{arg_name}, onChange: (sub: {sub}) => void, onEnd?: (reason: SubscriptionEnd) => void) => {sub}"));
         } else {
             let result = Schema::read(&entry.result)?;
             let result_name = format!("Result{i}");
             js.push_str(&result.javascript(&result_name));
             dts.push_str(&result.declarations(&result_name));
-            entries.push_str(&format!("call[{name}] = (args) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode);\n"));
-            calls.push(format!(
-                "{name}: (args: codec.{arg_name}) => Promise<Outcome<codec.{result_name}>>"
-            ));
+            entries.push_str(&format!("{} = (args) => client.call(want[{i}],codec.{arg_name}.encode(args),codec.{result_name}.decode);\n", at("call")));
+            calls.insert(
+                path,
+                format!("(args: codec.{arg_name}) => Promise<Outcome<codec.{result_name}>>"),
+            );
         }
     }
     entries.push_str("return {call,subscribe,subscribeDecoded};\n}\n");
@@ -588,10 +519,10 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
 "#);
     }
     let entry_dts = format!(
-        "import type * as codec from './codec.js';\nimport type {{Option, Outcome, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {{ {} }}; subscribe: {{ {} }}; subscribeDecoded: {{ {} }} }};\n",
-        calls.join("; "),
-        subscriptions.join("; "),
-        decoded.join("; ")
+        "import type * as codec from './codec.js';\nimport type {{Option, Outcome, Subscription, SubscriptionEnd, Transport}} from './client.js';\nexport const identity: {{readonly digest: Uint8Array; readonly target: string; readonly n_place: bigint}};\nexport const want: Array<{{identity: Uint8Array; args_fp: bigint; result_fp: bigint}}>;\nexport const tables: ReadonlyArray<{{name: string; id: number; owner: number; kind: number}}>;\nexport type DecodedRow<S, K, V> = {{slot: S; key: K; value: Option<V>}};\nexport function bind(client: Transport): {{call: {}; subscribe: {}; subscribeDecoded: {} }};\n",
+        calls.render(),
+        subscriptions.render(),
+        decoded.render()
     );
     let mut files = BTreeMap::from([
         ("package.json".into(), "{\"type\":\"module\"}\n".into()),
@@ -668,6 +599,7 @@ fn write_files(files: BTreeMap<String, String>, out: &Path) -> Result<(), Error>
 
 #[cfg(test)]
 mod tests {
+    use super::stubs::stub_path;
     use super::*;
     fn scalar(op: u8) -> Vec<u8> {
         vec![3, 0, 0, 0, 0, op]
@@ -729,43 +661,61 @@ mod tests {
         );
     }
     #[test]
-    fn sdk_duplicate_stub_name_writes_nothing() {
-        let d = Describe {
+    fn sdk_stub_paths_namespace_by_module() {
+        // Oracle: docs/spec/sdk.md section 4. Stubs are api.call.<module>.<name>,
+        // nested for a nested module; a clash or a function/namespace overlap is
+        // DuplicateStubName before any output is written.
+        let mut d = Describe {
             digest: vec![1],
             target: "t".into(),
             n_place: 16,
             revision: vec![],
-            exported: vec![entry("api/a", "toggle"), entry("api/b", "toggle")],
+            exported: vec![entry("a", "get"), entry("b", "get"), entry("x/y", "get")],
             tables: vec![],
             bindings: vec![],
         };
-        let dir = tempfile::tempdir().unwrap();
-        let out = dir.path().join("absent");
+        let files = generate(&d).unwrap();
+        for line in [
+            "ns(call,[\"a\"])[\"get\"] = (args) => client.call(want[0],codec.Args0.encode(args),codec.Result0.decode);\n",
+            "ns(call,[\"b\"])[\"get\"] = (args) => client.call(want[1],codec.Args1.encode(args),codec.Result1.decode);\n",
+            "ns(call,[\"x\",\"y\"])[\"get\"] = (args) => client.call(want[2],codec.Args2.encode(args),codec.Result2.decode);\n",
+        ] {
+            assert!(files["entries.js"].contains(line), "{line}");
+        }
+        assert!(files["entries.d.ts"].contains(
+            "export function bind(client: Transport): {call: { \"a\": { \"get\": (args: codec.Args0) => Promise<Outcome<codec.Result0>> }; \"b\": { \"get\": (args: codec.Args1) => Promise<Outcome<codec.Result1>> }; \"x\": { \"y\": { \"get\": (args: codec.Args2) => Promise<Outcome<codec.Result2>> } } }; subscribe: {  }; subscribeDecoded: {  } };\n"
+        ));
         assert_eq!(
-            write(&d, &out).unwrap_err().to_string(),
-            "DuplicateStubName(api.a::toggle, api.b::toggle)"
-        );
-        assert!(!out.exists());
-        assert_eq!(
-            stub_name(&entry("x", "%74oggle").identity).unwrap(),
-            "toggle"
+            stub_path(&entry("x", "%74oggle").identity).unwrap(),
+            ["x", "toggle"]
         );
         assert_eq!(
-            stub_name(b"\x01runner@1/runner_launch/echo(take u64)->u64").unwrap(),
-            "echo"
+            stub_path(b"\x01runner@1/runner_launch/echo(take u64)->u64").unwrap(),
+            ["runner_launch", "echo"]
         );
-        let generic_cases: &[(&[u8], &str)] = &[
-            (b"\x01app@1/main/pick[u64]{plain[u64]}($0,$0)->$0", "pick"),
+        let generic_cases: &[(&[u8], [&str; 2])] = &[
+            (
+                b"\x01app@1/main/pick[u64]{plain[u64]}($0,$0)->$0",
+                ["main", "pick"],
+            ),
             (
                 b"\x01app@1/main/swap[u64,core@1/core/Text]{send[u64]}(take($0,$1))->($1,$0)",
-                "swap",
+                ["main", "swap"],
             ),
-            (b"\x01app@1/main/a%5Bb(u64)->u64", "a[b"),
+            (b"\x01app@1/main/a%5Bb(u64)->u64", ["main", "a[b"]),
         ];
         for &(identity, expected) in generic_cases {
-            assert_eq!(stub_name(identity).unwrap(), expected);
+            assert_eq!(stub_path(identity).unwrap(), expected);
         }
-        let mut d = d;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("absent");
+        d.exported.push(entry("x", "y"));
+        assert_eq!(
+            write(&d, &out).unwrap_err().to_string(),
+            "DuplicateStubName(x.y::get, x::y)"
+        );
+        assert!(!out.exists());
+        d.exported.truncate(2);
         d.exported[0].identity = generic_cases[0].0.to_vec();
         d.exported[1].identity = b"\x01app@1/main/pick[u32]{plain[u32]}($0,$0)->$0".to_vec();
         assert_eq!(
@@ -818,11 +768,11 @@ mod tests {
         let files = generate(&d).unwrap();
         assert!(files["entries.js"].contains("n_place:18446744073709551615n"));
         assert!(files["entries.js"].contains("args_fp:18446744073709551615n"));
-        assert!(files["entries.js"].contains("call[\"toggle\"]"));
-        assert!(files["entries.js"].contains("subscribe[\"rows\"]"));
-        assert!(files["entries.js"].contains("subscribeDecoded[\"rows\"]"));
-        assert!(files["entries.js"].contains("subscribe[\"total\"]"));
-        assert!(files["entries.js"].contains("subscribeDecoded[\"total\"]"));
+        assert!(files["entries.js"].contains("ns(call,[\"m\"])[\"toggle\"]"));
+        assert!(files["entries.js"].contains("ns(subscribe,[\"m\"])[\"rows\"]"));
+        assert!(files["entries.js"].contains("ns(subscribeDecoded,[\"m\"])[\"rows\"]"));
+        assert!(files["entries.js"].contains("ns(subscribe,[\"m\"])[\"total\"]"));
+        assert!(files["entries.js"].contains("ns(subscribeDecoded,[\"m\"])[\"total\"]"));
         assert!(files["codec.d.ts"].contains("export type Args0 = bigint"));
         assert!(files["codec.d.ts"].contains("export type Key1_0 = bigint"));
         assert!(files["codec.d.ts"].contains("export type RowValue1_0 = string"));

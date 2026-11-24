@@ -58,7 +58,7 @@ atomic Batch. Reset and reconnect preserve the old cache until the replacement
 id appears in `Batch.complete`, including an empty initial result. Old ids are
 ignored. All subscriptions use `resume: None`.
 
-Pass `onEnd` after the row callback on `api.subscribe.<name>`,
+Pass `onEnd` after the row callback on `api.subscribe.<module>.<name>`,
 `client.subscribe()` or `client.subscribeChanges()` to receive the decoded
 `SubscriptionEnd` reason. The client removes the subscription before calling
 `onEnd` once for its `Ended` frame. Reset and reconnect resubscribe, and an empty

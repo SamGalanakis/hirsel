@@ -6,7 +6,7 @@
 //! connection is made. The specification is docs/spec/sdk.md, "Calling an
 //! entry from the terminal".
 use crate::cli::{Invocation, OptionId};
-use crate::sdk::{Describe, Exported, Schema, duplicate_stub_name, stub_name};
+use crate::sdk::{Describe, Exported, Schema, stub_paths};
 use serde_json::{Map, Number, Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -158,16 +158,16 @@ fn run_with(
     Ok(if returned { 0 } else { 1 })
 }
 
+/// Each entry under its terminal name, `MODULE/NAME` (docs/spec/sdk.md).
 fn named(description: &Describe) -> Result<Vec<(String, &Exported)>, Error> {
-    let mut entries: Vec<(String, &Exported)> = Vec::new();
-    for entry in &description.exported {
-        let name = stub_name(&entry.identity)?;
-        if let Some((_, old)) = entries.iter().find(|(n, _)| *n == name) {
-            return Err(duplicate_stub_name(&old.identity, &entry.identity));
-        }
-        entries.push((name, entry));
-    }
-    Ok(entries)
+    Ok(stub_paths(description)?
+        .into_iter()
+        .zip(&description.exported)
+        .map(|(path, entry)| {
+            let (name, module) = path.split_last().expect("stub path has a module");
+            (format!("{}/{name}", module.join(".")), entry)
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +311,7 @@ fn listing(description: &Describe, entries: &[(String, &Exported)]) -> Result<St
             result
         ));
     }
-    out.push_str("\nUse -- ENTRY --help for one entry's flags and types.\n");
+    out.push_str("\nUse -- MODULE/NAME --help for one entry's flags and types.\n");
     Ok(out)
 }
 
@@ -1361,7 +1361,7 @@ mod tests {
         let server = dir.path().join("server");
         std::fs::write(&server, []).unwrap();
         let attempt = |flags: &[&str]| {
-            let mut call = vec!["record".to_owned()];
+            let mut call = vec!["m/record".to_owned()];
             call.extend(flags.iter().map(|f| (*f).to_owned()));
             let options = Options {
                 server: server.clone(),

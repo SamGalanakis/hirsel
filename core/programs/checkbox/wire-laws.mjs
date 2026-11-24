@@ -93,7 +93,7 @@ async function toggle_smoke() {
     client = await runtime.Client.open({url: url.href, frame: Frame, wants: want, identity, credential: randomBytes(16),
       storage: new runtime.NodeStorage(state)});
     await client.whenReady();
-    const {toggle} = bind(client).call;
+    const {toggle} = bind(client).call.main;
     assert.deepEqual(await toggle(3), {tag: 'Returned', value: {tag: 'Ok', value: true}});
     assert.deepEqual(await toggle(1000000), {
       tag: 'Refused', value: {tag: 'Malformed', value: {kind: 6, at: 0n}},

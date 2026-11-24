@@ -195,9 +195,9 @@ export async function converge(origin, generated, {
       call: sdk.call.bind(sdk),
       subscribe: (entry, args) => sdk.subscribeChanges(entry, args, (rows, replace) => board.rows(rows, replace)),
     });
-    api.subscribe.board(undefined);
+    api.subscribe.main.board(undefined);
     await waitFor(() => board.replacements > 0, failure);
-    return {sdk, wire, board, toggle: api.call.toggle, storage, positions: new Set()};
+    return {sdk, wire, board, toggle: api.call.main.toggle, storage, positions: new Set()};
   }
 
   async function toggle(agent, bit, p) {

@@ -375,7 +375,7 @@ def cli_call_exact_value():
     # Some(n + 2)), nested: Some(None), total: n + 2). For n = 2^53 + 1 an f64
     # decoder prints 9007199254740992 and 9007199254740996 instead.
     n = 2**53 + 1
-    process = hirsel_call('ws://127.0.0.1:18094/hirsel', 'shape', '--arg', str(n))
+    process = hirsel_call('ws://127.0.0.1:18094/hirsel', 'admission/shape', '--arg', str(n))
     try:
         out, err = process.communicate(timeout=120)
     finally:
@@ -395,7 +395,7 @@ def cli_call_fingerprint_mismatch():
         listener.bind(('127.0.0.1', 0))
         listener.listen(1)
         listener.settimeout(120)
-        process = hirsel_call(f'ws://127.0.0.1:{listener.getsockname()[1]}/hirsel', 'shape', '--arg', '1')
+        process = hirsel_call(f'ws://127.0.0.1:{listener.getsockname()[1]}/hirsel', 'admission/shape', '--arg', '1')
         try:
             s = accept_from(listener, process.pid, descendants=True)
             with s:

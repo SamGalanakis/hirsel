@@ -66,7 +66,7 @@ fn journal_cap_restart(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let bytes_before = db.record_bytes
     let from = snapshot(db)
     match fork(mut db, "beta", from) {
-        Error(Full(Journal(problem))) if problem.requested == 16781430 && problem.available == 16781392 => (),
+        Error(Full(Journal(problem))) if problem.requested == 16781438 && problem.available == 16781392 => (),
         _ => return Error(Foreign),
     }
     if db.next_branch != id_before || db.frame_seq != frame_before || db.record_bytes != bytes_before {

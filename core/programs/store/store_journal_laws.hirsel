@@ -756,8 +756,8 @@ fn journal_test_fork_cost(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(
     let saved = snapshot(db)
     let (beta, receipt) = fork(mut db, "beta", saved)?
     let after = accounts(db)
-    let raw = disk_read_file(child, file, old_end + 38)?
-    if list.len(raw) != old_end + 38 || read_le(raw, old_end, 2) != 19 || read_le(raw, old_end + 2, 2) != 1 || read_le(raw, old_end + 4, 4) != 22 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 38 || after.resident != before.resident || db.next_node != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
+    let raw = disk_read_file(child, file, old_end + 46)?
+    if list.len(raw) != old_end + 46 || read_le(raw, old_end, 2) != 19 || read_le(raw, old_end + 2, 2) != 1 || read_le(raw, old_end + 4, 4) != 30 || before.logical != 9400448 || after.logical != 9400448 || before.exact || after.exact || before.frames != 0 || after.frames != 0 || after.journal != before.journal + 46 || after.resident != before.resident || db.next_node != old_stamp || db.checkpointed != old_generation || db.file_seq != old_segment || journal_mark(receipt) != journal_mark(preceding) + 1 || !covered(db, receipt.mark) {
         return Error(Foreign)
     }
     let on_beta = snapshot_of(db, beta)?

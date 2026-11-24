@@ -107,8 +107,9 @@ type ExportRead: send { d: Dir, c: Clock, limit: u64 }
 
 fn law_export_read(take job: ExportRead) -> Result[Option[DeployError], Capacity] waits {
     let empty: Bytes = list.new()
+    let options = result.unwrap(sized(Directory, 2147483648u64))
     bound bytes job.limit {
-        match open_export(job.d, job.c, empty, result.unwrap(sized(Directory, 2147483648u64))) {
+        match open_export(job.d, job.c, empty, options) {
             Ok(_) => None,
             Error(take problem) => Some(take problem),
         }

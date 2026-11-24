@@ -49,10 +49,10 @@ fn journaled_branch_drop(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
         }
     }
     let manifest = disk_read_file(d, "MANIFEST", 4096)?
-    // The index catalog key is 1 + 4 + 2 bytes. Its value has 33 fixed
-    // bytes, the key schema and the extractor's static identity.
+    // The index catalog key is 1 + 4 + 2 bytes. The value's 44 fixed bytes
+    // include the index kind, payload count and two empty projection fields.
     let schema = std.codec.key_schema(std.codec.key_u64()) ?=> |_| Schema(0)
-    let index_charge = 62 + round8(7 + 33 + list.len(schema) + list.len(code.identity(by)))
+    let index_charge = 62 + round8(7 + 44 + list.len(schema) + list.len(code.identity(by)))
     let logical = 2 * 126 + 2 * 94 + 2 * 86 + 134 + index_charge
     if read_le(manifest, 152, 8) != logical {
         return Error(Foreign)

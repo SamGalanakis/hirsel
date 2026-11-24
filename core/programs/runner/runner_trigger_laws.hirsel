@@ -765,9 +765,11 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     let h = result.unwrap(install_subs_data(mut db))
     let t: store.Table[u64, u64] = clone(h.t)
     let empty = store.snapshot(db)
-    set(mut db, t, 0u64, 1u64)
-    set(mut db, t, 1u64, 0u64)
-    set(mut db, t, 2u64, 0u64)
+    let mut model: List[Option[u64]] = list.new()
+    let mut watched: List[Watched] = list.new()
+    law_set(mut db, mut model, t, 0u64, 1u64)
+    law_set(mut db, mut model, t, 1u64, 0u64)
+    law_set(mut db, mut model, t, 2u64, 0u64)
     let base = store.snapshot(db)
     let mut keys: List[Bytes] = list.new()
     for ch in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), empty, base)).rows {
@@ -785,13 +787,14 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     let kf = query_key(code.describe(qf))
     // subscribe_at_latest: w0 commits and is released, then session 0 subscribes Q1 before the
     // round. Its result is the base's (row0 = 0), labelled with the base.
-    set(mut db, t, 1u64, 1u64)
+    law_set(mut db, mut model, t, 1u64, 1u64)
     b.newest = Some(store.snapshot(db))
     let first = at_base(mut b, 0u64, 1u32, clone(k1), no_arg())
     if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
         return false
     }
-    if !apply_all(mut cl, step_held(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) {
+    list.push(mut watched, Watched(who: 0u64, sub: 1u32, q: Q1))
+    if !apply_all(mut cl, step_held(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     // shared_cache: session 1 subscribes Q1 with the same sub id; session 0 subscribes Qf.
@@ -802,27 +805,36 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
     if !apply(mut cl, at_base(mut b, 0u64, 2u32, clone(kf), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
         return false
     }
-    set(mut db, t, 2u64, 5u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
+    list.push(mut watched, Watched(who: 1u64, sub: 1u32, q: Q1))
+    list.push(mut watched, Watched(who: 0u64, sub: 2u32, q: Qf))
+    if !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 2u64, 5u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     // rerun_without_retract: revoke re-runs both Q1s, whose Covers become empty, so both lose
     // row0 and row1. A Subscribe of Q1 now completes with an empty result (L17).
-    set(mut db, t, 0u64, 0u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) {
+    law_set(mut db, mut model, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     let empty_result = at_base(mut b, 1u64, 3u32, clone(k1), no_arg())
     if list.len(empty_result.complete) != 1u64 || empty_result.complete[0] != 3u32 || list.len(empty_result.rows) != 0u64 || !apply(mut cl, take empty_result) {
         return false
     }
-    // K7: grant, then the call's row1 = 2. Qf's re-run faults and ends Qf alone, with
-    // Failed(Raised(5)) (Fail); session 0's Q1 follows row1 by its Cover.
-    set(mut db, t, 0u64, 1u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 3u32, Some(1u8), Some(5u8)) {
+    list.push(mut watched, Watched(who: 1u64, sub: 3u32, q: Q1))
+    if !image_matches(cl, keys, model, watched) {
         return false
     }
-    set(mut db, t, 2u64, 2u64)
+    // K7: grant, then the call's row1 = 2. Qf's re-run faults and ends Qf alone, with
+    // Failed(Raised(5)) (Fail); session 0's Q1 follows row1 by its Cover.
+    law_set(mut db, mut model, t, 0u64, 1u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 3u32, Some(1u8), Some(5u8)) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 2u64, 2u64)
     let owes = step(mut b, db)
     let mut faulted = false
     for o in owes {
@@ -833,20 +845,22 @@ pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
             }
         }
     }
-    if !faulted || !apply_all(mut cl, take owes) || cached(cl, 0u64, 2u32) != None || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8)) {
+    unwatch(mut watched, 0u64, 2u32)
+    if !faulted || !apply_all(mut cl, take owes) || cached(cl, 0u64, 2u32) != None || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8)) || !image_matches(cl, keys, model, watched) {
         return false
     }
     // Moving the selector invalidates the Point and moves the read Span from [4,5) to
     // [3,4). A write at the old lower bound must miss both Spans. The new lower bound
     // must rerun the query and move its Cover from row0 to row1.
     let moving = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_moving)), no_arg())
-    if !apply(mut cl, take moving) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) { return false }
-    set(mut db, t, 0u64, 0u64)
-    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) { return false }
-    set(mut db, t, 4u64, 20u64)
-    if list.len(step(mut b, db)) != 0u64 { return false }
-    set(mut db, t, 3u64, 21u64)
-    apply_all(mut cl, step(mut b, db)) && holds(cl, keys, 2u64, 1u32, None, Some(2u8))
+    list.push(mut watched, Watched(who: 2u64, sub: 1u32, q: QMoving))
+    if !apply(mut cl, take moving) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) || !image_matches(cl, keys, model, watched) { return false }
+    law_set(mut db, mut model, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) || !image_matches(cl, keys, model, watched) { return false }
+    law_set(mut db, mut model, t, 4u64, 20u64)
+    if list.len(step(mut b, db)) != 0u64 || !image_matches(cl, keys, model, watched) { return false }
+    law_set(mut db, mut model, t, 3u64, 21u64)
+    apply_all(mut cl, step(mut b, db)) && holds(cl, keys, 2u64, 1u32, None, Some(2u8)) && image_matches(cl, keys, model, watched)
 }
 
 fn range_limit(n: u32) -> Bytes {

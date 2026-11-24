@@ -1,0 +1,111 @@
+// VM1 client image. The law keeps the table as it wrote it (`model[k]` is key k's
+// value, None when absent) and runs each watched query over that model from scratch.
+// After each published version every client cache must equal the query's rows over
+// the model at that version: the expected image never comes from the publisher's owes.
+type LawQuery = Q1 | Qf | QMoving
+
+type Watched {
+    who: u64,
+    sub: u32,
+    q: LawQuery
+}
+
+fn law_set(mut db: store.Db, mut model: List[Option[u64]], t: store.Table[u64, u64], k: u64, v: u64) waits {
+    set(mut db, t, k, v)
+    while list.len(model) <= k {
+        list.push(mut model, None)
+    }
+    let _ = list.set(mut model, k, Some(v))
+}
+
+fn model_at(model: List[Option[u64]], k: u64) -> Option[u64] {
+    if k < list.len(model) {
+        model[k]
+    } else {
+        None
+    }
+}
+
+// The u64 codec's value bytes, little-endian (codec.md), written out here.
+fn le_word(v: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    for i in 0u64 .. 8u64 {
+        list.push(mut out, int.truncate((v >> (8u64 * i)) & 255u64))
+    }
+    out
+}
+
+// The rows (key, value) a from-scratch run of `q` covers over `model`.
+fn law_query_rows(model: List[Option[u64]], q: LawQuery) -> List[(u64, u64)] {
+    let mut covered: List[u64] = list.new()
+    match q {
+        Q1 => if let Some(perm) = model_at(model, 0u64) {
+            if perm != 0u64 {
+                list.push(mut covered, 1u64)
+                list.push(mut covered, 2u64)
+            }
+        },
+        Qf => list.push(mut covered, 2u64),
+        QMoving => {
+            let selector = match model_at(model, 0u64) {
+                Some(v) => v,
+                None => 0u64
+            }
+            let probe = if selector == 0u64 {
+                3u64
+            } else {
+                4u64
+            }
+            list.push(mut covered, match model_at(model, probe) {
+                Some(_) => 2u64,
+                None => 1u64
+            })
+        },
+    }
+    let mut rows: List[(u64, u64)] = list.new()
+    for k in covered {
+        if let Some(v) = model_at(model, k) {
+            list.push(mut rows, (k, v))
+        }
+    }
+    rows
+}
+
+// Every cache of `c` is a watched (who, sub), and each holds exactly its query's rows.
+// `keys[k]` is table key k's tree key.
+fn image_matches(c: Client, keys: List[Bytes], model: List[Option[u64]], watched: List[Watched]) -> bool {
+    if list.len(c.caches) != list.len(watched) {
+        return false
+    }
+    for w in watched {
+        let at = match cached(c, w.who, w.sub) {
+            Some(at) => at,
+            None => return false,
+        }
+        let expected = law_query_rows(model, w.q)
+        let rows = c.caches[at].rows
+        if map.len(rows) != list.len(expected) {
+            return false
+        }
+        for (k, v) in expected {
+            match map.get(rows, keys[k]) {
+                Some(got) => if got != le_word(v) {
+                    return false
+                },
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+fn unwatch(mut watched: List[Watched], who: u64, sub: u32) {
+    let mut i = 0u64
+    while i < list.len(watched) {
+        if watched[i].who == who && watched[i].sub == sub {
+            let _ = list.remove(mut watched, i)
+            return
+        }
+        i += 1u64
+    }
+}

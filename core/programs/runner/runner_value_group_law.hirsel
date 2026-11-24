@@ -27,13 +27,115 @@ fn group_number(encoded_value: Bytes, expected: u64) -> bool {
     }
 }
 
+// VM1 client image of the view: a subscriber's R and its slot rows, rebuilt only from
+// the groups it receives. A complete starts the image empty, an empty encoded value
+// keeps R, and each row replaces or removes its (slot, key). The oracle runs
+// value_group_query over the law's own model of the table at each version.
+type ViewImage {
+    who: u64,
+    value: Bytes,
+    rows: Map[Bytes, Bytes]
+}
+
+fn view_slot_key(at_slot: u16, key: Bytes) -> Bytes {
+    let mut out: Bytes = list.new()
+    list.push(mut out, int.truncate(at_slot))
+    for b in key {
+        list.push(mut out, b)
+    }
+    out
+}
+
+fn view_image_at(images: List[ViewImage], who: u64) -> Option[u64] {
+    let mut i = 0u64
+    while i < list.len(images) {
+        if images[i].who == who {
+            return Some(i)
+        }
+        i += 1u64
+    }
+    None
+}
+
+fn apply_view(mut images: List[ViewImage], owing: Owe) -> bool {
+    if list.len(owing.complete) != 0u64 {
+        if let Some(i) = view_image_at(images, owing.session) {
+            let _ = list.remove(mut images, i)
+        }
+        list.push(mut images, ViewImage(who: owing.session, value: list.new(), rows: map.new()))
+    }
+    let i = match view_image_at(images, owing.session) {
+        Some(i) => i,
+        None => return false,
+    }
+    for g in owing.groups {
+        let groups: std.codec.Codec[GroupLawPayload] = std.codec.of()
+        let payload = match std.codec.decode(groups, g.payload) {
+            Ok(take p) => take p,
+            Error(_) => return false,
+        }
+        if list.len(payload.value) != 0u64 {
+            images[i].value = clone(payload.value)
+        }
+        for row in payload.rows {
+            let at = view_slot_key(row.slot, row.key)
+            let _ = map.remove(mut images[i].rows, at)
+            if let Some(v) = view row.value {
+                map.insert(mut images[i].rows, take at, clone(v))
+            }
+        }
+    }
+    true
+}
+
+// R is row0 mod 2, and slot "left" (0) or "right" (1), chosen by row2, covers row1.
+fn view_images_match(images: List[ViewImage], key1: Bytes, model: List[Option[u64]]) -> bool {
+    let number = match model_at(model, 0u64) {
+        Some(v) => v,
+        None => return false
+    }
+    let side = match model_at(model, 2u64) {
+        Some(v) => v,
+        None => return false
+    }
+    let held_slot = if side == 0u64 {
+        0u16
+    } else {
+        1u16
+    }
+    for image in images {
+        if image.value != le_word(number % 2u64) || map.len(image.rows) != 1u64 {
+            return false
+        }
+        match model_at(model, 1u64) {
+            Some(v) => match map.get(image.rows, view_slot_key(held_slot, key1)) {
+                Some(got) => if got != le_word(v) {
+                    return false
+                },
+                None => return false,
+            },
+            None => return false,
+        }
+    }
+    true
+}
+
 @test
 fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 67108864u64)))
     let h = result.unwrap(install_subs_data(mut db))
-    set(mut db, h.t, 0u64, 1u64)
-    set(mut db, h.t, 1u64, 5u64)
-    set(mut db, h.t, 2u64, 0u64)
+    let empty = store.snapshot(db)
+    let mut model: List[Option[u64]] = list.new()
+    law_set(mut db, mut model, h.t, 0u64, 1u64)
+    law_set(mut db, mut model, h.t, 1u64, 5u64)
+    law_set(mut db, mut model, h.t, 2u64, 0u64)
+    let filled = store.snapshot(db)
+    let mut keys: List[Bytes] = list.new()
+    for ch in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), empty, filled)).rows {
+        list.push(mut keys, clone(ch.tree_key))
+    }
+    let key1: Bytes = clone(keys[1u64])
+    let mut images: List[ViewImage] = list.new()
     let mut registered = result.unwrap(placed(code.describe(value_group_place), 1048576u64))
     result.unwrap(bind_query_slots(mut registered, h))
     let key = {
@@ -51,8 +153,11 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
         list.len(initial.rows) != 1u64 || initial.rows[0u64].slot != 0u16 {
         return Error("subscribers did not get the same initial image")
     }
-    set(mut db, h.t, 0u64, 3u64)
-    set(mut db, h.t, 1u64, 6u64)
+    if !apply_view(mut images, first) || !apply_view(mut images, joined) || !view_images_match(images, key1, model) {
+        return Error("a client's initial image differs from the query over the table")
+    }
+    law_set(mut db, mut model, h.t, 0u64, 3u64)
+    law_set(mut db, mut model, h.t, 1u64, 6u64)
     b.newest = Some(store.snapshot(db))
     let mut fences = Fenced(sessions: map.new())
     let elided = round(mut b, mut fences)
@@ -63,9 +168,13 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     if list.len(row_only.value) != 0u64 || list.len(row_only.rows) != 1u64 {
         return Error("equal encoded values must elide")
     }
+    for owing in elided {
+        if !apply_view(mut images, owing) { return Error("an elided group reached a client without an image") }
+    }
+    if !view_images_match(images, key1, model) { return Error("an elided group left a client image wrong") }
 
-    set(mut db, h.t, 0u64, 4u64)
-    set(mut db, h.t, 2u64, 1u64)
+    law_set(mut db, mut model, h.t, 0u64, 4u64)
+    law_set(mut db, mut model, h.t, 2u64, 1u64)
     let moved = step(mut b, db)
     if list.len(moved) != 2u64 { return Error("slot move did not reach both subscribers") }
     let Some(atomic) = group_payload(moved[0u64]) else { return Error("slot move split the group") }
@@ -77,28 +186,40 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     }
     let Some(value_bytes) = atomic.rows[1u64].value else { return Error("slot move must insert row 1") }
     if !group_number(value_bytes, 6u64) { return Error("slot move inserted the wrong value") }
+    for owing in moved {
+        if !apply_view(mut images, owing) { return Error("a slot move reached a client without an image") }
+    }
+    if !view_images_match(images, key1, model) { return Error("a slot move left a client image wrong") }
 
-    set(mut db, h.t, 0u64, 5u64)
+    law_set(mut db, mut model, h.t, 0u64, 5u64)
     let only = step(mut b, db)
     if list.len(only) != 2u64 { return Error("value-only update did not reach both subscribers") }
     let Some(computed_only) = group_payload(only[0u64]) else { return Error("value-only group was dropped") }
     if !group_number(computed_only.value, 1u64) || list.len(computed_only.rows) != 0u64 {
         return Error("value-only group sent the wrong image")
     }
+    for owing in only {
+        if !apply_view(mut images, owing) { return Error("a value-only group reached a client without an image") }
+    }
+    if !view_images_match(images, key1, model) { return Error("a value-only group left a client image wrong") }
     if !mark_due(mut b.subs, 1u64, 10u32) { return Error("subscriber did not become due") }
-    set(mut db, h.t, 0u64, 7u64)
+    law_set(mut db, mut model, h.t, 0u64, 7u64)
     b.newest = Some(store.snapshot(db))
     let mut same_fences = Fenced(sessions: map.new())
     let unchanged = round(mut b, mut same_fences)
     if list.len(unchanged) != 0u64 || map.len(same_fences.sessions) != 2u64 {
         return Error("empty delta must be skipped while the hit fences both sessions")
     }
+    if !view_images_match(images, key1, model) { return Error("a skipped delta left a client image wrong") }
     let at = store.version(b.base)
     let full = repair_entry(mut b, 1u64, 10u32, at)
     let Some(repaired) = group_payload(full) else { return Error("repair needs a full group") }
     if list.len(full.complete) != 1u64 || !group_number(repaired.value, 1u64) ||
         list.len(repaired.rows) != 1u64 || repaired.rows[0u64].slot != 1u16 {
         return Error("repair elided or misplaced content")
+    }
+    if !apply_view(mut images, full) || !view_images_match(images, key1, model) {
+        return Error("a repair left a client image wrong")
     }
     Ok(())
 }

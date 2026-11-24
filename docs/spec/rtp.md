@@ -90,6 +90,7 @@ pub type Error = Short | Version | Csrc | Extension | Padding
 pub type Block = NoBlock | OneByte(at: u64, len: u64) | TwoByte(at: u64, len: u64) | Opaque(profile: u16, at: u64, len: u64)
 pub type Header = Header(marker: bool, pt: u8, seq: u16, ts: u32, ssrc: u32, csrcs: u8, padded: bool, block: Block, end: u64)
 pub type Fields = Fields(marker: bool, pt: u8, seq: u16, ts: u32, ssrc: u32)
+pub type WriteError = Capacity(Capacity) | Form
 
 pub fn parse(pkt: Bytes) -> Result[Header, Error]
 pub fn payload(h: Header, pkt: Bytes) -> Result[(u64, u64), Error]
@@ -165,7 +166,9 @@ that SRTP authenticated is the index that statistics, loss tracking and rewritin
 
 `estimate32` applies the same rule to 32-bit RTP timestamps (half range `2^31`), and
 `estimate24` to the 24-bit TWCC reference time (half range `2^23`). An extended timestamp is
-per source and starts at the first authenticated packet's timestamp.
+per source and starts at the first authenticated packet's timestamp. A timestamp that extends to
+`None` is from before the source's first packet: the caller drops the packet before any
+stateful operation.
 
 Law: `estimate` is RFC 3711's estimate, and the extended values it gives are the only
 ordering any stateful operation uses.
@@ -177,6 +180,7 @@ ordering any stateful operation uses.
 pub type Kind = Mid | Rid | RepairedRid | AudioLevel | AbsSendTime | TransportSeq
 pub type Error = Overrun | Value(Kind)
 pub type Element = Element(id: u8, at: u64, len: u64)
+pub type MapError = BadId | IdTaken | KindTaken | Full
 pub opaque type ExtMap
 pub opaque type ExtWriter
 
@@ -197,7 +201,7 @@ An **extension map** binds local ids to kinds, as an SDP `a=extmap` line negotia
 ([RFC 8285 §5](https://www.rfc-editor.org/rfc/rfc8285#section-5)). Each peer and direction
 has its own map, because a publisher's ids and a subscriber's ids are negotiated apart.
 `bind` refuses id 0, id 15 in a one-byte map, an id above 255, and an id or kind already
-bound (`MapError`). `two_byte` records whether the peer negotiated `a=extmap-allow-mixed`.
+bound (`BadId`, `IdTaken`, `KindTaken`); `put` past the writer's 16 elements or 256 bytes is `Full`. `two_byte` records whether the peer negotiated `a=extmap-allow-mixed`.
 A kind `rtp` does not name stays unbound: the caller reads it with `next` and the raw
 element, and writes it with `put_other`. The dependency descriptor goes that way to
 `media_bits.dependency`.
@@ -440,7 +444,7 @@ pub fn clear[P](mut h: History[P]) -> u64
 
 // module rtx
 pub type Rtx = Repair(u16, u64) | Probe
-pub fn unwrap(h: Header, pkt: Bytes, payload_at: u64, payload_len: u64) -> Result[Rtx, Error]
+pub fn unwrap(h: Header, pkt: Bytes, payload_at: u64, payload_len: u64) -> Result[Rtx, header.Error]
 pub fn write(f: Fields, exts: View[ExtWriter], osn: u16, mut out: Bytes) -> Result[u64, WriteError]
 pub fn write_probe(f: Fields, pad: u8, mut out: Bytes) -> Result[u64, WriteError]
 ```
@@ -475,7 +479,7 @@ header and the OSN into `out`, and the caller seals the original payload behind 
 
 - an empty payload is a `Probe`, the padding-only packet that senders use to probe
   bandwidth. It carries no OSN and repairs nothing;
-- a 1-byte payload is malformed (`Error.Padding`);
+- a 1-byte payload is malformed (`header.Error.Padding`);
 - otherwise it is `Repair(osn, at)`, with the original payload from `at`.
 
 The caller extends the OSN with `seq.estimate` against the **media** stream's highest index,
@@ -516,7 +520,8 @@ order, to `out`. `arrived_us` is the remote arrival time in microseconds on the 
 clock, or `None` for a packet reported lost. Only differences between arrival times mean
 anything. A reported number whose record has left the ring, or that extends to `None`, is skipped. The base sequence
 number is extended with `seq.estimate` against the highest assigned, and the reference time
-with `estimate24` against the last report's.
+with `estimate24` against the last report's. A feedback packet whose base number or reference
+time extends to `None` is older than any report already read, and is skipped whole.
 
 **The feedback format.** After the RTPFB header (FMT 15) and the two SSRCs:
 
@@ -569,7 +574,9 @@ pub opaque type Bwe
 pub fn bwe(c: Config) -> Bwe
 pub fn on_acked(mut b: Bwe, acked: View[List[Acked]], now_ns: u64, rtt_ns: Option[u64])
 pub fn target(b: Bwe) -> u64
+pub type Cluster = Cluster(id: u32, rate_bps: u64, packets: u32, min_ns: u64)
 pub fn probe(mut b: Bwe, want_bps: u64, now_ns: u64) -> Option[Cluster]
+pub fn probe_sent(mut b: Bwe, id: u32, index: u64)
 ```
 
 The estimator is Google congestion control's delay-based controller
@@ -618,7 +625,8 @@ from Decrease to Hold, and Increase stays. With `R` the acked rate and `A` the e
   since the last change, capped at 1: near convergence, `A += max(1000, 0.5 · min(t / r, 1)
   · p)`, where `r` is the round-trip time plus 100 ms in seconds and `p` the expected packet
   size in bits: `f = A / 30`, `p = f / ceil(f / 9600)`. Otherwise
-  `A += max(1000, (exp(t · ln 1.08) − 1) · A)`. Then `A = min(A, 1.5·R, 1.5·R + 10_000)`.
+  `A += max(1000, (exp(t · ln 1.08) − 1) · A)`. Then `A = min(A, 1.5·R)`. (str0m writes `min(A, 1.5·R, 1.5·R + 10 kbps)`, which is the same
+value.) The cap applies after the increase, so it may lower `A`, as in str0m.
 - **Decrease**, at most once per round-trip time clamped to `[10, 200]` ms, unless `R` has
   fallen below `A / 2`: `A = min(A, 0.85 · R)`.
 - **Convergence** follows libwebrtc's throughput average, in kbit/s with `α = 0.05`. On a
@@ -638,10 +646,13 @@ holds. `target()` is `min(A, L)`.
 **Probing.** A sender that sends less than it could cannot see more capacity: the increase
 is capped at 1.5 times the acked rate. A forwarder that wants a higher layer must raise the
 estimate first. `probe(want, now)` answers a cluster to send when `want > target()` and no
-cluster is outstanding: a rate of `min(2·target(), want)`, at least 5 packets and 15 ms. The
-pacer ([RTP-10](#rtp-10-pacer)) sends it as padding-only RTX packets. A stream with no RTX
-cannot probe, and the caller gets `None`. When feedback covers at least 80% of the
-cluster's packets, the send rate is `(bytes − last size) · 8 / (last send − first send)` and
+cluster is outstanding: `Cluster(id, rate, 5, 15 ms)` with `rate = min(2·target(), want)` and
+`id` counting up from 0. The caller hands it to the pacer ([RTP-10](#rtp-10-pacer)), which
+answers `Probe(id, bytes)`. The caller sends each one as a padding-only RTX packet, assigns it
+a transport number, and tells the estimator with `probe_sent(id, index)`. The caller asks only
+for a transport that has a stream with RTX, because a probe on any other stream would
+reach a decoder. A cluster is outstanding until feedback covers its packets, or 1 s passes.
+When feedback (`on_acked`) covers at least 80% of the packets recorded for the cluster, the send rate is `(bytes − last size) · 8 / (last send − first send)` and
 the receive rate is `(bytes − first size) · 8 / (last arrival − first arrival)`. A result
 `min(send, receive)` above `A` sets `A` to it.
 
@@ -654,11 +665,12 @@ the estimate to what the link delivered. The arithmetic is the text above, to th
 ```hirsel unbuilt
 // module pacer
 pub type Class = Audio | Retransmit | Video | Padding
-pub type Next[Q] = Send(Q) | Pad(u64) | Wait(u64) | Idle
+pub type Next[Q] = Send(Q) | Probe(u32, u64) | Pad(u64) | Wait(u64) | Idle
 pub opaque type Pacer[Q]
 
 pub fn pacer[Q](slots: u32, factor: f64, queue_limit_ns: u64) -> Result[Pacer[Q], Capacity]
 pub fn set_rate[Q](mut p: Pacer[Q], target_bps: u64, padding_bps: u64)
+pub fn probe[Q](mut p: Pacer[Q], c: Cluster, now_ns: u64)
 pub fn push[Q](mut p: Pacer[Q], stream: u32, class: Class, size: u32, now_ns: u64, take q: Q) -> Result[(), Q]
 pub fn poll[Q](mut p: Pacer[Q], now_ns: u64) -> Next[Q]
 pub fn sent[Q](mut p: Pacer[Q], size: u32, now_ns: u64)
@@ -677,8 +689,12 @@ keyframe does not leave as one burst that overflows a bottleneck queue (`str0m`
     late audio is worse than a burst;
   - `Send(q)` for the oldest queued packet of the highest class (Retransmit, then Video),
     when the debt is 0;
+  - `Probe(id, bytes)` while a cluster is active, when the debt is 0 and no media packet is
+    queued. The cluster's rate stands in for the pacing rate while it runs, and `bytes` is
+    `max(200, rate · 1 ms / 8)`, at most 1,200. The cluster ends when it has answered
+    `packets` probes and `min_ns` has passed since its first;
   - `Pad(bytes)` when the queues are empty, a padding rate is set, and the padding debt
-    allows it, for the caller to send as probe packets;
+    allows it, for the caller to send as padding-only RTX packets;
   - `Wait(at)`, the time the debt reaches 0, when packets are queued;
   - `Idle` otherwise.
 - **Queue limit.** When the queued bytes would take longer than `queue_limit_ns` at the
@@ -701,12 +717,13 @@ pub type Out = Forward(u64, u64) | Late(u64, u64) | Drop | Wait
 pub opaque type Rewrite
 pub opaque type Counter
 
-pub fn rewrite(ranges: u32, first_seq: u64, first_ts: u64) -> Result[Rewrite, Capacity]
+pub fn rewrite(clock: u32, ranges: u32, first_seq: u64, first_ts: u64) -> Result[Rewrite, Capacity]
 pub fn target(mut r: Rewrite, t: Target)
 pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: u64, at_ns: u64, padding_only: bool, u: Unit) -> Out
 pub fn on_sr(mut r: Rewrite, source: u32, info: SenderInfo)
 pub fn sr_timestamp(r: Rewrite, ntp_now: u64) -> Option[u32]
 pub fn switch_index(r: Rewrite) -> Option[u64]
+pub fn pending(r: Rewrite) -> Option[u32]
 pub fn close(mut r: Rewrite)
 
 pub fn counter(width: u8) -> Counter
@@ -746,6 +763,9 @@ stops forwarding. The current layer changes only at a switch point:
 
 Until then the old layer keeps forwarding. With no current layer, every packet answers
 `Wait`, and the caller asks for a keyframe ([RTP-6](#rtp-6-loss-tracking-nack-and-keyframe-requests)).
+While a target on another source is pending, that source's packets answer `Drop`: the caller
+asks for that source's keyframe when it sets the target, and again at each `Keyframes`
+interval until the switch happens. `pending(r)` answers the pending source, if any.
 
 **Sequence numbers.** A packet is forwarded when it belongs to the current source and the
 current target's bit is set in `needs`. Its outgoing index is `index − offset`.
@@ -958,8 +978,10 @@ code under test. The harness is the package's law suite, `core/programs/rtp/laws
 - **`nack_recovery_under_loss` (RTP-6, RTP-7).** *Harness:* `std.sim.udp` (W0.3), with a
   sender (history, RTX, pacer) and a receiver (`Losses`) as two sans-IO ends. Two thousand
   packets at 50 per second cross a link with 10% independent loss each way and 40 ms delay.
-  With `tries` 10, every packet arrives: the chance that one packet and all ten repairs are
-  lost is below `10^−10`. *Oracle:* that probability, by hand.
+  With `tries` 10, `retry_ns` 100 ms, `max_age_ns` and the history's age 2 s, and `min_resend`
+  50 ms, every packet arrives. A repair fails when its NACK or its RTX is lost, with chance
+  `0.19`, so one packet is lost for good with chance `0.1 · 0.19^10 ≈ 6.1·10^−9`, and any of the
+  2,000 with chance below `1.3·10^−5`. The law runs 8 fixed seeds. *Oracle:* that probability, by hand.
 - **`congestion_backoff` (RTP-8 to RTP-10).** *Harness:* `std.sim.udp`, a 1 Mbit/s bottleneck
   with a 100-packet queue, and a sender offering 3 Mbit/s. Within 10 s the target is between
   0.7 and 1.1 Mbit/s and stays there, and the 95th percentile queueing delay over the last

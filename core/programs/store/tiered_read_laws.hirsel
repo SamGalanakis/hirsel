@@ -422,6 +422,30 @@ fn test_l62_batch_error_follows_touch(d: Dir, tasks: Tasks) -> Result[(), Error]
 }
 
 @test
+fn test_l68_resident_images_ignore_cold_slots() -> Result[(), Error] {
+    let base = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 111, stamp: 40)
+    let mut roots = empty_roots()
+    roots.collections = l62_replay_read_tree(base)?
+    let mut retained: List[Roots] = list.with_capacity(2)
+    list.push(mut retained, share_roots(roots))
+    list.push(mut retained, share_roots(roots))
+    if resident_images(retained, None) != 91 || page_row_account(retained) != 126 {
+        fail("L68: shared collection map counts once and its Cold data is neither resident nor Memory")
+    }
+    let reference = std.page.BlobRef(stamp: 30, len: 1025, checksum: 101, pack: 7, offset: 72, body: 0)
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: key_word(1), cell: BlobValue(reference)))
+    let image = page_result(std.page.encode(rows, 0, 50, Collection))?
+    let page = page_result(std.page.attach_cold(take image))?
+    let mut seen: Map[u64, ()] = map.new()
+    // 24-byte header, 8-byte prefix, 45-byte BLOB entry, 2-byte slot.
+    if page_image_charge(page, mut seen) != 79 || map.contains(seen, 30u64) {
+        fail("L68: a Cold BLOB still consumes only the bytes of its resident leaf")
+    }
+    Ok(())
+}
+
+@test
 fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     let owner = StoreId(hi: 3, lo: 4)
     let value = arc.new(string.into_bytes(string.from("test")))

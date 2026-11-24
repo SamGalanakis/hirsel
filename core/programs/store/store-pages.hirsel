@@ -188,12 +188,17 @@ fn page_image_charge(node: Arc[std.page.Page], mut seen: Map[u64, ()]) -> u64 {
     for slot in 0u64 .. std.page.count(image) {
         match std.page.owning_edge(image, slot) {
             Some(PageEdge(_)) => {
-                let child = option.unwrap(std.page.child(node, slot))
-                total = int.saturating_add(total, page_image_charge(child, mut seen))
+                if let HotPage(child) = option.unwrap(std.page.child_slot(node, slot)) {
+                    total = int.saturating_add(total, page_image_charge(child, mut seen))
+                }
             },
-            Some(BlobEdge(body_ref)) => if !map.contains(seen, body_ref.stamp) {
-                map.insert(mut seen, body_ref.stamp, ())
-                total = int.saturating_add(total, body_ref.len)
+            Some(BlobEdge(body_ref)) => {
+                if let HotBlob(_) = option.unwrap(std.page.blob_slot(node, body_ref.body)) {
+                    if !map.contains(seen, body_ref.stamp) {
+                        map.insert(mut seen, body_ref.stamp, ())
+                        total = int.saturating_add(total, body_ref.len)
+                    }
+                }
             },
             None => (),
         }

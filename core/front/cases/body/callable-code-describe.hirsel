@@ -89,14 +89,17 @@ fn e[T: key]() -> StaticFn[fn(T, T) -> bool] { code.describe(same) }
 
 // expect: run generic_body_descriptors() = 1
 fn generic_body_descriptors() -> u64 {
-    let d32: StaticFn[fn(u32, u32) -> bool] = e()
+    let generic32: StaticFn[fn(u32, u32) -> bool] = e()
     if described_same() == e()
-        && code.identity(d32) == b"\x01app@1/main/same[u32]{key[u32]}($0,$0)->bool"
-        && (code.callable(d32))(7u32, 7u32) {
+        && code.identity(generic32) == b"\x01app@1/main/same[u32]{key[u32]}($0,$0)->bool"
+        && (code.callable(generic32))(7u32, 7u32) {
         1
     } else {
         0
     }
 }
 
+fn vector_item(x: Simd[u8, 16]) -> u64 { 0 }
+// expect: refuse SEM-11 at 104:40
+fn vector_descriptor() { code.describe(vector_item) }
 pub fn main()->Result[(),Exit] {Ok(())}

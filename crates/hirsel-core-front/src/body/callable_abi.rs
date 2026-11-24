@@ -98,6 +98,47 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
+    pub(super) fn checked_function_item(&mut self, f: usize, n: NodeId) -> Option<TyId> {
+        let g = &self.p.fns[f];
+        if mentions_error(&self.t, g.callable) {
+            self.inherited_refusal = true;
+            self.halt();
+            return None;
+        }
+        if g.params.iter().any(|p| self.vector_shape(p.ty).is_some())
+            || self.vector_shape(g.result).is_some()
+        {
+            self.refuse(
+                "SEM-11",
+                n,
+                "a function with a vector parameter or result cannot be a callable value",
+            );
+            return None;
+        }
+        if g.anchors
+            .iter()
+            .any(|&i| !self.region_handle(g.params[i as usize].ty))
+        {
+            self.refuse(
+                "LANG-13",
+                n,
+                "a result anchored to a view parameter fits no callable type",
+            );
+            return None;
+        }
+        let ty = g.callable;
+        if let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
+            && !crate::decls::scoped_result_rooted(&self.p.decls, &self.t, *result, false)
+        {
+            self.gap(
+                n,
+                "scoped callable result region anchors are not represented",
+            );
+            return None;
+        }
+        Some(ty)
+    }
+
     pub(super) fn item_adapter(
         &mut self,
         item: usize,

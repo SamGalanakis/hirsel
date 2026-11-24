@@ -17,12 +17,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         };
-        let fd = &self.p.fns[item];
-        if mentions_error(&self.t, fd.callable) {
-            self.inherited_refusal = true;
-            self.halt();
+        let Some(callable) = self.checked_function_item(item, argument) else {
             return (ERROR, None);
-        }
+        };
+        let fd = &self.p.fns[item];
         let expected = want.and_then(|ty| match self.t.kind(ty) {
             TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::StaticFn) => {
                 Some(args[0])
@@ -38,10 +36,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let generic = fd.generics.iter().any(|g| !g.region);
         let mut fits = true;
         if generic && let Some(expected) = expected {
-            match (
-                self.t.kind(fd.callable).clone(),
-                self.t.kind(expected).clone(),
-            ) {
+            match (self.t.kind(callable).clone(), self.t.kind(expected).clone()) {
                 (TyKind::Fn(ps, r, waits, _), TyKind::Fn(es, er, ew, _)) => {
                     fits = ps.len() == es.len() && (!waits || ew);
                     for ((mode, ty), (em, et)) in ps.into_iter().zip(es) {
@@ -85,7 +80,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         let args = found.into_iter().map(Option::unwrap).collect::<Vec<_>>();
-        let ty = subst(&mut self.t, fd.callable, &args);
+        let ty = subst(&mut self.t, callable, &args);
         if !fits {
             self.refuse_compared(
                 "LANG-13",

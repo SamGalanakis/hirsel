@@ -57,7 +57,9 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/float.hirsel": {
-    "lines": 3331
+    "lines": 3391,
+    "raise_revision": 2,
+    "reason": "profilesmash-json-outliers-2389"
   },
   "core/std/http.hirsel": {
     "lines": 3306,
@@ -65,9 +67,9 @@
     "reason": "hirsel4-cutover-2276"
   },
   "core/std/json.hirsel": {
-    "lines": 3587,
-    "raise_revision": 2,
-    "reason": "sharkbench-read-shape-2322"
+    "lines": 3604,
+    "raise_revision": 4,
+    "reason": "profilesmash-json-outliers-2389"
   },
   "core/std/markdown.hirsel": {
     "lines": 2819

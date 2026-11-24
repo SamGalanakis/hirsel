@@ -1435,7 +1435,7 @@ const POW5: Inline[(u64, u64), 651] =[
 /// Alloc: GROWTH of s only. Cost: O(digits of x).
 /// Ex: `float.push_f64(mut line, 0.1)` appends "0.1"
 pub fn push_f64(mut s: String, x: f64) {
-    push_shortest(mut s, x, false, string.push, string.push_u64)
+    push_shortest(mut s, x, false)
 }
 
 /// Appends the shortest round-trip number with serde_json's spelling. Finite
@@ -1444,35 +1444,93 @@ pub fn push_f64(mut s: String, x: f64) {
 /// Fails: Error(c); s then holds a prefix of the text. Alloc: GROWTH of s only.
 /// Cost: O(digits).
 pub fn push_json_f64(mut s: String, x: f64) {
-    write_json_f64(mut s, x, string.push, string.push_u64)
+    push_shortest(mut s, x, true)
 }
 
-/// Writes the JSON number using callbacks for literal text and unpadded decimal digits.
-pub fn write_json_f64[T](mut out: T, x: f64, text: scoped fn(mut T, String), digits: scoped fn(mut T, u64)) {
-    push_shortest(mut out, x, true, text, digits)
-}
-
-fn push_shortest[T](mut s: T, x: f64, json: bool, text: scoped fn(mut T, String), digits: scoped fn(mut T, u64)) {
+// Append to the String directly so the plain writer keeps its append path.
+fn push_shortest(mut s: String, x: f64, json: bool) {
     let bits = float.to_bits64(x)
     if !is_finite(x) {
-        let representation = if json {
+        return string.push(mut s, if json {
             "null"
         } else {
             special(bits)
-        }
-        return text(mut s, representation)
+        })
     }
     if bits >> 63 != 0 {
-        text(mut s, "-")
+        string.push(mut s, "-")
     }
     let (c, p) = shortest64(x)
     if c == 0 {
-        return text(mut s, if json {
+        return string.push(mut s, if json {
             "0.0"
         } else {
             "0"
         })
     }
+    let layout = shortest_layout(c, p, json)
+    if layout.whole != 0 {
+        string.push_u64(mut s, layout.whole)
+    }
+    if layout.fractional {
+        string.push(mut s, decimal_point(layout.whole))
+    }
+    push_zeros(mut s, layout.zeros)
+    if layout.fractional {
+        string.push_u64(mut s, layout.fraction)
+    } else if json && !layout.scientific {
+        string.push(mut s, ".0")
+    }
+    if layout.scientific {
+        let (sign, digits) = exponent_parts(layout.point - 1)
+        string.push(mut s, sign)
+        string.push_u64(mut s, digits)
+    }
+}
+
+/// Writes the JSON number using callbacks for literal text and unpadded decimal digits.
+pub fn write_json_f64[T](mut out: T, x: f64, text: scoped fn(mut T, String), digits: scoped fn(mut T, u64)) {
+    let bits = float.to_bits64(x)
+    if !is_finite(x) {
+        return text(mut out, "null")
+    }
+    if bits >> 63 != 0 {
+        text(mut out, "-")
+    }
+    let (c, p) = shortest64(x)
+    if c == 0 {
+        return text(mut out, "0.0")
+    }
+    let layout = shortest_layout(c, p, true)
+    if layout.whole != 0 {
+        digits(mut out, layout.whole)
+    }
+    if layout.fractional {
+        text(mut out, decimal_point(layout.whole))
+    }
+    write_zeros(mut out, layout.zeros, text)
+    if layout.fractional {
+        digits(mut out, layout.fraction)
+    } else if !layout.scientific {
+        text(mut out, ".0")
+    }
+    if layout.scientific {
+        let (sign, magnitude) = exponent_parts(layout.point - 1)
+        text(mut out, sign)
+        digits(mut out, magnitude)
+    }
+}
+
+type ShortestLayout {
+    whole: u64,
+    fraction: u64,
+    fractional: bool,
+    zeros: u64,
+    scientific: bool,
+    point: i64
+}
+
+fn shortest_layout(c: u64, p: i64, json: bool) -> ShortestLayout {
     let len = decimal_len(c)
     let width: i64 = int.narrow(len)
     let point = width + p
@@ -1495,42 +1553,31 @@ fn push_shortest[T](mut s: T, x: f64, json: bool, text: scoped fn(mut T, String)
         whole = c / scale
         fraction = c % scale
     }
-    if whole != 0 {
-        digits(mut s, whole)
-    }
     let zeros: u64 = if places != 0 {
-        text(mut s, if whole == 0 {
-            "0."
-        } else {
-            "."
-        })
         places - decimal_len(fraction)
     } else if scientific {
         0
     } else {
         int.narrow(p)
     }
-    push_zeros(mut s, zeros, text)
-    if places != 0 {
-        digits(mut s, fraction)
-    } else if json && !scientific {
-        text(mut s, ".0")
+    ShortestLayout(whole, fraction, fractional: places != 0, zeros, scientific, point)
+}
+
+fn decimal_point(whole: u64) -> String {
+    if whole == 0 {
+        "0."
+    } else {
+        "."
     }
-    if !scientific {
-        return
-    }
+}
+
+fn exponent_parts(exponent: i64) -> (String, u64) {
     // serde_json 1.0.154 uses Zmij's signed exponent spelling.
-    let exponent = point - 1
-    text(mut s, if exponent < 0 {
-        "e-"
+    if exponent < 0 {
+        ("e-", int.narrow(-exponent))
     } else {
-        "e+"
-    })
-    digits(mut s, int.narrow(if exponent < 0 {
-        -exponent
-    } else {
-        exponent
-    }))
+        ("e+", int.narrow(exponent))
+    }
 }
 
 /// The number of decimal digits push_u64 writes for v: 1 for 0.
@@ -1548,7 +1595,20 @@ fn decimal_len(v: u64) -> u64 {
     }
 }
 
-fn push_zeros[T](mut s: T, n: u64, text: scoped fn(mut T, String)) {
+fn push_zeros(mut s: String, n: u64) {
+    let zeros = "00000000000000000000000000000000"
+    let mut left = n
+    while left > 32 {
+        string.push(mut s, zeros)
+        left -= 32
+    }
+    if left == 0 {
+        return
+    }
+    string.push(mut s, string.slice(zeros, 0, left))
+}
+
+fn write_zeros[T](mut s: T, n: u64, text: scoped fn(mut T, String)) {
     let zeros = "00000000000000000000000000000000"
     let mut left = n
     while left > 32 {

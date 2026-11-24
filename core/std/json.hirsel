@@ -561,9 +561,23 @@ fn next_quote_escape(b: Bytes, start: u64, end: u64) -> u64 {
 // Goose stdlib/json.goose:35 and serde_json 1.0.154 ser.rs:2079: copy runs
 // between ASCII escapes. Each cut is a UTF-8 boundary, including after an escape.
 fn push_quoted(mut s: String, value: String) {
-    emit_quoted(value, scoped fn(piece: String) {
-        string.push(mut s, piece)
-    })
+    string.push(mut s, "\"")
+    let b = string.as_bytes(value)
+    let end = list.len(b)
+    let mut i = next_quote_escape(b, 0, end)
+    if i == end {
+        string.push(mut s, value)
+    } else {
+        let mut start: u64 = 0
+        while i < end {
+            string.push(mut s, string.slice(value, start, i))
+            string.push(mut s, quoted_escape(ESCAPES, b[i]))
+            start = i + 1
+            i = next_quote_escape(b, start, end)
+        }
+        string.push(mut s, string.slice(value, start, end))
+    }
+    string.push(mut s, "\"")
 }
 
 /// Appends a JSON string, including quotes, to a byte buffer.
@@ -585,21 +599,7 @@ fn emit_quoted(value: String, append: scoped fn(String)) {
         let mut start: u64 = 0
         while i < end {
             append(string.slice(value, start, i))
-            let c = b[i]
-            match c {
-                b'"' => append("\\\""),
-                b'\\' => append("\\\\"),
-                8 => append("\\b"),
-                9 => append("\\t"),
-                10 => append("\\n"),
-                12 => append("\\f"),
-                13 => append("\\r"),
-                _ => {
-                    let control: u64 = int.widen(c)
-                    let offset = control * 6
-                    append(string.slice(CONTROL_ESCAPES, offset, offset + 6))
-                },
-            }
+            append(quoted_escape(ESCAPES, b[i]))
             start = i + 1
             i = next_quote_escape(b, start, end)
         }
@@ -608,7 +608,26 @@ fn emit_quoted(value: String, append: scoped fn(String)) {
     append("\"")
 }
 
-const CONTROL_ESCAPES: String = "\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f"
+fn quoted_escape(escapes: String, c: u8) -> View[String] in escapes {
+    let offset: u64 = match c {
+        b'"' => 0,
+        b'\\' => 2,
+        8 => 4,
+        9 => 6,
+        10 => 8,
+        12 => 10,
+        13 => 12,
+        _ => {
+            let control: u64 = int.widen(c)
+            let start = 14 + control * 6
+            return string.slice(escapes, start, start + 6)
+        },
+    }
+    string.slice(escapes, offset, offset + 2)
+}
+
+// The short escapes occupy the first 14 bytes, followed by fixed-width control escapes.
+const ESCAPES: String = "\\\"\\\\\\b\\t\\n\\f\\r\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\u0008\\u0009\\u000a\\u000b\\u000c\\u000d\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f"
 
 /// Finds the last member of ms whose key equals k, as a view of its value.
 /// Returns None when no member matches. Alloc: none. Cost: one pass.

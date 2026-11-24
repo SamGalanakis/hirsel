@@ -195,6 +195,52 @@ pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: 
     count_page_rows(s.roots.collections, t.id, low, high)
 }
 
+fn decode_row_key[K, V](r: RowDecoder[K, V], row_key: Bytes, raw: Bytes) -> Result[(K, Option[Bytes]), Error] {
+    let mut at: u64 = 4
+    if let Some(skip) = r.skip {
+        match (skip)(row_key, mut at) {
+            Ok(()) => {},
+            Error(e) => return Error(Decode(e))
+        }
+    }
+    let key = if r.unique {
+        list.slice(raw, 4, unique_owner_end(raw)?)
+    } else {
+        list.slice(row_key, at, list.len(row_key))
+    }
+    let k = decoded(std.codec.decode_key(r.key, key))?
+    let primary = if let Some(_) = r.skip {
+        Some(logical_key(r.table, key)?)
+    } else {
+        None
+    }
+    Ok((take k, take primary))
+}
+
+fn advance_rows[K, V](r: RowDecoder[K, V], data: PageTree, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+    let (take k, take owner) = decode_row_key(r, row_key, raw)?
+    if let Some(primary) = view owner {
+        match get_page_row(data, primary) {
+            Some(value) => finish_row(r, take k, primary, value, remaining, seen),
+            None => Error(Stale(r.table))
+        }
+    } else {
+        finish_row(r, take k, row_key, raw, remaining, seen)
+    }
+}
+
+fn finish_row[K, V](r: RowDecoder[K, V], take key: K, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
+    let size = list.len(row_key) + list.len(raw)
+    if let Some(left) = remaining {
+        if size > left {
+            return Ok(None)
+        }
+    }
+    let value = row_value(r.readers, r.table, raw)?
+    seen(row_key)?
+    Ok(Some(((take key, take value), size)))
+}
+
 fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K], reverse: bool) -> Result[Rows[K, V], Error] waits {
     read_access(r, s)?
     if !same(s.store, t.store) { return Error(Foreign) }
@@ -238,7 +284,7 @@ fn resume_data(data: PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes
 }
 
 fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: PageTree, inventory: TieredReadInventory, edge: std.page.Slot,
-    descriptor: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] waits {
+    descriptor: Bytes) -> Result[Option[(Bytes, (K, V))], Error] waits {
     let mut start = copied(rows.low)?
     let mut stop = copied(rows.high)?
     if let Some(previous) = view rows.last {
@@ -250,46 +296,53 @@ fn snapshot_scan_step[K, V](r: Reader, rows: Rows[K, V], tree: PageTree, invento
         }
     }
     let (take source, take grant, root) = snapshot_pager(r, rows.capture, inventory)?
-    read_tiered_scan(source, grant, root, tree, edge, descriptor, rows.source, take start, take stop, rows.reverse, inventory.touch_slots)
+    read_tiered_scan(source, grant, root, tree, edge, descriptor, rows.source, take start, take stop, rows.reverse, inventory.touch_slots, rows.decoder)
+}
+
+fn decode_snapshot_next[K, V](r: Reader, s: Snapshot, decoder: RowDecoder[K, V], key: Bytes, raw: Bytes) -> Result[(K, V), Error] waits {
+    let (take row_key, take owner) = decode_row_key(decoder, key, raw)?
+    let value = if let Some(primary) = view owner {
+        snapshot_point(r, s, primary, scoped fn(stored: Option[View[Bytes]]) -> Result[V, Error] {
+            let Some(row) = stored else {
+                return Error(Stale(decoder.table))
+            }
+            row_value(decoder.readers, decoder.table, row)
+        })?
+    } else {
+        row_value(decoder.readers, decoder.table, raw)?
+    }
+    Ok((take row_key, take value))
 }
 
 pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Error] waits {
     read_access(r, rows.capture)?
     if rows.done { return Ok(None) }
     readable(rows.capture.roots, rows.catalog_key, rows.catalog_page, rows.source)?
-    if let None = rows.decoder.skip {
+    let selected = {
         let data = view rows.capture.roots.collections
         if let Some(inventory) = view data.paging {
             if let Some((edge, descriptor)) = std.page.collection_slot(data.root, prefix(rows.source)?) {
                 if descriptor[53u64] == 1 {
-                    let Some((take key, take raw)) = snapshot_scan_step(r, rows, data, inventory, edge, descriptor)? else {
+                    let Some((take key, take result)) = snapshot_scan_step(r, rows, data, inventory, edge, descriptor)? else {
                         rows.done = true
                         return Ok(None)
                     }
-                    let result = advance_rows(rows.decoder, data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] { Ok(()) })?
                     rows.last = Some(take key)
-                    let (take selected, _) = option.unwrap(take result)
-                    return Ok(Some(take selected))
+                    return Ok(Some(take result))
                 }
             }
         }
-    }
-    let selected = {
-        let data = view rows.capture.roots.collections
         let mut cursor = resume_data(data, rows.low, rows.high, rows.last, rows.reverse)?
         let Some((take key, raw)) = next_bytes(mut cursor)? else {
             rows.done = true
             return Ok(None)
         }
-        let result = advance_rows(rows.decoder, data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] { Ok(()) })?
+        let result = decode_snapshot_next(r, rows.capture, rows.decoder, key, raw)?
         (take key, take result)
     }
     let (take key, take result) = take selected
     rows.last = Some(take key)
-    match take result {
-        Some((take row, _)) => Ok(Some(take row)),
-        None => Ok(None),
-    }
+    Ok(Some(take result))
 }
 
 fn scan_raw(s: Snapshot, id: u32, lo: Bound[Bytes], hi: Bound[Bytes]) -> Result[PageRange, Error] {

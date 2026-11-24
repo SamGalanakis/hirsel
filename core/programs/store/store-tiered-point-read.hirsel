@@ -58,7 +58,10 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
                     let (_, take problem) = option.unwrap(replace(mut pending, None))
                     return Error(take problem)
                 }
-                let sought = if attempt.upper_bound { option.unwrap(upper) } else { view key }
+                let sought = match attempt.seek_key {
+                    Some(secondary) => view secondary,
+                    None => if attempt.upper_bound { option.unwrap(upper) } else { view key },
+                }
                 let demand = TieredPointDemand(target: clone(target), key: copied(sought)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
                 let TieredPointDelivery(frames: take frames, failure: take failure, ..) = tiered_point_delivery(source.pager, take demand)?
                 for frame in frames {

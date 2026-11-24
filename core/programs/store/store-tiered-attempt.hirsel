@@ -7,6 +7,7 @@ type TieredTouchSet: send {
     partition: u64,
     frames: List[Arc[TieredFrame]],
     upper_bound: bool,
+    seek_key: Option[Bytes],
     stopped: Option[TieredAttemptStop]
 }
 
@@ -15,7 +16,7 @@ fn tiered_touch_set(partition: u64, initial: u64) -> Result[TieredTouchSet, Capa
     let mut frames: List[Arc[TieredFrame]] = list.new()
     map.try_reserve(mut stamps, initial)?
     list.try_reserve(mut frames, initial)?
-    Ok(TieredTouchSet(stamps: take stamps, touched_bytes: 0, slots: initial, partition: partition, frames: take frames, upper_bound: false, stopped: None))
+    Ok(TieredTouchSet(stamps: take stamps, touched_bytes: 0, slots: initial, partition: partition, frames: take frames, upper_bound: false, seek_key: None, stopped: None))
 }
 
 fn tiered_touch_grow(mut attempt: TieredTouchSet) -> Result[(), Capacity] {

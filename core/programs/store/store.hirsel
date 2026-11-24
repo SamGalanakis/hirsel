@@ -3157,43 +3157,6 @@ fn index_bound[J](ix: u32, key: std.codec.Key[J], limit: Bound[J], high: bool) -
     }
 }
 
-fn advance_rows[K, V](r: RowDecoder[K, V], data: PageTree, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
-    let mut at: u64 = 4
-    if let Some(skip) = r.skip {
-        match (skip)(row_key, mut at) {
-            Ok(()) => {},
-            Error(e) => return Error(Decode(e))
-        }
-    }
-    let key = if r.unique {
-        list.slice(raw, 4, unique_owner_end(raw)?)
-    } else {
-        list.slice(row_key, at, list.len(row_key))
-    }
-    let k = decoded(std.codec.decode_key(r.key, key))?
-    if let Some(_) = r.skip {
-        let primary = logical_key(r.table, key)?
-        match get_page_row(data, primary) {
-            Some(value) => finish_row(r, take k, primary, value, remaining, seen),
-            None => Error(Stale(r.table))
-        }
-    } else {
-        finish_row(r, take k, row_key, raw, remaining, seen)
-    }
-}
-
-fn finish_row[K, V](r: RowDecoder[K, V], take key: K, row_key: Bytes, raw: Bytes, remaining: Option[u64], seen: scoped[view] fn(Bytes) -> Result[(), Error]) -> Result[Option[((K, V), u64)], Error] {
-    let size = list.len(row_key) + list.len(raw)
-    if let Some(left) = remaining {
-        if size > left {
-            return Ok(None)
-        }
-    }
-    let value = row_value(r.readers, r.table, raw)?
-    seen(row_key)?
-    Ok(Some(((take key, take value), size)))
-}
-
 fn named(s: String) -> Result[String, Error] {
     Ok(string.from(s))
 }

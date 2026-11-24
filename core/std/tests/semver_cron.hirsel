@@ -1,0 +1,149 @@
+// SemVer §11 precedence chain, CC BY 3.0, https://semver.org/spec/v2.0.0.html#spec-item-11
+// expect: run semver_precedence_chain() = true
+fn semver_precedence_chain() -> bool {
+    let expected: Inline[String, 8] =["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0"]
+    let mut versions: List[semver.Version] = list.with_capacity(8)
+    for i in 0u64 .. 8 {
+        list.push(mut versions, result.unwrap(semver.parse(expected[7 - i])))
+    }
+    list.sort(mut versions, fn(a: semver.Version, b: semver.Version) -> Order {
+        semver.ordered(a, b)
+    })
+    for i in 0u64 .. 8 {
+        if semver.format(versions[i]) != expected[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn compare(a: String, b: String) -> Order {
+    semver.ordered(result.unwrap(semver.parse(a)), result.unwrap(semver.parse(b)))
+}
+
+// expect: run semver_wide_numbers_ascii_and_build() = true
+fn semver_wide_numbers_ascii_and_build() -> bool {
+    compare("99999999999999999999.0.0", "100000000000000000000.0.0") == Less && compare("1.0.0-99999999999999999999", "1.0.0-100000000000000000000") == Less && compare("1.0.0-1", "1.0.0-A") == Less && compare("1.0.0-Z", "1.0.0-a") == Less && compare("1.0.0-alpha+001", "1.0.0-alpha+other") == Equal && semver.format(result.unwrap(semver.parse("0.2.1-01a.-+002.b"))) == "0.2.1-01a.-+002.b"
+}
+
+// expect: run semver_refuses_invalid_grammar() = true
+fn semver_refuses_invalid_grammar() -> bool {
+    let invalid: Inline[String, 13] =["", "1", "1.0", "1.0.0.0", "01.0.0", "1.00.0", "1.0.00", "1.0.0-01", "1.0.0-", "1.0.0+", "1.0.0-alpha..one", "1.0.0-ß", " 1.0.0"]
+    for s in invalid {
+        match semver.parse(s) {
+            Error(SemVerSyntax(_)) => {},
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn matches(req: String, version: String) -> bool {
+    semver.matches(result.unwrap(semver.requirement(req)), result.unwrap(semver.parse(version)))
+}
+
+// Derived from Cargo's version requirement syntax and npm's semver range documentation.
+// https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#version-requirement-syntax
+// https://docs.npmjs.com/cli/v6/using-npm/semver/
+// expect: run semver_caret_and_tilde() = true
+fn semver_caret_and_tilde() -> bool {
+    matches("^1.2.3", "1.9.9") && !matches("^1.2.3", "2.0.0") && matches("^0.2.3", "0.2.9") && !matches("^0.2.3", "0.3.0") && matches("^0.0.3", "0.0.3") && !matches("^0.0.3", "0.0.4") && matches("^0.0", "0.0.9") && !matches("^0.0", "0.1.0") && matches("^0", "0.9.0") && !matches("^0", "1.0.0") && matches("1.2", "1.9.0") && !matches("1.2", "1.1.9") && matches("~1.2.3", "1.2.9") && !matches("~1.2.3", "1.2.2") && matches("~1.2", "1.2.99") && !matches("~1.2", "1.3.0") && matches("~1", "1.99.0") && !matches("~1", "2.0.0")
+}
+
+// expect: run semver_conjunction_and_disjunction() = true
+fn semver_conjunction_and_disjunction() -> bool {
+    let req = " > 1.2.3, <=1.8.0 || =2.0.1+ignored "
+    !matches(req, "1.2.3") && matches(req, "1.2.4") && matches(req, "1.8.0") && !matches(req, "1.8.1") && matches(req, "2.0.1+other") && !matches(req, "2.0.2")
+}
+
+// expect: run semver_prereleases_need_the_same_tuple_in_the_same_alternative() = true
+fn semver_prereleases_need_the_same_tuple_in_the_same_alternative() -> bool {
+    let req = ">=1.2.3-beta.2, <2.0.0"
+    matches(req, "1.2.3-beta.3") && matches(req, "1.2.3") && !matches(req, "1.2.3-beta.1") && !matches(req, "1.2.4-beta.1") && !matches(">1.2.3-beta.9 || >1.0.0", "1.2.3-beta.8") && matches("^1.2.3, >=1.2.4-beta", "1.2.4-beta") && !matches("~1.2, >=1.2.4-beta", "1.2.4-beta") && !matches(">=1.2, >=1.2.4-beta", "1.2.4-beta")
+}
+
+// expect: run semver_refuses_invalid_requirements() = true
+fn semver_refuses_invalid_requirements() -> bool {
+    let invalid: Inline[String, 8] =["", "^", "^0.01", "1.2-beta", "^1,", "^1 ||", "^1 | ^2", "^1 ^2"]
+    for s in invalid {
+        match semver.requirement(s) {
+            Error(SemVerSyntax(_)) => {},
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn next(spec: String, after: i64) -> Option[i64] {
+    cron.next_after(result.unwrap(cron.parse(spec)), after)
+}
+
+// UTC timestamps from croniter 6.0.0, MIT, https://pypi.org/project/croniter/6.0.0/
+// expect: run croniter_day_or() = true
+fn croniter_day_or() -> bool {
+    next("0 9 13 * MON", 1739178000) == Some(1739437200) && next("0 9 13 * MON", 1739437200) == Some(1739782800)
+}
+
+// expect: run croniter_leap_day_and_impossible_date() = true
+fn croniter_leap_day_and_impossible_date() -> bool {
+    next("0 0 29 FEB *", 3981312000) == Some(4233686400) && next("0 0 30 FEB *", 1735689600) == None
+}
+
+// expect: run croniter_year_and_field_rollovers() = true
+fn croniter_year_and_field_rollovers() -> bool {
+    next("0 0 1 JAN *", 1767225599) == Some(1767225600) && next("1,10-20/5 8-12/2 * jan,Mar Mon-FRI", 1769775600) == Some(1772438460) && next("* * * * *", -61) == Some(-60) && next("30 1,4 * * *", 1738373400) == Some(1738384200) && next("0 0 * * 7", 1738411200) == Some(1738454400)
+}
+
+// expect: run croniter_aliases() = true
+fn croniter_aliases() -> bool {
+    next("@yearly", 1738411200) == Some(1767225600) && next("@monthly", 1738411200) == Some(1740787200) && next("@weekly", 1738411200) == Some(1738454400) && next("@daily", 1738411200) == Some(1738454400) && next("@hourly", 1738411200) == Some(1738414800)
+}
+
+// 2025-02-02 is Sunday and the second day of the month. */2 starts at day 1.
+// The next day, Monday February 3, satisfies both day fields.
+// expect: run cron_vixie_star_step() = true
+fn cron_vixie_star_step() -> bool {
+    let spec = result.unwrap(cron.parse("0 0 */2 * SUN,MON"))
+    let sunday = option.unwrap(time.at(option.unwrap(time.date(2025, 2, 2)), 0, 0, 0, 0))
+    let monday = option.unwrap(time.at(option.unwrap(time.date(2025, 2, 3)), 0, 0, 30, 1))
+    !cron.matches(spec, sunday) && cron.matches(spec, monday) && cron.next_after(spec, 1738411200) == Some(1738540800)
+}
+
+// February 30 cannot satisfy DOM, but Monday February 3 satisfies DOW.
+// expect: run cron_day_or_with_impossible_dom() = true
+fn cron_day_or_with_impossible_dom() -> bool {
+    next("0 0 30 FEB MON", 1735689600) == Some(1738540800) && next("@yearly", 253402300799) == None && next("@yearly", -9223372036854775808) == None
+}
+
+// expect: run cron_refuses_malformed_fields() = true
+fn cron_refuses_malformed_fields() -> bool {
+    let invalid: Inline[String, 11] =["* * * *", "* * * * * *", "@reboot", "*/0 * * * *", "9-1 * * * *", "60 * * * *", "* 24 * * *", "* * 0 * *", "* * * JUNE *", "* * * * 8", "1, * * * *"]
+    for s in invalid {
+        match cron.parse(s) {
+            Error(CronSyntax(_)) => {},
+            _ => return false,
+        }
+    }
+    true
+}
+
+// expect: run parsers_refuse_over_limit() = true
+fn parsers_refuse_over_limit() -> bool {
+    let mut s = string.with_capacity(4097)
+    for _ in 0u64 .. 4097 {
+        string.push_char(mut s, '1')
+    }
+    let v = match semver.parse(s) {
+        Error(SemVerTooLong) => true,
+        _ => false,
+    }
+    let r = match semver.requirement(s) {
+        Error(SemVerTooLong) => true,
+        _ => false,
+    }
+    let c = match cron.parse(s) {
+        Error(CronTooLong) => true,
+        _ => false,
+    }
+    v && r && c
+}

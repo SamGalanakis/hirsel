@@ -1,0 +1,298 @@
+pub type Error = CronSyntax(u64) | CronTooLong
+
+pub opaque type Spec {
+    minutes: u64,
+    hours: u64,
+    days: u64,
+    months: u64,
+    weekdays: u64,
+    either_day: bool
+}
+
+const MAX_BYTES: u64 = 4096
+
+const DAY_SECONDS: i64 = 86400
+
+const CYCLE_SECONDS: i64 = 146097 * DAY_SECONDS
+
+fn at(b: Bytes, i: u64, c: u8) -> bool {
+    i < list.len(b) && b[i] == c
+}
+
+fn space(b: Bytes, i: u64) -> bool {
+    at(b, i, b' ') || at(b, i, b'\t')
+}
+
+fn skip_space(b: Bytes, start: u64) -> u64 {
+    let mut i = start
+    while space(b, i) {
+        i += 1
+    }
+    i
+}
+
+fn bit(i: u32) -> u64 {
+    let shift: u64 = int.widen(i)
+    1u64 << shift
+}
+
+fn contains(mask: u64, i: u8) -> bool {
+    (mask & bit(int.widen(i))) != 0
+}
+
+fn next_bit(mask: u64, start: u32) -> Option[u32] {
+    let shift: u64 = int.widen(start)
+    let tail = mask >> shift
+    if tail == 0 {
+        return None
+    }
+    Some(start + int.trailing_zeros(tail))
+}
+
+// Values above 60 are outside every field. For a step, all such values
+// select just the first entry, so they need no machine-integer conversion.
+fn decimal(b: Bytes, start: u64) -> Result[(u32, u64), Error] {
+    let mut i = start
+    let mut n: u32 = 0
+    while i < list.len(b) && int.is_ascii_digit(b[i]) {
+        if n <= 60 {
+            n = n * 10 + int.widen(b[i] - b'0')
+        }
+        i += 1
+    }
+    if i == start {
+        return Error(CronSyntax(i))
+    }
+    Ok((n, i))
+}
+
+fn value(b: Bytes, i: u64, low: u32, high: u32, names: Bytes) -> Result[(u32, u64), Error] {
+    if i < list.len(b) && int.is_ascii_digit(b[i]) {
+        let (n, end) = decimal(b, i)?
+        if n < low || n > high {
+            return Error(CronSyntax(i))
+        }
+        return Ok((n, end))
+    }
+    if i + 3 <= list.len(b) {
+        for j in 0 .. list.len(names) / 3 {
+            let k = j * 3
+            if int.to_ascii_lower(b[i]) == names[k] && int.to_ascii_lower(b[i + 1]) == names[k + 1] && int.to_ascii_lower(b[i + 2]) == names[k + 2] {
+                return Ok((low + int.narrow(j), i + 3))
+            }
+        }
+    }
+    Error(CronSyntax(i))
+}
+
+fn entry(b: Bytes, start: u64, low: u32, high: u32, names: Bytes) -> Result[(u64, u64), Error] {
+    let star = at(b, start, b'*')
+    let (first, after_first) = if star {
+        (low, start + 1)
+    } else {
+        value(b, start, low, high, names)?
+    }
+    let mut i = after_first
+    let mut last = first
+    if star {
+        last = high
+    } else if at(b, i, b'-') {
+        let (end_value, end_pos) = value(b, i + 1, low, high, names)?
+        if end_value < first {
+            return Error(CronSyntax(i + 1))
+        }
+        last = end_value
+        i = end_pos
+    } else if at(b, i, b'/') {
+        last = high
+    }
+    let mut step: u32 = 1
+    if at(b, i, b'/') {
+        let (n, end) = decimal(b, i + 1)?
+        if n == 0 {
+            return Error(CronSyntax(i + 1))
+        }
+        step = n
+        i = end
+    }
+    let mut mask: u64 = 0
+    let mut n = first
+    while n <= last {
+        mask |= bit(n)
+        n += step
+    }
+    Ok((mask, i))
+}
+
+fn field(b: Bytes, start: u64, low: u32, high: u32, names: String) -> Result[(u64, u64, bool), Error] {
+    let mut i = skip_space(b, start)
+    let star = at(b, i, b'*')
+    let mut mask: u64 = 0
+    loop {
+        let (bits, end) = entry(b, i, low, high, string.as_bytes(names))?
+        mask |= bits
+        if at(b, end, b',') {
+            i = end + 1
+        } else if end == list.len(b) || space(b, end) {
+            return Ok((mask, end, star))
+        } else {
+            return Error(CronSyntax(end))
+        }
+    }
+}
+
+fn parse_fields(b: Bytes) -> Result[Spec, Error] {
+    let (minutes, m, _) = field(b, 0, 0, 59, "")?
+    let (hours, h, _) = field(b, m, 0, 23, "")?
+    let (days, d, day_star) = field(b, h, 1, 31, "")?
+    let (months, mo, _) = field(b, d, 1, 12, "janfebmaraprmayjunjulaugsepoctnovdec")?
+    let (dow, end, weekday_star) = field(b, mo, 0, 7, "sunmontuewedthufrisat")?
+    let i = skip_space(b, end)
+    if i != list.len(b) {
+        return Error(CronSyntax(i))
+    }
+    // Sunday can be written as 0 or 7. Expand ranges and steps before folding.
+    let weekdays = (dow & 127) | (dow >> 7)
+    Ok(Spec(minutes, hours, days, months, weekdays, either_day: !day_star && !weekday_star))
+}
+
+/// Parses five fields (minute, hour, day of month, month, weekday), or a
+/// supported @alias. Names are three ASCII letters and case-insensitive.
+/// Fails: CronSyntax(byte offset) for malformed fields, CronTooLong above 4096 bytes.
+/// Alloc: nothing. Cost: O(bytes) with at most 60 bit insertions per list entry.
+pub fn parse(s: String) -> Result[Spec, Error] {
+    if string.byte_len(s) > MAX_BYTES {
+        return Error(CronTooLong)
+    }
+    let b = string.as_bytes(s)
+    let start = skip_space(b, 0)
+    if !at(b, start, b'@') {
+        return parse_fields(b)
+    }
+    let mut end = start
+    while end < list.len(b) && !space(b, end) {
+        end += 1
+    }
+    let rest = skip_space(b, end)
+    if rest != list.len(b) {
+        return Error(CronSyntax(rest))
+    }
+    let alias = string.slice(s, start, end)
+    let expanded = if alias == "@yearly" {
+        "0 0 1 1 *"
+    } else if alias == "@monthly" {
+        "0 0 1 * *"
+    } else if alias == "@weekly" {
+        "0 0 * * 0"
+    } else if alias == "@daily" {
+        "0 0 * * *"
+    } else if alias == "@hourly" {
+        "0 * * * *"
+    } else {
+        return Error(CronSyntax(start))
+    }
+    parse_fields(string.as_bytes(expanded))
+}
+
+fn day_matches(spec: Spec, date: time.Date) -> bool {
+    let weekday: u8 = match time.weekday(date) {
+        Sunday => 0,
+        Monday => 1,
+        Tuesday => 2,
+        Wednesday => 3,
+        Thursday => 4,
+        Friday => 5,
+        Saturday => 6,
+    }
+    let dom = contains(spec.days, time.day(date))
+    let dow = contains(spec.weekdays, weekday)
+    if spec.either_day {
+        dom || dow
+    } else {
+        dom && dow
+    }
+}
+
+/// Tests the containing civil minute. Uses Vixie cron's OR between the day
+/// fields when neither begins with *. Otherwise both day fields must match.
+/// Alloc: nothing. Cost: O(1).
+pub fn matches(spec: Spec, civil: time.Civil) -> bool {
+    let date = time.date_of(civil)
+    contains(spec.months, time.month(date)) && contains(spec.hours, time.hour(civil)) && contains(spec.minutes, time.minute(civil)) && day_matches(spec, date)
+}
+
+fn clock_at_or_after(spec: Spec, minute_of_day: i64) -> Option[i64] {
+    let start_hour: u32 = int.narrow(minute_of_day / 60)
+    let start_min: u32 = int.narrow(minute_of_day % 60)
+    let hour = next_bit(spec.hours, start_hour)?
+    if hour == start_hour {
+        if let Some(minute) = next_bit(spec.minutes, start_min) {
+            return Some(int.widen(hour * 3600 + minute * 60))
+        }
+        let later = next_bit(spec.hours, hour + 1)?
+        return Some(int.widen(later * 3600 + int.trailing_zeros(spec.minutes) * 60))
+    }
+    Some(int.widen(hour * 3600 + int.trailing_zeros(spec.minutes) * 60))
+}
+
+fn search_month(spec: Spec, year: u16, month: u8, start_day: u8, first: i64) -> Option[i64] {
+    let mut day: u32 = int.widen(start_day)
+    while day <= 31 {
+        if !spec.either_day {
+            day = next_bit(spec.days, day)?
+        }
+        let date = time.date(year, month, int.narrow(day))?
+        if day_matches(spec, date) {
+            let midnight = time.days(date) * DAY_SECONDS
+            let minute = if first > midnight {
+                (first - midnight) / 60
+            } else {
+                0
+            }
+            if let Some(clock) = clock_at_or_after(spec, minute) {
+                return Some(midnight + clock)
+            }
+        }
+        day += 1
+    }
+    None
+}
+
+/// Finds the first scheduled UTC minute boundary strictly after unix_secs.
+/// Returns None for an input outside std.time, a schedule with no occurrence,
+/// or exhaustion of the representable years. The Gregorian pattern repeats in
+/// 400 years. Visits at most 4801 months, with at most 31 day checks per month.
+/// Uses bit scans for allowed months, hours and minutes. Alloc: nothing.
+pub fn next_after(spec: Spec, unix_secs: i64) -> Option[i64] {
+    let now = time.civil(time.from_unix(unix_secs, 0)?, 0)?
+    let second: i64 = int.widen(time.second(now))
+    let first = unix_secs + 60 - second
+    let start = time.date_of(time.civil(time.from_unix(first, 0)?, 0)?)
+    let initial_year = time.year(start)
+    let initial_month: u32 = int.widen(time.month(start))
+    let mut month = initial_month
+    for year in initial_year .. initial_year + 401 {
+        if year > 9999 {
+            break
+        }
+        while let Some(allowed) = next_bit(spec.months, month) {
+            if year == initial_year + 400 && allowed > initial_month {
+                return None
+            }
+            let day = if year == initial_year && allowed == initial_month {
+                time.day(start)
+            } else {
+                1
+            }
+            if let Some(candidate) = search_month(spec, year, int.narrow(allowed), day, first) {
+                if candidate < first + CYCLE_SECONDS {
+                    return Some(candidate)
+                }
+                return None
+            }
+            month = allowed + 1
+        }
+        month = 1
+    }
+    None
+}

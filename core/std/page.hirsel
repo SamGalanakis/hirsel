@@ -1906,6 +1906,11 @@ type PageSlot: shareable + send {
     blob: Option[BlobSlot]
 }
 
+type PagePiece {
+    root: Arc[Page],
+    separator: Bytes
+}
+
 fn take_stamp(mut next: u64) -> Result[u64, Error] {
     let Some(end) = int.checked_add(next, 1) else {
         return Error(StampLimit)
@@ -2193,20 +2198,25 @@ fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u6
     Ok(arc.new(new_page(take image, take kids, take blobs, true)))
 }
 
-fn build_pieces(items: List[PageSlot], domain: Domain, lvl: u8, rightmost: bool, mut next: u64) -> Result[List[Arc[Page]], Error] {
+fn build_pieces(items: List[PageSlot], domain: Domain, lvl: u8, rightmost: bool, mut next: u64) -> Result[List[PagePiece], Error] {
     let n = list.len(items)
     let (left, middle) = split_slots(n, lvl, rightmost, scoped fn(slot: u64) -> u64 {
         full_size(items[slot].row)
     }, scoped fn(lo: u64, hi: u64, width: u64) -> u64 {
         slot_size_with_prefix(items, lvl, lo, hi, width)
     })?
-    let mut parts: List[Arc[Page]] = list.new()
-    list.push(mut parts, build_section(items, domain, lvl, 0, left, take_stamp(mut next)?)?)
+    let mut parts: List[PagePiece] = list.new()
+    let first = build_section(items, domain, lvl, 0, left, take_stamp(mut next)?)?
+    list.push(mut parts, PagePiece(root: take first, separator: list.new()))
+    // The first child in a branch piece uses the empty divider inside that
+    // piece. Keep the original divider for the edge that joins it to its parent.
     if left < middle {
-        list.push(mut parts, build_section(items, domain, lvl, left, middle, take_stamp(mut next)?)?)
+        let second = build_section(items, domain, lvl, left, middle, take_stamp(mut next)?)?
+        list.push(mut parts, PagePiece(root: take second, separator: clone(items[left].row.key)))
     }
     if middle < n {
-        list.push(mut parts, build_section(items, domain, lvl, middle, n, take_stamp(mut next)?)?)
+        let third = build_section(items, domain, lvl, middle, n, take_stamp(mut next)?)?
+        list.push(mut parts, PagePiece(root: take third, separator: clone(items[middle].row.key)))
     }
     Ok(take parts)
 }
@@ -2243,12 +2253,12 @@ fn refresh_child(mut page: Page, slot: u64) {
 
 // Puts the pieces that replace the child at slot into the private page itself
 // while they fit, and rebuilds the page into pieces only when one does not.
-fn adopt_children(mut page: Page, slot: u64, parts: List[Arc[Page]], rightmost: bool, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
-    let _ = list.set(mut page.kids, slot, HotPage(arc.share(parts[0])))
+fn adopt_children(mut page: Page, slot: u64, parts: List[PagePiece], rightmost: bool, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
+    let _ = list.set(mut page.kids, slot, HotPage(arc.share(parts[0].root)))
     refresh_child(mut page, slot)
     for i in 1u64 .. list.len(parts) {
-        let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
-        let row = branch_slot(take divider, parts[i])
+        let piece = view parts[i]
+        let row = branch_slot(clone(piece.separator), piece.root)
         if private_put(mut page, row.row, row.kid, None)? == Split {
             return Ok(Some(replace_children(page, slot, parts, i, rightmost, mut next)?))
         }
@@ -2258,11 +2268,11 @@ fn adopt_children(mut page: Page, slot: u64, parts: List[Arc[Page]], rightmost: 
 
 // The page already holds parts[0] at slot and the dividers of parts[1..from];
 // the rebuilt pieces add the rest.
-fn replace_children(page: Page, slot: u64, parts: List[Arc[Page]], from: u64, rightmost: bool, mut next: u64) -> Result[List[Arc[Page]], Error] {
+fn replace_children(page: Page, slot: u64, parts: List[PagePiece], from: u64, rightmost: bool, mut next: u64) -> Result[List[PagePiece], Error] {
     let mut edited = owned_slots(page)
     for i in from .. list.len(parts) {
-        let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
-        open_slot(mut edited, slot + i, branch_slot(take divider, parts[i]))
+        let piece = view parts[i]
+        open_slot(mut edited, slot + i, branch_slot(clone(piece.separator), piece.root))
     }
     build_pieces(edited, page.image.domain, level(page.image), rightmost, mut next)
 }
@@ -2305,7 +2315,19 @@ fn build_leaf_piece(page: Page, incoming: PageSlot, entries: List[PackedSlot], s
     arc.new(new_page(take image, take kids, take blobs, page.image.domain == CollectionMap))
 }
 
-fn split_insert(page: Page, incoming: PageSlot, rightmost: bool, mut next: u64) -> Result[List[Arc[Page]], Error] {
+fn append_leaf_piece(mut parts: List[PagePiece], take leaf: Arc[Page]) -> Result[(), Error] {
+    let n = list.len(parts)
+    let divider: Bytes = if n == 0 {
+        list.new()
+    } else {
+        let previous = parts[n - 1].root.image
+        separator(option.unwrap(key_at(previous, count(previous) - 1)), option.unwrap(key_at(leaf.image, 0)))?
+    }
+    list.push(mut parts, PagePiece(root: take leaf, separator: take divider))
+    Ok(())
+}
+
+fn split_insert(page: Page, incoming: PageSlot, rightmost: bool, mut next: u64) -> Result[List[PagePiece], Error] {
     let (slot, hit) = search(page.image, incoming.row.key)
     let entries = leaf_edit_slots(page.image, incoming.row, slot, hit)
     let n = list.len(entries)
@@ -2314,20 +2336,20 @@ fn split_insert(page: Page, incoming: PageSlot, rightmost: bool, mut next: u64) 
     }, scoped fn(lo: u64, hi: u64, width: u64) -> u64 {
         slot_section_size(page.image, incoming.row.key, entries, lo, hi, width)
     })?
-    let mut parts: List[Arc[Page]] = list.new()
-    list.push(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, 0, left, take_stamp(mut next)?))
+    let mut parts: List[PagePiece] = list.new()
+    append_leaf_piece(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, 0, left, take_stamp(mut next)?))?
     if left < middle {
-        list.push(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, left, middle, take_stamp(mut next)?))
+        append_leaf_piece(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, left, middle, take_stamp(mut next)?))?
     }
     if middle < n {
-        list.push(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, middle, n, take_stamp(mut next)?))
+        append_leaf_piece(mut parts, build_leaf_piece(page, incoming, entries, slot, hit, middle, n, take_stamp(mut next)?))?
     }
     Ok(take parts)
 }
 
 // The boolean tracks a decrease in this page's sealed size. Child totals alone
 // do not change a branch's size, so only a rebuilt branch can pass it upward.
-fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64) -> Result[(Option[List[Arc[Page]]], bool), Error] {
+fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64) -> Result[(Option[List[PagePiece]], bool), Error] {
     let Some(slot) = descend(page.image, incoming.row.key) else {
         let (position, hit) = search(page.image, incoming.row.key)
         let extends = rightmost && !hit && position == count(page.image)
@@ -2350,7 +2372,7 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmo
         if !shrank {
             return Ok((adopt_children(mut page, slot, parts, extends, mut next)?, false))
         }
-        page.kids[slot] = HotPage(arc.share(parts[0]))
+        page.kids[slot] = HotPage(arc.share(parts[0].root))
     }
     if !shrank {
         refresh_child(mut page, slot)
@@ -2358,17 +2380,17 @@ fn insert_private(mut page: Page, incoming: PageSlot, private_from: u64, rightmo
     }
     let rebuilt = rebalance_child(mut page, slot, mut next)?
     let smaller = if let Some(parts) = view rebuilt {
-        list.len(parts) == 1 && sealed_size(parts[0].image) < sealed_size(page.image)
+        list.len(parts) == 1 && sealed_size(parts[0].root.image) < sealed_size(page.image)
     } else {
         false
     }
     Ok((take rebuilt, smaller))
 }
 
-fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64) -> Result[(Option[List[Arc[Page]]], bool), Error] {
+fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, rightmost: bool, mut next: u64) -> Result[(Option[List[PagePiece]], bool), Error] {
     let prior = stamp(root.image)
     if prior != 0 && prior >= private_from {
-        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[Arc[Page]]], bool), Error] {
+        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[PagePiece]], bool), Error] {
             stamp_replay_edit(mut page, private_from, mut next)?
             insert_private(mut page, incoming, private_from, rightmost, mut next)
         })
@@ -2377,12 +2399,12 @@ fn insert_path(mut root: Arc[Page], incoming: PageSlot, private_from: u64, right
         }
     }
     root = copy_with_stamp(root, take_stamp(mut next)?)
-    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[Arc[Page]]], bool), Error] {
+    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[(Option[List[PagePiece]], bool), Error] {
         insert_private(mut page, incoming, private_from, rightmost, mut next)
     }))
 }
 
-fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
     let lvl = level(hot_child(page.kids[slot]).image)
     let n = count(hot_child(page.kids[slot]).image)
     let siblings = count(page.image)
@@ -2443,7 +2465,7 @@ fn rebalance_child(mut page: Page, slot: u64, mut next: u64) -> Result[Option[Li
     Ok(Some(build_pieces(parent, domain, level(page.image), false, mut next)?))
 }
 
-fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
     let Some(slot) = descend(page.image, key) else {
         private_delete(mut page, key)
         return Ok(None)
@@ -2458,7 +2480,7 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) 
     if let Some(parts) = revised {
         page.loose_below = true
         if list.len(parts) == 1 {
-            page.kids[slot] = HotPage(arc.share(parts[0]))
+            page.kids[slot] = HotPage(arc.share(parts[0].root))
             return rebalance_child(mut page, slot, mut next)
         }
         return adopt_children(mut page, slot, parts, false, mut next)
@@ -2466,9 +2488,9 @@ fn remove_private(mut page: Page, key: Bytes, private_from: u64, mut next: u64) 
     rebalance_child(mut page, slot, mut next)
 }
 
-fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[Arc[Page]]], Error] {
+fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
     if stamp(root.image) >= private_from {
-        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+        let update = arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[PagePiece]], Error] {
             stamp_replay_edit(mut page, private_from, mut next)?
             remove_private(mut page, key, private_from, mut next)
         })
@@ -2477,22 +2499,18 @@ fn remove_path(mut root: Arc[Page], key: Bytes, private_from: u64, mut next: u64
         }
     }
     root = copy_with_stamp(root, take_stamp(mut next)?)
-    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[Arc[Page]]], Error] {
+    option.unwrap(arc.with_unique(mut root, scoped fn(mut page: Page) -> Result[Option[List[PagePiece]], Error] {
         remove_private(mut page, key, private_from, mut next)
     }))
 }
 
-fn finish_split(mut root: Arc[Page], parts: List[Arc[Page]], mut next: u64) -> Result[(), Error] {
+fn finish_split(mut root: Arc[Page], parts: List[PagePiece], mut next: u64) -> Result[(), Error] {
     if list.len(parts) == 1 {
-        root = arc.share(parts[0])
+        root = arc.share(parts[0].root)
         return Ok(())
     }
     let mut parents: List[PageSlot] = list.with_capacity(list.len(parts))
-    list.push(mut parents, branch_slot(list.new(), parts[0]))
-    for i in 1u64 .. list.len(parts) {
-        let divider = separator(extreme_key(parts[i - 1], true), extreme_key(parts[i], false))?
-        list.push(mut parents, branch_slot(take divider, parts[i]))
-    }
+    append_piece_slots(mut parents, parts)
     root = build_section(parents, root.image.domain, level(root.image) + 1, 0, list.len(parents), take_stamp(mut next)?)?
     Ok(())
 }
@@ -3420,41 +3438,13 @@ pub fn walk_next(mut walk: Walk) {
     }
 }
 
-type TrimPiece {
-    root: Arc[Page],
-    separator: Bytes
-}
-
-fn one_trim_piece(root: Arc[Page]) -> List[TrimPiece] {
-    let mut result: List[TrimPiece] = list.with_capacity(1)
-    list.push(mut result, TrimPiece(root: arc.share(root), separator: list.new()))
+fn one_trim_piece(root: Arc[Page]) -> List[PagePiece] {
+    let mut result: List[PagePiece] = list.with_capacity(1)
+    list.push(mut result, PagePiece(root: arc.share(root), separator: list.new()))
     take result
 }
 
-// The supplied slot separators already divide the kept children. Preserve
-// the first key of each split piece for its parent without rereading a spine.
-fn trim_branch(kept_slots: List[PageSlot], lvl: u8, mut next: u64) -> Result[List[TrimPiece], Error] {
-    let n = list.len(kept_slots)
-    let (left, middle) = split_slots(n, lvl, false, scoped fn(slot: u64) -> u64 {
-        full_size(kept_slots[slot].row)
-    }, scoped fn(lo: u64, hi: u64, width: u64) -> u64 {
-        slot_size_with_prefix(kept_slots, lvl, lo, hi, width)
-    })?
-    let mut pieces: List[TrimPiece] = list.new()
-    let first = build_section(kept_slots, Collection, lvl, 0, left, take_stamp(mut next)?)?
-    list.push(mut pieces, TrimPiece(root: take first, separator: list.new()))
-    if left < middle {
-        let second = build_section(kept_slots, Collection, lvl, left, middle, take_stamp(mut next)?)?
-        list.push(mut pieces, TrimPiece(root: take second, separator: clone(kept_slots[left].row.key)))
-    }
-    if middle < n {
-        let third = build_section(kept_slots, Collection, lvl, middle, n, take_stamp(mut next)?)?
-        list.push(mut pieces, TrimPiece(root: take third, separator: clone(kept_slots[middle].row.key)))
-    }
-    Ok(take pieces)
-}
-
-fn trim_piece_slots(mut kept_slots: List[PageSlot], pieces: List[TrimPiece]) {
+fn append_piece_slots(mut kept_slots: List[PageSlot], pieces: List[PagePiece]) {
     for piece in pieces {
         list.push(mut kept_slots, branch_slot(clone(piece.separator), piece.root))
     }
@@ -3463,7 +3453,7 @@ fn trim_piece_slots(mut kept_slots: List[PageSlot], pieces: List[TrimPiece]) {
 // Insert the shorter survivor at the matching depth of the next kept tree.
 // The enclosing separator is a bridge above every left key and below every
 // key of the donor, so the join needs only the donor's left spine.
-fn trim_join(left: Arc[Page], donor: Arc[Page], bridge: Bytes, mut next: u64) -> Result[List[TrimPiece], Error] {
+fn trim_join(left: Arc[Page], donor: Arc[Page], bridge: Bytes, mut next: u64) -> Result[List[PagePiece], Error] {
     let lvl = level(donor.image)
     let source = owned_slots(donor)
     let mut kept_slots: List[PageSlot] = list.new()
@@ -3474,15 +3464,15 @@ fn trim_join(left: Arc[Page], donor: Arc[Page], bridge: Bytes, mut next: u64) ->
         list.push(mut kept_slots, take right)
     } else {
         let pieces = trim_join(left, hot_child(donor.kids[0u64]), bridge, mut next)?
-        trim_piece_slots(mut kept_slots, pieces)
+        append_piece_slots(mut kept_slots, pieces)
     }
     for i in 1u64 .. list.len(source) {
         list.push(mut kept_slots, clone(source[i]))
     }
-    trim_branch(kept_slots, lvl, mut next)
+    build_pieces(kept_slots, Collection, lvl, false, mut next)
 }
 
-fn trim_path(root: Arc[Page], key: Bytes, mut next: u64) -> Result[List[TrimPiece], Error] {
+fn trim_path(root: Arc[Page], key: Bytes, mut next: u64) -> Result[List[PagePiece], Error] {
     let lvl = level(root.image)
     if lvl == 0 {
         let (slot, hit) = search(root.image, key)
@@ -3506,20 +3496,20 @@ fn trim_path(root: Arc[Page], key: Bytes, mut next: u64) -> Result[List[TrimPiec
     let source = owned_slots(root)
     let mut rest = following
     if level(pieces[0u64].root.image) + 1 == lvl {
-        trim_piece_slots(mut kept_slots, pieces)
+        append_piece_slots(mut kept_slots, pieces)
     } else {
         let donor = hot_child(root.kids[following])
         let joined = trim_join(pieces[0u64].root, donor, source[following].row.key, mut next)?
         if following + 1 == list.len(source) && list.len(joined) == 1 {
             return Ok(take joined)
         }
-        trim_piece_slots(mut kept_slots, joined)
+        append_piece_slots(mut kept_slots, joined)
         rest += 1
     }
     for i in rest .. list.len(source) {
         list.push(mut kept_slots, clone(source[i]))
     }
-    trim_branch(kept_slots, lvl, mut next)
+    build_pieces(kept_slots, Collection, lvl, false, mut next)
 }
 
 /// Remove keys below an existing boundary of a resident collection.
@@ -3529,6 +3519,6 @@ pub fn cut_before(root: Arc[Page], key: Bytes, mut next: u64) -> Result[Arc[Page
         return Ok(arc.share(pieces[0u64].root))
     }
     let mut kept_slots: List[PageSlot] = list.new()
-    trim_piece_slots(mut kept_slots, pieces)
+    append_piece_slots(mut kept_slots, pieces)
     build_section(kept_slots, Collection, level(pieces[0u64].root.image) + 1, 0, list.len(kept_slots), take_stamp(mut next)?)
 }

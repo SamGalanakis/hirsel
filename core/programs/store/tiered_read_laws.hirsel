@@ -580,3 +580,51 @@ fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     }
     Ok(())
 }
+
+@test
+fn test_l63_branch_split_reuses_cold_divider() -> Result[(), Error] {
+    let mut value: Bytes = list.with_capacity(1000)
+    list.fill(mut value, 1000, 106u8)
+    let mut rows: List[std.page.Entry] = list.with_capacity(4)
+    for key in 70u64 .. 74 {
+        list.push(mut rows, std.page.Entry(key: key_word(key), cell: InlineValue(clone(value))))
+    }
+    let leaf_image = page_result(std.page.encode(rows, 0, 71, Collection))?
+    let leaf = page_result(std.page.attach(take leaf_image, list.new(), list.new()))?
+    let mut branches: List[std.page.Entry] = list.with_capacity(71)
+    let mut children: List[std.page.Slot] = list.with_capacity(71)
+    for slot in 0u64 .. 70 {
+        let ptr = std.page.PagePtr(pack: 8, offset: 72 + 61 * slot, len: 45, checksum: 11, stamp: slot + 1)
+        let divider: Bytes = if slot == 0 { list.new() } else { key_word(slot) }
+        list.push(mut children, ColdPage(ptr))
+        list.push(mut branches, std.page.Entry(key: take divider, cell: Child(std.page.Branch(child: ptr, rows: 1, charge: 86))))
+    }
+    list.push(mut children, HotPage(arc.share(leaf)))
+    list.push(mut branches, std.page.Entry(key: key_word(70), cell: Child(std.page.Branch(child: std.page.unlocated(71), rows: 4, charge: 4312))))
+    let branch_image = page_result(std.page.encode(branches, 1, 72, Collection))?
+    let mut root = page_result(std.page.attach(take branch_image, take children, list.new()))?
+    let mut ids = 73u64
+    // The append splits the 4,059-byte rightmost leaf, then overflows
+    // the 4,077-byte branch. AP3 puts its last two children to the right.
+    page_result(std.page.append_row(mut root, key_word(74), value, None, 1024, 73, mut ids))?
+    let top = std.page.image_of(root)
+    if std.page.level(top) != 2 || std.page.key_at(top, 1) != Some(key_word(70)) {
+        fail("L63: the branch must give its parent the existing divider at slot 70")
+    }
+    let Some(HotPage(left)) = std.page.child_slot(root, 0) else {
+        fail("L63: split did not build the new left branch")
+    }
+    let Some(ColdPage(last_untouched)) = std.page.child_slot(left, 69) else {
+        fail("L63: split forced the Cold child before the divider")
+    }
+    if last_untouched.stamp != 70 || last_untouched.offset != 4281 || std.page.totals(root) != (75u64, 11410u64) {
+        fail("L63: split changed the untouched edge or the collection totals")
+    }
+    let Some(added) = std.page.lookup(root, key_word(74)) else {
+        fail("L63: the new divider does not route the appended key")
+    }
+    if added != value {
+        fail("L63: split changed the appended value")
+    }
+    Ok(())
+}

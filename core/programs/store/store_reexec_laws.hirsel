@@ -218,3 +218,63 @@ fn disk_test_reexecute_info(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result
         Error(())
     }
 }
+
+// L62(d): all settlements and reruns encode the same reply bytes.
+@test
+fn test_l62_replay_stop_precedence(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut db = result.unwrap(open(tasks, dir, c, r, result.unwrap(sized(Directory, 2147483648u64))))
+    let ample = Plan(n_e: 65536, s_e: 65536, reply_max: 4096)
+    let short = Plan(n_e: 65536, s_e: 1, reply_max: 4096)
+    let return_reply = fn(mut tx: Tx, env: ()) -> Result[Bytes, Bytes] {
+        Ok(key_word(17))
+    }
+    let replay_reply = fn(call: Recorded, mut tx: Tx, env: ()) -> Result[Bytes, Bytes] {
+        Ok(key_word(17))
+    }
+    let failed = fn(stop: Stop) -> Bytes {
+        key_word(17)
+    }
+    let line = main_branch(db)
+    {
+        let (take complete, take record) = reexecute_admit(mut db, 71)
+        let Ok(Failed(take pending_steps, OutOfSteps(_))) = serve(mut db, take complete, short, Some(take record), (), return_reply) else {
+            fail("L62(d): expected a recorded step stop")
+        }
+        let Committed(steps_receipt) = result.unwrap(conclude(mut db, take pending_steps, key_word(17), Resident)) else {
+            fail("L62(d): step stop did not settle")
+        }
+        result.unwrap(durable(mut db, steps_receipt.ticket))
+        let steps_version = version(snapshot(db))
+        let Unknown(Residency) = result.unwrap(reexecute(db, line, steps_version, ample, failed, (), replay_reply)) else {
+            fail("L62(d): a recorded step stop reran to success")
+        }
+    }
+    {
+        let (take complete, take record) = reexecute_admit(mut db, 72)
+        let Committed(receipt) = result.unwrap(serve(mut db, take complete, ample, Some(take record), (), return_reply)) else {
+            fail("L62(d): expected a recorded success")
+        }
+        result.unwrap(durable(mut db, receipt.ticket))
+        let Unknown(Residency) = result.unwrap(reexecute(db, line, version(snapshot(db)), short, failed, (), replay_reply)) else {
+            fail("L62(d): a recorded success reran to a step stop")
+        }
+    }
+    {
+        let (take complete, take record) = reexecute_admit(mut db, 73)
+        let raised = serve(mut db, take complete, ample, Some(take record), (), fn(mut tx, env) -> Result[Bytes, Bytes] {
+            fail("L62(d): body fault")
+        })
+        let Ok(Failed(take pending_raise, Raised(_))) = take raised else {
+            fail("L62(d): expected a recorded raise")
+        }
+        let Committed(raised_receipt) = result.unwrap(conclude(mut db, take pending_raise, key_word(17), Resident)) else {
+            fail("L62(d): raise did not settle")
+        }
+        result.unwrap(durable(mut db, raised_receipt.ticket))
+        let Different(Reply) = result.unwrap(reexecute(db, line, version(snapshot(db)), ample, failed, (), replay_reply)) else {
+            fail("L62(d): a raise reran to success with the same reply")
+        }
+    }
+    close(take db)
+}

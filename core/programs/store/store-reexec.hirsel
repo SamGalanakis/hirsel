@@ -2,7 +2,7 @@
 // recorded CallInfo, compared with what it committed.
 pub type Difference = Reply | Writes
 
-pub type UnknownReason = NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects | AdmissionRefused
+pub type UnknownReason = NoEntry | ArgsUnresolved | StateGone | RevisionUnknown | NotRecorded | Effects | AdmissionRefused | Residency
 
 pub type Verdict = Same | Different(Difference) | Unknown(UnknownReason)
 
@@ -168,6 +168,14 @@ fn base_roots(db: Db, b: Branch, base: u64) -> Result[Option[Roots], Error] wait
     Ok(None)
 }
 
+fn stop_kind(stop: Stop) -> StopKind {
+    match stop {
+        Raised(_) => Raised,
+        OutOfSteps(steps) => OutOfSteps(steps),
+        OutOfBytes(_) => OutOfBytes,
+    }
+}
+
 type Rerun[R] = RanTo(R, DataRows) | Halted(Stop) | RoomRefused
 
 // Section 7 step 3: the body on `base` under the recorded CallInfo, bounded as
@@ -301,11 +309,22 @@ fn replay_run(db: Db, registry: IndexRegistry, source: ReplaySource, plan: Plan,
         RanTo(output, _) if list.len(output) > plan.reply_max => Halted(OutOfBytes(Capacity(requested: list.len(output), available: plan.reply_max))),
         take within => take within,
     }
-    let (take output, take writes) = match (call.settle, take metered) {
-        (0, RanTo(take output, take writes)) => (take output, take writes),
-        (1, Halted(stop)) => (failed(stop), new_data_rows()),
-        (_, RoomRefused) => return Ok(Unknown(AdmissionRefused)),
-        _ => return Ok(Different(Reply)),
+    let rerun_stop: Option[StopKind] = match metered {
+        RanTo(_, _) => None,
+        Halted(stop) => Some(stop_kind(stop)),
+        RoomRefused => return Ok(Unknown(StateGone)),
+    }
+    if call.stop != rerun_stop {
+        return Ok(match (call.stop, rerun_stop) {
+            (Some(OutOfSteps(_)), _) => Unknown(Residency),
+            (_, Some(OutOfSteps(_))) => Unknown(Residency),
+            _ => Different(Reply),
+        })
+    }
+    let (take output, take writes) = match take metered {
+        RanTo(take output, take writes) => (take output, take writes),
+        Halted(stop) => (failed(stop), new_data_rows()),
+        RoomRefused => return Ok(Unknown(StateGone)),
     }
     let stored = option.unwrap(recorded_reply(source.commit, call.record.stream))
     if list.len(stored) != 41 + list.len(output) || !list.starts_with_at(stored, 41, output) {

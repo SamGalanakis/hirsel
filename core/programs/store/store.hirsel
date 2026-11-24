@@ -1133,12 +1133,7 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
 
 fn stopped_pending(take pending_run: Pending, stop: Stop) -> Served {
     let mut pending = take pending_run
-    let kind: StopKind = match stop {
-        Raised(_) => Raised,
-        OutOfSteps(steps) => OutOfSteps(steps),
-        OutOfBytes(_) => OutOfBytes,
-    }
-    pending.stop = Some(kind)
+    pending.stop = Some(stop_kind(stop))
     Failed(take pending, stop)
 }
 
@@ -6852,7 +6847,7 @@ pub type CallRecord: codec + shareable + send {
     code: Bytes
 }
 
-pub type StopKind = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
+pub type StopKind: key = Raised | OutOfSteps(u64) | OutOfBytes | Conflict
 
 // The CALL carries the original execution context only when a later frame
 // settles the call. An inline reply uses the context of its own frame.

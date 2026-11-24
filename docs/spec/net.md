@@ -277,7 +277,10 @@ cannot leave a rule that silently reaches nothing. Every constructor of `Rule` n
 A fetcher that reaches arbitrary public hosts also needs to resolve and verify arbitrary
 names. So a name pattern may be a bare `*`, which covers every name, in `Resolve` and
 `Tls` rules ([TLS-3](tls.md#tls-3-authority), NET-11). `*` intersected with any pattern
-gives that pattern. A whole public-web grant is:
+gives that pattern. `*` covers IP literals as well as DNS names, and may stand in a list
+beside other patterns, which then add nothing. A served Net's root ([Provide](core.md#provide)) holds `Resolve *`
+and a `Tls *` rule whose trust is any pin; a grant may carry `Resolve *` and `Tls *` with a
+`System` or `Roots` trust, but never that root's trust. A whole public-web grant is:
 
 ```sh
 hirsel run fetcher --grant 'Net=Resolve *;Connect 0.0.0.0/0 80-80 public;Connect 0.0.0.0/0 443-443 public;Connect 2000::/3 80-80 public;Connect 2000::/3 443-443 public;Tls * 443-443 System'

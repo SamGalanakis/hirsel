@@ -135,7 +135,12 @@ impl SecretPolicy {
                 if send.is_some() {
                     return None;
                 }
-                send = Some(Pattern::parse_list(patterns)?);
+                let patterns = Pattern::parse_list(patterns)?;
+                // A bare `*` is not a `tls_send` pattern (TLS-5).
+                if patterns.contains(&Pattern::Any) {
+                    return None;
+                }
+                send = Some(patterns);
             } else {
                 let word = SecretUse::word(token)?;
                 // Reject duplicate permissions, including implied uses.

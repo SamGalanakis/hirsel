@@ -136,14 +136,6 @@ impl ResolveRule {
         Self(Box::new([Pattern::Any]))
     }
 
-    /// A rule as stored in a rule row: `*` only as the served root wrote it.
-    pub fn stored(patterns: &str) -> Option<Self> {
-        if patterns == "*" {
-            return Some(Self::served());
-        }
-        Self::new(patterns)
-    }
-
     fn parse(text: &str) -> Option<Self> {
         let mut words = text.split_whitespace();
         match (words.next(), words.next(), words.next()) {
@@ -231,9 +223,8 @@ impl GrantRule {
     /// Whether this is a served Net's root rule, which no grant may carry.
     pub fn is_served(&self) -> bool {
         match self {
-            Self::Address(_) => false,
+            Self::Address(_) | Self::Resolve(_) => false,
             Self::Tls(rule) => rule.is_served(),
-            Self::Resolve(rule) => rule.0.contains(&Pattern::Any),
             Self::Unix(rule) => rule.endpoint().is_none(),
         }
     }
@@ -391,7 +382,7 @@ impl RuleView {
             return None;
         }
         if self.address.dir == 3 {
-            return ResolveRule::stored(patterns).map(GrantRule::Resolve);
+            return ResolveRule::new(patterns).map(GrantRule::Resolve);
         }
         let trust = match self.trust {
             0 => TlsTrust::System,

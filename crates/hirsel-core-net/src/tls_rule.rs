@@ -46,8 +46,7 @@ impl Name {
 pub enum Pattern {
     Exact(Name),
     Wildcard(Box<str>),
-    /// Every name: only a served Net's root holds it (`*`); no grant text
-    /// or program rule can name it.
+    /// Every name (`*`, NET-18). Never a `tls_send` pattern (TLS-5).
     Any,
 }
 
@@ -57,7 +56,9 @@ impl Pattern {
     }
 
     pub fn parse(pattern: &str) -> Option<Self> {
-        if let Some(suffix) = pattern.strip_prefix("*.") {
+        if pattern == "*" {
+            Some(Self::Any)
+        } else if let Some(suffix) = pattern.strip_prefix("*.") {
             let Name::Dns(suffix) = Name::parse(suffix)? else {
                 return None;
             };
@@ -215,8 +216,8 @@ impl TlsRule {
         }
     }
 
-    /// A rule as stored in a rule row: `*` and `Any` only as the served root
-    /// wrote them.
+    /// A rule as stored in a rule row: trust `Any` only as the served root
+    /// wrote it.
     pub fn stored(patterns: &str, first: u16, last: u16, trust: TlsTrust) -> Option<Self> {
         if patterns == "*" && trust == TlsTrust::Any {
             return ((first, last) == (0, u16::MAX)).then(Self::served);
@@ -227,9 +228,10 @@ impl TlsRule {
         Self::new(patterns, first, last, trust)
     }
 
-    /// Whether this is a served Net's root rule, which no grant may carry.
+    /// Whether this is a served Net's root rule, which no grant may carry:
+    /// its trust is `Any`, which no grant text can name.
     pub fn is_served(&self) -> bool {
-        self.trust == TlsTrust::Any || self.patterns.contains(&Pattern::Any)
+        self.trust == TlsTrust::Any
     }
 
     pub fn permits(&self, name: &Name, port: u16, trust: TlsTrust) -> bool {

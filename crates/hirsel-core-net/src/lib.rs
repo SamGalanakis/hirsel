@@ -322,6 +322,11 @@ mod tests {
             pair("file:/run/my mac/db", "sign(ed25519) wrap")
         );
         assert_eq!(policy("Secret:k=env:V alpha.test"), None);
+        // TLS-5: a bare `*` is not a `tls_send` pattern, alone or in a list,
+        // in a grant or in a seal/unwrap policy.
+        assert_eq!(policy("Secret:k=env:V to *"), None);
+        assert_eq!(policy("Secret:k=env:V to a.test,*"), None);
+        assert_eq!(SecretPolicy::parse("tls_send(a.test,*) mac"), None);
         assert_eq!(
             SecretPolicy::parse("tls_send(a.test) tls_send(b.test)"),
             None
@@ -550,10 +555,17 @@ mod tests {
                 [false, false, true, false, false],
                 440..=450,
             ),
+            // NET-18: a bare `*` covers every name.
+            ("Tls * 442-452 System", [true; 5], 442..=452),
         ]
         .map(|(text, verdicts, ports)| (TlsRule::parse(text).unwrap(), verdicts, ports));
+        let any = TlsRule::parse("Tls * 0-65535 System").unwrap();
+        assert!(!GrantRule::Tls(any.clone()).is_served());
         let root = TlsRule::parse("Tls a.test,*.test 0-65535 System").unwrap();
-        for (a, a_names, a_ports) in &rules {
+        for (root, (a, a_names, a_ports)) in [&root, &any]
+            .into_iter()
+            .flat_map(|root| rules.iter().map(move |rule| (root, rule)))
+        {
             for (b, b_names, b_ports) in &rules {
                 for (first, second) in [(a, b), (b, a)] {
                     let result = root.intersect(first).and_then(|r| r.intersect(second));
@@ -612,6 +624,18 @@ mod tests {
         }
         let outside = GrantRule::parse("Resolve xa.test").unwrap();
         assert!(parent.intersect(&outside).is_none());
+        // NET-18: `*` covers every name, literals included, and gives the
+        // other pattern on intersection.
+        let any = GrantRule::parse("Resolve *").unwrap();
+        assert!(!any.is_served());
+        let GrantRule::Resolve(every) = &any else {
+            panic!("NET-11 rule must be a Resolve rule");
+        };
+        for name in ["x.a.test", "a.test", "127.0.0.9"] {
+            assert!(every.permits(&Name::parse(name).unwrap()), "{name}");
+        }
+        assert_eq!(any.intersect(&parent), Some(parent.clone()));
+        assert_eq!(parent.intersect(&any), Some(parent.clone()));
         let tls = GrantRule::parse("Tls *.a.test 0-65535 System").unwrap();
         assert!(parent.intersect(&tls).is_none());
     }

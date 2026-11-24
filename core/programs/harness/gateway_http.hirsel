@@ -215,6 +215,7 @@ type Following {
     client: runner.client.Client,
     signal: runner.client.Signal,
     status: u32,
+    pending: u32,
     sub: u32,
     version: u64,
     fresh: bool,
@@ -267,6 +268,10 @@ fn follow_from(d: harness.gateway.Door, f: Front, id: u64, wake: bool, nudged: b
         runner.client.close(take client)
         return Error(503u16)
     }
+    let Ok(pending) = runner.client.subscribe(mut client, window_entry(), PendingTurn, f.within_ms) else {
+        runner.client.close(take client)
+        return Error(503u16)
+    }
     let Ok(sub) = runner.client.subscribe(mut client, window_entry(), From(from), f.within_ms) else {
         runner.client.close(take client)
         return Error(503u16)
@@ -284,7 +289,7 @@ fn follow_from(d: harness.gateway.Door, f: Front, id: u64, wake: bool, nudged: b
         runner.client.close(take client)
         return Error(503u16)
     }
-    Ok(Some(Following(client: take client, signal: take changed, status: status, sub: sub, version: 0u64, fresh: true, hold_until: hold_until)))
+    Ok(Some(Following(client: take client, signal: take changed, status: status, pending: pending, sub: sub, version: 0u64, fresh: true, hold_until: hold_until)))
 }
 
 fn send_out(mut w: WriteHalf, f: Front, take out: Bytes) -> bool waits {
@@ -522,15 +527,19 @@ fn place_stream(d: harness.gateway.Door, f: Front, id: u64, mut w: WriteHalf, qu
     while !halted(quit) {
         let at = if place.fresh { 0u64 } else { place.version + 1u64 }
         let Ok(take status_image) = runner.client.current(place.client, place.status, at) else { return false }
+        let Ok(take pending_image) = runner.client.current(place.client, place.pending, at) else { return false }
         match runner.client.current(place.client, place.sub, at) {
             Error(_) => return true,
             Ok(None) => (),
             Ok(Some(take image)) => {
                 let next = image.version
                 let Some(take head) = take status_image else { return false }
+                let Some(take queued) = take pending_image else { return false }
                 let Some(status) = visible_status(head) else { return false }
                 marks = harness.gateway.marks(d, id)
-                active = busy(status)
+                // Finishing a turn publishes its answer before the queued turn's Kick runs.
+                // A tool or approval wait still lets the place go idle.
+                active = busy(status) || (status != "waiting" && list.len(queued.rows) != 0u64)
                 if active && !watching(watch) {
                     if let Some(p) = view f.preview {
                         watch.observer = preview.observe_with(p, group, runner.client.bound_caller(place.client), Some(runner.client.signal(place.signal)))

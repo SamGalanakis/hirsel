@@ -57,12 +57,7 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes, again: bool) -
     if pages != paged_want {
         return 8u64
     }
-    let mut want = rows_want("answered", true)
-    if again {
-        list.push(mut want, row_of(6u64, Line("user", "again")))
-        list.push(mut want, row_of(7u64, Line("assistant", "done")))
-    }
-    if !same_rows(rows, want) {
+    if !same_rows(rows, tool_finished_rows(again)) {
         return 9u64
     }
     let (refused, _) = http(net, clock, port, "GET", "/sessions/0/history?before=4&lines=0", person(me, 0u64), list.new())
@@ -70,4 +65,13 @@ fn tail_and_history(net: Net, clock: Clock, port: u16, me: Bytes, again: bool) -
         return 10u64
     }
     0u64
+}
+
+fn tool_finished_rows(again: bool) -> List[(u64, Bytes)] {
+    let mut want = rows_want("answered", true)
+    if again {
+        list.push(mut want, row_of(6u64, Line("user", "again")))
+        list.push(mut want, row_of(7u64, Line("assistant", "done")))
+    }
+    take want
 }

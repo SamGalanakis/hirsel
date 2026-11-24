@@ -865,11 +865,11 @@ fn tool_stream(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net
         }
         let _ = channel.send(let_go, ())
     }
-    let r2 = read_until(mut stream, mut decoder, mut rows, "answered")
+    let r2 = read_until_row(mut stream, mut decoder, mut rows, "answered", if enabled { 7u64 } else { 5u64 })
     if !r2 {
         return 13u64
     }
-    if !same_rows(rows, rows_want("answered", true)) {
+    if !same_rows(rows, tool_finished_rows(enabled)) {
         return 14u64
     }
     let paged = tail_and_history(net, clock, port, me, enabled)

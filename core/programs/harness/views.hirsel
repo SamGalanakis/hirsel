@@ -51,7 +51,7 @@ fn reader_key(caller: store.Caller) -> Result[Bytes, Capacity] {
 // is rows from `page_from(before, n)` up to `before`: a reader pins `before` at its
 // oldest held row, so later appends never move a page. Rows are sparse, so a page can be
 // short or empty before the first row; a reader stops when `page_from` reaches 1.
-pub type Window: codec + send = Status | Tail(u64) | From(u64) | Page(u64, u64) | Transcript
+pub type Window: codec + send = Status | Tail(u64) | From(u64) | Page(u64, u64) | Transcript | PendingTurn
 
 pub fn page_from(before: u64, lines: u64) -> u64 {
     if before > lines + 1u64 {
@@ -104,6 +104,14 @@ fn visible_window(tx: store.Tx, h: Handles, w: Window) -> Result[runner.Answer[(
     let t = view h.views
     match w {
         Status => runner.table_answer("window", t, Included(0u64), Included(0u64)),
+        PendingTurn => {
+            // The status row is a presence marker. The queued message is not part of the transcript yet.
+            match queue_empty(tx, h) {
+                Ok(false) => runner.table_answer("window", t, Included(0u64), Included(0u64)),
+                Ok(true) => runner.table_answer("window", t, Included(0u64), Excluded(0u64)),
+                Error(_) => fail("cannot read the pending turn"),
+            }
+        },
         Transcript => runner.table_answer("window", t, Unbounded, Unbounded),
         Tail(n) => {
             let next = match store.fetch(tx, h.session, 0u64) {

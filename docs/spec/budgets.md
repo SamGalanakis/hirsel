@@ -270,6 +270,82 @@ are a safety contract, not an observable to match: a body that fits under `bound
 its logical charges fits on every engine and at every optimisation level, and a build may
 admit what the logical charges would refuse.
 
+### MEM-33: Reading a logical charge
+
+*Unbuilt (admission-plans-2113).* A program reads the logical charges of MEM-24 from the
+type, never from a number it copied. Two pieces do it, and nothing else prices a type.
+
+**`bytes[T]`** is an expression of type `u64` whose value is `T`'s logical size under the
+package's charge policy (the "Sizes are logical" paragraph of MEM-24): the size a field, an
+element, a channel item or a task result of type `T` counts. It is a primary
+([LANG-5](syntax.md#lang-5-grammar)) and a constant: it may appear in a `const` initializer
+([LANG-20](language.md#lang-20-constants)), it costs no step and charges nothing. `T` is any
+complete type, `bytes[T]` in a generic body included: there it is `T`'s size at each
+instantiation, exactly as `channel.new(n)` in that body charges `n` × that size. An opaque type
+of another package is accepted, because its size is already observable through every charge
+that counts it; opacity hides fields, not size ([PROG-2](programs.md#prog-2-visibility)). A
+resource type counts 8 here, as wherever it is held; its block is priced by `charge.block`
+below. `bytes[T]` is a source of truth for what a type counts and never a prediction of an
+engine's layout: an engine may hold fewer bytes (MEM-28).
+
+These examples are `text` until the parser has the form (IMPL item 1); they become `hirsel` fences with it.
+
+```text
+type Pair { a: u64, b: u32 }
+const PAIR: u64 = bytes[Pair]                                // 12
+const SLOT: u64 = bytes[Option[Pair]]                        // 20: 8 + 12
+fn item[T](n: u64) -> u64 { n * bytes[T] }
+```
+```text
+const BAD: u64 = bytes[List]                                 // refused: LANG-12, List takes a type argument
+```
+
+**The core module `charge`** holds MEM-24's recipes as functions of sizes and counts. They
+are the only place in any package where a recipe's own constants (the 256-byte task record,
+the 32-byte cause cell, the 64-byte channel base, Map's 16-byte entry overhead, the
+rounding to 8) are written, and each returns `None` on overflow:
+
+```hirsel unbuilt
+pub fn round(n: u64) -> Option[u64]                                    // up to a multiple of 8
+pub fn boxed(payload: u64) -> Option[u64]                              // Box[T]: round(payload)
+pub fn counted(payload: u64) -> Option[u64]                            // Rc, Arc, Unique node: round(payload + 8)
+pub fn shared(payload: u64) -> Option[u64]                             // Shared node: round(payload + 40)
+pub fn seq(element: u64, capacity: u64) -> Option[u64]                 // List, Deque, Heap, String storage
+pub fn map(key: u64, value: u64, capacity: u64) -> Option[u64]        // Map storage
+pub fn channel(item: u64, capacity: u64) -> Option[u64]                // 64 + capacity × item
+pub fn task(result: u64, limit: u64) -> Option[u64]                    // 256 + result + 32 + limit
+pub fn block(fields: u64, grant: u64) -> Option[u64]                   // a resource value's block: fields + 32 + grant
+pub fn port(item: u64, capacity: u64) -> Option[u64]                   // a flow port
+```
+
+A price is then the recipe applied to the type: `charge.channel(bytes[Ack], 3 * g + 3)`,
+`charge.task(bytes[Result[(), Error]], grant)`. These are ordinary functions, so a derived
+price is a `fn` or a `let`, never a `const` (LANG-20 calls no function). Their results are
+exactly MEM-24's rows; a later policy (MEM-24's last paragraph) changes the module and
+`bytes`, and no caller.
+
+**Who computes what.** A price that spans packages splits in exactly one way:
+- The **provider** of a value or a service derives the charge of **one owner** of it from
+  its own types, with `bytes` and `charge`, and publishes it as a function or a plan. A
+  provider's figure is never restated by a caller, in source or in a law.
+- The **caller** keeps the **number of simultaneous owners**, and multiplies or sums the
+  provider's figure by it with checked arithmetic. A caller that holds two stores asks the
+  provider for one store's price and doubles it; it does not know what a store holds.
+- A **law** pins a figure only in the package that derives it, against a hand derivation
+  from the recipes. A caller's law pins its own terms and its owner counts, and composes
+  them with the provider's published figure, so a provider's change moves no caller's
+  literal.
+
+Prior art:
+
+| system | what it exposes | verdict |
+|---|---|---|
+| Rust `core::mem::size_of::<T>()`, `Layout::new::<T>()`, `Layout::array::<T>(n)` | a `const fn` for a type's size and a checked layout calculator for arrays and extension | **ADAPTED.** A size readable in constants and generic code, and a checked composite (`Layout::array` returns `Err` on overflow, as `charge.*` returns `None`), are taken. Rust's figure is the target's layout, padding and alignment included, and differs by target; `bytes[T]` is the logical size, the same on every target. Rust has no recipe for a channel's or a task's cost: `std::sync::mpsc` and `tokio` allocate behind the call and no budget sees it, which MEM-24 exists to avoid. |
+| Zig `@sizeOf(T)`, `@alignOf(T)`, `std.mem.Allocator` byte counts | a builtin read at compile time; allocators take explicit byte counts | **ADAPTED.** A keyword-introduced form with a type operand, legal in comptime code, is the shape `bytes[T]` takes, since Hirsel never writes type arguments at a call (LANG-12) and `bytes` is already a keyword. Zig's figure is again the target's layout. Zig's allocator interface asks the caller for raw byte counts and leaves composite costs to each caller, the hand-copying this rule removes. |
+| Goose (`/tmp/ref-goose` at `d5ae5bb`) | no type-size expression in its spec, reference or stdlib docs (goose goose_spec.md, reference.md, stdlib.md); its tutorial measures C++ and Rust with `sizeof` and reads Goose's own sizes off packed declarations (goose tutorial.md:732) | **NOT TAKEN.** Its sizes are fixed by its packed layouts and are written beside declarations, which is the hand-copying this rule replaces. Its stdlib's explicit-cost stance (adopted in [HTTP](http.md)) is kept: every price is still explicit, only its source changes. |
+
+Reversible: before 1.0, the form, the module and the split are each spec and library text.
+
 ### MEM-30: Step bounds
 
 In the reference count (Determinism, below), a **step** is taken at each call, each loop

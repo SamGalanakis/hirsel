@@ -718,8 +718,8 @@ constant stack whatever the depth of the value; a finalizer is an ordinary call.
 ### LANG-20: Constants
 
 `const N: T = e` declares a plain constant or a static string. For a plain `T`, `e` may use
-literals, operators, tuple, plain and `Inline` array constructions, and other constants; it
-calls no function. Constants are evaluated once, before any body is checked, in
+literals, operators, tuple, plain and `Inline` array constructions, other constants and
+`bytes[T]` ([MEM-33](budgets.md#mem-33-reading-a-logical-charge)); it calls no function. Constants are evaluated once, before any body is checked, in
 dependency order, by the rules of [semantics](semantics.md); a constant that would fail, or whose
 constants reach itself, is refused. A **static string** is a constant of type `String` whose
 `e` is a string literal or another static string, `const NAME: String = "hirsel"`, and

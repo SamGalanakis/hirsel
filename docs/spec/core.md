@@ -836,14 +836,17 @@ claimed. The kernel is RustCrypto `argon2` 0.6.0 with `Algorithm::Argon2id`,
 `Version::V0x13` and `Argon2::new_with_secret` for a nonempty `key`, computing with
 `hash_password_into_with_memory` over the admitted blocks.
 
-**Std.** `std.argon2` is library code over the kernel. It holds a password as a PHC string
-and checks one:
+**Std.** `std.argon2` is library code over the kernel. Its `PhcError` has two cases,
+`Malformed` and `Argon2(Argon2Error)`.
 
-```hirsel library
-pub type PhcError = Malformed | Argon2(Argon2Error)
-pub fn hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, PhcError]
-pub fn verify(password: Bytes, phc: Bytes) -> Result[bool, PhcError]
-pub fn recommended() -> Argon2Cost
+```hirsel
+fn hash(password: Bytes, salt: Bytes, cost: Argon2Cost) -> Result[String, std.argon2.PhcError] {
+  std.argon2.hash(password, salt, cost)
+}
+fn verify(password: Bytes, phc: Bytes) -> Result[bool, std.argon2.PhcError] {
+  std.argon2.verify(password, phc)
+}
+fn recommended() -> Argon2Cost { std.argon2.recommended() }
 ```
 
 `hash` computes a 32-byte tag and writes

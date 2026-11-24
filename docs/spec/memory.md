@@ -733,8 +733,10 @@ hold a capability, does not. The condition is checked where the type is formed a
 every call of a `cell` operation, inferred and forwarded type arguments included, and for
 `cell.with`'s `A`, which appears in no result. Any other `Cell` or argument type is
 refused here, at the type; core's `cell` module declares its operations over open
-parameters, and the condition holds where they are called. A `Log[E]`'s element is held
-to its `inert` bound (OWN-4) instead, which also refuses an opaque owner such as `Causes`.
+parameters, and the condition holds where they are called. `Log[E]` refuses scoped type
+arguments under [OWN-19](ownership.md#own-19-scoped-values). A scoped argument also
+fails its `inert` bound ([LANG-12](language.md#lang-12-generics), OWN-4), as does an
+opaque owner such as `Causes`.
 
 **Logs.** A log is charged as its cell: the 24-byte node of a `Cell[List[E]]`. No
 operation reads, counts, clears or iterates its entries.
@@ -800,6 +802,7 @@ fn read(m: Map[u64, Row], seen: Log[u64], k: u64) -> Option[View[Row]] in m {
 }
 ```
 ```hirsel
+// refused: OWN-19, View[String] is scoped
 fn names(l: Log[View[String]]) {}                 // refused: LANG-12, View[String] is not inert
 ```
 ```hirsel

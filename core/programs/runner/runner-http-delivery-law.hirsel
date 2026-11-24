@@ -761,3 +761,106 @@ fn http_request_retire_after_forward(parent: Dir, clock: Clock, random: Random, 
     result.unwrap(std.dir.remove_all(parent, location))
     Ok(())
 }
+
+type DeliveryCarryDrive: send {
+    head: Sender[HeadInput],
+    publisher: Sender[PubIn],
+    clock: Clock,
+    random: Random,
+    tasks: Tasks,
+    net: Net,
+    stage: u8
+}
+
+fn delivery_carry_drive(take job: DeliveryCarryDrive) waits {
+    let DeliveryCarryDrive(head: take head, publisher: take pub_to, clock, random, tasks, net, stage) = take job
+    let definition: HttpOpPlace = code.describe(http_op_original)
+    let reg = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let (take relay, take relay_task) = result.unwrap(start_relay(reg, head, pub_to, clock, tasks, RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 2u64, arg_max: 1024u64)))
+    let (take listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 8u16))
+    let server_job = HttpOpListener(relay: take relay, listener: take listener, publisher: take pub_to, clock, random, tasks, place: definition, previous: None, retired: None, stage: 0u8, stop: None)
+    let server = task.spawn(tasks, bytes 4194304u64, take server_job, http_op_serve)
+    if stage == 0u8 {
+        // The binding refuses the credential before any head: 401 with no
+        // attempt marker, no committed marker and nothing recorded.
+        let refused = http_law_post(net, clock, address, "/old", b"expired", 6u32, 0u64, b"{}", 1000u32)
+        if refused.status != 401u16 || refused.committed || refused.replayed || !none(refused.refused) || list.len(refused.body) != 0u64 {
+            fail("a binding 401 carried a marker or a body")
+        }
+        // The same identity with a credential the binding accepts runs once.
+        let accepted = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
+        if accepted.status != 201u16 || !accepted.committed || accepted.replayed || accepted.body != b"\"1\"" {
+            fail("the refused identity was recorded by the binding 401")
+        }
+        let again = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
+        if again.status != 201u16 || !again.committed || !again.replayed || again.body != b"\"1\"" {
+            fail("the identity after a binding 401 ran twice")
+        }
+    } else if stage == 1u8 {
+        let first = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
+        if first.status != 201u16 || !first.committed || first.replayed || first.body != b"\"1\"" {
+            fail("the stream's first send did not commit")
+        }
+    } else {
+        let aged = http_law_post(net, clock, address, "/old", b"token", 6u32, 0u64, b"{}", 1000u32)
+        if aged.status != 410u16 || aged.committed || aged.replayed || aged.refused != Some(b"history_unavailable;key=\"00000000000000000000000000000006.0\"") {
+            fail("an aged stream's retry was not a marked 410")
+        }
+    }
+    let _ = std.task.cancel_join(take server)
+    let _ = std.task.cancel_join(take relay_task)
+}
+
+fn delivery_carry_cycle(dir: Dir, time: Clock, random: Random, tasks: Tasks, net: Net, retention_ms: u64, stage: u8) waits {
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.stream_retention_ms = retention_ms
+    let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
+    let definition: HttpOpPlace = code.describe(http_op_original)
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let mail = result.unwrap(mailbox(16u64))
+    let seed = DeliveryCarryDrive(head: take head, publisher: post(mail), clock: time, random, tasks, net, stage)
+    let work = task.spawn(tasks, bytes 16777216u64, take seed, delivery_carry_drive)
+    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    if let Error(take problem) = started {
+        fail(start_text(Open(take problem)))
+    }
+    match task.join(take work) {
+        Ok(()) => (),
+        Error(Failed(causes)) => fail(http_law_cause(causes)),
+        Error(Cancelled(causes)) => fail(http_law_cause(causes)),
+    }
+}
+
+// Carry 9 (http.md B-7, sdk.md credential recovery): a binding 401 is
+// unmarked and records nothing, so the SDK resends the same identity after a
+// fresh credential and it commits once.
+@test
+fn http_binding_401_unmarked_records_nothing(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (time, take wall) = provide.clock(0u64, 100u64)
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 0u8)
+    result.unwrap(std.dir.remove_all(d, name))
+    let _ = take wall
+    Ok(())
+}
+
+// Carry 8, HTTP half: stream t = 0 commits at wall 100 under retention
+// 3600000. At wall 3600100 its age floor is 100, so the same identity is a
+// marked 410. Reopened with retention 10800000 the floor would be absent, but
+// the recorded cutoff keeps the marked 410 instead of a replayed 201.
+@test
+fn http_age_refusal_survives_longer_retention(d: Dir, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    let (time, take wall) = provide.clock(0u64, 100u64)
+    let mut wall_hand = take wall
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 1u8)
+    clock.set_wall(mut wall_hand, 3600100u64)
+    delivery_carry_cycle(dir, time, random, tasks, net, 3600000u64, 2u8)
+    delivery_carry_cycle(dir, time, random, tasks, net, 10800000u64, 2u8)
+    result.unwrap(std.dir.remove_all(d, name))
+    let _ = take wall_hand
+    Ok(())
+}

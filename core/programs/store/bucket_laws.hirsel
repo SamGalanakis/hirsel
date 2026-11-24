@@ -363,13 +363,17 @@ fn bucket_test_fence(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] wai
 }
 
 fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error] waits {
+    // The successor and follower are live together, so both use the small-history sizing.
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_law_options(true))
+    let mut options: Options = clone(plan.options)
+    options.create = true
     let first = bucket_law_authority(s, tasks, "s3.test", 1)?
-    let mut writer = open_authority(tasks, take first, s.time, r, bucket_law_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    let mut writer = open_authority(tasks, take first, s.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     bucket_law_round(mut writer, 1)?
     bucket_law_commit(mut writer, 2)?
     let rows = bucket_law_rows_table(mut writer)?
     close(take writer)?
-    let options = bucket_law_options(false)
+    options.create = false
     let source = bucket_law_authority(s, tasks, "s3.test", 2)?
     let mut wrong_activation: Options = clone(options)
     wrong_activation.activation = Some(1u64)
@@ -378,7 +382,6 @@ fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error
         fail("L61: the writer open did not refuse the wrong activation")
     }
     let mut process = followers()
-    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), options)
     let service = follower_law_service(tasks, plan, 1)?
     let mut mirror = follower(mut process, follower_slot(follower_owner(service)?, plan)?, take returned, s.time, options.expect)?
     let Some(main) = follower_branch(mirror, "main") else {

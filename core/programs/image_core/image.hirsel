@@ -13,6 +13,8 @@ pub type IccProfile {
 
 pub type Limits {
     max_bytes: u64,
+    // JPEG bytes through the first scan header.
+    max_header_bytes: u64,
     max_pixels: u64,
     max_frames: u32,
     max_steps: u64
@@ -30,7 +32,7 @@ pub type ImageInfo {
     icc_profile: Option[IccProfile]
 }
 
-pub type Error = UnknownFormat | Truncated | Malformed | Unsupported | ByteLimit | PixelLimit | FrameLimit | WorkLimit
+pub type Error = UnknownFormat | Truncated | Malformed | Unsupported | ByteLimit | HeaderLimit | PixelLimit | FrameLimit | WorkLimit
 
 // The pixel cap covers full canvas pixels across all frames.
 fn check_size(w: u32, h: u32, frames: u32, limits: Limits) -> Result[(), Error] {

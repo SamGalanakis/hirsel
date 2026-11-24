@@ -1,8 +1,8 @@
 hirsel.laws 1
-image_core@1/tests/gif_and_avif_reference src=8a8a92ebd7e5ee45 sig=8e64a8f3f9f5c27e run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/icc_color_and_inflate_limit src=ccb674103129bb96 sig=82c2a1a3d699086a run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/png_and_qoi_reference_pixels src=8d0c6e8dcfdb3587 sig=e1af6848ff85bf9c run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/probe_headers_and_bombs src=686f8d1f44afb7b4 sig=6e7259e3d0335cb1 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/resize_and_geometry_reference src=b06f653d3043a5c3 sig=db94e764eac399f1 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/simd_filters_and_resize_reference src=e270451e54e732fb sig=ce76c53b471044b8 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
-image_core@1/tests/thumbhash_and_dhash_reference src=0efa80f9aeea0eab sig=b311694c3b9d9b16 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+image_core@1/tests/gif_and_avif_reference src=15cc85eb54dceb64 sig=ba17bb453bac7242 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+image_core@1/tests/icc_color_and_inflate_limit src=09a35ca5324c1b0e sig=b003cc5d2b8d3e74 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+image_core@1/tests/png_and_qoi_reference_pixels src=5ddab7c7b453d869 sig=4b88baa8258cb566 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+image_core@1/tests/probe_headers_and_bombs src=1ca7b95a23ee180a sig=3f9399481431466d run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+image_core@1/tests/resize_and_geometry_reference src=98c345d4c8dcd519 sig=232a8a87a0395bd7 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+image_core@1/tests/simd_filters_and_resize_reference src=563acee6e16993eb sig=c0139bc008c4dbb4 run=acdd7fe37d41c86f bug=- oracle=- rows=pending
+image_core@1/tests/thumbhash_and_dhash_reference src=1409a4425178ca61 sig=f70a79a14f135c07 run=acdd7fe37d41c86f bug=- oracle=- rows=pending

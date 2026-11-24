@@ -14,7 +14,7 @@ fn fixture(index: u64) -> Bytes {
 
 @test
 fn probe_headers_and_bombs() -> Result[(), ()] {
-    let limits = image.Limits(max_bytes: 4096, max_pixels: 96, max_frames: 2, max_steps: 100000)
+    let limits = image.Limits(max_bytes: 4096, max_header_bytes: 4096, max_pixels: 96, max_frames: 2, max_steps: 100000)
     for i in 0u64 .. 6 {
         let f = fixture(i)
         let header = result.unwrap(result.unwrap(bound bytes 0 {

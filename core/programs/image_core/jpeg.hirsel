@@ -2,6 +2,18 @@ fn jpeg_sof(marker: u8) -> bool {
     marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc
 }
 
+fn jpeg_header_marker(marker: u8) -> bool {
+    (marker >= 0xc0 && marker <= 0xc2) || marker == 0xc4 || marker == 0xcc || marker == 0xda || marker == 0xdb || marker == 0xdd || (marker >= 0xe0 && marker <= 0xef) || marker == 0xfe
+}
+
+fn jpeg_cutoff(end: u64, size: u64) -> Error {
+    if end < size {
+        HeaderLimit
+    } else {
+        Truncated
+    }
+}
+
 fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
     let n = list.len(input)
     let mut at = 2u64
@@ -14,7 +26,8 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
     let mut icc_count = 0u8
     let mut icc_seen = 0u64
     let mut icc_parts: Inline[bool, 256] =[false; 256]
-    while at < n {
+    let mut limit = order.min(n, limits.max_header_bytes)
+    while at < limit {
         if input[at] != 0xff {
             if !in_scan {
                 return Error(Malformed)
@@ -23,11 +36,11 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
             continue
         }
         let start = at
-        while at < n && input[at] == 0xff {
+        while at < limit && input[at] == 0xff {
             at += 1
         }
-        if at == n {
-            return Error(Truncated)
+        if at == limit {
+            return Error(jpeg_cutoff(limit, n))
         }
         let marker = input[at]
         at += 1
@@ -35,6 +48,9 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
             continue
         }
         in_scan = false
+        if !scanned && !jpeg_header_marker(marker) {
+            return Error(Malformed)
+        }
         if marker == 0xd9 {
             if !scanned || at != n {
                 return Error(Malformed)
@@ -51,12 +67,15 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
         if marker < 0xc0 || marker == 0xd8 || (marker >= 0xd0 && marker <= 0xd7) {
             return Error(Malformed)
         }
-        if n - at < 2 {
-            return Error(Truncated)
+        if limit - at < 2 {
+            return Error(jpeg_cutoff(limit, n))
         }
         let length: u64 = int.widen(tiff_short(input, at, false))
-        if length < 2 || length > n - at {
-            return Error(Truncated)
+        if length < 2 {
+            return Error(Malformed)
+        }
+        if length > limit - at {
+            return Error(jpeg_cutoff(limit, n))
         }
         let body = at + 2
         let end = at + length
@@ -72,7 +91,7 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
             check_size(w, h, 1, limits)?
             let channels: u64 = int.widen(input[body + 5])
             let depth = input[body]
-            if (channels != 1 && channels != 3 && channels != 4) || length != 8 + 3 * channels || (depth != 8 && depth != 12) {
+            if (channels != 1 && channels != 3) || length != 8 + 3 * channels || depth != 8 {
                 return Error(Malformed)
             }
             header.width = w
@@ -88,6 +107,7 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
             }
             in_scan = true
             scanned = true
+            limit = n
         } else if marker == 0xdc || marker == 0xde || marker == 0xdf {
             return Error(Unsupported)
         } else if marker == 0xe1 && length >= 8 && exif_signature(input, body) {
@@ -120,5 +140,5 @@ fn probe_jpeg(input: Bytes, limits: Limits) -> Result[ImageInfo, Error] {
         }
         at = end
     }
-    Error(Truncated)
+    Error(jpeg_cutoff(limit, n))
 }

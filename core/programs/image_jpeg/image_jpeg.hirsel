@@ -6,18 +6,6 @@ pub opaque type EncoderHandle {}
 
 pub type Error = Invalid | Limit | ShortBuffer | BadState
 
-pub type Size {
-    width: u32,
-    height: u32
-}
-
-pub type DecodeLimits {
-    max_input_bytes: u64,
-    max_header_bytes: u64,
-    max_pixels: u64,
-    max_native_bytes: u64
-}
-
 pub type DecodeStep = Pending | Rows(u32) | End
 
 pub type Sampling = S444 | S420
@@ -63,81 +51,27 @@ fn status(code: i64) -> Error {
     }
 }
 
-// Keep the codec's supported frame types and separate pre-SOS byte limit.
-fn check_header(input: Bytes, max_header_bytes: u64) -> Result[(), Error] {
-    let length = list.len(input)
-    if length < 2 || input[0] != 255 || input[1] != 216 {
-        return Error(Invalid)
-    }
-    let end = if length < max_header_bytes {
-        length
-    } else {
-        max_header_bytes
-    }
-    let mut at = 2u64
-    let mut frame = false
-    while at < end {
-        if input[at] != 255 {
-            return Error(Invalid)
-        }
-        at += 1
-        while at < end && input[at] == 255 {
-            at += 1
-        }
-        if end - at < 3 {
-            break
-        }
-        let marker = input[at]
-        at += 1
-        let span: u64 = int.widen((list.word_be(input, at) : u16))
-        if span < 2 {
-            return Error(Invalid)
-        }
-        if span > end - at {
-            break
-        }
-        if marker == 218 {
-            if frame {
-                return Ok(())
-            }
-            return Error(Invalid)
-        }
-        if marker == 192 || marker == 193 || marker == 194 {
-            if frame || span < 8 || input[at + 2] != 8 {
-                return Error(Invalid)
-            }
-            let components: u64 = int.widen(input[at + 7])
-            if (components != 1 && components != 3) || span != 8 + 3 * components {
-                return Error(Invalid)
-            }
-            frame = true
-        } else {
-            if marker != 196 && marker != 204 && marker != 219 && marker != 221 && marker != 254 && (marker < 224 || marker > 239) {
-                return Error(Invalid)
-            }
-        }
-        at += span
-    }
-    if end < length {
-        Error(Limit)
-    } else {
-        Error(Invalid)
-    }
-}
-
 /// Checks the JPEG with the shared image firewall before native allocation.
-pub fn probe(input: Bytes, limits: DecodeLimits) -> Result[Size, Error] {
+pub fn probe(input: Bytes, limits: image_core.image.Limits) -> Result[image_core.image.Size, Error] {
     let length = list.len(input)
-    if length > limits.max_input_bytes {
+    if length > limits.max_bytes {
         return Error(Limit)
     }
-    check_header(input, limits.max_header_bytes)?
-    // The JPEG scanner advances through the compressed bytes and metadata.
+    if length < 2 || input[0] != 0xff || input[1] != 0xd8 {
+        return Error(Invalid)
+    }
     let steps = int.saturating_add(256u64, int.saturating_mul(16u64, length))
-    let checked = image_core.image.probe(input, image_core.image.Limits(max_bytes: limits.max_input_bytes, max_pixels: limits.max_pixels, max_frames: 1, max_steps: steps))
-    match checked {
-        Ok(info) => Ok(Size(width: info.width, height: info.height)),
+    let mut bounded = limits
+    if steps < limits.max_steps {
+        bounded.max_steps = steps
+    }
+    match image_core.image.probe(input, bounded) {
+        Ok(info) => match info.format {
+            Jpeg => Ok(image_core.image.Size(width: info.width, height: info.height)),
+            _ => Error(Invalid),
+        },
         Error(ByteLimit) => Error(Limit),
+        Error(HeaderLimit) => Error(Limit),
         Error(PixelLimit) => Error(Limit),
         Error(FrameLimit) => Error(Limit),
         Error(WorkLimit) => Error(Limit),
@@ -147,7 +81,7 @@ pub fn probe(input: Bytes, limits: DecodeLimits) -> Result[Size, Error] {
 
 /// Chooses the smallest DCT scale that leaves at least 2× the target size
 /// on both axes. Uses full size if the source has insufficient headroom.
-pub fn shrink_eighths(source: Size, target: Size) -> u32 {
+pub fn shrink_eighths(source: image_core.image.Size, target: image_core.image.Size) -> u32 {
     let width: u64 = int.widen(source.width)
     let height: u64 = int.widen(source.height)
     let target_width: u64 = int.widen(target.width)
@@ -164,12 +98,12 @@ pub fn shrink_eighths(source: Size, target: Size) -> u32 {
 }
 
 /// Takes ownership of the bounded input. Only transient loans cross the FFI.
-pub fn decoder(f: Foreign[Jpeg], take input: Bytes, target: Size, limits: DecodeLimits) -> Result[Decoder, Error] {
+pub fn decoder(f: Foreign[Jpeg], take input: Bytes, target: image_core.image.Size, limits: image_core.image.Limits, max_native_bytes: u64) -> Result[Decoder, Error] {
     let size = probe(input, limits)?
     let eighths = shrink_eighths(size, target)
     let width: u64 = int.widen(size.width)
     let helper = width * DECODE_ROW_NS_PER_PIXEL > STACK_CALL_NS
-    match native.decoder_create(f, limits.max_native_bytes) {
+    match native.decoder_create(f, max_native_bytes) {
         None => Error(Limit),
         Some(p) => match Decoder(f: f, p: p, input: take input, eighths: eighths, helper: helper, done: false) {
             Ok(take d) => Ok(take d),
@@ -183,7 +117,7 @@ pub fn decoder(f: Foreign[Jpeg], take input: Bytes, target: Size, limits: Decode
 
 /// Advances header processing. Some contains the RGB output dimensions.
 /// Call until it returns Some before requesting strips.
-pub fn start_decode(mut d: Decoder) -> Result[Option[Size], Error] waits {
+pub fn start_decode(mut d: Decoder) -> Result[Option[image_core.image.Size], Error] waits {
     let code = if d.helper {
         native.decoder_start_waiting(d.f, d.p, d.input, d.eighths)
     } else {
@@ -195,7 +129,7 @@ pub fn start_decode(mut d: Decoder) -> Result[Option[Size], Error] waits {
     if code == 0 {
         return Ok(None)
     }
-    Ok(Some(Size(width: native.decoder_width(d.f, d.p), height: native.decoder_height(d.f, d.p))))
+    Ok(Some(image_core.image.Size(width: native.decoder_width(d.f, d.p), height: native.decoder_height(d.f, d.p))))
 }
 
 /// Writes packed RGB rows to the initialized destination. The destination
@@ -229,7 +163,7 @@ pub fn decode_strip(mut d: Decoder, mut rgb: Bytes) -> Result[DecodeStep, Error]
 }
 
 /// Takes an initialized output buffer. Its length bounds the JPEG size.
-pub fn encoder(f: Foreign[Jpeg], size: Size, quality: i32, sampling: Sampling, coding: Coding, max_native_bytes: u64, take output: Bytes) -> Result[Encoder, Error] waits {
+pub fn encoder(f: Foreign[Jpeg], size: image_core.image.Size, quality: i32, sampling: Sampling, coding: Coding, max_native_bytes: u64, take output: Bytes) -> Result[Encoder, Error] waits {
     let sampling_bit: u32 = match sampling {
         S444 => 0,
         S420 => 1,

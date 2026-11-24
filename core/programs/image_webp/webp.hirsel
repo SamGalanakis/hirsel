@@ -17,7 +17,7 @@ fn bounded_limits(limits: image_core.image.Limits) -> image_core.image.Limits {
         limits.max_bytes
     } else {
         16777216
-    }, max_pixels: if limits.max_pixels < 16777216 {
+    }, max_header_bytes: limits.max_header_bytes, max_pixels: if limits.max_pixels < 16777216 {
         limits.max_pixels
     } else {
         16777216

@@ -12,7 +12,7 @@ fn buffer(size: u64) -> Bytes {
 }
 
 fn limits(frames: u32) -> image_core.image.Limits {
-    image_core.image.Limits(max_bytes: 16777216, max_pixels: 16777216, max_frames: frames, max_steps: 100000)
+    image_core.image.Limits(max_bytes: 16777216, max_header_bytes: 16777216, max_pixels: 16777216, max_frames: frames, max_steps: 100000)
 }
 
 fn check_still_pixels(f: Foreign[webp.Webp], input: Bytes, expected: Bytes) waits {

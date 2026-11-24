@@ -8,11 +8,11 @@ fn buffer(size: u64) -> Bytes {
     out
 }
 
-fn limits() -> image_jpeg.DecodeLimits {
-    image_jpeg.DecodeLimits(max_input_bytes: 1048576, max_header_bytes: 131072, max_pixels: 1000000, max_native_bytes: 2097152)
+fn limits(max_header_bytes: u64) -> image_core.image.Limits {
+    image_core.image.Limits(max_bytes: 1048576, max_header_bytes: max_header_bytes, max_pixels: 1000000, max_frames: 1, max_steps: 16777472)
 }
 
-fn dimensions(mut decoder: image_jpeg.Decoder) -> image_jpeg.Size waits {
+fn dimensions(mut decoder: image_jpeg.Decoder) -> image_core.image.Size waits {
     for _ in 0u64 .. 64 {
         if let Some(size) = result.unwrap(image_jpeg.start_decode(mut decoder)) {
             return size
@@ -22,16 +22,16 @@ fn dimensions(mut decoder: image_jpeg.Decoder) -> image_jpeg.Size waits {
 }
 
 fn check_decode(f: Foreign[image_jpeg.Jpeg], take input: Bytes, expected: Bytes, eighths: u32, window: u32) waits {
-    let source = result.unwrap(image_jpeg.probe(input, limits()))
+    let source = result.unwrap(image_jpeg.probe(input, limits(131072)))
     let target = if eighths == 8 {
         source
     } else {
-        image_jpeg.Size(width: ((source.width * eighths + 7) / 8) / 2, height: ((source.height * eighths + 7) / 8) / 2)
+        image_core.image.Size(width: ((source.width * eighths + 7) / 8) / 2, height: ((source.height * eighths + 7) / 8) / 2)
     }
     if image_jpeg.shrink_eighths(source, target) != eighths {
         fail("wrong DCT scale")
     }
-    let mut decoder = result.unwrap(image_jpeg.decoder(f, take input, target, limits()))
+    let mut decoder = result.unwrap(image_jpeg.decoder(f, take input, target, limits(131072), 2097152))
     let size = dimensions(mut decoder)
     let width: u32 = list.word_be(expected, 0)
     let height: u32 = list.word_be(expected, 4)
@@ -65,7 +65,7 @@ fn check_decode(f: Foreign[image_jpeg.Jpeg], take input: Bytes, expected: Bytes,
     fail("decoder did not finish")
 }
 
-fn check_encode(f: Foreign[image_jpeg.Jpeg], rgb: Bytes, expected: Bytes, size: image_jpeg.Size, mode: u32, window: u64) waits {
+fn check_encode(f: Foreign[image_jpeg.Jpeg], rgb: Bytes, expected: Bytes, size: image_core.image.Size, mode: u32, window: u64) waits {
     let sampling: image_jpeg.Sampling = if mode % 2 == 0 {
         S444
     } else {
@@ -105,32 +105,30 @@ fn check_encode(f: Foreign[image_jpeg.Jpeg], rgb: Bytes, expected: Bytes, size: 
 
 fn check_limits(f: Foreign[image_jpeg.Jpeg], take input: Bytes, big_app: Bytes) {
     let bomb: Bytes = b"\xff\xd8\xff\xc0\x00\x0b\x08\xc3\x50\xc3\x50\x01\x01\x11\x00\xff\xda\x00\x02"
-    let size = image_jpeg.Size(width: 800, height: 600)
-    let no_native = image_jpeg.DecodeLimits(max_input_bytes: 1048576, max_header_bytes: 131072, max_pixels: 1000000, max_native_bytes: 0)
-    if let Error(Limit) = image_jpeg.probe(bomb, no_native) {
+    let size = image_core.image.Size(width: 800, height: 600)
+    if let Error(Limit) = image_jpeg.probe(bomb, limits(131072)) {
         ()
     } else {
         fail("accepted a 2.5 gigapixel header")
     }
-    if let Error(Limit) = image_jpeg.decoder(f, take bomb, size, limits()) {
+    if let Error(Limit) = image_jpeg.decoder(f, take bomb, size, limits(131072), 2097152) {
         ()
     } else {
         fail("pixel cap did not gate decode")
     }
-    let short_header = image_jpeg.DecodeLimits(max_input_bytes: 1048576, max_header_bytes: 4096, max_pixels: 1000000, max_native_bytes: 2097152)
-    if let Error(Limit) = image_jpeg.probe(big_app, short_header) {
+    if let Error(Limit) = image_jpeg.probe(big_app, limits(4096)) {
         ()
     } else {
         fail("header byte limit did not gate decode")
     }
     let mut truncated: Bytes = list.with_capacity(list.len(input) - 2)
     list.append(mut truncated, list.slice(input, 0, list.len(input) - 2))
-    if let Error(Invalid) = image_jpeg.decoder(f, take truncated, size, limits()) {
+    if let Error(Invalid) = image_jpeg.decoder(f, take truncated, size, limits(131072), 2097152) {
         ()
     } else {
         fail("opened a decoder without an end-of-image marker")
     }
-    if let Error(Limit) = image_jpeg.decoder(f, take input, size, no_native) {
+    if let Error(Limit) = image_jpeg.decoder(f, take input, size, limits(131072), 0) {
         ()
     } else {
         fail("zero native allocation budget admitted a decoder")
@@ -162,13 +160,13 @@ fn libjpeg_vectors(f: Foreign[image_jpeg.Jpeg], dir: Dir) -> Result[(), ()] wait
     check_decode(f, load(dir, "narrow.jpg"), load(dir, "narrow-8.rgb"), 8, 16)
     check_decode(f, load(dir, "flat.jpg"), load(dir, "flat-8.rgb"), 8, 512)
     let rgb = load(dir, "source.rgb")
-    let size = image_jpeg.Size(width: 227, height: 149)
+    let size = image_core.image.Size(width: 227, height: 149)
     for mode in 0u64 .. 4 {
         let mut name = string.from("encode-")
         string.push_u64(mut name, mode)
         string.push(mut name, ".jpg")
         check_encode(f, rgb, load(dir, name), size, int.narrow(mode), 16)
     }
-    check_encode(f, load(dir, "wide.rgb"), load(dir, "wide.jpg"), image_jpeg.Size(width: 2048, height: 37), 0, 37)
+    check_encode(f, load(dir, "wide.rgb"), load(dir, "wide.jpg"), image_core.image.Size(width: 2048, height: 37), 0, 37)
     Ok(())
 }

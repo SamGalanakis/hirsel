@@ -1,6 +1,6 @@
 @test
 fn gif_and_avif_reference() -> Result[(), ()] {
-    let limits = image.Limits(max_bytes: 4096, max_pixels: 96, max_frames: 2, max_steps: 1000000)
+    let limits = image.Limits(max_bytes: 4096, max_header_bytes: 4096, max_pixels: 96, max_frames: 2, max_steps: 1000000)
     let gif = result.unwrap(image.decode_gif(fixture(4), limits))
     if gif.width != 8 || gif.height != 6 || list.len(gif.frames) != 2 || gif.frames[0].delay_centiseconds != 3 || gif.frames[1].delay_centiseconds != 3 {
         fail("GIF dimensions, frame count or delay differ from Pillow")

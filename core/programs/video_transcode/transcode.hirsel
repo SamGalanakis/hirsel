@@ -1,0 +1,765 @@
+// Parallel GOP map-reduce: one helper unit per job, an ordered reduce and
+// the CMAF/HLS/DASH stitch into std.object. Reaches foreign code (dav1d,
+// openh264, SVT-AV1, libyuv), so no entry here is recorded, replayed or
+// pass-cached (FFI-8).
+
+pub type Codecs: cross {
+    dav: Foreign[av1.DecoderCodec],
+    svt: Foreign[av1.EncoderCodec],
+    avc: Foreign[h264.H264],
+    yuv: Foreign[video_yuv.Yuv]
+}
+
+/// One output rendition: its display height and SVT-AV1 CQP quantizer.
+pub type Rung: cross {
+    height: u32,
+    qp: u32
+}
+
+pub type Config {
+    rungs: List[Rung],
+    // SVT-AV1 preset, 0 (slowest) through 13.
+    enc_mode: u32,
+    segment_ms: u64,
+    // Helper units in flight.
+    workers: u64,
+    // Hirsel memory admitted per helper unit.
+    unit_bytes: u64,
+    audio: split.Audio,
+    limits: split.Limits
+}
+
+pub type Summary {
+    jobs: u64,
+    frames: u64,
+    output_bytes: u64
+}
+
+/// Map failures carry the job index and a helper status (see `Status`).
+pub type Error = Split(split.Error) | Read | Rung(u32) | Unit(u64) | Map(u64, Status) | Stitch(stitch.Error) | SequenceMismatch(u64) | Package(video_packager.packager.Error) | Store(std.object.Error)
+
+pub type Status: key = Done | DecoderOpen | Decode | FrameCount | FrameTime | FrameSize | PictureFormat | Scale | EncoderOpen | Encode | PacketCount
+
+type Job: cross {
+    codecs: Codecs,
+    codec: split.Codec,
+    width: u32,
+    height: u32,
+    turn: split.Turn,
+    range: split.Range,
+    parameter_sets: Bytes,
+    length_size: u64,
+    data: Bytes,
+    sizes: List[u32],
+    // Presentation times in decode order.
+    pts: List[u64],
+    widths: List[u32],
+    heights: List[u32],
+    qps: List[u32],
+    enc_mode: u32,
+    fps_num: u32,
+    fps_den: u32
+}
+
+/// Encoded temporal units of every rung, rung-major, and one size per unit.
+type Out: cross {
+    status: Status,
+    payload: Bytes,
+    sizes: List[u32]
+}
+
+fn zeros(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0)
+    b
+}
+
+fn failed(status: Status) -> Out {
+    Out(status: status, payload: list.new(), sizes: list.new())
+}
+
+// Per-helper pipeline state after decode.
+type Stage {
+    tone: Option[tone.Tone],
+    // Source-size 8-bit frame (tone-mapped or narrowed).
+    eight: Bytes,
+    rotated: Bytes,
+    scaled: List[Bytes],
+    encoders: List[av1.Encoder],
+    packet: Bytes,
+    outs: List[Bytes],
+    counts: List[List[u32]],
+    // Sorted presentation times and the next one expected.
+    order: List[u64],
+    next: u64
+}
+
+fn drain(mut e: av1.Encoder, mut packet: Bytes, mut out: Bytes, mut sizes: List[u32]) -> Status waits {
+    loop {
+        match av1.encode_receive(mut e, mut packet) {
+            Ok(None) => return Done,
+            Ok(Some(n)) => {
+                list.append(mut out, list.slice(packet, 0, int.widen(n)))
+                list.push(mut sizes, n)
+            },
+            Error(Buffer) => {
+                packet = zeros(2 * list.len(packet))
+            },
+            Error(_) => return Encode,
+        }
+    }
+}
+
+fn encode_rungs(job: Job, mut st: Stage, src: Bytes, w: u32, h: u32) -> Status waits {
+    for r in 0u64 .. list.len(job.qps) {
+        let rw = job.widths[r]
+        let rh = job.heights[r]
+        if rw == w && rh == h {
+            if let Error(_) = av1.encode_send(mut st.encoders[r], src) {
+                return Encode
+            }
+        } else {
+            if let Error(_) = video_yuv.scale(job.codecs.yuv, I420, Box, w, h, rw, rh, src, mut st.scaled[r]) {
+                return Scale
+            }
+            if let Error(_) = av1.encode_send(mut st.encoders[r], st.scaled[r]) {
+                return Encode
+            }
+        }
+        let s = drain(mut st.encoders[r], mut st.packet, mut st.outs[r], mut st.counts[r])
+        if s != Done {
+            return s
+        }
+    }
+    Done
+}
+
+fn rotation(turn: split.Turn) -> video_yuv.Rotation {
+    match turn {
+        Quarter => Clockwise90,
+        Half => Clockwise180,
+        _ => Clockwise270,
+    }
+}
+
+fn quarter(turn: split.Turn) -> bool {
+    match turn {
+        Quarter => true,
+        ThreeQuarter => true,
+        _ => false,
+    }
+}
+
+// An 8-bit I420 frame at the source size: rotate, scale and encode it.
+fn upright(job: Job, mut st: Stage, src: Bytes) -> Status waits {
+    match job.turn {
+        Upright => encode_rungs(job, mut st, src, job.width, job.height),
+        _ => {
+            if let Error(_) = video_yuv.rotate(job.codecs.yuv, I420, rotation(job.turn), job.width, job.height, src, mut st.rotated) {
+                return Scale
+            }
+            let rotated = replace(mut st.rotated, list.new())
+            let s = if quarter(job.turn) {
+                encode_rungs(job, mut st, rotated, job.height, job.width)
+            } else {
+                encode_rungs(job, mut st, rotated, job.width, job.height)
+            }
+            st.rotated = take rotated
+            s
+        },
+    }
+}
+
+// One decoded picture in presentation order.
+fn picture(job: Job, mut st: Stage, timestamp: u64, src: Bytes, depth: u32) -> Status waits {
+    if st.next >= list.len(st.order) {
+        return FrameCount
+    }
+    if st.order[st.next] != timestamp {
+        return FrameTime
+    }
+    st.next += 1
+    if depth == 8 {
+        if let Pq(_) = job.range {
+            return PictureFormat
+        }
+        return upright(job, mut st, src)
+    }
+    match st.tone {
+        Some(t) => tone.frame(t, job.width, job.height, src, mut st.eight),
+        None => tone.narrow(job.width, job.height, src, mut st.eight),
+    }
+    let eight = replace(mut st.eight, list.new())
+    let s = upright(job, mut st, eight)
+    st.eight = take eight
+    s
+}
+
+fn frame_bytes(w: u32, h: u32) -> u64 {
+    let wide: u64 = int.widen(w)
+    let high: u64 = int.widen(h)
+    wide * high + 2 * ((wide + 1) / 2) * ((high + 1) / 2)
+}
+
+fn decode_h264(job: Job, mut st: Stage) -> Status waits {
+    let coded_w = (job.width + 15) / 16 * 16
+    let coded_h = (job.height + 15) / 16 * 16
+    let Ok(take opened) = h264.decoder(job.codecs.avc, coded_w, coded_h) else {
+        return DecoderOpen
+    }
+    let mut d = take opened
+    let mut out = zeros(h264.decoded_capacity(d))
+    let picture_bytes = frame_bytes(job.width, job.height)
+    let mut nal: Bytes = list.with_capacity(65536)
+    // SPS and PPS from avcC, as 4-byte Annex B units.
+    let sets = view job.parameter_sets
+    let mut at = 0u64
+    while at + 4 <= list.len(sets) {
+        let mut end = at + 4
+        while end + 4 <= list.len(sets) && !(sets[end] == 0 && sets[end + 1] == 0 && sets[end + 2] == 0 && sets[end + 3] == 1) {
+            end += 1
+        }
+        if end + 4 > list.len(sets) {
+            end = list.len(sets)
+        }
+        let Ok(_) = h264.decode(mut d, list.slice(sets, at, end), job.pts[0], mut out) else {
+            return Decode
+        }
+        at = end
+    }
+    let mut offset = 0u64
+    for i in 0u64 .. list.len(job.sizes) {
+        let size: u64 = int.widen(job.sizes[i])
+        let end = offset + size
+        let mut p = offset
+        while p + job.length_size <= end {
+            let mut n = 0u64
+            for k in 0u64 .. job.length_size {
+                let b: u64 = int.widen(job.data[p + k])
+                n = n << 8 | b
+            }
+            p += job.length_size
+            if n == 0 || p + n > end {
+                return Decode
+            }
+            list.clear(mut nal)
+            list.push(mut nal, 0)
+            list.push(mut nal, 0)
+            list.push(mut nal, 0)
+            list.push(mut nal, 1)
+            list.append(mut nal, list.slice(job.data, p, p + n))
+            p += n
+            match h264.decode(mut d, nal, job.pts[i], mut out) {
+                Ok(None) => {},
+                Ok(Some(frame)) => {
+                    if frame.width != job.width || frame.height != job.height {
+                        return FrameSize
+                    }
+                    let s = picture(job, mut st, frame.timestamp, list.slice(out, 8, 8 + picture_bytes), 8)
+                    if s != Done {
+                        return s
+                    }
+                },
+                Error(_) => return Decode,
+            }
+        }
+        offset = end
+    }
+    loop {
+        match h264.finish(mut d, mut out) {
+            Ok(None) => return Done,
+            Ok(Some(frame)) => {
+                if frame.width != job.width || frame.height != job.height {
+                    return FrameSize
+                }
+                let s = picture(job, mut st, frame.timestamp, list.slice(out, 8, 8 + picture_bytes), 8)
+                if s != Done {
+                    return s
+                }
+            },
+            Error(_) => return Decode,
+        }
+    }
+}
+
+fn receive_av1(job: Job, mut st: Stage, mut d: av1.Decoder, mut pixels: Bytes) -> Status waits {
+    loop {
+        match av1.decode_receive(mut d, mut pixels) {
+            Ok(None) => return Done,
+            Ok(Some(p)) => {
+                if p.width != job.width || p.height != job.height {
+                    return FrameSize
+                }
+                let Yuv420 = p.layout else {
+                    return PictureFormat
+                }
+                if p.bit_depth != 8 && p.bit_depth != 10 {
+                    return PictureFormat
+                }
+                let need = frame_bytes(p.width, p.height) * if p.bit_depth == 8 {
+                    1u64
+                } else {
+                    2u64
+                }
+                // dav1d keeps no timestamps here: AV1 in MP4 has no
+                // reordering, so pictures come out in presentation order.
+                let timestamp = if st.next < list.len(st.order) {
+                    st.order[st.next]
+                } else {
+                    0u64
+                }
+                let s = picture(job, mut st, timestamp, list.slice(pixels, 0, need), p.bit_depth)
+                if s != Done {
+                    return s
+                }
+            },
+            Error(_) => return Decode,
+        }
+    }
+}
+
+fn decode_av1(job: Job, mut st: Stage) -> Status waits {
+    let w: u64 = int.widen(job.width)
+    let h: u64 = int.widen(job.height)
+    let Ok(take opened) = av1.decoder(job.codecs.dav, int.narrow(w * h)) else {
+        return DecoderOpen
+    }
+    let mut d = take opened
+    let mut pixels = zeros(2 * frame_bytes(job.width, job.height))
+    let mut offset = 0u64
+    for i in 0u64 .. list.len(job.sizes) {
+        let size: u64 = int.widen(job.sizes[i])
+        let unit = list.slice(job.data, offset, offset + size)
+        offset += size
+        loop {
+            match av1.decode_send(mut d, unit) {
+                Ok(()) => break,
+                Error(Drain) => {
+                    let s = receive_av1(job, mut st, mut d, mut pixels)
+                    if s != Done {
+                        return s
+                    }
+                },
+                Error(_) => return Decode,
+            }
+        }
+        let s = receive_av1(job, mut st, mut d, mut pixels)
+        if s != Done {
+            return s
+        }
+    }
+    receive_av1(job, mut st, mut d, mut pixels)
+}
+
+// The map step: decode one job from its own key frame and encode every rung.
+fn map(take job: Job) -> Out waits {
+    let rungs = list.len(job.qps)
+    let mut encoders: List[av1.Encoder] = list.with_capacity(rungs)
+    let mut scaled: List[Bytes] = list.with_capacity(rungs)
+    let mut outs: List[Bytes] = list.with_capacity(rungs)
+    let mut counts: List[List[u32]] = list.with_capacity(rungs)
+    let mut largest = 0u64
+    for r in 0u64 .. rungs {
+        let config = av1.EncodeConfig(width: job.widths[r], height: job.heights[r], bit_depth: 8, enc_mode: job.enc_mode, fast_decode: 0, level_of_parallelism: 1, avif: false, qp: job.qps[r], fps_num: job.fps_num, fps_den: job.fps_den)
+        let Ok(take e) = av1.encoder(job.codecs.svt, config) else {
+            return failed(EncoderOpen)
+        }
+        list.push(mut encoders, take e)
+        let need = frame_bytes(job.widths[r], job.heights[r])
+        if need > largest {
+            largest = need
+        }
+        list.push(mut scaled, zeros(need))
+        list.push(mut outs, list.new())
+        list.push(mut counts, list.with_capacity(list.len(job.sizes)))
+    }
+    let mut sorted: List[u64] = list.with_capacity(list.len(job.pts))
+    list.append(mut sorted, job.pts)
+    list.sort_stable(mut sorted, scoped fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    let tables: Option[tone.Tone] = match job.range {
+        Pq(peak) => Some(tone.new(peak, 100)),
+        Sdr => None,
+    }
+    let source = frame_bytes(job.width, job.height)
+    let mut st = Stage(tone: take tables, eight: zeros(source), rotated: zeros(source), scaled: take scaled, encoders: take encoders, packet: zeros(largest + 65536), outs: take outs, counts: take counts, order: take sorted, next: 0)
+    let decoded = match job.codec {
+        H264 => decode_h264(job, mut st),
+        Av1 => decode_av1(job, mut st),
+    }
+    if decoded != Done {
+        return failed(decoded)
+    }
+    let frames = list.len(job.sizes)
+    if st.next != frames {
+        return failed(FrameCount)
+    }
+    let mut payload: Bytes = list.new()
+    let mut sizes: List[u32] = list.with_capacity(rungs * frames)
+    for r in 0u64 .. rungs {
+        if let Error(_) = av1.encode_finish(mut st.encoders[r]) {
+            return failed(Encode)
+        }
+        let s = drain(mut st.encoders[r], mut st.packet, mut st.outs[r], mut st.counts[r])
+        if s != Done {
+            return failed(s)
+        }
+        if list.len(st.counts[r]) != frames {
+            return failed(PacketCount)
+        }
+        list.append(mut payload, st.outs[r])
+        list.append(mut sizes, st.counts[r])
+    }
+    Out(status: Done, payload: take payload, sizes: take sizes)
+}
+
+// --- Reduce and stitch ------------------------------------------------------
+
+const SYNC: u32 = 0x02000000
+const NON_SYNC: u32 = 0x01010000
+
+fn read_range(mut f: HostFile, at: u64, n: u64) -> Result[Bytes, Error] waits {
+    let mut buf: Bytes = list.with_capacity(n)
+    while list.len(buf) < n {
+        let Ok(got) = std.file.read_at(mut f, at + list.len(buf), mut buf) else {
+            return Error(Read)
+        }
+        if got == 0 {
+            return Error(Read)
+        }
+    }
+    if list.len(buf) > n {
+        list.truncate(mut buf, n)
+    }
+    Ok(take buf)
+}
+
+fn key(prefix: String, rung: u64, name: String) -> String {
+    let mut s: String = string.with_capacity(string.byte_len(prefix) + 32)
+    string.push(mut s, prefix)
+    string.push_char(mut s, 'r')
+    string.push_u64(mut s, rung)
+    string.push_char(mut s, '/')
+    string.push(mut s, name)
+    s
+}
+
+fn numbered(prefix: String, rung: u64, stem: String, n: u64) -> String {
+    let mut name: String = string.with_capacity(32)
+    string.push(mut name, stem)
+    string.push_u64(mut name, n)
+    string.push(mut name, ".m4s")
+    key(prefix, rung, name)
+}
+
+fn top(prefix: String, name: String) -> String {
+    let mut s: String = string.with_capacity(string.byte_len(prefix) + 16)
+    string.push(mut s, prefix)
+    string.push(mut s, name)
+    s
+}
+
+fn put(mut client: std.object.Client, k: String, take body: Bytes, mut total: u64) -> Result[(), Error] waits {
+    total += list.len(body)
+    let deadline = std.object.deadline_after_ms(client, 120000)
+    let (outcome, _) = std.object.store(mut client, k, take body, deadline)
+    match take outcome {
+        Ok(_) => Ok(()),
+        Error(take e) => Error(Store(take e)),
+    }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    let mut x = a
+    let mut y = b
+    while y != 0 {
+        let t = x % y
+        x = y
+        y = t
+    }
+    x
+}
+
+fn package(take outcome: Result[video_packager.packager.Segment, video_packager.packager.Error]) -> Result[video_packager.packager.Segment, Error] {
+    match take outcome {
+        Ok(s) => Ok(s),
+        Error(e) => Error(Package(e)),
+    }
+}
+
+fn manifest(take outcome: Result[String, video_packager.packager.Error]) -> Result[Bytes, Error] {
+    match take outcome {
+        Ok(take s) => Ok(string.into_bytes(take s)),
+        Error(e) => Error(Package(e)),
+    }
+}
+
+const SEGMENT_LIMIT: video_packager.packager.SegmentLimit = video_packager.packager.SegmentLimit(samples: 1048576, payload_bytes: 4294967296)
+const MANIFEST_LIMIT: video_packager.packager.ManifestLimit = video_packager.packager.ManifestLimit(octets: 16777216, steps: 67108864)
+
+// Ordered reduce state, one entry per video rung.
+type Ladder {
+    tracks: List[media_container.mp4.Track],
+    codecs: List[String],
+    sequences: List[Bytes],
+    segments: List[List[video_packager.packager.Segment]],
+    audio_segments: List[video_packager.packager.Segment],
+    audio_next: u64,
+    frames: u64,
+    written: u64
+}
+
+fn job_input(plan: split.Plan, codecs: Codecs, index: u64, widths: List[u32], heights: List[u32], qps: List[u32], enc_mode: u32, fps: (u32, u32), mut source: HostFile) -> Result[Job, Error] waits {
+    let span = plan.jobs[index]
+    let mut data: Bytes = list.new()
+    let mut sizes: List[u32] = list.with_capacity(span.count)
+    let mut pts: List[u64] = list.with_capacity(span.count)
+    for i in span.first .. span.first + span.count {
+        let row = plan.video.rows[i]
+        let sample = read_range(mut source, row.offset, int.widen(row.size))?
+        list.append(mut data, sample)
+        list.push(mut sizes, row.size)
+        list.push(mut pts, row.pts)
+    }
+    let (fps_num, fps_den) = fps
+    let mut sets: Bytes = list.with_capacity(list.len(plan.parameter_sets))
+    list.append(mut sets, plan.parameter_sets)
+    let mut w: List[u32] = list.new()
+    list.append(mut w, widths)
+    let mut h: List[u32] = list.new()
+    list.append(mut h, heights)
+    let mut q: List[u32] = list.new()
+    list.append(mut q, qps)
+    Ok(Job(codecs: codecs, codec: plan.codec, width: plan.width, height: plan.height, turn: plan.turn, range: plan.range, parameter_sets: take sets, length_size: plan.length_size, data: take data, sizes: take sizes, pts: take pts, widths: take w, heights: take h, qps: take q, enc_mode: enc_mode, fps_num: fps_num, fps_den: fps_den))
+}
+
+// Writes job `index`'s segment of every rung, and the audio segment that
+// covers the same presentation interval.
+fn stitch_job(plan: split.Plan, index: u64, out: Out, mut ladder: Ladder, mut client: std.object.Client, prefix: String, mut source: HostFile) -> Result[(), Error] waits {
+    let span = plan.jobs[index]
+    let frames = span.count
+    let rungs = list.len(ladder.tracks)
+    // Frame durations from the sorted presentation times; the job ends
+    // where the next one starts.
+    let mut sorted: List[u64] = list.with_capacity(frames)
+    for i in span.first .. span.first + frames {
+        list.push(mut sorted, plan.video.rows[i].pts)
+    }
+    list.sort_stable(mut sorted, scoped fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    let job_end = if index + 1 < list.len(plan.jobs) {
+        plan.jobs[index + 1].start
+    } else {
+        span.end
+    }
+    let mut durations: List[u32] = list.with_capacity(frames)
+    for i in 0u64 .. frames {
+        let next = if i + 1 < frames {
+            sorted[i + 1]
+        } else {
+            job_end
+        }
+        list.push(mut durations, int.narrow(next - sorted[i]))
+    }
+    let number: u32 = int.narrow(index + 1)
+    let mut at = 0u64
+    for r in 0u64 .. rungs {
+        let first: u64 = int.widen(out.sizes[r * frames])
+        let unit = list.slice(out.payload, at, at + first)
+        let Ok(header) = stitch.sequence_obu(unit) else {
+            return Error(Stitch(NoSequence))
+        }
+        if index == 0 {
+            let s = stitch.sequence(header) ?=> |e| Stitch(e)
+            let Video(w, h) = ladder.tracks[r].media else {
+                return Error(Rung(0))
+            }
+            let entry = stitch.av01_entry(int.widen(w), int.widen(h), s, header)
+            let mut init: Bytes = list.with_capacity(list.len(entry) + 1024)
+            if let Error(e) = video_packager.packager.write_init(mut init, ladder.tracks[r], entry, Clear) {
+                return Error(Package(e))
+            }
+            put(mut client, key(prefix, r + 1, "init.mp4"), take init, mut ladder.written)?
+            list.push(mut ladder.codecs, stitch.codec_string(s))
+            list.push(mut ladder.sequences, take header)
+        } else if header != ladder.sequences[r] {
+            return Error(SequenceMismatch(index))
+        }
+        let mut samples: List[media_container.mp4.Sample] = list.with_capacity(frames)
+        let mut payload_bytes = 0u64
+        let mut p = at
+        for i in 0u64 .. frames {
+            let size = out.sizes[r * frames + i]
+            let size64: u64 = int.widen(size)
+            let flags = if stitch.is_key(list.slice(out.payload, p, p + size64)) {
+                SYNC
+            } else {
+                NON_SYNC
+            }
+            list.push(mut samples, media_container.mp4.Sample(duration: durations[i], size: size, flags: flags, composition_offset: 0))
+            payload_bytes += size64
+            p += size64
+        }
+        let mut framing: Bytes = list.with_capacity(128 + 16 * frames + payload_bytes)
+        let segment = package(video_packager.packager.write_segment(mut framing, ladder.tracks[r], number, span.start, samples, payload_bytes, SEGMENT_LIMIT))?
+        let mut iframe: Bytes = list.with_capacity(144 + first)
+        if let Error(e) = video_packager.packager.write_iframe(mut iframe, segment) {
+            return Error(Package(e))
+        }
+        list.append(mut iframe, list.slice(out.payload, at, at + video_packager.packager.iframe_payload_bytes(segment)))
+        list.append(mut framing, list.slice(out.payload, at, at + payload_bytes))
+        put(mut client, numbered(prefix, r + 1, "", int.widen(number)), take framing, mut ladder.written)?
+        put(mut client, numbered(prefix, r + 1, "iframe-", int.widen(number)), take iframe, mut ladder.written)?
+        list.push(mut ladder.segments[r], segment)
+        at += payload_bytes
+    }
+    ladder.frames += frames
+    // Audio: the samples that start before this job's end, in video ticks.
+    if let Some(audio) = plan.audio {
+        let a_scale: u64 = int.widen(audio.timescale)
+        let v_scale: u64 = int.widen(plan.video.timescale)
+        let last = index + 1 == list.len(plan.jobs)
+        let boundary = job_end * a_scale / v_scale
+        let first = ladder.audio_next
+        let mut end = first
+        while end < list.len(audio.rows) && (last || audio.rows[end].pts < boundary) {
+            end += 1
+        }
+        if end > first {
+            let mut samples: List[media_container.mp4.Sample] = list.with_capacity(end - first)
+            let mut payload: Bytes = list.new()
+            for i in first .. end {
+                let row = audio.rows[i]
+                list.append(mut payload, read_range(mut source, row.offset, int.widen(row.size))?)
+                list.push(mut samples, media_container.mp4.Sample(duration: row.duration, size: row.size, flags: SYNC, composition_offset: 0))
+            }
+            let track = media_container.mp4.Track(id: 1, timescale: audio.timescale, media: Audio)
+            let n: u32 = int.narrow(list.len(ladder.audio_segments) + 1)
+            let mut framing: Bytes = list.with_capacity(128 + 16 * (end - first) + list.len(payload))
+            let segment = package(video_packager.packager.write_segment(mut framing, track, n, audio.rows[first].pts, samples, list.len(payload), SEGMENT_LIMIT))?
+            list.append(mut framing, payload)
+            put(mut client, numbered(prefix, rungs + 1, "", int.widen(n)), take framing, mut ladder.written)?
+            list.push(mut ladder.audio_segments, segment)
+            ladder.audio_next = end
+        }
+    }
+    Ok(())
+}
+
+/// Transcodes one VOD MP4 into an AV1 CMAF ladder under `prefix`: per
+/// rung `r<ID>/init.mp4`, `r<ID>/<n>.m4s`, `r<ID>/iframe-<n>.m4s`,
+/// `r<ID>/media.m3u8` and `r<ID>/iframe.m3u8`; Opus audio as the last
+/// rendition; `master.m3u8` and `manifest.mpd`.
+pub fn run(codecs: Codecs, tasks: Tasks, mut source: HostFile, config: Config, mut client: std.object.Client, prefix: String) -> Result[Summary, Error] waits {
+    let Ok(stat) = std.file.stat(mut source) else {
+        return Error(Read)
+    }
+    let planned = split.plan(stat.size, config.limits, config.segment_ms, config.audio, scoped fn(at: u64, n: u64) -> Result[Bytes, split.Error] waits {
+        match read_range(mut source, at, n) {
+            Ok(take b) => Ok(take b),
+            Error(_) => Error(Read),
+        }
+    })
+    let plan = match take planned {
+        Ok(take p) => take p,
+        Error(e) => return Error(Split(e)),
+    }
+    let (display_w, display_h) = if quarter(plan.turn) {
+        (plan.height, plan.width)
+    } else {
+        (plan.width, plan.height)
+    }
+    let dw: u64 = int.widen(display_w)
+    let dh: u64 = int.widen(display_h)
+    let mut widths: List[u32] = list.new()
+    let mut heights: List[u32] = list.new()
+    let mut qps: List[u32] = list.new()
+    let mut ladder = Ladder(tracks: list.new(), codecs: list.new(), sequences: list.new(), segments: list.new(), audio_segments: list.new(), audio_next: 0, frames: 0, written: 0)
+    for rung in config.rungs {
+        let rh: u64 = int.widen(rung.height)
+        if rh > dh || rh < 64 || rh % 2 != 0 {
+            return Error(Rung(rung.height))
+        }
+        let rw = (rh * dw + dh) / (2 * dh) * 2
+        if rw < 64 {
+            return Error(Rung(rung.height))
+        }
+        list.push(mut widths, int.narrow(rw))
+        list.push(mut heights, rung.height)
+        list.push(mut qps, rung.qp)
+        let id: u32 = int.narrow(list.len(ladder.tracks) + 1)
+        list.push(mut ladder.tracks, media_container.mp4.Track(id: 1, timescale: plan.video.timescale, media: Video(int.narrow(rw), int.narrow(rh))))
+        list.push(mut ladder.segments, list.new())
+        let _ = id
+    }
+    if list.len(widths) == 0 {
+        return Error(Rung(0))
+    }
+    let first_duration: u64 = int.widen(plan.video.rows[0].duration)
+    let scale: u64 = int.widen(plan.video.timescale)
+    let g = gcd(scale, first_duration)
+    let fps: (u32, u32) = if scale / g <= 60000 && first_duration / g <= 60000 {
+        (int.narrow(scale / g), int.narrow(first_duration / g))
+    } else {
+        (30u32, 1u32)
+    }
+    if let Some(audio) = plan.audio {
+        let track = media_container.mp4.Track(id: 1, timescale: audio.timescale, media: Audio)
+        let mut init: Bytes = list.with_capacity(list.len(audio.entry) + 1024)
+        if let Error(e) = video_packager.packager.write_init(mut init, track, audio.entry, Clear) {
+            return Error(Package(e))
+        }
+        put(mut client, key(prefix, list.len(widths) + 1, "init.mp4"), take init, mut ladder.written)?
+    }
+    let jobs = list.len(plan.jobs)
+    let mut handles: List[Task[Out]] = list.new()
+    let mut spawned = 0u64
+    let mut joined = 0u64
+    while joined < jobs {
+        while spawned < jobs && list.len(handles) < config.workers {
+            let job = job_input(plan, codecs, spawned, widths, heights, qps, config.enc_mode, fps, mut source)?
+            match task.spawn_unit(tasks, bytes config.unit_bytes, take job, map) {
+                Ok(take h) => list.push(mut handles, take h),
+                Error(_) => return Error(Unit(spawned)),
+            }
+            spawned += 1
+        }
+        let h = list.remove(mut handles, 0)
+        let out = match task.join(take h) {
+            Ok(take o) => take o,
+            Error(_) => return Error(Unit(joined)),
+        }
+        if out.status != Done {
+            return Error(Map(joined, out.status))
+        }
+        stitch_job(plan, joined, out, mut ladder, mut client, prefix, mut source)?
+        joined += 1
+    }
+    let mut renditions: List[video_packager.packager.Rendition] = list.new()
+    let rungs = list.len(widths)
+    for r in 0u64 .. rungs {
+        let mut segments: List[video_packager.packager.Segment] = list.new()
+        list.append(mut segments, ladder.segments[r])
+        let mut codec: String = string.new()
+        string.push(mut codec, ladder.codecs[r])
+        list.push(mut renditions, video_packager.packager.Rendition(id: int.narrow(r + 1), track: ladder.tracks[r], codec: take codec, segments: take segments))
+    }
+    if let Some(audio) = plan.audio {
+        let mut segments: List[video_packager.packager.Segment] = list.new()
+        list.append(mut segments, ladder.audio_segments)
+        list.push(mut renditions, video_packager.packager.Rendition(id: int.narrow(rungs + 1), track: media_container.mp4.Track(id: 1, timescale: audio.timescale, media: Audio), codec: string.from("opus"), segments: take segments))
+    }
+    for i in 0u64 .. list.len(renditions) {
+        let r = renditions[i]
+        let id: u64 = int.widen(r.id)
+        put(mut client, key(prefix, id, "media.m3u8"), manifest(video_packager.packager.hls_media(r, false, MANIFEST_LIMIT))?, mut ladder.written)?
+        if let Video(_, _) = r.track.media {
+            put(mut client, key(prefix, id, "iframe.m3u8"), manifest(video_packager.packager.hls_media(r, true, MANIFEST_LIMIT))?, mut ladder.written)?
+        }
+    }
+    put(mut client, top(prefix, "master.m3u8"), manifest(video_packager.packager.hls_master(renditions, MANIFEST_LIMIT))?, mut ladder.written)?
+    put(mut client, top(prefix, "manifest.mpd"), manifest(video_packager.packager.dash_manifest(renditions, MANIFEST_LIMIT))?, mut ladder.written)?
+    Ok(Summary(jobs: jobs, frames: ladder.frames, output_bytes: ladder.written))
+}

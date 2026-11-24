@@ -1,14 +1,18 @@
 #!/bin/bash
 # Nightly goal board (board-1270). Build CPUs 8-11, measure CPUs 16-17.
 set -euo pipefail
-tools=$(dirname "$(readlink -f "$0")")
-base=${HIRSEL_BOARD_BASE:-"$HOME/.local/share/hirsel-board"}
+script=$(readlink -f "$0")
+tools=$(dirname "$script")
+if [[ ${1:-} == --self-check ]]; then
+  exec python3 "$tools/tests/test_board_freshness.py"
+fi
+base=$(realpath -m -- "${HIRSEL_BOARD_BASE:-"$HOME/.local/share/hirsel-board"}")
 current=${HIRSEL_BOARD_CURRENT:-/workspace/code/hirsel-briefs/CURRENT-BOARD.md}
 mkdir -p "$base/runs"
-exec 8>"$base/nightly.lock"
-flock 8
-exec 9>"$base/baseline.lock"
-flock 9
+# The lock belongs to flock alone, outside the board's process tree.
+if [[ ${1:-} != --locked ]]; then
+  exec flock --close "$base/nightly.lock" "$script" --locked
+fi
 started=$(date +%s)
 run=$(mktemp -d "$base/runs/$(date -u -d "@$started" +%Y%m%dT%H%M%SZ)-XXXXXX")
 commit=$(git -C "$base/main" rev-parse --verify origin/main 2>/dev/null) || commit=
@@ -81,8 +85,13 @@ for manifest in "$base/peers/langarena/rust/Cargo.toml" "$base/peers/awfy/rust/C
   fi
 done
 baseline=()
-if [[ -e "$base/last-complete.json" || -L "$base/last-complete.json" ]]; then
-  baseline=(--baseline "$(realpath -m "$base/last-complete.json")")
+# Pass the pointer as a positional argument to the shell inside flock.
+# shellcheck disable=SC2016
+baseline_path=$(flock --close "$base/baseline.lock" bash -c '
+  if [[ -e "$1" || -L "$1" ]]; then realpath -m -- "$1"; fi
+' _ "$base/last-complete.json")
+if [[ -n "$baseline_path" ]]; then
+  baseline=(--baseline "$baseline_path")
 fi
 law_baseline=()
 if previous=$(python3 "$tools/board-freshness.py" --base "$base" --last-complete-commit); then
@@ -97,11 +106,14 @@ taskset -c 8-11,16-17 python3 bench/awfy/board.py "$run/board" \
   --build-cpus 8-11 --measure-cpus 16-17 --awfy "$base/peers/awfy" \
   --resid "$base/peers/resid" --goose "$base/peers/goose" --langarena "$base/peers/langarena" \
   "${baseline[@]}" >>"$run/run.log" 2>&1 || status=$?
-if (( status == 2 )); then
+if (( status == 0 )); then
+  step="promote baseline"
+  taskset -c 8-11 python3 bench/awfy/board.py rebaseline "$run" \
+    --base "$base" --expected-baseline "$baseline_path" >>"$run/run.log" 2>&1 || status=$?
+elif (( status == 2 )); then
   step="board comparison"
-  flock -u 9
-  if [[ -n ${baseline[1]:-} ]] && python3 bench/awfy/board.py rebaseline "$run" \
-      --base "$base" --expected-baseline "${baseline[1]}" >>"$run/run.log" 2>&1; then
+  if [[ -n "$baseline_path" ]] && taskset -c 8-11 python3 bench/awfy/board.py rebaseline "$run" \
+      --base "$base" --expected-baseline "$baseline_path" >>"$run/run.log" 2>&1; then
     step="rebaseline"
     status=0
   else
@@ -109,11 +121,8 @@ if (( status == 2 )); then
   fi
 elif (( status == 3 )); then
   step="board comparison"
-elif (( status == 0 )); then
-  step="promote baseline"
-  ln -s "$run/board/board.json" "$run/complete.json"
-  mv -Tf "$run/complete.json" "$base/last-complete.json"
 fi
+record
 
 build_toolchain() {
   local output

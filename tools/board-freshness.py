@@ -19,7 +19,7 @@ def read_report(path):
         return {}
 
 
-def last_complete(base):
+def last_complete(base, *, accepted_only=False):
     reports = []
     promoted = (base / "last-complete.json").resolve()
     for path in {promoted, *base.glob("runs/*/board/board.json")}:
@@ -30,8 +30,9 @@ def last_complete(base):
             continue
     for finished, path in sorted(reports, reverse=True):
         report = read_report(path)
-        if (report.get("complete") is True
-                and (report.get("exit_status") in (0, 3) or path == promoted)
+        status = report.get("exit_status")
+        if (report.get("complete") is True and status in (0, 2, 3)
+                and (not accepted_only or status != 2 or path == promoted)
                 and path.with_name("board.md").is_file()):
             return finished, report["commit"], path.with_name("board.md")
     return None
@@ -64,11 +65,22 @@ def main_distance(base, commit):
     )
 
 
+def attempt_order(run):
+    second = run.name.split("-", 1)[0]
+    for path in (run / "attempt.json", run / "board" / "board.json"):
+        try:
+            return second, path.stat().st_mtime_ns
+        except FileNotFoundError:
+            continue
+    return second, 0
+
+
 def latest_attempt(base):
-    for run in sorted(base.glob("runs/*"), reverse=True):
+    for run in sorted(base.glob("runs/*"), key=attempt_order, reverse=True):
+        report = read_report(run / "board" / "board.json")
         if attempt := read_report(run / "attempt.json"):
-            return attempt
-        if report := read_report(run / "board" / "board.json"):
+            return attempt, report
+        if report:
             started = datetime.strptime(run.name.split("-", 1)[0], "%Y%m%dT%H%M%SZ")
             status = report.get("exit_status")
             failures = ", ".join(report.get("failures", {}))
@@ -76,21 +88,37 @@ def latest_attempt(base):
                 "started": started.replace(tzinfo=timezone.utc).timestamp(),
                 "commit": report.get("commit"), "status": status,
                 "step": failures or ("board comparison" if status in (2, 3) else "board"),
-            }
-    return None
+            }, report
+    return None, {}
 
 
-def render(base, attempt, complete, now):
+def verdict(value):
+    return "pending" if value is None else "yes" if value else "no"
+
+
+def render(base, attempt, report, complete, now):
     lines = ["# Current Hirsel board", "", f"Freshness as of {timestamp(now)}.", ""]
+    alert = board_alert(complete, now)
+    board_status = report.get("exit_status")
+    finished = board_status is not None or (attempt is not None and attempt["status"] is not None)
+    recovered = board_status == 2 and attempt is not None and attempt["step"] == "rebaseline"
+    lines += [
+        f"- **Fresh** · {verdict(alert is None)}",
+        f"- **Complete** · {verdict(report.get('complete', False if finished else None))}",
+        f"- **Passed** · {verdict(board_status == 0 if finished else None)}",
+        f"- **Refused** · {verdict(board_status == 2 if finished else None)}",
+        f"- **Recovered** · {verdict(recovered)}",
+        "",
+    ]
     if attempt is None:
         lines.append("**Latest attempt** · No attempt recorded.")
     else:
         status = attempt["status"]
         step = attempt["step"]
         if status is None:
-            outcome = f"Running · {step}"
+            outcome = f"Running auxiliary checks · {step}" if board_status is not None else f"Running · {step}"
         elif status == 0:
-            outcome = "Rebaselined · comparison refused" if step == "rebaseline" else "Success"
+            outcome = f"Finished · {step} (exit 0)"
         else:
             comparison = {2: "Refused", 3: "Regression"} if step == "board comparison" else {}
             outcome = f"{comparison.get(status, 'Failed')} · {step} (exit {status})"
@@ -109,7 +137,7 @@ def render(base, attempt, complete, now):
         lines += [f"**Last complete board** · `{commit}` · {timestamp(finished)} · "
                   f"{hours(now - finished)} old · {main_distance(base, commit)}.",
                   f"Stale after {timestamp(finished + MAX_AGE)}."]
-    if alert := board_alert(complete, now):
+    if alert:
         lines += ["", f"**{alert}**"]
     if complete is not None:
         lines += ["", "---", "", complete[2].read_text().rstrip()]
@@ -152,14 +180,16 @@ def main():
                        "boat_status": args.boat_status, "vopr_status": args.vopr_status,
                        "law_status": args.law_status}
             atomic_write(args.record / "attempt.json", json.dumps(attempt) + "\n")
-        complete = last_complete(args.base)
-        if args.last_complete_commit and complete:
-            print(complete[1])
-        now = time.time()
-        if args.current:
-            atomic_write(args.current, render(args.base, latest_attempt(args.base), complete, now))
-        if args.alert and (alert := board_alert(complete, now)):
-            print(alert)
+        if args.last_complete_commit and (accepted := last_complete(args.base, accepted_only=True)):
+            print(accepted[1])
+        if args.current or args.alert:
+            complete = last_complete(args.base)
+            now = time.time()
+            if args.current:
+                attempt, report = latest_attempt(args.base)
+                atomic_write(args.current, render(args.base, attempt, report, complete, now))
+            if args.alert and (alert := board_alert(complete, now)):
+                print(alert)
 
 
 if __name__ == "__main__":

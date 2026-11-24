@@ -23,10 +23,12 @@ import time
 import arena
 import awfy_measure
 import board_baseline
+import board_size
 import build
 import comparison
 import comparison_units
 import receipt
+from board_baseline import rows_by_label
 from receipt import measurement_slot, write as write_json
 from timing_shield import BOARD as LOCK, REGIMES, hold, measurement_affinity
 from comparison import SPECTRALNORM, SPECTRALNORM_CHECKSUM, spectralnorm_marker
@@ -49,8 +51,6 @@ STARTUP = {
 EXPECTED = {**awfy_measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values())}
 INSTRUCTION_LIMIT = Decimal(2)
 SIZE_LIMIT = 2048
-SIZE_ROW = "AWFY original-14 harness"
-SIZE_IDENTITY = ("strip_version", "strip_flags", "verified_workloads", "pins")
 CHECKBOX_METRICS = {
     "converge": "toggles_per_second",
     "memory-subscribed": "server_rss_bytes",
@@ -130,16 +130,6 @@ def ratios(samples, fields):
     return result
 
 
-def rows_by_label(report):
-    rows = {}
-    for row in report["rows"]:
-        label = (row["goal"], row["row"])
-        if label in rows:
-            raise ValueError(f"duplicate board row {'/'.join(label)}")
-        rows[label] = row
-    return rows
-
-
 def inactive_counters(report):
     suites = {title: suite for suite, title in awfy_measure.SUITES.items()}
     blocked = {}
@@ -154,29 +144,6 @@ def inactive_counters(report):
                 key = f"{suites[goal]}/{name}"
                 blocked.setdefault(key, []).append(f"{goal}/{name}/{side}: inactive-counter (must be fully active)")
     return {key: ", ".join(reasons) for key, reasons in blocked.items()}
-
-
-def size_changes(reference, candidate):
-    previous_measurement = reference.get("size_measurement", {})
-    current_measurement = candidate.get("size_measurement", {})
-    for field in SIZE_IDENTITY:
-        previous = previous_measurement.get(field)
-        if not previous or previous != current_measurement.get(field):
-            raise ValueError(f"size identity differs: {field}")
-    left, right = (rows_by_label(report)["Size", SIZE_ROW] for report in (reference, candidate))
-    changes = []
-    for side in awfy_measure.SIDES:
-        previous, current = (row["samples"][side] for row in (left, right))
-        for sample in (previous, current):
-            if (sample["status"] != "ok" or type(sample["bytes"]) is not int or sample["bytes"] <= 0
-                    or not all(re.fullmatch("[a-f0-9]{64}", sample[field])
-                               for field in ("image_sha256", "binary_sha256"))):
-                raise ValueError(f"{side} lacks a verified size sample")
-        before, after = previous["bytes"], current["bytes"]
-        if previous["image_sha256"] == current["image_sha256"] and before != after:
-            raise ValueError(f"{side} has inconsistent byte counts for the same stripped image")
-        changes.append((side, before, after))
-    return changes
 
 
 def checkbox_value(sample, metric):
@@ -256,6 +223,8 @@ class Board:
         for gate in ("size", "checkbox"):
             if comparison := self.report.get(f"{gate}_comparison"):
                 lines += ["", f"## Nightly {gate} comparison", "", *comparison]
+            if gate == "size" and (census := self.report.get("size_census")):
+                lines += board_size.census_markdown(census)
         (self.out / "board.md").write_text("\n".join(lines) + "\n")
 
     def finish(self, baseline=None):
@@ -313,7 +282,7 @@ class Board:
         size, checkbox = [], []
         refused, failed = instructions == receipt.REFUSED, instructions == 1
         try:
-            for side, before, after in size_changes(reference, self.report):
+            for side, before, after in board_size.size_changes(reference, self.report):
                 delta = after - before
                 breach = side == "hirsel" and delta >= SIZE_LIMIT
                 failed |= breach
@@ -321,6 +290,12 @@ class Board:
                 size.append(line)
                 if delta > 0:
                     print(line)
+                if breach:
+                    try:
+                        self.report["size_census"] = board_size.size_census(
+                            baseline, self.out / "board.json", reference, self.report, side)
+                    except (*receipt.INVALID_RECEIPT, subprocess.SubprocessError) as error:
+                        self.report["size_census"] = {"error": str(error)}
         except receipt.INVALID_RECEIPT as error:
             refused = True
             size.append(f"REFUSED ({error})")
@@ -480,7 +455,7 @@ def awfy_rows(board, out, upstream, tools):
             "strip_flags": result["strip_flags"],
             "pins": {peer: PINS[peer] for peer in ("awfy", "resid", "goose")},
         }
-        board.row("Size", SIZE_ROW,
+        board.row("Size", board_size.SIZE_ROW,
                   {side: {"status": "ok", **image} for side, image in result["images"].items()}, ("bytes",))
     else:
         board.report["failures"]["Size"] = "not all original harness results verified"
@@ -1380,7 +1355,7 @@ def validate_baseline(path, report):
         raise ValueError(f"{path}: a baseline requires all current rows and fully active counters")
     if report["size_measurement"]["verified_workloads"] != sorted(EXPECTED["AWFY original"]):
         raise ValueError(f"{path}: size requires all original-14 workloads")
-    size_changes(report, report)
+    board_size.size_changes(report, report)
     for mode, metric in CHECKBOX_METRICS.items():
         row = rows["Checkbox", f"{mode}, {CHECKBOX_CLIENTS} clients"]
         list(checkbox_changes(row, row, metric))
@@ -1395,7 +1370,7 @@ def rebaseline(run, base=None, expected_baseline=None):
     exit_status = report["exit_status"]
     changed = set()
     if exit_status == receipt.REFUSED and report["complete"]:
-        changed = board_baseline.refused_identity_fields(report, set(instruction_keys()), SIZE_IDENTITY)
+        changed = board_baseline.refused_identity_fields(report, set(instruction_keys()), board_size.SIZE_IDENTITY)
     if report["complete"] is not True or report["failures"] or (exit_status != 0 and not changed):
         raise ValueError(f"{path}: rebaseline requires a complete run with clean gates or identity-only refusals")
     validate_baseline(path, report)
@@ -1430,7 +1405,8 @@ def main():
                                          description="Promote a complete board with clean gates or identity-only refusals")
         parser.add_argument("run", type=Path)
         parser.add_argument("--base", type=Path)
-        parser.add_argument("--expected-baseline", type=Path)
+        parser.add_argument("--expected-baseline", type=lambda value: Path(value) if value else "",
+                            help="compared board.json path, or an empty string for no previous baseline")
         args = parser.parse_args(sys.argv[2:])
         try:
             return rebaseline(args.run, args.base, args.expected_baseline)

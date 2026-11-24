@@ -7,6 +7,16 @@ import receipt
 from receipt import measurement_slot
 
 
+def rows_by_label(report):
+    rows = {}
+    for row in report["rows"]:
+        label = (row["goal"], row["row"])
+        if label in rows:
+            raise ValueError(f"duplicate board row {'/'.join(label)}")
+        rows[label] = row
+    return rows
+
+
 def refused_identity_fields(report, keys, size_identity):
     instruction = report["instruction_comparison"]
     size, checkbox = report["size_comparison"], report["checkbox_comparison"]
@@ -50,8 +60,10 @@ def promote(path, base, expected_baseline):
     base.mkdir(parents=True, exist_ok=True)
     baseline = base / "last-complete.json"
     with measurement_slot(base / "baseline.lock"):
-        if expected_baseline is not None and baseline.resolve() != expected_baseline:
-            raise ValueError("baseline changed since the nightly comparison")
+        if expected_baseline is not None:
+            target = baseline.resolve() if baseline.exists() or baseline.is_symlink() else ""
+            if target != expected_baseline:
+                raise ValueError("baseline changed since the nightly comparison")
         with tempfile.TemporaryDirectory(dir=base) as scratch:
             link = Path(scratch) / "baseline"
             link.symlink_to(path)

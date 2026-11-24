@@ -103,3 +103,25 @@ def census(before, after):
         } | {"sections": {name: after_sections[name] - before_sections[name]
                            for name in sorted(before_sections.keys() | after_sections.keys())}}
     return {"baseline": left, "candidate": right, "delta": deltas}
+
+
+def largest_deltas(result, limit=5):
+    def largest(changes):
+        return sorted(((name, size) for name, size in changes.items() if size),
+                      key=lambda row: (-abs(row[1]), row[0]))[:limit]
+
+    owners = Counter()
+    for side, sign in (("baseline", -1), ("candidate", 1)):
+        image = result[side]["unstripped"]
+        file_sections = {section["name"] for section in image["sections"] if section["file_bytes"]}
+        for symbol in image["symbol_owners"]:
+            if symbol["section"] not in file_sections:
+                continue
+            key = (symbol["section"], symbol["name"], symbol["type"])
+            owners[key] += sign * symbol["size"]
+    return {
+        "sections": [{"section": name, "bytes": size}
+                     for name, size in largest(result["delta"]["stripped"]["sections"])],
+        "symbols": [{"section": section, "symbol": name, "type": kind, "bytes": size}
+                    for (section, name, kind), size in largest(owners)],
+    }

@@ -1,0 +1,90 @@
+fn flat_packet(k: u64) -> List[twcc.Acked] {
+    let mut acked: List[twcc.Acked] = list.with_capacity(1)
+    let at: i64 = int.narrow(k * 10000)
+    list.push(mut acked, twcc.Acked(index: k, sent_ns: k * 10000000, size: 1200, arrived_us: Some(at)))
+    acked
+}
+
+/// bug: Group packets 10 ms apart together, update the threshold before the window is full, take the wrong time since the last update, or adapt or clamp the threshold off RTP-9's recurrence.
+/// oracle: RTP-9's recurrence, by hand. Packet k is sent and arrives at 10k ms, so every packet is its own group, every delay change is 0 and every answer is Normal. Delta k (groups k-1 and k) is formed when packet k+1 arrives, so the window of 20 fills at packet 21: gamma stays 12.5 (dt 0), then 12.5 - 0.039 * 12.5 * 10 = 7.625 at packet 22, then 7.625 * 0.61 = 4.65125, clamped to 6.0, at packet 23.
+@test
+fn trendline_flat() -> Result[(), ()] {
+    let mut b = bwe(Config(start_bps: 1000000, min_bps: 10000, max_bps: 100000000))
+    let mut k = 0u64
+    while k < 24 {
+        let pkt = flat_packet(k)
+        on_acked(mut b, view pkt, k * 10000000, None)
+        if b.usage != Normal {
+            fail("a flat link answered other than Normal")
+        }
+        if k == 20 && b.stamped != None {
+            fail("threshold updated before the window was full")
+        }
+        if k == 21 && (b.stamped == None || !float.eq(b.gamma, 12.5)) {
+            fail("first threshold update")
+        }
+        if k == 22 && !float.eq(b.gamma, 7.625) {
+            fail("second threshold update")
+        }
+        if k == 23 && !float.eq(b.gamma, 6.0) {
+            fail("third threshold update and its clamp")
+        }
+        k += 1
+    }
+    Ok(())
+}
+
+/// bug: Answer Overuse too early or never on a rising delay: count the overuse time or count wrongly, skip the rising-trend condition, or fit the slope off RTP-9.
+/// oracle: str0m 2ada76a src/bwe/delay/trendline.rs:323-388 (test_overuse), whose constants are RTP-9's: 25 deltas of 1 ms send and arrival at 5g ms + 40i us (threshold clock 100g ms), then (send 5, arrival 17) at 25 ms, (5, 18) at 25.14 ms and (8, 22) at 25.25 ms (clock 600 ms): Normal after the warm-up, then Normal, Normal, Overuse. Rechecked by an independent Python transcription of RTP-9's text.
+@test
+fn trendline_overuse() -> Result[(), ()] {
+    let mut b = bwe(Config(start_bps: 1000000, min_bps: 10000, max_bps: 100000000))
+    let mut g = 0i64
+    while g < 5 {
+        let mut i = 0i64
+        while i < 5 {
+            delta(mut b, 1.0, 1.0, 5000 * g + 40 * i, g * 100000)
+            i += 1
+        }
+        g += 1
+    }
+    if b.usage != Normal || list.len(b.points) != 20 {
+        fail("warm-up")
+    }
+    delta(mut b, 5.0, 17.0, 25000, 600000)
+    if b.usage != Normal {
+        fail("first rising delay")
+    }
+    delta(mut b, 5.0, 18.0, 25140, 600000)
+    if b.usage != Normal {
+        fail("second rising delay, overuse time not yet past 10 ms")
+    }
+    delta(mut b, 8.0, 22.0, 25250, 600000)
+    if b.usage != Overuse {
+        fail("third rising delay")
+    }
+    Ok(())
+}
+
+/// bug: Increase or decrease the estimate off RTP-9: the wrong time base or growth factor, a decrease that ignores 0.85 R, or a stamp missing from the capped increase.
+/// oracle: RTP-9, by hand. A first Normal with R = 600,000 only stamps the time (A = 1,000,000 >= 1.5 R + 10,000 = 910,000). A second at t = 1 s with R = 1,000,000, no average yet: exp(ln 1.08) is 1.08 in f64 (the true value is 3.6e-19 from it), (1.08 - 1) * 1,000,000 rounds to 80,000, so A = 1,080,000 exactly. Overuse with R = 800,000 at 1.5 s (500 ms >= the 100 ms default interval): A = min(1,080,000, 0.85 * 800,000) = 680,000, exactly in f64, below L (still 1,000,000), so target() = 680,000.
+@test
+fn aimd_steps() -> Result[(), ()] {
+    let mut b = bwe(Config(start_bps: 1000000, min_bps: 10000, max_bps: 100000000))
+    control(mut b, Normal, 600000.0, 0)
+    if !float.eq(b.a, 1000000.0) || b.changed != Some(0u64) {
+        fail("a capped increase changed A or missed its stamp")
+    }
+    control(mut b, Normal, 1000000.0, 1000000000)
+    let None = b.avg else {
+        fail("an average before any decrease")
+    }
+    if float.to_bits64(b.a) != float.to_bits64(1080000.0) {
+        fail("multiplicative increase")
+    }
+    control(mut b, Overuse, 800000.0, 1500000000)
+    if float.to_bits64(b.a) != float.to_bits64(680000.0) || b.state != Hold || target(b) != 680000 {
+        fail("decrease")
+    }
+    Ok(())
+}

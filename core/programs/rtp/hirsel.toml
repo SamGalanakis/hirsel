@@ -3,6 +3,9 @@ name = "rtp"
 major = 1
 charge = "charge-v1"
 
+[dependencies]
+std = { major = 1 }
+
 [sources]
 "header.hirsel" = "header"
 "seq.hirsel" = "seq"
@@ -11,6 +14,7 @@ charge = "charge-v1"
 "history.hirsel" = "history"
 "rtx.hirsel" = "rtx"
 "twcc.hirsel" = "twcc"
+"bwe.hirsel" = "bwe"
 "stats.hirsel" = "stats"
 "loss.hirsel" = "loss"
 
@@ -19,4 +23,5 @@ limit = 67108864
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"bwe_laws.hirsel" = "bwe"
 "stats_laws.hirsel" = "laws"

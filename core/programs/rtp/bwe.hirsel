@@ -1,0 +1,519 @@
+pub type Usage: key = Normal | Overuse | Underuse
+
+pub type Config {
+    start_bps: u64,
+    min_bps: u64,
+    max_bps: u64
+}
+
+type State: key = Increase | Decrease | Hold
+
+// An arrival group: send times in whole ms from the send origin, arrival
+// times in us on the remote clock. last_* are the maxima over its packets.
+type Group {
+    first_send: i64,
+    first_arrival: i64,
+    last_send: i64,
+    last_arrival: i64
+}
+
+// One trendline point, in ms: x from the first group's arrival, y smoothed.
+type Point {
+    x: f64,
+    y: f64
+}
+
+// One arrival inside the acked-rate window: remote us and bytes.
+type Arrived {
+    at: i64,
+    size: u32
+}
+
+pub opaque type Bwe {
+    min: f64,
+    max: f64,
+    // Arrival groups.
+    origin: Option[u64],
+    current: Option[Group],
+    previous: Option[Group],
+    // Trendline and detector.
+    seen: u64,
+    accumulated: f64,
+    smoothed: f64,
+    zero: Option[i64],
+    points: List[Point],
+    gamma: f64,
+    trend: f64,
+    over: Option[(f64, u64)],
+    stamped: Option[i64],
+    usage: Usage,
+    // Acked rate.
+    window: List[Arrived],
+    // Rate control.
+    state: State,
+    a: f64,
+    changed: Option[u64],
+    rtt: Option[u64],
+    avg: Option[f64],
+    var: f64,
+    // Loss.
+    l: f64,
+    reported: u64,
+    lost: u64,
+    lowered: Option[u64],
+    raised: Option[u64]
+}
+
+const WINDOW: u64 = 20
+
+// ln 1.08 rounded to f64.
+const LN_108: f64 = 0.0769610411361284
+
+const MS_NS: u64 = 1000000
+
+fn lt(a: f64, b: f64) -> bool {
+    float.lt(a, b)
+}
+
+fn fmin(a: f64, b: f64) -> f64 {
+    if float.lt(b, a) {
+        b
+    } else {
+        a
+    }
+}
+
+fn fmax(a: f64, b: f64) -> f64 {
+    if float.gt(b, a) {
+        b
+    } else {
+        a
+    }
+}
+
+fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
+    fmin(fmax(x, lo), hi)
+}
+
+fn ms_of_us(us: i64) -> f64 {
+    let f: f64 = float.from_int(us)
+    f / 1000.0
+}
+
+pub fn bwe(c: Config) -> Bwe {
+    let min: f64 = float.from_int(c.min_bps)
+    let max: f64 = float.from_int(c.max_bps)
+    let start: f64 = float.from_int(c.start_bps)
+    Bwe(
+        min: min,
+        max: max,
+        origin: None,
+        current: None,
+        previous: None,
+        seen: 0,
+        accumulated: 0.0,
+        smoothed: 0.0,
+        zero: None,
+        points: list.with_capacity(WINDOW + 1),
+        gamma: 12.5,
+        trend: 0.0,
+        over: None,
+        stamped: None,
+        usage: Normal,
+        window: list.new(),
+        state: Increase,
+        a: clamp(start, min, max),
+        changed: None,
+        rtt: None,
+        avg: None,
+        var: 0.4,
+        l: clamp(start, min, max),
+        reported: 0,
+        lost: 0,
+        lowered: None,
+        raised: None
+    )
+}
+
+pub fn target(b: Bwe) -> u64 {
+    result.unwrap(float.to_int(fmin(b.a, b.l)))
+}
+
+pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: Option[u64]) {
+    if let Some(r) = rtt_ns {
+        b.rtt = Some(r)
+    }
+    let mut i = 0u64
+    while i < list.len(acked) {
+        let p = acked[i]
+        b.reported += 1
+        match p.arrived_us {
+            None => {
+            b.lost += 1
+        }
+            Some(at) => {
+                arrive(mut b, at, p.size)
+                group(mut b, p.sent_ns, at)
+            }
+        }
+        i += 1
+    }
+    loss(mut b, now_ns)
+    let usage = b.usage
+    let rate = acked_rate(mut b)
+    if let Some(r) = rate {
+        control(mut b, usage, r, now_ns)
+    }
+}
+
+// Arrival groups (RTP-9): a packet's send time is rounded to the nearest
+// ms from the first send time seen.
+fn group(mut b: Bwe, sent_ns: u64, at: i64) {
+    let origin = match b.origin {
+        Some(o) => o,
+        None => {
+            b.origin = Some(sent_ns)
+            sent_ns
+        }
+    }
+    if sent_ns < origin {
+        return
+    }
+    let send: i64 = int.narrow(((sent_ns - origin) / 1000 + 500) / 1000)
+    let Some(g) = b.current else {
+        b.current = Some(Group(first_send: send, first_arrival: at, last_send: send, last_arrival: at))
+        return
+    }
+    if send < g.first_send {
+        return
+    }
+    let send_delta = send - g.last_send
+    let arrival_delta = at - g.last_arrival
+    let joins = send_delta == 0 || (arrival_delta - send_delta * 1000 < 0 && arrival_delta <= 5000 && at - g.first_arrival < 100000) || send - g.first_send <= 5
+    if joins {
+        b.current = Some(Group(first_send: g.first_send, first_arrival: g.first_arrival, last_send: if send > g.last_send {
+            send
+        } else {
+            g.last_send
+        }, last_arrival: if at > g.last_arrival {
+            at
+        } else {
+            g.last_arrival
+        }))
+        return
+    }
+    if let Some(prev) = b.previous {
+        let s: f64 = float.from_int(g.last_send - prev.last_send)
+        delta(mut b, s, ms_of_us(g.last_arrival - prev.last_arrival), g.last_arrival, g.last_arrival)
+    }
+    b.previous = Some(g)
+    b.current = Some(Group(first_send: send, first_arrival: at, last_send: send, last_arrival: at))
+}
+
+// One delta pair (RTP-9 trendline and detector). send and arrival are the
+// deltas in ms, at the later group's arrival in remote us, and clock the
+// threshold clock in remote us.
+fn delta(mut b: Bwe, send: f64, arrival: f64, at: i64, clock: i64) {
+    let zero = match b.zero {
+        Some(z) => z,
+        None => {
+            b.zero = Some(at)
+            at
+        }
+    }
+    if b.seen < 1000 {
+        b.seen += 1
+    }
+    b.accumulated = b.accumulated + (arrival - send)
+    b.smoothed = 0.9 * b.smoothed + 0.1 * b.accumulated
+    let pt = Point(x: ms_of_us(at - zero), y: b.smoothed)
+    // Keep the points sorted by x: after the last one at or before pt.
+    let mut k = list.len(b.points)
+    while k > 0 && lt(pt.x, b.points[k - 1].x) {
+        k -= 1
+    }
+    list.push(mut b.points, pt)
+    let mut j = list.len(b.points) - 1
+    while j > k {
+        b.points[j] = b.points[j - 1]
+        j -= 1
+    }
+    b.points[k] = pt
+    if list.len(b.points) > WINDOW {
+        let mut i = 0u64
+        while i < WINDOW {
+            b.points[i] = b.points[i + 1]
+            i += 1
+        }
+        list.truncate(mut b.points, WINDOW)
+    }
+    if list.len(b.points) < WINDOW {
+        return
+    }
+    let trend = slope(view b.points, b.trend)
+    detect(mut b, trend, send, clock)
+}
+
+fn slope(points: View[List[Point]], previous: f64) -> f64 {
+    let n: f64 = float.from_int(list.len(points))
+    let mut sx = 0.0f64
+    let mut sy = 0.0f64
+    let mut i = 0u64
+    while i < list.len(points) {
+        sx = sx + points[i].x
+        sy = sy + points[i].y
+        i += 1
+    }
+    let mx = sx / n
+    let my = sy / n
+    let mut num = 0.0f64
+    let mut den = 0.0f64
+    i = 0
+    while i < list.len(points) {
+        let dx = points[i].x - mx
+        num = num + dx * (points[i].y - my)
+        den = den + dx * dx
+        i += 1
+    }
+    if float.eq(den, 0.0f64) {
+        previous
+    } else {
+        num / den
+    }
+}
+
+fn detect(mut b: Bwe, trend: f64, send: f64, clock: i64) {
+    let seen: f64 = float.from_int(if b.seen < 60 {
+        b.seen
+    } else {
+        60
+    })
+    let m = seen * trend * 4.0
+    if float.gt(m, b.gamma) {
+        let (time, count) = match b.over {
+            None => (send / 2.0, 1u64),
+            Some((t, c)) => (t + send, c + 1),
+        }
+        b.over = Some((time, count))
+        if float.gt(time, 10.0) && count > 1 && float.gt(trend, b.trend) {
+            b.over = None
+            b.usage = Overuse
+        }
+    } else if lt(m, -b.gamma) {
+        b.over = None
+        b.usage = Underuse
+    } else {
+        b.over = None
+        b.usage = Normal
+    }
+    b.trend = trend
+    threshold(mut b, m, clock)
+}
+
+fn threshold(mut b: Bwe, m: f64, clock: i64) {
+    let last = match b.stamped {
+        Some(s) => s,
+        None => clock,
+    }
+    b.stamped = Some(clock)
+    let size = float.abs(m)
+    if float.gt(size, b.gamma + 15.0) {
+        return
+    }
+    let k: f64 = if lt(size, b.gamma) {
+        0.039
+    } else {
+        0.0087
+    }
+    // Whole ms since the last update, 0 when the clock went back.
+    let elapsed: f64 = float.from_int(if clock > last {
+        (clock - last) / 1000
+    } else {
+        0
+    })
+    b.gamma = clamp(b.gamma + k * (size - b.gamma) * fmin(elapsed, 100.0), 6.0, 600.0)
+}
+
+// Acked rate (RTP-9): arrivals in the last 500 ms of remote time.
+fn arrive(mut b: Bwe, at: i64, size: u32) {
+    list.push(mut b.window, Arrived(at: at, size: size))
+}
+
+fn acked_rate(mut b: Bwe) -> Option[f64] {
+    if list.len(b.window) == 0 {
+        return None
+    }
+    let mut newest = b.window[0].at
+    let mut i = 0u64
+    while i < list.len(b.window) {
+        if b.window[i].at > newest {
+            newest = b.window[i].at
+        }
+        i += 1
+    }
+    let mut kept = 0u64
+    let mut oldest = newest
+    let mut total = 0u64
+    i = 0
+    while i < list.len(b.window) {
+        let e = b.window[i]
+        if e.at > newest - 500000 {
+            b.window[kept] = e
+            kept += 1
+            let size: u64 = int.widen(e.size)
+            total += size
+            if e.at < oldest {
+                oldest = e.at
+            }
+        }
+        i += 1
+    }
+    list.truncate(mut b.window, kept)
+    let span = fmax(ms_of_us(newest - oldest), 150.0)
+    let bits: f64 = float.from_int(total * 8)
+    Some(bits * 1000.0 / span)
+}
+
+// Rate control (RTP-9). r is the acked rate in bit/s.
+fn control(mut b: Bwe, usage: Usage, r: f64, now_ns: u64) {
+    b.state = match usage {
+        Overuse => Decrease,
+        Underuse => Hold,
+        Normal => match b.state {
+            Decrease => Hold,
+            _ => Increase,
+        },
+    }
+    match b.state {
+        Hold => (),
+        Increase => increase(mut b, r, now_ns),
+        Decrease => {
+            observe(mut b, r, true)
+            if reduce_now(b, r, now_ns) {
+                b.state = Hold
+                let lower = fmin(b.a, 0.85 * r)
+                set(mut b, lower, now_ns)
+            }
+        }
+    }
+}
+
+fn deviation(avg: f64, var: f64) -> f64 {
+    float.sqrt(var * avg)
+}
+
+// The throughput average in kbit/s. lower clears an average that r falls
+// more than 3 deviations below.
+fn observe(mut b: Bwe, r: f64, lower: bool) {
+    let kbps = r / 1000.0
+    if let Some(avg) = b.avg {
+        let dev = deviation(avg, b.var)
+        if lower && lt(kbps, avg - 3.0 * dev) {
+            b.avg = None
+            b.var = 0.4
+        }
+    }
+    let avg = match b.avg {
+        None => kbps,
+        Some(avg) => 0.95 * avg + 0.05 * kbps,
+    }
+    b.avg = Some(avg)
+    let d = avg - kbps
+    b.var = clamp(0.95 * b.var + 0.05 * d * d / fmax(avg, 1.0), 0.4, 2.5)
+}
+
+fn reduce_now(b: Bwe, r: f64, now_ns: u64) -> bool {
+    let Some(last) = b.changed else {
+        return true
+    }
+    let rtt = match b.rtt {
+        Some(t) => t,
+        None => 100 * MS_NS,
+    }
+    let interval = if rtt < 10 * MS_NS {
+        10 * MS_NS
+    } else if rtt > 200 * MS_NS {
+        200 * MS_NS
+    } else {
+        rtt
+    }
+    (now_ns >= last && now_ns - last >= interval) || lt(r, b.a / 2.0)
+}
+
+fn increase(mut b: Bwe, r: f64, now_ns: u64) {
+    if !lt(b.a, 1.5 * r + 10000.0) {
+        b.changed = Some(now_ns)
+        return
+    }
+    let last = match b.changed {
+        Some(c) => c,
+        None => now_ns,
+    }
+    if let Some(avg) = b.avg {
+        let var = b.var
+        if float.gt(r / 1000.0, avg + 3.0 * deviation(avg, var)) {
+            b.avg = None
+            b.var = 0.4
+        }
+    }
+    let elapsed: f64 = float.from_int(if now_ns > last {
+        now_ns - last
+    } else {
+        0
+    })
+    let t = fmin(elapsed / 1000000000.0, 1.0)
+    let next = match b.avg {
+        Some(_) => {
+            let rtt: f64 = float.from_int(match b.rtt {
+                Some(x) => x,
+                None => 0,
+            })
+            let response = rtt / 1000000000.0 + 0.1
+            let f = b.a / 30.0
+            let p = f / float.ceil(f / 9600.0)
+            b.a + fmax(1000.0, 0.5 * fmin(t / response, 1.0) * p)
+        }
+        None => b.a + fmax(1000.0, (float.exp(t * LN_108) - 1.0) * b.a),
+    }
+    let capped = fmin(next, 1.5 * r)
+    set(mut b, capped, now_ns)
+}
+
+fn set(mut b: Bwe, a: f64, now_ns: u64) {
+    b.a = clamp(a, b.min, b.max)
+    b.changed = Some(now_ns)
+}
+
+// Loss (RTP-9): the GCC draft's classic rule.
+fn loss(mut b: Bwe, now_ns: u64) {
+    if b.reported < 20 {
+        return
+    }
+    let lost: f64 = float.from_int(b.lost)
+    let reported: f64 = float.from_int(b.reported)
+    let p = lost / reported
+    b.reported = 0
+    b.lost = 0
+    let rtt = match b.rtt {
+        Some(t) => t,
+        None => 0,
+    }
+    if float.gt(p, 0.10) {
+        if since(b.lowered, now_ns, 300 * MS_NS + rtt) {
+            b.l = clamp(b.l * (1.0 - 0.5 * p), b.min, b.max)
+            b.lowered = Some(now_ns)
+        }
+    } else if lt(p, 0.02) {
+        if since(b.raised, now_ns, 1000 * MS_NS) {
+            b.l = clamp(1.05 * b.l, b.min, b.max)
+            b.raised = Some(now_ns)
+        }
+    }
+}
+
+fn since(last: Option[u64], now_ns: u64, gap: u64) -> bool {
+    match last {
+        None => true,
+        Some(t) => now_ns >= t && now_ns - t >= gap,
+    }
+}

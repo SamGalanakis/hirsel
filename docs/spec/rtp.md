@@ -837,13 +837,18 @@ group's last, or when its propagation delta (arrival delta minus send delta, bot
 the group's last packet) is negative, its arrival delta is at most 5 ms, and it arrived
 within 100 ms of the group's first packet. Otherwise it starts a new group when its send
 time is more than 5 ms after the group's first packet, and joins otherwise. A packet sent
-before the group's first is skipped. When a group closes, the estimator takes the send
-delta and arrival delta between its last packet and the previous group's last packet.
+before the group's first is skipped. Send times are first rounded to the nearest whole
+millisecond (half up) from the first send time the estimator saw, and a packet sent before
+that origin is skipped, as str0m's `accumulate_packet` does; arrival times stay in
+microseconds. A group's send and arrival times are the latest of its packets'. When a group
+closes, the estimator takes the send delta and arrival delta between it and the previous
+group, and the later group's arrival time is the point's arrival and the detector's clock.
 
 **Trendline.** Each delta pair adds a point (`trendline.rs`): `accumulated += arrival_delta
 − send_delta`, `smoothed = 0.9·smoothed + 0.1·accumulated`, and the point is
-`(arrival − first arrival, smoothed)`. The window holds the last 20 points. With a full
-window the trend is the least-squares slope `Σ(x − x̄)(y − ȳ) / Σ(x − x̄)²`, or the previous
+`(arrival − first arrival, smoothed)`. The window holds the last 20 points, kept in
+order of `x`: a point goes after the last one at or before it, and the first is dropped
+when a 21st arrives. The detector runs only on a full window. There the trend is the least-squares slope `Σ(x − x̄)(y − ȳ) / Σ(x − x̄)²`, or the previous
 trend when the denominator is 0.
 
 **Detector.** With `n` the number of points seen, capped at 1,000, and
@@ -854,39 +859,53 @@ trend when the denominator is 0.
   1, and the trend rose since the last point.
 - `m < −γ`: `Underuse`. Otherwise `Normal`. Both clear the overuse time and count.
 - Then `γ` adapts, unless `|m| > γ + 15`: `γ += k · (|m| − γ) · min(Δt, 100)`, with
-  `k = 0.039` when `|m| < γ` and `0.0087` otherwise, `Δt` the milliseconds since its last
-  update (0 at the first update), and `γ` clamped to `[6, 600]`.
+  `k = 0.039` when `|m| < γ` and `0.0087` otherwise, `Δt` the whole milliseconds
+  (truncated) on the detector's clock since its last update (0 at the first update, and
+  when the clock went back), and `γ` clamped to `[6, 600]`. A point skipped by the
+  `γ + 15` rule still counts as an update for `Δt`.
 
 **Acked rate.** The acked rate is the bytes of packets that arrived in the last 500 ms of
-remote time, times 8, divided by the span from the window's first arrival to its last, with
-the span at least 150 ms. It replaces libwebrtc's Bayesian estimator, whose extra state buys
+remote time (strictly after the latest arrival minus 500 ms), times 8, divided by the span
+from the window's first arrival to its last, with the span at least 150 ms. It exists once
+any packet has arrived. Rate control runs once per `on_acked`, after its packets, with the
+detector's current answer and the acked rate, and not before an acked rate exists. It replaces libwebrtc's Bayesian estimator, whose extra state buys
 smoothing that the 500 ms window already gives.
 
-**Rate control** (`rate_control.rs`). The state moves on each detector answer: `Overuse`
+**Rate control** (`rate_control.rs`). `A` starts at `start_bps` in Increase. The state
+moves on each detector answer: `Overuse`
 to Decrease from any state; `Underuse` to Hold from any state; `Normal` from Hold to Increase,
 from Decrease to Hold, and Increase stays. With `R` the acked rate and `A` the estimate:
 
-- **Increase.** Nothing changes when `A >= 1.5·R + 10_000`. Otherwise, with `t` the seconds
-  since the last change, capped at 1: near convergence, `A += max(1000, 0.5 · min(t / r, 1)
+- **Increase.** When `A >= 1.5·R + 10_000`, only the time of the last change moves to now,
+  as in str0m and libwebrtc. Otherwise, with `t` the seconds since the last change (0 before
+  any), capped at 1: near convergence, `A += max(1000, 0.5 · min(t / r, 1)
   · p)`, where `r` is the round-trip time plus 100 ms in seconds and `p` the expected packet
-  size in bits: `f = A / 30`, `p = f / ceil(f / 9600)`. Otherwise
-  `A += max(1000, (exp(t · ln 1.08) − 1) · A)`. Then `A = min(A, 1.5·R)`. (str0m writes `min(A, 1.5·R, 1.5·R + 10 kbps)`, which is the same
+  size in bits: `f = A / 30`, `p = f / ceil(f / 9600)`; the round-trip time is the last one
+  `on_acked` was given, 0 before any. Otherwise
+  `A += max(1000, (exp(t · ln 1.08) − 1) · A)`, where `ln 1.08` is the `f64`
+  `0.0769610411361284`. Then `A = min(A, 1.5·R)`. (str0m writes `min(A, 1.5·R, 1.5·R + 10 kbps)`, which is the same
 value.) The cap applies after the increase, so it may lower `A`, as in str0m.
-- **Decrease**, at most once per round-trip time clamped to `[10, 200]` ms, unless `R` has
-  fallen below `A / 2`: `A = min(A, 0.85 · R)`.
+- **Decrease**, at most once per round-trip time clamped to `[10, 200]` ms (100 ms before
+  any round-trip time is known; no wait before the first change), unless `R` has fallen
+  below `A / 2`: `A = min(A, 0.85 · R)`, and the state becomes Hold. A decrease held back by
+  the wait leaves the state at Decrease.
 - **Convergence** follows libwebrtc's throughput average, in kbit/s with `α = 0.05`. On a
-  decrease, an average that `R` falls more than 3 deviations below is cleared. Then
-  `avg = (1 − α)·avg + α·R`, `var = (1 − α)·var + α·(avg − R)² / max(avg, 1)`, with `var`
+  decrease (every answer in the Decrease state, also one the wait holds back), an average
+  that `R` falls more than 3 deviations below is cleared. Then `avg = (1 − α)·avg + α·R`
+  (`avg = R` when none exists), `var = (1 − α)·var + α·(avg − R)² / max(avg, 1)`, with `var`
   clamped to `[0.4, 2.5]` and starting at 0.4. On an increase, an average that `R` exceeds
   by more than 3 deviations is cleared. The deviation is `sqrt(var · avg)`. The estimate is
   near convergence while an average exists.
-- `A` stays within `[min_bps, max_bps]`.
+- `A` stays within `[min_bps, max_bps]`, and every change of `A` moves the time of the last
+  change to now.
 
 **Loss.** A second estimate `L`, starting at `start_bps`, follows the classic loss rule of
 the GCC draft (§6). With `p` the fraction of packets reported lost since the last update, and
-at least 20 reported: `p > 0.10` gives `L = L · (1 − 0.5·p)`, at most once per 300 ms plus
+at least 20 reported (counts carry across `on_acked` calls until they reach 20, then
+restart): `p > 0.10` gives `L = L · (1 − 0.5·p)`, at most once per 300 ms plus
 the round-trip time; `p < 0.02` gives `L = 1.05 · L`, at most once per second; otherwise `L`
-holds. `target()` is `min(A, L)`.
+holds. The round-trip time is the last given, 0 before any, the waits run on `now_ns`, and
+`L` stays within `[min_bps, max_bps]`. `target()` is `min(A, L)`, truncated to an integer.
 
 **Probing.** A sender that sends less than it could cannot see more capacity: the increase
 is capped at 1.5 times the acked rate. A forwarder that wants a higher layer must raise the
@@ -1419,18 +1438,21 @@ written here and repeated in the law's comment.
   - Room: a report of 4 statuses with `max` 2 answers `Capacity` and leaves the log as it
     was; the retry with `max` 4 emits all four. A report of 65,535 statuses with `max` 1,000
     is refused before any `Acked`.
-- **`trendline_flat` (RTP-9).** Groups 10 ms apart in send and arrival time (each a new
-  group under the strict `> 5 ms` rule), so every delay change is 0: every answer is
-  `Normal`. The threshold stays 12.5 at the first update (`Δt = 0`), then
+- **`trendline_flat` (RTP-9).** Packets fed through `on_acked`, packet `k` sent and arriving
+  at `10k` ms, so each is a new group under the strict `> 5 ms` rule and every delay change
+  is 0: every answer is `Normal`. The window fills at packet 21. The threshold stays 12.5 at the first update (`Δt = 0`), then
   `γ = 12.5 − 0.039 · 12.5 · 10 = 7.625`, then `7.625 · 0.61 = 4.65125`, clamped to 6.0 on
   the third update. *Oracle:* RTP-9's recurrence, by hand; the first update's `Δt = 0` is
   str0m's (`src/bwe/delay/trendline.rs:234-260`).
 - **`trendline_overuse` (RTP-9).** The input sequence of str0m's `test_overuse`
-  (`src/bwe/delay/trendline.rs:323-388`), fed as explicit group deltas, gives the hypotheses
-  that test expects after warm-up: `Normal`, `Normal`, `Overuse`. *Oracle:* the peer's test,
+  (`src/bwe/delay/trendline.rs:323-388`), fed as explicit group deltas with that test's
+  threshold clock (`100g` ms in the warm-up, 600 ms after it), gives the hypotheses that
+  test expects after warm-up: `Normal`, `Normal`, `Overuse`. On the arrival clock instead
+  the third is still `Normal`. *Oracle:* the peer's test,
   which shares RTP-9's constants.
-- **`aimd_steps` (RTP-9).** From `A = 1,000,000` in Increase, not near convergence, with
-  `R = 1,000,000` and `t = 1`: `A = 1,080,000` (within the 1.08 rounding of `exp`, which the
+- **`aimd_steps` (RTP-9).** From `A = 1,000,000` in Increase, not near convergence, after a
+  first `Normal` at 0 with `R = 600,000` that only stamps the time, then `Normal` with
+  `R = 1,000,000` at `t = 1`: `A = 1,080,000` (within the 1.08 rounding of `exp`, which the
   law states to the bit). An `Overuse` with `R = 800,000` gives `A = 680,000`. *Oracle:* RTP-9,
   by hand.
 - **`probe_result` (RTP-9, RTP-10).** Target 1 Mbit/s (`A = 1,000,000`, `L = 3,000,000`), `want`

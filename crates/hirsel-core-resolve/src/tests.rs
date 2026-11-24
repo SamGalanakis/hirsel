@@ -550,15 +550,15 @@ fn repeated_reads_are_a_set_but_missing_and_shadowed_reads_survive() {
             .iter()
             .filter(|u| u.target == Target::Binder(0))
             .count(),
-        4
+        3
     );
     assert_eq!(
         r.names
             .iter()
             .filter(|u| u.target == Target::Missing)
             .count(),
-        2
-    ); // every written use retains its site
+        3
+    ); // two unbound uses and one use of the refused binder
     let keys = r
         .reads
         .iter()

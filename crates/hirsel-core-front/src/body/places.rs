@@ -493,8 +493,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
             NodeKind::Path => {
-                let p: &'c Program<'a> = self.p;
-                let Some(u) = p.resolved(self.at, n) else {
+                let resolved = self.p.resolved(self.at, n);
+                let Some(u) = resolved.filter(|u| u.target != Target::Missing) else {
                     self.halt();
                     return Err(());
                 };

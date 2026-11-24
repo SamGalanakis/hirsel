@@ -1575,10 +1575,10 @@ fn diagnostic_delimiter_openers() {
 #[test]
 fn diagnostic_name_candidates() {
     let failures: Vec<_> = ["transpose", "case", "other-module", "available"]
-        .iter()
+        .into_iter()
+        .chain(["take-shadowed"])
         .flat_map(|case| {
-            let path = root().join(format!("cases/body/diag-name-{case}.hirsel"));
-            run_case(&path)
+            run_case(&root().join(format!("cases/body/diag-name-{case}.hirsel")))
                 .into_iter()
                 .map(move |failure| format!("{case}: {failure}"))
         })

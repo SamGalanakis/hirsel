@@ -197,6 +197,7 @@ impl ResolutionScratch {
                         | NodeKind::ScopedType
                 ),
             lost: false,
+            refused_bindings: Vec::new(),
             scope_id: 0,
             next_scope: 1,
             depth: 0,
@@ -261,6 +262,7 @@ struct Resolver<'a, 's> {
     /// (PROG-8): it may have bound names, so a bare value name found nowhere
     /// is poisoned rather than refused.
     lost: bool,
+    refused_bindings: Vec<(Symbol, Namespace)>,
     scope_id: u32,
     next_scope: u32,
     depth: u32,
@@ -352,8 +354,28 @@ impl<'a> Resolver<'a, '_> {
         let b = self.scratch.slots[Self::slot(name, ns)];
         (b != u32::MAX).then_some(b)
     }
+    fn local_target(&mut self, n: NodeId, name: Symbol, ns: Namespace) -> Option<Target> {
+        let local = if self.refused_bindings.contains(&(name, ns)) {
+            Some(Target::Missing)
+        } else {
+            self.local_in(name, ns).map(Target::Binder)
+        };
+        self.record_local(n, name, ns, local);
+        local
+    }
+    fn record_local(&mut self, n: NodeId, name: Symbol, ns: Namespace, target: Option<Target>) {
+        self.record(
+            n,
+            ns,
+            LookupScope::Local(self.scope_id),
+            name,
+            false,
+            target.map_or(LookupResult::Missing, LookupResult::Found),
+        );
+    }
     fn scope(&mut self, f: impl FnOnce(&mut Self)) {
         let mark = self.scratch.bindings.len();
+        let refused = self.refused_bindings.len();
         let old = self.scope_id;
         self.scope_id = self.next_scope;
         self.next_scope += 1;
@@ -361,6 +383,7 @@ impl<'a> Resolver<'a, '_> {
         for b in self.scratch.bindings.drain(mark..) {
             self.scratch.slots[Self::slot(b.symbol, b.namespace)] = b.previous;
         }
+        self.refused_bindings.truncate(refused);
         self.scope_id = old;
     }
     fn bind(&mut self, n: NodeId, t: TokenId, kind: BinderKind) {
@@ -381,18 +404,8 @@ impl<'a> Resolver<'a, '_> {
             );
             return;
         }
-        let local = self.local_in(name, ns);
-        self.record(
-            n,
-            ns,
-            LookupScope::Local(self.scope_id),
-            name,
-            false,
-            local.map_or(LookupResult::Missing, |b| {
-                LookupResult::Found(Target::Binder(b))
-            }),
-        );
-        let mut existing = local.map(Target::Binder);
+        let mut existing = self.local_in(name, ns).map(Target::Binder);
+        self.record_local(n, name, ns, existing);
         if existing.is_none() && ns == Namespace::Value {
             existing = self
                 .module_lookup(n, self.module, name, ns, false)
@@ -423,6 +436,11 @@ impl<'a> Resolver<'a, '_> {
             d.declared = Some(self.index.symbols.text(name).into());
             d.required = Some("a name not already visible in this namespace".into());
             self.out.diagnostics.push(d);
+            // Later uses depend on the refused binder, even if an earlier name
+            // with the same spelling would resolve (PROG-8).
+            self.refused_bindings.push((name, ns));
+            self.scope_id = self.next_scope;
+            self.next_scope += 1;
             return;
         }
         let id = self.out.binders.len() as u32;
@@ -710,19 +728,8 @@ impl<'a> Resolver<'a, '_> {
         } else {
             Namespace::Value
         };
-        let local = self.local_in(name, ns);
-        self.record(
-            n,
-            ns,
-            LookupScope::Local(self.scope_id),
-            name,
-            false,
-            local.map_or(LookupResult::Missing, |b| {
-                LookupResult::Found(Target::Binder(b))
-            }),
-        );
-        if let Some(b) = local {
-            return Target::Binder(b);
+        if let Some(target) = self.local_target(n, name, ns) {
+            return target;
         }
         if let Some(t) = self
             .module_lookup(n, self.module, name, ns, false)
@@ -941,25 +948,16 @@ impl<'a> Resolver<'a, '_> {
         let target = if type_context && last.is_none() && builtin(name) {
             Target::Builtin(name)
         } else {
-            let local = self.local_in(name, first_ns);
-            self.record(
-                n,
-                first_ns,
-                LookupScope::Local(self.scope_id),
-                name,
-                false,
-                local.map_or(LookupResult::Missing, |b| {
-                    LookupResult::Found(Target::Binder(b))
-                }),
-            );
-            if let Some(b) = local {
-                if let Some(p) = rest.clone().next() {
+            if let Some(target) = self.local_target(n, name, first_ns) {
+                if matches!(target, Target::Binder(_))
+                    && let Some(p) = rest.clone().next()
+                {
                     projections = Span {
                         start: p.0,
                         end: self.item.tree.node(n).origin.tokens.end,
                     };
                 }
-                Target::Binder(b)
+                target
             } else if let Some(last) = last {
                 let first = self
                     .head_lookup(n, name)

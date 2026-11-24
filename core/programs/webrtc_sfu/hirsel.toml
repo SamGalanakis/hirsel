@@ -5,6 +5,11 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
+dtls = { major = 1, path = "../dtls" }
+media_bits = { major = 1, path = "../media_bits" }
+rtp = { major = 1, path = "../rtp" }
+srtp = { major = 1, path = "../srtp" }
+stun_ice = { major = 1, path = "../stun_ice" }
 
 [sources]
 "sdp.hirsel" = "sdp"
@@ -12,6 +17,8 @@ std = { major = 1 }
 "sdp_write.hirsel" = "sdp"
 "sdp_negotiate.hirsel" = "sdp"
 "peer.hirsel" = "peer"
+"peer_ingress.hirsel" = "peer"
+"peer_egress.hirsel" = "peer"
 "router.hirsel" = "router"
 "signal.hirsel" = "signal"
 

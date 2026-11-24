@@ -51,7 +51,9 @@ pub type Agreed {
     streams: List[Stream],
     rid_drops: RidDrops,
     local: Section,
-    down_track: bool
+    down_track: bool,
+    remote_ssrcs: List[u32],
+    remote_rtx: List[(u32, u32)]
 }
 
 pub type Negotiated {
@@ -366,8 +368,8 @@ fn choose_rids(enabled: bool, sent: Section, mut s: Section) -> Result[RidDrops,
     Ok(drops)
 }
 
-fn agreed_section(index: u8, s: Section, drops: RidDrops, down_track: bool, mixed: bool) -> Agreed {
-    Agreed(index: index, mid: s.mid, mid_len: s.mid_len, media: s.media, recv: s.port != Rejected && has_recv(s.dir), send: s.port != Rejected && has_send(s.dir), formats: clone(s.formats), extmaps: clone(s.extmaps), ext_form: ext_form(s, mixed), rids: clone(s.rids), streams: clone(s.simulcast.recv), rid_drops: drops, local: clone(s), down_track: down_track)
+fn agreed_section(index: u8, s: Section, remote: Section, drops: RidDrops, down_track: bool, mixed: bool) -> Agreed {
+    Agreed(index: index, mid: s.mid, mid_len: s.mid_len, media: s.media, recv: s.port != Rejected && has_recv(s.dir), send: s.port != Rejected && has_send(s.dir), formats: clone(s.formats), extmaps: clone(s.extmaps), ext_form: ext_form(s, mixed), rids: clone(s.rids), streams: clone(s.simulcast.recv), rid_drops: drops, local: clone(s), down_track: down_track, remote_ssrcs: clone(remote.ssrcs), remote_rtx: clone(remote.rtx_pairs))
 }
 
 fn set_remote(d: Description, mut n: Negotiated) {
@@ -450,7 +452,7 @@ pub fn answer(policy: Policy, current: Option[Negotiated], remote: Description, 
             }
             drops = choose_rids(policy.simulcast, orig, mut s)?
         }
-        add(mut n.sections, agreed_section(int.narrow(i), s, drops, down, d.mixed_extmaps))?
+        add(mut n.sections, agreed_section(int.narrow(i), s, orig, drops, down, d.mixed_extmaps))?
         add(mut d.sections, take s)?
     }
     local_bundle(local, mut d)?
@@ -692,7 +694,7 @@ pub fn accept_answer(current: Negotiated, sent: Description, remote: Description
         }
         narrowed.mixed_extmaps = narrowed.port != Rejected && mixed && !n.mixed_extmaps
         let down = i >= list.len(current.sections) || current.sections[i].down_track
-        add(mut n.sections, agreed_section(index, narrowed, drop_rids(), down, n.mixed_extmaps))?
+        add(mut n.sections, agreed_section(index, narrowed, remote.sections[i], drop_rids(), down, n.mixed_extmaps))?
     }
     agreed = take n
     Ok(())

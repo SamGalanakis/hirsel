@@ -62,6 +62,11 @@ source = "member:image_webp"
 edges = ["image_core@1"]
 
 [[package]]
+id = "jwtbind@1"
+source = "member:jwtbind"
+edges = ["runner@1", "std@1", "store@1"]
+
+[[package]]
 id = "mcp@1"
 source = "member:mcp"
 edges = ["std@1"]
@@ -174,7 +179,7 @@ edges = []
 [[package]]
 id = "webrtc_sfu@1"
 source = "member:webrtc_sfu"
-edges = ["std@1"]
+edges = ["dtls@1", "media_bits@1", "rtp@1", "srtp@1", "std@1", "stun_ice@1"]
 
 [[package]]
 id = "xml@1"

@@ -1,1 +1,593 @@
-// The peer transport is implemented in slice S3.
+// RTC-3 PeerSession and RTC-4 outbound SSRCs (webrtc spec, slice S3).
+pub type Class: key = Stun | Dtls | Rtp | Rtcp | Drop
+
+pub type RoomId: key = RoomId(u64)
+
+pub type Gen: key = Gen(id: u64, epoch: u64)
+
+pub type Tag {
+    src: Option[Gen],
+    dst: Gen,
+    room: RoomId
+}
+
+pub type Participant {
+    gen: Gen,
+    room: RoomId
+}
+
+pub type Outbox {
+    data: Bytes,
+    pkts: List[UdpTx],
+    tags: List[Tag]
+}
+
+pub type PeerLimits {
+    sections: u8,
+    down_tracks: u16,
+    rtx_bytes: u64,
+    pacer_packets: u32
+}
+
+pub type PeerError = Sdp(sdp.SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(dtls.DtlsError) | Srtp(srtp.SrtpError) | Rtp(rtp.header.WriteError) | Capacity(Capacity)
+
+/// One drop counter per reason. Every dropped datagram raises exactly one.
+pub type Drops: key {
+    classified: u64,
+    short_stun: u64,
+    short_dtls: u64,
+    short_rtp: u64,
+    short_rtcp: u64,
+    off_path: u64,
+    stun: u64,
+    early: u64,
+    srtp: u64,
+    malformed: u64,
+    unbound: u64,
+    format: u64,
+    repair: u64,
+    late: u64,
+    nack: u64,
+    capacity: u64
+}
+
+/// An authenticated media packet, with views into the receive slot.
+pub type MediaIn {
+    section: u8,
+    encoding: u8,
+    ssrc: u32,
+    index: u64,
+    pt: u8,
+    ts: u32,
+    marker: bool,
+    payload_at: u64,
+    payload_len: u64,
+    audio_level: Option[u8],
+    voice: Option[bool],
+    layer: Option[media_bits.unit.Unit]
+}
+
+/// A NACK hit on a down-track's egress history. The home unit resolves the
+/// plaintext handle and answers with `resend`.
+pub type RepairAsk {
+    track: u16,
+    index: u64,
+    src: Gen,
+    handle: u64,
+    from: u64,
+    len: u64
+}
+
+/// A keyframe request a subscriber sent for one of its down-tracks.
+pub type KeyframeAsk {
+    track: u16,
+    fir: bool
+}
+
+pub type ControlIn {
+    repairs: List[RepairAsk],
+    keyframes: List[KeyframeAsk],
+    collided: List[u16],
+    reports: u32,
+    // Sent packets the TWCC feedback in this input acknowledged.
+    acked: u64
+}
+
+pub type Input = Nothing | Replied | Media(MediaIn) | Repair(MediaIn) | Control(ControlIn)
+
+pub type Poll = Transmit | WakeAt(u64) | Idle
+
+/// The rewriter's answer for one output packet (rtp RTP-11 `Forward` and `Late`).
+pub type Egress = OnTime(u64, u32) | Late(u64, u32)
+
+/// One output packet's leg rewrite: the source generation, the ingress plaintext
+/// handle and range, the leg's payload type, marker and rewritten codec descriptor.
+pub type Media {
+    src: Gen,
+    handle: u64,
+    marker: bool,
+    pt: u8,
+    pre: Bytes,
+    from: u64,
+    len: u64
+}
+
+pub type Sent: key = OnMedia | AsRepair | Dropped
+
+/// The ingress bindings and path of a session, as RTC-3 states them.
+pub type Binding: key {
+    ssrc: u32,
+    section: u8,
+    encoding: u8,
+    repair: bool
+}
+
+type Record {
+    src: Gen,
+    handle: u64,
+    from: u64,
+    len: u64,
+    ts: u32,
+    marker: bool,
+    pt: u8,
+    pre: Bytes
+}
+
+type Inbound {
+    ssrc: u32,
+    section: u8,
+    encoding: u8,
+    repair: bool,
+    // The extended index of the packet that made the current MID binding.
+    bound_at: u64,
+    highest: u64,
+    ts: i64,
+    stats: rtp.stats.Received,
+    nack: bool,
+    losses: rtp.loss.Losses,
+    keyframes: rtp.loss.Keyframes,
+    // Slot index mod RECEIVED holds the last index received there.
+    received: List[u64]
+}
+
+type Track {
+    section: u8,
+    video: bool,
+    ssrc: u32,
+    rtx_ssrc: u32,
+    rtx_seq: u16,
+    highest: u64,
+    last_ts: u32,
+    sent: rtp.stats.Sent,
+    history: rtp.history.History[Record],
+    src: Option[Gen]
+}
+
+type Section {
+    agreed: sdp.Agreed,
+    map: rtp.ext.ExtMap
+}
+
+pub opaque type PeerSession {
+    who: Participant,
+    limits: PeerLimits,
+    random: Random,
+    base: Addr,
+    agreed: sdp.Negotiated,
+    sections: List[Section],
+    ice: stun_ice.Lite,
+    path: Option[Addr],
+    identity: Option[dtls.Identity],
+    dtls: Option[dtls.Endpoint],
+    srtp: Option[srtp.Session],
+    closed: bool,
+    drops: Drops,
+    inbound: List[Inbound],
+    tracks: List[Track],
+    used: List[u32],
+    control: u32,
+    cname: Bytes,
+    recv_log: rtp.twcc.RecvLog,
+    send_log: rtp.twcc.SendLog,
+    bwe: rtp.bwe.Bwe,
+    rtt: Option[u64],
+    next_report: u64,
+    next_feedback: u64,
+    // Down-tracks a collision found on the RTP path, for the next `Control`.
+    collided: List[u16]
+}
+
+const EMPTY: u64 = 0xffffffffffffffff
+
+const RECEIVED: u64 = 1024
+
+const HISTORY_SLOTS: u32 = 1024
+
+const HISTORY_AGE_NS: u64 = 1000000000
+
+const MIN_RESEND_NS: u64 = 10000000
+
+const REPORT_NS: u64 = 1000000000
+
+const FEEDBACK_NS: u64 = 50000000
+
+const KEYFRAME_NS: u64 = 300000000
+
+const MAX_NACK_PAIRS: u32 = 16
+
+const SLOT: u64 = 1500
+
+const STUN_BUFFER: u64 = 576
+
+/// RFC 9443 section 3 (updating RFC 7983 section 7) and RFC 5761 section 4, from
+/// at most the first two bytes.
+pub fn classify(prefix: Bytes) -> Class {
+    let n = list.len(prefix)
+    if n == 0 {
+        return Drop
+    }
+    let b = prefix[0]
+    if b <= 3 {
+        Stun
+    } else if b >= 20 && b <= 63 {
+        Dtls
+    } else if b >= 128 && b <= 191 {
+        if n < 2 {
+            Drop
+        } else if prefix[1] >= 192 && prefix[1] <= 223 {
+            Rtcp
+        } else {
+            Rtp
+        }
+    } else {
+        Drop
+    }
+}
+
+pub fn outbox(size: u64, packets: u64) -> Result[Outbox, PeerError] {
+    let mut data: Bytes = list.new()
+    let mut pkts: List[UdpTx] = list.new()
+    let mut tags: List[Tag] = list.new()
+    list.try_reserve(mut data, size) ?=> |c| Capacity(c)
+    list.try_reserve(mut pkts, packets) ?=> |c| Capacity(c)
+    list.try_reserve(mut tags, packets) ?=> |c| Capacity(c)
+    Ok(Outbox(data: take data, pkts: take pkts, tags: take tags))
+}
+
+pub fn clear_outbox(mut out: Outbox) {
+    list.clear(mut out.data)
+    list.clear(mut out.pkts)
+    list.clear(mut out.tags)
+}
+
+fn no_drops() -> Drops {
+    Drops(classified: 0, short_stun: 0, short_dtls: 0, short_rtp: 0, short_rtcp: 0, off_path: 0, stun: 0, early: 0, srtp: 0, malformed: 0, unbound: 0, format: 0, repair: 0, late: 0, nack: 0, capacity: 0)
+}
+
+fn ext_kind(e: sdp.Ext) -> Option[rtp.ext.Kind] {
+    match e {
+        Mid => Some(Mid),
+        RidExtension => Some(Rid),
+        RepairedRid => Some(RepairedRid),
+        AudioLevel => Some(AudioLevel),
+        AbsSendTime => Some(AbsSendTime),
+        TransportCc => Some(TransportSeq),
+        DependencyDescriptor => None,
+    }
+}
+
+fn section_map(a: sdp.Agreed) -> Result[rtp.ext.ExtMap, PeerError] {
+    let form: rtp.ext.Form = match a.ext_form {
+        OneOnly => OneOnly,
+        TwoOnly => TwoOnly,
+        Mixed => Mixed,
+    }
+    let mut m = rtp.ext.map(form)
+    for x in a.extmaps {
+        if let Some(k) = ext_kind(x.ext) {
+            if let Error(_) = rtp.ext.bind(mut m, x.id, k) {
+                return Error(Sdp(ExtmapConflict(a.index)))
+            }
+            if k == AudioLevel {
+                rtp.ext.vad(mut m, x.vad == Some(VadOn))
+            }
+        }
+    }
+    Ok(m)
+}
+
+fn build_sections(n: sdp.Negotiated, limits: PeerLimits) -> Result[List[Section], PeerError] {
+    if list.len(n.sections) > int.widen(limits.sections) {
+        return Error(Sdp(TooManySections))
+    }
+    let mut out: List[Section] = list.new()
+    list.try_reserve(mut out, list.len(n.sections)) ?=> |c| Capacity(c)
+    for a in n.sections {
+        let m = section_map(a)?
+        list.push(mut out, Section(agreed: clone(a), map: m))
+    }
+    Ok(out)
+}
+
+fn copied(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+/// Open the session for one participant on its home unit's socket `base`.
+/// `cert` is the unit's DTLS identity (`dtls.share_identity`), `r` its randomness.
+pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base: Addr, limits: PeerLimits, agreed: sdp.Negotiated, participant: Participant) -> Result[PeerSession, PeerError] {
+    let sections = build_sections(agreed, limits)?
+    let credentials = stun_ice.credentials(copied(local.ice_ufrag), copied(local.ice_pwd)) ?=> |take e| Ice(e)
+    let mut bases: List[stun_ice.Local] = list.new()
+    list.push(mut bases, stun_ice.Local(component: 1, base: base))
+    let ice = stun_ice.lite(take credentials, take bases) ?=> |take e| Ice(e)
+    let recv_log = rtp.twcc.recv_log(1024) ?=> |c| Capacity(c)
+    let send_log = rtp.twcc.send_log(1024) ?=> |c| Capacity(c)
+    let mut cname: Bytes = list.with_capacity(16)
+    list.append(mut cname, b"hirsel-sfu")
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: 300000, min_bps: 30000, max_bps: 20000000)), rtt: None, next_report: 0, next_feedback: 0, collided: list.new())
+    let fresh = draw(mut p)
+    p.control = fresh
+    Ok(take p)
+}
+
+// ---- RTC-4's SSRC generator ----
+fn listed(xs: List[u32], v: u32) -> bool {
+    for x in xs {
+        if x == v {
+            return true
+        }
+    }
+    false
+}
+
+fn remote_used(p: PeerSession, v: u32) -> bool {
+    for s in p.agreed.sections {
+        if listed(s.remote_ssrcs, v) {
+            return true
+        }
+    }
+    for i in p.inbound {
+        if i.ssrc == v {
+            return true
+        }
+    }
+    false
+}
+
+/// Never repeats a value in the session and never returns an SSRC the remote
+/// end has used so far.
+fn draw(mut p: PeerSession) -> u32 {
+    loop {
+        let mut b: Bytes = list.with_capacity(4)
+        host.random(p.random, mut b)
+        let v: u32 = list.word_be(b, 0)
+        if v != 0 && !listed(p.used, v) && !remote_used(p, v) {
+            list.push(mut p.used, v)
+            return v
+        }
+    }
+}
+
+// ---- Outbox ----
+fn queue(mut out: Outbox, to: Addr, packet: Bytes, tag: Tag) -> Result[(), PeerError] {
+    let at = list.len(out.data)
+    if list.capacity(out.data) - at < list.len(packet) {
+        return Error(Capacity(Capacity(requested: list.len(packet), available: list.capacity(out.data) - at)))
+    }
+    list.try_reserve(mut out.pkts, 1) ?=> |c| Capacity(c)
+    list.try_reserve(mut out.tags, 1) ?=> |c| Capacity(c)
+    list.append(mut out.data, packet)
+    list.push(mut out.pkts, UdpTx(to: to, at: at, len: list.len(packet), ecn: 0))
+    list.push(mut out.tags, tag)
+    Ok(())
+}
+
+fn own_tag(p: PeerSession) -> Tag {
+    Tag(src: None, dst: p.who.gen, room: p.who.room)
+}
+
+// ---- Readers ----
+pub fn drops(p: PeerSession) -> Drops {
+    p.drops
+}
+
+pub fn selected(p: PeerSession) -> Option[Addr] {
+    p.path
+}
+
+pub fn connected(p: PeerSession) -> bool {
+    match p.srtp {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+pub fn bindings(p: PeerSession) -> List[Binding] {
+    let mut out: List[Binding] = list.new()
+    for i in p.inbound {
+        list.push(mut out, Binding(ssrc: i.ssrc, section: i.section, encoding: i.encoding, repair: i.repair))
+    }
+    out
+}
+
+pub fn control_ssrc(p: PeerSession) -> u32 {
+    p.control
+}
+
+/// A down-track's media and RTX SSRCs, for `a=ssrc` and `a=ssrc-group:FID`.
+pub fn track_ssrcs(p: PeerSession, track: u16) -> Option[(u32, u32)] {
+    let i: u64 = int.widen(track)
+    if i >= list.len(p.tracks) {
+        return None
+    }
+    Some((p.tracks[i].ssrc, p.tracks[i].rtx_ssrc))
+}
+
+pub fn target_bps(p: PeerSession) -> u64 {
+    rtp.bwe.target(p.bwe)
+}
+
+// ---- Ingress ----
+pub fn receive(mut p: PeerSession, now: u64, from: Addr, mut slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    let class = classify(list.slice(slot, 0, if list.len(slot) < 2 {
+        list.len(slot)
+    } else {
+        2
+    }))
+    if class == Drop {
+        p.drops.classified += 1
+        return Ok(Nothing)
+    }
+    if class == Stun {
+        return stun_in(mut p, from, slot, mut out)
+    }
+    // Only the selected path reaches DTLS, RTP and RTCP.
+    let on_path = match p.path {
+        Some(a) => a == from,
+        None => false,
+    }
+    if !on_path {
+        p.drops.off_path += 1
+        return Ok(Nothing)
+    }
+    match class {
+        Dtls => dtls_in(mut p, now, slot, mut out),
+        Rtp => rtp_in(mut p, now, mut slot, mut out),
+        _ => rtcp_in(mut p, now, mut slot, mut out),
+    }
+}
+
+fn stun_in(mut p: PeerSession, from: Addr, slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
+    if list.len(slot) < 20 {
+        p.drops.short_stun += 1
+        return Ok(Nothing)
+    }
+    let mut reply: Bytes = list.with_capacity(STUN_BUFFER)
+    list.fill(mut reply, STUN_BUFFER, 0)
+    let mut scratch: Bytes = list.with_capacity(STUN_BUFFER)
+    list.fill(mut scratch, STUN_BUFFER, 0)
+    let n = match stun_ice.lite_receive(mut p.ice, p.base, from, slot, mut reply, mut scratch) {
+        Ok(n) => n,
+        Error(_) => {
+            p.drops.stun += 1
+            return Ok(Nothing)
+        },
+    }
+    queue(mut out, from, list.slice(reply, 0, n), own_tag(p))?
+    if let None = p.path {
+        if let Some(path) = stun_ice.lite_selected(p.ice, 1) {
+            select(mut p, path.peer)?
+        }
+    }
+    Ok(Replied)
+}
+
+fn select(mut p: PeerSession, peer: Addr) -> Result[(), PeerError] {
+    let Some(take id) = replace(mut p.identity, None) else {
+        return Ok(())
+    }
+    let mut e = dtls.server(take id, dtls.defaults(), peer, Verified) ?=> |take x| Dtls(x)
+    let mut digest: Bytes = list.with_capacity(32)
+    for b in p.agreed.remote_fingerprint {
+        list.push(mut digest, b)
+    }
+    let mut pins: List[dtls.Fingerprint] = list.new()
+    list.push(mut pins, dtls.Fingerprint(hash: Sha256, digest: take digest))
+    dtls.expect(mut e, take pins) ?=> |take x| Dtls(x)
+    p.dtls = Some(take e)
+    p.path = Some(peer)
+    Ok(())
+}
+
+fn dtls_in(mut p: PeerSession, now: u64, slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
+    if list.len(slot) < 13 {
+        p.drops.short_dtls += 1
+        return Ok(Nothing)
+    }
+    let before = list.len(out.pkts)
+    let r = p.random
+    if let Some(take held) = replace(mut p.dtls, None) {
+        let mut e = take held
+        let mut data: Bytes = list.new()
+        let got = dtls.receive(mut e, now, r, slot, mut data)
+        p.dtls = Some(take e)
+        let _ = got ?=> |take x| Dtls(x)
+    }
+    flush_dtls(mut p, now, mut out)?
+    start_srtp(mut p)?
+    if list.len(out.pkts) > before {
+        Ok(Replied)
+    } else {
+        Ok(Nothing)
+    }
+}
+
+fn flush_dtls(mut p: PeerSession, now: u64, mut out: Outbox) -> Result[Option[u64], PeerError] {
+    let Some(to) = p.path else {
+        return Ok(None)
+    }
+    let tag = own_tag(p)
+    let r = p.random
+    let Some(take held) = replace(mut p.dtls, None) else {
+        return Ok(None)
+    }
+    let mut e = take held
+    let mut wake: Result[Option[u64], PeerError] = Ok(None)
+    loop {
+        let mut d: Bytes = list.with_capacity(SLOT)
+        match dtls.poll(mut e, now, r, mut d) {
+            Ok(Send(_)) => if let Error(take x) = queue(mut out, to, d, tag) {
+                wake = Error(take x)
+                break
+            },
+            Ok(WakeAt(t)) => {
+                wake = Ok(Some(t))
+                break
+            },
+            Ok(Idle) => break,
+            Error(Closed(_)) => break,
+            Error(take x) => {
+                wake = Error(Dtls(take x))
+                break
+            },
+        }
+    }
+    p.dtls = Some(take e)
+    wake
+}
+
+fn start_srtp(mut p: PeerSession) -> Result[(), PeerError] {
+    if let Some(_) = p.srtp {
+        return Ok(())
+    }
+    let mut ready: Option[schedule.SrtpProfile] = None
+    if let Some(e) = p.dtls {
+        if let Connected = dtls.state(e) {
+            ready = dtls.srtp_profile(e)
+        }
+    }
+    let Some(profile) = ready else {
+        return Ok(())
+    }
+    let Some(take held) = replace(mut p.dtls, None) else {
+        return Ok(())
+    }
+    let mut e = take held
+    let keys = dtls.take_srtp(mut e)
+    p.dtls = Some(take e)
+    let k = keys ?=> |take x| Dtls(x)
+    let tracks: u32 = int.widen(p.limits.down_tracks)
+    let sections: u32 = int.widen(p.limits.sections)
+    let streams: u32 = 2 * tracks + 2
+    let inbound: u32 = 8 * sections
+    let l = srtp.Limits(send_streams: streams, receive_streams: inbound, ended_streams: streams)
+    let s = srtp.session(take k, profile, l) ?=> |take x| Srtp(x)
+    p.srtp = Some(take s)
+    Ok(())
+}

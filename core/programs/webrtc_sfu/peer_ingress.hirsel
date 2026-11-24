@@ -1,0 +1,502 @@
+// RTC-3 media and control ingress after the selected path: SRTP open, binding and RTX repair.
+// ---- SRTP, held in the session once DTLS completes ----
+fn open_rtp(mut p: PeerSession, mut slot: Bytes) -> Option[Result[srtp.Opened, srtp.SrtpError]] {
+    let Some(take held) = replace(mut p.srtp, None) else {
+        return None
+    }
+    let mut s = take held
+    let r = srtp.unprotect_rtp(mut s, mut slot)
+    p.srtp = Some(take s)
+    Some(r)
+}
+
+fn open_rtcp(mut p: PeerSession, mut slot: Bytes) -> Option[Result[u64, srtp.SrtpError]] {
+    let Some(take held) = replace(mut p.srtp, None) else {
+        return None
+    }
+    let mut s = take held
+    let r = srtp.unprotect_rtcp(mut s, mut slot)
+    p.srtp = Some(take s)
+    Some(r)
+}
+
+fn seal(mut p: PeerSession, rtcp: bool, mut b: Bytes) -> Result[(), PeerError] {
+    let Some(take held) = replace(mut p.srtp, None) else {
+        return Error(Closed)
+    }
+    let mut s = take held
+    let r = if rtcp {
+        srtp.protect_rtcp(mut s, mut b)
+    } else {
+        srtp.protect_rtp(mut s, mut b)
+    }
+    p.srtp = Some(take s)
+    let _ = r ?=> |take x| Srtp(x)
+    Ok(())
+}
+
+fn end_send(mut p: PeerSession, ssrc: u32) {
+    if let Some(take held) = replace(mut p.srtp, None) {
+        let mut s = take held
+        srtp.end_send(mut s, ssrc)
+        p.srtp = Some(take s)
+    }
+}
+
+fn find_inbound(p: PeerSession, ssrc: u32) -> Option[u64] {
+    for i in 0u64 .. list.len(p.inbound) {
+        if p.inbound[i].ssrc == ssrc {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn same_id(b: Bytes, e: rtp.ext.Element, id: Inline[u8, 16], len: u8) -> bool {
+    let n: u64 = int.widen(len)
+    if e.len != n {
+        return false
+    }
+    for i in 0u64 .. n {
+        if b[e.at + i] != id[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn mid_section(p: PeerSession, pkt: Bytes, e: rtp.ext.Element) -> Option[u8] {
+    for s in p.sections {
+        if s.agreed.recv && same_id(pkt, e, s.agreed.mid, s.agreed.mid_len) {
+            return Some(s.agreed.index)
+        }
+    }
+    None
+}
+
+// The MID and RID extension IDs are bundle-wide, so any receiving section's map reads them.
+fn any_map(p: PeerSession) -> Option[rtp.ext.ExtMap] {
+    for s in p.sections {
+        if s.agreed.recv {
+            return Some(s.map)
+        }
+    }
+    None
+}
+
+fn find_ext(m: Option[rtp.ext.ExtMap], pkt: Bytes, h: rtp.header.Header, k: rtp.ext.Kind) -> Option[rtp.ext.Element] {
+    let Some(map) = m else {
+        return None
+    }
+    match rtp.ext.find(map, pkt, h, k) {
+        Ok(Some(found)) => match rtp.ext.token(pkt, h, k, found) {
+            Ok(t) => Some(t),
+            Error(_) => None,
+        },
+        _ => None,
+    }
+}
+
+fn pt_section(p: PeerSession, pt: u8) -> (u64, u8) {
+    let mut count = 0u64
+    let mut found: u8 = 0
+    for s in p.sections {
+        if !s.agreed.recv {
+            continue
+        }
+        for f in s.agreed.formats {
+            if f.pt == pt {
+                count += 1
+                found = s.agreed.index
+                break
+            }
+        }
+    }
+    (count, found)
+}
+
+fn section_format(p: PeerSession, section: u8, pt: u8) -> Option[sdp.Format] {
+    let i: u64 = int.widen(section)
+    for f in p.sections[i].agreed.formats {
+        if f.pt == pt {
+            return Some(clone(f))
+        }
+    }
+    None
+}
+
+fn rid_encoding(p: PeerSession, section: u8, pkt: Bytes, e: rtp.ext.Element) -> u8 {
+    let i: u64 = int.widen(section)
+    let rids = p.sections[i].agreed.rids
+    for j in 0u64 .. list.len(rids) {
+        if same_id(pkt, e, rids[j].id, rids[j].len) {
+            return int.narrow(j)
+        }
+    }
+    0
+}
+
+fn new_inbound(ssrc: u32, section: u8, encoding: u8, repair: bool, index: u64, ts: u32, now: u64, clock: u32, nack: bool, fir: bool) -> Result[Inbound, PeerError] {
+    let losses = rtp.loss.losses(rtp.loss.NackConfig(window: 512, retry_ns: 20000000, tries: 5, max_age_ns: 1000000000), index, now) ?=> |c| Capacity(c)
+    let mut received: List[u64] = list.new()
+    list.try_reserve(mut received, RECEIVED) ?=> |c| Capacity(c)
+    list.fill(mut received, RECEIVED, EMPTY)
+    received[index % RECEIVED] = index
+    let wide: i64 = int.widen(ts)
+    Ok(Inbound(ssrc: ssrc, section: section, encoding: encoding, repair: repair, bound_at: index, highest: index, ts: wide, stats: rtp.stats.received(clock, index, wide, now), nack: nack, losses: take losses, keyframes: rtp.loss.keyframes(fir, KEYFRAME_NS), received: take received))
+}
+
+fn rtp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
+    if list.len(slot) < 12 {
+        p.drops.short_rtp += 1
+        return Ok(Nothing)
+    }
+    // Authentication before state: SRTP's open is the first stateful step.
+    let opened = match open_rtp(mut p, mut slot) {
+        None => {
+            p.drops.early += 1
+            return Ok(Nothing)
+        },
+        Some(Ok(o)) => o,
+        Some(Error(_)) => {
+            p.drops.srtp += 1
+            return Ok(Nothing)
+        },
+    }
+    list.truncate(mut slot, opened.length)
+    let Ok(h) = rtp.header.parse(slot) else {
+        p.drops.malformed += 1
+        return Ok(Nothing)
+    }
+    let Ok((payload_at, payload_len)) = rtp.header.payload(h, slot) else {
+        p.drops.malformed += 1
+        return Ok(Nothing)
+    }
+    let mut collided: List[u16] = list.new()
+    collide(mut p, now, h.ssrc, mut collided, mut out)?
+    // Reported with the next control input, so the caller re-offers.
+    for t in collided {
+        list.push(mut p.collided, t)
+    }
+    let m = any_map(p)
+    let known = find_inbound(p, h.ssrc)
+    // RTC-3 binding steps 1 to 3.
+    let mut section: Option[u8] = None
+    let mut rebind = false
+    if let Some(e) = find_ext(m, slot, h, Mid) {
+        let Some(s) = mid_section(p, slot, e) else {
+            p.drops.unbound += 1
+            return Ok(Nothing)
+        }
+        if let Some(i) = known {
+            let current = p.inbound[i].section
+            if s != current && opened.index > p.inbound[i].bound_at {
+                section = Some(s)
+                rebind = true
+            } else {
+                section = Some(current)
+            }
+        } else {
+            section = Some(s)
+        }
+    } else if let Some(i) = known {
+        section = Some(p.inbound[i].section)
+    } else {
+        let (count, s) = pt_section(p, h.pt)
+        if count != 1 {
+            p.drops.unbound += 1
+            return Ok(Nothing)
+        }
+        section = Some(s)
+    }
+    let Some(sec) = section else {
+        p.drops.unbound += 1
+        return Ok(Nothing)
+    }
+    let Some(format) = section_format(p, sec, h.pt) else {
+        p.drops.format += 1
+        return Ok(Nothing)
+    }
+    let si: u64 = int.widen(sec)
+    let map = p.sections[si].map
+    let is_rtx = format.codec == Rtx
+    let rid = find_ext(Some(map), slot, h, if is_rtx {
+        RepairedRid
+    } else {
+        Rid
+    })
+    let encoding = match rid {
+        Some(e) => rid_encoding(p, sec, slot, e),
+        None => match known {
+            Some(i) => p.inbound[i].encoding,
+            None => 0,
+        },
+    }
+    if is_rtx {
+        return repair_in(mut p, now, sec, encoding, format, h, opened.index, slot, known)
+    }
+    let level = find_level(map, slot, h)
+    let i = match known {
+        Some(i) => {
+            if rebind {
+                p.inbound[i].section = sec
+                p.inbound[i].encoding = encoding
+                p.inbound[i].bound_at = opened.index
+            }
+            i
+        },
+        None => {
+            let cap: u64 = int.widen(p.limits.sections)
+            if list.len(p.inbound) >= 8 * cap {
+                p.drops.capacity += 1
+                return Ok(Nothing)
+            }
+            let video = p.sections[si].agreed.media == Video
+            let n = new_inbound(h.ssrc, sec, encoding, false, opened.index, h.ts, now, format.clock, video && format.nack, format.fir)?
+            list.push(mut p.inbound, take n)
+            list.len(p.inbound) - 1
+        },
+    }
+    arrived(mut p, i, opened.index, h.ts, now, known != None)
+    if let Some(e) = find_ext(Some(map), slot, h, TransportSeq) {
+        if let Ok(n) = rtp.ext.transport_seq(slot, h, e) {
+            rtp.twcc.on_packet(mut p.recv_log, n, now)
+        }
+    }
+    let layer = if format.codec == Vp8 {
+        match media_bits.unit.vp8(list.slice(slot, payload_at, payload_at + payload_len), h.marker) {
+            Ok(u) => Some(u),
+            Error(_) => None,
+        }
+    } else {
+        None
+    }
+    let (voice, audio_level) = level
+    Ok(Media(MediaIn(section: sec, encoding: encoding, ssrc: h.ssrc, index: opened.index, pt: h.pt, ts: h.ts, marker: h.marker, payload_at: payload_at, payload_len: payload_len, audio_level: audio_level, voice: voice, layer: layer)))
+}
+
+fn find_level(map: rtp.ext.ExtMap, pkt: Bytes, h: rtp.header.Header) -> (Option[bool], Option[u8]) {
+    match rtp.ext.find(map, pkt, h, AudioLevel) {
+        Ok(Some(e)) => match rtp.ext.audio_level(map, pkt, h, e) {
+            Ok((voice, level)) => (voice, Some(level)),
+            Error(_) => (None, None),
+        },
+        _ => (None, None),
+    }
+}
+
+// Every stateful reader of one inbound stream, called with the index open authenticated.
+fn arrived(mut p: PeerSession, i: u64, index: u64, ts: u32, now: u64, counted_before: bool) {
+    let ext = rtp.seq.estimate32(p.inbound[i].ts, ts)
+    if counted_before {
+        let _ = rtp.stats.on_packet(mut p.inbound[i].stats, index, ext, now)
+        let _ = rtp.loss.on_packet(mut p.inbound[i].losses, index, now)
+    }
+    p.inbound[i].ts = ext
+    p.inbound[i].received[index % RECEIVED] = index
+    if index > p.inbound[i].highest {
+        p.inbound[i].highest = index
+    }
+}
+
+fn media_of_rtx(p: PeerSession, sec: u8, encoding: u8, rtx_ssrc: u32) -> Option[u64] {
+    let si: u64 = int.widen(sec)
+    for (media, rtx) in p.agreed.sections[si].remote_rtx {
+        if rtx == rtx_ssrc {
+            return find_inbound(p, media)
+        }
+    }
+    for i in 0u64 .. list.len(p.inbound) {
+        let s = p.inbound[i]
+        if !s.repair && s.section == sec && s.encoding == encoding {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn repair_in(mut p: PeerSession, now: u64, sec: u8, encoding: u8, format: sdp.Format, h: rtp.header.Header, index: u64, slot: Bytes, known: Option[u64]) -> Result[Input, PeerError] {
+    let Some(apt) = format.apt else {
+        p.drops.format += 1
+        return Ok(Nothing)
+    }
+    let Some(media_format) = section_format(p, sec, apt) else {
+        p.drops.format += 1
+        return Ok(Nothing)
+    }
+    let (osn, at) = match rtp.rtx.unwrap(h, slot) {
+        Ok(Repair(osn, at)) => (osn, at),
+        Ok(Probe) => return Ok(Nothing),
+        Error(_) => {
+            p.drops.malformed += 1
+            return Ok(Nothing)
+        },
+    }
+    let Some(mi) = media_of_rtx(p, sec, encoding, h.ssrc) else {
+        p.drops.repair += 1
+        return Ok(Nothing)
+    }
+    let highest = p.inbound[mi].highest
+    let Index(original) = rtp.seq.estimate(highest, osn) else {
+        p.drops.repair += 1
+        return Ok(Nothing)
+    }
+    let seen = if original + RECEIVED <= highest {
+        true
+    } else {
+        p.inbound[mi].received[original % RECEIVED] == original
+    }
+    if seen {
+        p.drops.repair += 1
+        return Ok(Nothing)
+    }
+    // The RTX stream itself is bound, so its SSRC keeps routing.
+    match known {
+        Some(_) => (),
+        None => {
+            let n = new_inbound(h.ssrc, sec, encoding, true, index, h.ts, now, format.clock, false, false)?
+            list.push(mut p.inbound, take n)
+        },
+    }
+    arrived(mut p, mi, original, h.ts, now, true)
+    let ssrc = p.inbound[mi].ssrc
+    let enc = p.inbound[mi].encoding
+    // The original payload runs from after the OSN to the end of the RTX payload.
+    let payload_len = match rtp.header.payload(h, slot) {
+        Ok((from, n)) => from + n - at,
+        Error(_) => {
+            p.drops.malformed += 1
+            return Ok(Nothing)
+        },
+    }
+    let layer = if media_format.codec == Vp8 {
+        match media_bits.unit.vp8(list.slice(slot, at, at + payload_len), h.marker) {
+            Ok(u) => Some(u),
+            Error(_) => None,
+        }
+    } else {
+        None
+    }
+    Ok(Repair(MediaIn(section: sec, encoding: enc, ssrc: ssrc, index: original, pt: apt, ts: h.ts, marker: h.marker, payload_at: at, payload_len: payload_len, audio_level: None, voice: None, layer: layer)))
+}
+
+fn rtcp_mode(p: PeerSession) -> rtp.rtcp.Mode {
+    for s in p.sections {
+        if s.agreed.local.rtcp_rsize {
+            return Reduced
+        }
+    }
+    Compound
+}
+
+fn track_of(p: PeerSession, ssrc: u32) -> Option[u64] {
+    for i in 0u64 .. list.len(p.tracks) {
+        if p.tracks[i].ssrc == ssrc {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Result[Input, PeerError] {
+    if list.len(slot) < 8 {
+        p.drops.short_rtcp += 1
+        return Ok(Nothing)
+    }
+    let length = match open_rtcp(mut p, mut slot) {
+        None => {
+            p.drops.early += 1
+            return Ok(Nothing)
+        },
+        Some(Ok(n)) => n,
+        Some(Error(_)) => {
+            p.drops.srtp += 1
+            return Ok(Nothing)
+        },
+    }
+    list.truncate(mut slot, length)
+    if let Error(_) = rtp.rtcp.check(slot, rtcp_mode(p)) {
+        p.drops.malformed += 1
+        return Ok(Nothing)
+    }
+    let mut c = ControlIn(repairs: list.new(), keyframes: list.new(), collided: replace(mut p.collided, list.new()), reports: 0, acked: 0)
+    let mut at = 0u64
+    while let Ok(Some(pkt)) = rtp.rtcp.next(slot, mut at) {
+        match pkt.item {
+            Sr(info, _) => {
+                collide(mut p, now, info.ssrc, mut c.collided, mut out)?
+                if let Some(i) = find_inbound(p, info.ssrc) {
+                    rtp.stats.on_sr(mut p.inbound[i].stats, info, now)
+                }
+                c.reports += 1
+            },
+            Rr(ssrc, count) => {
+                collide(mut p, now, ssrc, mut c.collided, mut out)?
+                for b in 0u8 .. count {
+                    if let Ok(block) = rtp.rtcp.block(slot, pkt, b) {
+                        if let Some(_) = track_of(p, block.ssrc) {
+                            if let Some(rtt) = rtp.stats.rtt(block, ntp(now)) {
+                                p.rtt = Some(rtt)
+                            }
+                        }
+                    }
+                }
+                c.reports += 1
+            },
+            Nack(_, media) => nack_in(mut p, now, slot, pkt, media, mut c.repairs),
+            Pli(_, media) => {
+                if let Some(t) = track_of(p, media) {
+                    list.push(mut c.keyframes, KeyframeAsk(track: int.narrow(t), fir: false))
+                }
+            },
+            Fir(_) => {
+                let mut f = 0u64
+                while let Ok(Some((target, _))) = rtp.rtcp.fir_next(slot, pkt, mut f) {
+                    if let Some(t) = track_of(p, target) {
+                        list.push(mut c.keyframes, KeyframeAsk(track: int.narrow(t), fir: true))
+                    }
+                }
+            },
+            Twcc(_, _) => {
+                let mut acked: List[rtp.twcc.Acked] = list.with_capacity(1024)
+                if let Ok(_) = rtp.twcc.on_feedback(mut p.send_log, slot, pkt, 1024, mut acked) {
+                    rtp.bwe.on_acked(mut p.bwe, view acked, now, p.rtt)
+                    c.acked += list.len(acked)
+                }
+            },
+            _ => (),
+        }
+    }
+    Ok(Control(take c))
+}
+
+fn nack_in(mut p: PeerSession, now: u64, pkt: Bytes, r: rtp.rtcp.Packet, media: u32, mut asks: List[RepairAsk]) {
+    let Some(t) = track_of(p, media) else {
+        p.drops.nack += 1
+        return
+    }
+    if p.tracks[t].rtx_ssrc == 0 || p.tracks[t].highest == EMPTY {
+        p.drops.nack += 1
+        return
+    }
+    let mut at = 0u64
+    while let Ok(Some((pid, blp))) = rtp.rtcp.nack_next(pkt, r, mut at) {
+        for bit in 0u16 .. 17 {
+            let s = if bit == 0 {
+                pid
+            } else if (blp >> (bit - 1)) & 1 == 1 {
+                int.wrapping_add(pid, bit)
+            } else {
+                continue
+            }
+            let Index(index) = rtp.seq.estimate(p.tracks[t].highest, s) else {
+                continue
+            }
+            if let Found(_) = rtp.history.get(mut p.tracks[t].history, index, now, MIN_RESEND_NS) {
+                if let Some(rec) = rtp.history.entry(p.tracks[t].history, index) {
+                    list.push(mut asks, RepairAsk(track: int.narrow(t), index: index, src: rec.src, handle: rec.handle, from: rec.from, len: rec.len))
+                }
+            }
+        }
+    }
+}

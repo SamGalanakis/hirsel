@@ -458,3 +458,497 @@ fn glare_settles_in_one_round() -> Result[(), sdp.SdpError] {
     }
     Ok(())
 }
+
+// ---- RTC-3 PeerSession laws (W4, W19) ----
+// RFC 8839 section 5.4: ice-char is ALPHA, DIGIT, "+" and "/".
+fn server_pwd() -> Bytes {
+    b"serverpass0123456789abcd"
+}
+
+fn rig_local() -> sdp.LocalEnd {
+    let mut l = local_end(1)
+    l.ice_pwd = server_pwd()
+    l
+}
+
+const CLIENT_SSRC: u32 = 0x0c0c0c0c
+
+const MEDIA_SSRC: u32 = 0x11111111
+
+const MS: u64 = 1000000
+
+fn server_addr() -> Addr {
+    Addr(ip: V4(0xc0000201), port: 5000)
+}
+
+fn client_addr() -> Addr {
+    Addr(ip: V4(0xc6336401), port: 50000)
+}
+
+fn stranger() -> Addr {
+    Addr(ip: V4(0xc6336402), port: 50002)
+}
+
+type Party {
+    id: dtls.Identity,
+    certificate: Bytes
+}
+
+fn party(seed: u64) -> Party {
+    let r = provide.random(seed)
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(r, "sign(p256)", mut point))
+    let start = option.unwrap(std.time.from_unix(1704067200, 0))
+    let end = option.unwrap(std.time.from_unix(2524608000, 0))
+    let der = result.unwrap(std.x509_build.self_signed_p256(key, r, point, seed, "webrtc.test", start, end))
+    let mut certificate: Bytes = list.with_capacity(list.len(der))
+    list.append(mut certificate, der)
+    Party(id: result.unwrap(dtls.identity(take key, take der, r)), certificate: take certificate)
+}
+
+/// RFC 8122 section 5: the SHA-256 of the whole certificate DER.
+fn pin_list(certificate: Bytes) -> List[dtls.Fingerprint] {
+    let d = std.sha256.hash(certificate)
+    let mut digest: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut digest, d[i])
+    }
+    let mut out: List[dtls.Fingerprint] = list.new()
+    list.push(mut out, dtls.Fingerprint(hash: Sha256, digest: take digest))
+    out
+}
+
+// Sections a and b receive VP8 on the same payload type 96; c is the server's down-track.
+fn session_offer() -> Bytes {
+    let mut b = minimal_head(b" a b c")
+    list.append(mut b, minimal_video(b"96 97", b"a", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    list.append(mut b, minimal_video(b"96", b"b", true))
+    list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\n")
+    list.append(mut b, minimal_video(b"96 97", b"c", true))
+    list.append(mut b, b"a=recvonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\n")
+    take b
+}
+
+/// One established PeerSession and the browser end that reached it: the STUN
+/// nomination, the DTLS handshake and the browser's SRTP session.
+type Rig {
+    p: peer.PeerSession,
+    c: dtls.Endpoint,
+    cs: srtp.Session,
+    out: peer.Outbox
+}
+
+fn copy_of(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(1500)
+    list.append(mut out, b)
+    out
+}
+
+fn to_client(mut c: dtls.Endpoint, rc: Random, now: u64, out: peer.Outbox) {
+    for tx in out.pkts {
+        let UdpTx(to: _, at, len, ecn: _) = tx
+        let mut data: Bytes = list.new()
+        let _ = dtls.receive(mut c, now, rc, list.slice(out.data, at, at + len), mut data)
+    }
+}
+
+fn established(seed: u64) -> Rig {
+    let Party(id: take server_id, certificate: server_certificate) = party(seed)
+    let Party(id: take client_id, certificate: client_certificate) = party(seed + 1)
+    let mut offer = sdp.description()
+    result.unwrap(sdp.parse(session_offer(), mut offer))
+    let mut reply = sdp.description()
+    let mut n = sdp.negotiated(rig_local())
+    result.unwrap(sdp.answer(sdp.default_policy(), None, offer, rig_local(), mut reply, mut n))
+    let d = std.sha256.hash(client_certificate)
+    for i in 0u64 .. 32 {
+        n.remote_fingerprint[i] = d[i]
+    }
+    let limits = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64)
+    let who = peer.Participant(gen: Gen(id: 1, epoch: 1), room: RoomId(7))
+    let mut p = result.unwrap(peer.open(rig_local(), take server_id, provide.random(seed + 2), server_addr(), limits, n, who))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pkt: Bytes = list.with_capacity(576)
+    list.fill(mut pkt, 576, 0)
+    let mut scratch: Bytes = list.with_capacity(576)
+    list.fill(mut scratch, 576, 0)
+    let check = stun_ice.Check(role: stun_ice.IceRole(role: Controlling, tie: 7), priority: 0x6e0001ff, nominate: true)
+    let k = result.unwrap(stun_ice.binding_request(stun_ice.Transaction(high: 1, low: 2), b"server:remote", Some(check), Sha1, true, server_pwd(), mut pkt, mut scratch))
+    let mut slot = copy_of(list.slice(pkt, 0, k))
+    if let Ok(Replied) = peer.receive(mut p, 0, client_addr(), mut slot, mut out) {} else {
+        fail("nomination not answered")
+    }
+    if peer.selected(p) != Some(client_addr()) {
+        fail("nomination did not select the path")
+    }
+    peer.clear_outbox(mut out)
+    let rc = provide.random(seed + 3)
+    let mut c = result.unwrap(dtls.client(take client_id, dtls.defaults(), server_addr()))
+    result.unwrap(dtls.expect(mut c, pin_list(server_certificate)))
+    for _ in 0u64 .. 8 {
+        while true {
+            let mut f: Bytes = list.with_capacity(1500)
+            match dtls.poll(mut c, 0, rc, mut f) {
+                Ok(Send(_)) => {
+                    let _ = result.unwrap(peer.receive(mut p, 0, client_addr(), mut f, mut out))
+                },
+                _ => break,
+            }
+        }
+        let _ = peer.poll(mut p, 0, mut out)
+        to_client(mut c, rc, 0, out)
+        peer.clear_outbox(mut out)
+    }
+    if !peer.connected(p) {
+        fail("DTLS did not connect the session")
+    }
+    let profile = option.unwrap(dtls.srtp_profile(c))
+    let keys = result.unwrap(dtls.take_srtp(mut c))
+    let cs = result.unwrap(srtp.session(take keys, profile, srtp.Limits(send_streams: 8, receive_streams: 8, ended_streams: 8)))
+    Rig(p: take p, c: take c, cs: take cs, out: take out)
+}
+
+// A browser RTP packet with the one-byte MID element first (RFC 8285 section 4.2).
+fn media(mut cs: srtp.Session, ssrc: u32, seq: u16, mid: Bytes, pt: u8) -> Bytes {
+    let mut m = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut m, 1, Mid))
+    let mut w = rtp.ext.writer()
+    if list.len(mid) != 0 {
+        result.unwrap(rtp.ext.put(mut w, m, Mid, mid, 0, list.len(mid)))
+    }
+    let wide: u32 = int.widen(seq)
+    let f = rtp.header.Fields(marker: true, pt: pt, seq: seq, ts: 3000 * wide, ssrc: ssrc)
+    let mut b: Bytes = list.with_capacity(1500)
+    let _ = result.unwrap(rtp.header.write(f, view w, mut b))
+    list.append(mut b, b"\x10\x00\x9d\x01\x2a\x00\x00\x00")
+    let _ = result.unwrap(srtp.protect_rtp(mut cs, mut b))
+    b
+}
+
+fn sealed_rtcp(mut cs: srtp.Session, take plain: Bytes) -> Bytes {
+    let mut b = take plain
+    let _ = result.unwrap(srtp.protect_rtcp(mut cs, mut b))
+    b
+}
+
+fn nack(mut cs: srtp.Session, media_ssrc: u32, seq: u16) -> Bytes {
+    let mut b: Bytes = list.with_capacity(1500)
+    let empty: List[rtp.rtcp.Block] = list.new()
+    let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view empty, mut b))
+    let _ = result.unwrap(rtp.rtcp.write_cname(CLIENT_SSRC, b"browser", mut b))
+    let mut pairs: List[(u16, u16)] = list.new()
+    list.push(mut pairs, (seq, 0))
+    let _ = result.unwrap(rtp.rtcp.write_nack(CLIENT_SSRC, media_ssrc, view pairs, mut b))
+    sealed_rtcp(mut cs, take b)
+}
+
+fn twcc(mut cs: srtp.Session, media_ssrc: u32, count: u16, now: u64) -> Bytes {
+    let mut log = result.unwrap(rtp.twcc.recv_log(64))
+    for i in 0u16 .. count {
+        let at: u64 = int.widen(i)
+        rtp.twcc.on_packet(mut log, i, now + at * MS)
+    }
+    let mut b: Bytes = list.with_capacity(1500)
+    let empty: List[rtp.rtcp.Block] = list.new()
+    let _ = result.unwrap(rtp.rtcp.write_rr(CLIENT_SSRC, view empty, mut b))
+    let _ = result.unwrap(rtp.rtcp.write_cname(CLIENT_SSRC, b"browser", mut b))
+    let _ = result.unwrap(rtp.twcc.write(mut log, CLIENT_SSRC, media_ssrc, 1000, mut b))
+    sealed_rtcp(mut cs, take b)
+}
+
+fn counts(d: peer.Drops) -> List[u64] {
+    let mut out: List[u64] = list.new()
+    for v in[d.classified, d.short_stun, d.short_dtls, d.short_rtp, d.short_rtcp, d.off_path, d.stun, d.early, d.srtp, d.malformed, d.unbound, d.format, d.repair, d.late, d.nack, d.capacity] {
+        list.push(mut out, v)
+    }
+    out
+}
+
+// The one drop counter that moved, which must have moved by exactly one.
+fn raised(before: peer.Drops, after: peer.Drops) -> Option[u64] {
+    let a = counts(before)
+    let b = counts(after)
+    let mut moved: Option[u64] = None
+    for i in 0u64 .. list.len(a) {
+        if a[i] != b[i] {
+            if b[i] != a[i] + 1 || moved != None {
+                return None
+            }
+            moved = Some(i)
+        }
+    }
+    moved
+}
+
+const SHORT_STUN: u64 = 1
+
+const SHORT_DTLS: u64 = 2
+
+const SHORT_RTP: u64 = 3
+
+const SHORT_RTCP: u64 = 4
+
+const OFF_PATH: u64 = 5
+
+const BAD_STUN: u64 = 6
+
+const BAD_SRTP: u64 = 8
+
+const UNBOUND: u64 = 10
+
+// Feed one datagram that must be dropped: no input, no output, one counter.
+fn dropped(mut r: Rig, now: u64, from: Addr, packet: Bytes, counter: u64, take what: String) {
+    let before = peer.drops(r.p)
+    let mut slot = copy_of(packet)
+    match peer.receive(mut r.p, now, from, mut slot, mut r.out) {
+        Ok(Nothing) => (),
+        _ => fail(take what),
+    }
+    if list.len(r.out.pkts) != 0 || raised(before, peer.drops(r.p)) != Some(counter) {
+        fail(take what)
+    }
+}
+
+fn media_at(mut r: Rig, now: u64, packet: Bytes) -> peer.MediaIn {
+    let mut slot = copy_of(packet)
+    match peer.receive(mut r.p, now, client_addr(), mut slot, mut r.out) {
+        Ok(Media(take m)) => take m,
+        _ => fail("a valid packet was not taken as media"),
+    }
+}
+
+fn bound_to(r: Rig, ssrc: u32) -> Option[u8] {
+    for b in peer.bindings(r.p) {
+        if b.ssrc == ssrc {
+            return Some(b.section)
+        }
+    }
+    None
+}
+
+/// RFC 9443 section 3 with RFC 5761 section 4, as the table states it: first-byte
+/// ranges and their class, the RTP range split by the second byte.
+fn rfc9443(first: u8, second: u8) -> peer.Class {
+    let mut table: List[(u8, u8, peer.Class)] = list.new()
+    list.push(mut table, (0, 3, Stun))
+    list.push(mut table, (4, 15, Drop))
+    list.push(mut table, (16, 19, Drop))
+    list.push(mut table, (20, 63, Dtls))
+    list.push(mut table, (64, 79, Drop))
+    list.push(mut table, (80, 127, Drop))
+    list.push(mut table, (128, 191, Rtp))
+    list.push(mut table, (192, 255, Drop))
+    for (lo, hi, class) in table {
+        if first >= lo && first <= hi {
+            if class == Rtp && second >= 192 && second <= 223 {
+                return Rtcp
+            }
+            return class
+        }
+    }
+    fail("table does not cover the byte")
+}
+
+/// bug: demultiplex on the wrong byte boundary, take an empty or 1-byte datagram as RTP, let a short datagram reach its parser uncounted, bind a payload type two sections share, or let an older packet undo a newer MID binding.
+/// oracle: RFC 9443 section 3's table and RFC 5761 section 4 by hand, exhaustive over the first byte; RTC-3's reader minimums and binding steps.
+@test
+fn demux_prefix() -> Result[(), peer.PeerError] {
+    for f in 0u64 .. 256 {
+        let first: u8 = int.narrow(f)
+        for second in[191u8, 192u8, 223u8, 224u8] {
+            let mut prefix: Bytes = list.with_capacity(2)
+            list.push(mut prefix, first)
+            list.push(mut prefix, second)
+            if peer.classify(prefix) != rfc9443(first, second) {
+                fail("classify disagrees with RFC 9443")
+            }
+        }
+    }
+    if peer.classify(b"") != Drop || peer.classify(b"\x80") != Drop || peer.classify(b"\xbf") != Drop {
+        fail("empty or 1-byte RTP-range datagram not dropped")
+    }
+    let mut r = established(41)
+    dropped(mut r, MS, client_addr(), b"\x00\x01\x00\x00\x21\x12\xa4\x42\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", SHORT_STUN, "19-byte STUN")
+    dropped(mut r, MS, client_addr(), b"\x16\xfe\xfd\x00\x00\x00\x00\x00\x00\x00\x00\x00", SHORT_DTLS, "12-byte DTLS")
+    dropped(mut r, MS, client_addr(), b"\x80\x60\x00\x01\x00\x00\x00\x00\x11\x11\x11", SHORT_RTP, "11-byte RTP")
+    dropped(mut r, MS, client_addr(), b"\x80\xc9\x00\x01\x0c\x0c\x0c", SHORT_RTCP, "7-byte RTCP")
+    // Payload type 96 names sections a and b, and the packet has no MID.
+    let shared = media(mut r.cs, 0x22222222, 7, b"", 96)
+    dropped(mut r, 2 * MS, client_addr(), shared, UNBOUND, "a shared payload type bound an SSRC")
+    if bound_to(r, 0x22222222) != None {
+        fail("a shared payload type bound an SSRC")
+    }
+    // RFC 8843 section 9.2: rebind only for a higher extended index.
+    let first = media(mut r.cs, 0x33333333, 10, b"a", 96)
+    let older = media(mut r.cs, 0x33333333, 11, b"a", 96)
+    let newer = media(mut r.cs, 0x33333333, 12, b"b", 96)
+    if media_at(mut r, 3 * MS, first).section != 0 || bound_to(r, 0x33333333) != Some(0) {
+        fail("MID a did not bind section a")
+    }
+    if media_at(mut r, 4 * MS, newer).section != 1 || bound_to(r, 0x33333333) != Some(1) {
+        fail("a newer MID b did not rebind")
+    }
+    if media_at(mut r, 5 * MS, older).section != 1 || bound_to(r, 0x33333333) != Some(1) {
+        fail("an older packet with the earlier MID took the SSRC back")
+    }
+    Ok(())
+}
+
+fn same_out(a: peer.Outbox, b: peer.Outbox) -> bool {
+    if list.len(a.pkts) != list.len(b.pkts) || list.compare_bytes(a.data, b.data) != Equal {
+        return false
+    }
+    for i in 0u64 .. list.len(a.pkts) {
+        let UdpTx(to: ta, at: aa, len: la, ecn: _) = a.pkts[i]
+        let UdpTx(to: tb, at: ab, len: lb, ecn: _) = b.pkts[i]
+        if ta != tb || aa != ab || la != lb {
+            return false
+        }
+    }
+    true
+}
+
+fn flip(packet: Bytes, at: u64) -> Bytes {
+    let mut b = copy_of(packet)
+    b[at] = b[at] ^ 1
+    b
+}
+
+// The same egress on a twin: a down-track and five sent packets on it.
+fn egress(mut r: Rig, payload: Bytes) {
+    let track = result.unwrap(peer.add_track(mut r.p, 2))
+    for i in 0u64 .. 5 {
+        let ts: u32 = int.narrow(3000 * i)
+        let m = peer.Media(src: Gen(id: 9, epoch: 1), handle: i, marker: true, pt: 96, pre: b"", from: 0, len: list.len(payload))
+        if result.unwrap(peer.send(mut r.p, 6 * MS + i * MS, track, OnTime(100 + i, ts), m, payload, mut r.out)) != OnMedia {
+            fail("an on-time packet was not sent on the media SSRC")
+        }
+    }
+    peer.clear_outbox(mut r.out)
+}
+
+fn control_at(mut r: Rig, now: u64, packet: Bytes) -> peer.ControlIn {
+    let mut slot = copy_of(packet)
+    match peer.receive(mut r.p, now, client_addr(), mut slot, mut r.out) {
+        Ok(Control(take c)) => take c,
+        _ => fail("valid RTCP was not taken as control"),
+    }
+}
+
+/// bug: let an unauthenticated datagram move statistics, the loss window, the egress history, TWCC, BWE, bindings, the path or the ROC before SRTP or ICE has authenticated it.
+/// oracle: RTC-3 by hand: a twin session fed the same valid traffic, compared on everything it sends and reports; the ROC by the next packet's hand-derived index 65538.
+@test
+fn unauthenticated_changes_nothing() -> Result[(), peer.PeerError] {
+    let mut a = established(51)
+    let mut b = established(51)
+    let payload: Bytes = b"\x10\x00\x9d\x01\x2a\x00\x00\x00\x00\x00"
+    egress(mut a, payload)
+    egress(mut b, payload)
+    // Five packets that cross the 16-bit wrap: indices 65533 to 65537, ROC 1.
+    let mut now = 20 * MS
+    let mut replayed: Bytes = list.new()
+    for seq in[65533u16, 65534u16, 65535u16, 0u16, 1u16] {
+        let pkt = media(mut a.cs, MEDIA_SSRC, seq, b"a", 96)
+        replayed = copy_of(pkt)
+        let x = media_at(mut a, now, pkt)
+        let y = media_at(mut b, now, pkt)
+        if x.index != y.index || x.section != 0 {
+            fail("twins differ on valid traffic")
+        }
+        now += MS
+    }
+    let next = media(mut a.cs, MEDIA_SSRC, 2, b"a", 96)
+    let Some((track_ssrc, _)) = peer.track_ssrcs(a.p, 0) else {
+        fail("down-track has no SSRC")
+    }
+    // Non-vacuity: a valid NACK hits the history and yields a repair ask.
+    let first_nack = nack(mut a.cs, track_ssrc, 101)
+    let x = control_at(mut a, now, first_nack)
+    let y = control_at(mut b, now, first_nack)
+    if list.len(x.repairs) != 1 || x.repairs[0].index != 101 || x.repairs[0].handle != 1 || list.len(y.repairs) != 1 {
+        fail("a valid NACK did not reach the egress history")
+    }
+    let tail = list.len(next) - 1
+    // Every bad input goes to twin a only.
+    dropped(mut a, now, client_addr(), flip(next, tail), BAD_SRTP, "flipped tag bit")
+    dropped(mut a, now, client_addr(), replayed, BAD_SRTP, "replay")
+    let mut jump = flip(next, tail)
+    jump[2] = 0x80
+    jump[3] = 0x01
+    dropped(mut a, now, client_addr(), jump, BAD_SRTP, "index 2^15 ahead under a bad tag")
+    let mut moved = flip(next, tail)
+    if moved[17] != b'a' {
+        fail("fixture MID element moved")
+    }
+    moved[17] = b'b'
+    dropped(mut a, now, client_addr(), moved, BAD_SRTP, "new MID under a bad tag")
+    let bad_nack = nack(mut a.cs, track_ssrc, 102)
+    dropped(mut a, now, client_addr(), flip(bad_nack, list.len(bad_nack) - 5), BAD_SRTP, "NACK under a bad tag")
+    let bad_twcc = twcc(mut a.cs, track_ssrc, 5, now)
+    dropped(mut a, now, client_addr(), flip(bad_twcc, list.len(bad_twcc) - 5), BAD_SRTP, "TWCC under a bad tag")
+    dropped(mut a, now, stranger(), next, OFF_PATH, "valid packet off the 5-tuple table")
+    let mut pkt: Bytes = list.with_capacity(576)
+    list.fill(mut pkt, 576, 0)
+    let mut scratch: Bytes = list.with_capacity(576)
+    list.fill(mut scratch, 576, 0)
+    let check = stun_ice.Check(role: stun_ice.IceRole(role: Controlling, tie: 7), priority: 0x6e0001ff, nominate: true)
+    let k = result.unwrap(stun_ice.binding_request(stun_ice.Transaction(high: 3, low: 4), b"server:remote", Some(check), Sha1, true, b"not-the-server-password-00", mut pkt, mut scratch))
+    dropped(mut a, now, stranger(), list.slice(pkt, 0, k), BAD_STUN, "STUN with bad MESSAGE-INTEGRITY")
+    if peer.selected(a.p) != Some(client_addr()) {
+        fail("bad STUN moved the selected path")
+    }
+    // The valid continuation: the next index is accepted at ROC 1, and both twins agree.
+    let xn = media_at(mut a, now, next)
+    let yn = media_at(mut b, now, next)
+    if xn.index != 65538 || yn.index != 65538 || xn.section != yn.section || xn.payload_len != yn.payload_len {
+        fail("the next valid packet was not taken at index 65538")
+    }
+    let good_nack = nack(mut a.cs, track_ssrc, 102)
+    let xr = control_at(mut a, now, good_nack)
+    let yr = control_at(mut b, now, good_nack)
+    if list.len(xr.repairs) != 1 || list.len(yr.repairs) != 1 || xr.repairs[0].index != yr.repairs[0].index || xr.repairs[0].handle != yr.repairs[0].handle {
+        fail("NACK answers differ after bad input")
+    }
+    // Non-vacuity: the five sent packets carry transport numbers 0 to 4, so the good
+    // feedback acknowledges all five on both twins.
+    let good_twcc = twcc(mut a.cs, track_ssrc, 5, now)
+    let xt = control_at(mut a, now, good_twcc)
+    let yt = control_at(mut b, now, good_twcc)
+    if xt.acked != 5 || yt.acked != 5 || peer.target_bps(a.p) != peer.target_bps(b.p) {
+        fail("TWCC or BWE differs after bad input")
+    }
+    if peer.bindings(a.p) != peer.bindings(b.p) || peer.selected(a.p) != peer.selected(b.p) {
+        fail("bindings or path differ after bad input")
+    }
+    peer.clear_outbox(mut a.out)
+    peer.clear_outbox(mut b.out)
+    let _ = peer.poll(mut a.p, 3000 * MS, mut a.out)
+    let _ = peer.poll(mut b.p, 3000 * MS, mut b.out)
+    if list.len(a.out.pkts) == 0 || !same_out(a.out, b.out) {
+        fail("reports, NACKs or TWCC feedback differ after bad input")
+    }
+    let da = counts(peer.drops(a.p))
+    let db = counts(peer.drops(b.p))
+    if da[BAD_SRTP] != db[BAD_SRTP] + 6 || da[OFF_PATH] != db[OFF_PATH] + 1 || da[BAD_STUN] != db[BAD_STUN] + 1 {
+        fail("drop counters")
+    }
+    // Negative control: statistics run on the header before open count the replay as
+    // received (RFC 3550 appendix A.3), so the twin comparison would see it.
+    let mut early = rtp.stats.received(90000, 65533, 0, 0)
+    let mut late = rtp.stats.received(90000, 65533, 0, 0)
+    for i in 65534u64 .. 65538 {
+        let _ = rtp.stats.on_packet(mut early, i, 0, 0)
+        let _ = rtp.stats.on_packet(mut late, i, 0, 0)
+    }
+    let h = result.unwrap(rtp.header.parse(replayed))
+    if let Index(i) = rtp.seq.estimate(65537, h.seq) {
+        let _ = rtp.stats.on_packet(mut early, i, 0, 0)
+    }
+    let _ = rtp.stats.on_packet(mut early, 65538, 0, 0)
+    let _ = rtp.stats.on_packet(mut late, 65538, 0, 0)
+    if rtp.stats.report(mut early, MEDIA_SSRC, 0) == rtp.stats.report(mut late, MEDIA_SSRC, 0) {
+        fail("negative control: statistics before open went unseen")
+    }
+    Ok(())
+}

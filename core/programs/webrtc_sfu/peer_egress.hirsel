@@ -1,0 +1,402 @@
+// RTC-4 egress: SSRC collisions, sealed media and RTX, NACK answers, reports and the session clock.
+// ---- RTC-4: SSRC collisions ----
+fn retire(mut p: PeerSession, ssrc: u32, mut out: Outbox) -> Result[(), PeerError] {
+    let Some(to) = p.path else {
+        return Ok(())
+    }
+    let mut b: Bytes = list.with_capacity(64)
+    let empty: List[rtp.rtcp.Block] = list.new()
+    let _ = rtp.rtcp.write_rr(ssrc, view empty, mut b)
+    let _ = rtp.rtcp.write_bye(ssrc, mut b)
+    let tag = own_tag(p)
+    if let Ok(_) = seal(mut p, true, mut b) {
+        queue(mut out, to, b, tag)?
+    }
+    end_send(mut p, ssrc)
+    Ok(())
+}
+
+/// A confirmed collision: an authenticated packet or report from the remote end uses
+/// an SSRC this session sends on.
+fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut collided: List[u16], mut out: Outbox) -> Result[(), PeerError] {
+    if ssrc == p.control {
+        retire(mut p, ssrc, mut out)?
+        let fresh = draw(mut p)
+        p.control = fresh
+        return Ok(())
+    }
+    for t in 0u64 .. list.len(p.tracks) {
+        if p.tracks[t].ssrc == ssrc || (p.tracks[t].rtx_ssrc != 0 && p.tracks[t].rtx_ssrc == ssrc) {
+            let old = p.tracks[t].ssrc
+            let old_rtx = p.tracks[t].rtx_ssrc
+            retire(mut p, old, mut out)?
+            let fresh = draw(mut p)
+            p.tracks[t].ssrc = fresh
+            if old_rtx != 0 {
+                retire(mut p, old_rtx, mut out)?
+                let fresh_rtx = draw(mut p)
+                p.tracks[t].rtx_ssrc = fresh_rtx
+            }
+            p.tracks[t].highest = EMPTY
+            p.tracks[t].sent = rtp.stats.sent(0)
+            let _ = rtp.history.clear(mut p.tracks[t].history)
+            list.push(mut collided, int.narrow(t))
+        }
+    }
+    Ok(())
+}
+
+// ---- Egress ----
+fn has_rtx(a: sdp.Agreed) -> bool {
+    for f in a.formats {
+        if f.codec == Rtx {
+            return true
+        }
+    }
+    false
+}
+
+/// Make a down-track on a sending section. It draws its media SSRC and, for video
+/// with RTX agreed, its RTX SSRC; both keep for the track's life while collision-free.
+pub fn add_track(mut p: PeerSession, section: u8) -> Result[u16, PeerError] {
+    let si: u64 = int.widen(section)
+    if si >= list.len(p.sections) || !p.sections[si].agreed.send {
+        return Error(Sdp(AnswerMismatch(section)))
+    }
+    if list.len(p.tracks) >= int.widen(p.limits.down_tracks) {
+        return Error(Capacity(Capacity(requested: list.len(p.tracks) + 1, available: int.widen(p.limits.down_tracks))))
+    }
+    let video = p.sections[si].agreed.media == Video
+    let clock = match list.get(p.sections[si].agreed.formats, 0) {
+        Some(f) => f.clock,
+        None => 90000,
+    }
+    let ssrc = draw(mut p)
+    let rtx = if video && has_rtx(p.sections[si].agreed) {
+        draw(mut p)
+    } else {
+        0
+    }
+    let history: rtp.history.History[Record] = rtp.history.history(HISTORY_SLOTS, HISTORY_AGE_NS) ?=> |c| Capacity(c)
+    list.try_reserve(mut p.tracks, 1) ?=> |c| Capacity(c)
+    list.push(mut p.tracks, Track(section: section, video: video, ssrc: ssrc, rtx_ssrc: rtx, rtx_seq: 0, highest: EMPTY, last_ts: 0, sent: rtp.stats.sent(clock), history: take history, src: None))
+    Ok(int.narrow(list.len(p.tracks) - 1))
+}
+
+fn rtx_pt(a: sdp.Agreed, pt: u8) -> Option[u8] {
+    for f in a.formats {
+        if f.codec == Rtx && f.apt == Some(pt) {
+            return Some(f.pt)
+        }
+    }
+    None
+}
+
+fn leg_writer(mut p: PeerSession, now: u64, si: u64, size: u32) -> Result[rtp.ext.ExtWriter, PeerError] {
+    let a = p.sections[si].agreed
+    let map = p.sections[si].map
+    let mut w = rtp.ext.writer()
+    let mut mid: Bytes = list.with_capacity(16)
+    let n: u64 = int.widen(a.mid_len)
+    for i in 0u64 .. n {
+        list.push(mut mid, a.mid[i])
+    }
+    rtp.ext.put(mut w, map, Mid, mid, 0, n) ?=> |_| Rtp(Form)
+    let mut wants_twcc = false
+    for x in a.extmaps {
+        if x.ext == TransportCc {
+            wants_twcc = true
+        }
+    }
+    if wants_twcc {
+        let number = rtp.twcc.assign(mut p.send_log, now, size)
+        let mut v: Bytes = list.with_capacity(2)
+        list.put_word_be(mut v, number)
+        rtp.ext.put(mut w, map, TransportSeq, v, 0, 2) ?=> |_| Rtp(Form)
+    }
+    Ok(w)
+}
+
+fn seal_out(mut p: PeerSession, mut b: Bytes, src: Gen, mut out: Outbox) -> Result[(), PeerError] {
+    let Some(to) = p.path else {
+        return Error(Closed)
+    }
+    seal(mut p, false, mut b)?
+    queue(mut out, to, b, Tag(src: Some(src), dst: p.who.gen, room: p.who.room))
+}
+
+fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, marker: bool, pt: u8, pre: Bytes, payload: Bytes, from: u64, len: u64, src: Gen, mut out: Outbox) -> Result[bool, PeerError] {
+    let si: u64 = int.widen(p.tracks[t].section)
+    let Some(rpt) = rtx_pt(p.sections[si].agreed, pt) else {
+        return Ok(false)
+    }
+    if p.tracks[t].rtx_ssrc == 0 {
+        return Ok(false)
+    }
+    let size: u32 = int.narrow(12 + 2 + list.len(pre) + len)
+    let w = leg_writer(mut p, now, si, size)?
+    let f = rtp.header.Fields(marker: marker, pt: rpt, seq: p.tracks[t].rtx_seq, ts: ts, ssrc: p.tracks[t].rtx_ssrc)
+    let mut b: Bytes = list.with_capacity(SLOT + 64)
+    let _ = rtp.rtx.write(f, view w, int.truncate(index), pre, payload, from, len, mut b) ?=> |take x| Rtp(x)
+    p.tracks[t].rtx_seq = int.wrapping_add(p.tracks[t].rtx_seq, 1u16)
+    seal_out(mut p, mut b, src, mut out)?
+    Ok(true)
+}
+
+/// Send one output packet of a down-track. `OnTime` goes on the media SSRC at the
+/// rewriter's index. `Late` goes out at once as an RFC 4588 repair on the RTX SSRC,
+/// or is dropped and counted when the leg negotiated no RTX.
+pub fn send(mut p: PeerSession, now: u64, track: u16, e: Egress, m: Media, payload: Bytes, mut out: Outbox) -> Result[Sent, PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    let t: u64 = int.widen(track)
+    if t >= list.len(p.tracks) {
+        return Error(Sdp(AnswerMismatch(0)))
+    }
+    match e {
+        OnTime(index, ts) => {
+            let si: u64 = int.widen(p.tracks[t].section)
+            let size: u32 = int.narrow(12 + list.len(m.pre) + m.len)
+            let w = leg_writer(mut p, now, si, size)?
+            let f = rtp.header.Fields(marker: m.marker, pt: m.pt, seq: int.truncate(index), ts: ts, ssrc: p.tracks[t].ssrc)
+            let mut b: Bytes = list.with_capacity(SLOT + 64)
+            let _ = rtp.header.write(f, view w, mut b) ?=> |take x| Rtp(x)
+            list.append(mut b, m.pre)
+            list.append(mut b, list.slice(payload, m.from, m.from + m.len))
+            seal_out(mut p, mut b, m.src, mut out)?
+            p.tracks[t].highest = index
+            p.tracks[t].last_ts = ts
+            p.tracks[t].src = Some(m.src)
+            rtp.stats.on_sent(mut p.tracks[t].sent, list.len(m.pre) + m.len)
+            if p.tracks[t].video {
+                let rec = Record(src: m.src, handle: m.handle, from: m.from, len: m.len, ts: ts, marker: m.marker, pt: m.pt, pre: clone(m.pre))
+                drop(rtp.history.put(mut p.tracks[t].history, index, now, take rec))
+            }
+            Ok(OnMedia)
+        },
+        Late(index, ts) => {
+            if !write_rtx(mut p, now, t, index, ts, m.marker, m.pt, m.pre, payload, m.from, m.len, m.src, mut out)? {
+                p.drops.late += 1
+                return Ok(Dropped)
+            }
+            let rec = Record(src: m.src, handle: m.handle, from: m.from, len: m.len, ts: ts, marker: m.marker, pt: m.pt, pre: clone(m.pre))
+            drop(rtp.history.put(mut p.tracks[t].history, index, now, take rec))
+            Ok(AsRepair)
+        },
+    }
+}
+
+/// Answer a `RepairAsk` with the plaintext its handle names, rebuilt from the
+/// recorded output rewrite, never from the track's current state.
+pub fn resend(mut p: PeerSession, now: u64, ask: RepairAsk, payload: Bytes, mut out: Outbox) -> Result[bool, PeerError] {
+    let t: u64 = int.widen(ask.track)
+    if p.closed || t >= list.len(p.tracks) {
+        return Ok(false)
+    }
+    let rec = match rtp.history.entry(p.tracks[t].history, ask.index) {
+        Some(r) => {
+            let c: Record = clone(r)
+            c
+        },
+        None => return Ok(false),
+    }
+    if rec.src != ask.src || rec.handle != ask.handle {
+        return Ok(false)
+    }
+    write_rtx(mut p, now, t, ask.index, rec.ts, rec.marker, rec.pt, rec.pre, payload, rec.from, rec.len, rec.src, mut out)
+}
+
+/// Note that a down-track's source switched at output index `index` (RTP-11
+/// `switch_index`): a NACK below it answers nothing.
+pub fn switched(mut p: PeerSession, track: u16, index: u64) {
+    let t: u64 = int.widen(track)
+    if t < list.len(p.tracks) {
+        rtp.history.gate(mut p.tracks[t].history, index)
+    }
+}
+
+/// Ask the publisher of one inbound stream for a keyframe, throttled per stream.
+pub fn request_keyframe(mut p: PeerSession, now: u64, ssrc: u32, why: rtp.loss.Why, mut out: Outbox) -> Result[bool, PeerError] {
+    let Some(i) = find_inbound(p, ssrc) else {
+        return Ok(false)
+    }
+    let Some(req) = rtp.loss.want(mut p.inbound[i].keyframes, why, now) else {
+        return Ok(false)
+    }
+    let mut b: Bytes = list.with_capacity(64)
+    let empty: List[rtp.rtcp.Block] = list.new()
+    let _ = rtp.rtcp.write_rr(p.control, view empty, mut b)
+    let _ = rtp.rtcp.write_cname(p.control, p.cname, mut b)
+    match req {
+        Pli => {
+            let _ = rtp.rtcp.write_pli(p.control, ssrc, mut b)
+        },
+        Fir(n) => {
+            let _ = rtp.rtcp.write_fir(p.control, ssrc, n, mut b)
+        },
+    }
+    seal_rtcp_out(mut p, mut b, mut out)?
+    Ok(true)
+}
+
+fn seal_rtcp_out(mut p: PeerSession, mut b: Bytes, mut out: Outbox) -> Result[(), PeerError] {
+    let Some(to) = p.path else {
+        return Ok(())
+    }
+    let tag = own_tag(p)
+    if !connected(p) {
+        return Ok(())
+    }
+    seal(mut p, true, mut b)?
+    queue(mut out, to, b, tag)
+}
+
+// ---- Time ----
+// NTP time for reports: the session clock in 32.32 fixed point.
+fn ntp(now: u64) -> u64 {
+    let secs = now / 1000000000
+    let frac = ((now % 1000000000) << 32) / 1000000000
+    (secs << 32) | frac
+}
+
+fn reports(mut p: PeerSession, now: u64, mut out: Outbox) -> Result[(), PeerError] {
+    // One SR per down-track, under that track's SSRC and its own counts.
+    for t in 0u64 .. list.len(p.tracks) {
+        if p.tracks[t].highest == EMPTY {
+            continue
+        }
+        let ssrc = p.tracks[t].ssrc
+        let info = rtp.stats.sender_info(p.tracks[t].sent, ssrc, ntp(now), p.tracks[t].last_ts)
+        let mut b: Bytes = list.with_capacity(128)
+        let empty: List[rtp.rtcp.Block] = list.new()
+        let _ = rtp.rtcp.write_sr(info, view empty, mut b)
+        let _ = rtp.rtcp.write_cname(ssrc, p.cname, mut b)
+        seal_rtcp_out(mut p, mut b, mut out)?
+    }
+    let mut blocks: List[rtp.rtcp.Block] = list.new()
+    for i in 0u64 .. list.len(p.inbound) {
+        if !p.inbound[i].repair && list.len(blocks) < 31 {
+            let ssrc = p.inbound[i].ssrc
+            list.push(mut blocks, rtp.stats.report(mut p.inbound[i].stats, ssrc, now))
+        }
+    }
+    if list.len(blocks) != 0 {
+        let mut b: Bytes = list.with_capacity(1024)
+        let _ = rtp.rtcp.write_rr(p.control, view blocks, mut b)
+        let _ = rtp.rtcp.write_cname(p.control, p.cname, mut b)
+        seal_rtcp_out(mut p, mut b, mut out)?
+    }
+    Ok(())
+}
+
+fn feedback(mut p: PeerSession, now: u64, mut out: Outbox) -> Result[(), PeerError] {
+    let mut b: Bytes = list.with_capacity(1200)
+    let empty: List[rtp.rtcp.Block] = list.new()
+    let _ = rtp.rtcp.write_rr(p.control, view empty, mut b)
+    let _ = rtp.rtcp.write_cname(p.control, p.cname, mut b)
+    let prefix = list.len(b)
+    let rtt = p.rtt
+    for i in 0u64 .. list.len(p.inbound) {
+        let ssrc = p.inbound[i].ssrc
+        let mut pairs: List[(u16, u16)] = list.with_capacity(int.widen(MAX_NACK_PAIRS))
+        if p.inbound[i].nack {
+            let _ = rtp.loss.due(mut p.inbound[i].losses, now, rtt, MAX_NACK_PAIRS, mut pairs)
+        }
+        if list.len(pairs) != 0 {
+            let _ = rtp.rtcp.write_nack(p.control, ssrc, view pairs, mut b)
+        }
+    }
+    let media = match list.get(p.inbound, 0) {
+        Some(i) => i.ssrc,
+        None => 0,
+    }
+    let _ = rtp.twcc.write(mut p.recv_log, p.control, media, 1000, mut b)
+    if list.len(b) > prefix {
+        seal_rtcp_out(mut p, mut b, mut out)?
+    }
+    Ok(())
+}
+
+pub fn poll(mut p: PeerSession, now: u64, mut out: Outbox) -> Poll {
+    if p.closed {
+        return Idle
+    }
+    let before = list.len(out.pkts)
+    let dtls_wake = match flush_dtls(mut p, now, mut out) {
+        Ok(w) => w,
+        Error(_) => None,
+    }
+    if let Error(_) = start_srtp(mut p) {
+        return Idle
+    }
+    if connected(p) {
+        if now >= p.next_report {
+            let _ = reports(mut p, now, mut out)
+            p.next_report = now + REPORT_NS
+        }
+        if now >= p.next_feedback {
+            let _ = feedback(mut p, now, mut out)
+            p.next_feedback = now + FEEDBACK_NS
+        }
+    }
+    if list.len(out.pkts) > before {
+        return Transmit
+    }
+    let mut wake: Option[u64] = dtls_wake
+    if connected(p) {
+        let next = if p.next_report < p.next_feedback {
+            p.next_report
+        } else {
+            p.next_feedback
+        }
+        wake = match wake {
+            Some(w) if w < next => Some(w),
+            _ => Some(next),
+        }
+    }
+    match wake {
+        Some(w) => WakeAt(w),
+        None => Idle,
+    }
+}
+
+/// Install a renegotiated agreement. Bindings of sections no longer receiving go.
+pub fn renegotiated(mut p: PeerSession, agreed: sdp.Negotiated) -> Result[(), PeerError] {
+    if p.closed {
+        return Error(Closed)
+    }
+    let sections = build_sections(agreed, p.limits)?
+    p.sections = take sections
+    p.agreed = clone(agreed)
+    let mut kept: List[Inbound] = list.new()
+    let old = replace(mut p.inbound, list.new())
+    for take i in take old {
+        let si: u64 = int.widen(i.section)
+        if si < list.len(p.sections) && p.sections[si].agreed.recv {
+            list.push(mut kept, take i)
+        }
+    }
+    p.inbound = take kept
+    Ok(())
+}
+
+/// Erase the session. With `notify` (an ordinary leave), a DTLS close_notify is
+/// appended; a revoke sends nothing.
+pub fn close(take p: PeerSession, notify: bool, mut out: Outbox) {
+    let mut s = take p
+    if notify {
+        if let Some(to) = s.path {
+            let tag = own_tag(s)
+            if let Some(take held) = replace(mut s.dtls, None) {
+                let mut e = take held
+                let mut d: Bytes = list.with_capacity(SLOT)
+                if let Ok(_) = dtls.close(mut e, mut d) {
+                    let _ = queue(mut out, to, d, tag)
+                }
+            }
+        }
+    }
+    s.closed = true
+    drop(take s)
+}

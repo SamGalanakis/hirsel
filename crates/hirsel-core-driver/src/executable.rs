@@ -6,7 +6,7 @@
 //! so a file written and then executed at once can be busy for a moment that
 //! no `O_CLOEXEC` closes. The writer therefore runs on a thread with its own
 //! descriptor table: no other thread's fork can copy its descriptor.
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -47,7 +47,7 @@ pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
                     }
                 }
                 let mut file = tempfile::NamedTempFile::new_in(parent)?;
-                file.write_all(bytes)?;
+                crate::store::write_bounded(&mut file, &[bytes])?;
                 file.as_file()
                     .set_permissions(std::fs::Permissions::from_mode(mode))?;
                 file.persist(path).map_err(|e| e.error)?;

@@ -133,7 +133,6 @@ pub(crate) fn add_source_note(object: &mut object::write::Object<'_>, source: Co
 }
 
 fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
     // The debug object records the image's identity; hashing the image again
     // would only find it.
     let recorded = object::File::parse(debug).map_err(io::Error::other)?;
@@ -148,7 +147,7 @@ fn deliver(path: &Path, image: &[u8], debug: &[u8]) -> io::Result<()> {
     let parent = target.parent().unwrap();
     std::fs::create_dir_all(parent)?;
     let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    staged.write_all(debug)?;
+    crate::store::write_bounded(&mut staged, &[debug])?;
     staged.persist(target).map_err(|e| e.error)?;
     Ok(())
 }

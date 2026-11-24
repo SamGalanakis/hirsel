@@ -24,6 +24,53 @@ use twox_hash::XxHash3_64;
 #[path = "release_cache.rs"]
 pub(crate) mod release_cache;
 
+/// The most bytes one `write` hands the page cache. The kernel sizes the
+/// folios it allocates for a buffered write to the write's length, so one
+/// multi-megabyte write asks for 2 MiB folios. On a host whose free memory is
+/// fragmented, each of those allocations compacts memory and drains every
+/// CPU's free page lists under the zone lock: writing a 50 MB executable that
+/// way took from 50 ms to over a second (edit-loop-d-2432). Writes of at most
+/// this size take smaller folios from the per-CPU lists.
+const WRITE_CHUNK: usize = 256 << 10;
+
+/// Write `parts` in order, as one stream, in writes of at most
+/// [`WRITE_CHUNK`] bytes, without copying them into one buffer.
+pub(crate) fn write_bounded(out: &mut impl Write, parts: &[&[u8]]) -> io::Result<()> {
+    let mut rest = parts.to_vec();
+    let mut first = 0;
+    loop {
+        while rest.get(first).is_some_and(|part| part.is_empty()) {
+            first += 1;
+        }
+        if first == rest.len() {
+            return Ok(());
+        }
+        let mut budget = WRITE_CHUNK;
+        let window: Vec<IoSlice<'_>> = rest[first..]
+            .iter()
+            .map_while(|part| {
+                let take = part.len().min(budget);
+                budget -= take;
+                (take > 0).then(|| IoSlice::new(&part[..take]))
+            })
+            .collect();
+        let mut written = match out.write_vectored(&window) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => written,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        while written > 0 {
+            let take = rest[first].len().min(written);
+            rest[first] = &rest[first][take..];
+            written -= take;
+            if rest[first].is_empty() {
+                first += 1;
+            }
+        }
+    }
+}
+
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
 /// A body record's envelope: `BODY_MAGIC VERSION head_len ir_len head ir_hash
 /// ir prefix_check ir_check address`. The address names everything before
@@ -375,20 +422,7 @@ impl Store {
     /// synced (module documentation).
     fn publish<const N: usize>(&self, path: &Path, parts: [&[u8]; N]) -> io::Result<()> {
         self.publish_to(|file| {
-            if let [bytes] = parts.as_slice() {
-                file.write_all(bytes)?;
-            } else {
-                let mut buffers = parts.map(IoSlice::new);
-                let mut remaining = buffers.as_mut_slice();
-                while !remaining.is_empty() {
-                    match file.write_vectored(remaining) {
-                        Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
-                        Ok(written) => IoSlice::advance_slices(&mut remaining, written),
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
+            write_bounded(file, &parts)?;
             Ok((path, ()))
         })?;
         if let Some(release) = &self.release {
@@ -784,6 +818,48 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::Store;
+
+    /// Law: a bounded write delivers exactly the concatenation of its parts,
+    /// in order, in writes of at most `WRITE_CHUNK` bytes, even when the
+    /// writer takes fewer bytes than offered, including mid-part.
+    #[test]
+    fn bounded_writes_deliver_the_parts_in_order() {
+        struct Short {
+            bytes: Vec<u8>,
+            largest: usize,
+        }
+        impl std::io::Write for Short {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.write_vectored(&[std::io::IoSlice::new(buf)])
+            }
+            fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
+                let offered: usize = bufs.iter().map(|b| b.len()).sum();
+                self.largest = self.largest.max(offered);
+                // Take an uneven 7/9 of each offer, so writes end mid-part.
+                let mut take = (offered * 7 / 9).max(1);
+                let before = self.bytes.len();
+                for buf in bufs {
+                    let n = buf.len().min(take);
+                    self.bytes.extend_from_slice(&buf[..n]);
+                    take -= n;
+                }
+                Ok(self.bytes.len() - before)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let big: Vec<u8> = (0..600_000u32).map(|i| (i % 251) as u8).collect();
+        let exact = vec![7u8; super::WRITE_CHUNK];
+        let parts: [&[u8]; 6] = [b"abc", &[], &big, b"de", &exact, b"f"];
+        let mut out = Short {
+            bytes: Vec::new(),
+            largest: 0,
+        };
+        super::write_bounded(&mut out, &parts).unwrap();
+        assert_eq!(out.bytes, parts.concat());
+        assert!(out.largest <= super::WRITE_CHUNK);
+    }
     /// Law: opening a store removes every temporary no writer holds, file or
     /// scratch directory, and keeps each one a live writer holds.
     #[test]

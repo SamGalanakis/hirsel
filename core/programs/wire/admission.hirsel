@@ -3,8 +3,8 @@ type Reg = runner.Registry[Random, H]
 
 fn schema(mut d: store.Declare) -> Result[H, store.Error] {
     let codec: std.codec.Codec[u32] = std.codec.of()
-    let table = store.declare_table(mut d, "data", std.codec.key_u64(), codec)?
-    let table = store.finish(mut d, take table)?
+    let declaration = store.declare_table(mut d, "data", std.codec.key_u64(), codec)?
+    let table = store.finish(mut d, take declaration)?
     Ok(H(table: table))
 }
 
@@ -88,7 +88,7 @@ fn server(take seed: Server) -> () waits {
     let make: scoped[view] fn() -> runner.Service[runner.WireSession[Random, Random]] = fn() -> runner.Service[runner.WireSession[Random, Random]] {
         runner.wire_service(random, Some(runner.wire(random, Some(code.describe(bind_test)), 4096u64, 65536u64)), head, c, tasks, config, a)
     }
-    let _ = runner.serve(take listener, tasks, c, post, config, 128u64, list.new(), make, result.unwrap(runner.wire_place_allocator(code.describe(place), 1048576u64)))
+    let _ = runner.serve_wire(take listener, tasks, c, post, config, 128u64, list.new(), make, result.unwrap(runner.wire_place_allocator(code.describe(place), 1048576u64)))
 }
 
 // A callback fault ends the owner task under FAIL-14.
@@ -114,7 +114,7 @@ fn fault_listener(n: Net, c: Clock, tasks: Tasks, reject: bool) -> Result[(), Ex
     let mail = result.unwrap(runner.mailbox(1u64))
     let mut config = runner.wire_defaults(0u64)
     if reject { config.budget = 100u64 }
-    match runner.serve(take listener, tasks, c, runner.post(mail), config, 1u64, list.new(), fault_service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) }) {
+    match runner.serve_wire(take listener, tasks, c, runner.post(mail), config, 1u64, list.new(), fault_service, fn(mut context: (), take plan: runner.ServiceAllocation) -> Result[runner.ServicePlan, u16] { Error(1013u16) }) {
         Error(Configuration) => if reject { Ok(()) } else { Error(Exit(status: 1u8)) },
         Ok(()) => if reject { Error(Exit(status: 1u8)) } else { Ok(()) },
         Error(_) => Error(Exit(status: 1u8)),

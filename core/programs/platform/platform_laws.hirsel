@@ -684,8 +684,8 @@ fn with_pair(take l: List[Pair], gen: u64, activation: u64) -> List[Pair] {
 fn last_activation(r: Rig) -> Option[u64] {
     let mut found: Option[u64] = None
     for l in r.sent {
-        if let ServingMode(_, serve) = l.mode {
-            found = Some(serve.activation)
+        if let ServingMode(_, serving_place) = l.mode {
+            found = Some(serving_place.activation)
         }
     }
     found
@@ -1185,8 +1185,8 @@ fn two_pairs(g1: u64, a1: u64, s1: Bytes, g2: u64, a2: u64, s2: Bytes) -> List[P
 fn starts_are(r: Rig, want: List[Pair]) -> bool {
     let mut got: List[Pair] = list.new()
     for l in r.sent {
-        if let ServingMode(gen, serve) = l.mode {
-            list.push(mut got, Pair(gen: gen, activation: serve.activation, assembly: clone(l.assembly)))
+        if let ServingMode(gen, serving_place) = l.mode {
+            list.push(mut got, Pair(gen: gen, activation: serving_place.activation, assembly: clone(l.assembly)))
         }
     }
     if list.len(got) != list.len(want) {
@@ -1225,8 +1225,8 @@ fn installed_new(r: Rig, activation: u64) -> bool waits {
 fn place_answers(mut r: Rig, store_at: u64) waits {
     let mut chosen: Option[(launcher.Child, u64)] = None
     for l in r.sent {
-        if let ServingMode(gen, serve) = l.mode {
-            chosen = Some((launcher.Child(group: clone(l.group), role: Serving(gen)), serve.activation))
+        if let ServingMode(gen, serving_place) = l.mode {
+            chosen = Some((launcher.Child(group: clone(l.group), role: Serving(gen)), serving_place.activation))
         }
     }
     let Some((ch, selected)) = chosen else {
@@ -1757,8 +1757,8 @@ fn closed(r: Rig, name: String) -> bool {
 // A serving Start of group `name` at activation `activation` running `assembly`.
 fn serving_at(r: Rig, name: String, activation: u64, assembly: Bytes) -> bool {
     for l in r.sent {
-        if let ServingMode(_, serve) = l.mode {
-            if l.group.name == name && serve.activation == activation && serve.candidate == None && l.assembly == assembly {
+        if let ServingMode(_, serving_place) = l.mode {
+            if l.group.name == name && serving_place.activation == activation && serving_place.candidate == None && l.assembly == assembly {
                 return true
             }
         }

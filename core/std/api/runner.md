@@ -36,7 +36,8 @@ so they never cross sessions; deduplication across reconnects needs a binding.
 ## Running a place
 
 `runner.main(args, process, tasks, place, serve)` passes a stop receiver to
-`serve` on the normal launch path. Pass that receiver to `runner.operate`.
+`serve` on the normal launch path. Pass that receiver with the place config,
+status and optional phase watcher to `platform.serve`.
 The first [process stop](process.md) closes the channel and starts the drain
 specified in RUNNER-SPEC §12.4. Describe mode runs `place` before the serve
 callback or the stop task starts.
@@ -77,14 +78,15 @@ The wire configuration does not carry it: each session takes the head's value
 --n-place`); a client whose bindings carry another value reports both on its
 `launch identity mismatch` diagnostic.
 
-**Sizing `--limit`.** `runner.operate_bytes(config)` is what `operate` spends: the
+**Sizing `--limit`.** `platform.serve` uses `runner.operate` to start and drain the place.
+`runner.operate_bytes(config)` is what `operate` spends: the
 head (`n_place`, `n_publisher` and its own reserve), every session's
 reserve up to `max_sessions`, and operate's own 256 KiB. The current task's root
 limit (`hirsel build --limit`) must exceed it plus what `main` keeps; a smaller one is
 refused `Full(capacity)` with the requested and available bytes. The store takes the
-rest. `operate` opens it with `store.sized_with(kind, root limit − operate_bytes − 1 MiB, sizes)`
-(store.md "Sizing a store"), and `PlaceConfig.sizes` overrides single figures. So
-`--limit` is the one number a place chooses.
+rest. `operate` derives the Store options and reservation using the sizing rules
+of `store.sized_with` (store.md "Sizing a store"). Use `store.derived_sizes()` for
+default sizing. `PlaceConfig.sizes` can override individual figures.
 
 The wire types are `Kind`, `Refusal`, `Fault`, `Outcome` and `Described`, all
 `codec + send`. `Room` and `Bad` carry Capacity and DecodeError, because those types
@@ -265,7 +267,7 @@ version, completing subscription ids, groups and outcomes, in that order. A Grou
 Row is `{slot, key, value}`. A Row key
 is the logical key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
-schema prefix. Wire serving runs over `runner.serve` / `runner.operate` (below).
+schema prefix. Wire serving runs over `runner.serve_wire` / `runner.operate` (below).
 Outcome tags are Returned 0, Failed 1, Refused 2, Abandoned 3 and InDoubt 4.
 Refusal appends RequestMismatch 6 and HistoryUnavailable 7 after NotAllowed 5.
 Fault tags are Raised 0, OutOfBytes 1, OutOfTime 2, Gone 3 and Conflict 4.
@@ -310,7 +312,7 @@ and one assembly allowance under that reservation. It runs on the evaluator and
 native engines in `core-runner-r0` after a push, and in `core-runner-wire`.
 
 
-`serve` owns a bounded accept loop and an owner, reader and writer per connection.
+`runner.serve_wire` owns a bounded accept loop and an owner, reader and writer per connection.
 `max_sessions` bounds active owners independently of `socket.pending_max`.
 The listener can respond with HTTP 503 while a refusal worker is available.
 

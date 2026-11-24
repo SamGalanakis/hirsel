@@ -450,3 +450,55 @@ fn ping_call(client: runner.wire_client.Conn, ping_keys: List[Bytes], key: Bytes
         }
     }
 }
+
+fn budget_place(mut calls: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] { Ok(()) }
+fn budget_schema(mut declaration: store.Declare) -> Result[(), store.Error] { Ok(()) }
+
+fn serve_budget_config(take backing: runner.Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> runner.PlaceConfig[(), (), (), ()] {
+    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(budget_place), n_place: 262144u64,
+        on_migrate: None, schema: code.describe(budget_schema), session: local_wire(), max_sessions: 1u64,
+        proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
+        net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
+}
+
+type ServeReady: send { phases: Receiver[Receiver[runner.Phase]], stop: Sender[()] }
+
+fn stop_ready_place(take request: ServeReady) -> bool waits {
+    let ServeReady(phases: take handoff, stop: take stopping) = take request
+    if let Ok(take phases) = channel.receive(handoff) {
+        while let Ok(phase) = channel.receive(phases) {
+            if let Ready = phase {
+                return match channel.send(stopping, ()) { Ok(()) => true, Error(_) => false }
+            }
+        }
+    }
+    false
+}
+
+fn serve_fits(take config: runner.PlaceConfig[(), (), (), ()], tasks: Tasks) -> Result[(), String] waits {
+    let (stopping, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let (watch, phases): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
+    let observe = task.spawn(tasks, bytes 4096u64, ServeReady(phases: take phases, stop: take stopping), stop_ready_place)
+    let served = platform.serve(take config, take stop, result.unwrap(runner.status_root()), Some(take watch))
+    if let Ok(Stopped(_)) = served {} else { return Error("L60: platform.serve did not drain") }
+    if let Ok(true) = task.join(take observe) { Ok(()) } else { Error("L60: platform.serve never reached Ready") }
+}
+
+fn serve_shortfall(take config: runner.PlaceConfig[(), (), (), ()]) -> Result[runner.Ended, runner.StartError] waits {
+    let (stopping, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let _ = take stopping
+    platform.serve(take config, take stop, result.unwrap(runner.status_root()), None)
+}
+
+@test
+fn test_platform_serve_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
+    serve_fits(serve_budget_config(Memory, c, r, tasks, n), tasks)?
+    serve_fits(serve_budget_config(Temp(d), c, r, tasks, n), tasks)?
+    let limited = serve_budget_config(Memory, c, r, tasks, n)
+    let child = task.spawn(tasks, bytes 12582912u64, take limited, serve_shortfall)
+    match task.join(take child) {
+        Ok(Error(Full(cap))) if cap.requested == 2097152u64 && cap.available == 1238473u64 => Ok(()),
+        _ => Error("L60: platform.serve must report the exact Store shortage"),
+    }
+}

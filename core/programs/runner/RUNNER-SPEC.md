@@ -1,4 +1,4 @@
-# RUNNER-SPEC v2.51: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
+# RUNNER-SPEC v2.52: entries, calls, sessions, subscriptions and operation of a place (lane runner-spec-1020)
 
 **Tree:** `62f15988b85ca4afdb6d37e0ff324d9072274615` (detached), 18 crates. The checker was rebuilt there (BUILD SUCCEEDED). Every v2.2 probe was checked and run on it. **v2.3** adds R0's built figures (runner-build-1033, landed bf7cf64f, measured there and at 71b306f0) and three probes run at 62f15988 (p19 split and few-registration variants).
 
@@ -21,6 +21,10 @@ Evidence marks:
 **v2.5** answers review 1042 (runner-build-review-1042/ATTACK.md): one send received two Outcomes in the built runner, and no check observed it. Rule 5 now defines a send and its one Outcome. The calls and subscription models gain exactly-once checks (`models/calls25_model.py`, `models/subs25_model.py`), and every model was re-run. The v2.4 text is RUNNER-SPEC-v2.4.md.
 
 The v2.2 and v2.3 texts are RUNNER-SPEC-v2.2.md and RUNNER-SPEC-v2.3.md. **v2.4** rules on R1's five gaps (runner-build-1033, followups.md 2026-11-16 "R1 gaps") against STORE-SPEC v2.9 and REPLAY-SPEC v2.1, by reading; no model behaviour changed, so no model was re-run. Models are in `models/`, their outputs in `models/evidence/`. Probes are in `programs/`, their outcomes in `probes.txt`. The v2 and v2.1 change tables are in CHANGES-HISTORY.md, and the v2.1 text is RUNNER-SPEC-v2.1.md.
+
+## CHANGES-v2.52 (W3a B23)
+
+`platform.serve` is the place entry point. It runs the same lifecycle and root-limit budget admission as `runner.operate`. The standalone WebSocket accept loop is `runner.serve_wire`.
 
 ## CHANGES-v2.51 (generic entries by PROG-9's instance descriptors; lane generic-descriptor-spec-2041)
 
@@ -1682,7 +1686,9 @@ pub fn operate[G: send, H: send, S: send, B: send](take p: PlaceConfig[G, H, S, 
 pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity]
 ```
 
-- **Store sizes (v2.45, DX Q6a).** The head opens the store with `store.sized_with(kind, share, p.sizes)`, where kind is `Memory` for `Memory`, and `Directory` for `Disk` and `Temp` (`Bucket` for an objects@1 authority), and share = the task's root limit (`runtime.root_limit()`, a build item) − `operate_bytes` − 1 MiB kept by main. A `Shortage` is `StartError.Full(Capacity{requested: need, available: have})`, reported with its parts before anything opens. There is no store number in `PlaceConfig` or in a launch.
+- **Place entry.** `platform.serve(take config, take stop, status, take watch)` accepts the `PlaceConfig`, stop receiver, status and optional phase watcher. It calls `runner.operate`, which derives the store share from the executable's `--limit`. Use `store.derived_sizes()` for the default Store options.
+
+- **Store sizes (v2.45, DX Q6a).** Before opening the store, `operate` derives the options and reservation with `store.sized_reservation(kind, share, p.sizes)`, using the same sizing rules as `store.sized_with`. The kind is `Memory` for `Memory`, `Directory` for `Disk` and `Temp`, and `Bucket` for an objects@1 authority. The share is the task's root limit (`runtime.root_limit()`) − `operate_bytes` − 1 MiB kept by main, computed with checked arithmetic. A `Shortage` returns `StartError.Full(Capacity{requested: need, available: have})`. `operate_report` also writes the parts to stderr. The root limit supplies the budget and `p.sizes` supplies any per-part overrides.
 - `operate` refuses `grace_ms = 0` with `Missing("grace_ms")` before it opens anything. A zero bound is a bound that was not given, as in STORE-SPEC W1. Admission closes at min(t₀ + `lag_ms`, D), so a lag that reaches the grace needs no refusal.
 - `Temp(d)` uses `std.dir.create_temp` for a fresh subdirectory of `d`. The head removes a named directory after it closes or drops the store. Cancellation at directory creation's delivery point can leave a directory whose name was never received (the `host.mkdtemp` cancellation prefix). `Disk` takes the store directory itself, already narrowed by the caller (for launch, the `--dir` grant), and removes nothing.
 - (v2.24) A managed wire call to a `Granted` entry runs only when `PlaceConfig.wire` is `Some`; the session starts the entry's task with its own copy of the wire grant and its Caller. With `None` it is refused as `NotAllowed`. `PlaceConfig.triggers` grants a movable `G` only to triggered attempts. (v2.27) The head runs a trigger drive when its entry list is non-empty or its store holds any branch-0 trigger row; an absent configuration is an empty list. It decides once, after `Activating`. With an empty list, a pending row's cancel, hold and release run as at any dispatch, and a row that reaches its entry lookup is consumed with the terminal `Gone`, so removing a place's last trigger entry never strands a committed row. Only `triggers.write` adds a row, and it requires a listed entry, so a store that has no row under an empty list never gets one, and only that place runs no drive. After a durable start, the place invokes the plain grant callback with its seed and the new attempt context in the grant task, then passes the result to the granted entry.
@@ -1696,7 +1702,7 @@ pub fn release_digest(exported: List[Exported]) -> Result[Bytes, Capacity]
 
 **Tasks.** `operate` runs in the caller's task as the place's supervisor. It waits only on its own inbox, as http.md's supervisor does (HTTP-1). It spawns these children:
 - **The head (H).** It opens the store, so it owns the `Db` (P2: own, not send). It runs `schema` and activation, spawns the publisher as its own child, and then serves its inbox, as `place_head` does today. It sends its progress to `operate`: each step, then `Published(Sender[PubIn])`.
-- **The serve supervisor (S).** It owns the sessions. It spawns one acceptor child (A) that holds the listener and sends `Accepted` to S. Sessions are S's children, not A's, so A can be cancelled without cancelling a session. This is HTTP-1's split of acceptor and supervisor, applied to `runner.serve`.
+- **The serve supervisor (S).** It owns the sessions. It spawns one acceptor child (A) that holds the listener and sends `Accepted` to S. Sessions are S's children, not A's, so A can be cancelled without cancelling a session. This is HTTP-1's split of acceptor and supervisor, applied to `runner.serve_wire`.
 - **A stop watcher (W).** It waits on `stop`, then sends `StopRequested` to `operate`.
 - **A drain timer (T).** Spawned at the stop, it sends `AdmissionClose` at min(t₀ + `lag_ms`, D) and `Expired` at D, each with `host.sleep_until`. So `operate`'s timers are events on its inbox like every other.
 
@@ -1784,7 +1790,7 @@ A failure after the activation commit and before `Ready` leaves the new activati
 
 **What a reader sees.** Before the bind, a probe sees a refused connection. Between the bind and `Ready`, it waits in the backlog and then gets 200. From `Draining` until admission closes, it gets 503 `"draining"`. After admission closes, it sees a refused connection again. So "not ready" is either a 503 or a refused connection, and only `Ready` is ever a 200.
 
-**Until std.http serves the place,** the place listens through `runner.serve`'s WebSocket accept path, which has no router. In that interval, the lifecycle and its `Latest` are built and tested in process (§12.3), and the route is built with http.md §6's cutover. That is build order, and SLICES.md records it.
+**Until std.http serves the place,** the place listens through `runner.serve_wire`'s WebSocket accept path, which has no router. In that interval, the lifecycle and its `Latest` are built and tested in process (§12.3), and the route is built with http.md §6's cutover. That is build order, and SLICES.md records it.
 
 ### 12.2 Release manifest and preview
 

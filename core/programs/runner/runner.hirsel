@@ -5542,7 +5542,7 @@ fn start_socket_refusal(tasks: Tasks, take socket: Socket, clock: Clock, at: u64
     }
 }
 
-pub fn serve[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[(), std.wsock.Error] waits {
+pub fn serve_wire[C: send](take listener: Listener, tasks: Tasks, clock: Clock, to_publisher: Sender[PubIn], c: WireConfig, max_sessions: u64, take proxies: List[std.wsock.Prefix], make: scoped[view] fn() -> Service[C], take allocate: own[send] fn(mut C, take ServiceAllocation) -> Result[ServicePlan, u16]) -> Result[(), std.wsock.Error] waits {
     if max_sessions == 0u64 || max_sessions > WIRE_OWNER_LIMIT || !wire_configuration(c) { return Error(Configuration) }
     // The caller supplies an allocator that already owns its Registry.
     let required = match serving_bytes(c, max_sessions, 0u64) { Ok(total) => total, Error(cap) => return Error(Allocation(cap)) }

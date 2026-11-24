@@ -368,7 +368,15 @@ operations it names; nothing else about them may be inferred from an implementat
   unchanged and `x` untaken. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
   return an element, `None` when empty, and admit nothing; `heap.pop` returns a least element
   by `<` ([SEM-7](semantics.md#sem-7-equality-and-order)), and `heap.peek` views the
-  element the next `pop` would return. `new` admits nothing and `len` counts elements. Both
+  element the next `pop` would return. A deque index counts from the front.
+  `deque.get(d, i)` views element `i`, and `deque.front` and `deque.back` the first and last,
+  each `None` past the end, as `list.get` does. `deque.set(mut d, i, take x)` replaces
+  element `i` and returns the old one. `deque.remove(mut d, i)` removes and returns element
+  `i`, keeping the others in order and moving at most `min(i, len - 1 - i)` of them.
+  `deque.swap_remove_back` and `deque.swap_remove_front` remove and return element `i`,
+  moving the back or front element into its place. Reads and these four admit nothing; the four fail with
+  `Bounds` when `i` is not below the length, as `list.set` does, leaving `d` unchanged and `x`
+  untaken. `new` admits nothing and `len` counts elements. Both
   grow by MEM-24 and never shrink. A `Deque` is cleaned from front to back, a `Heap` in an
   unspecified order. A heap compares with `<` on an `ordered` type, which never fails, so
   only `sort_stable` calls a caller's comparator. Both are core Hirsel code over private

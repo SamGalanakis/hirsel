@@ -62,12 +62,105 @@ pub fn push_front[T](mut d: Deque[T], take x: T) {
     slots_put(mut d.ring, d.head, take x)
 }
 
+// Logical index i counts from the front. Each accessor follows List's
+// convention: a view or None for reads, Bounds for a write or removal at
+// i >= len. None of them admits anything.
+pub fn get[T](d: Deque[T], i: u64) -> Option[View[T]] in d {
+    if i >= list.len(d.ring.raw) {
+        return None
+    }
+    Some(slots_view(d.ring, slot(d, i)))
+}
+
+pub fn front[T](d: Deque[T]) -> Option[View[T]] in d {
+    get(d, 0)
+}
+
+pub fn back[T](d: Deque[T]) -> Option[View[T]] in d {
+    get(d, int.wrapping_sub(list.len(d.ring.raw), 1))
+}
+
+// Replaces element i and returns the old one.
+pub fn set[T](mut d: Deque[T], i: u64, take x: T) -> T {
+    check_index(d, i)
+    let at = slot(d, i)
+    let old = slots_take(mut d.ring, at)
+    slots_put(mut d.ring, at, take x)
+    old
+}
+
+// Removes element i, keeping order: moves the shorter side by one, as
+// VecDeque::remove does.
+pub fn remove[T](mut d: Deque[T], i: u64) -> T {
+    check_index(d, i)
+    let count = list.len(d.ring.raw)
+    let head = d.head
+    let mask = int.wrapping_sub(list.capacity(d.ring.raw), 1)
+    let x = slots_take(mut d.ring, int.wrapping_add(head, i) & mask)
+    if i < int.wrapping_sub(int.wrapping_sub(count, 1), i) {
+        let mut j = i
+        while j > 0 {
+            let to = int.wrapping_add(head, j) & mask
+            j = int.wrapping_sub(j, 1)
+            slots_shift(mut d.ring, int.wrapping_add(head, j) & mask, to)
+        }
+        d.head = int.wrapping_add(head, 1) & mask
+    } else {
+        let mut j = i
+        while int.wrapping_add(j, 1) < count {
+            let to = int.wrapping_add(head, j) & mask
+            j = int.wrapping_add(j, 1)
+            slots_shift(mut d.ring, int.wrapping_add(head, j) & mask, to)
+        }
+    }
+    x
+}
+
+// Removes element i and moves the back element into its place.
+pub fn swap_remove_back[T](mut d: Deque[T], i: u64) -> T {
+    check_index(d, i)
+    let last = int.wrapping_sub(list.len(d.ring.raw), 1)
+    let at = slot(d, i)
+    let from = slot(d, last)
+    let x = slots_take(mut d.ring, at)
+    if i != last {
+        slots_shift(mut d.ring, from, at)
+    }
+    x
+}
+
+// Removes element i and moves the front element into its place.
+pub fn swap_remove_front[T](mut d: Deque[T], i: u64) -> T {
+    check_index(d, i)
+    let at = slot(d, i)
+    let head = d.head
+    let next = slot(d, 1)
+    let x = slots_take(mut d.ring, at)
+    if i != 0 {
+        slots_shift(mut d.ring, head, at)
+    }
+    d.head = next
+    x
+}
+
+// The ring slot of logical index i. Only meaningful for a non-empty ring.
+fn slot[T](d: Deque[T], i: u64) -> u64 {
+    int.wrapping_add(d.head, i) & int.wrapping_sub(list.capacity(d.ring.raw), 1)
+}
+
+// Bounds when i >= len, raised by indexing the slot list past its live count.
+fn check_index[T](d: Deque[T], i: u64) {
+    if i >= list.len(d.ring.raw) {
+        let _ = view d.ring.raw[i]
+    }
+}
+
 fn prepare_push[T](d: Deque[T], i: u64) {
     slots_unmark_spare(d.ring, i)
 }
 
-fn finish_prepared_push[T](mut d: Deque[T], i: u64, front: bool) {
-    if front {
+fn finish_prepared_push[T](mut d: Deque[T], i: u64, at_front: bool) {
+    if at_front {
         d.head = i
     }
     slots_publish_spare(mut d.ring, i)

@@ -29,18 +29,18 @@ The following deviations preserve Hirsel's ownership and API semantics:
   bounded-buffer API. Slice operations are endpoint pushes; iterator values
   are observed through indexed access and draining. Allocation-failure
   injection, exact capacity and pointer alias assertions are inapplicable.
-- Ring slots are `Option[unique T]`, rather than uninitialized memory.
-  Growth doubles from four slots and moves elements into a preinitialized
-  buffer. This preserves ownership and keeps endpoints amortized constant.
-  `get`, `front`, `back` and heap `peek` copy only copyable values; owned
-  resources leave through the pop operations.
-- The heap comparator is a unique, no-allocation, capability-free callback.
-  Construction takes an ordinary owned callback and makes it unique once,
-  including captured context; `push` and `pop` accept no comparator.
-  Zig's arbitrary-index removal regression runs directly on the shared
-  kernels because the public heap has no arbitrary removal API. Iterator,
-  allocator shrink and value-update APIs are not added; their storage or
-  update-specific assertions are outside the existing heap surface.
+- The ring is one `List` of uninhabited slots, whose length counts the live
+  slots, rather than Zig's uninitialized memory. Growth doubles from one slot
+  and relocates the live interval, at most two runs, into logical order at
+  slot 0. This preserves ownership and keeps endpoints amortized constant.
+  `get`, `front` and `back` return views, as `list.get` does. `set`, `remove`
+  (which moves the shorter side, as Rust's `VecDeque::remove` does) and
+  `swap_remove_back`/`swap_remove_front` follow `VecDeque`, but fail with
+  `Bounds` past the end, as `List` does, instead of returning `None`.
+- The heap is Rust's `BinaryHeap` hole sift over one `List`, minimum first by
+  `<` on an `ordered` element type; it stores no comparator. Its surface is
+  `new`, `len`, `push`, `pop` and `peek`. Zig's arbitrary-index removal,
+  iterator, allocator shrink and value-update APIs are not added.
 - The heap kernel retains the shared heapsort convention: downward sift is
   a max heap, upward sift a min heap. Priority queues reverse arguments for
   downward sift, avoiding overflow from negating `i32::MIN`.

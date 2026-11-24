@@ -305,19 +305,14 @@ fn remove_send(mut q: Deque[Pending], newest: bool, earliest: bool) -> Option[Pe
     if newest { return deque.pop_back(mut q) }
     if !earliest { return deque.pop_front(mut q) }
     let n = deque.len(q)
+    if n == 0u64 { return None }
     let mut chosen = 0u64
     let mut deadline = 18446744073709551615u64
     for i in 0u64 .. n {
-        let p = option.unwrap(deque.pop_front(mut q))
+        let p = option.unwrap(deque.get(q, i))
         if p.deadline < deadline { deadline = p.deadline; chosen = i }
-        deque.push_back(mut q, take p)
     }
-    let mut selected: Option[Pending] = None
-    for i in 0u64 .. n {
-        let p = option.unwrap(deque.pop_front(mut q))
-        if i == chosen { selected = Some(take p) } else { deque.push_back(mut q, take p) }
-    }
-    selected
+    Some(deque.remove(mut q, chosen))
 }
 
 pub fn write_verdicts(err: Stderr, take events: List[Obs], end: Obs) -> () waits {

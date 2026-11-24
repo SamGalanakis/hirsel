@@ -235,6 +235,217 @@ fn arc_share_unwrap() -> u64 {
     n
 }
 
+// List-model differential. Pushes and pops at both ends leave a capacity-8 ring
+// empty at head h; then push_back 2..n and push_front 1 give [1..n] starting at slot
+// h - 1, wrapped whenever h - 1 + n > 8. For every h, n and i: get, front and back
+// read the model, and each indexed write or removal leaves the model's order.
+fn ring_at(h: u64, n: u64) -> Deque[u64] {
+    let mut d: Deque[u64] = deque.new()
+    for i in 0u64 .. 8 {
+        deque.push_back(mut d, 100 + i)
+    }
+    for _ in 0u64 .. h {
+        let _ = deque.pop_front(mut d)
+    }
+    while deque.len(d) > 0 {
+        let _ = deque.pop_back(mut d)
+    }
+    for x in 2u64 .. n + 1 {
+        deque.push_back(mut d, x)
+    }
+    deque.push_front(mut d, 1)
+    d
+}
+
+fn model(n: u64) -> List[u64] {
+    let mut m: List[u64] = list.new()
+    for x in 1u64 .. n + 1 {
+        list.push(mut m, x)
+    }
+    m
+}
+
+fn read_or_zero(x: Option[View[u64]]) -> u64 {
+    match x {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+// Every get(j), front and back equal the model, get(len) is None, and draining
+// from the front yields the model in order.
+fn agrees(take q: Deque[u64], m: List[u64]) -> bool {
+    let mut d = take q
+    let n = list.len(m)
+    if deque.len(d) != n {
+        return false
+    }
+    for j in 0u64 .. n {
+        if read_or_zero(deque.get(d, j)) != m[j] {
+            return false
+        }
+    }
+    let ends_ok = if n == 0 {
+        read_or_zero(deque.front(d)) == 0 && read_or_zero(deque.back(d)) == 0
+    } else {
+        read_or_zero(deque.front(d)) == m[0] && read_or_zero(deque.back(d)) == m[n - 1]
+    }
+    if !ends_ok || read_or_zero(deque.get(d, n)) != 0 {
+        return false
+    }
+    for j in 0u64 .. n {
+        if option.unwrap(deque.pop_front(mut d)) != m[j] {
+            return false
+        }
+    }
+    true
+}
+
+// The model without element i, in order.
+fn without(m: List[u64], i: u64) -> List[u64] {
+    let mut r: List[u64] = list.new()
+    for j in 0u64 .. list.len(m) {
+        if j != i {
+            list.push(mut r, m[j])
+        }
+    }
+    r
+}
+
+// expect: run model_get() = true
+fn model_get() -> bool {
+    for n in 1u64 .. 9 {
+        for h in 0u64 .. 8 {
+            if !agrees(ring_at(h, n), model(n)) {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// expect: run model_set() = true
+fn model_set() -> bool {
+    for n in 1u64 .. 9 {
+        for h in 0u64 .. 8 {
+            for i in 0u64 .. n {
+                let mut d = ring_at(h, n)
+                let mut m = model(n)
+                let old = deque.set(mut d, i, 50 + i)
+                if old != list.set(mut m, i, 50 + i) || !agrees(take d, m) {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+// expect: run model_remove() = true
+fn model_remove() -> bool {
+    for n in 1u64 .. 9 {
+        for h in 0u64 .. 8 {
+            for i in 0u64 .. n {
+                let mut d = ring_at(h, n)
+                let m = model(n)
+                if deque.remove(mut d, i) != m[i] || !agrees(take d, without(m, i)) {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+// swap_remove_back(i): the model with element i replaced by its last, then the
+// last dropped; swap_remove_front(i): element i replaced by its first, then the
+// first dropped.
+// expect: run model_swap_remove() = true
+fn model_swap_remove() -> bool {
+    for n in 1u64 .. 9 {
+        for h in 0u64 .. 8 {
+            for i in 0u64 .. n {
+                let mut b = ring_at(h, n)
+                let mut mb = model(n)
+                let last = mb[n - 1]
+                let _ = list.set(mut mb, i, last)
+                let _ = list.pop(mut mb)
+                if deque.swap_remove_back(mut b, i) != i + 1 || !agrees(take b, mb) {
+                    return false
+                }
+                let mut f = ring_at(h, n)
+                let mut mf = model(n)
+                let _ = list.set(mut mf, i, 1)
+                if deque.swap_remove_front(mut f, i) != i + 1 || !agrees(take f, without(mf, 0)) {
+                    return false
+                }
+            }
+        }
+    }
+    true
+}
+
+// expect: run empty_ends() = true
+fn empty_ends() -> bool {
+    agrees(deque.new(), list.new())
+}
+
+// Owned elements on [a@3, b@0, c@1, d@2]: remove(1) moves a from slot 3 to 0 across
+// the wrap and returns b; set(1, b) returns c; swap_remove_back(1) returns b and
+// leaves [a, d], cleaned at the end. Out: replaced, swapped, front, back.
+// expect: run owned_remove() = "cbad"
+fn owned_remove() -> String {
+    let mut d: Deque[String] = deque.new()
+    for _ in 0u64 .. 3 {
+        deque.push_back(mut d, string.from("x"))
+    }
+    deque.push_back(mut d, string.from("a"))
+    for _ in 0u64 .. 3 {
+        let _ = deque.pop_front(mut d)
+    }
+    deque.push_back(mut d, string.from("b"))
+    deque.push_back(mut d, string.from("c"))
+    deque.push_back(mut d, string.from("d"))
+    let removed = deque.remove(mut d, 1)
+    let replaced = deque.set(mut d, 1, take removed)
+    let swapped = deque.swap_remove_back(mut d, 1)
+    let mut s = string.new()
+    string.push(mut s, replaced)
+    string.push(mut s, swapped)
+    if let Some(x) = deque.front(d) {
+        string.push(mut s, x)
+    }
+    if let Some(x) = deque.back(d) {
+        string.push(mut s, x)
+    }
+    s
+}
+
+// Writes and removals at len fail with Bounds, on a wrapped ring and an empty one.
+// expect: run set_past_end() = fail Bounds
+fn set_past_end() -> u64 {
+    let mut d = ring_at(6, 7)
+    deque.set(mut d, 7, 0)
+}
+
+// expect: run remove_past_end() = fail Bounds
+fn remove_past_end() -> u64 {
+    let mut d = ring_at(6, 7)
+    deque.remove(mut d, 7)
+}
+
+// expect: run swap_remove_back_past_end() = fail Bounds
+fn swap_remove_back_past_end() -> u64 {
+    let mut d = ring_at(6, 7)
+    deque.swap_remove_back(mut d, 7)
+}
+
+// expect: run swap_remove_front_empty() = fail Bounds
+fn swap_remove_front_empty() -> u64 {
+    let mut d: Deque[u64] = deque.new()
+    deque.swap_remove_front(mut d, 0)
+}
+
 // The primary cause of a caught failure, when it is a refused admission.
 fn refusal[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
     match r {

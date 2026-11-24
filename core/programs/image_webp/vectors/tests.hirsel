@@ -31,8 +31,8 @@ fn check_still(f: Foreign[webp.Webp], d: Dir, stem: String, scaled: bool) waits 
     if scaled {
         let expected_scaled = load(d, stem, ".scaled")
         let mut rgba_scaled = buffer(list.len(expected_scaled))
-        let crop = Some(webp.Crop(x: 2, y: 4, size: webp.Size(width: 96, height: 80)))
-        let scale = Some(webp.Size(width: 37, height: 29))
+        let crop = Some(image_core.image.Rect(x: 2, y: 4, width: 96, height: 80))
+        let scale = Some(image_core.image.Size(width: 37, height: 29))
         let size_scaled = result.unwrap(webp.decode(f, input, limits(1), crop, scale, mut rgba_scaled))
         if rgba_scaled != expected_scaled || size_scaled.width != 37 || size_scaled.height != 29 {
             fail("cropped and scaled RGBA differs from libwebp")
@@ -64,7 +64,7 @@ fn check_decode_route(f: Foreign[webp.Webp], d: Dir, tasks: Tasks, stem: String,
 fn check_encoding(f: Foreign[webp.Webp], d: Dir, name: String, encoding: webp.Encoding) waits {
     let rgba = load(d, "encode", ".rgba")
     let expected = load(d, name, ".webp")
-    let size = webp.Size(width: 37, height: 29)
+    let size = image_core.image.Size(width: 37, height: 29)
     let mut output = buffer(list.len(expected))
     let count = result.unwrap(webp.encode(f, rgba, size, encoding, mut output))
     let size_written: u64 = int.widen(count)
@@ -140,7 +140,7 @@ fn check_limits(f: Foreign[webp.Webp], d: Dir) waits {
     let Error(BufferTooSmall) = webp.decode(f, still, limits(1), None, None, mut output) else {
         fail("still decoder accepted short RGBA")
     }
-    let odd = Some(webp.Crop(x: 1, y: 0, size: webp.Size(width: 1, height: 1)))
+    let odd = Some(image_core.image.Rect(x: 1, y: 0, width: 1, height: 1))
     let Error(InvalidOptions) = webp.decode(f, still, limits(1), odd, None, mut output) else {
         fail("still decoder silently rounded down the crop origin")
     }

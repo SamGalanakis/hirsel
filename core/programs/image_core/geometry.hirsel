@@ -1,3 +1,8 @@
+pub type Size {
+    width: u32,
+    height: u32
+}
+
 pub type Rect {
     x: u32,
     y: u32,

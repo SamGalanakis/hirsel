@@ -29,9 +29,9 @@
     "lines": 1409
   },
   "core/programs/runner/runner.hirsel": {
-    "lines": 7197,
-    "raise_revision": 7,
-    "reason": "bucket-backing-t1-2022"
+    "lines": 7042,
+    "raise_revision": 8,
+    "reason": "m3-s3-slots-2010"
   },
   "core/programs/runner/runner_calls.hirsel": {
     "lines": 2507
@@ -46,9 +46,9 @@
     "lines": 2982
   },
   "core/programs/store/store.hirsel": {
-    "lines": 7368,
-    "raise_revision": 15,
-    "reason": "cell-log-build-2018"
+    "lines": 7169,
+    "raise_revision": 16,
+    "reason": "m3-s3-slots-2010"
   },
   "core/std/char.hirsel": {
     "lines": 4741

@@ -430,7 +430,7 @@ fn l70_cache_frame(stamp: u64) -> Arc[TieredFrame] {
 fn test_l70_cache_overlap() -> Result[(), Error] {
     // One legal Reader and exactly two 1,049-byte BLOB frames.
     let mut private_cache = new_tiered_cache(17762354)
-    tiered_cache_reserve_reader(mut private_cache, 17760256)?
+    let grant = tiered_cache_reserve_reader(mut private_cache, TieredReaderGrant(store: StoreId(hi: 0, lo: 0), opened: 0, pin_bytes: 17760256))?
     tiered_cache_admit(mut private_cache, l70_cache_frame(1))
     tiered_cache_admit(mut private_cache, l70_cache_frame(2))
     if private_cache.cached_bytes != 2098 || private_cache.reader_reserved != 17760256 {
@@ -459,7 +459,8 @@ fn test_l70_cache_overlap() -> Result[(), Error] {
     if tiered_fifo_len(private_cache.main) != 1 || private_cache.cached_bytes != 2098 {
         fail("L70: a remembered key did not return to the main queue")
     }
-    tiered_cache_release_reader(mut private_cache, 17760256)
+    let _ = take grant
+    tiered_cache_refresh_grants(mut private_cache)
     if private_cache.reader_reserved != 0 {
         fail("L70: dropping the Reader did not refund its reservation")
     }
@@ -589,7 +590,7 @@ fn test_l65_pager_directory(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     let inventory = PagePack(class: 3, frames: 1, live: 80, payload_bytes: 196, index: 168)
     let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 0xc3a9635c753cb40c, stamp: 40)
     let demand = TieredPagerTarget(edge: TieredPage(ptr), direction: TieredPoint, inventory: inventory, object: None, next_stamp: 42, deadline: 0)
-    let (requests, take worker) = start_tiered_pager(tasks, owner, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 4096, 1048576, 4)
     let verified = l65_pager_exchange(requests, demand)
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))

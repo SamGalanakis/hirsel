@@ -24,6 +24,7 @@ type FollowBackend = FollowLog(Dir) | FollowObject(ObjectFollowerIo)
 
 pub opaque type Follower {
     open: u64,
+    pager: Option[Sender[TieredPagerMessage]],
     backend: FollowBackend,
     tasks: Tasks,
     clock: Clock,
@@ -98,7 +99,7 @@ pub fn follower(mut source: Followers, tasks: Tasks, take authority: Authority, 
         },
     }
     source.issued = minted
-    Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, backend: take backend, tasks, clock: c, ceiling: o.resident_limit, capture: take captured, stopped: None))
+    Ok(Follower(open: HISTORY_OPEN_LIMIT | minted, pager: None, backend: take backend, tasks, clock: c, ceiling: o.resident_limit, capture: take captured, stopped: None))
 }
 
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {

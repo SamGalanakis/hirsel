@@ -661,6 +661,7 @@ fn store_capacity(cause: store.StoreCapacity) -> Capacity {
         Journal(c) => c,
         Resident(c) => c,
         Allocation(c) => c,
+        Cache(c) => c,
     }
 }
 
@@ -1027,6 +1028,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Full(Journal(cap)) => { string.push(mut line, "the journal options do not fit: "); push_capacity(mut line, cap) },
         Full(Resident(cap)) => { string.push(mut line, "the store's resident bound is full: "); push_capacity(mut line, cap) },
         Full(Allocation(cap)) => { string.push(mut line, "out of memory opening the store: "); push_capacity(mut line, cap) },
+        Full(Cache(cap)) => { string.push(mut line, "the store's cache partition is full: "); push_capacity(mut line, cap) },
         Limit(_) => string.push(mut line, "a store limit was exceeded"),
         Schema(_) => string.push(mut line, "a table's stored schema differs from this build's handles"),
         Stale(_) => string.push(mut line, "a stale table handle"),
@@ -3355,10 +3357,12 @@ fn answer_trigger[G: send, H: shareable + inert + send](mut hd: Head[G, H], driv
         Snap(a, take answer) => {
             let reply: Result[(store.Reader, store.Snapshot), TriggerCallError] = if stopped { Error(Closed) } else {
                 let seen = store.snapshot(hd.db)
-                let read_handle = store.reader(hd.db, store.VALUE_LIMIT + 1048576u64)?
-                match checked_boundary(triggers.boundary(read_handle, seen, drive.tables, a)) {
-                    Ok(()) => Ok((take read_handle, seen)),
-                    Error(take problem) => Error(take problem),
+                match store.reader(hd.db, store.VALUE_LIMIT + 1048576u64) {
+                    Ok(take read_handle) => match checked_boundary(triggers.boundary(read_handle, seen, drive.tables, a)) {
+                        Ok(()) => Ok((take read_handle, seen)),
+                        Error(take problem) => Error(take problem),
+                    },
+                    Error(take problem) => Error(Store(take problem)),
                 }
             }
             let _ = channel.send(answer, take reply)

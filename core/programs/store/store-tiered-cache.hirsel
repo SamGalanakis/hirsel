@@ -37,6 +37,12 @@ type TieredCacheEntry: send {
     frequency: u8
 }
 
+type TieredReaderGrant: shareable + send {
+    store: StoreId,
+    opened: u64,
+    pin_bytes: u64
+}
+
 type TieredCache: send {
     entries: Map[TieredCacheKey, TieredCacheEntry],
     small: TieredFifo[TieredCacheKey],
@@ -46,6 +52,7 @@ type TieredCache: send {
     ghost_next: u64,
     ghost_limit: u64,
     overlap: List[Option[Arc[TieredFrame]]],
+    reader_grants: List[Option[Arc[TieredReaderGrant]]],
     cached_bytes: u64,
     small_bytes: u64,
     overlap_bytes: u64,
@@ -55,7 +62,7 @@ type TieredCache: send {
 }
 
 fn new_tiered_cache(shared: u64) -> TieredCache {
-    TieredCache(entries: map.new(), small: tiered_fifo(), main: tiered_fifo(), ghosts: tiered_fifo(), ghost_numbers: map.new(), ghost_next: 1, ghost_limit: shared / 24, overlap: list.new(), cached_bytes: 0, small_bytes: 0, overlap_bytes: 0, reader_reserved: 0, shared_bytes: shared, small_limit: shared / 10)
+    TieredCache(entries: map.new(), small: tiered_fifo(), main: tiered_fifo(), ghosts: tiered_fifo(), ghost_numbers: map.new(), ghost_next: 1, ghost_limit: shared / 24, overlap: list.new(), reader_grants: list.new(), cached_bytes: 0, small_bytes: 0, overlap_bytes: 0, reader_reserved: 0, shared_bytes: shared, small_limit: shared / 10)
 }
 
 fn tiered_cache_key(facts: TieredFrameId) -> TieredCacheKey {
@@ -100,6 +107,23 @@ fn tiered_cache_refresh_overlap(mut pager_cache: TieredCache) {
     list.truncate(mut pager_cache.overlap, kept)
 }
 
+fn tiered_cache_refresh_grants(mut pager_cache: TieredCache) {
+    let mut kept = 0u64
+    for slot in 0u64 .. list.len(pager_cache.reader_grants) {
+        let grant = option.unwrap(list.set(mut pager_cache.reader_grants, slot, None))
+        match arc.try_unwrap(take grant) {
+            Ok(released) => {
+                pager_cache.reader_reserved -= released.pin_bytes
+            },
+            Error(take retained_grant) => {
+                let _ = list.set(mut pager_cache.reader_grants, kept, Some(take retained_grant))
+                kept += 1
+            },
+        }
+    }
+    list.truncate(mut pager_cache.reader_grants, kept)
+}
+
 fn tiered_cache_ghost(mut pager_cache: TieredCache, key: TieredCacheKey) {
     if pager_cache.ghost_limit == 0 {
         return
@@ -130,11 +154,11 @@ fn tiered_cache_ghost(mut pager_cache: TieredCache, key: TieredCacheKey) {
     list.push(mut pager_cache.ghosts.queue, (key, serial))
 }
 
-fn tiered_cache_evict(mut pager_cache: TieredCache) -> bool {
+fn tiered_cache_evict(mut pager_cache: TieredCache) -> Result[bool, Capacity] {
     let has_small = tiered_fifo_len(pager_cache.small) != 0
     let has_main = tiered_fifo_len(pager_cache.main) != 0
     if !has_small && !has_main {
-        return false
+        return Ok(false)
     }
     let from_small = has_small && (pager_cache.small_bytes > pager_cache.small_limit || !has_main)
     let key = if from_small {
@@ -147,9 +171,7 @@ fn tiered_cache_evict(mut pager_cache: TieredCache) -> bool {
         (tiered_frame_charge(held.frame), held.frequency)
     }
     if (from_small && frequency > 1) || (!from_small && frequency != 0) {
-        if let Error(_) = tiered_fifo_space(mut pager_cache.main) {
-            return false
-        }
+        tiered_fifo_space(mut pager_cache.main)?
         if from_small {
             tiered_fifo_remove(mut pager_cache.small)
             pager_cache.small_bytes -= charge
@@ -160,11 +182,9 @@ fn tiered_cache_evict(mut pager_cache: TieredCache) -> bool {
             })
         }
         list.push(mut pager_cache.main.queue, key)
-        return true
+        return Ok(true)
     }
-    if let Error(_) = list.try_reserve(mut pager_cache.overlap, 1) {
-        return false
-    }
+    list.try_reserve(mut pager_cache.overlap, 1)?
     let TieredCacheEntry(frame: take retired, ..) = option.unwrap(map.remove(mut pager_cache.entries, key))
     pager_cache.cached_bytes -= charge
     if from_small {
@@ -181,21 +201,16 @@ fn tiered_cache_evict(mut pager_cache: TieredCache) -> bool {
             list.push(mut pager_cache.overlap, Some(take shared_frame))
         },
     }
-    true
+    Ok(true)
 }
 
-fn tiered_cache_room(mut pager_cache: TieredCache, extra: u64) -> bool {
+fn tiered_cache_room(mut pager_cache: TieredCache, extra: u64) -> Result[u64, Capacity] {
+    tiered_cache_refresh_grants(mut pager_cache)
     tiered_cache_refresh_overlap(mut pager_cache)
     loop {
-        let reserved = pager_cache.reader_reserved + pager_cache.overlap_bytes
-        if extra > pager_cache.shared_bytes - reserved {
-            return false
-        }
-        if pager_cache.cached_bytes <= pager_cache.shared_bytes - reserved - extra {
-            return true
-        }
-        if !tiered_cache_evict(mut pager_cache) {
-            return false
+        let available = pager_cache.shared_bytes - pager_cache.reader_reserved - pager_cache.overlap_bytes - pager_cache.cached_bytes
+        if available >= extra || !tiered_cache_evict(mut pager_cache)? {
+            return Ok(available)
         }
     }
 }
@@ -206,8 +221,9 @@ fn tiered_cache_admit(mut pager_cache: TieredCache, frame: Arc[TieredFrame]) {
         return
     }
     let charge = tiered_frame_charge(frame)
-    if !tiered_cache_room(mut pager_cache, charge) {
-        return
+    match tiered_cache_room(mut pager_cache, charge) {
+        Ok(available) if available >= charge => (),
+        _ => return,
     }
     if let Error(_) = map.try_reserve(mut pager_cache.entries, 1) {
         return
@@ -229,18 +245,25 @@ fn tiered_cache_admit(mut pager_cache: TieredCache, frame: Arc[TieredFrame]) {
     map.insert(mut pager_cache.entries, key, TieredCacheEntry(frame: arc.share(frame), frequency: 0))
 }
 
-fn tiered_cache_reserve_reader(mut pager_cache: TieredCache, requested: u64) -> Result[(), Error] {
+fn check_reader_pin_bytes(requested: u64) -> Result[(), Error] {
     if requested < VALUE_LIMIT + 1048576 {
         return Error(Missing("pin_bytes"))
     }
-    if !tiered_cache_room(mut pager_cache, requested) {
-        let available = pager_cache.shared_bytes - pager_cache.reader_reserved - pager_cache.overlap_bytes - pager_cache.cached_bytes
-        return Error(Full(Resident(Capacity(requested: requested, available: available))))
-    }
-    pager_cache.reader_reserved += requested
     Ok(())
 }
 
-fn tiered_cache_release_reader(mut pager_cache: TieredCache, reserved: u64) {
-    pager_cache.reader_reserved -= reserved
+fn tiered_cache_reserve_reader(mut pager_cache: TieredCache, grant: TieredReaderGrant) -> Result[Arc[TieredReaderGrant], Error] {
+    let requested = grant.pin_bytes
+    check_reader_pin_bytes(requested)?
+    let available = capacity(tiered_cache_room(mut pager_cache, requested))?
+    if available < requested {
+        return Error(Full(Cache(Capacity(requested: requested, available: available))))
+    }
+    capacity(list.try_reserve(mut pager_cache.reader_grants, 1))?
+    let granted = disk_allocation(fn() -> Result[Arc[TieredReaderGrant], Error] {
+        Ok(arc.new(grant))
+    })?
+    pager_cache.reader_reserved += requested
+    list.push(mut pager_cache.reader_grants, Some(arc.share(granted)))
+    Ok(take granted)
 }

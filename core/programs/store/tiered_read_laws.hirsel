@@ -109,9 +109,98 @@ fn test_l62_pager_point_batch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
     list.push(mut branches, std.page.Entry(key: key_word(42), cell: Child(std.page.Branch(child: leaf, rows: 1, charge: 86))))
     let branch_image = page_result(std.page.encode(branches, 1, 50, Collection))?
     let root = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(branch_image))?
-    let (requests, take worker) = start_tiered_pager(tasks, owner, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let (requests, take worker) = start_tiered_pager(tasks, owner, 0, PagerDirectory(fixtures), 4096, 1048576, 4)
     let delivered = l62_deliver_branch(requests, root, leaf)
     let _ = take requests
     let _ = result.unwrap(task.join(take worker))
     delivered
+}
+
+fn l62_grant_cache_frames(owner: StoreId, retain_all: bool) -> Result[(), Error] {
+    let mut cache_state = new_tiered_cache(96 * 1048576)
+    let original = tiered_cache_reserve_reader(mut cache_state, TieredReaderGrant(store: owner, opened: 1, pin_bytes: 32 * 1048576))?
+    let mut held: List[Arc[TieredFrame]] = list.with_capacity(7)
+    for slot in 0u64 .. 7 {
+        let value_len = 8 * 1048576u64 - 24
+        let mut stored: Bytes = list.with_capacity(value_len)
+        list.fill(mut stored, value_len, 106u8)
+        let reference = std.page.BlobRef(stamp: slot + 1, len: value_len, checksum: 0, pack: slot + 1, offset: 72, body: 0)
+        let frame = arc.new(TieredFrame(identity: tiered_frame_id(TieredBlob(reference)), payload: TieredValue(arc.new(take stored))))
+        if slot == 0 || retain_all {
+            list.push(mut held, arc.share(frame))
+        }
+        tiered_cache_admit(mut cache_state, frame)
+    }
+    if !capacity(tiered_cache_evict(mut cache_state))? || cache_state.cached_bytes != 48 * 1048576 || cache_state.overlap_bytes != 8 * 1048576 {
+        fail("L62: expected 48 MiB cached and 8 MiB of overlap")
+    }
+    let admission = tiered_cache_reserve_reader(mut cache_state, TieredReaderGrant(store: owner, opened: 1, pin_bytes: 24 * 1048576))
+    if retain_all {
+        let Error(Full(Cache(problem))) = take admission else {
+            fail("L62: overlap must leave the grant too little room")
+        }
+        if problem.requested != 24 * 1048576 || problem.available != 8 * 1048576 || cache_state.reader_reserved != 32 * 1048576 {
+            fail("L62: refusal did not report the reclaimable shared room")
+        }
+    } else {
+        let added = admission?
+        if added.pin_bytes != 24 * 1048576 || cache_state.cached_bytes != 32 * 1048576 || cache_state.reader_reserved != 56 * 1048576 || cache_state.overlap_bytes != 8 * 1048576 {
+            fail("L62: a 24 MiB grant must evict exactly 16 MiB")
+        }
+    }
+    let _ = take original
+    let _ = take held
+    Ok(())
+}
+
+fn l62_reader_grants(db: Db) -> Result[(), Error] waits {
+    let Error(Missing(field)) = reader(db, 0) else {
+        fail("L62: Tiered Readers must request at least a blob and a path")
+    }
+    if field != "pin_bytes" {
+        fail("L62: wrong field for a short Reader reservation")
+    }
+    {
+        let held = reader(db, 32 * 1048576)?
+        let Some(grant) = view held.grant else {
+            fail("L62: Reader must own its reservation")
+        }
+        if !same(grant.store, db.store) || grant.opened != open_number(db) || grant.pin_bytes != 32 * 1048576 {
+            fail("L62: grant does not belong to this open")
+        }
+        let Error(Full(Cache(problem))) = reader(db, 24 * 1048576) else {
+            fail("L62: another Reader charged the writer's partition")
+        }
+        if problem.requested != 24 * 1048576 || problem.available != 0 {
+            fail("L62: a live reservation did not consume all shared room")
+        }
+    }
+    // The marker for an abandoned reply must also be reclaimable.
+    let (answer, abandoned): (Sender[Result[Arc[TieredReaderGrant], Error]], Receiver[Result[Arc[TieredReaderGrant], Error]]) = channel.new(1)
+    let _ = take abandoned
+    let Some(requests) = view db.pager else {
+        fail("L62: fixture pager is missing")
+    }
+    channel.send(requests, PagerReserve(32 * 1048576, take answer)) ?=> |_| Io(Closed)
+    let _ = reader(db, 32 * 1048576)?
+    Ok(())
+}
+
+@test
+fn test_l62_reader_reservation(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = test_db(c, 2147483648)
+    {
+        let memory_reader = reader(db, 0)?
+        if let Some(_) = view memory_reader.grant {
+            fail("L62: a Memory open reserved shared bytes")
+        }
+    }
+    l62_grant_cache_frames(db.store, false)?
+    l62_grant_cache_frames(db.store, true)?
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(d), 32 * 1048576, 1048576, 4)
+    db.pager = Some(take requests)
+    let admitted = l62_reader_grants(db)
+    let _ = take db
+    let _ = result.unwrap(task.join(take worker))
+    admitted
 }

@@ -993,5 +993,5 @@ fn scan_matches_rows(s: Snapshot, sh: Table[u64, u64], low: u64, high: u64, hi: 
 }
 
 fn law_reader(s: Snapshot) -> Reader {
-    result.unwrap(make_reader(s.store, s.open))
+    result.unwrap(make_reader(s.store, s.open, None))
 }

@@ -24,24 +24,25 @@ type TieredPointDemand: send {
     deadline: u64
 }
 
-type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[List[Arc[TieredFrame]], Error]]) | PagerReserve(u64, Sender[Result[(), Error]]) | PagerRelease(u64)
+type TieredPagerMessage: send = PagerRead(TieredPagerTarget, Sender[Result[Arc[TieredFrame], Error]]) | PagerPoint(TieredPointDemand, Sender[Result[List[Arc[TieredFrame]], Error]]) | PagerReserve(u64, Sender[Result[Arc[TieredReaderGrant], Error]])
 
 type TieredPagerStart: send {
     store: StoreId,
+    opened: u64,
     authority: TieredPagerSource,
     inbox: Receiver[TieredPagerMessage],
     shared_bytes: u64
 }
 
-fn start_tiered_pager(tasks: Tasks, owner: StoreId, take authority: TieredPagerSource, shared: u64, task_limit: u64, queue_slots: u64) -> (Sender[TieredPagerMessage], Task[()]) {
+fn start_tiered_pager(tasks: Tasks, owner: StoreId, opened: u64, take authority: TieredPagerSource, shared: u64, task_limit: u64, queue_slots: u64) -> (Sender[TieredPagerMessage], Task[()]) {
     let (requests, incoming): (Sender[TieredPagerMessage], Receiver[TieredPagerMessage]) = channel.new(queue_slots)
-    let launch = TieredPagerStart(store: owner, authority: take authority, inbox: take incoming, shared_bytes: shared)
+    let launch = TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, shared_bytes: shared)
     let worker = task.spawn(tasks, bytes task_limit, take launch, run_tiered_pager)
     (take requests, take worker)
 }
 
 fn run_tiered_pager(take launch: TieredPagerStart) waits {
-    let TieredPagerStart(store: owner, authority: take authority, inbox: take incoming, shared_bytes: shared) = take launch
+    let TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, shared_bytes: shared) = take launch
     let mut input = match take authority {
         PagerDirectory(d) => PagerLocal(d),
         PagerBucket(take requests) => PagerObjects(std.object.attach(take requests)),
@@ -58,12 +59,20 @@ fn run_tiered_pager(take launch: TieredPagerStart) waits {
                 let _ = channel.send(answer, take delivered)
             },
             PagerReserve(amount, answer) => {
-                let reserved = tiered_cache_reserve_reader(mut private_cache, amount)
-                let _ = channel.send(answer, take reserved)
+                let reserved = tiered_cache_reserve_reader(mut private_cache, TieredReaderGrant(store: owner, opened: opened, pin_bytes: amount))
+                let _ = channel.try_send(answer, take reserved)
             },
-            PagerRelease(amount) => tiered_cache_release_reader(mut private_cache, amount),
         }
     }
+}
+
+fn pager_reader_grant(requests: Sender[TieredPagerMessage], pin_bytes: u64) -> Result[Arc[TieredReaderGrant], Error] waits {
+    check_reader_pin_bytes(pin_bytes)?
+    let (answer, granted) = disk_allocation(fn() -> Result[(Sender[Result[Arc[TieredReaderGrant], Error]], Receiver[Result[Arc[TieredReaderGrant], Error]]), Error] {
+        Ok(channel.new(1))
+    })?
+    channel.send(requests, PagerReserve(pin_bytes, take answer)) ?=> |_| Io(Closed)
+    channel.receive(granted) ?=> |_| Io(Closed)
 }
 
 fn tiered_point_delivery(requests: Sender[TieredPagerMessage], take demand: TieredPointDemand) -> Result[List[Arc[TieredFrame]], Error] waits {

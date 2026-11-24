@@ -9,7 +9,8 @@ type ReadAccess {
 }
 
 pub opaque resource type Reader: send {
-    access: ReadAccess
+    access: ReadAccess,
+    grant: Option[Arc[TieredReaderGrant]]
 } drop(owned_reader) {}
 
 fn hot_read_access(id: StoreId, opened: u64, captured: Snapshot) -> Result[(), Error] {
@@ -19,27 +20,35 @@ fn hot_read_access(id: StoreId, opened: u64, captured: Snapshot) -> Result[(), E
     Ok(())
 }
 
-fn make_reader(id: StoreId, opened: u64) -> Result[Reader, Error] {
+fn make_reader(id: StoreId, opened: u64, take grant: Option[Arc[TieredReaderGrant]]) -> Result[Reader, Error] {
     let access = ReadAccess(store: id, opened: opened, check: hot_read_access)
-    match Reader(access: access) {
+    match Reader(access: access, grant: take grant) {
         Ok(take opened_reader) => Ok(take opened_reader),
         Error((problem, _)) => Error(Full(Allocation(problem))),
     }
 }
 
-pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] {
-    make_reader(db.store, open_number(db))
+fn open_reader(id: StoreId, opened: u64, pager: Option[Sender[TieredPagerMessage]], pin_bytes: u64) -> Result[Reader, Error] waits {
+    let grant: Option[Arc[TieredReaderGrant]] = match pager {
+        Some(requests) => Some(pager_reader_grant(requests, pin_bytes)?),
+        None => None,
+    }
+    make_reader(id, opened, take grant)
 }
 
-pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error] {
-    make_reader(f.capture.store, f.open)
+pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] waits {
+    open_reader(db.store, open_number(db), db.pager, pin_bytes)
 }
 
-pub fn read_only_reader(source: ReadOnly, pin_bytes: u64) -> Result[Reader, Error] {
-    make_reader(source.snapshot.store, source.snapshot.open)
+pub fn follower_reader(f: Follower, pin_bytes: u64) -> Result[Reader, Error] waits {
+    open_reader(f.capture.store, f.open, f.pager, pin_bytes)
 }
 
-pub fn staged_reader(source: Preparation, pin_bytes: u64) -> Result[Reader, Error] {
+pub fn read_only_reader(source: ReadOnly, pin_bytes: u64) -> Result[Reader, Error] waits {
+    open_reader(source.snapshot.store, source.snapshot.open, None, pin_bytes)
+}
+
+pub fn staged_reader(source: Preparation, pin_bytes: u64) -> Result[Reader, Error] waits {
     reader(source.db, pin_bytes)
 }
 

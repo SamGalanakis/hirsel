@@ -5460,7 +5460,7 @@ fn wire_apply_plan[G: send, B: send](mut s: WireSession[G, B], mut work: WireWor
 fn wire_start_granted[G: send, B: send](mut s: WireSession[G, B], mut work: WireWork, take caller: Caller, take sent: Send, take key: Bytes, stream: StreamId, take reply: Bytes) -> Result[(), u16] {
     let launch = replace(mut s.launch, None)
     let named = result.unwrap(store.stream_key_bytes(sent.stream))
-    let Send(stream: _, key: _, p: p, arg: take argument, digest: digest, deadline: deadline, budget: _) = take sent
+    let Send(stream: _, key: _, p: p, arg: take argument, digest: digest, deadline: deadline, ..) = take sent
     let copied: Option[G] = match s.wire {
         Some(w) => match w.grant { Some(g) => Some((g.duplicate)(g.value)), None => None },
         None => None,

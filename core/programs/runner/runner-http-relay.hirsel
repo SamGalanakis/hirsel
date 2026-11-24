@@ -267,7 +267,7 @@ fn relay_forward(mut s: RelayState, id: u64, sent: Send) -> bool {
     let seed = result.unwrap(owner_seed(s.owner))
     let receiver = RelayRecipient(to: channel.sender(s.inbox), position: id, backing: list.with_capacity(DONE_MAX))
     let owned = Send(stream: clone(sent.stream), key: std.http.copy_bytes(sent.key), p: sent.p, arg: std.http.copy_bytes(sent.arg),
-        digest: sent.digest, deadline: sent.deadline, budget: sent.budget)
+        digest: sent.digest, deadline: sent.deadline, budget: sent.budget, expires_at_ms: sent.expires_at_ms)
     let req = prepared_request(s.owner, take seed, take owned, RelayReply(take receiver))
     if let Posted = try_head(s.owner.head, take req) {
         list.push(mut s.positions, RelayPosition(id: id, stream: clone(sent.stream), position: sent.p, digest: sent.digest))

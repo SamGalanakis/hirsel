@@ -176,6 +176,15 @@ fn http_sse_reset(version: u64) -> std.stream.MeasuredEvent {
     std.stream.MeasuredEvent(length: length, body: take body, gate: None)
 }
 
+fn http_sse_expired() -> std.stream.MeasuredEvent {
+    let event = "event: expired\ndata: {\"reason\":\"auth_expired\"}\n\n"
+    let length = string.byte_len(event)
+    let body: std.http.BodyWriter = fn(mut _out: Bytes, flush: scoped fn(Bytes) -> bool waits) -> bool waits {
+        flush(string.as_bytes(event))
+    }
+    std.stream.MeasuredEvent(length: length, body: take body, gate: None)
+}
+
 fn http_sse_control(owner: HttpOwner, format: Arc[std.json.JsonPlan], take frame: HttpFrame) -> Result[std.stream.MeasuredEvent, std.json.TypedWriteError] {
     match take frame {
         HttpReset(at) => Ok(http_sse_reset(at)),

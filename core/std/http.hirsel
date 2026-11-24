@@ -1487,8 +1487,8 @@ fn handle[S: send](input: Bytes, h: View[http1.Head], meta: RequestHead, frame: 
                         if let Some(e) = b.fault {
                             break 'exchange error_step(mut b.writer, e.status, b.clock, clock.deadline_after_ms(returned, cfg.write_ms), b.stop)
                         }
-                        if returned >= clamp_deadline(b.stop, b.handler_deadline) {
-                            break 'exchange error_step(mut b.writer, 503, b.clock, clock.deadline_after_ms(returned, cfg.write_ms), b.stop)
+                        if let Some(status) = stream.pre_head_refusal(spec, b.clock, returned, clamp_deadline(b.stop, b.handler_deadline)) {
+                            break 'exchange error_step(mut b.writer, status, b.clock, clock.deadline_after_ms(returned, cfg.write_ms), b.stop)
                         }
                         let Some(max_bytes) = entry.route.stream_bytes else {
                             break 'exchange error_step(mut b.writer, 500, b.clock, clock.deadline_after_ms(returned, cfg.write_ms), b.stop)

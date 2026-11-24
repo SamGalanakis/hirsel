@@ -10,7 +10,8 @@ pub opaque type Spec: send {
     block: Bytes,
     state_at: u64,
     room: Bounds,
-    source: Source
+    source: Source,
+    expires_at_ms: Option[u64],
 }
 
 type Source: send = Encoded(fn(take Seed) waits) | Owned(own[send] fn(take Seed, Clock, Option[Dir]) waits, Option[Dir]) | Managed
@@ -51,7 +52,7 @@ fn encode_spec[P: codec + send](spec_status: u16, room: Bounds, state: P, out_ca
         }
     }
     match take made {
-        Ok(Ok(take block)) => Ok(Spec(status: spec_status, fields: list.new(), block: take block, state_at: out_cap, room, source: take source)),
+        Ok(Ok(take block)) => Ok(Spec(status: spec_status, fields: list.new(), block: take block, state_at: out_cap, room, source: take source, expires_at_ms: None)),
         Ok(Error(_)) => Error(InvalidStream),
         Error(e) => Error(Allocation(e)),
     }
@@ -80,8 +81,30 @@ pub fn spec_owned(req: http.Request, response_status: u16, room: Bounds, directo
         take block
     }
     match take made {
-        Ok(take block) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, source: Owned(take driver, directory))),
+        Ok(take block) => Ok(Spec(status: response_status, fields: list.new(), block: take block, state_at: out_cap, room, source: Owned(take driver, directory), expires_at_ms: None)),
         Error(e) => Error(Allocation(e)),
+    }
+}
+
+/// Gives a private stream its binding's exclusive wall-clock deadline.
+pub fn expire_at(mut offer: Spec, expires_at_ms: Option[u64]) {
+    offer.expires_at_ms = expires_at_ms
+}
+
+pub fn pre_head_refusal(s: Spec, c: Clock, now: u64, deadline: u64) -> Option[u16] {
+    if auth_lapsed(c, s.expires_at_ms) {
+        Some(401u16)
+    } else if now >= deadline {
+        Some(503u16)
+    } else {
+        None
+    }
+}
+
+pub fn auth_lapsed(c: Clock, expires_at_ms: Option[u64]) -> bool {
+    match expires_at_ms {
+        Some(at) => host.wall_ms(c) >= at,
+        None => false,
     }
 }
 
@@ -144,19 +167,20 @@ pub type Offer: send {
     heartbeat: bool,
     suppress: bool,
     at: u64,
-    pre_head: u64
+    pre_head: u64,
+    expires_at_ms: Option[u64],
 }
 
 pub fn prepare(take s: Spec, head: Bytes, chunked: bool, heartbeat: bool, suppress: bool, at: u64, pre_head: u64) -> Offer {
-    let Spec(status: _, fields: _, block: take owned, state_at, room, source: take source) = take s
+    let Spec(status: _, fields: _, block: take owned, state_at, room, source: take source, expires_at_ms) = take s
     let mut block = take owned
     for i in 0u64 .. list.len(head) {
         block[i] = head[i]
     }
-    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat, suppress, at, pre_head)
+    Offer(block: take block, head_len: list.len(head), state_at, room, source: take source, chunked, heartbeat, suppress, at, pre_head, expires_at_ms)
 }
 
-pub type Delivery: send = Item(Bytes) | Staged(Bytes, u64) | Committed(u64) | Sent(SentUnit) | WriteFailed | UnitDropped | ReadEnd | Tick | SourceEnded | Stop
+pub type Delivery: send = Item(Bytes) | Staged(Bytes, u64) | Committed(u64) | Sent(SentUnit) | WriteFailed | UnitDropped | Expiry | UnitExpired | ReadEnd | Tick | SourceEnded | Stop
 
 pub opaque type StopHandle: send {
     inbox: Sender[Delivery]
@@ -168,7 +192,7 @@ pub fn signal_stop(handle: StopHandle) {
 
 pub type SentUnit: key = HeadSent | ItemSent | ControlSent | EndSent
 
-type Unit: send = Head | Data(Bytes, u64) | Heartbeat | Terminal(u64) | Refusal | Measured(MeasuredEvent, u64, bool) | FirstFailure(http.Response, Option[http.ReleaseGate])
+type Unit: send = Head | Data(Bytes, u64) | Heartbeat | Terminal(u64) | Refusal | AuthRefusal | AuthTerminal(MeasuredEvent, u64) | Measured(MeasuredEvent, u64, bool) | FirstFailure(http.Response, Option[http.ReleaseGate])
 
 pub type MeasuredEvent: send {
     length: u64,
@@ -277,6 +301,7 @@ type Writer[E: send]: send {
     clock: Clock,
     pre_head: u64,
     write_ms: u64,
+    expires_at_ms: Option[u64],
     stop: Option[http.DrainSignal],
     inbox: Sender[E],
     units: Receiver[Unit],
@@ -390,14 +415,30 @@ fn write_head[E: send](mut socket: WriteHalf, head: Bytes, c: Clock, deadline: u
 }
 
 fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
-    let Writer(half: take half, block: take block, size, state_at, out_cap: capacity, chunked, suppressed, clock: c, pre_head, write_ms: ms, stop: take signal, inbox: take inbox, units: take units, notify) = take job
+    let Writer(half: take half, block: take block, size, state_at, out_cap: capacity, chunked, suppressed, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: take signal, inbox: take inbox, units: take units, notify) = take job
     let mut socket = take half
     let mut scratch: Bytes = list.with_capacity(capacity)
     let _ = list.append(mut scratch, list.slice(block, 0, size))
     if let Error(_) = channel.send(inbox, notify(Staged(take block, state_at))) {
         return take socket
     }
+    let mut committed = false
+    let mut expired = false
     while let Ok(take unit) = channel.receive(units) {
+        expired = expired || auth_lapsed(c, expires_at_ms)
+        if expired && !after_expiry(unit) {
+            if committed {
+                let _ = channel.send(inbox, notify(UnitExpired))
+                continue
+            }
+            let sent = write_auth_refusal(mut socket, c, ms, signal)
+            let _ = channel.send(inbox, notify(if sent {
+                Sent(EndSent)
+            } else {
+                WriteFailed
+            }))
+            break
+        }
         if !unit_allowed(unit) {
             if !unit_started(unit) {
                 let _ = channel.send(inbox, notify(UnitDropped))
@@ -455,11 +496,25 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
                     Ok(EndSent) => Ok(EndSent),
                     Ok(_) if suppressed => Ok(EndSent),
                     Ok(_) => {
+                        if initial {
+                            committed = true
+                            if auth_lapsed(c, expires_at_ms) {
+                                expired = true
+                                let _ = channel.send(inbox, notify(UnitExpired))
+                                continue
+                            }
+                        }
                         let deadline = order.min(cap, clock.deadline_after_ms(host.mono_ns(c), ms))
                         send_measured(mut socket, mut scratch, event, chunked, c, deadline, signal)
                     },
                     Error(e) => Error(e),
                 }
+            },
+            AuthTerminal(take event, deadline) => send_measured(mut socket, mut scratch, event, chunked, c, deadline, signal),
+            AuthRefusal => if write_auth_refusal(mut socket, c, ms, signal) {
+                Ok(EndSent)
+            } else {
+                Error(Reset)
             },
             FirstFailure(take response, _) => {
                 let now = host.mono_ns(c)
@@ -487,6 +542,9 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
         }
         match wrote {
             Ok(sent) => {
+                if sent == HeadSent {
+                    committed = true
+                }
                 if let Error(_) = channel.send(inbox, notify(Sent(sent))) {
                     break
                 }
@@ -501,6 +559,25 @@ fn writer[E: send](take job: Writer[E]) -> WriteHalf waits {
         }
     }
     take socket
+}
+
+fn after_expiry(unit: Unit) -> bool {
+    match unit {
+        AuthTerminal(..) => true,
+        AuthRefusal => true,
+        Terminal(_) => true,
+        _ => false,
+    }
+}
+
+fn write_auth_refusal(mut socket: WriteHalf, c: Clock, ms: u64, signal: Option[http.DrainSignal]) -> bool waits {
+    let head = b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    let deadline = clock.deadline_after_ms(host.mono_ns(c), ms)
+    if let Ok(()) = http.write_wire_until(mut socket, head, b"", c, deadline, signal) {
+        true
+    } else {
+        false
+    }
 }
 
 fn unit_allowed(unit: Unit) -> bool {
@@ -572,13 +649,14 @@ pub opaque type ManagedWriter {
     writer: Task[WriteHalf],
     reader: Task[ReadHalf],
     timer: Task[()],
+    expiry: Option[Task[()]],
     signal: Option[http.DrainSignal],
     clock: Clock,
     linger: u64,
 }
 
-pub fn managed_timing(work: Work) -> (Clock, u64, u64, u64) {
-    (work.transport.clock, work.transport.offer.pre_head, work.transport.lease_ms, work.transport.write_ms)
+pub fn managed_timing(work: Work) -> (Clock, u64, u64, u64, Option[u64]) {
+    (work.transport.clock, work.transport.offer.pre_head, work.transport.lease_ms, work.transport.write_ms, work.transport.offer.expires_at_ms)
 }
 
 pub fn managed_state[P: codec](packet: Bytes, start: u64) -> Result[P, codec.DecodeError] {
@@ -591,16 +669,17 @@ pub fn start_managed[E: send](take work: Work, to: Sender[E], notify: fn(take De
     if buffered > allowance {
         return None
     }
-    let Offer(block: take block, head_len, state_at, room: _, source: _, chunked, heartbeat: _, suppress, at, pre_head) = take offer
+    let Offer(block: take block, head_len, state_at, room: _, source: _, chunked, heartbeat: _, suppress, at, pre_head, expires_at_ms) = take offer
     let signal = http.stream_signal(control)
     let (units, writes): (Sender[Unit], Receiver[Unit]) = channel.new(1u64)
-    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(to), units: take writes, notify)
+    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: http.stream_signal(control), inbox: channel.sender(to), units: take writes, notify)
     let watching = Monitor(half: take input, remaining: allowance - buffered, inbox: channel.sender(to), notify)
     let waking = Alarm(clock: c, from: at, interval: period, pre_head, inbox: channel.sender(to), notify)
     let write: fn(take Writer[E]) -> WriteHalf waits = writer
     let read: fn(take Monitor[E]) -> ReadHalf waits = monitor
     let tick: fn(take Alarm[E]) waits = alarm
-    Some(ManagedWriter(units: take units, writer: task.spawn(tasks, bytes ((capacity + 7u64) / 8u64 * 8u64 + 1024u64), take writing, write), reader: task.spawn(tasks, bytes 64u64, take watching, read), timer: task.spawn(tasks, bytes 4096u64, take waking, tick), signal: take signal, clock: c, linger: linger))
+    let expiry = stream_expiry(tasks, c, expires_at_ms, to, notify)
+    Some(ManagedWriter(units: take units, writer: task.spawn(tasks, bytes ((capacity + 7u64) / 8u64 * 8u64 + 1024u64), take writing, write), reader: task.spawn(tasks, bytes 64u64, take watching, read), timer: task.spawn(tasks, bytes 4096u64, take waking, tick), expiry: take expiry, signal: take signal, clock: c, linger: linger))
 }
 
 pub fn managed_offer(active: ManagedWriter, take event: MeasuredEvent, until: u64, initial: bool) -> bool {
@@ -609,6 +688,14 @@ pub fn managed_offer(active: ManagedWriter, take event: MeasuredEvent, until: u6
     } else {
         false
     }
+}
+
+pub fn managed_expired(active: ManagedWriter, take event: MeasuredEvent, until: u64) {
+    let _ = channel.try_send(active.units, AuthTerminal(take event, until))
+}
+
+pub fn managed_auth_refusal(active: ManagedWriter) {
+    let _ = channel.try_send(active.units, AuthRefusal)
 }
 
 pub fn managed_failure(active: ManagedWriter, take response: http.Response, take gate: Option[http.ReleaseGate]) {
@@ -632,16 +719,21 @@ pub fn managed_stop(active: ManagedWriter) -> Option[u64] {
 }
 
 pub fn finish_managed(take active: ManagedWriter) waits {
-    let ManagedWriter(units: _, writer: take writing_task, reader: take reader, timer: take timer, signal: _, clock: c, linger) = take active
+    let ManagedWriter(units: _, writer: take writing_task, reader: take reader, timer: take timer, expiry: take expiry_task, signal: _, clock: c, linger) = take active
     let mut writing = take writing_task
     let mut reading = take reader
     let mut ticking = take timer
     task.cancel(mut writing)
     task.cancel(mut reading)
     task.cancel(mut ticking)
+    let mut expiry = take expiry_task
+    stop_producer(mut expiry)
     let out_half = task.join(take writing)
     let in_half = task.join(take reading)
     let _ = task.join(take ticking)
+    if let Some(take expiry_alarm) = take expiry {
+        let _ = task.join(take expiry_alarm)
+    }
     if let (Ok(take write_half), Ok(take read_half)) = (take out_half, take in_half) {
         let _ = net.finish(take write_half, take read_half, c, clock.deadline_after_ms(host.mono_ns(c), linger))
     }
@@ -656,17 +748,37 @@ pub fn reservation(offer: Offer, out_cap: u64) -> u64 {
     let owner: u64 = 256 + 104 + 64 + 96 + 8192
     let children: u64 = 296 + (296 + 64) + (288 + 4096) + 288
     let output = (int.saturating_add(out_cap, 7) / 8) * 8
+    let expiry = if offer.expires_at_ms != None {
+        288u64 + 4096u64
+    } else {
+        0u64
+    }
     if managed(offer) {
         // The subscription has a depth stack and an owner inbox. It has no
         // producer task, its credits or a retained producer-owned event.
-        return int.saturating_add(managed_reservation(out_cap), (int.saturating_add(list.len(offer.block) - offer.state_at, 7u64) / 8u64) * 8u64)
+        return int.saturating_add(managed_reservation(out_cap), expiry + (int.saturating_add(list.len(offer.block) - offer.state_at, 7u64) / 8u64) * 8u64)
     }
-    int.saturating_add(owner + children, int.saturating_add(output, offer.room.producer_bytes))
+    int.saturating_add(owner + children + expiry, int.saturating_add(output, offer.room.producer_bytes))
 }
 
 fn stop_producer(mut running: Option[Task[()]]) {
     if let Some(mut producer) = running {
         task.cancel(mut producer)
+    }
+}
+
+fn stream_expiry[E: send](tasks: Tasks, c: Clock, expires_at_ms: Option[u64], to: Sender[E], notify: fn(take Delivery) -> E) -> Option[Task[()]] {
+    match expires_at_ms {
+        Some(at_ms) => Some(clock.wall_alarm(tasks, c, at_ms, to, notify(Expiry))),
+        None => None,
+    }
+}
+
+pub fn expiry_wake(message: Delivery) -> bool {
+    match message {
+        Expiry => true,
+        UnitExpired => true,
+        _ => false,
     }
 }
 
@@ -680,7 +792,7 @@ pub fn drive(take job: Work) waits {
     if buffered > allowance {
         return
     }
-    let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, heartbeat, suppress, at, pre_head) = take offer
+    let Offer(block: take block, head_len, state_at, room, source: take offered_source, chunked, heartbeat, suppress, at, pre_head, expires_at_ms) = take offer
     let mut source = Some(take offered_source)
     let (tx, rx): (Sender[Delivery], Receiver[Delivery]) = channel.new(6)
     if let Some(owner) = control {
@@ -694,12 +806,13 @@ pub fn drive(take job: Work) waits {
     let _ = channel.try_send(give, ())
     let _ = channel.try_send(give, ())
     let mut queue: List[Bytes] = list.with_capacity(2)
-    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes, notify: same_delivery)
+    let writing = Writer(half: take output, block: take block, size: head_len, state_at, out_cap: capacity, chunked, suppressed: suppress, clock: c, pre_head, write_ms: ms, expires_at_ms, stop: http.stream_signal(control), inbox: channel.sender(tx), units: take writes, notify: same_delivery)
     let watching = Monitor(half: take input, remaining: allowance - buffered, inbox: channel.sender(tx), notify: same_delivery)
     let waking = Alarm(clock: c, from: at, interval: period, pre_head, inbox: channel.sender(tx), notify: same_delivery)
     let mut write_task = task.spawn(tasks, bytes ((capacity + 7) / 8 * 8), take writing, writer)
     let mut read_task = task.spawn(tasks, bytes 64, take watching, monitor)
     let mut alarm_task = task.spawn(tasks, bytes 4096, take waking, alarm)
+    let mut expiry = stream_expiry(tasks, c, expires_at_ms, tx, same_delivery)
     let mut producer: Option[Task[()]] = None
     let mut credit: Option[Receiver[()]] = Some(take take_credit)
     let mut head_started = false
@@ -707,6 +820,7 @@ pub fn drive(take job: Work) waits {
     let mut lease_end: Option[u64] = None
     let mut end: Option[u64] = None
     let mut draining = false
+    let mut expired = false
     while let Ok(take message) = channel.receive(rx) {
         let now = host.mono_ns(c)
         let mut heartbeat_ready = false
@@ -723,6 +837,19 @@ pub fn drive(take job: Work) waits {
                 end = Some(order.min(d, stop))
                 list.clear(mut queue)
                 stop_producer(mut producer)
+            }
+        }
+        if !expired && (expiry_wake(message) || auth_lapsed(c, expires_at_ms)) {
+            expired = true
+            if end == None {
+                end = Some(clock.deadline_after_ms(now, ms))
+            }
+            list.clear(mut queue)
+            stop_producer(mut producer)
+            if !head_started {
+                head_started = true
+                busy = true
+                let _ = channel.try_send(units, AuthRefusal)
             }
         }
         if let Some(expires) = lease_end {
@@ -785,6 +912,10 @@ pub fn drive(take job: Work) waits {
             Sent(EndSent) => break,
             WriteFailed => break,
             UnitDropped => break,
+            UnitExpired => {
+                busy = false
+            },
+            Expiry => (),
             ReadEnd => {
                 stop_producer(mut producer)
                 if lease_end == None {
@@ -839,12 +970,16 @@ pub fn drive(take job: Work) waits {
     task.cancel(mut write_task)
     task.cancel(mut read_task)
     task.cancel(mut alarm_task)
+    stop_producer(mut expiry)
     if let Some(take running) = take producer {
         let _ = task.join(take running)
     }
     let write_result = task.join(take write_task)
     let read_result = task.join(take read_task)
     let _ = task.join(take alarm_task)
+    if let Some(take expiry_alarm) = take expiry {
+        let _ = task.join(take expiry_alarm)
+    }
     if let (Ok(take write_half), Ok(take read_half)) = (take write_result, take read_result) {
         let _ = net.finish(take write_half, take read_half, c, clock.deadline_after_ms(host.mono_ns(c), linger))
     }

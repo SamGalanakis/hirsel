@@ -207,12 +207,13 @@ fn http_ended_reply(take outcome: Outcome) -> Result[std.http.Response, std.http
     }
 }
 
-type HttpStreamSeed: codec + send { route: u64, caller: Caller, key: Bytes, arg: Bytes, budget: u64 }
+type HttpStreamSeed: codec + send { route: u64, caller: Caller, key: Bytes, arg: Bytes, budget: u64, expires_at_ms: Option[u64] }
 
 fn http_stream_offer(req: std.http.Request, take sent: Send, budget: u64) -> Result[std.stream.Spec, std.http.HandlerError] {
-    let Send(stream: store.StreamKey(caller: take caller, ..), key: take key, arg: take arg, ..) = take sent
-    let seed = HttpStreamSeed(route: std.http.route_tag(req), caller: take caller, key: take key, arg: take arg, budget: budget)
+    let Send(stream: store.StreamKey(caller: take caller, ..), key: take key, arg: take arg, expires_at_ms, ..) = take sent
+    let seed = HttpStreamSeed(route: std.http.route_tag(req), caller: take caller, key: take key, arg: take arg, budget: budget, expires_at_ms)
     let mut stream = std.stream.spec_managed(req, seed)?
+    std.stream.expire_at(mut stream, seed.expires_at_ms)
     std.stream.header(mut stream, b"Content-Type", b"text/event-stream")?
     Ok(take stream)
 }
@@ -259,21 +260,21 @@ fn http_stream_notice(take event: std.stream.Delivery) -> WireEvent {
 }
 
 fn http_stream_drive(take work: std.stream.Work, take site: HttpStreamSite) waits {
-    let (clock, pre_head, lease_ms, write_ms) = std.stream.managed_timing(work)
+    let (clock, pre_head, lease_ms, write_ms, expires_at_ms) = std.stream.managed_timing(work)
     let Ok((take owner, take ports)) = http_owner(site.publisher, site.inbox_size) else { return }
     let mut joined = take owner
     let Some(take writer) = std.stream.start_managed(take work, joined.to, http_stream_notice) else { return }
-    http_stream_loop(writer, mut joined, take ports, site, clock, pre_head, lease_ms, write_ms)
+    http_stream_loop(writer, mut joined, take ports, site, clock, pre_head, lease_ms, write_ms, expires_at_ms)
     std.stream.finish_managed(take writer)
     let _ = take joined
 }
 
-type HttpStreamEnd: send = EndNormally | EndWithFrame(HttpFrame) | EndWithRefusal(Refusal)
+type HttpStreamEnd: send = EndNormally | EndWithFrame(HttpFrame) | EndWithRefusal(Refusal) | EndWithExpiry
 
 type HttpQueuedBatch: send { version: u64, complete: bool, payload: Arc[Bytes], charge: u64 }
 
 fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take ports: HttpJoinPorts,
-    site: HttpStreamSite, clock: Clock, pre_head: u64, lease_ms: u64, write_ms: u64) waits {
+    site: HttpStreamSite, clock: Clock, pre_head: u64, lease_ms: u64, write_ms: u64, expires_at_ms: Option[u64]) waits {
     let (refund, available): (Sender[()], Receiver[()]) = channel.new(2u64)
     let _ = channel.try_send(refund, ())
     let _ = channel.try_send(refund, ())
@@ -294,6 +295,9 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
         let now = host.mono_ns(clock)
         let end_at = std.clock.deadline_after_ms(now, write_ms)
         let mut heartbeat = false
+        let mut expired = std.stream.auth_lapsed(clock, expires_at_ms)
+        if let HttpStream(delivery) = event { expired = expired || std.stream.expiry_wake(delivery) }
+        if expired && http_stream_open(ending) { ending = Some((end_at, EndWithExpiry)) }
         if awaiting_admit && http_stream_open(ending) {
             match channel.try_receive(owner.admit) {
                 Ok(Admit(who: id, round: take register)) => {
@@ -322,6 +326,12 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
                     http_stream_progress(owner)
                 }
             },
+            HttpStream(UnitExpired) => {
+                busy = false
+                if let Some((until, _)) = ending {
+                    ending = Some((until, EndWithExpiry))
+                }
+            },
             HttpStream(UnitDropped) => {
                 busy = false
                 if http_stream_open(ending) || matches_normal(ending) {
@@ -331,8 +341,8 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
                 }
             },
             HttpStream(Tick) => { heartbeat = true },
-            HttpStream(Staged(take packet, at)) if now < pre_head => {
-                let HttpStreamSeed(route, caller: take caller, key: take key, arg: take arg, budget: limit) =
+            HttpStream(Staged(take packet, at)) if now < pre_head && http_stream_open(ending) => {
+                let HttpStreamSeed(route, caller: take caller, key: take key, arg: take arg, budget: limit, expires_at_ms: _) =
                     result.unwrap((std.stream.managed_state(packet, at) : Result[HttpStreamSeed, std.codec.DecodeError]))
                 operation_index = route - 1u64
                 budget = limit
@@ -367,7 +377,7 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
             if lease == None { return }
             if http_stream_open(ending) { ending = Some((std.order.min(end_at, stop_at), EndNormally)) }
         }
-        if lease == None && now >= pre_head && !busy {
+        if lease == None && now >= pre_head && !busy && !matches_expiry(ending) {
             std.stream.managed_deadline(writer)
             busy = true
             continue
@@ -383,6 +393,7 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
             if lease == None {
                 match take reason {
                     EndNormally => return,
+                    EndWithExpiry => std.stream.managed_auth_refusal(writer),
                     EndWithRefusal(take why) => std.stream.managed_failure(writer, result.unwrap(http_refusal(take why)), None),
                     EndWithFrame(take terminal) => match take terminal {
                         HttpEnded(at, take outcome) => std.stream.managed_failure(writer, result.unwrap(http_ended_reply(take outcome)), http_stream_gate(owner, at)),
@@ -394,6 +405,10 @@ fn http_stream_loop(writer: std.stream.ManagedWriter, mut owner: HttpOwner, take
                 continue
             }
             match take reason {
+                EndWithExpiry => {
+                    std.stream.managed_expired(writer, http_sse_expired(), until)
+                    ending = Some((until, EndNormally))
+                },
                 EndWithFrame(take terminal) => {
                     let control = match http_sse_control(owner, site.outcome, take terminal) {
                         Ok(take unit) => take unit,
@@ -451,6 +466,10 @@ fn http_stream_progress(owner: HttpOwner) {
 
 fn http_stream_open(ending: Option[(u64, HttpStreamEnd)]) -> bool {
     if let None = ending { true } else { false }
+}
+
+fn matches_expiry(ending: Option[(u64, HttpStreamEnd)]) -> bool {
+    if let Some((_, EndWithExpiry)) = ending { true } else { false }
 }
 
 fn matches_normal(ending: Option[(u64, HttpStreamEnd)]) -> bool {

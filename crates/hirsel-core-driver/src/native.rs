@@ -1741,8 +1741,7 @@ fn link_objects(
                     })
                     .transpose()?;
                 if let Some((frame, objects)) = &incremental {
-                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
-                    if let Some(image) = resident.patch(*frame, objects)? {
+                    if let Some(image) = crate::incremental_link::patch(*frame, objects)? {
                         patched.set(true);
                         return Ok(image);
                     }
@@ -1758,8 +1757,7 @@ fn link_objects(
                 )?;
                 let image = std::fs::read(&output)?;
                 if let Some((frame, objects)) = incremental {
-                    let mut resident = crate::incremental_link::RESIDENT.lock().unwrap();
-                    resident.remember(frame, &objects, &image)?;
+                    crate::incremental_link::remember(frame, &objects, &image)?;
                 }
                 Ok::<_, NativeStop>(image)
             };

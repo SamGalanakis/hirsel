@@ -47,7 +47,24 @@ struct Previous {
 pub(crate) struct Incremental(Option<Previous>);
 
 /// The resident compiler's incremental link.
-pub(crate) static RESIDENT: Mutex<Incremental> = Mutex::new(Incremental(None));
+pub(crate) static RESIDENT: crate::resident::WorkingMemo<(), Arc<Mutex<Incremental>>> =
+    crate::resident::WorkingMemo::new();
+
+pub(crate) fn patch(frame: ContentHash, objects: &[Slot<'_>]) -> io::Result<Option<Vec<u8>>> {
+    RESIDENT
+        .previous_or_default()
+        .lock()
+        .unwrap()
+        .patch(frame, objects)
+}
+
+pub(crate) fn remember(frame: ContentHash, objects: &[Slot<'_>], image: &[u8]) -> io::Result<()> {
+    RESIDENT
+        .previous_or_default()
+        .lock()
+        .unwrap()
+        .remember(frame, objects, image)
+}
 
 /// The bytes of a bundle's member, as the linker reads them.
 fn read(&(bundle, n): &(&crate::native::link_input::Bundle, usize)) -> io::Result<Arc<[u8]>> {

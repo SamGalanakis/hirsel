@@ -66,10 +66,13 @@ client starts a `run` program after receiving the complete launch answer.
 
 A resident compiler refuses a request from another toolchain or another
 environment. The client then compiles in its own process. A refusal for
-another toolchain also stops the server. The server exits after a
-request that leaves it above `--max-memory BYTES` (default 1 GiB)
-resident, and after a request that panics. `hirsel serve --stop`
-stops the store's server.
+another toolchain also stops the server. After each request, the server
+evicts least recently used working sets until its resident memory fits
+`--max-memory BYTES` (default 1.75 GiB). An exact memo entry shared by
+several working sets stays cached while any of those sets remains.
+If the limit is still exceeded after eviction, the server exits when
+its launched clients finish. It also exits after a request that panics.
+`hirsel serve --stop` stops the store's server.
 
 ## CPU profiles
 

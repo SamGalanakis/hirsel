@@ -698,7 +698,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--max-memory"],
         Some("BYTES"),
         ["serve"],
-        "Exit once the resident compiler's memory exceeds BYTES after a request (default 1 GiB)."
+        "Evict least recently used working sets above BYTES after a request (default 1.75 GiB)."
     ),
     option!(
         Stop,

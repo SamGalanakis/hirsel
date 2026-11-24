@@ -482,8 +482,9 @@ impl State {
     }
 }
 
-/// A resident compiler's last recipe map.
-static STATE: Mutex<Option<State>> = Mutex::new(None);
+/// Each resident working set's last recipe map.
+pub(super) static STATE: crate::resident::WorkingMemo<(), Arc<Mutex<Option<State>>>> =
+    crate::resident::WorkingMemo::new();
 
 /// How a recipe's map was made.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -506,7 +507,8 @@ pub(crate) fn map<E>(
     let Some(key) = key.filter(|_| crate::resident::serving()) else {
         return Ok((Arc::new(full()?), Made::Full));
     };
-    let mut slot = STATE.lock().unwrap();
+    let slot = STATE.previous_or_default();
+    let mut slot = slot.lock().unwrap();
     if let Some(state) = slot.as_mut().filter(|state| state.std == std) {
         if state.key == key {
             return Ok((Arc::clone(state.map()), Made::Remembered));
@@ -523,7 +525,8 @@ pub(crate) fn map<E>(
 
 /// What the rebase that made the map keyed `to` changed, if one did.
 pub(crate) fn transition(to: ContentHash) -> Option<Arc<Transition>> {
-    let slot = STATE.lock().unwrap();
+    let slot = STATE.previous()?;
+    let slot = slot.lock().unwrap();
     let transition = slot.as_ref()?.transition.as_ref()?;
     (transition.to == to).then(|| Arc::clone(transition))
 }

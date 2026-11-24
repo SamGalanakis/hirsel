@@ -658,25 +658,24 @@ impl CheckProduct {
         // An unused launch grant could otherwise touch host state before the
         // test starts.
         let mut options = self.granted(test, options);
-        let foreign = laws.is_some()
-            && !options.foreign_grants.is_empty()
-            && self
-                .reachable(test, options.instance_limit)?
-                .foreign_functions()
-                .next()
-                .is_some();
+        let mut reached = if options.foreign_grants.is_empty() || options.recording {
+            self.reachable_for(test, &options)?
+        } else {
+            self.reachable(test, options.instance_limit)?
+        };
+        let foreign = laws.is_some() && reached.foreign_functions().next().is_some();
         if foreign {
             options.recording = false;
             if let Some(runtime) = laws.flatten() {
                 options.runtime = runtime.to_owned();
             }
+            reached = if options.foreign_grants.is_empty() {
+                self.reachable_for(test, &options)?
+            } else {
+                self.reachable(test, options.instance_limit)?
+            };
         }
         let options = &options;
-        let reached = if options.foreign_grants.is_empty() || options.recording {
-            self.reachable_for(test, options)?
-        } else {
-            self.reachable(test, options.instance_limit)?
-        };
         let pass = cache
             .filter(|_| {
                 matches!(runner, Runner::Native)

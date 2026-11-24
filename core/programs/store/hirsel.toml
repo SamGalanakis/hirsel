@@ -202,6 +202,9 @@ limit = 268435456
 [tests.runs."store@1/store/test_l88_compaction_retires_a_cold_pack"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_l87_probe_across_a_fork"]
+limit = 268435456
+
 [tests.runs."store@1/store/test_l68_fold_cut_publishes_replayed_writes"]
 limit = 268435456
 

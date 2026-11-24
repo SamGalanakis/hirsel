@@ -4175,7 +4175,7 @@ A reader never holds more than one entry body per lane. The chain list is the on
 
 **Where each law runs.**
 - **objects@1 laws** (L52, L53, L54, L57, L58, L60, L61) are cases in the existing `bucket_laws.hirsel` over `std.sim.s3`. Their oracle is the sim's object map and its **head-register history**: every applied conditional write, with its request id. The sim's fault plan injects reply loss, late delivery, 409, 412, 5xx, a 200 carrying an `Error` and `NoSuchUpload` below the real client.
-- **Seam laws** (L55, L56, L59) are in one new file, `authority_laws.hirsel`, over `authority.sim@1` (§12.4), whose ground-truth log is the oracle. L55's log@1 case runs in the existing §3.9 file-system model.
+- **Seam laws** (L55, L56, L59) are in one new file, `authority_laws.hirsel`, over `authority.sim@1` (§12.4), whose ground-truth log is the oracle. L55's log@1 case runs in the existing §3.9 file-system model. L56's native Runner case holds the effect's HEAD PUT at the loopback S3 endpoint and observes the real wire reply and a cold follower (`bucket_release_barrier`).
 
 No oracle reads the store under test. Each law names the bug that turns it red, and that bug is seeded only in the law's own review, not as a mutant harness.
 

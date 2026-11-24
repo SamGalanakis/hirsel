@@ -32,8 +32,9 @@ fn bucket_config(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: 
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let selection = runner.launch_selection(argv)?
+    let groups = if has_flag(argv, "--release-check") { Some(1u32) } else { None }
     Ok(runner.PlaceConfig(
-        backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: None, lock_wait_ms: None), selection: selection, place: code.describe(place), n_place: 524288u64,
+        backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: groups, lock_wait_ms: None), selection: selection, place: code.describe(place), n_place: 524288u64,
         on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64,
         proxies: list.new(), n_publisher: 3145728u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
@@ -57,16 +58,15 @@ fn bucket_sim(key: Secret, c: Clock, n: Net, out: Stdout) -> Result[(), Exit] wa
     Error(Exit(status: 1u8))
 }
 
-// One bump at stream 0 position p: Some(true) when it returned, Some(false) for any
-// other answer, None when the session ended first.
-fn bump_once(cn: runner.wire_client.Conn, p: u64) -> Option[bool] waits {
+// One bump at stream 0 position p. The result includes its wire batch version.
+fn bump_once(cn: runner.wire_client.Conn, p: u64) -> Option[(bool, u64)] waits {
     runner.wire_client.send_frame(cn, Call(0u32, p, 0u32, 30000u32, u64_bytes(p)))
     loop {
         match runner.wire_client.next(cn) {
-            Ok(Batch(_, _, _, done)) => {
+            Ok(Batch(at, _, _, done)) => {
                 for item in done {
                     if item.p == p {
-                        return Some(same(item.outcome, returned(Ok(p))))
+                        return Some((same(item.outcome, returned(Ok(p))), at))
                     }
                 }
             },
@@ -121,13 +121,23 @@ fn bucket_hold(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Ne
     }
     if list.slice(command, 0, 5) == string.as_bytes("fence") {
         // A deposed holder never answers a commit: its group fails on the claim.
-        want(bump_once(cn, 0u64) != Some(true), "bucket T1: the deposed holder committed")
+        if let Some((true, _)) = bump_once(cn, 0u64) { fail("bucket T1: the deposed holder committed") }
         let _ = runner.wire_client.close(take cn)
         say_ended(out, take running)
         return Ok(())
     }
-    want(bump_once(cn, 0u64) == Some(true), "bucket T1: the serving place did not commit")
-    say(out, "BUMPED")
+    let Some((true, released)) = bump_once(cn, 0u64) else { fail("bucket T1: the serving place did not commit") }
+    if has_flag(argv, "--release-check") {
+        let mut publication = string.from("BUMPED ")
+        string.push_u64(mut publication, released)
+        say(out, take publication)
+        // The host law crashes this process after the client saw a release.
+        // Keep the live place open until that cut.
+        list.clear(mut command)
+        let _ = stdin.read(input, mut command, Never)
+    } else {
+        say(out, "BUMPED")
+    }
     let _ = runner.wire_client.close(take cn)
     result.unwrap(channel.send(stop, ()))
     want(match task.join(take running) { Ok(Ok(Stopped(_))) => true, _ => false }, "bucket T1: the place did not stop")
@@ -135,9 +145,35 @@ fn bucket_hold(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Ne
     Ok(())
 }
 
+fn bucket_follow(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout) waits {
+    let bucket = std.object.Bucket(endpoint: bucket_endpoint(argv), aws_region: "us-east-1", bucket: "bucket-t1", prefix: "", style: Path)
+    let credential = std.cred.from_secret(string.from(BUCKET_ACCESS), secret.share(key), "")
+    let lanes = std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64)
+    let due = std.clock.deadline_after_ms(host.mono_ns(c), 30000u64)
+    let connected = result.unwrap(std.object.start(n, tasks, take bucket, take credential, None, System, c, r, lanes, due))
+    let follow_options = result.unwrap(store.sized(Bucket(lanes), 2147483648u64))
+    let mut ids = store.followers()
+    let mut mirror = result.unwrap(store.follower(mut ids, tasks, store.object_authority(take connected, "bucket", 30000u64), c, follow_options))
+    let image = result.unwrap(store.fresh(mut mirror, due))
+    let mut declaration = store.declare_follower(mirror)
+    let handle = result.unwrap(schema(mut declaration))
+    result.unwrap(store.seal_follower(mirror, take declaration))
+    let rows = result.unwrap(store.follower_reader(mirror, 0u64))
+    let accumulated = match result.unwrap(store.get(rows, image, handle.t, 0u64)) { Some(value) => value, None => 0u64 }
+    let mut line = string.from("FOLLOW ")
+    string.push_u64(mut line, store.version(image))
+    string.push_char(mut line, ' ')
+    string.push_u64(mut line, accumulated)
+    say(out, take line)
+}
+
 pub fn bucket_main(c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, process: Process, errors: Stderr, input: Stdin, out: Stdout, key: Secret) -> Result[(), Exit] waits {
     if has_flag(argv, "--sim") {
         return bucket_sim(key, c, n, out)
+    }
+    if has_flag(argv, "--follow") {
+        bucket_follow(argv, key, c, r, tasks, n, out)
+        return Ok(())
     }
     if has_flag(argv, "--hold") {
         return bucket_hold(argv, key, c, r, tasks, n, input, out)

@@ -1,6 +1,7 @@
 """Fixtures for the native runner host laws."""
 import ctypes
 import ctypes.util
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -100,14 +101,9 @@ def unpinned(tape, copy):
     return copy
 
 
-def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path, limit):
-    """Native T1 on a Bucket backing: two processes of one executable share the
-    loopback simulator bucket (STORE-SPEC v2.65 §12.2). A loopback relay to that
-    bucket which drops the proof does not qualify. The bare holder serves
-    activation 11; the successor installs 12 under the hosted allowance; the
-    holder's next commit is fenced; the relaunched place adopts 12 and commits."""
+@contextmanager
+def bucket_processes(work, engine, compiler, runtime, cc, manifest_path, limit):
     import queue
-    import socket
     import subprocess
     import threading
 
@@ -120,7 +116,7 @@ def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path,
                '--grant', 'Secret:key=env:HIRSEL_BUCKET_T1_KEY kdf', '-o', str(executable)]
     for capability in ('Clock', 'Random', 'Tasks', 'Process', 'Stderr', 'Stdin', 'Stdout'):
         command += ['--grant', capability]
-    checked(command, engine=engine, case='T1-bucket:build')
+    checked(command, engine=engine, case='bucket-place:build')
     # The root key lives only in the children's environment; nothing prints it.
     env = dict(os.environ, HIRSEL_BUCKET_T1_KEY=os.urandom(32).hex())
     hosted = '--hirsel-n-place=1048576'
@@ -149,58 +145,84 @@ def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path,
                                 timeout=120)
         return result.returncode, result.stdout + result.stderr
 
-    stripped = []
-
-    def relay(port):
-        # Forwards each one-request connection to the simulator and drops the proof
-        # field from the answer, so only the proof differs from the qualifying path.
-        server = socket.socket()
-        server.bind(('127.0.0.1', 0))
-        server.listen(16)
-
-        def serve():
-            while True:
-                try:
-                    client, _ = server.accept()
-                except OSError:
-                    return
-                with client, socket.create_connection(('127.0.0.1', port), timeout=30) as upstream:
-                    client.settimeout(30)
-                    request = b''
-                    while b'\r\n\r\n' not in request:
-                        chunk = client.recv(65536)
-                        if not chunk:
-                            break
-                        request += chunk
-                    head, _, body = request.partition(b'\r\n\r\n')
-                    length = next((int(field.split(b':')[1]) for field in head.split(b'\r\n')
-                                   if field.lower().startswith(b'content-length:')), 0)
-                    while len(body) < length:
-                        body += client.recv(65536)
-                    upstream.sendall(head + b'\r\n\r\n' + body)
-                    answer = b''
-                    while chunk := upstream.recv(65536):
-                        answer += chunk
-                    head, _, body = answer.partition(b'\r\n\r\n')
-                    kept = [field for field in head.split(b'\r\n')
-                            if not field.lower().startswith(b'x-hirsel-sim-proof:')]
-                    stripped.append(len(head.split(b'\r\n')) - len(kept))
-                    client.sendall(b'\r\n'.join(kept) + b'\r\n\r\n' + body)
-
-        threading.Thread(target=serve, daemon=True).start()
-        return server
+    def crash(process):
+        if process.poll() is None:
+            comm = subprocess.check_output(['ps', '-o', 'comm=', '-p', str(process.pid)], text=True).strip()
+            assert comm == executable.name[:15], comm
+            process.kill()
+        return process.wait(timeout=15)
 
     try:
+        yield spawn, line, once, crash, hosted
+    finally:
+        for process in started:
+            crash(process)
+
+
+@contextmanager
+def bucket_relay(port, before=None, after=None):
+    """Relay the signed request unchanged, one request per connection."""
+    import socket
+    from socketserver import BaseRequestHandler, ThreadingTCPServer
+    from threading import Thread
+
+    class Connection(BaseRequestHandler):
+        def handle(self):
+            with self.request.makefile('rb') as wire:
+                request_line = wire.readline()
+                if not request_line:
+                    return
+                fields = []
+                length = 0
+                while (header := wire.readline()) not in (b'\r\n', b''):
+                    fields.append(header)
+                    if header.lower().startswith(b'content-length:'):
+                        length = int(header.split(b':', 1)[1])
+                body = wire.read(length)
+            method, path, _ = request_line.split()
+            if before is not None:
+                before(method, path, body)
+            with socket.create_connection(('127.0.0.1', port)) as upstream:
+                upstream.sendall(request_line + b''.join(fields) + b'\r\n' + body)
+                with upstream.makefile('rb') as reply:
+                    answer = reply.read()
+            if after is not None:
+                answer = after(method, path, body, answer)
+            self.request.sendall(answer)
+
+    with ThreadingTCPServer(('127.0.0.1', 0), Connection) as server:
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield f'--bucket=http://127.0.0.1:{server.server_address[1]}'
+        finally:
+            server.shutdown()
+            worker.join()
+
+
+def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path, limit):
+    """Native T1 on a Bucket backing: two processes of one executable share the
+    loopback simulator bucket (STORE-SPEC v2.65 §12.2). A loopback relay to that
+    bucket which drops the proof does not qualify. The bare holder serves
+    activation 11; the successor installs 12 under the hosted allowance; the
+    holder's next commit is fenced; the relaunched place adopts 12 and commits."""
+    stripped = []
+
+    def strip_proof(method, path, body, answer):
+        head, _, data = answer.partition(b'\r\n\r\n')
+        fields = head.split(b'\r\n')
+        kept = [field for field in fields if not field.lower().startswith(b'x-hirsel-sim-proof:')]
+        stripped.append(len(fields) - len(kept))
+        return b'\r\n'.join(kept) + b'\r\n\r\n' + data
+
+    with bucket_processes(work, engine, compiler, runtime, cc, manifest_path, limit) as fixture:
+        spawn, line, once, _, hosted = fixture
         sim, sim_lines = spawn(['--sim'])
         port = line(sim_lines, 'T1-bucket:sim')
         assert port.startswith('PORT '), port
         bucket = f'--bucket=http://127.0.0.1:{port[5:]}'
-        unproven = relay(int(port[5:]))
-        try:
-            code, text = once([hosted, '--hirsel-install', f'--bucket=http://127.0.0.1:{unproven.getsockname()[1]}'],
-                              'T1-bucket:unproven')
-        finally:
-            unproven.close()
+        with bucket_relay(int(port[5:]), after=strip_proof) as unproven:
+            code, text = once([hosted, '--hirsel-install', unproven], 'T1-bucket:unproven')
         assert sum(stripped) and code != 0 and 'sim:proof' in text, f'an unproven answer qualified: {code} {text}'
 
         for activation in range(1, 10):
@@ -231,10 +253,78 @@ def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path,
         assert line(serving, 'T1-bucket:adopt-bump') == 'BUMPED'
         assert line(serving, 'T1-bucket:stop') == 'STOPPED'
         assert successor.wait(timeout=60) == 0, successor.stderr.read()
-    finally:
-        for process in started:
-            if process.poll() is None:
-                comm = subprocess.check_output(['ps', '-o', 'comm=', '-p', str(process.pid)], text=True).strip()
-                assert comm == executable.name[:15], comm
-                process.kill()
-            process.wait(timeout=15)
+
+
+def bucket_release_barrier(work, engine, compiler, runtime, cc, manifest_path, limit):
+    """L56 Runner half through the real Bucket backing and the native wire."""
+    import queue
+    import threading
+
+    held = queue.Queue()
+    release = threading.Event()
+    uploaded = set()
+
+    def remember_entry(method, path, data, answer):
+        if method == b'PUT' and path.startswith(b'/bucket-t1/e-') and answer.startswith(b'HTTP/1.1 200 '):
+            # The effect is the only commit at version 7. A one-commit group
+            # starts immediately after the 72-byte HEADER and 40-byte LINK.
+            if len(data) >= 140 and struct.unpack_from('<H', data, 112)[0] == 0x0011:
+                branch, version = struct.unpack_from('<IQ', data, 128)
+                if branch == 0 and version == 7:
+                    uploaded.add(path)
+        return answer
+
+    def hold_head(method, path, data):
+        if method != b'PUT' or path != b'/bucket-t1/head' or len(data) < 152:
+            return
+        seq, epoch, _, digest = struct.unpack_from('<QQQQ', data, 120)
+        if f'/bucket-t1/e-{seq:020d}-{epoch:020d}-{digest:016x}'.encode() in uploaded:
+            held.put('EFFECT 7')
+            release.wait()
+
+    with bucket_processes(work, engine, compiler, runtime, cc, manifest_path, limit) as fixture:
+        spawn, line, once, crash, hosted = fixture
+        _, listening = spawn(['--sim'])
+        addr = line(listening, 'L56:sim')
+        assert addr.startswith('PORT '), addr
+        port = int(addr[5:])
+        direct = f'--bucket=http://127.0.0.1:{port}'
+        # Installs take versions 1 through 5. The next call admits at 6 and
+        # commits its reply and one counter increment together at 7.
+        for version in range(1, 6):
+            code, text = once([hosted, '--hirsel-install', direct], f'L56:install-{version}')
+            assert code == 0, text
+        with bucket_relay(port, before=hold_head, after=remember_entry) as delayed:
+            try:
+                holder, output = spawn([hosted, '--hold', '--release-check', delayed])
+                ready = line(output, 'L56:ready')
+                assert ready == 'READY 5 1048576', ready
+                holder.stdin.write('write\n')
+                holder.stdin.flush()
+                assert line(held, 'L56:entry-complete') == 'EFFECT 7'
+                code, text = once(['--follow', direct], 'L56:follower-before')
+                assert code == 0 and text.strip() == 'FOLLOW 6 0', text
+                assert output.empty(), 'L56: a client received a reply while the HEAD PUT was held'
+                release.set()
+                published = line(output, 'L56:reply')
+                assert published == 'BUMPED 7', published
+                assert crash(holder) < 0
+            finally:
+                release.set()
+
+        code, text = once(['--follow', direct], 'L56:follower-after-crash')
+        assert code == 0 and text.strip() == 'FOLLOW 7 1', text
+        next_holder, output = spawn([hosted, '--hold', '--release-check', direct])
+        ready = line(output, 'L56:successor-ready')
+        assert ready == 'READY 5 1048576', ready
+        next_holder.stdin.write('write\n')
+        next_holder.stdin.flush()
+        published = line(output, 'L56:successor-reply')
+        assert published == 'BUMPED 9', published
+        assert crash(next_holder) < 0
+
+
+BUCKET_HOST_LAWS = {
+    'bucket_adopts_and_fences': bucket_adopts_and_fences,
+    'bucket_release_barrier': bucket_release_barrier,
+}

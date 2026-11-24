@@ -34,7 +34,7 @@ from urllib.request import urlopen
 
 from case_progress import run_case
 from std_native import ROOT, simulation_support
-from runner_host import bucket_adopts_and_fences, cutover_survives_host_loss, unpinned
+from runner_host import BUCKET_HOST_LAWS, cutover_survives_host_loss, unpinned
 from store_tests import crash_inputs, runner_inputs
 from store_crash_tests import checked, run_crashes
 
@@ -344,7 +344,7 @@ POISON = 'poison-segment'
 STOP_CASES = ('runner-deadline', 'runner-stop-early', 'runner-stop-twice')
 HOST_LAWS = ('two_recipes_one_digest', 'pinned_recording_uses_retained_image', 'foreign_recording_refused',
              'missing_store_mount', 'install_child', 'install_child_crash', 'cutover_survives_host_loss',
-             'bucket_adopts_and_fences')
+             *BUCKET_HOST_LAWS)
 
 
 def host_law(args, root, work, engine, name):
@@ -360,8 +360,8 @@ def host_law(args, root, work, engine, name):
     manifest_path.write_text(json.dumps(sources))
 
     compiler = str(args.compiler.resolve())
-    if name == 'bucket_adopts_and_fences':
-        return bucket_adopts_and_fences(work, engine, compiler, args.runtime, args.cc, manifest_path, 268435456)
+    if name in BUCKET_HOST_LAWS:
+        return BUCKET_HOST_LAWS[name](work, engine, compiler, args.runtime, args.cc, manifest_path, 268435456)
     publish_store = work / 'published'
     launch_store = work / 'place'
     (launch_store / 'live').mkdir(parents=True)

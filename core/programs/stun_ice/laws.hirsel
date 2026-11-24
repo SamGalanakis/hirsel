@@ -524,3 +524,109 @@ fn lite_peer_signaling() -> Result[(), stun_ice.IceError] {
     }
     Ok(())
 }
+
+/// bug: derive the wrong key from the prepared password for a long-term STUN request.
+/// oracle: RFC 5769 section 2.4 and RFC 8489 Appendix B.1, corrected by erratum 6268.
+@test
+fn long_term_key_vectors() -> Result[(), stun_ice.Error] {
+    let password = b"TheMatrIX"
+    let parent = result.unwrap(secret.seal(take password, "digest"))
+    let prefix = b"\xe3\x83\x9e\xe3\x83\x88\xe3\x83\xaa\xe3\x83\x83\xe3\x82\xaf\xe3\x82\xb9:example.org:"
+    let md5 = result.unwrap(secret.derive_digest(parent, Md5, prefix, Raw, b"", "mac"))
+    let sha256 = result.unwrap(secret.derive_digest(parent, Sha256, prefix, Raw, b"", "mac"))
+    let mut scratch: Bytes = list.with_capacity(160)
+    list.fill(mut scratch, 160, 0)
+    if stun_ice.verify_key(long_sha1(), Long(take md5), mut scratch)? != Sha1 {
+        fail("RFC 5769 long-term request did not verify")
+    }
+    if stun_ice.verify_key(long_sha256(), Long(take sha256), mut scratch)? != Sha256 {
+        fail("RFC 8489 erratum 6268 long-term request did not verify")
+    }
+    Ok(())
+}
+
+/// bug: derive a TURN relay key from the raw MAC or its unpadded encoding.
+/// oracle: Python hmac and hashlib over an RFC 8656 Allocate and the
+/// base64 password drQMYrWe3ae7X1QibpxONspvq5SLSuj98Wl9nLNQNGw=.
+/// The MD5 and SHA-256 keys are 71dce5a2bacb759846f8854891e51cba
+/// and 3fb85d010dc5b8daab7c1870271438de0f7ce680bb997e3b78c4e6dc6807040c.
+@test
+fn minted_credentials() -> Result[(), stun_ice.Error] {
+    let mut raw: Bytes = list.with_capacity(20)
+    list.fill(mut raw, 20, 0x0b)
+    let master = result.unwrap(secret.seal(take raw, "kdf"))
+    let password = result.unwrap(secret.derive_hmac_sha256(master, b"", b"1700000000:alice", "digest"))
+    let prefix = b"1700000000:alice:example.org:"
+    let md5 = result.unwrap(secret.derive_digest(password, Md5, prefix, Base64, b"", "mac"))
+    let sha256 = result.unwrap(secret.derive_digest(password, Sha256, prefix, Base64, b"", "mac"))
+    let mut scratch: Bytes = list.with_capacity(128)
+    list.fill(mut scratch, 128, 0)
+    let allocate_sha1 = b"\x00\x03\x00\x54\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x00\x19\x00\x04\x11\x00\x00\x00\x00\x06\x00\x101700000000:alice\x00\x14\x00\x0bexample.org\x00\x00\x15\x00\x0brelay-nonce\x00\x00\x08\x00\x14\x43\xef\xe6\x40\xe2\x5d\xa9\xa3\x98\xca\x32\x85\x81\xbb\xfe\x5c\x9f\xf5\xb5\x24"
+    let allocate_sha256 = b"\x00\x03\x00\x68\x21\x12\xa4\x42\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x00\x19\x00\x04\x11\x00\x00\x00\x00\x06\x00\x101700000000:alice\x00\x14\x00\x0bexample.org\x00\x00\x15\x00\x0brelay-nonce\x00\x00\x1d\x00\x04\x00\x02\x00\x00\x00\x1c\x00\x20\x75\xb6\xfb\x19\x60\xaf\x43\x3e\xe9\x08\xd2\xdf\x97\x02\x4d\xc6\x95\xc1\x8e\xcf\xe1\x64\x90\x08\x26\x79\x87\x4f\x49\x8e\x62\xd6"
+    if stun_ice.verify_key(allocate_sha1, Long(take md5), mut scratch)? != Sha1 {
+        fail("minted MD5 credentials did not verify Allocate")
+    }
+    if stun_ice.verify_key(allocate_sha256, Long(take sha256), mut scratch)? != Sha256 {
+        fail("minted SHA-256 credentials did not verify Allocate")
+    }
+    Ok(())
+}
+
+fn kd4_key(uses: String) -> Secret {
+    let mut raw: Bytes = list.with_capacity(131)
+    list.fill(mut raw, 131, 0xaa)
+    result.unwrap(secret.seal(take raw, uses))
+}
+
+/// bug: authorize a long-key hash as a MAC key or let a digest child derive another key.
+/// oracle: TLS-5 KD4, RFC 4231 case 6, and RFC 5869 Appendix A.1's OKM (first 32 bytes ending ecc4c5bf).
+@test
+fn kd4_digest_policy() -> Result[(), ()] {
+    let kdf = kd4_key("verify kdf")
+    let digest = kd4_key("digest")
+    if let Error(Invalid) = secret.derive_digest(kdf, Sha256, b"prefix", Raw, b"", "mac") {} else {
+        fail("secret.derive_digest accepted a kdf-only parent")
+    }
+    if let Error(Invalid) = secret.derive_digest(kdf, Sha256, b"", Raw, b"", "mac") {} else {
+        fail("secret.derive_digest allowed hashing the kdf key directly")
+    }
+    if let Error(Invalid) = secret.derive_digest(digest, Sha256, b"", Raw, b"", "mac") {} else {
+        fail("secret.derive_digest allowed hashing the digest key directly")
+    }
+    let tag = b"\x60\xe4\x31\x59\x1e\xe0\xb6\x7f\x0d\x8a\x26\xaa\xcb\xf5\xb7\x7f\x8e\x0b\xc6\x21\x37\x28\xc5\x14\x05\x46\x04\x0f\x0e\xe3\x7f\x54"
+    if !result.unwrap(secret.verify_hmac_sha256(kdf, b"Test Using Larger Than Block-Size Key - Hash Key First", tag)) {
+        fail("verify kdf did not verify RFC 4231 case 6")
+    }
+    let mut ikm: Bytes = list.with_capacity(22)
+    list.fill(mut ikm, 22, 0x0b)
+    let parent = result.unwrap(secret.seal(take ikm, "digest"))
+    let salt = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c"
+    let mut ipad: Bytes = list.with_capacity(64)
+    list.fill(mut ipad, 64, 0x36)
+    for i in 0u64 .. list.len(salt) {
+        ipad[i] = salt[i] ^ 0x36
+    }
+    if let Error(Invalid) = secret.derive_digest(parent, Sha256, ipad, Raw, b"", "digest") {} else {
+        fail("digest derivation granted digest to its child")
+    }
+    match secret.derive_digest(parent, Sha256, ipad, Raw, b"", "kdf") {
+        Error(Invalid) => {}
+        Ok(child) => {
+            let mut opad: Bytes = list.with_capacity(64)
+            list.fill(mut opad, 64, 0x5c)
+            for i in 0u64 .. list.len(salt) {
+                opad[i] = salt[i] ^ 0x5c
+            }
+            let data = b"\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\x01"
+            let okm_key = result.unwrap(secret.derive_hmac_sha256(child, opad, data, "mac"))
+            // HMAC-SHA256 over "x" keyed by the first 32 bytes of RFC 5869 A.1's OKM.
+            let okm_tag = b"\x21\xc3\xca\xa7\xe9\x6e\x59\xbc\xc0\x74\x06\x4f\xdd\x5d\x71\x35\x72\x35\xaf\xfa\xe8\xb7\x4d\x81\xf5\x66\x4a\x76\xfb\x2e\x8b\x54"
+            if result.unwrap(secret.verify_hmac_sha256(okm_key, b"x", okm_tag)) {
+                fail("a digest child holding kdf reproduced RFC 5869 A.1's HKDF child")
+            }
+            fail("digest derivation granted kdf to its child")
+        }
+        Error(_) => fail("digest derivation with a kdf child failed other than Invalid"),
+    }
+    Ok(())
+}

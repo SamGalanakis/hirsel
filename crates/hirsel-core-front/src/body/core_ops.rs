@@ -2778,10 +2778,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             return self.runtime_exec(op, f, vals, result, n);
         }
-        if matches!(
-            op,
-            HostOp::SecretDeriveHmac | HostOp::SecretDeriveHkdf | HostOp::SecretDeriveArgon2id
-        ) {
+        if op.is_secret_derivation() {
             return self.runtime_secret_derive(op, f, vals, result, n);
         }
         if op.is_secret_mac() {

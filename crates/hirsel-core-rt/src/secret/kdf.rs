@@ -3,6 +3,7 @@ use hirsel_core_net::{argon2id::Error as Argon2Error, secret_kdf::Derivation};
 
 pub(crate) const HKDF_MODE: u8 = 0x80;
 pub(crate) const ARGON2ID_MODE: u8 = 0x81;
+const DIGEST_MODE: u8 = 0x82;
 
 pub(crate) struct KdfRequest<'a> {
     pub(crate) secret: &'a Secret,
@@ -69,6 +70,28 @@ pub unsafe extern "C" fn hirsel_core_secret_derive_hmac_sha256(
 
 /// # Safety
 /// The Secret is live and all three input carriers stay pinned through delivery.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_secret_derive_digest(
+    context: *mut Context,
+    s: u64,
+    alg: u32,
+    prefix: *const Buffer,
+    inner: u32,
+    suffix: *const Buffer,
+    uses: *const Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        let prefix = crate::tls::bytes(&*prefix);
+        let suffix = crate::tls::bytes(&*suffix);
+        let derivation = Derivation::digest(alg, inner, prefix.is_empty() && suffix.is_empty());
+        derive(context, s, derivation, prefix, suffix, uses, site)
+    }
+}
+
+/// # Safety
+/// The Secret is live and all three input carriers stay pinned through delivery.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_secret_derive_hkdf_sha256(
     context: *mut Context,
@@ -126,14 +149,14 @@ unsafe fn derive(
     unsafe {
         crate::process::deny_describe_capability(context);
         let secret = resolve(context, s);
+        let Some(derivation) = derivation else {
+            return INVALID;
+        };
         let uses = crate::tls::bytes(&*uses);
         let Some(child) = std::str::from_utf8(uses)
             .ok()
-            .and_then(|uses| secret.policy.derived(uses))
+            .and_then(|uses| secret.policy.derived(derivation.parent_use(), uses))
         else {
-            return INVALID;
-        };
-        let Some(derivation) = derivation else {
             return INVALID;
         };
         let (len, steps, working) = derivation.charges();
@@ -150,6 +173,7 @@ unsafe fn derive(
             Derivation::Hmac => 0,
             Derivation::Hkdf { .. } => HKDF_MODE,
             Derivation::Argon2id { .. } => ARGON2ID_MODE,
+            Derivation::Digest { .. } => DIGEST_MODE,
         };
         let mut args = KdfRequest {
             secret: &secret,

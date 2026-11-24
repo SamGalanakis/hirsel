@@ -353,6 +353,7 @@ HirselCoreHostOutcome hirsel_core_scram_verify(HirselCoreContext *, uint64_t, co
 #define HIRSEL_CORE_SECRET_MAC 39
 #define HIRSEL_CORE_SECRET_KDF 79
 HirselCoreHostOutcome hirsel_core_secret_derive_hmac_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
+HirselCoreHostOutcome hirsel_core_secret_derive_digest(HirselCoreContext *, uint64_t, uint32_t, const HirselCoreBuffer *, uint32_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_derive_hkdf_sha256(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, const HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_derive_argon2id(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint32_t, uint32_t, uint32_t, uint64_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_secret_hmac_sha1(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t *, uint64_t);

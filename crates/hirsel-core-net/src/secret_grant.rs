@@ -29,10 +29,13 @@ impl SecretUse {
     pub const WRAP: Self = Self(32);
     pub const MTLS_CLIENT_ID: Self = Self(64);
     pub const KDF: Self = Self(128);
+    pub const DIGEST: Self = Self(1 << 18);
     const SRTP_SEND: Self = Self(1 << 14);
     const SRTP_RECEIVE: Self = Self(1 << 15);
     const TRAFFIC_SEND: Self = Self(1 << 16);
     const TRAFFIC_RECEIVE: Self = Self(1 << 17);
+    const IMPORTS: u32 =
+        Self::SRTP_SEND.0 | Self::SRTP_RECEIVE.0 | Self::TRAFFIC_SEND.0 | Self::TRAFFIC_RECEIVE.0;
 
     pub fn import(self) -> Option<ImportUse> {
         Some(match self {
@@ -53,10 +56,11 @@ impl SecretUse {
     }
 
     /// Each use word in canonical order, with a use ahead of any it implies.
-    const WORDS: [(&str, Self); 18] = [
+    const WORDS: [(&str, Self); 19] = [
         ("mac", Self::MAC),
         ("verify", Self::VERIFY),
         ("kdf", Self::KDF),
+        ("digest", Self::DIGEST),
         ("sign(ed25519)", Self::SIGN_ED25519),
         ("sign(p256)", Self::SIGN_P256),
         ("sign(rs256)", Self::SIGN_RS256),
@@ -109,7 +113,7 @@ impl SecretUse {
 }
 
 /// A Secret's typed set of uses (TLS-5): `tls_send(<patterns>)`, `mac`,
-/// `verify`, `kdf`, `sign(<alg>)`, `aead(<alg>)`, `open(<alg>)`, `wrap` and `mtls_client_id`, written in that
+/// `verify`, `kdf`, `digest`, `sign(<alg>)`, `aead(<alg>)`, `open(<alg>)`, `wrap` and `mtls_client_id`, written in that
 /// order, separated by single spaces. A DNS name appears only inside
 /// `tls_send(...)`, so no name can be read as a use.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -145,9 +149,7 @@ impl SecretPolicy {
         if send.is_empty() && uses.is_empty() {
             return None;
         }
-        // The four import policy bits follow the AEAD uses. An import owns
-        // exactly one bit and grants no other operation or destination.
-        if uses.0 >> 14 != 0 && (uses.import().is_none() || !send.is_empty()) {
+        if uses.0 & SecretUse::IMPORTS != 0 && (uses.import().is_none() || !send.is_empty()) {
             return None;
         }
         Some(Self { send, uses })
@@ -163,16 +165,21 @@ impl SecretPolicy {
         }
     }
 
-    /// The requested policy of a derived key. A parent with `kdf` may
-    /// derive keys for MAC, verification, further derivation and AEAD.
-    pub fn derived(&self, requested: &str) -> Option<Self> {
-        if !self.uses.permits(SecretUse::KDF) {
+    /// The requested policy of a derived key, given the parent use for the sink.
+    pub fn derived(&self, needed: SecretUse, requested: &str) -> Option<Self> {
+        if !self.uses.permits(needed) {
             return None;
         }
         let child = Self::parse(requested)?;
+        if needed == SecretUse::DIGEST
+            && (child.uses.permits(SecretUse::DIGEST) || child.uses.permits(SecretUse::KDF))
+        {
+            return None;
+        }
         let allowed = SecretUse(
             SecretUse::MAC.0
                 | SecretUse::KDF.0
+                | SecretUse::DIGEST.0
                 | SecretUse::aead(AeadAlg::ChaCha20Poly1305, AeadMode::Seal).0
                 | SecretUse::aead(AeadAlg::Aes128Gcm, AeadMode::Seal).0
                 | SecretUse::aead(AeadAlg::Aes256Gcm, AeadMode::Seal).0,
@@ -263,7 +270,7 @@ impl<'a> SecretSource<'a> {
 }
 
 impl SecretGrant {
-    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, sign(<alg>), aead(<alg>), open(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
+    pub const SYNTAX: &str = "expected --grant 'Secret:<parameter>=env:VAR|file:PATH <uses>', <uses> being tls_send(<patterns>), mac, verify, kdf, digest, sign(<alg>), aead(<alg>), open(<alg>), wrap or mtls_client_id separated by spaces, with 'to <patterns>' for tls_send(<patterns>)";
 
     pub fn logical_size(patterns: &[Pattern], len: u64) -> Option<u64> {
         Pattern::list_bytes(patterns)

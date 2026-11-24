@@ -22,7 +22,12 @@ fn import_policy_is_exclusive_and_directional() {
             }
         }
         assert!(SecretPolicy::parse(&format!("{sent} {received}")).is_none());
-        assert!(SecretPolicy::parse("kdf").unwrap().derived(sent).is_none());
+        assert!(
+            SecretPolicy::parse("kdf")
+                .unwrap()
+                .derived(SecretUse::KDF, sent)
+                .is_none()
+        );
         assert!(SecretGrant::new("key", "env:IMPORT_KEY", sent).is_some());
         assert!(SecretGrant::new("key", "env:IMPORT_KEY", received).is_some());
     }

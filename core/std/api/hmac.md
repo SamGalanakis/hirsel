@@ -99,3 +99,17 @@ the tag.
   holds the complete tag, verdict or JWS key-size refusal. On replay the provider
   delivers the recorded result without reading key bytes
   ([recording](../../../docs/recording.md#credentials)). Recording is off by default.
+
+## Deriving a secret key
+
+`secret.derive_digest(s, alg, prefix, inner, suffix, uses)` hashes the prefix, the
+secret's bytes, and the suffix in that order. `Raw` uses the secret bytes directly.
+`Base64` uses their padded standard encoding. The digest stays in a new `Secret`
+with the requested policy. `Md5` is for TURN interoperability. `Sha256` with
+`Raw` requires at least one nonempty affix.
+
+The parent needs `digest`. The call refuses a child policy containing
+`digest` or `kdf` before issue. It takes one step and admits 48 bytes for MD5 or
+64 bytes for SHA-256. The recording keeps the parent designation, algorithm,
+encoding, affixes and child policy. Replay delivers the child designation
+without its key bytes. [TLS-5](../../../docs/spec/tls.md#tls-5-secrets)

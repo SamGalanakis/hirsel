@@ -555,6 +555,7 @@ tags!(HostOp {
     168 => ScheduleSealerPair,
     169 => SecretHmacSha1,
     170 => SecretVerifyHmacSha1,
+    171 => SecretDeriveDigest,
 });
 
 tags!(RaiseCause {

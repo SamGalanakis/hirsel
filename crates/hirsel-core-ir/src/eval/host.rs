@@ -32,7 +32,10 @@ impl Machine<'_> {
             HostOp::ScramFinalLen => return Ok(self.scram_final_len(a)),
             HostOp::ScramVerify => return Ok(self.scram_verify(a)),
             HostOp::SecretNarrow => return Ok(self.secret_policy(t, op, a)),
-            HostOp::SecretDeriveHmac | HostOp::SecretDeriveHkdf | HostOp::SecretDeriveArgon2id => {
+            HostOp::SecretDeriveHmac
+            | HostOp::SecretDeriveDigest
+            | HostOp::SecretDeriveHkdf
+            | HostOp::SecretDeriveArgon2id => {
                 return self.secret_derive(t, op, a);
             }
             op if op.is_secret_mac() => return self.secret_mac(t, op, a),
@@ -97,6 +100,7 @@ impl Machine<'_> {
             | HostOp::SecretSeal
             | HostOp::SecretNarrow
             | HostOp::SecretDeriveHmac
+            | HostOp::SecretDeriveDigest
             | HostOp::SecretDeriveHkdf
             | HostOp::SecretDeriveArgon2id
             | HostOp::SecretHmac

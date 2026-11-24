@@ -346,6 +346,7 @@ operations! {
     ("secret", "hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretHmac)), "B", "hmac-1504", false),
     ("secret", "hmac_sha384", Lane::Runtime(Kernel::Net(HostOp::SecretHmacSha384)), "B", "secret-hmac-sha2-2277", false),
     ("secret", "hmac_sha512", Lane::Runtime(Kernel::Net(HostOp::SecretHmacSha512)), "B", "secret-hmac-sha2-2277", false),
+    ("secret", "derive_digest", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveDigest)), "B", "turn-u1-2405", false),
     ("secret", "derive_hmac_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHmac)), "B", "secret-kdf-signer-1816", false),
     ("secret", "derive_hkdf_sha256", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveHkdf)), "B", "crypto-derive-2137", false),
     ("secret", "derive_argon2id", Lane::Runtime(Kernel::Net(HostOp::SecretDeriveArgon2id)), "B", "crypto-derive-2137", false),

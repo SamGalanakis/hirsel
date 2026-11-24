@@ -5,7 +5,7 @@ IPv4-mapped peer is checked as its IPv4 address against `deny`, `local` and `all
 embedded IPv4 address in `deny` or `local` denies its NAT64, 6to4 or Teredo form;
 `peer_policy` gains those cases.
 Earlier (turn-amend3-2424): recheck 2406's R1 to R5 applied (uses are the
-one mechanism, with no per-policy `kdf` exclusion; no `digest` in a `derive_digest` child; one
+one mechanism, with no per-policy `kdf` exclusion; no `digest` or `kdf` in a `derive_digest` child; one
 place holding `mac kdf`; the relay-only recording; `streams_per_source` behind one NAT).
 Earlier (turn-amend2-2399): recheck 2383's N1 to N7 applied (`derive_digest`
 under its own `digest` use, replacing the 64-byte
@@ -240,8 +240,8 @@ pub fn verify_hmac_sha1(s: Secret, data: Bytes, tag: Bytes) -> Result[bool, MacE
 - `derive_digest` keeps `H(prefix ‖ enc(bytes of s) ‖ suffix)` as a new sealed secret, where
   `enc` is the identity for `Raw` and RFC 4648 §4 padded base64 for `Base64`. It is under
   TLS-5's derivation rule, with the long-key rules of the next bullet: the parent needs
-  `digest`, the child set is the rule's without `digest` (here `mac`), the child is opaque exactly when the parent is, and the
-  charges, frames and replay follow `derive_hmac_sha256`'s. MD5 runs in the provider over
+  `digest`, the child set is the rule's without `digest` and `kdf` (here `mac`), the child is opaque exactly
+  when the parent is, and the charges, frames and replay follow `derive_hmac_sha256`'s. MD5 runs in the provider over
   RustCrypto `md-5` (ring has none), SHA-256 over ring's `digest`. MD5 is offered only
   because RFC 8489 makes it the algorithm every TURN client without PASSWORD-ALGORITHMS
   uses, which is every browser today.
@@ -882,7 +882,7 @@ Sizes are S (under a day of one lane), M (one to three days) and L (more than th
 | slice | size | depends on | content | laws |
 |---|---|---|---|---|
 | **U0** STUN message layer | M | — | TURN-4 in `stun_ice`: `Key`, `Attr`, `Header`, `attrs`, `verify_key`, `Builder`; Binding functions rebuilt over them; constants; law lock rewritten | existing `binding_vectors`, `full_connectivity`, `lite_nat_rebinding`, `lite_peer_signaling` stay green |
-| **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; TLS-5's long-key rules: the `digest` use for `derive_digest`, `derive_digest` `Raw`/`Sha256` with empty prefix and suffix `Invalid`, and no `digest` in a `derive_digest` child; std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording`, TLS-5's KD4 long-key cases |
+| **U1** TLS-5 sinks | M | — | `secret.derive_digest` (MD5 over RustCrypto `md-5` as a Buck third-party crate, SHA-256 over ring), `secret.hmac_sha1`, `secret.verify_hmac_sha1`, in the OS, scripted and virtual paths; charges and recording frames as TLS-5's sinks; TLS-5's long-key rules: the `digest` use for `derive_digest`, `derive_digest` `Raw`/`Sha256` with empty prefix and suffix `Invalid`, and no `digest` or `kdf` in a `derive_digest` child; std hmac page | `long_term_key_vectors`, `minted_credentials` (relay half), `no_key_in_recording`, TLS-5's KD4 long-key cases |
 | **U2** long-term credentials and client | L | U0, U1 | `core/programs/turn/`<!-- doc-ref: planned --> package; TURN-5 (`mint`, `relay_key`, nonce, server check order as a function the relay calls, client rules, USERHASH); TURN-6 client | `userhash_vector`, `challenge_exchange`, `bid_down_refused`, `nonce_bound_to_tuple`, `expired_costs_no_derivation`, `retransmit_schedule`, client half of `lifetimes_exact` |
 | **U3** relay server | L | U2 | TURN-7 Allocate, Refresh, CreatePermission, ChannelBind, Send, Data, ChannelData; pool; timers; in-place framing | `allocate_check_order`, `unsupported_answers`, `lifetimes_exact`, `permissions_by_ip`, `channel_rules` |
 | **U4** relay policy, quota, revocation | M | U3, NET-18 S1 | TURN-7 policy with `local` and `net.class` (after NET-18 S1), the full-address check on every path including `from_peer`, quota per subject, capacity; TURN-9 | `peer_policy`, `quota_and_capacity`, `revoke_drops_paths` |

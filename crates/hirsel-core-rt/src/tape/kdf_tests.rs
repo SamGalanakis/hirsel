@@ -288,3 +288,189 @@ fn kdf_grants_charge_before_issue_and_replay_without_keys() {
         }
     }
 }
+
+#[test]
+fn no_key_in_recording() {
+    // Python hmac and hashlib over 1700000000:alice, realm example.org.
+    const MASTER: &[u8] = &[0x0b; 20];
+    const PASSWORD_HEX: &str = "76b40c62b59edda7bb5f54226e9c4e36ca6fab948b4ae8fdf1697d9cb350346c";
+    const MD5_HEX: &str = "71dce5a2bacb759846f8854891e51cba";
+    const SHA256_HEX: &str = "3fb85d010dc5b8daab7c1870271438de0f7ce680bb997e3b78c4e6dc6807040c";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("master");
+    std::fs::write(&path, MASTER).unwrap();
+    let grant = SecretGrant::new("master", &format!("file:{}", path.display()), "kdf").unwrap();
+    let mut header = header(REVISION);
+    header.kind = KIND_RUN;
+    header.secret_grants.push(grant.clone());
+    let mut store = Store::default();
+
+    for mode in [Mode::Record, Mode::Replay] {
+        in_task(mode == Mode::Record, &mut |context| {
+            // SAFETY: the run owns the registry, and each carrier lives through its call.
+            unsafe {
+                let (provider, handle) = store.dir();
+                let dir = Inner { provider, handle };
+                let input = match mode {
+                    Mode::Record => TapeInput::Record {
+                        dir,
+                        name: b"t",
+                        header: &header,
+                    },
+                    Mode::Replay => TapeInput::Replay(ReplayInput::open(dir, b"t").unwrap()),
+                };
+                let (tape, startup) = Tape::open_with_startup(REVISION, input, &expect()).unwrap();
+                let (_, handle) = tape
+                    .on_tape(crate::entry::SECRET, (MAC_PROVIDER, 0))
+                    .unwrap();
+                let origin = Origin::Granted(ordinal_of(handle) as u64);
+                let master = if mode == Mode::Record {
+                    let mut master = Granted::read(grant.clone(), 0).unwrap().secret;
+                    master.origin = origin;
+                    master
+                } else {
+                    let policy = SecretPolicy::parse(&startup.secret_grants[0].policy).unwrap();
+                    Secret::new(origin, policy, None, None)
+                };
+                let master = (*(*context).host_files)
+                    .registry
+                    .run_grants()
+                    .secrets
+                    .lock()
+                    .unwrap()
+                    .register(master);
+
+                let digest = move |parent, alg, prefix: &[u8], inner, uses: &[u8]| {
+                    crate::secret::kdf::hirsel_core_secret_derive_digest(
+                        context,
+                        parent,
+                        alg,
+                        &view(prefix),
+                        inner,
+                        &view(b""),
+                        &view(uses),
+                        21,
+                    )
+                };
+                let counted = Counted::new(None);
+                (*(*context).host_files).secret_mac_tape = Some(MacTape {
+                    provider: counted.provider(),
+                    handle: 0,
+                });
+                assert_eq!(digest(master, 1, b"", 0, b"mac").error.tag, 1);
+                assert_eq!(digest(master, 1, b"prefix", 0, b"mac").error.tag, 1);
+                let mut long_key = [0xaa; 131];
+                let source = Buffer {
+                    data: long_key.as_mut_ptr(),
+                    len: long_key.len(),
+                    capacity: long_key.len(),
+                };
+                let parent = hirsel_core_secret_seal(context, &source, &view(b"digest"), 20);
+                assert_eq!(parent.error.tag, 0);
+                assert_eq!(digest(parent.value, 1, b"", 0, b"mac").error.tag, 1);
+                assert_eq!(
+                    digest(parent.value, 1, b"prefix", 0, b"digest").error.tag,
+                    1
+                );
+                assert_eq!(
+                    digest(parent.value, 0, b"prefix", 0, b"mac digest")
+                        .error
+                        .tag,
+                    1
+                );
+                hirsel_core_secret_drop(context, parent.value);
+                assert_eq!(counted.calls.get(), 0);
+
+                (*(*context).host_files).secret_mac_tape = Some(tape.secret_mac());
+                let username = b"1700000000:alice";
+                let prefix = b"1700000000:alice:example.org:";
+                let password = hirsel_core_secret_derive_hmac_sha256(
+                    context,
+                    master,
+                    &view(b""),
+                    &view(username),
+                    &view(b"digest"),
+                    22,
+                );
+                assert_eq!(password.error.tag, 0);
+                for (alg, charge, verify, tag) in [
+                    (
+                        0,
+                        48,
+                        crate::secret::hirsel_core_secret_verify_hmac_sha1
+                            as unsafe extern "C" fn(
+                                *mut crate::Context,
+                                u64,
+                                *const Buffer,
+                                *const Buffer,
+                                u64,
+                            ) -> Outcome,
+                        "0f96df610495921c6de7cb7a401e7792cbf36244",
+                    ),
+                    (
+                        1,
+                        64,
+                        crate::secret::hirsel_core_secret_verify_hmac_sha256,
+                        "c014b161c0bce4d87d91895ec23364264b45e867ccdd8d5357f7ead6ef426954",
+                    ),
+                ] {
+                    (*context).limit_enter(charge - 1).unwrap();
+                    let refused = digest(password.value, alg, prefix, 1, b"mac");
+                    assert_eq!(
+                        (refused.error.tag, refused.value, refused.written),
+                        (2, charge, charge - 1)
+                    );
+                    (*context).limit_exit();
+                    (*context).limit_enter(charge).unwrap();
+                    let key = digest(password.value, alg, prefix, 1, b"mac");
+                    assert_eq!(key.error.tag, 0);
+                    assert_eq!((*context).available(), 0);
+                    let verified = verify(context, key.value, &view(b"x"), &view(&unhex(tag)), 23);
+                    assert_eq!((verified.error.tag, verified.value), (0, 1));
+                    hirsel_core_secret_drop(context, key.value);
+                    assert_eq!((*context).available(), charge);
+                    (*context).limit_exit();
+                }
+                hirsel_core_secret_drop(context, password.value);
+                tape.end(&Ending::returned(&[])).unwrap();
+            }
+        });
+        if mode == Mode::Record {
+            std::fs::remove_file(&path).unwrap();
+            let tape = store.file();
+            let frames = tape_frames(tape);
+            let deliveries = frames.iter().filter_map(|frame| match frame {
+                Frame::Op {
+                    op: SECRET_KDF,
+                    out,
+                    ..
+                } => Some(out),
+                _ => None,
+            });
+            let mut count = 0;
+            for out in deliveries {
+                assert_eq!(out.status, OK);
+                assert!(out.payload.is_empty());
+                count += 1;
+            }
+            assert_eq!(count, 3);
+            for (hex, base64) in [
+                (
+                    "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+                    "CwsLCwsLCwsLCwsLCwsLCwsLCws=",
+                ),
+                (PASSWORD_HEX, "drQMYrWe3ae7X1QibpxONspvq5SLSuj98Wl9nLNQNGw="),
+                (
+                    "6472514d5972576533616537583151696270784f4e7370767135534c53756a3938576c396e4c4e514e47773d",
+                    "ZHJRTVlyV2UzYWU3WDFRaWJweE9Oc3B2cTVTTFN1ajk4V2w5bkxOUU5Hdz0=",
+                ),
+                (MD5_HEX, "cdzlorrLdZhG+IVIkeUcug=="),
+                (SHA256_HEX, "P7hdAQ3FuNqrfBhwJxQ43g985oC7mX47eMTm3GgHBAw="),
+            ] {
+                for absent in [&unhex(hex), hex.as_bytes(), base64.as_bytes()] {
+                    assert!(!tape.windows(absent.len()).any(|window| window == absent));
+                }
+            }
+        }
+    }
+}

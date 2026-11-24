@@ -317,6 +317,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretHmacSha1
                     | HostOp::SecretVerifyHmacSha1
                     | HostOp::SecretDeriveHmac
+                    | HostOp::SecretDeriveDigest
                     | HostOp::SecretDeriveHkdf
                     | HostOp::SecretDeriveArgon2id
                     | HostOp::SecretVerifyHmac

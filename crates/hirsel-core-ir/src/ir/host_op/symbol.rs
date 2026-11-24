@@ -41,6 +41,7 @@ impl HostOp {
             Self::SecretVerifyHmacSha1 => "hirsel_core_secret_verify_hmac_sha1",
             Self::SecretHmac => "hirsel_core_secret_hmac_sha256",
             Self::SecretDeriveHmac => "hirsel_core_secret_derive_hmac_sha256",
+            Self::SecretDeriveDigest => "hirsel_core_secret_derive_digest",
             Self::SecretDeriveHkdf => "hirsel_core_secret_derive_hkdf_sha256",
             Self::SecretDeriveArgon2id => "hirsel_core_secret_derive_argon2id",
             Self::SecretVerifyHmac => "hirsel_core_secret_verify_hmac_sha256",

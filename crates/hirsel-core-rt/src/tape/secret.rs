@@ -98,6 +98,7 @@ pub(super) unsafe fn kdf_args(r: &Request) -> Args {
     put_varint(&mut head, kdf.salt_or_prefix.len() as u64);
     match kdf.derivation.as_ref().unwrap() {
         Derivation::Hmac => {}
+        Derivation::Digest { alg, inner } => head.extend([*alg as u8, *inner as u8]),
         Derivation::Hkdf { len } => put_varint(&mut head, *len as u64),
         Derivation::Argon2id { len, cost, .. } => {
             put_varint(&mut head, *len as u64);

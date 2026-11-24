@@ -147,6 +147,7 @@ pub enum HostOp {
     PacketOpen = hirsel_core_ids::host_op::PACKET_OPEN as isize,
     PacketOpenInto = hirsel_core_ids::host_op::PACKET_OPEN_INTO as isize,
     PacketMask = hirsel_core_ids::host_op::PACKET_MASK as isize,
+    SecretDeriveDigest = 166,
 }
 
 mod symbol;
@@ -245,6 +246,7 @@ impl HostOp {
         HostOp::SecretJwsHmacSign,
         HostOp::SecretJwsHmacVerify,
         HostOp::SecretDeriveHmac,
+        HostOp::SecretDeriveDigest,
         HostOp::SecretDeriveHkdf,
         HostOp::SecretDeriveArgon2id,
         HostOp::SecretWrap,
@@ -467,6 +469,17 @@ impl HostOp {
             // The caller retains the carrier, whose owned bytes are wiped on success.
             HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
             HostOp::SecretDeriveHmac => (vec![V(u64_), V(p), V(p), V(p)], outcome),
+            HostOp::SecretDeriveDigest => (
+                vec![
+                    V(u64_),
+                    V(Ty::Scalar(Scalar::U32)),
+                    V(p),
+                    V(Ty::Scalar(Scalar::U32)),
+                    V(p),
+                    V(p),
+                ],
+                outcome,
+            ),
             HostOp::SecretDeriveHkdf => (vec![V(u64_), V(p), V(p), V(u64_), V(p)], outcome),
             HostOp::SecretDeriveArgon2id => {
                 let w = V(Ty::Scalar(Scalar::U32));
@@ -719,6 +732,7 @@ impl HostOp {
             HostOp::SecretVerifyHmacSha1 => "secret_verify_hmac_sha1",
             HostOp::SecretHmac => "secret_hmac_sha256",
             HostOp::SecretDeriveHmac => "secret_derive_hmac_sha256",
+            HostOp::SecretDeriveDigest => "secret_derive_digest",
             HostOp::SecretDeriveHkdf => "secret_derive_hkdf_sha256",
             HostOp::SecretDeriveArgon2id => "secret_derive_argon2id",
             HostOp::SecretVerifyHmac => "secret_verify_hmac_sha256",
@@ -835,6 +849,16 @@ impl HostOp {
         )
     }
 
+    pub const fn is_secret_derivation(self) -> bool {
+        matches!(
+            self,
+            Self::SecretDeriveHmac
+                | Self::SecretDeriveDigest
+                | Self::SecretDeriveHkdf
+                | Self::SecretDeriveArgon2id
+        )
+    }
+
     /// The secret MAC signing and verification operations, including JWS.
     pub const fn is_secret_mac(self) -> bool {
         self.secret_mac_signs()
@@ -863,6 +887,7 @@ impl HostOp {
     /// Whether the operation waits (a cancellation point, so it can fail).
     pub const fn waits(self) -> bool {
         !self.is_media()
+            && !self.is_secret_derivation()
             && !matches!(
                 self,
                 HostOp::WallMs
@@ -884,9 +909,6 @@ impl HostOp {
                     | HostOp::SecretVerifyHmacSha512
                     | HostOp::SecretJwsHmacSign
                     | HostOp::SecretJwsHmacVerify
-                    | HostOp::SecretDeriveHmac
-                    | HostOp::SecretDeriveHkdf
-                    | HostOp::SecretDeriveArgon2id
                     | HostOp::SecretVerifyHmac
                     | HostOp::SecretWrap
                     | HostOp::SecretUnwrap

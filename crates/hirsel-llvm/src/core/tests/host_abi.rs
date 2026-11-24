@@ -41,6 +41,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::SecretSeal => &["ptr", "ptr"],
         HostOp::SecretNarrow => &["u64", "ptr"],
         HostOp::SecretDeriveHmac => &["u64", "ptr", "ptr", "ptr"],
+        HostOp::SecretDeriveDigest => &["u64", "u32", "ptr", "u32", "ptr", "ptr"],
         HostOp::SecretDeriveHkdf => &["u64", "ptr", "ptr", "u64", "ptr"],
         HostOp::SecretDeriveArgon2id => &["u64", "ptr", "u32", "u32", "u32", "u64", "ptr"],
         HostOp::NetSplit

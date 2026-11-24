@@ -84,4 +84,19 @@ fn describe_waits_widening() -> u64 waits {
         0
     }
 }
+
+fn e[T: key]() -> StaticFn[fn(T, T) -> bool] { code.describe(same) }
+
+// expect: run generic_body_descriptors() = 1
+fn generic_body_descriptors() -> u64 {
+    let d32: StaticFn[fn(u32, u32) -> bool] = e()
+    if described_same() == e()
+        && code.identity(d32) == b"\x01app@1/main/same[u32]{key[u32]}($0,$0)->bool"
+        && (code.callable(d32))(7u32, 7u32) {
+        1
+    } else {
+        0
+    }
+}
+
 pub fn main()->Result[(),Exit] {Ok(())}

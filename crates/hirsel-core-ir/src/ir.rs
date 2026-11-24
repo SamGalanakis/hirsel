@@ -2032,65 +2032,6 @@ impl Identity {
         symbol(self.digest())
     }
 }
-/// The link name of the revision carrier of the root whose identity digest is
-/// `digest` ([`Module::revision_root`]): a `Bytes` carrier `{bytes, 32, 0}` of
-/// its code revision. Each unit that describes an item's function defines it
-/// weak as `{0, 0, 0}` (no revision), and a link that knows the program's
-/// reach defines it; an intrinsic's carrier holds [`intrinsic_revision`].
-pub fn revision_symbol(digest: ContentHash) -> String {
-    symbol(digest) + "$revision"
-}
-/// Whose code revision a described function has (PROG-9 `code.revision`):
-/// the code a call through the `StaticFn` runs.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum RevisionRoot {
-    /// A reached instance: the described item, which a `$callable` adapter
-    /// calls.
-    Item(Identity),
-    /// A core item without a body, which the adapter computes itself: no
-    /// checked IR reaches out of it ([`intrinsic_revision`]).
-    Intrinsic(Identity),
-}
-impl RevisionRoot {
-    pub fn identity(&self) -> &Identity {
-        match self {
-            Self::Item(identity) | Self::Intrinsic(identity) => identity,
-        }
-    }
-}
-impl Module {
-    /// The revision root of described function `function`: itself, or for a
-    /// `$callable` adapter the item it calls. `code.describe` names a
-    /// non-generic item, so an item without a callee is a plain intrinsic.
-    pub fn revision_root(&self, function: FuncId) -> RevisionRoot {
-        let f = &self.functions[function.index()];
-        let identity = self.identity(f.instance);
-        let Some((source, _)) = identity.definition.0.name.split_once("$callable[") else {
-            return RevisionRoot::Item(identity);
-        };
-        let mut item = identity.definition.clone();
-        item.0.name = source.to_owned();
-        let callee = f
-            .body
-            .iter()
-            .flat_map(|b| &b.calls)
-            .find_map(|c| match c.callee {
-                Callee::Direct(g) => {
-                    let callee = self.identity(self.functions[g.index()].instance);
-                    (callee.definition == item).then_some(callee)
-                }
-                _ => None,
-            });
-        match callee {
-            Some(callee) => RevisionRoot::Item(callee),
-            None => RevisionRoot::Intrinsic(Identity::plain(item)),
-        }
-    }
-}
-/// The code revision of a compiler-implemented core definition.
-pub fn intrinsic_revision(root: &Identity) -> ContentHash {
-    crate::code_revision(crate::builtin_address(root).expect("intrinsic has a semantics number"))
-}
 /// `h` and the 64 hex digits of `digest`.
 pub fn symbol(digest: ContentHash) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2102,6 +2043,9 @@ pub fn symbol(digest: ContentHash) -> String {
     }
     name
 }
+
+mod revision;
+pub use revision::{RevisionRoot, intrinsic_revision, revision_symbol};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Function {

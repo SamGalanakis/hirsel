@@ -114,29 +114,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.live() {
             return (result, None);
         }
-        if fd
+        let depends_on_enclosing = fd
             .generics
             .iter()
             .zip(&args)
-            .any(|(g, &ty)| !g.region && has_param(&self.t, ty))
-        {
-            return self.gap_ty(
-                argument,
-                "a descriptor depending on a generic body parameter is not built",
-            );
-        }
+            .any(|(g, &ty)| !g.region && has_param(&self.t, ty));
         let raw = match self.instance_row(item, &args) {
             Ok((raw, _)) => raw,
             Err(what) => return self.gap_ty(argument, what),
         };
-        let Some(bytes) = self.code_identity_bytes(item, raw, &args) else {
+        let Some(recipe) = self.code_identity_recipe(item, raw, &args) else {
             return self.gap_ty(argument, "StaticFn identity source is not built");
         };
-        let Some(function) = self.item_adapter_closed(raw, item, &args, ty, n) else {
+        let Some(function) =
+            self.item_descriptor_adapter(raw, item, &args, ty, n, depends_on_enclosing)
+        else {
             return (result, None);
         };
-        self.nested.remove(&function);
-        let identity = self.e.static_bytes(&bytes);
+        let (identity, length) = if depends_on_enclosing {
+            if let Some(template) = self.nested.get_mut(&function) {
+                template.descriptor_adapter = Some(raw);
+            }
+            self.descriptor_recipes.insert(function, recipe);
+            (self.e.static_bytes(&[1]), None)
+        } else {
+            self.nested.remove(&function);
+            let bytes = recipe.render(&[]).expect("closed descriptor recipe");
+            (self.e.static_bytes(&bytes), Some(bytes.len() as u64))
+        };
         let descriptor = self.value(Ty::Ptr);
         self.inst(
             Inst::DescriptorRef {
@@ -148,16 +153,52 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let word = self.reinterpret(descriptor, Ty::Ptr, Ty::Scalar(Scalar::U64), n);
         if let Some(word) = word {
-            self.static_fns
-                .insert(word, (function, identity, bytes.len() as u64));
+            self.static_fns.insert(word, (function, identity, length));
         }
         self.temp(result, word);
         (result, word)
     }
 
-    fn code_identity_bytes(&self, item: usize, raw: FuncId, args: &[TyId]) -> Option<Vec<u8>> {
+    fn code_identity_recipe(
+        &self,
+        item: usize,
+        raw: FuncId,
+        args: &[TyId],
+    ) -> Option<crate::identity::DescriptorRecipe> {
         let key = &self.e.module.instances[self.e.module.functions[raw.index()].instance.index()];
         crate::identity::instance_identity(&self.p.decls, &self.t, &self.p.fns[item], key, args)
+    }
+
+    /// The descriptor of `value`, a StaticFn, and its identity length: a
+    /// StaticFn this body described has both here; any other has them in its
+    /// word.
+    pub(super) fn code_descriptor(
+        &mut self,
+        value: ValueId,
+        n: NodeId,
+    ) -> Option<(ValueId, ValueId)> {
+        if let Some(&(function, identity, length)) = self.static_fns.get(&value) {
+            let descriptor = self.value(Ty::Ptr);
+            self.inst(
+                Inst::DescriptorRef {
+                    result: descriptor,
+                    function,
+                    identity,
+                },
+                n,
+            );
+            let length = match length {
+                Some(length) => self.konst(Ty::Scalar(Scalar::U64), length, n)?,
+                None => self.descriptor_word(descriptor, 8, Ty::Scalar(Scalar::U64), n)?,
+            };
+            return Some((descriptor, length));
+        }
+        let Some(descriptor) = self.static_fn_pointer(value, n) else {
+            self.gap(n, "StaticFn identity carriage is not built");
+            return None;
+        };
+        let length = self.descriptor_word(descriptor, 8, Ty::Scalar(Scalar::U64), n)?;
+        Some((descriptor, length))
     }
 
     pub(super) fn reinterpret(

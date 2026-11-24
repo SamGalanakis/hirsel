@@ -102,11 +102,6 @@ pub fn symbol(module: &Module, function: FuncId) -> String {
     hirsel_core_ir::symbol(module.code_identity(function))
 }
 
-/// The link name of `function`'s static descriptor (`Inst::DescriptorRef`).
-fn descriptor_symbol(function: &str) -> String {
-    format!("{function}$static")
-}
-
 /// The `"hirsel-carriers"` marker: each LLVM parameter whose place the bridge
 /// may pass as words on cold calls (FORM #111), `m` when the callee may change it (`mut`,
 /// `take`, so its words come back) and `v` when it is frozen (`view`).
@@ -490,7 +485,7 @@ fn emit_module(
     }
     // Each function a body of this unit describes, its descriptor `{code,
     // length, revision}` then the identity bytes, defined weak beside the
-    // function's code identity: every unit that describes it defines it, and
+    // described instance: every unit that describes it defines it, and
     // the linker keeps one per program, as it keeps one body. `revision`
     // addresses its revision root's carrier (`Module::revision_root`): an
     // item's is defined here plain weak as `{0, 0, 0}` so that a link that
@@ -506,7 +501,7 @@ fn emit_module(
                 continue;
             };
             let function_symbol = items.function_symbol(function);
-            let name = descriptor_symbol(function_symbol);
+            let name = module.descriptor_symbol(function, function_symbol);
             if !described.insert(name.clone()) {
                 continue;
             }
@@ -2138,7 +2133,10 @@ impl FunctionEmitter<'_> {
                 result, function, ..
             } => self.put(
                 result,
-                &Value::global(descriptor_symbol(self.items.function_symbol(function))),
+                &Value::global(
+                    self.module
+                        .descriptor_symbol(function, self.items.function_symbol(function)),
+                ),
             ),
             Inst::CompactWidth { result, word, .. } => {
                 let x = self.numeric(word);

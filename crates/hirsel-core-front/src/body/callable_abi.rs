@@ -112,20 +112,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        self.callable_adapter(raw, Some((item, types)), ty, n, false)
+        self.callable_adapter(raw, Some((item, types)), ty, n, None)
     }
-    pub(super) fn item_adapter_closed(
+    pub(super) fn item_descriptor_adapter(
         &mut self,
         raw: FuncId,
         item: usize,
         types: &[TyId],
         ty: TyId,
         n: NodeId,
+        depends_on_enclosing: bool,
     ) -> Option<FuncId> {
-        self.callable_adapter(raw, Some((item, types)), ty, n, true)
+        self.callable_adapter(raw, Some((item, types)), ty, n, Some(depends_on_enclosing))
     }
     pub(super) fn row_adapter(&mut self, raw: FuncId, ty: TyId, n: NodeId) -> Option<FuncId> {
-        self.callable_adapter(raw, None, ty, n, false)
+        self.callable_adapter(raw, None, ty, n, None)
     }
     fn callable_adapter(
         &mut self,
@@ -133,7 +134,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: Option<(usize, &[TyId])>,
         ty: TyId,
         n: NodeId,
-        close_generics: bool,
+        descriptor_depends_on_enclosing: Option<bool>,
     ) -> Option<FuncId> {
         if !self.live() {
             return None;
@@ -154,8 +155,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        if self.e.module.signatures[self.e.source_signature(raw).index()]
-            == self.e.module.signatures[signature.index()]
+        let descriptor_instance = descriptor_depends_on_enclosing.is_some()
+            && item.is_some_and(|(f, _)| self.p.fns[f].generics.iter().any(|g| !g.region));
+        if !descriptor_instance
+            && self.e.module.signatures[self.e.source_signature(raw).index()]
+                == self.e.module.signatures[signature.index()]
             && item.map_or(
                 self.e.module.functions[raw.index()].body.is_some()
                     || self.nested.contains_key(&raw),
@@ -164,13 +168,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             return Some(raw);
         }
-        let descriptor_instance = close_generics
-            && item.is_some_and(|(f, _)| self.p.fns[f].generics.iter().any(|g| !g.region));
         let descriptor_key = descriptor_instance.then(|| {
             let mut key = self.e.module.instances
                 [self.e.module.functions[raw.index()].instance.index()]
             .clone();
-            key.definition.0.name.push_str("$callable[instance]");
+            if descriptor_depends_on_enclosing == Some(true) {
+                // Each rigid adapter belongs to one template. Its closed key is
+                // chosen from the specialized target during materialization.
+                let enclosing = self.func.expect("a live body has a function row");
+                key.definition
+                    .0
+                    .name
+                    .push_str(&format!("$descriptor-template[{}]", enclosing.0));
+            } else {
+                key.definition.0.name.push_str("$callable[instance]");
+            }
             key
         });
         let existing = match &descriptor_key {
@@ -186,7 +198,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // An item adapter closes the source function's generic arguments. Keeping
         // the enclosing generic declaration here leaves a body-less generic row;
         // a StaticFn described in a generic body then names no native body.
-        if close_generics {
+        if descriptor_depends_on_enclosing == Some(false) {
             fd.generics.clear();
             fd.has_region_parameters = false;
         }

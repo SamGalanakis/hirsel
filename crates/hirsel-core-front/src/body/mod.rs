@@ -1194,7 +1194,8 @@ struct Cx<'c, 'a, 'e> {
     /// The StaticFn words `code.describe` produced in this body: each one's
     /// described function, its identity static and that static's length, so a
     /// `code.identity` or `code.callable` of one reads no descriptor.
-    static_fns: HashMap<ValueId, (FuncId, hirsel_core_ir::StaticId, u64)>,
+    static_fns: HashMap<ValueId, (FuncId, hirsel_core_ir::StaticId, Option<u64>)>,
+    descriptor_recipes: std::collections::BTreeMap<FuncId, crate::identity::DescriptorRecipe>,
     flow_literals: HashSet<ValueId>,
     shared_flow_holds: &'c [std::sync::OnceLock<(u8, u64)>],
     local_flow_holds: Vec<Option<(u8, u64)>>,
@@ -1386,6 +1387,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             steps_in_source: !fd.path.package_is("core", "1"),
             func: None,
             static_fns: HashMap::default(),
+            descriptor_recipes: Default::default(),
             flow_literals: HashSet::default(),
             shared_flow_holds: p.flow_holds.get_or_init(|| {
                 (0..p.types.len())
@@ -2634,6 +2636,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     allocations: std::mem::take(&mut self.allocations),
                     numeric_sites: std::mem::take(&mut self.numeric_sites),
                     nested: std::mem::take(&mut self.nested),
+                    descriptor_adapter: None,
+                    descriptors: std::mem::take(&mut self.descriptor_recipes),
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),
                     codecs: self.e.generic_codecs.clone(),
@@ -3160,26 +3164,4 @@ pub(super) fn held_size(repr: LRepr, recipe: &Recipe, logical: bool) -> Result<u
 }
 
 #[cfg(test)]
-mod row_cache_tests {
-    use super::*;
-
-    #[test]
-    fn only_mentioned_function_rows_occupy_the_cache() {
-        let mut source = (0..64)
-            .map(|i| format!("fn unused{i}() -> u64 {{ 0 }}\n"))
-            .collect::<String>();
-        source.push_str("fn only() -> u64 { 42 }\n");
-        let (index, modules) = crate::tests::program_inputs(&source);
-        let p = Program::declare(&index, &modules);
-        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
-        let f = p.fns.iter().position(|f| f.path.0.name == "only").unwrap();
-        assert!(f >= 64);
-        let mut e = Emitter::new();
-        let mut t = Local::with_program(&p);
-        let row = e.row(&p, &mut t, f).unwrap();
-        assert_eq!(e.rows.len(), 1, "unmentioned definitions took cache slots");
-        assert_eq!(e.module.functions.len(), 1);
-        assert_eq!(e.row(&p, &mut t, f).unwrap(), row);
-        assert_eq!(e.rows.len(), 1);
-    }
-}
+mod row_cache_tests;

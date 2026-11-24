@@ -2145,32 +2145,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
-    /// The descriptor of `value`, a StaticFn, and its identity length: a
-    /// StaticFn this body described has both here; any other has them in its
-    /// word.
-    fn code_descriptor(&mut self, value: ValueId, n: NodeId) -> Option<(ValueId, ValueId)> {
-        if let Some(&(function, identity, length)) = self.static_fns.get(&value) {
-            let descriptor = self.value(Ty::Ptr);
-            self.inst(
-                Inst::DescriptorRef {
-                    result: descriptor,
-                    function,
-                    identity,
-                },
-                n,
-            );
-            return Some((descriptor, self.konst(Ty::Scalar(Scalar::U64), length, n)?));
-        }
-        let Some(descriptor) = self.static_fn_pointer(value, n) else {
-            self.gap(n, "StaticFn identity carriage is not built");
-            return None;
-        };
-        let length = self.descriptor_word(descriptor, 8, Ty::Scalar(Scalar::U64), n)?;
-        Some((descriptor, length))
-    }
-
     /// The word at `offset` in `descriptor`.
-    fn descriptor_word(
+    pub(super) fn descriptor_word(
         &mut self,
         descriptor: ValueId,
         offset: u64,
@@ -2332,7 +2308,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// A StaticFn's descriptor address: the value itself when it is carried as a
     /// pointer, else its word reinterpreted.
-    fn static_fn_pointer(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
+    pub(super) fn static_fn_pointer(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
         (self.b.values.get(value.index()) == Some(&Ty::Ptr))
             .then_some(value)
             .or_else(|| self.reinterpret(value, Ty::Scalar(Scalar::U64), Ty::Ptr, n))

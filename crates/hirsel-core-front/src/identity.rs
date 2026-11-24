@@ -25,7 +25,7 @@ pub(crate) fn code_identity(
     fd: &FnDecl,
     args: &[TyId],
 ) -> Option<Vec<u8>> {
-    identity(decls, t, fd, args, None)
+    identity_recipe(decls, t, fd, args, None)?.render(&[])
 }
 
 /// The source spellings accompany the key's layout rows: a layout erases anchors
@@ -36,8 +36,8 @@ pub(crate) fn instance_identity(
     fd: &FnDecl,
     key: &hirsel_core_ir::InstanceKey,
     source_args: &[TyId],
-) -> Option<Vec<u8>> {
-    identity(
+) -> Option<DescriptorRecipe> {
+    identity_recipe(
         decls,
         t,
         fd,
@@ -46,13 +46,13 @@ pub(crate) fn instance_identity(
     )
 }
 
-fn identity(
+fn identity_recipe(
     decls: &crate::Rows<TypeDecl>,
     t: &impl TyRead,
     fd: &FnDecl,
     args: &[TyId],
     key: Option<&hirsel_core_ir::InstanceKey>,
-) -> Option<Vec<u8>> {
+) -> Option<DescriptorRecipe> {
     let TyKind::Fn(params, result, waits, Callable::Plain) = t.kind(fd.callable).clone() else {
         return None;
     };
@@ -91,6 +91,7 @@ fn identity(
         return None;
     }
     let mut prefix = Words::new(decls, false);
+    prefix.recipe = Some(DescriptorRecipe::default());
     prefix.definition(key.map_or(&fd.path, |key| &key.definition));
     if type_count > 0 {
         prefix.punct("[");
@@ -129,11 +130,87 @@ fn identity(
             prefix.punct("}");
         }
     }
-    let mut bytes = Vec::with_capacity(1 + prefix.s.len() + w.s.len());
-    bytes.push(1);
-    bytes.extend_from_slice(prefix.s.as_bytes());
-    bytes.extend_from_slice(w.s.as_bytes());
-    Some(bytes)
+    prefix.punct(&w.s);
+    prefix.recipe
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct DescriptorRecipe {
+    parts: Vec<DescriptorPart>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+enum DescriptorPart {
+    Text { text: String, word: bool },
+    Argument(u32),
+}
+
+impl DescriptorRecipe {
+    pub(crate) fn render(&self, arguments: &[String]) -> Option<Vec<u8>> {
+        let mut out = String::from("\x01");
+        let mut previous_word = false;
+        for part in &self.parts {
+            match part {
+                DescriptorPart::Text { text, word } => {
+                    write_token(&mut out, &mut previous_word, text, *word);
+                }
+                DescriptorPart::Argument(i) => {
+                    append_layout_type(&mut out, &mut previous_word, arguments.get(*i as usize)?)?;
+                }
+            }
+        }
+        Some(out.into_bytes())
+    }
+}
+
+fn write_token(out: &mut String, previous_word: &mut bool, text: &str, word: bool) {
+    if *previous_word && word {
+        out.push(' ');
+    }
+    out.push_str(text);
+    *previous_word = word;
+}
+
+/// A specialized argument is available by its closed layout name. Instance
+/// layouts erase anchors and spell paths with package versions and raw
+/// components. Reframe the tokens as PROG-9 words and definition identities.
+fn append_layout_type(out: &mut String, previous_word: &mut bool, mut text: &str) -> Option<()> {
+    fn delimiter(c: char) -> bool {
+        matches!(c, ' ' | '(' | ')' | '[' | ']' | ',')
+    }
+    while !text.is_empty() {
+        let (token, word) = if let Some(rest) = text.strip_prefix(' ') {
+            text = rest;
+            continue;
+        } else if let Some(rest) = text.strip_prefix("->") {
+            text = rest;
+            ("->", false)
+        } else if text.starts_with(delimiter) {
+            let (punct, rest) = text.split_at(1);
+            text = rest;
+            if punct == "," && text.starts_with(')') {
+                continue;
+            }
+            (punct, false)
+        } else {
+            let (word, rest) = text.split_at(text.find(delimiter).unwrap_or(text.len()));
+            text = rest;
+            (word, true)
+        };
+        let definition = match token {
+            "View" => Some(DefPath::core("core.View")),
+            "Never" => Some(DefPath::core("core.Never")),
+            "in" => return None,
+            _ if token.contains('@') => Some(DefPath::from_full(token)?),
+            _ => None,
+        };
+        if let Some(definition) = definition {
+            write_token(out, previous_word, &definition.definition_identity(), true);
+        } else {
+            write_token(out, previous_word, token, word);
+        }
+    }
+    Some(())
 }
 
 /// Number a declared slot by its first occurrence.
@@ -168,6 +245,7 @@ struct Words<'a> {
     /// Declared type generic positions in the order first named.
     parameters: Vec<u32>,
     header: bool,
+    recipe: Option<DescriptorRecipe>,
 }
 
 impl<'a> Words<'a> {
@@ -179,20 +257,27 @@ impl<'a> Words<'a> {
             regions: vec![],
             parameters: vec![],
             header,
+            recipe: None,
         }
     }
 
-    fn word(&mut self, w: &str) {
-        if self.word {
-            self.s.push(' ');
-        }
-        self.s.push_str(w);
-        self.word = true;
+    fn word(&mut self, word: &str) {
+        self.token(word, true);
     }
 
-    fn punct(&mut self, p: &str) {
-        self.s.push_str(p);
-        self.word = false;
+    fn punct(&mut self, punct: &str) {
+        self.token(punct, false);
+    }
+
+    fn token(&mut self, text: &str, word: bool) {
+        if let Some(recipe) = &mut self.recipe {
+            recipe.parts.push(DescriptorPart::Text {
+                text: text.to_owned(),
+                word,
+            });
+        } else {
+            write_token(&mut self.s, &mut self.word, text, word);
+        }
     }
 
     /// A root key with a region generic renumbered to its written number.
@@ -335,7 +420,12 @@ impl<'a> Words<'a> {
                 let index = number(&mut self.parameters, slot);
                 self.word(&format!("${index}"));
             }
-            TyKind::Error | TyKind::Hole | TyKind::Param(_) | TyKind::Region(_) => return None,
+            TyKind::Param(slot) => self
+                .recipe
+                .as_mut()?
+                .parts
+                .push(DescriptorPart::Argument(slot)),
+            TyKind::Error | TyKind::Hole | TyKind::Region(_) => return None,
         }
         Some(())
     }

@@ -44,122 +44,18 @@ pub struct GenericTemplate {
     pub allocations: Vec<AllocationLayout>,
     pub numeric_sites: Vec<scalar_abi::NumericSite>,
     pub nested: BTreeMap<FuncId, GenericTemplate>,
+    pub descriptor_adapter: Option<FuncId>,
+    pub descriptors: BTreeMap<FuncId, crate::identity::DescriptorRecipe>,
     pub types: BTreeMap<TypeId, NameRecipe>,
     pub calls: BTreeMap<FuncId, GenericCall>,
     pub codecs: BTreeMap<TypeId, CodecRecipe>,
     pub key_codecs: BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum NamePart {
-    Text(String),
-    Parameter(u32),
-}
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct NameRecipe(pub Vec<NamePart>);
-impl NameRecipe {
-    fn render(&self, arguments: &[String]) -> String {
-        let mut result = String::new();
-        for part in &self.0 {
-            match part {
-                NamePart::Text(text) => result.push_str(text),
-                NamePart::Parameter(i) => result.push_str(&arguments[*i as usize]),
-            }
-        }
-        result
-    }
-    pub(super) fn dictionary(bound: &str, argument: &Self) -> Self {
-        let mut recipe = Self::default();
-        recipe.text(format!("{bound}["));
-        recipe.0.extend(argument.0.iter().cloned());
-        recipe.text("]");
-        recipe
-    }
-    fn text(&mut self, text: impl Into<String>) {
-        self.0.push(NamePart::Text(text.into()));
-    }
-    fn ty(&mut self, p: &Program, t: &impl TyRead, ty: TyId) {
-        if !has_param(t, ty) {
-            self.text(crate::decls::layout_name(&p.decls, t, ty));
-            return;
-        }
-        match t.kind(ty) {
-            TyKind::Param(i) => self.0.push(NamePart::Parameter(*i)),
-            TyKind::Tuple(xs) => {
-                self.text("(");
-                for (i, &x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
-                    }
-                    self.ty(p, t, x);
-                }
-                if xs.len() == 1 {
-                    self.text(",");
-                }
-                self.text(")");
-            }
-            TyKind::Array(x, n) => {
-                self.text("Inline[");
-                self.ty(p, t, *x);
-                self.text(format!(", {n}]"));
-            }
-            TyKind::View(x) => {
-                self.text("View[");
-                self.ty(p, t, *x);
-                self.text("]");
-            }
-            TyKind::Adt(d, xs) => {
-                self.text(p.decls[d.index()].path.to_string());
-                self.text("[");
-                for (i, &x) in xs.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
-                    }
-                    self.ty(p, t, x);
-                }
-                self.text("]");
-            }
-            TyKind::Fn(ps, r, waits, kind) => {
-                self.text(match kind {
-                    Callable::Plain => "fn(",
-                    Callable::Own => "own fn(",
-                    Callable::OwnSend => "own[send] fn(",
-                    Callable::Scoped => "scoped fn(",
-                    Callable::ScopedView => "scoped[view] fn(",
-                });
-                for (i, &(mode, ty)) in ps.iter().enumerate() {
-                    if i > 0 {
-                        self.text(", ");
-                    }
-                    self.text(match mode {
-                        Mode::View => "",
-                        Mode::Mut => "mut ",
-                        Mode::Take => "take ",
-                        Mode::Bytes => "bytes ",
-                        Mode::Steps => "steps ",
-                    });
-                    self.ty(p, t, ty);
-                }
-                self.text(") -> ");
-                self.ty(p, t, *r);
-                if *waits {
-                    self.text(" waits");
-                }
-            }
-            TyKind::Anchored(x, _) => self.ty(p, t, *x),
-            TyKind::Region(_) => self.text(crate::decls::layout_name(&p.decls, t, ty)),
-            _ => unreachable!("has_param identifies a structural type or a parameter"),
-        }
-    }
-    pub(super) fn of(p: &Program, t: &impl TyRead, mut ty: TyId) -> Self {
-        while let TyKind::Anchored(x, _) | TyKind::View(x) = *t.kind(ty) {
-            ty = x;
-        }
-        let mut name = Self::default();
-        name.ty(p, t, ty);
-        name
-    }
-}
+mod descriptors;
+mod names;
+pub use names::{NamePart, NameRecipe};
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericCall {
     pub operation: Option<CallOperation>,
@@ -532,6 +428,7 @@ struct Substitution<'a> {
     type_names: &'a BTreeMap<TypeId, NameRecipe>,
     call_names: &'a BTreeMap<FuncId, GenericCall>,
     nested: &'a BTreeMap<FuncId, GenericTemplate>,
+    owner: FuncId,
     codecs: &'a BTreeMap<TypeId, CodecRecipe>,
     key_codecs: &'a BTreeMap<TypeId, (DefPath, codec_glue::Rows)>,
     error: Option<String>,
@@ -761,6 +658,17 @@ impl Substitution<'_> {
         self.signatures.insert(old, id);
         id
     }
+    fn call_key(&mut self, mut key: InstanceKey, call: &GenericCall) -> InstanceKey {
+        for ty in &mut key.arguments {
+            *ty = self.ty(*ty);
+        }
+        key.dictionaries = call
+            .dictionaries
+            .iter()
+            .map(|name| name.render(&self.names))
+            .collect();
+        key
+    }
     fn function(&mut self, old: FuncId) -> FuncId {
         if let Some(&id) = self.functions.get(&old) {
             return id;
@@ -768,10 +676,14 @@ impl Substitution<'_> {
         let function = self.module.functions[old.index()].clone();
         let key = self.module.instances[function.instance.index()].clone();
         if let Some(template) = self.nested.get(&old) {
-            let key = InstanceKey {
-                definition: key.definition.clone(),
-                arguments: self.arguments.to_vec(),
-                dictionaries: vec![],
+            let key = if let Some(raw) = template.descriptor_adapter {
+                self.descriptor_adapter_key(raw)
+            } else {
+                InstanceKey {
+                    definition: key.definition.clone(),
+                    arguments: self.arguments.to_vec(),
+                    dictionaries: vec![],
+                }
             };
             if let Some(i) = self
                 .module
@@ -801,15 +713,7 @@ impl Substitution<'_> {
         let Some(call) = self.call_names.get(&old) else {
             return old;
         };
-        let key = InstanceKey {
-            definition: key.definition.clone(),
-            arguments: key.arguments.iter().map(|&t| self.ty(t)).collect(),
-            dictionaries: call
-                .dictionaries
-                .iter()
-                .map(|name| name.render(&self.names))
-                .collect(),
-        };
+        let key = self.call_key(key, call);
         match call.operation {
             Some(CallOperation::Key(op, ty)) => {
                 self.signature(function.signature);
@@ -948,6 +852,7 @@ fn fill(
         type_names: &template.types,
         call_names: &template.calls,
         nested: &template.nested,
+        owner: target,
         codecs: &template.codecs,
         key_codecs: &template.key_codecs,
         error: None,
@@ -999,8 +904,14 @@ fn fill(
             Inst::LayoutConst { query, .. } => {
                 query.map_types(|t| TypeRef(s.ty(TypeId(t.0)).0));
             }
-            Inst::FunctionRef { function, .. } | Inst::DescriptorRef { function, .. } => {
-                *function = s.function(*function)
+            Inst::FunctionRef { function, .. } => *function = s.function(*function),
+            Inst::DescriptorRef {
+                function, identity, ..
+            } => {
+                if let Some(recipe) = template.descriptors.get(function) {
+                    *identity = s.descriptor_bytes(recipe)?;
+                }
+                *function = s.function(*function);
             }
             Inst::Drop { ty, .. } | Inst::Release { ty, .. } | Inst::CompactWidth { ty, .. } => {
                 *ty = s.ty(*ty)

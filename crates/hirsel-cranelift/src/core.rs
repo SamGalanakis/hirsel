@@ -272,7 +272,7 @@ pub fn emit_object_with_charge_observation(
 }
 /// Each function a body of this unit describes (`Inst::DescriptorRef`), its
 /// descriptor `{code, length, revision}` then the identity bytes, defined weak
-/// beside the function's code identity: every unit that describes it defines
+/// beside the described instance: every unit that describes it defines
 /// it, and the linker keeps one per program, as it keeps one body. `revision`
 /// addresses its revision root's carrier (`c::Module::revision_root`): an
 /// item's this unit defines weak as `{0, 0, 0}` and a link that knows the
@@ -299,7 +299,7 @@ fn descriptors(
             }
             let id = object
                 .declare_data(
-                    &format!("{}$static", symbols[function.index()]),
+                    &input.descriptor_symbol(function, &symbols[function.index()]),
                     Linkage::Preemptible,
                     false,
                     false,

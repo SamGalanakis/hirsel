@@ -1607,7 +1607,7 @@ fn run_world(
             mach.world.env_entries.push((name, name_view, value_view));
         }
     }
-    // One descriptor per code identity, as the linker keeps one per program:
+    // One descriptor per described instance, as the linker keeps one per program:
     // `{code, length, revision}` then the identity bytes, where `code` is a
     // function token and `revision` addresses its revision root's carrier
     // (`Module::revision_root`), `{bytes, 32, 0}` from `revisions` or an
@@ -1625,7 +1625,7 @@ fn run_world(
             if mach.descriptors[function.index()] != 0 {
                 continue;
             }
-            let code = m.code_identity(function);
+            let code = m.descriptor_identity(function);
             let at = if let Some(&at) = by_code.get(&code) {
                 at
             } else {

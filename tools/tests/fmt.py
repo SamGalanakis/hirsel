@@ -36,6 +36,14 @@ class ChangedCases(unittest.TestCase):
         self.base = self.git('rev-parse', 'HEAD').strip()
         self.git('update-ref', 'refs/remotes/origin/main', self.base)
         formatter = str(Path(os.environ.get('HIRSEL_TEST_CASE_FORMATTER', '/formatter-not-built')).resolve())
+        self.formatter_log = self.root / 'formatter-invocations.jsonl'
+        wrapper = self.write('.buck2/bin/case-formatter', f'''#!/usr/bin/env python3
+import json, os, sys
+with open({str(self.formatter_log)!r}, 'a') as log:
+ log.write(json.dumps(sys.argv[1:]) + '\\n')
+os.execv({formatter!r}, [{formatter!r}, *sys.argv[1:]])
+''')
+        wrapper.chmod(0o755)
         compiler = self.write('.buck2/bin/hirsel', '#!/bin/sh\nexit 0\n')
         compiler.chmod(0o755)
         buck = self.write('.buck2/bin/buck2', '''#!/usr/bin/env python3
@@ -47,12 +55,13 @@ else:
  executables = {'root//:hirsel-core-syntax-bin-hirsel-core-syntax': FORMATTER,
                 'root//:hirsel-core-driver-bin-hirsel': COMPILER}
  print(json.dumps({target: executables[target]}))
-'''.replace('FORMATTER', repr(formatter)).replace('COMPILER', repr(str(compiler))))
+'''.replace('FORMATTER', repr(str(wrapper))).replace('COMPILER', repr(str(compiler))))
         self.write('tools/buck2/sync.py', '')
         self.write('tools/site_sync.py', '')
         self.write('tools/check_doc_refs.py', '')
         self.write('editors/tree-sitter-hirsel/check-local', '')
         self.write('core/std/API-INDEX.md', 'current')
+        self.write('core/tools/law_board.py', '')
         self.write('core/tools/std_api_index.py', '''import os, subprocess, sys
 from pathlib import Path
 
@@ -65,7 +74,9 @@ sys.exit(index.read_text() != 'current')
         buck.chmod(0o755)
         rustfmt.chmod(0o755)
         for active in [patch.object(fmt, 'ROOT', self.root), patch.object(fmt, 'BUCK2', buck),
-                       patch.object(fmt, 'RUSTFMT', rustfmt)]:
+                       patch.object(fmt, 'RUSTFMT', rustfmt),
+                       patch.object(fmt, 'check_file_lengths', lambda root: True),
+                       patch.object(fmt, 'check_boundaries', lambda root: True)]:
             active.start()
             self.addCleanup(active.stop)
 
@@ -78,9 +89,34 @@ sys.exit(index.read_text() != 'current')
         file.write_text(text)
         return file
 
+    def run_fmt_result(self, *args):
+        output = io.StringIO()
+        read, write = os.pipe()
+        duplicate = os.dup(1)
+        try:
+            os.dup2(write, 1)
+            with patch.object(sys, 'argv', ['fmt.py', *args]), contextlib.redirect_stdout(output):
+                status = fmt.main()
+        finally:
+            os.dup2(duplicate, 1)
+            os.close(duplicate)
+            os.close(write)
+        chunks = []
+        while chunk := os.read(read, 65536):
+            chunks.append(chunk)
+        os.close(read)
+        return status, output.getvalue() + b''.join(chunks).decode(errors='replace')
+
     def run_fmt(self, *args):
-        with patch.object(sys, 'argv', ['fmt.py', *args]), contextlib.redirect_stdout(io.StringIO()):
-            return fmt.main()
+        return self.run_fmt_result(*args)[0]
+
+    def formatter_invocations(self):
+        if not self.formatter_log.exists():
+            return []
+        return [json.loads(line) for line in self.formatter_log.read_text().splitlines()]
+
+    def formatter_invocations_with(self, path):
+        return [args for args in self.formatter_invocations() if path in args]
 
     def test_noncanonical_changed_case_fails_with_and_without_check(self):
         case = self.write('core/front/cases/case.hirsel', 'fn f(){1}')
@@ -135,6 +171,43 @@ sys.exit(index.read_text() != 'current')
         path = self.write('core/std/broken.hirsel', 'fn broken(')
         self.assertEqual(self.run_fmt('--check'), 1)
         self.assertEqual(path.read_text(), 'fn broken(')
+
+    def test_modified_program_source_is_reported(self):
+        path = 'core/programs/store/cache.hirsel'
+        self.write(path, 'fn f(){1}')
+        status, output = self.run_fmt_result('--check')
+        self.assertEqual(status, 1)
+        self.assertIn(path, output)
+        self.assertTrue(any('--signatures' not in args for args in self.formatter_invocations_with(path)))
+
+    def test_modified_program_refusal_fixture_is_skipped(self):
+        path = 'core/programs/store/refusal.hirsel'
+        self.write(path, '// expect: refuse LANG-5 at 2:7\nfn f(\n')
+        status, output = self.run_fmt_result('--check')
+        self.assertEqual((status, output), (0, ''))
+        self.assertEqual(self.formatter_invocations_with(path), [])
+
+    def test_modified_foreign_source_is_checked_in_signature_mode(self):
+        path = 'core/programs/av1/native.hirsel'
+        self.write('core/programs/av1/hirsel.toml', '''[package]
+name = "av1"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"native.hirsel" = "native"
+
+[foreign.native]
+symbols = "hfl_"
+archives = []
+''')
+        self.write(path, 'pub  fn  f(x:u64)->u64\n')
+        status, output = self.run_fmt_result('--check')
+        self.assertEqual(status, 1)
+        self.assertIn(path, output)
+        invocations = self.formatter_invocations_with(path)
+        self.assertTrue(any('--signatures' in args for args in invocations), invocations)
+        self.assertFalse(any('--signatures' not in args for args in invocations), invocations)
 
     def test_core_headers_use_signature_mode_and_all_new_source_families_are_selected(self):
         paths = ['core/core/int.hirsel', 'core/std/int.hirsel',

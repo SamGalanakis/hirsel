@@ -35,20 +35,22 @@ fn read_tiered_point[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
         return decode_row(stored)
     }
     let key = list.slice(logical, 4, list.len(logical))
-    retry_tiered_read(source, root_grant, root, key, None, touch_slots, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error] {
+    retry_tiered_read(source, root_grant, root, key, None, touch_slots, TieredPoint, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error] {
         let backing = TieredBorrowedRoot(edge: view edge, pins: view visible)
         let stored = tiered_point_bytes(mut attempt, backing, key)?
         decode_row(stored)
     })
 }
 
-fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], touch_slots: u64,
+fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGrant], root: TieredPinRoot, key: Bytes, upper: Option[View[Bytes]], touch_slots: u64, direction: TieredDirection,
     read: scoped[view] fn(mut TieredTouchSet, Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[R, Error]) -> Result[R, Error] waits {
     let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
+    let mut window = if direction == TieredPoint { 0u64 } else { 8u64 }
     loop {
         let (take attempt, take observed) = disk_allocation(scoped fn() -> Result[(TieredTouchSet, Result[R, Error]), Error] {
             let mut attempt_state = capacity(tiered_touch_set(root_grant.pin_bytes, touch_slots))?
+            attempt_state.sibling_window = window
             let result = read(mut attempt_state, pins.frames)
             Ok((take attempt_state, take result))
         })?
@@ -66,8 +68,10 @@ fn retry_tiered_read[R](source: TieredPageSource, root_grant: Arc[TieredReaderGr
                     Some(secondary) => view secondary,
                     None => if attempt.upper_bound { option.unwrap(upper) } else { view key },
                 }
-                let demand = TieredPointDemand(target: clone(target), key: copied(sought)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
+                let demand = TieredPointDemand(target: clone(target), key: copied(sought)?, direction: direction,
+                    siblings: clone(attempt.siblings), packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
                 let TieredPointDelivery(frames: take frames, failure: take failure, ..) = tiered_point_delivery(source.pager, take demand)?
+                window = int.saturating_mul(window, 2)
                 for frame in frames {
                     let _ = tiered_install_pin(mut pins, root, attempt.stamps, frame)?
                 }

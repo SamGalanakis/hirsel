@@ -39,7 +39,7 @@ fn snapshot_tiered_initial_changes(r: Reader, s: Snapshot, inventory: TieredRead
     low: Bytes, high: Bytes, limits: Limits) -> Result[ChangePage, Error] waits {
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, inventory.touch_slots,
+    retry_tiered_read(source, grant, root, empty_hint, None, inventory.touch_slots, TieredForward,
         scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[ChangePage, Error] {
             tiered_initial_changes(mut attempt, visible, s.roots.collections, low, high, limits)
         })

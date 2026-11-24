@@ -32,11 +32,33 @@ fn tiered_scan_edge(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Ar
     for offset in 0u64 .. int.saturating_sub(stop, start) {
         let selected = if reverse { stop - 1 - offset } else { start + offset }
         let child = option.unwrap(std.page.child_slot(page, selected))
-        if let Some(take row) = tiered_scan_edge(mut attempt, visible, child, Some(height - 1), low, high, reverse)? {
+        let walked = tiered_scan_edge(mut attempt, visible, child, Some(height - 1), low, high, reverse)
+        tiered_scan_siblings(mut attempt, page, child, selected, reverse)
+        let answer = (take walked)?
+        if let Some(take row) = take answer {
             return Ok(Some(take row))
         }
     }
     Ok(None)
+}
+
+fn tiered_scan_siblings(mut attempt: TieredTouchSet, page: Arc[std.page.Page], edge: std.page.Slot, selected: u64, reverse: bool) {
+    let Some(AttemptMiss(TieredPage(missing))) = attempt.stopped else { return }
+    let ColdPage(wanted) = view edge else { return }
+    if missing != wanted || attempt.sibling_window == 0 { return }
+    let n = std.page.count(std.page.image_of(page))
+    let remaining = if reverse { selected } else { n - selected - 1 }
+    let limit = order.min(attempt.sibling_window, remaining)
+    if let Error(problem) = list.try_reserve(mut attempt.siblings, limit) {
+        attempt.stopped = Some(AttemptAllocation(problem))
+        return
+    }
+    for distance in 1u64 .. limit + 1 {
+        let slot = if reverse { selected - distance } else { selected + distance }
+        if let Some(ColdPage(ptr)) = std.page.child_slot(page, slot) {
+            list.push(mut attempt.siblings, TieredPage(ptr))
+        }
+    }
 }
 
 fn tiered_scan_overlay(edits: Arc[ReplayOverlay], low: Bytes, high: Bytes, reverse: bool) -> Option[(Bytes, Arc[Bytes])] {
@@ -169,7 +191,8 @@ fn read_tiered_scan[K, V](source: TieredPageSource, grant: Arc[TieredReaderGrant
         None => None,
     }
     let hint = if reverse { view stop } else { view start }
-    retry_tiered_read(source, grant, root, list.slice(hint, 4, list.len(hint)), None, touch_slots,
+    let direction = if reverse { TieredBackward } else { TieredForward }
+    retry_tiered_read(source, grant, root, list.slice(hint, 4, list.len(hint)), None, touch_slots, direction,
         scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[(Bytes, (K, V))], Error] {
             let Some((take key, take raw)) = tiered_scan_row(mut attempt, visible, edge, collection, overlay, start, stop, reverse)? else {
                 return Ok(None)

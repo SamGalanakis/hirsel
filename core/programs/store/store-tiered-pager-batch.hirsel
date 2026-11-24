@@ -1,0 +1,145 @@
+const TIERED_GET_STREAMS: u64 = 8
+
+type TieredBucketTarget {
+    slot: u64,
+    pack: HistoryRef,
+    edge: TieredTarget,
+    direction: TieredDirection,
+}
+
+type TieredBucketBatch {
+    requests: List[TieredBucketGet],
+    members: List[List[u64]],
+}
+
+fn tiered_batch_edge(demand: TieredPointDemand, slot: u64) -> View[TieredTarget] in demand {
+    if slot == 0 { view demand.target } else { view demand.siblings[slot - 1] }
+}
+
+fn tiered_pager_read_batch(mut input: TieredPagerInput, mut pager_cache: TieredCache, owner: StoreId,
+    demand: TieredPointDemand) -> Result[List[Result[Arc[TieredFrame], Error]], Error] waits {
+    match input {
+        PagerLocal(_) => {
+            let mut fetched: List[Result[Arc[TieredFrame], Error]] = list.new()
+            capacity(list.try_reserve(mut fetched, 1 + list.len(demand.siblings)))?
+            for slot in 0u64 .. 1 + list.len(demand.siblings) {
+                let edge = tiered_batch_edge(demand, slot)
+                let delivered = tiered_pager_point_frame(mut input, mut pager_cache, owner, demand, edge)
+                list.push(mut fetched, take delivered)
+            }
+            Ok(take fetched)
+        },
+        PagerObjects(..) => tiered_pager_bucket_batch(mut input, mut pager_cache, owner, demand),
+    }
+}
+
+fn tiered_pager_bucket_batch(mut input: TieredPagerInput, mut pager_cache: TieredCache, owner: StoreId,
+    demand: TieredPointDemand) -> Result[List[Result[Arc[TieredFrame], Error]], Error] waits {
+    let width = 1 + list.len(demand.siblings)
+    let (take positions, take pending) = disk_allocation(scoped fn() -> Result[(List[Option[Result[Arc[TieredFrame], Error]]], List[TieredBucketTarget]), Error] {
+        // Reserve the two lists before probing the cache.
+        let mut positions: List[Option[Result[Arc[TieredFrame], Error]]] = list.with_capacity(width)
+        for _ in 0u64 .. width {
+            list.push(mut positions, None)
+        }
+        Ok((take positions, list.with_capacity(width)))
+    })?
+    let mut outcomes = take positions
+    let mut misses = take pending
+    for slot in 0u64 .. width {
+        let edge = tiered_batch_edge(demand, slot)
+        let bound_target = tiered_pager_demand_target(demand, edge)
+        let target = match take bound_target {
+            Ok(take ready) => take ready,
+            Error(take problem) => {
+                outcomes[slot] = Some(Error(take problem))
+                continue
+            },
+        }
+        let found = checked_tiered_pager_target(input, target)
+        let (take path, _) = match take found {
+            Ok(take ready) => take ready,
+            Error(take problem) => {
+                outcomes[slot] = Some(Error(take problem))
+                continue
+            },
+        }
+        match tiered_cache_lookup(mut pager_cache, path, edge) {
+            Ok(Some(take frame)) => { outcomes[slot] = Some(Ok(take frame)) },
+            Ok(None) => list.push(mut misses, TieredBucketTarget(slot: slot, pack: option.unwrap(target.object), edge: clone(edge), direction: target.direction)),
+            Error(take problem) => { outcomes[slot] = Some(Error(take problem)) },
+        }
+    }
+    if list.len(misses) != 0 {
+        if let PagerObjects(mut client, op_ms) = input {
+            let deadline = if demand.deadline == 0 { std.object.deadline_after_ms(client, op_ms) } else { demand.deadline }
+            list.sort(mut misses, fn(a: TieredBucketTarget, b: TieredBucketTarget) -> Order {
+                order.compare((a.pack.seq, a.slot), (b.pack.seq, b.slot))
+            })
+            let batch = disk_allocation(scoped fn() -> Result[TieredBucketBatch, Error] { plan_bucket_batch(misses, deadline) })?
+            let responses = read_tiered_bucket_windows(mut client, batch.requests, TIERED_GET_STREAMS)?
+            unpack_bucket_batch(owner, demand.next_stamp, misses, batch, responses, mut outcomes)?
+        } else {
+            fail("store: a Bucket batch needs an object client")
+        }
+    }
+    let mut accepted: List[Result[Arc[TieredFrame], Error]] = list.new()
+    capacity(list.try_reserve(mut accepted, width))?
+    for take item in take outcomes {
+        let delivered = option.unwrap(take item)
+        if let Ok(frame) = view delivered {
+            tiered_cache_admit(mut pager_cache, frame)
+        }
+        list.push(mut accepted, take delivered)
+    }
+    Ok(take accepted)
+}
+
+fn plan_bucket_batch(misses: List[TieredBucketTarget], deadline: u64) -> Result[TieredBucketBatch, Error] {
+    let mut requests: List[TieredBucketGet] = list.new()
+    let mut members: List[List[u64]] = list.new()
+    let mut start = 0u64
+    while start < list.len(misses) {
+        let pack = misses[start].pack
+        let mut stop = start
+        let mut wanted: List[TieredDemand] = list.new()
+        while stop < list.len(misses) && misses[stop].pack.seq == pack.seq {
+            let item = view misses[stop]
+            list.push(mut wanted, TieredDemand(target: clone(item.edge), direction: item.direction))
+            stop += 1
+        }
+        let options = tiered_bucket_windows(history_key("p-", pack), pack, wanted)?
+        for take window in take options {
+            let TieredBucketWindow(range: extent, demands: take indices) = take window
+            let mut absolute: List[u64] = list.with_capacity(list.len(indices))
+            for member in indices {
+                list.push(mut absolute, start + member)
+            }
+            list.push(mut requests, TieredBucketGet(pack_ref: pack, window: extent, deadline: deadline))
+            list.push(mut members, take absolute)
+        }
+        start = stop
+    }
+    Ok(TieredBucketBatch(requests: take requests, members: take members))
+}
+
+fn unpack_bucket_batch(owner: StoreId, next_stamp: u64, misses: List[TieredBucketTarget], batch: TieredBucketBatch,
+    responses: List[Result[Bytes, Error]], mut outcomes: List[Option[Result[Arc[TieredFrame], Error]]]) -> Result[(), Error] {
+    let mut window_slot = 0u64
+    for response in responses {
+        let request = view batch.requests[window_slot]
+        let path = history_key("p-", request.pack_ref)
+        for member in batch.members[window_slot] {
+            let target = view misses[member]
+            let delivered = match response {
+                Ok(raw) => disk_allocation(scoped fn() -> Result[Arc[TieredFrame], Error] {
+                    read_tiered_frame(path, owner, target.edge, raw, request.window.lo, next_stamp)
+                }),
+                Error(problem) => Error(clone(problem)),
+            }
+            outcomes[target.slot] = Some(take delivered)
+        }
+        window_slot += 1
+    }
+    Ok(())
+}

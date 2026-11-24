@@ -53,7 +53,7 @@ fn snapshot_tiered_span_step(r: Reader, s: Snapshot, inventory: TieredReadInvent
         }
     })?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, inventory.touch_slots,
+    retry_tiered_read(source, grant, root, empty_hint, None, inventory.touch_slots, TieredForward,
         scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
             let Some((take key, take value)) = tiered_span_row(mut attempt, visible, s.roots.collections, beginning, high)? else {
                 return Ok(None)
@@ -66,7 +66,7 @@ fn snapshot_tiered_span_step(r: Reader, s: Snapshot, inventory: TieredReadInvent
 fn snapshot_tiered_span(r: Reader, s: Snapshot, inventory: TieredReadInventory, low: Bytes, high: Bytes) -> Result[List[Change], Error] waits {
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, inventory.touch_slots,
+    retry_tiered_read(source, grant, root, empty_hint, None, inventory.touch_slots, TieredForward,
         scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[List[Change], Error] {
             let mut out: List[Change] = list.new()
             let mut start = copied(low)?

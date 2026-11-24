@@ -150,7 +150,7 @@ store@1/store/test_keyset_pages src=628948c415d2c901 sig=36b762342d0205b0 run=af
 store@1/store/test_l62_attempt_touch_order src=94ffc7d2978dc615 sig=b8e918dad24d2325 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l62_batch_error_follows_touch src=7995084751e83cae sig=47ff63cafc31f27d run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_initial_change_pages_resolve_tiered_rows src=3df277adf9659026 sig=46e084eeb93eb659 run=a6b003f729117be3 bug=- oracle=- rows=pending
-store@1/store/test_l62_pager_point_batch src=332a8edaaefd7bf9 sig=84eeb23a5cc6ae27 run=722e0e8306f441ca bug=- oracle=- rows=pending
+store@1/store/test_l62_pager_point_batch src=223137c8d26aac17 sig=91c7e1f95d00fdaf run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_pager_reads_replayed_points src=fd3117767e38f9fc sig=07f7ad8f975bd0b7 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l62_reader_reservation src=750d22da473089cb sig=2327f06820701ae2 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l62_replay_stop_precedence src=f14c2a31647b97d9 sig=13e675dc3e75b1c9 run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -189,6 +189,7 @@ store@1/store/test_l79_fold_checks_cold_evidence src=ea8eef2da85027ed sig=038867
 store@1/store/test_l79_overlay_trim_evidence src=41983a0ffe21b672 sig=07f94c0bf26c1964 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l79_pinned_trim_records_boundary_charge src=13394132f491d6e1 sig=ab406002b3b239d7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l84_bucket_window src=84f9be411c8ee4ad sig=1be0388a9f5321e1 run=c9049a952ba23a49 bug=- oracle=- rows=pending
+store@1/store/test_l84_pager_coalesces_sibling_demands src=6f0bc8b9f51e4aeb sig=8e9e732cb29dac1d run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l84_parallel_bucket_windows src=e6094fc25b791c26 sig=5263eed7e4206357 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_local_projector_laws src=69247f07bf78a9df sig=16f7b8f7adbff21f run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_look src=41970c5b73344465 sig=4a406ff15701f2c8 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

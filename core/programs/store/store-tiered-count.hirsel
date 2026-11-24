@@ -39,7 +39,7 @@ fn read_tiered_count(source: TieredPageSource, grant: Arc[TieredReaderGrant], ro
         Some(replay) => std.omap.get(replay.collections, collection),
         None => None,
     }
-    retry_tiered_read(source, grant, root, start, Some(end), touch_slots, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[u64, Error] {
+    retry_tiered_read(source, grant, root, start, Some(end), touch_slots, TieredPoint, scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[u64, Error] {
         let before = if low == id {
             0u64
         } else {

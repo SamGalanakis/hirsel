@@ -86,7 +86,7 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                     Some(replay) => std.omap.get(replay.collections, source),
                     None => None,
                 }
-                return retry_tiered_read(input, grant, root, hint, None, inventory.touch_slots,
+                return retry_tiered_read(input, grant, root, hint, None, inventory.touch_slots, TieredForward,
                     scoped fn(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Page[K, V], Error] {
                         read_snapshot_page(s, source, copied(high)?, limits, mut attempt,
                             scoped fn(mut current: TieredTouchSet, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {

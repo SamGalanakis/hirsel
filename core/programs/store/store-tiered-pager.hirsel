@@ -32,6 +32,8 @@ type TieredPageSource {
 type TieredPointDemand: send {
     target: TieredTarget,
     key: Bytes,
+    direction: TieredDirection,
+    siblings: List[TieredTarget],
     packs: std.omap.OMap[u64, TieredPagerPack],
     next_stamp: u64,
     deadline: u64,
@@ -121,7 +123,7 @@ fn tiered_point_delivery(requests: Sender[TieredPagerMessage], take demand: Tier
     channel.receive(delivered) ?=> |_| Io(Closed)
 }
 
-fn tiered_point_continuation(frame: TieredFrame, key: Bytes, expected_level: Option[u8]) -> Result[Option[(TieredTarget, u8)], Error] {
+fn tiered_point_continuation(frame: TieredFrame, key: Bytes, direction: TieredDirection, expected_level: Option[u8]) -> Result[Option[(TieredTarget, u8)], Error] {
     let TieredImage(page) = view frame.payload else {
         return Ok(None)
     }
@@ -132,8 +134,18 @@ fn tiered_point_continuation(frame: TieredFrame, key: Bytes, expected_level: Opt
             return Error(disk_fault(paged_pack_path(frame.identity.pack)?, frame.identity.offset, Malformed))
         }
     }
-    let Some(slot) = std.page.descend(image, key) else {
+    let Some(sought) = std.page.descend(image, key) else {
         return Ok(None)
+    }
+    let slot = if direction == TieredBackward {
+        if list.len(key) == 0 {
+            std.page.count(image) - 1
+        } else {
+            let (_, equal) = std.page.search(image, key)
+            if equal { sought - 1 } else { sought }
+        }
+    } else {
+        sought
     }
     let Some(ColdPage(child)) = std.page.child_slot(page, slot) else {
         fail("store: verified PAGE path has no Cold child")
@@ -146,21 +158,31 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
     let mut edge: TieredTarget = clone(demand.target)
     let mut expected_level: Option[u8] = None
     let mut failure: Option[(TieredTarget, Error)] = None
+    let mut siblings: List[Result[Arc[TieredFrame], Error]] = list.new()
+    let mut outcome = if list.len(demand.siblings) != 0 {
+        let mut batch = tiered_pager_read_batch(mut input, mut private_cache, owner, demand)?
+        let first = list.remove(mut batch, 0)
+        siblings = take batch
+        take first
+    } else {
+        tiered_pager_point_frame(mut input, mut private_cache, owner, demand, edge)
+    }
     loop {
-        let frame = match tiered_pager_point_frame(mut input, mut private_cache, owner, demand, edge) {
+        let frame = match take outcome {
             Ok(take found) => take found,
             Error(take problem) => {
                 failure = Some((take edge, take problem))
                 break
             },
         }
-        let following = tiered_point_continuation(frame, demand.key, expected_level)
+        let following = tiered_point_continuation(frame, demand.key, demand.direction, expected_level)
         capacity(list.try_reserve(mut frames, 1))?
         list.push(mut frames, take frame)
         match take following {
             Ok(Some((take child, height))) => {
                 edge = take child
                 expected_level = Some(height)
+                outcome = tiered_pager_point_frame(mut input, mut private_cache, owner, demand, edge)
             },
             Ok(None) => break,
             Error(take problem) => {
@@ -169,19 +191,39 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
             },
         }
     }
+    if let None = failure {
+        let mut slot = 0u64
+        for take sibling in take siblings {
+            match take sibling {
+                Ok(take frame) => {
+                    capacity(list.try_reserve(mut frames, 1))?
+                    list.push(mut frames, take frame)
+                },
+                Error(take problem) => {
+                    failure = Some((clone(demand.siblings[slot]), take problem))
+                    break
+                },
+            }
+            slot += 1
+        }
+    }
     Ok(TieredPointDelivery(frames: take frames, failure: take failure, grant: clone(demand.grant)))
 }
 
-fn tiered_pager_point_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand, edge: TieredTarget) -> Result[Arc[TieredFrame], Error] waits {
+fn tiered_pager_demand_target(demand: TieredPointDemand, edge: TieredTarget) -> Result[TieredPagerTarget, Error] {
     let facts = tiered_frame_id(edge)
     let Some(pack) = std.omap.get(demand.packs, facts.pack) else {
         return Error(disk_fault(paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp)))
     }
-    let target = TieredPagerTarget(edge: clone(edge), direction: TieredPoint, inventory: pack.inventory, object: pack.object, next_stamp: demand.next_stamp, deadline: demand.deadline)
+    Ok(TieredPagerTarget(edge: clone(edge), direction: demand.direction, inventory: pack.inventory, object: pack.object, next_stamp: demand.next_stamp, deadline: demand.deadline))
+}
+
+fn tiered_pager_point_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand, edge: TieredTarget) -> Result[Arc[TieredFrame], Error] waits {
+    let target = tiered_pager_demand_target(demand, edge)?
     tiered_pager_frame(mut input, mut private_cache, owner, target)
 }
 
-fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPagerTarget) -> Result[Arc[TieredFrame], Error] waits {
+fn checked_tiered_pager_target(input: TieredPagerInput, demand: TieredPagerTarget) -> Result[(String, TieredFrameId), Error] {
     let expected = tiered_frame_id(demand.edge)
     let path = match input {
         PagerLocal(_) => paged_pack_path(expected.pack)?,
@@ -218,9 +260,15 @@ fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCach
     if width > data_end - expected.offset {
         return Error(disk_fault(path, expected.offset, Checksum))
     }
+    Ok((take path, expected))
+}
+
+fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPagerTarget) -> Result[Arc[TieredFrame], Error] waits {
+    let (take path, expected) = checked_tiered_pager_target(input, demand)?
     if let Some(take found) = tiered_cache_lookup(mut private_cache, path, demand.edge)? {
         return Ok(take found)
     }
+    let width = 16 + expected.len
     let (take raw, start) = match input {
         PagerLocal(d) => {
             let mut opened = match host.open(d, path, Read) {

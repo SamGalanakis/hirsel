@@ -31,12 +31,16 @@ const DECODE_ROW_NS_PER_PIXEL: u64 = 299
 
 const ENCODE_ROW_NS_PER_PIXEL: u64 = 177
 
+// The helper sets this flag when it consumes the trailer with its final rows.
+const FINAL_ROWS: i32 = 65536
+
 pub opaque resource type Decoder: send {
     f: Foreign[Jpeg],
     p: foreign.Ptr[DecoderHandle],
     input: Bytes,
     eighths: u32,
-    helper: bool
+    helper: bool,
+    done: bool
 } drop(d) {
     native.decoder_destroy(d.f, d.p)
 }
@@ -167,9 +171,9 @@ pub fn decoder(f: Foreign[Jpeg], take input: Bytes, target: Size, limits: Decode
     let helper = width * DECODE_ROW_NS_PER_PIXEL > STACK_CALL_NS
     match native.decoder_create(f, limits.max_native_bytes) {
         None => Error(Limit),
-        Some(p) => match Decoder(f: f, p: p, input: take input, eighths: eighths, helper: helper) {
+        Some(p) => match Decoder(f: f, p: p, input: take input, eighths: eighths, helper: helper, done: false) {
             Ok(take d) => Ok(take d),
-            Error((_, (grant, handle, _, _, _))) => {
+            Error((_, (grant, handle, _, _, _, _))) => {
                 native.decoder_destroy(grant, handle)
                 Error(Limit)
             },
@@ -194,9 +198,14 @@ pub fn start_decode(mut d: Decoder) -> Result[Option[Size], Error] waits {
     Ok(Some(Size(width: native.decoder_width(d.f, d.p), height: native.decoder_height(d.f, d.p))))
 }
 
-/// Writes at most 16 RGB rows to the initialized destination. The destination
-/// must fit all remaining rows up to 16. Pending can occur without output.
+/// Writes packed RGB rows to the initialized destination. The destination
+/// must fit all remaining rows up to 16. A stack call writes at most 16 rows.
+/// A helper fills the destination with whole rows or reaches the image end.
+/// Pending can occur without output on the stack path.
 pub fn decode_strip(mut d: Decoder, mut rgb: Bytes) -> Result[DecodeStep, Error] waits {
+    if d.done {
+        return Ok(End)
+    }
     let code = if d.helper {
         native.decode_strip_waiting(d.f, d.p, d.input, mut rgb)
     } else {
@@ -204,6 +213,10 @@ pub fn decode_strip(mut d: Decoder, mut rgb: Bytes) -> Result[DecodeStep, Error]
     }
     if code == -5 {
         return Ok(End)
+    }
+    if code >= FINAL_ROWS {
+        d.done = true
+        return Ok(Rows(int.narrow(code - FINAL_ROWS)))
     }
     if code < 0 {
         return Error(status(int.widen(code)))
@@ -249,7 +262,8 @@ pub fn encoder(f: Foreign[Jpeg], size: Size, quality: i32, sampling: Sampling, c
     }
 }
 
-/// Accepts 1–16 whole RGB rows. Supply any unconsumed rows again.
+/// Accepts whole RGB rows, up to 16 on the stack or the supplied span on a
+/// helper. Supply any unconsumed rows again.
 pub fn encode_strip(mut e: Encoder, rgb: Bytes) -> Result[u32, Error] waits {
     let code = if e.helper {
         native.encode_strip_waiting(e.f, e.p, rgb, mut e.output)

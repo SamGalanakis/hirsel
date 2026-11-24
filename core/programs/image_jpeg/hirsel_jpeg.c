@@ -18,10 +18,13 @@ enum {
     LIMIT = -2,
     SHORT_BUFFER = -3,
     BAD_STATE = -4,
+    FINAL_ROWS = 1 << 16,
     STRIP_ROWS = 16,
     IO_WINDOW = 16384,
     MAX_MARKER = 65536
 };
+
+_Static_assert(JPEG_MAX_DIMENSION < FINAL_ROWS, "row count must fit below final flag");
 
 struct codec {
     struct jpeg_error_mgr error;
@@ -260,23 +263,9 @@ uint32_t hjpg_decoder_height(void *decoder)
     return ((struct decoder *)decoder)->jpeg.output_height;
 }
 
-/* A positive value is a strip's row count. Zero is pending. -5 is EOF. */
-int32_t hjpg_decode_strip(void *decoder, const uint8_t *input, uint64_t size,
-                          uint8_t *rgb, uint64_t rgb_size)
+static int32_t decode_chunk(struct decoder *d, const uint8_t *input, size_t size,
+                            uint8_t *rgb, size_t stride, size_t rows)
 {
-    struct decoder *d = decoder;
-    if (d->phase == DONE)
-        return -5;
-    if (d->phase == HEADER || d->phase == FAILED || size < d->offset)
-        return BAD_STATE;
-
-    size_t stride = 3u * d->jpeg.output_width;
-    size_t rows = d->jpeg.output_height - d->jpeg.output_scanline;
-    if (rows > STRIP_ROWS)
-        rows = STRIP_ROWS;
-    if (rgb_size < rows * stride)
-        return SHORT_BUFFER;
-
     source_attach(d, input, size);
     if (setjmp(d->codec.jump))
         return source_detach(d, size, d->codec.status);
@@ -311,6 +300,48 @@ int32_t hjpg_decode_strip(void *decoder, const uint8_t *input, uint64_t size,
     return detached < 0 ? detached : 0;
 }
 
+/* A positive value is a strip's row count. Zero is pending. -5 is EOF. */
+static int32_t decode_strip(struct decoder *d, const uint8_t *input, size_t size,
+                            uint8_t *rgb, size_t rgb_size, bool batch)
+{
+    if (d->phase == DONE)
+        return -5;
+    if (d->phase == HEADER || d->phase == FAILED || size < d->offset)
+        return BAD_STATE;
+
+    size_t stride = 3u * d->jpeg.output_width;
+    size_t rows = d->jpeg.output_height - d->jpeg.output_scanline;
+    size_t minimum = rows < STRIP_ROWS ? rows : STRIP_ROWS;
+    size_t capacity = rgb_size / stride;
+    if (capacity < minimum)
+        return SHORT_BUFFER;
+    if (rows > capacity)
+        rows = capacity;
+    if (!batch)
+        return decode_chunk(d, input, size, rgb, stride, minimum);
+
+    size_t written = 0;
+    do {
+        size_t chunk = rows - written;
+        if (chunk > STRIP_ROWS)
+            chunk = STRIP_ROWS;
+        uint8_t *next = written ? rgb + written * stride : rgb;
+        int32_t step = decode_chunk(d, input, size, next, stride, chunk);
+        if (step == -5 && written)
+            return FINAL_ROWS + (int32_t)written;
+        if (step < 0)
+            return step;
+        written += (size_t)step;
+    } while (written < rows || d->phase == TRAILER);
+    return (int32_t)written;
+}
+
+int32_t hjpg_decode_strip(void *decoder, const uint8_t *input, uint64_t size,
+                          uint8_t *rgb, uint64_t rgb_size)
+{
+    return decode_strip(decoder, input, size, rgb, rgb_size, false);
+}
+
 enum encode_phase { NEW_ENCODER, WRITING, FINISHED, BROKEN };
 
 struct encoder {
@@ -340,8 +371,6 @@ static boolean empty_dest(j_compress_ptr jpeg)
 static void dest_attach(struct encoder *e, uint8_t *output, size_t size, bool suspend)
 {
     size_t remaining = size - e->written;
-    if (suspend && remaining > IO_WINDOW)
-        remaining = IO_WINDOW;
     e->end = e->written + remaining;
     e->suspend = suspend;
     e->dest.next_output_byte = output + e->written;
@@ -423,33 +452,49 @@ int32_t hjpg_encoder_start(void *encoder, uint32_t width, uint32_t height, int32
     return 0;
 }
 
-int32_t hjpg_encode_strip(void *encoder, const uint8_t *rgb, uint64_t rgb_size,
-                          uint8_t *output, uint64_t size)
+static int32_t encode_strip(struct encoder *e, const uint8_t *rgb, size_t rgb_size,
+                            uint8_t *output, size_t size, bool batch)
 {
-    struct encoder *e = encoder;
     if (e->phase != WRITING || e->jpeg.next_scanline == e->jpeg.image_height)
         return BAD_STATE;
     size_t stride = 3u * e->jpeg.image_width;
     size_t rows = rgb_size / stride;
-    if (!rows || rgb_size % stride || rows > STRIP_ROWS ||
+    if (!rows || rgb_size % stride || (!batch && rows > STRIP_ROWS) ||
         rows > e->jpeg.image_height - e->jpeg.next_scanline)
         return INVALID;
     if (size < e->written || size - e->written < 1024)
         return SHORT_BUFFER;
 
+    if (!batch && !e->progressive && size - e->written > IO_WINDOW)
+        size = e->written + IO_WINDOW;
     dest_attach(e, output, size, !e->progressive);
     if (setjmp(e->codec.jump))
         return dest_fail(e);
 
     JSAMPROW row[STRIP_ROWS];
-    for (size_t i = 0; i < rows; ++i)
-        row[i] = (JSAMPROW)(rgb + i * stride);
     size_t prior = e->written;
-    JDIMENSION written = jpeg_write_scanlines(&e->jpeg, row, (JDIMENSION)rows);
+    size_t written = 0;
+    while (written < rows) {
+        size_t chunk = rows - written;
+        if (chunk > STRIP_ROWS)
+            chunk = STRIP_ROWS;
+        for (size_t i = 0; i < chunk; ++i)
+            row[i] = (JSAMPROW)(rgb + (written + i) * stride);
+        JDIMENSION step = jpeg_write_scanlines(&e->jpeg, row, (JDIMENSION)chunk);
+        written += step;
+        if (step < chunk)
+            break;
+    }
     dest_detach(e);
     if (written == 0 && e->written == prior)
         return SHORT_BUFFER;
     return (int32_t)written;
+}
+
+int32_t hjpg_encode_strip(void *encoder, const uint8_t *rgb, uint64_t rgb_size,
+                          uint8_t *output, uint64_t size)
+{
+    return encode_strip(encoder, rgb, rgb_size, output, size, false);
 }
 
 static int64_t finish(struct encoder *e, uint8_t *output, uint64_t size, bool progressive)
@@ -481,13 +526,17 @@ int64_t hjpg_encode_finish_progressive(void *encoder, uint8_t *output, uint64_t 
 
 int32_t hjpg_decoder_start_waiting(void *decoder, const uint8_t *input, uint64_t size, uint32_t scale)
 {
-    return hjpg_decoder_start(decoder, input, size, scale);
+    int32_t status;
+    do {
+        status = hjpg_decoder_start(decoder, input, size, scale);
+    } while (status == 0);
+    return status;
 }
 
 int32_t hjpg_decode_strip_waiting(void *decoder, const uint8_t *input, uint64_t size,
                                  uint8_t *rgb, uint64_t rgb_size)
 {
-    return hjpg_decode_strip(decoder, input, size, rgb, rgb_size);
+    return decode_strip(decoder, input, size, rgb, rgb_size, true);
 }
 
 int32_t hjpg_encoder_start_waiting(void *encoder, uint32_t width, uint32_t height, int32_t quality,
@@ -499,5 +548,5 @@ int32_t hjpg_encoder_start_waiting(void *encoder, uint32_t width, uint32_t heigh
 int32_t hjpg_encode_strip_waiting(void *encoder, const uint8_t *rgb, uint64_t rgb_size,
                                  uint8_t *output, uint64_t size)
 {
-    return hjpg_encode_strip(encoder, rgb, rgb_size, output, size);
+    return encode_strip(encoder, rgb, rgb_size, output, size, true);
 }

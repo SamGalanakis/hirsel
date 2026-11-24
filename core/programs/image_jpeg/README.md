@@ -16,13 +16,16 @@ allocation. The codec also checks the pre-SOS header length and supports
 8-bit grayscale and three-component Huffman DCT JPEGs, including
 progressive files. The target size selects a DCT scale before decoding.
 Call `start_decode` until the packed RGB dimensions are available, then
-call `decode_strip` until `End`. `Pending` means the decoder needs another
-call without having written rows.
+call `decode_strip` until `End`. The destination must fit all remaining
+rows up to 16. A stack call writes at most 16 rows and may return
+`Pending`. A helper fills the destination with whole rows or finishes
+the image.
 
-Encode accepts packed RGB in strips of up to 16 rows and writes to an
-initialized, caller-supplied buffer. Reoffer the unread rows when a call
-consumes fewer than supplied. Select sequential or progressive and 4:4:4
-or 4:2:0 sampling. `finish_progressive` runs the remaining whole-image
+Encode accepts packed RGB and writes to an initialized, caller-supplied
+buffer. A stack call accepts up to 16 rows. A helper can accept the
+remaining image in one call. Reoffer the unread rows when a call consumes
+fewer than supplied. Select sequential or progressive and 4:4:4 or 4:2:0
+sampling. `finish_progressive` runs the remaining whole-image
 passes on a helper, so it is a `waits` call. `finish_encode` finishes a
 sequential stream on the host stack.
 
@@ -36,9 +39,10 @@ when running `build.sh`, then pass that directory to `test-vectors.sh`.
 ## Measured cost
 
 Stock libjpeg processes one interleaved minimum coded unit (iMCU) row at
-a time. Suspension limits the compressed bytes offered per call. The
-codec still has to process across the row, so call duration depends on
-image width, sampling, and entropy.
+a time. Decode supplies compressed bytes in bounded windows. A helper
+can refill these windows within one call. The codec still has to process
+across the row, so call duration depends on image width, sampling, and
+entropy.
 
 The wrapper uses `waits` for decoder starts and strips at source widths
 of **168 px or more**, and for encoder starts and strips at input widths

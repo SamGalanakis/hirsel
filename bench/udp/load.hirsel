@@ -158,8 +158,16 @@ fn group(net: Net, clock: Clock, tasks: Tasks, out: Stdout, to: Addr, stop: u64,
 
 fn transmit(net: Net, clock: Clock, out: Stdout, to: Addr, start: u64, epoch: u64, packets: u64) waits {
     let mut socket = result.unwrap(host.udp_open(net, false, UdpOptions(slots: 1, slot_bytes: 1536)))
-    let mut data: Bytes = list.with_capacity(64 * S1_BYTES)
-    list.fill(mut data, 64 * S1_BYTES, 0)
+    let train_bytes = 64 * S1_BYTES
+    let mut data: Bytes = list.with_capacity(train_bytes)
+    list.fill(mut data, train_bytes, 0)
+    // Fault in the zero-filled train before READY, including any partial last page.
+    let mut offset = 0u64
+    while offset < train_bytes {
+        data[offset] = 0
+        offset = offset + 4096u64
+    }
+    data[train_bytes - 1] = 0
     let mut tx: List[UdpTx] = list.with_capacity(64)
     for at in 0u64 .. 64u64 {
         list.push(mut tx, UdpTx(to, at: at * S1_BYTES, len: S1_BYTES, ecn: 0))

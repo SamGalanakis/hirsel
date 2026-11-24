@@ -32,6 +32,8 @@ pub(crate) use memory::{Memory, SharedMemory};
 mod check;
 #[path = "units_ledger.rs"]
 pub(crate) mod ledger;
+#[path = "units_report.rs"]
+mod report;
 #[path = "units_sync.rs"]
 pub(crate) mod sync;
 use std::{
@@ -767,18 +769,20 @@ fn requeue_detached() {
     }
 }
 
-/// Publish readiness to the next entry even when the unit already has a
-/// pending entry. Only the PARKED transition publishes a new queue item.
-pub(crate) fn wake(u: &Unit) {
-    let prior = u
-        .state
+/// Publish readiness to the next entry. Only a parked unit needs a queue item.
+fn mark_ready(u: &Unit) -> bool {
+    u.state
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| match state {
             PARKED => Some(QUEUED),
             RUNNING => Some(NOTIFIED),
             QUEUED | NOTIFIED => Some(state),
             _ => None,
-        });
-    if prior == Ok(PARKED) {
+        })
+        == Ok(PARKED)
+}
+
+pub(crate) fn wake(u: &Unit) {
+    if mark_ready(u) {
         enqueue(pool(), u);
     }
 }
@@ -1098,13 +1102,15 @@ fn watch_blocking(p: &Pool, mut spawn: impl FnMut(Arc<Spare>) -> bool) {
     }
 }
 
-/// Put `up` on queue `q`, count it and tell the pool. Every unit that becomes
-/// counted work comes through here, so a sleeping worker or a poller blocked
-/// with no deadline always hears of it.
+/// Put `up` on queue `q`, count it and tell the pool.
 fn publish(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
+    push_counted(p, q, up);
+    notify_worker(p);
+}
+
+fn push_counted(p: &Pool, q: &Mutex<VecDeque<UP>>, up: UP) {
     q.lock().unwrap().push_back(up);
     p.queued.fetch_add(1, Ordering::SeqCst);
-    notify_worker(p);
 }
 
 /// Wake a sleeping worker unless the workers already searching cover the
@@ -1265,6 +1271,7 @@ fn poll_global(p: &Pool, timeout: i32) {
         unsafe { sync::epoll_wait(p.gep, evs.as_mut_ptr(), evs.len() as i32, timeout) }
     };
     p.last_poll.store(now(), Ordering::Relaxed);
+    let mut published = false;
     for e in evs.iter().take(n.max(0) as usize) {
         let tag = e.u64;
         if tag == WAKE_TAG {
@@ -1279,9 +1286,21 @@ fn poll_global(p: &Pool, timeout: i32) {
             if let Some(u) = unit_ref(unit) {
                 let ident = tag & ((1 << hirsel_core_net::SHARED_UNIT_SHIFT) - 1);
                 push_arrival(u, ident, e.events);
-                wake(u);
+                if mark_ready(u) {
+                    #[cfg(feature = "testing")]
+                    observe::queued(u);
+                    // Polling runs on a worker's host stack. These wakeups
+                    // go to its local queue, in the poller's event order.
+                    push_counted(p, &p.locals[worker_ix()], UP(u));
+                    published = true;
+                }
             }
         }
+    }
+    if published {
+        // One worker starts the search for the batch. The search path
+        // passes the wake on if queued work remains.
+        notify_worker(p);
     }
     fire_timers(p);
 }
@@ -1754,47 +1773,7 @@ pub(crate) fn launch(
     #[cfg(feature = "record")]
     crate::tape::writer::flush();
     if std::env::var_os("HIRSEL_XSTATS").is_some() {
-        p.memory.report();
-        let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
-        #[cfg(feature = "record")]
-        let tape_stats = format!(
-            " tape_writes={} tape_bytes={} tape_payload={} tape_skipped={} tape_worker_ns={} tape_truncated={} tape_writer_ns={} tape_writer_calls={} tape_write_failed={}",
-            crate::tape::TAPE_COUNTS[0].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[1].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[2].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[3].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[4].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[5].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[6].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[7].load(Ordering::Relaxed),
-            crate::tape::TAPE_COUNTS[8].load(Ordering::Relaxed),
-        );
-        #[cfg(not(feature = "record"))]
-        let tape_stats = "";
-        eprintln!(
-            "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_uring={}{tape_stats}",
-            w,
-            g(S_CREATED),
-            g(S_RESUMES),
-            g(S_PARKS),
-            g(S_YIELDS),
-            g(S_STEALS),
-            g(S_OS_WAKES),
-            g(S_GPOLLS),
-            g(S_GPOLL_BLOCKS),
-            g(S_GPOLL_EVENTS),
-            g(S_TIMER_FIRES),
-            g(S_NOTIFIED_REQUEUE),
-            g(S_CREATE_NS) / g(S_CREATED).max(1),
-            g(S_READY_TO_PARK_NS) / g(S_CREATED).max(1),
-            hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
-            g(S_LIFO),
-            g(S_HANDOFFS),
-            p.handoff_ticks.saturating_mul(p.handoff_tick_ns),
-            p.handoff_tick_ns,
-            g(S_HANDOFF_AGE_NS) / g(S_HANDOFFS).max(1),
-            u8::from(p.uring),
-        );
+        report::print(p);
     }
     WORST.load(Ordering::Relaxed)
 }

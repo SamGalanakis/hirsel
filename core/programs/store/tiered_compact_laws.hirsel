@@ -27,11 +27,33 @@ fn compact_walk_frame(d: Dir, db: Db, ptr: std.page.PagePtr, mut walk: CompactWa
     let wire = disk_read_file(d, path, 4194304)?
     let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(db.next_node)?)?
     let page = fold_page(frame)
-    for slot in 0u64 .. std.page.count(std.page.image_of(page)) {
+    let image = std.page.image_of(page)
+    for slot in 0u64 .. std.page.count(image) {
         if let Some(ColdPage(child)) = std.page.child_slot(page, slot) {
             compact_walk_frame(d, db, child, mut walk)?
+        } else if let Some(BlobEdge(body)) = std.page.owning_edge(image, slot) {
+            compact_walk_blob(d, db, body, mut walk)?
         }
     }
+    Ok(())
+}
+
+// A BLOB frame's payload is its 8-byte length word and the value (§13.8).
+fn compact_walk_blob(d: Dir, db: Db, body: std.page.BlobRef, mut walk: CompactWalk) -> Result[(), Error] waits {
+    if let Some(seen) = map.get(walk.places, body.stamp) {
+        if seen != (body.pack, body.offset) {
+            fail("L88 (h): one BLOB stamp is reached at two locations")
+        }
+        return Ok(())
+    }
+    map.insert(mut walk.places, body.stamp, (body.pack, body.offset))
+    let width = 8 + body.len
+    map.update_or_insert(mut walk.live, body.pack, 0, fn(mut total: u64) {
+        total += width
+    })
+    let path = paged_pack_path(body.pack)?
+    let wire = disk_read_file(d, path, 4194304)?
+    let _ = read_tiered_frame(path, db.store, TieredBlob(body), wire, 0, stamp_after(db.next_node)?)?
     Ok(())
 }
 
@@ -179,22 +201,30 @@ fn test_l88_compaction_retires_a_cold_pack(d: Dir, c: Clock, r: Random, tasks: T
 }
 
 fn compact_value(key: u64, edit: u8) -> Bytes {
-    let mut body: Bytes = list.with_capacity(48)
+    compact_value_of(key, edit, 48)
+}
+
+fn compact_value_of(key: u64, edit: u8, width: u64) -> Bytes {
+    let mut body: Bytes = list.with_capacity(width)
     let low: u8 = int.truncate(key)
-    list.fill(mut body, 48, low ^ edit)
+    list.fill(mut body, width, low ^ edit)
     take body
 }
 
 // `row_count` rows of 48 bytes in a Tiered table whose multi-leaf tree the cut
 // emits Cold into one class-3 pack.
 fn compact_cold_table(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row_count: u64) -> Result[Table[u64, Bytes], Error] waits {
+    compact_cold_table_of(d, c, r, tasks, floor, row_count, 48)
+}
+
+fn compact_cold_table_of(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, row_count: u64, width: u64) -> Result[Table[u64, Bytes], Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
     let fixture: Table[u64, Bytes] = clone(rows)
-    let Committed(_) = run(mut db, None, copy_env((fixture, row_count)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {
+    let Committed(_) = run(mut db, None, copy_env((fixture, row_count, width)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, u64)) -> Result[(), Error] {
         for key in 0u64 .. env.1 {
-            put(mut tx, env.0, key, compact_value(key, 0))?
+            put(mut tx, env.0, key, compact_value_of(key, 0, env.2))?
         }
         Ok(())
     })? else {
@@ -303,5 +333,234 @@ fn test_l87_probe_across_a_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     compact_branch_rows(reopened, main_branch(reopened), rows, row_count, edited, 7)?
     compact_branch_rows(reopened, beta_again, rows, row_count, edited, 0)?
+    close(take reopened)
+}
+
+fn compact_blob_rows(db: Db, rows: Table[u64, Bytes], row_count: u64, width: u64) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    for key in 0u64 .. row_count {
+        let wanted: Option[Bytes] = if key % 2 == 0 { None } else { Some(compact_value_of(key, 0, width)) }
+        if get(read_handle, s, rows, key)? != wanted {
+            fail("L88 (h): every kept row reads its BLOB back through the moved path")
+        }
+    }
+    drop(take s)
+    drop(take read_handle)
+    Ok(())
+}
+
+fn compact_blob_pack(db: Db) -> Result[u64, Error] {
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    let mut found: Option[u64] = None
+    while let Some((seq, listed)) = std.omap.next(mut inventory) {
+        if listed.class == 4 {
+            if found != None {
+                fail("L88 (h): the fixture's cut lays its blobs out in one class-4 pack")
+            }
+            found = Some(seq)
+        }
+    }
+    let Some(seq) = found else {
+        fail("L88 (h): the fixture emits a class-4 pack")
+    }
+    Ok(seq)
+}
+
+// The published tree reaches each frame once, only in listed packs on disk.
+// A pack's live bytes never fall below the frames the tree reaches in it; a
+// probed pack still counts the old copies of moved targets until it retires,
+// so the two are equal once no probe is running.
+fn compact_check_published(d: Dir, db: Db, collection: u32) -> Result[(), Error] waits {
+    let walk = compact_walk_from(d, db, compact_branch_root(db, 0, collection)?)?
+    for (seq, _) in walk.live {
+        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+            fail("L88 (h): a reachable frame lives in a listed pack on disk")
+        }
+    }
+    let idle = map.len(disk_state(db).pages.compaction.probes) == 0
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, listed)) = std.omap.next(mut inventory) {
+        if listed.class < 3 {
+            continue
+        }
+        let reached = map.get_or(walk.live, seq, 0)
+        if listed.live < reached || (idle && listed.live != reached) {
+            fail("L88 (h): a Tiered pack's live bytes are its reachable frames")
+        }
+    }
+    Ok(())
+}
+
+// L88 (h), Cold half, class 4 (§13.6, §13.6a T8 step 7): every value is a
+// 1,100-byte BLOB, so the cut lays them out in one class-4 pack B. Deleting
+// every even row drains half of B dead, so B falls below the ratio. Its probe
+// moves each matched BLOB with its stamp, and the leaf that names it is
+// rewritten to the new location. When the probe ends, B retires: the
+// independent walk of the published tree reaches no frame in B, each stamp at
+// one location, and once no probe runs every listed Tiered pack's live bytes
+// are exactly the frames the tree reaches in it.
+@test
+fn test_l88_compaction_relocates_blobs(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 160u64
+    let width = 1100u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, row_count, width)?
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 8
+    options.compact_permille = 900
+    let mut db = open(tasks, d, c, r, options)?
+    let probed = compact_blob_pack(db)?
+    let edit_handle: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, Some(10000000), copy_env((edit_handle, row_count)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64)) -> Result[(), Error] {
+        for key in 0u64 .. env.1 {
+            if key % 2 == 0 {
+                let _ = delete(mut tx, env.0, key)?
+            }
+        }
+        Ok(())
+    })? else {
+        fail("L88 (h): the deletes commit")
+    }
+    let _ = checkpoint(mut db)?
+    if !compact_listed(db, probed) {
+        fail("L88 (h): the delete cut does not finish B's probe")
+    }
+    let before = snapshot(db)
+    let mut cuts = 0u64
+    while compact_listed(db, probed) || map.len(disk_state(db).pages.compaction.probes) != 0 {
+        if cuts == 256 {
+            fail("L88 (h): the class-4 probe ends")
+        }
+        let _ = checkpoint(mut db)?
+        cuts += 1
+        compact_check_published(d, db, rows.id)?
+    }
+    let walk = compact_walk_from(d, db, compact_branch_root(db, 0, rows.id)?)?
+    if map.contains(walk.live, probed) {
+        fail("L88 (h): the retired class-4 pack holds no reachable BLOB")
+    }
+    let mut moved_blobs = false
+    for (seq, _) in walk.live {
+        if let Some(listed) = disk_index_get(disk_state(db).pages.locations.packs, seq) {
+            moved_blobs = moved_blobs || listed.class == 4
+        }
+    }
+    if !moved_blobs {
+        fail("L88 (h): the kept BLOBs move to a fresh class-4 pack")
+    }
+    compact_blob_rows(db, rows, row_count, width)?
+    // The Snapshot taken before the probe still reads through B.
+    {
+        let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+        for key in 0u64 .. row_count {
+            let wanted: Option[Bytes] = if key % 2 == 0 { None } else { Some(compact_value_of(key, 0, width)) }
+            if get(read_handle, before, rows, key)? != wanted {
+                fail("L88 (h): a Snapshot that lists the retired pack reads its BLOBs")
+            }
+        }
+        drop(take read_handle)
+    }
+    if !disk_exists(d, paged_pack_path(probed)?)? {
+        fail("L88 (h): a Snapshot that lists the retired pack keeps its file")
+    }
+    drop(take before)
+    let _ = checkpoint(mut db)?
+    let _ = checkpoint(mut db)?
+    if disk_exists(d, paged_pack_path(probed)?)? {
+        fail("L88 (h): the cut after the last reader removes the retired class-4 file")
+    }
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    compact_blob_rows(reopened, rows, row_count, width)?
+    close(take reopened)
+}
+
+fn compact_head_roots(db: Db) -> List[Roots] {
+    let mut shares: List[Roots] = list.new()
+    for head in db.heads {
+        let held = head.roots
+        list.push(mut shares, PageRoots(collections: share_page_tree(held.collections), streams: share_page_tree(held.streams), catalog: share_page_tree(held.catalog), keyed: share_keyed_pages(held.keyed)))
+    }
+    take shares
+}
+
+// §13.6a T3 is optional (AP16 item 3): a refused allocation in the
+// compaction probes drops this cut's probe progress. Every root is the one
+// the cut staged before the probes ran, the installed cursors stand and
+// nothing retires, so the cut publishes its mandatory steps. The probes run
+// under a rising allocation bound. Some bound refuses after a move was
+// installed in a root (the stamp counter advanced), and there the roots
+// still reach the original Cold root. A larger bound runs the probes to
+// completion of the budget, and the next real cut publishes them.
+@test
+fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 160u64
+    let rows = compact_cold_table(d, c, r, tasks, floor, row_count)?
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 64
+    options.compact_permille = 1001
+    let mut db = open(tasks, d, c, r, options)?
+    let original = compact_branch_root(db, 0, rows.id)?
+    let id = prefix(rows.id)?
+    let start = stamp_after(db.next_node)?
+    let mut restored = 0u64
+    let mut limit = 0u64
+    loop {
+        if limit > 67108864 {
+            fail("L88 (h): the probes run under a large enough bound")
+        }
+        let mut roots = compact_head_roots(db)
+        let mut stamp = start
+        let pager: Option[View[Sender[TieredPagerMessage]]] = match db.pager {
+            Some(requests) => Some(view requests),
+            None => None,
+        }
+        let ran = bound bytes limit {
+            compact_cut(db, pager, mut roots, list.new(), mut stamp)
+        }
+        let Ok(returned) = take ran else {
+            fail("L88 (h): a refused probe returns its refusal rather than raising it")
+        }
+        // Before any probe runs, a refusal may also refuse the whole cut.
+        let probed = match take returned {
+            Ok(take ready) => take ready,
+            Error(Full(Allocation(_))) => {
+                if stamp != start {
+                    fail("L88 (h): a refusal after a move skips the probes instead of failing the cut")
+                }
+                limit += 64
+                continue
+            },
+            Error(take problem) => return Error(take problem),
+        }
+        let progressed = list.len(probed.retiring) != 0 || map.len(probed.probes) != 0
+        if progressed {
+            break
+        }
+        // The probes were refused. Each root is the one staged before them.
+        let Some((ColdPage(kept), _)) = std.page.collection_slot(roots[0u64].collections.root, id) else {
+            fail("L88 (h): a refused probe leaves no moved path in a root")
+        }
+        if kept != original || list.len(probed.moved) != 0 {
+            fail("L88 (h): a refused probe restores the staged roots and charges no move")
+        }
+        if stamp > start {
+            restored += 1
+        }
+        limit += 64
+    }
+    if restored == 0 {
+        fail("L88 (h): some bound refuses the probes after a move was installed")
+    }
+    let _ = checkpoint(mut db)?
+    if map.len(disk_state(db).pages.compaction.probes) == 0 && compact_listed(db, original.pack) {
+        fail("L88 (h): an unbounded cut publishes the probes' progress")
+    }
+    compact_branch_rows(db, main_branch(db), rows, row_count, row_count, 0)?
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    compact_branch_rows(reopened, main_branch(reopened), rows, row_count, row_count, 0)?
     close(take reopened)
 }

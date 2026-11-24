@@ -8,7 +8,8 @@ type Link: send {
 
 type Peer: send {
     listener: Listener,
-    script: Script
+    script: Script,
+    own_deadline: bool
 }
 
 const HOSTNAME: String = "postgres.test"
@@ -102,7 +103,7 @@ fn authenticate(mut reader: ReadHalf, mut writer: WriteHalf) waits {
 }
 
 fn peer(take input: Peer) waits {
-    let Peer(listener: take listen, script) = take input
+    let Peer(listener: take listen, script, own_deadline) = take input
     if script == CommaHost {
         return
     }
@@ -142,6 +143,10 @@ fn peer(take input: Peer) waits {
             // down during resynchronization and reports admin_shutdown.
             send_frame(mut writer, b'E', b"SERROR\0VERROR\0C42703\0Mcolumn does not exist\0\0")
             expect_frame(mut reader, b'S', b"")
+            if own_deadline {
+                expect_eof(mut reader)
+                return
+            }
             send_frame(mut writer, b'E', b"SFATAL\0VFATAL\0C57P01\0Mterminating connection\0\0")
             drop(take writer)
             expect_eof(mut reader)
@@ -176,7 +181,7 @@ fn peer(take input: Peer) waits {
     expect_eof(mut reader)
 }
 
-fn client(net: Net, address: Addr, clock: Clock, script: Script) waits {
+fn client(net: Net, address: Addr, clock: Clock, script: Script, own_deadline: bool) waits {
     let password = string.into_bytes(string.from("pencil"))
     // One extra peer pattern would ride into the cancel key's tls_send policy.
     let hostname = if script == CommaHost {
@@ -221,13 +226,24 @@ fn client(net: Net, address: Addr, clock: Clock, script: Script) waits {
         FatalDuringSync => {
             let mut conn = result.unwrap(take opened)
             let params: List[postgres.Param] = list.new()
-            match postgres.execute(mut conn, "SELECT missing", params) {
-                Error(Fatal(e)) => {
-                    if e.sqlstate != "57P01" || e.message != "terminating connection" {
-                        fail("expected the shutdown diagnostic sent during Sync")
+            let outcome = postgres.execute(mut conn, "SELECT missing", params, clock, DEADLINE + 10)
+            if own_deadline {
+                if let Error(OutcomeUnknown(TimedOut)) = outcome {
+                    if host.mono_ns(clock) != DEADLINE + 10 {
+                        fail("SQL error drain used the wrong deadline")
                     }
-                },
-                _ => fail("fatal ErrorResponse during Sync must end the exchange"),
+                } else {
+                    fail("SQL error drain must time out without ReadyForQuery")
+                }
+            } else {
+                match outcome {
+                    Error(Fatal(e)) => {
+                        if e.sqlstate != "57P01" || e.message != "terminating connection" {
+                            fail("expected the shutdown diagnostic sent during Sync")
+                        }
+                    },
+                    _ => fail("fatal ErrorResponse during Sync must end the exchange"),
+                }
             }
             if let Some(_) = postgres.transaction(conn) {
                 fail("a connection shut down during Sync must be retired")
@@ -235,15 +251,18 @@ fn client(net: Net, address: Addr, clock: Clock, script: Script) waits {
         },
         SelectAnswer => {
             let mut conn = result.unwrap(take opened)
-            if result.unwrap(example.select_answer(mut conn)) != 42 {
+            if own_deadline {
+                host.sleep_until(clock, DEADLINE + 1)
+            }
+            if result.unwrap(example.select_answer(mut conn, clock, DEADLINE + 10)) != 42 {
                 fail("SELECT 6 * 7 must return 42")
             }
-            result.unwrap(postgres.close(take conn))
+            result.unwrap(postgres.close(take conn, clock, DEADLINE + 20))
         },
     }
 }
 
-fn simulate(tasks: Tasks, seed: u64, script: Script) waits {
+fn simulate(tasks: Tasks, seed: u64, script: Script, own_deadline: bool) waits {
     let (initial, clock) = std.sim.world.new(seed, 0, 0)
     let mut world = take initial
     let plan = std.sim.world.detach(mut world)
@@ -251,8 +270,8 @@ fn simulate(tasks: Tasks, seed: u64, script: Script) waits {
     let (net, port) = provide.net(bytes 4096)
     let link = task.spawn(tasks, bytes 4194304, Link(port: take port, clock: clock, plan: take plan), serve_link)
     let (listener, address) = result.unwrap(host.listen(net, Addr(ip: V4(2130706433), port: 0), 1))
-    let server = task.spawn(tasks, bytes 262144, Peer(listener: take listener, script: script), peer)
-    client(net, address, clock, script)
+    let server = task.spawn(tasks, bytes 262144, Peer(listener: take listener, script: script, own_deadline: own_deadline), peer)
+    client(net, address, clock, script, own_deadline)
     result.unwrap(task.join(take server))
     result.unwrap(task.join(take link))
     result.unwrap(task.join(take timer))
@@ -267,36 +286,43 @@ fn test_seed(e: Env) -> u64 {
 
 @test
 fn select_answer(tasks: Tasks, e: Env) -> Result[(), ()] waits {
-    simulate(tasks, test_seed(e), SelectAnswer)
+    simulate(tasks, test_seed(e), SelectAnswer, false)
     Ok(())
 }
 
 @test
 fn fragmented_startup_error(tasks: Tasks, e: Env) -> Result[(), ()] waits {
-    simulate(tasks, test_seed(e), StartupError)
+    simulate(tasks, test_seed(e), StartupError, false)
     Ok(())
 }
 
 @test
 fn eof_in_error_response(tasks: Tasks, e: Env) -> Result[(), ()] waits {
-    simulate(tasks, test_seed(e), TruncatedFrame)
+    simulate(tasks, test_seed(e), TruncatedFrame, false)
     Ok(())
 }
 
 @test
 fn startup_ready_deadline(tasks: Tasks, e: Env) -> Result[(), ()] waits {
-    simulate(tasks, test_seed(e), ReadyDeadline)
+    simulate(tasks, test_seed(e), ReadyDeadline, false)
     Ok(())
 }
 
 @test
 fn fatal_error_during_sync(tasks: Tasks, e: Env) -> Result[(), ()] waits {
-    simulate(tasks, test_seed(e), FatalDuringSync)
+    simulate(tasks, test_seed(e), FatalDuringSync, false)
     Ok(())
 }
 
 @test
 fn comma_host_refused(tasks: Tasks, e: Env) -> Result[(), ()] waits {
-    simulate(tasks, test_seed(e), CommaHost)
+    simulate(tasks, test_seed(e), CommaHost, false)
+    Ok(())
+}
+
+@test
+fn exchange_deadline(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), SelectAnswer, true)
+    simulate(tasks, test_seed(e), FatalDuringSync, true)
     Ok(())
 }

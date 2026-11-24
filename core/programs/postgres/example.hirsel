@@ -1,6 +1,6 @@
 // Read one typed column, then drain the cursor and recover the connection.
-pub fn select_answer(mut conn: postgres.Conn) -> Result[i32, postgres.Error] waits {
-    let mut rows = postgres.query(mut conn, "SELECT 6 * 7 AS answer", list.new())?
+pub fn select_answer(mut conn: postgres.Conn, clock: Clock, deadline: u64) -> Result[i32, postgres.Error] waits {
+    let mut rows = postgres.query(mut conn, "SELECT 6 * 7 AS answer", list.new(), clock, deadline)?
     if !postgres.next(mut rows)? {
         fail("expected one PostgreSQL row")
     }

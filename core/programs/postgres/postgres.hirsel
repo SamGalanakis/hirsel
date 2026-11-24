@@ -10,17 +10,11 @@
 // These buffers and the retained metadata are allocated on the run's memory
 // budget. Each admitted length is checked before reserving body storage.
 const BODY_LIMIT: u64 = 2097152
-
 const FIELD_LIMIT: u64 = 1024
-
 const SQL_LIMIT: u64 = 262144
-
 const STARTUP_VALUE_LIMIT: u64 = 4096
-
 const CONTROL_LIMIT: u64 = 65536
-
 const AUTH_LIMIT: u64 = 8192
-
 pub type Config {
     host: String,
     port: u16,
@@ -29,6 +23,7 @@ pub type Config {
     password: Secret,
     random: Random,
     clock: Clock,
+    /// Absolute monotonic deadline for connection and authentication.
     deadline: u64
 }
 
@@ -81,7 +76,6 @@ pub opaque type CancelToken: send {
 type Session {
     reader: ReadHalf,
     writer: WriteHalf,
-    until: Until,
     transaction: Transaction,
     portal_open: bool,
     parameters: Parameters,
@@ -111,6 +105,7 @@ type CursorPhase: key = Unstarted | Fetch | AfterRow | Complete
 // completed cursor returns the session. Dropping a cursor releases the stream.
 pub opaque type Rows {
     live: Option[Session],
+    until: Until,
     phase: CursorPhase,
     parse: Bytes,
     bind: Bytes,
@@ -405,8 +400,7 @@ fn notify(b: Bytes) -> Result[(), Error] {
     consumed(b, at)
 }
 
-fn receive(mut s: Session, mut buf: Bytes, expected: Bytes) -> Result[u8, Error] waits {
-    let until = s.until
+fn receive(mut s: Session, mut buf: Bytes, expected: Bytes, until: Until) -> Result[u8, Error] waits {
     loop {
         let tag = frame(mut s.reader, mut buf, expected, until)?
         match tag {
@@ -506,8 +500,8 @@ fn authentication_offer(b: Bytes) -> Result[bool, Error] {
     Ok(plus)
 }
 
-fn auth_reply(mut s: Session, mut b: Bytes, kind: i32) -> Result[(), Error] waits {
-    if receive(mut s, mut b, b"RE")? == b'E' {
+fn auth_reply(mut s: Session, mut b: Bytes, kind: i32, until: Until) -> Result[(), Error] waits {
+    if receive(mut s, mut b, b"RE", until)? == b'E' {
         return startup_error(b)
     }
     let mut at: u64 = 0
@@ -520,8 +514,8 @@ fn auth_reply(mut s: Session, mut b: Bytes, kind: i32) -> Result[(), Error] wait
     Ok(())
 }
 
-fn authenticate(mut s: Session, mut b: Bytes, password: Secret, nonce: Bytes) -> Result[(), Error] waits {
-    if receive(mut s, mut b, b"RE")? == b'E' {
+fn authenticate(mut s: Session, mut b: Bytes, password: Secret, nonce: Bytes, until: Until) -> Result[(), Error] waits {
+    if receive(mut s, mut b, b"RE", until)? == b'E' {
         return startup_error(b)
     }
     let plus = authentication_offer(b)?
@@ -541,8 +535,8 @@ fn authenticate(mut s: Session, mut b: Bytes, password: Secret, nonce: Bytes) ->
     let initial_size: u32 = int.narrow(list.len(client))
     list.put_word_be(mut first, initial_size)
     list.append(mut first, client)
-    send(mut s.writer, first, s.until)?
-    auth_reply(mut s, mut b, 11)?
+    send(mut s.writer, first, until)?
+    auth_reply(mut s, mut b, 11, until)?
     let check = {
         let server = list.slice(b, 4, list.len(b))
         let final_size = match secret.scram_final_len(s.writer, client, server) {
@@ -552,19 +546,19 @@ fn authenticate(mut s: Session, mut b: Bytes, password: Secret, nonce: Bytes) ->
         let mut header: Bytes = list.with_capacity(5)
         start_frame(mut header, b'p', final_size)
         let empty: Bytes = b""
-        match secret.scram_sha256(mut s.writer, password, client, server, header, empty, s.until) {
+        match secret.scram_sha256(mut s.writer, password, client, server, header, empty, until) {
             Ok(take c) => take c,
             Error(e) => return Error(scram_error(e)),
         }
     }
-    auth_reply(mut s, mut b, 12)?
+    auth_reply(mut s, mut b, 12, until)?
     {
         let final = list.slice(b, 4, list.len(b))
         if !secret.scram_verify(take check, final) {
             return Error(Protocol(UnverifiedServer))
         }
     }
-    auth_reply(mut s, mut b, 0)
+    auth_reply(mut s, mut b, 0, until)
 }
 
 fn valid_startup_value(s: String) -> bool {
@@ -666,16 +660,16 @@ fn secure(n: Net, take socket: Socket, address: Addr, hostname: String, trust: T
         Roots(pem) => PinnedRoots(bytes_copy(pem)),
     }
     let destination = CancelTarget(address, hostname: string.from(hostname), trust: take saved, mode)
-    Ok(Session(reader: take reader, writer: take writer, until, transaction: Idle, portal_open: false, parameters: Parameters(server_version: None, client_encoding: None, standard_conforming_strings: None), target: Some(take destination), backend: None, retire: false))
+    Ok(Session(reader: take reader, writer: take writer, transaction: Idle, portal_open: false, parameters: Parameters(server_version: None, client_encoding: None, standard_conforming_strings: None), target: Some(take destination), backend: None, retire: false))
 }
 
-fn login(take session: Session, user: String, database: String, password: Secret, nonce: Bytes) -> Result[Conn, Error] waits {
+fn login(take session: Session, user: String, database: String, password: Secret, nonce: Bytes, until: Until) -> Result[Conn, Error] waits {
     let mut s = take session
     let startup = startup_packet(user, database)
-    send(mut s.writer, startup, s.until)?
+    send(mut s.writer, startup, until)?
     let mut b: Bytes = list.new()
-    authenticate(mut s, mut b, password, nonce)?
-    startup_ready(mut s, mut b)?
+    authenticate(mut s, mut b, password, nonce, until)?
+    startup_ready(mut s, mut b, until)?
     Ok(Conn(live: Some(take s)))
 }
 
@@ -727,17 +721,17 @@ fn connect_with(net: Net, tls_trust: Trust, config: Config, mode: TlsMode) -> Re
     let mut entropy: Bytes = list.with_capacity(18)
     host.random(config.random, mut entropy)
     let nonce = std.base64.encode_string(entropy)
-    login(take session, config.user, config.database, config.password, string.as_bytes(nonce))
+    login(take session, config.user, config.database, config.password, string.as_bytes(nonce), until)
 }
 
-fn startup_ready(mut s: Session, mut b: Bytes) -> Result[(), Error] waits {
-    let mut tag = receive(mut s, mut b, b"KZE")?
+fn startup_ready(mut s: Session, mut b: Bytes, until: Until) -> Result[(), Error] waits {
+    let mut tag = receive(mut s, mut b, b"KZE", until)?
     if tag == b'K' {
         consumed(b, 8)?
         // Protocol 3.0 sends a four-byte PID and four-byte cancellation key.
         // Like other received backend bytes, BackendKeyData is recorded on tape.
         s.backend = Some((list.word_be(b, 0), list.word_be(b, 4)))
-        tag = receive(mut s, mut b, b"ZE")?
+        tag = receive(mut s, mut b, b"ZE", until)?
     }
     if tag == b'E' {
         return startup_error(b)
@@ -920,7 +914,8 @@ fn bind_results(mut b: Bytes, columns: List[u32]) {
     }
 }
 
-pub fn query(mut conn: Conn, sql: String, params: List[Param]) -> Result[Rows, Error] {
+/// Prepare a lazy exchange bounded by an absolute monotonic deadline, including every pull and drain.
+pub fn query(mut conn: Conn, sql: String, params: List[Param], clock: Clock, deadline: u64) -> Result[Rows, Error] {
     let Some(status) = transaction(conn) else {
         return Error(ConnectionClosed)
     }
@@ -941,7 +936,7 @@ pub fn query(mut conn: Conn, sql: String, params: List[Param]) -> Result[Rows, E
     let b = bind_parameters(params)?
     let p = parse_packet(sql, types)
     let live = replace(mut conn.live, None)
-    Ok(Rows(live: take live, phase: Unstarted, parse: take p, bind: take b, types: take types, columns: list.new(), returns_rows: false, row: Row(body: list.new(), cells: list.new()), affected: 0))
+    Ok(Rows(live: take live, until: At(clock, deadline), phase: Unstarted, parse: take p, bind: take b, types: take types, columns: list.new(), returns_rows: false, row: Row(body: list.new(), cells: list.new()), affected: 0))
 }
 
 fn parameter_description(b: Bytes, types: List[u32]) -> Result[(), Error] {
@@ -1140,16 +1135,17 @@ fn portal_message(tag: u8) -> Bytes {
 }
 
 fn drain_error(mut rows: Rows, mut s: Session, synced: bool) -> Result[bool, Error] waits {
+    let until = rows.until
     let e = diagnostic(rows.row.body)?
     if is_fatal(e) {
         return Error(Fatal(take e))
     }
     if !synced {
-        send(mut s.writer, b"S\x00\x00\x00\x04", s.until)?
+        send(mut s.writer, b"S\x00\x00\x00\x04", until)?
     }
     // Sync can report another error before ReadyForQuery. A fatal error
     // ends the session without ReadyForQuery and takes precedence.
-    while receive(mut s, mut rows.row.body, b"ZE")? == b'E' {
+    while receive(mut s, mut rows.row.body, b"ZE", until)? == b'E' {
         let later = diagnostic(rows.row.body)?
         if is_fatal(later) {
             return Error(Fatal(take later))
@@ -1160,10 +1156,10 @@ fn drain_error(mut rows: Rows, mut s: Session, synced: bool) -> Result[bool, Err
     Error(Sql(take e))
 }
 
-fn close_portal(mut s: Session, mut b: Bytes) -> Result[bool, Error] waits {
+fn close_portal(mut s: Session, mut b: Bytes, until: Until) -> Result[bool, Error] waits {
     let packet = portal_message(b'C')
-    send(mut s.writer, packet, s.until)?
-    if receive(mut s, mut b, b"3E")? == b'E' {
+    send(mut s.writer, packet, until)?
+    if receive(mut s, mut b, b"3E", until)? == b'E' {
         return Ok(false)
     }
     s.portal_open = false
@@ -1171,22 +1167,23 @@ fn close_portal(mut s: Session, mut b: Bytes) -> Result[bool, Error] waits {
 }
 
 fn start_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    let until = rows.until
     // Error recovery skips all frontend commands until Sync. A named portal
     // can survive that Sync in a failed transaction, so close it before Bind.
-    if s.portal_open && !close_portal(mut s, mut rows.row.body)? {
+    if s.portal_open && !close_portal(mut s, mut rows.row.body, until)? {
         return drain_error(mut rows, mut s, false)
     }
     let parse = replace(mut rows.parse, list.new())
-    send(mut s.writer, parse, s.until)?
+    send(mut s.writer, parse, until)?
     drop(take parse)
-    if receive(mut s, mut rows.row.body, b"1E")? == b'E' {
+    if receive(mut s, mut rows.row.body, b"1E", until)? == b'E' {
         return drain_error(mut rows, mut s, false)
     }
-    if receive(mut s, mut rows.row.body, b"tE")? == b'E' {
+    if receive(mut s, mut rows.row.body, b"tE", until)? == b'E' {
         return drain_error(mut rows, mut s, false)
     }
     parameter_description(rows.row.body, rows.types)?
-    match receive(mut s, mut rows.row.body, b"TnE")? {
+    match receive(mut s, mut rows.row.body, b"TnE", until)? {
         b'T' => {
             rows.columns = row_description(rows.row.body)?
             rows.returns_rows = true
@@ -1196,10 +1193,10 @@ fn start_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
     }
     let mut bind = replace(mut rows.bind, list.new())
     bind_results(mut bind, rows.columns)
-    send(mut s.writer, bind, s.until)?
+    send(mut s.writer, bind, until)?
     drop(take bind)
-    send(mut s.writer, b"H\x00\x00\x00\x04", s.until)?
-    if receive(mut s, mut rows.row.body, b"2E")? == b'E' {
+    send(mut s.writer, b"H\x00\x00\x00\x04", until)?
+    if receive(mut s, mut rows.row.body, b"2E", until)? == b'E' {
         return drain_error(mut rows, mut s, false)
     }
     s.portal_open = true
@@ -1208,11 +1205,12 @@ fn start_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
 }
 
 fn end_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
-    if !close_portal(mut s, mut rows.row.body)? {
+    let until = rows.until
+    if !close_portal(mut s, mut rows.row.body, until)? {
         return drain_error(mut rows, mut s, false)
     }
-    send(mut s.writer, b"S\x00\x00\x00\x04", s.until)?
-    if receive(mut s, mut rows.row.body, b"ZE")? == b'E' {
+    send(mut s.writer, b"S\x00\x00\x00\x04", until)?
+    if receive(mut s, mut rows.row.body, b"ZE", until)? == b'E' {
         return drain_error(mut rows, mut s, true)
     }
     ready(mut s, rows.row.body)?
@@ -1221,12 +1219,13 @@ fn end_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
 }
 
 fn advance(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    let until = rows.until
     list.clear(mut rows.row.cells)
     if rows.phase == Unstarted {
         let _ = start_exchange(mut rows, mut s)?
     }
     if rows.phase == AfterRow {
-        match receive(mut s, mut rows.row.body, b"sCE")? {
+        match receive(mut s, mut rows.row.body, b"sCE", until)? {
             b'E' => return drain_error(mut rows, mut s, false),
             b'C' => {
                 rows.affected = command_count(rows.row.body)?
@@ -1236,13 +1235,13 @@ fn advance(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
         }
     }
     let execute_packet = portal_message(b'E')
-    send(mut s.writer, execute_packet, s.until)?
+    send(mut s.writer, execute_packet, until)?
     let expected: Bytes = if rows.returns_rows {
         b"DCE"
     } else {
         b"CIE"
     }
-    match receive(mut s, mut rows.row.body, expected)? {
+    match receive(mut s, mut rows.row.body, expected, until)? {
         b'D' => {
             decode_row(mut rows.row, rows.columns)?
             rows.phase = AfterRow
@@ -1373,8 +1372,8 @@ pub fn finish(take rows: Rows) -> Conn {
     Conn(live: None)
 }
 
-pub fn execute(mut conn: Conn, sql: String, params: List[Param]) -> Result[i64, Error] waits {
-    let mut rows = query(mut conn, sql, params)?
+pub fn execute(mut conn: Conn, sql: String, params: List[Param], clock: Clock, deadline: u64) -> Result[i64, Error] waits {
+    let mut rows = query(mut conn, sql, params, clock, deadline)?
     loop {
         match next(mut rows) {
             Ok(true) => {},
@@ -1399,11 +1398,11 @@ pub fn parameters(c: Conn) -> Option[View[Parameters]] in c {
 }
 
 /// Send Terminate once and release both directional owners.
-pub fn close(take conn: Conn) -> Result[(), Error] waits {
+pub fn close(take conn: Conn, clock: Clock, deadline: u64) -> Result[(), Error] waits {
     let Conn(live: take live) = take conn
     let Some(take session) = take live else {
         return Ok(())
     }
     let mut s = take session
-    send(mut s.writer, b"X\x00\x00\x00\x04", s.until)
+    send(mut s.writer, b"X\x00\x00\x00\x04", At(clock, deadline))
 }

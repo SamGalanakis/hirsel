@@ -1,14 +1,14 @@
 // `appended` appends of 48 bytes in a Tiered Log whose tree the cut emits Cold.
-fn l87_cold_log(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, appended: u64) -> Result[Log[Bytes], Error] waits {
+fn l87_cold_log(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, appended: u64, width: u64) -> Result[Log[Bytes], Error] waits {
     let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
     let mut declaring = declare(db, Migrate)?
     let events = declare_log(mut declaring, "events", std.codec.of_bytes())?
     let _ = seal(mut db, take declaring)?
     let fixture: Log[Bytes] = clone(events)
-    let Committed(_) = run(mut db, None, copy_env((fixture, appended)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
+    let Committed(_) = run(mut db, None, copy_env((fixture, appended, width)), fn(mut tx: Tx, env: (Log[Bytes], u64, u64)) -> Result[(), Error] {
         for seq in 0u64 .. env.1 {
-            let mut body: Bytes = list.with_capacity(48)
-            list.fill(mut body, 48, int.truncate(seq))
+            let mut body: Bytes = list.with_capacity(env.2)
+            list.fill(mut body, env.2, int.truncate(seq))
             let _ = append(mut tx, env.0, body)?
         }
         Ok(())
@@ -62,17 +62,16 @@ fn l87_first_leaf(d: Dir, db: Db, collection: u32) -> Result[(std.page.PagePtr, 
 fn l87_queue(db: Db) -> Result[List[(u64, DeferredFree)], Error] {
     let lists = disk_state(db).pages.lists
     let mut rows: List[(u64, DeferredFree)] = list.new()
-    let image = std.page.image_of(lists.deferred)
-    if std.page.level(image) != 0 {
-        fail("L87: the fixture queue fits one leaf")
-    }
-    for slot in 0u64 .. std.page.count(image) {
-        let key = option.unwrap(std.page.key_at(image, slot))
-        let value = option.unwrap(std.page.value_at(lists.deferred, slot))
-        let seq: u64 = list.word_be(key, 0)
-        let ptr: std.page.PagePtr = std.page.decode_ptr(list.slice(value, 5, 41)) ?=> |_| Missing("L87 queued Page row")
-        let owner: u32 = list.word_le(value, 1)
-        list.push(mut rows, (seq, DeferredFree(branch_id: owner, target: TieredPage(ptr))))
+    let mut cursor = std.page.cursor_open(arc.share(lists.deferred), None, true, false)
+    while let Some(row) = std.page.cursor_next(mut cursor) {
+        let seq: u64 = list.word_be(row.key, 0)
+        let owner: u32 = list.word_le(row.value, 1)
+        let target = if row.value[0u64] == 0 {
+            TieredPage(std.page.decode_ptr(list.slice(row.value, 5, 41)) ?=> |_| Missing("L87 queued Page row"))
+        } else {
+            TieredBlob(std.page.decode_ref(list.slice(row.value, 5, 47)) ?=> |_| Missing("L87 queued Blob row"))
+        }
+        list.push(mut rows, (seq, DeferredFree(branch_id: owner, target: take target)))
     }
     Ok(take rows)
 }
@@ -90,7 +89,7 @@ fn l87_options(floor: u64, budget: u64) -> Result[Options, Error] {
 @test
 fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
-    let events = l87_cold_log(d, c, r, tasks, floor, 120)?
+    let events = l87_cold_log(d, c, r, tasks, floor, 120, 48)?
     let mut cold = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let (leaf, trim) = l87_first_leaf(d, cold, events.binding.id)?
     let Committed(_) = run(mut cold, Some(100000), copy_env((events, trim)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
@@ -129,7 +128,7 @@ fn test_l87_fold_cut_queues_detached_leaf(d: Dir, c: Clock, r: Random, tasks: Ta
 fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
     let appended = 400u64
-    let events = l87_cold_log(d, c, r, tasks, floor, appended)?
+    let events = l87_cold_log(d, c, r, tasks, floor, appended, 48)?
     let mut db = open(tasks, d, c, r, l87_options(floor, 0)?)?
     let collection = events.binding.id
     let (leaf, trim) = l87_first_leaf(d, db, collection)?
@@ -239,45 +238,71 @@ fn test_l87_live_trims_queue_detached_subtrees(d: Dir, c: Clock, r: Random, task
     close(take reopened)
 }
 
-// L87 drain (§13.6 "Deferred frees", §13.6a T8 step 4). A whole-Log trim
-// after a reopen loses the Cold root and every leaf. With `free_budget` 1,
-// each cut drains exactly one queued page, oldest first, and files it dead on
-// main: after every cut, the pack's `live` is its laid-out payload less each
-// lost page that no queue row still names. A queued root hands its leaves to
-// the queue's end. After the last drain the queue reopens empty.
+// L87 drain (§13.6 "Deferred frees", §13.6a T8 step 4). Each 1,100-byte body
+// is a class-4 BLOB. A whole-Log trim after a reopen loses the Cold root, every
+// leaf and every blob. With `free_budget` 1, each cut drains exactly one
+// queued page, oldest first, and files it dead on main; a drained leaf queues
+// its blobs at the end, and a blob row reads no frame. After every cut, each
+// pack's `live` is its laid-out payload less each lost frame that no queue row
+// still names. After the last drain the queue reopens empty.
 @test
 fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let floor = 182375272u64
     let appended = 400u64
-    let events = l87_cold_log(d, c, r, tasks, floor, appended)?
+    let events = l87_cold_log(d, c, r, tasks, floor, appended, 1100)?
     let mut db = open(tasks, d, c, r, l87_options(floor, 1)?)?
     let root = l69_cold_root(db, events.binding.id)?
-    let mut detached: List[std.page.PagePtr] = list.new()
-    list.push(mut detached, root)
-    {
-        let path = paged_pack_path(root.pack)?
-        let wire = disk_read_file(d, path, 1048576)?
-        let frame = read_tiered_frame(path, db.store, TieredPage(root), wire, 0, stamp_after(db.next_node)?)?
+    let mut pages: List[std.page.PagePtr] = list.new()
+    let mut blobs: List[(std.page.PagePtr, std.page.BlobRef)] = list.new()
+    list.push(mut pages, root)
+    let mut walk = 0u64
+    while walk < list.len(pages) {
+        let ptr = pages[walk]
+        walk += 1
+        let path = paged_pack_path(ptr.pack)?
+        let wire = disk_read_file(d, path, 4194304)?
+        let frame = read_tiered_frame(path, db.store, TieredPage(ptr), wire, 0, stamp_after(db.next_node)?)?
         let page = fold_page(frame)
-        for slot in 0u64 .. std.page.count(std.page.image_of(page)) {
-            let Some(ColdPage(child)) = std.page.child_slot(page, slot) else {
-                fail("L87: the cut leaves every leaf Cold")
+        let image = std.page.image_of(page)
+        for slot in 0u64 .. std.page.count(image) {
+            match std.page.owning_edge(image, slot) {
+                Some(PageEdge(child)) => list.push(mut pages, child),
+                Some(BlobEdge(body)) => list.push(mut blobs, (ptr, body)),
+                None => fail("L87: every fixture row is a blob"),
             }
-            list.push(mut detached, child)
         }
     }
-    let mut total = 0u64
-    for ptr in detached {
+    if list.len(blobs) != appended {
+        fail("L87: each body is a Cold blob")
+    }
+    let mut page_total = 0u64
+    for ptr in pages {
         if ptr.pack != root.pack {
-            fail("L87: one cut lays the Log out in one class-3 pack")
+            fail("L87: one cut lays the Log's pages out in one class-3 pack")
         }
-        total += int.widen(ptr.len)
+        page_total += int.widen(ptr.len)
     }
-    let laid_out = l69_pack_live(db, root.pack)
+    let blob_pack = blobs[0u64].1.pack
+    let mut blob_total = 0u64
+    for (_, body) in blobs {
+        if body.pack != blob_pack {
+            fail("L87: one cut lays the Log's blobs out in one class-4 pack")
+        }
+        blob_total += 8 + body.len
+    }
+    let page_laid = l69_pack_live(db, root.pack)
+    let blob_laid = l69_pack_live(db, blob_pack)
     let Committed(_) = run(mut db, Some(100000), copy_env((events, appended)), fn(mut tx: Tx, env: (Log[Bytes], u64)) -> Result[(), Error] {
         trim_before(mut tx, env.0, env.1)
     })? else {
         fail("L87: the whole-Log trim commits")
+    }
+    let dropped_rows = list.len(disk_state(db).tiered_dirty.dropped)
+    let mut dropped_pages = 0u64
+    for row in disk_state(db).tiered_dirty.dropped {
+        if let TieredPage(_) = row.target {
+            dropped_pages += 1
+        }
     }
     let mut cuts = 0u64
     loop {
@@ -288,39 +313,66 @@ fn test_l87_cuts_drain_queued_pages(d: Dir, c: Clock, r: Random, tasks: Tasks) -
             db = open(tasks, d, c, r, l87_options(floor, 1)?)?
         }
         let queued = l87_queue(db)?
-        let mut kept = 0u64
+        let mut page_rows = 0u64
+        let mut page_kept = 0u64
+        let mut blob_kept = 0u64
         for (_, row) in queued {
-            let TieredPage(target) = row.target else {
-                fail("L87: a Log trim queues pages only")
-            }
             let mut hits = 0u64
-            for ptr in detached {
-                if ptr == target {
-                    hits += 1
-                }
+            match row.target {
+                TieredPage(target) => {
+                    page_rows += 1
+                    page_kept += int.widen(target.len)
+                    for ptr in pages {
+                        if ptr == target {
+                            hits += 1
+                        }
+                    }
+                },
+                TieredBlob(target) => {
+                    for (_, body) in blobs {
+                        if body == target {
+                            hits += 1
+                        }
+                    }
+                },
             }
             if hits != 1 || row.branch_id != 0 {
-                fail("L87: each queue row names one lost page of main")
+                fail("L87: each queue row names one lost frame of main")
             }
-            kept += int.widen(target.len)
         }
-        if disk_state(db).pages.lists.deferred_next - list.len(queued) != cuts {
+        for (leaf, body) in blobs {
+            let mut held = false
+            for (_, row) in queued {
+                let hit = match row.target {
+                    TieredPage(target) => target == leaf,
+                    TieredBlob(target) => target == body,
+                }
+                held = held || hit
+            }
+            if held {
+                blob_kept += 8 + body.len
+            }
+        }
+        if page_rows != int.saturating_sub(dropped_pages, cuts) {
             fail("L87: each cut drains exactly one queued page")
         }
-        if l69_pack_live(db, root.pack) != laid_out - (total - kept) {
-            fail("L87: a page leaves live once, when it is filed or drained")
+        if l69_pack_live(db, root.pack) != page_laid - (page_total - page_kept) || l69_pack_live(db, blob_pack) != blob_laid - (blob_total - blob_kept) {
+            fail("L87: a frame leaves live once, when it is filed or drained")
         }
         if list.len(queued) == 0 {
             break
         }
-        if cuts > 2 * list.len(detached) {
+        if cuts > 2 * list.len(pages) {
             fail("L87: the drain finishes")
         }
     }
     close(take db)?
     let reopened = open(tasks, d, c, r, l87_options(floor, 1)?)?
-    if list.len(l87_queue(reopened)?) != 0 || l69_pack_live(reopened, root.pack) != laid_out - total {
-        fail("L87: the drained queue and the pack's live reopen")
+    if disk_state(reopened).pages.lists.deferred_next <= dropped_rows {
+        fail("L87: a drained leaf queues its blobs")
+    }
+    if list.len(l87_queue(reopened)?) != 0 || l69_pack_live(reopened, root.pack) != page_laid - page_total || l69_pack_live(reopened, blob_pack) != blob_laid - blob_total {
+        fail("L87: the drained queue and both packs' live reopen")
     }
     close(take reopened)
 }

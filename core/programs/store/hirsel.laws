@@ -227,9 +227,9 @@ store@1/store/test_l82_tiered_tail_window_resolves_entering_rows src=e3035368708
 store@1/store/test_l84_bucket_window src=2a2021efcec702af sig=648cff6da94a161b run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l84_pager_coalesces_sibling_demands src=b7c9d90435a13314 sig=60901e380dff8c8d run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/test_l84_parallel_bucket_windows src=854c68b23ed37a87 sig=448d487f8a0e9d78 run=c9049a952ba23a49 bug=- oracle=- rows=pending
-store@1/store/test_l87_cuts_drain_queued_pages src=afc71c6b87025cc9 sig=2359e737336730fd run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-store@1/store/test_l87_fold_cut_queues_detached_leaf src=b10f568067bd17d7 sig=30fcb61f68019d59 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-store@1/store/test_l87_live_trims_queue_detached_subtrees src=7c127b2d6def87f3 sig=30fcb61f68019d59 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_l87_cuts_drain_queued_pages src=264b57d773b4ee28 sig=06e3bcdd61d18aaa run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_l87_fold_cut_queues_detached_leaf src=2d3294258147e377 sig=66a71d1f1925397a run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
+store@1/store/test_l87_live_trims_queue_detached_subtrees src=1cf97d3bc2c3031c sig=349cc48158a8f921 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l87_replay_fork_raises_stamp_counter src=d5e0800593fe424a sig=0a1c0c74ffa00336 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l88_promotion_converges_tiered_stamps src=69b96c28f2b36b4b sig=5ec0fd704e088491 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l88_stamp_equal_pin_takes_current_head src=98a15559b548ec58 sig=ea2b6bf1560eaf70 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

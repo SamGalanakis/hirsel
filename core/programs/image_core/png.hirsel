@@ -162,7 +162,10 @@ fn decode_png_inner(input: Bytes, limits: Limits) -> Result[Raster, Error] {
     let mut data = png_read_data(input, size, colors, depth)?
     let size_bytes = rgba_size(header.width, header.height)?
     let mut rgba = alloc_bytes(size_bytes)?
-    list.fill(mut rgba, size_bytes, 0)
+    let packed = !interlace && colors == 6 && depth == 8
+    if !packed {
+        list.fill(mut rgba, size_bytes, 0)
+    }
     let mut at = 0u64
     let start: u64 = if interlace {
         0
@@ -192,10 +195,14 @@ fn decode_png_inner(input: Bytes, limits: Limits) -> Result[Raster, Error] {
             if filter != 0 {
                 png_unfilter(mut data.scanlines, body, row_bytes, bpp, row != 0, filter)
             }
-            for column in 0u64 .. wide {
-                let pixel = png_pixel(input, data, body, column * channels, sample_bits, colors)?
-                let dest = ((y + row * dy) * w + x + column * dx) * 4
-                list.set_word_be(mut rgba, dest, pixel)
+            if packed {
+                list.append(mut rgba, list.slice(data.scanlines, body, body + row_bytes))
+            } else {
+                for column in 0u64 .. wide {
+                    let pixel = png_pixel(input, data, body, column * channels, sample_bits, colors)?
+                    let dest = ((y + row * dy) * w + x + column * dx) * 4
+                    list.set_word_be(mut rgba, dest, pixel)
+                }
             }
             at = body + row_bytes
         }

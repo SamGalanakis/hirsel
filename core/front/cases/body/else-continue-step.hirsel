@@ -1,0 +1,30 @@
+// A `continue` leaves its loop's owners cleaned by its edge, and the loop's step
+// comes before that cleanup: a failed step cleans each owner once (FAIL-9), so the
+// refuted subject of a let-else, here an `Error` that owns a resource, is never
+// cleaned again by the step's failure. The trace is each finalized resource's `id`.
+// expect: accept
+// expect: run spin(3) = 0 trace 2,1,0
+resource type Bad {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
+fn pick(i: u64) -> Result[u64, Bad] {
+    match Bad(id: i) {
+        Ok(b) => Error(take b),
+        Error(_) => Ok(0),
+    }
+}
+
+fn spin(n: u64) -> u64 {
+    let mut i = n
+    while i != 0 {
+        i -= 1
+        let Ok(v) = pick(i) else {
+            continue
+        }
+        let _ = v
+    }
+    0
+}

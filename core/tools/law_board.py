@@ -2,6 +2,7 @@
 """Check, seed, or compare the core workspace's generated law locks."""
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -34,12 +35,13 @@ def baseline_for(commit, package, destination):
     return ["--laws-baseline", str(destination)]
 
 
-def run_package(args, member, env, commit):
+def run_package(args, member, env, commit, compiler_scratch):
     package = WORKSPACE / member
     inputs = [str(package), "--libraries", str(ROOT / "core")]
     if args.mode in ("check", "seed"):
         action = "check" if args.mode == "check" else "write"
-        command = [str(args.compiler), "laws", action, *inputs, "--store", str(Path(env["TMPDIR"]) / "store")]
+        lock_store = (compiler_scratch or Path(env["TMPDIR"])) / "store"
+        command = [str(args.compiler), "laws", action, *inputs, "--store", str(lock_store)]
         status = subprocess.run(command, cwd=ROOT, env=env).returncode
         if status or args.mode == "check":
             return status
@@ -48,6 +50,8 @@ def run_package(args, member, env, commit):
     logs.mkdir(parents=True, exist_ok=True)
     command = [str(args.compiler), "test", str(package),
                "--laws", "--json", "--test-timeout", "300"]
+    if compiler_scratch is not None:
+        command.extend(["--store", str(compiler_scratch / member)])
     if "tests" not in manifest(package):
         command += ["--limit", "67108864"]
     if member in FOREIGN_GRANTS:
@@ -81,6 +85,8 @@ def main():
     parser.add_argument("--compiler", type=Path, required=True)
     parser.add_argument("--commit")
     parser.add_argument("--logs", type=Path)
+    parser.add_argument("--compiler-scratch", type=Path,
+                        help="Parent directory for build stores and caches. Test directories still use TMPDIR.")
     args = parser.parse_args()
     if args.mode != "check" and args.logs is None:
         parser.error("--logs is required for seed and nightly")
@@ -93,10 +99,16 @@ def main():
             ["git", "rev-parse", "--verify", f"{args.commit}^{{commit}}"], cwd=ROOT, text=True,
         ).strip()
     status = 0
-    with tempfile.TemporaryDirectory(prefix="hirsel-laws-", dir=os.getenv("TMPDIR", "/dev/shm")) as temp:
-        env = os.environ | {"TMPDIR": temp, "XDG_CACHE_HOME": str(Path(temp) / "cache")}
+    with ExitStack() as stack:
+        temp = stack.enter_context(tempfile.TemporaryDirectory(prefix="hirsel-laws-", dir=os.getenv("TMPDIR", "/dev/shm")))
+        compiler_scratch = None
+        if args.compiler_scratch is not None:
+            compiler_scratch = Path(stack.enter_context(tempfile.TemporaryDirectory(
+                prefix="hirsel-law-builds-", dir=args.compiler_scratch.absolute())))
+        cache = (compiler_scratch or Path(temp)) / "cache"
+        env = os.environ | {"TMPDIR": temp, "XDG_CACHE_HOME": str(cache)}
         for member in manifest(WORKSPACE)["workspace"]["members"]:
-            status |= int(run_package(args, member, env, commit) != 0)
+            status |= int(run_package(args, member, env, commit, compiler_scratch) != 0)
     return status
 
 

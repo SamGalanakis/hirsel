@@ -355,15 +355,23 @@ def main() -> int:
     runtime = env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
     lock_directory = Path(runtime if os.path.isdir(runtime) else '/tmp')
     with slot(lock_directory, slots, command, args.long):
-        if not scope_available(env):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'core/tools'))
+        from timing_shield import in_timing_slice, local_host, scoped_command
+
+        timing = local_host() and in_timing_slice()
+        if not timing and not scope_available(env):
             print('capped: no systemd user manager is reachable; using process limits', file=sys.stderr)
             os.environ.update(HIRSEL_MEMORY_LIMIT=limit, HIRSEL_JOBS=jobs)
             return inside(limit, command, process_limits(limit_bytes(limit), int(jobs)), args.stats)
-        scope = ['systemd-run', '--user', '--scope', '--quiet', '--collect',
-                 '-p', f'MemoryMax={limit}', '-p', 'MemorySwapMax=0', '-p', 'OOMPolicy=continue',
-                 '-p', f'CPUQuota={int(jobs) * 100}%',
-                 '--', sys.executable or 'python3', os.path.abspath(__file__), '--inside',
-                 *(['--long'] if args.long else []), *(['--stats', str(args.stats.resolve())] if args.stats else []), '--', *command]
+        inside_command = [sys.executable or 'python3', os.path.abspath(__file__), '--inside',
+                          *(['--long'] if args.long else []),
+                          *(['--stats', str(args.stats.resolve())] if args.stats else []), '--', *command]
+        if timing:
+            scope = scoped_command(inside_command, memory_bytes=limit_bytes(limit), jobs=int(jobs))
+        else:
+            scope = ['systemd-run', '--user', '--scope', '--quiet', '--collect',
+                     '-p', f'MemoryMax={limit}', '-p', 'MemorySwapMax=0', '-p', 'OOMPolicy=continue',
+                     '-p', f'CPUQuota={int(jobs) * 100}%', '--', *inside_command]
         try:
             return subprocess.run(scope, env=env).returncode
         except KeyboardInterrupt:

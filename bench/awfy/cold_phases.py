@@ -178,7 +178,7 @@ def collect(args, scratch):
     prepare_env = build.capped_env(directory, "8G", str(min(2, len(args.build_cpus)))) | ld
     command, exe = prepare(directory, artifacts, prepare_env)
 
-    with receipt.measurement_slot(args.lock):
+    with receipt.hold(args.lock):
         try:
             os.sched_setaffinity(0, {args.measure_cpus[0]})
             env = build.capped_env(directory) | ld
@@ -242,9 +242,10 @@ def main():
         if args.build_cpus is not None or args.measure_cpus is not None:
             parser.error("--cpus cannot be combined with --build-cpus or --measure-cpus")
         args.build_cpus, args.measure_cpus = args.cpus, args.cpus[:1]
-        args.siblings = validate_cpu_sets(parser, args, sequential=True)
+        args.siblings = validate_cpu_sets(parser, args, sequential=True,
+                                         measure_affinity=receipt.measurement_affinity(args.lock))
     else:
-        validate_cpu_sets(parser, args)
+        validate_cpu_sets(parser, args, measure_affinity=receipt.measurement_affinity(args.lock))
         args.siblings = sibling_cpus(args.measure_cpus[:1])
     if args.out.is_relative_to(build.ROOT):
         parser.error("use a new evidence directory outside the checkout")

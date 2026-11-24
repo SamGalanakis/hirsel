@@ -28,12 +28,12 @@ import comparison
 import comparison_units
 import receipt
 from receipt import measurement_slot, write as write_json
+from timing_shield import BOARD as LOCK, REGIMES, hold, measurement_affinity
 from comparison import SPECTRALNORM, SPECTRALNORM_CHECKSUM, spectralnorm_marker
 from bench_cpus import add_cpu_sets, sibling_cpus, smt_activity, validate_cpu_sets
 
 ROOT = build.ROOT
 CAP = ROOT / "tools/capped"
-LOCK = Path("/run/user") / str(os.getuid()) / "hirsel-board.lock"
 PINS = {
     "awfy": "f35aed0a61171594804a44efe9d75f1f35360700",
     "resid": "0ab89f373829776d3ea285bfb25f3f1505d7be35",
@@ -1140,7 +1140,7 @@ def run_board(board, args):
     compile_ready = board.attempt("Compile preparation", prepare_compile, compile_dir, artifacts, env)
     checkbox_dir = out / "checkbox"
     checkbox_ready = board.attempt("Checkbox build", prepare_checkbox, checkbox_dir, artifacts, env)
-    with measurement_slot(LOCK.with_name("hirsel-mc-regimes.lock")), measurement_slot(args.lock):
+    with hold(REGIMES, args.lock):
         require_comparison_window()
         os.sched_setaffinity(0, {args.measure_cpus[0]})
         if awfy_ready:
@@ -1363,10 +1363,10 @@ def measure_comparison_board(evidence, out, args, selected):
 
 @contextmanager
 def comparison_measurement_hold(args, evidence):
-    with measurement_slot(LOCK.with_name("hirsel-mc-regimes.lock")), measurement_slot(args.lock):
+    with hold(REGIMES, args.lock):
         require_comparison_window()
         evidence["hold"] = {"started": datetime.now().astimezone().isoformat(),
-                            "locks": [str(LOCK.with_name("hirsel-mc-regimes.lock")), str(args.lock)]}
+                            "locks": [str(REGIMES), str(args.lock)]}
         os.sched_setaffinity(0, {args.measure_cpus[0]})
         try:
             yield
@@ -1458,7 +1458,7 @@ def main():
     add_cpu_sets(parser)
     parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
-    validate_cpu_sets(parser, args, width=2)
+    validate_cpu_sets(parser, args, width=2, measure_affinity=measurement_affinity(REGIMES, args.lock))
     families = args.comparison_family or comparison.FAMILIES
     peers = required_peers(set(families)) if args.comparison else set(PINS)
     for peer in PINS:

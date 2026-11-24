@@ -10,7 +10,6 @@ import argparse
 from bisect import bisect_right
 from contextlib import contextmanager
 from datetime import datetime
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -20,6 +19,7 @@ import subprocess
 import time
 
 from blocks import BOARD, REGIMES, board_window_ok, cpuset
+from timing_shield import hold
 from part3u import (
     PARTITIONS, RUN, SYNCS, TOOL_DELAY_US, complete_in_time, search_steps,
 )
@@ -83,9 +83,7 @@ def timing_hold(receipt):
     # can close while another lane owns the lock.
     while not board_window_ok():
         time.sleep(HOLDS_GAP_S)
-    with open(REGIMES, "a") as regimes, open(BOARD, "a") as board:
-        fcntl.flock(regimes, fcntl.LOCK_EX)
-        fcntl.flock(board, fcntl.LOCK_EX)
+    with hold(REGIMES, BOARD):
         receipt["started"] = datetime.now().astimezone().isoformat()
         t0 = time.monotonic()
         try:
@@ -94,13 +92,9 @@ def timing_hold(receipt):
             receipt["load_start"] = os.getloadavg()[0]
             yield receipt["board_window_open"]
         finally:
-            try:
-                receipt["cc1plus_end"] = cc1plus()
-                receipt["load_end"] = os.getloadavg()[0]
-                receipt["hold_s"] = round(time.monotonic() - t0, 3)
-            finally:
-                fcntl.flock(board, fcntl.LOCK_UN)
-                fcntl.flock(regimes, fcntl.LOCK_UN)
+            receipt["cc1plus_end"] = cc1plus()
+            receipt["load_end"] = os.getloadavg()[0]
+            receipt["hold_s"] = round(time.monotonic() - t0, 3)
 
 
 def launch(argv, pidfile, **kwargs):

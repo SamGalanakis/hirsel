@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Measure one process-tree sample per workload, language, and worker count."""
 import argparse
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from datetime import datetime
 from collections import Counter
-import fcntl
 import hashlib
 import json
 import os
@@ -30,6 +29,7 @@ else:
 sys.path.insert(0, str(ROOT / "core/tools"))
 from bench_cpus import add_cpu_sets, cpu_list, sibling_cpus, smt_activity, validate_cpu_sets
 from std_native import wait_load
+from timing_shield import hold, measurement_affinity
 
 LOCK = Path("/tmp/hirsel-langarena-measure.lock")
 WIDTHS = (1, 2, 4, 8, 12, 16)
@@ -233,9 +233,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
     stdin = sample_stdin(bins, case, language)
     if lock_path:
         wait_load()
-    with lock_path.open("a") if lock_path else nullcontext() as lock:
-        if lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+    with hold(lock_path) if lock_path else nullcontext():
         with (smt_activity(siblings, f"{case}/{language}/{width}") as busy, stdin.open("rb") as inp,
               (directory / "stdout").open("wb") as out_file, (directory / "stderr").open("wb") as err):
             result = subprocess.run(launch, cwd=ROOT, env=env,
@@ -514,13 +512,6 @@ def measured_load(cpus, command):
     return ["taskset", "-c", cpus, ROOT / "tools/capped", *command]
 
 
-@contextmanager
-def measurement_lock(path):
-    with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
-
-
 def host_snapshot(process):
     result = subprocess.run(["pgrep", "-x", "--", re.escape(process)], capture_output=True, text=True)
     if result.returncode not in (0, 1):
@@ -534,8 +525,8 @@ def host_snapshot(process):
 
 def run_regime_block(args, parser, bins, out, workers):
     # Keep the process checks and every pair inside the same lane lock.
-    with (measurement_lock(args.lock),
-          measurement_lock(args.also_lock) if args.also_lock else nullcontext()):
+    paths = (args.lock, args.also_lock) if args.also_lock else (args.lock,)
+    with hold(*paths):
         before = host_snapshot(args.block_process_check)
         after = None
         result = None
@@ -608,7 +599,7 @@ def run_regimes(args, parser, bins, out, workers):
                 for repeat in range(1, repeats + 1):
                     point = out / f"{case}-{grain}ns-{rounds}r-w{width}-r{repeat}"
                     point.mkdir()
-                    with nullcontext() if args.block_process_check else measurement_lock(args.lock):
+                    with nullcontext() if args.block_process_check else hold(args.lock):
                         peers = [lang for lang in ("Hirsel", "Tokio", "Go")
                                  if (not args.languages or lang in args.languages)
                                  and (lang != "Go" or work.go)]
@@ -677,6 +668,7 @@ def main():
         if out.is_relative_to(ROOT) or out.exists():
             parser.error("--out must be a new directory outside the repository")
         workers = args.workers or ([1] if args.s0 else (1, 2, 4, 8, 16) if args.regimes else WIDTHS)
+        assigned = measurement_affinity(*(path for path in (args.lock, args.also_lock) if path))
         if args.regimes:
             if args.s0 or args.standard_rust or set(workers) - {1, 2, 4, 8, 16}:
                 parser.error("use the grain sweep by itself at widths 1, 2, 4, 8 or 16")
@@ -686,8 +678,9 @@ def main():
                 parser.error("supply one nonnegative --rounds value for each --grain-ns value")
             if (args.size is not None and args.size < 1) or args.repeats < 1:
                 parser.error("--size and --repeats must be positive")
-            validate_cpu_sets(parser, args, width=max(workers), sequential=True, allow_smt=args.allow_smt)
-            if args.load_cpus and not set(args.load_cpus).issubset(os.sched_getaffinity(0)):
+            validate_cpu_sets(parser, args, width=max(workers), sequential=True, allow_smt=args.allow_smt,
+                              measure_affinity=assigned)
+            if args.load_cpus and not set(args.load_cpus).issubset(assigned):
                 parser.error("load CPUs outside the caller's affinity")
             os.sched_setaffinity(0, args.build_cpus)
             out.mkdir(parents=True)
@@ -696,7 +689,7 @@ def main():
             return run_regimes(args, parser, bins, out, workers)
         if args.s0 and args.standard_rust:
             parser.error("--s0 and --standard-rust select different workloads")
-        validate_cpu_sets(parser, args, width=max(workers))
+        validate_cpu_sets(parser, args, width=max(workers), measure_affinity=assigned)
         os.sched_setaffinity(0, args.build_cpus)
         sizes = S0_SIZES if args.s0 else STANDARD_RUST_SIZES if args.standard_rust else SIZES
         languages = ("Rust",) if args.standard_rust else args.languages or LANGUAGES

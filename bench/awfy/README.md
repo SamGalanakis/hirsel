@@ -169,7 +169,10 @@ Use at least two measurement CPUs. The first runs AWFY, LangArena and the
 checkbox server. The second runs the checkbox loader. A measurement CPU
 must have a core to itself within the run's CPU assignment. The board
 reports sibling activity for each sample. The default lock is
-`/run/user/<uid>/hirsel-board.lock` for the current user. The board needs Linux perf user
+`/run/user/<uid>/hirsel-board.lock` for the current user. On the timing host,
+the board and cycle-pairs runner hold both shared timing locks, move into
+transient system scopes, and reserve CPUs 0-3 and 16-19 from `user.slice`
+and `system.slice` until the hold ends. The board needs Linux perf user
 counters, CMake, Clang, Rust 1.99.0 with the pinned Cargo dependencies
 available, Node.js, and GNU strip and time. Keep `board.json` and `board.md`
 with the captured logs. Add `--baseline PREVIOUS/board.json` to check each

@@ -3,7 +3,6 @@
 import argparse
 from contextlib import contextmanager, nullcontext
 from decimal import Decimal, InvalidOperation
-import fcntl
 import hashlib
 import json
 import math
@@ -23,6 +22,7 @@ import elf_census
 import profile_diff
 from bench_cpus import positive_int, sibling_cpus, smt_activity
 from measurement_artifacts import SHIPPING, check
+from timing_shield import file_locks, hold, measurement_affinity
 
 VERSION = 6
 REFUSED = 2
@@ -54,8 +54,7 @@ def write(path, data):
 
 @contextmanager
 def measurement_slot(path, *, blocking=True):
-    with path.open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    with file_locks((path,), blocking=blocking):
         yield
 
 
@@ -218,7 +217,7 @@ def sample(args):
     out = args.out.resolve()
     if out.is_relative_to(build.ROOT):
         raise ValueError("use a new evidence directory outside the checkout")
-    if args.cpu not in os.sched_getaffinity(0):
+    if args.cpu not in measurement_affinity(args.lock):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
     siblings = sibling_cpus((args.cpu,))
     cases = dict(runtime_rows(args))
@@ -243,7 +242,7 @@ def sample(args):
         except (OSError, ValueError, KeyError) as error:
             receipt["failures"][key] = str(error)
     env = build.capped_env(out)
-    with measurement_slot(args.lock):
+    with hold(args.lock):
         os.sched_setaffinity(0, {args.cpu})
         for key, row in rows.items():
             try:
@@ -520,7 +519,7 @@ def report_cycle_pairs(key, kept, attempted, wanted, *, filtered=True, peer=Fals
 def cycle_pairs(args):
     limit = args.sibling_busy_threshold
     affinity = os.sched_getaffinity(0)
-    if args.cpu not in affinity:
+    if args.cpu not in measurement_affinity(args.lock, force=True):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
     if args.peer and (args.candidate is not None or args.aa):
         raise ValueError("--peer takes one Hirsel receipt and cannot be combined with --aa")
@@ -533,7 +532,7 @@ def cycle_pairs(args):
     if target.resolve() in {path.resolve() for path in [args.lock, *inputs]}:
         raise ValueError("--out must differ from the input receipts and lock")
     report = pair_report(args, "peer" if args.peer else "A/A" if args.aa else "A/B")
-    with measurement_slot(args.lock), tempfile.TemporaryDirectory() as temporary:
+    with hold(args.lock, force=True), tempfile.TemporaryDirectory() as temporary:
         siblings = sibling_cpus((args.cpu,))
         env = build.capped_env(Path(temporary))
         activity = "no busy filter" if limit is None else f"quiet means below {limit}% busy per run"
@@ -772,7 +771,7 @@ def pair_samples(args):
     out = args.out.resolve()
     if out.is_relative_to(build.ROOT):
         raise ValueError("use a new evidence directory outside the checkout")
-    if args.cpu not in os.sched_getaffinity(0):
+    if args.cpu not in measurement_affinity(args.lock):
         raise ValueError(f"CPU {args.cpu} is outside the assigned affinity")
     siblings = sibling_cpus((args.cpu,))
     env = build.capped_env(out)
@@ -783,7 +782,7 @@ def pair_samples(args):
     if not comparing:
         limit = None
     failed = False
-    with measurement_slot(args.lock):
+    with hold(args.lock):
         os.sched_setaffinity(0, {args.cpu})
         for key in keys:
             pairs = report["rows"][key] = []
@@ -821,7 +820,7 @@ def profile(args):
     base_identity, candidate = match_rows(args.row, left, right)
     affinity = set(left["affinity"])
     assigned = os.sched_getaffinity(0)
-    if not affinity <= assigned:
+    if not affinity <= measurement_affinity(args.lock):
         raise ValueError(f"run on the recorded affinity {sorted(affinity)}")
     out = args.out.resolve()
     if out.is_relative_to(build.ROOT):
@@ -838,7 +837,7 @@ def profile(args):
         sides.append((out / label, row, verify_runtime_files(row, label)))
     out.mkdir(parents=True)
     try:
-        with measurement_slot(args.lock):
+        with hold(args.lock):
             os.sched_setaffinity(0, affinity)
             for directory, row, _ in sides:
                 directory.mkdir()

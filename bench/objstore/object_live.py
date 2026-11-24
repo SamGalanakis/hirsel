@@ -1,9 +1,7 @@
 """Run the optional live S3 contract under one fresh prefix."""
 
 import argparse
-from contextlib import ExitStack
 import datetime as dt
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -17,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "core/tools"))
 from omap_bench import inputs
+from timing_shield import BOARD, REGIMES, hold
 
 
 def command():
@@ -51,11 +50,7 @@ def cleanup(s3, name, prefix):
 def measure_knee(cmd, arguments, env, binary, results):
     subprocess.run([*cmd, "--backend", "llvm", "--release", "-o", binary], env=env, check=True)
     subprocess.run([binary, "seed", "8", *arguments], env=env, check=True)
-    with ExitStack() as stack:
-        for name in ("hirsel-mc-regimes.lock", "hirsel-board.lock"):
-            handle = stack.enter_context((Path("/run/user") / str(os.getuid()) / name).open("a"))
-            fcntl.flock(handle, fcntl.LOCK_EX)
-        output = stack.enter_context(results.open("x"))
+    with hold(REGIMES, BOARD), results.open("x") as output:
         for lanes in (1, 2, 4, 8, 16, 32, 64, 128):
             now = dt.datetime.now().time()
             if dt.time(2, 45) <= now < dt.time(4):

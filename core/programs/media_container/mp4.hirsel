@@ -68,35 +68,72 @@ pub type Sample {
     composition_offset: i32
 }
 
-const FTYP: u32 = 0x66747970
+pub const FTYP: u32 = 0x66747970
 
-const MOOV: u32 = 0x6d6f6f76
+pub const MOOV: u32 = 0x6d6f6f76
 
-const MOOF: u32 = 0x6d6f6f66
+pub const MOOF: u32 = 0x6d6f6f66
 
-const MDAT: u32 = 0x6d646174
+pub const MDAT: u32 = 0x6d646174
 
-const TRAF: u32 = 0x74726166
+pub const TRAF: u32 = 0x74726166
 
-const TFHD: u32 = 0x74666864
+pub const TFHD: u32 = 0x74666864
 
-const TFDT: u32 = 0x74666474
+pub const TFDT: u32 = 0x74666474
 
-const TRUN: u32 = 0x7472756e
+pub const TRUN: u32 = 0x7472756e
 
-fn start_box(mut out: Bytes, kind: u32) -> u64 {
+pub const META: u32 = 0x6d657461
+
+pub const HDLR: u32 = 0x68646c72
+
+pub const PITM: u32 = 0x7069746d
+
+pub const ILOC: u32 = 0x696c6f63
+
+pub const IINF: u32 = 0x69696e66
+
+pub const INFE: u32 = 0x696e6665
+
+pub const IREF: u32 = 0x69726566
+
+pub const AUXL: u32 = 0x6175786c
+
+pub const IPRP: u32 = 0x69707270
+
+pub const IPCO: u32 = 0x6970636f
+
+pub const COLR: u32 = 0x636f6c72
+
+pub const IROT: u32 = 0x69726f74
+
+pub const IMIR: u32 = 0x696d6972
+
+pub const AUXC: u32 = 0x61757843
+
+pub const IPMA: u32 = 0x69706d61
+
+pub const ISPE: u32 = 0x69737065
+
+pub const PIXI: u32 = 0x70697869
+
+pub const AV1C: u32 = 0x61763143
+
+// Reserve a 32-bit size. The caller must keep the completed box below 2^32 bytes.
+pub fn start_box(mut out: Bytes, kind: u32) -> u64 {
     let at = list.len(out)
     list.put_word_be(mut out, 0u32)
     list.put_word_be(mut out, kind)
     at
 }
 
-fn close_box(mut out: Bytes, at: u64) {
+pub fn close_box(mut out: Bytes, at: u64) {
     let size: u32 = int.narrow(list.len(out) - at)
     list.set_word_be(mut out, at, size)
 }
 
-fn full_box(mut out: Bytes, kind: u32, version_flags: u32) -> u64 {
+pub fn full_box(mut out: Bytes, kind: u32, version_flags: u32) -> u64 {
     let at = start_box(mut out, kind)
     list.put_word_be(mut out, version_flags)
     at

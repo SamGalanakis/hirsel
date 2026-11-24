@@ -21,24 +21,6 @@ pub fn mux_avif(primary: AvifSource, alpha: Option[AvifSource], options: AvifOpt
     }
 }
 
-fn avif_start(mut out: Bytes, kind: u32) -> u64 {
-    let pos = list.len(out)
-    list.put_word_be(mut out, 0u32)
-    list.put_word_be(mut out, kind)
-    pos
-}
-
-fn avif_end(mut out: Bytes, start: u64) {
-    let size: u32 = int.narrow(list.len(out) - start)
-    list.set_word_be(mut out, start, size)
-}
-
-fn avif_full(mut out: Bytes, kind: u32, flags: u32) -> u64 {
-    let start = avif_start(mut out, kind)
-    list.put_word_be(mut out, flags)
-    start
-}
-
 fn avif_source_size(source: AvifSource, limits: Limits) -> Result[u64, Error] {
     let h = list.len(source.configuration)
     let n = list.len(source.av1)
@@ -102,13 +84,17 @@ fn mux_avif_inner(primary: AvifSource, alpha: Option[AvifSource], options: AvifO
         return Error(ByteLimit)
     }
     let mut out = alloc_bytes(total)?
-    list.append(mut out, b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf")
-    let meta = avif_full(mut out, 0x6d657461, 0)
-    list.append(mut out, b"\x00\x00\x00\x21hdlr\x00\x00\x00\x00\x00\x00\x00\x00pict\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
-    let pitm = avif_full(mut out, 0x7069746d, 0)
+    let ftyp = media_container.mp4.start_box(mut out, media_container.mp4.FTYP)
+    list.append(mut out, b"avif\x00\x00\x00\x00avifmif1miaf")
+    media_container.mp4.close_box(mut out, ftyp)
+    let meta = media_container.mp4.full_box(mut out, media_container.mp4.META, 0)
+    let hdlr = media_container.mp4.full_box(mut out, media_container.mp4.HDLR, 0)
+    list.append(mut out, b"\x00\x00\x00\x00pict\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+    media_container.mp4.close_box(mut out, hdlr)
+    let pitm = media_container.mp4.full_box(mut out, media_container.mp4.PITM, 0)
     list.put_word_be(mut out, 1u16)
-    avif_end(mut out, pitm)
-    let iloc = avif_full(mut out, 0x696c6f63, 0)
+    media_container.mp4.close_box(mut out, pitm)
+    let iloc = media_container.mp4.full_box(mut out, media_container.mp4.ILOC, 0)
     list.put_word_be(mut out, 0x4400u16)
     list.put_word_be(mut out, images)
     let first = avif_write_location(mut out, 1, list.len(primary.av1))
@@ -116,25 +102,27 @@ fn mux_avif_inner(primary: AvifSource, alpha: Option[AvifSource], options: AvifO
     if let Some(layer) = alpha {
         second = avif_write_location(mut out, 2, list.len(layer.av1))
     }
-    avif_end(mut out, iloc)
-    let iinf = avif_full(mut out, 0x69696e66, 0)
+    media_container.mp4.close_box(mut out, iloc)
+    let iinf = media_container.mp4.full_box(mut out, media_container.mp4.IINF, 0)
     list.put_word_be(mut out, images)
     for i in 1u16 .. images + 1 {
-        let infe = avif_full(mut out, 0x696e6665, 0x02000000)
+        let infe = media_container.mp4.full_box(mut out, media_container.mp4.INFE, 0x02000000)
         list.put_word_be(mut out, i)
         list.put_word_be(mut out, 0u16)
         list.append(mut out, b"av01\x00")
-        avif_end(mut out, infe)
+        media_container.mp4.close_box(mut out, infe)
     }
-    avif_end(mut out, iinf)
+    media_container.mp4.close_box(mut out, iinf)
     if images == 2 {
-        let iref = avif_full(mut out, 0x69726566, 0)
-        list.append(mut out, b"\x00\x00\x00\x0eauxl\x00\x02\x00\x01\x00\x01")
-        avif_end(mut out, iref)
+        let iref = media_container.mp4.full_box(mut out, media_container.mp4.IREF, 0)
+        let auxl = media_container.mp4.start_box(mut out, media_container.mp4.AUXL)
+        list.append(mut out, b"\x00\x02\x00\x01\x00\x01")
+        media_container.mp4.close_box(mut out, auxl)
+        media_container.mp4.close_box(mut out, iref)
     }
     avif_write_properties(mut out, primary, alpha, options, canvas, images, int.narrow(transforms))
-    avif_end(mut out, meta)
-    let mdat = avif_start(mut out, 0x6d646174)
+    media_container.mp4.close_box(mut out, meta)
+    let mdat = media_container.mp4.start_box(mut out, media_container.mp4.MDAT)
     let start: u32 = int.narrow(list.len(out))
     list.set_word_be(mut out, first, start)
     list.append(mut out, primary.av1)
@@ -143,7 +131,7 @@ fn mux_avif_inner(primary: AvifSource, alpha: Option[AvifSource], options: AvifO
         list.set_word_be(mut out, second, start_alpha)
         list.append(mut out, layer.av1)
     }
-    avif_end(mut out, mdat)
+    media_container.mp4.close_box(mut out, mdat)
     Ok(take out)
 }
 
@@ -174,8 +162,8 @@ fn avif_orientation_properties(orientation: u8) -> (u8, u8) {
 }
 
 fn avif_write_properties(mut out: Bytes, primary: AvifSource, alpha: Option[AvifSource], options: AvifOptions, orientation: (u8, u8), images: u16, transforms: u8) {
-    let iprp = avif_start(mut out, 0x69707270)
-    let ipco = avif_start(mut out, 0x6970636f)
+    let iprp = media_container.mp4.start_box(mut out, media_container.mp4.IPRP)
+    let ipco = media_container.mp4.start_box(mut out, media_container.mp4.IPCO)
     let channels: u8 = if options.monochrome {
         1
     } else {
@@ -189,33 +177,33 @@ fn avif_write_properties(mut out: Bytes, primary: AvifSource, alpha: Option[Avif
         } else {
             1
         }
-        let colr = avif_start(mut out, 0x636f6c72)
+        let colr = media_container.mp4.start_box(mut out, media_container.mp4.COLR)
         list.append(mut out, b"nclx")
         list.put_word_be(mut out, primaries)
         list.put_word_be(mut out, 13u16)
         list.put_word_be(mut out, 1u16)
         list.push(mut out, 0x80)
-        avif_end(mut out, colr)
+        media_container.mp4.close_box(mut out, colr)
         count += 1
     }
     if orientation.0 != 0 {
-        let irot = avif_start(mut out, 0x69726f74)
+        let irot = media_container.mp4.start_box(mut out, media_container.mp4.IROT)
         list.push(mut out, orientation.0)
-        avif_end(mut out, irot)
+        media_container.mp4.close_box(mut out, irot)
     }
     if orientation.1 != 0 {
-        let imir = avif_start(mut out, 0x696d6972)
+        let imir = media_container.mp4.start_box(mut out, media_container.mp4.IMIR)
         list.push(mut out, orientation.1 - 1)
-        avif_end(mut out, imir)
+        media_container.mp4.close_box(mut out, imir)
     }
     if let Some(layer) = alpha {
         avif_write_image_properties(mut out, layer, options, 1)
-        let auxc = avif_full(mut out, 0x61757843, 0)
+        let auxc = media_container.mp4.full_box(mut out, media_container.mp4.AUXC, 0)
         list.append(mut out, b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\x00")
-        avif_end(mut out, auxc)
+        media_container.mp4.close_box(mut out, auxc)
     }
-    avif_end(mut out, ipco)
-    let ipma = avif_full(mut out, 0x69706d61, 0)
+    media_container.mp4.close_box(mut out, ipco)
+    let ipma = media_container.mp4.full_box(mut out, media_container.mp4.IPMA, 0)
     let n: u32 = int.widen(images)
     list.put_word_be(mut out, n)
     list.put_word_be(mut out, 1u16)
@@ -238,22 +226,22 @@ fn avif_write_properties(mut out: Bytes, primary: AvifSource, alpha: Option[Avif
             })
         }
     }
-    avif_end(mut out, ipma)
-    avif_end(mut out, iprp)
+    media_container.mp4.close_box(mut out, ipma)
+    media_container.mp4.close_box(mut out, iprp)
 }
 
 fn avif_write_image_properties(mut out: Bytes, source: AvifSource, options: AvifOptions, channels: u8) {
-    let ispe = avif_full(mut out, 0x69737065, 0)
+    let ispe = media_container.mp4.full_box(mut out, media_container.mp4.ISPE, 0)
     list.put_word_be(mut out, options.width)
     list.put_word_be(mut out, options.height)
-    avif_end(mut out, ispe)
-    let pixi = avif_full(mut out, 0x70697869, 0)
+    media_container.mp4.close_box(mut out, ispe)
+    let pixi = media_container.mp4.full_box(mut out, media_container.mp4.PIXI, 0)
     list.push(mut out, channels)
     for _ in 0u8 .. channels {
         list.push(mut out, options.bit_depth)
     }
-    avif_end(mut out, pixi)
-    let cfg = avif_start(mut out, 0x61763143)
+    media_container.mp4.close_box(mut out, pixi)
+    let cfg = media_container.mp4.start_box(mut out, media_container.mp4.AV1C)
     list.append(mut out, source.configuration)
-    avif_end(mut out, cfg)
+    media_container.mp4.close_box(mut out, cfg)
 }

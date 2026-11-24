@@ -9,12 +9,14 @@ core/tools/std_api_index.py --write.
 """
 
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PRIMER = ROOT / "docs" / "PRIMER.md"
 INDEX = ROOT / "core" / "std" / "API-INDEX.md"
 GITHUB_STD = b"https://github.com/samgalanakis/hirsel/blob/main/core/std/"
+GITHUB = "https://github.com/samgalanakis/hirsel/"
 HTML = ROOT / "site" / "index.html"
 ALTERNATE = '  <link rel="alternate" type="text/markdown" href="/primer.md">\n'
 ANCHOR = '  <link rel="canonical" href="https://hirsel.ai/">\n'
@@ -45,13 +47,26 @@ def outputs() -> dict:
     primer = PRIMER.read_bytes()
     index = INDEX.read_bytes().replace(b"](api/", b"](" + GITHUB_STD + b"api/")
     index = index.replace(b"](API.md)", b"](" + GITHUB_STD + b"API.md)")
+    readme = (ROOT / "README.md").read_text()
+    start = readme.index("\n## Subscriptions\n")
+    end = readme.index("\n## License\n", start)
+    catalog = re.sub(r"\]\(([^)]+)\)", github_link, readme[start:end])
     return {
         ROOT / "site" / "primer.md": primer,
         ROOT / "skills" / "hirsel" / "references" / "PRIMER.md": primer,
         ROOT / "site" / "api-index.md": index,
-        ROOT / "site" / "llms.txt": LLMS.encode(),
+        ROOT / "site" / "llms.txt": (LLMS + catalog).encode(),
         HTML: html(HTML.read_text()).encode(),
     }
+
+
+def github_link(match: re.Match[str]) -> str:
+    target = match[1]
+    if "://" in target:
+        return match[0]
+    path = target.split("#", 1)[0]
+    kind = "tree" if path.endswith("/") else "blob"
+    return f"]({GITHUB}{kind}/main/{target})"
 
 
 def main() -> int:

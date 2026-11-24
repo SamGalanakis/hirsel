@@ -90,7 +90,18 @@ The scripted laws run as part of `runner.codec_frames:ts_frame_vectors` in
 STORE P1-P3 fixtures. Real `serve` crash/reconnect qualification is deferred to
 W3e; these laws make no claim about that integration.
 
-The packed-package check runs in `//:core-evaluator`. To run it alone, use
-`.buck2/bin/buck2 test //:core-evaluator -- --test-arg=--filter --test-arg=sdk.client:packed_consumer`.
-It installs the tarball offline and type-checks and runs generated bindings in
-an isolated Node project.
+## Run the subscription example
+
+The [subscription example](tests/subscription-cache.ts) reads a row committed
+by the [store and runner program](tests/packed_consumer.hirsel). It displays
+the row from `get` and the count from `map` on every `onChange`. The call
+temporarily reopens the item through `optimistic`. The runner reply carries
+no row update, so the item returns to its committed state.
+
+From the repository root, run the packed-package check in `//:core-evaluator`.
+It installs the tarball offline, builds and runs the Hirsel program, then
+type-checks and runs the TypeScript example with the generated bindings.
+
+```sh
+.buck2/bin/buck2 test //:core-evaluator -- --test-arg=--filter --test-arg=sdk.client:packed_consumer
+```

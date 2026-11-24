@@ -4,6 +4,7 @@ import {Client, type Socket, type Subscription} from '@hirsel/client';
 import {NodeStorage} from '@hirsel/client/node';
 import {Frame} from './generated/frame.js';
 import {bind, identity, tables, want} from './generated/entries.js';
+import {reopenWhileCalling, watchItem} from './subscription-cache.ts';
 
 const produced = await readFile(new URL('./payload.bin', import.meta.url));
 const replyEnd = 4 + produced.readUInt32LE();
@@ -65,10 +66,14 @@ try {
   assert.deepEqual(tables.map(({name, id, owner, kind}) => [name, id, owner, kind]),
     [['items', 1, 0, 1], ['by_id', 2, 1, 2]]);
   type ItemRow = {slot: 'items'; key: bigint; value: {tag: 'None'} | {tag: 'Some'; value: {title: string; done: boolean}}};
+  const item: ItemRow = {slot: 'items', key: 9007199254740993n,
+    value: {tag: 'Some', value: {title: 'crème', done: true}}};
+  const displayed: string[] = [];
   const sub = await new Promise<Subscription<undefined, {items: ItemRow}, {items: bigint}>>((resolve, reject) => {
     diagnostic = reject;
-    const sub = api.subscribeDecoded.packed_consumer.packed_rows(undefined, (current, change) => {
+    const sub = watchItem(api, item.key, (current, change, text) => {
       if (change.invalidated) return;
+      displayed.push(text);
       assert.deepEqual(current.value(), {tag: 'Ready', value: undefined});
       const rows = current.rows('items');
       if (rows.tag !== 'Ready') {
@@ -76,15 +81,15 @@ try {
         return;
       }
       const item = rows.value[0];
-      assert.deepEqual(current.get('items', 9007199254740993n), {tag: 'Ready', value: item});
+      assert.deepEqual(current.get('items', item.key), {tag: 'Ready', value: item});
       assert.strictEqual(change.rows[0].new, item);
       resolve(current);
     }, reject);
     assert.deepEqual(sub.value(), {tag: 'Pending'});
   });
-  const item: ItemRow = {slot: 'items', key: 9007199254740993n,
-    value: {tag: 'Some', value: {title: 'crème', done: true}}};
   assert.deepEqual(sub.rows('items'), {tag: 'Ready', value: [item]});
+  assert.deepEqual(await reopenWhileCalling(api, sub, item.key), expected);
+  assert.deepEqual(displayed, ['crème: done (total: 1)', 'crème: open (total: 1)', 'crème: done (total: 1)']);
   let ran = false;
   assert.deepEqual(await api.call.packed_consumer.packed_reply(undefined, {optimistic(draft) {
     if (false) {

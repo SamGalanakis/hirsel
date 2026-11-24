@@ -1423,7 +1423,7 @@ fn object<'m>(
                 })?;
             let bare = crate::native_object::publish(store, key, &object)?;
             let debug = object.debug.map(Arc::new);
-            (store, (bare, object.bytes), debug, true)
+            (store, (bare, object.bytes.into()), debug, true)
         }
     };
     Ok(ObjectProduct::shared(

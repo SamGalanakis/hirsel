@@ -321,7 +321,7 @@ fn failure_sites_discarded_by_linker() {
         instance: main.clone(),
         identity: ContentHash::of_bytes(&bytes),
         check: crate::store::checksum(&bytes),
-        bytes: Some(bytes.to_vec()),
+        bytes: Some(bytes.into()),
         path,
         debug: None,
         debug_record: None,

@@ -89,12 +89,13 @@ impl LinkArchives {
         )
     }
 
-    /// Check the actual generated inputs, then give LLD only the sealed
+    /// Check the actual generated inputs, the files `inputs` and the object
+    /// bytes `members` the link bundles, then give LLD only the sealed
     /// descriptors. The owner lives across LLD's invocation.
     pub(crate) fn append_link_inputs(
         &self,
         inputs: &mut Vec<PathBuf>,
-        bundle: Option<&crate::native::link_input::Bundle>,
+        members: &[std::sync::Arc<[u8]>],
         runtime: &Path,
         recipe: &crate::tool_inputs::LinkRecipe,
     ) -> Result<(), AdmissionError> {
@@ -103,15 +104,11 @@ impl LinkArchives {
         }
         let symbols = self.definitions(&Debit::unlimited())?;
         symbols.check_tool_inputs(runtime, recipe)?;
-        // The bundle among `inputs` is checked member by member.
-        let bundled = bundle.map(|b| b.path());
-        for input in inputs.iter().filter(|i| Some(*i) != bundled.as_ref()) {
+        for input in inputs.iter() {
             symbols.check_link_input(&std::fs::read(input)?, "the generated code")?;
         }
-        if let Some(bundle) = bundle {
-            for n in 0..bundle.len() {
-                symbols.check_link_input(&bundle.member(n)?, "the generated code")?;
-            }
+        for member in members {
+            symbols.check_link_input(member, "the generated code")?;
         }
         let pid = std::process::id();
         inputs.extend(

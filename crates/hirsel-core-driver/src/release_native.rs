@@ -509,7 +509,7 @@ pub(super) fn emit_release_image(
             path: crate::native_object::path(&shared, bare.address),
             identity: bare.address,
             check: bare.check,
-            bytes: Some(object.bytes),
+            bytes: Some(object.bytes.into()),
             debug: object.debug.map(std::sync::Arc::new),
             debug_record: None,
             compiled,

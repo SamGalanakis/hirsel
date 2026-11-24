@@ -17,14 +17,11 @@ use hirsel_core_ids::ContentHash;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-/// One object a link reads, in link order: bytes made for this link, or a
-/// member of the link's bundle with the key its bytes are a function of.
+/// One object a link reads, in link order: bytes made for this link, or
+/// checked bytes with the key they are a function of.
 pub(crate) enum Slot<'a> {
     Bytes(&'a [u8]),
-    Keyed(
-        (ContentHash, u64),
-        (&'a crate::native::link_input::Bundle, usize),
-    ),
+    Keyed((ContentHash, u64), &'a Arc<[u8]>),
 }
 
 struct Remembered {
@@ -66,11 +63,6 @@ pub(crate) fn remember(frame: ContentHash, objects: &[Slot<'_>], image: &[u8]) -
         .remember(frame, objects, image)
 }
 
-/// The bytes of a bundle's member, as the linker reads them.
-fn read(&(bundle, n): &(&crate::native::link_input::Bundle, usize)) -> io::Result<Arc<[u8]>> {
-    Ok(bundle.member(n)?.into())
-}
-
 impl Incremental {
     /// The executable lld would make of `objects` under `frame`, written
     /// over the remembered one, when only patchable edits separate them.
@@ -91,7 +83,7 @@ impl Incremental {
                 Slot::Bytes(bytes) if *bytes == &*old.bytes => continue,
                 Slot::Bytes(bytes) => Arc::from(*bytes),
                 Slot::Keyed(key, _) if old.key == Some(*key) => continue,
-                Slot::Keyed(_, file) => read(file)?,
+                Slot::Keyed(_, bytes) => Arc::clone(bytes),
             };
             changed.push((n, new));
         }
@@ -158,9 +150,9 @@ impl Incremental {
                         key: None,
                         bytes: Arc::from(*bytes),
                     },
-                    Slot::Keyed(key, file) => Remembered {
+                    Slot::Keyed(key, bytes) => Remembered {
                         key: Some(*key),
-                        bytes: read(file)?,
+                        bytes: Arc::clone(bytes),
                     },
                 })
             })

@@ -104,33 +104,36 @@ fn record(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, Option<Na
     Ok(Some((root.object, debug)))
 }
 
-/// A stored record's key-determined parts ([`record`]), shared by a
-/// resident compiler's requests.
-pub(crate) type Shared = (Bare, Option<std::sync::Arc<NativeDebug>>);
+/// A stored record's key-determined parts ([`record`]) and its object's
+/// checked bytes, shared by a resident compiler's requests.
+pub(crate) type Shared = (
+    Bare,
+    Option<std::sync::Arc<NativeDebug>>,
+    std::sync::Arc<[u8]>,
+);
 
-/// [`load`] with its debug rows shared: a resident compiler remembers each
-/// record it read. The object itself is read and checked again.
-pub(crate) fn load_shared(
-    store: &Store,
-    key: ContentHash,
-) -> io::Result<Option<(Bare, Option<std::sync::Arc<NativeDebug>>, Vec<u8>)>> {
-    let shared = crate::resident::OBJECT_RECORDS.get_or(
-        Some((store.root().to_owned(), key)),
-        || match record(store, key) {
-            Ok(Some((object, debug))) => Ok((object, debug.map(std::sync::Arc::new))),
-            Ok(None) => Err(None),
-            Err(error) => Err(Some(error)),
-        },
-    );
-    let (object, debug) = match shared {
-        Ok(shared) => shared,
-        Err(None) => return Ok(None),
-        Err(Some(error)) => return Err(error),
-    };
-    let Some(bytes) = store.get_bare(object)? else {
-        return Ok(None);
-    };
-    Ok(Some((object, debug, bytes)))
+/// [`load`] with its object read and checked: a resident compiler remembers
+/// each record it read with its object's bytes, which are a function of the
+/// record's key, and reads neither again.
+pub(crate) fn load_shared(store: &Store, key: ContentHash) -> io::Result<Option<Shared>> {
+    let shared =
+        crate::resident::OBJECT_RECORDS.get_or(Some((store.root().to_owned(), key)), || {
+            let (object, debug) = match record(store, key) {
+                Ok(Some(found)) => found,
+                Ok(None) => return Err(None),
+                Err(error) => return Err(Some(error)),
+            };
+            match store.get_bare(object) {
+                Ok(Some(bytes)) => Ok((object, debug.map(std::sync::Arc::new), bytes.into())),
+                Ok(None) => Err(None),
+                Err(error) => Err(Some(error)),
+            }
+        });
+    match shared {
+        Ok(shared) => Ok(Some(shared)),
+        Err(None) => Ok(None),
+        Err(Some(error)) => Err(error),
+    }
 }
 
 /// A Cranelift development instance's record, under its instance key

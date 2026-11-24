@@ -1,6 +1,8 @@
 //! The objects a link hands the linker, as one archive of their checked
 //! bytes: a sealed memory file the linker reads whole through one descriptor
-//! of this process, however many objects the link has.
+//! of this process, however many objects the link has. A link that patches
+//! its last executable (`incremental_link`) reads the members it changes
+//! and never makes the archive.
 #[cfg(test)]
 use crate::native::{AFTER_CHECK, BEFORE_OPEN};
 use crate::native::{NativeStop, ObjectProduct};
@@ -9,6 +11,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// A link's objects, in link order, as the members of a GNU archive without
 /// a symbol table, in a sealed memory file. The linker reads it under
@@ -33,8 +36,13 @@ impl Bundle {
             std::os::fd::AsRawFd::as_raw_fd(&self.file)
         ))
     }
-    pub(crate) fn len(&self) -> usize {
-        self.members.len()
+    /// The bundle of `members`, in order.
+    pub(crate) fn of(members: &[Arc<[u8]>]) -> io::Result<Self> {
+        let mut bundle = BundleWriter::new()?;
+        for member in members {
+            bundle.push(member)?;
+        }
+        bundle.finish()
     }
     /// Member `n`'s bytes.
     pub(crate) fn member(&self, n: usize) -> io::Result<Vec<u8>> {
@@ -42,6 +50,36 @@ impl Bundle {
         let mut bytes = vec![0; len];
         self.file.read_exact_at(&mut bytes, at)?;
         Ok(bytes)
+    }
+}
+
+/// A link's members, bundled for the linker on first use: a link that
+/// patches its last executable reads them and never makes the bundle. The
+/// bundle is the link's second input, after the entry object.
+pub(crate) struct Members {
+    members: Vec<Arc<[u8]>>,
+    bundle: std::cell::OnceCell<Bundle>,
+}
+
+impl Members {
+    pub(crate) fn new(members: Vec<Arc<[u8]>>) -> Self {
+        Self {
+            members,
+            bundle: std::cell::OnceCell::new(),
+        }
+    }
+    pub(crate) fn bundle(&self) -> io::Result<&Bundle> {
+        if self.bundle.get().is_none() {
+            let _ = self.bundle.set(Bundle::of(&self.members)?);
+        }
+        Ok(self.bundle.get().expect("set above"))
+    }
+}
+
+impl std::ops::Deref for Members {
+    type Target = [Arc<[u8]>];
+    fn deref(&self) -> &Self::Target {
+        &self.members
     }
 }
 
@@ -141,16 +179,15 @@ fn seal(_: &File) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-/// Append each object's checked bytes to `bundle`, in order: the bytes an
-/// object this request read or emitted holds, or a stored object's, read and
-/// checked here through one descriptor closed before the next opens. Every
-/// stored object is checked; each that fails is removed, and the instances
-/// of all of them are returned.
-pub(crate) fn bundle_objects(
+/// Each object's checked bytes, in order: the bytes an object this request
+/// read or emitted holds, or a stored object's, read and checked here
+/// through one descriptor closed before the next opens. Every stored object
+/// is checked; each that fails is removed, and the instances of all of them
+/// are returned.
+pub(crate) fn object_members(
     objects: &[&ObjectProduct],
-    bundle: &mut BundleWriter,
     counters: &mut crate::reach::ReachCounters,
-) -> Result<Result<(), Vec<Identity>>, NativeStop> {
+) -> Result<Result<Vec<Arc<[u8]>>, Vec<Identity>>, NativeStop> {
     use std::io::Read;
     #[cfg(test)]
     BEFORE_OPEN.with(|hook| {
@@ -159,10 +196,10 @@ pub(crate) fn bundle_objects(
         }
     });
     let mut refused = Vec::new();
-    let mut bytes = Vec::new();
+    let mut members = Vec::with_capacity(objects.len());
     for &object in objects {
         if let Some(held) = &object.bytes {
-            bundle.push(held)?;
+            members.push(Arc::clone(held));
             continue;
         }
         let mut file = match File::open(&object.path) {
@@ -175,7 +212,7 @@ pub(crate) fn bundle_objects(
         };
         crate::meter::count(crate::meter::Count::FilesOpened, 1);
         crate::meter::count(crate::meter::Count::ObjectsOpened, 1);
-        bytes.clear();
+        let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         drop(file);
         counters.objects_verified += 1;
@@ -188,7 +225,7 @@ pub(crate) fn bundle_objects(
             refused.push(object.instance.clone());
             continue;
         }
-        bundle.push(&bytes)?;
+        members.push(bytes.into());
     }
     if !refused.is_empty() {
         return Ok(Err(refused));
@@ -199,5 +236,5 @@ pub(crate) fn bundle_objects(
             hook(&objects.iter().map(|o| o.path.clone()).collect::<Vec<_>>());
         }
     });
-    Ok(Ok(()))
+    Ok(Ok(members))
 }

@@ -19,15 +19,13 @@ fn allocatable<'data>(section: &impl object::ObjectSection<'data>) -> bool {
 pub(crate) fn runtime_sources(
     sources: &SourceMap,
     map: Option<hirsel_core_ids::ContentHash>,
-    inputs: &crate::native::link_input::Bundle,
+    members: &[std::sync::Arc<[u8]>],
     keys: &[(hirsel_core_ids::ContentHash, u64)],
 ) -> std::io::Result<(std::sync::Arc<SourceMap>, bool)> {
     let scans = keys
         .iter()
         .enumerate()
-        .map(|(n, key)| {
-            crate::resident::REFERENCED.get_or(Some(*key), || referenced(&inputs.member(n)?))
-        })
+        .map(|(n, key)| crate::resident::REFERENCED.get_or(Some(*key), || referenced(&members[n])))
         .collect::<std::io::Result<Vec<_>>>()?;
     let digests: Vec<_> = scans.iter().map(|scan| scan.digest).collect();
     let key = map.map(|map| (map, digests.clone()));

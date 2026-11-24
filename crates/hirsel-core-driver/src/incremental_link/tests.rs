@@ -2,6 +2,7 @@ use super::{Incremental, Slot};
 use hirsel_core_ids::ContentHash;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 fn bin() -> PathBuf {
     PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin")
@@ -97,12 +98,10 @@ fn a_patched_link_is_the_lld_link_of_the_edited_objects() {
     let mut linker = Incremental::default();
     let mut step = |name: &str, unit_source: String, patches: bool| {
         let unit = assemble(dir, name, &unit_source);
-        let mut bundle = crate::native::link_input::BundleWriter::new().unwrap();
-        bundle.push(&unit).unwrap();
-        let bundle = bundle.finish().unwrap();
+        let member: Arc<[u8]> = unit.as_slice().into();
         let objects = [
             Slot::Bytes(&main),
-            Slot::Keyed((ContentHash::of_bytes(&unit), 0), (&bundle, 0)),
+            Slot::Keyed((ContentHash::of_bytes(&unit), 0), &member),
         ];
         let want = lld(dir, &[&main, &unit]);
         match linker.patch(frame, &objects).unwrap() {
@@ -158,14 +157,11 @@ fn an_edited_static_patches_beside_another_members_static_of_its_index() {
     let left = cranelift_unit("left", 5);
     let mut linker = Incremental::default();
     let mut link = |right: &[u8]| {
-        let mut bundle = crate::native::link_input::BundleWriter::new().unwrap();
-        bundle.push(&left).unwrap();
-        bundle.push(right).unwrap();
-        let bundle = bundle.finish().unwrap();
+        let members: [Arc<[u8]>; 2] = [left.as_slice().into(), right.into()];
         let objects = [
             Slot::Bytes(&start),
-            Slot::Keyed((ContentHash::of_bytes(&left), 0), (&bundle, 0)),
-            Slot::Keyed((ContentHash::of_bytes(right), 0), (&bundle, 1)),
+            Slot::Keyed((ContentHash::of_bytes(&left), 0), &members[0]),
+            Slot::Keyed((ContentHash::of_bytes(right), 0), &members[1]),
         ];
         let want = lld(dir, &[&start, &left, right]);
         let patched = linker.patch(frame, &objects).unwrap();

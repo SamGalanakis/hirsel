@@ -234,7 +234,7 @@ pub struct ObjectProduct {
     /// The bytes this request checked or wrote, which the link hands the
     /// linker. None: a stored object named by a record, which the link reads
     /// and checks.
-    pub(crate) bytes: Option<Vec<u8>>,
+    pub(crate) bytes: Option<std::sync::Arc<[u8]>>,
     pub debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
     /// Stored debug rows: their store and address. A link with debug lines
     /// reads them when `debug` is not in hand.
@@ -268,7 +268,7 @@ impl ObjectProduct {
         let mut product = Self::shared(
             instance,
             store,
-            (object, native.bytes),
+            (object, native.bytes.into()),
             native.debug.map(std::sync::Arc::new),
             compiled,
         );
@@ -280,7 +280,7 @@ impl ObjectProduct {
     pub(crate) fn shared(
         instance: Identity,
         store: &Store,
-        (object, bytes): (Bare, Vec<u8>),
+        (object, bytes): (Bare, std::sync::Arc<[u8]>),
         debug: Option<std::sync::Arc<hirsel_core_ir::source::NativeDebug>>,
         compiled: bool,
     ) -> Self {
@@ -1625,8 +1625,8 @@ fn link_objects(
         let (in_image, separate): (Vec<&ObjectProduct>, Vec<&ObjectProduct>) = objects
             .iter()
             .partition(|o| image.is_some_and(|image| image.holds(&o.path)));
-        // The linker reads every object from one bundle of checked bytes.
-        let mut bundle = link_input::BundleWriter::new()?;
+        // The objects' checked bytes, bundled only for lld (`link_input::Members`).
+        let mut members: Vec<std::sync::Arc<[u8]>> = Vec::new();
         let unit = match image.filter(|_| !in_image.is_empty()) {
             None => None,
             Some(image) => {
@@ -1637,32 +1637,30 @@ fn link_objects(
                 let (_unit, bytes, _prelinked) = match crate::image_unit::load(image, unit_key)? {
                     Some((unit, bytes)) => (unit, bytes, false),
                     None => {
-                        let mut objects = link_input::BundleWriter::new()?;
-                        if let Err(refused) =
-                            link_input::bundle_objects(&in_image, &mut objects, &mut counters)?
-                        {
-                            return Ok(Linked::Damaged(refused, compiled, counters));
-                        }
+                        let held = match link_input::object_members(&in_image, &mut counters)? {
+                            Ok(held) => held,
+                            Err(r) => return Ok(Linked::Damaged(r, compiled, counters)),
+                        };
                         let (unit, bytes) = crate::image_unit::prelink(
                             image,
                             unit_key,
                             &recipe.linker,
-                            &objects.finish()?,
+                            &link_input::Bundle::of(&held)?,
                         )?;
                         (unit, bytes, true)
                     }
                 };
                 #[cfg(test)]
                 UNIT.set(Some((unit_key, image.path(_unit.address), _prelinked)));
-                bundle.push(&bytes)?;
+                members.push(bytes.into());
                 Some(unit_key)
             }
         };
-        if let Err(refused) = link_input::bundle_objects(&separate, &mut bundle, &mut counters)? {
-            return Ok(Linked::Damaged(refused, compiled, counters));
-        }
-        let bundle = bundle.finish()?;
-        let mut inputs = vec![entry.clone(), bundle.path()];
+        let members = match link_input::object_members(&separate, &mut counters)? {
+            Ok(objects) => link_input::Members::new(members.into_iter().chain(objects).collect()),
+            Err(refused) => return Ok(Linked::Damaged(refused, compiled, counters)),
+        };
+        let mut inputs = vec![entry.clone()];
         // Each member is named by the key its bytes are a function of: the
         // unit by its key, an object by its identity and read check.
         let keys: Vec<_> = unit
@@ -1671,7 +1669,7 @@ fn link_objects(
             .chain(separate.iter().map(|o| (o.identity, o.check)))
             .collect();
         let (runtime_sources, spawns_units) =
-            crate::native_entry::runtime_sources(&sources, sources_key, &bundle, &keys)?;
+            crate::native_entry::runtime_sources(&sources, sources_key, &members, &keys)?;
         let write_entry = |live_sites: Option<&BTreeSet<u64>>| -> Result<Vec<u8>, NativeStop> {
             let bytes = entry_plan
                 .emit(
@@ -1710,7 +1708,7 @@ fn link_objects(
                 let mut inputs = inputs.clone();
                 link_archives.append_link_inputs(
                     &mut inputs,
-                    Some(&bundle),
+                    &members,
                     &options.runtime,
                     recipe,
                 )?;
@@ -1719,8 +1717,8 @@ fn link_objects(
                     .then(|| {
                         let objects: Vec<_> =
                             std::iter::once(crate::incremental_link::Slot::Bytes(&entry_bytes))
-                                .chain(keys.iter().enumerate().map(|(n, key)| {
-                                    crate::incremental_link::Slot::Keyed(*key, (&bundle, n))
+                                .chain(keys.iter().zip(members.iter()).map(|(key, bytes)| {
+                                    crate::incremental_link::Slot::Keyed(*key, bytes)
                                 }))
                                 .collect();
                         key(
@@ -1743,10 +1741,12 @@ fn link_objects(
                         return Ok(image);
                     }
                 }
+                let bundle = members.bundle()?.path();
+                inputs.insert(1, bundle.clone());
                 direct_link(
                     recipe,
                     &inputs,
-                    Some(&bundle.path()),
+                    Some(&bundle),
                     &output,
                     options.optimize,
                     options.debug_lines,
@@ -1783,7 +1783,7 @@ fn link_objects(
             }
         };
         counters.link_patched = u64::from(patched.get());
-        drop(bundle);
+        drop(members);
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         let debug = crate::native_debug::bind_detached(
             &rows,
@@ -2314,7 +2314,7 @@ fn f5 = n5 g5 extern
             std::fs::write(path("startup.o"), startup).unwrap();
             let mut inputs = vec![path("startup.o"), path("unit.o")];
             archives
-                .append_link_inputs(&mut inputs, None, &options.runtime, &recipe)
+                .append_link_inputs(&mut inputs, &[], &options.runtime, &recipe)
                 .unwrap();
             inputs.push(options.runtime.clone());
             let output = path("program");

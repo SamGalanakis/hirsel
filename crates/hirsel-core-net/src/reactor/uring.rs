@@ -1,6 +1,6 @@
 //! The io_uring backend of a [`Poller`](super::Poller): one ring per owner,
 //! its mailbox, and the multishot polls of its watched descriptors.
-use super::{ARM_PARITY, INTEREST, REGISTER_SEND_MSG_RING, REMOVED, WAKE, sendzc};
+use super::{INTEREST, REGISTER_SEND_MSG_RING, REMOVED, WAKE, sendzc};
 use std::{
     collections::{HashMap, VecDeque},
     io,
@@ -37,12 +37,10 @@ pub(super) fn msg_ring_wake(fd: i32) -> io::Result<()> {
 /// worker thread, or a tied run's driver. A poll's readiness is task work on
 /// the thread that armed it, which under `COOP_TASKRUN` runs at that thread's
 /// next return to user space without an interrupt; so only the owner submits
-/// (it arms every poll), only the owner waits, and a thread that takes a slot
-/// over re-arms its polls ([`Uring::adopt`]). Other threads post entries to
-/// the mailbox and wake the owner with a MSG_RING completion. The owner
-/// learns of pending task work from `IORING_SQ_TASKRUN` without a syscall.
-/// `SINGLE_ISSUER` and `DEFER_TASKRUN` stay off: a slot's owner changes when a
-/// spare thread takes the slot over.
+/// (it arms every poll) and only the owner waits; a slot's thread never gives
+/// its slot up. Other threads post entries to the mailbox and wake the owner
+/// with a MSG_RING completion. The owner learns of pending task work from
+/// `IORING_SQ_TASKRUN` without a syscall.
 pub(super) struct Uring {
     pub(super) ring: io_uring::IoUring,
     /// The mailbox: entries for the owner to submit, in order.
@@ -61,8 +59,6 @@ pub(super) struct Uring {
 
 pub(super) struct Watch {
     pub(super) fd: Arc<OwnedFd>,
-    /// The parity bit of the poll that is (or will be) armed for this watch.
-    parity: u64,
 }
 
 struct Submission {
@@ -165,14 +161,14 @@ impl Uring {
         io_uring::opcode::PollAdd::new(io_uring::types::Fd(watch.fd.as_raw_fd()), INTEREST)
             .multi(true)
             .build()
-            .user_data(tag | watch.parity)
+            .user_data(tag)
     }
 
     /// Watch `fd` under `tag` with one multishot poll for every direction. A
     /// poll checks readiness as it is armed, so nothing before it is lost.
     pub(super) fn add(&self, tag: u64, fd: Arc<OwnedFd>) {
         let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
-        let watch = Watch { fd, parity: 0 };
+        let watch = Watch { fd };
         self.push(Self::poll_add(tag, &watch), Some(watch.fd.clone()));
         watched.insert(tag, watch);
     }
@@ -184,31 +180,14 @@ impl Uring {
         let Some(watch) = watched.remove(&tag) else {
             return false;
         };
+        drop(watch);
         self.push(
-            io_uring::opcode::PollRemove::new(tag | watch.parity)
+            io_uring::opcode::PollRemove::new(tag)
                 .build()
                 .user_data(REMOVED),
             None,
         );
         true
-    }
-
-    /// Re-arm every watch from the calling thread, the ring's new owner: each
-    /// old poll is removed and a fresh one armed under the other parity, so
-    /// the old poll's end (whenever its task work runs) is told apart. Both
-    /// go in one enter with the rest of the mailbox.
-    pub(super) fn adopt(&self) {
-        let mut watched = self.watched.lock().unwrap_or_else(|e| e.into_inner());
-        for (&tag, watch) in watched.iter_mut() {
-            self.push(
-                io_uring::opcode::PollRemove::new(tag | watch.parity)
-                    .build()
-                    .user_data(REMOVED),
-                None,
-            );
-            watch.parity ^= ARM_PARITY;
-            self.push(Self::poll_add(tag, watch), Some(watch.fd.clone()));
-        }
     }
 
     pub(super) fn due(&self) -> bool {
@@ -324,11 +303,11 @@ impl Uring {
                     }
                 }
                 _ => {
-                    let tag = data & !ARM_PARITY;
+                    let tag = data;
                     let Some(watch) = watched.get(&tag) else {
                         continue;
                     };
-                    if !io_uring::cqueue::more(cqe.flags()) && data & ARM_PARITY == watch.parity {
+                    if !io_uring::cqueue::more(cqe.flags()) {
                         self.push(Self::poll_add(tag, watch), Some(watch.fd.clone()));
                     }
                     let res = cqe.result();

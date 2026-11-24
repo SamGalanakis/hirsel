@@ -23,12 +23,8 @@
 //! root's available bytes at the end, equal the stackful form's; the root's
 //! bytes are all back. A lost wake leaves the client parked (the liveness law
 //! fails); one delivered twice runs a task twice.
-//!
-//! `handoff_park_waits` adds the blocking-call hand-off at one wait the seed
-//! picks: the root makes a host call long enough for its worker slot to go to
-//! the spare thread, then joins the client. The unit idles off the handed-off
-//! thread, and the helper's wake resumes the client on another thread.
-use super::{FLAG, param, served};
+
+use super::{FLAG, served};
 use crate::Context;
 use crate::tasks::*;
 use crate::units_lang::{
@@ -95,24 +91,15 @@ const JOIN_HELPER: u64 = 9;
 const RECV_CLOSED: u64 = 10;
 const WAITS: usize = 11;
 /// The waits a hand-off can land on: each one's wake comes from the helper.
-const HANDOFF_AT: [u64; 4] = [RECV_HELLO, SEND_TWO, RECV_TWO, JOIN_HELPER];
 
 /// The furthest wait the client has reached (see the module docs).
 static REACHED: super::seam::AtomicU64 = super::seam::AtomicU64::new(0);
 /// The wait the client last parked at with its stack given back.
 static PARKED: super::seam::AtomicU64 = super::seam::AtomicU64::new(0);
-/// Set by `handoff_body`: the root hands off at the wait `param(1)` picks.
-static HANDOFF: super::seam::AtomicBool = super::seam::AtomicBool::new(false);
-/// Set by the root once its worker slot went to the spare thread: the helper
-/// holds the hand-off wait's wake until then.
-static HANDED: super::seam::AtomicBool = super::seam::AtomicBool::new(false);
 /// What the client observed, in order.
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
-/// Per wait: returned stacks, the thread it parked on, and whether a resume
-/// ran on another thread.
+/// Per wait: returned stacks.
 static PARKS: Mutex<[u32; WAITS]> = Mutex::new([0; WAITS]);
-static PARKED_ON: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
-static MOVED: Mutex<[bool; WAITS]> = Mutex::new([false; WAITS]);
 
 fn log(s: String) {
     super::say(format!("client {s}"));
@@ -126,18 +113,8 @@ fn reach(phase: u64) {
 /// The helper's wait for the client to reach `phase`. Each load is a
 /// scheduling point of the checker; the helper is a task, so it never leaves
 /// its unit here (a unit yield from inside a task is refused).
-///
-/// After a hand-off the root joins the client, which is then its unit's only
-/// task: its later waits park the unit in place with the stack kept
-/// (`park_unit_alone`) and never mark a wait reached, so they are not gated.
 fn after(phase: u64) {
-    let handoff = HANDOFF.load(Ordering::SeqCst);
-    let at = HANDOFF_AT[param(1) as usize];
-    if handoff && phase > at && HANDED.load(Ordering::SeqCst) {
-        return;
-    }
     while REACHED.load(Ordering::SeqCst) < phase {}
-    while handoff && phase == at && !HANDED.load(Ordering::SeqCst) {}
 }
 
 /// The client's frame, homed in its record (returnable) or on its stack.
@@ -219,7 +196,6 @@ unsafe fn waited(context: *mut Context, a: *mut Area, job: &Job, what: String) -
         if job.returnable && (*a).child != 0 {
             super::say(format!("client parked returning at {phase}"));
             PARKS.lock().unwrap()[phase as usize] += 1;
-            *PARKED_ON.lock().unwrap() = Some(std::thread::current().id());
             PARKED.store(phase, Ordering::SeqCst);
             reach(phase);
             return false;
@@ -235,15 +211,13 @@ unsafe fn waited(context: *mut Context, a: *mut Area, job: &Job, what: String) -
     }
 }
 
-/// Mark a wait reached before a stackful call; note a returnable resume's thread.
+/// Mark a wait reached before a stackful call.
 fn entering(job: &Job, a: *mut Area) {
     // SAFETY: the client's live area.
-    let (phase, resumed) = unsafe { ((*a).phase, (*a).child != 0) };
+    let phase = unsafe { (*a).phase };
     if !job.returnable {
         PARKED.store(phase, Ordering::SeqCst);
         reach(phase);
-    } else if resumed && *PARKED_ON.lock().unwrap() != Some(std::thread::current().id()) {
-        MOVED.lock().unwrap()[phase as usize] = true;
     }
 }
 
@@ -427,7 +401,6 @@ fn run_form(returnable: bool) -> (Vec<String>, u64, u64) {
     LOG.lock().unwrap().clear();
     REACHED.store(0, Ordering::SeqCst);
     PARKED.store(0, Ordering::SeqCst);
-    HANDED.store(false, Ordering::SeqCst);
     unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
         // SAFETY: run_root pins the form and its flags through the run.
         unsafe {
@@ -441,20 +414,7 @@ fn run_form(returnable: bool) -> (Vec<String>, u64, u64) {
             let task =
                 hirsel_core_spawn(context, 0, 64 << 10, (&raw mut job).cast(), client, l, 0).task;
             assert!(!task.is_null());
-            let at = HANDOFF_AT[param(1) as usize];
             while !job.done.read_volatile() {
-                if HANDOFF.load(Ordering::SeqCst) && PARKED.load(Ordering::SeqCst) == at {
-                    super::say(format!("root hands off at {at}"));
-                    // Lose the worker slot in a blocking call, then wait for
-                    // the client: the unit idles off the handed-off thread.
-                    super::host_for(param(0));
-                    while crate::units::worker_ix() != usize::MAX {
-                        super::host_for(param(0));
-                    }
-                    super::say("root handed off".to_string());
-                    HANDED.store(true, Ordering::SeqCst);
-                    break;
-                }
                 let s =
                     hirsel_core_spawn(context, 0, 0, ptr::null_mut(), scribbler, layout(0, 0), 0);
                 join_plain(context, s.task);
@@ -495,8 +455,6 @@ fn compare(stackful: &(Vec<String>, u64, u64), returnable: &(Vec<String>, u64, u
 
 fn reset() {
     *PARKS.lock().unwrap() = [0; WAITS];
-    *MOVED.lock().unwrap() = [false; WAITS];
-    *PARKED_ON.lock().unwrap() = None;
 }
 
 pub(super) fn body(_: u32) -> u8 {
@@ -516,31 +474,6 @@ pub(super) fn body(_: u32) -> u8 {
     served(
         0,
         "every returnable wait gave its stack back and matched the stackful client",
-    );
-    0
-}
-
-/// `body` with a hand-off at the wait `param(1)` picks.
-pub(super) fn handoff_body(_: u32) -> u8 {
-    HANDOFF.store(true, Ordering::SeqCst);
-    reset();
-    let stackful = run_form(false);
-    reset();
-    let returnable = run_form(true);
-    FLAG[0].store(true, Ordering::SeqCst);
-    let at = HANDOFF_AT[param(1) as usize] as usize;
-    assert!(
-        PARKS.lock().unwrap()[at] > 0,
-        "wait {at} never returned its stack"
-    );
-    assert!(
-        MOVED.lock().unwrap()[at],
-        "wait {at} never resumed on another thread"
-    );
-    compare(&stackful, &returnable);
-    served(
-        0,
-        "the returnable wait resumed on another thread and matched the stackful client",
     );
     0
 }

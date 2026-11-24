@@ -164,13 +164,7 @@ fn cross_home_release(make: fn() -> io::Result<Arc<Poller>>) -> (bool, bool, boo
     fn here() -> Option<Here> {
         HERE.get()
     }
-    let at = |slot| {
-        HERE.set(Some(Here {
-            unit: 1,
-            slot,
-            owner: true,
-        }))
-    };
+    let at = |slot| HERE.set(Some(Here { unit: 1, slot }));
     let pollers = share(vec![make().unwrap(), make().unwrap()], here).unwrap();
     let mut sockets = Sockets::default();
     let mut woken = Vec::new();

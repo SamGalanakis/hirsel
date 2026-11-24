@@ -61,6 +61,10 @@ pub(crate) fn profile_stack_top(sp: usize) -> Option<usize> {
 pub(crate) fn guard(bounds: (usize, usize)) {
     GUARD.set(bounds);
 }
+/// The bounds `guard` last set.
+pub(crate) fn guarded() -> (usize, usize) {
+    GUARD.get()
+}
 /// `guard` from code that does not cross a stack switch before returning.
 #[inline(always)]
 pub(crate) fn guard_here(bounds: (usize, usize)) {
@@ -441,8 +445,7 @@ struct Alternate {
 }
 impl Alternate {
     fn new() -> Self {
-        let stack = crate::units::signal_stack_memory()
-            .map_or_else(Stack::new, |memory| memory.signal_stack());
+        let stack = Stack::new();
         // SAFETY: install owned usable pages as the current thread's signal stack.
         unsafe {
             let mut previous = std::mem::zeroed();

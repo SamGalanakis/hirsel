@@ -131,8 +131,8 @@ impl Default for SchedulerProvider {
         }
     }
 }
-crate::units::moved_tls! { static CALLBACK_TASK: *mut Task = ptr::null_mut(); }
-crate::units::moved_tls! { static CURRENT: *mut Task = ptr::null_mut(); }
+crate::units::moved_tls! { pub(crate) static CALLBACK_TASK: *mut Task = ptr::null_mut(); }
+crate::units::moved_tls! { pub(crate) static CURRENT: *mut Task = ptr::null_mut(); }
 
 pub(crate) fn private_flow_step<R>(run: impl FnOnce() -> R) -> R {
     struct Restore(*mut Task);
@@ -3086,14 +3086,6 @@ unsafe fn poll_turn(task: *mut Task) {
     unsafe {
         (*task).polls_left = POLLS_PER_TURN;
         let run = (*task).run;
-        if crate::units::lost_slot() {
-            // This poll can move the unit without changing the running task or
-            // taking any of the unit's inputs. The old thread keeps its host
-            // and callback frames until they have unwound to a safe point.
-            leave_task_tls();
-            crate::limit::preserve_binding(crate::units::maybe_yield);
-            enter_task_tls(task);
-        }
         if !(*run).head.is_null() || !(*run).deferred.is_null() {
             (*task).state = State::Ready;
             #[cfg(feature = "prof")]

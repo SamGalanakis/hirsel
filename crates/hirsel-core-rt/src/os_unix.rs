@@ -292,21 +292,23 @@ pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<Owne
 pub(crate) fn private_bind(fd: BorrowedFd<'_>, parent: OwnedFd, name: &str) -> Result<()> {
     let (addr, len) = address(name.as_bytes());
     let fd = fd.as_raw_fd();
-    let _blocking = crate::units::blocking();
-    std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .spawn_scoped(scope, move || {
-                // SAFETY: fd remains borrowed until the join. Only this
-                // helper's cwd changes, and the parent entry stays pinned.
-                hirsel_core_net::unix::isolate_binding_thread(parent.as_fd()).map_err(host)?;
-                retry(|| unsafe {
-                    libc::bind(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize
-                })?;
-                Ok(())
-            })
-            .map_err(host)?
-            .join()
-            .unwrap()
+    // The bind runs on its own thread, which this unit waits for off the slot.
+    crate::units::off_slot(move || {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .spawn_scoped(scope, move || {
+                    // SAFETY: fd remains borrowed until the join. Only this
+                    // helper's cwd changes, and the parent entry stays pinned.
+                    hirsel_core_net::unix::isolate_binding_thread(parent.as_fd()).map_err(host)?;
+                    retry(|| unsafe {
+                        libc::bind(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize
+                    })?;
+                    Ok(())
+                })
+                .map_err(host)?
+                .join()
+                .unwrap()
+        })
     })
 }
 

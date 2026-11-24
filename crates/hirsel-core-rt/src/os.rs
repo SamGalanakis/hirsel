@@ -4,6 +4,7 @@ use crate::provider::*;
 
 mod listing;
 mod metadata;
+mod random;
 pub(crate) mod temp;
 use listing::Listing;
 use metadata::{stat, zero_extension};
@@ -116,11 +117,13 @@ impl OsProvider {
     /// Only run configuration can acquire a root from an ambient host path.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn grant(&mut self, path: &Path) -> io::Result<u64> {
-        let _blocking = crate::units::blocking();
-        let file = std::fs::File::open(path)?;
-        if !file.metadata()?.is_dir() {
-            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
-        }
+        let file = crate::units::off_slot(|| {
+            let file = std::fs::File::open(path)?;
+            if !file.metadata()?.is_dir() {
+                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+            }
+            Ok(file)
+        })?;
         let id = self.id();
         self.directories.insert(id, file.into());
         Ok(id)
@@ -128,13 +131,11 @@ impl OsProvider {
     /// Startup-only capability probe. The per-operation confined open is unchanged.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
-        let _blocking = crate::units::blocking();
-        drop(beneath(
-            self.directories[&handle].as_raw_fd(),
-            b".",
-            libc::O_PATH | libc::O_DIRECTORY,
-        )?);
-        Ok(())
+        let directory = self.directories[&handle].as_raw_fd();
+        crate::units::off_slot(|| {
+            drop(beneath(directory, b".", libc::O_PATH | libc::O_DIRECTORY)?);
+            Ok(())
+        })
     }
     fn id(&mut self) -> u64 {
         let id = self.next;
@@ -830,18 +831,40 @@ unsafe extern "C" fn abort_with_directory(
     unsafe { abort(state, request, token, reason) }
 }
 unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: a provider operation exclusively owns the request during issue.
+    match unsafe { (*request).operation } {
+        // Waiting is owned by the scheduler; issue completes at once.
+        SLEEP_UNTIL | SLEEP_UNTIL_WALL => return Outcome::default(),
+        // A seeded pool never waits; only an early boot's would.
+        RANDOM => match random::request(unsafe { &mut *request }, libc::GRND_NONBLOCK) {
+            Err(error) if error.raw_os_error() == Some(libc::EAGAIN) => {}
+            result => return request_outcome(result),
+        },
+        _ => {}
+    }
+    struct Issue(*mut u8, *mut Request);
+    // SAFETY: the unit stays parked, and its operation pinned, until the
+    // helper returns.
+    unsafe impl Send for Issue {}
+    let issue = Issue(state, request);
+    // Every other operation can wait without bound, so it runs off the slot.
+    crate::units::off_slot(move || {
+        let issue = issue;
+        // SAFETY: forwarded caller contract.
+        unsafe { issue_now(issue.0, issue.1) }
+    })
+}
+
+/// # Safety
+/// As `issue_on_stack`.
+unsafe fn issue_now(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.
     let os = unsafe { &mut *state.cast::<OsProvider>() };
     let request = unsafe { &mut *request };
     match request.operation {
         STDOUT => write_request(os.stdout.as_ref().map_or(-1, AsRawFd::as_raw_fd), request),
         STDERR => write_request(os.stderr_fd(), request),
-        // Waiting is owned by the scheduler; issue completes at once.
-        SLEEP_UNTIL | SLEEP_UNTIL_WALL => Outcome::default(),
-        RANDOM => {
-            let _blocking = crate::units::blocking();
-            request_outcome(random(request))
-        }
+        RANDOM => request_outcome(random::request(request, 0)),
         _ => {
             let issue_file = os.issue_file.unwrap();
             // SAFETY: the directory provider was installed before the run issued this request.
@@ -850,9 +873,10 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
     }
 }
 
-thread_local! {
-    /// The token `submit_on_stack` queues for, and the step it answers.
-    static SUBMIT: std::cell::Cell<(u64, Step)> = std::cell::Cell::new((0, Step::default()));
+// The token `submit_on_stack` queues for, and the step it answers. Moved:
+// the submit can park the unit on the memory thread's reply.
+crate::units::moved_tls! {
+    static SUBMIT: (u64, Option<Step>) = (0, None);
 }
 
 /// SYNC and SYNC_DIR park while the helper syncs a duplicate of the handle's
@@ -873,10 +897,10 @@ unsafe fn sync_file(state: *mut u8, request: *mut Request, token: u64) -> Option
     } else {
         os.files.get(&handle)
     }?;
-    SUBMIT.set((token, Step::default()));
-    // SAFETY: as `issue`; submit never suspends.
+    SUBMIT.set((token, None));
+    // SAFETY: as `issue`.
     unsafe { crate::tasks::host_operation(state, request, submit_on_stack) };
-    Some(SUBMIT.get().1)
+    Some(SUBMIT.take().1.unwrap_or_default())
 }
 
 unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
@@ -895,15 +919,12 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
     if let Some(cell) = untracked {
         os.in_flight_syncs.push(cell);
     }
-    SUBMIT.set((token, step));
+    SUBMIT.set((token, Some(step)));
     Outcome::default()
 }
 
 unsafe extern "C" fn issue_file(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded caller contract.
-    let operation = unsafe { (*request).operation };
-    // Writes are marked by write_all_from, which also serves standard streams.
-    let _blocking = (!matches!(operation, WRITE | WRITE_AT)).then(crate::units::blocking_file);
     request_outcome(unsafe { (&mut *state.cast::<OsProvider>()).execute_file(&mut *request) })
 }
 
@@ -925,33 +946,6 @@ fn write_request(fd: i32, request: &Request) -> Outcome {
     write_all_from(fd, bytes, offset)
 }
 
-fn random(request: &mut Request) -> io::Result<Outcome> {
-    let spare = request.buffer.capacity.saturating_sub(request.buffer.len);
-    if spare != 0 {
-        // SAFETY: the request pins the writable spare capacity, which may be uninitialized.
-        let data = unsafe { request.buffer.data.add(request.buffer.len) };
-        fill_random_bytes(data, spare)?;
-    }
-    request.buffer.len += spare;
-    Ok(Outcome {
-        written: spare as u64,
-        ..Outcome::default()
-    })
-}
-
-fn fill_random_bytes(mut data: *mut u8, mut remaining: usize) -> io::Result<()> {
-    while remaining != 0 {
-        // SAFETY: both callers provide a live writable range of the given length.
-        let n = syscall(unsafe { libc::getrandom(data.cast(), remaining, 0) } as isize)? as usize;
-        if n == 0 {
-            return Err(io::Error::from_raw_os_error(libc::EIO));
-        }
-        data = data.wrapping_add(n);
-        remaining -= n;
-    }
-    Ok(())
-}
-
 fn syscall(rc: isize) -> io::Result<isize> {
     if rc < 0 {
         Err(io::Error::last_os_error())
@@ -964,7 +958,6 @@ pub(crate) fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
 }
 
 fn write_all_from(fd: i32, bytes: &[u8], offset: Option<u64>) -> Outcome {
-    let _blocking = crate::units::blocking_file();
     let mut written = 0;
     while written < bytes.len() {
         // SAFETY: live descriptor and remaining readable bytes.

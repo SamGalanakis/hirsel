@@ -473,8 +473,8 @@ reaches it from outside: the items and close of each inbox it holds and the outc
 its root, refunds sent to its limits by other units, and its providers' results. Two units
 with the same entry that receive the same inputs in the same order behave the same. The order
 in which inputs from different senders reach a unit is free. How many workers run the
-units, which worker or thread runs a unit at any moment, and whether a spare thread takes
-the place of a worker blocked in a host call are not observable.
+units, which worker or thread runs a unit at any moment, and which thread carries out a
+host call while its unit waits are not observable.
 
 Every charged byte has one payer, a limit, at each moment, and each reservation is released
 at one point. A limit's spendable balance changes only at an operation of its own unit or

@@ -24,11 +24,6 @@ const WAKE: u64 = u64::MAX;
 /// io_uring: the completion of a poll removal, which carries no readiness.
 const REMOVED: u64 = u64::MAX - 1;
 const INTEREST: u32 = (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP) as u32;
-/// io_uring: a multishot poll carries its tag with this bit flipped at each
-/// re-arm on adoption ([`Uring::adopt`]), so the ends of the poll it replaced
-/// are told from its own. Tags never use it: a slot index stays below it
-/// ([`Sockets::insert_record`]) and WAKE and REMOVED are matched first.
-const ARM_PARITY: u64 = 1 << 31;
 /// `IORING_REGISTER_SEND_MSG_RING`: a MSG_RING issued without a source ring.
 const REGISTER_SEND_MSG_RING: libc::c_long = 31;
 
@@ -407,15 +402,6 @@ impl Poller {
         ring.due()
     }
 
-    /// io_uring: the calling thread becomes this ring's owner. A poll's
-    /// readiness runs as task work on the thread that armed it, so every
-    /// watch is re-armed from this thread at its next enter.
-    pub fn adopt(&self) {
-        if let Backend::Uring(ring) = &self.backend {
-            ring.adopt();
-        }
-    }
-
     // The optional operations are installed with the native poller, so a
     // scheduler that can never construct one does not link this syscall path.
     fn poll_epoll<'a>(
@@ -506,14 +492,12 @@ fn tag(index: usize, generation: u32) -> u64 {
     index as u64 | (u64::from(generation) << 32)
 }
 
-/// Where the calling thread is in a unit pool: its unit, the worker slot it
-/// registers on, and whether it owns that slot's poller now (false on a
-/// thread that lost its slot to a spare during a blocking call).
+/// Where the calling thread is in a unit pool: its unit and the worker slot
+/// it runs on, whose poller it owns.
 #[derive(Clone, Copy, Debug)]
 pub struct Here {
     pub unit: u32,
     pub slot: usize,
-    pub owner: bool,
 }
 
 /// mc-units-light: one poller per worker slot of a unit pool. A unit's
@@ -636,7 +620,7 @@ impl Sockets {
         match &self.shared {
             Some(shared) => (
                 &shared.slots.pollers[home],
-                (shared.slots.here)().is_some_and(|here| here.owner && here.slot == home),
+                (shared.slots.here)().is_some_and(|here| here.slot == home),
             ),
             None => (self.poller.as_ref().unwrap(), true),
         }
@@ -693,11 +677,7 @@ impl Sockets {
         let index = if let Some(index) = self.free.pop() {
             index
         } else {
-            // Each slot owns a descriptor, and descriptors stay below 2^31
-            // (fs.nr_open), so an io_uring poll's parity bit is free.
-            let index = u32::try_from(self.slots.len())
-                .ok()
-                .filter(|&index| u64::from(index) < ARM_PARITY)?;
+            let index = u32::try_from(self.slots.len()).ok()?;
             self.slots.push(Slot {
                 generation: 1,
                 record: None,
@@ -826,11 +806,9 @@ impl Sockets {
             return Ok(());
         }
         self.poller()?;
-        // A pool registry registers on the calling thread's slot: its own,
-        // or the one it lost to a spare during a blocking call, which it
-        // posts to and wakes.
+        // A pool registry registers on the calling thread's slot.
         let (home, owner) = match &self.shared {
-            Some(shared) => (shared.slots.here)().map_or((0, false), |h| (h.slot, h.owner)),
+            Some(shared) => (shared.slots.here)().map_or((0, false), |h| (h.slot, true)),
             None => (0, true),
         };
         let tag = Self::registration_tag(self.shared_unit(), index, self.slots[index].generation);

@@ -1,7 +1,7 @@
 use super::{
-    Ordering, Pool, S_CREATE_NS, S_CREATED, S_GPOLL_BLOCKS, S_GPOLL_EVENTS, S_GPOLLS,
-    S_HANDOFF_AGE_NS, S_HANDOFFS, S_LIFO, S_NOTIFIED_REQUEUE, S_OS_WAKES, S_PARKS,
-    S_READY_TO_PARK_NS, S_RESUMES, S_STEALS, S_TIMER_FIRES, S_YIELDS, USTATS,
+    Ordering, Pool, S_CREATE_NS, S_CREATED, S_GPOLL_BLOCKS, S_GPOLL_EVENTS, S_GPOLLS, S_LIFO,
+    S_NOTIFIED_REQUEUE, S_OS_WAKES, S_PARKS, S_READY_TO_PARK_NS, S_RESUMES, S_STEALS,
+    S_TIMER_FIRES, S_YIELDS, USTATS,
 };
 
 pub(super) fn print(p: &Pool) {
@@ -23,7 +23,7 @@ pub(super) fn print(p: &Pool) {
     #[cfg(not(feature = "record"))]
     let tape_stats = "";
     eprintln!(
-        "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} unit_epoll_waits={} lifo={} handoffs={} handoff_ns={} handoff_tick_ns={} handoff_age_ns_avg={} net_uring={}{tape_stats}",
+        "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} unit_epoll_waits={} lifo={} net_uring={}{tape_stats}",
         p.w,
         g(S_CREATED),
         g(S_RESUMES),
@@ -40,10 +40,6 @@ pub(super) fn print(p: &Pool) {
         g(S_READY_TO_PARK_NS) / g(S_CREATED).max(1),
         hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
         g(S_LIFO),
-        g(S_HANDOFFS),
-        p.handoff_ticks.saturating_mul(p.handoff_tick_ns),
-        p.handoff_tick_ns,
-        g(S_HANDOFF_AGE_NS) / g(S_HANDOFFS).max(1),
         u8::from(p.uring),
     );
 }

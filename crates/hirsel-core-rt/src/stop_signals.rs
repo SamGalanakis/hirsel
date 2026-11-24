@@ -42,16 +42,20 @@ pub(crate) struct StopSignals {
 }
 impl StopSignals {
     fn install() -> io::Result<Self> {
-        let _blocking = crate::units::blocking();
-        let mut active = ACTIVE.lock().unwrap();
-        if active.is_none() {
-            *active = Some(Relay::install()?);
-        }
-        let relay = active.as_mut().unwrap();
-        relay.users += 1;
+        // The relay's start and its lock wait off the slot. The relay keeps
+        // `state` while this user holds it.
+        let state = crate::units::off_slot(|| {
+            let mut active = ACTIVE.lock().unwrap();
+            if active.is_none() {
+                *active = Some(Relay::install()?);
+            }
+            let relay = active.as_mut().unwrap();
+            relay.users += 1;
+            io::Result::Ok(relay.state.clone())
+        })?;
         Ok(Self {
             provider: Provider {
-                state: Arc::as_ptr(&relay.state).cast_mut().cast(),
+                state: Arc::as_ptr(&state).cast_mut().cast(),
                 wait,
                 issue: await_stop,
                 resume: await_stop,
@@ -73,13 +77,15 @@ impl Drop for StopSignals {
 }
 
 fn release() {
-    let _blocking = crate::units::blocking();
-    let mut active = ACTIVE.lock().unwrap();
-    let relay = active.as_mut().unwrap();
-    relay.users -= 1;
-    if relay.users == 0 {
-        drop(active.take());
-    }
+    // The last user joins the relay thread, off the slot.
+    crate::units::off_slot(|| {
+        let mut active = ACTIVE.lock().unwrap();
+        let relay = active.as_mut().unwrap();
+        relay.users -= 1;
+        if relay.users == 0 {
+            drop(active.take());
+        }
+    });
 }
 
 struct Relay {

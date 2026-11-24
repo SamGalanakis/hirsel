@@ -209,7 +209,6 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
         answer: None,
     }));
     let result = completion.clone();
-    let blocking = crate::units::blocking();
     let helper = std::thread::Builder::new()
         .name("hirsel-cred".into())
         .spawn(move || {
@@ -223,7 +222,6 @@ unsafe extern "C" fn submit_on_stack(state: *mut u8, request: *mut Request) -> O
                 active.complete(token);
             }
         });
-    drop(blocking);
     match helper {
         Ok(helper) => {
             drop(helper);

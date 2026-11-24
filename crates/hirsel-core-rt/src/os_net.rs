@@ -883,15 +883,18 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                 if let Some(roots) = cache.system.get() {
                     return roots.clone();
                 }
-                let _blocking = crate::units::blocking();
-                cache.system.get_or_init(system_roots).clone()
+                // Loaded off the slot, outside the cell: no unit waits in
+                // `get_or_init` for another's load.
+                let _ = cache.system.set(crate::units::off_slot(system_roots));
+                cache.system.get().unwrap().clone()
             });
-            let stream = {
-                let _blocking = crate::units::blocking();
+            // Building a client configuration can take milliseconds of CPU.
+            let (alpn, cacheable, name) = (std::mem::take(&mut s.alpn), s.cacheable, s.name.take());
+            let stream = crate::units::off_slot(|| {
                 cache
-                    .client_config(roots, std::mem::take(&mut s.alpn), s.cacheable)
-                    .and_then(|config| crate::os_tls::Stream::new(s.name.take().unwrap(), config))
-            };
+                    .client_config(roots, alpn, cacheable)
+                    .and_then(|config| crate::os_tls::Stream::new(name.unwrap(), config))
+            });
             match stream {
                 Ok(stream) => s.stream = Some(stream),
                 Err(outcome) => return tls_finish(tls, key, outcome),

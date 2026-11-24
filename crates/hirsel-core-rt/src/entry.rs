@@ -513,12 +513,10 @@ impl OsProcess {
             }
             if preview_mode {
                 use std::io::Read;
-                let _blocking = crate::units::blocking();
                 let input = std::fs::File::from(duplicate(libc::STDIN_FILENO)?);
                 let mut old = Vec::new();
-                input
-                    .take(n_place.saturating_add(1))
-                    .read_to_end(&mut old)?;
+                let limit = n_place.saturating_add(1);
+                crate::units::off_slot(|| input.take(limit).read_to_end(&mut old))?;
                 if old.len() as u64 > n_place {
                     return Err(io::Error::from_raw_os_error(libc::EFBIG).into());
                 }
@@ -853,7 +851,8 @@ impl OsProcess {
             process.config.state = (&mut *process as *mut Self).cast();
             if let Some(exec) = &process._exec {
                 for line in &exec.lines {
-                    let outcome = crate::os::write_all(input.stderr_fd, line.as_bytes());
+                    let (fd, line) = (input.stderr_fd, line.as_bytes());
+                    let outcome = crate::units::off_slot(|| crate::os::write_all(fd, line));
                     if outcome.error != IoError::OK {
                         return Err(StartupError::Exec(
                             "could not write Exec approval record".into(),
@@ -1280,6 +1279,7 @@ unsafe extern "C" fn describe_output(state: *mut u8, data: *const u8, len: usize
         let Some(out) = &process.describe_out else {
             return false;
         };
-        crate::os::write_all(out.as_raw_fd(), bytes(View { data, len })).error == IoError::OK
+        let (fd, bytes) = (out.as_raw_fd(), bytes(View { data, len }));
+        crate::units::off_slot(|| crate::os::write_all(fd, bytes)).error == IoError::OK
     }
 }

@@ -13,10 +13,6 @@ pub(crate) use std::sync::{
     Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicU64, AtomicUsize},
 };
-#[cfg(not(test))]
-pub(crate) mod thread {
-    pub(crate) use std::thread::{Thread, current, park, park_timeout};
-}
 
 #[cfg(test)]
 pub(crate) use super::check::seam::*;

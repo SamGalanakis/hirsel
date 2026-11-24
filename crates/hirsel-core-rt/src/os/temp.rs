@@ -69,7 +69,7 @@ fn append_temp_suffix(buffer: &mut Buffer, suffix: &[u8]) {
 
 fn temp_entropy() -> io::Result<u128> {
     let mut bytes = [0; 16];
-    super::fill_random_bytes(bytes.as_mut_ptr(), bytes.len())?;
+    super::random::fill(bytes.as_mut_ptr(), bytes.len(), 0)?;
     Ok(u128::from_ne_bytes(bytes))
 }
 

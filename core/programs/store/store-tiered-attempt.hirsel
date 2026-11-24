@@ -201,3 +201,35 @@ fn tiered_plan_prior(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, A
     }
     Ok(tiered_leaf_prior(leaf, key))
 }
+
+fn stage_tiered_row(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], base: std.page.Slot, empty_root: Arc[std.page.Page], key: Bytes, value: ReplayValue, inline: u64, rightmost: bool, private_from: u64, mut next_stamp: u64) -> Result[Arc[std.page.Page], Error] {
+    let mut working = tiered_point_page(mut attempt, visible, base, None)?
+    let mut following_stamp = next_stamp
+    let mut failure: Option[Error] = None
+    let edited: Result[(), std.page.Error] = {
+        let load = scoped fn(ptr: std.page.PagePtr) -> Result[Arc[std.page.Page], std.page.Error] {
+            match tiered_point_page(mut attempt, visible, ColdPage(ptr), None) {
+                Ok(take loaded) => Ok(take loaded),
+                Error(take problem) => {
+                    failure = Some(take problem)
+                    Error(MalformedPage)
+                },
+            }
+        }
+        match value {
+            ReplayPut(raw) => std.page.insert_shared_resolved(mut working, key, raw, inline, private_from, rightmost, mut following_stamp, load),
+            ReplayAbsent => {
+                match std.page.remove_resolved(mut working, key, empty_root, private_from, mut following_stamp, load) {
+                    Ok(_) => Ok(()),
+                    Error(problem) => Error(problem),
+                }
+            },
+        }
+    }
+    if let Some(take problem) = take failure {
+        return Error(take problem)
+    }
+    page_result(take edited)?
+    next_stamp = following_stamp
+    Ok(take working)
+}

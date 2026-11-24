@@ -889,3 +889,42 @@ fn test_l63_resolved_edits_follow_candidate_neighbors() -> Result[(), Error] {
     }
     Ok(())
 }
+
+@test
+fn test_l63_pinned_row_edit_discards_a_missed_candidate() -> Result[(), Error] {
+    let left_leaf = l63_edit_leaf(10, 3, (1000u64, 32u64), 40)?
+    let right_leaf = l63_edit_leaf(20, 1, (32u64, 32u64), 41)?
+    let left = std.page.PagePtr(pack: 8, offset: 72, len: 1116, checksum: 11, stamp: 40)
+    let right = std.page.PagePtr(pack: 8, offset: 1204, len: 71, checksum: 12, stamp: 41)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: left, rows: 3, charge: 1298))))
+    list.push(mut branches, std.page.Entry(key: key_word(20), cell: Child(std.page.Branch(child: right, rows: 1, charge: 110))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let base = page_result(std.page.attach_cold(take image))?
+    let target: std.page.Slot = HotPage(arc.share(base))
+    let empty_root = std.page.empty(0, 0, Collection)
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let first = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(left)), payload: TieredImage(arc.share(left_leaf))))
+    map.insert(mut visible, (8u64, 72u64), take first)
+    let mut attempted = capacity(tiered_touch_set(1379, 3))?
+    let mut ids = 51u64
+    let Error(Missed) = stage_tiered_row(mut attempted, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids) else {
+        fail("L63: editing without a required sibling must latch a miss")
+    }
+    let Some(AttemptMiss(TieredPage(requested))) = attempted.stopped else {
+        fail("L63: missing edit sibling did not become the attempt's demand")
+    }
+    // 160 bytes for the branch and 1,132 and 87 bytes for its leaves.
+    if requested != right || attempted.touched_bytes != 1379 || ids != 51 || std.page.totals(base) != (4u64, 1408u64) {
+        fail("L63: the missed edit changed the base or counted its path incorrectly")
+    }
+    let second = arc.new(TieredFrame(identity: tiered_frame_id(TieredPage(right)), payload: TieredImage(arc.share(right_leaf))))
+    map.insert(mut visible, (8u64, 1204u64), take second)
+    let mut retry = capacity(tiered_touch_set(1379, 3))?
+    let ready = stage_tiered_row(mut retry, visible, target, empty_root, key_word(10), ReplayAbsent, 1024, false, 51, mut ids)?
+    if retry.touched_bytes != 1379 || std.page.lookup(ready, key_word(10)) != None || std.page.totals(ready) != (3u64, 330u64) ||
+        std.page.totals(base) != (4u64, 1408u64) {
+        fail("L63: the retry must apply once and keep its base intact")
+    }
+    Ok(())
+}

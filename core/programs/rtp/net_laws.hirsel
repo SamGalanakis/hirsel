@@ -1,0 +1,363 @@
+// The two sim.udp laws of RTP build slice S10. Each end is a sans-IO state
+// machine driven by its own task over std.sim.udp's virtual network.
+const MS: u64 = 1000000
+
+const MEDIA_SSRC: u32 = 0x11111111
+
+const RTX_SSRC: u32 = 0x22222222
+
+const SOCKET: UdpOptions = UdpOptions(slots: 256, slot_bytes: 1536)
+
+const SENDER: Addr = Addr(ip: V4(0x0a000001), port: 5004)
+
+const RECEIVER: Addr = Addr(ip: V4(0x0a000002), port: 5004)
+
+// Fifty media packets, then two sentinels, one every 20 ms.
+const PACKETS: u64 = 52
+
+const MEDIA: u64 = 50
+
+const END_NS: u64 = 3000000000
+
+fn original(index: u64) -> Bytes {
+    let mut p: Bytes = list.with_capacity(100)
+    let mut j = 0u64
+    while j < 100 {
+        list.push(mut p, int.truncate((index * 7 + j * 13) & 0xff))
+        j += 1
+    }
+    p
+}
+
+fn stamp(index: u64) -> u32 {
+    int.truncate(index * 1800)
+}
+
+fn send_one(mut socket: UdpSocket, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to, at: 0, len: list.len(data), ecn: 0))
+    if result.unwrap(host.udp_send(mut socket, data, tx, Never)) != 1 {
+        fail("sim.udp did not commit the datagram")
+    }
+}
+
+type Queued = Media(u64) | Repair(u64)
+
+type Sender: send {
+    socket: UdpSocket,
+    clock: Clock
+}
+
+// The sender: history, RTX and pacer. It answers how many repairs it sent.
+fn sender(take end: Sender) -> u64 waits {
+    let Sender(socket: take owned, clock) = take end
+    let mut socket = take owned
+    let mut sent: history.History[Bytes] = result.unwrap(history.history(128, 2000 * MS))
+    let mut p: pacer.Pacer[Queued] = result.unwrap(pacer.pacer(256, 2.5, 0, 12))
+    pacer.set_rate(mut p, 4000000, 0)
+    let empty = ext.writer()
+    let mut next = 0u64
+    let mut highest = 0u64
+    let mut rtx_seq = 0u16
+    let mut repairs = 0u64
+    let mut data: Bytes = list.with_capacity(16384)
+    let mut packets: List[UdpPacket] = list.with_capacity(8)
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= END_NS {
+            break
+        }
+        while next < PACKETS && next * 20 * MS <= now {
+            if let Error(_) = pacer.push(mut p, 1, Video, 112, now, Media(next)) {
+                fail("the pacer refused media")
+            }
+            next += 1
+        }
+        let mut wake = END_NS
+        loop {
+            match pacer.poll(mut p, now) {
+                Send(Media(index)) => {
+                    let mut out: Bytes = list.with_capacity(112)
+                    let _ = result.unwrap(header.write(header.Fields(marker: false, pt: 96, seq: int.truncate(index), ts: stamp(index), ssrc: MEDIA_SSRC), view empty, mut out))
+                    let payload = original(index)
+                    for b in payload {
+                        list.push(mut out, b)
+                    }
+                    drop(history.put(mut sent, index, now, take payload))
+                    highest = index
+                    send_one(mut socket, RECEIVER, out)
+                },
+                Send(Repair(index)) => {
+                    let Some(saved) = history.entry(sent, index) else {
+                        fail("a found index without an entry")
+                    }
+                    let mut out: Bytes = list.with_capacity(128)
+                    let _ = result.unwrap(rtx.write(header.Fields(marker: false, pt: 97, seq: rtx_seq, ts: stamp(index), ssrc: RTX_SSRC), view empty, int.truncate(index), b"", saved, 0, list.len(saved), mut out))
+                    rtx_seq += 1
+                    repairs += 1
+                    send_one(mut socket, RECEIVER, out)
+                },
+                Wait(at) => {
+                    wake = order.min(wake, at)
+                    break
+                },
+                Idle => break,
+                _ => fail("the pacer answered a probe or padding"),
+            }
+        }
+        if next < PACKETS {
+            wake = order.min(wake, next * 20 * MS)
+        }
+        match host.udp_recv(mut socket, mut data, mut packets, At(clock, wake)) {
+            Ok(_) => {
+                let at = host.mono_ns(clock)
+                for d in packets {
+                    let UdpPacket(at: start, len: size, ..) = d
+                    let pkt = list.slice(data, start, start + size)
+                    let mut cursor = 0u64
+                    while let Some(rtcp_packet) = result.unwrap(rtcp.next(pkt, mut cursor)) {
+                        let mut entry = 0u64
+                        while let Some((pid, blp)) = result.unwrap(rtcp.nack_next(pkt, rtcp_packet, mut entry)) {
+                            let mut bit = 0u64
+                            while bit <= 16 {
+                                let asked = bit == 0 || ((blp >> int.truncate(bit - 1)) & 1) == 1
+                                if asked {
+                                    let Index(index) = seq.estimate(highest, pid + int.truncate(bit)) else {
+                                        fail("a NACK outside the index domain")
+                                    }
+                                    if let Found(i) = history.get(mut sent, index, at, 50 * MS) {
+                                        if let Error(_) = pacer.push(mut p, 1, Retransmit, 114, at, Repair(i)) {
+                                            fail("the pacer refused a repair")
+                                        }
+                                    }
+                                }
+                                bit += 1
+                            }
+                        }
+                    }
+                }
+            },
+            Error(TimedOut) => (),
+            Error(_) => fail("sender receive"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+    }
+    repairs
+}
+
+type Receiver: send {
+    socket: UdpSocket,
+    clock: Clock,
+    scripted: bool
+}
+
+pub type Log: send {
+    // Arrivals past the link, per index: originals and repairs alike.
+    delivered: List[u8],
+    // How often each index was asked for in a NACK, and when: slots 3k to
+    // 3k + 2 hold index k's first three asks.
+    asked: List[u64],
+    times: List[u64]
+}
+
+// The fixed schedule: media 10, 20, 30 and 49 are lost; the first two repairs
+// of 20 and every repair of 30 are lost.
+fn scripted_loss(repair: bool, index: u64, attempt: u64) -> bool {
+    if !repair {
+        return index == 10 || index == 20 || index == 30 || index == 49
+    }
+    index == 30 || (index == 20 && attempt <= 2)
+}
+
+// The receiver: Losses, and a NACK writer.
+fn receiver(take end: Receiver) -> Log waits {
+    let Receiver(socket: take owned, clock, scripted) = take end
+    let mut socket = take owned
+    let config = loss.NackConfig(window: 128, retry_ns: 100 * MS, tries: 3, max_age_ns: 2000 * MS)
+    // Media 0 is the first index; on a random schedule that loses it, it is
+    // never tracked, which only narrows the coverage.
+    let mut tracked = result.unwrap(loss.losses(config, 0, 0))
+    let mut highest = 0u64
+    let mut delivered: List[u8] = list.with_capacity(PACKETS)
+    list.fill(mut delivered, PACKETS, 0u8)
+    let mut repaired: List[u64] = list.with_capacity(PACKETS)
+    list.fill(mut repaired, PACKETS, 0u64)
+    let mut asked: List[u64] = list.with_capacity(PACKETS)
+    list.fill(mut asked, PACKETS, 0u64)
+    let mut times: List[u64] = list.with_capacity(3 * PACKETS)
+    list.fill(mut times, 3 * PACKETS, 0u64)
+    let mut data: Bytes = list.with_capacity(16384)
+    let mut packets: List[UdpPacket] = list.with_capacity(8)
+    let mut pairs: List[(u16, u16)] = list.with_capacity(64)
+    let mut wake = END_NS
+    loop {
+        let got = host.udp_recv(mut socket, mut data, mut packets, At(clock, wake))
+        let now = host.mono_ns(clock)
+        match got {
+            Ok(_) => {
+                for d in packets {
+                    let UdpPacket(at: start, len: size, ..) = d
+                    let pkt = list.slice(data, start, start + size)
+                    let h = result.unwrap(header.parse(pkt))
+                    let (repair, wire, from) = if h.ssrc == RTX_SSRC {
+                        let Repair(osn, at) = result.unwrap(rtx.unwrap(h, pkt)) else {
+                            fail("a probe on the repair stream")
+                        }
+                        (true, osn, at)
+                    } else {
+                        (false, h.seq, h.end)
+                    }
+                    let Index(index) = seq.estimate(highest, wire) else {
+                        fail("an arrival outside the index domain")
+                    }
+                    if index >= PACKETS {
+                        fail("an index the sender never sent")
+                    }
+                    if repair {
+                        repaired[index] += 1
+                    }
+                    if scripted && scripted_loss(repair, index, repaired[index]) {
+                        continue
+                    }
+                    if h.ts != stamp(index) || list.compare_bytes(list.slice(pkt, from, list.len(pkt)), original(index)) != Equal {
+                        fail("a packet whose timestamp or payload differs from the original's")
+                    }
+                    delivered[index] += 1
+                    let _ = loss.on_packet(mut tracked, index, now)
+                    if index > highest {
+                        highest = index
+                    }
+                }
+            },
+            Error(TimedOut) => (),
+            Error(_) => fail("receiver receive"),
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+        if now >= END_NS {
+            break
+        }
+        wake = END_NS
+        match loss.due(mut tracked, now, None, 64, mut pairs) {
+            Done(Some(t)) => {
+                wake = order.min(t, END_NS)
+            },
+            Done(None) => (),
+            More => fail("more than 64 NACK pairs due at once"),
+        }
+        if list.len(pairs) != 0 {
+            for (pid, blp) in pairs {
+                let mut bit = 0u64
+                while bit <= 16 {
+                    if bit == 0 || ((blp >> int.truncate(bit - 1)) & 1) == 1 {
+                        let Index(index) = seq.estimate(highest, pid + int.truncate(bit)) else {
+                            fail("a NACK outside the index domain")
+                        }
+                        if delivered[index] != 0 {
+                            fail("a NACK for an index the receiver holds")
+                        }
+                        if asked[index] == 3 {
+                            fail("an index asked for more than tries times")
+                        }
+                        times[3 * index + asked[index]] = now
+                        asked[index] += 1
+                    }
+                    bit += 1
+                }
+            }
+            let mut out: Bytes = list.with_capacity(12 + 4 * list.len(pairs))
+            let _ = result.unwrap(rtcp.write_nack(0x33333333, MEDIA_SSRC, view pairs, mut out))
+            send_one(mut socket, SENDER, out)
+            list.clear(mut pairs)
+        }
+    }
+    Log(delivered, asked, times)
+}
+
+fn run(tasks: Tasks, config: std.sim.udp.Config, seed: u64, scripted: bool) -> (u64, Log) waits {
+    let (network, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(seed, 0, 0)
+    let server = std.sim.udp.Server(config, plan: std.sim.world.plan(seed), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take server, std.sim.udp.serve)
+    let (take send_socket, _) = result.unwrap(host.udp_bind(network, SENDER, SOCKET))
+    let (take receive_socket, _) = result.unwrap(host.udp_bind(network, RECEIVER, SOCKET))
+    let sending = task.spawn(tasks, bytes 4194304, Sender(socket: take send_socket, clock), sender)
+    let receiving = task.spawn(tasks, bytes 4194304, Receiver(socket: take receive_socket, clock, scripted), receiver)
+    let repairs = result.unwrap(task.join(take sending))
+    let log = result.unwrap(task.join(take receiving))
+    result.unwrap(task.join(take served))
+    (repairs, log)
+}
+
+fn link(loss_ppm: u64) -> std.sim.udp.Config {
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 40 * MS
+    config.loss = std.sim.udp.Loss(good_to_bad: 0, bad_to_good: 0, good_loss: loss_ppm, bad_loss: 0)
+    config
+}
+
+// The asks the schedule implies for index k, in ms: count, then the times.
+fn schedule_asks(k: u64) -> (u64, u64, u64, u64) {
+    match k {
+        10 => (1, 260, 0, 0),
+        20 => (3, 460, 560, 660),
+        30 => (3, 660, 760, 860),
+        49 => (1, 1040, 0, 0),
+        _ => (0, 0, 0, 0),
+    }
+}
+
+fn asked_as_scheduled(log: Log, k: u64) -> bool {
+    let (count, first, second, third) = schedule_asks(k)
+    if log.asked[k] != count {
+        return false
+    }
+    let at = 3 * k
+    (count < 1 || log.times[at] == first * MS) && (count < 2 || log.times[at + 1] == second * MS) && (count < 3 || log.times[at + 2] == third * MS)
+}
+
+/// bug: Leave a gap unrepaired (no NACK, a repair never sent, a lost repair never retried), ask again before retry_ns or past tries, ask for an index already held, repair with a different OSN, timestamp or payload, or miss a last packet a later one reveals.
+/// oracle: The fixed schedule, by hand. Packet k leaves at 20k ms and arrives 40 ms later; a NACK and its repair take 40 ms each way. 10 is revealed by 11 at 260 and asked once (repair at 340). 20 is revealed by 21 at 460 and asked at 460, 560 and 660 (retry_ns 100 ms); its third repair arrives at 740. 30 is revealed by 31 at 660, asked at 660, 760 and 860, and dropped after tries 3. 49 is revealed by sentinel 50 at 1040 and asked once. Eight repairs are sent, every index but 30 arrives exactly once, and nothing else is asked for.
+@test
+fn nack_recovery_under_loss(tasks: Tasks) -> Result[(), ()] waits {
+    let (repairs, log) = run(tasks, link(0), 2477, true)
+    let mut k = 0u64
+    while k < PACKETS {
+        let expected = if k == 30 {
+            0u8
+        } else {
+            1u8
+        }
+        if log.delivered[k] != expected {
+            fail("an index arrived other than the schedule implies")
+        }
+        if !asked_as_scheduled(log, k) {
+            fail("an index was asked for other than the schedule implies")
+        }
+        k += 1
+    }
+    if repairs != 8 {
+        fail("the sender sent other than eight repairs")
+    }
+    // Simulation coverage: 10% loss each way, checked only against RTP-6's
+    // laws (never ask for an index held, at most tries asks, retry_ns apart)
+    // and RTP-7's (every repair is the original), which the ends enforce.
+    let mut seed = 1u64
+    while seed <= 8 {
+        let (_, random) = run(tasks, link(100000), seed, false)
+        let mut i = 0u64
+        while i < MEDIA {
+            let mut j = 1u64
+            while j < random.asked[i] {
+                if random.times[3 * i + j] - random.times[3 * i + j - 1] < 100 * MS {
+                    fail("an index asked again inside retry_ns")
+                }
+                j += 1
+            }
+            i += 1
+        }
+        seed += 1
+    }
+    Ok(())
+}

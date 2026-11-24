@@ -19,3 +19,4 @@ rtp@1/laws/rtt_example src=7c736fe2ecae2633 sig=de43867c0ec271a0 run=c2c0c6612d4
 rtp@1/laws/rtx_layout src=2753acd8891c5855 sig=77dcecb87a599c53 run=c2c0c6612d4cbb79 bug=44e8570fff41092e oracle=0d977c675171d549 rows=pending
 rtp@1/laws/twcc_chunks src=45ecbd1b76160ff4 sig=db6ee15d01472ece run=c2c0c6612d4cbb79 bug=1a61c5072fb2babb oracle=e747f10f97c62930 rows=pending
 rtp@1/laws/twcc_report_bytes src=b93a137d82151607 sig=bde427aec23ea97e run=c2c0c6612d4cbb79 bug=7ad8cd5ac94e9d69 oracle=31c9563c2e41242b rows=pending
+rtp@1/net/nack_recovery_under_loss src=d84136faf490b0f5 sig=29f6a3aac2944d25 run=c7b2a52baff70a63 bug=3f81871bad776d65 oracle=b9967398ff74d81c rows=pending

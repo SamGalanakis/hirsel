@@ -9,6 +9,7 @@ std = { major = 1 }
 [sources]
 "aac.hirsel" = "aac"
 "av1.hirsel" = "av1"
+"codec.hirsel" = "codec"
 "dependency.hirsel" = "dependency"
 "h264.hirsel" = "h264"
 "hevc.hirsel" = "hevc"

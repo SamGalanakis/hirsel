@@ -5,6 +5,7 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
+media_bits = { major = 1, path = "../media_bits" }
 media_container = { major = 1, path = "../media_container" }
 
 [sources]

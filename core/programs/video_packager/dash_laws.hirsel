@@ -12,7 +12,7 @@ fn dash_segment_timeline() -> Result[(), ()] {
     let mut ladder: List[packager.Rendition] = list.with_capacity(3)
     list.push(mut ladder, take first)
     list.push(mut ladder, take second)
-    list.push(mut ladder, packager.Rendition(id: 3, track: track, codec: string.from("mp4a.40.2"), segments: take audio))
+    list.push(mut ladder, result.unwrap(packager.rendition(3, track, Mp4a(0x40, b"\x11\x90"), take audio)))
     let xml = result.unwrap(packager.dash_manifest(ladder, packager.ManifestLimit(octets: 16384, steps: 20000)))
     let expected: Inline[String, 6] =[
         string.from("mediaPresentationDuration=\"PT3.000000000S\""),

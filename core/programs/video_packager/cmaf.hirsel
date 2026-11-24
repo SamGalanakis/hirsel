@@ -31,6 +31,14 @@ pub type Rendition {
     segments: List[Segment]
 }
 
+/// Derives the manifest codec token from the same configuration as the sample entry.
+pub fn rendition(id: u32, track: media_container.mp4.Track, config: media_bits.codec.Config, take segments: List[Segment]) -> Result[Rendition, Error] {
+    match media_bits.codec.codec_string(config) {
+        Ok(take codec) => Ok(Rendition(id: id, track: track, codec: take codec, segments: take segments)),
+        Error(_) => Error(InvalidLadder),
+    }
+}
+
 pub fn write_init(mut out: Bytes, track: media_container.mp4.Track, entry: Bytes, encryption: Encryption) -> Result[(), Error] {
     match encryption {
         Clear => container(media_container.mp4.write_init(mut out, track, entry)),

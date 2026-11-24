@@ -17,11 +17,26 @@ fn fixture(mut out: Bytes, id: u32, scale: u32, w: u16) -> packager.Rendition {
     let mut segments: List[packager.Segment] = list.with_capacity(2)
     list.push(mut segments, first)
     list.push(mut segments, second)
-    packager.Rendition(id: id, track: track, codec: string.from("avc1.42c01e"), segments: take segments)
+    result.unwrap(packager.rendition(id, track, Avc1(b"\x01\x42\xc0\x1e\xff\xe0\x00"), take segments))
+}
+
+fn check_codec_strings() {
+    // 14496-15 AVC writes the three profile, compatibility and level octets.
+    let high = result.unwrap(media_bits.codec.codec_string(Avc1(b"\x01\x64\x00\x28\xff\xe0\x00")))
+    // HEVC Main: profile 1, flags 1 and 2, main tier, level 3.1, constraint B0.
+    let main = result.unwrap(media_bits.codec.codec_string(Hvc1(b"\x01\x01\x60\x00\x00\x00\xb0\x00\x00\x00\x00\x00\x5d\xf0\x00\xfc\xfd\xf8\xf8\x00\x00\x0f\x00")))
+    // AV1 ISOBMFF §5: profile 0, level index 0, main tier, 8-bit.
+    let av1 = result.unwrap(media_bits.codec.codec_string(Av01(b"\x81\x00\x0c\x00")))
+    // RFC 6381: MPEG-4 Audio 0x40, AAC-LC Audio Object Type 2.
+    let aac = result.unwrap(media_bits.codec.codec_string(Mp4a(0x40, b"\x11\x90")))
+    if high != "avc1.640028" || main != "hvc1.1.6.L93.B0" || av1 != "av01.0.00M.08" || aac != "mp4a.40.2" {
+        fail("codec strings differ from RFC 6381 and codec configuration fields")
+    }
 }
 
 @test
 fn hls_cmaf() -> Result[(), ()] {
+    check_codec_strings()
     let mut prefix: Bytes = list.with_capacity(128)
     let first = fixture(mut prefix, 1, 1000, 160)
     let second = fixture(mut prefix, 2, 90000, 320)

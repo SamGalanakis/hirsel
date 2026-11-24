@@ -98,6 +98,22 @@ fn read_object_type(input: Bytes, mut at: u64) -> Result[u8, Error] {
     Ok(int.narrow(first))
 }
 
+// RFC 6381 uses the first signaled Audio Object Type for MPEG-4 audio.
+pub fn codec_string(indication: u8, asc: Bytes) -> Result[String, Error] {
+    if indication != 0x40 && (indication < 0x66 || indication > 0x68) {
+        return Error(Unsupported)
+    }
+    let mut out = string.from("mp4a.")
+    string.push_uint(mut out, int.widen(indication), 16, 2, '0')
+    if indication == 0x40 {
+        let mut at = 0u64
+        let kind = read_object_type(asc, mut at)?
+        string.push_char(mut out, '.')
+        string.push_u64(mut out, int.widen(kind))
+    }
+    Ok(take out)
+}
+
 fn frequency(input: Bytes, mut at: u64) -> Result[u32, Error] {
     let index: u8 = int.narrow(bits(input, mut at, 4)?)
     if index == 15 {

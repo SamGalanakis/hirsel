@@ -1,6 +1,6 @@
 pub type Error = Container(media_container.mp4.Error) | InvalidSegment | InvalidLadder | UnsupportedEncryption | BudgetExceeded
 
-// These modes reserve the sample-encryption entry point for TLS-8 PacketCipher.
+// These modes reserve the sample-encryption entry point; TLS-8 defines no sample cipher yet.
 pub type Encryption = Clear | Cbcs | Cenc
 
 pub type SegmentLimit {

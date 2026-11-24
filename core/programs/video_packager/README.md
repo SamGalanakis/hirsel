@@ -22,7 +22,7 @@ The segment limits bound payload size and the number of samples inspected.
 The caller owns the framing buffer. Manifest limits reserve storage and
 bound work. Exhausting storage inside a manifest call raises Hirsel's
 `Capacity` failure. The encryption mode reserves the CBCS/CENC entry
-point for TLS-8's `PacketCipher`. Both encryption modes refuse until
+point for a sample cipher, which TLS-8 does not yet define. Both encryption modes refuse until
 that implementation is available.
 
 Call `dash_manifest` for `manifest.mpd`. The MPD uses the same init and

@@ -433,3 +433,115 @@ fn test_reserve_latches(c: Clock) -> Result[(), ()] waits {
         Error(())
     }
 }
+
+// G1: a refused run leaves the version and rows unchanged. Readmission
+// of the same position finds the original admit, with no saved reply.
+fn refused_reply(mut db: Db, oversized: bool) -> bool waits {
+    let admitted = version(snapshot(db)) + 1
+    // Creating the durable table advances its branch version by a cut.
+    let admit_sequence = if oversized { db.frame_seq + 1 } else { 1u64 }
+    let stream = string.as_bytes("s")
+    let digest = digest_for("request")
+    match result.unwrap(admit(mut db, stream, 0, digest)) {
+        Admitted(t) => {
+            if !mark_is(ticket(t), admit_sequence) {
+                return false
+            }
+            result.unwrap(durable(mut db, ticket(t)))
+        },
+        _ => return false
+    }
+    let attempted = result.unwrap(run(mut db, None, (copy_env(oversized), copy_env(stream)), fn(mut tx, call_env) -> Result[(), Error] {
+        if call_env.0 {
+            // §2.4 and §13.1: 26 + 16*25 + 15*1048576 + 1048086
+            // leaves 128 bytes in the payload for the streams and CALL sections.
+            for k in 1u64 .. 17 {
+                let size = if k == 16 {
+                    1048086u64
+                } else {
+                    1048576u64
+                }
+                let mut v: Bytes = list.with_capacity(size)
+                list.fill(mut v, size, 0u8)
+                if let Error(_) = put_bytes(mut tx, 1, key_word(k), v) {
+                    fail("fixture data exhausted the frame before staging a reply")
+                }
+            }
+        } else {
+            put_bytes(mut tx, 1, key_word(1), key_word(10))?
+        }
+        let mut call = call_for(call_env.1, if call_env.0 {
+            32u64
+        } else {
+            31u64
+        })
+        if call_env.0 {
+            list.fill(mut call.args, 1024, 0u8)
+        }
+        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, take call)
+    }))
+    match take attempted {
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => if !oversized {
+            return false
+        },
+        Aborted(Undone(value: Missing(what), ticket: None)) => if oversized || what != "revision" {
+            return false
+        },
+        _ => return false
+    }
+    let head = snapshot(db)
+    if version(head) != admitted {
+        return false
+    }
+    if let Some(_) = result.unwrap(get_raw(head, 1, key_word(1))) {
+        return false
+    }
+    match result.unwrap(admit(mut db, stream, 0, digest)) {
+        Abandoned(t) => if !mark_is(ticket(t), admit_sequence) {
+            return false
+        },
+        _ => return false
+    }
+    if !oversized {
+        return true
+    }
+    // A runner refusal also discards an already staged reply and CALL.
+    let rejected = result.unwrap(run_with_reply(mut db, None, fn(_error: Error) -> bool {
+        false
+    }, stream, fn(mut tx, call_env) -> Result[(), Error] {
+        reply_recorded(mut tx, 0, copied(string.as_bytes("success"))?, call_for(call_env, 32))?
+        Error(Limit(Transaction))
+    }))
+    match take rejected {
+        Aborted(Undone(value: Limit(Transaction), ticket: None)) => {},
+        _ => return false
+    }
+    if version(snapshot(db)) != admitted {
+        return false
+    }
+    match result.unwrap(admit(mut db, stream, 0, digest)) {
+        Abandoned(t) => mark_is(ticket(t), admit_sequence),
+        _ => false
+    }
+}
+
+pub fn law_refused_reply(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    let mut journal = result.unwrap(open(tasks, disk_test_directory(d), c, r, options))
+    result.unwrap(create_table(mut journal, spec("rows", std.codec.key_u64(), std.codec.of_bytes())))
+    let frame = refused_reply(mut journal, true)
+    result.unwrap(close(take journal))
+    let mut in_memory = raw_test_db(c, 1073741824)
+    let revision = refused_reply(mut in_memory, false)
+    frame && revision
+}
+
+@test
+fn test_refused_reply(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    if law_refused_reply(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

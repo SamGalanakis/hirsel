@@ -8,9 +8,14 @@ type ReadAccess {
     check: fn(StoreId, u64, Snapshot) -> Result[(), Error] waits
 }
 
+type ReaderPool: send {
+    requests: Sender[TieredPagerMessage],
+    grant: Arc[TieredReaderGrant]
+}
+
 pub opaque resource type Reader: send {
     access: ReadAccess,
-    grant: Option[Arc[TieredReaderGrant]]
+    pool: Option[ReaderPool]
 } drop(owned_reader) {}
 
 fn hot_read_access(id: StoreId, opened: u64, captured: Snapshot) -> Result[(), Error] {
@@ -20,20 +25,23 @@ fn hot_read_access(id: StoreId, opened: u64, captured: Snapshot) -> Result[(), E
     Ok(())
 }
 
-fn make_reader(id: StoreId, opened: u64, take grant: Option[Arc[TieredReaderGrant]]) -> Result[Reader, Error] {
+fn make_reader(id: StoreId, opened: u64, take pool: Option[ReaderPool]) -> Result[Reader, Error] {
     let access = ReadAccess(store: id, opened: opened, check: hot_read_access)
-    match Reader(access: access, grant: take grant) {
+    match Reader(access: access, pool: take pool) {
         Ok(take opened_reader) => Ok(take opened_reader),
         Error((problem, _)) => Error(Full(Allocation(problem))),
     }
 }
 
 fn open_reader(id: StoreId, opened: u64, pager: Option[Sender[TieredPagerMessage]], pin_bytes: u64) -> Result[Reader, Error] waits {
-    let grant: Option[Arc[TieredReaderGrant]] = match pager {
-        Some(requests) => Some(pager_reader_grant(requests, pin_bytes)?),
+    let pool: Option[ReaderPool] = match pager {
+        Some(requests) => {
+            let grant = pager_reader_grant(requests, pin_bytes)?
+            Some(ReaderPool(requests: channel.sender(requests), grant: take grant))
+        },
         None => None,
     }
-    make_reader(id, opened, take grant)
+    make_reader(id, opened, take pool)
 }
 
 pub fn reader(db: Db, pin_bytes: u64) -> Result[Reader, Error] waits {
@@ -122,16 +130,39 @@ fn table_rows[K, V](s: Snapshot, t: Table[K, V], take cursor: PageRange) -> Page
     PageRows(cursor: take cursor, data: share_page_tree(s.roots.collections), decoder: table_decoder(t))
 }
 
+fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[view] fn(Option[View[Bytes]]) -> Result[R, Error]) -> Result[R, Error] waits {
+    let tree = view s.roots.collections
+    if let Some(inventory) = view tree.paging {
+        if let Some((_, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) {
+            if descriptor[53u64] == 1 {
+                let Some(pool) = view r.pool else {
+                    return Error(Io(Closed))
+                }
+                let source = TieredPageSource(pager: channel.sender(pool.requests), packs: std.omap.snapshot(inventory.packs), next_stamp: s.watermark, deadline: 0)
+                let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: inventory.generation, root_stamp: tree_stamp(tree))
+                let stored = read_tiered_point(source, pool.grant, root, tree, logical, inventory.touch_slots)?
+                return match stored {
+                    Some(raw) => decode_row(Some(view raw)),
+                    None => decode_row(None),
+                }
+            }
+        }
+    }
+    decode_row(get_page_row(tree, logical))
+}
+
 pub fn get[K, V](r: Reader, s: Snapshot, t: Table[K, V], k: K) -> Result[Option[V], Error] waits {
     read_access(r, s)?
     if !same(s.store, t.store) { return Error(Foreign) }
     readable(s.roots, t.catalog_key, t.catalog_page, t.id)?
     let mut key = prefixed(t.id, 8, false)?
     std.codec.encode_key(t.key, k, mut key)
-    match get_page_row(s.roots.collections, key) {
-        Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
-        None => Ok(None),
-    }
+    snapshot_point(r, s, key, scoped fn(stored: Option[View[Bytes]]) -> Result[Option[V], Error] {
+        match stored {
+            Some(raw) => Ok(Some(row_value(t.readers, t.id, raw)?)),
+            None => Ok(None),
+        }
+    })
 }
 
 pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[u64, Error] waits {

@@ -155,7 +155,9 @@ pub fn log_get[V](r: Reader, s: Snapshot, l: Log[V], seq: u64) -> Result[Option[
     read_access(r, s)?
     readable_value(s.store, s.roots, l.binding)?
     let key = log_key(l.binding.id, seq)?
-    decode_log_row(l, get_page_row(s.roots.collections, key))
+    snapshot_point(r, s, key, scoped fn(raw: Option[View[Bytes]]) -> Result[Option[V], Error] {
+        decode_log_row(l, raw)
+    })
 }
 
 pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)], Error] waits {
@@ -165,7 +167,9 @@ pub fn log_last[V](r: Reader, s: Snapshot, l: Log[V]) -> Result[Option[(u64, V)]
     }
     let seq = current.next - 1
     let key = log_key(l.binding.id, seq)?
-    decode_log_last(l, seq, get_page_row(s.roots.collections, key))
+    snapshot_point(r, s, key, scoped fn(raw: Option[View[Bytes]]) -> Result[Option[(u64, V)], Error] {
+        decode_log_last(l, seq, raw)
+    })
 }
 
 fn log_decoder[V](l: Log[V]) -> RowDecoder[u64, V] {

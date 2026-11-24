@@ -1,16 +1,16 @@
 hirsel.laws 1
 runner@1/runner/journal_test_trigger_cancel src=dc962b7f72e01a31 sig=551d34b2d3f44f0a run=ea720f3846592392 bug=- oracle=- rows=-
 runner@1/runner/journal_test_trigger_granted src=f4ee2318009cc581 sig=d0239af957d4f364 run=ea720f3846592392 bug=- oracle=- rows=-
-runner@1/runner/journal_test_trigger_snapshot src=f909996c1c05fad5 sig=ef713d8d75558571 run=ea720f3846592392 bug=- oracle=- rows=-
+runner@1/runner/journal_test_trigger_snapshot src=f909996c1c05fad5 sig=c87f1eebc854e902 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/journal_test_trigger_transact src=b833e179fdb5cc89 sig=5d8de2463ca71609 run=ea720f3846592392 bug=- oracle=- rows=pending
-runner@1/runner/law_trigger_model src=01f9118d6764183d sig=d1cf6dec38ab6057 run=4e2c39d888a20f27 bug=- oracle=- rows=pending
+runner@1/runner/law_trigger_model src=01f9118d6764183d sig=eb5a92c94cf5fb12 run=4e2c39d888a20f27 bug=- oracle=- rows=pending
 runner@1/runner/operate_derived_budgets src=5dd664dd95bfc71f sig=9fcab3daa83b4c3d run=ad4c20fab40b1abf bug=- oracle=- rows=-
 runner@1/runner/test_after_publication src=f22fa0f63cfc612e sig=0bf8fe84f762fe65 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_bounced_ended_ages src=53d1bf7f407f9924 sig=26bba0d90725aba9 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_declaration_open src=d8ba61fca3fc6c7a sig=1c7e6d8f7635f9b2 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_dropped_keeps_outcomes src=26a40fbcd8b43c2c sig=9eac338f5b98dd64 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_durable_wire_admission src=1c54297b1885898f sig=5ab58dccba7d343c run=dbf6722727633166 bug=- oracle=- rows=pending
-runner@1/runner/test_global_fence_barrier_failed_reads src=489ba3ffff353168 sig=81ff0fd73ba1e740 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+runner@1/runner/test_global_fence_barrier_failed_reads src=489ba3ffff353168 sig=15715fbed6109b28 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_join_waits src=fc049bf9f27b311e sig=f9d348004e902c7d run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_named_slots src=f67459ea41151fa7 sig=a1a82dd02d685aff run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_pool_releases_cancelled_reader src=ef0509ace0d6f695 sig=9499d0453f8bf733 run=9db96dd71cd83a70 bug=- oracle=- rows=pending

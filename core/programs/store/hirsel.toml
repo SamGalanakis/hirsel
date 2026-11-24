@@ -101,6 +101,7 @@ dirs = ["."]
 "tiered_laws.hirsel" = "store"
 "tiered_read_laws.hirsel" = "store"
 "tiered_plan_laws.hirsel" = "store"
+"tiered_snapshot_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format4_laws.hirsel" = "store"

@@ -162,9 +162,10 @@ fn l62_reader_grants(db: Db) -> Result[(), Error] waits {
     }
     {
         let held = reader(db, 32 * 1048576)?
-        let Some(grant) = view held.grant else {
+        let Some(pool) = view held.pool else {
             fail("L62: Reader must own its reservation")
         }
+        let grant = view pool.grant
         if !same(grant.store, db.store) || grant.opened != open_number(db) || grant.pin_bytes != 32 * 1048576 {
             fail("L62: grant does not belong to this open")
         }
@@ -191,7 +192,7 @@ fn test_l62_reader_reservation(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Err
     let mut db = test_db(c, 2147483648)
     {
         let memory_reader = reader(db, 0)?
-        if let Some(_) = view memory_reader.grant {
+        if let Some(_) = view memory_reader.pool {
             fail("L62: a Memory open reserved shared bytes")
         }
     }

@@ -1,0 +1,65 @@
+fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, table_id: u32) -> Result[(), Error] waits {
+    let id = prefix(table_id)?
+    let mut tree = share_page_tree(db.heads[0u64].roots.collections)
+    let (take raw, inventory, place, take leaf, take descriptor) = {
+        let Some((here, _)) = std.page.collection_entry(tree.root, id) else {
+            fail("L62: fixture has no collection")
+        }
+        let image = std.page.image_of(here)
+        let mut draft = begin_tiered_pack(db.store, 8, 3, 4096)?
+        let frame = PackFrame(stamp: std.page.stamp(image), size: std.page.sealed_size(image), body: PageBody(arc.share(here)))
+        let first_key = log_key(table_id, 1)?
+        let Some(place) = add_tiered_pack_frame(mut draft, frame, table_id, first_key, scoped fn(stamp: u64) -> std.page.PagePtr {
+            fail("L62: the fixture leaf has no owning edge")
+        })? else {
+            fail("L62: fixture PAGE did not fit")
+        }
+        let (take raw, inventory) = finish_tiered_pack(take draft)?
+        (take raw, inventory, place, arc.share(here), rooted_collection_record(here, 1, 1)?)
+    }
+    disk_write_synced(d, paged_pack_path(8)?, raw)?
+    let mut draw = stamp_after(db.next_node)?
+    let first = draw
+    page_result(std.page.insert(mut tree.root, id, descriptor, Some(take leaf), tree.inline, first, mut draw))?
+    page_result(std.page.install_tiered_root(mut tree.root, id, ColdPage(place), mut draw))?
+    let mut ids = 0u64
+    let initial: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take packs, _) = std.omap.insert(mut ids, initial, 8u64, TieredPagerPack(inventory: inventory, object: None))
+    tree.paging = Some(arc.new(TieredReadInventory(packs: take packs, generation: 1, touch_slots: 4)))
+    db.heads[0u64].roots.collections = take tree
+    db.next_node = draw - 1
+    Ok(())
+}
+
+fn l62_snapshot_point_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    if get(read_handle, s, rows_handle, 1u64)? != Some(42u32) ||
+        get(read_handle, s, rows_handle, 1u64)? != Some(42u32) ||
+        get(read_handle, s, rows_handle, 2u64)? != None {
+        fail("L62: Reader value changed across cold, warm, and absent point lookups")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_get_uses_tiered_pager(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let mut db = test_db(c, 2147483648)
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
+    let rows_handle = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u32())?
+    let Committed(_) = run(mut db, None, copy_env(rows_handle), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+        put(mut tx, handle, 1u64, 42u32)
+    })? else {
+        fail("L62: fixture insert did not commit")
+    }
+    let table_id = rows_handle.id
+    l62_prepare_snapshot_pages(mut db, fixtures, table_id)?
+    let funding = TieredPagerFunding(cache_bytes: 32 * 1048576, writer_pin_bytes: 0, pager_task_bytes: 1048576)
+    let (take requests, take worker) = start_tiered_pager(tasks, db.store, open_number(db), PagerDirectory(fixtures), funding, 4)?
+    db.pager = Some(take requests)
+    let answered = l62_snapshot_point_reads(db, rows_handle)
+    db.pager = None
+    let _ = result.unwrap(task.join(take worker))
+    answered
+}

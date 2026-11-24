@@ -598,3 +598,96 @@ fn claim_liveness_before_digest() -> Result[(), Error] waits {
     }
     Ok(())
 }
+
+fn claim_reserve_run(mut db: Db, rows: Table[u64, Bytes], take completion: Completion, width: u64) -> Result[Served, ServeError] waits {
+    let plan = Plan(n_e: 33554432, s_e: 50000000, reply_max: 64)
+    let no_stream_record: Option[CallRecord] = None
+    serve(mut db, take completion, plan, take no_stream_record, (copy_env(rows), width),
+        fn(mut tx: Tx, input: (Table[u64, Bytes], u64)) -> Result[Bytes, Bytes] {
+            // Rows of at most 64 KiB from key 1000, input.1 value bytes in all.
+            let mut left = input.1
+            let mut slot = 1000u64
+            while left > 0 {
+                let chunk = order.min(left, 65536)
+                let mut data: Bytes = list.with_capacity(chunk)
+                list.fill(mut data, chunk, 9u8)
+                result.unwrap(put(mut tx, input.0, slot, data))
+                left -= chunk
+                slot += 1
+            }
+            Ok(b"done")
+        })
+}
+
+// Fill application rows until each width is refused, so free resident room
+// outside the keyed credit is under the last width.
+fn claim_reserve_fill(mut db: Db, rows: Table[u64, Bytes], c: Clock) -> Result[(), Error] waits {
+    let keep: Option[fn(Error) -> bool] = None
+    let widths: Inline[u64, 4] = [1048576u64, 65536u64, 4096u64, 256u64]
+    let mut slot = 1u64
+    for band in 0u64 .. 4u64 {
+        let width = widths[band]
+        let mut room = true
+        while room {
+            let prepared = append_transaction_at(mut db, 0, host.wall_ms(c), None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
+                let mut data: Bytes = list.with_capacity(width)
+                list.fill(mut data, width, 7u8)
+                put(mut tx, rows, slot, data)
+            })?
+            match take prepared {
+                Committed(_) => { slot += 1 },
+                Refused(_) => { room = false },
+                Aborted(Undone(value: take why, ..)) => return Error(take why),
+                _ => fail("unexpected fill outcome"),
+            }
+        }
+    }
+    Ok(())
+}
+
+// L20t (http.md H9, K-7): each Admitted claim's terminal reserve is its own.
+// At resident_limit with a pin retaining old roots, a success that would
+// spend another claim's reserve is refused and commits nothing; a success
+// within its own reserve commits and releases only its own; the other
+// claim's control-only reply still commits.
+@test
+fn claim_terminal_reserve_is_per_claim(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 41943040)
+    let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_bytes()))?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let digest = request_digest(b"charge", b"args")
+    let policy = claim_law_policy()
+    let Accepted(take first) = admit_claim(mut db, claim_law_key(b"one"), digest, b"args", Some(clone(policy)))? else { fail("first admission") }
+    let Accepted(take second) = admit_claim(mut db, claim_law_key(b"two"), digest, b"args", Some(clone(policy)))? else { fail("second admission") }
+    let hand_frame: u64 = 37 + 5 + (10 + 387 + 41 + 8192) + (10 + 460) + (10 + 526) + (6 + 387) + 198
+    // A 40 MiB ceiling: floor(41943040 / 70) + 1 = 599187 rows, 20 halvings
+    // to one, so a keyed page height of 21.
+    let hand_resident: u64 = 526 + 590 + hand_frame + 4 * (6 * 21 + 2) * 32768
+    if db.keyed_credit.resident != 2 * hand_resident || db.keyed_credit.journal != 2 * hand_frame {
+        fail("two admissions did not hold two hand-counted reserves")
+    }
+    let held = snapshot(db)
+    let _ = pin(mut db, "old", held)?
+    claim_reserve_fill(mut db, rows, c)?
+    let call = KeyedCallRecord(entry: b"charge", args: b"args", revision: None, code: b"0123456789abcdef")
+    // Larger than the first claim's whole reserve, smaller than both.
+    let pending = match claim_reserve_run(mut db, rows, keyed_completion(take first, clone(call)), hand_resident + 65536) {
+        Ok(NoRoom(take pending, Resident(_))) => take pending,
+        Ok(Committed(_)) => fail("a success spent the second claim's reserve"),
+        _ => fail("the oversized success was not refused for resident room"),
+    }
+    if get(reader(db, 0u64)?, snapshot(db), rows, 1000u64)? != None || db.keyed_credit.resident != 2 * hand_resident {
+        fail("a refused success committed or released a reserve")
+    }
+    let Pending(completion: take again, ..) = take pending
+    match claim_reserve_run(mut db, rows, take again, 65536) {
+        Ok(Committed(_)) => (),
+        _ => fail("a success within its own reserve did not commit"),
+    }
+    if db.keyed_credit.resident != hand_resident || db.keyed_credit.journal != hand_frame {
+        fail("the first success released more or less than its own reserve")
+    }
+    let _ = conclude_claim(mut db, take second, b"done")?
+    if db.keyed_credit.resident != 0 || db.keyed_credit.journal != 0 { fail("the control-only reply left a reserve") }
+    Ok(())
+}

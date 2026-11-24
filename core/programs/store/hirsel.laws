@@ -53,6 +53,7 @@ store@1/store/claim_reclaims_expired_front src=a5ca87b222d5bc50 sig=1fece35513f3
 store@1/store/claim_roots_survive_checkpoint src=4c621bf112f0c051 sig=da04462405b9e2a6 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/claim_served_body_and_record_reopen src=bed0377bff593c27 sig=b207a7bf9754c61b run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/claim_terminal_credit_survives_reopen src=7fa8354590ea877f sig=abf78576448cc63c run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/claim_terminal_reserve_is_per_claim src=112ab499a5732e66 sig=8501a756f6c3e6f8 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/directory_grant_covers_journal_worker src=7b7a67d7a1078af0 sig=aefc94aee727d903 run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/disk_pack_bound src=3031abe6e70c903a sig=11e7541f2b72e0c6 run=aa75ab2775f5e821 bug=- oracle=- rows=pending
 store@1/store/disk_test_blob_threshold src=1603be365862436f sig=855aafc2855e6e51 run=ea720f3846592392 bug=- oracle=- rows=pending

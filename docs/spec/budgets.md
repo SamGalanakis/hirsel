@@ -375,7 +375,9 @@ is core's plain record `{ steps: u64 }`.
   compression their parameters choose, at the call and before any work, because a stored
   hash or a caller names a cost that no limit bounds ([core](core.md#argon2id)).
   `crc32c.update` and `crc64nvme.update` take one further step before each nonempty
-  16 KiB chunk, including a final partial chunk. Code an engine adds for drop, clone and growth
+  16 KiB chunk, including a final partial chunk. `host.udp_recv` takes one further step for each 64 entries, or part of 64, of
+  its `out` spare capacity, and `host.udp_send` one for each 64 packets, or part of 64, of its
+  `pkts`, at the call and before issue ([NET-16](net.md#net-16-udp-sockets-and-batches)). Code an engine adds for drop, clone and growth
   takes no steps. This is the **reference count**, the count the reference evaluator takes;
   a build may count otherwise (Determinism, below).
 - **The current bound.** At each point exactly one step bound is current, or none: the
@@ -440,7 +442,7 @@ is core's plain record `{ steps: u64 }`.
   iteration of a loop in user code and each call into user code that recursion reaches, and
   the extra steps of
   `secret.scram_sha256`, `argon2.id`, `secret.derive_argon2id`, `crc32c.update` and
-  `crc64nvme.update` as the reference count does, so code that computes without end exhausts every bound and work an untrusted input
+  `crc64nvme.update`, `host.udp_recv` and `host.udp_send` as the reference count does, so code that computes without end exhausts every bound and work an untrusted input
   chooses is bounded by it. A step taken while no bound is current uses nothing and
   ends no slice, so an engine need not count it, even in code that also runs under a bound.
 

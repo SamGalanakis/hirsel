@@ -499,7 +499,7 @@ replay and a served Net make the same checks.
 
 ```hirsel unbuilt
 pub opaque resource type UdpSocket
-pub type Steer = Hash | Byte(offset: u16)
+pub type Steer = Hash | Quic
 pub type UdpOptions = UdpOptions(slots: u32, slot_bytes: u32)
 pub type UdpPacket = UdpPacket(peer: Addr, at: u64, len: u64, truncated: bool, ecn: u8)
 pub type UdpTx = UdpTx(to: Addr, at: u64, len: u64, ecn: u8)
@@ -547,9 +547,9 @@ the largest a UDP header's length field and the IP header allow without jumbogra
 packet over its family's maximum returns `Oversize(max)` before issue with nothing sent. The
 host sets `IP_MTU_DISCOVER`/`IPV6_MTU_DISCOVER` to `PMTUDISC_PROBE`, so datagrams are never
 fragmented by the sender. A packet larger than the route's MTU is refused by the kernel
-(`EMSGSIZE`) and delivers `Oversize(mtu_payload)`, the largest payload that route takes; no
-packet of that call from it onward is sent. A program doing path MTU discovery (RFC 8899)
-uses this. An empty datagram is a datagram.
+(`EMSGSIZE`) as `Oversize(0)`: the route's limit is smaller than that packet, and an
+unconnected socket cannot read it (`IP_MTU` needs a connected one). A program doing path MTU
+discovery probes for it, as RFC 8899 does. An empty datagram is a datagram.
 
 **Receiving.** `udp_recv` waits until at least one datagram is queued for the socket or its
 deadline passes, then delivers a batch:
@@ -564,8 +564,9 @@ deadline passes, then delivers a batch:
    than one slot's payload room (`slot_bytes - 256`) is truncated to that room the same way,
    before it reaches `buf`.
 3. Each later datagram is delivered only whole: a datagram that does not fit `buf`'s
-   remaining spare capacity, or would need an entry beyond `out`'s spare capacity, stays
-   queued for the next receive. So batching never truncates a datagram and never loses one.
+   remaining spare capacity, would need an entry beyond `out`'s spare capacity, or was cut by
+   its slot, stays queued for the next receive, where it is first. So batching never
+   truncates a datagram and never loses one.
 4. A batch ends when the queued datagrams run out, `out` is full or the next datagram does not
    fit. It never waits for more after the first.
 
@@ -586,8 +587,11 @@ at most `data`'s length and `ecn` at most 3, or the call returns `Denied` before
 nothing sent. Every packet's `to` is checked first (NET-15); one uncovered destination
 denies the whole call with nothing sent. The call returns `k`, the number of packets
 committed: packets `0..k` were each handed to the kernel exactly once as one datagram, and
-none after them was. A call that returns an error committed none. Each packet commits whole
-or not at all; there is no partial datagram. The call waits while the socket's send buffer
+none after them was. Each packet commits whole or not at all; there is no partial datagram.
+When the kernel refuses packet `k` after packets `0..k` committed, the call returns `Ok(k)`;
+the caller resends from packet `k`, which is then first and gets the error. So an error is
+returned only by a call that committed nothing, and the failing packet is always the first
+one not committed. The call waits while the socket's send buffer
 is full and keeps one absolute deadline through readiness retries; at the deadline it
 returns the `k` committed so far, or `TimedOut` if none. A program sends a GSO train by
 listing equal-length packets to one peer one after another: the host groups any run of
@@ -605,13 +609,21 @@ in the kernel's order; the host never drops one to make room.
 (`SO_ATTACH_REUSEPORT_CBPF`). The kernel delivers a datagram to the member whose index the
 program returns:
 
-- `Hash` returns the packet's receive hash (`SKF_AD_RXHASH`) modulo `members`, which keeps
-  one 4-tuple on one member;
-- `Byte(offset)` returns the payload byte at `offset` modulo `members`. A QUIC server
-  writes the member index into byte 1 of each connection ID it issues (the first byte of a
-  short header's Destination Connection ID) so that every packet of a connection reaches
-  the unit that owns it. A datagram shorter than `offset + 1` bytes goes to member 0, the
-  value a classic BPF load past the end of the packet ends with.
+- `Hash` returns a fixed hash of the source address and port, read from the network header,
+  modulo `members`, so one flow stays on one member. It does not use the skb's receive hash
+  (`SKF_AD_RXHASH`), which reads the raw `skb->hash` (`filter.c:412-415`) and is 0 when
+  neither the NIC nor the stack has computed one, which would send every datagram to member 0.
+- `Quic` reads a QUIC v1 or v2 header (RFC 9000 §17). A server issues every connection ID
+  with the owning member's index in its first byte. A short-header packet (fixed bit set,
+  long bit clear) steers by the first byte of its Destination Connection ID, at offset 1. A
+  Handshake long-header packet steers by the first byte of its Destination Connection ID, at
+  offset 6. An Initial or 0-RTT packet carries a connection ID the client invented, so it and
+  every other datagram, including a version this cannot read and a datagram too short for its
+  loads, steers by `Hash`. A retransmitted Initial keeps its source, so it reaches the member
+  that received the first one, which owns the handshake. The program checks each datagram's
+  length before every load, because a classic BPF load past the end of the packet ends the
+  program with 0, which would pick member 0. This is `moq-sock`'s filter
+  (`/tmp/ref-moq/rs/moq-sock/src/shard.rs:40-50,812-833`) for one generation.
 
 Because the program returns an index below `members`, a socket that some other process of
 the same user later joins to the group (Linux lets any process of the same effective UID
@@ -619,7 +631,9 @@ join, `udp.c:157-159`) is placed past the members and never chosen. A member tha
 dropped would let the kernel move the last socket into its index
 (`sock_reuseport.c:142-143`) and shift the steering. So the host keeps a dropped member's
 descriptor open until every member of its group is dropped, and discards what it receives.
-Member indices stay fixed for the group's life.
+Member indices stay fixed for the group's life. Datagrams the group steers to a dropped
+member are lost until the whole group is dropped, so a program that stops serving a member
+keeps it, or rebinds the group.
 
 **Endpoint query.** `udp_local_addr` returns the bound endpoint, or `Denied` for an opened
 socket that has not yet sent. It borrows, admits nothing and waits only as NET-1's queries
@@ -627,7 +641,9 @@ do.
 
 **The receive pool.** Each socket owns a receive pool of `slots` slots of `slot_bytes` each.
 The host receives into a slot and copies the payload to the caller's `buf` at delivery, so a
-slot is never lent to program memory, and is back in the pool before `udp_recv` returns.
+slot is never lent to program memory. A slot returns to the pool once every datagram in it has
+been delivered; a coalesce that a batch delivered only in part keeps its slot until the rest
+is delivered.
 The first 256 bytes of each slot are reserved for the host's per-datagram header (on
 io_uring, `io_uring_recvmsg_out`, the source address and the control messages); the rest is
 the slot's payload room. When `slot_bytes` is 65,792 the payload room is 65,536, at least

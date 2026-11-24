@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build an isolated distribution bundle, optionally with reproducible PGO.
 
-    tools/toolchain-dist/build --output /tmp/dist [--pgo --profdata /path/to/llvm-profdata]
+    tools/toolchain-dist/build --output /tmp/dist [--bolt] [--pgo --profdata /path/to/llvm-profdata]
 
 Uses Buck2's remote pool. Training uses one tools/capped command at a time.
 Keep output and work outside the repository; generated profiles are never committed.
@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 import notices
@@ -23,6 +24,9 @@ import notices
 ROOT = Path(__file__).resolve().parents[2]
 BUCK = ROOT / '.buck2/bin/buck2'
 PROFILE = Path(__file__).with_name('profile.profdata')
+BOLT_COMPILER = Path(__file__).with_name('hirsel.bolt')
+COMPILER_TARGET = '//:hirsel-core-driver-bin-hirsel'
+RUNTIME_TARGET = '//:hirsel-core-rt-archives'
 
 
 def check_glibc(prefix):
@@ -72,12 +76,29 @@ def check_glibc(prefix):
     print(f'dist: glibc {floor} baseline passed', flush=True)
 
 
-def build(mode, output, options):
+def build_targets(mode, options, *targets, bolt='off'):
     done = subprocess.run([str(BUCK), 'build', '--target-platforms', '//tools/buck2:dist',
-                           *options,
-                           '-c', 'hirsel.dist_pgo=' + mode, '//:hirsel-toolchain', '--show-json-output'],
+                           *options, '-c', 'hirsel.dist_pgo=' + mode, '-c', 'hirsel.dist_bolt=' + bolt,
+                           *targets, '--show-json-output'],
                           cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
-    bundle = ROOT / json.loads(done.stdout)['root//:hirsel-toolchain']
+    outputs = json.loads(done.stdout)
+    return [ROOT / outputs['root' + target] for target in targets]
+
+
+def build(mode, output, options, *, bolt=False):
+    if bolt:
+        compiler, runtimes = build_targets(mode, options, COMPILER_TARGET, RUNTIME_TARGET, bolt='link')
+        runtime = runtimes / 'x86_64-unknown-linux-gnu/libhirsel_core_rt.a'
+        try:
+            jobs = min(4, len(os.sched_getaffinity(0)))
+            subprocess.run([ROOT / 'tools/capped', sys.executable, ROOT / 'tools/native-toolchain/bolt.py',
+                            'compiler', compiler, runtime, BOLT_COMPILER], cwd=ROOT, check=True,
+                           env=dict(os.environ, HIRSEL_JOBS=str(jobs), HIRSEL_MEMORY_LIMIT='8G'))
+            (bundle,) = build_targets(mode, options, '//:hirsel-toolchain', bolt='use')
+        finally:
+            BOLT_COMPILER.unlink(missing_ok=True)
+    else:
+        (bundle,) = build_targets(mode, options, '//:hirsel-toolchain')
     shutil.copytree(bundle, output, dirs_exist_ok=True)
 
 
@@ -169,7 +190,7 @@ def fresh_witness(prefix):
     print('dist: fresh-root acceptance passed', flush=True)
 
 
-def manifest(output, mode):
+def manifest(output, mode, bolt):
     try:
         notices.collect(output, mode)
     except Exception:
@@ -182,7 +203,7 @@ def manifest(output, mode):
     record = dict(commit=command('git', 'rev-parse', 'HEAD'),
                   patch_sha256=hashlib.sha256(command('git', 'diff', 'HEAD').encode()).hexdigest(),
                   rustc=command(str(ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'), '-vV'),
-                  profile='dist', pgo=mode, lto='fat', codegen_units=1,
+                  profile='dist', pgo=mode, bolt=bolt, lto='fat', codegen_units=1,
                   training='hirsel new project: check, Cranelift, LLVM',
                   hirsel_sha256=digest(output / 'hirsel'),
                   core_packages_sha256=hashlib.sha256(json.dumps({str(p.relative_to(output / 'core-packages')): digest(p) for p in sorted((output / 'core-packages').rglob('*')) if p.is_file()}, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
@@ -211,11 +232,14 @@ def main():
                         help='check the glibc floor on an existing bundle (requires readelf)')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', action='store_true')
+    parser.add_argument('--bolt', action='store_true', help='optimize the compiler with llvm-bolt and merge-fdata')
     parser.add_argument('--cpu', type=int, default=8)
     parser.add_argument('--local', action='store_true', help='build locally without the remote action cache')
     parser.add_argument('--num-threads', type=int, help='Buck2 execution threads')
     parser.add_argument('--profdata', help='LLVM tools matching the pinned rustc')
     args = parser.parse_args()
+    if args.bolt and args.output is None:
+        parser.error('--bolt requires --output')
     if args.check_glibc is not None:
         check_glibc(args.check_glibc.resolve())
         return
@@ -240,8 +264,12 @@ def main():
         options.extend(['--num-threads', str(args.num_threads)])
     subprocess.run(prepare, cwd=ROOT, check=True)
     if not args.pgo:
-        build('off', output, options)
-        manifest(output, 'off')
+        if args.bolt:
+            with profile_lock():
+                build('off', output, options, bolt=True)
+        else:
+            build('off', output, options)
+        manifest(output, 'off', args.bolt)
         witness(output)
         return
     with profile_lock():
@@ -264,9 +292,9 @@ def main():
                        env=dict(os.environ, HIRSEL_JOBS='1'), check=True)
         subprocess.run([args.profdata, 'show', str(merged)], check=True)
         shutil.copyfile(merged, PROFILE)
-        build('use', output, options)
+        build('use', output, options, bolt=args.bolt)
         shutil.copyfile(merged, output / 'hirsel.profdata')
-        manifest(output, 'use')
+        manifest(output, 'use', args.bolt)
         witness(output)
 
 

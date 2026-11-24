@@ -3,6 +3,7 @@
 # Format: one record per line, fields separated by single spaces; `#` starts a comment.
 #   key <value>                       pinned scalar facts
 #   bootstrap_llvm <sha256> <size> <asset>  clang, tools and stock libLLVM
+#   bolt_tools <sha256> <size> <asset>     llvm-bolt, merge-fdata and BOLT instrumentation runtime
 #   static_lld <sha256> <size> <asset>   the image's bin/ld.lld, built from source_url
 #                                        by build-static-lld (README.md)
 #   engine_llvm <sha256> <size> <asset>  the compiler's libLLVM.so.23.1 (the tree's engine/),
@@ -24,8 +25,9 @@ source_url https://github.com/SamGalanakis/hirsel-lang/releases/download/toolcha
 source_sha256 51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5
 asset_pool https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5
 bootstrap_llvm 54b75c91673445cd61fbe8a552ade35a73244da9d138ac8d6e8e8e10a2d313f4 41391580 llvm-23.1.5-bootstrap-manylinux_2_28-x86_64.tar.xz
+bolt_tools b108a9575324c8989c9ba5ca85796feeb8f26b59c08ac4b7f4f04a3817ab8311 12513160 llvm-bolt-23.1.5-manylinux_2_28-x86_64.tar.xz
 static_lld ac8db179571813f67e823c6ebf69a9ed8f5eeae941546cc0a74fea2b22a2d679 79508536 ld.lld-23.1.5-static-pie-manylinux_2_28-x86_64
-engine_llvm 34e9c29b5f54adc2b74ccc8b52e3080c9d5f55da51b8d84da2a8fdec02cb19d7 94921024 libLLVM-23.1.5-engine-manylinux_2_28-x86_64.so
+engine_llvm 79f22f6dfa99adb6681e5850356e64d48f7f7d5c8e4a1f7c0d73ba7d3db87ad5 137286992 libLLVM-23.1.5-engine-bolt-manylinux_2_28-x86_64.so
 engine_llvm_guard 0.6470
 engine_llvm_guard_deb 3ac14e55c6349f3d7bf7ebc5fc6f753404c9fc592339306c1ddaa5683ca228a5 33737044 libllvm23_23.1.5.++20261028083854+a738f2737189-1.exp1.20261028203912.92_amd64.deb
 engine_llvm_guard_source 8b13c2585ac114773d28d7dcef8b43e3a131c026

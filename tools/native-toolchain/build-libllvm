@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Build the compiler's engine libLLVM (`engine_llvm` in llvm-23.lock): PGO + ThinLTO.
+# Build the compiler's engine libLLVM (`engine_llvm` in llvm-23.lock): PGO + ThinLTO + BOLT.
 #
-#   build-libllvm DIR ARTIFACTS bootstrap|package|instr|train|opt|guard|plain
+#   build-libllvm DIR ARTIFACTS bootstrap|package|instr|train|opt|bolt-tools|bolt|guard|plain
 #
 # ARTIFACTS is a core/tools/measurement_artifacts.py identity (compiler and runtime
-# archive). For train and guard, set HIRSEL_LLVM_PROFILE_SOURCE to the checkout
-# named by engine_llvm_guard_source and use ARTIFACTS built in that checkout.
+# archive). For IR train and guard, set HIRSEL_LLVM_PROFILE_SOURCE to the checkout
+# named by engine_llvm_guard_source and use ARTIFACTS from that checkout. For BOLT
+# training use a release compiler and runtime from this checkout.
 #
 #   bootstrap  each build tool and its stock shared libraries, as DIR/llvm-bootstrap.tar.xz
 #   package    package an already-built bootstrap tree
 #   instr  IR-instrumented libLLVM.so.23.1 from the locked source archive
 #   train  every training program of engine_llvm.py through it, merged into DIR/llvm.profdata
-#   opt    the profile-guided ThinLTO libLLVM.so.23.1, debug info stripped, as DIR/libLLVM.so.23.1
+#   opt    the profile-guided ThinLTO libLLVM.so.23.1 with relocations in DIR/opt/lib
+#   bolt-tools  build and package llvm-bolt and merge-fdata from the same source pin
+#   bolt   instrument that library, train on release builds, and write DIR/libLLVM.so.23.1
 #   guard  the locked apt.llvm.org deb against DIR/libLLVM.so.23.1 on the training
 #          and held-out programs. Fails unless every .text is byte-identical and the warm build
 #          cost geomean is below the stock library's and no worse than the lock's previous
@@ -40,7 +43,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 lock="$here/llvm-23.lock"
 fail() { echo "build-libllvm: $*" >&2; exit 1; }
-(( $# == 3 )) || { echo "usage: build-libllvm DIR ARTIFACTS bootstrap|package|instr|train|opt|guard|plain" >&2; exit 2; }
+(( $# == 3 )) || { echo "usage: build-libllvm DIR ARTIFACTS bootstrap|package|instr|train|opt|bolt-tools|bolt|guard|plain" >&2; exit 2; }
 lock_value() {
   awk -v k="$1" '$1 == k { sub(/^[^ ]+ /, ""); print; found = 1 } END { exit !found }' "$lock" \
     || fail "llvm-23.lock has no '$1' record"
@@ -158,20 +161,55 @@ train() {
   "$tool_bin/llvm-profdata" merge -o "$dir/llvm.profdata" "$dir"/profiles/*.profraw
 }
 
-opt() {
+configure_opt() {
   [[ -f "$dir/llvm.profdata" ]] || fail "no profile: run the train stage"
   source_tree
-  configure_engine "$dir/opt" "-Wl,--thinlto-jobs=$jobs" \
+  configure_engine "$dir/opt" "-Wl,--thinlto-jobs=$jobs -Wl,--emit-relocs" \
+    -DLLVM_ENABLE_PROJECTS=bolt -DBOLT_TARGETS_TO_BUILD=X86 \
     -DLLVM_ENABLE_LTO=Thin -DLLVM_PROFDATA_FILE="$dir/llvm.profdata" \
     -DLLVM_THINLTO_CACHE_PATH="$dir/opt/thinlto-cache"
+}
+
+opt() {
+  configure_opt
   library "$dir/opt"
-  "$tool_bin/llvm-strip" --strip-debug -o "$dir/libLLVM.so.23.1" "$dir/opt/lib/libLLVM.so.23.1"
-  [[ "$(readelf -d "$dir/libLLVM.so.23.1" | awk '/\(SONAME\)/ { print $NF }')" == '[libLLVM.so.23.1]' ]] \
+}
+
+bolt-tools() {
+  configure_opt
+  local build="$dir/opt" stage="$dir/bolt-install"
+  local archive="$dir/llvm-bolt-$version-manylinux_2_28-x86_64.tar.xz"
+  # BOLT configures its runtime in a nested CMake project that inherits
+  # compiler flags from the environment.
+  CFLAGS="${CFLAGS:+$CFLAGS }--gcc-install-dir=$gcc_install" \
+  CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }--gcc-install-dir=$gcc_install" \
+  capped ninja -C "$build" -j "$jobs" llvm-bolt merge-fdata > "$dir/bolt-tools.ninja.log"
+  rm -rf "$stage"
+  mkdir -p "$stage/bin" "$stage/lib" "$stage/share/licenses/bolt"
+  "$tool_bin/llvm-strip" --strip-debug -o "$stage/bin/llvm-bolt" "$build/bin/llvm-bolt"
+  "$tool_bin/llvm-strip" --strip-debug -o "$stage/bin/merge-fdata" "$build/bin/merge-fdata"
+  cp "$build/tools/bolt/bolt_rt-bins/lib/libbolt_rt_instr.a" "$stage/lib/"
+  cp "$dir/src/bolt/LICENSE.TXT" "$stage/share/licenses/bolt/"
+  tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cJf "$archive" -C "$stage" .
+  echo "bolt_tools $(sha256sum "$archive" | cut -d ' ' -f 1) $(stat -c %s "$archive") ${archive##*/}"
+}
+
+bolt() (
+  local input="$dir/opt/lib/libLLVM.so.23.1"
+  [[ -f "$input" ]] || fail "no profile-guided library: run the opt stage"
+  local output
+  output=$(mktemp -d "$dir/.bolt.XXXXXXXX")
+  trap 'rm -rf "$output"' EXIT
+  PATH="$dir/bolt-install/bin:$PATH" capped \
+    python3 "$here/bolt.py" engine "$input" "$output/libLLVM.so.23.1" --artifacts "$artifacts"
+  local library="$output/libLLVM.so.23.1"
+  "$tool_bin/llvm-strip" --strip-debug "$library"
+  [[ "$(readelf -d "$library" | awk '/\(SONAME\)/ { print $NF }')" == '[libLLVM.so.23.1]' ]] \
     || fail "the library's soname is not libLLVM.so.23.1"
-  [[ "$(readelf -n "$dir/libLLVM.so.23.1" | awk '/Build ID:/ { print $NF }')" =~ ^[0-9a-f]{40}$ ]] \
+  [[ "$(readelf -n "$library" | awk '/Build ID:/ { print $NF }')" =~ ^[0-9a-f]{40}$ ]] \
     || fail "the library has no SHA-1 build ID"
   local needed
-  needed="$(readelf -d "$dir/libLLVM.so.23.1" | awk '/\(NEEDED\)/ { print $NF }' | sort | tr '\n' ' ')"
+  needed="$(readelf -d "$library" | awk '/\(NEEDED\)/ { print $NF }' | sort | tr '\n' ' ')"
   local name
   for name in $needed; do
     case "$name" in
@@ -181,11 +219,12 @@ opt() {
   done
   # No search path of its own: the loading executable's RPATH finds libz, never the
   # build tree's lib/ or, through an empty entry, the working directory.
-  ! readelf -d "$dir/libLLVM.so.23.1" | grep -qE '\((RPATH|RUNPATH)\)' || fail "the library carries a search path"
-}
+  ! readelf -d "$library" | grep -qE '\((RPATH|RUNPATH)\)' || fail "the library carries a search path"
+  mv "$library" "$dir/libLLVM.so.23.1"
+)
 
 guard() (
-  [[ -f "$dir/libLLVM.so.23.1" ]] || fail "no engine library: run the opt stage"
+  [[ -f "$dir/libLLVM.so.23.1" ]] || fail "no engine library: run the bolt stage"
   local benchmark reference sha256 size asset package
   benchmark=$(benchmark_script)
   reference=$(mktemp -d "$dir/.guard-deb.XXXXXXXX")
@@ -202,7 +241,7 @@ guard() (
     python3 "$benchmark" guard "$reference/root/usr/lib/x86_64-linux-gnu" "$dir" "$dir/guard" \
     --artifacts "$artifacts" --previous-warm "$(lock_value engine_llvm_guard)" \
     || fail "the engine library fails its guard (see $dir/guard/guard.json)"
-  echo "engine_llvm $(sha256sum "$dir/libLLVM.so.23.1" | cut -d ' ' -f 1) $(stat -c %s "$dir/libLLVM.so.23.1") libLLVM-$version-engine-manylinux_2_28-x86_64.so"
+  echo "engine_llvm $(sha256sum "$dir/libLLVM.so.23.1" | cut -d ' ' -f 1) $(stat -c %s "$dir/libLLVM.so.23.1") libLLVM-$version-engine-bolt-manylinux_2_28-x86_64.so"
 )
 
 plain() {
@@ -212,6 +251,6 @@ plain() {
 }
 
 case $3 in
-  bootstrap | package | instr | train | opt | guard | plain) "$3" ;;
+  bootstrap | package | instr | train | opt | bolt-tools | bolt | guard | plain) "$3" ;;
   *) fail "unknown stage '$3'" ;;
 esac

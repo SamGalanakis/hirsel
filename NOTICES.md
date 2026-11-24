@@ -207,7 +207,7 @@ llvm-23.lock `static_lld`: `ld.lld-23.1.5-static-pie-manylinux_2_28-x86_64`, 795
 
 ### `lib/libLLVM.so.23.1`
 
-llvm-23.lock `engine_llvm`: `libLLVM-23.1.5-engine-manylinux_2_28-x86_64.so`, 94921024 bytes, SHA-256 `34e9c29b5f54adc2b74ccc8b52e3080c9d5f55da51b8d84da2a8fdec02cb19d7`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. Linked by clang and lld in manylinux_2_28 against AlmaLinux's glibc and GCC Toolset 14. These notices cover the startup objects and the libgcc, libstdc++ and libc_nonshared parts linked into the library.
+llvm-23.lock `engine_llvm`: `libLLVM-23.1.5-engine-bolt-manylinux_2_28-x86_64.so`, 137286992 bytes, SHA-256 `79f22f6dfa99adb6681e5850356e64d48f7f7d5c8e4a1f7c0d73ba7d3db87ad5`. Built from https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz (SHA-256 `51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5`), whose notices follow. Runtimes linked statically: glibc, gcc. Linked by clang and lld in manylinux_2_28 against AlmaLinux's glibc and GCC Toolset 14. These notices cover the startup objects and the libgcc, libstdc++ and libc_nonshared parts linked into the library.
 
 | Source file | SHA-256 |
 |---|---|
@@ -1673,12 +1673,12 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    ]
   },
   {
-   "asset": "libLLVM-23.1.5-engine-manylinux_2_28-x86_64.so",
+   "asset": "libLLVM-23.1.5-engine-bolt-manylinux_2_28-x86_64.so",
    "lock": "engine_llvm",
    "note": "Linked by clang and lld in manylinux_2_28 against AlmaLinux's glibc and GCC Toolset 14. These notices cover the startup objects and the libgcc, libstdc++ and libc_nonshared parts linked into the library.",
    "path": "lib/libLLVM.so.23.1",
-   "sha256": "34e9c29b5f54adc2b74ccc8b52e3080c9d5f55da51b8d84da2a8fdec02cb19d7",
-   "size": 94921024,
+   "sha256": "79f22f6dfa99adb6681e5850356e64d48f7f7d5c8e4a1f7c0d73ba7d3db87ad5",
+   "size": 137286992,
    "source": {
     "sha256": "51f5bf7d7af1c72e1b16eb48bf14872a6e7bf6be0dc3d3b5d6a04386e70e88d5",
     "url": "https://github.com/SamGalanakis/hirsel-lang/releases/download/toolchain-llvm-23.1.5/llvm-project-23.1.5.src.tar.xz"

@@ -3,6 +3,9 @@
 [export_file(name = "profile", src = "profile.profdata", visibility = ["PUBLIC"])
  for _ in [0] if read_root_config("hirsel", "dist_pgo", "off") == "use"]
 
+[export_file(name = "hirsel-bolt", src = "hirsel.bolt", mode = "reference", visibility = ["PUBLIC"])
+ for _ in [0] if read_root_config("hirsel", "dist_bolt", "off") == "use"]
+
 export_file(name = "notices.py", visibility = ["PUBLIC"])
 
 # The notices gate reads these at their repository paths.

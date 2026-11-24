@@ -44,6 +44,8 @@ export interface Change<V, Slots extends object> {
 }
 export interface Subscription<V = Uint8Array, Slots extends object = Record<number, SlotRow>,
   Keys extends Record<keyof Slots, unknown> = Record<keyof Slots, Uint8Array>> extends SubscriptionControl {
+  /** @internal Preserves type inference between the packaged and generated declarations. */
+  readonly __subscriptionTypes?: {value: V; slots: Slots; keys: Keys};
   value(): Access<Frozen<V>>;
   rows<S extends keyof Slots>(slot: S): Access<readonly Frozen<Slots[S]>[]>;
   map<S extends keyof Slots>(slot: S): Access<ReadonlyMap<string, Frozen<Slots[S]>>>;

@@ -13,6 +13,7 @@ const caller = {issuer: 2, subject: new Uint8Array(16).fill(1)};
 let diagnostic: (error: Error) => void = console.error;
 
 function openSocket(): Socket {
+  let version = 1n;
   const emit = (frame: Frame) => {
     const data = Frame.encode(frame);
     queueMicrotask(() => socket.onmessage?.({data}));
@@ -31,13 +32,16 @@ function openSocket(): Socket {
         assert.equal(id, 0);
         assert.equal(slot, 1);
         assert.deepEqual(args, new Uint8Array());
+        const initial = Frame.decode(batch);
+        assert.equal(initial.tag, 'Batch');
+        version = initial.values[0];
         queueMicrotask(() => socket.onmessage?.({data: batch}));
       } else {
         assert.equal(frame.tag, 'Call');
         const [stream, p, slot, , args] = frame.values;
         assert.equal(slot, 0);
         assert.deepEqual(args, new Uint8Array());
-        emit({tag: 'Batch', values: [1n, [], [], [{stream, p, outcome: {tag: 'Returned', value: payload}}]]});
+        emit({tag: 'Batch', values: [version, [], [], [{stream, p, outcome: {tag: 'Returned', value: payload}}]]});
       }
     },
     close() {},
@@ -89,9 +93,10 @@ try {
       // @ts-expect-error The generated slot's key is a bigint.
       draft.delete(sub, 'items', 1);
     }
-    ran = true;
     assert.deepEqual(draft.get(sub, 'items', item.key), item);
     draft.put(sub, 'items', item.key, item);
+    draft.value(sub, undefined);
+    ran = true;
   }}), expected);
   assert(ran);
 } finally {

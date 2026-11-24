@@ -696,9 +696,9 @@ mod tests {
         };
         let files = generate(&d).unwrap();
         for line in [
-            "ns(call,[\"a\"])[\"get\"] = (args) => client.call(want[0],codec.Args0.encode(args),codec.Result0.decode);\n",
-            "ns(call,[\"b\"])[\"get\"] = (args) => client.call(want[1],codec.Args1.encode(args),codec.Result1.decode);\n",
-            "ns(call,[\"x\",\"y\"])[\"get\"] = (args) => client.call(want[2],codec.Args2.encode(args),codec.Result2.decode);\n",
+            "ns(call,[\"a\"])[\"get\"] = (args,options) => client.call(want[0],codec.Args0.encode(args),codec.Result0.decode,options);\n",
+            "ns(call,[\"b\"])[\"get\"] = (args,options) => client.call(want[1],codec.Args1.encode(args),codec.Result1.decode,options);\n",
+            "ns(call,[\"x\",\"y\"])[\"get\"] = (args,options) => client.call(want[2],codec.Args2.encode(args),codec.Result2.decode,options);\n",
         ] {
             assert!(files["entries.js"].contains(line), "{line}");
         }

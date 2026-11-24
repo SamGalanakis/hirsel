@@ -19,7 +19,7 @@ pub type Request: key = Pli | Fir(u8)
 pub opaque type Losses {
     config: NackConfig,
     highest: u64,
-    missing: Bytes,
+    missing: std.bitset.BitSet,
     found_at: List[u64],
     asked_at: List[u64],
     asked: List[u8]
@@ -40,16 +40,13 @@ pub fn losses(c: NackConfig, first: u64, at_ns: u64) -> Result[Losses, Capacity]
     if n == 0 {
         return Error(Capacity(requested: 0, available: 0))
     }
-    let size = (n + 7) / 8
-    let mut missing: Bytes = list.new()
+    let missing = std.bitset.try_new(n)?
     let mut found_at: List[u64] = list.new()
     let mut asked_at: List[u64] = list.new()
     let mut asked: List[u8] = list.new()
-    list.try_reserve(mut missing, size)?
     list.try_reserve(mut found_at, n)?
     list.try_reserve(mut asked_at, n)?
     list.try_reserve(mut asked, n)?
-    list.fill(mut missing, size, 0u8)
     list.fill(mut found_at, n, at_ns)
     list.fill(mut asked_at, n, 0u64)
     list.fill(mut asked, n, 0u8)
@@ -60,18 +57,8 @@ fn window(l: Losses) -> u64 {
     int.widen(l.config.window)
 }
 
-fn is_missing(l: Losses, slot: u64) -> bool {
-    (l.missing[slot / 8] >> int.truncate(slot % 8)) & 1 != 0
-}
-
-fn clear(mut l: Losses, slot: u64) {
-    let bit = 1u8 << int.truncate(slot % 8)
-    l.missing[slot / 8] = l.missing[slot / 8] & (bit ^ 0xff)
-}
-
 fn mark(mut l: Losses, slot: u64, at_ns: u64) {
-    let bit = 1u8 << int.truncate(slot % 8)
-    l.missing[slot / 8] = l.missing[slot / 8] | bit
+    std.bitset.set(mut l.missing, slot)
     l.found_at[slot] = at_ns
     l.asked_at[slot] = 0
     l.asked[slot] = 0
@@ -81,14 +68,13 @@ pub fn on_packet(mut l: Losses, index: u64, at_ns: u64) -> Gap {
     let w = window(l)
     if index > l.highest {
         if index - l.highest - 1 > w {
-            let size = list.len(l.missing)
-            list.fill_slice(mut l.missing, 0, size, 0u8)
+            std.bitset.clear_all(mut l.missing)
             l.highest = index
             return Reset
         }
         // The old highest's slot now stands for the old highest, which arrived.
         let old = l.highest % w
-        clear(mut l, old)
+        std.bitset.clear(mut l.missing, old)
         let mut j = l.highest + 1
         while j < index {
             mark(mut l, j % w, at_ns)
@@ -100,7 +86,7 @@ pub fn on_packet(mut l: Losses, index: u64, at_ns: u64) -> Gap {
     // The highest's own slot belongs to highest - window, so a duplicate of
     // the highest touches nothing.
     if index < l.highest && l.highest - index <= w {
-        clear(mut l, index % w)
+        std.bitset.clear(mut l.missing, index % w)
     }
     Tracked
 }
@@ -147,12 +133,12 @@ pub fn due(mut l: Losses, now_ns: u64, rtt_ns: Option[u64], max: u32, mut pairs:
     let mut next: Option[u64] = None
     while index < l.highest {
         let slot = index % w
-        if is_missing(l, slot) {
+        if std.bitset.get(l.missing, slot) {
             let tries = l.asked[slot]
             let age = int.saturating_sub(now_ns, l.found_at[slot])
             let waiting = tries > 0 && now_ns < int.saturating_add(l.asked_at[slot], retry)
             if tries >= l.config.tries || age >= l.config.max_age_ns {
-                clear(mut l, slot)
+                std.bitset.clear(mut l.missing, slot)
             } else if waiting {
                 if let Some(t) = retry_at(l, slot, tries, l.asked_at[slot], retry) {
                     next = earlier(next, t)

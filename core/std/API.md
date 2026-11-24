@@ -40,9 +40,9 @@ in [MEM-24](../../docs/spec/budgets.md#mem-24-logical-charges). A comparator fai
 preserves every element in unspecified order, and Capacity leaves the list unchanged.
 The Deque ring uses uninhabited slots,
 and the Heap uses hole sifts over one List. Their modules are in `core/core`, with no
-std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, omap, set, pool, tally, dir,
+std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, omap, set, bitset, pool, tally, dir,
 file) are reached from another package through the package name: `std.order.compare`,
-`std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
+`std.set.Set[u64]`, `std.bitset.BitSet`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).
 
 **Authority.** The language rules live in `docs/spec/*.md` and `core/core/*.hirsel`. The core

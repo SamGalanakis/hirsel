@@ -1,0 +1,108 @@
+fn model_resize(mut model: List[bool], n: u64) {
+    let have = list.len(model)
+    if n < have {
+        list.truncate(mut model, n)
+    } else if n > have {
+        list.fill(mut model, n - have, false)
+    }
+}
+
+fn model_count(model: List[bool]) -> u64 {
+    let mut total = 0u64
+    for bit in model {
+        if bit {
+            total += 1
+        }
+    }
+    total
+}
+
+fn model_next(model: List[bool], from: u64) -> Option[u64] {
+    let mut i = from
+    while i < list.len(model) {
+        if model[i] {
+            return Some(i)
+        }
+        i += 1
+    }
+    None
+}
+
+fn same_next(actual: Option[u64], model: Option[u64]) -> bool {
+    match actual {
+        Some(a) => match model {
+            Some(m) => a == m,
+            None => false,
+        },
+        None => match model {
+            Some(_) => false,
+            None => true,
+        },
+    }
+}
+
+fn agrees(actual: bitset.BitSet, model: List[bool]) -> bool {
+    if bitset.len(actual) != list.len(model) || bitset.count(actual) != model_count(model) {
+        return false
+    }
+    let end = list.len(model) + 2
+    for from in 0u64 .. end {
+        if !same_next(bitset.next_set(actual, from), model_next(model, from)) {
+            return false
+        }
+    }
+    true
+}
+
+fn step(seed: u64) -> u64 {
+    int.wrapping_add(int.wrapping_mul(seed, 6364136223846793005u64), 1442695040888963407u64)
+}
+
+// A List[bool] model over a seeded mix of set, clear and resize. Lengths reach 193 and
+// are often not multiples of 64, so a shrink that leaves tail bits set is exposed by the
+// next growth and fails count or next_set here.
+// expect: run list_bool_model() = true
+fn list_bool_model() -> bool {
+    let mut actual = bitset.new(0)
+    let mut model: List[bool] = list.new()
+    let mut seed = 0x9e3779b97f4a7c15u64
+    for _ in 0u64 .. 384 {
+        seed = step(seed)
+        let length = bitset.len(actual)
+        match seed % 10 {
+            0 ..= 3 => {
+                if length != 0 {
+                    let at = seed / 10 % length
+                    bitset.set(mut actual, at)
+                    model[at] = true
+                }
+            },
+            4 ..= 6 => {
+                if length != 0 {
+                    let at = seed / 10 % length
+                    bitset.clear(mut actual, at)
+                    model[at] = false
+                }
+            },
+            _ => {
+                let n = seed / 10 % 194
+                bitset.resize(mut actual, n)
+                model_resize(mut model, n)
+            },
+        }
+        if !agrees(actual, model) {
+            return false
+        }
+    }
+    // End on a shrink and regrow across one partial word boundary, independent of where
+    // the seeded sequence happened to leave the length.
+    bitset.resize(mut actual, 129)
+    model_resize(mut model, 129)
+    bitset.set(mut actual, 127)
+    model[127] = true
+    bitset.resize(mut actual, 65)
+    model_resize(mut model, 65)
+    bitset.resize(mut actual, 130)
+    model_resize(mut model, 130)
+    agrees(actual, model)
+}

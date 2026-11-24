@@ -1,0 +1,153 @@
+// Module `bitset`: a resizable set of bit indices over u64 words. Bits past len are
+// always zero, including the tail bits of the last word. Field legend: API.md;
+// design: api/bitset.md.
+//
+// Representation: `words` is a List[u64] whose length is ceil(len / 64), charged as
+// charge.seq(8, capacity(words)) to the limit where the list was made (MEM-26). Growth
+// follows List's rule; shrinking truncates words and keeps the capacity.
+pub opaque type BitSet {
+    words: List[u64],
+    len: u64
+}
+
+const WORD: u64 = 64
+
+const ALL: u64 = 0xffffffffffffffffu64
+
+fn words_for(n: u64) -> u64 {
+    let tail: u64 = if n % WORD == 0 {
+        0
+    } else {
+        1
+    }
+    n / WORD + tail
+}
+
+fn require_index(size: u64, i: u64) {
+    if i >= size {
+        let empty = string.as_bytes("")
+        let _ = empty[0]
+    }
+}
+
+/// A set of n zero bits. Fails: a refused allocation raises Capacity, keeping nothing.
+/// Alloc: the word list, current limit. Cost: O(ceil(n / 64)).
+/// Ex: `let mut seen: std.bitset.BitSet = std.bitset.new(128)`
+pub fn new(n: u64) -> BitSet {
+    result.unwrap(try_new(n))
+}
+
+/// Like new, returning a refused allocation as a value. Cost: O(ceil(n / 64)).
+/// Ex: `let mut seen = std.bitset.try_new(128)?`
+pub fn try_new(n: u64) -> Result[BitSet, Capacity] {
+    let need = words_for(n)
+    let mut words: List[u64] = list.new()
+    list.try_reserve(mut words, need)?
+    list.fill(mut words, need, 0u64)
+    Ok(BitSet(words: take words, len: n))
+}
+
+/// Number of bit positions, including clear positions. Cost: O(1).
+/// Ex: `std.bitset.len(seen)`
+pub fn len(s: BitSet) -> u64 {
+    s.len
+}
+
+/// Sets the length to n. New bits are zero. Shrinking clears the tail bits of the last
+/// word before they can be exposed by a later growth. Fails: a refused growth raises
+/// Capacity with s unchanged. Alloc: GROWTH of the word list. Cost: O(words added or
+/// removed). Ex: `std.bitset.resize(mut seen, 192)`
+pub fn resize(mut s: BitSet, n: u64) {
+    result.unwrap(try_resize(mut s, n))
+}
+
+/// Like resize, returning a refused growth as a value with s unchanged.
+/// Cost: O(words added or removed). Ex: `std.bitset.try_resize(mut seen, 192)?`
+pub fn try_resize(mut s: BitSet, n: u64) -> Result[(), Capacity] {
+    let need = words_for(n)
+    let have = list.len(s.words)
+    if need > have {
+        list.try_reserve(mut s.words, need - have)?
+        list.fill(mut s.words, need - have, 0u64)
+    } else if need < have {
+        list.truncate(mut s.words, need)
+    }
+    if n < s.len && n % WORD != 0 {
+        let at = n / WORD
+        let keep = n % WORD
+        let mask = (1u64 << int.truncate(keep)) - 1
+        s.words[at] = s.words[at] & mask
+    }
+    s.len = n
+    Ok(())
+}
+
+/// Whether bit i is set. Fails: Bounds when i >= len. Alloc: nothing. Cost: O(1).
+/// Ex: `std.bitset.get(seen, field)`
+pub fn get(s: BitSet, i: u64) -> bool {
+    require_index(s.len, i)
+    (s.words[i / WORD] >> int.truncate(i % WORD)) & 1 != 0
+}
+
+/// Sets bit i. Fails: Bounds when i >= len; the set is unchanged. Alloc: nothing.
+/// Cost: O(1). Ex: `std.bitset.set(mut seen, field)`
+pub fn set(mut s: BitSet, i: u64) {
+    require_index(s.len, i)
+    let bit = 1u64 << int.truncate(i % WORD)
+    s.words[i / WORD] = s.words[i / WORD] | bit
+}
+
+/// Clears bit i. Fails: Bounds when i >= len; the set is unchanged. Alloc: nothing.
+/// Cost: O(1). Ex: `std.bitset.clear(mut seen, field)`
+pub fn clear(mut s: BitSet, i: u64) {
+    require_index(s.len, i)
+    let bit = 1u64 << int.truncate(i % WORD)
+    s.words[i / WORD] = s.words[i / WORD] & (bit ^ ALL)
+}
+
+/// Clears every bit without changing len or storage. Alloc: nothing. Cost: O(len / 64).
+/// Ex: `std.bitset.clear_all(mut seen)`
+pub fn clear_all(mut s: BitSet) {
+    let wide = list.len(s.words)
+    list.fill_slice(mut s.words, 0, wide, 0u64)
+}
+
+/// Number of set bits. Alloc: nothing. Cost: O(len / 64).
+/// Ex: `std.bitset.count(seen)`
+pub fn count(s: BitSet) -> u64 {
+    let mut total = 0u64
+    let mut i = 0u64
+    while i < list.len(s.words) {
+        let ones: u64 = int.widen(int.count_ones(s.words[i]))
+        total += ones
+        i += 1
+    }
+    total
+}
+
+/// The first set bit at or after from, or None. from may be len or greater.
+/// Alloc: nothing. Cost: O(words scanned). Ex: `std.bitset.next_set(seen, at)`
+pub fn next_set(s: BitSet, from: u64) -> Option[u64] {
+    if from >= s.len {
+        return None
+    }
+    let mut at = from / WORD
+    let shift = from % WORD
+    let mut word = s.words[at] & (ALL << shift)
+    while at < list.len(s.words) {
+        if word != 0 {
+            let lane: u64 = int.widen(int.trailing_zeros(word))
+            let bit = at * WORD + lane
+            return if bit < s.len {
+                Some(bit)
+            } else {
+                None
+            }
+        }
+        at += 1
+        if at < list.len(s.words) {
+            word = s.words[at]
+        }
+    }
+    None
+}

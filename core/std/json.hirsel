@@ -1491,7 +1491,7 @@ type ReadTyped {
     marks: List[SourceMark],
     mode: ReadMode,
     parts: List[RecordPart],
-    seen_fields: Bytes,
+    seen_fields: bitset.BitSet,
     reordered: Bytes,
 }
 
@@ -1558,7 +1558,7 @@ pub fn wire_bytes(plan: JsonPlan, input: String) -> Result[Bytes, TypedError] {
 }
 
 fn read_wire(plan: JsonPlan, s: String, mode: ReadMode) -> Result[(Bytes, TypedLocations, u64), TypedError] {
-    let mut d = ReadTyped(pos: 0, path: list.new(), declarations: list.new(), mark_tokens: list.new(), marks: list.new(), mode, parts: list.new(), seen_fields: list.new(), reordered: list.new())
+    let mut d = ReadTyped(pos: 0, path: list.new(), declarations: list.new(), mark_tokens: list.new(), marks: list.new(), mode, parts: list.new(), seen_fields: bitset.new(0), reordered: list.new())
     skip(s, mut d.pos)
     let start = d.pos
     let mut out: Bytes = list.new()
@@ -1969,9 +1969,9 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
     let count = list.len(fields)
     let start = list.len(out)
     let parts = list.len(d.parts)
-    let bits = list.len(d.seen_fields)
+    let bits = bitset.len(d.seen_fields)
     list.fill(mut d.parts, count, RecordPart(start: 0, end: 0, marks: 0, mark_end: 0))
-    list.fill(mut d.seen_fields, (count + 7) / 8, 0)
+    bitset.resize(mut d.seen_fields, bits + count)
     let mut ordered = true
     let mut next: u64 = 0
     let mut ignored: Map[String, ()] = map.new()
@@ -1984,12 +1984,10 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
             let name = typed_string(mut input, true, mut d)?
             push_path(mut d, InputMember(member_at))
             if let Some(i) = field_index(fields, name) {
-                let byte_at = bits + i / 8
-                let mask = (1u8 << int.truncate(i % 8))
-                if d.seen_fields[byte_at] & mask != 0 {
+                if bitset.get(d.seen_fields, bits + i) {
                     return Error(typed_input_issue(s, d, member_at, DuplicateMember))
                 }
-                d.seen_fields[byte_at] |= mask
+                bitset.set(mut d.seen_fields, bits + i)
                 ordered = ordered && i == next
                 next += 1
                 let field_start = list.len(out)
@@ -2013,7 +2011,7 @@ fn read_record(plan: JsonPlan, definition: u64, fields: List[Field], s: String, 
         reorder_record(plan, definition, fields, s, start, parts, bits, mut d, mut out)?
     }
     list.truncate(mut d.parts, parts)
-    list.truncate(mut d.seen_fields, bits)
+    bitset.resize(mut d.seen_fields, bits)
     Ok(())
 }
 
@@ -2023,7 +2021,7 @@ fn reorder_record(plan: JsonPlan, definition: u64, fields: List[Field], s: Strin
     list.truncate(mut out, start)
     let path = list.len(d.path)
     for i in 0u64 .. list.len(fields) {
-        if d.seen_fields[bits + i / 8] & (1u8 << int.truncate(i % 8)) != 0 {
+        if bitset.get(d.seen_fields, bits + i) {
             let part = d.parts[parts + i]
             let dest = list.len(out)
             list.append(mut out, list.slice(d.reordered, part.start - start, part.end - start))

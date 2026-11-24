@@ -1081,9 +1081,9 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
     let Some(grant) = call_reserves(plan) else {
         return Error(Before(Limit(Transaction), None))
     }
-    let metered = metered_draft(db, complete, attempted, plan, grant, rec, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let metered = serve_before(serve_until_decided(mut db, complete, attempted, plan, grant, rec, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         body(mut tx, env)
-    })
+    }))?
     let DraftedCall(stage: take draft, next_id: next_id) = match take metered {
         Error(AdmissionBytes(problem)) => return Error(Before(Full(Allocation(problem)), None)),
         Error(DraftStopped(take stop)) => return Ok(stopped_pending(untried(take complete, take rec, attempted), take stop)),
@@ -1097,16 +1097,11 @@ pub fn serve[E: inert](mut db: Db, take complete: Completion, plan: Plan, take r
         Over(Failed(Raised(causes))) => Ok(stopped_pending(take pending_run, Raised(cause_number(causes)))),
         Over(Failed(Conflict(take name))) => Ok(stopped_pending(take pending_run, Conflict(take name))),
         Over(Refused(Allocation(problem))) => Ok(stopped_pending(take pending_run, OutOfBytes(problem))),
+        Over(Refused(take problem)) => Ok(NoRoom(take pending_run, take problem)),
         Over(Aborted(Undone(value: BodyStop(take stop), ..))) => Ok(stopped_pending(take pending_run, take stop)),
         Over(Aborted(Undone(value: StoreFailure(take problem), ..))) => Error(Before(take problem, None)),
         _ => fail("store: missing staged reply"),
     }
-}
-
-fn stopped_pending(take pending_run: Pending, take stop: Stop) -> Served {
-    let mut pending = take pending_run
-    pending.stop = Some(stop_kind(stop))
-    Failed(take pending, take stop)
 }
 
 fn finish_served(mut db: Db, take pending_run: Pending, take staged: Ran[Bytes, ServeReply], retry: bool) -> Result[Served, ServeError] waits {
@@ -1198,6 +1193,18 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
     journal_poll(mut db)?
     healthy(db)?
     let i = branch_index(db, b)?
+    // A retry-capable call is bounded, so a body that loops on a caught
+    // Missed ends at its bound and the driver reruns it (§13.3).
+    if let None = steps {
+        if tiered_collections(db.heads[i].roots.collections.root) {
+            return Error(Missing("steps"))
+        }
+    }
+    store_body_on(mut db, i, steps, keep_reply, body)
+}
+
+// The store's own bodies, which read no Tiered row, run here unbounded.
+fn store_body_on[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let outcome = append_transaction(mut db, i, steps, keep_reply, body)
     if let Ok(Refused(Journal(_))) = outcome {
         return take outcome
@@ -1208,13 +1215,6 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
 
 fn append_transaction[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let wall = host.wall_ms(db.clock)
-    // A retry-capable call is bounded, so a body that loops on a caught
-    // Missed ends at its bound and the driver reruns it (§13.3).
-    if let None = steps {
-        if tiered_collections(db.heads[i].roots.collections.root) {
-            return Error(Missing("steps"))
-        }
-    }
     let outcome: Result[Outcome[R, A], Error] = match staged_until_decided(mut db, i, wall, steps, keep_reply, body)? {
         Over(take o) => Ok(take o),
         Ran(take ran) => settle_admit(mut db, i, take ran),
@@ -1352,18 +1352,6 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
         Ok(Ok(Error(e))) => Over(Stopped(e)),
         Ok(Ok(Ok(take f))) => finish_stage(ci, take f, take seen),
     }
-}
-
-// R1: a refused admission inside a body raises Capacity. The store reports it
-// as the refusal it is (`Refused`), not as a fault, so it is never recorded.
-fn raised_capacity(causes: Causes) -> Option[Capacity] {
-    for cause in causes {
-        return match cause.kind {
-            Capacity(c) => Some(c),
-            _ => None,
-        }
-    }
-    None
 }
 
 fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, keep_reply: Option[fn(A) -> bool], reads: core.Log[Read], issued: core.Log[u64], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Finished[R, A] {
@@ -2283,10 +2271,13 @@ fn admit_commit(mut db: Db, stream: Bytes, p: u64, d: RequestDigest, abandoned: 
     if !map.contains(db.admits, key) {
         capacity(map.try_reserve(mut db.admits, 1))?
     }
-    let b = main_branch(db)
-    let outcome = run_on(mut db, b, None, (copy_env(d), copy_env(p), copy_env(stream)), fn(mut tx, call_env) -> Result[(), Error] {
-        let value = stream_bytes(call_env.1, call_env.0, false, list.new())?
-        stream_write(mut tx, copied(call_env.2)?, take value, 0)
+    journal_poll(mut db)?
+    healthy(db)?
+    let i = branch_index(db, main_branch(db))?
+    let keep: Option[fn(Error) -> bool] = None
+    let outcome = store_body_on(mut db, i, None, keep, scoped fn(mut tx: Tx) -> Result[(), Error] {
+        let value = stream_bytes(p, d, false, list.new())?
+        stream_write(mut tx, copied(stream)?, take value, 0)
     })?
     let admitted = match take outcome {
         Committed(done) => done.ticket,
@@ -6575,7 +6566,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         let ci = next_call_info(db)
         // One step is the call of metered_draft outside its own reserve.
         let rejected = bound steps step_total {
-            metered_draft(db, complete, ci, plan, grant, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            metered_draft(db, complete, ci, plan, grant, no_record, None, map.new(), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
                 reserve_tx(mut tx, fault)
             })
         }
@@ -6586,7 +6577,7 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
             _ => return false,
         }
         let admitted = bound steps step_total + 1u64 {
-            metered_draft(db, complete, ci, plan, grant, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            metered_draft(db, complete, ci, plan, grant, no_record, None, map.new(), scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
                 reserve_tx(mut tx, fault)
             })
         }
@@ -6695,7 +6686,7 @@ fn reserve_settles_pin(c: Clock, rows: u64, plan: Plan) -> bool waits {
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
     let short = bound steps grant.steps {
-        metered_draft(db, complete, ci, plan, grant, no_record, fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        metered_draft(db, complete, ci, plan, grant, no_record, None, map.new(), fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             Ok(key_word(7))
         })
     }

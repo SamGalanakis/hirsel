@@ -393,13 +393,14 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
     }
     let ci = next_call_info(db)
     let no_record: Option[CallRecord] = None
+    let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let s_e = 200000u64
     // The least n_e that admits the body.
     let mut low = 1u64
     let mut high = 65536u64
     while low < high {
         let mid = (low + high) / 2
-        let drafted = draft_call(db, complete, ci, Plan(n_e: mid, s_e: s_e, reply_max: 64), no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        let drafted = draft_call(db, complete, ci, Plan(n_e: mid, s_e: s_e, reply_max: 64), no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             latch_body(mut tx, k, 0)
         })
         match drafted.stage {
@@ -420,7 +421,7 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
     let mut most = s_e
     while least < most {
         let mid = (least + most + 1) / 2
-        let drafted = draft_call(db, complete, ci, plan, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        let drafted = draft_call(db, complete, ci, plan, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             latch_body(mut tx, k, mid)
         })
         match drafted.stage {
@@ -433,7 +434,7 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
         }
     }
     let saturated = least
-    let full = draft_call(db, complete, ci, plan, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+    let full = draft_call(db, complete, ci, plan, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
         latch_body(mut tx, k, saturated)
     })
     match full.stage {
@@ -441,7 +442,7 @@ pub fn law_reserve_latches(c: Clock) -> bool waits {
         _ => return false,
     }
     let granted = bound steps grant.steps + 1u64 {
-        metered_draft(db, complete, ci, plan, grant, no_record, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+        metered_draft(db, complete, ci, plan, grant, no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
             latch_body(mut tx, k, saturated)
         })
     }

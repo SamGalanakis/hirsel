@@ -180,6 +180,7 @@ store@1/store/test_l63_missed_attempt_fallback_commits_nothing src=0003748a08a63
 store@1/store/test_l63_pinned_row_edit_discards_a_missed_candidate src=7415f28bd0d5fd3d sig=73a77fc4a058dc52 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_plan_prior_uses_deciding_leaf src=7359dbac4ad28063 sig=4c3077bc93f63477 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_resolved_edits_follow_candidate_neighbors src=e3e748a2c24ca807 sig=7e10b203ec9f2270 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/test_l63_served_miss_reruns_and_commits_once src=30ae35d03401f3b6 sig=6cb09fc752c7d633 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_tiered_plan_writes_deciding_priors src=4517574350043d32 sig=c9e8e06cdc81c9ba run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l65_pager_directory src=f9d6225cbf04e41f sig=7f752a4ce0741ed1 run=722e0e8306f441ca bug=- oracle=- rows=pending
 store@1/store/test_l65_tiered_edges src=5beff9f45cbebfa1 sig=ba8f120645d447c7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
@@ -233,7 +234,7 @@ store@1/store/test_reader_task src=84ad91feb882c2e6 sig=5c1a003dea860606 run=c90
 store@1/store/test_reads_ranges src=e345d5363b3a704d sig=13fcc84edaae9442 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_refused_reply src=c693f6887a45306b sig=5353990f034f8791 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_request_digest src=88c14463dd0d8f85 sig=b2544bccc5e4bd18 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-store@1/store/test_reserve_latches src=4759012171d697e5 sig=d69cf0e8b4f9cf3b run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_reserve_latches src=c6b1950c9b91c2ef sig=609a891c9948e171 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_resident src=f0c38e99c8aefc38 sig=68ea5b006218351b run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_retention_keeps_steps src=0bb86bac89221728 sig=5aff81455c1e2109 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_rollback_on_overrun src=010f69ef874f6de6 sig=fd409f0bec68b41e run=aff7b6b8625190d8 bug=- oracle=- rows=pending

@@ -125,3 +125,69 @@ fn l63_fallback_discarded(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]
 fn test_l63_missed_attempt_fallback_commits_nothing(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
     l63_call_fixture(d, c, tasks, l63_fallback_discarded)
 }
+
+// (a) for serve: the first attempt misses row 3 and its body writes a fallback
+// and replies; the driver discards that attempt, delivers the page and drafts
+// again, and the rerun commits once with the hit's write and reply. With no
+// pager the same miss is `Before(Io(Closed))`, so row 3 really is Cold.
+fn l63_serve_rerun(mut db: Db, handles: (Table[u64, u32], Table[u64, u32])) -> Result[(), Error] waits {
+    let stream = key_word(23)
+    let request = request_digest(stream, stream)
+    let plan = Plan(n_e: 1048576, s_e: 1048576, reply_max: 16)
+    let body = fn(mut tx: Tx, env: (Table[u64, u32], Table[u64, u32])) -> Result[Bytes, Bytes] {
+        match fetch(tx, env.0, 3u64) {
+            Ok(Some(v)) => {
+                result.unwrap(put(mut tx, env.1, 2u64, v))
+                Ok(key_word(3))
+            },
+            _ => {
+                result.unwrap(put(mut tx, env.1, 1u64, 1u32))
+                Ok(key_word(0))
+            },
+        }
+    }
+    let Admitted(take first) = admit(mut db, stream, 0, request)? else {
+        fail("L63: the serve call is admitted")
+    }
+    let requests = replace(mut db.pager, None)
+    let unserved = serve(mut db, take first, plan, None, copy_env(handles), body)
+    db.pager = take requests
+    let Error(Before(Io(Closed), _)) = unserved else {
+        fail("L63: a served miss with no pager is Before(Io(Closed))")
+    }
+    // A partition too small for one pin latches the pin limit: NoRoom(Cache).
+    let Abandoned(take starved) = admit(mut db, stream, 0, request)? else {
+        fail("L63: the unserved call is handed back as Abandoned")
+    }
+    let partition = replace(mut db.writer_pin_bytes, 1)
+    let refused = serve(mut db, take starved, plan, None, copy_env(handles), body)
+    db.writer_pin_bytes = partition
+    let Ok(NoRoom(_, Cache(_))) = refused else {
+        fail("L63: a served call over its pin partition is NoRoom(Cache)")
+    }
+    let before = version(snapshot(db))
+    let Abandoned(take again) = admit(mut db, stream, 0, request)? else {
+        fail("L63: the refused call is handed back as Abandoned")
+    }
+    let Ok(Committed(receipt)) = serve(mut db, take again, plan, None, copy_env(handles), body) else {
+        fail("L63: the served call commits after the delivered miss")
+    }
+    if receipt.reply != key_word(3) {
+        fail("L63: the committed reply is the rerun's hit")
+    }
+    if version(snapshot(db)) != before + 1 {
+        fail("L63: the served call commits exactly once")
+    }
+    if l63_mark(mut db, handles.1, 1)? != None {
+        fail("L63: the missed attempt's fallback write is discarded")
+    }
+    if l63_mark(mut db, handles.1, 2)? != Some(30) {
+        fail("L63: the rerun's write commits with row 3 as 30")
+    }
+    Ok(())
+}
+
+@test
+fn test_l63_served_miss_reruns_and_commits_once(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l63_call_fixture(d, c, tasks, l63_serve_rerun)
+}

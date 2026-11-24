@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {getEventListeners} from 'node:events';
 import {mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -727,6 +728,56 @@ export async function laws(codec, only, mutant, entries) {
     assert.equal(h.server.sockets.length,2);await h.time.advance(50);assert.equal(h.server.sockets.length,3);
     await h.time.advance(30000);h.server.close(h.server.sockets[2],1001);await settle();await h.time.advance(50);
     assert.equal(h.server.sockets.length,4);
+  };
+  tests.browser_wakes_only_in_backoff=async()=>{
+    const browser=new EventTarget(),page=new EventTarget();
+    const originalWindow=Object.getOwnPropertyDescriptor(globalThis,'window');
+    const originalDocument=Object.getOwnPropertyDescriptor(globalThis,'document');
+    const online=()=>browser.dispatchEvent(new Event('online'));
+    const visibility=state=>{page.visibilityState=state;page.dispatchEvent(new Event('visibilitychange'));};
+    Object.defineProperty(globalThis,'window',{configurable:true,value:browser});
+    Object.defineProperty(globalThis,'document',{configurable:true,value:page});
+    try {
+      const h=await setup(undefined,{prepare:server=>{server.welcome=false;}});
+      let ready=false;
+      const pending=h.client.whenReady();
+      void pending.then(()=>{ready=true;},()=>{});
+      h.server.close(h.server.sockets[0],1001);await settle();
+      assert.equal(h.client.state,'Backoff');
+      const scheduled=[...h.time.timers];
+      visibility('hidden');await settle();
+      assert.equal(h.client.state,'Backoff');assert.equal(h.server.sockets.length,1);
+      assert.deepEqual([...h.time.timers],scheduled);
+
+      h.server.welcome=true;
+      online();online();await settle();
+      assert.equal(h.server.sockets.length,2);assert.equal(h.client.state,'Ready');assert.equal(ready,true);
+      await pending;
+      online();visibility('hidden');await h.time.advance(50);
+      assert.equal(h.client.state,'Ready');assert.equal(h.server.sockets.length,2);
+      assert.equal(h.server.sockets[1].closed,false);
+
+      h.server.close(h.server.sockets[1],1001);await settle();
+      visibility('visible');await settle();
+      assert.equal(h.server.sockets.length,3);assert.equal(h.client.state,'Ready');
+
+      h.server.close(h.server.sockets[2],1001);await settle();
+      const elapsed=h.time.advance(200);
+      online();await elapsed;
+      assert.equal(h.server.sockets.length,4);
+
+      h.server.close(h.server.sockets[3],1001);await settle();
+      assert.equal(getEventListeners(browser,'online').length,1);
+      assert.equal(getEventListeners(page,'visibilitychange').length,1);
+      await h.client.close();
+      assert.equal(getEventListeners(browser,'online').length,0);
+      assert.equal(getEventListeners(page,'visibilitychange').length,0);
+      online();visibility('visible');await h.time.advance(1000);
+      assert.equal(h.client.state,'Closed');assert.equal(h.server.sockets.length,4);
+    }finally{
+      if(originalWindow)Object.defineProperty(globalThis,'window',originalWindow);else delete globalThis.window;
+      if(originalDocument)Object.defineProperty(globalThis,'document',originalDocument);else delete globalThis.document;
+    }
   };
   tests.failed_advances_and_request_is_immutable=async()=>{
     const h=await setup();await ready(h);

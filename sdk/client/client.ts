@@ -1,7 +1,9 @@
+import {defaultClock, listenForBrowserWake, type Clock, type Socket} from './browser.js';
 import {CorruptState, emptyStream, fresh, hex, intact, maxU64, randomGeneration, streamHex, decimalU64, replaceStream,
   streamLock, u64, validCaller, validHttpRequest, type Caller, type HttpRequest, type Installation,
   type Lease, type Pending, type Storage, type StreamId, type StreamRecord} from './persistence.js';
 export {CorruptState, RECOVERY_VERSION, intact, validCaller, validHttpRequest} from './persistence.js';
+export type {Clock, Socket} from './browser.js';
 export type {Caller, HttpRequest, Installation, Lease, Pending, Storage, StreamId, StreamRecord} from './persistence.js';
 import {applyImage, commitVisible, equal, freezeDecoded, key, rawSubscription, slotEdits, stageImage,
   type ImageChange, type ImageEdits, type ImageSlots, type ImageState} from './image.js';
@@ -97,18 +99,6 @@ export interface Transport {
 export interface HttpReply { status: number; body: string; committed: boolean; replayed: boolean }
 interface HttpAttempt extends HttpReply { refusal?: string; at?: bigint; retention?: bigint }
 export type State = 'Connecting' | 'Ready' | 'Backoff' | 'Incompatible' | 'Unbound' | 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
-export interface Socket {
-  binaryType: string;
-  onopen: ((event?: unknown) => void) | null;
-  onmessage: ((event: {data: unknown}) => void) | null;
-  onclose: ((event: {code: number; reason?: string}) => void) | null;
-  onerror: ((event?: unknown) => void) | null;
-  send(data: Uint8Array): void; close(code?: number, reason?: string): void;
-}
-export interface Clock {
-  now(): number; random(): number;
-  set(fn: () => void, ms: number): unknown; clear(id: unknown): void;
-}
 export interface Identity {digest: Uint8Array; target: string; n_place: bigint}
 export interface Options {
   url: string; storage: Storage; frame: Codec; wants: Want[]; identity?: Identity; credential?: Uint8Array;
@@ -120,10 +110,6 @@ export interface Options {
   onRecovered?: (outcome: Outcome<Uint8Array>) => void;
   onBatch?: (version: bigint) => void;
 }
-const clock: Clock = {
-  now: () => performance.now(), random: () => Math.random(),
-  set: (fn, ms) => setTimeout(fn, ms), clear: id => clearTimeout(id as ReturnType<typeof setTimeout>),
-};
 const sameCaller = (a: Caller | null, b: Caller | null) =>
   a === null || b === null ? a === b : a.issuer === b.issuer && equal(a.subject, b.subject);
 const sameWant = (a: Want, b: Want) => equal(a.identity, b.identity) && a.args_fp === b.args_fp && a.result_fp === b.result_fp;
@@ -191,6 +177,7 @@ export class Client implements Transport {
   private timer?: unknown;
   private stableTimer?: unknown;
   private clock: Clock;
+  private removeBrowserWake?: () => void;
   private sent = false;
   private nextSub = 0;
   private subs = new Set<Sub>();
@@ -211,7 +198,7 @@ export class Client implements Transport {
     this.wants = options.wants.map(copyWant);
     const pending = this.record.pending;
     if (pending && !pending.http && !this.wants.some(w => sameWant(w, pending.want))) this.wants.push(copyWant(pending.want));
-    this.clock = options.clock ?? clock;
+    this.clock = options.clock ?? defaultClock;
     this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
     void this.ready.catch(() => {});
     this.watchLease(lease);
@@ -269,6 +256,7 @@ export class Client implements Transport {
       const client = new Client(options, state, stream, lease!);
       await lock.release();
       client.connect();
+      client.removeBrowserWake = listenForBrowserWake(() => client.wakeBackoff());
       return client;
     } catch (error) {
       await lease?.release(); await lock.release(); throw error;
@@ -380,10 +368,20 @@ export class Client implements Transport {
     this.timer = undefined; this.stableTimer = undefined;
   }
   private transient(): void {
-    this.cancelTimers(); this.disconnect(); this.setState('Backoff');
+    this.cancelTimers(); this.disconnect();
     const delay = this.clock.random() * this.backoff;
     this.backoff = Math.min(10000, this.backoff * 2);
-    this.timer = this.clock.set(() => { this.timer = undefined; void this.enqueue(async () => this.connect()); }, delay);
+    this.timer = this.clock.set(() => this.wakeBackoff(), delay);
+    this.setState('Backoff');
+  }
+  private wakeBackoff(): void {
+    if (this.state !== 'Backoff' || this.timer === undefined) return;
+    this.clock.clear(this.timer);
+    this.timer = undefined;
+    const epoch = this.epoch;
+    void this.enqueue(async () => {
+      if (epoch === this.epoch && this.state === 'Backoff') this.connect();
+    });
   }
   private async incompatible(code: number, problem = 'Incompatible'): Promise<void> {
     this.cancelTimers(); this.disconnect(); this.setState('Incompatible');
@@ -995,6 +993,8 @@ export class Client implements Transport {
     }
   }
   async close(): Promise<void> {
+    this.removeBrowserWake?.();
+    this.removeBrowserWake = undefined;
     await this.enqueue(async () => { await this.stop('Closed', 'LocallyUnknown'); await this.streamLease.release(); });
   }
 }

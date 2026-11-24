@@ -1,5 +1,35 @@
-import {CorruptState, type Storage, type Installation, type Lease} from './client.js';
-import {encodeState, decodeState} from './persistence.js';
+import {CorruptState, encodeState, decodeState, type Storage, type Installation, type Lease} from './persistence.js';
+
+export interface Socket {
+  binaryType: string;
+  onopen: ((event?: unknown) => void) | null;
+  onmessage: ((event: {data: unknown}) => void) | null;
+  onclose: ((event: {code: number; reason?: string}) => void) | null;
+  onerror: ((event?: unknown) => void) | null;
+  send(data: Uint8Array): void; close(code?: number, reason?: string): void;
+}
+export interface Clock {
+  now(): number; random(): number;
+  set(fn: () => void, ms: number): unknown; clear(id: unknown): void;
+}
+
+export const defaultClock: Clock = {
+  now: () => performance.now(), random: () => Math.random(),
+  set: (fn, ms) => setTimeout(fn, ms), clear: id => clearTimeout(id as ReturnType<typeof setTimeout>),
+};
+
+export function listenForBrowserWake(wake: () => void): (() => void) | undefined {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  const page = document;
+  const browser = window;
+  const onVisibility = () => { if (page.visibilityState === 'visible') wake(); };
+  browser.addEventListener('online', wake);
+  page.addEventListener('visibilitychange', onVisibility);
+  return () => {
+    browser.removeEventListener('online', wake);
+    page.removeEventListener('visibilitychange', onVisibility);
+  };
+}
 
 export class BrowserStorage implements Storage {
   private db?: IDBDatabase;

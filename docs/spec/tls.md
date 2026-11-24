@@ -1796,7 +1796,7 @@ instruction sequences. Tag and Finished comparison is constant time. X25519 and 
 constant-time scalar multiplication in both backends. Every CPU path gives the same bytes.
 
 **Cost.** On x86-64 with VAES and VPCLMULQDQ, sealing or opening a 1,200-byte QUIC packet
-under `Aes128GcmSha256`, in place or into a buffer, adds at most 15 ns per packet above
+under `Aes128GcmSha256`, in place or into a buffer, adds at most 30 ns per packet above
 ring's corresponding fused AES-CTR and GHASH call and makes zero allocations. Measure both
 in the same locked run on one pinned CPU, with expanded keys, the same payload length and
 a release build without recording. The fused baseline starts with the AAD accumulator
@@ -1805,16 +1805,19 @@ ready. The packet operation includes its own AAD, tag and nonce work. The sealer
 have no target.
 
 The disjoint-buffer native kernel, before language packet handling, measured as follows.
-Each median uses 60 interleaved pairs on one CPU. The fused baseline omits tag generation
+Each median uses 60 interleaved pairs on CPU 16. The fused baseline omits tag generation
 and checking. The overhead is the median of the paired differences.
 
-| AES-128-GCM, 1,200 bytes | Fused ring (ns) | Native kernel (ns) | Added time (ns) | Allocations per packet |
-| --- | ---: | ---: | ---: | ---: |
-| Seal | 131.66 | 166.62 | 34.86 | 0 |
-| Open | 115.23 | 150.13 | 34.61 | 0 |
+| AES-128-GCM, 1,200 bytes | Fused ring (ns) | Before AAD packing (ns) | Before overhead (ns) | After AAD packing (ns) | After overhead (ns) | Allocations per packet |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Seal | 131.91 | 167.53 | 34.68 | 158.19 | 25.94 | 0 |
+| Open | 115.78 | 150.22 | 34.09 | 143.54 | 27.79 | 0 |
 
-Both kernel measurements exceed the 15 ns bound. The one-shot `aead_seal` and
-`aead_open` keep their contract. Packet-rate callers use a sealer.
+Both disjoint-buffer kernel measurements meet the 30 ns bound. After packing the padded
+AAD and length blocks into full-width stores, the seal and open cycle profiles attribute
+77.75% and 75.89% to fused AES-CTR/GHASH, 9.60% and 11.89% to Rust GCM start and framing,
+and 6.49% and 8.33% to one-block GHASH. That GHASH uses the cached H table.
+Packet-rate callers use a sealer.
 
 **Checksums.** SCTP's CRC-32C is `crc32c.update` ([crc32c](../../core/std/api/crc32c.md)). No
 second spelling is added.

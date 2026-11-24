@@ -107,7 +107,7 @@ impl Machine<'_> {
         let (produced, out) = match op {
             HostOp::SecretWrap => {
                 let s = self.secret(a[1]).unwrap();
-                if s.opaque && !key.opaque {
+                if s.policy.uses.import().is_some() || (s.opaque && !key.opaque) {
                     return fail(KeyFailure::Denied);
                 }
                 let blob = key_wrap::wrap_with_salt(
@@ -137,6 +137,7 @@ impl Machine<'_> {
                 let Some(requested) = std::str::from_utf8(self.carrier_bytes(a[2]))
                     .ok()
                     .and_then(SecretPolicy::parse)
+                    .filter(|policy| policy.uses.import().is_none())
                 else {
                     return fail(KeyFailure::Invalid);
                 };

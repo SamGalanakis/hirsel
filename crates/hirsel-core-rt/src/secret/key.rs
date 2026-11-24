@@ -212,6 +212,7 @@ pub unsafe extern "C" fn hirsel_core_secret_wrap(
         // A program that holds the KEK's bytes could open the blob itself,
         // so it never wraps bytes it does not hold under that KEK.
         if !kek.policy.uses.permits(SecretUse::WRAP)
+            || secret.policy.uses.import().is_some()
             || (secret.origin.opaque() && !kek.origin.opaque())
         {
             return key_error(KEY_DENIED);
@@ -242,7 +243,7 @@ pub unsafe extern "C" fn hirsel_core_secret_unwrap(
         if !kek.policy.uses.permits(SecretUse::WRAP) {
             return key_error(KEY_DENIED);
         }
-        let Some(requested) = policy(uses) else {
+        let Some(requested) = policy(uses).filter(|policy| policy.uses.import().is_none()) else {
             return key_error(KEY_INVALID);
         };
         let blob = crate::tls::bytes(&*blob);

@@ -6,7 +6,16 @@ use std::sync::Arc;
 /// permits verification too, so its set holds `VERIFY` as well, and an
 /// intersection is the bitwise and.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct SecretUse(u16);
+pub struct SecretUse(u32);
+
+/// The sole authority on an imported packet key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImportUse {
+    SrtpSend,
+    SrtpReceive,
+    TrafficSend,
+    TrafficReceive,
+}
 
 impl SecretUse {
     pub const VERIFY: Self = Self(1);
@@ -17,6 +26,20 @@ impl SecretUse {
     pub const WRAP: Self = Self(32);
     pub const MTLS_CLIENT_ID: Self = Self(64);
     pub const KDF: Self = Self(128);
+    const SRTP_SEND: Self = Self(1 << 14);
+    const SRTP_RECEIVE: Self = Self(1 << 15);
+    const TRAFFIC_SEND: Self = Self(1 << 16);
+    const TRAFFIC_RECEIVE: Self = Self(1 << 17);
+
+    pub fn import(self) -> Option<ImportUse> {
+        Some(match self {
+            Self::SRTP_SEND => ImportUse::SrtpSend,
+            Self::SRTP_RECEIVE => ImportUse::SrtpReceive,
+            Self::TRAFFIC_SEND => ImportUse::TrafficSend,
+            Self::TRAFFIC_RECEIVE => ImportUse::TrafficReceive,
+            _ => return None,
+        })
+    }
 
     pub const fn aead(alg: AeadAlg, mode: AeadMode) -> Self {
         let open = 1 << (8 + 2 * alg as u32);
@@ -27,7 +50,7 @@ impl SecretUse {
     }
 
     /// Each use word in canonical order, with a use ahead of any it implies.
-    const WORDS: [(&str, Self); 14] = [
+    const WORDS: [(&str, Self); 18] = [
         ("mac", Self::MAC),
         ("verify", Self::VERIFY),
         ("kdf", Self::KDF),
@@ -59,6 +82,10 @@ impl SecretUse {
             Self::aead(AeadAlg::Aes256Gcm, AeadMode::Open),
         ),
         ("wrap", Self::WRAP),
+        ("srtp_import(send)", Self::SRTP_SEND),
+        ("srtp_import(receive)", Self::SRTP_RECEIVE),
+        ("traffic_import(send)", Self::TRAFFIC_SEND),
+        ("traffic_import(receive)", Self::TRAFFIC_RECEIVE),
         ("mtls_client_id", Self::MTLS_CLIENT_ID),
     ];
 
@@ -113,6 +140,11 @@ impl SecretPolicy {
         }
         let send: Arc<[Pattern]> = send.map_or_else(|| Arc::from([]), Into::into);
         if send.is_empty() && uses.is_empty() {
+            return None;
+        }
+        // The four import policy bits follow the AEAD uses. An import owns
+        // exactly one bit and grants no other operation or destination.
+        if uses.0 >> 14 != 0 && (uses.import().is_none() || !send.is_empty()) {
             return None;
         }
         Some(Self { send, uses })
@@ -324,3 +356,6 @@ pub fn derive_hmac_sha256(key: &[u8], prefix: &[u8], data: &[u8]) -> zeroize::Ze
     };
     zeroize::Zeroizing::new(ring::hmac::sign(&key, data).as_ref().to_vec())
 }
+
+#[cfg(test)]
+mod tests;

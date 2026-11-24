@@ -9,6 +9,8 @@
 //! hashed as ciphertext zero-padded to a block.
 #![cfg(target_arch = "x86_64")]
 
+use zeroize::{Zeroize, Zeroizing};
+
 const BLOCK: usize = 16;
 
 // Layouts match ring's `AES_KEY` (aes.h) and its 16-byte-aligned `HTable`.
@@ -57,6 +59,14 @@ pub(super) struct GcmKey {
     table: HTable,
 }
 
+impl Drop for GcmKey {
+    fn drop(&mut self) {
+        self.aes.rd_key.zeroize();
+        self.aes.rounds.zeroize();
+        self.table.0.zeroize();
+    }
+}
+
 impl GcmKey {
     /// The CPU features ring requires before it selects this assembly.
     fn supported() -> bool {
@@ -70,28 +80,28 @@ impl GcmKey {
     }
 
     /// An AES-128 or AES-256 key, or none on CPUs without the assembly.
-    pub(super) fn new(key: &[u8]) -> Option<Self> {
+    pub(super) fn new(key: &[u8]) -> Option<Box<Self>> {
         if !matches!(key.len(), 16 | 32) || !Self::supported() {
             return None;
         }
-        let mut this = Self {
+        let mut this = Box::new(Self {
             aes: AesKey {
                 rd_key: [0; 60],
                 rounds: 0,
             },
             table: HTable([0; 32]),
-        };
+        });
         // SAFETY: the key is 16 or 32 bytes and the schedule has room for 14 rounds.
         let status = unsafe { aes_set_key(key.as_ptr(), key.len() as i32 * 8, &mut this.aes) };
         assert_eq!(status, 0);
-        let mut h = [0; BLOCK];
+        let mut h = Zeroizing::new([0; BLOCK]);
         // SAFETY: one in-place block under the initialized schedule.
         unsafe { aes_ctr32(h.as_mut_ptr(), h.as_mut_ptr(), 1, &this.aes, &[0; BLOCK]) };
         let (hi, lo) = h.split_at(8);
-        let h = [
+        let h = Zeroizing::new([
             u64::from_be_bytes(hi.try_into().unwrap()),
             u64::from_be_bytes(lo.try_into().unwrap()),
-        ];
+        ]);
         // SAFETY: the CPU features were checked above.
         unsafe { gcm_init(&mut this.table, &h) };
         Some(this)
@@ -262,6 +272,25 @@ impl GcmKey {
 mod tests {
     use super::GcmKey;
     use ring::aead::{AES_128_GCM, AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+
+    #[test]
+    fn drops_owned_vaes_state_in_place() {
+        let key = Box::into_raw(GcmKey::new(&[0x16; 16]).unwrap());
+        // Keep the allocation after the destructor, and inspect only the
+        // fully initialized integer fields it owns. Padding is not read.
+        unsafe {
+            let round_keys = std::ptr::addr_of!((*key).aes.rd_key).cast::<u32>();
+            let rounds = std::ptr::addr_of!((*key).aes.rounds);
+            let table = std::ptr::addr_of!((*key).table.0).cast::<u64>();
+            assert!((0..60).any(|index| round_keys.add(index).read_volatile() != 0));
+            assert!((0..32).any(|index| table.add(index).read_volatile() != 0));
+            std::ptr::drop_in_place(key);
+            assert_eq!(rounds.read_volatile(), 0);
+            assert!((0..60).all(|index| round_keys.add(index).read_volatile() == 0));
+            assert!((0..32).all(|index| table.add(index).read_volatile() == 0));
+            drop(Box::from_raw(key.cast::<std::mem::MaybeUninit<GcmKey>>()));
+        }
+    }
 
     fn hex(text: &str) -> Vec<u8> {
         (0..text.len())

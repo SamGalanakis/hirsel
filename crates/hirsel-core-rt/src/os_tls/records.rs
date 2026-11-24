@@ -81,7 +81,7 @@ struct TrafficKey {
     /// AES-GCM that seals straight from the caller's bytes into the send
     /// slot and opens straight from the receive slot into the caller's bytes.
     #[cfg(target_arch = "x86_64")]
-    out_of_place: Option<super::gcm::GcmKey>,
+    out_of_place: Option<Box<super::gcm::GcmKey>>,
     iv: Iv,
     seq: u64,
 }

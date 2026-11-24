@@ -1832,7 +1832,7 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     let result = match take req {
         Error(take e) => Invalid(take e),
         Ok(take wire) => {
-            let response = transact(mut h.connection, wire, lane.proof, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe, mut lane.list_parsing)
+            let response = transact(mut h.connection, wire, lane.proof, lane.server.secure, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe, mut lane.list_parsing)
             reclaim_request(mut lane.wire, take wire)
             take response
         },
@@ -1901,7 +1901,7 @@ fn proven_answer(head: http_client.ResponseHead, wire: http_client.Request, key:
     false
 }
 
-fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Option[Secret], mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
+fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Option[Secret], secure: bool, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     if let Error(e) = http_client.start(mut c, wire, job.deadline) {
         return failure(if http_client.request_started(c) {
             RequestSent
@@ -1910,8 +1910,10 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Opt
         }, e)
     }
     if uploads_body(op) {
-        if let Error(e) = http_client.write(mut c, job.data) {
-            return failure(RequestSent, e)
+        match http_client.write(mut c, job.data) {
+            Error(Write(Reset)) if !secure && op == PutIf => return failure(BeforeRequest, Write(Reset)),
+            Error(e) => return failure(RequestSent, e),
+            Ok(()) => (),
         }
     }
     if let Error(e) = http_client.finish_request(mut c, MAX_U64) {
@@ -1926,9 +1928,7 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Opt
     if payload_read(op) && status >= 200 && status < 300 {
         return receive_object(mut c, mut job.data, mut progress, status, from, to, mut probe)
     }
-    let octets = list.len(job.data)
-    let id = job.id
-    receive_control(mut c, octets, id, op, status, prefix, mut job.entries, mut control, mut probe, mut scratch)
+    receive_control(mut c, list.len(job.data), job.id, op, status, prefix, mut job.entries, mut control, mut probe, mut scratch)
 }
 
 fn wait_retry(mut lane: Lane, attempt: u64, throttle: bool, deadline: u64) waits {

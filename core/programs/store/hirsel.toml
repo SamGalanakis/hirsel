@@ -88,6 +88,7 @@ dirs = ["."]
 "import_read_laws.hirsel" = "store"
 "bucket_laws.hirsel" = "store"
 "bucket_order_laws.hirsel" = "store"
+"bucket_q5_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
 "authority_laws.hirsel" = "store"
@@ -219,4 +220,7 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_claim_witness"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_test_m2_q5_matrix"]
 limit = 134217728

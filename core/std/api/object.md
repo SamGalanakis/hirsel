@@ -108,6 +108,10 @@ as `x-amz-meta-hirsel-put-id`. When resolving a write, HEAD returns
 `Created` for the same put-id and `Exists` for a different or missing
 put-id on the identified object. A missing object permits another attempt.
 
+On plain HTTP, a connection reset while sending a conditional PUT's fixed
+body leaves the message incomplete. The client retries it as a request that
+could not apply. A reset while reading the reply retains uncertainty.
+
 Dynamic credentials refresh 300 seconds before expiry. A replacement must
 pass a signed HEAD of the bucket. HTTP 403 leaves the active credentials
 in use up to their expiry. Refresh failures wait 100 ms at first and double

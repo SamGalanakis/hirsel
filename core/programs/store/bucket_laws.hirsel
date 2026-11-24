@@ -956,3 +956,17 @@ fn bucket_test_m2_claim_witness(c: Clock, r: Random, tasks: Tasks, seed_grant: E
     witness_case(tasks, c, r, seed, false)?
     witness_case(tasks, c, r, seed, true)
 }
+
+@test
+fn bucket_test_m2_q5_matrix(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
+    let seed = bucket_law_seed(seed_grant, 541)
+    let writes: Inline[Q5Operation, 3] = [GenesisWrite, ClaimWrite, ActivationWrite]
+    let schedules: Inline[Q5Fault, 6] = [AfterBody, BeforeBody, OvertakeDrop, OvertakeApply, Retry500, ExhaustBeforeBody]
+    for operation in writes {
+        let site = q5_clean_site(d, c, r, tasks, seed, operation)?
+        for fault in schedules {
+            q5_case(d, c, r, tasks, seed, operation, site, fault)?
+        }
+    }
+    Ok(())
+}

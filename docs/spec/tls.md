@@ -28,7 +28,7 @@ an existing `NetError` case with its existing meaning.
 
 | type | kind | bounds | logical size | cleanup |
 |---|---|---|---|---|
-| `Secret` | resource, mechanical | `send` | 8 | releases one holder (TLS-5) |
+| `Secret` | resource, mechanical | `cross` | 8 | releases one holder (TLS-5) |
 
 `Secret` is a capability type ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)).
 It designates bytes that let a program act as an account. It has neither `key` nor
@@ -1163,10 +1163,10 @@ neither domain is marked issued. A recorded pair binds each sealer to its positi
 
 | type | kind | bounds | logical size | cleanup |
 |---|---|---|---|---|
-| `KeyShare` | resource, mechanical | `send` | 8 | erases what Hirsel owns of its state (zeroing, below) and refunds 64 bytes |
-| `Schedule` | resource, mechanical | `send` | 8 | zeroes its secrets, retires its sender ledger and refunds its charges |
-| `Sealer`, `Opener` | resource, mechanical | `send` | 8 | zeroes the state Hirsel owns and refunds 1024 bytes |
-| `HeaderMask` | resource, mechanical | `send` | 8 | zeroes the state Hirsel owns and refunds 512 bytes |
+| `KeyShare` | resource, mechanical | `cross` | 8 | erases what Hirsel owns of its state (zeroing, below) and refunds 64 bytes |
+| `Schedule` | resource, mechanical | `cross` | 8 | zeroes its secrets, retires its sender ledger and refunds its charges |
+| `Sealer`, `Opener` | resource, mechanical | `cross` | 8 | zeroes the state Hirsel owns and refunds 1024 bytes |
+| `HeaderMask` | resource, mechanical | `cross` | 8 | zeroes the state Hirsel owns and refunds 512 bytes |
 
 Each type is a capability type in the sense of `Secret`
 ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)). It has neither `key` nor `codec`, so
@@ -1450,9 +1450,11 @@ set, so no derivation makes an import key. `wrap` of a secret holding an import 
 use. The canonical text writes the two uses after `wrap` and before `mtls_client_id`.
 
 An import **spends the bytes**. It consumes the designation it is given. On success, and on
-any refusal after issue, it marks the run-owned bytes behind that designation as spent. The
+an `Invalid` length, it marks the run-owned bytes behind that designation as spent. The
 mark covers every designation of those bytes, the ones `share` and `narrow` made included,
-in every unit. A later import of spent bytes is `Spent` before issue. Checking the mark
+in every unit. A later import of spent bytes is `Spent`. The mark is run-wide state that
+another unit can change, so an import issues before it reads the mark, and `Spent` is a
+delivery ([unit recordings](../recording.md#unit-recordings)). Checking the mark
 and setting it are one transition of the run, atomic across units and across every
 designation of the bytes, so two imports racing in two units through two aliases give one
 schedule and one `Spent`. The import results, in this order, which is the imports' own and
@@ -1460,10 +1462,12 @@ takes precedence over the general order above:
 
 - `Denied` before issue: the secret lacks this import's use (`srtp_import(..)` for
   `import_srtp`, `traffic_import(..)` for `import_traffic`). A spent SRTP designation given
-  to `import_traffic` is therefore `Denied`. `Spent` before issue: its bytes are spent.
-  `Invalid` before issue: the profile does not fit the import kind. `Capacity(c)` before
-  issue: the schedule's 512 bytes are refused. Each of these returns the secret, with its
-  holder unchanged. A spent designation with an unsupported profile is `Spent`.
+  to `import_traffic` is therefore `Denied`. Then the import issues.
+- As a delivery, in this order: `Spent`: its bytes are spent. `Invalid`: the profile does
+  not fit the import kind. `Capacity(c)`: the schedule's 512 bytes are refused. Each of
+  these returns the secret, with its holder unchanged, and marks nothing. A spent
+  designation with an unsupported profile is `Spent`. This is the one admission TLS-8 makes
+  after issue: it waits on the mark, which no unit-local state decides.
 - `Invalid` as a delivery, with the bytes spent and the secret consumed. For `import_srtp`
   the length is not the profile's master key length (16, 16 or 32) plus 14, or plus 12 for
   the AEAD profiles. For `import_traffic` it is not the suite's HashLen.
@@ -1753,11 +1757,18 @@ every object made from one, has bytes on replay exactly when it is not opaque.
 
 An operation **passes the replay point**
 ([CAP-8](capabilities.md#cap-8-the-replay-point)) exactly when it draws from a host `Random`,
-reads key material without bytes on replay (any opaque object, or a `Secret` as above), or
-observes an agreement registry verdict at a `tls13` or `dtls12` constructor.
+reads key material without bytes on replay (any opaque object, or a `Secret` as above),
+observes an agreement registry verdict at a `tls13` or `dtls12` constructor, or is an
+`import_srtp` or `import_traffic`, which observes the run-wide spent mark. A virtual `Random`
+counts as a host one in a unit where its operations pass the replay point
+([unit recordings](../recording.md#unit-recordings): one made in another unit, or one that
+another unit has drawn from), and a `Secret` or key object that arrived from another unit
+has no bytes on replay there.
 The registry is a run-wide input to the unit. The root records each verdict, including
 a verdict for a wholly virtual agreement. Replay reads the verdict from the tape and
-applies its share lifetime and refunds. It never recomputes the registry verdict.
+never recomputes it. An entry's retirement depends on shares in every unit, so its refund
+is an input of the unit that paid it, supplied from that unit's stream; replay never
+retires an entry from its own share count.
 Helper units record the same input in their own streams once
 [unit recordings](../recording.md#unit-recordings) are built. Today the run tape records
 the root alone. Every other TLS-8 operation is **wholly virtual**. It is recomputed on replay as it
@@ -1778,7 +1789,7 @@ When an operation passes the replay point, it writes one issue frame and one del
 and a packet sealed and masked passes it twice. An issue frame holds every argument that can
 change the result, by the canonical-arguments rule ([recording](../recording.md)), and the
 spare of every `mut` buffer the call appends to. A delivery holds the origin of every object
-the call makes. Admissions happen before issue, live and on replay alike, so a replay makes
+the call makes. Admissions happen before issue, except an import's (above), live and on replay alike, so a replay makes
 the same charges. On replay, the delivery comes from the tape and the program state changes
 as follows. A ledger changes only in the rows that say so.
 
@@ -1788,7 +1799,7 @@ as follows. A ledger changes only in the rows that say so.
 | `p256_key`, host | `Random`, policy, spare | public point and designation origin | as above; the designation has no bytes |
 | `sign` | key designation, algorithm, `Random` identity, `msg` by the canonical-arguments rule, `out`'s spare | the signature or a refusal | `out` gains the signature |
 | `tls13`, `dtls12` | share origin, profile, suite, side, epoch, `peer`, randoms and hashes | the schedule's origin, or `Invalid` or `Issued` | the share is consumed and its 64 refunded. On success the registry gains an entry with the live share count, and the schedule has no secrets when opaque; a virtual one computes its secrets as live, after the recorded verdict. A refusal refunds as live |
-| `import_srtp`, `import_traffic` | designation, profile | schedule origin, or a refusal | the bytes are marked spent where live marked them; the schedule's direction comes from the designation's policy |
+| `import_srtp`, `import_traffic` | designation, profile | schedule origin, or `Spent`, `Invalid` or `Capacity` | the mark is never read. After a delivery other than `Spent` or a profile `Invalid`, the 512 bytes are admitted against the replay's own limit, as live, and a delivered `Capacity` is that admission's result; the bytes are marked spent where live marked them; the schedule's direction comes from the designation's policy |
 | `application` | schedule origin, `finished_hash` | done or a refusal | the stage changes as live |
 | `key_update` | schedule origin, `local` | done or a refusal | the generation of that direction changes and its old ledger retires, refunding its entries, as live |
 | `retire` | schedule origin, space | done or a refusal | the space is spent and its ledgers retire, refunding their entries, as live |

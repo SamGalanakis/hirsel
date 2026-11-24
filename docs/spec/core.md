@@ -1078,6 +1078,11 @@ pub fn trigger(take t: StopTrigger)
 - **Replay.** A virtual provider's results are computed by the run, so they are not
   inputs of [CAP-8](capabilities.md#cap-8-the-replay-point): a replay recomputes them. The
   host operations a server makes pass the replay point as every provider operation does.
+  A virtual capability is `cross`, so it can reach another unit
+  ([CONC-15](tasks.md#conc-15-units)). There its operations depend on another unit's order,
+  so they pass the replay point in the unit that issues them, and so does every operation
+  on the same cell in its home unit after the first one another unit issued
+  ([unit recordings](../recording.md#unit-recordings)).
   A seeded simulation is a test-run configuration over today's task order, not an order
   promise.
 

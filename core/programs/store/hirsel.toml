@@ -331,3 +331,9 @@ limit = 134217728
 
 [tests.runs."store@1/store/bucket_test_m2_sim_levels"]
 limit = 268435456
+
+[tests.runs."store@1/store/test_l88_crash_before_publication_keeps_the_probed_pack"]
+limit = 268435456
+
+[tests.runs."store@1/store/test_l88_crash_after_publication_resumes_remove"]
+limit = 268435456

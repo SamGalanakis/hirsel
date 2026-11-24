@@ -564,3 +564,109 @@ fn test_l88_refused_probe_publishes_mandatory_steps(d: Dir, c: Clock, r: Random,
     compact_branch_rows(reopened, main_branch(reopened), rows, row_count, row_count, 0)?
     close(take reopened)
 }
+
+// The retiring cut of the §13.6 crash-table laws: with `probe_budget` 64 and
+// `compact_permille` 1001 one cut walks the whole Cold pack P and retires it.
+// Its MANIFEST seal is refused after every pack is written, and the bytes the
+// rename would have published are returned, sealed.
+fn compact_refused_retiring_cut(mut db: Db) -> Result[Bytes, Error] waits {
+    let sealed: core.Log[Bytes] = log.new()
+    match disk_cut_state(mut db, NoHolderChange, scoped fn(mut raw: Bytes, context: DiskContext, fence: u32) -> Result[(), Error] {
+        let mut whole: Bytes = clone(raw)
+        seal_page_manifest_file(mut whole, context, fence)?
+        log.append(sealed, take whole)
+        capacity(bound bytes 0 {
+            seal_page_manifest_file(mut raw, context, fence)
+        })?
+    }) {
+        Error(Full(Allocation(_))) => (),
+        _ => fail("§13.6 crash: the refused seal fails the retiring cut before its rename"),
+    }
+    let mut published = log.finish(take sealed)
+    if list.len(published) != 1 {
+        fail("§13.6 crash: the retiring cut seals one MANIFEST")
+    }
+    Ok(list.remove(mut published, 0))
+}
+
+fn compact_crash_options(floor: u64) -> Result[Options, Error] {
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 64
+    options.compact_permille = 1001
+    Ok(options)
+}
+
+// §13.6 crash table, rows 2 and 3 (the old side): a retiring cut is
+// interrupted after its packs and its MANIFEST.tmp are written and before the
+// rename. Reopen recovers the previous generation: P is listed and on disk,
+// the tree reaches every frame once in listed packs, every row reads, and the
+// cut's outputs are removed as leftovers. The next cut retires P again.
+@test
+fn test_l88_crash_before_publication_keeps_the_probed_pack(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 160u64
+    let rows = compact_cold_table(d, c, r, tasks, floor, row_count)?
+    let mut db = open(tasks, d, c, r, compact_crash_options(floor)?)?
+    let probed = compact_branch_root(db, 0, rows.id)?.pack
+    let first_output = disk_state(db).pages.next_pack
+    let sealed = compact_refused_retiring_cut(mut db)?
+    if !disk_exists(d, paged_pack_path(first_output)?)? {
+        fail("§13.6 crash: the retiring cut wrote its packs before the rename")
+    }
+    disk_write_synced(d, "MANIFEST.tmp", sealed)?
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, compact_crash_options(floor)?)?
+    if disk_exists(d, "MANIFEST.tmp")? || disk_exists(d, paged_pack_path(first_output)?)? {
+        fail("§13.6 crash: open removes an unpublished cut's outputs")
+    }
+    if !compact_listed(reopened, probed) || !disk_exists(d, paged_pack_path(probed)?)? {
+        fail("§13.6 crash: the previous generation recovers with P listed and on disk")
+    }
+    compact_check_published(d, reopened, rows.id)?
+    compact_branch_rows(reopened, main_branch(reopened), rows, row_count, row_count, 0)?
+    let _ = checkpoint(mut reopened)?
+    if compact_listed(reopened, probed) {
+        fail("§13.6 crash: the next cut retires P")
+    }
+    compact_check_published(d, reopened, rows.id)?
+    close(take reopened)?
+    let again = open(tasks, d, c, r, l70_open_options(floor)?)?
+    compact_branch_rows(again, main_branch(again), rows, row_count, row_count, 0)?
+    close(take again)
+}
+
+// §13.6 crash table, rows 3 (the new side) and 4: the retiring cut's rename
+// lands and the process dies before RAM install and before Remove. Reopen
+// selects the new generation: P is unlisted, every frame the tree reaches is
+// in a listed pack on disk, and Remove resumes, so P's file is gone. A crash
+// during that Remove reopens the same state.
+@test
+fn test_l88_crash_after_publication_resumes_remove(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 160u64
+    let rows = compact_cold_table(d, c, r, tasks, floor, row_count)?
+    let mut db = open(tasks, d, c, r, compact_crash_options(floor)?)?
+    let probed = compact_branch_root(db, 0, rows.id)?.pack
+    let sealed = compact_refused_retiring_cut(mut db)?
+    close(take db)?
+    disk_write_synced(d, "MANIFEST", sealed)?
+    if !disk_exists(d, paged_pack_path(probed)?)? {
+        fail("§13.6 crash: P's file is still on disk when Remove has not run")
+    }
+    let reopened = open(tasks, d, c, r, compact_crash_options(floor)?)?
+    if compact_listed(reopened, probed) {
+        fail("§13.6 crash: reopen selects the new generation, which retired P")
+    }
+    if disk_exists(d, paged_pack_path(probed)?)? {
+        fail("§13.6 crash: Remove resumes at open and unlinks P")
+    }
+    compact_check_published(d, reopened, rows.id)?
+    compact_branch_rows(reopened, main_branch(reopened), rows, row_count, row_count, 0)?
+    close(take reopened)?
+    let again = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if compact_listed(again, probed) {
+        fail("§13.6 crash: a crash during Remove reopens the new generation")
+    }
+    compact_branch_rows(again, main_branch(again), rows, row_count, row_count, 0)?
+    close(take again)
+}

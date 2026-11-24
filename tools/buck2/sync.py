@@ -792,7 +792,7 @@ def first_party(meta: dict) -> str:
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_store_package", name="store-package", hirsel="//:hirsel-core-driver-bin-hirsel",
-                            sources=Raw('glob(["core/programs/store/*.hirsel", "core/programs/runner/*.hirsel"]) + ["core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml"]')))
+                            sources=Raw('glob(["core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/tests/*.hirsel"]) + ["core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml"]')))
     out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
                             runtimes="//:hirsel-core-rt-archives",
                             recording_runtimes="//:hirsel-core-rt-record-archives",

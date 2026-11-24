@@ -555,7 +555,7 @@ def _store_package_impl(ctx):
     scratch = ctx.actions.declare_output("scratch", dir = True)
     script = ctx.actions.write("pack.sh", [
         "set -eu",
-        'mkdir -p "$3" "$4/store" "$4/runner"; cp -L "$2"/store/* "$4/store/"; cp -L "$2"/runner/* "$4/runner/"',
+        'mkdir -p "$3" "$4/store" "$4/runner"; cp -L "$2"/store/* "$4/store/"; cp -RL "$2"/runner/. "$4/runner/"',
         # The copies keep the inputs' read-only mode under remote execution: replace the
         # manifest rather than write through it.
         'rm -f "$4/runner/hirsel.toml"',

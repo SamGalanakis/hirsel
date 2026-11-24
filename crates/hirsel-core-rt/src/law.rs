@@ -7,6 +7,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+mod model;
+
 static ACTIVE: Mutex<Option<Observation>> = Mutex::new(None);
 
 struct Observation {
@@ -26,6 +28,15 @@ struct ActiveCall {
 struct Row {
     callee: u64,
     site: u64,
+    outcome: Outcome,
+}
+
+enum Outcome {
+    Prop(Prop),
+    Model(model::Verdict),
+}
+
+struct Prop {
     bounds: [u64; 4],
     class: &'static str,
     first: u64,
@@ -65,14 +76,23 @@ impl Run {
             let name = CALLEES[row.callee as usize];
             // SAFETY: startup pins the source table until this guard finishes.
             let location = unsafe { crate::abi_sites::format_site(row.site, self.1) };
-            write!(output, "row\t{name}\t")?;
+            let family = match &row.outcome {
+                Outcome::Prop(_) => "row",
+                Outcome::Model(_) => "model",
+            };
+            write!(output, "{family}\t{name}\t")?;
             write_hex(&mut output, location.as_deref().unwrap_or_default())?;
-            let [cases, max_choices, max_rejects, gen_steps] = row.bounds;
-            writeln!(
-                output,
-                "\t{}\t{}\t{}\t{}\t{cases}\t{max_choices}\t{max_rejects}\t{gen_steps}",
-                row.class, row.first, row.second, row.failure
-            )?;
+            match &row.outcome {
+                Outcome::Prop(prop) => {
+                    let [cases, max_choices, max_rejects, gen_steps] = prop.bounds;
+                    writeln!(
+                        output,
+                        "\t{}\t{}\t{}\t{}\t{cases}\t{max_choices}\t{max_rejects}\t{gen_steps}",
+                        prop.class, prop.first, prop.second, prop.failure
+                    )?;
+                }
+                Outcome::Model(verdict) => verdict.write(&mut output)?,
+            }
         }
         for (label, count) in &observation.witnesses {
             write!(output, "witness\t{count}\t")?;
@@ -110,16 +130,8 @@ pub unsafe extern "C" fn hirsel_core_law_witness(label: *const u8, cond: u8) {
     let Some(observation) = active.as_mut() else {
         return;
     };
-    // SAFETY: String uses the native sequence carrier (data pointer, byte length, capacity).
-    let label = unsafe {
-        let len = label.add(8).cast::<usize>().read_unaligned();
-        if len == 0 {
-            ""
-        } else {
-            let bytes = label.cast::<*const u8>().read_unaligned();
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(bytes, len))
-        }
-    };
+    // SAFETY: the caller lends a live String through this hook.
+    let label = unsafe { string_bytes(label) };
     if let Some(count) = observation.witnesses.get_mut(label) {
         if let Some(next) = count.checked_add(u64::from(cond != 0)) {
             *count = next;
@@ -130,6 +142,20 @@ pub unsafe extern "C" fn hirsel_core_law_witness(label: *const u8, cond: u8) {
         observation
             .witnesses
             .insert(label.to_owned(), u64::from(cond != 0));
+    }
+}
+
+/// The String carrier and its UTF-8 bytes must remain live for `'a`.
+unsafe fn string_bytes<'a>(label: *const u8) -> &'a str {
+    // SAFETY: String uses the native sequence carrier (data pointer, byte length, capacity).
+    unsafe {
+        let len = label.add(8).cast::<usize>().read_unaligned();
+        if len == 0 {
+            ""
+        } else {
+            let bytes = label.cast::<*const u8>().read_unaligned();
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(bytes, len))
+        }
     }
 }
 
@@ -215,6 +241,20 @@ pub unsafe extern "C" fn hirsel_core_law_observe(
     let Some(call) = observation.calls.get(&context) else {
         return;
     };
+    if let Some(engine) = model_engine(call.callee) {
+        if operation == OUTCOME && callee == engine && call.depth == call.settling_depth {
+            // SAFETY: this is the returned model outcome and the matching layout descriptor.
+            let verdict = unsafe { model::Verdict::read(value, words, call.bounds, &read) };
+            observation.rows.push(Row {
+                callee: call.callee,
+                site: call.site,
+                outcome: Outcome::Model(verdict),
+            });
+            // The wrapper may run user code after its delegated verdict settles.
+            observation.calls.get_mut(&context).unwrap().settling_depth = 1;
+        }
+        return;
+    }
     let outer_outcome = operation == OUTCOME && call.depth == 1;
     let outer_check =
         operation != OUTCOME && call.callee >= CHECK && call.depth == call.settling_depth;
@@ -252,10 +292,12 @@ pub unsafe extern "C" fn hirsel_core_law_observe(
     observation.rows.push(Row {
         callee: call.callee,
         site: call.site,
-        bounds: call.bounds,
-        class,
-        first,
-        second,
-        failure,
+        outcome: Outcome::Prop(Prop {
+            bounds: call.bounds,
+            class,
+            first,
+            second,
+            failure,
+        }),
     });
 }

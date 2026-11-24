@@ -10,6 +10,13 @@ fn prop_name(definition: &DefPath) -> Option<&str> {
 }
 
 pub fn callee(definition: &DefPath) -> Option<u64> {
+    if definition.package_is("std", "1") && definition.0.modules == ["model"] {
+        return match definition.0.name.as_str() {
+            "explore" => Some(law::MODEL_EXPLORE),
+            "check" => Some(law::MODEL_CHECK),
+            _ => None,
+        };
+    }
     let name = prop_name(definition)?;
     law::CALLEES
         .iter()
@@ -61,6 +68,18 @@ impl Hooks {
             body.edges[otherwise.index()].target
         };
         if let Some(callee) = callee(definition) {
+            let model = law::model_engine(callee);
+            let (config_name, fields) = if model.is_some() {
+                (
+                    "std@1/model/Bounds",
+                    ["depth", "states", "step_steps", "step_bytes"],
+                )
+            } else {
+                (
+                    "std@1/prop/Config",
+                    ["cases", "max_choices", "max_rejects", "gen_steps"],
+                )
+            };
             let (i, config) = signature
                 .params
                 .iter()
@@ -73,27 +92,31 @@ impl Hooks {
                     else {
                         return None;
                     };
-                    (module.types[ty.index()].name == "std@1/prop/Config").then_some((i, ty))
+                    (module.types[ty.index()].name == config_name).then_some((i, ty))
                 })
-                .expect("a prop engine takes Config");
+                .expect("an observed engine takes bounds");
             let entry = Hook {
                 operation: law::ENTER,
                 value: params[usize::from(signature.dest.is_some()) + i],
                 predicate: None,
-                words: ["cases", "max_choices", "max_rejects", "gen_steps"]
+                words: fields
                     .map(|name| field(module, layouts, config, name))
                     .to_vec(),
             };
-            let result = matches!(callee, law::ALL | law::SEARCH).then(|| Hook {
-                operation: law::OUTCOME,
-                value: params[0],
-                predicate: None,
-                words: outcome(
-                    module,
-                    layouts,
-                    signature.dest.expect("an engine outcome has a destination"),
-                ),
-            });
+            let result =
+                matches!(callee, law::ALL | law::SEARCH | law::MODEL_EXPLORE).then(|| Hook {
+                    operation: law::OUTCOME,
+                    value: params[0],
+                    predicate: None,
+                    words: {
+                        let ty = signature.dest.expect("an engine outcome has a destination");
+                        if model.is_some() {
+                            model_outcome(module, layouts, ty)
+                        } else {
+                            outcome(module, layouts, ty)
+                        }
+                    },
+                });
             return Some(Self {
                 callee: Some(callee),
                 start,
@@ -145,16 +168,17 @@ impl Hooks {
     }
 
     pub fn delegates(&self, module: &Module, target: Callee) -> bool {
-        let name = match self.callee {
-            Some(law::CHECK_CORPUS) => "check",
-            Some(law::CHECK_TASKS_CORPUS) => "check_tasks",
-            _ => return false,
-        };
         let Callee::Direct(target) = target else {
             return false;
         };
         let instance = module.functions[target.index()].instance;
-        prop_name(&module.instances[instance.index()].definition) == Some(name)
+        let expected = match self.callee {
+            Some(law::CHECK_CORPUS) => law::CHECK,
+            Some(law::CHECK_TASKS_CORPUS) => law::CHECK_TASKS,
+            Some(law::MODEL_CHECK) => law::MODEL_EXPLORE,
+            _ => return false,
+        };
+        callee(&module.instances[instance.index()].definition) == Some(expected)
     }
 }
 
@@ -211,5 +235,53 @@ fn outcome(module: &Module, layouts: &[RecipeRow], ty: TypeId) -> Vec<u64> {
         panic!("expected Found")
     };
     words.extend(found(module, layouts, TypeId(found_ty.0)));
+    words
+}
+
+fn inline(ty: &FieldTy) -> TypeId {
+    let FieldTy::Inline(ty) = ty else {
+        panic!("expected inline model data")
+    };
+    TypeId(ty.0)
+}
+
+fn model_outcome(module: &Module, layouts: &[RecipeRow], ty: TypeId) -> Vec<u64> {
+    let layout = fixed(layouts, ty);
+    let ShapeBody::Variant(cases) = &module.types[ty.index()].body else {
+        panic!("expected a model outcome variant")
+    };
+    let stats = inline(&cases[0].fields[0].ty);
+    let failure = inline(&cases[2].fields[0].ty);
+    let limit = inline(&cases[1].fields[1].ty);
+    let ShapeBody::Record(stats_fields) = &module.types[stats.index()].body else {
+        unreachable!()
+    };
+    let FieldTy::Seq(pair) = &stats_fields[field_index(module, stats, "witnessed")].ty else {
+        panic!("expected a list of model witnesses")
+    };
+    let pair = fixed(layouts, inline(pair));
+    let ShapeBody::Record(failure_fields) = &module.types[failure.index()].body else {
+        unreachable!()
+    };
+    let reason = inline(&failure_fields[field_index(module, failure, "reason")].ty);
+
+    let mut words = law::tag_words(layout.tag.expect("model outcome tag")).to_vec();
+    words.extend([
+        layout.offsets[0][0],
+        layout.offsets[1][0],
+        layout.offsets[2][0],
+    ]);
+    words.extend(
+        ["states", "edges", "depth", "witnessed"].map(|name| field(module, layouts, stats, name)),
+    );
+    words.extend([pair.size, pair.offsets[0][0], pair.offsets[0][1]]);
+    words.push(layout.offsets[1][1]);
+    words.extend(law::tag_words(
+        fixed(layouts, limit).tag.expect("model limit tag"),
+    ));
+    words.extend(["depth", "reason"].map(|name| field(module, layouts, failure, name)));
+    words.extend(law::tag_words(
+        fixed(layouts, reason).tag.expect("model failure kind tag"),
+    ));
     words
 }

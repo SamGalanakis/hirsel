@@ -6,6 +6,8 @@ use std::{path::PathBuf, process::Command};
 mod sites;
 use sites::Sites;
 
+const MODEL_FAILURE_KINDS: [&str; 4] = ["Violated", "Stuck", "Unwitnessed", "Handler"];
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct LawRow {
     pub callee: String,
@@ -46,6 +48,15 @@ impl LawRow {
             "gave up" => format!("{first} cases, {second} rejected"),
             "sampled" | "vacuous" => format!("{first} cases"),
             "unbounded" => format!("at {first}"),
+            "closed" => format!("{first}, {second}, {}", rest[1]),
+            "failed" => {
+                let kind = MODEL_FAILURE_KINDS[self.kind.unwrap() as usize];
+                if self.per_build {
+                    kind.into()
+                } else {
+                    format!("{kind}, {first}")
+                }
+            }
             _ => String::new(),
         };
         let summary = match (&self.bound, counts.is_empty()) {
@@ -53,7 +64,11 @@ impl LawRow {
             (Some(bound), false) => format!("{counts}; {bound}"),
             (None, _) => counts,
         };
-        let mut text = self.class.clone();
+        let mut text = if self.class == "to depth" {
+            format!("to depth {first}")
+        } else {
+            self.class.clone()
+        };
         if !summary.is_empty() {
             text.push_str(&format!(" ({summary})"));
         }
@@ -137,22 +152,29 @@ impl LawReport {
             if row.callee == "sometimes" {
                 for (label, count) in &row.witnessed {
                     witnessed = true;
-                    if label.is_empty()
-                        || label.chars().any(|c| c.is_whitespace() || c.is_control())
-                    {
-                        println!("  sometimes {label:?} {count}");
-                    } else {
-                        println!("  sometimes {label} {count}");
-                    }
+                    println!("  sometimes {} {count}", display_label(label));
                 }
             } else {
                 let site = row.site.rsplit('/').next().unwrap();
-                println!("  {}  {}  {}", row.callee, site, row.display());
+                print!("  {}  {}  {}", row.callee, site, row.display());
+                for (label, count) in &row.witnessed {
+                    witnessed = true;
+                    print!("; witnessed {} {count}", display_label(label));
+                }
+                println!();
             }
         }
         if !witnessed {
             println!("  no reach declared");
         }
+    }
+}
+
+fn display_label(label: &str) -> std::borrow::Cow<'_, str> {
+    if label.is_empty() || label.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        format!("{label:?}").into()
+    } else {
+        label.into()
     }
 }
 
@@ -222,6 +244,7 @@ fn parse(summary: &str, places: &Sites) -> Option<Vec<LawRow>> {
                 }
             }
             "row" => prop_row(fields.by_ref(), places)?,
+            "model" => model_row(fields.by_ref(), places)?,
             _ => return None,
         };
         if fields.next().is_some() {
@@ -235,19 +258,56 @@ fn parse(summary: &str, places: &Sites) -> Option<Vec<LawRow>> {
 fn combine(rows: &mut BTreeMap<(String, String), LawRow>, mut row: LawRow) -> Option<()> {
     let key = (row.callee.clone(), row.site.clone());
     if let Some(old) = rows.get_mut(&key) {
-        if row.callee == "sometimes" {
-            for (label, count) in &mut row.witnessed {
-                *count = count.checked_add(*old.witnessed.get(label).unwrap_or(&0))?;
-                row.numbers[0] = *count;
-            }
-            *old = row;
-        } else if row.strength() < old.strength() {
-            *old = row;
+        if row.strength() < old.strength() {
+            std::mem::swap(old, &mut row);
+        }
+        for (label, count) in row.witnessed {
+            let total = old.witnessed.entry(label).or_default();
+            *total = total.checked_add(count)?;
+        }
+        if old.callee == "sometimes" {
+            old.numbers[0] = old.witnessed[&old.site];
         }
     } else {
         rows.insert(key, row);
     }
     Some(())
+}
+
+fn model_row<'a>(mut fields: impl Iterator<Item = &'a str>, places: &Sites) -> Option<LawRow> {
+    let callee = fields.next()?;
+    let location = unhex(fields.next()?)?;
+    let (definition, ordinal) = places.get(callee)?.get(&location)?;
+    let class = fields.next()?;
+    let mut numbers = fields
+        .next()?
+        .split(',')
+        .map(str::parse)
+        .collect::<Result<Vec<u64>, _>>()
+        .ok()?;
+    let bound = fields.next()?;
+    let bound = (!bound.is_empty()).then(|| bound.to_owned());
+    let kind = match (class, numbers.as_slice()) {
+        ("closed", [_, _, _]) | ("to depth", [_]) => None,
+        ("failed", [_, kind]) if *kind < MODEL_FAILURE_KINDS.len() as u64 => numbers.pop(),
+        _ => return None,
+    };
+    let mut witnessed = BTreeMap::<String, u64>::new();
+    for field in fields {
+        let (count, label) = field.split_once('=')?;
+        let total = witnessed.entry(unhex(label)?).or_default();
+        *total = total.checked_add(count.parse().ok()?)?;
+    }
+    Some(LawRow {
+        callee: callee.into(),
+        site: format!("{definition}#{ordinal}"),
+        class: class.into(),
+        numbers,
+        bound,
+        per_build: kind == Some(3),
+        witnessed,
+        kind,
+    })
 }
 
 fn prop_row<'a>(mut fields: impl Iterator<Item = &'a str>, places: &Sites) -> Option<LawRow> {

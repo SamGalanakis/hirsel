@@ -16,14 +16,25 @@ pub const CHECK: u64 = 2;
 pub const CHECK_TASKS: u64 = 3;
 pub const CHECK_CORPUS: u64 = 4;
 pub const CHECK_TASKS_CORPUS: u64 = 5;
-pub const CALLEES: [&str; 6] = [
+pub const MODEL_EXPLORE: u64 = 6;
+pub const MODEL_CHECK: u64 = 7;
+pub const CALLEES: [&str; 8] = [
     "all",
     "search",
     "check",
     "check_tasks",
     "check_corpus",
     "check_tasks_corpus",
+    "model.explore",
+    "model.check",
 ];
+
+pub fn model_engine(callee: u64) -> Option<u64> {
+    match callee {
+        MODEL_EXPLORE | MODEL_CHECK => Some(MODEL_EXPLORE),
+        _ => None,
+    }
+}
 
 pub const TAG_WORDS: usize = 5;
 pub const ABSENT: u64 = u64::MAX;

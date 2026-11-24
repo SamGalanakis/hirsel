@@ -72,13 +72,22 @@ impl Sites {
 }
 
 fn indirect(module: &Module, signature: &Signature) -> Option<u64> {
+    let dest = signature
+        .dest
+        .map(|ty| module.types[ty.index()].name.as_str());
+    if matches!(signature.params.get(1), Some(Param::Address { place: PlaceTy::Declared(ty), .. })
+        if module.types[ty.index()].name == "std@1/model/Bounds")
+    {
+        return match (dest, signature.params.len()) {
+            (Some("std@1/model/Outcome"), 2) => Some(law::MODEL_EXPLORE),
+            (_, 2) => Some(law::MODEL_CHECK),
+            _ => None,
+        };
+    }
     let config = signature.params.iter().position(|param| {
         matches!(param, Param::Address { place: PlaceTy::Declared(ty), .. }
             if module.types[ty.index()].name == "std@1/prop/Config")
     })?;
-    let dest = signature
-        .dest
-        .map(|ty| module.types[ty.index()].name.as_str());
     match (dest, config) {
         (Some("std@1/prop/AllOutcome"), 0) => Some(law::ALL),
         (Some("std@1/prop/Outcome"), 0) => Some(law::SEARCH),

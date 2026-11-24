@@ -2020,6 +2020,7 @@ pub(crate) mod tests {
     include!("startup_native.rs");
     include!("test_rules_native.rs");
     include!("test_run_native.rs");
+    include!("test_run_laws_native.rs");
     include!("clone_native.rs");
     include!("record_native.rs");
     include!("source_sites_native.rs");
@@ -2035,7 +2036,6 @@ pub(crate) mod tests {
     include!("request_sequences.rs");
     include!("revision_native.rs");
     include!("build_identity.rs");
-
     #[test]
     fn fmt_files_match_check_sites_and_prepare_the_whole_directory_before_writing() {
         let dir = tempfile::tempdir().unwrap();

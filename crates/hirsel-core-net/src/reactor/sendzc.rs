@@ -178,7 +178,7 @@ impl Poller {
                 let table = ring.tx();
                 (table.notified, table.copied)
             }
-            Backend::Epoll(_) => (0, 0),
+            Backend::Epoll { .. } => (0, 0),
         }
     }
 }
@@ -187,7 +187,7 @@ impl TxSlot {
     fn ring(&self) -> &Uring {
         match &self.poller.backend {
             Backend::Uring(ring) => ring,
-            Backend::Epoll(_) => unreachable!(),
+            Backend::Epoll { .. } => unreachable!(),
         }
     }
 
@@ -238,6 +238,8 @@ impl TxSlot {
         drop(table);
         drop(watched);
         self.submitted = true;
+        // Only the poller's owner holds a send target, so it submits now.
+        self.poller.submit_or_wake(true);
         Ok(())
     }
 
@@ -266,6 +268,8 @@ impl TxSlot {
                     .user_data(super::REMOVED),
                 None,
             );
+            drop(table);
+            self.poller.submit_or_wake(true);
         }
     }
 }

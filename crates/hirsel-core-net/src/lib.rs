@@ -176,8 +176,8 @@ pub use grant::{
 };
 mod reactor;
 pub use reactor::{
-    Poller, REACTOR_ENV, Reactor, SEND_ZC_ENV, SHARED_UNIT_SHIFT, SocketTransfer, Sockets, TxSlot,
-    TxState, reactor, share_epoll_poller, share_poller,
+    Here, Poller, REACTOR_ENV, Reactor, SEND_ZC_ENV, SHARED_UNIT_SHIFT, SocketTransfer, Sockets,
+    TxSlot, TxState, reactor, slot_epoll_pollers, slot_pollers,
 };
 /// mc-units-untied: kernel waits (epoll_wait or io_uring_enter) made by run reactors.
 pub static EPOLL_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -7,7 +7,7 @@
 #[cfg(not(test))]
 pub(crate) use crate::os::monotonic_ns;
 #[cfg(not(test))]
-pub(crate) use libc::{epoll_wait, read, write};
+pub(crate) use libc::{epoll_wait, write};
 #[cfg(not(test))]
 pub(crate) use std::sync::{
     Mutex, MutexGuard,

@@ -7,22 +7,20 @@ type BindingJob[B: shareable + send]: send {
     steps: u64
 }
 
-fn binding_job[G: send, B: shareable + send](supplied: Option[Wire[G, B]], take credential: Option[Bytes]) -> Option[(BindingJob[B], u64)] {
-    if let Some(w) = supplied {
-        if let Some(bind_app) = w.bind {
-            let raw = match take credential {
-                Some(take bytes_in) => take bytes_in,
-                None => list.new()
-            }
-            let seed = match w.seed {
-                PlainSeed(value, duplicate) => CopiedSeed(duplicate(value)),
-                PublishedSeed(handle) => SnapshotSeed(latest.read(handle)),
-            }
-            let job = BindingJob(seed: take seed, bind: bind_app, credential: take raw, steps: w.bind_steps)
-            return Some((take job, w.bind_bytes))
-        }
+fn binding_job[B: shareable + send](supplied: Option[Wire[B]], take credential: Option[Bytes]) -> Option[(BindingJob[B], u64)] {
+    let Some(w) = view supplied else {
+        return None
     }
-    None
+    let raw = match take credential {
+        Some(take bytes_in) => take bytes_in,
+        None => list.new()
+    }
+    let seed = match w.seed {
+        PlainSeed(value, duplicate) => CopiedSeed(duplicate(value)),
+        PublishedSeed(handle) => SnapshotSeed(latest.read(handle)),
+    }
+    let job = BindingJob(seed: take seed, bind: w.bind, credential: take raw, steps: w.bind_steps)
+    Some((take job, w.bind_bytes))
 }
 
 fn anonymous_caller(random: Random) -> Option[Caller] {
@@ -292,7 +290,7 @@ fn run_http_binding[B: shareable + send](take job: HttpBindingJob[B]) -> () wait
     completion.sent = true
 }
 
-pub fn bind_http[G: send, B: shareable + send](supplied: Option[Wire[G, B]], take credential: Option[Bytes], take entries: List[Bytes], random: Random, clock: Clock, tasks: Tasks, deadline: u64, budget: u64, arg_max: u64) -> Result[Admitted, HttpBindError] waits {
+pub fn bind_http[B: shareable + send](supplied: Option[Wire[B]], take credential: Option[Bytes], take entries: List[Bytes], random: Random, clock: Clock, tasks: Tasks, deadline: u64, budget: u64, arg_max: u64) -> Result[Admitted, HttpBindError] waits {
     let arrived = host.mono_ns(clock)
     if arrived >= deadline {
         return Error(BindingDeadline)
@@ -500,48 +498,38 @@ pub type BoundCaller: send {
 
 pub type BindRefusal: codec + send = Rejected | Unavailable
 
-// A wire grant is copied per call. A binding alone reads a published seed and
-// carries no grant, so it also works with a movable trigger grant.
-pub opaque type Wire[G: send, B: shareable + send]: send {
-    grant: Option[WireGrant[G]],
+// A wire only binds: its seed reaches the binding and nothing else. Granted
+// entries take their G from the place's `Grants` (RUNNER-SPEC v2.67).
+pub opaque type Wire[B: shareable + send]: send {
     seed: WireSeed[B],
-    bind: Option[StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits]],
+    bind: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits],
     bind_bytes: u64,
     bind_steps: u64,
 }
 
 type WireSeed[B: shareable + send]: send = PlainSeed(B, fn(B) -> B) | PublishedSeed(Latest[B])
 
-type WireGrant[G: send]: send {
-    value: G,
-    duplicate: fn(G) -> G
+fn copy_plain[B: plain](b: B) -> B {
+    b
 }
 
-fn copy_plain[G: plain](g: G) -> G {
-    g
+pub fn wire[B: plain + send](seed: B, bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[B] {
+    let duplicate: fn(B) -> B = copy_plain
+    Wire(seed: PlainSeed(seed, duplicate), bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
 }
 
-pub fn wire[G: plain + send](grant: G, bind_app: Option[StaticFn[fn(G, Bytes) -> Result[BoundCaller, BindRefusal] waits]], bind_bytes: u64, bind_steps: u64) -> Wire[G, G] {
-    let duplicate: fn(G) -> G = copy_plain
-    Wire(grant: Some(WireGrant(value: grant, duplicate: duplicate)), seed: PlainSeed(grant, duplicate), bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
+pub fn wire_bind[B: shareable + send](take seed: Latest[B], bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[B] {
+    Wire(seed: PublishedSeed(take seed), bind: bind_app, bind_bytes: bind_bytes, bind_steps: bind_steps)
 }
 
-pub fn wire_bind[G: send, B: shareable + send](take seed: Latest[B], bind_app: StaticFn[fn(B, Bytes) -> Result[BoundCaller, BindRefusal] waits], bind_bytes: u64, bind_steps: u64) -> Wire[G, B] {
-    Wire(grant: None, seed: PublishedSeed(take seed), bind: Some(bind_app), bind_bytes: bind_bytes, bind_steps: bind_steps)
-}
-
-fn copy_wire[G: send, B: shareable + send](supplied: Option[Wire[G, B]]) -> Option[Wire[G, B]] {
+fn copy_wire[B: shareable + send](supplied: Option[Wire[B]]) -> Option[Wire[B]] {
     match supplied {
         Some(w) => {
-            let grant = match w.grant {
-                Some(g) => Some(WireGrant(value: (g.duplicate)(g.value), duplicate: g.duplicate)),
-                None => None
-            }
             let seed = match w.seed {
                 PlainSeed(value, duplicate) => PlainSeed(duplicate(value), duplicate),
                 PublishedSeed(handle) => PublishedSeed(latest.handle(handle)),
             }
-            Some(Wire(grant: take grant, seed: take seed, bind: w.bind, bind_bytes: w.bind_bytes, bind_steps: w.bind_steps))
+            Some(Wire(seed: take seed, bind: w.bind, bind_bytes: w.bind_bytes, bind_steps: w.bind_steps))
         },
         None => None,
     }

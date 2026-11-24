@@ -14,7 +14,7 @@ fn expiring_caller(_seed: (), credential: Bytes) -> Result[runner.BoundCaller, r
 }
 
 fn expiring_pair(d: Drive, e: u8) -> Result[(wire_client.Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
-    let binding: runner.Wire[(), ()] = runner.wire_bind(latest.new(arc.new(())), code.describe(expiring_caller), 4096u64, 65536u64)
+    let binding: runner.Wire[()] = runner.wire_bind(latest.new(arc.new(())), code.describe(expiring_caller), 4096u64, 65536u64)
     let mut credential: Bytes = list.new()
     list.push(mut credential, 2u8)
     list.push(mut credential, e)
@@ -82,8 +82,8 @@ fn expiry_hold_place(mut registry: runner.Registry[ExpiryHold, Hd]) -> Result[()
     runner.granted(mut registry, code.describe(expiry_held), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn expiring_hold_caller(_grant: ExpiryHold, credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
-    expiring_caller((), credential)
+fn expiry_hold_mint(seed: ExpiryHold, _h: ()) -> Result[ExpiryHold, Capacity] {
+    Ok(ExpiryHold(clock: seed.clock))
 }
 
 fn drive_expiry_late(take job: Expiring) -> () waits {
@@ -96,16 +96,19 @@ fn drive_expiry_late(take job: Expiring) -> () waits {
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
     config.n_granted = 131072u64
-    let grant = runner.wire(ExpiryHold(clock: d.clock), Some(code.describe(expiring_hold_caller)), 4096u64, 65536u64)
+    let binding = runner.wire((), code.describe(expiring_caller), 4096u64, 65536u64)
+    let given: runner.Grants[ExpiryHold, (), ExpiryHold] = runner.Grants(seed: ExpiryHold(clock: d.clock), attempt: None, call: Some(expiry_hold_mint), grant_bytes: 65536u64)
+    let running = runner.grant_task(d.tasks, (), take given)
     let mut credential: Bytes = list.new()
     list.push(mut credential, 2u8)
     list.push(mut credential, 60u8)
-    let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, Some(take grant), d.head, d.post, code.describe(expiry_hold_place), requested, Some(take credential), config, 2097152u64))
+    let (take wire, take session) = paired(wire_client.pair_config(d.tasks, d.net, d.clock, d.random, Some(take binding), runner.grant_calls_of(running), d.head, d.post, code.describe(expiry_hold_place), requested, Some(take credential), config, 2097152u64))
     wire_client.send_frame(wire, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 0u32, 10000u32, u64_arg(7u64)))
     clock.set_wall(mut hand, 1050u64)
     clock.advance_to(mut hand, 1u64)
     expiry_ends(wire, string.from("bind_expiry: a call answered after the expiry was delivered"))
     let _ = task.join(take session)
+    runner.stop_grants(Some(take running))
 }
 
 // One place on a virtual clock (wall 1000 ms, mono 0); the driver holds the clock's hand.

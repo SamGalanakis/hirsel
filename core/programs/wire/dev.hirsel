@@ -6,15 +6,13 @@ fn place(mut registry: runner.Registry[(), ()]) -> Result[(), runner.RegisterErr
     runner.query(mut registry, code.describe(current), runner.slots(), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn schema(mut _d: store.Declare) -> Result[(), store.Error] { Ok(()) }
+fn schema(mut _d: store.Declare) -> Result[(), store.Error] {
+    Ok(())
+}
 
 pub fn main(d: Dir, n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     runner.main(a, process, errors, tasks, c, code.describe(place), code.describe(schema), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-        let configured: runner.PlaceConfig[(), (), (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(),
-            selection: runner.launch_selection(a) ?=> Usage, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(schema),
-            session: runner.wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64,
-            listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random,
-            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+        let configured: runner.PlaceConfig[(), (), (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: runner.launch_selection(a) ?=> Usage, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(schema), session: runner.wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
         Ok(runner.operate_report(take configured, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start)
     })
 }

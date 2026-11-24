@@ -76,7 +76,7 @@ pub type FoundActivation: send = Empty | Legacy | Active(u64, Bytes, Bytes)
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
 pub type Selection: send = Current(u64) | Reopen | Install(fate.Fates) | InstallAt(u64, fate.Fates)
 
-pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoWire(Bytes) | Unsettled(fate.HeldReport)
+pub type OpenError: send = Store(store.Error) | Place(RegisterError) | Migrate(store.Error) | NotCurrent(FoundActivation) | IdentityUnknown | StoreMismatch((u64, u64), (u64, u64)) | PublisherStopped | InstallVersion(u64) | InstallUncertain(store.Error) | KeyedOpDropped(store.DroppedClaimOp) | KeyedOpQuotaChanged(Bytes, u64, u64) | KeyedOpChanged(Bytes, String) | KeyedNoGrant(Bytes) | Unsettled(fate.HeldReport)
 
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 
@@ -121,19 +121,16 @@ pub type PlaceConfig[G: send, H: shareable + inert + send, S: send, B: shareable
     clock: Clock,
     random: Random,
     stop: Stop,
-    wire: Option[Wire[G, B]],
-    triggers: Option[TriggerConfig[G, H, S]],
+    wire: Option[Wire[B]],
+    grants: Option[Grants[G, H, S]],
+    triggers: Option[TriggerConfig],
     idle: Option[u64],
 }
 
-// Grants are made per attempt. The context routes place calls back to the
-// same head and carries the attempt fence.
-pub type TriggerConfig[G: send, H: shareable + inert + send, S: send]: send {
+// A granted attempt takes its G from the place's `Grants.attempt` mint.
+pub type TriggerConfig: send {
     entries: triggers.Entries,
     author: Caller,
-    grants: S,
-    grant: fn(S, H, take TriggerContext) -> Result[G, Capacity] waits,
-    grant_bytes: u64,
 }
 
 // `Exceeds` names a PlaceConfig or WireConfig setting, its value and the most this
@@ -318,7 +315,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     } else {
         p.n_place
     }
-    if let Some(take problem) = check_keyed_wire(p.place, n_place, p.wire) {
+    if let Some(take problem) = check_keyed_grants(p.place, n_place, p.grants) {
         if let Some(_) = launch.install {
             return finish_install(Error(Open(take problem)))
         }
@@ -364,7 +361,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     if p.stop.grace_ms == 0u64 {
         return Error(Missing("grace_ms"))
     }
-    let PlaceConfig(backing: take backing, selection: selection, place: place, on_migrate: on_migrate, schema: schema, n_publisher: n_publisher, session: wire_config, max_sessions: limit, proxies: take proxies, listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, triggers: take trigger_config, idle: configured_idle, ..) = take p
+    let PlaceConfig(backing: take backing, selection: selection, place: place, on_migrate: on_migrate, schema: schema, n_publisher: n_publisher, session: wire_config, max_sessions: limit, proxies: take proxies, listen: listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, grants: take place_grants, triggers: take trigger_config, idle: configured_idle, ..) = take p
     let idle = match launch.idle {
         Some(ms) => Some(ms),
         None => configured_idle
@@ -399,12 +396,20 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
             None
         },
     }
-    let head = place_head_bytes(n_place, n_publisher, trigger_bytes(trigger_config)) ?=> Full
+    let head = place_head_bytes(n_place, n_publisher, place_grant_bytes(place_grants)) ?=> Full
+    let granting = match take place_grants {
+        Some(take given) => Some(grant_start(take given)),
+        None => None
+    }
+    let session_grants = match granting {
+        Some(starting) => grant_calls(starting),
+        None => None
+    }
     let funded_head = add_place_bytes(head, claims - recovery_inbox_slot()) ?=> Full
     let allowance = add_place_bytes(funded_head, store_bytes) ?=> Full
     let activity = cut_activity()?
     let cut = latest.handle(activity.root)
-    let head_job = ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain), head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, idle: idle, expected_store: launch.store_id)
+    let head_job = ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain), head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, granting: take granting, idle: idle, expected_store: launch.store_id)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
     // The head is the place's largest task; a root limit too small for it is a resource
     // failure that names the bytes, not a fault at this line.
@@ -415,7 +420,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
     let mut serving: Option[Task[()]] = None
     let mut drain_waiter: Option[Task[()]] = None
     let mut ready: Option[(Listener, Sender[PubIn])] = None
-    let mut unused_listener_inputs = Some((take proxies, take supplied_wire, take inbox_serve))
+    let mut unused_listener_inputs = Some((take proxies, take supplied_wire, take session_grants, take inbox_serve))
     let mut phase: PlacePhase = OpeningPlace
     let mut finishing: PlaceFinish = WaitingToFinish
     let mut serve_done: Option[u64] = None
@@ -492,9 +497,9 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: shareab
             Some(take event) => take event,
             None => {
                 if let Some((take listener, take pub_to)) = replace(mut ready, None) {
-                    let (take addresses, take session_wire, take from_serve) = option.unwrap(replace(mut unused_listener_inputs, None))
+                    let (take addresses, take session_wire, take serve_grants, take from_serve) = option.unwrap(replace(mut unused_listener_inputs, None))
                     let target = string.from(current.target)
-                    let serving_config = ServePlace(listener: take listener, config: wire_config, tasks: tasks, clock: clock, random: random, wire: take session_wire, max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms, head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain), status: latest.handle(status), idle: idle, first_write: match hosting {
+                    let serving_config = ServePlace(listener: take listener, config: wire_config, tasks: tasks, clock: clock, random: random, wire: take session_wire, grants: take serve_grants, max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms, head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain), status: latest.handle(status), idle: idle, first_write: match hosting {
                         Some(host) => Some(channel.sender(host.ack)),
                         None => None
                     }, report: report)
@@ -980,7 +985,7 @@ fn adapt_compute[A, R](f: StaticFn[fn(take A) -> Result[R, Capacity]], ca: std.c
     }
 }
 
-type JobGrant[G: send]: send = Direct(G) | FromPlace(Sender[GrantRequest[G]], TriggerContext)
+type JobGrant[G: send]: send = Direct(G) | FromPlace(Sender[GrantRequest[G]], GrantFor)
 
 type Job[G: send, A, R]: send {
     f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits],
@@ -999,7 +1004,7 @@ fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
         let Job(f: f, ca: ca, cr: cr, grant: take source, caller: take caller, arg: take arg, steps: _) = take j
         let grants = match take source {
             Direct(take value) => take value,
-            FromPlace(to, take ctx) => match attempt_grants(to, take ctx) {
+            FromPlace(to, take why) => match place_grant(to, take why) {
                 Ok(take value) => take value,
                 Error(take outcome) => return take outcome,
             },
@@ -1316,7 +1321,7 @@ pub fn start_text(problem: StartError) -> String {
             string.push_u64(mut line, saved)
         },
         Open(KeyedOpChanged(name, field)) => keyed_open_report(mut line, name, field),
-        Open(KeyedNoWire(name)) => keyed_open_report(mut line, name, "needs a wire grant"),
+        Open(KeyedNoGrant(name)) => keyed_open_report(mut line, name, "needs a call grant"),
         Open(InstallUncertain(e)) => {
             string.push(mut line, "install outcome unknown: ");
             push_store_error(mut line, e)
@@ -3136,11 +3141,6 @@ type ArmedTimer {
     task_handle: Task[()]
 }
 
-type TriggerGrants[G: send] {
-    to: Sender[GrantRequest[G]],
-    worker: Task[()]
-}
-
 type TriggerDrive[G: send] {
     tables: triggers.Tables,
     revision: Bytes,
@@ -3149,22 +3149,19 @@ type TriggerDrive[G: send] {
     to: Sender[HeadInput],
     entries: triggers.Entries,
     author: Caller,
-    grants: Option[TriggerGrants[G]],
+    grants: Option[Sender[GrantRequest[G]]],
     active: Map[triggers.Id, Task[Outcome]],
     timer: Option[ArmedTimer]
 }
 
-fn make_trigger_drive[G: send, H: shareable + inert + send, S: send](take tables: triggers.Tables, h: H, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig[G, H, S]) -> Result[Box[TriggerDrive[G]], store.Error] {
+fn make_trigger_drive[G: send](take tables: triggers.Tables, clock: Clock, tasks: Tasks, take to: Sender[HeadInput], revision: Bytes, take config: TriggerConfig, take grants: Option[Sender[GrantRequest[G]]]) -> Result[Box[TriggerDrive[G]], store.Error] {
     let stamp = copy_bytes(revision)?
-    let TriggerConfig(entries: take entries, author: take author, grants: take seed, grant: grant, grant_bytes: allowance) = take config
-    let (grants, inbox): (Sender[GrantRequest[G]], Receiver[GrantRequest[G]]) = channel.new(1u64)
-    let supply = GrantWorker(grants: take seed, handles: store.copy_env(h), grant: grant, inbox: take inbox)
-    let granting = task.spawn(tasks, bytes allowance, take supply, supply_grants)
-    let drive = TriggerDrive(tables: take tables, revision: take stamp, clock: clock, tasks: tasks, to: take to, entries: take entries, author: take author, grants: Some(TriggerGrants(to: take grants, worker: take granting)), active: map.new(), timer: None)
+    let TriggerConfig(entries: take entries, author: take author) = take config
+    let drive = TriggerDrive(tables: take tables, revision: take stamp, clock: clock, tasks: tasks, to: take to, entries: take entries, author: take author, grants: take grants, active: map.new(), timer: None)
     Ok(box.new(take drive))
 }
 
-fn open_trigger_drive[G: send, H: shareable + inert + send, S: send](db: store.Db, h: H, reg: Registry[G, H], clock: Clock, tasks: Tasks, take to: Sender[HeadInput], n_place: u64, take config: Option[TriggerConfig[G, H, S]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
+fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, reg: Registry[G, H], clock: Clock, tasks: Tasks, take to: Sender[HeadInput], n_place: u64, take config: Option[TriggerConfig], take grants: Option[Sender[GrantRequest[G]]]) -> Result[Option[Box[TriggerDrive[G]]], store.Error] waits {
     let snapshot = store.snapshot(db)
     let tables = declared_triggers(reg, h, snapshot)?
     if let Some(take configured) = take config {
@@ -3172,7 +3169,7 @@ fn open_trigger_drive[G: send, H: shareable + inert + send, S: send](db: store.D
             let Some(take opened_tables) = take tables else {
                 return Error(Missing("trigger table selector"))
             }
-            return Ok(Some(make_trigger_drive(take opened_tables, h, clock, tasks, take to, trigger_stamp(reg.exported, reg.bindings, n_place)?, take configured)?))
+            return Ok(Some(make_trigger_drive(take opened_tables, clock, tasks, take to, trigger_stamp(reg.exported, reg.bindings, n_place)?, take configured, take grants)?))
         }
     }
     let Some(take opened_tables) = take tables else {
@@ -3232,9 +3229,7 @@ fn stop_triggers[G: send](take drive: Box[TriggerDrive[G]]) -> triggers.Tables w
     for take (_, take watcher) in take active {
         let _ = task.cancel_join(take watcher)
     }
-    if let Some(TriggerGrants(worker: take grant_task, ..)) = take grants {
-        let _ = task.cancel_join(take grant_task)
-    }
+    let _ = take grants
     take tables
 }
 
@@ -3404,12 +3399,12 @@ fn launch_trigger[G: send, H: shareable + inert + send](r: Registry[G, H], mut d
     }
     let go = launch().go
     let grant_to = match drive.grants {
-        Some(grants) => channel.sender(grants.to),
+        Some(grants) => channel.sender(grants),
         None => return Error(NoEntry),
     }
     map.reserve(mut drive.active, 1u64)
     let context = TriggerContext(attempt: a, to: channel.sender(drive.to))
-    let source = FromPlace(take grant_to, take context)
+    let source = FromPlace(take grant_to, ForAttempt(take context))
     let raw: Bytes = match copy_bytes(triggers.argument(p)) {
         Ok(take payload) => take payload,
         Error(Full(cap)) => return Error(Budget(capacity_room(store_capacity(cap)))),
@@ -4473,38 +4468,4 @@ pub fn fixture_owner(pub_in: Sender[PubIn], take caller: Caller) -> FixtureOwner
 pub fn fixture_subscribe(owner: FixtureOwner, sub: u32, take key: Bytes, take arg: Bytes) -> () waits {
     let copied: Caller = clone(owner.caller)
     let _ = channel.send(owner.post, PubIn(e: Subscribed(owner.who, sub, take copied, take key, take arg)))
-}
-
-fn fixture_content(owner: FixtureOwner, take event: WireEvent) -> () waits {
-    let Notice(e: take e) = publisher_notice(take event)
-    let mut dropped: List[u32] = list.new()
-    if let Updated(Update(version: _, content: Some(take o), outcomes: take outcomes)) = take e {
-        hand(owner.out, take o, mut dropped, take outcomes)
-    }
-    let _ = channel.try_send(owner.progress, ())
-    let _ = channel.try_send(owner.post, PubIn(e: Drained))
-}
-
-pub fn fixture_receive(owner: FixtureOwner) -> Result[Down, ReceiveError] waits {
-    loop {
-        if let Ok(take d) = channel.try_receive(owner.from) {
-            return Ok(take d)
-        }
-        match channel.receive(owner.inbox) {
-            Ok(take e) => fixture_content(owner, take e),
-            Error(_) => return Error(Closed),
-        }
-    }
-}
-
-pub fn fixture_close(take owner: FixtureOwner) -> () waits {
-    let _ = channel.send(owner.post, PubIn(e: Left(owner.who)))
-}
-
-fn publisher_notice(take event: WireEvent) -> Notice {
-    let WireEvent(e: take input) = take event
-    match take input {
-        FromRunner(take notice) => take notice,
-        _ => fail("publisher fixture: non-publisher event")
-    }
 }

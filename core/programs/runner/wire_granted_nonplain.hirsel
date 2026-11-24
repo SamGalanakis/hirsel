@@ -1,6 +1,0 @@
-// R6 and OWN-4: owning a list makes the grant non-plain even though it is send.
-type OwnedGrant: send { values: List[u64] }
-
-pub fn configure(grant: OwnedGrant) -> runner.Wire[OwnedGrant, OwnedGrant] {
-    runner.wire(grant, None, 0u64, 0u64)
-}

@@ -114,7 +114,7 @@ fn server(take seed: Server) -> () waits {
         }
     }
     let make: scoped[view] fn() -> runner.Service[runner.WireSession[Random, Random]] = fn() -> runner.Service[runner.WireSession[Random, Random]] {
-        runner.wire_service(random, Some(runner.wire(random, Some(code.describe(bind_test)), 4096u64, 65536u64)), head, c, tasks, config, a)
+        runner.wire_service(random, Some(runner.wire(random, code.describe(bind_test), 4096u64, 65536u64)), head, c, tasks, config, a)
     }
     let _ = runner.serve_wire(take listener, tasks, c, post, config, 128u64, list.new(), make, result.unwrap(runner.wire_place_allocator(code.describe(place), 1048576u64)))
 }

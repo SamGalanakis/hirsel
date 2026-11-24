@@ -1,26 +1,63 @@
-pub type BucketBacking: send { net: Net, place: std.object.Bucket, credentials: std.cred.Credentials, lanes: std.object.LaneConfig, level: String, op_ms: u64 }
+pub type BucketBacking: send {
+    net: Net,
+    place: std.object.Bucket,
+    credentials: std.cred.Credentials,
+    lanes: std.object.LaneConfig,
+    level: String,
+    op_ms: u64
+}
+
 pub type SimBacking: send {
     requests: std.object.Requests,
     declaration: store.SimLevels,
     sync: store.LevelSync,
     op_ms: u64
 }
+
 pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking) | Sim(SimBacking)
-fn persistent_backing(backing: Backing) -> bool { match backing { Disk(_) => true, Bucket(_) => true, Sim(_) => true, _ => false } }
+
+fn persistent_backing(backing: Backing) -> bool {
+    match backing {
+        Disk(_) => true,
+        Bucket(_) => true,
+        Sim(_) => true,
+        _ => false
+    }
+}
 
 type ManagedHead[G: send, H: shareable + inert + send, S: send]: send {
-    backing: Backing, options: store.Options, follower_plan: Option[store.FollowerPlan], selection: Selection, tasks: Tasks, clock: Clock, random: Random,
+    backing: Backing,
+    options: store.Options,
+    follower_plan: Option[store.FollowerPlan],
+    selection: Selection,
+    tasks: Tasks,
+    clock: Clock,
+    random: Random,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
-    n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
-    to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
-    head_to: Sender[HeadInput], cut: CutActivity,
-    triggering: Option[TriggerConfig[G, H, S]], idle: Option[u64], expected_store: Option[(u64, u64)],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
+    schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
+    n_place: u64,
+    n_publisher: u64,
+    inbox: Receiver[HeadInput],
+    finish_from: Receiver[()],
+    to: Sender[LifeEvent],
+    drain: Latest[Option[DrainWindow]],
+    head_to: Sender[HeadInput],
+    cut: CutActivity,
+    triggering: Option[TriggerConfig],
+    granting: Option[GrantStart[G, H, S]],
+    idle: Option[u64],
+    expected_store: Option[(u64, u64)],
 }
 
 fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress: LifeEvent) -> bool waits {
-    if let Error(_) = channel.send(to, take progress) { return false }
-    match channel.receive(inbox) { Ok(HeadContinue) => true, _ => false }
+    if let Error(_) = channel.send(to, take progress) {
+        return false
+    }
+    match channel.receive(inbox) {
+        Ok(HeadContinue) => true,
+        _ => false
+    }
 }
 
 fn head_ended[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> () waits {
@@ -45,8 +82,14 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
         Disk(dir) => store.open(tasks, dir, clock, random, options),
         Temp(parent) => {
             let name = string.with_capacity(32u64)
-            let mut cleanup = match TemporaryBacking(dir: parent, name: take name) { Ok(take guard) => take guard, Error((cap, _)) => return Error(Start(Full(cap))) }
-            let dir = match std.dir.create_temp(parent, mut cleanup.name) { Ok(dir) => dir, Error(problem) => return Error(Start(Open(Store(Io(problem))))) }
+            let mut cleanup = match TemporaryBacking(dir: parent, name: take name) {
+                Ok(take guard) => take guard,
+                Error((cap, _)) => return Error(Start(Full(cap)))
+            }
+            let dir = match std.dir.create_temp(parent, mut cleanup.name) {
+                Ok(dir) => dir,
+                Error(problem) => return Error(Start(Open(Store(Io(problem)))))
+            }
             temporary = Some(take cleanup)
             store.open(tasks, dir, clock, random, options)
         },
@@ -65,21 +108,28 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
             }
         },
     }
-    let db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Start(Open(Store(take problem)))) }
+    let db = match take opened {
+        Ok(take db) => take db,
+        Error(take problem) => return Error(Start(Open(Store(take problem))))
+    }
     Ok((take db, take temporary))
 }
 
 fn managed_head[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
-    let ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
-        n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
-        head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle, expected_store: expected_store) = take job
+    let ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: take head_to, cut: take cut, triggering: take triggering, granting: take granting, idle: idle, expected_store: expected_store) = take job
     let persistent = persistent_backing(backing)
     let mut opening = take options
     let mut registration: Option[HeadRegistration[G, H]] = None
     if let Some(_) = follower_plan {
-        if let Some((hi, lo)) = expected_store { opening.expect = Some(store.StoreId(hi, lo)) }
-        if let Current(expected) = selection { opening.activation = Some(expected) }
-        if launch_env().revision.size == 0u64 { return Error(Open(IdentityUnknown)) }
+        if let Some((hi, lo)) = expected_store {
+            opening.expect = Some(store.StoreId(hi, lo))
+        }
+        if let Current(expected) = selection {
+            opening.activation = Some(expected)
+        }
+        if launch_env().revision.size == 0u64 {
+            return Error(Open(IdentityUnknown))
+        }
         let reg = placed(place, n_place) ?=> |problem| Open(Place(take problem))
         let (take description, take record) = prepare_activation(reg, n_place, list.new()) ?=> |problem| Open(Place(take problem))
         opening.binding = Some(clone(record.binding))
@@ -89,11 +139,12 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         Ok(take opened) => take opened,
         Error(BucketOpen(store.Refusal(error: NotCurrent(version), authority: take authority), op_ms)) => {
             let _ = take registration
-            let Some(take plan) = take follower_plan else { fail("Bucket start has no follower plan") }
+            let Some(take plan) = take follower_plan else {
+                fail("Bucket start has no follower plan")
+            }
             return Error(Open(bucket_not_current(take authority, plan, tasks, clock, opening.expect, version, op_ms)))
         },
-        Error(BucketOpen(store.Refusal(error: NotFound, ..), _)) if opening.activation != None =>
-            return Error(Open(NotCurrent(Empty))),
+        Error(BucketOpen(store.Refusal(error: NotFound, ..), _)) if opening.activation != None => return Error(Open(NotCurrent(Empty))),
         Error(take problem) => return Error(backing_start_error(take problem)),
     }
     let mut db = take opened
@@ -104,33 +155,73 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
             return Error(Open(StoreMismatch(expected, actual)))
         }
     }
-    if !head_advance(to, inbox, Recovered) { return head_closed(take db) }
+    if !head_advance(to, inbox, Recovered) {
+        return head_closed(take db)
+    }
     let prepared = head_prepare_registered(mut db, selection, persistent, place, on_migrate, schema, n_place, tasks, take registration)
     let (reg, local, release, replay_identity) = match take prepared {
         Ok(take values) => take values,
-        Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
+        Error(take problem) => {
+            let _ = close_store(take db);
+            return Error(Open(take problem))
+        },
     }
     // A place directory reopens a disk store at this version (RUNNER-SPEC §13.3).
     let (version, retain_from) = if persistent {
-        match activation_window(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
-    } else { (0u64, 0u64) }
+        match activation_window(db) {
+            Ok(found) => found,
+            Error(take problem) => {
+                let _ = close_store(take db);
+                return Error(Open(Store(take problem)))
+            }
+        }
+    } else {
+        (0u64, 0u64)
+    }
     let read: Bytes = if persistent {
         match capture_release(db, version, launch_env().witness) {
             Ok(take raw) => take raw,
-            Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
+            Error(take problem) => {
+                let _ = close_store(take db);
+                return Error(Open(Store(take problem)))
+            },
         }
-    } else { list.new() }
-    if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from, take read)) { return head_closed(take db) }
-    let trigger_drive = match open_trigger_drive(db, local, reg, clock, tasks, channel.sender(head_to), n_place, take triggering) {
+    } else {
+        list.new()
+    }
+    if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from, take read)) {
+        return head_closed(take db)
+    }
+    let running_grants = match take granting {
+        Some(take starting) => Some(start_grants(tasks, local, take starting)),
+        None => None
+    }
+    let attempt_grants = match running_grants {
+        Some(running) => match running.attempts {
+            Some(sender) => Some(channel.sender(sender)),
+            None => None
+        },
+        None => None
+    }
+    let trigger_drive = match open_trigger_drive(db, local, reg, clock, tasks, channel.sender(head_to), n_place, take triggering, take attempt_grants) {
         Ok(take drive) => take drive,
-        Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
+        Error(take problem) => {
+            stop_grants(take running_grants);
+            let _ = close_store(take db);
+            return Error(Open(Store(take problem)))
+        },
     }
     let mail = match mailbox(PUBLISHER_INBOX) {
         Ok(take mail) => take mail,
-        Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
+        Error(cap) => {
+            stop_grants(take running_grants);
+            let _ = close_store(take db);
+            return Error(Full(cap))
+        },
     }
     let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock, tasks: tasks, head_to: take head_to, n_place: n_place, cut: take cut, idle: idle)
     let ended = run_head(take db, take reg, take replay_identity, take local, place, n_place, take inbox, take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
+    stop_grants(take running_grants)
     let _ = take temporary
     match take ended {
         Ok(due) => Ok(due),

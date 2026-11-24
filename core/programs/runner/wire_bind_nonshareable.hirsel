@@ -8,6 +8,6 @@ fn bind(seed: OwnedSeed, credential: Bytes) -> Result[runner.BoundCaller, runner
     Error(Rejected)
 }
 
-pub fn configure(take seed: Latest[OwnedSeed]) -> runner.Wire[(), OwnedSeed] {
+pub fn configure(take seed: Latest[OwnedSeed]) -> runner.Wire[OwnedSeed] {
     runner.wire_bind(take seed, code.describe(bind), 0u64, 0u64)
 }

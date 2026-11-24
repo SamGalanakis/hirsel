@@ -133,7 +133,7 @@ fn sse_law_serve(take job: SseLawServer) -> Result[(), std.http.ServeError] wait
     let relay = Relay(inbox: take relay_to, credit: take credits, end_credit: take ends, head: take head)
     let make: scoped[view] fn() -> HttpConnection[(), SseLawTables, ()] = fn() -> HttpConnection[(), SseLawTables, ()] {
         let registry_copy = result.unwrap(placed(place, HTTP_LAW_PLACE_BYTES))
-        let supplied = wire((), Some(code.describe(sse_law_bind)), 8192u64, DEFAULT_STEPS)
+        let supplied = wire((), code.describe(sse_law_bind), 8192u64, DEFAULT_STEPS)
         http_connection(take registry_copy, arc.share(plans), Some(take supplied), relay_endpoint(relay), random, clock, tasks, 65536u64)
     }
     let mut listeners: List[Listener] = list.with_capacity(1u64)

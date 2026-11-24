@@ -1,0 +1,211 @@
+// A session owner's inbox capacity: C, the run of takes after which a joined owner wakes the
+// publisher (v2.13).
+const INBOX: u64 = 64u64
+
+// ---- R2's subscription law (RUNNER-SPEC §8.2: subs25's main_two_sessions, as hand-written
+// steps). Table "data" holds perm (key 0), row0 (key 1) and row1 (key 2). Q1 reads perm and,
+// when it is not 0, covers row0 and row1; otherwise it covers nothing. Qf reads row1 and
+// covers it, and faults when row1 is 2. The client applies each owe to its cache per
+// (session, sub); the expected caches are written out by hand from the store's values at each
+// version, as a from-scratch run of the query would give them (K1), never from the publisher.
+// A value is the u64 codec's 8 bytes little-endian (codec.md), so `word` is the oracle's.
+type Qh: shareable + send {
+    t: store.Table[u64, u64]
+}
+
+fn query_key(f: StaticFn[fn(store.Tx, Qh, take u32) -> Result[Answer[()], Capacity]]) -> Bytes {
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let result_schema = result.unwrap(query_result_schema(std.codec.of_unit(), result.unwrap(law_query_slots())))
+    let (take k, _) = result.unwrap(described_result(code.identity(f), None, Query, ca, take result_schema))
+    k
+}
+
+fn no_arg() -> Bytes {
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let mut a: Bytes = list.new()
+    result.unwrap(std.codec.encode(ca, 0u32, mut a))
+    a
+}
+
+fn apply_all(mut c: Client, take owes: List[Owe]) -> bool {
+    for take o in owes {
+        if !apply(mut c, take o) {
+            return false
+        }
+    }
+    true
+}
+
+fn step_held[G: send, H: shareable + inert + send](mut b: Board[G, H]) -> List[Owe] waits {
+    let mut fenced = Fenced(sessions: map.new())
+    round(mut b, mut fenced)
+}
+
+pub fn law_subs_main(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
+    let empty = store.snapshot(db)
+    let mut model: List[Option[u64]] = list.new()
+    let mut watched: List[Watched] = list.new()
+    law_set(mut db, mut model, t, 0u64, 1u64)
+    law_set(mut db, mut model, t, 1u64, 0u64)
+    law_set(mut db, mut model, t, 2u64, 0u64)
+    let base = store.snapshot(db)
+    let mut keys: List[Bytes] = list.new()
+    for ch in result.unwrap(store.changes(result.unwrap(store.reader(db, 0u64)), empty, base)).rows {
+        list.push(mut keys, clone(ch.tree_key))
+    }
+    let reg = match placed(code.describe(subs_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: take base, newest: None, subs: subscriptions())
+    let mut cl = Client(caches: list.new(), last: list.new())
+    let k1 = query_key(code.describe(q1))
+    let kf = query_key(code.describe(qf))
+    // subscribe_at_latest: w0 commits and is released, then session 0 subscribes Q1 before the
+    // round. Its result is the base's (row0 = 0), labelled with the base.
+    law_set(mut db, mut model, t, 1u64, 1u64)
+    b.newest = Some(store.snapshot(db))
+    let first = at_base(mut b, 0u64, 1u32, clone(k1), no_arg())
+    if first.version != 4u64 || list.len(first.complete) != 1u64 || !apply(mut cl, take first) || !holds(cl, keys, 0u64, 1u32, Some(0u8), Some(0u8)) {
+        return false
+    }
+    list.push(mut watched, Watched(who: 0u64, sub: 1u32, q: Q1))
+    if !apply_all(mut cl, step_held(mut b)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(0u8)) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    // shared_cache: session 1 subscribes Q1 with the same sub id; session 0 subscribes Qf.
+    // Then row1 = 5 is a cover change for both Q1s and a re-run for Qf.
+    if !apply(mut cl, at_base(mut b, 1u64, 1u32, clone(k1), no_arg())) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(0u8)) {
+        return false
+    }
+    if !apply(mut cl, at_base(mut b, 0u64, 2u32, clone(kf), no_arg())) || !holds(cl, keys, 0u64, 2u32, None, Some(0u8)) {
+        return false
+    }
+    list.push(mut watched, Watched(who: 1u64, sub: 1u32, q: Q1))
+    list.push(mut watched, Watched(who: 0u64, sub: 2u32, q: Qf))
+    if !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 2u64, 5u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    // rerun_without_retract: revoke re-runs both Q1s, whose Covers become empty, so both lose
+    // row0 and row1. A Subscribe of Q1 now completes with an empty result (L17).
+    law_set(mut db, mut model, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, None, None) || !holds(cl, keys, 1u64, 1u32, None, None) || !holds(cl, keys, 0u64, 2u32, None, Some(5u8)) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    let empty_result = at_base(mut b, 1u64, 3u32, clone(k1), no_arg())
+    if list.len(empty_result.complete) != 1u64 || empty_result.complete[0] != 3u32 || list.len(empty_result.rows) != 0u64 || !apply(mut cl, take empty_result) {
+        return false
+    }
+    list.push(mut watched, Watched(who: 1u64, sub: 3u32, q: Q1))
+    if !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    // K7: grant, then the call's row1 = 2. Qf's re-run faults and ends Qf alone, with
+    // Failed(Raised(5)) (Fail); session 0's Q1 follows row1 by its Cover.
+    law_set(mut db, mut model, t, 0u64, 1u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(5u8)) || !holds(cl, keys, 1u64, 3u32, Some(1u8), Some(5u8)) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 2u64, 2u64)
+    let owes = step(mut b, db)
+    let mut faulted = false
+    for o in owes {
+        for e in o.ended {
+            faulted = o.session == 0u64 && e.sub == 2u32 && match e.outcome {
+                Failed(Raised(n)) => n == 5u32,
+                _ => false,
+            }
+        }
+    }
+    unwatch(mut watched, 0u64, 2u32)
+    if !faulted || !apply_all(mut cl, take owes) || cached(cl, 0u64, 2u32) != None || !holds(cl, keys, 0u64, 1u32, Some(1u8), Some(2u8)) || !holds(cl, keys, 1u64, 1u32, Some(1u8), Some(2u8)) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    // Moving the selector invalidates the Point and moves the read Span from [4,5) to
+    // [3,4). A write at the old lower bound must miss both Spans. The new lower bound
+    // must rerun the query and move its Cover from row0 to row1.
+    let moving = at_base(mut b, 2u64, 1u32, query_key(code.describe(q_moving)), no_arg())
+    list.push(mut watched, Watched(who: 2u64, sub: 1u32, q: QMoving))
+    if !apply(mut cl, take moving) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 0u64, 0u64)
+    if !apply_all(mut cl, step(mut b, db)) || !holds(cl, keys, 2u64, 1u32, Some(1u8), None) || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 4u64, 20u64)
+    if list.len(step(mut b, db)) != 0u64 || !image_matches(cl, keys, model, watched) {
+        return false
+    }
+    law_set(mut db, mut model, t, 3u64, 21u64)
+    apply_all(mut cl, step(mut b, db)) && holds(cl, keys, 2u64, 1u32, None, Some(2u8)) && image_matches(cl, keys, model, watched)
+}
+
+fn range_limit(n: u32) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.put_u32(n, mut out)
+    take out
+}
+
+// A tail insert misses a prefix subscription but hits a cursor that received
+// None. An insert before the prefix's first row also changes its Cover.
+pub fn law_range_reruns(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let h = result.unwrap(install_subs_data(mut db))
+    let t: store.Table[u64, u64] = clone(h.t)
+    set(mut db, t, 3, 30)
+    set(mut db, t, 7, 70)
+    let reg = result.unwrap(placed(code.describe(subs_place), 1048576))
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let _ = at_base(mut b, 1, 1, query_key(code.describe(q_range_prefix)), range_limit(1))
+    let _ = at_base(mut b, 2, 1, query_key(code.describe(q_range_prefix)), range_limit(8))
+    set(mut db, t, 8, 80)
+    let hits = result.unwrap(affected_routes(b, store.snapshot(db)))
+    if list.len(hits) != 1 || hits[0].0 != option.unwrap(sub_at(b.subs, 2u64, 1u32)).routes || !hits[0].1 {
+        return false
+    }
+    let updated = step(mut b, db)
+    if list.len(updated) != 1 || updated[0].session != 2 {
+        return false
+    }
+    set(mut db, t, 2, 20)
+    let reruns = result.unwrap(affected_routes(b, store.snapshot(db)))
+    if list.len(reruns) != 2 || !reruns[0].1 || !reruns[1].1 {
+        return false
+    }
+    b.newest = Some(store.snapshot(db))
+    let mut fenced = Fenced(sessions: map.new())
+    let projected = round(mut b, mut fenced)
+    // Both read sets hit. The prefix moves its cover from key 3 to key 2.
+    // The exhausted cursor still covers key 8, so its unit result and rows send no group.
+    if map.len(fenced.sessions) != 2 || !map.contains(fenced.sessions, 1u64) || !map.contains(fenced.sessions, 2u64) {
+        return false
+    }
+    if list.len(projected) != 1 || projected[0].session != 1 || list.len(projected[0].rows) != 2 || list.len(projected[0].groups) != 1 || projected[0].reset || list.len(projected[0].ended) != 0 {
+        return false
+    }
+    let rows = view projected[0].rows
+    let inserted = view rows[0]
+    let removed = view rows[1]
+    inserted.sub == 1 && removed.sub == 1 && inserted.value == Some(clone(b"\x14\x00\x00\x00\x00\x00\x00\x00")) && removed.value == None && list.slice(inserted.key, 4u64, list.len(inserted.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x02" && list.slice(removed.key, 4u64, list.len(removed.key)) == b"\x00\x00\x00\x00\x00\x00\x00\x03"
+}
+
+@test
+fn test_range_reruns(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_range_reruns(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

@@ -2,7 +2,9 @@
 // core/tools/runner_tests.py on the charge-observation runtime's peak_retained_bytes.
 // argv: number of malformed calls before the valid call. Each malformed call appends
 // one byte to a 4,096-byte String, so the decoder reads the full String before refusal.
-type Hd: shareable + send { t: store.Table[u64, u64] }
+type Hd: shareable + send {
+    t: store.Table[u64, u64]
+}
 
 type Calls = runner.Registry[(), Hd]
 
@@ -12,7 +14,6 @@ fn schema(mut d: store.Declare) -> Result[Hd, store.Error] {
     let t = store.finish(mut d, take table)?
     Ok(Hd(t: t))
 }
-
 
 fn named(mut tx: store.Tx, h: Hd, author: runner.Caller, take s: String) -> Result[u64, u32] {
     match store.put(mut tx, h.t, 0u64, string.byte_len(s)) {
@@ -47,7 +48,15 @@ fn string_arg(n: u64, trailing: bool) -> Bytes {
     b
 }
 
-type D: send { head: Sender[runner.HeadInput], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, flood: u64, net: Net, random: Random }
+type D: send {
+    head: Sender[runner.HeadInput],
+    post: Sender[runner.PubIn],
+    clock: Clock,
+    tasks: Tasks,
+    flood: u64,
+    net: Net,
+    random: Random
+}
 
 fn answer(cn: wire_client.Conn) -> runner.Outcome waits {
     match wire_client.next(cn) {
@@ -66,7 +75,7 @@ fn answer(cn: wire_client.Conn) -> runner.Outcome waits {
 fn drive(take d: D) -> () waits {
     let mut requested: List[Bytes] = list.new()
     list.push(mut requested, k_named())
-    let unbound: Option[runner.Wire[(), ()]] = None
+    let unbound: Option[runner.Wire[()]] = None
     let (cn, session) = result.unwrap(wire_client.pair(d.tasks, d.net, d.clock, d.random, take unbound, d.head, d.post, code.describe(place), requested, None, 1u64, 2097152u64))
     let bad = string_arg(4096u64, true)
     for _ in 0u64 .. d.flood {
@@ -89,7 +98,9 @@ fn drive(take d: D) -> () waits {
 }
 
 pub fn main(clock: Clock, random: Random, tasks: Tasks, argv: Args, net: Net) -> Result[(), Exit] waits {
-    let Some(m) = args.get(argv, 0) else { return Error(Exit(status: 2)) }
+    let Some(m) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
     let flood = result.unwrap(std.int.parse_uint(m, 10u32))
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let cv: std.codec.Codec[u64] = std.codec.of()

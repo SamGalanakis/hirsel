@@ -94,8 +94,8 @@ fn http_law_binding(_seed: (), credential: Bytes) -> Result[BoundCaller, BindRef
     ingress.caller((), credential)
 }
 
-fn http_law_bind() -> Option[Wire[(), ()]] {
-    Some(wire((), Some(code.describe(http_law_binding)), 4096u64, 65536u64))
+fn http_law_bind() -> Option[Wire[()]] {
+    Some(wire((), code.describe(http_law_binding), 4096u64, 65536u64))
 }
 
 fn http_law_credential() -> Bytes {
@@ -656,7 +656,7 @@ fn test_l10j(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits 
 }
 
 pub fn law_j2_binding(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    runner_calls.law_granted_copied(c, r, tasks, n) && runner_calls.law_bind_only(c, r, tasks, n) && match http_law_run(c, r, tasks, n, BindCodes) {
+    runner_calls.law_granted_copied(c, r, tasks, n) && runner_calls.law_bind_granted(c, r, tasks, n) && match http_law_run(c, r, tasks, n, BindCodes) {
         Ok(()) => true,
         Error(()) => false
     }

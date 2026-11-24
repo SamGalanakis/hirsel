@@ -9,7 +9,7 @@ type JwtClient: send {
     random: Random,
     head: Sender[runner.HeadInput],
     post: Sender[runner.PubIn],
-    wire: runner.Wire[(), jwtbind.Seed],
+    wire: runner.Wire[jwtbind.Seed],
     token: Bytes
 }
 
@@ -23,7 +23,8 @@ fn jwt_client(take d: JwtClient) -> String waits {
     config.socket.max_frame = 32768u64
     // The session task's allowance must hold the hello's bind child (4096 + BIND_BYTES).
     config.n_granted = 4096u64 + jwtbind.BIND_BYTES
-    let pair = runner.wire_client.pair_config(tasks, n, c, r, Some(take session_wire), head, post, code.describe(place), keys, Some(take token), config, 2097152u64)
+    let no_grants: Option[Sender[runner.GrantRequest[()]]] = None
+    let pair = runner.wire_client.pair_config(tasks, n, c, r, Some(take session_wire), take no_grants, head, post, code.describe(place), keys, Some(take token), config, 2097152u64)
     let (take wire, take server) = match take pair {
         Ok(take connected) => take connected,
         Error(Allocation(_)) => return "L68: client allocation refused",
@@ -70,7 +71,7 @@ pub fn no_jwt_at_rest(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, n: 
         Ok(take v) => take v,
         Error(_) => fail("L68: the fixture JWKS was refused"),
     }
-    let session_wire: runner.Wire[(), jwtbind.Seed] = runner.wire_bind(jwtbind.seed(v), code.describe(jwtbind.bind), jwtbind.BIND_BYTES, jwtbind.BIND_STEPS)
+    let session_wire: runner.Wire[jwtbind.Seed] = runner.wire_bind(jwtbind.seed(v), code.describe(jwtbind.bind), jwtbind.BIND_BYTES, jwtbind.BIND_STEPS)
     let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
     result.unwrap(install_data(mut db))
     let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)

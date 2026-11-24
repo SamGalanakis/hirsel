@@ -9,7 +9,7 @@ fn empty_schema(mut d: store.Declare) -> Result[(), store.Error] {
 fn budget_config(take disk: Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), (), ()] {
     let mut session_sizes = wire_defaults(65536u64)
     session_sizes.n_pool = 4194304u64
-    PlaceConfig(backing: take disk, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(empty_place), n_place: 262144u64, on_migrate: None, schema: code.describe(empty_schema), session: session_sizes, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
+    PlaceConfig(backing: take disk, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(empty_place), n_place: 262144u64, on_migrate: None, schema: code.describe(empty_schema), session: session_sizes, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
 fn refused_budget(take input: (PlaceConfig[(), (), (), ()], u64)) -> Result[Ended, StartError] waits {

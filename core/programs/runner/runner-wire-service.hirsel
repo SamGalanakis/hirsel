@@ -125,7 +125,8 @@ fn try_head(head: WireHead, take req: Req) -> HeadOffer {
 pub opaque type WireSession[G: send, B: shareable + send]: send {
     room_link: Option[RoomLink],
     anonymous: Caller,
-    wire: Option[Wire[G, B]],
+    wire: Option[Wire[B]],
+    grants: Option[Sender[GrantRequest[G]]], // the place's call mint, when it has one (RUNNER-SPEC v2.67)
     head: WireHead,
     clock: Clock,
     tasks: Tasks,
@@ -171,14 +172,14 @@ pub opaque type WireSession[G: send, B: shareable + send]: send {
     told_taken: u64
 }
 
-pub fn wire_service[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, B]] {
-    wire_service_with_head(random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, launch_target(a))
+pub fn wire_service[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, a: Args) -> Service[WireSession[G, B]] {
+    wire_service_with_head(random, take session_wire, None, LifecycleHead(channel.sender(head)), clock, tasks, config, launch_target(a))
 }
 
-fn wire_service_with_head[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[G, B]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
+fn wire_service_with_head[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[B]], take grants: Option[Sender[GrantRequest[G]]], take head: WireHead, clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
     let anonymous = option.unwrap(anonymous_caller(random))
     let retirement = wire_retirement(head, anonymous)
-    let context: WireSession[G, B] = WireSession(room_link: None, anonymous: take anonymous, wire: take session_wire, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64, me: None, publisher: None, caller: None, phase: 0u8, wants: list.new(), entries: list.new(), known: list.new(), launch: None, placing: 0u64, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64, joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false, holding: false, leaving: list.new(), deferred_subs: list.new(), next_sub: 0u64, progress: None, taken: None, completes: 0u64, told_taken: 0u64)
+    let context: WireSession[G, B] = WireSession(room_link: None, anonymous: take anonymous, wire: take session_wire, grants: take grants, head: take head, clock: clock, tasks: tasks, config: config, target: take target, n_place: 0u64, me: None, publisher: None, caller: None, phase: 0u8, wants: list.new(), entries: list.new(), known: list.new(), launch: None, placing: 0u64, pending: None, held: map.new(), refusals: 0u64, last: 0u64, generation: 0u64, joined: None, joining: None, join_lease: None, marked: false, mark: None, subscription: None, subscription_room: None, sub_generation: 0u64, subs: list.new(), pub_subs: list.new(), reset_seen: false, holding: false, leaving: list.new(), deferred_subs: list.new(), next_sub: 0u64, progress: None, taken: None, completes: 0u64, told_taken: 0u64)
     Service(context: take context, step: wire_step, ready: wire_can_read, finish: wire_finish, check: wire_check_live, retirement: Some(take retirement), flush_subscriptions: wire_flush_subscriptions)
 }
 
@@ -405,15 +406,8 @@ fn wire_start_granted[G: send, B: shareable + send](mut s: WireSession[G, B], mu
     let launch = replace(mut s.launch, None)
     let named = result.unwrap(store.stream_key_bytes(sent.stream))
     let Send(stream: _, key: _, p: p, arg: take argument, digest: digest, deadline: deadline, ..) = take sent
-    let copied: Option[G] = match s.wire {
-        Some(w) => match w.grant {
-            Some(g) => Some((g.duplicate)(g.value)),
-            None => None
-        },
-        None => None,
-    }
-    let seed = match take copied {
-        Some(take g) => take g,
+    let mint = match s.grants {
+        Some(to) => channel.sender(to),
         None => return wire_refused(mut s, mut work, stream, p, NotAllowed),
     }
     if host.mono_ns(s.clock) >= deadline {
@@ -446,7 +440,7 @@ fn wire_start_granted[G: send, B: shareable + send](mut s: WireSession[G, B], mu
     let timer = std.clock.alarm(s.tasks, s.clock, until, to, deadline_notice(clone(named), p, generation))
     let report = WireGrantReport(tick: Tick(stream: take named, p: p, generation: generation), to: take to, clock: s.clock, deadline: until)
     let launched: Result[Task[Outcome], Refusal] = match take launch {
-        Some(take prepared) => match (prepared.go)(s.tasks, Direct(take seed), take caller, take argument, Some(WireGrant(take report))) {
+        Some(take prepared) => match (prepared.go)(s.tasks, FromPlace(take mint, ForCall), take caller, take argument, Some(WireGrant(take report))) {
             Ok(take handle) => Ok(take handle),
             Error(cap) => Error(Budget(capacity_room(cap))),
         },
@@ -804,8 +798,8 @@ fn wire_finish[G: send, B: shareable + send](mut s: WireSession[G, B]) -> Option
 }
 
 // Embedded hosts and socket fixtures supply their launch target directly.
-pub fn wire_target_service[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[G, B]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
-    wire_service_with_head(random, take session_wire, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
+pub fn wire_target_service[G: send, B: shareable + send](random: Random, take session_wire: Option[Wire[B]], take grants: Option[Sender[GrantRequest[G]]], head: Sender[HeadInput], clock: Clock, tasks: Tasks, config: WireConfig, take target: String) -> Service[WireSession[G, B]] {
+    wire_service_with_head(random, take session_wire, take grants, LifecycleHead(channel.sender(head)), clock, tasks, config, take target)
 }
 
 // The place's one Registry, built once under `bytes n_place` and owned by the allocation

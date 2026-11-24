@@ -206,15 +206,16 @@ fn keyed_registry_count[G: send, H: shareable + inert + send](reg: Registry[G, H
     Some(maximum)
 }
 
-fn check_keyed_wire[G: send, H: shareable + inert + send, B: shareable + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, wire_input: Option[Wire[G, B]]) -> Option[OpenError] {
-    if let Some(supplied) = wire_input {
-        if !none(supplied.grant) {
+// A keyed claim runs with a G from the place's call mint (http.md K-2).
+fn check_keyed_grants[G: send, H: shareable + inert + send, S: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, supplied: Option[Grants[G, H, S]]) -> Option[OpenError] {
+    if let Some(given) = supplied {
+        if !none(given.call) {
             return None
         }
     }
     if let Ok(reg) = placed(place, n_place) {
         for (name, _) in reg.keyed {
-            return Some(KeyedNoWire(clone(name)))
+            return Some(KeyedNoGrant(clone(name)))
         }
     }
     None

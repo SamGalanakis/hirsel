@@ -9,6 +9,7 @@ store = { major = 1, path = "../store" }
 
 [sources]
 "runner.hirsel" = "runner"
+"runner-fixture-owner.hirsel" = "runner"
 "runner-wire-io.hirsel" = "runner"
 "runner-wire-owner.hirsel" = "runner"
 "runner-wire-listener.hirsel" = "runner"
@@ -110,6 +111,7 @@ dirs = ["."]
 "runner_wire.hirsel" = "runner_wire"
 "runner_trigger_laws.hirsel" = "runner"
 "runner_activation_fate_laws.hirsel" = "runner"
+"runner_subs_laws.hirsel" = "runner"
 "schedule_laws.hirsel" = "runner"
 "park_laws.hirsel" = "runner"
 "runner_trigger_model.hirsel" = "triggers"
@@ -129,6 +131,9 @@ dirs = ["."]
 "triggers_journal_laws.hirsel" = "triggers"
 
 [tests.runs."runner@1/runner_calls/test_fixture_granted"]
+limit = 1342177280
+
+[tests.runs."runner@1/runner_calls/test_bind_granted"]
 limit = 1342177280
 
 [tests.runs."runner@1/runner/operate_derived_budgets"]

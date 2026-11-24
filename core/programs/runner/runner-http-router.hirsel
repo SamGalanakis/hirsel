@@ -18,7 +18,8 @@ pub opaque type HttpRoutes: shareable + send {
 pub opaque type HttpConnection[G: send, H: shareable + inert + send, B: shareable + send]: send {
     registered: Registry[G, H],
     routes: Arc[HttpRoutes],
-    wire: Option[Wire[G, B]],
+    wire: Option[Wire[B]],
+    grants: Option[Sender[GrantRequest[G]]],
     relay: Relay,
     random: Random,
     clock: Clock,
@@ -28,12 +29,17 @@ pub opaque type HttpConnection[G: send, H: shareable + inert + send, B: shareabl
     retire: Latest[Option[Bytes]],
 }
 
-pub fn http_connection[G: send, H: shareable + inert + send, B: shareable + send](take registered: Registry[G, H], take routes: Arc[HttpRoutes], take supplied: Option[Wire[G, B]], take relay: Relay, random: Random, clock: Clock, tasks: Tasks, budget: u64) -> HttpConnection[G, H, B] {
+pub fn http_connection[G: send, H: shareable + inert + send, B: shareable + send](take registered: Registry[G, H], take routes: Arc[HttpRoutes], take supplied: Option[Wire[B]], take relay: Relay, random: Random, clock: Clock, tasks: Tasks, budget: u64) -> HttpConnection[G, H, B] {
     let mut registry_copy = take registered
     for key in routes.gone {
         result.unwrap(retain_gone(mut registry_copy, std.http.copy_bytes(key)))
     }
-    HttpConnection(registered: take registry_copy, routes: take routes, wire: take supplied, relay: take relay, random: random, clock: clock, tasks: tasks, budget: budget, reads: None, retire: latest.new(arc.new(None)))
+    HttpConnection(registered: take registry_copy, routes: take routes, wire: take supplied, grants: None, relay: take relay, random: random, clock: clock, tasks: tasks, budget: budget, reads: None, retire: latest.new(arc.new(None)))
+}
+
+// A keyed claim runs with a G from the place's call mint (http.md K-2, RUNNER-SPEC v2.67).
+pub fn http_grant_calls[G: send, H: shareable + inert + send, B: shareable + send](mut connection: HttpConnection[G, H, B], take to: Sender[GrantRequest[G]]) {
+    connection.grants = Some(take to)
 }
 
 pub fn http_enable_reads[G: send, H: shareable + inert + send, B: shareable + send](mut connection: HttpConnection[G, H, B], take access: HttpReadAccess) {
@@ -435,9 +441,9 @@ fn claim_job_reply[G: send](take work: (ClaimJob[G], ClaimCompletionSignal)) wai
     completion.sent = true
 }
 
-fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, grant: WireGrant[G], claim: Claim[G], tasks: Tasks, clock: Clock, deadline: u64) -> Option[Claimed] waits {
+fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, mint: Sender[GrantRequest[G]], claim: Claim[G], tasks: Tasks, clock: Clock, deadline: u64) -> Option[Claimed] waits {
     let copied = bound bytes claim.claim_bytes {
-        isolate(scoped fn() -> ClaimJob[G] {
+        isolate(scoped fn() -> ClaimRequest {
             let mut headers: List[(String, Bytes)] = list.new()
             let mut i = 0u64
             while let Some((name, value)) = std.http.header_at(req, i) {
@@ -449,13 +455,16 @@ fn derive_http_claim[G: send](req: std.http.Request, body: Bytes, grant: WireGra
                 }
                 i += 1
             }
-            let request = ClaimRequest(headers: take headers, body: std.http.copy_bytes(body))
-            ClaimJob(seed: (grant.duplicate)(grant.value), derive: claim.f, request: take request, steps: claim.claim_steps)
+            ClaimRequest(headers: take headers, body: std.http.copy_bytes(body))
         })
     }
-    let Ok(Ok(Ok(take job))) = take copied else {
+    let Ok(Ok(Ok(take request))) = take copied else {
         return None
     }
+    let Ok(take seed) = place_grant(mint, ForCall) else {
+        return None
+    }
+    let job = ClaimJob(seed: take seed, derive: claim.f, request: take request, steps: claim.claim_steps)
     let (to, from): (Sender[Option[Claimed]], Receiver[Option[Claimed]]) = channel.new(1u64)
     let Ok(take completion) = ClaimCompletionSignal(to: channel.sender(to), sent: false) else {
         return None
@@ -483,10 +492,7 @@ fn http_keyed_handler[G: send, H: shareable + inert + send, B: shareable + send]
     let Some(registered) = map.get(state.registered.keyed, name) else {
         return Ok(Reply(http_refusal(NoEntry)?))
     }
-    let Some(supplied) = view state.wire else {
-        return Ok(Reply(http_reply(401u16, "", false, false, false)?))
-    }
-    let Some(grant) = view supplied.grant else {
+    let Some(mint) = view state.grants else {
         return Ok(Reply(http_reply(401u16, "", false, false, false)?))
     }
     let body = match http_request_body_bytes(req, mut resp, true) {
@@ -496,7 +502,7 @@ fn http_keyed_handler[G: send, H: shareable + inert + send, B: shareable + send]
     if host.mono_ns(state.clock) >= horizon {
         return Ok(Reply(http_refusal(Deadline)?))
     }
-    let classified = derive_http_claim(req, body, grant, registered.claim, state.tasks, state.clock, horizon)
+    let classified = derive_http_claim(req, body, mint, registered.claim, state.tasks, state.clock, horizon)
     if host.mono_ns(state.clock) >= horizon {
         return Ok(Reply(http_refusal(Deadline)?))
     }

@@ -1,7 +1,15 @@
 const IDLE_MS: u64 = 30u64
 
-type IdleSeed: send { clock: Clock, starts: Sender[u64] }
-type IdleGrant: send { clock: Clock, starts: Sender[u64], attempt: u64 }
+type IdleSeed: send {
+    clock: Clock,
+    starts: Sender[u64]
+}
+
+type IdleGrant: send {
+    clock: Clock,
+    starts: Sender[u64],
+    attempt: u64
+}
 
 fn idle_grant(seed: IdleSeed, unused_handles: Hd, take ctx: runner.TriggerContext) -> Result[IdleGrant, Capacity] {
     let number = triggers.number(runner.trigger_attempt(ctx))
@@ -23,7 +31,9 @@ fn idle_entries() -> (triggers.Entries, triggers.Entry[u64]) {
 }
 
 fn idle_place(mut r: runner.Registry[IdleGrant, Hd]) -> Result[(), runner.RegisterError] {
-    runner.use_trigger_tables(mut r, fn(h: Hd) -> triggers.Tables { ping_tables(h) })
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> triggers.Tables {
+        ping_tables(h)
+    })
     runner.granted(mut r, code.describe(idle_body), 65536u64, runner.DEFAULT_STEPS)
 }
 
@@ -42,7 +52,9 @@ fn idle_net(take seed: (Sender[()], Served[NetOp])) waits {
                 let _ = channel.try_send(accepts, ())
                 let _ = replace(mut pending, Some(take request))
             },
-            Released(..) => { let _ = replace(mut pending, None) },
+            Released(..) => {
+                let _ = replace(mut pending, None)
+            },
             _ => fail("idle: unexpected network operation"),
         }
     }
@@ -74,7 +86,11 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     let mut ticks = take hand
     let mut name = string.with_capacity(32u64)
     let dir = result.unwrap(host.mkdtemp(parent, mut name))
-    let due = if at_idle_deadline { 1000u64 + IDLE_MS } else { 1000u64 }
+    let due = if at_idle_deadline {
+        1000u64 + IDLE_MS
+    } else {
+        1000u64
+    }
     let future = 2000u64
     let id = idle_triggers(dir, virtual_time, random, tasks, due, future)
     let (network, provider) = provide.net(bytes 4096u64)
@@ -84,56 +100,71 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     let stop = runner.Stop(lag_ms: 1000u64, grace_ms: 1000u64)
     let (starts, started): (Sender[u64], Receiver[u64]) = channel.new(2u64)
     let (entries, _) = idle_entries()
-    let config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
-        grants: IdleSeed(clock: virtual_time, starts: take starts), grant: idle_grant, grant_bytes: 65536u64)
+    let config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))
+    let config_grants: runner.Grants[IdleGrant, Hd, IdleSeed] = runner.Grants(seed: IdleSeed(clock: virtual_time, starts: take starts), attempt: Some(idle_grant), call: None, grant_bytes: 65536u64)
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed, ()] = runner.PlaceConfig(
-        backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None,
-            cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE,
-        on_migrate: None, schema: code.describe(ping_schema), session: wire, max_sessions: 1u64,
-        proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: network, tasks: tasks, clock: virtual_time,
-        random: random, stop: stop, wire: None, triggers: Some(take config), idle: Some(IDLE_MS))
+    let settings: runner.PlaceConfig[IdleGrant, Hd, IdleSeed, ()] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(4194304u64), pack_bytes: Some(512u64), group_bytes: Some(1048576u64), group_commits: Some(2u32), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(idle_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: listen, net: network, tasks: tasks, clock: virtual_time, random: random, stop: stop, wire: None, grants: Some(take config_grants), triggers: Some(take config), idle: Some(IDLE_MS))
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     loop {
-        match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("idle: place did not become ready") }
+        match channel.receive(phases) {
+            Ok(Ready) => break,
+            Ok(Starting(_)) => (),
+            _ => fail("idle: place did not become ready")
+        }
     }
     let first_due = (due - 1000u64) * 1000000u64
     let mut now = 0u64
     let quantum = IDLE_MS * 500000u64
     while now <= first_due {
         let _ = clock.idle(mut ticks)
-        if now == first_due { break }
+        if now == first_due {
+            break
+        }
         now += quantum
         clock.advance_to(mut ticks, now)
         clock.set_wall(mut ticks, 1000u64 + now / 1000000u64)
     }
-    if let Ok(1u64) = channel.try_receive(started) {} else { fail("idle: the first attempt did not start") }
+    if let Ok(1u64) = channel.try_receive(started) {} else {
+        fail("idle: the first attempt did not start")
+    }
     let finish_at = first_due + 3u64 * IDLE_MS * 1000000u64
     while now < finish_at {
-        if let Ready = latest.read(status).phase {} else { fail("idle: a waiting granted run lost its place") }
+        if let Ready = latest.read(status).phase {} else {
+            fail("idle: a waiting granted run lost its place")
+        }
         now += quantum
         clock.advance_to(mut ticks, now)
         clock.set_wall(mut ticks, 1000u64 + now / 1000000u64)
         let _ = clock.idle(mut ticks)
     }
     if !at_idle_deadline {
-        if let Ok(()) = channel.try_receive(observed_accepts) {} else { fail("idle: the listener never armed") }
-        if let Error(Empty) = channel.try_receive(observed_accepts) {} else { fail("idle: the listener polled while a run was held") }
+        if let Ok(()) = channel.try_receive(observed_accepts) {} else {
+            fail("idle: the listener never armed")
+        }
+        if let Error(Empty) = channel.try_receive(observed_accepts) {} else {
+            fail("idle: the listener polled while a run was held")
+        }
     }
     let mut next_clock: Option[u64] = None
     while now < finish_at + 5u64 * IDLE_MS * 1000000u64 {
-        if let Draining = latest.read(status).phase { break }
+        if let Draining = latest.read(status).phase {
+            break
+        }
         now += quantum
         clock.advance_to(mut ticks, now)
         clock.set_wall(mut ticks, 1000u64 + now / 1000000u64)
         next_clock = clock.idle(mut ticks)
     }
-    if let Draining = latest.read(status).phase {} else { fail("idle: completed run kept the place up") }
+    if let Draining = latest.read(status).phase {} else {
+        fail("idle: completed run kept the place up")
+    }
     want(next_clock == None, "idle: drain waited for the configured lag")
     if let Ok(Ok(Stopped(Some(next)))) = task.join(take running) {
         want(next == future, "idle: clean stop lost the future trigger")
-    } else { fail("idle: expected a clean stop") }
+    } else {
+        fail("idle: expected a clean stop")
+    }
     let _ = take serving_net
     let _ = take stop_to
     let _ = take started
@@ -141,7 +172,9 @@ fn idle_trigger_case(parent: Dir, wall_clock: Clock, random: Random, tasks: Task
     let tables = ping_tables(result.unwrap(store.bind_declaration(mut db, Open, ping_schema)))
     if let Ok(Some(Returned(raw))) = triggers.outcome(result.unwrap(store.reader(db, 0u64)), store.snapshot(db), tables, id) {
         want(result.unwrap(std.codec.decode(std.codec.of_u64(), raw)) == 1u64, "idle: the run did not finish on attempt one")
-    } else { fail("idle: no terminal result") }
+    } else {
+        fail("idle: no terminal result")
+    }
     result.unwrap(store.close(take db))
     result.unwrap(std.dir.remove_all(parent, name))
 }
@@ -157,5 +190,9 @@ fn test_idle_keeps_runs(parent: Dir, clock: Clock, random: Random, tasks: Tasks)
 
 @test
 fn test_trigger_timer_wall_wait(tasks: Tasks) -> Result[(), ()] waits {
-    if runner.law_trigger_timer_wall_wait(tasks) { Ok(()) } else { Error(()) }
+    if runner.law_trigger_timer_wall_wait(tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }

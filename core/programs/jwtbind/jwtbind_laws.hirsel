@@ -212,7 +212,7 @@ fn jwt_caller_map(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
         Ok(take v) => take v,
         Error(_) => return Error(()),
     }
-    let _wired: runner.Wire[(), Seed] = runner.wire_bind(seed(v), code.describe(bind), BIND_BYTES, BIND_STEPS)
+    let _wired: runner.Wire[Seed] = runner.wire_bind(seed(v), code.describe(bind), BIND_BYTES, BIND_STEPS)
     let mut rsa = issuer_defaults(string.from(ISS), string.from(AUD), 9u8, std.jwt.allow(Rs256))
     rsa.max_token = std.jwt.MAX_TOKEN
     let w = match verifier(take rsa, Static(string.from(JWKS_RSA)), n, System, c, r, tasks) {

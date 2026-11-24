@@ -1,0 +1,33 @@
+fn fixture_content(owner: FixtureOwner, take event: WireEvent) -> () waits {
+    let Notice(e: take e) = publisher_notice(take event)
+    let mut dropped: List[u32] = list.new()
+    if let Updated(Update(version: _, content: Some(take o), outcomes: take outcomes)) = take e {
+        hand(owner.out, take o, mut dropped, take outcomes)
+    }
+    let _ = channel.try_send(owner.progress, ())
+    let _ = channel.try_send(owner.post, PubIn(e: Drained))
+}
+
+pub fn fixture_receive(owner: FixtureOwner) -> Result[Down, ReceiveError] waits {
+    loop {
+        if let Ok(take d) = channel.try_receive(owner.from) {
+            return Ok(take d)
+        }
+        match channel.receive(owner.inbox) {
+            Ok(take e) => fixture_content(owner, take e),
+            Error(_) => return Error(Closed),
+        }
+    }
+}
+
+pub fn fixture_close(take owner: FixtureOwner) -> () waits {
+    let _ = channel.send(owner.post, PubIn(e: Left(owner.who)))
+}
+
+fn publisher_notice(take event: WireEvent) -> Notice {
+    let WireEvent(e: take input) = take event
+    match take input {
+        FromRunner(take notice) => take notice,
+        _ => fail("publisher fixture: non-publisher event")
+    }
+}

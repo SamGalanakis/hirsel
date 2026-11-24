@@ -146,10 +146,7 @@ const STOP_GRACE_MS: u64 = 5000u64
 fn config(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, selection: runner.Selection, listen: Addr, take proxies: List[std.wsock.Prefix]) -> runner.PlaceConfig[(), Handles, (), ()] {
     let mut session = runner.wire_defaults(65536u64)
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(),
-        selection: selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema),
-        session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64,
-        listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    runner.PlaceConfig(backing: Disk(directory), sizes: store.derived_sizes(), selection: selection, place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: runner.WIRE_OWNER_LIMIT, proxies: take proxies, n_publisher: 67108864u64, listen: listen, net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: STOP_GRACE_MS), wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
 }
 
 fn start(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, errors: Stderr, take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
@@ -189,10 +186,8 @@ fn serve_board(take app: BenchmarkBoard) -> Result[(), Exit] waits {
 
 // The store runner's publisher, owner and reader use unit-local channels.
 // The benchmark moves the whole application into an owned unit.
-pub fn shipping_benchmark(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args,
-                           process: Process, errors: Stderr) -> Result[(), Exit] waits {
-    let app = BenchmarkBoard(net: n, directory: directory, web: web, clock: c,
-        random: random, tasks: tasks, args: a, process: process, errors: errors)
+pub fn shipping_benchmark(n: Net, directory: Dir, web: Dir, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    let app = BenchmarkBoard(net: n, directory: directory, web: web, clock: c, random: random, tasks: tasks, args: a, process: process, errors: errors)
     let h = result.unwrap(task.spawn_unit(tasks, bytes 3221225472 - 1048576, take app, serve_board))
     result.unwrap(task.join(take h))
 }

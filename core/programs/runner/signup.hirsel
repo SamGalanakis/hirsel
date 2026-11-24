@@ -1,8 +1,22 @@
 // A sign-up process over the store step library.
-pub type Signup: codec + send { id: u64, email: String, card: String }
-type Account: codec + send { email: String, active: bool }
-type StatusRequest: codec + send { id: u64, run: triggers.Id }
+pub type Signup: codec + send {
+    id: u64,
+    email: String,
+    card: String
+}
+
+type Account: codec + send {
+    email: String,
+    active: bool
+}
+
+type StatusRequest: codec + send {
+    id: u64,
+    run: triggers.Id
+}
+
 pub type WriteError: codec + send = Exists | Missing | Rejected | PaymentUnknown
+
 type RunResult: codec + send = Active | Held | Cancelled | MailInDoubt | ChargeInDoubt | Rejected
 
 pub opaque type Tables: shareable + send {
@@ -11,8 +25,12 @@ pub opaque type Tables: shareable + send {
     steps: steps.Tables,
 }
 
-fn accounts_name() -> String { "signup.accounts" }
+fn accounts_name() -> String {
+    "signup.accounts"
+}
+
 const ENTRY_BYTES: u64 = 131072u64
+
 const PLACE_BYTES: u64 = 1048576u64
 
 pub fn schema(mut d: store.Declare) -> Result[Tables, store.Error] {
@@ -24,14 +42,23 @@ pub fn schema(mut d: store.Declare) -> Result[Tables, store.Error] {
     Ok(Tables(accounts: take account_table, triggers: take pending, steps: take step_handles))
 }
 
-pub fn trigger_tables(h: Tables) -> triggers.Tables { clone(h.triggers) }
+pub fn trigger_tables(h: Tables) -> triggers.Tables {
+    clone(h.triggers)
+}
 
-pub fn step_tables(h: Tables) -> steps.Tables { clone(h.steps) }
+pub fn step_tables(h: Tables) -> steps.Tables {
+    clone(h.steps)
+}
 
-fn same_tables(h: Tables) -> Tables { clone(h) }
+fn same_tables(h: Tables) -> Tables {
+    clone(h)
+}
 
 fn stored[R](take x: Result[R, store.Error]) -> Result[R, WriteError] {
-    match take x { Ok(take a) => Ok(take a), Error(_) => Error(Rejected) }
+    match take x {
+        Ok(take a) => Ok(take a),
+        Error(_) => Error(Rejected)
+    }
 }
 
 fn trigger_entries(target: triggers.Entry[Signup]) -> Result[triggers.Entries, triggers.Error] {
@@ -41,10 +68,18 @@ fn trigger_entries(target: triggers.Entry[Signup]) -> Result[triggers.Entries, t
 }
 
 fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -> Result[triggers.Id, WriteError] {
-    if let Some(_) = stored(store.fetch(tx, h.accounts, arg.id))? { return Error(Exists) }
+    if let Some(_) = stored(store.fetch(tx, h.accounts, arg.id))? {
+        return Error(Exists)
+    }
     let made: Result[triggers.Entry[Signup], std.codec.EncodeError] = triggers.granted(code.describe(run))
-    let target = match take made { Ok(take value) => take value, Error(_) => return Error(Rejected) }
-    let entries = match trigger_entries(target) { Ok(take value) => take value, Error(_) => return Error(Rejected) }
+    let target = match take made {
+        Ok(take value) => take value,
+        Error(_) => return Error(Rejected)
+    }
+    let entries = match trigger_entries(target) {
+        Ok(take value) => take value,
+        Error(_) => return Error(Rejected)
+    }
     let copied: String = clone(arg.email)
     let email = take copied
     stored(store.put(mut tx, h.accounts, arg.id, Account(email: take email, active: false)))?
@@ -55,7 +90,9 @@ fn signup(mut tx: store.Tx, h: Tables, caller: store.Caller, take arg: Signup) -
 }
 
 pub fn activate(mut tx: store.Tx, h: Tables, id: u64) -> Result[(), WriteError] {
-    let Some(take found) = stored(store.fetch(tx, h.accounts, id))? else { return Error(Missing) }
+    let Some(take found) = stored(store.fetch(tx, h.accounts, id))? else {
+        return Error(Missing)
+    }
     let mut account = take found
     account.active = true
     stored(store.put(mut tx, h.accounts, id, account))
@@ -68,19 +105,39 @@ pub fn enroll(mut tx: store.Tx, h: Tables, id: u64) -> Result[triggers.Id, Write
 pub fn active(db: store.Db, h: Tables, id: u64) -> Result[bool, store.Error] waits {
     let snapshot = store.snapshot(db)
     let row = store.get(result.unwrap(store.reader(db, 0u64)), snapshot, h.accounts, id)?
-    Ok(match row { Some(account) => account.active, None => false })
+    Ok(match row {
+        Some(account) => account.active,
+        None => false
+    })
 }
 
 fn signup_status(mut tx: store.Tx, h: Tables, caller: store.Caller, take request: StatusRequest) -> Result[Option[bool], WriteError] {
-    if let None = stored(triggers.fetch_outcome(tx, h.triggers, request.run))? { return Ok(None) }
+    if let None = stored(triggers.fetch_outcome(tx, h.triggers, request.run))? {
+        return Ok(None)
+    }
     let row = stored(store.fetch(tx, h.accounts, request.id))?
-    Ok(Some(match row { Some(account) => account.active, None => false }))
+    Ok(Some(match row {
+        Some(account) => account.active,
+        None => false
+    }))
 }
 
-type Mail: send { email: String, reply: Sender[u64] }
+type Mail: send {
+    email: String,
+    reply: Sender[u64]
+}
+
 type Payment: send = Charge(Bytes, String, Sender[u64]) | Lookup(Bytes, Sender[Option[u64]])
-pub type Services: send { mail: Sender[Mail], payment: Sender[Payment] }
-type Grants: send { context: runner.TriggerContext, services: Services }
+
+pub type Services: send {
+    mail: Sender[Mail],
+    payment: Sender[Payment]
+}
+
+type Grants: send {
+    context: runner.TriggerContext,
+    services: Services
+}
 
 fn make_grants(services: Services, unused_handles: Tables, take ctx: runner.TriggerContext) -> Result[Grants, Capacity] {
     Ok(Grants(context: take ctx, services: Services(mail: channel.sender(services.mail), payment: channel.sender(services.payment))))
@@ -106,7 +163,10 @@ fn payment_service(take inbox: Receiver[Payment]) -> () waits {
                 let _ = channel.send(reply, charged)
             },
             Lookup(key, reply) => {
-                let found: Option[u64] = match map.get(charges, key) { Some(receipt) => Some(receipt), None => None }
+                let found: Option[u64] = match map.get(charges, key) {
+                    Some(receipt) => Some(receipt),
+                    None => None
+                }
                 let _ = channel.send(reply, found)
             },
         }
@@ -135,7 +195,9 @@ fn entry_key[A: codec, R: codec](f: StaticFn[fn(mut store.Tx, Tables, store.Call
 }
 
 fn decode_reply[R: codec](outcome: runner.Outcome) -> Result[R, Capacity] {
-    let Returned(raw) = view outcome else { fail("sign-up: transact did not return") }
+    let Returned(raw) = view outcome else {
+        fail("sign-up: transact did not return")
+    }
     let codec: std.codec.Codec[Result[R, WriteError]] = std.codec.of()
     match std.codec.decode(codec, raw) {
         Ok(Ok(take value)) => Ok(take value),
@@ -146,21 +208,27 @@ fn decode_reply[R: codec](outcome: runner.Outcome) -> Result[R, Capacity] {
 pub type Port: send = Welcome(Sender[Mail]) | Billing(Sender[Payment])
 
 pub fn send_welcome(port: Port, take email: String) -> Result[u64, WriteError] waits {
-    let Welcome(mail) = view port else { fail("sign-up: expected mail grant") }
+    let Welcome(mail) = view port else {
+        fail("sign-up: expected mail grant")
+    }
     let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     result.unwrap(channel.send(mail, Mail(email: take email, reply: take to)))
     Ok(result.unwrap(channel.receive(from)))
 }
 
 pub fn send_charge(port: Port, key: Bytes, take card: String) -> Result[u64, WriteError] waits {
-    let Billing(payment) = view port else { fail("sign-up: expected payment grant") }
+    let Billing(payment) = view port else {
+        fail("sign-up: expected payment grant")
+    }
     let (to, from): (Sender[u64], Receiver[u64]) = channel.new(1u64)
     result.unwrap(channel.send(payment, Charge(clone(key), take card, take to)))
     Ok(result.unwrap(channel.receive(from)))
 }
 
 pub fn find_charge(port: Port, key: Bytes, take _card: String) -> Result[u64, WriteError] waits {
-    let Billing(payment) = view port else { fail("sign-up: expected payment grant") }
+    let Billing(payment) = view port else {
+        fail("sign-up: expected payment grant")
+    }
     let (to, from): (Sender[Option[u64]], Receiver[Option[u64]]) = channel.new(1u64)
     result.unwrap(channel.send(payment, Lookup(clone(key), take to)))
     match channel.receive(from) {
@@ -198,7 +266,9 @@ fn run(g: Grants, caller: runner.Caller, take arg: Signup) -> Result[RunResult, 
 }
 
 fn place(mut registry: runner.Registry[Grants, Tables]) -> Result[(), runner.RegisterError] {
-    runner.use_trigger_tables(mut registry, fn(h: Tables) -> triggers.Tables { trigger_tables(h) })
+    runner.use_trigger_tables(mut registry, fn(h: Tables) -> triggers.Tables {
+        trigger_tables(h)
+    })
     runner.transact(mut registry, code.describe(signup), ENTRY_BYTES, runner.DEFAULT_STEPS)?
     runner.transact(mut registry, code.describe(signup_status), ENTRY_BYTES, runner.DEFAULT_STEPS)?
     steps.register(mut registry, step_tables, ENTRY_BYTES, runner.DEFAULT_STEPS)?
@@ -206,7 +276,12 @@ fn place(mut registry: runner.Registry[Grants, Tables]) -> Result[(), runner.Reg
     runner.granted(mut registry, code.describe(run), ENTRY_BYTES, runner.DEFAULT_STEPS)
 }
 
-type Demo: send { config: runner.PlaceConfig[Grants, Tables, Services, ()], stop: Receiver[()], status: Latest[runner.Status], watch: Sender[Receiver[runner.Phase]] }
+type Demo: send {
+    config: runner.PlaceConfig[Grants, Tables, Services, ()],
+    stop: Receiver[()],
+    status: Latest[runner.Status],
+    watch: Sender[Receiver[runner.Phase]]
+}
 
 fn operate(take demo: Demo) -> Result[runner.Ended, runner.StartError] waits {
     let Demo(config: take config, stop: take stop, status: take status, watch: take watch) = take demo
@@ -219,7 +294,9 @@ fn client_call[R: codec](conn: wire_client.Conn, slot: u32, take arg: Bytes, pos
         match wire_client.next(conn) {
             Ok(Batch(_, _, _, done)) => {
                 for item in done {
-                    if item.p == position { return result.unwrap(decode_reply(item.outcome)) }
+                    if item.p == position {
+                        return result.unwrap(decode_reply(item.outcome))
+                    }
                 }
             },
             Ok(_) => (),
@@ -237,16 +314,12 @@ fn exercise(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -
     let payment = channel.sender(services.payment)
     let target: triggers.Entry[Signup] = result.unwrap(triggers.granted(code.describe(run)))
     let entries = result.unwrap(trigger_entries(target))
-    let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()),
-        grants: take services, grant: make_grants, grant_bytes: 65536u64)
+    let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))
+    let trigger_config_grants: runner.Grants[Grants, Tables, Services] = runner.Grants(seed: take services, attempt: Some(make_grants), call: None, grant_bytes: 65536u64)
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let options = triggers.law_options()
-    let settings: runner.PlaceConfig[Grants, Tables, Services, ()] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(options.pack_bytes), group_bytes: Some(int.widen(options.group_bytes)), group_commits: Some(options.group_commits), lock_wait_ms: Some(options.lock_wait_ms),
-        cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: PLACE_BYTES,
-        on_migrate: None, schema: code.describe(schema), session: wire, max_sessions: 1u64,
-        proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16),
-        net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: Some(take trigger_config), idle: None)
+    let settings: runner.PlaceConfig[Grants, Tables, Services, ()] = runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(options.pack_bytes), group_bytes: Some(int.widen(options.group_bytes)), group_commits: Some(options.group_commits), lock_wait_ms: Some(options.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Current(0u64), place: code.describe(place), n_place: PLACE_BYTES, on_migrate: None, schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: PLACE_BYTES, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: Some(take trigger_config_grants), triggers: Some(take trigger_config), idle: None)
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (watch, watching): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let status = result.unwrap(runner.status_root())
@@ -257,7 +330,11 @@ fn exercise(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -
     let mut running = task.spawn(tasks, bytes allowance, take demo, operate)
     let phases = result.unwrap(channel.receive(watching))
     loop {
-        match channel.receive(phases) { Ok(Ready) => break, Ok(Starting(_)) => (), _ => fail("sign-up: place did not start") }
+        match channel.receive(phases) {
+            Ok(Ready) => break,
+            Ok(Starting(_)) => (),
+            _ => fail("sign-up: place did not start")
+        }
     }
     let address = option.unwrap(latest.read(status).addr)
     let mut keys: List[Bytes] = list.new()
@@ -284,17 +361,27 @@ fn exercise(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -
     // Stop the place gracefully after observing the terminal commit, then reopen its store.
     let _ = wire_client.close(take conn)
     result.unwrap(channel.send(stop, ()))
-    if let Ok(Ok(Stopped(_))) = task.join(take running) {} else { fail("sign-up: place did not stop") }
+    if let Ok(Ok(Stopped(_))) = task.join(take running) {} else {
+        fail("sign-up: place did not stop")
+    }
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let snapshot = store.snapshot(db)
     let h = result.unwrap(store.bind_declaration(mut db, Open, schema))
-    let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(result.unwrap(store.reader(db, 0u64)), snapshot, h.triggers, run_id)) else { fail("sign-up: missing terminal outcome") }
+    let Some(Returned(take outcome)) = result.unwrap(triggers.outcome(result.unwrap(store.reader(db, 0u64)), snapshot, h.triggers, run_id)) else {
+        fail("sign-up: missing terminal outcome")
+    }
     let result_codec: std.codec.Codec[RunResult] = std.codec.of()
-    if let Ok(Active) = std.codec.decode(result_codec, outcome) {} else { fail("sign-up: expected an active outcome") }
+    if let Ok(Active) = std.codec.decode(result_codec, outcome) {} else {
+        fail("sign-up: expected an active outcome")
+    }
     let welcome: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, h.steps, steps.StepId(run: run_id, index: 0u64))
     let paid: Result[Option[Result[u64, WriteError]], store.Error] = steps.recorded(db, h.steps, steps.StepId(run: run_id, index: 1u64))
-    if let Ok(Some(Ok(1u64))) = welcome {} else { fail("sign-up: missing welcome receipt") }
-    if let Ok(Some(Ok(1u64))) = paid {} else { fail("sign-up: missing payment receipt") }
+    if let Ok(Some(Ok(1u64))) = welcome {} else {
+        fail("sign-up: missing welcome receipt")
+    }
+    if let Ok(Some(Ok(1u64))) = paid {} else {
+        fail("sign-up: missing payment receipt")
+    }
     // StepId is the trigger id's fixed-width little-endian fields followed by the step index.
     let mut key: Bytes = list.with_capacity(44u64)
     list.put_word_le(mut key, run_id.store_hi)
@@ -305,7 +392,9 @@ fn exercise(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -
     list.put_word_le(mut key, 1u64)
     let (to, from): (Sender[Option[u64]], Receiver[Option[u64]]) = channel.new(1u64)
     result.unwrap(channel.send(payment, Lookup(take key, take to)))
-    if let Ok(Some(1u64)) = channel.receive(from) {} else { fail("sign-up: payment received the wrong step key") }
+    if let Ok(Some(1u64)) = channel.receive(from) {} else {
+        fail("sign-up: payment received the wrong step key")
+    }
     result.unwrap(store.close(take db))
     let _ = take mailing
     let _ = take payments
@@ -321,12 +410,24 @@ pub fn main(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net, o
 fn keyed_outside_step(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
     exercise(parent, clock, random, tasks, net)
     let mut headers: List[std.http_client.Header] = list.new()
-    if let Ok(()) = std.http_client.idempotency_key(mut headers, b"other") {} else { return Error(()) }
-    if let Error(InvalidRequest) = std.http_client.idempotency_key(mut headers, b"other") {} else { return Error(()) }
+    if let Ok(()) = std.http_client.idempotency_key(mut headers, b"other") {} else {
+        return Error(())
+    }
+    if let Error(InvalidRequest) = std.http_client.idempotency_key(mut headers, b"other") {} else {
+        return Error(())
+    }
     list.clear(mut headers)
     std.http_client.idempotency_key(mut headers, b"\x00\xff") ?=> |_| ()
     let header = view headers[0u64]
-    if header.name != "Idempotency-Key" { return Error(()) }
-    let Public(value) = view header.value else { return Error(()) }
-    if value == b"\"00ff\"" { Ok(()) } else { Error(()) }
+    if header.name != "Idempotency-Key" {
+        return Error(())
+    }
+    let Public(value) = view header.value else {
+        return Error(())
+    }
+    if value == b"\"00ff\"" {
+        Ok(())
+    } else {
+        Error(())
+    }
 }

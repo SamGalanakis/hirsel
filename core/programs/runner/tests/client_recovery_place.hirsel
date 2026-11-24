@@ -44,8 +44,8 @@ fn recovery_binding(_seed: (), credential: Bytes) -> Result[BoundCaller, BindRef
     Ok(BoundCaller(caller: store.Caller(issuer: 2u8, subject: b"sdk-recovery"), expires_at_ms: None))
 }
 
-fn recovery_wire() -> Option[Wire[(), ()]] {
-    Some(wire((), Some(code.describe(recovery_binding)), 8192u64, DEFAULT_STEPS))
+fn recovery_wire() -> Option[Wire[()]] {
+    Some(wire((), code.describe(recovery_binding), 8192u64, DEFAULT_STEPS))
 }
 
 type RecoveryWs: send {
@@ -63,7 +63,7 @@ fn recovery_ws(take job: RecoveryWs) waits {
     config.n_pool = 4194304u64
     config.socket.max_frame = 65536u64
     let make: scoped[view] fn() -> Service[WireSession[(), ()]] = fn() -> Service[WireSession[(), ()]] {
-        wire_target_service(random, recovery_wire(), head, clock, tasks, config, owned_launch_target(launch_env().target))
+        wire_target_service(random, recovery_wire(), None, head, clock, tasks, config, owned_launch_target(launch_env().target))
     }
     let allocate: own[send] fn(mut WireSession[(), ()], take ServiceAllocation) -> Result[ServicePlan, u16] = result.unwrap(wire_place_allocator(code.describe(recovery_place), RECOVERY_PLACE_BYTES))
     result.unwrap(serve_wire(take listener, tasks, clock, post_to, config, 4u64, list.new(), make, take allocate))

@@ -61,6 +61,9 @@ type Sub: send {
 pub opaque type Client {
     conn: wire_client.Conn,
     keys: List[Bytes],
+    // The client's one call stream, named by its connect wall time: the store refuses a
+    // stream older than its retention (STORE-SPEC AH2), so a fixed t of 0 is never admitted.
+    stream: store.StreamId,
     next_p: u64,
     next_sub: u32,
     subs: List[Sub],
@@ -307,7 +310,7 @@ pub fn client_at(tasks: Tasks, net: Net, clock: Clock, random: Random, keys: Lis
         },
     }
     let held: List[Bytes] = clone(keys)
-    Ok(Client(conn: take conn, keys: take held, next_p: first_p, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
+    Ok(Client(conn: take conn, keys: take held, stream: store.StreamId(t: host.wall_ms(clock), n: 0u64), next_p: first_p, next_sub: 0u32, subs: list.new(), version: 0u64, lost: false, generation: 0u64, tasks: tasks, clock: clock))
 }
 
 // Identity returned by the place in Welcome after binding the credential.
@@ -379,7 +382,7 @@ fn step(mut c: Client, want: Option[u64]) -> Step waits {
             if let Some(p) = want {
                 for take d in take done {
                     let runner.Done(stream: stream, p: at, outcome: take outcome) = take d
-                    if stream == store.StreamId(t: 0u64, n: 0u64) && at == p {
+                    if stream == c.stream && at == p {
                         return Answered(take outcome, version)
                     }
                 }
@@ -429,7 +432,7 @@ pub fn call[A: codec, R: codec](mut c: Client, e: Callee[A, R], take a: A, deadl
     let arg = encoded(e.args, a)?
     let p = c.next_p
     c.next_p += 1u64
-    if let Error(_) = channel.send(c.conn.to, Send(Call(store.StreamId(t: 0u64, n: 0u64), p, slot, deadline_ms, take arg))) {
+    if let Error(_) = channel.send(c.conn.to, Send(Call(c.stream, p, slot, deadline_ms, take arg))) {
         return Error(Closed)
     }
     loop {

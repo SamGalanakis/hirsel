@@ -16,8 +16,8 @@ pub fn caller(_seed: (), supplied: Bytes) -> Result[runner.BoundCaller, runner.B
     Ok(runner.BoundCaller(caller: store.Caller(issuer: 2u8, subject: take subject), expires_at_ms: None))
 }
 
-pub fn binding() -> runner.Wire[(), ()] {
-    runner.wire((), Some(code.describe(caller)), 4096u64, 65536u64)
+pub fn binding() -> runner.Wire[()] {
+    runner.wire((), code.describe(caller), 4096u64, 65536u64)
 }
 
 pub fn credential(random: Random) -> Bytes {

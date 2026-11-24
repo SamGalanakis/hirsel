@@ -150,20 +150,29 @@ fn fixture_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.granted(mut r, code.describe(ping), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[(), ()]]) -> runner.PlaceConfig[(), Hd, (), ()] {
+fn unit_call(seed: (), unused_handles: Hd) -> Result[(), Capacity] {
+    Ok(())
+}
+
+fn fixture_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, take wire: Option[runner.Wire[()]], call: bool) -> runner.PlaceConfig[(), Hd, (), ()] {
+    let grants: Option[runner.Grants[(), Hd, ()]] = if call {
+        Some(runner.Grants(seed: (), attempt: None, call: Some(unit_call), grant_bytes: 65536u64))
+    } else {
+        None
+    }
     let mut session = runner.wire_defaults(65536u64)
     session.n_pool = 4194304u64
     session.n_granted = 131072u64
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(fixture_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: take wire, grants: take grants, triggers: None, idle: None)
 }
 
 // RUNNER-SPEC §12.3: a fixture's typed Callee names the key registration computes, a
-// granted call runs only when the place's PlaceConfig.wire is Some, and V4 releases a
+// granted call runs only when the place's Grants has a call mint, and V4 releases a
 // reply that reports a commit only at or after that commit's version.
 pub fn law_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
     let put_entry = fixture.transact_entry(code.describe(write))
     let ping_entry = fixture.granted_entry(code.describe(ping))
-    let with_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, Some(ingress.binding())), 5000u64))
+    let with_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, Some(ingress.binding()), true), 5000u64))
     let mut c = result.unwrap(fixture.client(with_wire, Some(ingress.credential(random)), 5000u64))
     let put_reply = result.unwrap(fixture.call(mut c, put_entry, 5u64, 2000u32))
     let put_durable = match put_reply.answer {
@@ -179,7 +188,7 @@ pub fn law_fixture_granted(clock: Clock, random: Random, tasks: Tasks, net: Net)
         Ok(Stopped(None)) => true,
         _ => false
     }
-    let without_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, None), 5000u64))
+    let without_wire = result.unwrap(fixture.start(fixture_settings(clock, random, tasks, net, None, false), 5000u64))
     let mut d = result.unwrap(fixture.client(without_wire, None, 5000u64))
     let ping_refused = match result.unwrap(fixture.call(mut d, ping_entry, 9u64, 2000u32)).answer {
         Refused(NotAllowed) => true,
@@ -213,7 +222,8 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
     let ephemeral = Addr(ip: V4(0x7f000001u32), port: 0u16)
     let bounds = runner.Stop(lag_ms: 0u64, grace_ms: 1000u64)
     let mut settings = managed_settings(dir, clock, random, tasks, net, ephemeral, bounds)
-    settings.triggers = Some(runner.TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: no_trigger_grant, grant_bytes: 0u64))
+    settings.triggers = Some(runner.TriggerConfig(entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new())))
+    settings.grants = Some(runner.Grants(seed: (), attempt: Some(no_trigger_grant), call: None, grant_bytes: 0u64))
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     if let Ok(Starting(Recovering)) = channel.receive(phases) {} else {
         fail("expected Recovering")
@@ -583,7 +593,8 @@ pub fn law_stop_after_trigger_run(parent: Dir, clock: Clock, random: Random, tas
     settings.place = code.describe(ping_place)
     settings.schema = code.describe(ping_schema)
     let (entries, _) = ping_entries()
-    settings.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: unit_grant, grant_bytes: 65536u64))
+    settings.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new())))
+    settings.grants = Some(runner.Grants(seed: (), attempt: Some(unit_grant), call: None, grant_bytes: 65536u64))
     let socket = settings.session.socket
     let (running, stop_to, phases, status) = start_managed(tasks, take settings, false)
     loop {

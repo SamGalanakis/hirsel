@@ -110,10 +110,10 @@ fn http_op_serve(take job: HttpOpListener) waits {
     let reads = http_read_access(pub_to, list.new(), 65536u64)
     let make: scoped[view] fn() -> HttpConnection[(), HttpLawHandles, ()] = fn() -> HttpConnection[(), HttpLawHandles, ()] {
         let registry_copy = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
-        let supplied: Option[Wire[(), ()]] = match stage {
-            1u8 => Some(wire((), Some(code.describe(http_op_bind_changed)), 8192u64, DEFAULT_STEPS)),
+        let supplied: Option[Wire[()]] = match stage {
+            1u8 => Some(wire((), code.describe(http_op_bind_changed), 8192u64, DEFAULT_STEPS)),
             2u8 => None,
-            _ => Some(wire((), Some(code.describe(http_op_bind_original)), 8192u64, DEFAULT_STEPS)),
+            _ => Some(wire((), code.describe(http_op_bind_original), 8192u64, DEFAULT_STEPS)),
         }
         let mut client_state = http_connection(take registry_copy, arc.share(plans), take supplied, relay_endpoint(endpoint), random, clock, tasks, 65536u64)
         http_enable_reads(mut client_state, http_read_endpoint(reads))

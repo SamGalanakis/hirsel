@@ -45,6 +45,7 @@ dirs = ["."]
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"settle_laws.hirsel" = "laws"
 "life_fixture.hirsel" = "laws"
 "catalog_laws.hirsel" = "laws"
 "mcp_laws.hirsel" = "laws"
@@ -53,6 +54,7 @@ dirs = ["."]
 "frame_laws.hirsel" = "laws"
 "present_laws.hirsel" = "laws"
 "provider_laws.hirsel" = "provider_laws"
+"provider_hedge_laws.hirsel" = "provider_laws"
 "gateway_laws.hirsel" = "gateway_laws"
 "gateway_front_laws.hirsel" = "gateway_laws"
 "gateway_preview_laws.hirsel" = "gateway_laws"

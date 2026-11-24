@@ -274,7 +274,8 @@ type Server[G: send, H: shareable + inert + send, B: shareable + send]: send {
     tasks: Tasks,
     clock: Clock,
     random: Random,
-    wire: Option[runner.Wire[G, B]],
+    wire: Option[runner.Wire[B]],
+    grants: Option[Sender[runner.GrantRequest[G]]],
     head: Sender[runner.HeadInput],
     post: Sender[runner.PubIn],
     config: runner.WireConfig,
@@ -282,7 +283,7 @@ type Server[G: send, H: shareable + inert + send, B: shareable + send]: send {
 }
 
 fn server[G: send, H: shareable + inert + send, B: shareable + send](take seed: Server[G, H, B]) -> Result[(), std.wsock.Error] waits {
-    let Server(listener: take listener, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, head: take head, post: take post, config: config, place: place) = take seed
+    let Server(listener: take listener, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, grants: take grants, head: take head, post: take post, config: config, place: place) = take seed
     let mut l = take listener
     let socket = match std.net.accept_from(mut l, peer, deadline(c)) {
         Ok(take s) => take s,
@@ -291,7 +292,7 @@ fn server[G: send, H: shareable + inert + send, B: shareable + send](take seed: 
     let pending = std.wsock.pending(config.socket)?
     let lease = option.unwrap(std.wsock.acquire(pending)?)
     let up = std.wsock.server(take socket, take lease, peer.ip, list.new(), config.socket, c, host.mono_ns(c))?
-    let service = runner.wire_target_service(random, take session_wire, head, c, tasks, config, "fixture")
+    let service = runner.wire_target_service(random, take session_wire, take grants, head, c, tasks, config, "fixture")
     let placed: Result[own[send] fn(mut runner.WireSession[G, B], take runner.ServiceAllocation) -> Result[runner.ServicePlan, u16], runner.RegisterError] = runner.wire_place_allocator(place, 65536u64)
     let allocate = match take placed {
         Ok(take a) => take a,
@@ -307,17 +308,18 @@ fn server[G: send, H: shareable + inert + send, B: shareable + send](take seed: 
     }
 }
 
-pub fn pair[G: send, H: shareable + inert + send, B: shareable + send](tasks: Tasks, n: Net, c: Clock, random: Random, take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn], place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]], keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64) -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
+pub fn pair[G: send, H: shareable + inert + send, B: shareable + send](tasks: Tasks, n: Net, c: Clock, random: Random, take session_wire: Option[runner.Wire[B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn], place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]], keys: List[Bytes], take token: Option[Bytes], q: u64, n_session: u64) -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
     let mut config = runner.wire_defaults(524288u64)
     config.q = q
     config.budget = 65536u64
     config.socket.max_frame = 32768u64
-    pair_config(tasks, n, c, random, take session_wire, head, post, place, keys, take token, config, n_session)
+    let no_grants: Option[Sender[runner.GrantRequest[G]]] = None
+    pair_config(tasks, n, c, random, take session_wire, take no_grants, head, post, place, keys, take token, config, n_session)
 }
 
 // Cover retention needs one whole initial Batch of 1,954 rows. Its fixture
 // selects the frame bound explicitly, using the same listener and owner.
-pub fn pair_config[G: send, H: shareable + inert + send, B: shareable + send](tasks: Tasks, n: Net, c: Clock, random: Random, take session_wire: Option[runner.Wire[G, B]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn], place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]], keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64) -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
+pub fn pair_config[G: send, H: shareable + inert + send, B: shareable + send](tasks: Tasks, n: Net, c: Clock, random: Random, take session_wire: Option[runner.Wire[B]], take grants: Option[Sender[runner.GrantRequest[G]]], head: Sender[runner.HeadInput], post: Sender[runner.PubIn], place: StaticFn[fn(mut runner.Registry[G, H]) -> Result[(), runner.RegisterError]], keys: List[Bytes], take token: Option[Bytes], config: runner.WireConfig, n_session: u64) -> Result[(Conn, Task[Result[(), std.wsock.Error]]), std.wsock.Error] waits {
     let (l, address) = match host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16) {
         Ok(take sockets) => take sockets,
         Error(e) => return Error(Network(e))
@@ -331,7 +333,7 @@ pub fn pair_config[G: send, H: shareable + inert + send, B: shareable + send](ta
         Ok(a) => a,
         Error(e) => return Error(Network(e))
     }
-    let seed = Server(listener: take l, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, head: channel.sender(head), post: channel.sender(post), config: config, place: place)
+    let seed = Server(listener: take l, peer: peer, tasks: tasks, clock: c, random: random, wire: take session_wire, grants: take grants, head: channel.sender(head), post: channel.sender(post), config: config, place: place)
     let run: fn(take Server[G, H, B]) -> Result[(), std.wsock.Error] waits = server
     let mut h = task.spawn(tasks, bytes n_session, take seed, run)
     match connect_socket(tasks, take client, c, random, keys, take token, config.socket, until, 5000u64) {

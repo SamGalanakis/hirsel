@@ -48,7 +48,7 @@ CHUNK = 500
 # evaluator (the registry's map grows to 2 MiB while its old table is live).
 N_PLACE = 16 * 1024 * 1024
 
-CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'anonymous_fresh', 'granted_copied', 'bind_only', 'calls_refusals',
+CALLS = ('atomic_migration', 'serve_bounded_and_settled', 'duplicate_own_reply', 'release_digest', 'ready_after_activation', 'drain_answers_once', 'drain_reopened', 'lag_window', 'calls_two_streams', 'calls_group_version', 'calls_joiners', 'calls_duplicate', 'anonymous_fresh', 'granted_copied', 'bind_granted', 'calls_refusals',
          'calls_runs_once', 'calls_session_charge', 'calls_store_refusal', 'calls_one_outcome_per_send', 'calls_deadline_held', 'calls_deadline_hung', 'calls_held_head', 'calls_retired_head', 'calls_session_mismatch', 'calls_recorded', 'subs_wired', 'query_as_caller', 'publisher_never_blocks', 'repair_delivered',
          'local_one_head', 'local_route_during_unload', 'local_idle_unload', 'local_reopen_keeps')
 # The in-process host's laws (RUNNER-SPEC §14.9) bind sockets and use disk stores.
@@ -933,7 +933,7 @@ def evaluate(evaluator, inputs_path, definition, launch_image=None):
     return value, report
 
 
-WIRE_BOUNDS = (('wire_granted_nonplain', 'OwnedGrant', 'plain'), ('wire_bind_nonshareable', 'OwnedSeed', 'shareable'))
+WIRE_BOUNDS = (('wire_bind_nonshareable', 'OwnedSeed', 'shareable'),)
 
 
 def granted_bound(args, root, work, row):

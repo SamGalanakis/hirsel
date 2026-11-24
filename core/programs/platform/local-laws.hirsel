@@ -8,7 +8,7 @@ fn local_wire() -> runner.WireConfig {
 }
 
 fn local_config(supplied: local.Supplied, place_fn: StaticFn[fn(mut Calls) -> Result[(), runner.RegisterError]], schema_fn: StaticFn[fn(mut store.Declare) -> Result[Hd, store.Error]], stop: runner.Stop) -> runner.PlaceConfig[(), Hd, (), ()] {
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install(runner.fate.none()), place: place_fn, n_place: N_PLACE, on_migrate: None, schema: schema_fn, session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Install(runner.fate.none()), place: place_fn, n_place: N_PLACE, on_migrate: None, schema: schema_fn, session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: supplied.net, tasks: supplied.tasks, clock: supplied.clock, random: supplied.random, stop: stop, wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
 }
 
 // A place that stops at once.
@@ -381,7 +381,8 @@ fn kept_place(mut r: Calls) -> Result[(), runner.RegisterError] {
 fn keeping_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, (), ()], Capacity] {
     let mut config = local_config(supplied, code.describe(kept_place), code.describe(ping_schema), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
     let (entries, _) = ping_entries()
-    config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grants: (), grant: unit_grant, grant_bytes: 65536u64))
+    config.triggers = Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new())))
+    config.grants = Some(runner.Grants(seed: (), attempt: Some(unit_grant), call: None, grant_bytes: 65536u64))
     Ok(take config)
 }
 
@@ -580,7 +581,7 @@ fn budget_schema(mut declaration: store.Declare) -> Result[(), store.Error] {
 }
 
 fn serve_budget_config(take backing: runner.Backing, c: Clock, r: Random, tasks: Tasks, n: Net) -> runner.PlaceConfig[(), (), (), ()] {
-    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(budget_place), n_place: 262144u64, on_migrate: None, schema: code.describe(budget_schema), session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, triggers: None, idle: None)
+    runner.PlaceConfig(backing: take backing, sizes: store.derived_sizes(), selection: Reopen, place: code.describe(budget_place), n_place: 262144u64, on_migrate: None, schema: code.describe(budget_schema), session: local_wire(), max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
 type ServeReady: send {

@@ -163,7 +163,8 @@ type ServePlace[G: send, H: shareable + inert + send, B: shareable + send]: send
     tasks: Tasks,
     clock: Clock,
     random: Random,
-    wire: Option[Wire[G, B]],
+    wire: Option[Wire[B]],
+    grants: Option[Sender[GrantRequest[G]]],
     max_sessions: u64,
     proxies: List[std.wsock.Prefix],
     target: String,
@@ -189,14 +190,18 @@ fn run_serve_place[G: send, H: shareable + inert + send, B: shareable + send](ta
 }
 
 fn supervise_serve[G: send, H: shareable + inert + send, B: shareable + send](take seed: ServePlace[G, H, B]) -> Result[u64, StartError] waits {
-    let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire, max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms, head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
+    let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire, grants: take session_grants, max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms, head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
     let registered = match placed(place, n_place) {
         Ok(take r) => take r,
         Error(take problem) => return Error(Open(Place(take problem)))
     }
     let relay = start_room_relay(rooms, config, limit, pub_to, tasks, random)?
     let make: scoped[view] fn() -> Service[WireSession[G, B]] = fn() -> Service[WireSession[G, B]] {
-        let mut service = wire_service_with_head(random, copy_wire(session_wire), LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
+        let grants = match session_grants {
+            Some(sender) => Some(channel.sender(sender)),
+            None => None
+        }
+        let mut service = wire_service_with_head(random, copy_wire(session_wire), take grants, LifecycleHead(channel.sender(head_to)), clock, tasks, config, clone(target))
         if let Some((ports, _)) = relay {
             service.context.room_link = Some(copy_room_link(ports))
         }

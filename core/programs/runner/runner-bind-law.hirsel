@@ -1,21 +1,71 @@
-// bind_only (RUNNER-SPEC §3 "Binding", L36): a registry whose grant owns a list, so is not
-// plain, binds its sessions through `runner.wire_bind`. The test chose subject byte 2 for
-// credential [2], so Welcome names Caller(2, [2]). `mine` covers keys from the subject byte
-// up; W wrote keys 1 and 2, so the bound session's image is {2} at 5. A wire call to the
-// registry's `Granted` entry is Refused(NotAllowed): the configuration has no grant.
-type HeldGrant: send {
-    clock: Clock,
-    values: List[u64]
+// bind_granted (RUNNER-SPEC §3 "Binding", L36 v2.67): a place whose G holds a Sender, so
+// is not plain, binds its sessions through `runner.wire_bind` and mints G from its
+// `Grants`. The test chose seed 7 and subject byte 2 for credential [2], so a bound
+// session is Caller(2, [2]). Each mint reports its kind on the test's channel: 1 for a
+// call, 2 for a trigger attempt. The granted trigger run reports seed * 10 + kind.
+type Probe: send {
+    seed: u64,
+    kind: u64,
+    report: Sender[u64]
 }
 
-fn held_body(grant: HeldGrant, caller: runner.Caller, take value: u64) -> Result[u64, Capacity] waits {
-    host.sleep_until(grant.clock, host.mono_ns(grant.clock))
-    Ok(list.len(grant.values) + value)
+type ProbeSeed: send {
+    seed: u64,
+    report: Sender[u64]
 }
 
-fn held_place(mut r: runner.Registry[HeldGrant, Hd]) -> Result[(), runner.RegisterError] {
-    runner.granted(mut r, code.describe(held_body), 65536u64, runner.DEFAULT_STEPS)?
-    runner.query_as(mut r, code.describe(mine), query_slots()?, 65536u64, runner.DEFAULT_STEPS)
+type ProbeReply: codec + send {
+    seed: u64,
+    kind: u64,
+    caller: runner.Caller
+}
+
+fn probe_call(s: ProbeSeed, unused_handles: Hd) -> Result[Probe, Capacity] waits {
+    result.unwrap(channel.send(s.report, 1u64))
+    Ok(Probe(seed: s.seed, kind: 1u64, report: channel.sender(s.report)))
+}
+
+fn probe_attempt(s: ProbeSeed, unused_handles: Hd, take _context: runner.TriggerContext) -> Result[Probe, Capacity] waits {
+    result.unwrap(channel.send(s.report, 2u64))
+    Ok(Probe(seed: s.seed, kind: 2u64, report: channel.sender(s.report)))
+}
+
+fn probed(g: Probe, caller: runner.Caller, take unused: u64) -> Result[ProbeReply, Capacity] {
+    Ok(ProbeReply(seed: g.seed, kind: g.kind, caller: clone(caller)))
+}
+
+fn probed_run(g: Probe, caller: runner.Caller, take k: u64) -> Result[u64, Capacity] waits {
+    result.unwrap(channel.send(g.report, g.seed * 10u64 + g.kind))
+    Ok(k)
+}
+
+fn probe_entries() -> (triggers.Entries, triggers.Entry[u64]) {
+    let target: triggers.Entry[u64] = result.unwrap(triggers.granted(code.describe(probed_run)))
+    let mut entries = triggers.empty_entries()
+    result.unwrap(triggers.allow(mut entries, target))
+    (take entries, take target)
+}
+
+// Writes one granted trigger run after this commit.
+fn arm_probe(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
+    let Some(t) = view h.triggers else {
+        return Error(1u32)
+    }
+    let (entries, target) = probe_entries()
+    match triggers.write(mut tx, t, entries, target, k, AfterCommit) {
+        Ok(id) => Ok(id.version),
+        Error(_) => Error(2u32),
+    }
+}
+
+fn probe_place(mut r: runner.Registry[Probe, Hd]) -> Result[(), runner.RegisterError] {
+    runner.use_trigger_tables(mut r, fn(h: Hd) -> triggers.Tables {
+        ping_tables(h)
+    })
+    runner.transact(mut r, code.describe(write), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(arm_probe), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(probed), 65536u64, runner.DEFAULT_STEPS)?
+    runner.granted(mut r, code.describe(probed_run), 65536u64, runner.DEFAULT_STEPS)
 }
 
 fn chosen_caller(seed: List[u8], credential: Bytes) -> Result[runner.BoundCaller, runner.BindRefusal] {
@@ -25,50 +75,103 @@ fn chosen_caller(seed: List[u8], credential: Bytes) -> Result[runner.BoundCaller
     Ok(runner.BoundCaller(caller: subject_caller(seed[0u64] + credential[0u64]), expires_at_ms: None))
 }
 
-fn drive_bind_only(take d: Drive) -> () waits {
-    let w = conn(d, 1u64)
-    put_at(w, d.clock, 0u64, 1u64)
-    put_at(w, d.clock, 1u64, 2u64)
-    let mut requested: List[Bytes] = list.new()
-    list.push(mut requested, k_mine())
-    list.push(mut requested, key_of(code.identity(code.describe(held_body)), std.codec.of_u64(), std.codec.of_u64()))
+fn probe_settings(clock: Clock, random: Random, tasks: Tasks, net: Net, report: Sender[u64], call: bool) -> runner.PlaceConfig[Probe, Hd, ProbeSeed, List[u8]] {
+    let mut session = runner.wire_defaults(65536u64)
+    session.n_pool = 4194304u64
+    session.n_granted = 131072u64
     let seed = latest.new(arc.new(b"\x00"))
-    let binding: runner.Wire[HeldGrant, List[u8]] = runner.wire_bind(latest.handle(seed), code.describe(chosen_caller), 4096u64, 65536u64)
-    let mut credential: Bytes = list.new()
-    list.push(mut credential, 2u8)
-    let (take wire, take session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(take binding), d.head, d.post, code.describe(held_place), requested, Some(take credential), 1u64, 2097152u64))
-    want(wire.caller.issuer == 2u8 && wire.caller.subject == b"\x02", "bind_only: Welcome names the bound Caller")
-    latest.publish(seed, arc.new(b"\x01"))
-    let republished: runner.Wire[HeldGrant, List[u8]] = runner.wire_bind(latest.handle(seed), code.describe(chosen_caller), 4096u64, 65536u64)
-    let (take later, take later_session) = paired(wire_client.pair(d.tasks, d.net, d.clock, d.random, Some(take republished), d.head, d.post, code.describe(held_place), list.new(), Some(b"\x02"), 1u64, 2097152u64))
-    want(later.caller.issuer == 2u8 && later.caller.subject == b"\x03", "bind_only: a new Hello uses the published seed")
-    hang(Socket(take later, take later_session))
-    let mut arg: Bytes = list.new()
-    result.unwrap(std.codec.encode(std.codec.of_u32(), 0u32, mut arg))
-    wire_client.send_frame(wire, Subscribe(1u32, 0u32, take arg, None))
-    let cn: Conn = Socket(take wire, take session)
-    let mut image = Image(rows: map.new(), at: 0u64, completes: 0u64)
-    image_at(cn, mut image, 5u64, 1u64, key_list(Some(2u64), None), string.from("bind_only: mine runs as the bound Caller"))
-    match cn {
-        Socket(sock, _) => wire_client.send_frame(sock, Call(store.StreamId(t: 0u64, n: 0u64), 0u64, 1u32, 10000u32, u64_arg(1u64))),
-        _ => fail("bind_only: not a socket")
+    let binding: runner.Wire[List[u8]] = runner.wire_bind(take seed, code.describe(chosen_caller), 4096u64, 65536u64)
+    let start = ProbeSeed(seed: 7u64, report: channel.sender(report))
+    let grants: runner.Grants[Probe, Hd, ProbeSeed] = if call {
+        runner.Grants(seed: take start, attempt: Some(probe_attempt), call: Some(probe_call), grant_bytes: 65536u64)
+    } else {
+        runner.Grants(seed: take start, attempt: Some(probe_attempt), call: None, grant_bytes: 65536u64)
     }
-    want(is(frame(cn).outcome, Refused(NotAllowed)), "bind_only: a Granted call is refused")
-    hang(take cn)
-    hang(take w)
+    let (entries, _) = probe_entries()
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(probe_place), n_place: N_PLACE, on_migrate: None, schema: code.describe(ping_schema), session: session, max_sessions: 2u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: net, tasks: tasks, clock: clock, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(take binding), grants: Some(take grants), triggers: Some(runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))), idle: None)
 }
 
-pub fn law_bind_only(c: Clock, r: Random, tasks: Tasks, n: Net) -> bool waits {
-    served(c, r, tasks, n, drive_bind_only)
+fn quiet(reports: Receiver[u64]) -> bool {
+    match channel.try_receive(reports) {
+        Error(Empty) => true,
+        _ => false,
+    }
+}
+
+// The next report, or 0 when none arrives within 5 s, so a missing mint fails the law
+// instead of hanging it.
+fn next_report(clock: Clock, reports: Receiver[u64]) -> u64 waits {
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), 5000u64)
+    loop {
+        match channel.try_receive(reports) {
+            Ok(kind) => return kind,
+            Error(Empty) => if host.mono_ns(clock) >= deadline {
+                return 0u64
+            },
+            Error(_) => return 0u64,
+        }
+        std.clock.sleep_ns(clock, 1000000u64)
+    }
+}
+
+pub fn law_bind_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let put_entry = fixture.transact_entry(code.describe(write))
+    let arm_entry = fixture.transact_entry(code.describe(arm_probe))
+    let probe_entry = fixture.granted_entry(code.describe(probed))
+    let (report, reports): (Sender[u64], Receiver[u64]) = channel.new(16u64)
+    let wired = result.unwrap(fixture.start(probe_settings(clock, random, tasks, net, report, true), 5000u64))
+    let mut c = result.unwrap(fixture.client(wired, Some(b"\x02"), 5000u64))
+    let welcome = fixture.bound_caller(c)
+    let welcomed = welcome.issuer == 2u8 && welcome.subject == b"\x02"
+    // (2) A pure call commits and mints nothing.
+    let pure = match result.unwrap(fixture.call(mut c, put_entry, 5u64, 2000u32)).answer {
+        Returned(Ok(_)) => quiet(reports),
+        _ => false
+    }
+    // (1) A granted trigger runs with an attempt-minted G.
+    let armed = match result.unwrap(fixture.call(mut c, arm_entry, 3u64, 2000u32)).answer {
+        Returned(Ok(_)) => true,
+        _ => false
+    }
+    let attempted = next_report(clock, reports) == 2u64 && next_report(clock, reports) == 72u64
+    // A granted call records no stream position, so it comes after the stored calls: the
+    // store admits only latest + 1 and would hold a later stored call behind it.
+    // (1) A granted call runs with a call-minted G and the bound Caller.
+    let called = match result.unwrap(fixture.call(mut c, probe_entry, 0u64, 2000u32)).answer {
+        Returned(r) => r.seed == 7u64 && r.kind == 1u64 && r.caller.issuer == 2u8 && r.caller.subject == b"\x02",
+        _ => false,
+    }
+    let call_minted = next_report(clock, reports) == 1u64 && quiet(reports)
+    // (3) A rejected credential closes 1008 before any entry runs.
+    let probe_keys = result.unwrap(fixture.entry_keys(code.describe(probe_place)))
+    let address = option.unwrap(fixture.status(wired).addr)
+    let rejected = match wire_client.connect_for(tasks, net, address, clock, random, probe_keys, Some(b"\x02\x02"), runner.wire_defaults(65536u64).socket, 5000u64, 5000u64) {
+        Error(Protocol(1008u16)) => quiet(reports),
+        _ => false,
+    }
+    fixture.close(take c)
+    let stopped = match fixture.end(take wired, 5000u64) {
+        Ok(Stopped(None)) => true,
+        _ => false
+    }
+    // (4) Without a call mint the granted call is refused and nothing is minted.
+    let bare = result.unwrap(fixture.start(probe_settings(clock, random, tasks, net, report, false), 5000u64))
+    let mut d = result.unwrap(fixture.client(bare, Some(b"\x02"), 5000u64))
+    let refused = match result.unwrap(fixture.call(mut d, probe_entry, 0u64, 2000u32)).answer {
+        Refused(NotAllowed) => quiet(reports),
+        _ => false
+    }
+    fixture.close(take d)
+    let bare_stopped = match fixture.end(take bare, 5000u64) {
+        Ok(Stopped(None)) => true,
+        _ => false
+    }
+    welcomed && pure && called && call_minted && armed && attempted && rejected && stopped && refused && bare_stopped
 }
 
 @test
-fn test_bind_only(r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
-    // The fixture writes to stream t = 0, inside retention at wall 1000 ms.
-    let (clock, take hand) = provide.clock(0u64, 1000u64)
-    let passed = law_bind_only(clock, r, tasks, n)
-    let _ = take hand
-    if passed {
+fn test_bind_granted(clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_bind_granted(clock, random, tasks, net) {
         Ok(())
     } else {
         Error(())

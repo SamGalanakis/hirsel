@@ -1,4 +1,6 @@
-type Handles: shareable + send { rows: store.Table[u64, u64] }
+type Handles: shareable + send {
+    rows: store.Table[u64, u64]
+}
 
 fn place(mut r: runner.Registry[(), Handles]) -> Result[(), runner.RegisterError] {
     Ok(())
@@ -31,19 +33,19 @@ fn seed(d: Dir, c: Clock, random: Random, tasks: Tasks) -> Result[(), store.Erro
         store.put(mut tx, t, 3u64, 22u64)?
         store.put(mut tx, t, 5u64, 17u64)
     })?
-    let Committed(done) = saved else { return Error(MigrationFault) }
+    let Committed(done) = saved else {
+        return Error(MigrationFault)
+    }
     store.durable(mut db, done.ticket)?
     store.close(take db)
 }
 
 pub fn main(d: Dir, n: Net, c: Clock, random: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
-    if args.get(a, 0u64) == Some("seed") { return Ok(seed(d, c, random, tasks) ?=> |_| Exit(status: 1u8)) }
+    if args.get(a, 0u64) == Some("seed") {
+        return Ok(seed(d, c, random, tasks) ?=> |_| Exit(status: 1u8))
+    }
     runner.main(a, process, errors, tasks, c, code.describe(place), code.describe(candidate_schema), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-        let configured: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(),
-            selection: runner.launch_selection(a) ?=> Usage, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(candidate_schema),
-            session: runner.wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64,
-            listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random,
-            stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), triggers: None, idle: None)
+        let configured: runner.PlaceConfig[(), Handles, (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: runner.launch_selection(a) ?=> Usage, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(candidate_schema), session: runner.wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: None, triggers: None, idle: None)
         Ok(runner.operate_report(take configured, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start)
     })
 }

@@ -1,4 +1,7 @@
-type ParkLawState: codec + send { value: u64, label: String }
+type ParkLawState: codec + send {
+    value: u64,
+    label: String
+}
 
 type ParkLawHandles: shareable + send {
     parks: park.Tables[ParkLawState],
@@ -20,27 +23,40 @@ fn park_law_schema(mut d: store.Declare) -> Result[ParkLawHandles, store.Error] 
 }
 
 fn park_law_wake(mut tx: store.Tx, h: ParkLawHandles, _who: Caller, take id: park.ParkId) -> Result[(), u64] {
-    let Some(take arrived) = park.take_wake(mut tx, h.parks, id) ?=> |_| 1u64 else { return Ok(()) }
+    let Some(take arrived) = park.take_wake(mut tx, h.parks, id) ?=> |_| 1u64 else {
+        return Ok(())
+    }
     let (take s, extra) = match take arrived {
         Due(take state) => (take state, 0u64),
         Completed(take state, payload) => {
-            if payload != b"ready" { return Error(2u64) }
+            if payload != b"ready" {
+                return Error(2u64)
+            }
             (take state, 100u64)
         },
     }
-    if s.label != "v2" { return Error(3u64) }
+    if s.label != "v2" {
+        return Error(3u64)
+    }
     let saved = store.fetch(tx, h.seen, id) ?=> |_| 4u64
-    let prior = match saved { Some(n) => n, None => 0u64 }
+    let prior = match saved {
+        Some(n) => n,
+        None => 0u64
+    }
     store.put(mut tx, h.seen, id, prior + s.value + extra) ?=> |_| 5u64
     Ok(())
 }
 
 fn park_law_places(mut reg: Registry[(), ParkLawHandles]) -> Result[(), RegisterError] {
-    use_trigger_tables(mut reg, fn(h: ParkLawHandles) -> triggers.Tables { clone(h.triggers) })
+    use_trigger_tables(mut reg, fn(h: ParkLawHandles) -> triggers.Tables {
+        clone(h.triggers)
+    })
     transact(mut reg, code.describe(park_law_wake), 131072u64, DEFAULT_STEPS)
 }
 
-fn park_law_grants(_seed: (), _handles: ParkLawHandles, take _ctx: TriggerContext) -> Result[(), Capacity] { Ok(()) }
+fn park_law_grants(_seed: (), _handles: ParkLawHandles, take _ctx: TriggerContext) -> Result[(), Capacity] {
+    Ok(())
+}
 
 fn park_law_commit[R, E](mut db: store.Db, take run: Result[store.Outcome[R, E], store.Error]) -> R waits {
     match take run {
@@ -64,8 +80,12 @@ fn promise_resumes_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let asked = store.run(mut db, None, initial, fn(mut tx, env) -> Result[(park.ParkId, park.ParkId), park.Error] {
         let parked = park.until(mut tx, env.0, env.1, env.2, 41u64, 0u64)?
         let promise = park.create(mut tx, env.0, env.1, env.2, 42u64, Some(0u64))?
-        if let Recorded = park.complete(mut tx, env.0, env.1, promise, clone(b"ready"))? {} else { fail("promise law: completion lost") }
-        if let AlreadyComplete = park.complete(mut tx, env.0, env.1, promise, clone(b"other"))? {} else { fail("promise law: completion repeated") }
+        if let Recorded = park.complete(mut tx, env.0, env.1, promise, clone(b"ready"))? {} else {
+            fail("promise law: completion lost")
+        }
+        if let AlreadyComplete = park.complete(mut tx, env.0, env.1, promise, clone(b"other"))? {} else {
+            fail("promise law: completion repeated")
+        }
         Ok((parked, park.park_id(promise)))
     })
     let (parked, promise) = park_law_commit(mut db, take asked)
@@ -77,32 +97,41 @@ fn promise_resumes_once(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
     }))
     result.unwrap(store.durable(mut db, migrated))
     result.unwrap(store.close(take db))
-
     let mut reopened = result.unwrap(store.open(tasks, dir, c, r, triggers.law_options()))
     let h = result.unwrap(store.bind_declaration(mut reopened, Migrate, park_law_schema))
     let ran = store.run(mut reopened, None, (store.copy_env(h.triggers), store.copy_env(entries), store.copy_env(wake), parked), fn(mut tx, env) -> Result[triggers.Id, triggers.Error] {
         triggers.write(mut tx, env.0, env.1, env.2, env.3, AfterCommit)
     })
     let _ = park_law_commit(mut reopened, take ran)
-
-    let config: TriggerConfig[(), ParkLawHandles, ()] = TriggerConfig(entries: take entries, author: law_caller(0u64),
-        grants: (), grant: park_law_grants, grant_bytes: 65536u64)
+    let config = TriggerConfig(entries: take entries, author: law_caller(0u64))
+    let given: Grants[(), ParkLawHandles, ()] = Grants(seed: (), attempt: Some(park_law_grants), call: None, grant_bytes: 65536u64)
+    let running = start_grants(tasks, h, grant_start(take given))
     let (notify, inbox): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(4u64)
-    let drive = result.unwrap(make_trigger_drive(clone(h.triggers), h, c, tasks, take notify, clone(b"v2"), take config))
+    let drive = result.unwrap(make_trigger_drive(clone(h.triggers), c, tasks, take notify, clone(b"v2"), take config, match running.attempts {
+        Some(to) => Some(channel.sender(to)),
+        None => None
+    }))
     let reg = result.unwrap(placed(code.describe(park_law_places), 1048576u64))
     let (to, from): (Sender[PubIn], Receiver[PubIn]) = channel.new(16u64)
-    let mut head = Head(db: take reopened, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take to,
-        busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false,
-        trigger_drive: Some(take drive), parked: list.new(), recovery: None)
+    let mut head = Head(db: take reopened, anonymous: anonymous_streams(), r: take reg, replay_identity: list.new(), h: arc.new(take h), out: take to, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: Some(take drive), parked: list.new(), recovery: None)
     for _ in 0u64 .. 4u64 {
-        if !result.unwrap(advance_triggers(mut head)) { return Error(()) }
+        if !result.unwrap(advance_triggers(mut head)) {
+            return Error(())
+        }
     }
-    if result.unwrap(advance_triggers(mut head)) { return Error(()) }
+    if result.unwrap(advance_triggers(mut head)) {
+        return Error(())
+    }
     let snapshot = store.snapshot(head.db)
     let read_handle = result.unwrap(store.reader(head.db, 0u64))
-    if result.unwrap(store.get(read_handle, snapshot, head.h.seen, parked)) != Some(41u64) { return Error(()) }
-    if result.unwrap(store.get(read_handle, snapshot, head.h.seen, promise)) != Some(142u64) { return Error(()) }
+    if result.unwrap(store.get(read_handle, snapshot, head.h.seen, parked)) != Some(41u64) {
+        return Error(())
+    }
+    if result.unwrap(store.get(read_handle, snapshot, head.h.seen, promise)) != Some(142u64) {
+        return Error(())
+    }
     let Head(db: take kept, ..) = take head
+    stop_grants(Some(take running))
     result.unwrap(store.close(take kept))
     Ok(())
 }

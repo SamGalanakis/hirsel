@@ -145,11 +145,12 @@ fn settings_for(dir: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, take seed: 
     let target: triggers.Entry[RunArg] = result.unwrap(triggers.granted(code.describe(run)))
     let mut entries = triggers.empty_entries()
     result.unwrap(triggers.allow(mut entries, target))
-    let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()), grants: take seed, grant: make_grants, grant_bytes: 65536u64)
+    let trigger_config = runner.TriggerConfig(entries: take entries, author: store.Caller(issuer: 0u8, subject: list.new()))
+    let trigger_config_grants: runner.Grants[Grants, LawHandles, Control] = runner.Grants(seed: take seed, attempt: Some(make_grants), call: None, grant_bytes: 65536u64)
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let options = triggers.law_options()
-    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(options.pack_bytes), group_bytes: Some(int.widen(options.group_bytes)), group_commits: Some(options.group_commits), lock_wait_ms: Some(options.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Reopen, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(law_schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 100u64), wire: None, triggers: Some(take trigger_config), idle: None)
+    runner.PlaceConfig(backing: Disk(dir), sizes: store.Overrides(resident_limit: Some(options.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(options.pack_bytes), group_bytes: Some(int.widen(options.group_bytes)), group_commits: Some(options.group_commits), lock_wait_ms: Some(options.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None), selection: Reopen, place: code.describe(place), n_place: 1048576u64, on_migrate: None, schema: code.describe(law_schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 100u64), wire: None, grants: Some(take trigger_config_grants), triggers: Some(take trigger_config), idle: None)
 }
 
 fn start_place(tasks: Tasks, take settings: runner.PlaceConfig[Grants, LawHandles, Control, ()]) -> Running waits {

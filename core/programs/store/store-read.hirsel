@@ -87,12 +87,16 @@ pub fn open_span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result
 pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change], Error] waits {
     read_access(r, rows.capture)?
     if rows.done { return Ok(None) }
-    let selected = disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
-        let mut cursor = resume_data(rows.capture.roots.collections, rows.low, rows.high, rows.last, false)?
-        let Some((take key, take value)) = next_bytes(mut cursor)? else { return Ok(None) }
-        let resume = copied(key)?
-        Ok(Some((take key, take value, take resume)))
-    })?
+    let selected = if let Some(inventory) = view rows.capture.roots.collections.paging {
+        snapshot_tiered_span_step(r, rows.capture, inventory, rows.low, rows.high, rows.last)?
+    } else {
+        disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+            let mut cursor = resume_data(rows.capture.roots.collections, rows.low, rows.high, rows.last, false)?
+            let Some((take key, take value)) = next_bytes(mut cursor)? else { return Ok(None) }
+            let resume = copied(key)?
+            Ok(Some((take key, take value, take resume)))
+        })?
+    }
     match take selected {
         Some((take key, take value, take resume)) => {
             rows.last = Some(take resume)
@@ -109,6 +113,9 @@ pub fn span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result[List
     read_access(r, s)?
     let mut out: List[Change] = list.new()
     if hi <= lo { return Ok(take out) }
+    if let Some(inventory) = view s.roots.collections.paging {
+        return snapshot_tiered_span(r, s, inventory, lo, hi)
+    }
     let mut cursor = byte_cursor(s.roots.collections, Included(copied(lo)?), hi)?
     while let Some((take key, take value)) = next_bytes(mut cursor)? {
         list.push(mut out, Change(tree_key: take key, value: Some(take value)))

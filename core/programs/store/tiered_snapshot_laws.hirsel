@@ -143,7 +143,7 @@ fn l62_snapshot_scan_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), E
     Ok(())
 }
 
-fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, read: scoped[view] fn(Db, Table[u64, u32]) -> Result[(), Error] waits) -> Result[(), Error] waits {
+fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, memory_sibling: bool, read: scoped[view] fn(Db, Table[u64, u32]) -> Result[(), Error] waits) -> Result[(), Error] waits {
     let fixtures = disk_test_directory(d)
     let mut db = test_db(c, 2147483648)
     let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u32()))?
@@ -154,6 +154,15 @@ fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, read: scoped[view] fn
         put(mut tx, handle, 5u64, 50u32)
     })? else {
         fail("L62: fixture inserts did not commit")
+    }
+    if memory_sibling {
+        let _ = create_table(mut db, spec("memory", std.codec.key_u64(), std.codec.of_u32()))?
+        let neighbor = table(mut db, "memory", std.codec.key_u64(), std.codec.of_u32())?
+        let Committed(_) = run(mut db, None, copy_env(neighbor), fn(mut tx: Tx, handle: Table[u64, u32]) -> Result[(), Error] {
+            put(mut tx, handle, 7u64, 70u32)
+        })? else {
+            fail("L62: the Memory neighbor's insert did not commit")
+        }
     }
     let collection = rows_handle.id
     l62_prepare_snapshot_pages(mut db, fixtures, collection, 8)?
@@ -169,7 +178,7 @@ fn l62_tiered_scan_fixture(d: Dir, c: Clock, tasks: Tasks, read: scoped[view] fn
 
 @test
 fn test_l62_snapshot_scan_merges_cold_and_replayed_rows(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
-    l62_tiered_scan_fixture(d, c, tasks, l62_snapshot_scan_reads)
+    l62_tiered_scan_fixture(d, c, tasks, false, l62_snapshot_scan_reads)
 }
 
 fn l62_snapshot_page_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
@@ -206,7 +215,52 @@ fn l62_snapshot_page_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), E
 
 @test
 fn test_l62_snapshot_pages_resume_the_tiered_range(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
-    l62_tiered_scan_fixture(d, c, tasks, l62_snapshot_page_reads)
+    l62_tiered_scan_fixture(d, c, tasks, false, l62_snapshot_page_reads)
+}
+
+fn l62_check_span_row(change: Change, rows_handle: Table[u64, u32], key: u64, expected: u32) -> Result[(), Error] {
+    let Some(raw) = view change.value else {
+        fail("L62: a Snapshot span only returns visible values")
+    }
+    if change.tree_key != log_key(rows_handle.id, key)? || row_value(rows_handle.readers, rows_handle.id, raw)? != expected {
+        fail("L62: a span must read the same ordered rows as its Snapshot")
+    }
+    Ok(())
+}
+
+fn l62_snapshot_span_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    let lo: Bytes = list.new()
+    let mut hi: Bytes = list.new()
+    list.push(mut hi, 255u8)
+    let whole = span_changes(read_handle, s, lo, hi)?
+    if list.len(whole) != 4 {
+        fail("L62: a Snapshot span must merge the Cold, replay and Memory rows")
+    }
+    l62_check_span_row(whole[0u64], rows_handle, 1, 10)?
+    l62_check_span_row(whole[1u64], rows_handle, 2, 20)?
+    l62_check_span_row(whole[2u64], rows_handle, 5, 50)?
+    let neighbor = catalog_handle(s.store, s.roots.catalog, "memory", std.codec.key_u64(), std.codec.of_u32())?
+    l62_check_span_row(whole[3u64], neighbor, 7, 70)?
+    let mut streamed = open_span_changes(read_handle, s, lo, hi)?
+    for row in whole {
+        let Some(found) = next_span_change(read_handle, mut streamed)? else {
+            fail("L62: a resumed span skipped a row")
+        }
+        if found.tree_key != row.tree_key || found.value != row.value {
+            fail("L62: a resumed span changed the key or value")
+        }
+    }
+    if let Some(_) = next_span_change(read_handle, mut streamed)? {
+        fail("L62: the span must exhaust after the last visible row")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_snapshot_span_resumes_cold_and_replay(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    l62_tiered_scan_fixture(d, c, tasks, true, l62_snapshot_span_reads)
 }
 
 fn l62_index_parity(value: u32) -> Result[u32, Capacity] {

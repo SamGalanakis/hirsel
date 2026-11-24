@@ -145,8 +145,7 @@ fn tiered_snapshot_row[K, V](mut attempt: TieredTouchSet, visible: Map[TieredCac
     }
 }
 
-fn read_tiered_scan[K, V](source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, edge: std.page.Slot,
-    descriptor: Bytes, collection: u32, take low: Bytes, take high: Bytes, reverse: bool, touch_slots: u64, decoder: RowDecoder[K, V]) -> Result[Option[(Bytes, (K, V))], Error] waits {
+fn tiered_scan_bounds(descriptor: Bytes, collection: u32, take low: Bytes, take high: Bytes) -> Result[(Bytes, Bytes), Error] {
     let mut start = take low
     let mut stop = take high
     if descriptor[52u64] == 4 {
@@ -156,6 +155,12 @@ fn read_tiered_scan[K, V](source: TieredPageSource, grant: Arc[TieredReaderGrant
         if start < first_key { start = take first_key }
         if stop > next_key { stop = take next_key }
     }
+    Ok((take start, take stop))
+}
+
+fn read_tiered_scan[K, V](source: TieredPageSource, grant: Arc[TieredReaderGrant], root: TieredPinRoot, tree: PageTree, edge: std.page.Slot,
+    descriptor: Bytes, collection: u32, take low: Bytes, take high: Bytes, reverse: bool, touch_slots: u64, decoder: RowDecoder[K, V]) -> Result[Option[(Bytes, (K, V))], Error] waits {
+    let (take start, take stop) = tiered_scan_bounds(descriptor, collection, take low, take high)?
     if start >= stop {
         return Ok(None)
     }

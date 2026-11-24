@@ -1,4 +1,4 @@
-type Script: key + send = StartupError | TruncatedFrame | ReadyDeadline | FatalDuringSync | CommaHost | SelectAnswer | ParameterDiagnostics
+type Script: key + send = StartupError | TruncatedFrame | ReadyDeadline | FatalDuringSync | CommaHost | SelectAnswer | ParameterDiagnostics | FlightFusion
 
 type Link: send {
     port: Served[NetOp],
@@ -163,19 +163,14 @@ fn peer(take input: Peer) waits {
             // One int4 column, with no source table or typmod.
             send_frame(mut writer, b'T', b"\0\x01answer\0\0\0\0\0\0\0\0\0\0\x17\0\x04\xff\xff\xff\xff\0\0")
             expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\0\0\0\0\x01\0\x01")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x10")
             expect_frame(mut reader, b'H', b"")
             send_frame(mut writer, b'2', b"")
-            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x01")
-            expect_frame(mut reader, b'H', b"")
             send_frame(mut writer, b'D', b"\0\x01\0\0\0\x04\0\0\0\x2a")
-            send_frame(mut writer, b's', b"")
-            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x01")
-            expect_frame(mut reader, b'H', b"")
-            send_frame(mut writer, b'C', b"SELECT 0\0")
+            send_frame(mut writer, b'C', b"SELECT 1\0")
             expect_frame(mut reader, b'C', b"Phirsel_rows\0")
-            expect_frame(mut reader, b'H', b"")
-            send_frame(mut writer, b'3', b"")
             expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'3', b"")
             send_frame(mut writer, b'Z', b"I")
             expect_frame(mut reader, b'X', b"")
         },
@@ -191,12 +186,72 @@ fn peer(take input: Peer) waits {
             send_frame(mut writer, b'n', b"")
             // Two input formats: 1 for binary int4, 0 for text uuid. No result formats.
             expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\x02\0\x01\0\0\0\x02\0\0\0\x04\0\0\0\x2a\0\0\0\x2412345678-1234-5678-abcd-1234567890ab\0\0")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x10")
+            expect_frame(mut reader, b'C', b"Phirsel_rows\0")
+            expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'2', b"")
+            send_frame(mut writer, b'E', b"VERROR\0C23514\0Mcheck failed\0Ddetail\0nmixed_check\0tmixed\0ctoken\0Huse another token\0P31\0qextension\0\0")
+            send_frame(mut writer, b'Z', b"I")
+            expect_frame(mut reader, b'X', b"")
+        },
+        FlightFusion => {
+            authenticate(mut reader, mut writer)
+            send_frame(mut writer, b'Z', b"I")
+            // A failed row-producing Bind skips Execute and Flush. Sync is not yet queued.
+            expect_frame(mut reader, b'P', b"\0SELECT $1::uuid\0\0\x01\0\0\0\0")
+            expect_frame(mut reader, b'D', b"S\0")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'1', b"")
+            send_frame(mut writer, b't', b"\0\x01\0\0\x0b\x86")
+            send_frame(mut writer, b'T', b"\0\x01uuid\0\0\0\0\0\0\0\0\0\x0b\x86\0\x10\xff\xff\xff\xff\0\0")
+            expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\x01\0\0\0\x01\0\0\0\x03bad\0\x01\0\0")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x10")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'E', b"VERROR\0C22P02\0Minvalid input syntax for type uuid\0\0")
+            expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'Z', b"I")
+            // NoData needs two response flights. The second includes Sync.
+            expect_frame(mut reader, b'P', b"\0UPDATE items SET n = 10\0\0\0")
+            expect_frame(mut reader, b'D', b"S\0")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'1', b"")
+            send_frame(mut writer, b't', b"\0\0")
+            send_frame(mut writer, b'n', b"")
+            expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\0\0\0\0\0")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x10")
+            expect_frame(mut reader, b'C', b"Phirsel_rows\0")
+            expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'2', b"")
+            send_frame(mut writer, b'C', b"UPDATE 1\0")
+            send_frame(mut writer, b'3', b"")
+            send_frame(mut writer, b'Z', b"I")
+            // A full batch suspends, and a second Execute fetches the final row.
+            expect_frame(mut reader, b'P', b"\0SELECT generate_series(1, 17) AS n\0\0\0")
+            expect_frame(mut reader, b'D', b"S\0")
+            expect_frame(mut reader, b'H', b"")
+            send_frame(mut writer, b'1', b"")
+            send_frame(mut writer, b't', b"\0\0")
+            send_frame(mut writer, b'T', b"\0\x01n\0\0\0\0\0\0\0\0\0\0\x17\0\x04\xff\xff\xff\xff\0\0")
+            expect_frame(mut reader, b'B', b"hirsel_rows\0\0\0\0\0\0\0\x01\0\x01")
+            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x10")
             expect_frame(mut reader, b'H', b"")
             send_frame(mut writer, b'2', b"")
-            expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x01")
-            expect_frame(mut reader, b'H', b"")
-            send_frame(mut writer, b'E', b"VERROR\0C23514\0Mcheck failed\0Ddetail\0nmixed_check\0tmixed\0ctoken\0Huse another token\0P31\0qextension\0\0")
+            let mut data: Bytes = list.with_capacity(10)
+            for value in 1u32 .. 18 {
+                if value == 17 {
+                    send_frame(mut writer, b's', b"")
+                    expect_frame(mut reader, b'E', b"hirsel_rows\0\0\0\0\x10")
+                    expect_frame(mut reader, b'H', b"")
+                }
+                list.clear(mut data)
+                list.append(mut data, b"\0\x01\0\0\0\x04")
+                list.put_word_be(mut data, value)
+                send_frame(mut writer, b'D', data)
+            }
+            send_frame(mut writer, b'C', b"SELECT 1\0")
+            expect_frame(mut reader, b'C', b"Phirsel_rows\0")
             expect_frame(mut reader, b'S', b"")
+            send_frame(mut writer, b'3', b"")
             send_frame(mut writer, b'Z', b"I")
             expect_frame(mut reader, b'X', b"")
         },
@@ -297,6 +352,40 @@ fn client(net: Net, address: Addr, clock: Clock, script: Script, own_deadline: b
             }
             result.unwrap(postgres.close(take conn, clock, DEADLINE + 20))
         },
+        FlightFusion => {
+            let mut conn = result.unwrap(take opened)
+            let deadline = DEADLINE + 10
+            let mut invalid: List[postgres.Param] = list.new()
+            list.push(mut invalid, UntypedText(string.from("bad")))
+            if let Error(Sql(e)) = postgres.execute(mut conn, "SELECT $1::uuid", invalid, clock, deadline) {
+                if e.sqlstate != "22P02" {
+                    fail("failed Bind must return the server's SQLSTATE")
+                }
+            } else {
+                fail("failed Bind must recover through Sync")
+            }
+            if result.unwrap(postgres.execute(mut conn, "UPDATE items SET n = 10", list.new(), clock, deadline)) != 1 {
+                fail("NoData exchange must recover the update count")
+            }
+            let mut rows = result.unwrap(postgres.query(mut conn, "SELECT generate_series(1, 17) AS n", list.new(), clock, deadline))
+            for value in 1i32 .. 18 {
+                if !result.unwrap(postgres.next(mut rows)) {
+                    fail("batch ended before all 17 rows")
+                }
+                let row = option.unwrap(postgres.row(rows))
+                let Some(postgres.Field(value: Int4(actual), ..)) = postgres.field(row, 0) else {
+                    fail("expected an int4 column in the batch")
+                }
+                if actual != value {
+                    fail("batched fetch changed row order or value")
+                }
+            }
+            if result.unwrap(postgres.next(mut rows)) {
+                fail("batch returned more than 17 rows")
+            }
+            conn = postgres.finish(take rows)
+            result.unwrap(postgres.close(take conn, clock, deadline))
+        },
         SelectAnswer => {
             let mut conn = result.unwrap(take opened)
             if own_deadline {
@@ -378,5 +467,11 @@ fn exchange_deadline(tasks: Tasks, e: Env) -> Result[(), ()] waits {
 @test
 fn parameters_and_diagnostics(tasks: Tasks, e: Env) -> Result[(), ()] waits {
     simulate(tasks, test_seed(e), ParameterDiagnostics, false)
+    Ok(())
+}
+
+@test
+fn fused_flights(tasks: Tasks, e: Env) -> Result[(), ()] waits {
+    simulate(tasks, test_seed(e), FlightFusion, false)
     Ok(())
 }

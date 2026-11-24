@@ -1,0 +1,159 @@
+fn append_execute(mut b: Bytes) {
+    start_frame(mut b, b'E', string.byte_len(PORTAL) + 5)
+    put_string(mut b, PORTAL)
+    list.put_word_be(mut b, FETCH_LIMIT)
+}
+
+fn append_close(mut b: Bytes) {
+    start_frame(mut b, b'C', string.byte_len(PORTAL) + 2)
+    list.push(mut b, b'P')
+    put_string(mut b, PORTAL)
+}
+
+fn drain_error(mut rows: Rows, mut s: Session, synced: bool) -> Result[bool, Error] waits {
+    let until = rows.until
+    let e = diagnostic(rows.row.body)?
+    if is_fatal(e) {
+        return Error(Fatal(take e))
+    }
+    if !synced {
+        send(mut s.writer, b"S\x00\x00\x00\x04", until)?
+    }
+    // Sync can report another error before ReadyForQuery. A fatal error
+    // ends the session without ReadyForQuery and takes precedence.
+    while receive(mut s, mut rows.row.body, b"ZE", until)? == b'E' {
+        let later = diagnostic(rows.row.body)?
+        if is_fatal(later) {
+            return Error(Fatal(take later))
+        }
+    }
+    ready(mut s, rows.row.body)?
+    rows.phase = Complete
+    Error(Sql(take e))
+}
+
+fn start_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    let until = rows.until
+    // A named portal may survive error recovery. Close it before this Parse.
+    let parse = replace(mut rows.parse, list.new())
+    send(mut s.writer, parse, until)?
+    drop(take parse)
+    if s.portal_open && receive(mut s, mut rows.row.body, b"3E", until)? == b'E' {
+        return drain_error(mut rows, mut s, false)
+    }
+    s.portal_open = false
+    if receive(mut s, mut rows.row.body, b"1E", until)? == b'E' || receive(mut s, mut rows.row.body, b"tE", until)? == b'E' {
+        return drain_error(mut rows, mut s, false)
+    }
+    parameter_description(rows.row.body, rows.types)?
+    match receive(mut s, mut rows.row.body, b"TnE", until)? {
+        b'T' => {
+            rows.columns = row_description(rows.row.body)?
+            rows.returns_rows = true
+        },
+        b'E' => return drain_error(mut rows, mut s, false),
+        _ => {},
+    }
+    let mut bind = replace(mut rows.bind, list.new())
+    bind_results(mut bind, rows.columns)
+    append_execute(mut bind)
+    let synced = !rows.returns_rows
+    if synced {
+        append_close(mut bind)
+        list.append(mut bind, b"S\x00\x00\x00\x04")
+    } else {
+        list.append(mut bind, b"H\x00\x00\x00\x04")
+    }
+    send(mut s.writer, bind, until)?
+    drop(take bind)
+    if receive(mut s, mut rows.row.body, b"2E", until)? == b'E' {
+        return drain_error(mut rows, mut s, synced)
+    }
+    s.portal_open = true
+    Ok(false)
+}
+
+fn end_exchange(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    let until = rows.until
+    if rows.returns_rows {
+        let mut packet: Bytes = list.with_capacity(12 + string.byte_len(PORTAL))
+        append_close(mut packet)
+        list.append(mut packet, b"S\x00\x00\x00\x04")
+        send(mut s.writer, packet, until)?
+    }
+    if receive(mut s, mut rows.row.body, b"3E", until)? == b'E' {
+        return drain_error(mut rows, mut s, true)
+    }
+    s.portal_open = false
+    if receive(mut s, mut rows.row.body, b"ZE", until)? == b'E' {
+        return drain_error(mut rows, mut s, true)
+    }
+    ready(mut s, rows.row.body)?
+    rows.phase = Complete
+    Ok(false)
+}
+
+fn advance(mut rows: Rows, mut s: Session) -> Result[bool, Error] waits {
+    let until = rows.until
+    list.clear(mut rows.row.cells)
+    if rows.phase == Unstarted {
+        let _ = start_exchange(mut rows, mut s)?
+    }
+    let synced = !rows.returns_rows
+    loop {
+        let expected: Bytes = if synced {
+            b"CIE"
+        } else if rows.fetched == FETCH_LIMIT {
+            b"sCE"
+        } else {
+            b"DCE"
+        }
+        match receive(mut s, mut rows.row.body, expected, until)? {
+            b'D' => {
+                decode_row(mut rows.row, rows.columns)?
+                rows.fetched += 1
+                rows.phase = AfterRow
+                return Ok(true)
+            },
+            b's' => {
+                let mut packet: Bytes = list.with_capacity(15 + string.byte_len(PORTAL))
+                append_execute(mut packet)
+                list.append(mut packet, b"H\x00\x00\x00\x04")
+                send(mut s.writer, packet, until)?
+                rows.fetched = 0
+            },
+            b'E' => return drain_error(mut rows, mut s, synced),
+            b'C' => {
+                rows.affected = command_count(rows.row.body)?
+                return end_exchange(mut rows, mut s)
+            },
+            _ => return end_exchange(mut rows, mut s),
+        }
+    }
+}
+
+/// Read one row. Its views expire when the caller advances the cursor.
+/// An ordinary SQL error is returned after ReadyForQuery has been validated.
+pub fn next(mut rows: Rows) -> Result[bool, Error] waits {
+    if rows.phase == Complete {
+        return Ok(false)
+    }
+    let Some(take session) = replace(mut rows.live, None) else {
+        return Error(ConnectionClosed)
+    }
+    // The local owner releases both halves on an allocation or task failure.
+    let mut s = take session
+    let outcome = advance(mut rows, mut s)
+    match outcome {
+        Ok(_) => {
+            rows.live = Some(take s)
+        },
+        Error(Sql(_)) => {
+            rows.live = Some(take s)
+        },
+        _ => {
+            rows.phase = Complete
+        },
+    }
+    take outcome
+}

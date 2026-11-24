@@ -145,24 +145,31 @@ fn postgres_scripted_peer_laws() {
             b"\0\0"
         });
         assert_eq!(recv(peer, b'B'), bind);
-        assert!(recv(peer, b'H').is_empty());
-        send(peer, b'2', b"");
-        demand(peer);
-    }
-
-    fn demand(peer: &mut Peer) {
         let mut execute = PORTAL.to_vec();
-        execute.extend_from_slice(&1u32.to_be_bytes());
+        execute.extend_from_slice(&16u32.to_be_bytes());
         assert_eq!(recv(peer, b'E'), execute);
-        assert!(recv(peer, b'H').is_empty());
+        if returns_rows {
+            assert!(recv(peer, b'H').is_empty());
+        } else {
+            expect_close_portal(peer);
+            assert!(recv(peer, b'S').is_empty());
+        }
+        send(peer, b'2', b"");
     }
 
-    fn close_portal(peer: &mut Peer) {
+    fn expect_close_portal(peer: &mut Peer) {
         let mut close = vec![b'P'];
         close.extend_from_slice(PORTAL);
         assert_eq!(recv(peer, b'C'), close);
-        assert!(recv(peer, b'H').is_empty());
+    }
+
+    fn finish(peer: &mut Peer, status: &[u8], returns_rows: bool) {
+        if returns_rows {
+            expect_close_portal(peer);
+            assert!(recv(peer, b'S').is_empty());
+        }
         send(peer, b'3', b"");
+        send(peer, b'Z', status);
     }
 
     fn sync(peer: &mut Peer, status: &[u8]) {
@@ -180,40 +187,36 @@ fn postgres_scripted_peer_laws() {
         );
         send(peer, b'S', b"standard_conforming_strings\0off\0");
         send(peer, b'D', b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x07");
-        send(peer, b's', b"");
-        demand(peer);
         send(peer, b'E', SQL_ERROR);
         sync(peer, b"I");
 
-        close_portal(peer);
+        expect_close_portal(peer);
+        send(peer, b'3', b"");
         begin(peer, "SELECT 42", true);
         send(peer, b'D', b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x2a");
-        send(peer, b's', b"");
-        demand(peer);
         send(peer, b'C', b"SELECT 1\0");
-        close_portal(peer);
-        sync(peer, b"I");
+        finish(peer, b"I", true);
 
         begin(peer, "SELECT 'late'", true);
         send(peer, b'C', b"SELECT 0\0");
-        close_portal(peer);
+        expect_close_portal(peer);
         assert!(recv(peer, b'S').is_empty());
+        send(peer, b'3', b"");
         send(peer, b'E', SQL_ERROR);
         send(peer, b'Z', b"I");
 
         begin(peer, "BEGIN", false);
         send(peer, b'C', b"BEGIN\0");
-        close_portal(peer);
-        sync(peer, b"T");
+        finish(peer, b"T", false);
         begin(peer, "SAVEPOINT recover", false);
         send(peer, b'C', b"SAVEPOINT\0");
-        close_portal(peer);
-        sync(peer, b"T");
+        finish(peer, b"T", false);
         begin(peer, "SELECT 1 / x FROM inputs", true);
         send(peer, b'E', SQL_ERROR);
         sync(peer, b"E");
 
-        close_portal(peer);
+        expect_close_portal(peer);
+        send(peer, b'3', b"");
         assert_eq!(recv(peer, b'P'), b"\0SELECT 1\0\0\0");
         assert_eq!(recv(peer, b'D'), b"S\0");
         assert!(recv(peer, b'H').is_empty());
@@ -225,19 +228,14 @@ fn postgres_scripted_peer_laws() {
         sync(peer, b"E");
         begin(peer, "ROLLBACK TO SAVEPOINT recover", false);
         send(peer, b'C', b"ROLLBACK\0");
-        close_portal(peer);
-        sync(peer, b"T");
+        finish(peer, b"T", false);
         begin(peer, "SELECT 1", true);
         send(peer, b'D', b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x01");
-        send(peer, b's', b"");
-        demand(peer);
         send(peer, b'C', b"SELECT 1\0");
-        close_portal(peer);
-        sync(peer, b"T");
+        finish(peer, b"T", true);
         begin(peer, "ROLLBACK", false);
         send(peer, b'C', b"ROLLBACK\0");
-        close_portal(peer);
-        sync(peer, b"I");
+        finish(peer, b"I", false);
         assert!(recv(peer, b'X').is_empty());
         ended(peer);
     }
@@ -261,11 +259,8 @@ fn postgres_scripted_peer_laws() {
 
         begin(original, "SELECT 42", true);
         send(original, b'D', b"\x00\x01\x00\x00\x00\x04\x00\x00\x00\x2a");
-        send(original, b's', b"");
-        demand(original);
         send(original, b'C', b"SELECT 1\0");
-        close_portal(original);
-        sync(original, b"I");
+        finish(original, b"I", true);
         ended(original);
     }
 
@@ -286,9 +281,10 @@ fn postgres_scripted_peer_laws() {
     let roots = dir.path().join("roots.pem");
     std::fs::write(&roots, CA).unwrap();
     let source = format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         include_str!("../../../core/programs/postgres/postgres.hirsel"),
         include_str!("../../../core/programs/postgres/diagnostic.hirsel"),
+        include_str!("../../../core/programs/postgres/exchange.hirsel"),
         include_str!("../../../core/front/fixtures/recording/postgres-peer.hirsel")
             .replace("12345", &port.to_string()),
     );

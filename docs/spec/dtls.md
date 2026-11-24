@@ -5,6 +5,12 @@ to SRTP-6, the Wave 1 rows 1.2 and 1.3 of the real-time media track. Not yet bui
 fence is `unbuilt`, and every test path is planned. The sections end with
 [build laws](#build-laws), [cost targets](#cost-targets) and [build slices](#build-slices).
 
+Amended 2026-11-24 (dtls-spec-amend-2341) for the soundness review dtls-spec-review-2331:
+the required message order and proof of possession (DTLS-5 Message order), stateless
+cookie admission through `admit` (DTLS-5 Admission), no epoch-0 replay window (DTLS-4),
+flight 6 resent only for an authenticated Finished, kept replay floors after `end_receive`
+(SRTP-4), the unreduced sender estimate (SRTP-3), and the version fields (DTLS-1, DTLS-4).
+
 Two pure Hirsel packages sit over [TLS-8](tls.md#tls-8-packet-ciphers-and-key-agreement) and
 under any program that carries real-time media over UDP ([NET-15 to NET-17](net.md#udp)):
 
@@ -64,7 +70,7 @@ One `Endpoint` holds one DTLS 1.2 association with one peer address. It implemen
 
 | item | Wave 1 | reference |
 |---|---|---|
-| version | DTLS 1.2 (`{254, 253}`) only; `legacy_version` of a ClientHello may be `{254, 253}` or `{254, 255}` | RFC 6347 §4.1 |
+| version | DTLS 1.2 (`{254, 253}`) only. A ClientHello body's `client_version` is `{254, 253}` or newer (DTLS-5 Versions); `{254, 255}` appears only in record headers sent before the version is fixed (DTLS-4 Framing) and in HelloVerifyRequest's `server_version` | RFC 6347 §4.1, §4.2.1 |
 | cipher suites | `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (0xC02B), `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384` (0xC02C), `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256` (0xCCA9): TLS-8's `Suite12` | RFC 5289, RFC 7905 |
 | groups | `x25519` (0x001D), `secp256r1` (0x0017): TLS-8's `Group` | RFC 8422 |
 | own signature | `ecdsa_secp256r1_sha256` (0x0403), with a P-256 key from `secret.p256_key` | RFC 8422 §5.4 |
@@ -72,7 +78,7 @@ One `Endpoint` holds one DTLS 1.2 association with one peer address. It implemen
 | extensions | `supported_groups` (10), `ec_point_formats` (11, uncompressed only), `signature_algorithms` (13), `use_srtp` (14), `extended_master_secret` (23), `renegotiation_info` (0xFF01, empty only) | RFC 5764 §9, RFC 7627 §5.1, RFC 5746 |
 | Extended Master Secret | required: a peer that does not negotiate it fails the handshake | RFC 7627 §5.2 |
 | client certificate | always requested by the server and always sent by the client | RFC 8122 §6.2 |
-| HelloVerifyRequest cookie | per server, by admission (DTLS-5) | RFC 6347 §4.2.1 |
+| HelloVerifyRequest cookie | stateless, by `admit` before any `Endpoint` exists, or skipped for an ICE-verified address (DTLS-5 Admission) | RFC 6347 §4.2.1 |
 | application data | sealed records in epoch 1, for a caller that tunnels a protocol over DTLS | RFC 6347 §4.1 |
 
 Not in Wave 1, each refused explicitly: renegotiation (a ClientHello after the handshake
@@ -109,6 +115,7 @@ pub type State = Handshaking | Connected | Closed(Close)
 pub type Close = Local | PeerClosed | PeerAlert(u8) | SentAlert(u8) | Timeout
 pub type Poll = Send(u64) | WakeAt(u64) | Idle
 pub type Admission = Verified | Cookie(Inline[u8, 32])
+pub type Admit = Reply(u64) | Admitted | Discard
 pub type Discards { malformed: u64, replayed: u64, tampered: u64, stale_epoch: u64, overflow: u64 }
 
 pub type DtlsError = Config | Setup | Fingerprint | Closed(Close) | NotConnected
@@ -116,12 +123,14 @@ pub type DtlsError = Config | Setup | Fingerprint | Closed(Close) | NotConnected
                    | Packet(packet.PacketError) | Capacity(Capacity)
 
 pub fn defaults() -> Config
-pub fn identity(take key: Secret, take certificate: Bytes) -> Result[Identity, DtlsError]
+pub fn identity(take key: Secret, take certificate: Bytes, r: Random) -> Result[Identity, DtlsError]
+pub fn share_identity(i: Identity) -> Identity
 pub fn fingerprint(i: Identity, h: HashFunc) -> Fingerprint
 pub fn fingerprint_text(f: Fingerprint, mut out: Bytes) -> u64
 pub fn parse_fingerprint(text: Bytes) -> Result[Fingerprint, DtlsError]
 pub fn negotiate_setup(offer: Setup, answer: Setup) -> Result[schedule.Side, DtlsError]
 
+pub fn admit(key: Inline[u8, 32], peer: Addr, datagram: Bytes, mut out: Bytes) -> Admit
 pub fn client(take id: Identity, c: Config, peer: Addr) -> Result[Endpoint, DtlsError]
 pub fn server(take id: Identity, c: Config, peer: Addr, a: Admission) -> Result[Endpoint, DtlsError]
 pub fn expect(mut e: Endpoint, take fingerprints: List[Fingerprint]) -> Result[(), DtlsError]
@@ -164,6 +173,12 @@ The endpoint is driven by three calls, as [dimpl](#prior-art) is:
   splitting at `mtu`, and appends the datagrams to `out`, answering the bytes appended. It is
   `NotConnected` before `Connected`.
 
+Application data is never delivered before `Connected`. An epoch-1 application-data record
+that authenticates while the endpoint is still `Handshaking` (the peer finished first, or
+`expect` has not been called) is held with the early records of DTLS-4 Epochs, within
+`max_ahead`, and delivered only once the state is `Connected`; past the bound it is
+`overflow`. An epoch-0 application-data record is `malformed`.
+
 A client starts its handshake at its first `poll`. Every `DtlsError` from `receive`, `poll`
 or `send` other than `Capacity`, `Config` and `NotConnected` is **fatal**: the state becomes
 `Closed`, every later call answers `Closed(c)`, and the caller drops the endpoint. Transient
@@ -180,9 +195,17 @@ verified, and the certificate's digest equal to one of the fingerprints given to
 **Framing.** A record is the 13-byte `DTLSPlaintext` header (type, version, epoch, 48-bit
 sequence number, length) and a fragment (RFC 6347 §4.1). The endpoint accepts content
 types 20 (change_cipher_spec), 21 (alert), 22 (handshake) and 23 (application_data). A
-record whose length runs past the datagram, whose version is not `{254, 253}` (or
-`{254, 255}` in an initial ClientHello record), or whose type is other is discarded as
-`malformed`, with the rest of the datagram discarded too, since its boundaries are lost.
+record whose length runs past the datagram, whose version is not `{254, 253}`, or whose
+type is other is discarded as `malformed`, with the rest of the datagram discarded too,
+since its boundaries are lost. One exception: an epoch-0 handshake record received before
+the version is fixed may carry `{254, 255}`. For a server that is every ClientHello
+record; for a client, every record before the ServerHello is processed. OpenSSL stamps
+`{254, 255}` on all records it writes under its version-flexible `DTLS_*_method` until a
+version is chosen (`ssl/record/rec_layer_d1.c:929-931`, and `ssl/d1_lib.c:1111` for
+`DTLSv1_listen`), and `openssl s_server -dtls1_2` and `s_client -dtls1_2` use that method
+(`apps/s_server.c:2245`), so its ClientHellos and HelloVerifyRequests carry it. Hirsel
+writes `{254, 255}` on the HelloVerifyRequest record and `{254, 253}` on every other
+record.
 
 **Epochs.** Epoch 0 carries the plaintext handshake. Epoch 1 is protected by the `dtls12`
 schedule's `Application` space: one sealer, issued with domain 0 and floor 0, and one opener.
@@ -198,21 +221,28 @@ the ChangeCipherSpec) is held, at most `max_ahead` records counted with handshak
 fragments, and processed when the keys exist; past that it is discarded as `overflow` and
 retransmission recovers it. A record in any other epoch is `stale_epoch`.
 
-**Replay.** Each epoch has a 64-record sliding window (RFC 6347 §4.1.2.6), as in dimpl's
+**Replay.** Epoch 1 has a 64-record sliding window (RFC 6347 §4.1.2.6), as in dimpl's
 `ReplayWindow` (`src/window.rs`). A record whose number is in the window and already
 marked, or below it, is discarded as `replayed` before decryption. The window is updated only
-after the record authenticates. Epoch 0 records cannot authenticate, so the epoch-0 window
-marks a record once it parses; it only filters exact duplicates, and a forged epoch-0 record
-can at worst make the endpoint ignore one genuine copy, which retransmission repairs. After
-`Connected`, the only epoch-0 records an endpoint acts on are the retransmissions that
-DTLS-5 Final flights names; the rest are discarded as `stale_epoch`.
+after the record authenticates. **Epoch 0 keeps no replay window.** Its records cannot
+authenticate, so a window there would let one forged record numbered `2^48 − 1` push every
+later genuine epoch-0 record below the window and stall the handshake until `Timeout`.
+Instead an unauthenticated record number changes no state at all: handshake messages are
+deduplicated by `message_seq` and fragment range (DTLS-5 Fragmentation), a repeated
+ChangeCipherSpec is a no-op, and alerts follow Alerts below. After `Connected`, every
+epoch-0 record is discarded as `stale_epoch`; the only retransmission an endpoint answers
+then is the authenticated one in DTLS-5 Final flights.
 
 **Invalid records.** A record that fails authentication is discarded as `tampered` and
 sends no alert (RFC 6347 §4.1.2.7). The association continues.
 
 **Alerts.** A received fatal alert (level 2), or a received `close_notify` (0), closes the
 endpoint as `PeerAlert(n)` or `PeerClosed`. A warning alert other than `close_notify` is
-ignored. When the endpoint fails a handshake it queues one fatal alert record with the
+ignored. This holds for a plaintext epoch-0 alert too, until the peer's ChangeCipherSpec
+has arrived: anyone on the path can close a handshake that way, as in every DTLS 1.2
+implementation, and the endpoint gains nothing by ignoring it, because the same attacker
+can drop every datagram. Once the peer's ChangeCipherSpec has arrived, an epoch-0 alert is
+discarded as `stale_epoch` and only epoch-1 alerts act. When the endpoint fails a handshake it queues one fatal alert record with the
 description the table in DTLS-5 gives, protected if epoch 1 is active, and closes as
 `SentAlert(n)`. `close` queues `close_notify` and closes as `Local`.
 
@@ -230,16 +260,47 @@ cookie exchange as flights 1 and 2:
 | 5 | client | Certificate, ClientKeyExchange, CertificateVerify, ChangeCipherSpec, Finished |
 | 6 | server | ChangeCipherSpec, Finished |
 
+**Message order.** Every message in the table is required, and each side accepts the
+peer's messages only in this order (RFC 5246 §7.3, §7.4.8, §7.4.9; RFC 6347 §4.2.4):
+
+- **Server receives:** ClientHello (epoch 0); then Certificate, ClientKeyExchange,
+  CertificateVerify, ChangeCipherSpec (all epoch 0); then Finished in epoch 1.
+- **Client receives:** HelloVerifyRequest (only before any ServerHello, and only in answer
+  to a ClientHello), then ServerHello, Certificate, ServerKeyExchange, CertificateRequest,
+  ServerHelloDone (all epoch 0); then ChangeCipherSpec (epoch 0); then Finished in epoch 1.
+
+A handshake message whose type is not the next one this list expects, a Finished in epoch
+0, or a Finished before the peer's ChangeCipherSpec, is `unexpected_message` (10). In
+particular a non-empty client Certificate followed by anything other than
+ClientKeyExchange and then CertificateVerify is 10: CertificateVerify is the only proof
+that the peer holds the certificate's key, since a certificate and its fingerprint are
+public. An empty client Certificate (RFC 5246 §7.4.6 lets a client send one) is
+`bad_certificate` (42). A server flight 4 without ServerKeyExchange is 10. No message is
+optional, so the state machine holds no "skipped" branch. Retransmitted copies of messages
+already processed are recognised by `message_seq` before the order check and never fail it.
+
 **ClientHello.** The client sends `client_version` `{254, 253}`, a fresh 32-byte random
 drawn from `r`, an empty `session_id`, an empty cookie at first, `Config.suites` in order,
 null compression, and the extensions of DTLS-1. `use_srtp` lists `Config.srtp` in order with
 an empty MKI and is left out when `Config.srtp` is empty.
 
+**Versions.** The server reads a ClientHello's body `client_version`. `{254, 253}`, or a
+newer DTLS version (major 254, minor below 253), is answered as DTLS 1.2 (RFC 5246
+Appendix E.1: the server answers with the highest version both support). `{254, 255}` is a
+DTLS 1.0 client, and so is `{254, 254}` or any other value: each is `protocol_version` (70),
+since the only version both could share is unsupported here, as dimpl refuses it
+(`src/dtls12/server.rs:355`). The HelloVerifyRequest's `server_version` is `{254, 255}`
+(RFC 6347 §4.2.1 SHOULD; OpenSSL writes `DTLS1_VERSION` at `ssl/statem/statem_srvr.c:1896`,
+dimpl at `src/dtls12/server.rs:400`); a client accepts `{254, 255}` or `{254, 253}` there,
+as dimpl does (`src/dtls12/client.rs:422`). A ServerHello's `server_version` other than
+`{254, 253}` is 70.
+
 **Server choice.** The server picks the first entry of its own `suites` the client offered,
 the first of its own `groups` the client offered, and the first of its own `srtp` profiles
 the client offered. It fails with `handshake_failure` (40) when no suite or group is shared,
-when the client does not offer `extended_master_secret`, or when `Config.srtp` is non-empty
-and no profile is shared. It fails with `illegal_parameter` (47) when the client's `srtp_mki`
+when the client does not offer `extended_master_secret`, when the client's
+`signature_algorithms` lacks 0x0403 (the server's only signature), or when `Config.srtp` is
+non-empty and no profile is shared. It fails with `illegal_parameter` (47) when the client's `srtp_mki`
 is non-empty, or `use_srtp` lists no profile or an odd number of bytes. A ClientHello
 carrying `supported_versions` is answered as DTLS 1.2: the server ignores that extension and
 any `key_share` and replies with a 1.2 ServerHello (law `offered_13_negotiates_12`).
@@ -254,8 +315,11 @@ point` (RFC 8422 §5.4). CertificateRequest lists `ecdsa_sign` (64) and signatur
 0x0403 and 0x0503, with no certificate authorities.
 
 **Client flight.** The client checks the server's ServerHello (the suite, group and profile
-are ones it offered; `extended_master_secret` is present; it fails with `illegal_parameter`
-otherwise, or `handshake_failure` for a missing EMS), takes the public key from the server's
+are ones it offered; `extended_master_secret` is present; `use_srtp` is present exactly when
+the client offered it; it fails with `illegal_parameter` otherwise, or `handshake_failure`
+for a missing EMS or a missing `use_srtp` (RFC 5764 §4.1.1 lets a server decline it, and
+this client then has no keys for media); a CertificateRequest whose algorithms lack 0x0403
+is also `handshake_failure`), takes the public key from the server's
 certificate (`std.x509_key`, below), verifies the ServerKeyExchange signature (a failure is
 `decrypt_error` (51)), creates its key share, sends its Certificate, ClientKeyExchange with
 its public point, CertificateVerify, ChangeCipherSpec and Finished. The server verifies the
@@ -301,41 +365,91 @@ flight that needed a retransmission keeps the doubled value for the next flight 
 time is a pure function of the inputs, so sim traces are exact.
 
 **Final flights.** The server sends the last flight (6). It keeps flight 6 after
-`Connected`, and each time it receives a retransmission of flight 5 it resends flight 6 once
-(§4.2.4), until the endpoint is dropped or closed. The client, once it has flight 6, treats a
-retransmitted flight 4 as noise. A server that receives a retransmitted flight 3 while
+`Connected` until the endpoint is dropped or closed, and resends it once for each
+retransmitted client Finished that authenticates in epoch 1 under a record number it has not
+seen (§4.2.4). That is the only trigger. A retransmitted flight 5 spanning several records
+or datagrams carries one Finished, so it gets exactly one flight 6. Its epoch-0 part
+(Certificate, ClientKeyExchange, CertificateVerify, ChangeCipherSpec) is `stale_epoch`
+after `Connected` (DTLS-4 Replay) and triggers nothing, so no unauthenticated datagram
+makes the server seal or send. A replayed Finished record is `replayed` by the epoch-1
+window. The client, once it has flight 6, discards a retransmitted flight 4 as
+`stale_epoch`. A server that receives a retransmitted flight 3 while
 waiting for flight 5 resends flight 4. Every other retransmitted message is ignored.
 
 **Admission (cookies).** `server(.., Verified)` skips flights 2 and 3: the caller attests the
 peer address is proven, for example by an ICE connectivity check that carried
 `MESSAGE-INTEGRITY` under the peer's credentials ([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445)).
-`server(.., Cookie(key))` answers every ClientHello that lacks a valid cookie with a
-HelloVerifyRequest whose cookie is `HMAC-SHA256(key, address bytes ‖ client_random)` (32
-bytes, `std.hmac.sha256`), and creates no other state. The address bytes are the peer
-`Addr`'s family byte, address and big-endian port. A ClientHello is admitted when its cookie
-equals that value in constant time (`std.hmac.equal`). The cookie key is caller bytes, not a
-protocol key: it authenticates reachability, protects no traffic, and the caller draws it
-from its own `Random`. dimpl binds the cookie to the client random only
+For an unproven address the caller runs **`admit(key, peer, datagram, mut out)` before it
+builds anything**. `admit` is a pure function: it takes no `Endpoint`, no `Identity` and no
+`Random`, and it keeps nothing, so a sender spoofing many source addresses makes the
+caller allocate nothing per address. It reads only the first record of `datagram`:
+
+- `Reply(n)`: the record is an epoch-0 handshake record holding a ClientHello fragment with
+  `fragment_offset` 0 that reaches at least through the cookie field, and the cookie is
+  empty or wrong. `admit` appends one HelloVerifyRequest datagram of `n` = 60 bytes to `out`
+  and the caller sends it to `peer`.
+- `Admitted`: the same, and the cookie is right. The caller now builds
+  `server(take id, c, peer, Cookie(key))` and passes it the same datagram through `receive`.
+- `Discard`: anything else (not a ClientHello, a later fragment, a first fragment cut before
+  the cookie, malformed framing, an `out` without 60 bytes spare). Nothing is sent.
+
+The cookie is `HMAC-SHA256(key, address bytes ‖ client_random)` (32 bytes,
+`std.hmac.sha256`), where the address bytes are the peer `Addr`'s family byte, address and
+big-endian port; it is right when it equals that value in constant time
+(`std.hmac.equal`). A `Cookie` server checks the cookie again on the first ClientHello it
+receives: one that is not right is discarded as `malformed` and gets no reply, so a caller
+that skips `admit` never sends flight 4 to an unproven address.
+
+**A fragmented ClientHello.** The cookie field follows only the version, random and
+`session_id`, before the suites and extensions, so `admit` judges the first fragment alone, as
+OpenSSL's `DTLSv1_listen` does (`ssl/d1_lib.c:1015-1026`: "we only look at the first
+ClientHello fragment and require that the cookie must be contained within it"). The later
+fragments of a cookieless ClientHello are `Discard`; the client resends the whole message
+with the cookie. Once `admit` answers `Admitted`, the server endpoint exists and
+reassembles the rest of that ClientHello under DTLS-5 Fragmentation, so a large
+DTLS 1.3-style ClientHello still connects under `Cookie` (law
+`cookie_bounds_unproven_address`). The
+review asked for `Discard` of every ClientHello that does not fit one datagram; that would
+refuse such peers under `Cookie` for no gain, since the first fragment already carries all
+the cookie binds.
+
+**No amplification.** The smallest datagram that earns a reply is 13 (record header) + 12
+(handshake header) + 2 (`client_version`) + 32 (random) + 1 (`session_id` length, 0) + 1
+(cookie length, 0) = 61 bytes. The reply is 13 + 12 + 2 (`server_version`) + 1 (cookie
+length) + 32 = 60 bytes, and `admit` answers at most one per datagram. The
+HelloVerifyRequest takes its record sequence number from the ClientHello record it answers
+(RFC 6347 §4.2.1), since `admit` keeps no counter, and its `message_seq` is 0. The
+ServerHello and the rest of flight 4 take the cookie ClientHello's record sequence number for
+their first record and continue from its `message_seq` (1). After that the server numbers
+its records and messages normally.
+
+**Why stateless, against OpenSSL, pion and webrtc-rs.** OpenSSL's `DTLSv1_listen` is
+stateless in the same way and is the model here. pion's listener creates a connection per
+source address before any cookie (`listener.go:17` accepts any handshake record, and the
+cookie is per-connection random state, `internal/flight/flight12/flight0handler.go:211`), as
+does webrtc-rs (`rtc-dtls/src/endpoint.rs:227` inserts a connection per `SocketAddr` on
+first read). Both let a spoofing sender make the server allocate per address, which is what
+RFC 6347 §4.2.1's cookie exists to prevent; the clean end state is the stateless gate.
+
+**Deviations in the cookie.** dimpl binds the cookie to the client random only
 (`src/dtls12/server.rs:1217`); binding the address too means a cookie seen on one path cannot
-admit a ClientHello from another. Before admission, a `Cookie` server sends exactly one
-HelloVerifyRequest datagram per ClientHello datagram received, which is 13 (record header) + 12 (handshake header) + 2 (`server_version`) + 1 (cookie
-length) + 32 = 60 bytes (law `cookie_bounds_unproven_address`). The HelloVerifyRequest and the
-ServerHello that answers the cookie ClientHello take their record sequence numbers from the
-ClientHello they answer (RFC 6347 §4.2.1), because a stateless server keeps no counter. Their
-`message_seq` follows the client's: the HelloVerifyRequest is 0, and the ServerHello and the
-rest of flight 4 continue from the cookie ClientHello's `message_seq` (1). After that the
-server numbers its records and messages normally.
+admit a ClientHello from another. RFC 6347 §4.2.1 says the cookie SHOULD also cover the
+version, `session_id`, cipher suites and compression methods; this one does not, and it
+never expires. Both are harmless here: the transcript starts at the cookie ClientHello, so a
+client that changes those fields after the cookie only negotiates on its own second
+ClientHello, and the address binding is what bounds reuse. Rotating the key (and so
+expiring cookies) is the caller's: it passes a new key to `admit` and `server`.
 
 **Failures.** Each handshake failure sends one fatal alert and closes as `SentAlert(n)`:
 
 | failure | alert |
 |---|---|
-| no shared suite or group, no EMS, no shared SRTP profile, transcript too large | `handshake_failure` (40) |
-| malformed or contradictory message, non-empty MKI, invalid peer point, fragment inconsistency | `illegal_parameter` (47) |
-| a message out of order for the state | `unexpected_message` (10) |
-| peer certificate missing or not P-256/P-384 ECDSA, or fingerprint mismatch | `bad_certificate` (42) |
-| a signature or Finished that does not verify | `decrypt_error` (51) |
-| a version other than DTLS 1.2 in ServerHello | `protocol_version` (70) |
+| no shared suite or group, no EMS, no shared SRTP profile, `use_srtp` offered but not answered, no 0x0403 in the peer's `signature_algorithms` or CertificateRequest, transcript too large | `handshake_failure` (40) |
+| malformed or contradictory message, non-empty MKI, invalid peer point, fragment inconsistency, an answered extension that was not offered | `illegal_parameter` (47) |
+| a message out of the order in Message order, including a skipped CertificateVerify or ServerKeyExchange and a Finished in epoch 0 | `unexpected_message` (10) |
+| peer certificate missing, empty or not P-256/P-384 ECDSA, or fingerprint mismatch | `bad_certificate` (42) |
+| a signature or Finished that does not verify, including a CertificateVerify by a key other than the certificate's | `decrypt_error` (51) |
+| a ClientHello `client_version` older than DTLS 1.2, or a ServerHello version other than DTLS 1.2 | `protocol_version` (70) |
 
 ### DTLS-6: Discards
 
@@ -347,11 +461,21 @@ and attack traffic; nothing is dropped silently.
 
 ### DTLS-7: Certificates, fingerprints and roles
 
-**Identity.** `identity(take key, take certificate)` pairs a P-256 signing key (policy
+**Identity.** `identity(take key, take certificate, r)` pairs a P-256 signing key (policy
 `sign(p256)`, from `secret.p256_key`) with its DER certificate, as
 [`std.x509_build.self_signed_p256`](../../core/std/api/x509_build.md) makes it. It checks
-that the certificate's subject public key is the key's point (by signing a fixed message and
-verifying with `p256.verify` against the certificate's key) and is `Config` otherwise. The
+that the certificate's subject public key is the key's point (by signing a fixed message
+with `secret.sign(key, P256, r, ..)`, which needs the `Random`, and verifying with
+`p256.verify` against the certificate's key) and is `Config` otherwise; a `sign` error maps
+as DTLS-8's table gives it.
+
+**One certificate, many endpoints.** `client` and `server` take an `Identity`, so each
+endpoint holds one. `share_identity(i)` makes another `Identity` for the same key and
+certificate, through `secret.share` on the key ([TLS-5](tls.md#tls-5-secrets)) and a copy
+of the certificate bytes, without signing again. A server that answers many peers under one
+certificate (one `a=fingerprint` in all its SDP) builds one `Identity` once and shares it
+per admitted peer. Sharing grants no new use: the key keeps its `sign(p256)` policy, and
+dropping one endpoint's identity leaves the others working. The
 endpoint never validates a certificate chain, name or validity period: in this model the
 peer is authenticated by the fingerprint that the signalling channel carried
 ([RFC 8122 §6.2](https://www.rfc-editor.org/rfc/rfc8122#section-6.2)).
@@ -377,7 +501,8 @@ any one matching suffices (RFC 8122 §5 allows several). It may be called before
 handshake or after it has completed, because an answer can outrace signalling (RFC 8122
 §6.2). Until it has been called, a completed handshake stays `Handshaking`: no application
 data is delivered, `take_srtp` is `NotConnected`, and the endpoint keeps answering
-retransmissions. When the peer's certificate is known and fingerprints are given, the first
+retransmissions. The `handshake_ns` deadline (DTLS-5 Timers) still runs while it waits: an
+endpoint whose `expect` has not come by then closes as `Timeout`. When the peer's certificate is known and fingerprints are given, the first
 `receive` or `poll` compares them. A mismatch fails with `bad_certificate` (42), as RFC 8122
 §6.2 requires of both sides. A second `expect` is `Fingerprint`. Fingerprints and the peer
 certificate are public data; the comparison need not be constant time.
@@ -444,7 +569,8 @@ the same value, and TLS-8's agreement registry refuses the second with `Issued`.
 
 The caller owns the socket and the clock, demultiplexes datagrams by first byte, decides
 when to construct the endpoint (after ICE selects a path, or at once for an offerer that must
-listen first), passes the setup side and the fingerprints from signalling, calls `poll` until
+listen first), runs `admit` on each datagram from an unproven address and builds a server
+only on `Admitted`, passes the setup side and the fingerprints from signalling, calls `poll` until
 `Idle` or `WakeAt` after every `receive`, and polls again at `WakeAt`. Once `Connected`, it
 calls `take_srtp` and builds an SRTP `Session`. Lifetime limits beyond the handshake (rekey)
 are not in Wave 1: a new association is a new endpoint.
@@ -468,17 +594,17 @@ pub type Discard = Malformed | Replayed | TooOld | Tampered
 pub type SrtpError = Discarded(Discard) | Reused | Exhausted | Streams | Retired
                    | Short | Direction | Schedule(schedule.ScheduleError)
                    | Capacity(Capacity)
-pub type Limits { send_streams: u32, receive_streams: u32 }
+pub type Limits { send_streams: u32, receive_streams: u32, ended_streams: u32 }
 pub type Opened { length: u64, ssrc: u32, index: u64 }
 
 pub opaque type Session                 // holds TLS-8 sealers and openers; move-only
 
 pub fn session(take s: schedule.Schedule, p: schedule.SrtpProfile, l: Limits) -> Result[Session, SrtpError]
 pub fn session_pair(take send: schedule.Schedule, take receive: schedule.Schedule, p: schedule.SrtpProfile, l: Limits) -> Result[Session, SrtpError]
-pub fn send_from(mut s: Session, ssrc: u32, roc: u32, seq: u16) -> Result[(), SrtpError]
-pub fn receive_from(mut s: Session, ssrc: u32, roc: u32, seq: u16) -> Result[(), SrtpError]
+pub fn send_from(mut s: Session, ssrc: u32, roc: u32, seq: u16, srtcp: u32) -> Result[(), SrtpError]
+pub fn receive_from(mut s: Session, ssrc: u32, roc: u32, seq: u16, srtcp: u32) -> Result[(), SrtpError]
 pub fn end_send(mut s: Session, ssrc: u32)
-pub fn end_receive(mut s: Session, ssrc: u32)
+pub fn end_receive(mut s: Session, ssrc: u32) -> Result[(), SrtpError]
 pub fn protect_rtp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError]
 pub fn protect_rtp_into(mut s: Session, header: Bytes, src: Bytes, from: u64, mut dst: Bytes) -> Result[u64, SrtpError]
 pub fn unprotect_rtp(mut s: Session, mut buf: Bytes) -> Result[Opened, SrtpError]
@@ -503,10 +629,20 @@ sent index, ROC and SRTCP index. At most `send_streams` SSRCs exist at once; one
 marked: TLS-8 never issues a domain twice in one send epoch, so a later packet on an ended
 SSRC is `Retired`. A sender that needs a new stream uses a new SSRC.
 
-**Sending index.** The packet index is `i = 2^16 × ROC + SEQ` (RFC 3711 §3.3.1). The sender
-starts each SSRC at ROC 0 unless `send_from(ssrc, roc, seq)` set it. For each packet it
-estimates `v` against its highest sent `s_l` with RFC 3711 Appendix A and uses
-`i = 2^16 × v + SEQ`. The sealer refuses any index not above every index it sealed (TLS-8
+**Starting a send stream.** `send_from(ssrc, roc, seq, srtcp)` places a stream before its
+first packet: the first RTP packet is estimated against `2^16 × roc + seq` and may equal it
+(the `Rtp` sealer is issued with that index as its TLS-8 `floor`), and the first SRTCP index
+is `srtcp` (the `Rtcp` sealer's floor), which must be below `2^31`. Without it a stream
+starts at ROC 0 with `s_l` equal to its first SEQ, and SRTCP index 0. `send_from` on an SSRC
+that has already sent, or has ended, is `Retired`: a start can never lower a floor.
+
+**Sending index.** The packet index is `i = 2^16 × ROC + SEQ` (RFC 3711 §3.3.1). For each
+packet the sender estimates `v` against its highest sent index with RFC 3711 Appendix A's
+three cases **without reducing modulo `2^32`**, exactly `rtp.seq.estimate`
+([RTP-2](rtp.md#rtp-2-extended-sequence-numbers)), and uses `i = 2^16 × v + SEQ`. `v = 2^32`
+(the next ROC past the last) is `Exhausted`, since the index would pass `2^48 − 1`. `v = ROC
+− 1`, at ROC 0 too (where `rtp.seq.estimate` answers `None`), is `Reused`: it names an index
+below the highest sent. The sealer refuses any index not above every index it sealed (TLS-8
 sender ownership), so `protect_rtp` of an index at or below the highest sent is `Reused`
 before issue, with `buf` unchanged and no counter consumed. This is a real constraint on
 callers:
@@ -539,7 +675,8 @@ encrypted once per receiving session without being copied first.
 
 **Protecting RTCP.** `protect_rtcp(mut s, mut buf)` reads the sender SSRC at bytes 4..7 of
 the first RTCP packet (a compound shorter than 8 bytes, or version other than 2, is
-`Malformed`). It uses and then increments that stream's SRTCP index, starting at 0, and
+`Malformed`). It uses and then increments that stream's SRTCP index, starting at 0 or at
+`send_from`'s `srtcp`, and
 always encrypts (`E = 1`). Under AEAD it seals with the first 8 bytes as AAD and `extra` =
 `E ‖ index`, then appends `E ‖ index` after the tag (RFC 7714 §9). Under CM it seals with the
 first 8 bytes as AAD and `extra` = `E ‖ index`, then moves the 10-byte tag 4 bytes on and
@@ -554,14 +691,28 @@ the SRTCP index. Openers are stateless (TLS-8), so the session holds one `Rtp` a
 `Rtcp` opener. A packet on an unknown SSRC is authenticated first, with ROC 0 and `s_l` =
 its SEQ (RFC 3711 §3.3.1), or with the values `receive_from` set; only a packet that
 authenticates creates the stream. When `receive_streams` streams exist, an authenticated
-packet on a new SSRC is `Streams` and creates nothing. `end_receive(ssrc)` frees the stream; a
-later packet on it starts a new one from ROC 0.
+packet on a new SSRC is `Streams` and creates nothing. `receive_from(ssrc, roc, seq, srtcp)`
+places a stream before its first packet (RTP estimated against `2^16 × roc + seq`, SRTCP
+window starting at `srtcp`); on an SSRC that has a live stream or a kept entry (below) it is
+`Retired`, so it can never lower a replay floor.
 
-**Index estimate.** For a known stream, `v` is chosen from `{ROC − 1, ROC, ROC + 1}` modulo
-`2^32` by RFC 3711 Appendix A, and `i = 2^16 × v + SEQ`. This is the same function the RTP
-spec of media-rtp-spec-2318 defines as `rtp.seq.estimate` (RTP-2); once that lands, `srtp`
-depends on `rtp` and calls it rather than keeping a second copy, and sending uses it too. A `v` of `ROC − 1` when ROC is 0 is
-`TooOld`, since no such packet was ever sent.
+**Ending a receive stream.** `end_receive(ssrc)` frees the stream's windows but keeps, for
+that SSRC, the highest authenticated RTP index and the highest authenticated SRTCP index:
+the same key still opens every packet ever recorded on it, so forgetting them would let a
+recorded packet authenticate and be delivered again (RFC 3711 §3.3.2). A later RTP packet
+whose estimate against the kept index is at or below it, or a later SRTCP packet whose index
+is at or below its kept index, is `TooOld`. One above authenticates first and then resumes
+the stream with an empty window, the kept index as its floor, and the ROC its estimate
+gave. At most `ended_streams` kept entries exist; an `end_receive` beyond that is `Streams`
+and leaves the stream open, windows and all, so the bound never costs replay protection.
+
+**Index estimate.** For a known stream, `v` is chosen from `{ROC − 1, ROC, ROC + 1}` by RFC
+3711 Appendix A's three cases, without reduction modulo `2^32`, and `i = 2^16 × v + SEQ`.
+This is exactly `rtp.seq.estimate` ([RTP-2](rtp.md#rtp-2-extended-sequence-numbers)), which
+also does not reduce; once that lands, `srtp` depends on `rtp` and calls it rather than
+keeping a second copy, and sending uses it too. A `v` of `ROC − 1` when ROC is 0
+(`rtp.seq.estimate` answers `None`) is `TooOld`, since no such packet was ever sent, and so
+is `v = 2^32`, whose index passes `2^48 − 1`.
 
 **Replay.** Before opening, an index more than 127 below the highest authenticated index is
 `TooOld`, and one inside the window already marked is `Replayed`. Both are discards with
@@ -581,8 +732,11 @@ zeroed. A packet shorter than its header plus tag is `Malformed`.
 
 **Unprotecting RTCP.** `unprotect_rtcp(mut s, mut buf)` reads `E ‖ index` from the end
 (AEAD: the last 4 bytes, after the tag; CM: the 4 bytes before the 10-byte tag, and moves the
-tag back over them before `open`), checks the SRTCP window of the sender SSRC, opens with
-`extra` = `E ‖ index`, and answers the length of the RTCP compound. `E = 0` is accepted: the
+tag back over them before `open`), checks the SRTCP window of the sender SSRC (an index more
+than 127 below the highest authenticated one is `TooOld`, a marked one `Replayed`), opens
+with `extra` = `E ‖ index`, and answers the length of the RTCP compound. As for RTP, the
+SRTCP window marks an index and moves its highest only after `open` authenticates, so a
+forged far-ahead SRTCP index moves nothing. `E = 0` is accepted: the
 compound was authenticated, not encrypted (RFC 3711 §3.4), and is returned as it is.
 
 ### SRTP-5: Revocation and lifetime
@@ -612,9 +766,9 @@ Every in-scope requirement of the Wave 1 consumer contract, in generic form:
 | requirement | where | laws |
 |---|---|---|
 | DTLS 1.2 flights and retransmit | DTLS-5 Flights, Timers, Final flights | `flight_timer_schedule`, `final_flight_resent`, `handshake_survives_loss` |
-| SDP certificate fingerprint via `x509_build` | DTLS-7 Identity, Fingerprints, Pinning | `fingerprint_pins_peer`, `interop_openssl` |
+| SDP certificate fingerprint via `x509_build` | DTLS-7 Identity, Fingerprints, Pinning; DTLS-5 Message order | `fingerprint_pins_peer`, `possession_before_keys`, `interop_openssl` |
 | negotiated roles | DTLS-7 Roles | `setup_roles` |
-| `use_srtp` exporter | DTLS-5 Server choice, DTLS-8 The exporter | `interop_openssl`, `exporter_once_after_pin` |
+| `use_srtp` exporter | DTLS-5 Server choice, DTLS-8 The exporter | `interop_openssl`, `exporter_once_after_pin`, `possession_before_keys` |
 | SRTP/SRTCP AES-GCM and AES-CM/HMAC | SRTP-1, SRTP-3, SRTP-4 | `rtp_header_boundary`, `srtcp_trailer_order` |
 | independent in and out keys | SRTP-2, DTLS-8 | `directions_independent` |
 | SSRC, ROC and the replay window | SRTP-3, SRTP-4 | `roc_rollover`, `replay_window`, `sender_index_monotone`, `streams_after_auth` |
@@ -626,7 +780,10 @@ belongs to media-rtp and media-webrtc-sfu, which consume these two packages.
 ## Prior art
 
 Goose (`/tmp/ref-goose` at `d5ae5bb`) and dimpl (`/tmp/ref-dimpl` at `e341a90`) for DTLS,
-with str0m (`/tmp/ref-str0m` at `2ada76a`) for SRTP.
+with str0m (`/tmp/ref-str0m` at `2ada76a`) for SRTP. The 2341 amend added OpenSSL
+(`/tmp/ref-openssl` at `ce0aecb6`), pion/dtls (`/tmp/ref-pion-dtls` at `67c3adf`) and
+webrtc-rs's sans-IO `rtc` (`/tmp/ref-webrtc-rs` at `0fbcaa7`) for cookie admission and
+record versions.
 
 | item | source | verdict |
 |---|---|---|
@@ -637,9 +794,12 @@ with str0m (`/tmp/ref-str0m` at `2ada76a`) for SRTP.
 | Application validates the peer certificate | dimpl `src/lib.rs:50` | ADAPTED: the library pins RFC 8122 fingerprints itself, so no caller can forget |
 | DTLS 1.3 and version auto-sense | dimpl `src/lib.rs:27` | NOT TAKEN for Wave 1 (DTLS 1.3 is out of Wave 1) |
 | Stateless cookie `HMAC(secret, client_random)` | dimpl `src/dtls12/server.rs:378`, `:1217` | ADAPTED: the address is bound too, and an ICE-verified address skips it |
+| Stateless listen before any connection; cookie judged from the first ClientHello fragment | OpenSSL `DTLSv1_listen`, `ssl/d1_lib.c:1015-1026` | ADOPTED as `admit` |
+| `{254, 255}` on records before the version is fixed, including HelloVerifyRequest | OpenSSL `ssl/record/rec_layer_d1.c:929-931`, `ssl/d1_lib.c:1111` | ADOPTED for HelloVerifyRequest; accepted on receipt (DTLS-4 Framing) |
+| A connection per source address before the cookie | pion/dtls `listener.go:17`, `internal/flight/flight12/flight0handler.go:211`; webrtc-rs `rtc-dtls/src/endpoint.rs:227` | REPLACED by `admit`: per-address state before the cookie is what RFC 6347 §4.2.1 exists to prevent |
 | Flight timer 1 s, 4 retries, 40 s handshake, 50% jitter | dimpl `src/config.rs:93-95`, `src/timer.rs` | ADAPTED: RFC 6347's 1 s doubling to 60 s, 7 retries, 60 s deadline, no jitter, so sim time is exact |
 | MTU 1,150, 30 queued records | dimpl `src/config.rs:88-89` | ADAPTED: MTU 1,200 and 32 held fragments, both explicit `Config` |
-| 64-record replay window per epoch, updated after decryption | dimpl `src/window.rs` | ADOPTED |
+| 64-record replay window per epoch, updated after decryption | dimpl `src/window.rs` | ADAPTED: epoch 1 only; epoch 0 keeps none, since its records cannot authenticate (DTLS-4 Replay) |
 | Extended Master Secret enforced | dimpl `src/lib.rs:48` | ADOPTED |
 | PSK and CCM_8 suites, P-384 key exchange | dimpl `src/lib.rs:36-44` | NOT TAKEN: TLS-8 offers X25519 and P-256 only, and WebRTC peers use certificates |
 | Pluggable crypto provider traits | dimpl `src/crypto/provider.rs` | REPLACED by TLS-8 schedules, which never let a key leave |
@@ -664,9 +824,12 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   `openssl s_server -dtls1_2 -use_srtp <profile> -keymatexport EXTRACTOR-dtls_srtp -keymatexportlen <n>`
   with a P-256 certificate and `-verify 1`, and a Hirsel server against
   `openssl s_client -dtls1_2` with the same options. Run each of the three suites at least
-  once and each of the three SRTP profiles at least once, and the Hirsel server once in
-  `Cookie` mode (OpenSSL's client answers a HelloVerifyRequest by default). *Oracle:* OpenSSL's wire output and
-  printed keying material. The handshake completes on both sides. Python `cryptography`
+  once and each of the three SRTP profiles at least once, the Hirsel server once in
+  `Cookie` mode through `admit` (OpenSSL's client answers a HelloVerifyRequest by default,
+  and its ClientHello records carry `{254, 255}`), and the Hirsel client once against
+  `openssl s_server -dtls1_2 -listen`, whose HelloVerifyRequest record and body carry
+  `{254, 255}` (DTLS-4 Framing). *Oracle:* OpenSSL's wire output and printed keying
+  material. The handshake completes on both sides. Python `cryptography`
   seals one RTP packet under OpenSSL's exported bytes, cut as TLS-8 `srtp` cuts them, and
   gets the bytes Hirsel's `protect_rtp` makes, and the reverse opens. The peer certificate
   Hirsel reports has the SHA-256 that `openssl x509 -fingerprint -sha256` prints for
@@ -680,10 +843,19 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
 - **`handshake_survives_loss`.** *Scenario:* client and server in process, each datagram
   independently dropped with probability 0.2, duplicated with 0.05 and delayed by up to
   three datagrams, from a seeded stream; 32 seeds, under 15 s. Then the same 32 seeds with
-  duplication and delay but no loss. *Oracle:* an invariant per seed, by hand. Every seed
-  either reaches `Connected` on both sides with a cross-check (the client's SRTP packet opens
-  at the server and the reverse), or both sides close as `Timeout` at the instant the timer
-  schedule gives; no other end is allowed. With no loss, every seed connects. The number of
+  duplication and delay but no loss. *Oracle:* an exhaustive list of ends per seed, by hand
+  from DTLS-5. Let `t_c` be the client's first send and `t_s` the instant the server accepted
+  its first ClientHello, both read from the harness's own delivery log. At defaults a flight
+  cannot exhaust its 7 retries before `handshake_ns` (that takes at least 1 + 2 + 4 + 8 + 16
+  + 32 + 60 + 60 = 183 s, past 60 s), so every `Timeout` is at its side's start plus 60 s. The
+  allowed ends are exactly: (1) both `Connected`, with a cross-check (the client's SRTP
+  packet opens at the server and the reverse); (2) the client `Timeout` at `t_c + 60 s` and
+  the server `Timeout` at `t_s + 60 s`; (3) the client `Timeout` at `t_c + 60 s` and the
+  server `Connected` (flight 5 arrived and every flight 6 was lost); (4) the client
+  `Timeout` at `t_c + 60 s` and the server still `Handshaking` with `poll` answering `Idle`,
+  because no ClientHello ever reached it. The client cannot connect without the server,
+  since flight 6 follows a verified flight 5. Any other end fails. With no loss, every seed
+  ends in (1). The number of
   lossy seeds that connect is reported and gates nothing, since no hand bound on it is
   tight.
 - **`flight_timer_schedule`.** *Scenario:* a client whose every datagram is dropped, three
@@ -696,11 +868,16 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   `retries` 2 it is resent at 1 and 3 s and closes at 7 s. In the last case flight 1 is
   answered at 0.5 s, so flight 3 starts at 0.5 s with a 1 s timer; it is resent at 1.5 s and
   answered at 2 s, so flight 5 starts at 2 s with the doubled 2 s timer (`WakeAt` 4 s).
-- **`final_flight_resent`.** *Scenario:* the server's flight 6 is dropped. The client
-  retransmits flight 5 twice. *Oracle:* RFC 6347 §4.2.4 by hand. The server is `Connected`
+- **`final_flight_resent`.** *Scenario:* `mtu` 300, so flight 5 spans three datagrams. The
+  server's flight 6 is dropped. The client retransmits flight 5 twice. Then, at the
+  connected server, a replay of an epoch-0 Certificate record from flight 5 and a replay of
+  the epoch-1 Finished record with its original record number; at the connected client, a
+  retransmitted flight 4. *Oracle:* RFC 6347 §4.2.4 by hand. The server is `Connected`
   after flight 5. Each retransmitted flight 5 gets exactly one flight 6, with record numbers
-  above the previous ones, and the client then connects. A retransmitted flight 4 reaching a
-  connected client produces nothing.
+  above the previous ones, and the client then connects. The replayed Certificate produces
+  no datagram and counts `stale_epoch`; the replayed Finished produces none and counts
+  `replayed`; the flight 4 at the client produces none and counts `stale_epoch`. Red on a
+  server that answers flight 6 per epoch-0 record or per datagram.
 - **`fragments_reassemble`.** *Scenario:* a 3,000-byte Certificate split into fragments
   delivered in reverse order with one overlap and one duplicate; a ClientHello split in two;
   `openssl s_server -mtu 300` live. *Oracle:* the source messages and OpenSSL. The
@@ -720,22 +897,53 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
   `openssl x509 -noout -fingerprint -sha256` output after its `=`, and parses back.
 - **`setup_roles`.** *Oracle:* the DTLS-7 table from RFC 5763 §5 by hand, all 9 pairs of
   `Setup`.
-- **`refusals`.** *Scenario:* hand-built peer messages: a ClientHello without EMS; one with a
-  non-empty `srtp_mki`; one sharing no SRTP profile while `Config.srtp` is non-empty; a
-  ServerHello choosing a suite the client did not offer; a ServerKeyExchange with a broken
-  signature. *Oracle:* the DTLS-5 failure table by hand: alerts 40, 47, 40, 47 and 51.
+- **`refusals`.** *Scenario:* hand-built peer messages, one handshake each: a ClientHello
+  without EMS; one with a non-empty `srtp_mki`; one sharing no SRTP profile while
+  `Config.srtp` is non-empty; one whose `signature_algorithms` lacks 0x0403; one whose body
+  `client_version` is `{254, 255}`; a ServerHello choosing a suite the client did not offer;
+  a ServerHello without `use_srtp` to a client that offered it; a ServerKeyExchange with a
+  broken signature; a server flight 4 with no ServerKeyExchange; a client flight 5 with an
+  empty Certificate; a client flight 5 whose Finished is sent in epoch 0. *Oracle:* the
+  DTLS-5 failure table and RFC 5246 §7.3, §7.4.1.2 and Appendix E.1 by hand: alerts 40, 47,
+  40, 40, 70, 47, 40, 51, 10, 42 and 10.
+- **`possession_before_keys`.** *Scenario:* a genuine handshake between client A and server
+  S records A's Certificate message. A hand-built client C, with its own P-256 key, then
+  runs against a fresh server that `expect`s A's fingerprint. C's flight 5 carries A's
+  certificate and (a) no CertificateVerify, then ChangeCipherSpec and a Finished and an
+  application record that C seals under keys it derived itself; (b) a CertificateVerify
+  signed by C's key instead. *Oracle:* RFC 5246 §7.4.8 and RFC 8122 §6.2 by hand: only
+  CertificateVerify proves possession, and the fingerprint is public. The server closes as
+  `SentAlert(10)` in (a) and `SentAlert(51)` in (b), and in both it never reports
+  `Connected`, delivers 0 bytes of C's application record, and answers `take_srtp` with
+  `NotConnected` before closing and `Closed(_)` after. Red on any state machine that treats
+  CertificateVerify as optional or pins on the certificate alone.
 - **`record_replay_and_discards`.** *Scenario:* after connecting, an application record
   delivered twice, one 70 records behind the newest, one with a flipped tag bit, and one in
-  epoch 2. *Oracle:* RFC 6347 §§4.1.2.6, 4.1.2.7 by hand. The four are discarded and counted
-  as `replayed`, `replayed`, `tampered` and `stale_epoch`, no alert is sent, and the next
-  genuine record is delivered.
-- **`cookie_bounds_unproven_address`.** *Scenario:* a `Cookie` server receives 10
-  ClientHellos without cookies, one with a cookie computed for another address, and one with
-  the correct cookie. *Oracle:* RFC 6347 §4.2.1 by hand. Each of the first 11 gets one
-  60-byte HelloVerifyRequest and no other datagram, with the record sequence number of the
-  ClientHello it answers, and the server holds no state beyond the endpoint. The twelfth gets
-  flight 4, whose first record has that ClientHello's record sequence number and whose
-  ServerHello has `message_seq` 1.
+  epoch 2. Separately, mid-handshake, after the client has processed flight 4: an injected
+  epoch-0 record with sequence number `2^48 − 1` carrying a copy of ServerHelloDone (a
+  `message_seq` already processed), then the genuine flight 6, whose ChangeCipherSpec
+  record has a low epoch-0 number. *Oracle:* RFC 6347 §§4.1.2.6, 4.1.2.7 and §4.2.2 by hand.
+  The four are discarded and counted as `replayed`, `replayed`, `tampered` and
+  `stale_epoch`, no alert is sent, and the next genuine record is delivered. In the second
+  part the client connects with no retransmission from either side and `replayed` stays 0.
+  Red on an epoch-0 replay window.
+- **`cookie_bounds_unproven_address`.** *Scenario:* `admit` alone, with one key: 10
+  cookieless ClientHellos from 10 addresses; one with a cookie computed for another address;
+  a 61-byte first fragment of a cookieless ClientHello (empty `session_id`, ending after the
+  cookie length byte); a 60-byte one ending before that byte; the second fragment of a
+  cookieless ClientHello; and the first fragment of a two-fragment ClientHello carrying the
+  right cookie. Then a server built on that `Admitted` receives both fragments. Last, a
+  `Cookie` server built without `admit` receives a cookieless ClientHello. *Oracle:* RFC 6347
+  §4.2.1 by hand, with each expected cookie from Python's `hmac` over the hand-built address
+  bytes and client random. The first 12 inputs each give `Reply(60)`, and the appended bytes
+  equal a hand-built HelloVerifyRequest: `{254, 255}` in the record header and in
+  `server_version`, the ClientHello record's sequence number, `message_seq` 0 and the Python
+  cookie; no reply is longer than its input. The 60-byte input and the second fragment give
+  `Discard` with `out` unchanged. The last `admit` gives `Admitted`, no `Endpoint` having
+  been built before it; that server reassembles the ClientHello and sends flight 4, whose
+  first record has the first fragment's record sequence number and whose ServerHello has
+  `message_seq` 1. The server built without `admit` sends nothing and counts one
+  `malformed`.
 - **`exporter_once_after_pin`.** *Scenario:* `take_srtp` before `Connected`, after
   `Connected`, and again; an endpoint that negotiated no profile. *Oracle:* DTLS-8 by hand:
   `NotConnected`, a schedule, `Taken`, `NoSrtp`.
@@ -758,24 +966,39 @@ in-process pair. It switches to `std.sim.udp` once that lands. The DTLS harness 
 - **`replay_window`.** *Scenario:* after indices 0 to 200 except 73, a repeat of 150, then 73,
   then 72, then a forged packet at index 10,000 with a bad tag, then 201. *Oracle:* SRTP-4 by
   hand. 150 is `Replayed`. 73 is 127 below and unseen in the window, so it opens. 72 is
-  `TooOld`. The forgery is `Tampered` and moves nothing, so 201 opens.
+  `TooOld`. The forgery is `Tampered` and moves nothing, so 201 opens. Then, on a second
+  SSRC with `ended_streams` 1: open RTP indices 0 to 5 and SRTCP indices 0 to 3, a forged
+  SRTCP packet at index 10,000 with a bad tag (`Tampered`, and SRTCP 4 then opens),
+  `end_receive`, then RTP index 3 (`TooOld`), SRTCP index 2 (`TooOld`), `receive_from` on
+  that SSRC (`Retired`), and RTP index 6, which opens. Last, a third SSRC's `end_receive`
+  while the one kept entry is full is `Streams`, and that stream still answers a repeat of
+  its last index with `Replayed`. *Oracle:* RFC 3711 §3.3.2 by hand: a key opens every packet
+  it ever sealed, so only a kept floor refuses a recorded one.
 - **`srtcp_trailer_order`.** *Scenario:* `protect_rtcp` of libSRTP `rtcp_plaintext_ref`
-  under both validation keys; an `E = 0` compound; index 2^31 − 1, then one more.
-  *Oracle:* libSRTP `test/srtp_driver.c` at `fd08747f` for the protected bytes (the tag
-  before `E ‖ index` under AEAD, after it under CM), RFC 3711 §3.4 for `E = 0`, and SRTP-3 for
-  the last: it seals, and the next is `Exhausted`.
+  under both validation keys; an `E = 0` compound; then a stream placed by
+  `send_from(ssrc, 0, 0, 2^31 − 1)` sends one compound and one more, and a receiver placed
+  by `receive_from(ssrc, 0, 0, 2^31 − 1)` opens the first. *Oracle:* libSRTP
+  `test/srtp_driver.c` at `fd08747f` for the protected bytes (the tag before `E ‖ index`
+  under AEAD, after it under CM), RFC 3711 §3.4 for `E = 0`, Python `cryptography` with the
+  RFC 7714 §9.1 nonce for index `2^31 − 1` (the trailer is `0xFFFFFFFF`), and SRTP-3 for the
+  last: it seals, and the next is `Exhausted`.
 - **`directions_independent`.** *Scenario:* the two sessions of one in-process DTLS
   association. *Oracle:* TLS-8's direction rule by hand. A's protected packet unprotects at
   B. A's own `unprotect_rtp` of it is `Discarded(Tampered)`, because its opener holds B's key.
   `session_pair` with two `send` imports is `Direction`.
-- **`sender_index_monotone`.** *Scenario:* send SEQ 10, then 9, then 11; on a stream set by
-  `send_from` to ROC `2^32 − 1`, send SEQ 65,535 (index `2^48 − 1`), then SEQ 0. *Oracle:*
-  SRTP-3 by hand. 9 is `Reused` with `buf` unchanged, and 11 then seals. Index `2^48 − 1`
-  seals, and SEQ 0, whose index would be `2^48`, is `Exhausted`.
+- **`sender_index_monotone`.** *Scenario:* send SEQ 10, then 9, then 11; on a second fresh
+  stream send SEQ 5, then SEQ 40,000; on a stream placed by `send_from(ssrc, 2^32 − 1,
+  65,535, 0)`, send SEQ 65,535, then SEQ 0; then `send_from` on the first SSRC. *Oracle:*
+  RFC 3711 Appendix A's three cases computed by hand, unreduced, and RFC 7714 §10's `2^48`
+  limit. 9 gives `v` 0 and index 9, below 10: `Reused` with `buf` unchanged, and 11 then
+  seals. 40,000 against `s_l` 5 is more than `2^15` above, so `v` = ROC − 1 at ROC 0:
+  `Reused`. 65,535 gives index `2^48 − 1`, which seals; 0 against `s_l` 65,535 gives `v` =
+  `2^32`: `Exhausted`, where an estimate reduced modulo `2^32` would answer index 0 and
+  `Reused`. The late `send_from` is `Retired`.
 - **`streams_after_auth`.** *Scenario:* `receive_streams` 2. Forged packets on 5 new SSRCs,
   then genuine packets on 3 new SSRCs. Then `end_send` of an SSRC and a packet on it.
-  *Oracle:* SRTP-3 and SRTP-4 by hand. The forgeries create no stream. The first two genuine
-  SSRCs open, and the third is `Streams`. The ended SSRC is `Retired`.
+  *Oracle:* SRTP-3 and SRTP-4 by hand. The forgeries create no stream and no kept entry. The
+  first two genuine SSRCs open, and the third is `Streams`. The ended SSRC is `Retired`.
 - **`fan_out_into`.** *Scenario:* one 1,000-byte payload through `protect_rtp_into` to three
   sessions with three different headers. *Oracle:* Python per session. Each output equals
   Python's, and `src` is unchanged.
@@ -800,19 +1023,19 @@ From PLAN rows 1.2 and 1.3, and nothing else:
 
 | slice | size | depends on | content | laws |
 |---|---|---|---|---|
-| **S0** expose TLS-8 DTLS and SRTP schedule operations | M | — | `schedule.dtls12`, `schedule.srtp`, `schedule.finished`, `schedule.verify_finished`, `schedule.import_srtp` and `schedule.SrtpProfile`, `schedule.Suite12` in `core/core/schedule.hirsel`, over the TLS-8 T14 kernels | TLS-8 PC10 and PC2. The [source laws](../../core/std/tests/secret_agree.hirsel) check DTLS 1.2 records and Finished, SRTP import direction and libSRTP packets, and both sides of the DTLS-SRTP exporter on the evaluator, Cranelift and LLVM. |
+| **S0** expose TLS-8 DTLS and SRTP schedule operations (landed: 034e6dcd, e07a09da) | M | — | `schedule.dtls12`, `schedule.srtp`, `schedule.finished`, `schedule.verify_finished`, `schedule.import_srtp` and `schedule.SrtpProfile`, `schedule.Suite12` in `core/core/schedule.hirsel`, over the TLS-8 T14 kernels | TLS-8 PC10 and PC2. The [source laws](../../core/std/tests/secret_agree.hirsel) check DTLS 1.2 records and Finished, SRTP import direction and libSRTP packets, and both sides of the DTLS-SRTP exporter on the evaluator, Cranelift and LLVM. |
 | **S1** `std.x509_key` | S | — | SPKI reader for P-256 and P-384 points (DTLS-7) | one case in the std x509 laws: OpenSSL-generated P-256 and P-384 certificates give the points `openssl ec -pubout` prints; RSA and trailing bytes give `Invalid` |
-| **S2** DTLS records | M | S0 | `core/programs/dtls/`<!-- doc-ref: planned --> package, record framing, epochs, replay window, alerts, fragmentation and reassembly, the transcript (DTLS-4, DTLS-5 Fragmentation and Transcript, DTLS-6) | `record_replay_and_discards`, `fragments_reassemble` (hand-built parts) |
-| **S3** DTLS handshake | L | S1, S2 | client and server flights, cookie admission, server choice, EMS, `use_srtp`, failures, timers and final flights, `take_srtp`, error mapping (DTLS-3, DTLS-5, DTLS-8) | `flight_timer_schedule`, `final_flight_resent`, `offered_13_negotiates_12`, `refusals`, `cookie_bounds_unproven_address`, `exporter_once_after_pin`, `handshake_survives_loss` |
-| **S4** identity, fingerprints, roles | S | S1 | DTLS-7 | `fingerprint_pins_peer`, `setup_roles` |
-| **S5** SRTP sessions | M | S0; `rtp.seq.estimate` once rtp.md's RTP-2 lands (until then S5 keeps the Appendix A estimate and switches) | `core/programs/srtp/`<!-- doc-ref: planned --> package (SRTP-2 to SRTP-6) | every SRTP law |
-| **S6** interop | M | S3, S4, S5 | `interop.py` against OpenSSL on loopback, and against dimpl at `e341a90` through a small Rust driver built from a clone in `/tmp`, never vendored | `interop_openssl` and `interop_dimpl`, the live part of `fragments_reassemble` |
-| **S7** SRTP cost | S | S5 | counted-allocator and instruction-count run (cost targets) | the cost targets |
+| **S2** DTLS records | M | S0 | `core/programs/dtls/`<!-- doc-ref: planned --> package, record framing and versions, epochs, the epoch-1 replay window and no epoch-0 window, alerts, fragmentation and reassembly, the transcript (DTLS-4, DTLS-5 Fragmentation and Transcript, DTLS-6) | `record_replay_and_discards` (the connected part, hand-built records), `fragments_reassemble` (hand-built parts) |
+| **S3** DTLS handshake | L | S1, S2 | `admit`, client and server flights, message order, versions, server choice, EMS, `use_srtp`, failures, timers and final flights, early data held to `Connected`, `take_srtp`, error mapping (DTLS-3, DTLS-5, DTLS-8) | `possession_before_keys`, `refusals`, `cookie_bounds_unproven_address`, `final_flight_resent`, `record_replay_and_discards` (the mid-handshake epoch-0 part), `flight_timer_schedule`, `offered_13_negotiates_12`, `exporter_once_after_pin`, `handshake_survives_loss` |
+| **S4** identity, fingerprints, roles | S | S1 | DTLS-7, `share_identity` | `fingerprint_pins_peer`, `setup_roles` |
+| **S5** SRTP sessions | M | S0; `rtp.seq.estimate` once rtp.md's RTP-2 lands (until then S5 keeps the same unreduced Appendix A estimate and switches) | `core/programs/srtp/`<!-- doc-ref: planned --> package (SRTP-2 to SRTP-6), with `send_from`/`receive_from` SRTCP starts and kept floors after `end_receive` | `rtp_header_boundary`, `roc_rollover`, `replay_window`, `srtcp_trailer_order`, `directions_independent`, `sender_index_monotone`, `streams_after_auth`, `fan_out_into` |
+| **S6** interop | M | S3, S4, S5 | `interop.py` against OpenSSL on loopback (including `s_server -listen`, whose `{254, 255}` HelloVerifyRequest record DTLS-4 Framing accepts), and against dimpl at `e341a90` through a small Rust driver built from a clone in `/tmp`, never vendored | `interop_openssl`, `interop_dimpl`, the live part of `fragments_reassemble` |
+| **S7** SRTP cost | S | S5 | counted-allocator and instruction-count run (cost targets) | the SRTP cost targets: 0 allocations per packet, instructions per packet reported |
 
-S1, S2 and S5 run in parallel after S0. S0 blocks everything else. A Sol lane can take
+S1, S2 and S5 run in parallel after S0. S0 blocks S2 and S5. A Sol lane can take
 S0, S1, S2, S4, S5 and S7 from this text. S3 is the security-bearing slice: PLAN row 1.2
-asks for an Astra security attack on it (the handshake state machine, cookie admission,
-fingerprint pinning, the exporter) before it lands. S6 closes the build.
+asks for an Astra security attack on it (the handshake state machine and message order,
+`admit`, fingerprint pinning and proof of possession, the exporter) before it lands. S6 closes the build.
 
 **Deviation from PLAN row 1.2's verification.** PLAN asks for interop with Chromium, Firefox,
 str0m and dimpl under `sim.udp` at 20% loss. This text covers OpenSSL and dimpl at wire level

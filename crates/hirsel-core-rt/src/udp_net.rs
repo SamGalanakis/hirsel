@@ -75,16 +75,20 @@ pub(crate) struct Allowance {
 
 impl Default for Allowance {
     fn default() -> Self {
-        let bytes = std::env::var("HIRSEL_UDP_KERNEL_BYTES")
-            .ok()
-            .map_or(Some(64 * 1024 * 1024), |bytes| bytes.parse().ok());
+        let bytes = match std::env::var("HIRSEL_UDP_KERNEL_BYTES") {
+            Ok(value) => value
+                .parse()
+                .unwrap_or_else(|_| crate::process::stop(b"UdpAllowance")),
+            Err(std::env::VarError::NotPresent) => 64 * 1024 * 1024,
+            Err(std::env::VarError::NotUnicode(_)) => crate::process::stop(b"UdpAllowance"),
+        };
         let sysctl = |name| {
             std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
                 .ok()
                 .and_then(|n| n.trim().parse::<u64>().ok())
         };
         Self {
-            left: AtomicU64::new(bytes.unwrap_or(0)),
+            left: AtomicU64::new(bytes),
             per_socket: sysctl("rmem_default")
                 .zip(sysctl("wmem_default"))
                 .and_then(|(r, w)| r.checked_add(w))

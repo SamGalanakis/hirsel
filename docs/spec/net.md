@@ -470,10 +470,8 @@ readiness poll arm has its own identity. Member readers and writers publish thei
 and then recheck, with a sequentially consistent fence on both sides. A writable edge wakes
 every member writer waiting on the group's socket. The turn budget starts no step that does
 not fit what is left, and reaping counts every completion it examines. Served packet
-staging is paid from the port's room. A build law measures completion-mode receive against
-readiness-only receive. The faster one becomes the only receive path wherever io_uring
-opens, and the build deletes the other. The section ends with the
-[UDP build laws](#udp-build-laws).
+staging is paid from the port's room. The receive-mode comparison kept readiness
+receive with `recvmmsg`. The section ends with the [UDP build laws](#udp-build-laws).
 
 UDP gives programs IP datagrams for media, QUIC and DNS-like protocols. Its operations
 move **batches**: one call receives or sends many datagrams, so a program pays one call,
@@ -961,8 +959,8 @@ A run that ends first discards its retirement events with the rest of its state.
 **Host allowance.** The kernel's socket queues use host memory up to the host's defaults
 (`net.core.rmem_default` and `wmem_default`), which no program limit pays for. The host
 therefore keeps one **UDP host allowance** per run, read once at run start from the host
-setting `HIRSEL_UDP_KERNEL_BYTES` (a byte count; unset means 64 MiB, and a value that is not
-a byte count refuses the run), as `HIRSEL_NET_REACTOR` chooses the backend. A socket reserves
+setting `HIRSEL_UDP_KERNEL_BYTES`. The default is 64 MiB. A value that fails to parse as a
+byte count stops the run with `UdpAllowance`. `HIRSEL_NET_REACTOR` chooses the backend. A socket reserves
 `rmem_default + wmem_default`, read once at run start, from the allowance from its creation
 until its retirement. A group reserves that amount once, for its one kernel socket. A
 reservation the allowance cannot meet, or a descriptor or socket the kernel refuses, returns

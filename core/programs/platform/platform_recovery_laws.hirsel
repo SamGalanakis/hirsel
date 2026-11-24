@@ -25,13 +25,13 @@ pub fn hand_install_catalog(dir: Dir, c: Clock, rnd: Random, tasks: Tasks, argv:
                 let attempt = fresh_attempt(mut tx, call_env.2)?
                 let hosted_binding = Binding(identity: clone(call_env.0.hosted), n_place: 1048576u64)
                 let d = DeployRow(request: list.new(), attempt: attempt, assembly: clone(call_env.0.new), image: list.new(),
-                    old_assembly: clone(g.assembly), old_binding: Some(clone(hosted_binding)), binding: Some(take hosted_binding),
+                    old_assembly: clone(g.assembly), old_binding: Some(clone(hosted_binding)), old_claim: None, binding: Some(take hosted_binding),
                     new_retained: false, digest: bytes_of(32u64, 9u8), release: list.new(), activation: 10u64,
                     old: w.gen, candidate: w.gen + 1u64, outcome: Failed("not installed after recovery"), describe: list.new(),
                     retry_of: None, fetch_ns: None, assemble_ns: None, preview: operator.Preview(grants: launcher.no_grants(), entries: list.new(), triggers: list.new()))
                 g.activation = 3u64
                 retain_release(mut g, d.assembly)
-                g.recovery = Some(Unmatched(attempt, 11u64, Binding(identity: clone(call_env.0.bare), n_place: 524288u64)))
+                g.recovery = Some(Unmatched(attempt, 11u64, clone(call_env.0.bare), Some(524288u64)))
                 index_release(mut tx, call_env.2, g, 3u64, g.assembly)?
                 st(store.put(mut tx, call_env.2.groups, call_env.1, g))?
                 st(store.put(mut tx, call_env.2.deploys, call_env.1, d))
@@ -62,7 +62,7 @@ fn failed_outcome(outcome: DeployOutcome) -> bool {
 fn cutover_read(store_at: u64) -> Bytes {
     let description = describe_of(if store_at == 2u64 { image_two() } else { image() })
     let witness_bytes: Bytes = if store_at == 2u64 { image_two() } else { list.new() }
-    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: result.unwrap(runner.identity_digest(description)), n_place: description.n_place, prepared: take witness_bytes)
+    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: result.unwrap(runner.identity_digest(description)), n_place: Some(description.n_place), prepared: take witness_bytes, witness_present: store_at == 2u64, claim: None)
     let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
     let mut raw: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, read, mut raw))
@@ -81,11 +81,42 @@ fn cut_case(c: Clock, rnd: Random) -> (Rig, launcher.Child, List[launcher.Reques
 }
 
 fn trace_read(id: u8, n_place: u64) -> Bytes {
-    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: bytes_of(32u64, id), n_place: n_place, prepared: list.new())
+    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: bytes_of(32u64, id), n_place: Some(n_place), prepared: list.new(), witness_present: false, claim: None)
     let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
     let mut raw: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, read, mut raw))
     take raw
+}
+
+fn claim_read(epoch: u64, holder: u8) -> Bytes {
+    let description = describe_of(image())
+    let binding = result.unwrap(runner.identity_digest(description))
+    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: take binding,
+        n_place: Some(description.n_place), prepared: list.new(), witness_present: false, claim: Some((epoch, bytes_of(16u64, holder))))
+    let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
+    let mut raw: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, read, mut raw))
+    take raw
+}
+
+fn bucket_absent_witness(c: Clock, rnd: Random) waits {
+    let mut setup = rig(c, rnd, 4u64)
+    add(mut setup, "g", "t")
+    op_wake(mut setup, "g")
+    let old = last(setup, "g")
+    old_says(mut setup, old, PlaceOpened(runner.PlaceReady(version: 1u64, store_hi: 1u64, store_lo: 2u64,
+        release: release_at(1u64), retain_from: 0u64, ready_ns: 0u64, read: claim_read(1u64, 1u8))))
+    let go = prepared(mut setup, old)
+    pump(mut setup, take go)
+    let mut probing = restart_bare(take setup, 4u64)
+    trace_current(mut probing, 1u64, claim_read(1u64, 1u8))
+    if let Some(Undecided(ProbeOld)) = deploy_outcome(probing.h, "g") {} else {
+        fail("L44 Bucket: absence under OLD's claim did not keep the deploy Undecided")
+    }
+    expect(starts_are(probing, two_pairs(3u64, 2u64, image_two(), 4u64, 1u64, image())),
+        "L44 Bucket: absence under OLD's claim did not probe OLD next")
+    trace_current(mut probing, 1u64, claim_read(2u64, 2u8))
+    expect(failed_with(probing, "not installed after recovery"), "L44 Bucket: absence under a new claim proved no outcome")
 }
 
 fn trace_probe(c: Clock, rnd: Random, shared: bool, retain_r: bool) -> Rig waits {

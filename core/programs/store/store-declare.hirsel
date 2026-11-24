@@ -147,6 +147,12 @@ pub fn declare_release_table[V](mut d: Declare, take value: std.codec.Codec[V]) 
     finish(mut d, take declared)
 }
 
+pub fn declare_activation_table(mut d: Declare) -> Result[Table[u8, Bytes], Error] {
+    let Follower = d.mode else { return Error(Foreign) }
+    let declared = declare_table_inner(mut d, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
+    finish(mut d, take declared)
+}
+
 fn declare_table_inner[K, V](mut d: Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[TableDecl[K, V], Error] {
     if d.failed {
         return Error(MigrationFault)

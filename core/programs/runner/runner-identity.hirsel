@@ -41,8 +41,10 @@ pub type PlaceRead: codec + send {
     store_hi: u64,
     store_lo: u64,
     binding: Bytes,
-    n_place: u64,
+    n_place: Option[u64],
     prepared: Bytes,
+    witness_present: bool,
+    claim: Option[(u64, Bytes)],
 }
 
 fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], store.Error] waits {
@@ -55,15 +57,20 @@ fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], s
 // as a start outcome, but supplies no evidence for a recovery decision.
 fn capture_release(db: store.Db, version: u64, witness: u64) -> Result[Bytes, store.Error] waits {
     let Some(current) = release_record(db, version)? else { return Error(Missing("activation release")) }
-    let prepared: Bytes = if witness == 0u64 {
-        list.new()
+    let (present, take prepared): (bool, Bytes) = if witness == 0u64 {
+        (false, list.new())
     } else if witness == version {
-        clone(current.prepared)
+        (true, clone(current.prepared))
     } else {
-        match release_record(db, witness)? { Some(record) => clone(record.prepared), None => list.new() }
+        match release_record(db, witness)? { Some(record) => (true, clone(record.prepared)), None => (false, list.new()) }
+    }
+    let claim: Option[(u64, Bytes)] = match store.claim_of(db) {
+        Ok(store.Claim(epoch, holder: take holder)) => Some((epoch, take holder)),
+        Error(_) => None,
     }
     let (hi, lo) = store.identity_words(db)
-    let read = PlaceRead(store_hi: hi, store_lo: lo, binding: clone(current.binding), n_place: current.n_place, prepared: take prepared)
+    let read = PlaceRead(store_hi: hi, store_lo: lo, binding: clone(current.binding), n_place: Some(current.n_place), prepared: take prepared,
+        witness_present: present, claim: take claim)
     encode_place_read(read)
 }
 
@@ -75,6 +82,21 @@ fn encode_place_read(read: PlaceRead) -> Result[Bytes, store.Error] {
 }
 
 pub fn follower_release(f: store.Follower, witness: u64) -> Result[(u64, Bytes), store.Error] waits {
+    let (version, take read, _) = read_follower_release(f, witness)?
+    Ok((version, encode_place_read(read)?))
+}
+
+fn follower_description(f: store.Follower, read_handle: store.Reader, captured: store.Snapshot, binding: Bytes) -> Result[(Option[Bytes], Option[u64]), store.Error] waits {
+    let mut declaration = store.declare_follower(f)
+    let table = store.declare_activation_table(mut declaration)?
+    let Some(take raw) = store.get(read_handle, captured, table, 0u8)? else { return Ok((None, None)) }
+    let Some(decoded) = decode_description(raw) else { return Ok((None, None)) }
+    let Ok(actual) = identity_digest(decoded) else { return Ok((None, None)) }
+    if actual != binding { return Ok((None, None)) }
+    Ok((Some(take raw), Some(decoded.n_place)))
+}
+
+fn read_follower_release(f: store.Follower, witness: u64) -> Result[(u64, PlaceRead, Option[Bytes]), store.Error] waits {
     let current = store.follower_head(f)?
     let Some(main_branch) = store.follower_branch(f, "main") else { return Error(Missing("main")) }
     let captured = store.snapshot_follower(f, main_branch)?
@@ -88,18 +110,55 @@ pub fn follower_release(f: store.Follower, witness: u64) -> Result[(u64, Bytes),
     if release.binding != current.binding {
         return Error(NotCurrent(current.activation))
     }
-    let prepared: Bytes = if witness == 0 {
-        list.new()
+    let (present, take prepared): (bool, Bytes) = if witness == 0 {
+        (false, list.new())
     } else if witness == current.activation {
-        clone(release.prepared)
+        (true, clone(release.prepared))
     } else {
         match store.get(read_handle, captured, releases, witness)? {
-            Some(record) => clone(record.prepared),
-            None => list.new(),
+            Some(record) => (true, clone(record.prepared)),
+            None => (false, list.new()),
         }
     }
-    let read = PlaceRead(store_hi: current.store.hi, store_lo: current.store.lo, binding: clone(current.binding), n_place: release.n_place, prepared: take prepared)
-    Ok((current.activation, encode_place_read(read)?))
+    let (take description, n_place) = follower_description(f, read_handle, captured, current.binding)?
+    let store.HeadView(binding: take binding, claim: store.Claim(epoch, holder: take holder), store: id, activation, ..) = take current
+    let read = PlaceRead(store_hi: id.hi, store_lo: id.lo, binding: take binding, n_place, prepared: take prepared,
+        witness_present: present, claim: Some((epoch, take holder)))
+    Ok((activation, take read, take description))
+}
+
+fn bucket_not_current(take authority: store.Authority, plan: store.FollowerPlan, tasks: Tasks, clock: Clock,
+    expect: Option[store.StoreId], activation: u64, op_ms: u64) -> OpenError waits {
+    let read = capture_follower(take authority, plan, tasks, clock, expect, launch_env().witness, op_ms)
+    match take read {
+        Ok((version, take description, take report)) => NotCurrent(Active(version, take description, take report)),
+        Error(_) => NotCurrent(Active(activation, list.new(), list.new())),
+    }
+}
+
+fn capture_follower(take authority: store.Authority, plan: store.FollowerPlan, tasks: Tasks, clock: Clock,
+    expect: Option[store.StoreId], witness: u64, op_ms: u64) -> Result[(u64, Bytes, Bytes), store.Error] waits {
+    let budget = {
+        let mut plans: List[store.FollowerPlan] = list.with_capacity(1u64)
+        list.push(mut plans, clone(plan))
+        option.unwrap(store.service_bytes(plans))
+    }
+    let service = store.follower_service(tasks, budget)?
+    let captured = capture_with_service(take authority, plan, service, clock, expect, witness, op_ms)
+    store.close_follower_service(take service)?
+    take captured
+}
+
+fn capture_with_service(take authority: store.Authority, plan: store.FollowerPlan, service: store.FollowerService,
+    clock: Clock, expect: Option[store.StoreId], witness: u64, op_ms: u64) -> Result[(u64, Bytes, Bytes), store.Error] waits {
+    let owner = store.follower_owner(service)?
+    let reserved_slot = store.follower_slot(owner, plan)?
+    let mut source = store.followers()
+    let mut follower = store.follower(mut source, take reserved_slot, take authority, clock, expect)?
+    let _ = store.fresh(mut follower, std.clock.deadline_after_ms(host.mono_ns(clock), op_ms))?
+    let (version, take product, take description) = read_follower_release(follower, witness)?
+    let selected: Bytes = match take description { Some(take raw) => take raw, None => list.new() }
+    Ok((version, take selected, encode_place_read(product)?))
 }
 
 fn not_current_activation(db: store.Db, version: u64, take description: Bytes) -> OpenError waits {

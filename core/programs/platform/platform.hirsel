@@ -30,6 +30,7 @@ pub type GroupRow: codec + send {
     retained: List[Bytes],
     recovery: Option[Recovery],
     store_id: Option[(u64, u64)],
+    store_claim: Option[(u64, (u64, Bytes))],
     incarnation: u64,
     retiring: Option[Disposition],
     // The program's arguments, passed to every serving start of the group.
@@ -62,6 +63,7 @@ pub type DeployRow: codec + send {
     image: Bytes,
     old_assembly: Bytes,
     old_binding: Option[Binding],
+    old_claim: Option[(u64, Bytes)],
     binding: Option[Binding],
     new_retained: bool,
     digest: Bytes,
@@ -1353,111 +1355,6 @@ fn cutover_result(mut h: Host, c: launcher.Child, attempt: launcher.Attempt, rep
     }
 }
 
-fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut out: List[launcher.Request]) waits {
-    let Some(g) = current(h, c) else {
-        return
-    }
-    let Serving(gen) = c.role else {
-        return
-    }
-    let name = string.from(c.group.name)
-    if let PlaceOpened(ready) = reply {
-        let is_current = run_gen(h, name) == Some(gen)
-        let candidate = cut_of(h, name)
-        let is_candidate = match candidate {
-            Some(cut) => cut.candidate == gen && cut.activation == ready.version && cut.release == ready.release,
-            None => false,
-        }
-        if !is_current {
-            if !is_candidate {
-                return
-            }
-            if !opens_cutover(h, name, ready) {
-                list.push(mut out, Kill(clone(c)))
-                return
-            }
-        }
-        let actual = (ready.store_hi, ready.store_lo)
-        if let Some(expected) = g.store_id {
-            if expected != actual {
-                if is_current {
-                    unsuccessful(mut h, name, runner.store_mismatch(expected, actual), false, now, mut out)
-                }
-                list.push(mut out, Kill(clone(c)))
-                return
-            }
-        }
-        if is_none(g.store_id) || (is_current && (g.activation == 0u64 || !is_none(g.recovery))) {
-            if let Error(_) = record_store(mut h, name, g.incarnation, ready, is_current) {
-                list.push(mut out, Kill(clone(c)))
-                return
-            }
-        }
-        list.push(mut out, Command(clone(c), HostStoreAccepted))
-    }
-    let preparing = prep_of(h, name)
-    if let Some(take p) = take preparing {
-        if p.old == gen {
-            prep_placed(mut h, name, take p, reply, mut out);
-            return
-        }
-    }
-    let found = cut_of(h, name)
-    match take found {
-        Some(take outstanding) => {
-            let mut cut = take outstanding
-            if gen == cut.candidate {
-                if let PlaceOpened(ready) = reply {
-                    if ready.version == cut.activation && ready.release == cut.release {
-                        cut.opened = true
-                        finish_ended_cut(mut h, name, take cut, now, mut out)
-                    }
-                }
-            } else if gen == cut.old && !cut.held {
-                // The launcher can refuse to forward a cutover to a missing endpoint.
-                if let PlaceRefused(why) = reply {
-                    abort_cut(mut h, name, g, take cut, why, now, mut out)
-                }
-            }
-        },
-        None => {
-            let Vol(run: take running, ..) = vol_read(h, name)
-            if let Some(run) = take running {
-                if run.gen != gen {
-                    return
-                }
-                match reply {
-                    PlaceOpened(ready) => {
-                        report_recovery(mut h, name, gen, ready.version, run.selected, ready.read, true)
-                        set_run(mut h, name, Some(Run(gen: gen, phase: Ready(now.mono_ns), selected: clone(run.selected))))
-                    },
-                    PlaceStoreMismatch(ehi, elo, ahi, alo) => unsuccessful(mut h, name, runner.store_mismatch((ehi, elo), (ahi, alo)), false, now, mut out),
-                    PlaceCurrent(version, read) => {
-                        if adopt_genesis(mut h, name, g.incarnation, version) {
-                            let mut v = vol_read(h, name)
-                            v.reprobe = true
-                            vol_put(mut h, name, take v)
-                        } else {
-                            report_recovery(mut h, name, gen, version, run.selected, read, false)
-                            let mut v = vol_read(h, name)
-                            if !v.reprobe {
-                                v.cause = Some(start_current(version, run.selected))
-                                vol_put(mut h, name, take v)
-                            }
-                        }
-                    },
-                    PlaceRefused(why) => {
-                        let mut v = vol_read(h, name)
-                        v.cause = Some(string.from(why))
-                        vol_put(mut h, name, take v)
-                    },
-                    _ => (),
-                }
-            }
-        },
-    }
-}
-
 // §14.5 "Genesis": the group's genesis start installs the store's first activation under
 // LOCK before the host records it on that start's PlaceOpened, so a crash between them
 // leaves the store activated and the group at 0, and every start at 0 is refused
@@ -2022,7 +1919,7 @@ fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt,
                     _ => return Error(Busy(a)),
                 }
             }
-            let row = DeployRow(request: clone(call_env.6), attempt: call_env.2, assembly: clone(call_env.1), image: clone(call_env.4), old_assembly: clone(call_env.8 .assembly), old_binding: None, binding: None, new_retained: retains(call_env.8, call_env.1), digest: list.new(), release: list.new(), activation: 0u64, old: call_env.9, candidate: 0u64, outcome: Preparing, describe: list.new(), retry_of: None, fetch_ns: Some(call_env.3), assemble_ns: Some(call_env.0), preview: clone(call_env.7))
+            let row = DeployRow(request: clone(call_env.6), attempt: call_env.2, assembly: clone(call_env.1), image: clone(call_env.4), old_assembly: clone(call_env.8 .assembly), old_binding: None, old_claim: claim_for_generation(call_env.8, a), binding: None, new_retained: retains(call_env.8, call_env.1), digest: list.new(), release: list.new(), activation: 0u64, old: call_env.9, candidate: 0u64, outcome: Preparing, describe: list.new(), retry_of: None, fetch_ns: Some(call_env.3), assemble_ns: Some(call_env.0), preview: clone(call_env.7))
             put_deploy(mut tx, call_env.10, call_env.5, row, StoreClass)
         })
     }
@@ -3048,7 +2945,7 @@ fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
     } else {
         Untrusted
     }
-    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, label: spec.label, listen: string.from(spec.listen), bindings: clone(spec.bindings), limits: spec.limits, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
 }
 
 // Whether a catalog group already holds store directory `path`.

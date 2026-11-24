@@ -167,6 +167,7 @@ fn cutover_survives_host_loss(c: Clock, rnd: Random) -> Result[(), ()] waits {
     to_export(mut pv, old9, preview_answer(image(), release_two()))
     expect(asked_of(pv, 1u64) == 0u64 && failed_with(pv, "preview does not describe the selected assembly") && gens(pv, "g") == one(1u64), "L44 preview mismatch: OLD was asked to export, or the deploy did not fail")
     release_recovery_traces(c, rnd)
+    bucket_absent_witness(c, rnd)
     Ok(())
 }
 

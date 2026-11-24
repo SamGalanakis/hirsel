@@ -627,7 +627,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     let initial_window: Option[DrainWindow] = None
     let drain = latest.new(arc.new(initial_window))
     let triggering = if explicit_empty { Some(trigger_law_config(triggers.empty_entries())) } else { None }
-    let job = ManagedHead(backing: Disk(dir), options: clone(options), selection: selection, tasks: tasks, clock: c, random: r,
+    let job = ManagedHead(backing: Disk(dir), options: clone(options), follower_plan: None, selection: selection, tasks: tasks, clock: c, random: r,
         place: code.describe(trigger_scan_law_empty), on_migrate: None,
         schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox,
         finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to),

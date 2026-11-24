@@ -4,7 +4,7 @@ runner@1/runner/journal_test_trigger_granted src=e5d99f07a35577b4 sig=b4f56d01cf
 runner@1/runner/journal_test_trigger_snapshot src=eeeca843ac949bda sig=d6f9a73b55173092 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/journal_test_trigger_transact src=f71a12f6ffd81214 sig=a035cebb643f0f6b run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/law_trigger_model src=96051ef040e5a864 sig=5333f9d30017800a run=4e2c39d888a20f27 bug=- oracle=- rows=pending
-runner@1/runner/operate_derived_budgets src=ade70428512e6e8f sig=b907fe8c7d41dc5d run=ad4c20fab40b1abf bug=- oracle=- rows=pending
+runner@1/runner/operate_derived_budgets src=e6f5f02693e4abcd sig=e501cfdb05e1b0c9 run=7354a0686cbd09f3 bug=- oracle=- rows=pending
 runner@1/runner/test_after_publication src=f22fa0f63cfc612e sig=0e88bcc879eae94a run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_bounced_ended_ages src=53d1bf7f407f9924 sig=26bba0d90725aba9 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_declaration_open src=d8ba61fca3fc6c7a sig=e247324b2de17405 run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -36,7 +36,7 @@ runner@1/runner/test_wire_admission src=4947ca73fff87cf2 sig=04c5d0a0010142ba ru
 runner@1/runner/test_wire_replacement_generation src=f813d258f38c258a sig=e91efcfa2824a4f7 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_session src=1235f49aa5079d5f sig=c2ec52bc024fc2e2 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_write src=739634d239c3e300 sig=1a74fd00c32ba8f5 run=9db96dd71cd83a70 bug=- oracle=- rows=pending
-runner@1/runner/trigger_scan_classes src=7373694118a3bd05 sig=c354d2a01436a54a run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/trigger_scan_classes src=b1afe9126d8841c8 sig=ee663b6438988a54 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_anonymous_fresh src=1c6ba620c6888e3e sig=c02de86a3aaa84a6 run=9db96dd71cd83a70 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_atomic_migration src=daaf0947bc4ce071 sig=4ba3c962fe647366 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner_calls/test_bind_only src=b8bb94d4aafa4bd6 sig=1404b672fc23c85a run=9db96dd71cd83a70 bug=- oracle=- rows=pending

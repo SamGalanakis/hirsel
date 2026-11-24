@@ -216,7 +216,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     let launch = launch_env()
     let n_place = if launch.n_place_explicit { launch.n_place } else { p.n_place }
     let sized_store = place_store(p, report)
-    let (take options, _, store_bytes) = match take sized_store {
+    let (take options, _, store_bytes, take follower_plan) = match take sized_store {
         Ok(take sized) => take sized,
         Error(take e) => {
             if let Some(_) = launch.install { return finish_install(Error(take e)) }
@@ -271,7 +271,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send, B: send](t
     let allowance = add_place_bytes(head, store_bytes) ?=> Full
     let activity = cut_activity()?
     let cut = latest.handle(activity.root)
-    let head_job = ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
+    let head_job = ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
         n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain),
         head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, idle: idle, expected_store: launch.store_id)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
@@ -553,7 +553,7 @@ fn operate_install[G: send, H: shareable + inert + send, S: send, B: send](take 
     if let InstallAt(_) = selection {
         if !persistent { return Error(Missing("disk store")) }
     }
-    let (take db, take temporary) = open_backing(take backing, options, tasks, clock, random)?
+    let (take db, take temporary) = open_backing(take backing, options, tasks, clock, random) ?=> backing_start_error
     let mut opened = take db
     let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, on_migrate, schema, n_place, tasks) {
         Ok(_) => if persistent {
@@ -598,7 +598,7 @@ fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartEr
 }
 
 pub fn prepare_place[G: send, H: shareable + inert + send, S: send, B: send](take p: PlaceConfig[G, H, S, B], take attempt: Bytes, take image: Bytes, errors: Stderr) -> Result[Ended, StartError] waits {
-    let (take options, _, _) = place_store(p, Some(errors))?
+    let (take options, _, _, _) = place_store(p, Some(errors))?
     let n_place = p.n_place
     prepare_placed(take p, take options, n_place, take attempt, take image)
 }
@@ -1747,106 +1747,6 @@ type WritePause {
 type HeadDrain {
     finish: Receiver[()], events: Sender[LifeEvent], window: Latest[Option[DrainWindow]],
     clock: Clock, tasks: Tasks, head_to: Sender[HeadInput], n_place: u64, cut: CutActivity, idle: Option[u64],
-}
-
-type ManagedHead[G: send, H: shareable + inert + send, S: send]: send {
-    backing: Backing, options: store.Options, selection: Selection, tasks: Tasks, clock: Clock, random: Random,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
-    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
-    n_place: u64, n_publisher: u64, inbox: Receiver[HeadInput], finish_from: Receiver[()],
-    to: Sender[LifeEvent], drain: Latest[Option[DrainWindow]],
-    head_to: Sender[HeadInput], cut: CutActivity,
-    triggering: Option[TriggerConfig[G, H, S]], idle: Option[u64], expected_store: Option[(u64, u64)],
-}
-
-fn head_advance(to: Sender[LifeEvent], inbox: Receiver[HeadInput], take progress: LifeEvent) -> bool waits {
-    if let Error(_) = channel.send(to, take progress) { return false }
-    match channel.receive(inbox) { Ok(HeadContinue) => true, _ => false }
-}
-
-fn head_ended[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> () waits {
-    let to = channel.sender(job.to)
-    let ended = managed_head(take job)
-    let _ = channel.send(to, HeadEnded(take ended))
-}
-
-fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clock: Clock, random: Random) -> Result[(store.Db, Option[TemporaryBacking]), StartError] waits {
-    let mut temporary: Option[TemporaryBacking] = None
-    let opened: Result[store.Db, store.Error] = match backing {
-        Memory => Ok(store.memory(clock, random, options)),
-        Disk(dir) => store.open(tasks, dir, clock, random, options),
-        Temp(parent) => {
-            let name = string.with_capacity(32u64)
-            let mut cleanup = match TemporaryBacking(dir: parent, name: take name) { Ok(take guard) => take guard, Error((cap, _)) => return Error(Full(cap)) }
-            let dir = match std.dir.create_temp(parent, mut cleanup.name) { Ok(dir) => dir, Error(problem) => return Error(Open(Store(Io(problem)))) }
-            temporary = Some(take cleanup)
-            store.open(tasks, dir, clock, random, options)
-        },
-        Bucket(take bucket) => {
-            let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms) = take bucket
-            let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), op_ms)
-            match std.object.start(net, tasks, take place, take credentials, None, System, clock, random, lanes, deadline) {
-                Ok(take client) => Ok(store.open_authority(tasks, store.object_authority(take client, level, op_ms), clock, random, options) ?=> |store.Refusal(error: take problem, ..)| Open(Store(take problem))),
-                Error(take problem) => Error(Remote(take problem)),
-            }
-        },
-    }
-    let db = match take opened { Ok(take db) => take db, Error(take problem) => return Error(Open(Store(take problem))) }
-    Ok((take db, take temporary))
-}
-
-fn managed_head[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
-    let ManagedHead(backing: take backing, options: take options, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema,
-        n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain,
-        head_to: take head_to, cut: take cut, triggering: take triggering, idle: idle, expected_store: expected_store) = take job
-    let persistent = persistent_backing(backing)
-    let (take opened, take temporary) = open_backing(take backing, options, tasks, clock, random)?
-    let mut db = take opened
-    if let Some(expected) = expected_store {
-        let actual = store.identity_words(db)
-        if expected != actual {
-            let _ = close_store(take db)
-            return Error(Open(StoreMismatch(expected, actual)))
-        }
-    }
-    if !head_advance(to, inbox, Recovered) { return head_closed(take db) }
-    let prepared = head_prepare(mut db, selection, persistent, place, on_migrate, schema, n_place, tasks)
-    let (reg, local, release, replay_identity) = match take prepared {
-        Ok(take values) => take values,
-        Error(take problem) => { let _ = close_store(take db); return Error(Open(take problem)) },
-    }
-    // A place directory reopens a disk store at this version (RUNNER-SPEC §13.3).
-    let (version, retain_from) = if persistent {
-        match activation_window(db) { Ok(found) => found, Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) } }
-    } else { (0u64, 0u64) }
-    let read: Bytes = if persistent {
-        match capture_release(db, version, launch_env().witness) {
-            Ok(take raw) => take raw,
-            Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
-        }
-    } else { list.new() }
-    if !head_advance(to, inbox, Activated(clone(release), version, store.identity_words(db), retain_from, take read)) { return head_closed(take db) }
-    let trigger_drive = match open_trigger_drive(db, local, reg, clock, tasks, channel.sender(head_to), n_place, take triggering) {
-        Ok(take drive) => take drive,
-        Error(take problem) => { let _ = close_store(take db); return Error(Open(Store(take problem))) },
-    }
-    let mail = match mailbox(PUBLISHER_INBOX) {
-        Ok(take mail) => take mail,
-        Error(cap) => { let _ = close_store(take db); return Error(Full(cap)) },
-    }
-    let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock, tasks: tasks, head_to: take head_to, n_place: n_place, cut: take cut, idle: idle)
-    let ended = run_head(take db, take reg, take replay_identity, take local, place, n_place, take inbox, take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
-    let _ = take temporary
-    match take ended {
-        Ok(due) => Ok(due),
-        Error(Store(Full(cap))) => Error(Full(store_capacity(cap))),
-        Error(take problem) => Error(Open(take problem)),
-    }
-}
-
-fn head_closed(take db: store.Db) -> Result[Option[u64], StartError] waits {
-    close_store(take db) ?=> Open
-    Ok(None)
 }
 
 pub type PrepareError: send = Open(OpenError) | Deploy(store.DeployError) | Identity

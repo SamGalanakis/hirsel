@@ -40,7 +40,7 @@ pub fn operate_bytes[G: send, H: shareable + inert + send, S: send, B: send](p: 
     add_place_bytes(tasks, OPERATE_OWN_BYTES)
 }
 
-fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64), StartError] waits {
+fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceConfig[G, H, S, B], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan]), StartError] waits {
     let overhead = operate_bytes(p) ?=> Full
     let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
     let limit = runtime.root_limit()
@@ -76,7 +76,7 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
             },
         }
         let mut plans: List[store.FollowerPlan] = list.with_capacity(1u64)
-        list.push(mut plans, take plan)
+        list.push(mut plans, clone(plan))
         let Some(service) = store.service_bytes(plans) else {
             return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
         }
@@ -89,9 +89,9 @@ fn place_store[G: send, H: shareable + inert + send, S: send, B: send](p: PlaceC
         let Some(peak) = peak_bytes else {
             return Error(Full(Capacity(requested: 18446744073709551615u64, available: share)))
         }
-        return Ok((take options, share, order.max(reserved_store, peak)))
+        return Ok((take options, share, order.max(reserved_store, peak), Some(take plan)))
     }
-    Ok((take options, share, reserved_store))
+    Ok((take options, share, reserved_store, None))
 }
 
 fn report_store_shortage(report: Option[Stderr], short: store.Shortage, cap: Capacity) waits {

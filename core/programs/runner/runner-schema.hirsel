@@ -15,6 +15,18 @@ fn open_place_schema[H: shareable + inert + send](mut db: store.Db, schema: Stat
 fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool,
     place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
     on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
+    head_prepare_registered(mut db, selection, persistent, place, on_migrate, schema, n_place, tasks, None)
+}
+
+type HeadRegistration[G: send, H: shareable + inert + send] {
+    registry: Registry[G, H],
+    description: Bytes,
+    record: ReleaseRecord
+}
+
+fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool,
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks, take pre_registered: Option[HeadRegistration[G, H]]) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
     if !store.is_disk(db) {
         let mut local_registry = match placed(place, n_place) { Ok(take registered) => take registered, Error(take problem) => return Error(Place(take problem)) }
         let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
@@ -65,8 +77,14 @@ fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selectio
             },
         },
     }
-    let mut reg = match placed(place, n_place) { Ok(take reg) => take reg, Error(take problem) => return Error(Place(take problem)) }
-    let (description, record) = prepare_activation(reg, n_place) ?=> Place
+    let (take reg, take description, take record) = match take pre_registered {
+        Some(HeadRegistration(registry: take reg, description: take description, record: take record)) => (take reg, take description, take record),
+        None => {
+            let reg = placed(place, n_place) ?=> Place
+            let (take description, take record) = prepare_activation(reg, n_place) ?=> Place
+            (take reg, take description, take record)
+        },
+    }
     if let Some(version) = selected {
         let old = option.unwrap(take current)
         let prior = activation_result(release_record(db, version))?

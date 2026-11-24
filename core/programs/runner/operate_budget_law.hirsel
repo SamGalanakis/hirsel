@@ -46,9 +46,13 @@ fn open_sized_place(take config: PlaceConfig[(), (), (), ()]) -> Result[(), Stri
 
 fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfig[(), (), (), ()] {
     let key = result.unwrap(secret.seal(clone(string.as_bytes("budget fixture")), "mac"))
+    capture_budget_config(c, r, tasks, n, "http://127.0.0.1:1", key)
+}
+
+fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: String, key: Secret) -> PlaceConfig[(), (), (), ()] {
     let bucket = BucketBacking(net: n,
-        place: std.object.Bucket(endpoint: "http://127.0.0.1:1", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path),
-        credentials: std.cred.from_secret("access", take key, ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64),
+        place: std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path),
+        credentials: std.cred.from_secret("access", secret.share(key), ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64),
         level: "bucket", op_ms: 30000u64)
     let mut config = budget_config(Bucket(take bucket), c, r, tasks, n)
     config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(65536u64),
@@ -57,7 +61,7 @@ fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfi
 }
 
 fn bucket_budget_at_limit(take config: PlaceConfig[(), (), (), ()]) -> Result[u64, StartError] waits {
-    let (_, share, total) = place_store(config, None)?
+    let (_, share, total, _) = place_store(config, None)?
     if share != 38270700u64 { fail("L60: Bucket share at the floor") }
     Ok(total)
 }
@@ -75,22 +79,88 @@ fn exercise_bucket_budget(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(
     }
 }
 
+fn budget_bucket_server(take input: (Listener, std.sim.s3.Loopback, Clock)) waits {
+    let (take listener, take bucket, clock) = take input
+    let mut serving = take listener
+    let _ = std.sim.s3.serve_loopback(mut serving, take bucket, clock)
+}
+
+fn seed_budget_bucket(take config: PlaceConfig[(), (), (), ()]) -> Result[store.StoreId, String] waits {
+    let (take options, _, _, _) = place_store(config, None) ?=> |problem| start_text(problem)
+    let PlaceConfig(backing: take backing, clock: clock, random: random, tasks: tasks, ..) = take config
+    let (take opened, _) = open_backing(take backing, options, tasks, clock, random) ?=> |problem| start_text(backing_start_error(take problem))
+    let mut db = take opened
+    let mut revision: Bytes = list.with_capacity(32u64)
+    list.fill(mut revision, 32u64, 1u8)
+    let description = Describe(digest: list.new(), target: "", n_place: 262144u64, revision: take revision, exported: list.new(), tables: list.new())
+    let raw = result.unwrap(encode_describe(description))
+    let binding = result.unwrap(identity_digest(description))
+    let codec: std.codec.Codec[ReleaseRecord] = std.codec.of()
+    let record = ReleaseRecord(release: list.new(), digest: list.new(), binding: clone(binding), n_place: 262144u64, prepared: list.new())
+    for activation in 1u64 .. 4u64 {
+        let declaration = result.unwrap(store.declare(db, Migrate))
+        let mut staged = result.unwrap(store.finish_migration(db, take declaration))
+        result.unwrap(store.stage_activation(mut staged, activation, None, raw, codec, record))
+        result.unwrap(store.install_bound_activation(mut db, take staged, activation, binding))
+    }
+    let id = store.identity(db)
+    result.unwrap(store.close(take db))
+    Ok(id)
+}
+
+fn refused_bucket_place(take config: PlaceConfig[(), (), (), ()]) -> Result[Ended, StartError] waits {
+    let (closing, stop): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let ended = operate(take config, take stop, result.unwrap(status_root()), None)
+    let _ = take closing
+    take ended
+}
+
+fn exercise_bucket_capture(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    let key = result.unwrap(secret.seal(clone(string.as_bytes("bucket fixture")), "kdf"))
+    let (take listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16))
+    let mut endpoint = string.from("http://127.0.0.1:")
+    string.push_u64(mut endpoint, int.widen(address.port))
+    let server = task.spawn(tasks, bytes 8388608u64,
+        (take listener, std.sim.s3.Loopback(bucket: "bucket", access_key: "access", aws_region: "us-east-1",
+            root: secret.share(key), exists_status: 412u16, max_body: 4194304u64), c), budget_bucket_server)
+    let id = seed_budget_bucket(capture_budget_config(c, r, tasks, n, endpoint, key))?
+    let mut stale = capture_budget_config(c, r, tasks, n, endpoint, key)
+    stale.selection = Current(2u64)
+    let refused = task.spawn(tasks, bytes 49616253u64, take stale, refused_bucket_place)
+    let response = task.join(take refused)
+    let _ = task.cancel_join(take server)
+    let Ok(Error(Open(NotCurrent(Active(3u64, description, capture_wire))))) = response else {
+        return Error("L60: Bucket start at the limit must report the current activation")
+    }
+    let codec: std.codec.Codec[PlaceRead] = std.codec.of()
+    let Ok(decoded) = std.codec.decode(codec, capture_wire) else { return Error("L60: Bucket refusal omitted its capture") }
+    let PlaceRead(claim: take claim, store_hi, store_lo, binding: take observed, n_place, ..) = take decoded
+    let Some((epoch, _)) = take claim else { return Error("L60: Bucket refusal omitted its claim") }
+    if epoch != 1u64 || store_hi != id.hi || store_lo != id.lo || list.len(observed) != 32u64 ||
+        n_place != Some(262144u64) {
+        return Error("L60: Bucket refusal did not read activation 3 under the original claim")
+    }
+    if let None = decode_description(description) { return Error("L60: Bucket refusal omitted the description") }
+    Ok(())
+}
+
 @test
 fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
     if runtime.root_limit() != 67108864u64 { return Error("L60: executable limit") }
     let memory = budget_config(Memory, c, r, tasks, n)
-    let (memory_sizes, share, _) = place_store(memory, None) ?=> |problem| start_text(problem)
+    let (memory_sizes, share, _, _) = place_store(memory, None) ?=> |problem| start_text(problem)
     // Head 3,407,872 B, serving 6,625,847 B, operate 262,144 B and main 1 MiB.
     if share != 55764425u64 || memory_sizes.resident_limit != 54715849u64 { return Error("L60: Memory share") }
     open_sized_place(take memory)?
     let disk = budget_config(Temp(d), c, r, tasks, n)
-    let (disk_sizes, disk_share, _) = place_store(disk, None) ?=> |problem| start_text(problem)
+    let (disk_sizes, disk_share, _, _) = place_store(disk, None) ?=> |problem| start_text(problem)
     if disk_share != 55764425u64 || disk_sizes.pack_bytes != 3485276u64 ||
         disk_sizes.checkpoint_bytes != 3485276u64 || disk_sizes.resident_limit != 12839321u64 {
         return Error("L60: Directory share")
     }
     open_sized_place(take disk)?
     exercise_bucket_budget(c, r, tasks, n)?
+    exercise_bucket_capture(c, r, tasks, n)?
     let low = budget_config(Memory, c, r, tasks, n)
     let child = task.spawn(tasks, bytes 12582912u64, take low, refused_budget)
     // The child has 1,238,473 B of share. Memory's keep and minimum require 2 MiB.

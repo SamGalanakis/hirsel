@@ -9,6 +9,7 @@ store = { major = 1, path = "../store" }
 
 [sources]
 "runner.hirsel" = "runner"
+"runner-managed-head.hirsel" = "runner"
 "runner-schema.hirsel" = "runner"
 "runner-describe.hirsel" = "runner"
 "runner-query-slots.hirsel" = "runner"
@@ -72,3 +73,6 @@ dirs = ["."]
 
 [tests.runs."runner@1/runner_calls/test_fixture_granted"]
 limit = 1342177280
+
+[tests.runs."runner@1/runner/operate_derived_budgets"]
+grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]

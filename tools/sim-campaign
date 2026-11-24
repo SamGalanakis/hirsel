@@ -54,6 +54,10 @@ def allocate_ranges(db, campaign, laws):
         status INTEGER NOT NULL, stdout TEXT NOT NULL, stderr TEXT NOT NULL,
         PRIMARY KEY (campaign, seed)
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS seed_failure_classes (
+        campaign TEXT, seed INTEGER, failure_class TEXT NOT NULL,
+        PRIMARY KEY (campaign, seed)
+    )""")
     db.execute("""CREATE TABLE IF NOT EXISTS law_trace_counts (
         campaign TEXT, shard INTEGER, distinct_hashes INTEGER NOT NULL,
         minimum INTEGER NOT NULL, failed INTEGER NOT NULL,
@@ -80,12 +84,26 @@ def outcome(ran):
             "stderr": ran.stderr.decode(errors="replace")}
 
 
+# A law's message names its class; the exit contract stays nonzero for any red.
+# "bounded progress:" is the VP2 post-heal convergence epilogue
+# (core/programs/store/follower_laws.hirsel).
+FAILURE_CLASSES = (("bounded progress:", "bounded_progress"),)
+
+
+def failure_class(row):
+    if row["status"] == 0:
+        return None
+    text = row["stdout"] + row["stderr"]
+    return next((name for marker, name in FAILURE_CLASSES if marker in text), None)
+
+
 def run_seed(executable, seed, diagnose_red=False):
     with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as directory:
         inputs = {"cwd": directory, "stdin": subprocess.DEVNULL,
                   "env": {"HIRSEL_TEST_SIM_SEED": str(seed)}, "capture_output": True}
         ran = subprocess.run([executable], **inputs)
         row = {"seed": seed, **outcome(ran)}
+        row["failure_class"] = failure_class(row)
         if diagnose_red and ran.returncode != 0:
             # Recreate the empty directory at the same path the first run saw.
             shutil.rmtree(directory)
@@ -108,7 +126,8 @@ def seed_zero_failed(db, campaign, law, results):
     verdict = law.seed_zero if law.seed_zero is not None else run_seed(law.binary, 0)
     if verdict["status"] == 0:
         return False
-    row = {**verdict, "law": law.name, "seed": 0, "kind": "deterministic_red"}
+    row = {**verdict, "law": law.name, "seed": 0, "kind": "deterministic_red",
+           "failure_class": failure_class(verdict)}
     line = json.dumps(row)
     with db:
         db.execute("""CREATE TABLE IF NOT EXISTS deterministic_reds (
@@ -125,6 +144,7 @@ def seed_zero_failed(db, campaign, law, results):
 def record(db, campaign, ranges, output, results, executable, laws=None):
     observed = {}
     replays = []
+    classes = []
     traces = defaultdict(set)
     trace_reds = []
     malformed = False
@@ -142,6 +162,9 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
                 if status == 0 or type(changed) is not bool or type(replay["status"]) is not int:
                     raise ValueError("unexpected diagnostic replay")
                 replays.append((campaign, seed, changed, replay["status"], replay["stdout"], replay["stderr"]))
+            row["failure_class"] = failure_class(row)
+            if row["failure_class"] is not None:
+                classes.append((campaign, seed, row["failure_class"]))
         except (ValueError, KeyError, TypeError):
             malformed = True
             print(line, end="", file=sys.stderr)
@@ -159,6 +182,7 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
         observed[seed] = status
     with db:
         db.executemany("INSERT INTO seed_replays VALUES (?, ?, ?, ?, ?, ?)", replays)
+        db.executemany("INSERT INTO seed_failure_classes VALUES (?, ?, ?)", classes)
         for shard, (start, stop) in enumerate(ranges):
             statuses = [observed[seed] for seed in range(start, stop) if seed in observed]
             db.execute("UPDATE shards SET executed = ?, failed = ? WHERE campaign = ? AND shard = ?",

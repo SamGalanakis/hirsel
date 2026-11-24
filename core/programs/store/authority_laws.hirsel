@@ -141,7 +141,9 @@ fn object_branch_position_law(r: Random, tasks: Tasks, sim: BucketSim) -> Result
     let outcome = run_on(mut writer, line, None, (copy_env(rows), copy_env(value)), fn(mut tx, envs) -> Result[(), Error] {
         put(mut tx, envs.0, 7, envs.1)
     })?
-    let Committed(done) = outcome else { fail("L57: the branch write was not committed") }
+    let Committed(done) = outcome else {
+        fail("L57: the branch write was not committed")
+    }
     durable(mut writer, done.ticket)?
     for _ in 0u64 .. 3 {
         bucket_law_checkpoint(mut writer)?
@@ -182,39 +184,44 @@ fn bucket_test_m2_branch_position(c: Clock, r: Random, tasks: Tasks, seed_grant:
 fn sim_law_declared(first: String, other: Option[String]) -> SimLevels {
     let mut weak: List[String] = list.with_capacity(2)
     list.push(mut weak, string.from(first))
-    if let Some(next_name) = other { list.push(mut weak, string.from(next_name)) }
+    if let Some(next_name) = other {
+        list.push(mut weak, string.from(next_name))
+    }
     SimLevels(weak: take weak, strongest: "durable")
 }
 
-fn sim_law_open(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, declare_levels: SimLevels,
-    take sync: LevelSync, create: bool) -> Result[Db, Error] waits {
+fn sim_law_open(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, declare_levels: SimLevels, take sync: LevelSync, create: bool) -> Result[Db, Error] waits {
     let client = bucket_law_client_with(sim, tasks, "s3.test", seed, true)?
-    let opened = open_authority(tasks, sim_authority(take client, declare_levels, take sync, BUCKET_LAW_OP_MS),
-        sim.time, r, bucket_order_options(create))
+    let opened = open_authority(tasks, sim_authority(take client, declare_levels, take sync, BUCKET_LAW_OP_MS), sim.time, r, bucket_order_options(create))
     Ok(opened ?=> |Refusal(error: take problem, ..)| take problem)
 }
 
-fn sim_law_follower(mut writer: Db, wanted: Position, receipt: Ticket, tasks: Tasks, sim: BucketSim,
-    mut world: LevelWorld) -> Result[(), Error] waits {
+fn sim_law_follower(mut writer: Db, wanted: Position, receipt: Ticket, tasks: Tasks, sim: BucketSim, mut world: LevelWorld) -> Result[(), Error] waits {
     let opts = bucket_order_options(false)
     let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), opts)
     let service = follower_law_service(tasks, plan, 1)?
     let client = bucket_law_client_with(sim, tasks, "s3.test", 605, true)?
     let no_declared_levels = SimLevels(weak: list.new(), strongest: "reader")
     let mut ids = followers()
-    let mut watch = follower(mut ids, follower_slot(follower_owner(service)?, plan)?,
-        sim_authority(take client, no_declared_levels, level_sync(mut world)?, BUCKET_LAW_OP_MS), sim.time, Some(wanted.store))?
+    let mut watch = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, sim_authority(take client, no_declared_levels, level_sync(mut world)?, BUCKET_LAW_OP_MS), sim.time, Some(wanted.store))?
     let due = clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
-    if version(fresh(mut watch, due)?) != 6 { fail("L56-W: fresh saw the weak prefix") }
+    if version(fresh(mut watch, due)?) != 6 {
+        fail("L56-W: fresh saw the weak prefix")
+    }
     let short = clock.deadline_after_ms(host.mono_ns(sim.time), 10)
     match at_least(mut watch, wanted, short) {
         Error(Behind(visible)) if same(visible.store, wanted.store) && visible.branch == 0 && visible.version == 6 => (),
         _ => fail("L56-W: the first at_least did not report Behind at version 6"),
     }
     sim_law_get_mark(tasks, sim)?
+    // The GET of mark-1 releases the held head PUT. Once `durable` returns it
+    // is applied and no hold or fault is left: the heal of the VP2 epilogue.
     durable(mut writer, receipt)?
-    let advanced = at_least(mut watch, wanted, due)?
-    if version(advanced) != 7 { fail("L56-W: at_least missed the applied prefix") }
+    let mut marker = bucket_law_client_with(sim, tasks, "s3.test", 606, true)?
+    let advanced = follower_converges(mut watch, mut marker, sim.time, wanted, "L56-W watch")
+    if version(advanced) != 7 {
+        fail("L56-W: at_least missed the applied prefix")
+    }
     let _ = take watch
     close_follower_service(take service)
 }
@@ -223,15 +230,18 @@ fn sim_law_get_mark(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let mut inspector = bucket_law_client_with(sim, tasks, "s3.test", 604, true)?
     let due = std.object.deadline_after_ms(inspector, BUCKET_LAW_OP_MS)
     let (observed, _) = std.object.fetch(mut inspector, "mark-1", list.new(), due)
-    if let Error(NotFound) = observed { return Ok(()) }
+    if let Error(NotFound) = observed {
+        return Ok(())
+    }
     fail("L55-1: the independent GET did not reach the simulator")
 }
 
-fn sim_law_reopen_refusal(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelWorld,
-    declare_levels: SimLevels, expected: String) -> Result[(), Error] waits {
+fn sim_law_reopen_refusal(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelWorld, declare_levels: SimLevels, expected: String) -> Result[(), Error] waits {
     let opened = sim_law_open(tasks, r, sim, 603, declare_levels, level_sync(mut world)?, false)
     if let Error(Declared(rejected)) = opened {
-        if rejected == expected { return Ok(()) }
+        if rejected == expected {
+            return Ok(())
+        }
     }
     fail("L55-2: the open did not name the first differing recorded level")
 }
@@ -262,17 +272,22 @@ fn sim_law_bad_header(tasks: Tasks, r: Random, sim: BucketSim, mut world: LevelW
     let old = history_fetch(mut client, "head", mut wire, due)?
     // AUTHORITY begins with style and four length-prefixed strings.
     let mut cursor = 241u64
-    for _ in 0u64 .. 4 { cursor += 2 + read_le(wire, cursor, 2) }
+    for _ in 0u64 .. 4 {
+        cursor += 2 + read_le(wire, cursor, 2)
+    }
     cursor += 1
     cursor += 2 + read_le(wire, cursor, 2)
     wire[cursor] = 1
-    let header = DiskContext(store: StoreId(hi: read_le(wire, 32, 8), lo: read_le(wire, 40, 8)),
-        role: 7, seq: read_le(wire, 56, 8))
+    let header = DiskContext(store: StoreId(hi: read_le(wire, 32, 8), lo: read_le(wire, 40, 8)), role: 7, seq: read_le(wire, 56, 8))
     capacity(history_seal(mut wire, header, 224, 0x00D0))?
     let (written, _) = std.object.store_if(mut client, "head", Match(old.etag), take wire, due)
-    if let Ok(Applied(_)) = written {} else { fail("L55-2: the fixture did not write its malformed declaration") }
+    if let Ok(Applied(_)) = written {} else {
+        fail("L55-2: the fixture did not write its malformed declaration")
+    }
     let opened = sim_law_open(tasks, r, sim, 607, sim_law_declared("volatile", None), level_sync(mut world)?, false)
-    if let Error(Corrupt(Fault(why: Malformed, ..))) = opened { return Ok(()) }
+    if let Error(Corrupt(Fault(why: Malformed, ..))) = opened {
+        return Ok(())
+    }
     fail("L55-2: a recorded weak level claimed host-crash survival")
 }
 
@@ -318,18 +333,27 @@ fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_las
     }
     let _ = take writer
     let later = sim_law_open(tasks, r, sim, 602, declare_levels, level_sync(mut world)?, false)?
-    if version(snapshot(later)) != recovered_version { fail("L55-1: B recovered the wrong prefix") }
+    if version(snapshot(later)) != recovered_version {
+        fail("L55-1: B recovered the wrong prefix")
+    }
     close(take later)?
-    if !apply_last { sim_law_declarations(tasks, r, sim, mut world)? }
+    if !apply_last {
+        sim_law_declarations(tasks, r, sim, mut world)?
+    }
     let events = level_log(take world)?
     let report = bucket_law_report(take sim)
     if apply_last {
         bucket_law_head_history(report)?
+        follower_heal_reads(report, "L56-W watch")
     } else {
         let invalid_head = view report.head_writes[list.len(report.head_writes) - 1]
         let latest_claim = view report.head_writes[list.len(report.head_writes) - 2]
-        let Some(predecessor) = invalid_head.if_match else { fail("L55-2: malformed fixture lost its precondition") }
-        if predecessor != latest_claim.etag { fail("L55-2: malformed fixture skipped its predecessor") }
+        let Some(predecessor) = invalid_head.if_match else {
+            fail("L55-2: malformed fixture lost its precondition")
+        }
+        if predecessor != latest_claim.etag {
+            fail("L55-2: malformed fixture skipped its predecessor")
+        }
         let mut after_claim = false
         let mut after_malformed = false
         let mut refused_gets = 0u64
@@ -340,30 +364,52 @@ fn sim_law_weak_ahead(tasks: Tasks, real: Clock, r: Random, seed: u64, apply_las
             } else if request.request == invalid_head.request {
                 after_malformed = true
             } else if after_claim {
-                if request.method != "GET" || request.key != "head" { fail("L55-2: a refusal made another request") }
-                if after_malformed { last_gets += 1 } else { refused_gets += 1 }
+                if request.method != "GET" || request.key != "head" {
+                    fail("L55-2: a refusal made another request")
+                }
+                if after_malformed {
+                    last_gets += 1
+                } else {
+                    refused_gets += 1
+                }
             }
         }
-        if refused_gets != 3 || last_gets != 1 { fail("L55-2: refusal requests did not stop after their head GET") }
+        if refused_gets != 3 || last_gets != 1 {
+            fail("L55-2: refusal requests did not stop after their head GET")
+        }
     }
     let mut synced_last = false
     for event in events {
         match event.kind {
-            Synced(9) if event.epoch == 1 && event.level == "volatile" => { synced_last = true },
+            Synced(9) if event.epoch == 1 && event.level == "volatile" => {
+                synced_last = true
+            },
             Mark(1) if !synced_last => fail("L55-1: weak durability returned before Synced(9)"),
             _ => (),
         }
     }
-    if !synced_last { fail("L55-1: the world never synced position 9") }
+    if !synced_last {
+        fail("L55-1: the world never synced position 9")
+    }
     let mut newest = 0u64
     let mut successor_writes = 0u64
     for item in report.head_writes {
         let epoch = read_le(item.data, 88, 8)
-        if item.data[29] != 2 { fail("L55-1: sim head did not record authority 2") }
-        if epoch == 1 { newest = read_le(item.data, 120, 8) }
-        if epoch == 2 { successor_writes += 1 }
+        if item.data[29] != 2 {
+            fail("L55-1: sim head did not record authority 2")
+        }
+        if epoch == 1 {
+            newest = read_le(item.data, 120, 8)
+        }
+        if epoch == 2 {
+            successor_writes += 1
+        }
     }
-    if newest != recovered_version + 2 || successor_writes != (if apply_last { 2u64 } else { 3u64 }) {
+    if newest != recovered_version + 2 || successor_writes != (if apply_last {
+        2u64
+    } else {
+        3u64
+    }) {
         fail("L55: the head history contains an extra or missing write")
     }
     Ok(())
@@ -374,7 +420,9 @@ fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_
     list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "head", from: 3, count: 1, until: At(20000000), then: Apply))
     let sim = bucket_law_sim_holds(tasks, real, seed, None, list.new(), take holds, std.sim.world.plan(seed))
     let mut weak_holds: List[LevelHold] = list.with_capacity(2)
-    if hold_first { list.push(mut weak_holds, LevelHold(level: "a", until: Never)) }
+    if hold_first {
+        list.push(mut weak_holds, LevelHold(level: "a", until: Never))
+    }
     list.push(mut weak_holds, LevelHold(level: "b", until: At(10000000)))
     let mut world = level_world(tasks, sim.time, take weak_holds, 1048576)?
     let declare_levels = sim_law_declared("a", Some("b"))
@@ -395,11 +443,15 @@ fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_
     sim_law_reopen_refusal(tasks, r, sim, mut world, sim_law_declared("b", Some("a")), "a")?
     let events = level_log(take world)?
     let report = bucket_law_finish(take sim)
-    if list.len(report.head_writes) != 3 { fail("L55-3: a weak barrier or refusal moved the register") }
+    if list.len(report.head_writes) != 3 {
+        fail("L55-3: a weak barrier or refusal moved the register")
+    }
     let request_id = report.head_writes[2].request
     let mut head_at: Option[u64] = None
     for item in report.requests {
-        if item.request == request_id && item.applied { head_at = Some(item.at_ns) }
+        if item.request == request_id && item.applied {
+            head_at = Some(item.at_ns)
+        }
     }
     let put_at = option.unwrap(head_at)
     let mut first_sync: Option[u64] = None
@@ -409,11 +461,21 @@ fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_
     let mut third_mark: Option[u64] = None
     for event in events {
         match event.kind {
-            Synced(3) if event.level == "a" => { first_sync = Some(event.at_ns) },
-            Synced(3) if event.level == "b" => { second_sync = Some(event.at_ns) },
-            Mark(1) => { first_mark = Some(event.at_ns) },
-            Mark(2) => { second_mark = Some(event.at_ns) },
-            Mark(3) => { third_mark = Some(event.at_ns) },
+            Synced(3) if event.level == "a" => {
+                first_sync = Some(event.at_ns)
+            },
+            Synced(3) if event.level == "b" => {
+                second_sync = Some(event.at_ns)
+            },
+            Mark(1) => {
+                first_mark = Some(event.at_ns)
+            },
+            Mark(2) => {
+                second_mark = Some(event.at_ns)
+            },
+            Mark(3) => {
+                third_mark = Some(event.at_ns)
+            },
             _ => (),
         }
     }
@@ -422,10 +484,14 @@ fn sim_law_ordered_levels(tasks: Tasks, real: Clock, r: Random, seed: u64, hold_
     let two_at = option.unwrap(second_mark)
     let three_at = option.unwrap(third_mark)
     if hold_first {
-        if first_sync != None || b_at > one_at { fail("L55-3: level a ignored the stronger frontier") }
+        if first_sync != None || b_at > one_at {
+            fail("L55-3: level a ignored the stronger frontier")
+        }
     } else {
         let a_at = option.unwrap(first_sync)
-        if a_at >= one_at || one_at >= b_at { fail("L55-3: level a waited for the stronger barrier") }
+        if a_at >= one_at || one_at >= b_at {
+            fail("L55-3: level a waited for the stronger barrier")
+        }
     }
     if b_at > two_at || two_at >= put_at || put_at >= three_at {
         fail("L55-3: waiters woke out of barrier order")

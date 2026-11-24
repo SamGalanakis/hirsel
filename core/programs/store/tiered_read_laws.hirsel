@@ -378,6 +378,49 @@ fn test_l62_pager_reads_replayed_points(d: Dir, tasks: Tasks) -> Result[(), Erro
     checked
 }
 
+fn l62_check_batch_error_order(source: TieredPageSource, owner: StoreId, base: std.page.PagePtr) -> Result[(), Error] waits {
+    let tree = l62_replay_read_tree(base)?
+    let root = TieredPinRoot(domain: 1, branch: 0, generation: 1, root_stamp: tree_stamp(tree))
+    let key = log_key(9, 1)?
+    // Two 54-byte branch entries, an 8-byte separator, a 24-byte page
+    // header and two 2-byte slots. The 16-byte frame head makes 160.
+    let short = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 160))
+    let Error(Full(Cache(problem))) = read_tiered_point(source, short, root, tree, key, 2) else {
+        fail("L62: a batch tail error escaped the first-touch limit")
+    }
+    if problem.requested != 216 || problem.available != 160 {
+        fail("L62: the touch counts the missing child's 40 bytes and frame head")
+    }
+    let enough = arc.new(TieredReaderGrant(store: owner, opened: 1, pin_bytes: 216))
+    let Error(Corrupt(Fault(why: Dangling(48), ..))) = read_tiered_point(source, enough, root, tree, key, 2) else {
+        fail("L62: a failing edge that passes admission must report its fault")
+    }
+    Ok(())
+}
+
+@test
+fn test_l62_batch_error_follows_touch(d: Dir, tasks: Tasks) -> Result[(), Error] waits {
+    let fixtures = disk_test_directory(d)
+    let owner = StoreId(hi: 3, lo: 4)
+    let missing = std.page.PagePtr(pack: 7, offset: 72, len: 40, checksum: 11, stamp: 48)
+    let sibling = std.page.PagePtr(pack: 8, offset: 72, len: 40, checksum: 12, stamp: 49)
+    let mut branches: List[std.page.Entry] = list.with_capacity(2)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: missing, rows: 1, charge: 86))))
+    list.push(mut branches, std.page.Entry(key: key_word(42), cell: Child(std.page.Branch(child: sibling, rows: 1, charge: 86))))
+    let image = page_result(std.page.encode(branches, 1, 50, Collection))?
+    let base = l68_write_page_pack(fixtures, owner, 9, 50, std.page.payload(image))?
+    let inventory = PagePack(class: 3, frames: 1, live: 144, payload_bytes: 260, index: 232)
+    let mut ids = 0u64
+    let empty: std.omap.OMap[u64, TieredPagerPack] = std.omap.new()
+    let (take packs, _) = std.omap.insert(mut ids, empty, 9u64, TieredPagerPack(inventory: inventory, object: None))
+    let (take pager, take worker) = start_tiered_pager(tasks, owner, 1, PagerDirectory(fixtures), 4096, 1048576, 4)
+    let source = TieredPageSource(pager: take pager, packs: take packs, next_stamp: 51, deadline: 0)
+    let checked = l62_check_batch_error_order(source, owner, base)
+    let _ = take source
+    let _ = result.unwrap(task.join(take worker))
+    checked
+}
+
 @test
 fn test_l68_indexed_tiered_pack() -> Result[(), Error] {
     let owner = StoreId(hi: 3, lo: 4)

@@ -24,6 +24,7 @@ fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant
     }
     let key = list.slice(logical, 4, list.len(logical))
     let mut pins = empty_tiered_pins(root, root_grant.pin_bytes)
+    let mut pending: Option[(TieredTarget, Error)] = None
     loop {
         let (take attempt, take observed) = disk_allocation(scoped fn() -> Result[(TieredTouchSet, Result[Option[Arc[Bytes]], Error]), Error] {
             let mut attempt_state = capacity(tiered_touch_set(root_grant.pin_bytes, touch_slots))?
@@ -32,10 +33,21 @@ fn read_tiered_point(source: TieredPageSource, root_grant: Arc[TieredReaderGrant
         })?
         match attempt.stopped {
             Some(AttemptMiss(target)) => {
+                let failed_here = match pending {
+                    Some((failed, _)) => tiered_frame_id(failed) == tiered_frame_id(target),
+                    None => false,
+                }
+                if failed_here {
+                    let (_, take problem) = option.unwrap(replace(mut pending, None))
+                    return Error(take problem)
+                }
                 let demand = TieredPointDemand(target: clone(target), key: copied(key)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: Some(arc.share(root_grant)))
-                let delivered = tiered_point_delivery(source.pager, take demand)?
-                for frame in delivered.frames {
+                let TieredPointDelivery(frames: take frames, failure: take failure, ..) = tiered_point_delivery(source.pager, take demand)?
+                for frame in frames {
                     let _ = tiered_install_pin(mut pins, root, attempt.stamps, frame)?
+                }
+                if let Some(take refused) = take failure {
+                    pending = Some(take refused)
                 }
             },
             Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),

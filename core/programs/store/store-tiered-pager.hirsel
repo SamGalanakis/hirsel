@@ -34,6 +34,7 @@ type TieredPointDemand: send {
 
 type TieredPointDelivery: send {
     frames: List[Arc[TieredFrame]],
+    failure: Option[(TieredTarget, Error)],
     grant: Option[Arc[TieredReaderGrant]]
 }
 
@@ -120,22 +121,40 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
     let mut frames: List[Arc[TieredFrame]] = list.new()
     let mut edge: TieredTarget = clone(demand.target)
     let mut expected_level: Option[u8] = None
+    let mut failure: Option[(TieredTarget, Error)] = None
     loop {
-        let facts = tiered_frame_id(edge)
-        let Some(pack) = std.omap.get(demand.packs, facts.pack) else {
-            return Error(disk_fault(paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp)))
+        let frame = match tiered_pager_point_frame(mut input, mut private_cache, owner, demand, edge) {
+            Ok(take found) => take found,
+            Error(take problem) => {
+                failure = Some((take edge, take problem))
+                break
+            },
         }
-        let target = TieredPagerTarget(edge: clone(edge), direction: TieredPoint, inventory: pack.inventory, object: pack.object, next_stamp: demand.next_stamp, deadline: demand.deadline)
-        let frame = tiered_pager_frame(mut input, mut private_cache, owner, target)?
-        let following = tiered_point_continuation(frame, demand.key, expected_level)?
+        let following = tiered_point_continuation(frame, demand.key, expected_level)
         capacity(list.try_reserve(mut frames, 1))?
         list.push(mut frames, take frame)
-        let Some((take child, height)) = take following else {
-            return Ok(TieredPointDelivery(frames: take frames, grant: clone(demand.grant)))
+        match take following {
+            Ok(Some((take child, height))) => {
+                edge = take child
+                expected_level = Some(height)
+            },
+            Ok(None) => break,
+            Error(take problem) => {
+                failure = Some((take edge, take problem))
+                break
+            },
         }
-        edge = take child
-        expected_level = Some(height)
     }
+    Ok(TieredPointDelivery(frames: take frames, failure: take failure, grant: clone(demand.grant)))
+}
+
+fn tiered_pager_point_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPointDemand, edge: TieredTarget) -> Result[Arc[TieredFrame], Error] waits {
+    let facts = tiered_frame_id(edge)
+    let Some(pack) = std.omap.get(demand.packs, facts.pack) else {
+        return Error(disk_fault(paged_pack_path(facts.pack)?, facts.offset, Dangling(facts.stamp)))
+    }
+    let target = TieredPagerTarget(edge: clone(edge), direction: TieredPoint, inventory: pack.inventory, object: pack.object, next_stamp: demand.next_stamp, deadline: demand.deadline)
+    tiered_pager_frame(mut input, mut private_cache, owner, target)
 }
 
 fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCache, owner: StoreId, demand: TieredPagerTarget) -> Result[Arc[TieredFrame], Error] waits {

@@ -3,13 +3,18 @@ fn fold_cold_path(source: TieredPageSource, base: std.page.PagePtr, key: Bytes) 
         return Ok(list.new())
     }
     let demand = TieredPointDemand(target: TieredPage(base), key: copied(key)?, packs: std.omap.snapshot(source.packs), next_stamp: source.next_stamp, deadline: source.deadline, grant: None)
-    match tiered_point_delivery(source.pager, take demand) {
+    let fetched: Result[List[Arc[TieredFrame]], Error] = match tiered_point_delivery(source.pager, take demand) {
+        Ok(TieredPointDelivery(failure: Some((_, take problem)), ..)) => Error(take problem),
+        Ok(TieredPointDelivery(frames: take frames, ..)) => Ok(take frames),
+        Error(take problem) => Error(take problem),
+    }
+    match take fetched {
         Error(Corrupt(take fault)) => {
             let mut malformed_fault = take fault
             malformed_fault.why = Malformed
             Error(Corrupt(take malformed_fault))
         },
-        Ok(TieredPointDelivery(frames: take frames, ..)) => Ok(take frames),
+        Ok(take frames) => Ok(take frames),
         Error(take problem) => Error(take problem),
     }
 }

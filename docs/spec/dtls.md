@@ -346,8 +346,9 @@ it again. The endpoint keeps the transcript bytes (CertificateVerify signs them 
 `handshake_failure`.
 
 **Fragmentation.** A handshake message longer than fits one datagram is split into fragments
-(RFC 6347 §4.2.3) that each fit, with the record header and, in epoch 1, the 8-byte explicit
-nonce and 16-byte tag counted. Several whole records go into one datagram while they fit
+(RFC 6347 §4.2.3) that each fit, with the record header and, in epoch 1, the 16-byte tag
+counted, and under the AES-GCM suites the 8-byte explicit nonce too (TLS-8's DTLS 1.2
+rows; ChaCha20-Poly1305 has none). Several whole records go into one datagram while they fit
 `mtu`. On receipt each message is reassembled by `message_seq` from fragments in any order,
 overlapping or duplicated. A fragment whose `length` differs from an earlier fragment of
 the same message, whose range runs past `length`, or whose `length` exceeds `max_message`
@@ -619,9 +620,12 @@ pub fn tag_room(p: schedule.SrtpProfile) -> u64
 
 `session` takes a schedule holding both directions (from `take_srtp`); `session_pair` takes
 a `send` import and a `receive` import of the same profile. A schedule of the wrong
-direction or profile is `Direction`. The send and receive keys are always different: under
-DTLS-SRTP they are the client's and the server's halves of the exporter, and under imports
-they are two separately issued secrets. Nothing in a `Session` lets a received packet's
+direction or profile is `Direction`. The send and receive keys differ. Under DTLS-SRTP they
+always do: they are the client's and the server's halves of the exporter. Under imports they
+are two separately issued secrets, and that they differ is the caller's obligation: two
+independently designated secrets can hold the same bytes, and `session_pair` does not
+compare them, because an equality probe on key material would be a key oracle. Nothing in a
+`Session` lets a received packet's
 context serve sending, or the reverse.
 
 ### SRTP-3: Streams, ROC and sending

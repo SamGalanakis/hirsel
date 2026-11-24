@@ -73,7 +73,7 @@ where this package must use them in a particular way.
 | Synchronously stops ingress and egress, cancels queued RTX, invalidates DTLS and ICE | RTC-7 steps 1 to 5, by session-generation tags on every queue (W14, W15) |
 | Ack only once nothing more can be forwarded for the revoked epoch | RTC-7 acknowledgement: after every unit has applied the fence and every writer has handed off or cancelled its work, with both endpoints rechecked before any later send or retry (W14) |
 | TURN over TLS, or ICE-TCP, for strict firewalls | TURN over a stream with UDP relays, [turn.md](turn.md) TURN-2; ICE-TCP is withdrawn (S8, W17) |
-| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the roster incarnation, revision and snapshot (runner slice R1), the Hirsel room client (F1) and the SDK room API (F2) |
+| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the roster incarnation, revision and snapshot (runner slice R1), the Hirsel room client (F1) and the incarnation and revision in the SDK's room API (F2) |
 | Idle lease (contract §4) | not this package's: hirsel4-rooms-2301 reports it. The service holds a room membership for each room it routes, so it is affected only if that membership keeps a Place alive |
 
 ## Session shape
@@ -597,7 +597,7 @@ datagram of that batch**, so a fence that arrived while the unit waited is in fo
 every datagram the wait returned. It runs each datagram through its session (RTC-3), routes
 each `Media` and `Repair` (below), drives `poll` for sessions whose deadline has passed, and
 ends with the send step: it drops every entry of `out` and of the uncommitted suffix whose
-tag names a fenced or suspended generation, then calls `udp_send`. A partial send (NET-16:
+tag names a fenced generation, or a suspended room with a `src`, then calls `udp_send`. A partial send (NET-16:
 `Ok(k)` with `k` below the count) keeps entries `k` onward as the **uncommitted suffix**,
 which the next turn's send step rechecks against the fences before it retries it. It
 appends signaling and dynacast output to `events`, which the adapter sends (RTC-8). It
@@ -879,7 +879,7 @@ the unit does each of these before it routes any datagram or media message:
    answer, and their DTLS and SRTP state is erased, so nothing they hold can be unprotected.
 2. **Every queue, by tag.** Every entry whose `Tag` (RTC-3) has a fenced `src` or a fenced
    `dst` is removed: in `out`, in the uncommitted suffix of a partial `udp_send`, in every
-   pacer (`Pacer.remove(stream)` with the handed-back entries discarded), and among the `RepairAsk` and `RepairReply` messages it holds. This covers
+   pacer (`Pacer.remove(stream)` for each removed down-track; for a down-track that stays, each entry its pacer hands out is checked against the fences before it is sealed, and a fenced one is dropped), and among the `RepairAsk` and `RepairReply` messages it holds. This covers
    media, RTX repair (late-packet RTX and NACK answers), and RTCP addressed to a fenced
    session.
 3. **Routing state.** Every down-track of their publications, and every down-track they
@@ -920,8 +920,8 @@ new SRTP schedule.
 
 **Suspend.** `suspend(r, room)` uses the same machinery for a whole room without revoking
 anyone. Every unit, at its fence point, stops routing media and repair for every session of
-the room, and removes every queued entry whose tag names the room in step 2's queues and
-messages. Ingress stays up, so ICE consent and DTLS keep running and RTCP receiver reports
+the room, and removes every queued entry whose tag names the room and has a `src`, in step 2's
+queues and messages. Entries with no `src` (STUN, DTLS, RTCP) stay. Ingress stays up, so ICE consent and DTLS keep running and RTCP receiver reports
 continue. The control unit returns when every unit has acknowledged it, under the same rule
 as a revoke. `resume(r, room)` lifts it the same way. A `join`, `subscribe` or `set_target`
 on a suspended room is `Suspended`. RTC-8 uses this for signaling loss.
@@ -947,7 +947,7 @@ generic over them:
 ```hirsel unbuilt
 pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, Target) | Target(u64, Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(Inline[u64, 8], u8) | Fenced(u64, u64) | Refused(u32)
 pub type Incarnation = Incarnation(Inline[u8, 16])
-pub type RoomIn[M] = Part(Incarnation, u64, bool) | Joined(u32) | Left(u32) | Message(u32, M) | Lost
+pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
 pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
 pub type Embed[M] = Embed(wrap: own[send] fn(Signal) -> M, unwrap: own[send] fn(M) -> Option[Signal], publish: own[send] fn(u32) -> bool)
 
@@ -963,8 +963,9 @@ answers whether a peer may publish, and the adapter passes it to `join`. The app
 decides it from its own state (for example the peer's `S`), and the router never reads `S`.
 
 **The roster the adapter reads.** Each room Part the relay sends begins with a head,
-`Part(incarnation, revision, snapshot)`, followed by that Part's `Joined`, `Left` and
-`Message` entries. These are runner slice R1's fields (below):
+`Part(incarnation, revision, complete, snapshot)`, followed by that Part's `Joined`, `Left` and
+`Message` entries. `complete` is the relay's existing flag on a membership's first Part.
+`PartEnd` follows a Part's last entry. These are runner slice R1's fields (below):
 
 - the **incarnation** names one life of the room's roster. It is 16 random bytes, drawn by
   the relay each time it creates the roster, and again before the first admission after
@@ -1003,9 +1004,16 @@ decides it from its own state (for example the peer's `S`), and the router never
   for the room. The call returns when every unit has acknowledged it. The service cannot see
   a kick while it cannot see the roster. Ingress stays up, so ICE consent and DTLS survive a
   short gap.
-- **Resuming from a proven roster.** After `Lost`, the adapter applies `Joined` and `Left`
-  entries to a scratch roster and resumes only at a Part with `snapshot` set. It then
-  compares the snapshot with what it knew before the gap:
+- **Resuming from a proven roster.** After `Lost`, the adapter builds a scratch roster. A Part
+  with `complete` set starts a new roster image: the scratch roster is emptied there, because
+  that image carries no `Left` for a peer that went during the gap, so absence from it is the
+  only sign. With no `complete` Part the service's membership continued and the relay's diffs
+  are exact, so the scratch roster starts as the pre-gap roster. A Part with `complete` set,
+  or with an incarnation other than the adapter's, that arrives with no `Lost` before it is
+  treated as `Lost` first. A `Message` taken while the room is suspended is answered
+  `Refused` to its stamped sender and applied to nothing. The adapter resumes only at the
+  `PartEnd` of a Part whose head has `snapshot` set, after every entry of that Part is
+  applied. It then compares the snapshot with what it knew before the gap:
   - a snapshot whose incarnation equals the pre-gap incarnation and whose revision is below
     the last revision the adapter applied is **stale**. It is discarded, and the room stays
     suspended until a current snapshot arrives;
@@ -1014,13 +1022,13 @@ decides it from its own state (for example the peer's `S`), and the router never
     from it is revoked and `Fenced` is sent;
   - if the incarnation differs, the relay restarted or the room emptied during the gap, and
     no pre-gap admission's continuity can be proved. Every pre-gap admission is revoked, and
-    each present peer must join afresh with a new offer. The same holds when the Part head is
-    absent, so the adapter fails closed against a relay that predates R1;
+    each present peer must join afresh with a new offer. The same holds when an entry
+    arrives with no `Part` head since `Lost`, so the adapter fails closed against a relay that predates R1;
   - new peers in the snapshot are admitted as new identities. Then `resume(room)` is called.
 
   Revoking every pre-gap session on any loss would also be sound. It is not the end state:
   the relay change costs one 16-byte incarnation, one revision counter and one flag per Part,
-  F1 and F2 are unbuilt, so no consumer migrates, while a blanket revoke would force every
+  F1 is unbuilt and the SDK does not yet expose the head (F2), so no consumer migrates, while a blanket revoke would force every
   participant in the room through a new ICE and DTLS handshake on every reconnect of the
   service's room session. The proof keeps an unchanged member's media flowing across a gap
   and still fails closed whenever continuity is not proved.
@@ -1040,7 +1048,7 @@ items belongs to hirsel4-rooms-2301's report.
 | Targeted kick | The application withdraws the peer's `Grant` in its admission view, and the grant set's revocation path removes it | none |
 | Per-connection expiry | Built for WebSocket sessions by 7e01e2ee (rooms released at expiry, RUNNER-SPEC "Enforcement") | none |
 | A Hirsel-side room client | **Missing.** `std.websocket` has client framing but no `hirsel.4` session or room client | follow-up F1, which decodes the R1 Part head into `RoomIn.Part` |
-| Room calls in the generated JS SDK | **Missing.** sdk/client/client.ts has no room API | follow-up F2, which exposes the incarnation and revision with the roster |
+| Room calls in the generated JS SDK | **Built except roster identity.** `client.room` (sdk/client/room.ts) gives unicast and room `send`, the roster and state. sdk/client/wire.ts decodes R1's Part head, but `LiveRoom` exposes neither the incarnation nor the revision | follow-up F2, which exposes the incarnation and revision with the roster |
 
 **Runner slice R1 (the relay's roster identity).** In core/programs/runner:
 
@@ -1062,7 +1070,9 @@ items belongs to hirsel4-rooms-2301's report.
   set on exactly the Part that completes the roster. On main before R1 the first case
   shows peer 1 twice with nothing to tell the two apart, so the law is red.
 
-R1 changes no wire field that a shipped client reads, since F1 and F2 do not exist yet.
+The shipped JS SDK reads Live Parts (sdk/client/wire.ts), so R1's Part head changes a wire
+field it reads: the SDK decoder, the frame schema and the frame vectors change with the relay
+in the same commit. No Hirsel-side client reads it yet (F1).
 Until F1 lands, the adapter is driven by a test harness that feeds `RoomIn` and reads
 `RoomOut`. Its laws run that way. The browser end-to-end case waits on F1 and F2.
 
@@ -1221,13 +1231,14 @@ unless named otherwise.
   after `revoke` returns carries the participant's media or repair at the fenced epoch, or
   goes to its fenced session. The same enumeration runs `suspend`. A negative control that
   acknowledges while a writer still holds a fenced packet (the uncommitted suffix kept for
-  retry) must fail the enumeration.
+  retry) must fail the enumeration. A further step holds, across the ACK, a paced entry from a
+  publisher the down-track was rebound away from; the invariant must still hold.
 - **W15 `revoke_stops_everything`.** Real units over `sim.udp`. The
   revoked participant publishes video with NACK-driven RTX queued, and subscribes to two
   publications. At the revoke, an RTX reply and a UDP suffix are each held across
   the acknowledgement, in both directions. After `revoke` returns: *Oracle:* by hand from
   RTC-7, from captures at each unit's writer. Across 200 ms of further input, no
-  captured datagram or frame carries any of its down-tracks' SSRCs or any packet of its
+  captured datagram carries any of its down-tracks' SSRCs or any packet of its
   publications. A Binding request under its old ufrag gets no response. A DTLS record and an
   SRTP packet from its old 5-tuple are dropped and counted. An unrelated participant's media
   keeps flowing throughout. `join` at the same epoch is `Fenced`, and at a higher epoch it
@@ -1236,13 +1247,21 @@ unless named otherwise.
   fenced epoch is still refused `Fenced`.
 - **W16 `signaling_loss_fails_closed`.** The adapter, driven by a harness, gets `Lost` while
   units hold queued media and an RTX repair for the room, then Parts with `snapshot`. Cases:
-  the same incarnation with one peer gone and one unchanged; a stale snapshot whose revision
-  is below the last applied; a changed incarnation in which a different admission now holds
-  the same peer number; and a missing Part head. *Oracle:* by hand from RTC-8, with
-  captures at every unit. Nothing is forwarded from `Lost` until resume, the queued repair
-  never leaves, the stale snapshot is discarded and the room stays suspended, the gone peer
-  is revoked with `Fenced` sent, the unchanged peer resumes with its id and epoch, and in
-  the last two cases every pre-gap admission is revoked, the same-number peer included.
+  (a) the same incarnation on a continued membership, with one peer `Left` and one
+  unchanged; (b) a new membership (`complete`) on the same incarnation whose image omits a
+  pre-gap peer and carries no `Left` for it; (c) a snapshot Part that itself carries a
+  `Left`; (d) a stale snapshot whose revision is below the last applied; (e) a changed
+  incarnation in which a different admission holds the same peer number; (f) entries with
+  no `Part` head since `Lost`; (g) a `complete` Part with no `Lost` before it. *Oracle:* by
+  hand from RTC-8, with captures at every unit. Nothing is forwarded from `Lost` until
+  resume, and the queued repair never leaves. In (a) the gone peer is revoked with `Fenced`
+  sent and the unchanged peer resumes with its id and epoch. In (b) and (c) the omitted or
+  left peer is revoked before `resume`. In (d) the snapshot is discarded and the room stays
+  suspended. In (e) and (f) every pre-gap admission is revoked, the same-number peer
+  included. In (g) the room suspends before any entry of that Part is applied.
+
+  Case (b) is red on an adapter that seeds the scratch roster from the pre-gap roster, and
+  (c) on one that compares at the head.
 - **W17** withdrawn with ICE-TCP; stream framing is turn.md's `stream_framing`.
 - **W18 `forward_allocates_nothing`.** Forwarding RTP packets to 8 down-tracks on one unit,
   after warm-up, runs under a zero-byte allocation bound, as `stun_ice`'s Binding laws do.
@@ -1312,8 +1331,8 @@ W19, blocks, because those are soundness reds.
 
 - **F1** (runner): a Hirsel-side `hirsel.4` room client, so a Hirsel service can be a room peer
   and feed `RoomIn`, including R1's Part head.
-- **F2** (SDK): room calls in the generated JS SDK, for unicast `Message`, the roster with its
-  incarnation and revision, and state.
+- **F2** (SDK): expose the roster's incarnation and revision through `LiveRoom`
+  (sdk/client/room.ts). Room calls, unicast `Message`, the roster and state are built.
 - **F3** is [turn.md](turn.md): TURN client and relay, long-term credentials, the stream fallback.
 - **Ownership:** the active-speaker detector is this package's (RTC-6), not the rtp lane's.
   The rtp lane parses the RFC 6464 extension.

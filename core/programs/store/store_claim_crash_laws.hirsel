@@ -290,3 +290,176 @@ fn dropped_claim_time_survives_reopen_before_sweep(d: Dir, r: Random, tasks: Tas
     if let None = keyed_policy(reopened, b"acct")? { fail("sweep removed a bound operation") }
     close(take reopened)
 }
+
+// L21k (http.md H9): the journal-keyed W2 scenario cuts every mutation of two
+// concurrent admissions, a success, an Error, a reclaiming admission, a Failed
+// reply and a checkpoint. The body increments a counter, so a second committed
+// run of one claim is visible. The read phase checks the durable prefix against
+// a hand-derived table of K-4's seven trees, then recovers every claim the
+// prefix leaves Admitted (K-8) and checks each claim's effect is exactly once.
+fn claim_crash_options() -> Options {
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    options.group_commits = 1
+    options
+}
+
+fn claim_crash_policy() -> KeyedPolicy {
+    let mut policy = claim_law_policy()
+    policy.keys_max = 2
+    policy.principal_keys_max = 2
+    policy
+}
+
+fn claim_crash_mark(mut db: Db, out: Stdout, marker: Ticket) -> Result[(), Error] waits {
+    durable(mut db, marker)?
+    journal_note(out, version(snapshot(db)))
+    Ok(())
+}
+
+// which: 1 succeeds, 2 returns Error, 3 faults. Each increments its own row.
+fn claim_crash_execution(mut db: Db, rows: Table[u64, u64], take completion: ClaimCompletion, which: u64) -> Result[Ticket, Error] waits {
+    let call = KeyedCallRecord(entry: b"charge", args: b"args", revision: None, code: b"0123456789abcdef")
+    let plan = Plan(n_e: 1048576, s_e: 30000, reply_max: 64)
+    let no_stream_record: Option[CallRecord] = None
+    let tried = serve(mut db, keyed_completion(take completion, take call), plan, take no_stream_record, (copy_env(rows), which),
+        fn(mut tx: Tx, input: (Table[u64, u64], u64)) -> Result[Bytes, Bytes] {
+            let before = match result.unwrap(fetch(tx, input.0, input.1)) { Some(n) => n, None => 0u64 }
+            result.unwrap(put(mut tx, input.0, input.1, before + 1))
+            if input.1 == 1 { return Ok(b"committed") }
+            if input.1 == 2 { return Error(b"aborted") }
+            fail("claim crash law body fault")
+        })
+    match take tried {
+        Ok(Committed(receipt)) if which == 1 => Ok(receipt.ticket),
+        Ok(Kept(receipt)) if which == 2 => Ok(receipt.ticket),
+        Ok(Failed(take pending, Raised(_))) if which == 3 => match conclude(mut db, take pending, b"fault", Claim) {
+            Ok(Committed(receipt)) => Ok(receipt.ticket),
+            Error(Before(take e, _)) => Error(take e),
+            Error(After(take e)) => Error(take e),
+            _ => fail("reserved fault reply did not settle"),
+        },
+        Error(Before(take e, _)) => Error(take e),
+        Error(After(take e)) => Error(take e),
+        _ => fail("unexpected keyed crash law verdict"),
+    }
+}
+
+fn claim_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), Error] waits {
+    let mut options = claim_crash_options()
+    options.create = false
+    let mut db = open(tasks, d, c, r, options)?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    result.unwrap(stdout.write(out, "ARM"))
+    let policy = claim_crash_policy()
+    let digest = request_digest(b"charge", b"args")
+    let Accepted(take first) = admit_claim(mut db, claim_law_key(b"one"), digest, b"args", Some(clone(policy)))? else { fail("first admission") }
+    claim_crash_mark(mut db, out, claim_ticket(first))?
+    let Accepted(take second) = admit_claim(mut db, claim_law_key(b"two"), digest, b"args", Some(clone(policy)))? else { fail("second admission") }
+    claim_crash_mark(mut db, out, claim_ticket(second))?
+    let done = claim_crash_execution(mut db, rows, take first, 1)?
+    claim_crash_mark(mut db, out, done)?
+    let aborted = claim_crash_execution(mut db, rows, take second, 2)?
+    claim_crash_mark(mut db, out, aborted)?
+    // Both replies expire at their reply's at + 10000. Lift keyed time there,
+    // so the next admission at a full scope reclaims both in its own commit.
+    let at = db.heads[0u64].at + 10000
+    let keep: Option[fn(Error) -> bool] = None
+    let lifted = store_body_at(mut db, 0, at, None, keep, scoped fn(mut _tx: Tx) -> Result[(), Error] { Ok(()) })?
+    let Committed(floor) = lifted else { fail("claim clock floor") }
+    claim_crash_mark(mut db, out, floor.ticket)?
+    let Accepted(take third) = admit_claim(mut db, claim_law_key(b"three"), digest, b"args", Some(take policy))? else { fail("reclaim admission") }
+    claim_crash_mark(mut db, out, claim_ticket(third))?
+    let stopped = claim_crash_execution(mut db, rows, take third, 3)?
+    claim_crash_mark(mut db, out, stopped)?
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    close(take db)
+}
+
+// Hand-derived from K-4 and K-6. Versions: 1 init; 2 admit one; 3 admit two;
+// 4 one succeeds; 5 two errs; 6 keyed time floor; 7 three admitted, reclaiming
+// one and two; 8 three's Failed reply. Slots: ops, claims, exp, pexp, count,
+// pcount, open.
+fn claim_crash_trees(head: u64) -> Inline[u64, 7] {
+    match head {
+        2 => [1u64, 1u64, 0u64, 0u64, 1u64, 1u64, 1u64],
+        3 => [1u64, 2u64, 0u64, 0u64, 1u64, 1u64, 2u64],
+        4 => [1u64, 2u64, 1u64, 1u64, 1u64, 1u64, 1u64],
+        5 => [1u64, 2u64, 2u64, 2u64, 1u64, 1u64, 0u64],
+        6 => [1u64, 2u64, 2u64, 2u64, 1u64, 1u64, 0u64],
+        7 => [1u64, 1u64, 0u64, 0u64, 1u64, 1u64, 1u64],
+        _ => [1u64, 1u64, 1u64, 1u64, 1u64, 1u64, 0u64],
+    }
+}
+
+fn claim_crash_expect(db: Db, floor: u64, rows: Table[u64, u64]) -> Result[bool, Error] waits {
+    let snap = snapshot(db)
+    let head = version(snap)
+    if head < floor || head < 1 || head > 8 { return Ok(false) }
+    let read = reader(db, 0u64)?
+    let one = if head >= 4 { Some(1u64) } else { None }
+    if get(read, snap, rows, 1u64)? != one || get(read, snap, rows, 2u64)? != None || get(read, snap, rows, 3u64)? != None {
+        return Ok(false)
+    }
+    let roots = view db.heads[0u64].roots.keyed
+    if head == 1 { return Ok(list.len(roots) == 0) }
+    if list.len(roots) != 7 { return Ok(false) }
+    let expected = claim_crash_trees(head)
+    for slot in 0u64 .. 7u64 {
+        let (seen, _) = std.page.totals(roots[slot].root)
+        if seen != expected[slot] { return Ok(false) }
+    }
+    let counted = if head >= 3 && head <= 6 { b"\x02\x00\x00\x00\x00\x00\x00\x00" } else { b"\x01\x00\x00\x00\x00\x00\x00\x00" }
+    let Some(per_op) = get_page_row(roots[4u64], b"\x03pay") else { return Ok(false) }
+    let Some(per_principal) = get_page_row(roots[5u64], b"\x03pay\x02\x05alice") else { return Ok(false) }
+    Ok(per_op == counted && per_principal == counted)
+}
+
+// Each claim the prefix leaves Admitted must be ownerless (K-5) and recover
+// with one more run; every finished claim must answer its stored reply.
+fn claim_crash_recover(mut db: Db, rows: Table[u64, u64]) -> Result[bool, Error] waits {
+    let head = version(snapshot(db))
+    let digest = request_digest(b"charge", b"args")
+    let policy = claim_crash_policy()
+    let names: Inline[Bytes, 3] = [b"one", b"two", b"three"]
+    let replies: Inline[Bytes, 3] = [b"committed", b"aborted", b"fault"]
+    // Claim i is admitted at version admitted[i] and replied at replied[i].
+    // From version 6 keyed time is 10001, so one and two (expiring at 10001)
+    // are absent: a retry there is a new operation, not this claim.
+    let admitted: Inline[u64, 3] = [2u64, 3u64, 7u64]
+    let replied: Inline[u64, 3] = [4u64, 5u64, 8u64]
+    for i in 0u64 .. 3u64 {
+        let which = i + 1
+        if head < admitted[i] || (which < 3 && head >= 6) { continue }
+        let answer = admit_claim(mut db, claim_law_key(names[i]), digest, b"args", Some(clone(policy)))?
+        if head >= replied[i] {
+            match take answer {
+                Duplicate(saved) if saved == replies[i] => (),
+                _ => return Ok(false),
+            }
+        } else {
+            let Ownerless(take pending) = take answer else { return Ok(false) }
+            let _ = claim_crash_execution(mut db, rows, take pending, which)?
+        }
+    }
+    let snap = snapshot(db)
+    let read = reader(db, 0u64)?
+    let one = if head >= 2 { Some(1u64) } else { None }
+    Ok(get(read, snap, rows, 1u64)? == one && get(read, snap, rows, 2u64)? == None && get(read, snap, rows, 3u64)? == None)
+}
+
+fn claim_crash_phase(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, phase: String, floor: u64) -> Result[(), Error] waits {
+    if phase == "write" { return claim_crash_write(d, c, r, tasks, out) }
+    let mut options = claim_crash_options()
+    options.create = phase == "init"
+    let mut db = open(tasks, d, c, r, options)?
+    if phase == "init" {
+        let _ = create_table(mut db, spec("rows", std.codec.key_u64(), std.codec.of_u64()))?
+    } else {
+        let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+        if !claim_crash_expect(db, floor, rows)? { fail("keyed write or replay violated the durable prefix") }
+        if !claim_crash_recover(mut db, rows)? { fail("keyed recovery ran a claim twice or lost a reply") }
+    }
+    close(take db)
+}

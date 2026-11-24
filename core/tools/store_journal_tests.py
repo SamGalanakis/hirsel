@@ -136,7 +136,7 @@ def main():
                 # the immutable binary once at every W2 mutation cut.
                 cuts = run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc,
                                    manifest, work, engine, entry='store@1/store/journal_crash_main',
-                                   scenarios=SCENARIOS, environment=env, count_only=('orphan-end', *FORK_IMAGES))
+                                   scenarios=(*SCENARIOS, 'journal-keyed'), environment=env, count_only=('orphan-end', *FORK_IMAGES))
                 rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 checks = provider_checks(work / (engine + '-crash') / 'store', engine, env)
                 rows.append(dict(engine=engine, passed=True, providers=checks))

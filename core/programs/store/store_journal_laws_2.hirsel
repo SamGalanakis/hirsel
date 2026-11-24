@@ -844,6 +844,20 @@ fn journal_crash_retry(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), 
 pub fn journal_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let phase = option.unwrap(args.get(argv, 0))
     let scenario = option.unwrap(args.get(argv, 1))
+    if scenario == "journal-keyed" {
+        let text = option.unwrap(args.get(argv, 3))
+        let mut floor = 0u64
+        for digit in string.as_bytes(text) { floor = floor * 10 + int.widen(digit - b'0') }
+        return match claim_crash_phase(d, c, r, tasks, out, phase, floor) {
+            Ok(()) => {
+                if phase == "write" { let _ = stdout.write(out, "DONE") }
+                Ok(())
+            },
+            Error(Io(_)) if phase == "write" => Ok(()),
+            Error(Poisoned(_)) if phase == "write" => Ok(()),
+            Error(_) => Error(Exit(status: 32)),
+        }
+    }
     let recovery_sync = scenario == "orphan-end-recovery-sync"
     let orphan_end = recovery_sync || scenario == "orphan-end"
     if phase == "init" {

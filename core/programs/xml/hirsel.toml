@@ -1,0 +1,17 @@
+[package]
+name = "xml"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"encoding.hirsel" = "xml"
+"pull.hirsel" = "xml"
+"dom.hirsel" = "xml"
+"write.hirsel" = "xml"
+
+[tests]
+limit = 33554432
+grants = []
+
+[tests.sources]
+"laws.hirsel" = "tests"

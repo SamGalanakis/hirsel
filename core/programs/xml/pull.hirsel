@@ -1,0 +1,616 @@
+pub type Limits {
+    max_bytes: u64,
+    max_depth: u64,
+    max_attributes: u64,
+    max_name_bytes: u64,
+    max_steps: u64
+}
+
+pub fn defaults() -> Limits {
+    Limits(max_bytes: 1048576, max_depth: 128, max_attributes: 128, max_name_bytes: 1024, max_steps: 8388608)
+}
+
+pub type Error = Syntax | BadEncoding | UnsupportedEncoding | BadCharacter | BadNamespace | UnknownEntity | DtdForbidden | ByteLimit | DepthLimit | AttributeLimit | NameLimit | StepLimit | Resources(Capacity) | ParserFailed
+
+pub type Name {
+    qualified: String,
+    prefix: String,
+    local: String,
+    namespace_uri: String
+}
+
+pub type Attribute {
+    name: Name,
+    value: String
+}
+
+pub type Element {
+    name: Name,
+    attributes: List[Attribute]
+}
+
+pub type Instruction {
+    target: String,
+    data: String
+}
+
+pub type Event = Start(Element) | End(String) | Text(String) | Comment(String) | ProcessingInstruction(Instruction)
+
+type Frame {
+    qualified: String,
+    scope: u64
+}
+
+type Binding {
+    prefix: String,
+    uri: String
+}
+
+type RawAttribute {
+    qualified: String,
+    value: String
+}
+
+type Phase = BeforeRoot | InRoot | AfterRoot | Failed
+
+pub opaque type Parser {
+    input: Bytes,
+    at: u64,
+    enc: Encoding,
+    limits: Limits,
+    steps: u64,
+    phase: Phase,
+    empty_end: bool,
+    stack: List[Frame],
+    bindings: List[Binding]
+}
+
+const XML_URI: String = "http://www.w3.org/XML/1998/namespace"
+
+const XMLNS_URI: String = "http://www.w3.org/2000/xmlns/"
+
+/// Start a pull reader over an owned byte buffer. The reader decodes on demand.
+/// max_steps meters consumed input bytes and namespace work across all pulls.
+pub fn reader(take input: Bytes, limits: Limits) -> Result[Parser, Error] {
+    if list.len(input) > limits.max_bytes {
+        return Error(ByteLimit)
+    }
+    let (enc, bom) = encoding(input)
+    let mut p = Parser(input: take input, at: 0, enc: enc, limits: limits, steps: limits.max_steps, phase: BeforeRoot, empty_end: false, stack: list.new(), bindings: list.new())
+    advance(mut p, bom)?
+    if starts(p, b"<?xml") && space(unit(p.input, p.enc, p.at + 5 * unit_width(p.enc))) {
+        declaration(mut p)?
+    }
+    if p.at == 0 && unit_width(p.enc) == 2 {
+        return Error(BadEncoding)
+    }
+    Ok(take p)
+}
+
+/// Return the next event, or None at a well-formed end of document.
+/// A refusal seals the reader. Empty tags produce a start and an end.
+pub fn next(mut p: Parser) -> Result[Option[Event], Error] {
+    if let Failed = p.phase {
+        return Error(ParserFailed)
+    }
+    let event = pull(mut p)
+    if let Error(_) = event {
+        p.phase = Failed
+    }
+    take event
+}
+
+fn charge(mut p: Parser, count: u64) -> Result[(), Error] {
+    if count > p.steps {
+        return Error(StepLimit)
+    }
+    p.steps -= count
+    Ok(())
+}
+
+fn advance(mut p: Parser, count: u64) -> Result[(), Error] {
+    charge(mut p, count)?
+    p.at += count
+    Ok(())
+}
+
+fn starts(p: Parser, token: Bytes) -> bool {
+    let width = unit_width(p.enc)
+    let n = list.len(token)
+    if n > (list.len(p.input) - p.at) / width {
+        return false
+    }
+    for i in 0u64 .. n {
+        if unit(p.input, p.enc, p.at + i * width) != int.widen(token[i]) {
+            return false
+        }
+    }
+    true
+}
+
+fn accept(mut p: Parser, token: Bytes) -> Result[bool, Error] {
+    if !starts(p, token) {
+        return Ok(false)
+    }
+    let count = list.len(token) * unit_width(p.enc)
+    advance(mut p, count)?
+    Ok(true)
+}
+
+fn expect(mut p: Parser, token: Bytes) -> Result[(), Error] {
+    if !accept(mut p, token)? {
+        return Error(Syntax)
+    }
+    Ok(())
+}
+
+fn peek(p: Parser) -> u32 {
+    let (cp, _) = scalar(p.input, p.enc, p.at)
+    cp
+}
+
+fn read(mut p: Parser) -> Result[u32, Error] {
+    let (cp, width) = scalar(p.input, p.enc, p.at)
+    if cp == EOF {
+        return Error(Syntax)
+    }
+    if cp == BAD_SCALAR {
+        return Error(BadEncoding)
+    }
+    if !xml_char(cp) {
+        return Error(BadCharacter)
+    }
+    advance(mut p, width)?
+    if cp != 13 {
+        return Ok(cp)
+    }
+    let (after, after_width) = scalar(p.input, p.enc, p.at)
+    if after == 10 {
+        advance(mut p, after_width)?
+    }
+    Ok(10)
+}
+
+fn white(mut p: Parser) -> Result[bool, Error] {
+    let start = p.at
+    while space(peek(p)) {
+        let _ = read(mut p)?
+    }
+    Ok(start != p.at)
+}
+
+fn quote(mut p: Parser) -> Result[u32, Error] {
+    let cp = read(mut p)?
+    if cp == 34 || cp == 39 {
+        Ok(cp)
+    } else {
+        Error(Syntax)
+    }
+}
+
+fn equals(mut p: Parser) -> Result[(), Error] {
+    let _ = white(mut p)?
+    expect(mut p, b"=")?
+    let _ = white(mut p)?
+    Ok(())
+}
+
+fn declaration(mut p: Parser) -> Result[(), Error] {
+    expect(mut p, b"<?xml")?
+    let _ = white(mut p)?
+    expect(mut p, b"version")?
+    equals(mut p)?
+    let version_quote = quote(mut p)?
+    expect(mut p, b"1.")?
+    if !digit(peek(p)) {
+        return Error(Syntax)
+    }
+    while digit(peek(p)) {
+        let _ = read(mut p)?
+    }
+    if read(mut p)? != version_quote {
+        return Error(Syntax)
+    }
+    let mut separated = white(mut p)?
+    let mut has_encoding = false
+    if separated && accept(mut p, b"encoding")? {
+        equals(mut p)?
+        let mark = quote(mut p)?
+        if !ascii_letter(peek(p)) {
+            return Error(Syntax)
+        }
+        let mut label: Bytes = list.new()
+        while peek(p) != mark {
+            let cp = read(mut p)?
+            if !ascii_letter(cp) && !digit(cp) && cp != 45 && cp != 46 && cp != 95 {
+                return Error(Syntax)
+            }
+            if list.len(label) == p.limits.max_name_bytes {
+                return Error(NameLimit)
+            }
+            append_scalar(mut label, cp)?
+        }
+        let _ = read(mut p)?
+        p.enc = declared_encoding(p.enc, text(take label)?)?
+        has_encoding = true
+        separated = white(mut p)?
+    }
+    let bare_utf16 = match p.enc {
+        Bare16Be => true,
+        Bare16Le => true,
+        _ => false,
+    }
+    if bare_utf16 && !has_encoding {
+        return Error(BadEncoding)
+    }
+    if separated && accept(mut p, b"standalone")? {
+        equals(mut p)?
+        let mark = quote(mut p)?
+        if !accept(mut p, b"yes")? {
+            expect(mut p, b"no")?
+        }
+        if read(mut p)? != mark {
+            return Error(Syntax)
+        }
+        let _ = white(mut p)?
+    }
+    expect(mut p, b"?>")
+}
+
+fn scan_name(mut p: Parser, qname: bool) -> Result[String, Error] {
+    let mut cp = peek(p)
+    if !name_start(cp) {
+        return Error(Syntax)
+    }
+    let mut out: Bytes = list.new()
+    let mut colon = false
+    while name_char(cp) {
+        if qname && cp == 58 {
+            if colon || list.len(out) == 0 {
+                return Error(BadNamespace)
+            }
+            colon = true
+        }
+        let width = utf8_width(cp)
+        if width > p.limits.max_name_bytes - list.len(out) {
+            return Error(NameLimit)
+        }
+        let _ = read(mut p)?
+        append_scalar(mut out, cp)?
+        let after = peek(p)
+        if qname && cp == 58 && (!name_start(after) || after == 58) {
+            return Error(BadNamespace)
+        }
+        cp = after
+    }
+    text(take out)
+}
+
+fn reference(mut p: Parser) -> Result[u32, Error] {
+    if accept(mut p, b"#")? {
+        let radix: u32 = if accept(mut p, b"x")? {
+            16
+        } else {
+            10
+        }
+        let mut value = 0u32
+        let start = p.at
+        while peek(p) != 59 {
+            let cp = read(mut p)?
+            let digit_value = if digit(cp) {
+                cp - 48
+            } else if cp >= 65 && cp <= 70 {
+                cp - 55
+            } else if cp >= 97 && cp <= 102 {
+                cp - 87
+            } else {
+                return Error(Syntax)
+            }
+            if digit_value >= radix || value > (0x10ffff - digit_value) / radix {
+                return Error(BadCharacter)
+            }
+            value = value * radix + digit_value
+        }
+        if p.at == start || !xml_char(value) {
+            return Error(BadCharacter)
+        }
+        expect(mut p, b";")?
+        return Ok(value)
+    }
+    if accept(mut p, b"amp;")? {
+        return Ok(38)
+    }
+    if accept(mut p, b"lt;")? {
+        return Ok(60)
+    }
+    if accept(mut p, b"gt;")? {
+        return Ok(62)
+    }
+    if accept(mut p, b"apos;")? {
+        return Ok(39)
+    }
+    if accept(mut p, b"quot;")? {
+        return Ok(34)
+    }
+    Error(UnknownEntity)
+}
+
+fn attribute_value(mut p: Parser) -> Result[String, Error] {
+    let mark = quote(mut p)?
+    let mut out: Bytes = list.new()
+    while peek(p) != mark {
+        let cp = read(mut p)?
+        let value = match cp {
+            60 => return Error(Syntax),
+            38 => reference(mut p)?,
+            9 => 32,
+            10 => 32,
+            _ => cp,
+        }
+        append_scalar(mut out, value)?
+    }
+    let _ = read(mut p)?
+    text(take out)
+}
+
+fn character_data(mut p: Parser) -> Result[String, Error] {
+    let mut out: Bytes = list.new()
+    while p.at < list.len(p.input) && peek(p) != 60 {
+        if starts(p, b"]]>") {
+            return Error(Syntax)
+        }
+        let cp = read(mut p)?
+        let value = if cp == 38 {
+            reference(mut p)?
+        } else {
+            cp
+        }
+        append_scalar(mut out, value)?
+    }
+    text(take out)
+}
+
+fn until(mut p: Parser, end: Bytes, comment: bool) -> Result[String, Error] {
+    let mut out: Bytes = list.new()
+    while !accept(mut p, end)? {
+        if comment && starts(p, b"--") {
+            return Error(Syntax)
+        }
+        let cp = read(mut p)?
+        append_scalar(mut out, cp)?
+    }
+    text(take out)
+}
+
+fn instruction(mut p: Parser) -> Result[Instruction, Error] {
+    let target = scan_name(mut p, false)?
+    {
+        let target_data = string.as_bytes(target)
+        if ascii_equal(target_data, b"xml") {
+            return Error(Syntax)
+        }
+        for byte in target_data {
+            if byte == b':' {
+                return Error(BadNamespace)
+            }
+        }
+    }
+    let data = if accept(mut p, b"?>")? {
+        ""
+    } else {
+        if !white(mut p)? {
+            return Error(Syntax)
+        }
+        until(mut p, b"?>", false)?
+    }
+    Ok(Instruction(target: take target, data: take data))
+}
+
+fn colon_at(qualified: String) -> Option[u64] {
+    let data = string.as_bytes(qualified)
+    for i in 0u64 .. list.len(data) {
+        if data[i] == b':' {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn split_name(qualified: String) -> Result[(String, String), Error] {
+    match colon_at(qualified) {
+        Some(i) => Ok((copy_text(string.slice(qualified, 0, i))?, copy_text(string.slice(qualified, i + 1, string.byte_len(qualified)))?)),
+        None => Ok(("", copy_text(qualified)?)),
+    }
+}
+
+fn same(mut p: Parser, a: String, b: String) -> Result[bool, Error] {
+    if string.byte_len(a) != string.byte_len(b) {
+        charge(mut p, 1)?
+        return Ok(false)
+    }
+    charge(mut p, string.byte_len(a))?
+    charge(mut p, 1)?
+    Ok(a == b)
+}
+
+fn binding(mut p: Parser, prefix: String) -> Result[String, Error] {
+    if prefix == "xml" {
+        return Ok(XML_URI)
+    }
+    if prefix == "xmlns" {
+        return Error(BadNamespace)
+    }
+    let mut i = list.len(p.bindings)
+    while i != 0 {
+        i -= 1
+        // Borrow the list only for the comparison and debit before the next lookup.
+        let len = string.byte_len(p.bindings[i].prefix)
+        charge(mut p, 1)?
+        if len == string.byte_len(prefix) {
+            charge(mut p, len)?
+            if p.bindings[i].prefix == prefix {
+                let size = string.byte_len(p.bindings[i].uri)
+                charge(mut p, size)?
+                return copy_text(p.bindings[i].uri)
+            }
+        }
+    }
+    if prefix == "" {
+        return Ok("")
+    }
+    Error(BadNamespace)
+}
+
+fn declare(mut p: Parser, prefix: String, uri: String) -> Result[(), Error] {
+    charge(mut p, string.byte_len(uri))?
+    if prefix == "xmlns" || uri == XMLNS_URI || (prefix == "xml") != (uri == XML_URI) || (prefix != "" && uri == "") {
+        return Error(BadNamespace)
+    }
+    let prefix_copy = copy_text(prefix)?
+    let uri_copy = copy_text(uri)?
+    reserve(mut p.bindings, 1)?
+    list.push(mut p.bindings, Binding(prefix: take prefix_copy, uri: take uri_copy))
+    Ok(())
+}
+
+fn namespace_decl(prefix: String, local: String) -> bool {
+    prefix == "xmlns" || (prefix == "" && local == "xmlns")
+}
+
+fn resolved(mut p: Parser, take qualified: String, attribute: bool) -> Result[Name, Error] {
+    let (take prefix, take local) = split_name(qualified)?
+    let uri = if attribute && namespace_decl(prefix, local) {
+        XMLNS_URI
+    } else if attribute && prefix == "" {
+        ""
+    } else {
+        binding(mut p, prefix)?
+    }
+    Ok(Name(qualified: take qualified, prefix: take prefix, local: take local, namespace_uri: take uri))
+}
+
+fn start_tag(mut p: Parser) -> Result[Event, Error] {
+    if let AfterRoot = p.phase {
+        return Error(Syntax)
+    }
+    if list.len(p.stack) >= p.limits.max_depth {
+        return Error(DepthLimit)
+    }
+    let tag = scan_name(mut p, true)?
+    let scope = list.len(p.bindings)
+    let mut raw: List[RawAttribute] = list.new()
+    loop {
+        let separated = white(mut p)?
+        if accept(mut p, b"/>")? {
+            p.empty_end = true
+            break
+        }
+        if accept(mut p, b">")? {
+            break
+        }
+        if !separated {
+            return Error(Syntax)
+        }
+        if list.len(raw) >= p.limits.max_attributes {
+            return Error(AttributeLimit)
+        }
+        let qualified = scan_name(mut p, true)?
+        for prior in raw {
+            if same(mut p, qualified, prior.qualified)? {
+                return Error(Syntax)
+            }
+        }
+        equals(mut p)?
+        let value = attribute_value(mut p)?
+        let (take prefix, take local) = split_name(qualified)?
+        if namespace_decl(prefix, local) {
+            declare(mut p, if prefix == "" {
+                ""
+            } else {
+                take local
+            }, value)?
+        }
+        reserve(mut raw, 1)?
+        list.push(mut raw, RawAttribute(qualified: take qualified, value: take value))
+    }
+    let qualified = copy_text(tag)?
+    let element_name = resolved(mut p, take tag, false)?
+    let mut attributes: List[Attribute] = list.new()
+    reserve(mut attributes, list.len(raw))?
+    while let Some(take item) = list.pop(mut raw) {
+        let RawAttribute(qualified: take raw_name, value: take value) = take item
+        let name = resolved(mut p, take raw_name, true)?
+        for prior in attributes {
+            if same(mut p, name.local, prior.name.local)? && same(mut p, name.namespace_uri, prior.name.namespace_uri)? {
+                return Error(BadNamespace)
+            }
+        }
+        list.push(mut attributes, Attribute(name: take name, value: take value))
+    }
+    let count = list.len(attributes)
+    for i in 0u64 .. count / 2 {
+        list.swap(mut attributes, i, count - i - 1)
+    }
+    reserve(mut p.stack, 1)?
+    list.push(mut p.stack, Frame(qualified: take qualified, scope: scope))
+    p.phase = InRoot
+    Ok(Start(Element(name: take element_name, attributes: take attributes)))
+}
+
+fn end_tag(mut p: Parser, empty: bool) -> Result[Event, Error] {
+    let Some(take frame) = list.pop(mut p.stack) else {
+        return Error(Syntax)
+    }
+    let Frame(qualified: take qualified, scope: scope) = take frame
+    if !empty {
+        let name = scan_name(mut p, true)?
+        if !same(mut p, name, qualified)? {
+            return Error(Syntax)
+        }
+        let _ = white(mut p)?
+        expect(mut p, b">")?
+    }
+    list.truncate(mut p.bindings, scope)
+    if list.len(p.stack) == 0 {
+        p.phase = AfterRoot
+    }
+    Ok(End(take qualified))
+}
+
+fn pull(mut p: Parser) -> Result[Option[Event], Error] {
+    if p.empty_end {
+        p.empty_end = false
+        return Ok(Some(end_tag(mut p, true)?))
+    }
+    if let InRoot = p.phase {} else {
+        let _ = white(mut p)?
+    }
+    if p.at == list.len(p.input) {
+        if let AfterRoot = p.phase {
+            return Ok(None)
+        }
+        return Error(Syntax)
+    }
+    if accept(mut p, b"<!--")? {
+        return Ok(Some(Comment(until(mut p, b"-->", true)?)))
+    }
+    if accept(mut p, b"<?")? {
+        return Ok(Some(ProcessingInstruction(instruction(mut p)?)))
+    }
+    if starts(p, b"<!DOCTYPE") {
+        return Error(DtdForbidden)
+    }
+    if let InRoot = p.phase {
+        if accept(mut p, b"</")? {
+            return Ok(Some(end_tag(mut p, false)?))
+        }
+        if accept(mut p, b"<![CDATA[")? {
+            return Ok(Some(Text(until(mut p, b"]]>", false)?)))
+        }
+        if !starts(p, b"<") {
+            return Ok(Some(Text(character_data(mut p)?)))
+        }
+    }
+    expect(mut p, b"<")?
+    Ok(Some(start_tag(mut p)?))
+}

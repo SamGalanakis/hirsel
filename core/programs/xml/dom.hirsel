@@ -1,0 +1,74 @@
+pub type Content = Tag(Element) | Characters(String) | Remark(String) | InstructionNode(Instruction)
+
+pub type Node {
+    content: Content,
+    parent: Option[u64],
+    first_child: Option[u64],
+    next_sibling: Option[u64],
+    last_child: Option[u64]
+}
+
+pub opaque type Document {
+    root_index: u64,
+    items: List[Node]
+}
+
+/// Parse a complete document, retaining document order including trailing miscellany.
+/// Nodes use indices in one list so even deeply nested values are dropped iteratively.
+pub fn parse(take input: Bytes, limits: Limits) -> Result[Document, Error] {
+    let mut p = reader(take input, limits)?
+    let mut items: List[Node] = list.new()
+    let mut parent: Option[u64] = None
+    let mut last_top: Option[u64] = None
+    let mut root_index = 0u64
+    while let Some(take event) = next(mut p)? {
+        let index = list.len(items)
+        let content = match take event {
+            Start(take element) => {
+                if let None = parent {
+                    root_index = index
+                }
+                Tag(take element)
+            },
+            End(_) => {
+                if let Some(i) = parent {
+                    parent = items[i].parent
+                }
+                continue
+            },
+            Text(take value) => Characters(take value),
+            Comment(take value) => Remark(take value),
+            ProcessingInstruction(take value) => InstructionNode(take value),
+        }
+        if let Some(i) = parent {
+            if let Some(last) = items[i].last_child {
+                items[last].next_sibling = Some(index)
+            } else {
+                items[i].first_child = Some(index)
+            }
+            items[i].last_child = Some(index)
+        } else {
+            if let Some(last) = last_top {
+                items[last].next_sibling = Some(index)
+            }
+            last_top = Some(index)
+        }
+        let node_parent = parent
+        if let Tag(_) = content {
+            parent = Some(index)
+        }
+        reserve(mut items, 1)?
+        list.push(mut items, Node(content: take content, parent: node_parent, first_child: None, next_sibling: None, last_child: None))
+    }
+    Ok(Document(root_index: root_index, items: take items))
+}
+
+/// Index of the document element in nodes(doc).
+pub fn root(doc: Document) -> u64 {
+    doc.root_index
+}
+
+/// Index zero is the first document-level node. Follow sibling and child indices in this list.
+pub fn nodes(doc: Document) -> View[List[Node]] in doc {
+    list.slice(doc.items, 0, list.len(doc.items))
+}

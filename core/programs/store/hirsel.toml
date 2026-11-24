@@ -93,6 +93,7 @@ dirs = ["."]
 "store_journal_laws_4.hirsel" = "store"
 "store_pages_paged_laws.hirsel" = "store"
 "tiered_laws.hirsel" = "store"
+"tiered_read_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format4_laws.hirsel" = "store"

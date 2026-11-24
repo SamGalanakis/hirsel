@@ -1,0 +1,66 @@
+fn l62_point_path_fixture() -> Result[(std.page.Slot, Arc[TieredFrame], Arc[TieredFrame]), Error] {
+    let mut value: Bytes = list.with_capacity(1025)
+    list.fill(mut value, 1025, 106u8)
+    let stored_ref = std.page.BlobRef(stamp: 39, len: 1025, checksum: 0x8234157262b2bd3d, pack: 7, offset: 72, body: 0)
+    let mut rows: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut rows, std.page.Entry(key: key_word(42), cell: BlobValue(stored_ref)))
+    let leaf_image = page_result(std.page.encode(rows, 0, 40, Collection))?
+    let digest = std.check.xxh3(std.page.payload(leaf_image), 0, 79)
+    let ptr = std.page.PagePtr(pack: 8, offset: 72, len: 79, checksum: digest, stamp: 40)
+    let leaf = page_result(std.page.attach_cold(take leaf_image))?
+    let mut branches: List[std.page.Entry] = list.with_capacity(1)
+    list.push(mut branches, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: ptr, rows: 1, charge: 1110))))
+    let parent = page_result(std.page.encode(branches, 1, 41, Collection))?
+    let root = page_result(std.page.attach_cold(take parent))?
+    let page_frame = TieredFrame(identity: tiered_frame_id(TieredPage(ptr)), payload: TieredImage(take leaf))
+    let blob_frame = TieredFrame(identity: tiered_frame_id(TieredBlob(stored_ref)), payload: TieredValue(arc.new(take value)))
+    Ok((HotPage(take root), arc.new(take page_frame), arc.new(take blob_frame)))
+}
+
+@test
+fn test_l62_tiered_point_path() -> Result[(), Error] {
+    // Hot parent: 80 + 16. Cold leaf: 79 + 16. BLOB: 1025 + 8 + 16.
+    let (take root, take leaf, take cached_blob) = l62_point_path_fixture()?
+    let key = key_word(42)
+    let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+    let mut first = capacity(tiered_touch_set(1240, 1))?
+    let Error(Missed) = tiered_point_path(mut first, visible, root, None, key) else {
+        fail("L62: an unpinned leaf did not miss")
+    }
+    let Some(AttemptMiss(TieredPage(ptr))) = first.stopped else {
+        fail("L62: the first miss did not name a PAGE")
+    }
+    if ptr.stamp != 40 || first.touched_bytes != 191 {
+        fail("L62: point lookup did not count the Hot parent before the Cold leaf")
+    }
+    map.insert(mut visible, tiered_cache_key(leaf.identity), take leaf)
+    let mut second = capacity(tiered_touch_set(1240, 1))?
+    let Error(Missed) = tiered_point_path(mut second, visible, root, None, key) else {
+        fail("L62: an unpinned body did not miss")
+    }
+    let Some(AttemptMiss(TieredBlob(reference))) = second.stopped else {
+        fail("L62: the second miss did not name a BLOB")
+    }
+    if reference.stamp != 39 || second.touched_bytes != 1240 {
+        fail("L62: point lookup did not count the full BLOB frame")
+    }
+    map.insert(mut visible, tiered_cache_key(cached_blob.identity), take cached_blob)
+    let mut admitted = capacity(tiered_touch_set(1240, 1))?
+    let Some(value) = tiered_point_path(mut admitted, visible, root, None, key)? else {
+        fail("L62: an admitted pinned row was not read")
+    }
+    if list.len(value) != 1025 || value[1024u64] != 106 || admitted.touched_bytes != 1240 || list.len(admitted.frames) != 2 {
+        fail("L62: pin-only lookup did not return the selected BLOB")
+    }
+    let mut refused = capacity(tiered_touch_set(1239, 1))?
+    let Error(Missed) = tiered_point_path(mut refused, visible, root, None, key) else {
+        fail("L62: a warm pin bypassed the physical limit")
+    }
+    let Some(AttemptPinLimit(problem)) = refused.stopped else {
+        fail("L62: the limit did not take precedence over the pin hit")
+    }
+    if problem.requested != 1240 || problem.available != 1239 {
+        fail("L62: invalid capacity for the selected path")
+    }
+    Ok(())
+}

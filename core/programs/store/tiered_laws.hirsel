@@ -645,12 +645,12 @@ fn l62_refusal(pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[(), Error]
     let mut attempt = capacity(tiered_touch_set(2097, 1))?
     let first_frame = l70_cache_target(1)
     let second_frame = l70_cache_target(2)
-    let _ = option.unwrap(tiered_resolve_cold(mut attempt, pins, "p-7", first_frame)?)
-    let _ = option.unwrap(tiered_resolve_cold(mut attempt, pins, "p-7", first_frame)?)
+    let _ = option.unwrap(tiered_resolve_cold(mut attempt, pins, first_frame)?)
+    let _ = option.unwrap(tiered_resolve_cold(mut attempt, pins, first_frame)?)
     if attempt.touched_bytes != 1049 || list.len(attempt.frames) != 1 {
         fail("L62: a repeated BLOB touch charged a second frame")
     }
-    if let Some(_) = tiered_resolve_cold(mut attempt, pins, "p-7", second_frame)? {
+    if let Some(_) = tiered_resolve_cold(mut attempt, pins, second_frame)? {
         fail("L62: a cache hit skipped the first-touch limit")
     }
     let Some(AttemptPinLimit(refused)) = attempt.stopped else {
@@ -667,7 +667,7 @@ fn test_l62_attempt_touch_order() -> Result[(), Error] {
     let mut visible: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let first_frame = l70_cache_target(1)
     let mut refused = capacity(tiered_touch_set(2097, 1))?
-    let _ = tiered_resolve_cold(mut refused, visible, "p-7", first_frame)?
+    let _ = tiered_resolve_cold(mut refused, visible, first_frame)?
     let Some(AttemptMiss(TieredBlob(demanded))) = refused.stopped else {
         fail("L62: a missing pin was not latched")
     }

@@ -49,7 +49,10 @@ fn tiered_touch(mut attempt: TieredTouchSet, stamp: u64, payload: u64) -> bool {
     true
 }
 
-fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], path: String, target: TieredTarget) -> Result[Option[Arc[TieredFrame]], Error] {
+fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], target: TieredTarget) -> Result[Option[Arc[TieredFrame]], Error] {
+    if let Some(_) = attempt.stopped {
+        return Ok(None)
+    }
     let facts = tiered_frame_id(target)
     let was_touched = map.contains(attempt.stamps, facts.stamp)
     if !tiered_touch(mut attempt, facts.stamp, facts.len) {
@@ -59,9 +62,86 @@ fn tiered_resolve_cold(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey,
         attempt.stopped = Some(AttemptMiss(clone(target)))
         return Ok(None)
     }
-    verify_tiered_edge(path, target, frame.identity)?
+    if frame.identity != facts {
+        verify_tiered_edge(paged_pack_path(facts.pack)?, target, frame.identity)?
+    }
     if !was_touched {
         list.push(mut attempt.frames, arc.share(frame))
     }
     Ok(Some(arc.share(frame)))
+}
+
+fn tiered_point_page(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected_level: Option[u8]) -> Result[Arc[std.page.Page], Error] {
+    if let Some(_) = attempt.stopped {
+        return Error(Missed)
+    }
+    match edge {
+        HotPage(page) => {
+            let image = std.page.image_of(page)
+            let id = std.page.stamp(image)
+            if id != 0 && !tiered_touch(mut attempt, id, list.len(std.page.payload(image))) {
+                return Error(Missed)
+            }
+            Ok(arc.share(page))
+        },
+        ColdPage(ptr) => {
+            let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredPage(ptr))? else {
+                return Error(Missed)
+            }
+            let TieredImage(page) = view frame.payload else {
+                fail("store: verified PAGE has no image")
+            }
+            if let Some(wanted) = expected_level {
+                if std.page.level(std.page.image_of(page)) != wanted {
+                    return Error(disk_fault(paged_pack_path(ptr.pack)?, ptr.offset, Malformed))
+                }
+            }
+            Ok(arc.share(page))
+        },
+    }
+}
+
+fn tiered_point_value(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], page: Arc[std.page.Page], slot: u64) -> Result[Arc[Bytes], Error] {
+    let Some(BlobEdge(reference)) = std.page.owning_edge(std.page.image_of(page), slot) else {
+        let Some(value) = std.page.value_at(page, slot) else {
+            fail("store: missing selected inline value")
+        }
+        return Ok(arc.new(copied(value)?))
+    }
+    let Some(edge) = std.page.blob_slot(page, reference.body) else {
+        fail("store: missing attached BLOB")
+    }
+    match edge {
+        HotBlob(contents) => {
+            if !tiered_touch(mut attempt, reference.stamp, 8 + list.len(contents)) {
+                return Error(Missed)
+            }
+            Ok(arc.share(contents))
+        },
+        ColdBlob(ptr) => {
+            let Some(frame) = tiered_resolve_cold(mut attempt, visible, TieredBlob(ptr))? else {
+                return Error(Missed)
+            }
+            let TieredValue(contents) = view frame.payload else {
+                fail("store: verified BLOB has no value")
+            }
+            Ok(arc.share(contents))
+        },
+    }
+}
+
+fn tiered_point_path(mut attempt: TieredTouchSet, visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, expected_level: Option[u8], key: Bytes) -> Result[Option[Arc[Bytes]], Error] {
+    let page = tiered_point_page(mut attempt, visible, edge, expected_level)?
+    let image = std.page.image_of(page)
+    if let Some(slot) = std.page.descend(image, key) {
+        let Some(child_edge) = std.page.child_slot(page, slot) else {
+            fail("store: missing attached PAGE")
+        }
+        return tiered_point_path(mut attempt, visible, child_edge, Some(std.page.level(image) - 1), key)
+    }
+    let (slot, hit) = std.page.search(image, key)
+    if !hit {
+        return Ok(None)
+    }
+    Ok(Some(tiered_point_value(mut attempt, visible, page, slot)?))
 }

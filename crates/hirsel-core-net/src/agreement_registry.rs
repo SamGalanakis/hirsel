@@ -71,6 +71,10 @@ impl<Charge> AgreementRegistry<Charge> {
 }
 
 impl<Charge> ShareTicket<Charge> {
+    pub fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
     pub fn resolve(self, side: Side, shared: &[u8; 32], charge: Charge) -> RegistryVerdict {
         let mut hash = digest::Context::new(&digest::SHA256);
         hash.update(b"hirsel agreement 1\0");

@@ -163,149 +163,8 @@ pub(crate) fn is_core_prelude(path: &DefPath, names: &[&str]) -> bool {
         && (names.is_empty() || names.contains(&path.0.name.as_str()))
 }
 
-/// A core type whose kind and layout are fixed by its definition path (LANG-7, OWN-3).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Role {
-    View,
-    Box,
-    Rc,
-    Arc,
-    /// `Shared[T]` (CONC-15): a counted node many units read.
-    Shared,
-    Latest,
-    Client,
-    Inbox,
-    List,
-    String,
-    Text,
-    Map,
-    Region,
-    Capability,
-    /// `Secret` (TLS-5): a capability that is a resource, one holder of a designation.
-    Secret,
-    Task,
-    Sender,
-    Receiver,
-    HostFile,
-    FixedSpan,
-    SeqSpan,
-    IndexedSpan,
-    SeqIndex,
-    Link,
-    Dest,
-    Writer,
-    Child,
-    SpanBuilder,
-    Builder,
-    Args,
-    Unique,
-    Site,
-    Causes,
-    Cell,
-    StaticFn,
-    Socket,
-    Flow,
-    FlowEndpoint,
-    FrozenBytes,
-    ForeignHandle,
-}
-impl Role {
-    fn of(path: &DefPath) -> Option<Role> {
-        if path.package_is("core", "1") && path.0.modules == ["secret"] && path.0.name == "Scram" {
-            return Some(Role::HostFile);
-        }
-        if path.is_core("foreign.Ptr") {
-            return Some(Role::ForeignHandle);
-        }
-        if !is_core_prelude(path, &[]) {
-            return None;
-        }
-        Some(match path.0.name.as_str() {
-            "View" => Role::View,
-            "Box" => Role::Box,
-            "Rc" => Role::Rc,
-            "Arc" => Role::Arc,
-            "Shared" => Role::Shared,
-            "Latest" => Role::Latest,
-            "Client" => Role::Client,
-            "Inbox" => Role::Inbox,
-            "List" => Role::List,
-            "String" => Role::String,
-            "FrozenBytes" => Role::FrozenBytes,
-            "Text" => Role::Text,
-            "Map" => Role::Map,
-            "Region" => Role::Region,
-            "Task" => Role::Task,
-            "Sender" => Role::Sender,
-            "Receiver" => Role::Receiver,
-            "HostFile" | "HostEntries" | "ClockHand" | "StopTrigger" | "Served" | "Call" => {
-                Role::HostFile
-            }
-            "Socket" | "ReadHalf" | "WriteHalf" | "Listener" | "UnixListener" | "UnixDatagram"
-            | "UdpSocket" | "Proc" => Role::Socket,
-            "FixedSpan" => Role::FixedSpan,
-            "SeqSpan" => Role::SeqSpan,
-            "IndexedSpan" => Role::IndexedSpan,
-            "SeqIndex" => Role::SeqIndex,
-            "Link" => Role::Link,
-            "Dest" => Role::Dest,
-            "Writer" => Role::Writer,
-            "Child" => Role::Child,
-            "SpanBuilder" => Role::SpanBuilder,
-            "Builder" => Role::Builder,
-            "Args" => Role::Args,
-            "Unique" => Role::Unique,
-            "Site" => Role::Site,
-            "Causes" => Role::Causes,
-            "Cell" => Role::Cell,
-            "StaticFn" => Role::StaticFn,
-            "Flow" => Role::Flow,
-            "Into" | "Port" | "Sink" => Role::FlowEndpoint,
-
-            "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
-            | "Process" | "Tasks" | "Foreign" | "Exec" | "Cred" => Role::Capability,
-            "Secret" => Role::Secret,
-            _ => return None,
-        })
-    }
-    pub fn kind(self) -> Kind {
-        match self {
-            Role::Box
-            | Role::List
-            | Role::String
-            | Role::FrozenBytes
-            | Role::Map
-            | Role::SpanBuilder
-            | Role::Builder
-            | Role::Causes
-            | Role::Cell => Kind::Own,
-            Role::Rc | Role::Arc | Role::Shared => Kind::Counted,
-            Role::View | Role::Region | Role::Dest | Role::Writer => Kind::Scoped,
-            Role::Text | Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan | Role::SeqIndex => {
-                Kind::Region
-            }
-            Role::Capability
-            | Role::Args
-            | Role::Unique
-            | Role::Site
-            | Role::Child
-            | Role::Link
-            | Role::StaticFn
-            | Role::FlowEndpoint
-            | Role::ForeignHandle => Kind::Plain,
-            Role::Task
-            | Role::Sender
-            | Role::Receiver
-            | Role::Socket
-            | Role::HostFile
-            | Role::Latest
-            | Role::Client
-            | Role::Inbox
-            | Role::Flow
-            | Role::Secret => Kind::Resource,
-        }
-    }
-}
+mod roles;
+pub use roles::Role;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Generic {
@@ -2320,7 +2179,7 @@ impl Program<'_> {
             let mut params = 0u64;
             let mut h = match decl.role {
                 Some(Role::Capability) => H_CAPABILITY,
-                Some(Role::Secret) => H_CAPABILITY | H_RESOURCE,
+                Some(Role::Secret | Role::Media) => H_CAPABILITY | H_RESOURCE,
                 Some(
                     Role::Task
                     | Role::Sender
@@ -3132,7 +2991,7 @@ fn nominal_bounds(decl: &TypeDecl, meet: impl Fn() -> u16, at: impl Fn(usize) ->
         Some(Role::Shared) => SHAREABLE | SEND | CROSS | (meet() & (KEY | ORDERED)),
         Some(Role::Box) => meet() & (SHAREABLE | SEND | KEY | ORDERED),
         Some(Role::Sender | Role::Receiver | Role::HostFile | Role::Latest | Role::Inbox) => SEND,
-        Some(Role::Client | Role::Secret) => SEND | CROSS,
+        Some(Role::Client | Role::Secret | Role::Media) => SEND | CROSS,
         Some(Role::Socket) => match decl.path.0.name.as_str() {
             "Socket" | "Listener" | "UdpSocket" => SEND | CROSS,
             _ => SEND,

@@ -457,6 +457,7 @@ operations! {
     ("secret", "unwrap", Lane::Runtime(Kernel::Net(HostOp::SecretUnwrap)), "B", "secret-wrap-sign-1781", false),
     ("secret", "sign", Lane::Runtime(Kernel::Net(HostOp::SecretSign)), "B", "secret-wrap-sign-1781", false),
     ("secret", "p256_key", Lane::Runtime(Kernel::Net(HostOp::SecretP256Key)), "B", "media-w0-crypto-build-2282", false),
+    ("secret", "key_share", Lane::Runtime(Kernel::Net(HostOp::SecretKeyShare)), "B", "media-w0-crypto-build-2282", false),
     ("secret", "aead_seal", Lane::Runtime(Kernel::Net(HostOp::SecretAeadSeal)), "B", "crypto-aead-2123", false),
     ("secret", "aead_open", Lane::Runtime(Kernel::Net(HostOp::SecretAeadOpen)), "B", "crypto-aead-2123", false),
     ("secret", "render", Lane::Runtime(Kernel::SecretRender), "A", "tls-t4-1447", false),
@@ -3720,95 +3721,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 cx.start(join);
             },
         )
-    }
-
-    fn runtime_secret_seal(
-        &mut self,
-        f: usize,
-        vals: &[Option<ValueId>],
-        result: TyId,
-        n: NodeId,
-    ) -> Option<ValueId> {
-        let bytes = self.p.fns[f].params[0].ty;
-        let rep = self.rep_at(bytes, n)?;
-        let source = vals[0]?;
-        let [value, tag, _, available] = self.runtime_row(
-            RtOp::Host(HostOp::SecretSeal),
-            &[Arg::Value(source), Arg::Value(vals[1]?)],
-            n,
-        )?;
-        let byte = Ty::Scalar(Scalar::U8);
-        let ok = self.runtime_compare(byte, tag, 0, n)?;
-        // Success drops the wiped source. The error arm moves its carrier.
-        self.consume(Some(source), n);
-        self.runtime_result(
-            result,
-            ok,
-            n,
-            |cx, to, ty| {
-                cx.drop_field(Some(source), bytes, n);
-                if let Some(at) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
-                {
-                    cx.runtime_store(at, &[], Ty::Scalar(Scalar::U64), value, n);
-                }
-            },
-            |cx, to, pair| {
-                let TyKind::Tuple(fields) = cx.t.kind(pair) else {
-                    unreachable!("secret.seal returns its error and source as a tuple");
-                };
-                let error_ty = fields[0];
-                let Some(to) =
-                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
-                else {
-                    return;
-                };
-                let Some(returned) = cx.runtime_field(to, &[Step::Field(1)], bytes, n) else {
-                    return;
-                };
-                cx.install(returned, rep, Some(source), n);
-                let Some(error) = cx.runtime_field(to, &[Step::Field(0)], error_ty, n) else {
-                    return;
-                };
-                cx.runtime_secret_error(error, tag, value, available, n);
-            },
-        )
-    }
-
-    fn runtime_secret_error(
-        &mut self,
-        error: AddressId,
-        tag: ValueId,
-        value: ValueId,
-        available: ValueId,
-        n: NodeId,
-    ) {
-        let Some(invalid) = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 1, n) else {
-            return;
-        };
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let join = self.new_block(&[]);
-        self.runtime_branch(invalid, yes, no, n);
-        self.start(yes);
-        self.runtime_case_payload(error, 0, UNIT, None, n);
-        self.jump(join, &[], n);
-        self.start(no);
-        self.inst(
-            Inst::SetCase {
-                address: error,
-                case: 1,
-            },
-            n,
-        );
-        let capacity = self.capacity_ty(n);
-        if let Some(at) =
-            self.runtime_field(error, &[Step::CaseField { case: 1, field: 0 }], capacity, n)
-        {
-            self.runtime_capacity(at, value, available, n);
-        }
-        self.jump(join, &[], n);
-        self.start(join);
     }
 
     fn runtime_tls_result(

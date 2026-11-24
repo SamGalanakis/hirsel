@@ -42,6 +42,7 @@ pub mod latest;
 #[cfg(feature = "record")]
 mod law;
 pub mod limit;
+mod media;
 #[cfg(feature = "prof")]
 mod mem_prof;
 #[cfg(any(test, feature = "prof"))]

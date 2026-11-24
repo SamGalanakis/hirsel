@@ -1,5 +1,20 @@
 use super::*;
 
+/// The code revision the tests open tapes as.
+pub(crate) const REVISION: [u8; 32] = {
+    let mut b = [0; 32];
+    let mut i = 0;
+    while i < 32 {
+        b[i] = 0x20 + i as u8;
+        i += 1;
+    }
+    b
+};
+
+pub(super) const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
+pub(super) const MODEL: &[u8] = include_bytes!("testdata/model-f4-tape.bin");
+pub(super) const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
+
 pub(super) fn tape_frames(mut bytes: &[u8]) -> Vec<Frame> {
     let (mut blocks, _) = Blocks::open(|buf| bytes.read(buf)).unwrap();
     let mut decoder = Decoder::default();

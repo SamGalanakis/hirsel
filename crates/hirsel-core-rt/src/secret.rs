@@ -12,6 +12,7 @@ use crate::{
 pub mod agreement;
 pub(crate) mod kdf;
 pub(crate) mod key;
+pub(crate) mod key_share;
 pub(crate) mod p256_generation;
 use hirsel_core_net::{
     HmacSha2, Name, Pattern, SecretGrant, SecretPolicy, SecretSource, SecretUse,

@@ -917,14 +917,11 @@ impl Glue<'_, '_, '_> {
             FieldTy::Handle(
                 h @ (hirsel_core_layout::Handle::HostFile
                 | hirsel_core_layout::Handle::Socket
-                | hirsel_core_layout::Handle::Secret),
+                | hirsel_core_layout::Handle::Secret
+                | hirsel_core_layout::Handle::Media),
             ) => {
                 let handle = self.load(at, 0);
-                let name = match h {
-                    hirsel_core_layout::Handle::Socket => "hirsel_core_socket_drop",
-                    hirsel_core_layout::Handle::Secret => "hirsel_core_secret_drop",
-                    _ => "hirsel_core_hostfile_drop",
-                };
+                let name = hirsel_core_ir::host_drop_symbol(*h).expect("a context-owned handle");
                 self.call(name, &[P, U], &[], &[self.ctx, handle])?;
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Flow) => {

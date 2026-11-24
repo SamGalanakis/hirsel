@@ -379,32 +379,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     // A provider handle's carrier: its one handle field, cleaned by the
                     // runtime (closing a channel side, abandoning a task, MEM-24).
-                    Some(
-                        role @ (Role::Sender
-                        | Role::Receiver
-                        | Role::Task
-                        | Role::Socket
-                        | Role::HostFile
-                        | Role::Latest
-                        | Role::Client
-                        | Role::Inbox
-                        | Role::Causes
-                        | Role::Flow
-                        | Role::Secret),
-                    ) => {
-                        let handle = match role {
-                            Role::Sender => Handle::Sender,
-                            Role::Receiver => Handle::Receiver,
-                            Role::Task => Handle::Task,
-                            Role::Latest => Handle::Latest,
-                            Role::Client => Handle::Client,
-                            Role::Inbox => Handle::Inbox,
-                            Role::HostFile => Handle::HostFile,
-                            Role::Socket => Handle::Socket,
-                            Role::Flow => Handle::Flow,
-                            Role::Secret => Handle::Secret,
-                            _ => Handle::Causes,
-                        };
+                    Some(role) if let Some(handle) = role.owned_handle() => {
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
                         let held = Some(FieldTy::Handle(handle));
                         return self.fill(r, ty, LRepr::Own, body, None, held);
@@ -675,17 +650,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Capability) => FieldTy::Handle(Handle::Capability),
                 Some(Role::ForeignHandle) => FieldTy::Inline(self.shape(ty)?),
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
-                Some(Role::Task) => FieldTy::Handle(Handle::Task),
-                Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
-                Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
-                Some(Role::Latest) => FieldTy::Handle(Handle::Latest),
-                Some(Role::Client) => FieldTy::Handle(Handle::Client),
-                Some(Role::Inbox) => FieldTy::Handle(Handle::Inbox),
-                Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
-                Some(Role::Socket) => FieldTy::Handle(Handle::Socket),
-                Some(Role::Flow) => FieldTy::Handle(Handle::Flow),
-                Some(Role::Secret) => FieldTy::Handle(Handle::Secret),
-                Some(Role::Causes) => FieldTy::Handle(Handle::Causes),
+                Some(role) if let Some(handle) = role.owned_handle() => FieldTy::Handle(handle),
                 Some(Role::Text) => {
                     if compact {
                         FieldTy::Text

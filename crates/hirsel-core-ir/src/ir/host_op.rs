@@ -123,6 +123,7 @@ pub enum HostOp {
     SecretJwsHmacSign = 129,
     SecretJwsHmacVerify = 130,
     SecretP256Key = hirsel_core_ids::host_op::MEDIA_P256_KEY as isize,
+    SecretKeyShare = hirsel_core_ids::host_op::MEDIA_KEY_SHARE as isize,
 }
 
 impl HostOp {
@@ -223,6 +224,7 @@ impl HostOp {
         HostOp::SecretUnwrap,
         HostOp::SecretSign,
         HostOp::SecretP256Key,
+        HostOp::SecretKeyShare,
         HostOp::SecretAeadSeal,
         HostOp::SecretAeadOpen,
         HostOp::RecvBounded,
@@ -294,6 +296,247 @@ impl HostOp {
         HostOp::ProvideExec,
         HostOp::ExecNarrow,
     ];
+    pub(super) fn operand_signature(self) -> (Vec<super::Param>, Vec<super::Ty>) {
+        use super::{Param::Value as V, Scalar, Ty};
+        let (u8_, u64_, p) = (Ty::Scalar(Scalar::U8), Ty::Scalar(Scalar::U64), Ty::Ptr);
+        let op = self;
+        let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
+        match op {
+            HostOp::Connect => (
+                vec![
+                    V(u64_),
+                    V(u8_),
+                    V(u64_),
+                    V(u64_),
+                    V(Ty::Scalar(Scalar::U16)),
+                    V(u8_),
+                    V(u64_),
+                    V(u64_),
+                ],
+                outcome,
+            ),
+            HostOp::Listen
+            | HostOp::Accept
+            | HostOp::LocalAddr
+            | HostOp::PeerAddr
+            | HostOp::UdpBind
+            | HostOp::UdpBindGroup
+            | HostOp::UdpLocalAddr => op.address_signature(),
+            HostOp::UdpOpen => (
+                vec![
+                    V(u64_),
+                    V(Ty::Scalar(Scalar::Bool)),
+                    V(Ty::Scalar(Scalar::U32)),
+                    V(Ty::Scalar(Scalar::U32)),
+                ],
+                outcome,
+            ),
+            HostOp::UdpRecv | HostOp::UdpSend => {
+                (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+            }
+            HostOp::RecvBounded => (
+                vec![V(u64_), V(p), V(u64_), V(u8_), V(u64_), V(u64_)],
+                outcome,
+            ),
+            HostOp::Resolve | HostOp::CredFetch | HostOp::UnixConnect | HostOp::SendPair => {
+                (vec![V(u64_), V(p), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+            }
+            HostOp::NetNarrowResolve => (vec![V(u64_), V(p)], outcome),
+            HostOp::ExecNarrow => (
+                vec![V(u64_), V(Ty::Scalar(Scalar::U32)), V(p), V(p)],
+                outcome,
+            ),
+            HostOp::UnixListen => (
+                vec![V(u64_), V(p), V(p), V(Ty::Scalar(Scalar::U16))],
+                outcome,
+            ),
+            HostOp::UnixAccept | HostOp::RecvReady | HostOp::ExecWait => {
+                (vec![V(u64_), V(u8_), V(u64_), V(u64_)], outcome)
+            }
+            HostOp::DatagramSend | HostOp::DatagramRecv => {
+                (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+            }
+            HostOp::DatagramSendTo => (
+                vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
+                outcome,
+            ),
+            HostOp::NetNarrowUnix => (vec![V(u64_), V(u8_), V(p), V(p)], outcome),
+            HostOp::NetNarrow => (
+                vec![
+                    V(u64_),
+                    V(u8_),
+                    V(u8_),
+                    V(u64_),
+                    V(u64_),
+                    V(u8_),
+                    V(Ty::Scalar(Scalar::U16)),
+                    V(Ty::Scalar(Scalar::U16)),
+                ],
+                outcome,
+            ),
+            HostOp::TlsConnect => (
+                vec![
+                    V(u64_),
+                    V(u64_),
+                    V(p),
+                    V(u8_),
+                    V(p),
+                    V(p),
+                    V(u8_),
+                    V(u64_),
+                    V(u64_),
+                ],
+                vec![
+                    u64_,
+                    u8_,
+                    Ty::Scalar(Scalar::U32),
+                    u64_,
+                    u64_,
+                    u64_,
+                    u64_,
+                    u64_,
+                ],
+            ),
+            HostOp::SendSecret => (
+                vec![V(u64_), V(p), V(p), V(p), V(u8_), V(u64_), V(u64_)],
+                outcome,
+            ),
+            HostOp::ScramSha256 => (
+                vec![
+                    V(u64_),
+                    V(u64_),
+                    V(p),
+                    V(p),
+                    V(p),
+                    V(p),
+                    V(u8_),
+                    V(u64_),
+                    V(u64_),
+                ],
+                outcome,
+            ),
+            HostOp::ScramVerify | HostOp::SecretNarrow => (vec![V(u64_), V(p)], outcome),
+            // The caller retains the carrier, whose owned bytes are wiped on success.
+            HostOp::SecretSeal => (vec![V(p), V(p)], outcome),
+            HostOp::SecretDeriveHmac => (vec![V(u64_), V(p), V(p), V(p)], outcome),
+            HostOp::SecretDeriveHkdf => (vec![V(u64_), V(p), V(p), V(u64_), V(p)], outcome),
+            HostOp::SecretDeriveArgon2id => {
+                let w = V(Ty::Scalar(Scalar::U32));
+                (vec![V(u64_), V(p), w, w, w, V(u64_), V(p)], outcome)
+            }
+            HostOp::SecretHmac
+            | HostOp::SecretVerifyHmac
+            | HostOp::SecretHmacSha384
+            | HostOp::SecretHmacSha512
+            | HostOp::SecretVerifyHmacSha384
+            | HostOp::SecretVerifyHmacSha512
+            | HostOp::SecretUnwrap
+            | HostOp::SecretP256Key
+            | HostOp::DatagramBind
+            | HostOp::DatagramConnect
+            | HostOp::ScramFinalLen
+            | HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
+            HostOp::SecretJwsHmacSign | HostOp::SecretJwsHmacVerify => {
+                (vec![V(u64_), V(p), V(p), V(u64_)], outcome)
+            }
+            HostOp::SecretSign => (vec![V(u64_), V(u64_), V(u64_), V(p), V(p)], outcome),
+            HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
+                (vec![V(u64_), V(u64_), V(p), V(p), V(p), V(p)], outcome)
+            }
+            HostOp::NetNarrowTls => (
+                vec![
+                    V(u64_),
+                    V(p),
+                    V(Ty::Scalar(Scalar::U16)),
+                    V(Ty::Scalar(Scalar::U16)),
+                    V(u8_),
+                    V(p),
+                ],
+                outcome,
+            ),
+            HostOp::DatagramOpen
+            | HostOp::NetSplit
+            | HostOp::EnvLen
+            | HostOp::ProvideRandom
+            | HostOp::ClockIdle
+            | HostOp::ProcessTrigger
+            | HostOp::ProvideDir
+            | HostOp::ProvideNet
+            | HostOp::ProvideExec
+            | HostOp::PortNext => (vec![V(u64_)], outcome),
+            HostOp::ProvideProcess => (vec![], outcome),
+            HostOp::ProvideRandomTape => (vec![V(p)], outcome),
+            HostOp::ProvideStdout | HostOp::ProvideStderr => {
+                (vec![V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
+            }
+            HostOp::StreamTerminal | HostOp::ExecSignal => (vec![V(u64_), V(u8_)], outcome),
+            HostOp::CallWord | HostOp::CallSecret | HostOp::NetJoin => {
+                (vec![V(u64_), V(u64_)], outcome)
+            }
+            HostOp::CallPayload
+            | HostOp::PortFill
+            | HostOp::UdpFillPackets
+            | HostOp::ReadAt
+            | HostOp::WriteAt
+            | HostOp::SecretWrap
+            | HostOp::SecretKeyShare => (vec![V(u64_), V(u64_), V(p)], outcome),
+            HostOp::CallPayloadPrefix => (vec![V(u64_), V(u64_), V(u64_), V(p)], outcome),
+            HostOp::PortReply => (vec![V(u64_); 9], outcome),
+            HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => {
+                (vec![V(u64_), V(u64_)], outcome)
+            }
+            HostOp::EnvGet | HostOp::EnvName => {
+                let input = if op == HostOp::EnvGet { p } else { u64_ };
+                (
+                    vec![V(u64_), V(input)],
+                    vec![p, u8_, Ty::Scalar(Scalar::U32), u64_],
+                )
+            }
+            HostOp::ExecSpawn => {
+                let mut results = outcome;
+                results.extend([u64_; 3]);
+                (
+                    vec![
+                        V(u64_),
+                        V(p),
+                        V(p),
+                        V(p),
+                        V(p),
+                        V(p),
+                        V(u8_),
+                        V(u8_),
+                        V(u8_),
+                    ],
+                    results,
+                )
+            }
+            HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
+            HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
+            HostOp::SleepUntil | HostOp::SleepUntilWall => (vec![V(u64_), V(u64_)], outcome),
+            HostOp::Stat | HostOp::StatFile => {
+                let mut metadata = outcome;
+                metadata[3] = Ty::Scalar(Scalar::I64);
+                metadata.push(u8_);
+                let params = if op == HostOp::Stat {
+                    vec![V(u64_), V(p)]
+                } else {
+                    vec![V(u64_)]
+                };
+                (params, metadata)
+            }
+            HostOp::Close
+            | HostOp::TryLock
+            | HostOp::Unlock
+            | HostOp::Sync
+            | HostOp::SyncDir
+            | HostOp::ZeroExtension => (vec![V(u64_)], outcome),
+            HostOp::Random => (vec![V(u64_), V(p)], vec![]),
+            HostOp::Stopped => (vec![V(u64_)], vec![]),
+            HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
+            _ => (vec![V(u64_), V(p)], outcome),
+        }
+    }
+
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
         self as u8
@@ -379,6 +622,7 @@ impl HostOp {
             HostOp::SecretUnwrap => "secret_unwrap",
             HostOp::SecretSign => "secret_sign",
             HostOp::SecretP256Key => "secret_p256_key",
+            HostOp::SecretKeyShare => "secret_key_share",
             HostOp::SecretAeadSeal => "secret_aead_seal",
             HostOp::SecretAeadOpen => "secret_aead_open",
             HostOp::NetSplit => "net_split",
@@ -471,6 +715,7 @@ impl HostOp {
             Self::SecretUnwrap => "hirsel_core_secret_unwrap",
             Self::SecretSign => "hirsel_core_secret_sign",
             Self::SecretP256Key => "hirsel_core_secret_p256_key",
+            Self::SecretKeyShare => "hirsel_core_secret_key_share",
             Self::SecretAeadSeal => "hirsel_core_secret_aead_seal",
             Self::SecretAeadOpen => "hirsel_core_secret_aead_open",
             Self::NetSplit => "hirsel_core_net_split",
@@ -529,6 +774,7 @@ impl HostOp {
                 | Self::SecretUnwrap
                 | Self::SecretSign
                 | Self::SecretP256Key
+                | Self::SecretKeyShare
                 | Self::SecretAeadSeal
                 | Self::SecretAeadOpen
         )
@@ -574,6 +820,7 @@ impl HostOp {
                 | HostOp::SecretUnwrap
                 | HostOp::SecretSign
                 | HostOp::SecretP256Key
+                | HostOp::SecretKeyShare
                 | HostOp::SecretAeadSeal
                 | HostOp::SecretAeadOpen
                 | HostOp::NetSplit
@@ -604,4 +851,16 @@ impl HostOp {
                 | HostOp::StreamTerminal
         )
     }
+}
+
+/// Cleanup for one-word provider handles that borrow the runtime context.
+pub fn host_drop_symbol(handle: hirsel_core_layout::Handle) -> Option<&'static str> {
+    use hirsel_core_layout::Handle;
+    Some(match handle {
+        Handle::HostFile => "hirsel_core_hostfile_drop",
+        Handle::Socket => "hirsel_core_socket_drop",
+        Handle::Secret => "hirsel_core_secret_drop",
+        Handle::Media => "hirsel_core_media_drop",
+        _ => return None,
+    })
 }

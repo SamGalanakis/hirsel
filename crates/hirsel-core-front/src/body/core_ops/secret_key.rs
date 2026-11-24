@@ -13,15 +13,20 @@ impl Cx<'_, '_, '_> {
     ) -> Option<ValueId> {
         let u = Ty::Scalar(Scalar::U64);
         let first = vals[0]?;
-        let mut operands = vec![if op == HostOp::SecretP256Key {
-            first
-        } else {
-            self.runtime_key(first, n)
-        }];
+        let mut operands = vec![
+            if matches!(op, HostOp::SecretP256Key | HostOp::SecretKeyShare) {
+                first
+            } else {
+                self.runtime_key(first, n)
+            },
+        ];
         match op {
             HostOp::SecretWrap => operands.extend([self.runtime_key(vals[1]?, n), vals[2]?]),
             HostOp::SecretUnwrap | HostOp::SecretP256Key => operands.extend([vals[1]?, vals[2]?]),
-            HostOp::SecretSign | HostOp::SecretAeadSeal | HostOp::SecretAeadOpen => {
+            HostOp::SecretSign
+            | HostOp::SecretAeadSeal
+            | HostOp::SecretAeadOpen
+            | HostOp::SecretKeyShare => {
                 let (_, at) = self.runtime_place(self.p.fns[f].params[1].ty, vals[1], n)?;
                 let tag = self.net_case(at, n);
                 let alg = self.value(u);
@@ -34,9 +39,13 @@ impl Cx<'_, '_, '_> {
                     },
                     n,
                 );
-                operands.extend([alg, vals[2]?, vals[3]?, vals[4]?]);
-                if op != HostOp::SecretSign {
-                    operands.push(vals[5]?);
+                if op == HostOp::SecretKeyShare {
+                    operands.extend([alg, vals[2]?]);
+                } else {
+                    operands.extend([alg, vals[2]?, vals[3]?, vals[4]?]);
+                    if op != HostOp::SecretSign {
+                        operands.push(vals[5]?);
+                    }
                 }
             }
             _ => unreachable!(),
@@ -194,5 +203,94 @@ impl Cx<'_, '_, '_> {
                 }
             },
         )
+    }
+
+    pub(super) fn runtime_secret_seal(
+        &mut self,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let bytes = self.p.fns[f].params[0].ty;
+        let rep = self.rep_at(bytes, n)?;
+        let source = vals[0]?;
+        let [value, tag, _, available] = self.runtime_row(
+            RtOp::Host(HostOp::SecretSeal),
+            &[Arg::Value(source), Arg::Value(vals[1]?)],
+            n,
+        )?;
+        let byte = Ty::Scalar(Scalar::U8);
+        let ok = self.runtime_compare(byte, tag, 0, n)?;
+        // Success drops the wiped source. The error arm moves its carrier.
+        self.consume(Some(source), n);
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                cx.drop_field(Some(source), bytes, n);
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                {
+                    cx.runtime_store(at, &[], Ty::Scalar(Scalar::U64), value, n);
+                }
+            },
+            |cx, to, pair| {
+                let TyKind::Tuple(fields) = cx.t.kind(pair) else {
+                    unreachable!("secret.seal returns its error and source as a tuple");
+                };
+                let error_ty = fields[0];
+                let Some(to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
+                else {
+                    return;
+                };
+                let Some(returned) = cx.runtime_field(to, &[Step::Field(1)], bytes, n) else {
+                    return;
+                };
+                cx.install(returned, rep, Some(source), n);
+                let Some(error) = cx.runtime_field(to, &[Step::Field(0)], error_ty, n) else {
+                    return;
+                };
+                cx.runtime_secret_error(error, tag, value, available, n);
+            },
+        )
+    }
+
+    pub(super) fn runtime_secret_error(
+        &mut self,
+        error: AddressId,
+        tag: ValueId,
+        value: ValueId,
+        available: ValueId,
+        n: NodeId,
+    ) {
+        let Some(invalid) = self.runtime_compare(Ty::Scalar(Scalar::U8), tag, 1, n) else {
+            return;
+        };
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(invalid, yes, no, n);
+        self.start(yes);
+        self.runtime_case_payload(error, 0, UNIT, None, n);
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: error,
+                case: 1,
+            },
+            n,
+        );
+        let capacity = self.capacity_ty(n);
+        if let Some(at) =
+            self.runtime_field(error, &[Step::CaseField { case: 1, field: 0 }], capacity, n)
+        {
+            self.runtime_capacity(at, value, available, n);
+        }
+        self.jump(join, &[], n);
+        self.start(join);
     }
 }

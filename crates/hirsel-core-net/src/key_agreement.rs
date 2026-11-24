@@ -12,6 +12,14 @@ pub enum Group {
 }
 
 impl Group {
+    pub const fn from_case(case: u64) -> Option<Self> {
+        match case {
+            0 => Some(Self::X25519),
+            1 => Some(Self::P256),
+            _ => None,
+        }
+    }
+
     pub const fn public_len(self) -> usize {
         match self {
             Self::X25519 => 32,

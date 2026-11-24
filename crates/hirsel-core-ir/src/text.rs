@@ -179,8 +179,10 @@ fn quote(s: &str) -> String {
     q.push('"');
     q
 }
+mod handle_names;
+use handle_names::HANDLE_NAMES;
+
 fn field_ty(f: &FieldTy) -> String {
-    use hirsel_core_layout::Handle;
     match f {
         FieldTy::Scalar(s) => s.name().into(),
         FieldTy::Inline(t) => format!("t{}", t.0),
@@ -196,18 +198,11 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::OwnFn => "ownfn".into(),
         FieldTy::Borrow => "borrow".into(),
         FieldTy::View(e) => format!("view {}", field_ty(e)),
-        FieldTy::Handle(Handle::Task) => "task".into(),
-        FieldTy::Handle(Handle::Sender) => "sender".into(),
-        FieldTy::Handle(Handle::Receiver) => "receiver".into(),
-        FieldTy::Handle(Handle::Latest) => "latest".into(),
-        FieldTy::Handle(Handle::Client) => "client".into(),
-        FieldTy::Handle(Handle::Inbox) => "inbox".into(),
-        FieldTy::Handle(Handle::Capability) => "cap".into(),
-        FieldTy::Handle(Handle::Causes) => "causes".into(),
-        FieldTy::Handle(Handle::HostFile) => "hostfile".into(),
-        FieldTy::Handle(Handle::Socket) => "socket".into(),
-        FieldTy::Handle(Handle::Flow) => "flow".into(),
-        FieldTy::Handle(Handle::Secret) => "secret".into(),
+        FieldTy::Handle(handle) => HANDLE_NAMES
+            .iter()
+            .find_map(|&(name, kind)| (*handle == kind).then_some(name))
+            .expect("every Handle has a text spelling")
+            .into(),
         FieldTy::Map(k, v) => format!("map {} {}", field_ty(k), field_ty(v)),
         FieldTy::Text => "text".into(),
         FieldTy::FixedSpan(e) => format!("fixed {}", field_ty(e)),
@@ -1045,7 +1040,6 @@ impl<'a> Line<'a> {
         Ok(hirsel_core_layout::TypeRef(self.id('t')?))
     }
     fn field_ty(&mut self) -> R<FieldTy> {
-        use hirsel_core_layout::Handle;
         let boxed = |l: &mut Self| l.field_ty().map(Box::new);
         Ok(match self.peek().ok_or("expected a field type")? {
             "box" | "rc" | "arc" | "shared" | "region_ref" | "link" => {
@@ -1097,23 +1091,16 @@ impl<'a> Line<'a> {
                     "fn" => FieldTy::Fn,
                     "ownfn" => FieldTy::OwnFn,
                     "borrow" => FieldTy::Borrow,
-                    "task" => FieldTy::Handle(Handle::Task),
-                    "sender" => FieldTy::Handle(Handle::Sender),
-                    "receiver" => FieldTy::Handle(Handle::Receiver),
-                    "latest" => FieldTy::Handle(Handle::Latest),
-                    "client" => FieldTy::Handle(Handle::Client),
-                    "inbox" => FieldTy::Handle(Handle::Inbox),
-                    "cap" => FieldTy::Handle(Handle::Capability),
-                    "causes" => FieldTy::Handle(Handle::Causes),
-                    "hostfile" => FieldTy::Handle(Handle::HostFile),
-                    "socket" => FieldTy::Handle(Handle::Socket),
-                    "flow" => FieldTy::Handle(Handle::Flow),
-                    "secret" => FieldTy::Handle(Handle::Secret),
                     "text" => FieldTy::Text,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
                         (Some(s), _) => FieldTy::Scalar(s),
                         (None, Some(Ok(n))) => FieldTy::Inline(hirsel_core_layout::TypeRef(n)),
-                        _ => return Err(format!("unknown field type `{w}`")),
+                        _ => FieldTy::Handle(
+                            HANDLE_NAMES
+                                .iter()
+                                .find_map(|&(name, kind)| (w == name).then_some(kind))
+                                .ok_or_else(|| format!("unknown field type `{w}`"))?,
+                        ),
                     },
                 }
             }

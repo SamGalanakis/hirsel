@@ -48,6 +48,13 @@ unsafe fn operands(r: &Request) -> Args {
         if r.operation == SECRET_KDF {
             return secret::kdf_args(r);
         }
+        if r.operation == MEDIA_KEY_SHARE {
+            let call = &*r.path.cast::<crate::secret::key_share::Generation>();
+            let mut encoded = vec![call.group as u8];
+            put_varint(&mut encoded, call.random);
+            put_varint(&mut encoded, (r.buffer.capacity - r.buffer.len) as u64);
+            return Args::of(&encoded);
+        }
         if r.operation == MEDIA_P256_KEY {
             let call = &*r.path.cast::<crate::secret::p256_generation::Generation>();
             let mut random = Vec::new();
@@ -114,7 +121,7 @@ pub(super) unsafe fn canonical(r: &Request) -> Args {
         }
         RESOLVE => arguments.buffered([crate::resolve::spare(&r.buffer) as u64, 0]),
         READ | READ_AT | RANDOM | NEXT_ENTRIES | RECV_BOUNDED | DATAGRAM_RECV | STDIN_READ
-        | MKSTEMP | MEDIA_P256_KEY => {
+        | MKSTEMP | MEDIA_P256_KEY | MEDIA_KEY_SHARE => {
             arguments.buffered([r.buffer.capacity.saturating_sub(r.buffer.len) as u64, 0])
         }
         SECRET_MAC

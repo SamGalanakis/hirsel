@@ -124,6 +124,7 @@ host_ops! {
     UDP_LOCAL_ADDR = 138,
     UDP_FILL_PACKETS = 139,
     MEDIA_P256_KEY = 140,
+    MEDIA_KEY_SHARE = 141,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

@@ -262,6 +262,8 @@ pub enum Handle {
     Flow,
     /// One holder of a `Secret` designation (TLS-5): cleaning it releases the holder.
     Secret,
+    /// A move-only media resource (TLS-8).
+    Media,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]

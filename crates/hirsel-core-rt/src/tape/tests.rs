@@ -4,26 +4,12 @@ use super::*;
 use crate::os::OsProvider;
 use std::collections::VecDeque;
 use std::{cell::Cell as Shared, io::Read};
-/// The code revision the tests open tapes as.
-pub(super) const REVISION: [u8; 32] = {
-    let mut b = [0; 32];
-    let mut i = 0;
-    while i < 32 {
-        b[i] = 0x20 + i as u8;
-        i += 1;
-    }
-    b
-};
 #[path = "aead_tests.rs"]
 mod aead;
 #[path = "kdf_tests.rs"]
 mod kdf;
 #[path = "rl2_tests.rs"]
 mod rl2;
-const HAND: &[u8] = include_bytes!("testdata/hand-tape.bin");
-const MODEL: &[u8] = include_bytes!("testdata/model-f4-tape.bin");
-const XXH3: &[u8] = include_bytes!("testdata/xxh3.bin");
-
 /// Counts every callback that reaches it. `inner: None` refuses everything:
 /// the refuse-all host of the bypass law.
 struct Counted {
@@ -2509,10 +2495,14 @@ fn unix_tape_rejects_impossible_packet_before_appending() {
 
 #[path = "test_frames.rs"]
 mod test_frames;
-use test_frames::{in_task, tape_frames};
+pub(super) use test_frames::REVISION;
+use test_frames::{HAND, MODEL, XXH3, in_task, tape_frames};
 
 #[path = "registry_tests.rs"]
 mod registry_tests;
 
 #[path = "p256_tests.rs"]
 mod p256_tests;
+
+#[path = "key_share_tests.rs"]
+mod key_share_tests;

@@ -117,6 +117,8 @@ pub(crate) struct RunGrants {
     pub(crate) exec_grants: Mutex<Vec<crate::exec::NarrowedGrant>>,
     pub(crate) env_grants: Mutex<Vec<crate::env::Grant>>,
     pub(crate) secrets: Mutex<crate::secret::Secrets>,
+    pub(crate) agreements:
+        Arc<hirsel_core_net::agreement_registry::AgreementRegistry<Arc<crate::secret::ChargeCell>>>,
     pub(crate) cells: crate::provide::Cells,
 }
 

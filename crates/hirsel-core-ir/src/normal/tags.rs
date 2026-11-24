@@ -64,6 +64,7 @@ tags!(Handle {
     10 => Client,
     11 => Inbox,
     12 => Secret,
+    13 => Media,
 });
 
 tags!(Repr {
@@ -530,6 +531,7 @@ tags!(HostOp {
     144 => UdpLocalAddr,
     145 => UdpFillPackets,
     146 => SecretP256Key,
+    147 => SecretKeyShare,
 });
 
 tags!(RaiseCause {

@@ -16,6 +16,7 @@ pub fn carries_payload(op: u8) -> bool {
             | TLS_CONNECT
             | SECRET_MAC
             | MEDIA_P256_KEY
+            | MEDIA_KEY_SHARE
             | CRED_FETCH
             | RESOLVE
             | STDIN_READ

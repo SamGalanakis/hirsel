@@ -1400,22 +1400,12 @@ fn measure<'r>(
         },
         FieldTy::Handle(Handle::Capability) => (POINTER, POINTER, 8),
         _ if stable => return Err("a region block holds only plain or region data"),
+        FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
         | FieldTy::Shared(_)
-        | FieldTy::Handle(
-            Handle::Task
-            | Handle::Causes
-            | Handle::Socket
-            | Handle::HostFile
-            | Handle::Latest
-            | Handle::Client
-            | Handle::Inbox
-            | Handle::Flow
-            | Handle::Secret,
-        ) => (POINTER, POINTER, 8),
-        FieldTy::Handle(Handle::Sender | Handle::Receiver) => (POINTER, POINTER, 24),
+        | FieldTy::Handle(_) => (POINTER, POINTER, 8),
         FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::FrozenBytes => (SEQ_CARRIER, POINTER, 24),
         FieldTy::OwnFn => (CLOSURE_CARRIER, POINTER, 16),
         FieldTy::Text
@@ -1431,20 +1421,8 @@ fn array_element(shapes: &[Row], ty: &FieldTy) -> bool {
     match ty {
         FieldTy::Inline(t) => matches!(shapes[t.index()].repr, Repr::Own | Repr::Region),
         FieldTy::Array(e, _) => array_element(shapes, e),
-        FieldTy::Borrow
-        | FieldTy::View(_)
-        | FieldTy::Handle(
-            Handle::Task
-            | Handle::Sender
-            | Handle::Receiver
-            | Handle::Latest
-            | Handle::Client
-            | Handle::Inbox
-            | Handle::Socket
-            | Handle::HostFile
-            | Handle::Flow
-            | Handle::Secret,
-        ) => false,
+        FieldTy::Handle(Handle::Capability | Handle::Causes) => true,
+        FieldTy::Borrow | FieldTy::View(_) | FieldTy::Handle(_) => false,
         _ => true,
     }
 }
@@ -1593,25 +1571,14 @@ fn drops(shapes: &[Row], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
         FieldTy::Seq(e) => !zero_sized(shapes, e, &mut vec![]),
         FieldTy::FrozenBytes => true,
         FieldTy::Inline(t) => !matches!(shapes[t.index()].repr, Repr::Compact(_)) && drop(*t),
+        FieldTy::Handle(Handle::Capability) => false,
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
         | FieldTy::Shared(_)
         | FieldTy::Map(..)
         | FieldTy::OwnFn
-        | FieldTy::Handle(
-            Handle::Task
-            | Handle::Sender
-            | Handle::Receiver
-            | Handle::Latest
-            | Handle::Client
-            | Handle::Inbox
-            | Handle::Causes
-            | Handle::Socket
-            | Handle::HostFile
-            | Handle::Flow
-            | Handle::Secret,
-        ) => true,
+        | FieldTy::Handle(_) => true,
         FieldTy::Array(e, n) => *n > 0 && drops(shapes, e, drop),
         _ => false,
     }

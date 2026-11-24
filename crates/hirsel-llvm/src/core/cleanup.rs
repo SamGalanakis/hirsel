@@ -603,14 +603,11 @@ impl FunctionEmitter<'_> {
             FieldTy::Handle(
                 h @ (hirsel_core_layout::Handle::HostFile
                 | hirsel_core_layout::Handle::Socket
-                | hirsel_core_layout::Handle::Secret),
+                | hirsel_core_layout::Handle::Secret
+                | hirsel_core_layout::Handle::Media),
             ) => {
                 let handle = self.load(&Type::I64, p, 1);
-                let name = match h {
-                    hirsel_core_layout::Handle::Socket => "hirsel_core_socket_drop",
-                    hirsel_core_layout::Handle::Secret => "hirsel_core_secret_drop",
-                    _ => "hirsel_core_hostfile_drop",
-                };
+                let name = hirsel_core_ir::host_drop_symbol(*h).expect("a context-owned handle");
                 self.runtime_void(name, &[ptr(CONTEXT), word(handle)]);
                 None
             }

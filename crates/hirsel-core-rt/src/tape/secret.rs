@@ -7,6 +7,7 @@ pub(super) fn inline_sink(op: u8) -> Option<Provider> {
         SECRET_KDF => crate::secret::kdf::KDF_PROVIDER,
         MEDIA_AGREEMENT => crate::secret::agreement::AGREEMENT_PROVIDER,
         MEDIA_P256_KEY => crate::secret::p256_generation::PROVIDER,
+        crate::provider::MEDIA_KEY_SHARE => crate::secret::key_share::PROVIDER,
         SCRAM_VERIFY => crate::scram::VERIFY_PROVIDER,
         _ => return None,
     })

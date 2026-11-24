@@ -14,6 +14,7 @@ mod argon2;
 mod conn;
 mod crc;
 mod frame;
+mod key_share;
 mod launch;
 mod map;
 mod provide;
@@ -163,6 +164,7 @@ struct World {
     grant_charges: Vec<(Limit, u64)>,
     /// Secret designations by key; a released one is `None` (TLS-5).
     secrets: Vec<Option<EvalSlot>>,
+    key_shares: Vec<Option<key_share::Share>>,
     /// Each sealed secret's charge, refunded once no designation holds its token.
     seals: Vec<(std::sync::Weak<()>, Limit, u64)>,
     tls_writes: BTreeMap<u64, (Name, bool, hirsel_core_net::scram::Binding)>,
@@ -4229,32 +4231,6 @@ impl Machine<'_> {
         self.world.secrets.len() as u64 - 1
     }
 
-    fn secret_share(&mut self, key: u64) -> u64 {
-        self.world.secrets[key as usize].as_mut().unwrap().holders += 1;
-        key
-    }
-
-    /// Release one holder; the last refunds the designation's charge, and the
-    /// last designation of sealed bytes refunds the seal (TLS-5).
-    fn secret_drop(&mut self, key: u64) {
-        let slot = self.world.secrets[key as usize].as_mut().unwrap();
-        slot.holders -= 1;
-        if slot.holders != 0 {
-            return;
-        }
-        let slot = self.world.secrets[key as usize].take().unwrap();
-        let (l, n) = slot.charge;
-        self.refund(l, n);
-        drop(slot.secret);
-        let (released, held): (Vec<_>, Vec<_>) = std::mem::take(&mut self.world.seals)
-            .into_iter()
-            .partition(|(token, ..)| token.strong_count() == 0);
-        self.world.seals = held;
-        for (_, l, n) in released {
-            self.refund(l, n);
-        }
-    }
-
     fn send_secret(&mut self, t: &Task, a: &[u64]) -> X<Vec<u64>> {
         let key = a[0];
         let words = |this: &Self, carrier: u64| -> Vec<u64> {
@@ -4458,6 +4434,7 @@ impl Machine<'_> {
             | HostOp::SecretJwsHmacSign
             | HostOp::SecretJwsHmacVerify => return self.secret_mac(t, op, a),
             HostOp::SecretP256Key => return self.secret_p256_key(t, a),
+            HostOp::SecretKeyShare => return self.key_share(t, a),
             HostOp::SecretWrap | HostOp::SecretUnwrap | HostOp::SecretSign => {
                 return Ok(self.secret_key(t, op, a));
             }
@@ -4531,6 +4508,7 @@ impl Machine<'_> {
             | HostOp::SecretUnwrap
             | HostOp::SecretSign
             | HostOp::SecretP256Key
+            | HostOp::SecretKeyShare
             | HostOp::SecretAeadSeal
             | HostOp::SecretAeadOpen
             | HostOp::EnvGet
@@ -5518,6 +5496,10 @@ impl Machine<'_> {
             FieldTy::Handle(Handle::Flow) => panic!("flow execution uses the native reference"),
             FieldTy::Handle(Handle::Socket) => {
                 self.socket_drop(self.load(at, 8));
+                false
+            }
+            FieldTy::Handle(Handle::Media) => {
+                self.drop_media(self.load(at, 8));
                 false
             }
             FieldTy::Handle(Handle::Secret) => {

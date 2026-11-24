@@ -19,6 +19,7 @@ limit = 16777216
 grants = []
 
 [tests.sources]
+"example.hirsel" = "tests"
 "hls_laws.hirsel" = "tests"
 "dash_laws.hirsel" = "tests"
 "low_latency_laws.hirsel" = "tests"

@@ -9,3 +9,4 @@ dirs = ["fixtures"]
 
 [tests.sources]
 "tests.hirsel" = "tests"
+"example.hirsel" = "tests"

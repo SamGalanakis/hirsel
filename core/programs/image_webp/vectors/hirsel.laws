@@ -1,2 +1,3 @@
 hirsel.laws 1
-image_webp@1/tests/libwebp_vectors src=3902d200f0ca8590 sig=4dc71b82d2cacd61 run=ede5256712a798a3 bug=- oracle=- rows=pending
+image_webp@1/tests/decode_lossless_rgba src=42be2bd6c0f1f0e2 sig=33ad5dcb3067764e run=16379e8358a085f9 bug=- oracle=- rows=pending
+image_webp@1/tests/libwebp_vectors src=3902d200f0ca8590 sig=4dc71b82d2cacd61 run=90b5a23c28fdd1c0 bug=- oracle=- rows=pending

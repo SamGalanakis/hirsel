@@ -10,4 +10,5 @@ reference=$2
 data=$3
 shift 3
 python3 "$codec/vectors/prepare.py" "$work" "$reference" "$data" "$llvm"
-"$compiler" test "$work/image_webp" --exact image_webp@1/tests/libwebp_vectors --grant Foreign=image_webp@1/webp/Webp "$@"
+"$compiler" test "$work/image_webp" --exact image_webp@1/tests/libwebp_vectors \
+    --exact image_webp@1/tests/decode_lossless_rgba --grant Foreign=image_webp@1/webp/Webp "$@"

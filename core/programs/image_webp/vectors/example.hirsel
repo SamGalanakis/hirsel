@@ -1,0 +1,14 @@
+@test
+fn decode_lossless_rgba(f: Foreign[webp.Webp], fixtures: Dir) -> Result[(), webp.Error] waits {
+    let input = load(fixtures, "lossless", ".webp")
+    let budget = limits(1)
+    let info = result.unwrap(image_core.image.probe(input, budget))
+    let width: u64 = int.widen(info.width)
+    let height: u64 = int.widen(info.height)
+    let mut rgba = buffer(4 * width * height)
+    let _ = webp.decode(f, input, budget, None, None, mut rgba)?
+    if list.slice(rgba, 0, 4) != b"\x0d\x07\xf5\0" {
+        fail("the lossless fixture starts with RGBA (13, 7, 245, 0)")
+    }
+    Ok(())
+}

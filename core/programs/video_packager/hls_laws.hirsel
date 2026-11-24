@@ -1,25 +1,3 @@
-fn sample(duration: u32, size: u32, sync: bool) -> media_container.mp4.Sample {
-    media_container.mp4.Sample(duration: duration, size: size, flags: if sync {
-        0x02000000
-    } else {
-        0x01010000
-    }, composition_offset: 0)
-}
-
-fn fixture(mut out: Bytes, id: u32, scale: u32, w: u16) -> packager.Rendition {
-    let track = media_container.mp4.Track(id: 1, timescale: scale, media: Video(w, 90))
-    let limit = packager.SegmentLimit(samples: 2, payload_bytes: 8)
-    let mut samples: List[media_container.mp4.Sample] = list.with_capacity(2)
-    list.push(mut samples, sample(scale / 2, 3, true))
-    list.push(mut samples, sample(scale, 5, false))
-    let first = result.unwrap(packager.write_segment(mut out, track, 7, 0, samples, 8, limit))
-    let second = result.unwrap(packager.write_segment(mut out, track, 8, int.widen(scale + scale / 2), samples, 8, limit))
-    let mut segments: List[packager.Segment] = list.with_capacity(2)
-    list.push(mut segments, first)
-    list.push(mut segments, second)
-    result.unwrap(packager.rendition(id, track, Avc1(b"\x01\x42\xc0\x1e\xff\xe0\x00"), take segments))
-}
-
 fn check_codec_strings() {
     // 14496-15 AVC writes the three profile, compatibility and level octets.
     let high = result.unwrap(media_bits.codec.codec_string(Avc1(b"\x01\x64\x00\x28\xff\xe0\x00")))
@@ -38,13 +16,9 @@ fn check_codec_strings() {
 fn hls_cmaf() -> Result[(), ()] {
     check_codec_strings()
     let mut prefix: Bytes = list.with_capacity(128)
-    let first = fixture(mut prefix, 1, 1000, 160)
-    let second = fixture(mut prefix, 2, 90000, 320)
     let limit = packager.ManifestLimit(octets: 8192, steps: 20000)
-    let media = result.unwrap(packager.hls_media(first, false, limit))
-    if media != "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1.500000000,\n7.m4s\n#EXTINF:1.500000000,\n8.m4s\n#EXT-X-ENDLIST\n" {
-        fail("media playlist differs from the two 1.5 s segments")
-    }
+    let first = write_vod_example(mut prefix, limit)
+    let second = fixture(mut prefix, 2, 90000, 320)
     let segment = first.segments[1]
     result.unwrap(packager.write_iframe(mut prefix, segment))
     let size: u32 = list.word_be(prefix, 104)

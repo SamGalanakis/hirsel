@@ -88,7 +88,8 @@ def stage(work):
     fixtures.mkdir(parents=True, exist_ok=True)
     for filename in ("opus.hirsel", "native.hirsel", "libhirsel_opus.a"):
         shutil.copyfile(codec / filename, work / filename)
-    shutil.copyfile(vectors / "tests.hirsel", work / "tests.hirsel")
+    for filename in ("tests.hirsel", "example.hirsel"):
+        shutil.copyfile(vectors / filename, work / filename)
 
     # The test runs in its own empty working directory, so its grant is absolute.
     base = (codec / "hirsel.toml").read_text()

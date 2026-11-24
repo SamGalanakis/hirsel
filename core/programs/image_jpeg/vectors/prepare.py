@@ -22,7 +22,8 @@ def main(work, reference):
         shutil.copytree(codec.parent / dependency, work / dependency, dirs_exist_ok=True)
     for name in ("image_jpeg.hirsel", "native.hirsel", "libhirsel_jpeg.a"):
         shutil.copyfile(codec / name, staged / name)
-    shutil.copyfile(vectors / "tests.hirsel", staged / "tests.hirsel")
+    for name in ("tests.hirsel", "example.hirsel"):
+        shutil.copyfile(vectors / name, staged / name)
     manifest = (codec / "hirsel.toml").read_text()
     manifest = manifest.replace("[dependencies]\n", "[dependencies]\nstd = { major = 1 }\n")
     tests = (vectors / "test.toml").read_text()

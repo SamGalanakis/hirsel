@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Copy docs/PRIMER.md and the std operation index to the site and the skill.
+"""Sync the primer, std operation index, and README package list.
 
-docs/PRIMER.md is the one source. This writes site/primer.md, site/api-index.md,
+This writes site/primer.md, site/api-index.md,
 site/llms.txt, skills/hirsel/references/PRIMER.md and the Markdown alternate link in
 site/index.html. --write owns those outputs; --check compares every byte and exits 1
 when any is stale. Neither runs hirsel: regenerate core/std/API-INDEX.md first with
@@ -87,7 +87,7 @@ def main() -> int:
             path.write_bytes(want[path])
         return 0
     for path in stale:
-        sys.stderr.write(f"{path.relative_to(ROOT)}: stale copy of the primer or std index; "
+        sys.stderr.write(f"{path.relative_to(ROOT)}: stale generated content; "
                          "run python3 tools/site_sync.py --write\n")
     return 1 if stale else 0
 

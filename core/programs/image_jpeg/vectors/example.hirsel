@@ -1,0 +1,28 @@
+@test
+fn decode_rgb_strips(f: Foreign[image_jpeg.Jpeg], fixtures: Dir) -> Result[(), image_jpeg.Error] waits {
+    let input = load(fixtures, "baseline.jpg")
+    let budget = limits(131072)
+    let header = result.unwrap(image_core.image.probe(input, budget))
+    let target = image_core.image.Size(width: header.width, height: header.height)
+    let mut decoder = image_jpeg.decoder(f, take input, target, budget, 2097152)?
+    let size = dimensions(mut decoder)
+    let width: u64 = int.widen(size.width)
+    let stride = 3 * width
+    let mut rgb = buffer(16 * stride)
+    let mut written = 0u64
+    loop {
+        match image_jpeg.decode_strip(mut decoder, mut rgb)? {
+            Pending => (),
+            // The first n rows of rgb are ready for a consumer.
+            Rows(n) => {
+                let rows: u64 = int.widen(n)
+                written += stride * rows
+            },
+            End => break,
+        }
+    }
+    if written != 3 * 227 * 149 {
+        fail("the 227 by 149 fixture must produce one RGB triplet per pixel")
+    }
+    Ok(())
+}

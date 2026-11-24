@@ -92,7 +92,8 @@ def main():
     )
     for filename in ("webp.hirsel", "native.hirsel", "libhirsel_webp.a"):
         shutil.copyfile(codec / filename, package / filename)
-    shutil.copyfile(vectors / "tests.hirsel", package / "tests.hirsel")
+    for filename in ("tests.hirsel", "example.hirsel"):
+        shutil.copyfile(vectors / filename, package / filename)
     manifest = (codec / "hirsel.toml").read_text()
     tests = (vectors / "test.toml").read_text().replace('"fixtures"', json.dumps(str(fixtures)))
     (package / "hirsel.toml").write_text(manifest + tests)

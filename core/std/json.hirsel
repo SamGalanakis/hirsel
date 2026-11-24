@@ -1334,8 +1334,10 @@ fn at(s: String, i: u64) -> u8 {
 
 /// Skips JSON whitespace: space, tab, line feed, carriage return.
 fn skip(s: String, mut i: u64) {
-    loop {
-        let c = at(s, i)
+    let b = string.as_bytes(s)
+    let end = list.len(b)
+    while i < end {
+        let c = b[i]
         if c != b' ' && c != b'\t' && c != b'\n' && c != b'\r' {
             return
         }
@@ -1606,23 +1608,24 @@ fn source_mark(mut d: ReadTyped, pos: u64, key: bool) {
 
 const TYPED_DEPTH: u64 = 64
 
+// The caller has skipped any leading whitespace.
 fn open_typed(s: String, depth: u64, bracket: u8, mut d: ReadTyped) -> Result[(), TypedError] {
-    skip(s, mut d.pos)
-    if depth == TYPED_DEPTH && at(s, d.pos) == bracket {
+    if at(s, d.pos) != bracket {
+        return Error(typed_input_issue(s, d, d.pos, ExpectedValue))
+    }
+    if depth == TYPED_DEPTH {
         return Error(typed_input_issue(s, d, d.pos, DepthLimit))
     }
-    let opened = opening(s, mut d.pos, bracket)
-    read_error(s, take opened, d)
+    d.pos += 1
+    Ok(())
 }
 
 fn after_typed(s: String, bracket: u8, mut d: ReadTyped) -> Result[bool, TypedError] {
-    let after = after_item(s, mut d.pos, bracket)
-    read_error(s, take after, d)
+    read_error(s, after_item(s, mut d.pos, bracket), d)
 }
 
 fn close_typed(s: String, bracket: u8, mut d: ReadTyped) -> Result[(), TypedError] {
-    let closed = opening(s, mut d.pos, bracket)
-    read_error(s, take closed, d)
+    read_error(s, opening(s, mut d.pos, bracket), d)
 }
 
 scoped type TypedInput {
@@ -1669,18 +1672,15 @@ fn remember_member(s: String, mut seen: Map[String, ()], take name: String, pos:
 fn skip_typed(s: String, depth: u64, mut d: ReadTyped) -> Result[(), TypedError] {
     skip(s, mut d.pos)
     let start = d.pos
-    let head = value_start(s, mut d.pos)
-    let close: u8 = match read_error(s, take head, d)? {
+    let close: u8 = match read_error(s, value_start(s, mut d.pos), d)? {
         JsonArray => b']',
         JsonObject => b'}',
         JsonString => {
-            let measured = string_size(s, mut d.pos)
-            let _ = read_error(s, take measured, d)?
+            let _ = read_error(s, string_size(s, mut d.pos), d)?
             return Ok(())
         },
         JsonNumber => {
-            let measured = number_size(s, mut d.pos)
-            let _ = read_error(s, take measured, d)?
+            let _ = read_error(s, number_size(s, mut d.pos), d)?
             return Ok(())
         },
         _ => return Ok(()),
@@ -1750,8 +1750,7 @@ fn read_shape(plan: JsonPlan, shape: u64, s: String, depth: u64, mut d: ReadType
         },
         Optional(item) => {
             if at(s, d.pos) == b'n' {
-                let parsed = literal(s, mut d.pos, "null")
-                read_error(s, take parsed, d)?
+                read_error(s, literal(s, mut d.pos, "null"), d)?
                 codec.put_tag(0, mut out)
                 Ok(())
             } else {
@@ -1789,6 +1788,7 @@ fn read_sequence(plan: JsonPlan, item: u64, value: Option[u64], s: String, depth
         loop {
             list.push(mut d.path, Index(n))
             if let Some(child) = value {
+                skip(s, mut d.pos)
                 open_typed(s, depth + 1, b'[', mut d)?
                 let pair = list.len(d.path)
                 list.push(mut d.path, Index(0))
@@ -2023,6 +2023,7 @@ fn read_sum(plan: JsonPlan, variants: List[Variant], s: String, depth: u64, mut 
             if n == 1 {
                 read_shape(plan, fields[0], s, depth + 1, mut d, mut out)?
             } else if n > 1 {
+                skip(s, mut d.pos)
                 open_typed(s, depth + 1, b'[', mut d)?
                 let variant = list.len(d.path)
                 for i in 0u64 .. n {
@@ -2049,8 +2050,7 @@ fn read_atom(profile: Profile, op: u8, s: String, mut d: ReadTyped, mut out: Byt
     let start = d.pos
     match op {
         0 => {
-            let parsed = literal(s, mut d.pos, "null")
-            read_error(s, take parsed, d)
+            read_error(s, literal(s, mut d.pos, "null"), d)
         },
         1 => {
             let yes = at(s, start) == b't'

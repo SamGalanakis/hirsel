@@ -145,7 +145,7 @@ pub(crate) fn private_flow_step<R>(run: impl FnOnce() -> R) -> R {
     crate::limit::preserve_binding(run)
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum State {
+pub(super) enum State {
     Ready,
     Running,
     Waiting,
@@ -3153,12 +3153,7 @@ unsafe fn prof_created(task: *mut Task, parent: *mut Task) {
 #[cfg(feature = "prof")]
 unsafe fn prof_state(task: *mut Task, state: State, reason: Reason, object: u64) {
     // SAFETY: the transition pins the task.
-    let [unit, id] = unsafe { prof_key(task) };
-    prof::append(
-        ProfKind::State,
-        &[unit, id, state as u64, reason as u64, object],
-        &[],
-    );
+    prof::task_state(unsafe { prof_key(task) }, state, reason, object);
 }
 
 #[cfg(feature = "prof")]

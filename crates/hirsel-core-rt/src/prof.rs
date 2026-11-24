@@ -1,4 +1,5 @@
 //! Bounded per-thread chunks for passive runtime observation.
+use crate::tasks::State;
 use std::cell::{RefCell, UnsafeCell};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -209,6 +210,18 @@ pub(crate) fn append(kind: Kind, words: &[u64], bytes: &[u8]) {
             writer.append(kind, words, bytes);
         }
     });
+}
+
+pub(super) fn task_state([unit, id]: [u64; 2], state: State, reason: Reason, object: u64) {
+    // HIRSOBS2 assigns tag 3 to the retired Flow state.
+    let tag = match state {
+        State::Ready => 0,
+        State::Running => 1,
+        State::Waiting => 2,
+        State::Provider => 4,
+        State::Ended => 5,
+    };
+    append(Kind::State, &[unit, id, tag, reason as u64, object], &[]);
 }
 
 struct Shared {

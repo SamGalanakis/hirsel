@@ -261,21 +261,21 @@ def bucket_adopts_and_fences(work, engine, compiler, runtime, cc, manifest_path,
 
 
 def bucket_release_barrier(work, engine, compiler, runtime, cc, manifest_path, limit):
-    """L56 Runner half through the real Bucket backing and the native wire."""
+    """L61 release and failed durability through the Bucket backing and native wire."""
     import queue
     import threading
 
     held = queue.Queue()
     release = threading.Event()
     uploaded = set()
+    effect_version = 7
 
     def remember_entry(method, path, data, answer):
         if method == b'PUT' and path.startswith(b'/bucket-t1/e-') and answer.startswith(b'HTTP/1.1 200 '):
-            # The effect is the only commit at version 7. A one-commit group
-            # starts immediately after the 72-byte HEADER and 40-byte LINK.
+            # A one-commit group starts after the 72-byte HEADER and 40-byte LINK.
             if len(data) >= 140 and struct.unpack_from('<H', data, 112)[0] == 0x0011:
                 branch, version = struct.unpack_from('<IQ', data, 128)
-                if branch == 0 and version == 7:
+                if branch == 0 and version == effect_version:
                     uploaded.add(path)
         return answer
 
@@ -284,7 +284,7 @@ def bucket_release_barrier(work, engine, compiler, runtime, cc, manifest_path, l
             return
         seq, epoch, _, digest = struct.unpack_from('<QQQQ', data, 120)
         if f'/bucket-t1/e-{seq:020d}-{epoch:020d}-{digest:016x}'.encode() in uploaded:
-            held.put('EFFECT 7')
+            held.put(effect_version)
             release.wait()
 
     with bucket_processes(work, engine, compiler, runtime, cc, manifest_path, limit) as fixture:
@@ -304,13 +304,15 @@ def bucket_release_barrier(work, engine, compiler, runtime, cc, manifest_path, l
                 holder, output = spawn([hosted, '--hold', '--release-check', delayed])
                 ready = line(output, 'L56:ready')
                 assert ready == 'READY 5 1048576', ready
+                assert line(output, 'L61:initial') == 'SUBSCRIBED'
                 holder.stdin.write('write\n')
                 holder.stdin.flush()
-                assert line(held, 'L56:entry-complete') == 'EFFECT 7'
+                assert line(held, 'L56:entry-complete') == 7
                 code, text = once(['--follow', direct], 'L56:follower-before')
                 assert code == 0 and text.strip() == 'FOLLOW 6 0', text
-                assert output.empty(), 'L56: a client received a reply while the HEAD PUT was held'
+                assert output.empty(), 'L61: a client got a group or outcome while the HEAD PUT was held'
                 release.set()
+                assert line(output, 'L61:group') == 'GROUP 7'
                 published = line(output, 'L56:reply')
                 assert published == 'BUMPED 7', published
                 assert crash(holder) < 0
@@ -322,11 +324,37 @@ def bucket_release_barrier(work, engine, compiler, runtime, cc, manifest_path, l
         next_holder, output = spawn([hosted, '--hold', '--release-check', direct])
         ready = line(output, 'L56:successor-ready')
         assert ready == 'READY 5 1048576', ready
+        assert line(output, 'L61:successor-initial') == 'SUBSCRIBED'
         next_holder.stdin.write('write\n')
         next_holder.stdin.flush()
+        assert line(output, 'L61:successor-group') == 'GROUP 9'
         published = line(output, 'L56:successor-reply')
         assert published == 'BUMPED 9', published
         assert crash(next_holder) < 0
+
+        effect_version = 11
+        release.clear()
+        with bucket_relay(port, before=hold_head, after=remember_entry) as delayed:
+            try:
+                fenced, output = spawn([hosted, '--hold', '--release-check', delayed])
+                assert line(output, 'L61:fenced-ready') == 'READY 5 1048576'
+                assert line(output, 'L61:fenced-initial') == 'SUBSCRIBED'
+                fenced.stdin.write('write\n')
+                fenced.stdin.flush()
+                assert line(held, 'L61:fenced-entry-complete') == 11
+                # A new holder claims HEAD while the first holder's effect is staged.
+                final_holder, final_lines = spawn([hosted, '--hold', direct])
+                assert line(final_lines, 'L61:claimant-ready') == 'READY 5 1048576'
+                release.set()
+                ended = line(output, 'L61:fenced-end')
+                assert ended.startswith('ENDED ') and 'another writer' in ended, ended
+                assert fenced.wait(timeout=60) == 0, fenced.stderr.read()
+                assert output.get(timeout=5) is None, 'L61: a failed durable sent a group or outcome'
+                code, text = once(['--follow', direct], 'L61:follower-after-fence')
+                assert code == 0 and text.strip() == 'FOLLOW 10 2', text
+                assert crash(final_holder) < 0
+            finally:
+                release.set()
 
 
 def bucket_claim_race(work, engine, compiler, runtime, cc, manifest_path, limit):

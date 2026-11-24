@@ -25,6 +25,16 @@ fn has_flag(argv: Args, flag: String) -> bool {
     false
 }
 
+fn bucket_counter(tx: store.Tx, h: Hd, take _arg: ()) -> Result[runner.Answer[u64], Capacity] {
+    let total = result.unwrap(counted(tx, h))
+    Ok(runner.Answer(value: total, covers: runner.covers()))
+}
+
+fn bucket_place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    place(mut r)?
+    runner.query(mut r, code.describe(bucket_counter), runner.slots(), 65536u64, runner.DEFAULT_STEPS)
+}
+
 fn bucket_config(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[runner.PlaceConfig[(), Hd, (), ()], Exit] {
     let spot = std.object.Bucket(endpoint: bucket_endpoint(argv), aws_region: "us-east-1", bucket: "bucket-t1", prefix: "", style: Path)
     let credentials = std.cred.from_secret(string.from(BUCKET_ACCESS), secret.share(key), "")
@@ -34,7 +44,7 @@ fn bucket_config(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: 
     let selection = runner.launch_selection(argv)?
     let groups = if has_flag(argv, "--release-check") { Some(1u32) } else { None }
     Ok(runner.PlaceConfig(
-        backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: groups, lock_wait_ms: None), selection: selection, place: code.describe(place), n_place: 524288u64,
+        backing: Bucket(take backing), sizes: store.Overrides(resident_limit: None, journal_limit: None, checkpoint_bytes: None, pack_bytes: None, group_bytes: Some(65536u64), group_commits: groups, lock_wait_ms: None), selection: selection, place: code.describe(bucket_place), n_place: 524288u64,
         on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 4u64,
         proxies: list.new(), n_publisher: 3145728u64,
         listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r,
@@ -58,20 +68,50 @@ fn bucket_sim(key: Secret, c: Clock, n: Net, out: Stdout) -> Result[(), Exit] wa
     Error(Exit(status: 1u8))
 }
 
-// One bump at stream 0 position p. The result includes its wire batch version.
-fn bump_once(cn: runner.wire_client.Conn, p: u64) -> Option[(bool, u64)] waits {
+fn live_counter(cn: runner.wire_client.Conn, out: Stdout) -> u64 waits {
+    runner.wire_client.send_frame(cn, Subscribe(1u32, 1u32, list.new(), None))
+    let Ok(Batch(_, complete, groups, outcomes)) = runner.wire_client.next(cn) else { fail("L61: missing initial Batch") }
+    want(list.len(complete) == 1u64 && complete[0u64] == 1u32 && list.len(outcomes) == 0u64, "L61: initial completion")
+    want(list.len(groups) == 1u64 && groups[0u64].sub == 1u32 && list.len(groups[0u64].rows) == 0u64, "L61: initial value-only group")
+    let number = result.unwrap(std.codec.decode(std.codec.of_u64(), groups[0u64].value))
+    say(out, "SUBSCRIBED")
+    number
+}
+
+// One bump at stream 0 position p. If subscribed, observe both the group and outcome.
+fn bump_once(cn: runner.wire_client.Conn, p: u64, observed: Option[(Stdout, u64)]) -> Option[(bool, u64)] waits {
     runner.wire_client.send_frame(cn, Call(0u32, p, 0u32, 30000u32, u64_bytes(p)))
+    let mut published: Option[u64] = None
+    let mut replied: Option[(bool, u64)] = None
     loop {
         match runner.wire_client.next(cn) {
-            Ok(Batch(at, _, _, done)) => {
+            Ok(Batch(at, complete, groups, done)) => {
+                if let Some((out, expected_count)) = observed {
+                    if list.len(groups) != 0u64 {
+                        want(published == None && list.len(complete) == 0u64 && list.len(groups) == 1u64,
+                            "L61: expected one delta group")
+                        let group = view groups[0u64]
+                        want(group.sub == 1u32 && list.len(group.rows) == 0u64 && group.value == u64_bytes(expected_count),
+                            "L61: counter group bytes")
+                        published = Some(at)
+                        let mut line = string.from("GROUP ")
+                        string.push_u64(mut line, at)
+                        say(out, take line)
+                    }
+                }
                 for item in done {
                     if item.p == p {
-                        return Some((same(item.outcome, returned(Ok(p))), at))
+                        replied = Some((same(item.outcome, returned(Ok(p))), at))
                     }
                 }
             },
+            Ok(Reset(..)) => fail("L61: subscription reset"),
             Ok(_) => (),
             Error(_) => return None,
+        }
+        if let Some((ok, at)) = replied {
+            if let None = observed { return Some((ok, at)) }
+            if published == Some(at) { return Some((ok, at)) }
         }
     }
 }
@@ -118,20 +158,33 @@ fn bucket_hold(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Ne
     }
     let mut keys: List[Bytes] = list.new()
     list.push(mut keys, body_key(0u64))
+    let release_check = has_flag(argv, "--release-check")
+    if release_check {
+        let counter = runner.client.query_entry(code.describe(bucket_counter), runner.slots())
+        list.push(mut keys, runner.client.entry_key(counter))
+    }
     let cn = result.unwrap(runner.wire_client.connect(tasks, n, option.unwrap(seen.addr), c, r, keys, Some(runner.ingress.credential(r)), std.wsock.defaults()))
+    let observed = if release_check { Some((out, live_counter(cn, out) + 1u64)) } else { None }
     let mut command: Bytes = list.with_capacity(16u64)
     while list.len(command) == 0 || command[list.len(command) - 1] != b'\n' {
         want(result.unwrap(stdin.read(input, mut command, Never)) != 0, "bucket T1: no command")
     }
     if list.slice(command, 0, 5) == string.as_bytes("fence") {
         // A deposed holder never answers a commit: its group fails on the claim.
-        if let Some((true, _)) = bump_once(cn, 0u64) { fail("bucket T1: the deposed holder committed") }
+        if let Some((true, _)) = bump_once(cn, 0u64, observed) { fail("bucket T1: the deposed holder committed") }
         let _ = runner.wire_client.close(take cn)
         say_ended(out, take running)
         return Ok(())
     }
-    let Some((true, released)) = bump_once(cn, 0u64) else { fail("bucket T1: the serving place did not commit") }
-    if has_flag(argv, "--release-check") {
+    let Some((true, released)) = bump_once(cn, 0u64, observed) else {
+        if release_check {
+            let _ = runner.wire_client.close(take cn)
+            say_ended(out, take running)
+            return Ok(())
+        }
+        fail("bucket T1: the serving place did not commit")
+    }
+    if release_check {
         let mut publication = string.from("BUMPED ")
         string.push_u64(mut publication, released)
         say(out, take publication)
@@ -197,5 +250,5 @@ pub fn bucket_main(c: Clock, r: Random, tasks: Tasks, argv: Args, n: Net, proces
         let ended = runner.operate_report(take config, take stopping, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     }
-    runner.main(argv, process, errors, tasks, c, code.describe(place), code.describe(schema), serve)
+    runner.main(argv, process, errors, tasks, c, code.describe(bucket_place), code.describe(schema), serve)
 }

@@ -1149,9 +1149,11 @@ fn hand_search(p: &Pool, mut idle: sync::MutexGuard<'_, Vec<usize>>) -> bool {
     true
 }
 
-/// Before running a unit, wake a sleeper if nobody holds the poll turn
-/// or is searching. Sleepers have no timeout. A searcher either polls or
-/// reaches this check when it finds work.
+/// Called by a worker about to run a unit. Parked workers sleep with no
+/// timeout, so while any sleeps, some worker must hold the poll turn or be
+/// searching (a searcher ends by polling or by coming here). If none does,
+/// wake a sleeper: it searches, then blocks in the poller until the earliest
+/// deadline.
 fn keep_poller(p: &Pool) {
     let unwatched =
         |p: &Pool| !p.poll_held.load(Ordering::SeqCst) && p.searching.load(Ordering::SeqCst) == 0;
@@ -1295,11 +1297,9 @@ fn poll_global(p: &Pool, timeout: i32) {
         }
     }
     if published {
-        // Reserve one unit for the poller. The count excludes its private slot.
-        let reserved = usize::from(p.lifo[worker_ix()].load(Ordering::Relaxed).is_null());
-        if p.queued.load(Ordering::SeqCst) > reserved {
-            notify_worker(p);
-        }
+        // One worker starts the search for the batch. The search path
+        // passes the wake on if queued work remains.
+        notify_worker(p);
     }
     fire_timers(p);
 }
